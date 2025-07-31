@@ -1,0 +1,327 @@
+<!DOCTYPE HTML>
+<html lang="en" class="navy sidebar-visible" dir="ltr">
+    <head>
+        <!-- Book generated using mdBook -->
+        <meta charset="UTF-8">
+        <title>Bans - Thorium</title>
+
+
+        <!-- Custom HTML head -->
+
+        <meta name="description" content="">
+        <meta name="viewport" content="width=device-width, initial-scale=1">
+        <meta name="theme-color" content="#ffffff">
+
+        <link rel="icon" href="../favicon.svg">
+        <link rel="shortcut icon" href="../favicon.png">
+        <link rel="stylesheet" href="../css/variables.css">
+        <link rel="stylesheet" href="../css/general.css">
+        <link rel="stylesheet" href="../css/chrome.css">
+        <link rel="stylesheet" href="../css/print.css" media="print">
+
+        <!-- Fonts -->
+        <link rel="stylesheet" href="../FontAwesome/css/font-awesome.css">
+        <link rel="stylesheet" href="../fonts/fonts.css">
+
+        <!-- Highlight.js Stylesheets -->
+        <link rel="stylesheet" href="../highlight.css">
+        <link rel="stylesheet" href="../tomorrow-night.css">
+        <link rel="stylesheet" href="../ayu-highlight.css">
+
+        <!-- Custom theme stylesheets -->
+
+
+        <!-- Provide site root to javascript -->
+        <script>
+            var path_to_root = "../";
+            var default_theme = window.matchMedia("(prefers-color-scheme: dark)").matches ? "navy" : "navy";
+        </script>
+        <!-- Start loading toc.js asap -->
+        <script src="../toc.js"></script>
+    </head>
+    <body>
+    <div id="body-container">
+        <!-- Work around some values being stored in localStorage wrapped in quotes -->
+        <script>
+            try {
+                var theme = localStorage.getItem('mdbook-theme');
+                var sidebar = localStorage.getItem('mdbook-sidebar');
+
+                if (theme.startsWith('"') && theme.endsWith('"')) {
+                    localStorage.setItem('mdbook-theme', theme.slice(1, theme.length - 1));
+                }
+
+                if (sidebar.startsWith('"') && sidebar.endsWith('"')) {
+                    localStorage.setItem('mdbook-sidebar', sidebar.slice(1, sidebar.length - 1));
+                }
+            } catch (e) { }
+        </script>
+
+        <!-- Set the theme before any content is loaded, prevents flash -->
+        <script>
+            var theme;
+            try { theme = localStorage.getItem('mdbook-theme'); } catch(e) { }
+            if (theme === null || theme === undefined) { theme = default_theme; }
+            const html = document.documentElement;
+            html.classList.remove('navy')
+            html.classList.add(theme);
+            html.classList.add("js");
+        </script>
+
+        <input type="checkbox" id="sidebar-toggle-anchor" class="hidden">
+
+        <!-- Hide / unhide sidebar before it is displayed -->
+        <script>
+            var sidebar = null;
+            var sidebar_toggle = document.getElementById("sidebar-toggle-anchor");
+            if (document.body.clientWidth >= 1080) {
+                try { sidebar = localStorage.getItem('mdbook-sidebar'); } catch(e) { }
+                sidebar = sidebar || 'visible';
+            } else {
+                sidebar = 'hidden';
+            }
+            sidebar_toggle.checked = sidebar === 'visible';
+            html.classList.remove('sidebar-visible');
+            html.classList.add("sidebar-" + sidebar);
+        </script>
+
+        <nav id="sidebar" class="sidebar" aria-label="Table of contents">
+            <!-- populated by js -->
+            <mdbook-sidebar-scrollbox class="sidebar-scrollbox"></mdbook-sidebar-scrollbox>
+            <noscript>
+                <iframe class="sidebar-iframe-outer" src="../toc.html"></iframe>
+            </noscript>
+            <div id="sidebar-resize-handle" class="sidebar-resize-handle">
+                <div class="sidebar-resize-indicator"></div>
+            </div>
+        </nav>
+
+        <div id="page-wrapper" class="page-wrapper">
+
+            <div class="page">
+                <div id="menu-bar-hover-placeholder"></div>
+                <div id="menu-bar" class="menu-bar sticky">
+                    <div class="left-buttons">
+                        <label id="sidebar-toggle" class="icon-button" for="sidebar-toggle-anchor" title="Toggle Table of Contents" aria-label="Toggle Table of Contents" aria-controls="sidebar">
+                            <i class="fa fa-bars"></i>
+                        </label>
+                        <button id="theme-toggle" class="icon-button" type="button" title="Change theme" aria-label="Change theme" aria-haspopup="true" aria-expanded="false" aria-controls="theme-list">
+                            <i class="fa fa-paint-brush"></i>
+                        </button>
+                        <ul id="theme-list" class="theme-popup" aria-label="Themes" role="menu">
+                            <li role="none"><button role="menuitem" class="theme" id="light">Light</button></li>
+                            <li role="none"><button role="menuitem" class="theme" id="rust">Rust</button></li>
+                            <li role="none"><button role="menuitem" class="theme" id="coal">Coal</button></li>
+                            <li role="none"><button role="menuitem" class="theme" id="navy">Navy</button></li>
+                            <li role="none"><button role="menuitem" class="theme" id="ayu">Ayu</button></li>
+                        </ul>
+                        <button id="search-toggle" class="icon-button" type="button" title="Search. (Shortkey: s)" aria-label="Toggle Searchbar" aria-expanded="false" aria-keyshortcuts="S" aria-controls="searchbar">
+                            <i class="fa fa-search"></i>
+                        </button>
+                    </div>
+
+                    <h1 class="menu-title">Thorium</h1>
+
+                    <div class="right-buttons">
+                        <a href="../print.html" title="Print this book" aria-label="Print this book">
+                            <i id="print-button" class="fa fa-print"></i>
+                        </a>
+
+                    </div>
+                </div>
+
+                <div id="search-wrapper" class="hidden">
+                    <form id="searchbar-outer" class="searchbar-outer">
+                        <input type="search" id="searchbar" name="searchbar" placeholder="Search this book ..." aria-controls="searchresults-outer" aria-describedby="searchresults-header">
+                    </form>
+                    <div id="searchresults-outer" class="searchresults-outer hidden">
+                        <div id="searchresults-header" class="searchresults-header"></div>
+                        <ul id="searchresults">
+                        </ul>
+                    </div>
+                </div>
+
+                <!-- Apply ARIA attributes after the sidebar and the sidebar toggle button are added to the DOM -->
+                <script>
+                    document.getElementById('sidebar-toggle').setAttribute('aria-expanded', sidebar === 'visible');
+                    document.getElementById('sidebar').setAttribute('aria-hidden', sidebar !== 'visible');
+                    Array.from(document.querySelectorAll('#sidebar a')).forEach(function(link) {
+                        link.setAttribute('tabIndex', sidebar === 'visible' ? 0 : -1);
+                    });
+                </script>
+
+                <div id="content" class="content">
+                    <main>
+                        <h1 id="bans"><a class="header" href="#bans">Bans</a></h1>
+<blockquote>
+<p>If you're a Thorium admin looking for instructions on adding/removing bans, see <a href="../admins/bans_admins.html">Ban Things in Thorium</a>.</p>
+</blockquote>
+<p>"Bans" in Thorium are applied to entities that are misconfigured or noncompliant such that they cannot "function"
+(e.g. an image cannot be scheduled, a pipeline cannot be run). As entities can have multiple bans, entities are effectively
+"banned" when they have one or more bans and are "unbanned" when all their bans are resolved/removed.</p>
+<p>Bans work hand-in-hand with <a href="./notifications.html">Notifications</a> to inform developers why their tools cannot be
+run. If an image/tool is banned, a notification is automatically created to explain the reasoning behind the
+ban. Most bans are applied automatically by the API or scaler, but Thorium admins can also "ban" (or perhaps more
+accurately, "indefinitely disable") tools/pipelines at their own discretion and provide a reason to the developer.</p>
+<h2 id="how-do-i-know-when-somethings-banned"><a class="header" href="#how-do-i-know-when-somethings-banned">How Do I Know When Something's Banned?</a></h2>
+<p>Let's say we're trying to run a pipeline called <code>harvest</code> in the <code>corn</code> group, but it's been banned for some reason.
+When we try to run <code>harvest</code>, we'll get an error similar to the following:</p>
+<pre><code class="language-Bash">Error: Unable to create reactions: Code: 400 Bad Request Error:
+{"error":"Unable to create reaction(s)! The following pipelines have
+one or more bans: '[\"corn:harvest\"]'. See their notifications for details."}
+</code></pre>
+<p>The error instructs us to check the pipeline's notifications for details on the ban(s). We can do that using Thorctl:</p>
+<pre><code>thorctl pipelines notifications get corn harvest
+
+[2024-10-31 22:13:00.800 UTC] ERROR: The image 'sow' has one or more bans! See the image's details for more info.
+[2024-10-31 22:30:52.940 UTC] ERROR: The image 'water' has one or more bans! See the image's details for more info.
+</code></pre>
+<p>We got two notifications explaining that the <code>sow</code> and <code>water</code> images in our pipeline were banned. We can view their notifications
+with Thorctl as well:</p>
+<pre><code>thorctl images notifications get corn sow
+
+[2024-10-31 22:13:00.800 UTC] ERROR: Please decrease
+your memory resources requirements to 64Gi maximum
+
+
+thorctl images notifications get corn water
+
+[2024-10-31 22:30:52.940 UTC] ERROR: The image volume 'corn-vol'
+has a host path of '/mnt/corn-vol' that is not on the list of allowed host
+paths! Ask an admin to add it to the allowed list or pick an allowed host path.
+</code></pre>
+<p>It looks like <code>sow</code> has a ban likely manually created by an admin instructing us to decrease the image's resource
+requirements. Meanwhile, <code>water</code> has a host path volume with a mount not on the allowed list. Once we address this issues
+and inform a Thorium admin, the bans will be lifted and we can again use our pipeline.</p>
+<h3 id="viewing-bans-in-an-entitys-metadata"><a class="header" href="#viewing-bans-in-an-entitys-metadata">Viewing Bans in an Entity's Metadata</a></h3>
+<p>A ban's notification should contain all the relevant info regarding a ban, but you can also see the ban
+itself in the affected entity's metadata. You can view an entity's bans together with its metadata by
+using the entity's respective <code>describe</code> command in Thorctl. For images, you would run:</p>
+<pre><code class="language-Bash">thorctl images describe &lt;IMAGE&gt;
+</code></pre>
+<p>This will output the image's data in JSON format, including the image's bans:</p>
+<pre><code class="language-JSON">{
+    "group": "&lt;GROUP&gt;",
+    "name": "&lt;IMAGE&gt;",
+    "creator": "&lt;USER&gt;",
+    ...
+    "bans": {
+        "bfe49500-dfcb-4790-a6b3-379114222426": {
+            "id": "bfe49500-dfcb-4790-a6b3-379114222426",
+            "time_banned": "2024-10-31T22:31:59.251188Z",
+            "ban_kind": {
+                "Generic": {
+                    "msg": "This is an example ban"
+                }
+            }
+        }
+    }
+}
+</code></pre>
+<blockquote>
+<p>Bans/notifications are currently not viewable in the Web UI, but this feature is planned for a future release of Thorium!</p>
+</blockquote>
+<h2 id="ban-types"><a class="header" href="#ban-types">Ban Types</a></h2>
+<p>Below are descriptions of the entities that can be banned, the types of bans they can receive, and what to
+do to lift the ban.</p>
+<h3 id="image-bans"><a class="header" href="#image-bans">Image Bans</a></h3>
+<p>Image bans are applied when an image is misconfigured in some way. The image will not be scaled until the issue
+is resolved.</p>
+<p>The types of image bans are described below.</p>
+<h4 id="invalid-host-path"><a class="header" href="#invalid-host-path">Invalid Host Path</a></h4>
+<p>An invalid host path image ban is applied when an image has an improperly configured host path volume.</p>
+<p>Thorium admins can specify a list of paths that developers can mount to their images as a host path volume (see
+the <a href="https://kubernetes.io/docs/concepts/storage/volumes/#hostpath">Kubernetes docs on host paths</a> for more details).
+This list of allowed paths is called the <code>Host Path Whitelist</code>. If an admin removes a path from the whitelist that was
+previously allowed, any images that configured host path volumes with that path will be automatically banned.</p>
+<p>The ban (and associated notification) will contain the name of the offending volume and its path so developers can
+quickly reconfigure their images. Removing or reconfiguring the problematic volume will automatically lift the ban.
+Images with multiple invalid host path volumes will have multiple bans, one for each invalid host path.</p>
+<h4 id="invalid-image-url"><a class="header" href="#invalid-image-url">Invalid Image URL</a></h4>
+<blockquote>
+<p>⚠️ This ban type is not yet implemented! It will be applied in a future release of Thorium.</p>
+</blockquote>
+<p>An invalid image URL ban is applied when an image has an improperly configured URL. If the scaler fails to pull
+an image at its configured URL multiple times, it will automatically apply a ban for an invalid URL.</p>
+<p>The ban's description and associated notification will contain the invalid URL that led to the error. The ban is
+removed once the developer modifies the image's URL, at which point the scaler will attempt to pull from the
+new URL (applying a new pan if the new URL is also invalid).</p>
+<h4 id="generic"><a class="header" href="#generic">Generic</a></h4>
+<p>A generic image ban is applied to an image if no other image ban type is applicable or if an admin applied the ban
+manually for any arbitrary reason.</p>
+<p>Generic bans must contain a description detailing the reason for the ban which can be found in the ban's
+associated notification. Generic bans must be manually removed by a Thorium admin.</p>
+<h3 id="pipeline-bans"><a class="header" href="#pipeline-bans">Pipeline Bans</a></h3>
+<p>Pipeline bans restrict entire pipelines from being run. Rather than banning at the scaler as with image
+bans, pipeline bans apply at the API and prevent reactions with the banned pipeline from being created
+in the first place. The API responds to the reaction creation request with an error containing the reason
+the pipeline was banned.</p>
+<p>The types of pipeline bans are described below.</p>
+<h4 id="invalid-image"><a class="header" href="#invalid-image">Invalid Image</a></h4>
+<p>An invalid image pipeline bans is applied when a pipeline has one or more images that are banned. This is the
+most common type of a pipeline ban.</p>
+<p>Pipeline bans for invalid images and their associated notifications will have the name of the offending image.
+Resolving the image's ban(s) or removing the image from the pipeline will automatically lift the ban. Pipelines
+with multiple banned images will have multiple bans, one for each banned image.</p>
+<h4 id="generic-1"><a class="header" href="#generic-1">Generic</a></h4>
+<p>A generic pipeline bans is applied if no other pipeline ban type is applicable or if an admin applied the
+ban manually for any arbitrary reason.</p>
+<p>Generic bans must contain a description detailing the reason for the ban which can be found in the ban's
+associated notification. Generic bans must be manually removed by a Thorium admin.</p>
+
+                    </main>
+
+                    <nav class="nav-wrapper" aria-label="Page navigation">
+                        <!-- Mobile navigation buttons -->
+                            <a rel="prev" href="../developers/generators.html" class="mobile-nav-chapters previous" title="Previous chapter" aria-label="Previous chapter" aria-keyshortcuts="Left">
+                                <i class="fa fa-angle-left"></i>
+                            </a>
+
+                            <a rel="next prefetch" href="../developers/notifications.html" class="mobile-nav-chapters next" title="Next chapter" aria-label="Next chapter" aria-keyshortcuts="Right">
+                                <i class="fa fa-angle-right"></i>
+                            </a>
+
+                        <div style="clear: both"></div>
+                    </nav>
+                </div>
+            </div>
+
+            <nav class="nav-wide-wrapper" aria-label="Page navigation">
+                    <a rel="prev" href="../developers/generators.html" class="nav-chapters previous" title="Previous chapter" aria-label="Previous chapter" aria-keyshortcuts="Left">
+                        <i class="fa fa-angle-left"></i>
+                    </a>
+
+                    <a rel="next prefetch" href="../developers/notifications.html" class="nav-chapters next" title="Next chapter" aria-label="Next chapter" aria-keyshortcuts="Right">
+                        <i class="fa fa-angle-right"></i>
+                    </a>
+            </nav>
+
+        </div>
+
+
+
+
+        <script>
+            window.playground_copyable = true;
+        </script>
+
+        <script src="../ace.js"></script>
+        <script src="../editor.js"></script>
+        <script src="../mode-rust.js"></script>
+        <script src="../theme-dawn.js"></script>
+        <script src="../theme-tomorrow_night.js"></script>
+
+        <script src="../elasticlunr.min.js"></script>
+        <script src="../mark.min.js"></script>
+        <script src="../searcher.js"></script>
+
+        <script src="../clipboard.min.js"></script>
+        <script src="../highlight.js"></script>
+        <script src="../book.js"></script>
+
+        <!-- Custom JS scripts -->
+
+
+    </div>
+    </body>
+</html>

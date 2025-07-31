@@ -1,0 +1,435 @@
+<!DOCTYPE HTML>
+<html lang="en" class="navy sidebar-visible" dir="ltr">
+    <head>
+        <!-- Book generated using mdBook -->
+        <meta charset="UTF-8">
+        <title>Network Policies - Thorium</title>
+
+
+        <!-- Custom HTML head -->
+
+        <meta name="description" content="">
+        <meta name="viewport" content="width=device-width, initial-scale=1">
+        <meta name="theme-color" content="#ffffff">
+
+        <link rel="icon" href="../../favicon.svg">
+        <link rel="shortcut icon" href="../../favicon.png">
+        <link rel="stylesheet" href="../../css/variables.css">
+        <link rel="stylesheet" href="../../css/general.css">
+        <link rel="stylesheet" href="../../css/chrome.css">
+        <link rel="stylesheet" href="../../css/print.css" media="print">
+
+        <!-- Fonts -->
+        <link rel="stylesheet" href="../../FontAwesome/css/font-awesome.css">
+        <link rel="stylesheet" href="../../fonts/fonts.css">
+
+        <!-- Highlight.js Stylesheets -->
+        <link rel="stylesheet" href="../../highlight.css">
+        <link rel="stylesheet" href="../../tomorrow-night.css">
+        <link rel="stylesheet" href="../../ayu-highlight.css">
+
+        <!-- Custom theme stylesheets -->
+
+
+        <!-- Provide site root to javascript -->
+        <script>
+            var path_to_root = "../../";
+            var default_theme = window.matchMedia("(prefers-color-scheme: dark)").matches ? "navy" : "navy";
+        </script>
+        <!-- Start loading toc.js asap -->
+        <script src="../../toc.js"></script>
+    </head>
+    <body>
+    <div id="body-container">
+        <!-- Work around some values being stored in localStorage wrapped in quotes -->
+        <script>
+            try {
+                var theme = localStorage.getItem('mdbook-theme');
+                var sidebar = localStorage.getItem('mdbook-sidebar');
+
+                if (theme.startsWith('"') && theme.endsWith('"')) {
+                    localStorage.setItem('mdbook-theme', theme.slice(1, theme.length - 1));
+                }
+
+                if (sidebar.startsWith('"') && sidebar.endsWith('"')) {
+                    localStorage.setItem('mdbook-sidebar', sidebar.slice(1, sidebar.length - 1));
+                }
+            } catch (e) { }
+        </script>
+
+        <!-- Set the theme before any content is loaded, prevents flash -->
+        <script>
+            var theme;
+            try { theme = localStorage.getItem('mdbook-theme'); } catch(e) { }
+            if (theme === null || theme === undefined) { theme = default_theme; }
+            const html = document.documentElement;
+            html.classList.remove('navy')
+            html.classList.add(theme);
+            html.classList.add("js");
+        </script>
+
+        <input type="checkbox" id="sidebar-toggle-anchor" class="hidden">
+
+        <!-- Hide / unhide sidebar before it is displayed -->
+        <script>
+            var sidebar = null;
+            var sidebar_toggle = document.getElementById("sidebar-toggle-anchor");
+            if (document.body.clientWidth >= 1080) {
+                try { sidebar = localStorage.getItem('mdbook-sidebar'); } catch(e) { }
+                sidebar = sidebar || 'visible';
+            } else {
+                sidebar = 'hidden';
+            }
+            sidebar_toggle.checked = sidebar === 'visible';
+            html.classList.remove('sidebar-visible');
+            html.classList.add("sidebar-" + sidebar);
+        </script>
+
+        <nav id="sidebar" class="sidebar" aria-label="Table of contents">
+            <!-- populated by js -->
+            <mdbook-sidebar-scrollbox class="sidebar-scrollbox"></mdbook-sidebar-scrollbox>
+            <noscript>
+                <iframe class="sidebar-iframe-outer" src="../../toc.html"></iframe>
+            </noscript>
+            <div id="sidebar-resize-handle" class="sidebar-resize-handle">
+                <div class="sidebar-resize-indicator"></div>
+            </div>
+        </nav>
+
+        <div id="page-wrapper" class="page-wrapper">
+
+            <div class="page">
+                <div id="menu-bar-hover-placeholder"></div>
+                <div id="menu-bar" class="menu-bar sticky">
+                    <div class="left-buttons">
+                        <label id="sidebar-toggle" class="icon-button" for="sidebar-toggle-anchor" title="Toggle Table of Contents" aria-label="Toggle Table of Contents" aria-controls="sidebar">
+                            <i class="fa fa-bars"></i>
+                        </label>
+                        <button id="theme-toggle" class="icon-button" type="button" title="Change theme" aria-label="Change theme" aria-haspopup="true" aria-expanded="false" aria-controls="theme-list">
+                            <i class="fa fa-paint-brush"></i>
+                        </button>
+                        <ul id="theme-list" class="theme-popup" aria-label="Themes" role="menu">
+                            <li role="none"><button role="menuitem" class="theme" id="light">Light</button></li>
+                            <li role="none"><button role="menuitem" class="theme" id="rust">Rust</button></li>
+                            <li role="none"><button role="menuitem" class="theme" id="coal">Coal</button></li>
+                            <li role="none"><button role="menuitem" class="theme" id="navy">Navy</button></li>
+                            <li role="none"><button role="menuitem" class="theme" id="ayu">Ayu</button></li>
+                        </ul>
+                        <button id="search-toggle" class="icon-button" type="button" title="Search. (Shortkey: s)" aria-label="Toggle Searchbar" aria-expanded="false" aria-keyshortcuts="S" aria-controls="searchbar">
+                            <i class="fa fa-search"></i>
+                        </button>
+                    </div>
+
+                    <h1 class="menu-title">Thorium</h1>
+
+                    <div class="right-buttons">
+                        <a href="../../print.html" title="Print this book" aria-label="Print this book">
+                            <i id="print-button" class="fa fa-print"></i>
+                        </a>
+
+                    </div>
+                </div>
+
+                <div id="search-wrapper" class="hidden">
+                    <form id="searchbar-outer" class="searchbar-outer">
+                        <input type="search" id="searchbar" name="searchbar" placeholder="Search this book ..." aria-controls="searchresults-outer" aria-describedby="searchresults-header">
+                    </form>
+                    <div id="searchresults-outer" class="searchresults-outer hidden">
+                        <div id="searchresults-header" class="searchresults-header"></div>
+                        <ul id="searchresults">
+                        </ul>
+                    </div>
+                </div>
+
+                <!-- Apply ARIA attributes after the sidebar and the sidebar toggle button are added to the DOM -->
+                <script>
+                    document.getElementById('sidebar-toggle').setAttribute('aria-expanded', sidebar === 'visible');
+                    document.getElementById('sidebar').setAttribute('aria-hidden', sidebar !== 'visible');
+                    Array.from(document.querySelectorAll('#sidebar a')).forEach(function(link) {
+                        link.setAttribute('tabIndex', sidebar === 'visible' ? 0 : -1);
+                    });
+                </script>
+
+                <div id="content" class="content">
+                    <main>
+                        <h1 id="network-policies"><a class="header" href="#network-policies">Network Policies</a></h1>
+<p>Thorium network policies provide configurable, fine-grained network isolation for tools running in
+Thorium. They are currently exclusive to the Kubernetes Thorium scaler, as they are powered by <a href="https://kubernetes.io/docs/concepts/services-networking/network-policies/">Kubernetes Network Policies</a>
+under the hood. Additionally, a compatible K8's network plugin must also be installed in Thorium's
+K8's cluster for policies to actually apply (see the linked K8's docs for more details).</p>
+<p>Network policies can only be created, deleted, and updated by Thorium admins. They can be added to
+images by tool developers to allow network access to or from tools as needed. Network policies are
+also grouped like other resources in Thorium, so only policies in the same group as a tool can
+be added to that tool. A tool can have more than one network policy applied at once, and because
+network policies are <em>additive</em> (they only <em>add</em> access rather than removing access), network
+policies can never be incompatible with one another.</p>
+<h2 id="base-network-policies"><a class="header" href="#base-network-policies">Base Network Policies</a></h2>
+<p>Network policies can only selectively <em>allow</em> network access to or from a tool in Thorium and
+don't provide any interface to specifically restrict access. Instead, network access is restricted
+in that access is allowed <em>only</em> to the entities matching the network policy's (or policies') rules.
+Any entity not matching any of the rules is blocked.</p>
+<p>That means that if a tool has <em>no</em> network policies applied, it will have blanket network access
+to and from everything, which defeats the purpose of network policies in the first place. To
+mitigate this, Thorium applies one or more "base network policies" to <em>all</em> tools running in Thorium,
+regardless of their group or which network policies they have already applied. These base network
+policies are defined in the configuration file <code>thorium.yml</code> (or in the Thorium Custom Resource
+Definition when Thorium is deployed with the Thorium Operator). <strong>If no base network policy is given,
+a default base policy is applied automatically</strong> that blocks all ingress/egress traffic except traffic
+to/from from the Thorium API as well as to the K8's <code>CoreDNS</code> and <code>LocalNodeDNS</code> services to allow
+the Thorium agent to resolve the API's hostname. The default base network policy is provided below
+for your reference in <a href="#default-base-network-policy">Default Base Network Policy</a>.</p>
+<p>A base network policy must have a unique name among base network policies (but not necessarily unique
+to other network policies in Thorium) and a list of ingress/egress rules to apply. Below is an example
+base network policy to refer to when creating one in the Thorium config file. The schemas defined
+in <a href="#network-policy-schema">Network Policy Schema</a> may also prove useful.</p>
+<p>thorium.yml:</p>
+<pre><code class="language-YAML">...
+  - thorium:
+    ...
+    - base_network_policies:
+      - name: "base-policy-1"
+        ingress:
+          - allowed_ips:
+            - cidr: 10.10.10.10
+            - cidr: 10.10.0.0/16
+              except:
+                - 10.10.5.0/24
+                - 10.10.6.0/24
+            allowed_groups:
+              - crabs
+              - corn
+            allowed_tools:
+              - harvester
+              - analyzer
+            allowed_local: false
+            allowed_internet: false
+            allowed_all: false
+            ports:
+              - port: 1000
+                end_port: 1006
+                protocol: TCP
+            allowed_custom:
+              - namespace_labels:
+                - key: ns-key1
+                  value: ns-value1
+                - key: ns-key2
+                  value: ns-value2
+              - pod_labels:
+                - key: pod-key1
+                  value: pod-value1
+                - key: pod-key2
+                  value: pod-value2
+              - namespace_labels:
+                - key: ns-with-pod-key
+                  value: ns-with-pod-value
+                pod_labels:
+                - key: pod-with-ns-key
+                  value: pod-with-ns-value
+              - &lt;MORE CUSTOM RULES&gt;
+          - &lt;MORE RULES&gt;
+        egress:
+          - &lt;EGRESS RULES&gt;
+      - name: "base-policy-2"
+        ingress:
+          - &lt;RULES&gt;
+        egress:
+          - &lt;RULES&gt;
+</code></pre>
+<p>The base policy should be fairly restrictive to allow other network policies to open up access as
+needed. Alternatively, you can bypass Thorium's network policy functionality altogether and allow
+full network access for all tools by providing a base network policy with rules to allow all traffic
+like below:</p>
+<pre><code class="language-YAML">...
+  - thorium:
+    ...
+    - base_network_policies:
+      - name: "allow_all"
+        ingress:
+          allowed_all: true
+        egress:
+          allowed_all: true
+
+</code></pre>
+<h3 id="default-base-network-policy"><a class="header" href="#default-base-network-policy">Default Base Network Policy</a></h3>
+<p>If you want to provide other base network policies without overriding the default one, you need to
+manually provide the default policy in the Thorium CRD (Custom Resource Definition). Below is the
+default base network policy you can copy and paste to the CRD in addition to your custom base
+network policies:</p>
+<pre><code class="language-YAML">- name: thorium-default
+  ingress:
+    - allowed_custom:
+      - namespace_labels:
+        - key: kubernetes.io/metadata.name
+          value: thorium
+        pod_labels:
+          - key: app
+            value: api
+  egress:
+    - allowed_custom:
+      - namespace_labels:
+        - key: kubernetes.io/metadata.name
+          value: thorium
+        pod_labels:
+          - key: app
+            value: api
+    - allowed_ips:
+      - cidr: 169.254.0.0/16
+      - cidr: fe80::/10
+      allowed_custom:
+      - namespace_labels:
+        - key: kubernetes.io/metadata.name
+          value: kube-system
+        pod_labels:
+          - key: k8s-app
+            value: kube-dns
+      - namespace_labels:
+        - key: kubernetes.io/metadata.name
+          value: kube-system
+        pod_labels:
+          - key: k8s-app
+            value: node-local-dns
+      ports:
+        - port: 53
+          protocol: UDP
+</code></pre>
+<h2 id="network-policy-types"><a class="header" href="#network-policy-types">Network Policy Types</a></h2>
+<h3 id="forced-network-policies"><a class="header" href="#forced-network-policies">Forced Network Policies</a></h3>
+<p>A forced network policy is forcibly applied in the Thorium scaler to all tools that are in the
+policy's groups. Forced policies work similarly to base network policies in that they are not
+directly attached to any specific tools and do not appear in an image's info if it wasn't explictly
+added to an image.</p>
+<h3 id="default-network-policies"><a class="header" href="#default-network-policies">Default Network Policies</a></h3>
+<p>A default network policy is a policy that is added to newly-created images in its group(s) when no other policy is provided by the user. Unlike forced network policies, default policies are directly
+added to images and will appear in an image's info.</p>
+<p>If a network policy is set to no longer be default, it will <em>not</em> be automatically removed from the
+images it was added to.</p>
+<h2 id="network-policy-schema"><a class="header" href="#network-policy-schema">Network Policy Schema</a></h2>
+<p>Creating, updating, and managing network policies in Thorium requires an understanding of their
+components. Below are a list of fields that make up a network policy, their descriptions, accepted
+values, and whether or not the field is required. Use this info to write <a href="#the-rules-file">rules files</a>
+when creating network policies as well as set the base network policy to apply to all tools in a
+Thorium instance.</p>
+<h3 id="network-policy-request"><a class="header" href="#network-policy-request">Network Policy Request</a></h3>
+<p>Below are the fundamental components required (or not required) to create a network policy:</p>
+<div class="table-wrapper"><table><thead><tr><th>Field</th><th>Description</th><th>Accepted Values</th><th>Required</th></tr></thead><tbody>
+<tr><td>name</td><td>The name of the network policy</td><td>Any UTF-8 string</td><td>yes</td></tr>
+<tr><td>groups</td><td>The names of groups the network policy should be in</td><td>Any names of groups existing in the Thorium instance</td><td>yes</td></tr>
+<tr><td>ingress</td><td>A list of rules applying to ingress traffic into tools; if not provided, all traffic is allowed in; if explicitly set to be empty (no rules), no traffic is allowed in</td><td>See <a href="#rules">Rules</a></td><td>no</td></tr>
+<tr><td>egress</td><td>A list of rules applying to egress traffic from tools; if not provided, all traffic is allowed out; if explicitly set to be empty (no rules), no traffic is allowed out</td><td>See <a href="#rules">Rules</a></td><td>no</td></tr>
+<tr><td>forced_policy</td><td>Sets the policy to apply to all tools spawned in its group(s); forced policies are not actually saved to individual images and are applied in the scaler when images are spawned</td><td>true/false (default: false)</td><td>no</td></tr>
+<tr><td>default_policy</td><td>Sets the policy to be added by default to an image on creation if no other policies are given; default policies are actually saved to all new images in their groups</td><td>true/false (default: false)</td><td>no</td></tr>
+</tbody></table>
+</div>
+<h3 id="rules"><a class="header" href="#rules">Rules</a></h3>
+<p>A network policy rule dictates which specific entities a Thorium image can connect to or be connected
+from. Rules are <em>additive</em>, meaning they combine together and can never deny what another rule allows.
+If one rule allows ingress access from the "corn" group, no other rule can deny access from that group.
+This also means policy rules are never incompatible with each other.</p>
+<div class="table-wrapper"><table><thead><tr><th>Field</th><th>Description</th><th>Accepted Values</th><th>Required</th></tr></thead><tbody>
+<tr><td>allowed_ips</td><td>A list of IP's to allow</td><td>See <a href="#ip-blocks">IP Blocks</a></td><td>no</td></tr>
+<tr><td>allowed_groups</td><td>A list of groups to allow</td><td>A name of any group existing in the Thorium instance</td><td>no</td></tr>
+<tr><td>tools</td><td>A list of tools to allow</td><td>Any valid tool name</td><td>no</td></tr>
+<tr><td>allowed_local</td><td>Allows all IP addresses in the local IP address space access</td><td>true/false (default: false)</td><td>no</td></tr>
+<tr><td>allowed_internet</td><td>Allows all IP addresses in the public IP address space access</td><td>true/false (default: false)</td><td>no</td></tr>
+<tr><td>allowed_all</td><td>Allows from all entities</td><td>true/false (default: false)</td><td>no</td></tr>
+<tr><td>ports</td><td>A list of ports this rule applies to; if not provided, the rule will apply on all ports</td><td>See <a href="#ports">Ports</a></td><td>no</td></tr>
+<tr><td>allowed_custom</td><td>A list of custom rules allowing access to peers on K8's matched by namespace and/or pod label(s)</td><td>See <a href="#k8s-custom-rules">K8's Custom Rules</a></td><td>no</td></tr>
+</tbody></table>
+</div>
+<h3 id="ip-blocks"><a class="header" href="#ip-blocks">IP Blocks</a></h3>
+<p>An IP block defines one or more IP addresses to allow access to or from. They can be defined as a
+simple IP address or as an IP CIDR covering an address space. In the later case, an optional list of
+CIDR's can be provided to exclude certain addresses access within an address space.</p>
+<div class="table-wrapper"><table><thead><tr><th>Field</th><th>Description</th><th>Valid Values</th><th>Required</th></tr></thead><tbody>
+<tr><td>cidr</td><td>A IPv4 or IPv6 CIDR or a single IPv4 or IPv6 address to allow</td><td>A valid IPv4/IPv6 CIDR or address</td><td>yes</td></tr>
+<tr><td>except</td><td>A list of CIDR's to exclude from the allowed CIDR described above</td><td>Zero or more CIDR's within the allowed CIDR described above; an error occur if any of the CIDR's are not in the allowed CIDR's address space, are of a different standard (v4 vs v6), or if the cidr above is a single IP address and except CIDR's were provided</td><td>no</td></tr>
+</tbody></table>
+</div>
+<h3 id="ports"><a class="header" href="#ports">Ports</a></h3>
+<p>Ports limit the scope of a given network policy rule to a single port or a range of ports and
+optionally a specific protocol.</p>
+<p>For example, if a user wanted to allow access to port 80 over TCP from any entity, they could provide
+an ingress rule with <code>allowed_all=true</code> and a port rule with <code>port=80</code> and <code>protocol=TCP</code>. If a user
+wanted to allow tools to access ports 1000-1006 over any protocol but only to tools in the "corn"
+group, they could provide an egress rule with <code>allowed_groups=["corn"]</code> and a port rule with
+<code>port=1000</code>, <code>end_port=1006</code>, and no value set for <code>protocol</code>.</p>
+<div class="table-wrapper"><table><thead><tr><th>Field</th><th>Description</th><th>Valid Values</th><th>Required</th></tr></thead><tbody>
+<tr><td>port</td><td>The port to allow, or the first port in a range of ports to allow when used in conjunction with <code>end_port</code></td><td>Any valid port number (1-65535)</td><td>yes</td></tr>
+<tr><td>end_port</td><td>The last port in the range of ports starting with <code>port</code></td><td>Any valid port number (1-65535)</td><td>no</td></tr>
+<tr><td>protocol</td><td>The protocol to allow on the specified port(s); if not provided, all protocols are allowed</td><td>TCP/UDP/SCTP</td><td>no</td></tr>
+</tbody></table>
+</div>
+<h3 id="k8s-custom-rules"><a class="header" href="#k8s-custom-rules">K8's Custom Rules</a></h3>
+<p>K8's custom rules provide fine-grained control to allow tool access to or from entities in the K8's cluster
+that aren't in Thorium. You can provide namespace labels to match for entire namespaces or
+pod labels to match for specific pods. If both namespace <em>and</em> pod labels are specified, only
+pods with all of the given pod labels that are in a namespace with all of the
+given namespace labels will match.</p>
+<div class="table-wrapper"><table><thead><tr><th>Field</th><th>Description</th><th>Accepted Values</th><th>Required</th></tr></thead><tbody>
+<tr><td>namespace_labels</td><td>A list of labels matching namespaces to allow</td><td>See <a href="#k8s-custom-labels">K8's Custom Labels</a></td><td>no</td></tr>
+<tr><td>pod_labels</td><td>A list of labels matching pods to allow</td><td>See <a href="#k8s-custom-labels">K8's Custom Labels</a></td><td>no</td></tr>
+</tbody></table>
+</div>
+<h3 id="k8s-custom-labels"><a class="header" href="#k8s-custom-labels">K8's Custom Labels</a></h3>
+<p>K8's custom labels will match K8's resources with the given key/value pairs.</p>
+<div class="table-wrapper"><table><thead><tr><th>Field</th><th>Description</th><th>Accepted Values</th><th>Required</th></tr></thead><tbody>
+<tr><td>key</td><td>The label key to match on</td><td>Any valid K8's label name (see the <a href="https://kubernetes.io/docs/concepts/overview/working-with-objects/labels/#syntax-and-character-set">K8's docs</a>)</td><td>yes</td></tr>
+<tr><td>value</td><td>The label value to match on</td><td>Any valid K8's label name (see the <a href="https://kubernetes.io/docs/concepts/overview/working-with-objects/labels/#syntax-and-character-set">K8's docs</a>)</td><td>yes</td></tr>
+</tbody></table>
+</div>
+                    </main>
+
+                    <nav class="nav-wrapper" aria-label="Page navigation">
+                        <!-- Mobile navigation buttons -->
+                            <a rel="prev" href="../../admins/common_issues/jobs_stuck_at_created.html" class="mobile-nav-chapters previous" title="Previous chapter" aria-label="Previous chapter" aria-keyshortcuts="Left">
+                                <i class="fa fa-angle-left"></i>
+                            </a>
+
+                            <a rel="next prefetch" href="../../admins/network_policies/configure_network_policies.html" class="mobile-nav-chapters next" title="Next chapter" aria-label="Next chapter" aria-keyshortcuts="Right">
+                                <i class="fa fa-angle-right"></i>
+                            </a>
+
+                        <div style="clear: both"></div>
+                    </nav>
+                </div>
+            </div>
+
+            <nav class="nav-wide-wrapper" aria-label="Page navigation">
+                    <a rel="prev" href="../../admins/common_issues/jobs_stuck_at_created.html" class="nav-chapters previous" title="Previous chapter" aria-label="Previous chapter" aria-keyshortcuts="Left">
+                        <i class="fa fa-angle-left"></i>
+                    </a>
+
+                    <a rel="next prefetch" href="../../admins/network_policies/configure_network_policies.html" class="nav-chapters next" title="Next chapter" aria-label="Next chapter" aria-keyshortcuts="Right">
+                        <i class="fa fa-angle-right"></i>
+                    </a>
+            </nav>
+
+        </div>
+
+
+
+
+        <script>
+            window.playground_copyable = true;
+        </script>
+
+        <script src="../../ace.js"></script>
+        <script src="../../editor.js"></script>
+        <script src="../../mode-rust.js"></script>
+        <script src="../../theme-dawn.js"></script>
+        <script src="../../theme-tomorrow_night.js"></script>
+
+        <script src="../../elasticlunr.min.js"></script>
+        <script src="../../mark.min.js"></script>
+        <script src="../../searcher.js"></script>
+
+        <script src="../../clipboard.min.js"></script>
+        <script src="../../highlight.js"></script>
+        <script src="../../book.js"></script>
+
+        <!-- Custom JS scripts -->
+
+
+    </div>
+    </body>
+</html>

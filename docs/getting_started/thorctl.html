@@ -1,0 +1,326 @@
+<!DOCTYPE HTML>
+<html lang="en" class="navy sidebar-visible" dir="ltr">
+    <head>
+        <!-- Book generated using mdBook -->
+        <meta charset="UTF-8">
+        <title>Command Line Tool - Thorium</title>
+
+
+        <!-- Custom HTML head -->
+
+        <meta name="description" content="">
+        <meta name="viewport" content="width=device-width, initial-scale=1">
+        <meta name="theme-color" content="#ffffff">
+
+        <link rel="icon" href="../favicon.svg">
+        <link rel="shortcut icon" href="../favicon.png">
+        <link rel="stylesheet" href="../css/variables.css">
+        <link rel="stylesheet" href="../css/general.css">
+        <link rel="stylesheet" href="../css/chrome.css">
+        <link rel="stylesheet" href="../css/print.css" media="print">
+
+        <!-- Fonts -->
+        <link rel="stylesheet" href="../FontAwesome/css/font-awesome.css">
+        <link rel="stylesheet" href="../fonts/fonts.css">
+
+        <!-- Highlight.js Stylesheets -->
+        <link rel="stylesheet" href="../highlight.css">
+        <link rel="stylesheet" href="../tomorrow-night.css">
+        <link rel="stylesheet" href="../ayu-highlight.css">
+
+        <!-- Custom theme stylesheets -->
+
+
+        <!-- Provide site root to javascript -->
+        <script>
+            var path_to_root = "../";
+            var default_theme = window.matchMedia("(prefers-color-scheme: dark)").matches ? "navy" : "navy";
+        </script>
+        <!-- Start loading toc.js asap -->
+        <script src="../toc.js"></script>
+    </head>
+    <body>
+    <div id="body-container">
+        <!-- Work around some values being stored in localStorage wrapped in quotes -->
+        <script>
+            try {
+                var theme = localStorage.getItem('mdbook-theme');
+                var sidebar = localStorage.getItem('mdbook-sidebar');
+
+                if (theme.startsWith('"') && theme.endsWith('"')) {
+                    localStorage.setItem('mdbook-theme', theme.slice(1, theme.length - 1));
+                }
+
+                if (sidebar.startsWith('"') && sidebar.endsWith('"')) {
+                    localStorage.setItem('mdbook-sidebar', sidebar.slice(1, sidebar.length - 1));
+                }
+            } catch (e) { }
+        </script>
+
+        <!-- Set the theme before any content is loaded, prevents flash -->
+        <script>
+            var theme;
+            try { theme = localStorage.getItem('mdbook-theme'); } catch(e) { }
+            if (theme === null || theme === undefined) { theme = default_theme; }
+            const html = document.documentElement;
+            html.classList.remove('navy')
+            html.classList.add(theme);
+            html.classList.add("js");
+        </script>
+
+        <input type="checkbox" id="sidebar-toggle-anchor" class="hidden">
+
+        <!-- Hide / unhide sidebar before it is displayed -->
+        <script>
+            var sidebar = null;
+            var sidebar_toggle = document.getElementById("sidebar-toggle-anchor");
+            if (document.body.clientWidth >= 1080) {
+                try { sidebar = localStorage.getItem('mdbook-sidebar'); } catch(e) { }
+                sidebar = sidebar || 'visible';
+            } else {
+                sidebar = 'hidden';
+            }
+            sidebar_toggle.checked = sidebar === 'visible';
+            html.classList.remove('sidebar-visible');
+            html.classList.add("sidebar-" + sidebar);
+        </script>
+
+        <nav id="sidebar" class="sidebar" aria-label="Table of contents">
+            <!-- populated by js -->
+            <mdbook-sidebar-scrollbox class="sidebar-scrollbox"></mdbook-sidebar-scrollbox>
+            <noscript>
+                <iframe class="sidebar-iframe-outer" src="../toc.html"></iframe>
+            </noscript>
+            <div id="sidebar-resize-handle" class="sidebar-resize-handle">
+                <div class="sidebar-resize-indicator"></div>
+            </div>
+        </nav>
+
+        <div id="page-wrapper" class="page-wrapper">
+
+            <div class="page">
+                <div id="menu-bar-hover-placeholder"></div>
+                <div id="menu-bar" class="menu-bar sticky">
+                    <div class="left-buttons">
+                        <label id="sidebar-toggle" class="icon-button" for="sidebar-toggle-anchor" title="Toggle Table of Contents" aria-label="Toggle Table of Contents" aria-controls="sidebar">
+                            <i class="fa fa-bars"></i>
+                        </label>
+                        <button id="theme-toggle" class="icon-button" type="button" title="Change theme" aria-label="Change theme" aria-haspopup="true" aria-expanded="false" aria-controls="theme-list">
+                            <i class="fa fa-paint-brush"></i>
+                        </button>
+                        <ul id="theme-list" class="theme-popup" aria-label="Themes" role="menu">
+                            <li role="none"><button role="menuitem" class="theme" id="light">Light</button></li>
+                            <li role="none"><button role="menuitem" class="theme" id="rust">Rust</button></li>
+                            <li role="none"><button role="menuitem" class="theme" id="coal">Coal</button></li>
+                            <li role="none"><button role="menuitem" class="theme" id="navy">Navy</button></li>
+                            <li role="none"><button role="menuitem" class="theme" id="ayu">Ayu</button></li>
+                        </ul>
+                        <button id="search-toggle" class="icon-button" type="button" title="Search. (Shortkey: s)" aria-label="Toggle Searchbar" aria-expanded="false" aria-keyshortcuts="S" aria-controls="searchbar">
+                            <i class="fa fa-search"></i>
+                        </button>
+                    </div>
+
+                    <h1 class="menu-title">Thorium</h1>
+
+                    <div class="right-buttons">
+                        <a href="../print.html" title="Print this book" aria-label="Print this book">
+                            <i id="print-button" class="fa fa-print"></i>
+                        </a>
+
+                    </div>
+                </div>
+
+                <div id="search-wrapper" class="hidden">
+                    <form id="searchbar-outer" class="searchbar-outer">
+                        <input type="search" id="searchbar" name="searchbar" placeholder="Search this book ..." aria-controls="searchresults-outer" aria-describedby="searchresults-header">
+                    </form>
+                    <div id="searchresults-outer" class="searchresults-outer hidden">
+                        <div id="searchresults-header" class="searchresults-header"></div>
+                        <ul id="searchresults">
+                        </ul>
+                    </div>
+                </div>
+
+                <!-- Apply ARIA attributes after the sidebar and the sidebar toggle button are added to the DOM -->
+                <script>
+                    document.getElementById('sidebar-toggle').setAttribute('aria-expanded', sidebar === 'visible');
+                    document.getElementById('sidebar').setAttribute('aria-hidden', sidebar !== 'visible');
+                    Array.from(document.querySelectorAll('#sidebar a')).forEach(function(link) {
+                        link.setAttribute('tabIndex', sidebar === 'visible' ? 0 : -1);
+                    });
+                </script>
+
+                <div id="content" class="content">
+                    <main>
+                        <h1 id="thorctl"><a class="header" href="#thorctl">Thorctl</a></h1>
+<hr />
+<p>Thorctl is a command line tool aimed at enabling large scale operations within Thorium. Thorctl provides a variety
+of features including:</p>
+<ul>
+<li>uploading files</li>
+<li>uploading Git repositories</li>
+<li>ingesting Git repositories by URL</li>
+<li>downloading files/repos</li>
+<li>starting reactions/jobs</li>
+<li>starting Git repo builds</li>
+<li>downloading results</li>
+<li>listing files</li>
+</ul>
+<p>An example of some of these can be found in the <a href="./../users/users.html">Users</a>
+section of these docs.</p>
+<p>To install Thorctl, follow the instructions for your specific operating system in the sections below.</p>
+<h3 id="linuxmac"><a class="header" href="#linuxmac">Linux/Mac</a></h3>
+<p>On a Linux or Mac machine, open a terminal window and run the following command:</p>
+<script>
+  let base = window.location.origin;
+  document.write("<pre>");
+  document.write("<code class=\"language-bash  hljs\">");
+  document.write("curl " + base + "/api/binaries/install-thorctl.sh | bash -s -- " + base);
+  document.write("</code>");
+  document.write("</pre>");
+</script>
+<h4 id="insecure-download"><a class="header" href="#insecure-download">Insecure Download</a></h4>
+<ul>
+<li>Although not recommended, you can bypass certificate validation and download Thorctl insecurely
+by adding the <code>-k</code> (insecure) flag to <code>curl</code> and <code>--insecure</code> at the very end of the command
+(see the command below for reference). The former tells <code>curl</code> to download the script itself
+insecurely while the latter will informs the script to use insecure communication when downloading
+Thorctl.</li>
+</ul>
+<script>
+  document.write("<pre>");
+  document.write("<code class=\"language-bash  hljs\">");
+  document.write("curl -k " + base + "/api/binaries/install-thorctl.sh | bash -s -- " + base + " --insecure");
+  document.write("</code>");
+  document.write("</pre>");
+</script>
+<h3 id="windows"><a class="header" href="#windows">Windows</a></h3>
+<p>Download Thorctl from the following link: <a href="../../../binaries/windows/x86-64/thorctl.exe">Windows Thorctl</a></p>
+<h3 id="login-via-thorctl"><a class="header" href="#login-via-thorctl">Login Via Thorctl</a></h3>
+<p>After you have downloaded Thorctl, you can authenticate by running:</p>
+<script>
+  document.write("<pre>");
+  document.write("<code class=\"language-bash  hljs\">");
+  document.write("thorctl login " + base);
+  document.write("</code>");
+  document.write("</pre>");
+</script>
+<video autoplay loop controls>
+  <source src="../static_resources/thorctl-login.mp4", type="video/mp4">
+</video>
+<h3 id="configure-thorctl"><a class="header" href="#configure-thorctl">Configure Thorctl</a></h3>
+<p>Logging into Thorium using <code>thorctl login</code> will generate a Thorctl config file containing the
+user's authentication key and the API to authenticate to. By default, the config is stored
+in <code>&lt;USER-HOME-DIR&gt;/.thorium/config.yml</code>, but you can manually specify a path like so:</p>
+<pre><code>thorctl --config &lt;PATH-TO-CONFIG-FILE&gt; ...
+</code></pre>
+<p>The config file can also contain various other optional Thorctl settings. To easily modify the config
+file, use <code>thorctl config</code>. For example, you can disable the automatic check for Thorctl updates
+by running:</p>
+<pre><code>thorctl config --skip-updates=true
+</code></pre>
+<p>You can specify a config file to modify using the <code>--config</code> flag as described above:</p>
+<pre><code>thorctl --config &lt;PATH-TO-CONFIG-FILE&gt; config --skip-updates=true
+</code></pre>
+<h3 id="thorctl-help"><a class="header" href="#thorctl-help">Thorctl Help</a></h3>
+<p>Thorctl will print help info if you pass in either the <code>-h</code> or <code>--help</code> flags.</p>
+<pre><code class="language-bash">$ thorctl -h
+The command line args passed to Thorctl
+
+Usage: thorctl [OPTIONS] &lt;COMMAND&gt;
+
+Commands:
+  clusters   Manage Thorium clusters
+  login      Login to a Thorium cluster
+  files      Perform file related tasks
+  reactions  Perform reactions related tasks
+  results    Perform results related tasks
+  repos      Perform repositories related tasks
+  help       Print this message or the help of the given subcommand(s)
+
+Options:
+      --admin &lt;ADMIN&gt;      The path to load the core Thorium config file from for admin actions [default: ~/.thorium/thorium.yml]
+      --config &lt;CONFIG&gt;    path to authentication key files for regular actions [default: ~/.thorium/config.yml]
+  -k, --keys &lt;KEYS&gt;        The path to the single user auth keys to use in place of the Thorctl config
+  -w, --workers &lt;WORKERS&gt;  The number of parallel async actions to process at once [default: 10]
+  -h, --help               Print help
+  -V, --version            Print version
+</code></pre>
+<p>Each subcommand of Thorctl (eg <code>files</code>) has its own help menu to inform users on the available options for that
+subcommand.</p>
+<pre><code class="language-bash">$ thorctl files upload --help
+Upload some files and/or directories to Thorium
+
+Usage: thorctl files upload [OPTIONS] --file-groups &lt;GROUPS&gt; [TARGETS]...
+
+Arguments:
+  [TARGETS]...  The files and or folders to upload
+
+Options:
+  -g, --groups &lt;GROUPS&gt;            The groups to upload these files to
+  -p, --pipelines &lt;PIPELINES&gt;      The pipelines to spawn for all files that are uploaded
+  -t, --tags &lt;TAGS&gt;                The tags to add to any files uploaded where key/value is separated by a deliminator
+      --deliminator &lt;DELIMINATOR&gt;  The deliminator character to use when splitting tags into key/values [default: =]
+  -f, --filter &lt;FILTER&gt;            Any regular expressions to use to determine which files to upload
+  -s, --skip &lt;SKIP&gt;                Any regular expressions to use to determine which files to skip
+      --folder-tags &lt;FOLDER_TAGS&gt;  The tags keys to use for each folder name starting at the root of the specified targets
+  -h, --help                       Print help
+  -V, --version                    Print version
+</code></pre>
+
+                    </main>
+
+                    <nav class="nav-wrapper" aria-label="Page navigation">
+                        <!-- Mobile navigation buttons -->
+                            <a rel="prev" href="../getting_started/adding_editing_groups.html" class="mobile-nav-chapters previous" title="Previous chapter" aria-label="Previous chapter" aria-keyshortcuts="Left">
+                                <i class="fa fa-angle-left"></i>
+                            </a>
+
+                            <a rel="next prefetch" href="../users/users.html" class="mobile-nav-chapters next" title="Next chapter" aria-label="Next chapter" aria-keyshortcuts="Right">
+                                <i class="fa fa-angle-right"></i>
+                            </a>
+
+                        <div style="clear: both"></div>
+                    </nav>
+                </div>
+            </div>
+
+            <nav class="nav-wide-wrapper" aria-label="Page navigation">
+                    <a rel="prev" href="../getting_started/adding_editing_groups.html" class="nav-chapters previous" title="Previous chapter" aria-label="Previous chapter" aria-keyshortcuts="Left">
+                        <i class="fa fa-angle-left"></i>
+                    </a>
+
+                    <a rel="next prefetch" href="../users/users.html" class="nav-chapters next" title="Next chapter" aria-label="Next chapter" aria-keyshortcuts="Right">
+                        <i class="fa fa-angle-right"></i>
+                    </a>
+            </nav>
+
+        </div>
+
+
+
+
+        <script>
+            window.playground_copyable = true;
+        </script>
+
+        <script src="../ace.js"></script>
+        <script src="../editor.js"></script>
+        <script src="../mode-rust.js"></script>
+        <script src="../theme-dawn.js"></script>
+        <script src="../theme-tomorrow_night.js"></script>
+
+        <script src="../elasticlunr.min.js"></script>
+        <script src="../mark.min.js"></script>
+        <script src="../searcher.js"></script>
+
+        <script src="../clipboard.min.js"></script>
+        <script src="../highlight.js"></script>
+        <script src="../book.js"></script>
+
+        <!-- Custom JS scripts -->
+
+
+    </div>
+    </body>
+</html>

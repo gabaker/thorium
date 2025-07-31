@@ -1,0 +1,525 @@
+<!DOCTYPE HTML>
+<html lang="en" class="navy sidebar-visible" dir="ltr">
+    <head>
+        <!-- Book generated using mdBook -->
+        <meta charset="UTF-8">
+        <title>Thorium - Thorium</title>
+
+
+        <!-- Custom HTML head -->
+
+        <meta name="description" content="">
+        <meta name="viewport" content="width=device-width, initial-scale=1">
+        <meta name="theme-color" content="#ffffff">
+
+        <link rel="icon" href="../../favicon.svg">
+        <link rel="shortcut icon" href="../../favicon.png">
+        <link rel="stylesheet" href="../../css/variables.css">
+        <link rel="stylesheet" href="../../css/general.css">
+        <link rel="stylesheet" href="../../css/chrome.css">
+        <link rel="stylesheet" href="../../css/print.css" media="print">
+
+        <!-- Fonts -->
+        <link rel="stylesheet" href="../../FontAwesome/css/font-awesome.css">
+        <link rel="stylesheet" href="../../fonts/fonts.css">
+
+        <!-- Highlight.js Stylesheets -->
+        <link rel="stylesheet" href="../../highlight.css">
+        <link rel="stylesheet" href="../../tomorrow-night.css">
+        <link rel="stylesheet" href="../../ayu-highlight.css">
+
+        <!-- Custom theme stylesheets -->
+
+
+        <!-- Provide site root to javascript -->
+        <script>
+            var path_to_root = "../../";
+            var default_theme = window.matchMedia("(prefers-color-scheme: dark)").matches ? "navy" : "navy";
+        </script>
+        <!-- Start loading toc.js asap -->
+        <script src="../../toc.js"></script>
+    </head>
+    <body>
+    <div id="body-container">
+        <!-- Work around some values being stored in localStorage wrapped in quotes -->
+        <script>
+            try {
+                var theme = localStorage.getItem('mdbook-theme');
+                var sidebar = localStorage.getItem('mdbook-sidebar');
+
+                if (theme.startsWith('"') && theme.endsWith('"')) {
+                    localStorage.setItem('mdbook-theme', theme.slice(1, theme.length - 1));
+                }
+
+                if (sidebar.startsWith('"') && sidebar.endsWith('"')) {
+                    localStorage.setItem('mdbook-sidebar', sidebar.slice(1, sidebar.length - 1));
+                }
+            } catch (e) { }
+        </script>
+
+        <!-- Set the theme before any content is loaded, prevents flash -->
+        <script>
+            var theme;
+            try { theme = localStorage.getItem('mdbook-theme'); } catch(e) { }
+            if (theme === null || theme === undefined) { theme = default_theme; }
+            const html = document.documentElement;
+            html.classList.remove('navy')
+            html.classList.add(theme);
+            html.classList.add("js");
+        </script>
+
+        <input type="checkbox" id="sidebar-toggle-anchor" class="hidden">
+
+        <!-- Hide / unhide sidebar before it is displayed -->
+        <script>
+            var sidebar = null;
+            var sidebar_toggle = document.getElementById("sidebar-toggle-anchor");
+            if (document.body.clientWidth >= 1080) {
+                try { sidebar = localStorage.getItem('mdbook-sidebar'); } catch(e) { }
+                sidebar = sidebar || 'visible';
+            } else {
+                sidebar = 'hidden';
+            }
+            sidebar_toggle.checked = sidebar === 'visible';
+            html.classList.remove('sidebar-visible');
+            html.classList.add("sidebar-" + sidebar);
+        </script>
+
+        <nav id="sidebar" class="sidebar" aria-label="Table of contents">
+            <!-- populated by js -->
+            <mdbook-sidebar-scrollbox class="sidebar-scrollbox"></mdbook-sidebar-scrollbox>
+            <noscript>
+                <iframe class="sidebar-iframe-outer" src="../../toc.html"></iframe>
+            </noscript>
+            <div id="sidebar-resize-handle" class="sidebar-resize-handle">
+                <div class="sidebar-resize-indicator"></div>
+            </div>
+        </nav>
+
+        <div id="page-wrapper" class="page-wrapper">
+
+            <div class="page">
+                <div id="menu-bar-hover-placeholder"></div>
+                <div id="menu-bar" class="menu-bar sticky">
+                    <div class="left-buttons">
+                        <label id="sidebar-toggle" class="icon-button" for="sidebar-toggle-anchor" title="Toggle Table of Contents" aria-label="Toggle Table of Contents" aria-controls="sidebar">
+                            <i class="fa fa-bars"></i>
+                        </label>
+                        <button id="theme-toggle" class="icon-button" type="button" title="Change theme" aria-label="Change theme" aria-haspopup="true" aria-expanded="false" aria-controls="theme-list">
+                            <i class="fa fa-paint-brush"></i>
+                        </button>
+                        <ul id="theme-list" class="theme-popup" aria-label="Themes" role="menu">
+                            <li role="none"><button role="menuitem" class="theme" id="light">Light</button></li>
+                            <li role="none"><button role="menuitem" class="theme" id="rust">Rust</button></li>
+                            <li role="none"><button role="menuitem" class="theme" id="coal">Coal</button></li>
+                            <li role="none"><button role="menuitem" class="theme" id="navy">Navy</button></li>
+                            <li role="none"><button role="menuitem" class="theme" id="ayu">Ayu</button></li>
+                        </ul>
+                        <button id="search-toggle" class="icon-button" type="button" title="Search. (Shortkey: s)" aria-label="Toggle Searchbar" aria-expanded="false" aria-keyshortcuts="S" aria-controls="searchbar">
+                            <i class="fa fa-search"></i>
+                        </button>
+                    </div>
+
+                    <h1 class="menu-title">Thorium</h1>
+
+                    <div class="right-buttons">
+                        <a href="../../print.html" title="Print this book" aria-label="Print this book">
+                            <i id="print-button" class="fa fa-print"></i>
+                        </a>
+
+                    </div>
+                </div>
+
+                <div id="search-wrapper" class="hidden">
+                    <form id="searchbar-outer" class="searchbar-outer">
+                        <input type="search" id="searchbar" name="searchbar" placeholder="Search this book ..." aria-controls="searchresults-outer" aria-describedby="searchresults-header">
+                    </form>
+                    <div id="searchresults-outer" class="searchresults-outer hidden">
+                        <div id="searchresults-header" class="searchresults-header"></div>
+                        <ul id="searchresults">
+                        </ul>
+                    </div>
+                </div>
+
+                <!-- Apply ARIA attributes after the sidebar and the sidebar toggle button are added to the DOM -->
+                <script>
+                    document.getElementById('sidebar-toggle').setAttribute('aria-expanded', sidebar === 'visible');
+                    document.getElementById('sidebar').setAttribute('aria-hidden', sidebar !== 'visible');
+                    Array.from(document.querySelectorAll('#sidebar a')).forEach(function(link) {
+                        link.setAttribute('tabIndex', sidebar === 'visible' ? 0 : -1);
+                    });
+                </script>
+
+                <div id="content" class="content">
+                    <main>
+                        <h2 id="deploy-thorium"><a class="header" href="#deploy-thorium">Deploy Thorium</a></h2>
+<h3 id="1-deploy-thorium-operator"><a class="header" href="#1-deploy-thorium-operator">1) Deploy Thorium Operator</a></h3>
+<h4 id="create-thorium-serviceaccount-and-rbac"><a class="header" href="#create-thorium-serviceaccount-and-rbac">Create Thorium ServiceAccount and RBAC</a></h4>
+<p>The Thorium operator and scaler can be configured to use a service account with the ability to
+modify K8s resources. This is the default configuration for single K8s cluster Thorium deployments.</p>
+<p>Start by creating a namespace for all Thorium resources.</p>
+<pre><code class="language-bash">kubectl create ns thorium
+</code></pre>
+<p>Create a Thorium ServiceAccount and roles</p>
+<pre><code class="language-bash editable">cat &lt;&lt;EOF | kubectl apply -f -
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: thorium
+  namespace: thorium
+imagePullSecrets:
+  - name: registry-token
+automountServiceAccountToken: true
+---
+
+apiVersion: v1
+kind: Secret
+metadata:
+  name: thorium-account-token
+  namespace: thorium
+  annotations:
+    kubernetes.io/service-account.name: thorium
+type: kubernetes.io/service-account-token
+---
+
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  # "namespace" omitted since ClusterRoles are not namespaced
+  name: thorium-operator
+rules:
+### https://kubernetes.io/docs/reference/kubectl/#resource-types
+### create custom resources
+- apiGroups: ["apiextensions.k8s.io"] 
+  resources: ["customresourcedefinitions"]
+  verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+### any custom resources under the sandia.gov group
+- apiGroups: ["sandia.gov"] 
+  resources: ["*"]
+  verbs: ["*"]
+### deployments
+- apiGroups: ["apps"] 
+  resources: ["deployments"]
+  verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+### networking
+- apiGroups: ["networking.k8s.io"] 
+  resources: ["networkpolicies"]
+  verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+### events
+- apiGroups: ["events.k8s.io"] 
+  resources: ["events"]
+  verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+### v1 API resources
+- apiGroups: [""] 
+  resources: ["pods", "services", "secrets", "configmaps", "nodes", "namespaces", "events"]
+  verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+---
+
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: thorium-operator-binding
+subjects:
+- kind: ServiceAccount
+  name: thorium 
+  namespace: thorium
+  #apiGroup: "rbac.authorization.k8s.io"
+roleRef:
+  kind: ClusterRole
+  name: thorium-operator
+  apiGroup: "rbac.authorization.k8s.io" 
+EOF
+</code></pre>
+<h4 id="create-a-registry-pull-secret-optional"><a class="header" href="#create-a-registry-pull-secret-optional">Create a registry pull secret (optional)</a></h4>
+<p>Create a registry token that will enable pulling the Thorium container image from the registry.</p>
+<pre><code class="language-bash">kubectl create secret generic operator-registry-token --namespace="thorium" --type=kubernetes.io/dockerconfigjson --from-file=".dockerconfigjson"
+</code></pre>
+<p>Here is an example of a <code>.dockerconfigjson</code> file. Replace the fields wrapped by <code>&lt;&gt;</code> with registry values.</p>
+<pre><code class="language-json">{
+	"auths": {
+		"&lt;REGISTRY.DOMAIN&gt;": {
+			"auth": "&lt;base64 of username:password&gt;"
+		}
+	}
+}
+</code></pre>
+<h4 id="create-the-thorium-operator"><a class="header" href="#create-the-thorium-operator">Create the Thorium Operator</a></h4>
+<p>Update the <code>image</code> field with the correct registry path and tag for the Thorium container image.</p>
+<pre><code class="language-bash editable">cat &lt;&lt;EOF | kubectl apply -f -
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: operator
+  namespace: thorium
+  labels:
+    app: operator
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: operator
+  template:
+    metadata:
+      labels:
+          app: operator
+    spec:
+      serviceAccountName: thorium
+      automountServiceAccountToken: true
+      containers:
+        - name: operator
+          image: "&lt;REGISTRY.DOMAIN/path/to/image/thorium:tag&gt;"
+          imagePullPolicy: Always
+          resources:
+            requests:
+              memory: "1Gi"
+              cpu: 1
+            limits:
+              memory: "1Gi"
+              cpu: 1
+          env:
+            - name: "noproxy"
+            - name: "http_proxy"
+            - name: "https_proxy"
+            - name: "NOPROXY"
+            - name: "HTTP_PROXY"
+            - name: "HTTPS_PROXY"
+      imagePullSecrets:
+        - name: operator-registry-token
+EOF
+</code></pre>
+<h4 id="verify-the-operator-has-successfully-started"><a class="header" href="#verify-the-operator-has-successfully-started">Verify the operator has successfully started</a></h4>
+<pre><code class="language-bash">kubectl rollout status --watch --timeout=600s deployment.apps/operator -n thorium
+</code></pre>
+<h3 id="4-create-a-thorium-banner-configmap"><a class="header" href="#4-create-a-thorium-banner-configmap">4) Create a Thorium banner ConfigMap</a></h3>
+<p>Create a text file called <code>banner.txt</code> that contains a banner message. This message will be displayed
+when users login into the Thorium web interface.</p>
+<pre><code class="language-bash">kubectl create cm banner --from-file=/path/to/banner.txt -n thorium
+</code></pre>
+<h3 id="5-create-a-thoriumcluster-resource"><a class="header" href="#5-create-a-thoriumcluster-resource">5) Create a ThoriumCluster resource</a></h3>
+<p>The ThoriumCluster CRD defines database client access, Thorium cluster nodes, and much more. Enter
+all the passwords, DB/S3 endpoints, and Thorium container image path/tag into this file. The operator
+will use this the CRD to deploy a working Thorium instance. If this resource definition is updated
+after the initial deployment the operator will role those changes out and restart Thorium components
+such as the scaler and API.</p>
+<h4 id="create-a-thorium-clusteryml-file-and-update-the-example-values"><a class="header" href="#create-a-thorium-clusteryml-file-and-update-the-example-values">Create a thorium-cluster.yml file and update the example values:</a></h4>
+<pre><code class="language-yaml">apiVersion: sandia.gov/v1
+kind: ThoriumCluster
+metadata:
+  name: prod
+  namespace: thorium
+spec:
+  registry: "&lt;REGISTRY.DOMAIN/path/to/image/thorium&gt;"
+  version: "&lt;IMAGE TAG&gt;"
+  image_pull_policy: Always
+  components:
+    api:
+      replicas: 1
+      urls:
+      - "&lt;THORIUM FQDN&gt;"
+      ports:
+      - 80
+      - 443
+    scaler:
+      service_account: true
+    baremetal_scaler: {}
+    search_streamer: {}
+    event_handler: {}
+  config: 
+    thorium:
+      secret_key: "&lt;SECRET&gt;" 
+      tracing:
+        external:
+          Grpc:
+            endpoint: "http://quickwit-indexer.quickwit.svc.cluster.local:7281"
+            level: "Info"
+        local:
+          level: "Info"
+      files:
+        bucket: "thorium-files"
+        password: "SecretCornIsBest"
+        earliest: 1610596807
+      results:
+        bucket: "thorium-result-files"
+        earliest: 1610596807
+      attachments:
+        bucket: "thorium-comment-files"
+      repos:
+        bucket: "thorium-repo-files"
+      ephemeral:
+        bucket: "thorium-ephemeral-files"
+      s3:
+        access_key: "&lt;KEY&gt;"
+        secret_token: "&lt;TOKEN&gt;"
+        endpoint: "https://&lt;S3 FQDN&gt;"
+      auth:
+        local_user_ids:
+          group: 1879048192
+          user: 1879048192
+        token_expire: 90
+      scaler:
+        crane:
+          insecure: true
+        k8s:
+          clusters:
+            kubernetes-admin@cluster.local:
+              alias: "production"
+              nodes:
+                - "&lt;K8s host 1&gt;"
+                - "&lt;K8s host 2&gt;"
+                - "&lt;K8s host 3&gt;"
+                - "&lt;K8s host 4&gt;"
+                - "&lt;K8s host 5&gt;"
+    redis:
+      host: "redis.redis.svc.cluster.local"
+      port: 6379
+      password: "&lt;PASSWORD&gt;"
+    scylla:
+      nodes:
+	- &lt;SCYLLA IP 1&gt;
+	- &lt;SCYLLA IP 2&gt;
+	- &lt;SCYLLA IP 3&gt;
+      replication: 3
+      auth:
+        username: "thorium"
+        password: "&lt;PASSWORD&gt;"
+    elastic:
+      node: "https://elastic-es-http.elastic-system.svc.cluster.local:9200"
+      username: "thorium"
+      password: "&lt;PASSWORD&gt;"
+      results: "results"
+  registry_auth:
+    &lt;REGISTRY.DOMAIN: &lt;base64 USERNAME:PASSWORD&gt;
+    &lt;REGISTRY2.DOMAIN: &lt;base64 USERNAME:PASSWORD&gt;
+</code></pre>
+<p>Thorium deployments that consist of multiple K8s clusters (managed by a single scaler pod) will
+require a dedicated <code>kubeconfig</code> secret rather than the use of a service account that is default
+for single cluster instances. This secret file must be built manually from the <code>kubeconfig</code> files
+of the Thorium clusters that will be managed. The <code>service_account</code> field in the ThoriumCluster
+CRD will be set to <code>false</code> for multi-cluster Thorium deployments. Most Thorium deployments will
+are not multi-cluster.</p>
+<h4 id="create-the-thoriumcluster-resource"><a class="header" href="#create-the-thoriumcluster-resource">Create the ThoriumCluster resource:</a></h4>
+<p>The operator will attempt to deploy the ThoriumCluster from the CRD you applied. This will include
+creating secrets such as the shared thorium config (<code>thorium.yml</code>). It will also deploy scaler,
+api, event-handler, and search-streamer pods if those have been been specified.</p>
+<pre><code class="language-bash"># create the thorium CRD
+kubectl create -f thorium-cluster-&lt;DEPLOYMENT&gt;.yml
+</code></pre>
+<h3 id="6-create-ingressroutes"><a class="header" href="#6-create-ingressroutes">6) Create IngressRoutes</a></h3>
+<p>IngressRoutes will be needed to direct web traffic to the Thorium API through the Traefik ingress
+proxy. Modify the following command with the correct <code>THORIUM.DOMAIN</code> FQDN. A TLS certificate
+called <code>api-certs</code> will be required. Without that K8s secret, Traefik will serve a default
+self-signed cert that web clients will flag as insecure.</p>
+<h4 id="create-tls-k8s-secret"><a class="header" href="#create-tls-k8s-secret">Create TLS K8s secret</a></h4>
+<p>Once you have signed <code>tls.crt</code> and <code>tls.key</code> files, create the <code>api-certs</code> secret using <code>kubectl</code>.</p>
+<pre><code class="language-bash">kubectl create secret tls api-certs --namespace="thorium" --key="tls.key" --cert="tls.crt"
+</code></pre>
+<h4 id="create-traefik-ingressroutes-and-middleware"><a class="header" href="#create-traefik-ingressroutes-and-middleware">Create Traefik IngressRoutes and Middleware</a></h4>
+<pre><code class="language-yaml">apiVersion: traefik.io/v1alpha1
+kind: TLSStore
+metadata:
+  name: default
+  namespace: thorium
+spec:
+  defaultCertificate:
+    secretName: api-certs
+---
+
+apiVersion: traefik.io/v1alpha1 
+kind: Middleware
+metadata:
+  name: ui-prefix-prepend
+spec:
+  addPrefix:
+    prefix: /ui
+---
+
+apiVersion: traefik.io/v1alpha1
+kind: IngressRoute
+metadata:
+  name: thorium-ingress
+spec:
+  entryPoints:
+    - websecure
+  routes:
+  - match: "Host(`THORIUM.DOMAIN`) &amp;&amp; PathPrefix(`/api`)"
+    kind: Rule
+    services:
+    - name: thorium-api
+      port: 80
+  - match: "Host(`THORIUM.DOMAIN`) &amp;&amp; PathPrefix(`/assets`)"
+    kind: Rule
+    services:
+    - name: thorium-api
+      port: 80
+  - match: "Host(`THORIUM.DOMAIN) &amp;&amp; PathPrefix(`/ui`)"
+    kind: Rule
+    services:
+    - name: thorium-api
+      port: 80
+  - match: "Host(`THORIUM.DOMAIN`)"
+    kind: Rule
+    services:
+    - name: thorium-api
+      port: 80
+    middlewares:
+      - name: ui-prefix-prepend
+  tls:
+    secretName: api-certs
+</code></pre>
+
+                    </main>
+
+                    <nav class="nav-wrapper" aria-label="Page navigation">
+                        <!-- Mobile navigation buttons -->
+                            <a rel="prev" href="../../admins/deploy/install-tracing.html" class="mobile-nav-chapters previous" title="Previous chapter" aria-label="Previous chapter" aria-keyshortcuts="Left">
+                                <i class="fa fa-angle-left"></i>
+                            </a>
+
+                            <a rel="next prefetch" href="../../admins/operations.html" class="mobile-nav-chapters next" title="Next chapter" aria-label="Next chapter" aria-keyshortcuts="Right">
+                                <i class="fa fa-angle-right"></i>
+                            </a>
+
+                        <div style="clear: both"></div>
+                    </nav>
+                </div>
+            </div>
+
+            <nav class="nav-wide-wrapper" aria-label="Page navigation">
+                    <a rel="prev" href="../../admins/deploy/install-tracing.html" class="nav-chapters previous" title="Previous chapter" aria-label="Previous chapter" aria-keyshortcuts="Left">
+                        <i class="fa fa-angle-left"></i>
+                    </a>
+
+                    <a rel="next prefetch" href="../../admins/operations.html" class="nav-chapters next" title="Next chapter" aria-label="Next chapter" aria-keyshortcuts="Right">
+                        <i class="fa fa-angle-right"></i>
+                    </a>
+            </nav>
+
+        </div>
+
+
+
+
+        <script>
+            window.playground_copyable = true;
+        </script>
+
+        <script src="../../ace.js"></script>
+        <script src="../../editor.js"></script>
+        <script src="../../mode-rust.js"></script>
+        <script src="../../theme-dawn.js"></script>
+        <script src="../../theme-tomorrow_night.js"></script>
+
+        <script src="../../elasticlunr.min.js"></script>
+        <script src="../../mark.min.js"></script>
+        <script src="../../searcher.js"></script>
+
+        <script src="../../clipboard.min.js"></script>
+        <script src="../../highlight.js"></script>
+        <script src="../../book.js"></script>
+
+        <!-- Custom JS scripts -->
+
+
+    </div>
+    </body>
+</html>

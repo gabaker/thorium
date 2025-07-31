@@ -1,0 +1,358 @@
+<!DOCTYPE HTML>
+<html lang="en" class="navy sidebar-visible" dir="ltr">
+    <head>
+        <!-- Book generated using mdBook -->
+        <meta charset="UTF-8">
+        <title>ECK - Thorium</title>
+
+
+        <!-- Custom HTML head -->
+
+        <meta name="description" content="">
+        <meta name="viewport" content="width=device-width, initial-scale=1">
+        <meta name="theme-color" content="#ffffff">
+
+        <link rel="icon" href="../../favicon.svg">
+        <link rel="shortcut icon" href="../../favicon.png">
+        <link rel="stylesheet" href="../../css/variables.css">
+        <link rel="stylesheet" href="../../css/general.css">
+        <link rel="stylesheet" href="../../css/chrome.css">
+        <link rel="stylesheet" href="../../css/print.css" media="print">
+
+        <!-- Fonts -->
+        <link rel="stylesheet" href="../../FontAwesome/css/font-awesome.css">
+        <link rel="stylesheet" href="../../fonts/fonts.css">
+
+        <!-- Highlight.js Stylesheets -->
+        <link rel="stylesheet" href="../../highlight.css">
+        <link rel="stylesheet" href="../../tomorrow-night.css">
+        <link rel="stylesheet" href="../../ayu-highlight.css">
+
+        <!-- Custom theme stylesheets -->
+
+
+        <!-- Provide site root to javascript -->
+        <script>
+            var path_to_root = "../../";
+            var default_theme = window.matchMedia("(prefers-color-scheme: dark)").matches ? "navy" : "navy";
+        </script>
+        <!-- Start loading toc.js asap -->
+        <script src="../../toc.js"></script>
+    </head>
+    <body>
+    <div id="body-container">
+        <!-- Work around some values being stored in localStorage wrapped in quotes -->
+        <script>
+            try {
+                var theme = localStorage.getItem('mdbook-theme');
+                var sidebar = localStorage.getItem('mdbook-sidebar');
+
+                if (theme.startsWith('"') && theme.endsWith('"')) {
+                    localStorage.setItem('mdbook-theme', theme.slice(1, theme.length - 1));
+                }
+
+                if (sidebar.startsWith('"') && sidebar.endsWith('"')) {
+                    localStorage.setItem('mdbook-sidebar', sidebar.slice(1, sidebar.length - 1));
+                }
+            } catch (e) { }
+        </script>
+
+        <!-- Set the theme before any content is loaded, prevents flash -->
+        <script>
+            var theme;
+            try { theme = localStorage.getItem('mdbook-theme'); } catch(e) { }
+            if (theme === null || theme === undefined) { theme = default_theme; }
+            const html = document.documentElement;
+            html.classList.remove('navy')
+            html.classList.add(theme);
+            html.classList.add("js");
+        </script>
+
+        <input type="checkbox" id="sidebar-toggle-anchor" class="hidden">
+
+        <!-- Hide / unhide sidebar before it is displayed -->
+        <script>
+            var sidebar = null;
+            var sidebar_toggle = document.getElementById("sidebar-toggle-anchor");
+            if (document.body.clientWidth >= 1080) {
+                try { sidebar = localStorage.getItem('mdbook-sidebar'); } catch(e) { }
+                sidebar = sidebar || 'visible';
+            } else {
+                sidebar = 'hidden';
+            }
+            sidebar_toggle.checked = sidebar === 'visible';
+            html.classList.remove('sidebar-visible');
+            html.classList.add("sidebar-" + sidebar);
+        </script>
+
+        <nav id="sidebar" class="sidebar" aria-label="Table of contents">
+            <!-- populated by js -->
+            <mdbook-sidebar-scrollbox class="sidebar-scrollbox"></mdbook-sidebar-scrollbox>
+            <noscript>
+                <iframe class="sidebar-iframe-outer" src="../../toc.html"></iframe>
+            </noscript>
+            <div id="sidebar-resize-handle" class="sidebar-resize-handle">
+                <div class="sidebar-resize-indicator"></div>
+            </div>
+        </nav>
+
+        <div id="page-wrapper" class="page-wrapper">
+
+            <div class="page">
+                <div id="menu-bar-hover-placeholder"></div>
+                <div id="menu-bar" class="menu-bar sticky">
+                    <div class="left-buttons">
+                        <label id="sidebar-toggle" class="icon-button" for="sidebar-toggle-anchor" title="Toggle Table of Contents" aria-label="Toggle Table of Contents" aria-controls="sidebar">
+                            <i class="fa fa-bars"></i>
+                        </label>
+                        <button id="theme-toggle" class="icon-button" type="button" title="Change theme" aria-label="Change theme" aria-haspopup="true" aria-expanded="false" aria-controls="theme-list">
+                            <i class="fa fa-paint-brush"></i>
+                        </button>
+                        <ul id="theme-list" class="theme-popup" aria-label="Themes" role="menu">
+                            <li role="none"><button role="menuitem" class="theme" id="light">Light</button></li>
+                            <li role="none"><button role="menuitem" class="theme" id="rust">Rust</button></li>
+                            <li role="none"><button role="menuitem" class="theme" id="coal">Coal</button></li>
+                            <li role="none"><button role="menuitem" class="theme" id="navy">Navy</button></li>
+                            <li role="none"><button role="menuitem" class="theme" id="ayu">Ayu</button></li>
+                        </ul>
+                        <button id="search-toggle" class="icon-button" type="button" title="Search. (Shortkey: s)" aria-label="Toggle Searchbar" aria-expanded="false" aria-keyshortcuts="S" aria-controls="searchbar">
+                            <i class="fa fa-search"></i>
+                        </button>
+                    </div>
+
+                    <h1 class="menu-title">Thorium</h1>
+
+                    <div class="right-buttons">
+                        <a href="../../print.html" title="Print this book" aria-label="Print this book">
+                            <i id="print-button" class="fa fa-print"></i>
+                        </a>
+
+                    </div>
+                </div>
+
+                <div id="search-wrapper" class="hidden">
+                    <form id="searchbar-outer" class="searchbar-outer">
+                        <input type="search" id="searchbar" name="searchbar" placeholder="Search this book ..." aria-controls="searchresults-outer" aria-describedby="searchresults-header">
+                    </form>
+                    <div id="searchresults-outer" class="searchresults-outer hidden">
+                        <div id="searchresults-header" class="searchresults-header"></div>
+                        <ul id="searchresults">
+                        </ul>
+                    </div>
+                </div>
+
+                <!-- Apply ARIA attributes after the sidebar and the sidebar toggle button are added to the DOM -->
+                <script>
+                    document.getElementById('sidebar-toggle').setAttribute('aria-expanded', sidebar === 'visible');
+                    document.getElementById('sidebar').setAttribute('aria-hidden', sidebar !== 'visible');
+                    Array.from(document.querySelectorAll('#sidebar a')).forEach(function(link) {
+                        link.setAttribute('tabIndex', sidebar === 'visible' ? 0 : -1);
+                    });
+                </script>
+
+                <div id="content" class="content">
+                    <main>
+                        <h2 id="deploy-eck"><a class="header" href="#deploy-eck">Deploy ECK</a></h2>
+<blockquote>
+<p>The Elasticsearch deployment process will be summarized in this guide. However, admins may want
+to consult the official ECK documentation for a more complete explanation of different configuration
+options and additional troubleshooting steps. The Elasticsearch deployment guide can be found
+<a href="https://www.elastic.co/guide/en/cloud-on-k8s/current/k8s-deploy-eck.html">here</a>.</p>
+</blockquote>
+<p>Thorium requires <code>Elasticsearch</code> to enable full-text search of analysis tool results and other
+submission data. <code>Kibana</code> may optionally be deployed as a web interface for managing the ECK
+configuration such as user roles, permissions and storage indexes.</p>
+<h3 id="1-deploy-elastic-operator-and-crds"><a class="header" href="#1-deploy-elastic-operator-and-crds">1) Deploy Elastic Operator and CRDs</a></h3>
+<blockquote>
+<p>Please consult the <a href="https://www.elastic.co/guide/en/cloud-on-k8s/current/k8s-supported.html">supported versions</a>
+of the <code>Elastic Cloud on Kubernetes</code> documentation to ensure the operator supports the Kubernetes
+version of your environment as well as the Elasticsearch and Kibana version you will be deploying.</p>
+</blockquote>
+<p>Create an Elasticsearch operator and the related CRDs. It may be necessary to update the following
+command with the latest operator and CRD version. Note that the shared operator/crd version will
+differ from the <code>Elasticsearch</code> and <code>Kibana</code> version.</p>
+<pre><code class="language-bash">kubectl apply -f https://download.elastic.co/downloads/eck/2.16.1/crds.yaml
+kubectl create -f https://download.elastic.co/downloads/eck/2.16.1/operator.yaml
+</code></pre>
+<h3 id="2-update-system-configuration"><a class="header" href="#2-update-system-configuration">2) Update System Configuration</a></h3>
+<p>The system configuration of K8s cluster nodes may need to be updated to meet the resource requirements
+of ECK. In particular the maximum allowed virtual memory maps for an individual process must be increased
+for elastic pods to successfully start. This configuration value may be added to a linux system's
+<code>/etc/sysctl.conf</code> or <code>/etc/sysctl.d/99-sysctl.conf</code> file. Be aware that some linux versions ignore the
+<code>/etc/sysctl.conf</code> file on boot.</p>
+<pre><code class="language-bash">echo "vm.max_map_count=262144" &gt;&gt; /etc/sysctl.d/99-sysctl.conf
+</code></pre>
+<p>System configuration options for elastic nodes can be found <a href="https://www.elastic.co/guide/en/elasticsearch/reference/current/system-config.html">here</a>. You can also set an <code>initContainer</code> to run before elastic starts that will set the <code>max_map_count</code>. That option is what the next step will show.</p>
+<h3 id="3-deploy-kibana-and-elasticsearch"><a class="header" href="#3-deploy-kibana-and-elasticsearch">3) Deploy Kibana and ElasticSearch</a></h3>
+<p>You may want to update these fields in the following resource files before applying them with <code>kubectl</code>:</p>
+<ul>
+<li><code>version</code> - version of ES and Kibana you want to deploy</li>
+<li><code>count</code> - number of nodes in your ES cluster or kibana replicas</li>
+<li><code>storageClassName</code> - name of the storage provisioner for requesting K8s PVCs</li>
+<li><code>resources.requests.storage</code> - size of storage volumes for each ES pod</li>
+<li><code>resources.[requests,limits].memory</code> - memory for each ES and Kibana pod</li>
+<li><code>resources.[requests,limits].cpu</code> - cpu for each ES and Kibana pod</li>
+</ul>
+<h4 id="deploy-elastic"><a class="header" href="#deploy-elastic">Deploy Elastic</a></h4>
+<pre><code class="language-yaml editable">cat &lt;&lt;EOF | kubectl apply -f -
+apiVersion: elasticsearch.k8s.elastic.co/v1
+kind: Elasticsearch
+metadata:
+  name: elastic
+  namespace: elastic-system
+spec:
+  version: 8.17.2
+  volumeClaimDeletePolicy: DeleteOnScaledownOnly
+  nodeSets:
+  - name: default
+    count: 3
+    podTemplate:
+      spec:
+        initContainers:
+        - name: sysctl
+          securityContext:
+            privileged: true
+            runAsUser: 0
+          command: ['sh', '-c', 'sysctl -w vm.max_map_count=262144']
+        containers:
+        - name: elasticsearch
+          env:
+          - name: ES_JAVA_OPTS
+            value: -Xms28g -Xmx28g
+          resources:
+            requests:
+              memory: 32Gi
+              cpu: 4
+            limits:
+              memory: 32Gi
+              cpu: 4
+    volumeClaimTemplates:
+      - metadata:
+          name: elasticsearch-data
+        spec:
+          storageClassName: csi-rbd-sc
+          accessModes:
+          - ReadWriteOnce
+          resources:
+            requests:
+              storage: 12Ti
+    config:
+      node.store.allow_mmap: true
+      http.max_content_length: 1024mb
+EOF
+</code></pre>
+<h4 id="deploy-kibana"><a class="header" href="#deploy-kibana">Deploy <code>Kibana</code></a></h4>
+<pre><code class="language-yaml editable">cat &lt;&lt;EOF | kubectl apply -f -
+apiVersion: kibana.k8s.elastic.co/v1
+kind: Kibana
+metadata:
+  name: elastic
+  namespace: elastic-system
+spec:
+  version: 8.17.2
+  count: 1
+  elasticsearchRef:
+    name: elastic
+EOF
+</code></pre>
+<h3 id="4-verify-elastic-and-kibana-are-up"><a class="header" href="#4-verify-elastic-and-kibana-are-up">4) Verify Elastic and Kibana are up</a></h3>
+<p>Ensure the Elastic and Kibana pods are <code>Running</code>.</p>
+<pre><code class="language-bash">kubectl get pods -n elastic-system
+# NAME                          READY   STATUS    RESTARTS       AGE
+# elastic-es-default-0          1/1     Running   0              1h
+# elastic-es-default-1          1/1     Running   0              1h
+# elastic-es-default-2          1/1     Running   0              1h
+# elastic-kb-55f49bdfb4-p6kg9   1/1     Running   0              1h
+# elastic-operator-0            1/1     Running   0              1h
+</code></pre>
+<h3 id="5-create-thorium-role-and-index"><a class="header" href="#5-create-thorium-role-and-index">5) Create Thorium role and index</a></h3>
+<p>Create the Elastic thorium user, role, and results index using the following command. Be sure to update the
+<code>INSECURE_ES_PASSWORD</code> to an appropriately secure value. The text block can be edited before copy-pasting
+the command into a terminal.</p>
+<blockquote>
+<p>You will use the username, password, and index name configured here when you create the
+ThoriumCluster resource.</p>
+</blockquote>
+<pre><code class="language-bash editable">export ESPASS=$(kubectl get secret -n elastic-system elastic-es-elastic-user -o=jsonpath='{.data.elastic}' | base64 --decode; echo)
+kubectl -n elastic-system exec -i --tty=false pod/elastic-es-default-0 -- /bin/bash &lt;&lt; EOF
+# Create thorium role
+curl -k -X PUT -u elastic:$ESPASS "https://localhost:9200/thorium?pretty"
+# Create results index and give thorium role privileges
+curl -k -X POST -u elastic:$ESPASS "https://localhost:9200/_security/role/thorium?pretty" -H 'Content-Type: application/json' -d'
+{
+  "indices": [
+    {
+      "names": ["results"],
+      "privileges": ["all"]
+    }
+  ]
+}
+'
+# Create thorium user with thorium role
+curl -k -X POST -u elastic:$ESPASS "https://localhost:9200/_security/user/thorium?pretty" -H 'Content-Type: application/json' -d'
+{
+  "password" : "INSECURE_ES_PASSWORD",
+  "roles" : ["thorium"],
+  "full_name" : "Thorium",
+  "email" : "thorium@sandia.gov"
+}
+'
+EOF
+</code></pre>
+
+                    </main>
+
+                    <nav class="nav-wrapper" aria-label="Page navigation">
+                        <!-- Mobile navigation buttons -->
+                            <a rel="prev" href="../../admins/deploy/install-scylla.html" class="mobile-nav-chapters previous" title="Previous chapter" aria-label="Previous chapter" aria-keyshortcuts="Left">
+                                <i class="fa fa-angle-left"></i>
+                            </a>
+
+                            <a rel="next prefetch" href="../../admins/deploy/install-tracing.html" class="mobile-nav-chapters next" title="Next chapter" aria-label="Next chapter" aria-keyshortcuts="Right">
+                                <i class="fa fa-angle-right"></i>
+                            </a>
+
+                        <div style="clear: both"></div>
+                    </nav>
+                </div>
+            </div>
+
+            <nav class="nav-wide-wrapper" aria-label="Page navigation">
+                    <a rel="prev" href="../../admins/deploy/install-scylla.html" class="nav-chapters previous" title="Previous chapter" aria-label="Previous chapter" aria-keyshortcuts="Left">
+                        <i class="fa fa-angle-left"></i>
+                    </a>
+
+                    <a rel="next prefetch" href="../../admins/deploy/install-tracing.html" class="nav-chapters next" title="Next chapter" aria-label="Next chapter" aria-keyshortcuts="Right">
+                        <i class="fa fa-angle-right"></i>
+                    </a>
+            </nav>
+
+        </div>
+
+
+
+
+        <script>
+            window.playground_copyable = true;
+        </script>
+
+        <script src="../../ace.js"></script>
+        <script src="../../editor.js"></script>
+        <script src="../../mode-rust.js"></script>
+        <script src="../../theme-dawn.js"></script>
+        <script src="../../theme-tomorrow_night.js"></script>
+
+        <script src="../../elasticlunr.min.js"></script>
+        <script src="../../mark.min.js"></script>
+        <script src="../../searcher.js"></script>
+
+        <script src="../../clipboard.min.js"></script>
+        <script src="../../highlight.js"></script>
+        <script src="../../book.js"></script>
+
+        <!-- Custom JS scripts -->
+
+
+    </div>
+    </body>
+</html>

@@ -1,0 +1,513 @@
+<!DOCTYPE HTML>
+<html lang="en" class="navy sidebar-visible" dir="ltr">
+    <head>
+        <!-- Book generated using mdBook -->
+        <meta charset="UTF-8">
+        <title>Rook - Thorium</title>
+
+
+        <!-- Custom HTML head -->
+
+        <meta name="description" content="">
+        <meta name="viewport" content="width=device-width, initial-scale=1">
+        <meta name="theme-color" content="#ffffff">
+
+        <link rel="icon" href="../../favicon.svg">
+        <link rel="shortcut icon" href="../../favicon.png">
+        <link rel="stylesheet" href="../../css/variables.css">
+        <link rel="stylesheet" href="../../css/general.css">
+        <link rel="stylesheet" href="../../css/chrome.css">
+        <link rel="stylesheet" href="../../css/print.css" media="print">
+
+        <!-- Fonts -->
+        <link rel="stylesheet" href="../../FontAwesome/css/font-awesome.css">
+        <link rel="stylesheet" href="../../fonts/fonts.css">
+
+        <!-- Highlight.js Stylesheets -->
+        <link rel="stylesheet" href="../../highlight.css">
+        <link rel="stylesheet" href="../../tomorrow-night.css">
+        <link rel="stylesheet" href="../../ayu-highlight.css">
+
+        <!-- Custom theme stylesheets -->
+
+
+        <!-- Provide site root to javascript -->
+        <script>
+            var path_to_root = "../../";
+            var default_theme = window.matchMedia("(prefers-color-scheme: dark)").matches ? "navy" : "navy";
+        </script>
+        <!-- Start loading toc.js asap -->
+        <script src="../../toc.js"></script>
+    </head>
+    <body>
+    <div id="body-container">
+        <!-- Work around some values being stored in localStorage wrapped in quotes -->
+        <script>
+            try {
+                var theme = localStorage.getItem('mdbook-theme');
+                var sidebar = localStorage.getItem('mdbook-sidebar');
+
+                if (theme.startsWith('"') && theme.endsWith('"')) {
+                    localStorage.setItem('mdbook-theme', theme.slice(1, theme.length - 1));
+                }
+
+                if (sidebar.startsWith('"') && sidebar.endsWith('"')) {
+                    localStorage.setItem('mdbook-sidebar', sidebar.slice(1, sidebar.length - 1));
+                }
+            } catch (e) { }
+        </script>
+
+        <!-- Set the theme before any content is loaded, prevents flash -->
+        <script>
+            var theme;
+            try { theme = localStorage.getItem('mdbook-theme'); } catch(e) { }
+            if (theme === null || theme === undefined) { theme = default_theme; }
+            const html = document.documentElement;
+            html.classList.remove('navy')
+            html.classList.add(theme);
+            html.classList.add("js");
+        </script>
+
+        <input type="checkbox" id="sidebar-toggle-anchor" class="hidden">
+
+        <!-- Hide / unhide sidebar before it is displayed -->
+        <script>
+            var sidebar = null;
+            var sidebar_toggle = document.getElementById("sidebar-toggle-anchor");
+            if (document.body.clientWidth >= 1080) {
+                try { sidebar = localStorage.getItem('mdbook-sidebar'); } catch(e) { }
+                sidebar = sidebar || 'visible';
+            } else {
+                sidebar = 'hidden';
+            }
+            sidebar_toggle.checked = sidebar === 'visible';
+            html.classList.remove('sidebar-visible');
+            html.classList.add("sidebar-" + sidebar);
+        </script>
+
+        <nav id="sidebar" class="sidebar" aria-label="Table of contents">
+            <!-- populated by js -->
+            <mdbook-sidebar-scrollbox class="sidebar-scrollbox"></mdbook-sidebar-scrollbox>
+            <noscript>
+                <iframe class="sidebar-iframe-outer" src="../../toc.html"></iframe>
+            </noscript>
+            <div id="sidebar-resize-handle" class="sidebar-resize-handle">
+                <div class="sidebar-resize-indicator"></div>
+            </div>
+        </nav>
+
+        <div id="page-wrapper" class="page-wrapper">
+
+            <div class="page">
+                <div id="menu-bar-hover-placeholder"></div>
+                <div id="menu-bar" class="menu-bar sticky">
+                    <div class="left-buttons">
+                        <label id="sidebar-toggle" class="icon-button" for="sidebar-toggle-anchor" title="Toggle Table of Contents" aria-label="Toggle Table of Contents" aria-controls="sidebar">
+                            <i class="fa fa-bars"></i>
+                        </label>
+                        <button id="theme-toggle" class="icon-button" type="button" title="Change theme" aria-label="Change theme" aria-haspopup="true" aria-expanded="false" aria-controls="theme-list">
+                            <i class="fa fa-paint-brush"></i>
+                        </button>
+                        <ul id="theme-list" class="theme-popup" aria-label="Themes" role="menu">
+                            <li role="none"><button role="menuitem" class="theme" id="light">Light</button></li>
+                            <li role="none"><button role="menuitem" class="theme" id="rust">Rust</button></li>
+                            <li role="none"><button role="menuitem" class="theme" id="coal">Coal</button></li>
+                            <li role="none"><button role="menuitem" class="theme" id="navy">Navy</button></li>
+                            <li role="none"><button role="menuitem" class="theme" id="ayu">Ayu</button></li>
+                        </ul>
+                        <button id="search-toggle" class="icon-button" type="button" title="Search. (Shortkey: s)" aria-label="Toggle Searchbar" aria-expanded="false" aria-keyshortcuts="S" aria-controls="searchbar">
+                            <i class="fa fa-search"></i>
+                        </button>
+                    </div>
+
+                    <h1 class="menu-title">Thorium</h1>
+
+                    <div class="right-buttons">
+                        <a href="../../print.html" title="Print this book" aria-label="Print this book">
+                            <i id="print-button" class="fa fa-print"></i>
+                        </a>
+
+                    </div>
+                </div>
+
+                <div id="search-wrapper" class="hidden">
+                    <form id="searchbar-outer" class="searchbar-outer">
+                        <input type="search" id="searchbar" name="searchbar" placeholder="Search this book ..." aria-controls="searchresults-outer" aria-describedby="searchresults-header">
+                    </form>
+                    <div id="searchresults-outer" class="searchresults-outer hidden">
+                        <div id="searchresults-header" class="searchresults-header"></div>
+                        <ul id="searchresults">
+                        </ul>
+                    </div>
+                </div>
+
+                <!-- Apply ARIA attributes after the sidebar and the sidebar toggle button are added to the DOM -->
+                <script>
+                    document.getElementById('sidebar-toggle').setAttribute('aria-expanded', sidebar === 'visible');
+                    document.getElementById('sidebar').setAttribute('aria-hidden', sidebar !== 'visible');
+                    Array.from(document.querySelectorAll('#sidebar a')).forEach(function(link) {
+                        link.setAttribute('tabIndex', sidebar === 'visible' ? 0 : -1);
+                    });
+                </script>
+
+                <div id="content" class="content">
+                    <main>
+                        <h2 id="deploy-rook"><a class="header" href="#deploy-rook">Deploy Rook</a></h2>
+<p>This section will describe how to deploy a Rook Ceph cluster on K8s. This deployment will assume
+the K8s cluster member nodes have attached unprovisioned raw storage devices. If you want to use host
+storage from an existing mounted filesystem, review the
+<a href="https://rook.github.io/docs/rook/latest/CRDs/Cluster/host-cluster/">rook docs</a> before proceeding.</p>
+<blockquote>
+<p>For single server Thorium deployments its best to skip deploying rook and just use a host path
+storageClass provisioner and Minio for better performance.</p>
+</blockquote>
+<h3 id="1-create-rook-crd"><a class="header" href="#1-create-rook-crd">1) Create Rook CRD:</a></h3>
+<p>Apply the rook CRD and common resources.</p>
+<pre><code class="language-bash">kubectl apply -f https://raw.githubusercontent.com/rook/rook/refs/tags/v1.16.4/deploy/examples/crds.yaml
+kubectl apply -f https://raw.githubusercontent.com/rook/rook/refs/tags/v1.16.4/deploy/examples/common.yaml
+</code></pre>
+<h3 id="2-create-the-rook-operator"><a class="header" href="#2-create-the-rook-operator">2) Create the Rook operator</a></h3>
+<p>You can deploy Rook Ceph with the default operator options. However, you may choose to disable certain drivers
+such as CephFS that won't be needed for Thorium. To do that download the operator YAML resource definition and
+modify it before applying it.</p>
+<pre><code class="language-bash">kubectl apply -f https://github.com/rook/rook/refs/tags/v1.16.4/deploy/examples/operator.yaml
+</code></pre>
+<h3 id="3-create-cephs3-object-store"><a class="header" href="#3-create-cephs3-object-store">3) Create Ceph/S3 Object Store</a></h3>
+<p>Create the Ceph pools and RADOS Object Gateway (RGW) instance(s). You may want to modify the redundancy
+factors and number of gateway instances depending on the size of your K8s cluster. Some fields you may
+look to modify are:</p>
+<blockquote>
+<p>The totals of <code>dataChunks</code> + <code>codingChunks</code> and separately <code>size</code> must both be &lt;= the number of k8s
+cluster servers with attached storage that Rook can utilize. If this condition is not met, the Ceph
+cluster Rook deploys will not be in a healthy state after deployment and the Rook operator may fail
+to complete the deployment process.</p>
+</blockquote>
+<ul>
+<li><code>spec.metadataPool.replicated.size</code> - Set to less than 3 for small k8s clusters</li>
+<li><code>spec.dataPool.erasureCoded.dataChunks</code> - More erasure coding data chunks for better storage efficiency, but lower write performance</li>
+<li><code>spec.dataPool.erasureCoded.codingChunks</code> - More erasure coding chunks for extra data redundancy</li>
+<li><code>spec.gateway.instances</code> - Increase number of RGW pods for larger K8s clusters and better performance</li>
+</ul>
+<pre><code class="language-yaml editable">cat &lt;&lt;EOF | kubectl apply -f -
+#################################################################################################################
+# Create an object store with settings for erasure coding for the data pool. A minimum of 3 nodes with OSDs are
+# required in this example since failureDomain is host.
+#  kubectl create -f object-ec.yaml
+#################################################################################################################
+
+apiVersion: ceph.rook.io/v1
+kind: CephObjectStore
+metadata:
+  name: thorium-s3-store
+  namespace: rook-ceph # namespace:cluster
+spec:
+  # The pool spec used to create the metadata pools. Must use replication.
+  metadataPool:
+    failureDomain: osd # host
+    replicated:
+      size: 3
+      # Disallow setting pool with replica 1, this could lead to data loss without recovery.
+      # Make sure you're *ABSOLUTELY CERTAIN* that is what you want
+      requireSafeReplicaSize: true
+    parameters:
+      # Inline compression mode for the data pool
+      # Further reference: https://docs.ceph.com/docs/master/rados/configuration/bluestore-config-ref/#inline-compression
+      compression_mode: none
+      # gives a hint (%) to Ceph in terms of expected consumption of the total cluster capacity of a given pool
+      # for more info: https://docs.ceph.com/docs/master/rados/operations/placement-groups/#specifying-expected-pool-size
+      #target_size_ratio: ".5"
+  # The pool spec used to create the data pool. Can use replication or erasure coding.
+  dataPool:
+    failureDomain: osd # host
+    erasureCoded:
+      dataChunks:  3
+      codingChunks:  2
+    parameters:
+      # Inline compression mode for the data pool
+      # Further reference: https://docs.ceph.com/docs/master/rados/configuration/bluestore-config-ref/#inline-compression
+      compression_mode: none
+      # gives a hint (%) to Ceph in terms of expected consumption of the total cluster capacity of a given pool
+      # for more info: https://docs.ceph.com/docs/master/rados/operations/placement-groups/#specifying-expected-pool-size
+      #target_size_ratio: ".5"
+  # Whether to preserve metadata and data pools on object store deletion
+  preservePoolsOnDelete: true
+  # The gateway service configuration
+  gateway:
+    # A reference to the secret in the rook namespace where the ssl certificate is stored
+    sslCertificateRef:
+    # The port that RGW pods will listen on (http)
+    port: 80
+    # The port that RGW pods will listen on (https). An ssl certificate is required.
+    # securePort: 443
+    # The number of pods in the rgw deployment
+    instances: 1 # 3
+    # The affinity rules to apply to the rgw deployment or daemonset.
+    placement:
+    #  nodeAffinity:
+    #    requiredDuringSchedulingIgnoredDuringExecution:
+    #      nodeSelectorTerms:
+    #      - matchExpressions:
+    #        - key: role
+    #          operator: In
+    #          values:
+    #          - rgw-node
+    #  tolerations:
+    #  - key: rgw-node
+    #    operator: Exists
+    #  podAffinity:
+    #  podAntiAffinity:
+    # A key/value list of annotations
+    annotations:
+    #  key: value
+    # A key/value list of labels
+    labels:
+    #  key: value
+    resources:
+    # The requests and limits set here, allow the object store gateway Pod(s) to use half of one CPU core and 1 gigabyte of memory
+    #  limits:
+    #    cpu: "500m"
+    #    memory: "1024Mi"
+    #  requests:
+    #    cpu: "500m"
+    #    memory: "1024Mi"
+    # priorityClassName: my-priority-class
+  #zone:
+  #name: zone-a
+  # service endpoint healthcheck
+  healthCheck:
+    # Configure the pod probes for the rgw daemon
+    startupProbe:
+      disabled: false
+    readinessProbe:
+      disabled: false
+EOF
+</code></pre>
+<h3 id="4-create-block-storage-class"><a class="header" href="#4-create-block-storage-class">4) Create block storage class</a></h3>
+<p>Use the following storage class to create a Rook Ceph data pool to store RADOS block devices (RBDs)
+that will map to Kubernetes persistent volumes. The following command will create a block device pool
+and storageClass (called <code>rook-ceph-block</code>). You will use this storage class name for creating PVCs
+in the sections that follow. You may want to update the replication factors depending on the size
+of your k8s cluster.</p>
+<ul>
+<li><code>spec.replicated.size</code> - Set to less than 3 for small k8s clusters</li>
+<li><code>spec.erasureCoded.dataChunks</code> - More erasure coding data chunks for better storage efficiency, but lower write performance</li>
+<li><code>spec.erasureCoded.codingChunks</code> - More erasure coding chunks for extra data redundancy</li>
+</ul>
+<pre><code class="language-yaml editable">cat &lt;&lt;EOF | kubectl apply -f -
+#################################################################################################################
+# Create a storage class with a data pool that uses erasure coding for a production environment.
+# A metadata pool is created with replication enabled. A minimum of 3 nodes with OSDs are required in this
+# example since the default failureDomain is host.
+#  kubectl create -f storageclass-ec.yaml
+#################################################################################################################
+
+apiVersion: ceph.rook.io/v1
+kind: CephBlockPool
+metadata:
+  name: replicated-metadata-pool
+  namespace: rook-ceph # namespace:cluster
+spec:
+  failureDomain: osd # host
+  replicated:
+    size: 3
+---
+apiVersion: ceph.rook.io/v1
+kind: CephBlockPool
+metadata:
+  name: ec-data-pool
+  namespace: rook-ceph # namespace:cluster
+spec:
+  failureDomain: osd # host
+  # Make sure you have enough nodes and OSDs running bluestore to support the replica size or erasure code chunks.
+  # For the below settings, you need at least 3 OSDs on different nodes (because the `failureDomain` is `host` by default).
+  erasureCoded:
+    dataChunks: 3
+    codingChunks: 2
+---
+apiVersion: storage.k8s.io/v1
+kind: StorageClass
+metadata:
+  name: rook-ceph-block
+# Change "rook-ceph" provisioner prefix to match the operator namespace if needed
+provisioner: rook-ceph.rbd.csi.ceph.com # driver:namespace:operator
+parameters:
+  # clusterID is the namespace where the rook cluster is running
+  # If you change this namespace, also change the namespace below where the secret namespaces are defined
+  clusterID: rook-ceph # namespace:cluster
+
+  # If you want to use erasure coded pool with RBD, you need to create
+  # two pools. one erasure coded and one replicated.
+  # You need to specify the replicated pool here in the `pool` parameter, it is
+  # used for the metadata of the images.
+  # The erasure coded pool must be set as the `dataPool` parameter below.
+  dataPool: ec-data-pool
+  pool: replicated-metadata-pool
+
+  # (optional) mapOptions is a comma-separated list of map options.
+  # For krbd options refer
+  # https://docs.ceph.com/docs/master/man/8/rbd/#kernel-rbd-krbd-options
+  # For nbd options refer
+  # https://docs.ceph.com/docs/master/man/8/rbd-nbd/#options
+  # mapOptions: lock_on_read,queue_depth=1024
+
+  # (optional) unmapOptions is a comma-separated list of unmap options.
+  # For krbd options refer
+  # https://docs.ceph.com/docs/master/man/8/rbd/#kernel-rbd-krbd-options
+  # For nbd options refer
+  # https://docs.ceph.com/docs/master/man/8/rbd-nbd/#options
+  # unmapOptions: force
+
+  # RBD image format. Defaults to "2".
+  imageFormat: "2"
+
+  # RBD image features. Available for imageFormat: "2". CSI RBD currently supports only `layering` feature.
+  imageFeatures: layering
+
+  # The secrets contain Ceph admin credentials. These are generated automatically by the operator
+  # in the same namespace as the cluster.
+  csi.storage.k8s.io/provisioner-secret-name: rook-csi-rbd-provisioner
+  csi.storage.k8s.io/provisioner-secret-namespace: rook-ceph # namespace:cluster
+  csi.storage.k8s.io/controller-expand-secret-name: rook-csi-rbd-provisioner
+  csi.storage.k8s.io/controller-expand-secret-namespace: rook-ceph # namespace:cluster
+  csi.storage.k8s.io/node-stage-secret-name: rook-csi-rbd-node
+  csi.storage.k8s.io/node-stage-secret-namespace: rook-ceph # namespace:cluster
+  # Specify the filesystem type of the volume. If not specified, csi-provisioner
+  # will set default as `ext4`.
+  csi.storage.k8s.io/fstype: xfs
+# uncomment the following to use rbd-nbd as mounter on supported nodes
+# **IMPORTANT**: CephCSI v3.4.0 onwards a volume healer functionality is added to reattach
+# the PVC to application pod if nodeplugin pod restart.
+# Its still in Alpha support. Therefore, this option is not recommended for production use.
+#mounter: rbd-nbd
+allowVolumeExpansion: true
+reclaimPolicy: Delete
+EOF
+</code></pre>
+<h3 id="6-create-a-thorium-s3-user"><a class="header" href="#6-create-a-thorium-s3-user">6) Create a Thorium S3 User</a></h3>
+<p>Create a Thorium S3 user and save access/secret key that are generated with the following command.</p>
+<pre><code class="language-bash">kubectl -n rook-ceph exec -it deploy/rook-ceph-tools -- radosgw-admin user create --uid=thorium-s3-user --display-name="Thorium S3 User"
+</code></pre>
+<h3 id="7-deploy-rook-ceph-toolbox-pod"><a class="header" href="#7-deploy-rook-ceph-toolbox-pod">7) Deploy Rook Ceph Toolbox pod</a></h3>
+<pre><code class="language-bash">kubectl https://raw.githubusercontent.com/rook/rook/refs/heads/master/deploy/examples/toolbox.yaml
+</code></pre>
+<h3 id="8-verify-rook-pods-are-all-running"><a class="header" href="#8-verify-rook-pods-are-all-running">8) Verify Rook pods are all running</a></h3>
+<pre><code class="language-bash">kubectl get pods -n rook-ceph
+</code></pre>
+<p>For a 5 node k8s cluster with 2 raw storage devices per node, the output might look like this:</p>
+<pre><code class="language-bash">csi-rbdplugin-provisioner-HASH                       5/5     Running     0             1h
+csi-rbdplugin-provisioner-HASH                       5/5     Running     0             1h
+csi-rbdplugin-HASH                                   3/3     Running     0             1h
+csi-rbdplugin-HASH                                   3/3     Running     0             1h
+csi-rbdplugin-HASH                                   3/3     Running     0             1h
+csi-rbdplugin-HASH                                   3/3     Running     0             1h
+csi-rbdplugin-HASH                                   3/3     Running     0             1h
+rook-ceph-crashcollector-NODE1-HASH                  1/1     Running     0             1h
+rook-ceph-crashcollector-NODE2-HASH                  1/1     Running     0             1h
+rook-ceph-crashcollector-NODE3-HASH                  1/1     Running     0             1h
+rook-ceph-crashcollector-NODE4-HASH                  1/1     Running     0             1h
+rook-ceph-crashcollector-NODE5-HASH                  1/1     Running     0             1h
+rook-ceph-exporter-NODE5-HASH                        1/1     Running     0             1h
+rook-ceph-exporter-NODE5-HASH                        1/1     Running     0             1h
+rook-ceph-exporter-NODE5-HASH                        1/1     Running     0             1h
+rook-ceph-exporter-NODE5-HASH                        1/1     Running     0             1h
+rook-ceph-exporter-NODE5-HASH                        1/1     Running     0             1h
+rook-ceph-mgr-a-HASH                                 3/3     Running     0             1h
+rook-ceph-mgr-b-HASH                                 3/3     Running     0             1h
+rook-ceph-mon-a-HASH                                 2/2     Running     0             1h
+rook-ceph-mon-b-HASH                                 2/2     Running     0             1h
+rook-ceph-mon-c-HASH                                 2/2     Running     0             1h
+rook-ceph-operator-HASH                              1/1     Running     0             1h
+rook-ceph-osd-0-HASH                                 2/2     Running     0             1h
+rook-ceph-osd-1-HASH                                 2/2     Running     0             1h
+rook-ceph-osd-3-HASH                                 2/2     Running     0             1h
+rook-ceph-osd-4-HASH                                 2/2     Running     0             1h
+rook-ceph-osd-5-HASH                                 2/2     Running     0             1h
+rook-ceph-osd-6-HASH                                 2/2     Running     0             1h
+rook-ceph-osd-7-HASH                                 2/2     Running     0             1h
+rook-ceph-osd-8-HASH                                 2/2     Running     0             1h
+rook-ceph-osd-9-HASH                                 2/2     Running     0             1h
+rook-ceph-osd-prepare-NODE5-HASH                     0/1     Completed   0             1h
+rook-ceph-osd-prepare-NODE5-HASH                     0/1     Completed   0             1h
+rook-ceph-osd-prepare-NODE5-HASH                     0/1     Completed   0             1h
+rook-ceph-osd-prepare-NODE5-HASH                     0/1     Completed   0             1h
+rook-ceph-osd-prepare-NODE5-HASH                     0/1     Completed   0             1h
+rook-ceph-rgw-thorium-s3-store-a-HASH                2/2     Running     0             1h
+rook-ceph-tools-HASH                                 1/1     Running     0             1h
+</code></pre>
+<h3 id="9-verify-ceph-cluster-is-healthy"><a class="header" href="#9-verify-ceph-cluster-is-healthy">9) Verify Ceph cluster is healthy</a></h3>
+<p>If the Rook Ceph cluster is healthy, you should be able to run a status command from the Rook
+toolbox. The health section of the cluster status will show <code>HEALTH_OK</code>. If you see <code>HEALTH_WARN</code>
+you will need to look at the reasons at the bottom of the cluster status to troubleshoot the
+cause.</p>
+<pre><code class="language-bash">kubectl -n rook-ceph exec -it deploy/rook-ceph-tools -- ceph -s
+</code></pre>
+<pre><code class="language-bash">  cluster:
+    id:     20ea7cb0-5cab-4565-bc1c-360b6cd1282b
+    health: HEALTH_OK
+ 
+  services:
+    mon: 3 daemons, quorum a,b,c (age 1h)
+    mgr: b(active, since 1h), standbys: a
+    osd: 10 osds: 10 up (since 1h), 10 in (since 1h)
+    rgw: 1 daemon active (1 hosts, 1 zones)
+ 
+  data:
+...
+    ```</code></pre>
+
+                    </main>
+
+                    <nav class="nav-wrapper" aria-label="Page navigation">
+                        <!-- Mobile navigation buttons -->
+                            <a rel="prev" href="../../admins/deploy/install-traefik.html" class="mobile-nav-chapters previous" title="Previous chapter" aria-label="Previous chapter" aria-keyshortcuts="Left">
+                                <i class="fa fa-angle-left"></i>
+                            </a>
+
+                            <a rel="next prefetch" href="../../admins/deploy/install-redis.html" class="mobile-nav-chapters next" title="Next chapter" aria-label="Next chapter" aria-keyshortcuts="Right">
+                                <i class="fa fa-angle-right"></i>
+                            </a>
+
+                        <div style="clear: both"></div>
+                    </nav>
+                </div>
+            </div>
+
+            <nav class="nav-wide-wrapper" aria-label="Page navigation">
+                    <a rel="prev" href="../../admins/deploy/install-traefik.html" class="nav-chapters previous" title="Previous chapter" aria-label="Previous chapter" aria-keyshortcuts="Left">
+                        <i class="fa fa-angle-left"></i>
+                    </a>
+
+                    <a rel="next prefetch" href="../../admins/deploy/install-redis.html" class="nav-chapters next" title="Next chapter" aria-label="Next chapter" aria-keyshortcuts="Right">
+                        <i class="fa fa-angle-right"></i>
+                    </a>
+            </nav>
+
+        </div>
+
+
+
+
+        <script>
+            window.playground_copyable = true;
+        </script>
+
+        <script src="../../ace.js"></script>
+        <script src="../../editor.js"></script>
+        <script src="../../mode-rust.js"></script>
+        <script src="../../theme-dawn.js"></script>
+        <script src="../../theme-tomorrow_night.js"></script>
+
+        <script src="../../elasticlunr.min.js"></script>
+        <script src="../../mark.min.js"></script>
+        <script src="../../searcher.js"></script>
+
+        <script src="../../clipboard.min.js"></script>
+        <script src="../../highlight.js"></script>
+        <script src="../../book.js"></script>
+
+        <!-- Custom JS scripts -->
+
+
+    </div>
+    </body>
+</html>

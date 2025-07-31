@@ -1,0 +1,371 @@
+<!DOCTYPE HTML>
+<html lang="en" class="navy sidebar-visible" dir="ltr">
+    <head>
+        <!-- Book generated using mdBook -->
+        <meta charset="UTF-8">
+        <title>Admin Command Line Tool - Thorium</title>
+
+
+        <!-- Custom HTML head -->
+
+        <meta name="description" content="">
+        <meta name="viewport" content="width=device-width, initial-scale=1">
+        <meta name="theme-color" content="#ffffff">
+
+        <link rel="icon" href="../../favicon.svg">
+        <link rel="shortcut icon" href="../../favicon.png">
+        <link rel="stylesheet" href="../../css/variables.css">
+        <link rel="stylesheet" href="../../css/general.css">
+        <link rel="stylesheet" href="../../css/chrome.css">
+        <link rel="stylesheet" href="../../css/print.css" media="print">
+
+        <!-- Fonts -->
+        <link rel="stylesheet" href="../../FontAwesome/css/font-awesome.css">
+        <link rel="stylesheet" href="../../fonts/fonts.css">
+
+        <!-- Highlight.js Stylesheets -->
+        <link rel="stylesheet" href="../../highlight.css">
+        <link rel="stylesheet" href="../../tomorrow-night.css">
+        <link rel="stylesheet" href="../../ayu-highlight.css">
+
+        <!-- Custom theme stylesheets -->
+
+
+        <!-- Provide site root to javascript -->
+        <script>
+            var path_to_root = "../../";
+            var default_theme = window.matchMedia("(prefers-color-scheme: dark)").matches ? "navy" : "navy";
+        </script>
+        <!-- Start loading toc.js asap -->
+        <script src="../../toc.js"></script>
+    </head>
+    <body>
+    <div id="body-container">
+        <!-- Work around some values being stored in localStorage wrapped in quotes -->
+        <script>
+            try {
+                var theme = localStorage.getItem('mdbook-theme');
+                var sidebar = localStorage.getItem('mdbook-sidebar');
+
+                if (theme.startsWith('"') && theme.endsWith('"')) {
+                    localStorage.setItem('mdbook-theme', theme.slice(1, theme.length - 1));
+                }
+
+                if (sidebar.startsWith('"') && sidebar.endsWith('"')) {
+                    localStorage.setItem('mdbook-sidebar', sidebar.slice(1, sidebar.length - 1));
+                }
+            } catch (e) { }
+        </script>
+
+        <!-- Set the theme before any content is loaded, prevents flash -->
+        <script>
+            var theme;
+            try { theme = localStorage.getItem('mdbook-theme'); } catch(e) { }
+            if (theme === null || theme === undefined) { theme = default_theme; }
+            const html = document.documentElement;
+            html.classList.remove('navy')
+            html.classList.add(theme);
+            html.classList.add("js");
+        </script>
+
+        <input type="checkbox" id="sidebar-toggle-anchor" class="hidden">
+
+        <!-- Hide / unhide sidebar before it is displayed -->
+        <script>
+            var sidebar = null;
+            var sidebar_toggle = document.getElementById("sidebar-toggle-anchor");
+            if (document.body.clientWidth >= 1080) {
+                try { sidebar = localStorage.getItem('mdbook-sidebar'); } catch(e) { }
+                sidebar = sidebar || 'visible';
+            } else {
+                sidebar = 'hidden';
+            }
+            sidebar_toggle.checked = sidebar === 'visible';
+            html.classList.remove('sidebar-visible');
+            html.classList.add("sidebar-" + sidebar);
+        </script>
+
+        <nav id="sidebar" class="sidebar" aria-label="Table of contents">
+            <!-- populated by js -->
+            <mdbook-sidebar-scrollbox class="sidebar-scrollbox"></mdbook-sidebar-scrollbox>
+            <noscript>
+                <iframe class="sidebar-iframe-outer" src="../../toc.html"></iframe>
+            </noscript>
+            <div id="sidebar-resize-handle" class="sidebar-resize-handle">
+                <div class="sidebar-resize-indicator"></div>
+            </div>
+        </nav>
+
+        <div id="page-wrapper" class="page-wrapper">
+
+            <div class="page">
+                <div id="menu-bar-hover-placeholder"></div>
+                <div id="menu-bar" class="menu-bar sticky">
+                    <div class="left-buttons">
+                        <label id="sidebar-toggle" class="icon-button" for="sidebar-toggle-anchor" title="Toggle Table of Contents" aria-label="Toggle Table of Contents" aria-controls="sidebar">
+                            <i class="fa fa-bars"></i>
+                        </label>
+                        <button id="theme-toggle" class="icon-button" type="button" title="Change theme" aria-label="Change theme" aria-haspopup="true" aria-expanded="false" aria-controls="theme-list">
+                            <i class="fa fa-paint-brush"></i>
+                        </button>
+                        <ul id="theme-list" class="theme-popup" aria-label="Themes" role="menu">
+                            <li role="none"><button role="menuitem" class="theme" id="light">Light</button></li>
+                            <li role="none"><button role="menuitem" class="theme" id="rust">Rust</button></li>
+                            <li role="none"><button role="menuitem" class="theme" id="coal">Coal</button></li>
+                            <li role="none"><button role="menuitem" class="theme" id="navy">Navy</button></li>
+                            <li role="none"><button role="menuitem" class="theme" id="ayu">Ayu</button></li>
+                        </ul>
+                        <button id="search-toggle" class="icon-button" type="button" title="Search. (Shortkey: s)" aria-label="Toggle Searchbar" aria-expanded="false" aria-keyshortcuts="S" aria-controls="searchbar">
+                            <i class="fa fa-search"></i>
+                        </button>
+                    </div>
+
+                    <h1 class="menu-title">Thorium</h1>
+
+                    <div class="right-buttons">
+                        <a href="../../print.html" title="Print this book" aria-label="Print this book">
+                            <i id="print-button" class="fa fa-print"></i>
+                        </a>
+
+                    </div>
+                </div>
+
+                <div id="search-wrapper" class="hidden">
+                    <form id="searchbar-outer" class="searchbar-outer">
+                        <input type="search" id="searchbar" name="searchbar" placeholder="Search this book ..." aria-controls="searchresults-outer" aria-describedby="searchresults-header">
+                    </form>
+                    <div id="searchresults-outer" class="searchresults-outer hidden">
+                        <div id="searchresults-header" class="searchresults-header"></div>
+                        <ul id="searchresults">
+                        </ul>
+                    </div>
+                </div>
+
+                <!-- Apply ARIA attributes after the sidebar and the sidebar toggle button are added to the DOM -->
+                <script>
+                    document.getElementById('sidebar-toggle').setAttribute('aria-expanded', sidebar === 'visible');
+                    document.getElementById('sidebar').setAttribute('aria-hidden', sidebar !== 'visible');
+                    Array.from(document.querySelectorAll('#sidebar a')).forEach(function(link) {
+                        link.setAttribute('tabIndex', sidebar === 'visible' ? 0 : -1);
+                    });
+                </script>
+
+                <div id="content" class="content">
+                    <main>
+                        <h1 id="thoradm"><a class="header" href="#thoradm">Thoradm</a></h1>
+<p>Thoradm is a command line tool similar to <a href="../getting_started/thorctl.html">Thorctl</a> that offers
+functionality only available to Thorium admins. While some admin functions are available in
+Thorctl (e.g. managing bans, notifications, and network policies), Thoradm focuses on functions
+focuses primarily on the infrastructure running Thorium.</p>
+<h2 id="config"><a class="header" href="#config">Config</a></h2>
+<p>Thoradm uses both the Thorctl config for user information – to verify admin status, for example –
+and the cluster config found in the <code>thorium.yml</code> file. The cluster config is required to perform
+backups/restores of Thorium data, as it contains authentication information Thoradm needs to pull
+and restore data from Redis, S3, and Scylla. You may not have a formal <code>thorium.yml</code> file, but you
+can easily create one by copying the information you provide in the Thorium CRD (Custom Resource
+Definition) in K8's, specifically the section labeled <code>config</code>. It should look similar to the following:</p>
+<pre><code class="language-YAML">config:
+    elastic:
+      node: &lt;ELASTIC-NODE&gt;
+      password: &lt;ELASTIC-PASSWORD&gt;
+      results: results-dev
+      username: thorium-dev-user
+    redis:
+      host: &lt;REDIS-HOST&gt;
+      password: &lt;REDIS-PASSWORD&gt;
+    scylla:
+      auth:
+        password: &lt;SCYLLA-PASSWORD&gt;
+        username: &lt;SCYLLA-USERNAME&gt;
+      nodes:
+      - &lt;SCYLLA-NODES&gt;
+      replication: 2
+      setup_time: 120
+    thorium:
+      assets:
+    ...
+</code></pre>
+<p>Copy the entire config section to a separate file called <code>thorium.yml</code>, remove the <code>config</code> header,
+and indent all lines to the left once to make <code>elastic</code>, <code>redis</code>, <code>scylla</code>, <code>thorium</code>, etc. the
+main headers. With that, you should have a valid cluster config file to provide Thoradm. By default,
+Thoradm will look for the config file in your current working directory, but you can provide a custom
+path with the <code>--cluster-conf/-c</code> flag:</p>
+<pre><code class="language-Bash">thoradm --cluster-conf &lt;PATH-TO-THORIUM.YML&gt;
+</code></pre>
+<h2 id="backup"><a class="header" href="#backup">Backup</a></h2>
+<p>Thoradm provides a helpful backup feature to manually backup important Thorium data, including
+Redis data, S3 data (including samples, repos, comment attachments, and results), tags, and
+metadata on Thorium nodes. Backups are especially helpful when upgrading Thorium to a new version,
+allowing admins to more easily revert back to a previous version if necessary.</p>
+<pre><code class="language-Bash">thoradm backup -h
+Backup a Thorium cluster
+
+Usage: thoradm backup &lt;COMMAND&gt;
+
+Commands:
+  new      Take a new backup
+  scrub    Scrub a backup for bitrot
+  restore  Restore a backup to a Thorium cluster
+  help     Print this message or the help of the given subcommand(s)
+
+Options:
+  -h, --help  Print help
+</code></pre>
+<h3 id="creating-a-backup"><a class="header" href="#creating-a-backup">Creating a Backup</a></h3>
+<p>To take a backup, run the following command:</p>
+<pre><code class="language-Bash">thoradm backup new
+</code></pre>
+<p>You can provide the <code>--output/-o</code> flag to specify where to save the backup. Depending on the
+size of your Thorium instance, the backup may be many TB in size, so choose a location suitable
+to store that data.</p>
+<pre><code class="language-Bash">thoradm backup new --output /mnt/big-storage
+</code></pre>
+<p>If your Thorium instance is very large, the backup command could take many hours. Running it as
+a background process or in something like a detached <code>tmux</code> session might be wise.</p>
+<h3 id="restoring-a-backup"><a class="header" href="#restoring-a-backup">Restoring a Backup</a></h3>
+<p>You can restore a Thorium backup with the following command:</p>
+<pre><code class="language-Bash">thoradm backup restore --backup &lt;BACKUP&gt;
+</code></pre>
+<p>As with taking a new backup, restoring a backup could take several hours depending on the size of
+the backup. Bear in mind that <strong>the restore will wipe all current data in Thorium and replace it with
+the data to be restored.</strong> You might want to verify the backup hasn't been corrupted in anyway before
+restoring by running the command in the following section.</p>
+<h3 id="scrubbing-a-backup"><a class="header" href="#scrubbing-a-backup">Scrubbing a Backup</a></h3>
+<p>Thorium backups contain partitioned checksums that are used to verify the backup hasn't been corrupted
+in some way overtime. You can recompute these checksums and verify the backup with the following command:</p>
+<pre><code class="language-Bash">thoradm backup scrub --backup &lt;BACKUP&gt;
+</code></pre>
+<p>Thoradm will break the backup into chunks, hash each chunk, and check that the hash matches the one that's
+stored in the backup. If there are any mismatches, one or more errors will be returned, and you can be fairly
+confident that the backup is corrupt. Restoring a corrupt backup could lead to serious data loss, so it's
+important to verify a backup is valid beforehand.</p>
+<h2 id="system-settings"><a class="header" href="#system-settings">System Settings</a></h2>
+<p>Thoradm also provides functionality to modify dynamic Thorium system settings that aren't contained in the
+cluster config file described above. By "dynamic", we mean settings that can be modified and take effect while
+Thorium is running without a system restart.</p>
+<pre><code class="language-Bash">thoradm settings -h
+Edit Thorium system settings
+
+Usage: thoradm settings &lt;COMMAND&gt;
+
+Commands:
+  get     Print the current Thorium system settings
+  update  Update Thorium system settings
+  reset   Reset Thorium system settings to default
+  scan    Run a manual consistency scan based on the current Thorium system settings
+  help    Print this message or the help of the given subcommand(s)
+</code></pre>
+<h3 id="viewing-system-settings"><a class="header" href="#viewing-system-settings">Viewing System Settings</a></h3>
+<p>You can view system settings with the following command:</p>
+<pre><code class="language-Bash">thoradm settings get
+</code></pre>
+<p>The output will look similar to the following:</p>
+<pre><code class="language-JSON">{
+  "reserved_cpu": 50000,
+  "reserved_memory": 524288,
+  "reserved_storage": 131072,
+  "fairshare_cpu": 100000,
+  "fairshare_memory": 102400,
+  "fairshare_storage": 102400,
+  "host_path_whitelist": [],
+  "allow_unrestricted_host_paths": false
+}
+</code></pre>
+<h3 id="updating-system-settings"><a class="header" href="#updating-system-settings">Updating System Settings</a></h3>
+<p>You can update system settings with the following command:</p>
+<pre><code class="language-Bash">thoradm settings update [OPTIONS]
+</code></pre>
+<p>At least one option must be provided. You can view the commands help documentation to see a list of
+settings you can update.</p>
+<h3 id="reset-system-settings"><a class="header" href="#reset-system-settings">Reset System Settings</a></h3>
+<p>You can restore all system settings to their defaults with the following command:</p>
+<pre><code class="language-Bash">thoradm settings reset
+</code></pre>
+<h3 id="consistency-scan"><a class="header" href="#consistency-scan">Consistency Scan</a></h3>
+<p>Thorium will attempt to remain consistent with system settings as they are updated without a restart.
+It does this by running a consistency scan over all pertinent data in Thorium and updating that data
+if needed. There may be instances were data is manually modified by an admin or added such that they
+are no longer consistent. For example, an admin adds a host path volume mount with a path that is not
+on the host path whitelist, resulting in an image with an invalid configuration that is not properly
+banned.</p>
+<p>You can manually run a consistency scan with the following command:</p>
+<pre><code class="language-Bash">thoradm settings scan
+</code></pre>
+<h2 id="provision-thorium-resources"><a class="header" href="#provision-thorium-resources">Provision Thorium Resources</a></h2>
+<p>Thoradm can also provision resources for Thorium. Currently, nodes are the only resource available to be
+provisioned by Thoradm.</p>
+<pre><code class="language-Bash">thoradm provision -h
+Provision Thorium resources including nodes
+
+Usage: thoradm provision &lt;COMMAND&gt;
+
+Commands:
+  node  Provision k8s or baremetal servers
+  help  Print this message or the help of the given subcommand(s)
+
+Options:
+  -h, --help  Print help
+</code></pre>
+<h3 id="provision-a-node"><a class="header" href="#provision-a-node">Provision a Node</a></h3>
+<p>You can provision a K8's node for Thorium's use by providing the node's target (IP address, hostname, etc.)
+and the path to the K8's API keys file to authenticate with.</p>
+<pre><code class="language-Bash">thoradm provision node --k8s &lt;K8S-TARGET&gt; --keys &lt;PATH-TO-KEYS-FILE&gt;
+</code></pre>
+<p>This will mark the node available for Thorium to schedule jobs to.</p>
+
+                    </main>
+
+                    <nav class="nav-wrapper" aria-label="Page navigation">
+                        <!-- Mobile navigation buttons -->
+                            <a rel="prev" href="../../admins/notifications_admins.html" class="mobile-nav-chapters previous" title="Previous chapter" aria-label="Previous chapter" aria-keyshortcuts="Left">
+                                <i class="fa fa-angle-left"></i>
+                            </a>
+
+                            <a rel="next prefetch" href="../../admins/common_issues.html" class="mobile-nav-chapters next" title="Next chapter" aria-label="Next chapter" aria-keyshortcuts="Right">
+                                <i class="fa fa-angle-right"></i>
+                            </a>
+
+                        <div style="clear: both"></div>
+                    </nav>
+                </div>
+            </div>
+
+            <nav class="nav-wide-wrapper" aria-label="Page navigation">
+                    <a rel="prev" href="../../admins/notifications_admins.html" class="nav-chapters previous" title="Previous chapter" aria-label="Previous chapter" aria-keyshortcuts="Left">
+                        <i class="fa fa-angle-left"></i>
+                    </a>
+
+                    <a rel="next prefetch" href="../../admins/common_issues.html" class="nav-chapters next" title="Next chapter" aria-label="Next chapter" aria-keyshortcuts="Right">
+                        <i class="fa fa-angle-right"></i>
+                    </a>
+            </nav>
+
+        </div>
+
+
+
+
+        <script>
+            window.playground_copyable = true;
+        </script>
+
+        <script src="../../ace.js"></script>
+        <script src="../../editor.js"></script>
+        <script src="../../mode-rust.js"></script>
+        <script src="../../theme-dawn.js"></script>
+        <script src="../../theme-tomorrow_night.js"></script>
+
+        <script src="../../elasticlunr.min.js"></script>
+        <script src="../../mark.min.js"></script>
+        <script src="../../searcher.js"></script>
+
+        <script src="../../clipboard.min.js"></script>
+        <script src="../../highlight.js"></script>
+        <script src="../../book.js"></script>
+
+        <!-- Custom JS scripts -->
+
+
+    </div>
+    </body>
+</html>

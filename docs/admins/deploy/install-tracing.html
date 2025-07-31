@@ -1,0 +1,382 @@
+<!DOCTYPE HTML>
+<html lang="en" class="navy sidebar-visible" dir="ltr">
+    <head>
+        <!-- Book generated using mdBook -->
+        <meta charset="UTF-8">
+        <title>Tracing - Thorium</title>
+
+
+        <!-- Custom HTML head -->
+
+        <meta name="description" content="">
+        <meta name="viewport" content="width=device-width, initial-scale=1">
+        <meta name="theme-color" content="#ffffff">
+
+        <link rel="icon" href="../../favicon.svg">
+        <link rel="shortcut icon" href="../../favicon.png">
+        <link rel="stylesheet" href="../../css/variables.css">
+        <link rel="stylesheet" href="../../css/general.css">
+        <link rel="stylesheet" href="../../css/chrome.css">
+        <link rel="stylesheet" href="../../css/print.css" media="print">
+
+        <!-- Fonts -->
+        <link rel="stylesheet" href="../../FontAwesome/css/font-awesome.css">
+        <link rel="stylesheet" href="../../fonts/fonts.css">
+
+        <!-- Highlight.js Stylesheets -->
+        <link rel="stylesheet" href="../../highlight.css">
+        <link rel="stylesheet" href="../../tomorrow-night.css">
+        <link rel="stylesheet" href="../../ayu-highlight.css">
+
+        <!-- Custom theme stylesheets -->
+
+
+        <!-- Provide site root to javascript -->
+        <script>
+            var path_to_root = "../../";
+            var default_theme = window.matchMedia("(prefers-color-scheme: dark)").matches ? "navy" : "navy";
+        </script>
+        <!-- Start loading toc.js asap -->
+        <script src="../../toc.js"></script>
+    </head>
+    <body>
+    <div id="body-container">
+        <!-- Work around some values being stored in localStorage wrapped in quotes -->
+        <script>
+            try {
+                var theme = localStorage.getItem('mdbook-theme');
+                var sidebar = localStorage.getItem('mdbook-sidebar');
+
+                if (theme.startsWith('"') && theme.endsWith('"')) {
+                    localStorage.setItem('mdbook-theme', theme.slice(1, theme.length - 1));
+                }
+
+                if (sidebar.startsWith('"') && sidebar.endsWith('"')) {
+                    localStorage.setItem('mdbook-sidebar', sidebar.slice(1, sidebar.length - 1));
+                }
+            } catch (e) { }
+        </script>
+
+        <!-- Set the theme before any content is loaded, prevents flash -->
+        <script>
+            var theme;
+            try { theme = localStorage.getItem('mdbook-theme'); } catch(e) { }
+            if (theme === null || theme === undefined) { theme = default_theme; }
+            const html = document.documentElement;
+            html.classList.remove('navy')
+            html.classList.add(theme);
+            html.classList.add("js");
+        </script>
+
+        <input type="checkbox" id="sidebar-toggle-anchor" class="hidden">
+
+        <!-- Hide / unhide sidebar before it is displayed -->
+        <script>
+            var sidebar = null;
+            var sidebar_toggle = document.getElementById("sidebar-toggle-anchor");
+            if (document.body.clientWidth >= 1080) {
+                try { sidebar = localStorage.getItem('mdbook-sidebar'); } catch(e) { }
+                sidebar = sidebar || 'visible';
+            } else {
+                sidebar = 'hidden';
+            }
+            sidebar_toggle.checked = sidebar === 'visible';
+            html.classList.remove('sidebar-visible');
+            html.classList.add("sidebar-" + sidebar);
+        </script>
+
+        <nav id="sidebar" class="sidebar" aria-label="Table of contents">
+            <!-- populated by js -->
+            <mdbook-sidebar-scrollbox class="sidebar-scrollbox"></mdbook-sidebar-scrollbox>
+            <noscript>
+                <iframe class="sidebar-iframe-outer" src="../../toc.html"></iframe>
+            </noscript>
+            <div id="sidebar-resize-handle" class="sidebar-resize-handle">
+                <div class="sidebar-resize-indicator"></div>
+            </div>
+        </nav>
+
+        <div id="page-wrapper" class="page-wrapper">
+
+            <div class="page">
+                <div id="menu-bar-hover-placeholder"></div>
+                <div id="menu-bar" class="menu-bar sticky">
+                    <div class="left-buttons">
+                        <label id="sidebar-toggle" class="icon-button" for="sidebar-toggle-anchor" title="Toggle Table of Contents" aria-label="Toggle Table of Contents" aria-controls="sidebar">
+                            <i class="fa fa-bars"></i>
+                        </label>
+                        <button id="theme-toggle" class="icon-button" type="button" title="Change theme" aria-label="Change theme" aria-haspopup="true" aria-expanded="false" aria-controls="theme-list">
+                            <i class="fa fa-paint-brush"></i>
+                        </button>
+                        <ul id="theme-list" class="theme-popup" aria-label="Themes" role="menu">
+                            <li role="none"><button role="menuitem" class="theme" id="light">Light</button></li>
+                            <li role="none"><button role="menuitem" class="theme" id="rust">Rust</button></li>
+                            <li role="none"><button role="menuitem" class="theme" id="coal">Coal</button></li>
+                            <li role="none"><button role="menuitem" class="theme" id="navy">Navy</button></li>
+                            <li role="none"><button role="menuitem" class="theme" id="ayu">Ayu</button></li>
+                        </ul>
+                        <button id="search-toggle" class="icon-button" type="button" title="Search. (Shortkey: s)" aria-label="Toggle Searchbar" aria-expanded="false" aria-keyshortcuts="S" aria-controls="searchbar">
+                            <i class="fa fa-search"></i>
+                        </button>
+                    </div>
+
+                    <h1 class="menu-title">Thorium</h1>
+
+                    <div class="right-buttons">
+                        <a href="../../print.html" title="Print this book" aria-label="Print this book">
+                            <i id="print-button" class="fa fa-print"></i>
+                        </a>
+
+                    </div>
+                </div>
+
+                <div id="search-wrapper" class="hidden">
+                    <form id="searchbar-outer" class="searchbar-outer">
+                        <input type="search" id="searchbar" name="searchbar" placeholder="Search this book ..." aria-controls="searchresults-outer" aria-describedby="searchresults-header">
+                    </form>
+                    <div id="searchresults-outer" class="searchresults-outer hidden">
+                        <div id="searchresults-header" class="searchresults-header"></div>
+                        <ul id="searchresults">
+                        </ul>
+                    </div>
+                </div>
+
+                <!-- Apply ARIA attributes after the sidebar and the sidebar toggle button are added to the DOM -->
+                <script>
+                    document.getElementById('sidebar-toggle').setAttribute('aria-expanded', sidebar === 'visible');
+                    document.getElementById('sidebar').setAttribute('aria-hidden', sidebar !== 'visible');
+                    Array.from(document.querySelectorAll('#sidebar a')).forEach(function(link) {
+                        link.setAttribute('tabIndex', sidebar === 'visible' ? 0 : -1);
+                    });
+                </script>
+
+                <div id="content" class="content">
+                    <main>
+                        <h2 id="deploy-tracing-jaeger--quickwit"><a class="header" href="#deploy-tracing-jaeger--quickwit">Deploy Tracing (Jaeger + Quickwit)</a></h2>
+<h3 id="1-deploy-postgres-db-using-kubegres"><a class="header" href="#1-deploy-postgres-db-using-kubegres">1) Deploy Postgres DB (using Kubegres)</a></h3>
+<p>Quickwit will need a Postgres database to store metadata. This guide uses the Kubegres operator to deploy
+a distributed instance of Postgres. Using Kubegres is optional, any Postgres deployment method may be used
+included external (to K8s) options.</p>
+<h4 id="deploy-kubegres-crd-and-operator"><a class="header" href="#deploy-kubegres-crd-and-operator">Deploy Kubegres CRD and operator</a></h4>
+<pre><code class="language-bash">kubectl apply -f https://raw.githubusercontent.com/reactive-tech/kubegres/refs/tags/v1.19/kubegres.yaml
+kubectl rollout status --watch --timeout=600s deployment.apps/kubegres-controller-manager -n kubegres-system
+</code></pre>
+<h4 id="create-postgresdb-user-password-secrets"><a class="header" href="#create-postgresdb-user-password-secrets">Create PostgresDB user password secrets</a></h4>
+<p>Update <code>SUPER_USER_PASSWORD</code> and <code>REPLICATION_PASSWORD</code> with secure values and save those to
+put in the Quickwit helm values YAML file later in this guide.</p>
+<pre><code class="language-bash editable">kubectl create ns quickwit
+cat &lt;&lt;EOF | kubectl apply -f -
+apiVersion: v1
+kind: Secret
+metadata:
+  name: postgres-cluster-auth
+  namespace: quickwit
+type: Opaque
+stringData:
+  superUserPassword: &lt;SUPER_USER_PASSWORD&gt;
+  replicationUserPassword: &lt;REPLICATION_PASSWORD&gt;
+EOF
+</code></pre>
+<h4 id="create-a-kubegres-postgres-db"><a class="header" href="#create-a-kubegres-postgres-db">Create a Kubegres postgres DB</a></h4>
+<p>Use the following command to deploy a Postgres cluster using Kubegres. It may be necessary to edit
+the DB size, Postgres version, and <code>storageClassName</code> depending on the deployment environment.</p>
+<pre><code class="language-bash editable">cat &lt;&lt;EOF | kubectl apply -f -
+apiVersion: kubegres.reactive-tech.io/v1
+kind: Kubegres
+metadata:
+  name: postgres
+  namespace: quickwit
+spec:
+   replicas: 3
+   image: docker.io/postgres:17
+   database:
+      storageClassName: csi-rbd-sc
+      size: 4Ti
+   env:
+      - name: POSTGRES_PASSWORD
+        valueFrom:
+           secretKeyRef:
+              name: postgres-cluster-auth
+              key: superUserPassword
+      - name: POSTGRES_REPLICATION_PASSWORD
+        valueFrom:
+           secretKeyRef:
+              name: postgres-cluster-auth
+              key: replicationUserPassword
+EOF
+</code></pre>
+<h4 id="set-password-for-postgres-quickwit-user-role"><a class="header" href="#set-password-for-postgres-quickwit-user-role">Set password for Postgres Quickwit user role</a></h4>
+<p>After Kubegres has completed deployment of Postgres, create a Quickwit Postgres user role using the
+following command. Before running the command, update <code>INSECURE_QUICKWIT_PASSWORD</code> to a secure value.</p>
+<pre><code class="language-bash editable">kubectl rollout status --watch --timeout=600s statefulset/postgres-1 -n quickwit
+kubectl -n quickwit exec -it pod/postgres-1-0 -- /bin/bash -c "PGPASSWORD=INSECURE_QUICKWIT_PASSWORD su postgres -c \"createdb quickwit-metastore\""
+</code></pre>
+<h3 id="4-deploy-quickwit"><a class="header" href="#4-deploy-quickwit">4) Deploy Quickwit</a></h3>
+<h4 id="add-the-quickwit-helm-repo"><a class="header" href="#add-the-quickwit-helm-repo">Add the Quickwit Helm repo</a></h4>
+<pre><code class="language-bash">helm repo add quickwit https://helm.quickwit.io
+helm repo update quickwit
+</code></pre>
+<h4 id="create-a-quickwit-helm-values-config-quickwit-valuesyml"><a class="header" href="#create-a-quickwit-helm-values-config-quickwit-valuesyml">Create a Quickwit Helm values config: <code>quickwit-values.yml</code></a></h4>
+<p>Update the <code>POSTGRES_PASSWORD</code>, <code>ACCESS_ID</code>, and <code>SECRET_KEY</code> values before deploying Quickwit.
+For non-rook deployments, the <code>endpoint</code> may also need to be updated to point at the correct S3
+endpoint. Edit the hostname om <code>QW_METASTORE_URI</code> for Postgres instances that were not setup using
+Kubegres.</p>
+<pre><code class="language-yaml editable">image:
+  repository: docker.io/quickwit/quickwit
+  pullPolicy: IfNotPresent
+  # Overrides the image tag whose default is the chart appVersion.
+  #tag: v0.6.4
+metastore:
+  replicaCount: 1
+  # Extra env for metastore
+  extraEnv:
+    QW_METASTORE_URI: "postgres://postgres:&lt;POSTGRES_PASSWORD&gt;@postgres.quickwit.svc.cluster.local:5432/quickwit-metastore"
+config:
+  default_index_root_uri: s3://quickwit/quickwit-indexes
+  storage:
+    s3:
+      flavor: minio
+      region: default
+      endpoint: http://rook-ceph-rgw-thorium-s3-store.rook-ceph.svc.cluster.local
+      force_path_style_access: true
+      access_key_id: "&lt;ACCESS_ID&gt;"
+      secret_access_key: "&lt;SECRET_KEY&gt;"
+</code></pre>
+<h4 id="now-use-that-values-file-to-install-quickwit"><a class="header" href="#now-use-that-values-file-to-install-quickwit">Now use that values file to install Quickwit</a></h4>
+<pre><code class="language-bash">helm install quickwit quickwit/quickwit -n quickwit -f quickwit-values.yml
+</code></pre>
+<h4 id="verify-quickwit-pods-are-all-running"><a class="header" href="#verify-quickwit-pods-are-all-running">Verify Quickwit pods are all running</a></h4>
+<pre><code class="language-bash">kubectl get pods -n quickwit
+# NAME                                      READY   STATUS    RESTARTS   AGE
+# postgres-2-0                              1/1     Running   0          1h
+# postgres-3-0                              1/1     Running   0          1h
+# postgres-4-0                              1/1     Running   0          1h
+# quickwit-control-plane-HASH               1/1     Running   0          1h
+# quickwit-indexer-0                        1/1     Running   0          1h
+# quickwit-janitor-HASH                     1/1     Running   0          1h
+# quickwit-metastore-HASH                   1/1     Running   0          1h
+# quickwit-searcher-0                       1/1     Running   0          1h
+# quickwit-searcher-1                       1/1     Running   0          1h
+# quickwit-searcher-2                       1/1     Running   0          1h
+</code></pre>
+<h3 id="5-deploy-jaeger"><a class="header" href="#5-deploy-jaeger">5) Deploy Jaeger</a></h3>
+<h4 id="create-a-namespace-for-jaeger"><a class="header" href="#create-a-namespace-for-jaeger">Create a namespace for Jaeger</a></h4>
+<pre><code class="language-bash">kubectl create ns jaeger
+</code></pre>
+<h4 id="create-the-jaeger-statefulset"><a class="header" href="#create-the-jaeger-statefulset">Create the Jaeger Statefulset</a></h4>
+<pre><code class="language-bash editable">cat &lt;&lt;EOF | kubectl apply -f -
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: jaeger
+  namespace: jaeger
+  labels:
+    app: jaeger
+spec:
+  serviceName: jaeger
+  replicas: 1
+  selector:
+    matchLabels:
+      app: jaeger
+  template:
+    metadata:
+      labels:
+          app: jaeger
+    spec:
+      containers:
+        - name: jaeger
+          image: jaegertracing/jaeger-query:latest
+          imagePullPolicy: Always
+          env:
+            - name: SPAN_STORAGE_TYPE
+              value: "grpc"
+            - name: GRPC_STORAGE_SERVER
+              value: "quickwit-searcher.quickwit.svc.cluster.local:7281"
+          resources:
+            requests:
+              memory: "8Gi"
+              cpu: "2"
+            limits:
+              memory: "8Gi"
+              cpu: "2"
+EOF
+</code></pre>
+<h4 id="create-the-jaeger-service"><a class="header" href="#create-the-jaeger-service">Create the Jaeger service</a></h4>
+<pre><code class="language-bash editable">cat &lt;&lt;EOF | kubectl apply -f -
+apiVersion: v1
+kind: Service
+metadata:
+  name: jaeger
+  namespace: jaeger
+spec:
+  type: ClusterIP
+  selector:
+    app: jaeger
+  ports:
+  - name: jaeger
+    port: 16686
+    targetPort: 16686
+EOF
+</code></pre>
+<h4 id="verify-the-jaeger-pod-is-running"><a class="header" href="#verify-the-jaeger-pod-is-running">Verify the Jaeger pod is running</a></h4>
+<pre><code class="language-bash">kubectl get pods -n jaeger
+# NAME       READY   STATUS    RESTARTS   AGE
+# jaeger-0   1/1     Running   0          1h
+</code></pre>
+
+                    </main>
+
+                    <nav class="nav-wrapper" aria-label="Page navigation">
+                        <!-- Mobile navigation buttons -->
+                            <a rel="prev" href="../../admins/deploy/install-elastic.html" class="mobile-nav-chapters previous" title="Previous chapter" aria-label="Previous chapter" aria-keyshortcuts="Left">
+                                <i class="fa fa-angle-left"></i>
+                            </a>
+
+                            <a rel="next prefetch" href="../../admins/deploy/deploy-thorium.html" class="mobile-nav-chapters next" title="Next chapter" aria-label="Next chapter" aria-keyshortcuts="Right">
+                                <i class="fa fa-angle-right"></i>
+                            </a>
+
+                        <div style="clear: both"></div>
+                    </nav>
+                </div>
+            </div>
+
+            <nav class="nav-wide-wrapper" aria-label="Page navigation">
+                    <a rel="prev" href="../../admins/deploy/install-elastic.html" class="nav-chapters previous" title="Previous chapter" aria-label="Previous chapter" aria-keyshortcuts="Left">
+                        <i class="fa fa-angle-left"></i>
+                    </a>
+
+                    <a rel="next prefetch" href="../../admins/deploy/deploy-thorium.html" class="nav-chapters next" title="Next chapter" aria-label="Next chapter" aria-keyshortcuts="Right">
+                        <i class="fa fa-angle-right"></i>
+                    </a>
+            </nav>
+
+        </div>
+
+
+
+
+        <script>
+            window.playground_copyable = true;
+        </script>
+
+        <script src="../../ace.js"></script>
+        <script src="../../editor.js"></script>
+        <script src="../../mode-rust.js"></script>
+        <script src="../../theme-dawn.js"></script>
+        <script src="../../theme-tomorrow_night.js"></script>
+
+        <script src="../../elasticlunr.min.js"></script>
+        <script src="../../mark.min.js"></script>
+        <script src="../../searcher.js"></script>
+
+        <script src="../../clipboard.min.js"></script>
+        <script src="../../highlight.js"></script>
+        <script src="../../book.js"></script>
+
+        <!-- Custom JS scripts -->
+
+
+    </div>
+    </body>
+</html>
