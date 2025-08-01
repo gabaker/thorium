@@ -27,7 +27,7 @@ generic-array = "0.14"
 lazy_static = "1.4"
 sha2 = "0.10"
 data-encoding = "2.3"
-cart-rs = { version = "*", path = "../../cart-rs"}
+cart-rs = { version = "*", path = "../cart-rs"}
 regex = "1.5"
 git2 = "0.18"
 gix = "0.63"

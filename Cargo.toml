@@ -16,7 +16,7 @@ members = [
 [workspace.package]
 version = "1.0.0"
 authors = ["mcarson <mcarson@sandia.gov>", "gmbaker <gmbaker@sandia.gov>", "jehamza <jehamza@sandia.gov>"]
-edition = "2021"
+edition = "2024"
 
 [profile.profiling]
 inherits = "release"

@@ -1,5 +1,6 @@
 FROM ubuntu:22.04
-
+RUN ls
+ADD ./ui/dist ui
 # install utilities
 RUN apt update -y && \
       apt install -y lsof curl libssl-dev jq

@@ -1,0 +1,186 @@
+name: Build Thorium Container
+
+on:
+  push:
+    branches:
+      - main
+
+jobs:
+  build-usage-docs:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Cargo install mdbook
+        run: cargo install mdbook
+      - name: Build mdbook docs
+        run: mdbook build api/docs
+      # Save static docs site for container build
+      - name: Upload docs as artifacts (API hosted)
+        uses: actions/upload-artifact@v4
+        with:
+          name: thorium-mdbook-bundle
+          path: api/docs/book/
+      # Save docs site for hosting in Github pages (gh-pages branch)
+      - name: Upload docs as artifacts (Github pages)
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: api/docs/book/
+
+  build-ui:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build UI Bundle
+        run: |
+          cd ui
+          npm install
+          npm run build
+      - name: Upload UI Bundle Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: thorium-ui-bundle
+          path: ui/dist/
+
+  # build-docker-deps-image:
+  #   runs-on: ubuntu-latest
+  #   permissions:
+  #     packages: write
+  #     contents: read
+  #   steps:
+  #     - uses: actions/checkout@v4
+  #     - name: Log in to registry
+  #       run: echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u ${{ github.actor }} --password-stdin
+  #     - name: Push image
+  #       id: build-base-image
+  #       run: |
+  #         IMAGE_NAME=${{ github.repository }}-base
+  #         IMAGE_PATH=ghcr.io/${{ github.repository_owner }}/$IMAGE_NAME-base
+  #         BASE_IMAGE_PATH=$(echo $IMAGE_PATH | tr '[A-Z]' '[a-z]')
+  #         IMAGE=$BASE_IMAGE_PATH:latest
+  #         # Build base docker image
+  #         docker build . --file base/Dockerfile --tag $IMAGE --label "runnumber=${GITHUB_RUN_ID}"
+  #         docker push $IMAGE
+  #         echo "BASE_IMAGE=$IMAGE" >> $GITHUB_OUTPUT
+
+  # build-glibc-binaries:
+  #   runs-on: ubuntu-latest
+  #   env:
+  #       RUSTFLAGS: "-C target-feature=+aes,+sse2"
+  #   steps:
+  #     - uses: actions/checkout@v4
+  #     - name: Build binaries
+  #       run: |
+  #         rustup default nightly
+  #         lscpu
+  #         # build binaries
+  #         cargo --config edition="2024" build --release --features vendored-openssl
+  #         # build the developer docs
+  #         cargo --config edition="2024" doc --no-deps
+  #         # make a glibc dir
+  #         mkdir glibc
+  #         # copy artifacts to the a glibc dir
+  #         mv target/release/thorium glibc/.
+  #         mv target/release/thoradm glibc/.
+  #         mv target/release/thorctl glibc/.
+  #         mv target/release/thorium-agent glibc/.
+  #         mv target/release/thorium-scaler glibc/.
+  #         mv target/release/thorium-reactor glibc/.
+  #         mv target/release/thorium-event-handler glibc/.
+  #         mv target/release/thorium-search-streamer glibc/.
+  #         mv target/release/thorium-operator glibc/.
+  #         mv target/doc dev_docs
+  #     # Save Thorium developer docs
+  #     - name: Upload glibc binaries as artifacts
+  #       uses: actions/upload-artifact@v4
+  #       with:
+  #         name: thorium-dev-docs
+  #         path: dev_docs/
+  #     # Save Thorium developer docs
+  #     - name: Upload dev docs as artifacts
+  #       uses: actions/upload-artifact@v4
+  #       with:
+  #         name: thorium-glibc-binaries
+  #         path: glibc/
+
+  # build-cross-binaries:
+  #   name: Build Thorium Cross - ${{ matrix.platform.os-name }}
+  #   strategy:
+  #     matrix:
+  #       platform:
+  #         - os-name: FreeBSD-x86_64
+  #           runs-on: ubuntu-24.04
+  #           target: x86_64-unknown-freebsd
+  #         - os-name: Linux-x86_64
+  #           runs-on: ubuntu-24.04
+  #           target: x86_64-unknown-linux-musl
+  #         - os-name: Linux-aarch64
+  #           runs-on: ubuntu-24.04
+  #           target: aarch64-unknown-linux-musl
+  #         - os-name: Windows-x86_64
+  #           runs-on: windows-latest
+  #           target: x86_64-pc-windows-msvc
+  #         - os-name: macOS-x86_64
+  #           runs-on: macOS-latest
+  #           target: x86_64-apple-darwin
+  #   runs-on: ${{ matrix.platform.runs-on }}
+  #   env:
+  #     RUSTFLAGS: "-C target-feature=+aes,+sse2"
+  #   steps:
+  #     - name: Checkout
+  #       uses: actions/checkout@v4
+  #     - name: Build binary
+  #       uses: houseabsolute/actions-rust-cross@v1
+  #       with:
+  #         command: build
+  #         target: ${{ matrix.platform.target }}
+  #         toolchain: nightly
+  #         args: "--features vendored-openssl --release"
+  #         strip: true
+  #     - name: Upload Cross Artifacts
+  #       uses: houseabsolute/actions-rust-release@v0
+  #       with:
+  #         executable-name: ubi
+  #         target: ${{ matrix.platform.target }}
+
+  build-core-container-image:
+    needs:
+      - build-usage-docs
+      - build-ui
+      #- build-glibc-binaries
+      #- build-cross-binaries
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download UI bundle artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: thorium-ui-bundle
+          run-id: ${{ github.event.workflow_run.id }}
+          path: ui/dist
+      - name: Download mdbook bundle artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: thorium-mdbook-bundle
+          run-id: ${{ github.event.workflow_run.id }}
+          path: api/docs/book
+      - name: check for artifact download
+        run: |
+          ls
+          ls api/docs/book
+          ls ui/dist
+     
+  # Deploy the updated mdbook docs to github pages
+  # We only deploy docs if the container images build successfully
+  deploy-updated-pages:
+    needs:
+     - build-usage-docs
+    permissions:
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4

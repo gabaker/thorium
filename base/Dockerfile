@@ -1,5 +1,7 @@
 FROM ubuntu:22.04
-ARG TOKEN
+
+# build apt cache
+RUN apt update
 
 # update apt and install curl
 RUN apt install curl -y
@@ -44,10 +46,10 @@ RUN mkdir app && \
       cd ..
 # grab the Thorium binaries
 COPY ./ thorium
-# clone in the latest branches of our dependencies
-RUN git clone https://gitlab-ci-token:$TOKEN@<INTERNAL_GIT>/Thorium/cart-rs.git && \
-      cd cart-rs && \
-      cd ../thorium
 # fetch our dependencies
 RUN cd thorium && \
       cargo fetch
+
+# clean up apt cache
+RUN apt clean all
+RUN rm -rf /var/lib/apt/lists/*
