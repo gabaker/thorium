@@ -4,9 +4,8 @@ on:
   push:
     branches:
       - main
-    #tags:
-    #  - '[0-9]+.[0-9]+.[0-9]+*'
-
+    tags:
+      - '[0-9]+.[0-9]+.[0-9]+*'
 jobs:
   build-mdbook-docs:
     runs-on: ubuntu-latest
@@ -127,6 +126,9 @@ jobs:
           path: target/${{ matrix.platform.target }}/release
 
   build-core-container:
+    if: |
+      (github.ref_type == 'branch' && github.ref == 'refs/heads/main') ||
+      github.ref_type == 'tag'
     needs:
       - build-mdbook-docs
       - build-ui-bundle
@@ -208,26 +210,31 @@ jobs:
         run: |
           IMAGE_NAME=${{ github.repository }}
           IMAGE_PATH=ghcr.io/${{ github.repository_owner }}/$IMAGE_NAME
-          BASE_IMAGE_PATH=$(echo $IMAGE_PATH | tr '[A-Z]' '[a-z]')
-          IMAGE=$BASE_IMAGE_PATH:latest
+          LOWER_IMAGE_PATH=$(echo $IMAGE_PATH | tr '[A-Z]' '[a-z]')
           # Build base docker image
+          if [[ "${{ github.ref_type }}" == "tag" ]]; then
+            TAG="${{ github.ref_name }}"
+          elif [[ "${{ github.ref_type }}" == "branch" && "${{ github.ref }}" == "refs/heads/main" ]]; then
+            TAG=latest
+          fi
+          IMAGE=$LOWER_IMAGE_PATH:$TAG
           docker build --file ./Dockerfile --tag $IMAGE --label "runnumber=${GITHUB_RUN_ID}" .
           docker push $IMAGE
-          #echo "BASE_IMAGE=$IMAGE" >> $GITHUB_OUTPUT
 
   # Deploy the updated mdbook docs to github pages
   # We only deploy docs if the container images build successfully
   deploy-updated-pages:
+    if: ${{ github.ref_type == 'branch' && github.ref == 'refs/heads/main'}}
     needs:
      - build-mdbook-docs
      - build-core-container
+    runs-on: ubuntu-latest
     permissions:
       pages: write
       id-token: write
     environment:
       name: github-pages
       url: ${{ steps.deployment.outputs.page_url }}
-    runs-on: ubuntu-latest
     steps:
       - name: Deploy to GitHub Pages
         id: deployment
