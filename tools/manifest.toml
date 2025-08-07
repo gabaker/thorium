@@ -1,0 +1,63 @@
+# Marketplace Name
+name = "Thorium Github Tools"
+
+# Project structure
+#
+# ├── images # Thorium Images
+# │   ├── <Source URL>
+# │   │   └── <URL Safe Organization Name>
+# │   │       └── <URL Safe Tool Name>
+# │   │           ├── Dockerfile
+# |   |           ├── <Tool Name>.json
+# │   │           └── <any required tool build files>
+# │   └── gnu.org
+# │       └── binutils-strings
+# │           ├── Dockerfile
+# │           └── wrapper.sh
+# ├── manifest.toml
+# └── pipelines # Thorium Pipelines
+#     └── static  # Thorium tool group
+#         ├── <Pipeline Name>
+#         │   └── <Pipeline Name>.json
+#         └── strings
+#             └── strings.json
+#
+# [pipelines]
+#
+# # Pipeline
+# [pipelines.PIPELINE_NAME] 
+# # path to pipeline configuration JSON, can also be URL
+# url = "./pipelines/static/strings.json"
+
+# # Image
+# [pipelines.PIPELINE_NAME.IMAGE_NAME]
+# # path to image configuration JSON, can also be URL
+# url = "./images/gnu.org/binutils/strings/strings.json"
+# # optional build path for CI/CD builds
+# build_path = "images/gnu.org/binutils/strings"
+# # optional name for built image for CI/CD builds
+# image_name = "tools/gnu.org/binutils/string"
+
+[pipelines]
+
+# Pipeline
+[pipelines.strings] 
+# path to pipeline configuration JSON, can also be URL
+url = "./pipelines/static/strings.json"
+
+# Image
+[pipelines.strings.binutils-strings]
+# path to image configuration JSON, can also be URL
+url = "images/gnu.org/binutils/strings/strings.json"
+# optional build path for CI/CD builds
+build_path = "images/gnu.org/binutils/strings"
+# optional name for built image for CI/CD builds
+image_name = "tools/gnu.org/binutils/string"
+
+[pipelines.antivirus]
+url = "pipelines/static/antivirus.json"
+
+[pipelines.antivirus.clamav]
+url = "images/github.com/Cisco-Talos/ClamAV/clamav.json"
+build_path = "images/github.com/Cisco-Talos/ClamAV"
+image_name = "tools/github.com/cisco-talos/clamav"

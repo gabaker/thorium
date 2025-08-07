@@ -1,0 +1,62 @@
+name: Nightly Workflow
+
+on:
+  #schedule:
+  #- cron: '0 0 * * *'
+  push:
+    branches:
+      - tool-builds
+      - main
+
+jobs:
+  generate-tool-builds:
+    if: github.ref_type == 'branch' && github.ref == 'refs/heads/tool-builds'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v4
+        #with:
+        #  ref: 'refs/heads/main'
+      - name: list images to build
+        run: |
+          cargo install toml-cli
+          export PATH=$PATH:~/.cargo/bin
+          cd tools
+          MATRIX=$(bash scripts/build-matrix.sh)
+          echo $MATRIX
+          echo "matrix=$MATRIX" >> $GITHUB_ENV
+        
+  # build-tools:
+  #   if: github.ref_type == 'branch' && github.ref == 'refs/heads/main'
+  #   runs-on: ubuntu-latest
+  #   permissions:
+  #     contents: read
+  #     packages: write
+  #   steps:
+  #     - uses: actions/checkout@v4
+  #       with:
+  #         ref: 'refs/heads/main'
+  #     - name: Login to Container Registry
+  #       run: echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u ${{ github.actor }} --password-stdin
+  #     - name: Build Tool Container Images
+  #       run: |
+  #         IMAGE_PATH=ghcr.io/${{ github.repository }}/tools/thorium
+  #         LOWER_IMAGE_PATH=$(echo $IMAGE_PATH | tr '[A-Z]' '[a-z]')
+  #         # Build base docker image
+  #         if [[ "${{ github.ref_type }}" == "tag" ]]; then
+  #           TAG="${{ github.ref_name }}"
+  #         elif [[ "${{ github.ref_type }}" == "branch" && "${{ github.ref }}" == "refs/heads/main" ]]; then
+  #           TAG=main
+  #         fi
+  #         IMAGE=$LOWER_IMAGE_PATH:$TAG
+  #         docker build --file ./Dockerfile --tag $IMAGE --label "runnumber=${GITHUB_RUN_ID}" .
+  #         docker push $IMAGE
+  #         # now check if tag is latest so can build correct latest tag
+  #         LATEST_TAG=$(git tag | sort --version-sort | grep -E "[0-9]+\.[0-9]+\.[0-9]+$" | tail -n1)
+  #         if [[ "${{ github.ref_type }}" == "tag" && "${{ github.ref_name }}" == $LATEST_TAG ]]; then
+  #           echo "Pushing latest release image"
+  #           docker tag $IMAGE $LOWER_IMAGE_PATH:latest
+  #           docker push $LOWER_IMAGE_PATH:latest
+  #         fi
