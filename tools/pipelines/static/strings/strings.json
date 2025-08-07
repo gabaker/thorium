@@ -1,0 +1,12 @@
+{
+  "group": "static",
+  "name": "strings",
+  "order": [
+    [
+      "strings"
+    ]
+  ],
+  "sla": 640800,
+  "triggers": {},
+  "description": null
+}
