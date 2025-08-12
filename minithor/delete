@@ -1,1 +1,5 @@
-minikube delete
+minikube delete --all --purge
+rm -rf ~/.minikube ~/.kube
+sudo rm -f /usr/local/bin/minikube
+docker system prune --force
+docker image prune -a --force
