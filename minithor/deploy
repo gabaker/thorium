@@ -1,4 +1,7 @@
 #!/bin/bash
+
+# Needed for non-interactive environments
+shopt -s expand_aliases
 alias kubectl="minikube kubectl --"
 
 ##### Helm
