@@ -445,3 +445,21 @@ impl From<std::convert::Infallible> for ApiError {
         ))
     }
 }
+
+impl From<lettre::error::Error> for ApiError {
+    fn from(error: lettre::error::Error) -> Self {
+        bad_internal!(format!("Email error: {error}"))
+    }
+}
+
+impl From<lettre::transport::smtp::Error> for ApiError {
+    fn from(error: lettre::transport::smtp::Error) -> Self {
+        bad_internal!(format!("Email SMTP error: {error}"))
+    }
+}
+
+impl From<lettre::address::AddressError> for ApiError {
+    fn from(error: lettre::address::AddressError) -> Self {
+        bad_internal!(format!("Parsing email error: {error}"))
+    }
+}

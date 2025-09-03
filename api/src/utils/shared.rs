@@ -1,6 +1,6 @@
 //! Shared objects and methods across all requests
 use axum::extract::FromRef;
-use bb8_redis::{bb8::Pool, RedisConnectionManager};
+use bb8_redis::{RedisConnectionManager, bb8::Pool};
 use elasticsearch::Elasticsearch;
 use lettre::message::header::ContentType;
 use lettre::message::{IntoBody, Mailbox};
@@ -115,17 +115,16 @@ impl EmailClient {
         body: B,
     ) -> Result<(), ApiError> {
         // try to parse the email address we are sending email too
-        let to = addr.parse().unwrap();
+        let to = addr.parse()?;
         // build the email to send
         let email = lettre::Message::builder()
             .from(self.from.clone())
             .to(to)
             .subject(subject)
             .header(ContentType::TEXT_PLAIN)
-            .body(body)
-            .unwrap();
+            .body(body)?;
         // send our email
-        self.client.send(email).await.unwrap();
+        self.client.send(email).await?;
         Ok(())
     }
 }
