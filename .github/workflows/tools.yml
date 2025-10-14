@@ -6,14 +6,12 @@ on:
   push:
     branches:
       - '*' 
-      #- main
 
 concurrency:
   group: tool-build-group
 
 jobs:
   generate-tool-builds:
-    if: github.ref_type == 'branch' && github.ref == 'refs/heads/tool-builds'
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -34,7 +32,6 @@ jobs:
         
   build-tools:
     name: Build Thorium Tool Image - #${{ matrix.tool.image_name }}
-    if: github.repository == 'gabaker/thorium'
     needs: generate-tool-builds
     runs-on: ubuntu-latest
     permissions:
