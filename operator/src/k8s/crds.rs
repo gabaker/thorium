@@ -3,10 +3,10 @@ use k8s_openapi::{
     apimachinery::pkg::api::resource::Quantity,
 };
 use kube::{
+    Client,
     api::{Api, Patch, PatchParams},
     core::CustomResourceExt,
     runtime::{conditions, wait::await_condition},
-    Client,
 };
 use kube_derive::CustomResource;
 use schemars::JsonSchema;
@@ -94,7 +94,7 @@ fn default_envs() -> Vec<EnvVar> {
 
 /// Serde helper for default api container args (cmd in a Dockerfile)
 fn default_api_cmd() -> Vec<String> {
-    vec!["/app/thorium".to_owned()]
+    vec!["/app/thorium-api".to_owned()]
 }
 
 /// Serde helper for default api container cmd (entrypoint in a Dockerfile)
@@ -448,7 +448,7 @@ pub async fn create_or_update(client: &Client) -> Result<(), Error> {
         Err(_) => {
             return Err(Error::new(format!(
                 "Timed out waiting for ThoriumCluster CRD to be established"
-            )))
+            )));
         }
     }
     Ok(())
