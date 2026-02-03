@@ -13,6 +13,7 @@ import {
   ImageEnvironmentVariables,
   ImageVolumes,
   ImageSecurityContext,
+  ImageCleanup,
   LoadingSpinner,
   OverlayTipLeft,
   OverlayTipRight,
@@ -141,6 +142,7 @@ const ImageInfo = ({ images, image, groups, setImages }) => {
   const [securityContext, setSecurityContext] = useState({}); // optional
   const [environmentVars, setEnvironmentVars] = useState([{ key: '', value: '' }]); // optional
   const [networkPolicies, setNetworkPolicies] = useState([]);
+  const [cleanup, setCleanup] = useState({}); // optional cleanup script configuration
   const { userInfo, checkCookie } = useAuth();
 
   const thoriumRole = getThoriumRole(userInfo.role);
@@ -218,6 +220,12 @@ const ImageInfo = ({ images, image, groups, setImages }) => {
     // so only update if network policies are not an array
     if (!Array.isArray(networkPolicies)) {
       newFields['network_policies'] = networkPolicies;
+    }
+
+    //        CLEANUP CONFIGURATION
+    // Cleanup specifies a script to run when jobs are canceled
+    if (Object.keys(cleanup).length) {
+      newFields['clean_up'] = cleanup;
     }
 
     // if there exists data to patch
@@ -366,6 +374,12 @@ const ImageInfo = ({ images, image, groups, setImages }) => {
         setRequestSecurityContext={setSecurityContext}
         mode={inEditMode && userInfo.role == 'Admin' ? 'Edit' : 'View'}
         disabled={(Object.keys(imageFields).includes('scaler') && imageFields.scaler == 'External') || userInfo.role != 'Admin'}
+      />
+      {/* Cleanup configuration for specifying a script to run when jobs are canceled */}
+      <ImageCleanup
+        cleanup={currentImage.clean_up ? currentImage.clean_up : null}
+        setRequestCleanup={setCleanup}
+        mode={inEditMode ? 'Edit' : 'View'}
       />
       <Row className="d-flex justify-content-center">
         <Col>

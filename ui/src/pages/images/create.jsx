@@ -15,6 +15,7 @@ import {
   ImageNetworkPolicies,
   ImageSecurityContext,
   ImageOutputCollection,
+  ImageCleanup,
   LoadingSpinner,
   Page,
 } from '@components';
@@ -36,6 +37,7 @@ const CreateImageContainer = () => {
   const [dependencies, setDependencies] = useState({});
   const [outputCollection, setOutputCollection] = useState({});
   const [networkPolicies, setNetworkPolicies] = useState([]); // optional
+  const [cleanup, setCleanup] = useState(null); // optional cleanup script configuration
   // Set error state functions
   const [displayErrors, setDisplayErrors] = useState(false);
   // required fields are blank at start
@@ -123,6 +125,13 @@ const CreateImageContainer = () => {
     if (Object.keys(securityContext).length && userInfo && userInfo.role == 'Admin' && data.scaler != 'External') {
       data['security_context'] = securityContext;
     }
+
+    // ----------------------- cleanup configuration -----------------------
+    // Cleanup specifies a script to run when jobs are canceled
+    if (cleanup && data.scaler != 'External') {
+      data['clean_up'] = cleanup;
+    }
+
     // --------------------------- tags ----------------------------
     const environmentVarsJson = {};
     // tags are key/value pairs where the values are strings
@@ -255,6 +264,13 @@ const CreateImageContainer = () => {
           setRequestSecurityContext={setSecurityContext}
           mode={state ? 'Copy' : 'Create'}
           disabled={(imageFields['scaler'] && imageFields.scaler == 'External') || !userInfo || userInfo.role != 'Admin'}
+        />
+        <hr />
+        {/* Cleanup configuration for specifying a script to run when jobs are canceled */}
+        <ImageCleanup
+          cleanup={state && state.clean_up ? state.clean_up : null}
+          setRequestCleanup={setCleanup}
+          mode={state ? 'Copy' : 'Create'}
         />
       </div>
       <Row className="d-flex justify-content-center">

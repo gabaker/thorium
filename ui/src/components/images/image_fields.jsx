@@ -11,6 +11,7 @@ const ImageFieldsToolTips = {
   name: `Image name that contains only alpha-numeric characters and dashes.`,
   creator: `The user that created this image.`,
   group: `The Thorium group that can use this image.`,
+  version: `The version of this image. Can be a semver string (e.g., 1.0.0) or a custom version string.`,
   description: `A description of this image's purpose and functionality.`,
   scaler: `The scaler type that executes this image. The scaler determines where Thorium
     will execute your tool. You must have the developer role permission for this scaler.`,
@@ -35,6 +36,7 @@ const ImageFieldsToolTips = {
 const ImageFieldsTemplate = {
   name: '',
   group: '',
+  version: '',
   description: '',
   scaler: 'K8s',
   image: '',
@@ -92,6 +94,19 @@ const DisplayImageFields = ({ image }) => {
           <FieldBadge field={image['group']} color={'#6a00db'} />
         </Col>
       </Row>
+      {/* Version field displays the image version when set */}
+      {image.version && (
+        <Row>
+          <Col className="field-name-col">
+            <OverlayTipRight tip={ImageFieldsToolTips.version}>
+              <b>{'Version'}</b> <FaQuestionCircle />
+            </OverlayTipRight>
+          </Col>
+          <Col className={'field-value-col'}>
+            <FieldBadge field={image['version']} color={'#7e7c7c'} />
+          </Col>
+        </Row>
+      )}
       <Row>
         <Col className="field-name-col">
           <OverlayTipRight tip={ImageFieldsToolTips.description}>
@@ -261,6 +276,7 @@ const filterImageFields = (image) => {
   fields['name'] = image.name;
   fields['image'] = image.image;
   fields['group'] = image.group;
+  fields['version'] = image.version;
   fields['description'] = image.description;
   fields['scaler'] = image.scaler;
   fields['lifetime'] = image.lifetime;
@@ -280,6 +296,10 @@ const updateCreateRequestImageFields = (newImageFields, setRequestImageFields) =
   requestImageFields.description = String(requestImageFields.description).trim();
   if (requestImageFields.description == '') {
     delete requestImageFields.description;
+  }
+  // version is optional, remove if empty
+  if (requestImageFields.version == '' || requestImageFields.version == null) {
+    delete requestImageFields.version;
   }
   // timeout
   if (requestImageFields.timeout == '') {
@@ -304,6 +324,12 @@ const updateEditRequestImageFields = (newImageFields, setRequestImageFields) => 
   if (requestImageFields.description == '') {
     requestImageFields['clear_description'] = true;
     delete requestImageFields.description;
+  }
+
+  // version is optional, set clear_version if empty to remove existing value
+  if (requestImageFields.version == '' || requestImageFields.version == null) {
+    requestImageFields['clear_version'] = true;
+    delete requestImageFields.version;
   }
 
   if (requestImageFields.timeout) {
@@ -406,6 +432,26 @@ const EditImageFields = ({ initialImage, setRequestFields, setHasErrors, showErr
                 value={image.description && image.description != 'null' ? image.description : ''}
                 placeholder="describe this image"
                 onChange={(e) => updateImage('description', String(e.target.value))}
+              />
+            </Form.Group>
+          </div>
+        </Col>
+      </Row>
+      {/* Version allows users to specify a semver or custom version string */}
+      <Row>
+        <Col className="field-name-col">
+          <OverlayTipRight tip={ImageFieldsToolTips.version}>
+            <b>{'Version'}</b> <FaQuestionCircle />
+          </OverlayTipRight>
+        </Col>
+        <Col className="field-value-col mb-2">
+          <div className="image-fields">
+            <Form.Group>
+              <Form.Control
+                type="text"
+                value={image.version ? image.version : ''}
+                placeholder="1.0.0"
+                onChange={(e) => updateImage('version', String(e.target.value).trim())}
               />
             </Form.Group>
           </div>
@@ -744,6 +790,20 @@ const CreateImageFields = ({ initialImage, groups, setRequestFields, setHasError
               value={image.description ? image.description : ''}
               placeholder="describe this image"
               onChange={(e) => updateImage('description', String(e.target.value))}
+            />
+          </OverlayTipRight>
+        </Form.Group>
+        {/* Version field for specifying a semver or custom version string */}
+        <Form.Group>
+          <Form.Label>
+            <Subtitle>Version</Subtitle>
+          </Form.Label>
+          <OverlayTipRight tip={ImageFieldsToolTips.version}>
+            <Form.Control
+              type="text"
+              value={image.version ? image.version : ''}
+              placeholder="1.0.0"
+              onChange={(e) => updateImage('version', String(e.target.value).trim())}
             />
           </OverlayTipRight>
         </Form.Group>

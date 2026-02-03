@@ -50,6 +50,7 @@ export { default as ImageDependencies } from './images/image_dependencies';
 export { default as ImageEnvironmentVariables } from './images/image_env_variables';
 export { default as ImageVolumes } from './images/image_volumes';
 export { default as ImageSecurityContext } from './images/image_security_context';
+export { default as ImageCleanup, CleanupTemplate, updateCreateRequestCleanup, updateEditRequestCleanup } from './images/image_cleanup';
 // ---------------------------------------------------------
 
 // ------------------------ Tools --------------------------
