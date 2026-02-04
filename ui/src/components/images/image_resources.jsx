@@ -133,10 +133,7 @@ const DisplayImageResources = ({ resources }) => {
         <Col className="key-col-3">
           <div className="image-fields">
             <OverlayTipRight tip={ResourcesToolTips.burstable_cpu}>
-              <FieldBadge
-                field={`${String(parseInt(resources.burstable ? resources.burstable['cpu'] : 0))} mCPU`}
-                color={'#7e7c7c'}
-              />
+              <FieldBadge field={`${String(parseInt(resources.burstable ? resources.burstable['cpu'] : 0))} mCPU`} color={'#7e7c7c'} />
             </OverlayTipRight>
           </div>
         </Col>
@@ -150,10 +147,7 @@ const DisplayImageResources = ({ resources }) => {
         <Col className="key-col-3">
           <div className="image-fields">
             <OverlayTipRight tip={ResourcesToolTips.burstable_memory}>
-              <FieldBadge
-                field={`${String(parseInt(resources.burstable ? resources.burstable['memory'] : 0))} MiB`}
-                color={'#7e7c7c'}
-              />
+              <FieldBadge field={`${String(parseInt(resources.burstable ? resources.burstable['memory'] : 0))} MiB`} color={'#7e7c7c'} />
             </OverlayTipRight>
           </div>
         </Col>

@@ -114,12 +114,7 @@ const ArgStrategyInput: React.FC<ArgStrategyInputProps> = ({ label, tooltip, val
                 </Col>
                 {strategyType === 'Kwarg' && (
                   <Col className="resource-type-col">
-                    <Form.Control
-                      type="text"
-                      value={kwargValue}
-                      placeholder="--flag"
-                      onChange={(e) => handleKwargChange(e.target.value)}
-                    />
+                    <Form.Control type="text" value={kwargValue} placeholder="--flag" onChange={(e) => handleKwargChange(e.target.value)} />
                   </Col>
                 )}
               </Row>
@@ -350,10 +345,7 @@ const EditImageCleanup: React.FC<EditImageCleanupProps> = ({ cleanup, setRequest
 };
 
 // Update create request to format cleanup for API submission
-export const updateCreateRequestCleanup = (
-  cleanup: Cleanup,
-  setRequestCleanup: (cleanup: Cleanup | null) => void
-): void => {
+export const updateCreateRequestCleanup = (cleanup: Cleanup, setRequestCleanup: (cleanup: Cleanup | null) => void): void => {
   // If script is empty, don't include cleanup in request
   if (!cleanup.script || cleanup.script.trim() === '') {
     setRequestCleanup(null);
@@ -363,10 +355,7 @@ export const updateCreateRequestCleanup = (
 };
 
 // Update edit request to format cleanup for API submission
-export const updateEditRequestCleanup = (
-  cleanup: Cleanup,
-  setRequestCleanup: (cleanup: CleanupUpdate) => void
-): void => {
+export const updateEditRequestCleanup = (cleanup: Cleanup, setRequestCleanup: (cleanup: CleanupUpdate) => void): void => {
   // If script is empty, set clear flag to remove existing cleanup
   if (!cleanup.script || cleanup.script.trim() === '') {
     setRequestCleanup({ clear: true });
