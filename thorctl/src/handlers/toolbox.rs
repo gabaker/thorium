@@ -2,10 +2,14 @@
 
 use thorium::Error;
 
+mod categorize;
+mod create;
+mod editor;
 mod import;
 mod manifest;
-pub mod merge;
+mod merge;
 mod shared;
+mod update;
 
 use crate::args::Args;
 use crate::args::toolbox::Toolbox;

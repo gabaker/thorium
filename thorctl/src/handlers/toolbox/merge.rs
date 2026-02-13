@@ -1,31 +1,24 @@
-//! Merge-conflict editor for resolving differences between existing Thorium
-//! resources and incoming toolbox manifest configurations
+//! Merge-conflict resolution for toolbox imports
 //!
 //! When a toolbox import encounters images or pipelines that already exist,
-//! this module generates YAML files with git-style conflict markers, opens
-//! the user's editor, validates the resolved YAML, and calculates the
-//! appropriate update to apply.
+//! this module handles the interactive merge workflow: prompting the user for
+//! an action, generating YAML with conflict markers, opening the editor,
+//! and calculating the appropriate update to apply.
 
 use colored::Colorize;
 use serde::{Deserialize, Serialize};
-use similar::{ChangeTag, TextDiff};
 use std::collections::{HashMap, HashSet};
-use std::io::Write;
 use thorium::models::{
-    BurstableResourcesUpdate, ChildFilters, Cleanup, Dependencies, EventTrigger, Image, ImageArgs,
-    ImageBanUpdate, ImageLifetime, ImageRequest, ImageScaler, ImageUpdate, ImageVersion, Kvm,
-    OutputCollection, OutputDisplayType, Pipeline, PipelineBanUpdate, PipelineRequest,
-    PipelineUpdate, Resources, ResourcesRequest, ResourcesUpdate, SecurityContext,
-    SecurityContextUpdate, SpawnLimits, Volume,
+    ChildFilters, Cleanup, Dependencies, Image, ImageArgs, ImageLifetime, ImageRequest,
+    ImageScaler, ImageUpdate, ImageVersion, Kvm, OutputCollection, OutputDisplayType, Pipeline,
+    PipelineRequest, PipelineUpdate, ResourcesRequest, SecurityContext, SpawnLimits, Volume,
 };
-use thorium::{CtlConf, Error};
-use uuid::Uuid;
+use thorium::{CtlConf, Error, Thorium};
 
-use crate::utils::diff;
-use crate::{
-    calc_remove_add_map, calc_remove_add_vec, set_clear, set_modified, set_modified_new_opt,
-    set_modified_opt,
-};
+use super::categorize::{CategorizedImage, CategorizedPipeline};
+use super::editor;
+use super::update;
+use crate::handlers::progress::Bar;
 
 // ─── Mergeable Structs ───────────────────────────────────────────────────────
 
@@ -165,79 +158,6 @@ impl From<PipelineRequest> for MergeablePipeline {
     }
 }
 
-// ─── Merge Conflict Generation ───────────────────────────────────────────────
-
-/// Generate a YAML string with git-style merge conflict markers showing the
-/// differences between two YAML representations
-///
-/// # Arguments
-///
-/// * `current_yaml` - The YAML string representing the current Thorium state
-/// * `incoming_yaml` - The YAML string representing the incoming manifest state
-fn generate_conflict_yaml(current_yaml: &str, incoming_yaml: &str) -> String {
-    let diff = TextDiff::from_lines(current_yaml, incoming_yaml);
-    let mut output = String::new();
-    // buffer for collecting consecutive changed lines
-    let mut current_lines: Vec<&str> = Vec::new();
-    let mut incoming_lines: Vec<&str> = Vec::new();
-
-    for change in diff.iter_all_changes() {
-        match change.tag() {
-            ChangeTag::Equal => {
-                // flush any buffered conflict before writing the equal line
-                flush_conflict(&mut output, &mut current_lines, &mut incoming_lines);
-                output.push_str(change.value());
-            }
-            ChangeTag::Delete => {
-                current_lines.push(change.value());
-            }
-            ChangeTag::Insert => {
-                incoming_lines.push(change.value());
-            }
-        }
-    }
-    // flush any remaining conflict at the end
-    flush_conflict(&mut output, &mut current_lines, &mut incoming_lines);
-    output
-}
-
-/// Flush buffered conflict lines into the output with git-style markers
-fn flush_conflict(output: &mut String, current_lines: &mut Vec<&str>, incoming_lines: &mut Vec<&str>) {
-    if current_lines.is_empty() && incoming_lines.is_empty() {
-        return;
-    }
-    output.push_str("<<<<<<< Current (Thorium)\n");
-    for line in current_lines.drain(..) {
-        output.push_str(line);
-        if !line.ends_with('\n') {
-            output.push('\n');
-        }
-    }
-    output.push_str("=======\n");
-    for line in incoming_lines.drain(..) {
-        output.push_str(line);
-        if !line.ends_with('\n') {
-            output.push('\n');
-        }
-    }
-    output.push_str(">>>>>>> Incoming (Manifest)\n");
-}
-
-/// Check if the content contains any unresolved merge conflict markers.
-/// Returns the line number of the first conflict marker found, if any.
-fn find_conflict_markers(content: &str) -> Option<usize> {
-    for (line_num, line) in content.lines().enumerate() {
-        let trimmed = line.trim();
-        if trimmed.starts_with("<<<<<<<")
-            || trimmed == "======="
-            || trimmed.starts_with(">>>>>>>")
-        {
-            return Some(line_num + 1);
-        }
-    }
-    None
-}
-
 // ─── Per-Resource Prompt ─────────────────────────────────────────────────────
 
 /// The action the user wants to take for a changed resource
@@ -260,7 +180,7 @@ pub enum MergeAction {
 /// * `resource_type` - Either "Image" or "Pipeline"
 /// * `group` - The group the resource is in
 /// * `name` - The name of the resource
-pub fn prompt_merge_action(resource_type: &str, group: &str, name: &str) -> Result<MergeAction, Error> {
+fn prompt_merge_action(resource_type: &str, group: &str, name: &str) -> Result<MergeAction, Error> {
     println!(
         "\n{} '{}:{}' has changes:",
         resource_type.bright_yellow(),
@@ -287,114 +207,11 @@ pub fn prompt_merge_action(resource_type: &str, group: &str, name: &str) -> Resu
     })
 }
 
-// ─── Editor Loop ─────────────────────────────────────────────────────────────
-
-/// Open a merge conflict file in the user's editor with a validation loop.
-/// Re-opens the editor if there are unresolved conflict markers or YAML
-/// syntax errors, displaying helpful error messages with line numbers.
-///
-/// # Arguments
-///
-/// * `content` - The initial content with merge conflict markers
-/// * `label` - A label for the temp file (e.g., "image-group-name")
-/// * `editor` - The editor command to use
-///
-/// Returns the validated, resolved YAML content as a string
-fn editor_loop(content: &str, label: &str, editor: &str) -> Result<String, Error> {
-    // create a temp directory
-    let temp_dir = std::env::temp_dir().join("thorium");
-    std::fs::create_dir_all(&temp_dir).map_err(|err| {
-        Error::new(format!(
-            "Failed to create temporary directory '{}': {}",
-            temp_dir.to_string_lossy(),
-            err
-        ))
-    })?;
-    let temp_path = temp_dir.join(format!("merge-{}-{}.yml", label, Uuid::new_v4()));
-    // write initial content
-    write_temp_file(&temp_path, content)?;
-    loop {
-        // open the editor
-        let status = std::process::Command::new(editor)
-            .arg(&temp_path)
-            .status()
-            .map_err(|err| {
-                let _ = std::fs::remove_file(&temp_path);
-                Error::new(format!("Unable to open editor '{editor}': {err}"))
-            })?;
-        if !status.success() {
-            let _ = std::fs::remove_file(&temp_path);
-            return Err(match status.code() {
-                Some(code) => Error::new(format!("Editor '{editor}' exited with error code: {code}")),
-                None => Error::new(format!("Editor '{editor}' exited with error!")),
-            });
-        }
-        // read back the file
-        let resolved = std::fs::read_to_string(&temp_path).map_err(|err| {
-            let _ = std::fs::remove_file(&temp_path);
-            Error::new(format!("Failed to read temporary file: {err}"))
-        })?;
-        // check for unresolved conflict markers
-        if let Some(line) = find_conflict_markers(&resolved) {
-            eprintln!(
-                "{} Unresolved merge conflict marker found at line {}. Please resolve all conflicts before saving.",
-                "Error:".bright_red().bold(),
-                line.to_string().bright_yellow(),
-            );
-            eprintln!("Re-opening editor...\n");
-            continue;
-        }
-        // validate YAML syntax by attempting to parse as serde_yaml::Value
-        match serde_yaml::from_str::<serde_yaml::Value>(&resolved) {
-            Ok(_) => {
-                // valid YAML — clean up and return
-                let _ = std::fs::remove_file(&temp_path);
-                return Ok(resolved);
-            }
-            Err(err) => {
-                // extract location info from the error
-                let location = err.location();
-                if let Some(loc) = location {
-                    eprintln!(
-                        "{} YAML syntax error at line {}, column {}: {}",
-                        "Error:".bright_red().bold(),
-                        loc.line().to_string().bright_yellow(),
-                        loc.column().to_string().bright_yellow(),
-                        err,
-                    );
-                } else {
-                    eprintln!(
-                        "{} YAML syntax error: {}",
-                        "Error:".bright_red().bold(),
-                        err,
-                    );
-                }
-                eprintln!("Re-opening editor...\n");
-            }
-        }
-    }
-}
-
-/// Write content to a temp file, creating or overwriting it
-fn write_temp_file(path: &std::path::Path, content: &str) -> Result<(), Error> {
-    let mut file = std::fs::File::create(path).map_err(|err| {
-        Error::new(format!(
-            "Failed to create temporary file '{}': {}",
-            path.to_string_lossy(),
-            err
-        ))
-    })?;
-    file.write_all(content.as_bytes()).map_err(|err| {
-        let _ = std::fs::remove_file(path);
-        Error::new(format!("Failed to write temporary file: {err}"))
-    })?;
-    Ok(())
-}
-
-// ─── Image Merge ─────────────────────────────────────────────────────────────
+// ─── Single-Resource Interactive Merge ───────────────────────────────────────
 
 /// Resolve an image merge conflict via the editor and return the resulting
-/// image update, or None if the user's edits result in no changes
+/// image update, or None if the user's edits result in no changes or they
+/// cancelled
 ///
 /// # Arguments
 ///
@@ -402,7 +219,7 @@ fn write_temp_file(path: &std::path::Path, content: &str) -> Result<(), Error> {
 /// * `req` - The incoming image request from the manifest
 /// * `conf` - The Thorctl config
 /// * `editor_override` - Optional editor override from the CLI
-pub fn merge_image_interactive(
+fn merge_image_interactive(
     image: &Image,
     req: &ImageRequest,
     conf: &CtlConf,
@@ -416,11 +233,14 @@ pub fn merge_image_interactive(
     let incoming_yaml = serde_yaml::to_string(&incoming)
         .map_err(|err| Error::new(format!("Failed to serialize incoming image to YAML: {err}")))?;
     // generate the conflict YAML
-    let conflict_yaml = generate_conflict_yaml(&current_yaml, &incoming_yaml);
+    let conflict_yaml = editor::generate_conflict_yaml(&current_yaml, &incoming_yaml);
     // open the editor
-    let editor = editor_override.unwrap_or(&conf.default_editor);
+    let editor_cmd = editor_override.unwrap_or(&conf.default_editor);
     let label = format!("{}-{}", image.group, image.name);
-    let resolved_yaml = editor_loop(&conflict_yaml, &label, editor)?;
+    let resolved_yaml = match editor::editor_loop(&conflict_yaml, &label, editor_cmd)? {
+        Some(yaml) => yaml,
+        None => return Ok(None),
+    };
     // deserialize the resolved YAML
     let resolved: MergeableImage = serde_yaml::from_str(&resolved_yaml).map_err(|err| {
         Error::new(format!(
@@ -428,79 +248,12 @@ pub fn merge_image_interactive(
         ))
     })?;
     // calculate update from the current image to the resolved state
-    Ok(calculate_image_update_from_mergeable(image.clone(), resolved))
+    Ok(update::calculate_image_update_from_mergeable(image.clone(), resolved))
 }
-
-/// Calculate an image update from the current image state and a resolved
-/// mergeable image from the editor
-fn calculate_image_update_from_mergeable(
-    mut image: Image,
-    mut resolved: MergeableImage,
-) -> Option<ImageUpdate> {
-    // check if nothing changed by comparing the resolved against current
-    let current = MergeableImage::from(image.clone());
-    let current_yaml = serde_yaml::to_string(&current).unwrap_or_default();
-    let resolved_yaml = serde_yaml::to_string(&resolved).unwrap_or_default();
-    if current_yaml == resolved_yaml {
-        return None;
-    }
-    // build an ImageRequest-like struct from the resolved for diff calculation
-    let (remove_volumes, add_volumes) =
-        calc_remove_add_vec!(image.volumes, |vol| vol.name, resolved.volumes, |vol| vol);
-    let (remove_env, add_env) = calc_remove_add_map!(image.env, resolved.env);
-    Some(ImageUpdate {
-        external: None,
-        scaler: set_modified!(image.scaler, resolved.scaler),
-        timeout: set_modified_opt!(image.timeout, resolved.timeout),
-        resources: calculate_resource_update(image.resources, resolved.resources),
-        spawn_limit: set_modified!(image.spawn_limit, resolved.spawn_limit),
-        add_volumes,
-        remove_volumes,
-        add_env,
-        remove_env,
-        clear_version: set_clear!(image.version, resolved.version),
-        version: set_modified_opt!(image.version, resolved.version),
-        clear_image: set_clear!(image.image, resolved.image),
-        image: set_modified_opt!(image.image, resolved.image),
-        clear_lifetime: set_clear!(image.lifetime, resolved.lifetime),
-        lifetime: set_modified_opt!(image.lifetime, resolved.lifetime),
-        clear_description: set_clear!(image.description, resolved.description),
-        args: diff::images::calculate_image_args_update(image.args, resolved.args),
-        modifiers: set_modified_opt!(image.modifiers, resolved.modifiers),
-        description: set_modified_opt!(image.description, resolved.description),
-        security_context: {
-            let resolved_sc = resolved.security_context.unwrap_or_default();
-            diff::images::calculate_security_context_update(image.security_context, resolved_sc)
-        },
-        collect_logs: set_modified!(image.collect_logs, resolved.collect_logs),
-        generator: set_modified!(image.generator, resolved.generator),
-        dependencies: diff::images::calculate_dependencies_update(
-            image.dependencies,
-            resolved.dependencies,
-        ),
-        display_type: set_modified!(image.display_type, resolved.display_type),
-        output_collection: diff::images::calculate_output_collection_update(
-            image.output_collection,
-            resolved.output_collection,
-        ),
-        child_filters: diff::images::calculate_child_filters_update(
-            image.child_filters,
-            resolved.child_filters,
-        ),
-        clean_up: diff::images::calculate_clean_up_update(image.clean_up, resolved.clean_up),
-        kvm: diff::images::calculate_kvm_update(image.kvm, resolved.kvm),
-        bans: ImageBanUpdate::default(),
-        network_policies: diff::images::calculate_network_policies_update(
-            image.network_policies,
-            resolved.network_policies,
-        ),
-    })
-}
-
-// ─── Pipeline Merge ──────────────────────────────────────────────────────────
 
 /// Resolve a pipeline merge conflict via the editor and return the resulting
-/// pipeline update, or None if the user's edits result in no changes
+/// pipeline update, or None if the user's edits result in no changes or they
+/// cancelled
 ///
 /// # Arguments
 ///
@@ -508,7 +261,7 @@ fn calculate_image_update_from_mergeable(
 /// * `req` - The incoming pipeline request from the manifest
 /// * `conf` - The Thorctl config
 /// * `editor_override` - Optional editor override from the CLI
-pub fn merge_pipeline_interactive(
+fn merge_pipeline_interactive(
     pipeline: &Pipeline,
     req: &PipelineRequest,
     conf: &CtlConf,
@@ -522,11 +275,14 @@ pub fn merge_pipeline_interactive(
     let incoming_yaml = serde_yaml::to_string(&incoming)
         .map_err(|err| Error::new(format!("Failed to serialize incoming pipeline to YAML: {err}")))?;
     // generate the conflict YAML
-    let conflict_yaml = generate_conflict_yaml(&current_yaml, &incoming_yaml);
+    let conflict_yaml = editor::generate_conflict_yaml(&current_yaml, &incoming_yaml);
     // open the editor
-    let editor = editor_override.unwrap_or(&conf.default_editor);
+    let editor_cmd = editor_override.unwrap_or(&conf.default_editor);
     let label = format!("{}-{}", pipeline.group, pipeline.name);
-    let resolved_yaml = editor_loop(&conflict_yaml, &label, editor)?;
+    let resolved_yaml = match editor::editor_loop(&conflict_yaml, &label, editor_cmd)? {
+        Some(yaml) => yaml,
+        None => return Ok(None),
+    };
     // deserialize the resolved YAML
     let resolved: MergeablePipeline = serde_yaml::from_str(&resolved_yaml).map_err(|err| {
         Error::new(format!(
@@ -534,183 +290,209 @@ pub fn merge_pipeline_interactive(
         ))
     })?;
     // calculate update from the current pipeline to the resolved state
-    Ok(calculate_pipeline_update_from_mergeable(pipeline.clone(), resolved))
+    Ok(update::calculate_pipeline_update_from_mergeable(pipeline.clone(), resolved))
 }
 
-/// Calculate a pipeline update from the current pipeline state and a resolved
-/// mergeable pipeline from the editor
-fn calculate_pipeline_update_from_mergeable(
-    pipeline: Pipeline,
-    resolved: MergeablePipeline,
-) -> Option<PipelineUpdate> {
-    // check if nothing changed
-    let current = MergeablePipeline::from(pipeline.clone());
-    let current_yaml = serde_yaml::to_string(&current).unwrap_or_default();
-    let resolved_yaml = serde_yaml::to_string(&resolved).unwrap_or_default();
-    if current_yaml == resolved_yaml {
-        return None;
-    }
-    // deserialize triggers back to the correct type
-    let mut resolved_triggers: HashMap<String, EventTrigger> = resolved
-        .triggers
+// ─── Batch Interactive Merge ─────────────────────────────────────────────────
+
+/// Interactively handle existing images that have changes, prompting the user
+/// for each one
+pub async fn interactive_merge_images(
+    thorium: &Thorium,
+    existing_images: Vec<&CategorizedImage>,
+    conf: &CtlConf,
+    editor_override: Option<&str>,
+    progress: &Bar,
+) -> Result<(), Error> {
+    // filter to only images with actual changes
+    let changed_images: Vec<_> = existing_images
         .into_iter()
-        .filter_map(|(k, v)| {
-            serde_json::from_value(v).ok().map(|trigger| (k, trigger))
+        .filter(|img| {
+            img.existing
+                .as_ref()
+                .is_some_and(|existing| existing != &img.request)
         })
         .collect();
-    let (remove_triggers, triggers) =
-        calc_remove_add_map!(pipeline.triggers, resolved_triggers);
-    Some(PipelineUpdate {
-        order: if pipeline.order == resolved.order {
-            None
-        } else {
-            Some(serde_json::to_value(&resolved.order).unwrap_or_default())
-        },
-        sla: set_modified_new_opt!(pipeline.sla, Some(resolved.sla)),
-        triggers,
-        remove_triggers,
-        clear_description: set_clear!(pipeline.description, resolved.description),
-        description: set_modified_opt!(pipeline.description, resolved.description),
-        bans: PipelineBanUpdate::default(),
-    })
+    if changed_images.is_empty() {
+        return Ok(());
+    }
+    for img in changed_images {
+        let existing = img.existing.as_ref().unwrap();
+        // suspend the progress bar for interactive prompts
+        let action = progress.suspend(|| {
+            prompt_merge_action("Image", &img.request.group, &img.request.name)
+        })?;
+        match action {
+            MergeAction::Edit => {
+                // open the editor for this image
+                let image_update = progress.suspend(|| {
+                    merge_image_interactive(
+                        existing,
+                        &img.request,
+                        conf,
+                        editor_override,
+                    )
+                })?;
+                if let Some(image_update) = image_update {
+                    thorium
+                        .images
+                        .update(&img.request.group, &img.request.name, &image_update)
+                        .await
+                        .map_err(|err| {
+                            Error::new(format!(
+                                "Error updating image '{}:{}': {}",
+                                img.image_name, img.version_name, err
+                            ))
+                        })?;
+                    println!(
+                        "{} {} {}",
+                        "Image".bright_green(),
+                        format!("'{}:{}'", img.request.group, img.request.name).yellow(),
+                        "updated successfully!".bright_green()
+                    );
+                } else {
+                    println!(
+                        "{} No changes detected for image '{}:{}'",
+                        "Skipped:".bright_blue(),
+                        img.request.group,
+                        img.request.name
+                    );
+                }
+            }
+            MergeAction::Skip => {
+                progress.info_anonymous(format!(
+                    "Skipping image '{}:{}'",
+                    img.image_name.bright_yellow(),
+                    img.version_name.bright_yellow()
+                ));
+            }
+            MergeAction::Apply => {
+                if let Some(image_update) =
+                    update::calculate_image_update(existing.clone(), img.request.clone())
+                {
+                    thorium
+                        .images
+                        .update(&img.request.group, &img.request.name, &image_update)
+                        .await
+                        .map_err(|err| {
+                            Error::new(format!(
+                                "Error updating image '{}:{}': {}",
+                                img.image_name, img.version_name, err
+                            ))
+                        })?;
+                    println!(
+                        "{} {} {}",
+                        "Image".bright_green(),
+                        format!("'{}:{}'", img.request.group, img.request.name).yellow(),
+                        "updated successfully!".bright_green()
+                    );
+                }
+            }
+            MergeAction::Quit => {
+                println!("Stopping further resource processing.");
+                return Ok(());
+            }
+        }
+    }
+    Ok(())
 }
 
-// ─── Direct Update Calculation (for --force) ─────────────────────────────────
-
-/// Calculate the updates for image resources (moved from update/images.rs)
-#[allow(clippy::needless_pass_by_value)]
-fn calculate_resource_update(
-    old: Resources,
-    new: ResourcesRequest,
-) -> Option<ResourcesUpdate> {
-    let new_cast = Resources::from(new.clone());
-    if old == new_cast {
-        return None;
+/// Interactively handle existing pipelines that have changes, prompting the user
+/// for each one
+pub async fn interactive_merge_pipelines(
+    thorium: &Thorium,
+    existing_pipelines: Vec<&CategorizedPipeline>,
+    conf: &CtlConf,
+    editor_override: Option<&str>,
+    progress: &Bar,
+) -> Result<(), Error> {
+    // filter to only pipelines with actual changes
+    let changed_pipelines: Vec<_> = existing_pipelines
+        .into_iter()
+        .filter(|pipe| {
+            pipe.existing
+                .as_ref()
+                .is_some_and(|existing| existing != &pipe.request)
+        })
+        .collect();
+    if changed_pipelines.is_empty() {
+        return Ok(());
     }
-    let mut burstable = BurstableResourcesUpdate::default();
-    if new_cast.burstable.cpu != old.burstable.cpu {
-        burstable.cpu = Some(new.burstable.cpu);
+    for pipe in changed_pipelines {
+        let existing = pipe.existing.as_ref().unwrap();
+        let action = progress.suspend(|| {
+            prompt_merge_action("Pipeline", &pipe.request.group, &pipe.request.name)
+        })?;
+        match action {
+            MergeAction::Edit => {
+                let pipeline_update = progress.suspend(|| {
+                    merge_pipeline_interactive(
+                        existing,
+                        &pipe.request,
+                        conf,
+                        editor_override,
+                    )
+                })?;
+                if let Some(pipeline_update) = pipeline_update {
+                    thorium
+                        .pipelines
+                        .update(&pipe.request.group, &pipe.request.name, &pipeline_update)
+                        .await
+                        .map_err(|err| {
+                            Error::new(format!(
+                                "Error updating pipeline '{}:{}': {}",
+                                pipe.pipeline_name, pipe.version_name, err
+                            ))
+                        })?;
+                    println!(
+                        "{} {} {}",
+                        "Pipeline".bright_green(),
+                        format!("'{}:{}'", pipe.request.group, pipe.request.name).yellow(),
+                        "updated successfully!".bright_green()
+                    );
+                } else {
+                    println!(
+                        "{} No changes detected for pipeline '{}:{}'",
+                        "Skipped:".bright_blue(),
+                        pipe.request.group,
+                        pipe.request.name
+                    );
+                }
+            }
+            MergeAction::Skip => {
+                progress.info_anonymous(format!(
+                    "Skipping pipeline '{}:{}'",
+                    pipe.pipeline_name.bright_yellow(),
+                    pipe.version_name.bright_yellow()
+                ));
+            }
+            MergeAction::Apply => {
+                if let Some(pipeline_update) =
+                    update::calculate_pipeline_update(existing.clone(), pipe.request.clone())
+                {
+                    thorium
+                        .pipelines
+                        .update(&pipe.request.group, &pipe.request.name, &pipeline_update)
+                        .await
+                        .map_err(|err| {
+                            Error::new(format!(
+                                "Error updating pipeline '{}:{}': {}",
+                                pipe.pipeline_name, pipe.version_name, err
+                            ))
+                        })?;
+                    println!(
+                        "{} {} {}",
+                        "Pipeline".bright_green(),
+                        format!("'{}:{}'", pipe.request.group, pipe.request.name).yellow(),
+                        "updated successfully!".bright_green()
+                    );
+                }
+            }
+            MergeAction::Quit => {
+                println!("Stopping further resource processing.");
+                return Ok(());
+            }
+        }
     }
-    if new_cast.burstable.memory != old.burstable.memory {
-        burstable.memory = Some(new.burstable.memory);
-    }
-    let new: ResourcesRequest = new_cast.into();
-    let old: ResourcesRequest = old.into();
-    Some(ResourcesUpdate {
-        cpu: set_modified!(old.cpu, new.cpu),
-        memory: set_modified!(old.memory, new.memory),
-        ephemeral_storage: set_modified!(old.ephemeral_storage, new.ephemeral_storage),
-        nvidia_gpu: set_modified!(old.nvidia_gpu, new.nvidia_gpu),
-        amd_gpu: set_modified!(old.amd_gpu, new.amd_gpu),
-        burstable,
-    })
-}
-
-/// Calculate the updates to a security context (moved from update/images.rs)
-#[allow(clippy::needless_pass_by_value)]
-fn calculate_security_context_update(
-    old: SecurityContext,
-    new: Option<SecurityContext>,
-) -> Option<SecurityContextUpdate> {
-    match new {
-        Some(new) if old == new => None,
-        Some(new) => Some(SecurityContextUpdate {
-            user: set_modified_opt!(old.user, new.user),
-            group: set_modified_opt!(old.group, new.group),
-            allow_privilege_escalation: set_modified!(
-                old.allow_privilege_escalation,
-                new.allow_privilege_escalation
-            ),
-            clear_user: set_clear!(old.user, new.user),
-            clear_group: set_clear!(old.group, new.group),
-        }),
-        None if old == SecurityContext::default() => None,
-        None => Some(
-            SecurityContextUpdate::default()
-                .clear_user()
-                .clear_group()
-                .disallow_escalation(),
-        ),
-    }
-}
-
-/// Calculate what updates need to be made to an image based on the image's
-/// current state and the request from the toolbox manifest (moved from update/images.rs)
-pub fn calculate_image_update(mut image: Image, mut req: ImageRequest) -> Option<ImageUpdate> {
-    if image == req {
-        return None;
-    }
-    let (remove_volumes, add_volumes) =
-        calc_remove_add_vec!(image.volumes, |vol| vol.name, req.volumes, |vol| vol);
-    let (remove_env, add_env) = calc_remove_add_map!(image.env, req.env);
-    let update = ImageUpdate {
-        clear_version: set_clear!(image.version, req.version),
-        clear_image: set_clear!(image.image, req.image),
-        clear_lifetime: set_clear!(image.lifetime, req.lifetime),
-        clear_description: set_clear!(image.description, req.description),
-        version: set_modified_opt!(image.version, req.version),
-        external: None,
-        image: set_modified_opt!(image.image, req.image),
-        scaler: set_modified!(image.scaler, req.scaler),
-        lifetime: set_modified_opt!(image.lifetime, req.lifetime),
-        timeout: set_modified_opt!(image.timeout, req.timeout),
-        resources: calculate_resource_update(image.resources, req.resources),
-        spawn_limit: set_modified!(image.spawn_limit, req.spawn_limit),
-        add_volumes,
-        remove_volumes,
-        add_env,
-        remove_env,
-        args: diff::images::calculate_image_args_update(image.args, req.args),
-        modifiers: set_modified_opt!(image.modifiers, req.modifiers),
-        description: set_modified_opt!(image.description, req.description),
-        security_context: calculate_security_context_update(
-            image.security_context,
-            req.security_context,
-        ),
-        collect_logs: set_modified!(image.collect_logs, req.collect_logs),
-        generator: set_modified!(image.generator, req.generator),
-        dependencies: diff::images::calculate_dependencies_update(
-            image.dependencies,
-            req.dependencies,
-        ),
-        display_type: set_modified!(image.display_type, req.display_type),
-        output_collection: diff::images::calculate_output_collection_update(
-            image.output_collection,
-            req.output_collection,
-        ),
-        child_filters: diff::images::calculate_child_filters_update(
-            image.child_filters,
-            req.child_filters,
-        ),
-        clean_up: diff::images::calculate_clean_up_update(image.clean_up, req.clean_up),
-        kvm: diff::images::calculate_kvm_update(image.kvm, req.kvm),
-        bans: ImageBanUpdate::default(),
-        network_policies: diff::images::calculate_network_policies_update(
-            image.network_policies,
-            req.network_policies,
-        ),
-    };
-    Some(update)
-}
-
-/// Calculate what updates need to be made to a pipeline based on the pipeline's
-/// current state and the request from the toolbox manifest (moved from update/pipelines.rs)
-#[allow(clippy::needless_pass_by_value)]
-pub fn calculate_pipeline_update(
-    pipeline: Pipeline,
-    mut req: PipelineRequest,
-) -> Option<PipelineUpdate> {
-    if pipeline == req {
-        return None;
-    }
-    let (remove_triggers, triggers) = calc_remove_add_map!(pipeline.triggers, req.triggers);
-    Some(PipelineUpdate {
-        order: (!req.compare_order(&pipeline.order)).then_some(req.order),
-        sla: set_modified_new_opt!(pipeline.sla, req.sla),
-        triggers,
-        remove_triggers,
-        clear_description: set_clear!(pipeline.description, req.description),
-        description: set_modified_opt!(pipeline.description, req.description),
-        bans: PipelineBanUpdate::default(),
-    })
+    Ok(())
 }
