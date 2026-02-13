@@ -58,7 +58,7 @@ const Resources = () => {
       <Route path="/create/device" element={<PageWrapper Contents={CreateDevice} />} />
       <Route path="/create/image" element={<PageWrapper Contents={CreateImage} />} />
       <Route path="/graph" element={<PageWrapper Contents={GraphBuilder} />} />
-      <Route path="/upload" element={<PageWrapper Contents={UploadFiles} />} />
+      <Route path="/upload" element={<PageWrapper auth={false} Contents={UploadFiles} />} />
       <Route path="/repos" element={<PageWrapper Contents={RepoBrowsing} />} />
       <Route path="/repo/*" element={<PageWrapper Contents={RepoDetails} />} />
       <Route path="/reaction/:group/:reactionID" element={<PageWrapper Contents={ReactionStatus} />} />

@@ -1,7 +1,7 @@
 import React from 'react';
 import { Col, Row } from 'react-bootstrap';
 import { Subtitle, UploadDropzone } from '@components';
-import { useUploadForm } from './upload_context';
+import { useUploadForm } from '../context';
 
 /**
  * Component for the file upload section

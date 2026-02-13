@@ -2,7 +2,7 @@ import React, { Fragment } from 'react';
 import { Alert, Row } from 'react-bootstrap';
 import { Link } from 'react-router-dom';
 import { RunReactionAlerts } from '@components';
-import { useUploadForm } from './upload_context';
+import { useUploadForm } from './context';
 
 /**
  * Component for displaying upload alerts and errors

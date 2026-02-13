@@ -2,7 +2,7 @@ import React from 'react';
 import { Col, Row } from 'react-bootstrap';
 import { Subtitle, SelectPipelines } from '@components';
 import { useAuth } from '@utilities';
-import { useUploadForm } from './upload_context';
+import { useUploadForm } from '../context';
 
 /**
  * Component for the pipelines selection section

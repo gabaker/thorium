@@ -3,31 +3,18 @@ import { Link } from 'react-router-dom';
 import { Button, Card, Col, Row } from 'react-bootstrap';
 import { FaChevronDown, FaChevronUp, FaRedo } from 'react-icons/fa';
 import { OverlayTipTop, Subtitle } from '@components';
-import { ProgressBarContainer } from './progress_bar_container';
-import { useUploadForm } from './upload_context';
-
-type UploadStatusPanelProps = {
-  computeTotal: () => number;
-  retryFileUpload: (fileName: string) => void;
-  retryAllFileUploads: () => void;
-  retrySubmitReaction: (status: any) => void;
-  retryAllReactionSubmissions: () => void;
-  cancelUpload: () => void;
-};
+import { ProgressBarContainer } from '../progress_bar';
+import { useUploadForm } from '../context';
+import { useUploadActions } from '../use_upload';
 
 /**
- * Component for displaying upload status panel with progress and results
- * Shows overall progress, file statuses, and reaction results
+ * Displays upload progress, per-file status rows, reaction results,
+ * and provides retry/cancel controls during and after file uploads.
  */
-export const UploadStatusPanel: React.FC<UploadStatusPanelProps> = ({
-  computeTotal,
-  retryFileUpload,
-  retryAllFileUploads,
-  retrySubmitReaction,
-  retryAllReactionSubmissions,
-  cancelUpload,
-}) => {
+export const UploadStatusPanel: React.FC = () => {
   const { state, dispatch } = useUploadForm();
+  const { computeTotalProgress, retryFileUpload, retryAllFileUploads, retrySubmitReaction, retryAllReactionSubmissions, cancelUpload } =
+    useUploadActions();
 
   const resetStatusMessages = () => {
     dispatch({ type: 'RESET_STATUS_MESSAGES' });
@@ -36,12 +23,13 @@ export const UploadStatusPanel: React.FC<UploadStatusPanelProps> = ({
   const setShowUploadStatus = (show: boolean) => {
     dispatch({ type: 'SET_SHOW_UPLOAD_STATUS', payload: show });
   };
+
   return (
     <Fragment>
       Total
       <Row className="upload-bar">
         <Col>
-          <ProgressBarContainer name={'Total'} value={computeTotal()} error={state.uploadError.length} />
+          <ProgressBarContainer name={'Total'} value={computeTotalProgress()} error={state.uploadError.length} />
         </Col>
       </Row>
       {state.uploadInProgress && (

@@ -1,0 +1,85 @@
+{
+  "$comment": "JSON model of the Rust API file creation request (SampleRequest + OriginRequest) from api/src/models/files.rs",
+  "SampleRequest": {
+    "groups": ["string"],
+    "description": "string | null",
+    "tags": {
+      "$comment": "HashMap<String, HashSet<String>> — key is tag category, value is set of tag values",
+      "example_key": ["value1", "value2"]
+    },
+    "origin": "OriginRequest | null",
+    "trigger_depth": 0
+  },
+  "OriginRequest": {
+    "origin_type": "OriginType",
+    "result_ids": ["uuid-string"],
+    "url": "string | null",
+    "name": "string | null",
+    "tool": "string | null",
+    "parent": "string (sha256) | null",
+    "flags": ["string"],
+    "cmd": "string | null",
+    "sniffer": "string | null",
+    "source": "string | null",
+    "destination": "string | null",
+    "incident": "string | null",
+    "cover_term": "string | null",
+    "mission_team": "string | null",
+    "network": "string | null",
+    "machine": "string | null",
+    "location": "string | null",
+    "memory_type": "string | null",
+    "reconstructed": ["string"],
+    "base_addr": "string | null",
+    "repo": "string | null",
+    "commitish": "string | null",
+    "commit": "string | null",
+    "system": "string | null",
+    "supporting": "boolean | null",
+    "src_ip": "IpAddr as string | null",
+    "dest_ip": "IpAddr as string | null",
+    "src_port": "u16 (number) | null",
+    "dest_port": "u16 (number) | null",
+    "proto": "PcapNetworkProtocol | null",
+    "clear_origin": false
+  },
+  "enums": {
+    "OriginType": [
+      "Downloaded",
+      "Unpacked",
+      "Transformed",
+      "Wire",
+      "Incident",
+      "MemoryDump",
+      "Source",
+      "CarvedPcap",
+      "CarvedUnknown",
+      "None"
+    ],
+    "CarvedOriginType": ["Pcap", "Unknown"],
+    "PcapNetworkProtocol": ["TCP", "UDP"]
+  },
+  "origin_type_required_fields": {
+    "Downloaded": { "required": ["url"], "optional": ["name"] },
+    "Unpacked": { "required": ["parent"], "optional": ["tool"] },
+    "Transformed": { "required": ["parent"], "optional": ["tool", "flags", "cmd"] },
+    "Wire": { "required": ["sniffer"], "optional": ["source", "destination"] },
+    "Incident": {
+      "required": ["incident"],
+      "optional": ["cover_term", "mission_team", "network", "machine", "location"]
+    },
+    "MemoryDump": {
+      "required": ["memory_type"],
+      "optional": ["parent", "reconstructed", "base_addr"]
+    },
+    "Source": {
+      "required": ["repo", "commit", "system", "supporting"],
+      "optional": ["commitish", "flags"]
+    },
+    "CarvedPcap": {
+      "required": ["parent"],
+      "optional": ["tool", "src_ip", "dest_ip", "src_port", "dest_port", "proto", "url"]
+    },
+    "CarvedUnknown": { "required": ["parent"], "optional": ["tool"] }
+  }
+}

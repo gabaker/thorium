@@ -1,9 +1,9 @@
 import React from 'react';
 import { Button, Col, Row } from 'react-bootstrap';
 import { OverlayTipTop } from '@components';
-import { useUploadForm } from './upload_context';
-import { ProgressBarContainer } from './progress_bar_container';
-import { AlertBanner } from './alert_banner';
+import { useUploadForm } from '../context';
+import { ProgressBarContainer } from '../progress_bar';
+import { AlertBanner } from '../alert_banner';
 
 /**
  * Component for the upload form footer

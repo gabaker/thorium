@@ -2,8 +2,8 @@ import React from 'react';
 import { Col, Row } from 'react-bootstrap';
 import { Button, Card } from 'react-bootstrap';
 import { Subtitle } from '@components';
-import { TLPColors, TLPState } from './types';
-import { useUploadForm } from './upload_context';
+import { TLPColors, TLPState } from '../types';
+import { useUploadForm } from '../context';
 
 /**
  * Component for TLP (Traffic Light Protocol) selection

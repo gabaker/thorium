@@ -2,7 +2,7 @@ import React from 'react';
 import { Col, Row } from 'react-bootstrap';
 import { Subtitle, SelectInputArray } from '@components';
 import { useAuth } from '@utilities';
-import { useUploadForm } from './upload_context';
+import { useUploadForm } from '../context';
 
 /**
  * Component for the groups selection section

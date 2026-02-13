@@ -1,6 +1,11 @@
 import React from 'react';
 import { ProgressBar } from 'react-bootstrap';
-import { ProgressBarProps } from './types';
+
+type ProgressBarProps = {
+  name: string;
+  value: number;
+  error: any;
+};
 
 // This container allows the progress bar color to change depending on error conditions.
 export const ProgressBarContainer: React.FC<ProgressBarProps> = ({ name, value, error }) => {

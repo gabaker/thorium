@@ -2,9 +2,9 @@ import React from 'react';
 import { Card, Col, Form, Row, Tabs, Tab } from 'react-bootstrap';
 import { isIP } from 'is-ip';
 import { SelectableArray, Subtitle } from '@components';
-import { OriginFormField } from './origin_form_field';
-import { useUploadForm } from './upload_context';
-import { CarvedOriginType, OriginType } from './types';
+import { OriginFormField } from './fields';
+import { useUploadForm } from '../../context';
+import { CarvedOriginType, OriginType } from '../../types';
 
 const ParentToolFlagsFields: React.FC = () => {
   const { state, dispatch } = useUploadForm();

@@ -1,3 +1,3 @@
 export { Upload } from './upload';
-export { UploadFormProvider, useUploadForm } from './upload_context';
+export { UploadFormProvider, useUploadForm } from './context';
 export * from './types';

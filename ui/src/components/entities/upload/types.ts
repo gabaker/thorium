@@ -31,12 +31,6 @@ export const TLPColors: Record<string, string> = {
   RED: 'tlp-red',
 };
 
-export type ProgressBarProps = {
-  name: string;
-  value: number;
-  error: any;
-};
-
 export type TLPState = {
   [key: string]: boolean;
 };

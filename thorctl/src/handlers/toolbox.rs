@@ -4,8 +4,8 @@ use thorium::Error;
 
 mod import;
 mod manifest;
+pub mod merge;
 mod shared;
-mod update;
 
 use crate::args::Args;
 use crate::args::toolbox::Toolbox;
@@ -24,6 +24,5 @@ pub async fn handle(args: &Args, toolbox: &Toolbox) -> Result<(), Error> {
     }
     match toolbox {
         Toolbox::Import(cmd) => import::import(thorium, conf, cmd).await,
-        Toolbox::Update(cmd) => update::update(thorium, conf, cmd).await,
     }
 }

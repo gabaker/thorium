@@ -1,5 +1,5 @@
 import React, { createContext, useContext, useReducer, Dispatch } from 'react';
-import { uploadFormReducer, UploadFormState, UploadFormAction, initialUploadFormState } from './upload_reducer';
+import { uploadFormReducer, UploadFormState, UploadFormAction, initialUploadFormState } from './reducer';
 
 interface UploadFormContextType {
   state: UploadFormState;
