@@ -1,11 +1,12 @@
 import React, { useState } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { Alert, Badge, Button, Col, Container, Form, Modal, Row } from 'react-bootstrap';
+import { Alert, Badge, Button, Col, Container, Form, Row } from 'react-bootstrap';
 import styled from 'styled-components';
 import Avatar from '@mui/material/Avatar';
 
 // project imports
 import { Subtitle, Page } from '@components';
+import { RevokeTokenModal } from '../../components/users';
 import { getThoriumRole, useAuth } from '@utilities';
 import { updateUser } from '@thorpi';
 
@@ -74,33 +75,6 @@ const Role = ({ role }) => {
   );
 };
 
-const RevokeTokenModal = ({ show, onHide }) => {
-  const { revoke } = useAuth();
-  const navigate = useNavigate();
-  // call thorium logout route and then
-  const handleRevoke = () => {
-    revoke().then(() => {
-      navigate('/');
-    });
-  };
-  return (
-    <Modal show={show} onHide={onHide}>
-      <Modal.Header closeButton>
-        <Modal.Title>Revoke Your Token?</Modal.Title>
-      </Modal.Header>
-      <Modal.Body>
-        Revoking your token will automatically log you out of this page and any currently running or queued analysis jobs (reactions) may
-        fail. Are you sure?
-      </Modal.Body>
-      <Modal.Footer className="d-flex justify-content-center">
-        <Button className="danger-btn" onClick={() => handleRevoke()}>
-          Confirm
-        </Button>
-      </Modal.Footer>
-    </Modal>
-  );
-};
-
 const Groups = ({ groups }) => {
   return (
     <Container>
@@ -124,12 +98,16 @@ const Groups = ({ groups }) => {
 const Token = () => {
   const [showRevokeTokenModal, setShowRevokeTokenModal] = useState(false);
   const [tokenShowing, setTokenShowing] = useState(false);
-  const { userInfo } = useAuth();
+  const { userInfo, revoke } = useAuth();
+  const navigate = useNavigate();
 
-  // toggle display of revoke token model from previous value
-  const handleToggleRevokeTokenModalDisplay = () => {
-    setShowRevokeTokenModal((prev) => !prev);
+  const handleRevoke = () => {
+    setShowRevokeTokenModal(false);
+    revoke().then(() => {
+      navigate('/');
+    });
   };
+
   return (
     <Container>
       <Row>
@@ -155,7 +133,7 @@ const Token = () => {
           <Button className="primary-btn" onClick={() => setTokenShowing(!tokenShowing)}>
             {tokenShowing ? 'Hide' : 'Show'}
           </Button>
-          <Button className="danger-btn" onClick={() => handleToggleRevokeTokenModalDisplay()}>
+          <Button className="danger-btn" onClick={() => setShowRevokeTokenModal(true)}>
             Revoke
           </Button>
         </Col>
@@ -168,7 +146,7 @@ const Token = () => {
           <p>{userInfo?.token_expiration}</p>
         </Col>
       </Row>
-      <RevokeTokenModal show={showRevokeTokenModal} onHide={handleToggleRevokeTokenModalDisplay} />
+      <RevokeTokenModal show={showRevokeTokenModal} onHide={() => setShowRevokeTokenModal(false)} onConfirm={handleRevoke} />
     </Container>
   );
 };

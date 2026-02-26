@@ -4,6 +4,7 @@ import { ThoriumRole } from '@models';
 import { getThoriumRole } from '@utilities';
 import { logoutUser, updateSingleUser } from '@thorpi';
 import RoleEditor, { DeveloperOptions, getDeveloperDefaults } from './RoleEditor';
+import RevokeTokenModal from './RevokeTokenModal';
 import { EditPanelActions, EditPanelContent, EditPanelWrapper, EditSection } from './styles';
 
 const THEMES = ['Dark', 'Light', 'Ocean', 'Automatic'];
@@ -31,9 +32,9 @@ const EditUserPanel: React.FC<EditUserPanelProps> = ({ username, role, email, th
   const [error, setError] = useState('');
   const [success, setSuccess] = useState('');
   const [revokeError, setRevokeError] = useState('');
+  const [showRevokeModal, setShowRevokeModal] = useState(false);
   const [isClosing, setIsClosing] = useState(false);
 
-  // Reset form when panel opens with fresh data
   useEffect(() => {
     if (isOpen) {
       setEditRole(getThoriumRole(role));
@@ -45,6 +46,7 @@ const EditUserPanel: React.FC<EditUserPanelProps> = ({ username, role, email, th
       setError('');
       setSuccess('');
       setRevokeError('');
+      setShowRevokeModal(false);
       setIsClosing(false);
     }
   }, [isOpen, role, email, theme, verified]);
@@ -63,7 +65,6 @@ const EditUserPanel: React.FC<EditUserPanelProps> = ({ username, role, email, th
 
     const update: Record<string, unknown> = {};
 
-    // Role
     if (editRole !== currentRoleStr || editRole === 'Developer') {
       if (editRole === 'Developer') {
         update.role = { Developer: devOptions };
@@ -72,22 +73,18 @@ const EditUserPanel: React.FC<EditUserPanelProps> = ({ username, role, email, th
       }
     }
 
-    // Email
     if (editEmail !== email) {
       update.email = editEmail;
     }
 
-    // Theme
     if (editTheme !== (theme || 'Automatic')) {
       update.settings = { theme: editTheme };
     }
 
-    // Verified
     if (editVerified !== verified) {
       update.verified = editVerified;
     }
 
-    // Password
     if (newPassword) {
       update.password = newPassword;
     }
@@ -101,7 +98,6 @@ const EditUserPanel: React.FC<EditUserPanelProps> = ({ username, role, email, th
     if (result) {
       setSuccess('User updated successfully');
       setNewPassword('');
-      // Notify parent of role change
       if (update.role) {
         onRoleUpdated(update.role as ThoriumRole);
       }
@@ -109,6 +105,7 @@ const EditUserPanel: React.FC<EditUserPanelProps> = ({ username, role, email, th
   };
 
   const handleRevokeToken = async () => {
+    setShowRevokeModal(false);
     setRevokeError('');
     const result = await logoutUser(username, setRevokeError);
     if (result) {
@@ -140,6 +137,13 @@ const EditUserPanel: React.FC<EditUserPanelProps> = ({ username, role, email, th
             onChange={(e) => setEditEmail(e.target.value)}
             style={{ maxWidth: '300px' }}
           />
+          <Form.Check
+            type="switch"
+            id={`verified-${username}`}
+            label="Email Verified"
+            checked={editVerified}
+            onChange={() => setEditVerified(!editVerified)}
+          />
         </EditSection>
 
         <EditSection>
@@ -151,11 +155,6 @@ const EditUserPanel: React.FC<EditUserPanelProps> = ({ username, role, email, th
               </option>
             ))}
           </Form.Select>
-        </EditSection>
-
-        <EditSection>
-          <label>Verified</label>
-          <Form.Check type="switch" id={`verified-${username}`} checked={editVerified} onChange={() => setEditVerified(!editVerified)} />
         </EditSection>
 
         {local && (
@@ -174,7 +173,7 @@ const EditUserPanel: React.FC<EditUserPanelProps> = ({ username, role, email, th
 
         <EditSection>
           <label>Token</label>
-          <Button className="danger-btn" size="sm" onClick={handleRevokeToken}>
+          <Button className="warning-btn" size="sm" onClick={() => setShowRevokeModal(true)}>
             Revoke Token
           </Button>
           {revokeError && (
@@ -183,6 +182,13 @@ const EditUserPanel: React.FC<EditUserPanelProps> = ({ username, role, email, th
             </Alert>
           )}
         </EditSection>
+
+        <RevokeTokenModal
+          show={showRevokeModal}
+          onHide={() => setShowRevokeModal(false)}
+          onConfirm={handleRevokeToken}
+          username={username}
+        />
 
         {error && (
           <Alert variant="danger" className="mb-0 text-center">
