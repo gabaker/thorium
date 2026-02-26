@@ -305,6 +305,29 @@ export async function syncLdap(errorHandler: (error: string) => void): Promise<b
 }
 
 /**
+ * Logout a specific user to revoke their token (admin only).
+ * @async
+ * @function
+ * @param {string} username - name of user to logout
+ * @param {(error: string) => void} errorHandler - error handler function
+ * @returns {Promise<boolean>} - whether the logout was successful
+ */
+export async function logoutUser(username: string, errorHandler: (error: string) => void): Promise<boolean> {
+  return client
+    .get('/users/logout/' + username)
+    .then((res) => {
+      if (res?.status == 204) {
+        return true;
+      }
+      return false;
+    })
+    .catch((error) => {
+      parseRequestError(error, errorHandler, 'Logout User');
+      return false;
+    });
+}
+
+/**
  * Delete a user by name.
  * @async
  * @function
