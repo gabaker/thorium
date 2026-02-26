@@ -118,6 +118,8 @@ pub(super) fn cast(
         verified: helpers::extract_bool_default(&mut raw, "verified", true)?,
         verification_token: helpers::extract_opt(&mut raw, "verification_token"),
         verification_sent: deserialize_opt!(&mut raw, "verification_sent"),
+        password_reset_token: helpers::extract_opt(&mut raw, "password_reset_token"),
+        password_reset_sent: deserialize_opt!(&mut raw, "password_reset_sent"),
     };
     Ok(user)
 }
@@ -431,6 +433,53 @@ pub async fn set_verification_token(username: &str, verification_token: &str, sh
     pipe.cmd("hset").arg(&data_key).arg("verification_token").arg(verification_token)
         .cmd("hset").arg(&data_key).arg("verification_sent").arg(serialize!(&Utc::now()));
     // save user into redis
+    let _: () = pipe.atomic()
+        .query_async(conn!(shared))
+        .await?;
+    Ok(())
+}
+
+/// Sets a password reset token for a user
+///
+/// # Arguments
+///
+/// * `username` - The name of the user to set the reset token for
+/// * `password_reset_token` - The password reset token to save
+/// * `shared` - Shared Thorium objects
+#[rustfmt::skip]
+#[instrument(name = "db::users::set_password_reset_token", skip(password_reset_token, shared), err(Debug))]
+pub async fn set_password_reset_token(username: &str, password_reset_token: &str, shared: &Shared) -> Result<(), ApiError> {
+    // build key to user data
+    let data_key = UserKeys::data(username, shared);
+    // build a redis pipeline
+    let mut pipe = redis::pipe();
+    // set our password reset token and timestamp
+    pipe.cmd("hset").arg(&data_key).arg("password_reset_token").arg(password_reset_token)
+        .cmd("hset").arg(&data_key).arg("password_reset_sent").arg(serialize!(&Utc::now()));
+    // save to redis
+    let _: () = pipe.atomic()
+        .query_async(conn!(shared))
+        .await?;
+    Ok(())
+}
+
+/// Clears a password reset token for a user
+///
+/// # Arguments
+///
+/// * `username` - The name of the user to clear the reset token for
+/// * `shared` - Shared Thorium objects
+#[rustfmt::skip]
+#[instrument(name = "db::users::clear_password_reset_token", skip(shared), err(Debug))]
+pub async fn clear_password_reset_token(username: &str, shared: &Shared) -> Result<(), ApiError> {
+    // build key to user data
+    let data_key = UserKeys::data(username, shared);
+    // build a redis pipeline
+    let mut pipe = redis::pipe();
+    // remove the password reset token
+    pipe.cmd("hdel").arg(&data_key).arg("password_reset_token")
+        .cmd("hdel").arg(&data_key).arg("password_reset_sent");
+    // save to redis
     let _: () = pipe.atomic()
         .query_async(conn!(shared))
         .await?;

@@ -38,6 +38,12 @@ pub struct CategorizedPipeline {
 
 /// Categorize all images in the manifest by checking which ones already exist
 /// in Thorium
+///
+/// # Arguments
+///
+/// * `thorium` - The Thorium client used to look up existing images
+/// * `images` - The image manifests to categorize, keyed by image name
+/// * `progress` - The progress bar to increment as each image is checked
 pub async fn categorize_images(
     thorium: &Thorium,
     images: &HashMap<String, ImageManifest>,
@@ -99,6 +105,12 @@ pub async fn categorize_images(
 
 /// Categorize all pipelines in the manifest by checking which ones already exist
 /// in Thorium
+///
+/// # Arguments
+///
+/// * `thorium` - The Thorium client used to look up existing pipelines
+/// * `pipelines` - The pipeline manifests to categorize, keyed by pipeline name
+/// * `progress` - The progress bar to increment as each pipeline is checked
 pub async fn categorize_pipelines(
     thorium: &Thorium,
     pipelines: &HashMap<String, PipelineManifest>,

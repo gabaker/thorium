@@ -110,6 +110,8 @@ async fn initial_settings_consistency_scan(
         verified: bool::default(),
         verification_token: None,
         verification_sent: None,
+        password_reset_token: None,
+        password_reset_sent: None,
     };
     // do a scan for consistency according to current settings
     settings.consistency_scan(&fake_admin, &shared).await?;

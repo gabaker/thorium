@@ -4,7 +4,7 @@ import { Alert, Badge, ButtonGroup, Button, Card, Col, Form, Modal, Row } from '
 // project imports
 import { LoadingSpinner, OverlayTipLeft, Title, Page } from '@components';
 import { getThoriumRole, useAuth } from '@utilities';
-import { deleteUser, listUsers, updateSingleUser } from '@thorpi';
+import { deleteUser, listUsers, syncLdap, updateSingleUser } from '@thorpi';
 
 // component to represent each user's info
 const SingleUserInfo = ({ user, impersonate }) => {
@@ -55,6 +55,25 @@ const ManipulateUserButtons = ({ impersonate, username, token, role, user, singl
   const [showImpersonateModal, setShowImpersonateModal] = useState(false);
   const handleCloseImpersonateModal = () => setShowImpersonateModal(false);
   const handleShowImpersonateModal = () => setShowImpersonateModal(true);
+  // Password reset modal state manipulation
+  const [showPasswordModal, setShowPasswordModal] = useState(false);
+  const [newPassword, setNewPassword] = useState('');
+  const [passwordError, setPasswordError] = useState('');
+  const [passwordSuccess, setPasswordSuccess] = useState(false);
+
+  const handleResetPassword = async () => {
+    setPasswordError('');
+    setPasswordSuccess(false);
+    if (!newPassword) {
+      setPasswordError('Password cannot be empty');
+      return;
+    }
+    const result = await updateSingleUser({ password: newPassword }, username, setPasswordError);
+    if (result) {
+      setPasswordSuccess(true);
+      setNewPassword('');
+    }
+  };
 
   return (
     <ButtonGroup>
@@ -90,6 +109,61 @@ const ManipulateUserButtons = ({ impersonate, username, token, role, user, singl
           >
             Confirm
           </Button>
+        </Modal.Footer>
+      </Modal>
+      {user.local && (
+        <OverlayTipLeft tip={`Reset password for ${username}.`}>
+          <Button
+            className="secondary-btn"
+            size="sm"
+            onClick={() => {
+              setShowPasswordModal(true);
+              setPasswordSuccess(false);
+              setPasswordError('');
+              setNewPassword('');
+            }}
+          >
+            Password
+          </Button>
+        </OverlayTipLeft>
+      )}
+      <Modal show={showPasswordModal} onHide={() => setShowPasswordModal(false)} keyboard={false}>
+        <Modal.Header closeButton>
+          <Modal.Title>Reset Password for {username}</Modal.Title>
+        </Modal.Header>
+        <Modal.Body>
+          {passwordSuccess ? (
+            <Alert variant="success">
+              <center>Password has been reset successfully.</center>
+            </Alert>
+          ) : (
+            <>
+              <Form.Group>
+                <Form.Label>New Password</Form.Label>
+                <Form.Control
+                  type="password"
+                  placeholder="Enter new password"
+                  value={newPassword}
+                  onChange={(e) => setNewPassword(e.target.value)}
+                  onKeyDown={(e) => {
+                    if (e.keyCode === 13) handleResetPassword();
+                  }}
+                />
+              </Form.Group>
+              {passwordError != '' && (
+                <Alert variant="danger" className="mt-2">
+                  <center>{passwordError}</center>
+                </Alert>
+              )}
+            </>
+          )}
+        </Modal.Body>
+        <Modal.Footer className="d-flex justify-content-center">
+          {!passwordSuccess && (
+            <Button className="ok-btn" onClick={() => handleResetPassword()}>
+              Reset Password
+            </Button>
+          )}
         </Modal.Footer>
       </Modal>
       <OverlayTipLeft tip={`Delete this user.`}>
@@ -283,6 +357,9 @@ const EditRoles = ({ role, username, user, setRole }) => {
 const Users = () => {
   const [loading, setLoading] = useState(false);
   const [users, setUsers] = useState([]);
+  const [syncing, setSyncing] = useState(false);
+  const [syncError, setSyncError] = useState('');
+  const [syncSuccess, setSyncSuccess] = useState(false);
   const { checkCookie, impersonate } = useAuth();
 
   // get user details
@@ -295,6 +372,20 @@ const Users = () => {
     setLoading(false);
   };
 
+  // trigger an LDAP sync
+  const handleSyncLdap = async () => {
+    setSyncing(true);
+    setSyncError('');
+    setSyncSuccess(false);
+    const result = await syncLdap(setSyncError);
+    if (result) {
+      setSyncSuccess(true);
+      // refresh the user list after sync
+      await getUserInfo();
+    }
+    setSyncing(false);
+  };
+
   // need user info to validate creator permissions
   useEffect(() => {
     getUserInfo();
@@ -303,11 +394,34 @@ const Users = () => {
 
   return (
     <Page title="Users · Thorium">
-      <Row className="d-flex justify-content-md-center">
+      <Row className="d-flex justify-content-md-center align-items-center">
         <Col xs={1} sm={1} md={1}>
           <Title>Users</Title>
         </Col>
+        <Col xs="auto">
+          <Button className="secondary-btn" size="sm" disabled={syncing} onClick={handleSyncLdap}>
+            {syncing ? 'Syncing...' : 'LDAP Sync'}
+          </Button>
+        </Col>
       </Row>
+      {syncSuccess && (
+        <Row className="d-flex justify-content-md-center">
+          <Col xs={4}>
+            <Alert variant="success" dismissible onClose={() => setSyncSuccess(false)}>
+              <center>LDAP sync completed successfully.</center>
+            </Alert>
+          </Col>
+        </Row>
+      )}
+      {syncError != '' && (
+        <Row className="d-flex justify-content-md-center">
+          <Col xs={4}>
+            <Alert variant="danger" dismissible onClose={() => setSyncError('')}>
+              <center>{syncError}</center>
+            </Alert>
+          </Col>
+        </Row>
+      )}
       <LoadingSpinner loading={loading}></LoadingSpinner>
       <Row>
         {users.length > 0 &&

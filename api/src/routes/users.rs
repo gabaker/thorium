@@ -11,8 +11,8 @@ use super::OpenApiSecurity;
 
 // our imports
 use crate::models::{
-    AuthResponse, Key, ScrubbedUser, Theme, UnixInfo, User, UserCreate, UserRole, UserSettings,
-    UserSettingsUpdate, UserUpdate,
+    AuthResponse, Key, PasswordReset, PasswordResetRequest, ScrubbedUser, Theme, UnixInfo, User,
+    UserCreate, UserRole, UserSettings, UserSettingsUpdate, UserUpdate,
 };
 use crate::utils::{ApiError, AppState};
 use crate::{is_admin, unauthorized, unavailable};
@@ -436,6 +436,57 @@ async fn delete_user(
     Ok(StatusCode::NO_CONTENT)
 }
 
+/// Requests a password reset email be sent for a user
+///
+/// Returns 200 OK regardless of whether the user exists to prevent user enumeration.
+///
+/// # Arguments
+///
+/// * `state` - Shared Thorium objects
+/// * `req` - The password reset request containing the username
+#[utoipa::path(
+    post,
+    path = "/api/users/password/reset/request",
+    request_body = PasswordResetRequest,
+    responses(
+        (status = 200, description = "Password reset email sent if user exists"),
+    ),
+)]
+#[instrument(name = "routes::users::request_password_reset", skip_all, err(Debug))]
+async fn request_password_reset(
+    State(state): State<AppState>,
+    Json(req): Json<PasswordResetRequest>,
+) -> Result<StatusCode, ApiError> {
+    // send the password reset email (silently succeeds if user doesn't exist)
+    User::send_password_reset_email(req, &state.shared).await?;
+    Ok(StatusCode::OK)
+}
+
+/// Resets a user's password using a reset token
+///
+/// # Arguments
+///
+/// * `state` - Shared Thorium objects
+/// * `req` - The password reset containing username, token, and new password
+#[utoipa::path(
+    post,
+    path = "/api/users/password/reset",
+    request_body = PasswordReset,
+    responses(
+        (status = 200, description = "Password reset successful"),
+        (status = 401, description = "Invalid or expired reset token"),
+    ),
+)]
+#[instrument(name = "routes::users::reset_password", skip_all, err(Debug))]
+async fn reset_password(
+    State(state): State<AppState>,
+    Json(req): Json<PasswordReset>,
+) -> Result<StatusCode, ApiError> {
+    // validate the token and reset the password
+    User::reset_password(req, &state.shared).await?;
+    Ok(StatusCode::OK)
+}
+
 /// Syncs all ldap metagroups and their users
 ///
 /// # Arguments
@@ -464,8 +515,8 @@ async fn sync_ldap(user: User, State(state): State<AppState>) -> Result<StatusCo
 /// The struct containing our openapi docs
 #[derive(OpenApi)]
 #[openapi(
-    paths(list, create, update, resend_email_verification, verify_email, list_details, auth, get_user, update_user, info, logout, logout_user, delete_user, sync_ldap),
-    components(schemas(AuthResponse, ScrubbedUser, Theme, UnixInfo, User, UserCreate, UserRole, UserSettings, UserSettingsUpdate, UserUpdate)),
+    paths(list, create, update, resend_email_verification, verify_email, list_details, auth, get_user, update_user, info, logout, logout_user, delete_user, request_password_reset, reset_password, sync_ldap),
+    components(schemas(AuthResponse, PasswordReset, PasswordResetRequest, ScrubbedUser, Theme, UnixInfo, User, UserCreate, UserRole, UserSettings, UserSettingsUpdate, UserUpdate)),
     modifiers(&OpenApiSecurity),
 )]
 pub struct UserApiDocs;
@@ -499,5 +550,10 @@ pub fn mount(router: Router<AppState>) -> Router<AppState> {
         .route("/users/logout", post(logout))
         .route("/users/logout/{target}", get(logout_user))
         .route("/users/delete/{target}", delete(delete_user))
+        .route(
+            "/users/password/reset/request",
+            post(request_password_reset),
+        )
+        .route("/users/password/reset", post(reset_password))
         .route("/users/sync/ldap", post(sync_ldap))
 }

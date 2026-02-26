@@ -18,6 +18,17 @@ use crate::handlers::progress::BarKind;
 
 /// Confirm the import with the user, showing what will be created and what
 /// already exists
+///
+/// # Arguments
+///
+/// * `conf` - The Thorctl config (used to display the API URL)
+/// * `new_images` - Images that will be created fresh
+/// * `existing_images` - Images that already exist and will be updated or prompted
+/// * `new_pipelines` - Pipelines that will be created fresh
+/// * `existing_pipelines` - Pipelines that already exist and will be updated or prompted
+/// * `missing_groups` - Groups that will be created before resources are imported
+/// * `current_user` - The currently authenticated user (shown in the confirmation prompt)
+/// * `force` - Whether existing resources will be force-updated without prompting
 fn confirm_import(
     conf: &CtlConf,
     new_images: &[&CategorizedImage],

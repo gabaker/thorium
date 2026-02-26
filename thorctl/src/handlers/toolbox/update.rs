@@ -23,6 +23,11 @@ use crate::{
 
 /// Calculate an image update from the current image state and a resolved
 /// mergeable image from the editor
+///
+/// # Arguments
+///
+/// * `image` - The current image as stored in Thorium
+/// * `resolved` - The editor-resolved [`MergeableImage`] to diff against
 pub fn calculate_image_update_from_mergeable(
     mut image: Image,
     mut resolved: MergeableImage,
@@ -89,6 +94,11 @@ pub fn calculate_image_update_from_mergeable(
 
 /// Calculate what updates need to be made to an image based on the image's
 /// current state and the request from the toolbox manifest
+///
+/// # Arguments
+///
+/// * `image` - The current image as stored in Thorium
+/// * `req` - The incoming [`ImageRequest`] from the manifest
 #[allow(clippy::needless_pass_by_value)]
 pub fn calculate_image_update(mut image: Image, mut req: ImageRequest) -> Option<ImageUpdate> {
     if image == req {
@@ -151,6 +161,11 @@ pub fn calculate_image_update(mut image: Image, mut req: ImageRequest) -> Option
 
 /// Calculate a pipeline update from the current pipeline state and a resolved
 /// mergeable pipeline from the editor
+///
+/// # Arguments
+///
+/// * `pipeline` - The current pipeline as stored in Thorium
+/// * `resolved` - The editor-resolved [`MergeablePipeline`] to diff against
 pub fn calculate_pipeline_update_from_mergeable(
     pipeline: Pipeline,
     resolved: MergeablePipeline,
@@ -189,6 +204,11 @@ pub fn calculate_pipeline_update_from_mergeable(
 
 /// Calculate what updates need to be made to a pipeline based on the pipeline's
 /// current state and the request from the toolbox manifest
+///
+/// # Arguments
+///
+/// * `pipeline` - The current pipeline as stored in Thorium
+/// * `req` - The incoming [`PipelineRequest`] from the manifest
 #[allow(clippy::needless_pass_by_value)]
 pub fn calculate_pipeline_update(
     pipeline: Pipeline,
@@ -212,6 +232,11 @@ pub fn calculate_pipeline_update(
 // ─── Resource & Security Context Updates ─────────────────────────────────────
 
 /// Calculate the updates for image resources
+///
+/// # Arguments
+///
+/// * `old` - The current resource allocation on the image
+/// * `new` - The incoming resource request from the manifest or editor
 #[allow(clippy::needless_pass_by_value)]
 fn calculate_resource_update(
     old: Resources,
@@ -241,6 +266,11 @@ fn calculate_resource_update(
 }
 
 /// Calculate the updates to a security context
+///
+/// # Arguments
+///
+/// * `old` - The current security context on the image
+/// * `new` - The incoming security context, or `None` to reset to defaults
 #[allow(clippy::needless_pass_by_value)]
 fn calculate_security_context_update(
     old: SecurityContext,

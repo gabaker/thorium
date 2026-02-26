@@ -219,7 +219,7 @@ fn prompt_merge_action(resource_type: &str, group: &str, name: &str) -> Result<M
 /// * `req` - The incoming image request from the manifest
 /// * `conf` - The Thorctl config
 /// * `editor_override` - Optional editor override from the CLI
-fn merge_image_interactive(
+async fn merge_image_interactive(
     image: &Image,
     req: &ImageRequest,
     conf: &CtlConf,
@@ -237,16 +237,10 @@ fn merge_image_interactive(
     // open the editor
     let editor_cmd = editor_override.unwrap_or(&conf.default_editor);
     let label = format!("{}-{}", image.group, image.name);
-    let resolved_yaml = match editor::editor_loop(&conflict_yaml, &label, editor_cmd)? {
-        Some(yaml) => yaml,
+    let resolved: MergeableImage = match editor::editor_loop(&conflict_yaml, &label, editor_cmd).await? {
+        Some(resolved) => resolved,
         None => return Ok(None),
     };
-    // deserialize the resolved YAML
-    let resolved: MergeableImage = serde_yaml::from_str(&resolved_yaml).map_err(|err| {
-        Error::new(format!(
-            "Failed to parse resolved image YAML: {err}"
-        ))
-    })?;
     // calculate update from the current image to the resolved state
     Ok(update::calculate_image_update_from_mergeable(image.clone(), resolved))
 }
@@ -261,7 +255,7 @@ fn merge_image_interactive(
 /// * `req` - The incoming pipeline request from the manifest
 /// * `conf` - The Thorctl config
 /// * `editor_override` - Optional editor override from the CLI
-fn merge_pipeline_interactive(
+async fn merge_pipeline_interactive(
     pipeline: &Pipeline,
     req: &PipelineRequest,
     conf: &CtlConf,
@@ -279,16 +273,10 @@ fn merge_pipeline_interactive(
     // open the editor
     let editor_cmd = editor_override.unwrap_or(&conf.default_editor);
     let label = format!("{}-{}", pipeline.group, pipeline.name);
-    let resolved_yaml = match editor::editor_loop(&conflict_yaml, &label, editor_cmd)? {
-        Some(yaml) => yaml,
+    let resolved: MergeablePipeline = match editor::editor_loop(&conflict_yaml, &label, editor_cmd).await? {
+        Some(resolved) => resolved,
         None => return Ok(None),
     };
-    // deserialize the resolved YAML
-    let resolved: MergeablePipeline = serde_yaml::from_str(&resolved_yaml).map_err(|err| {
-        Error::new(format!(
-            "Failed to parse resolved pipeline YAML: {err}"
-        ))
-    })?;
     // calculate update from the current pipeline to the resolved state
     Ok(update::calculate_pipeline_update_from_mergeable(pipeline.clone(), resolved))
 }
@@ -297,6 +285,14 @@ fn merge_pipeline_interactive(
 
 /// Interactively handle existing images that have changes, prompting the user
 /// for each one
+///
+/// # Arguments
+///
+/// * `thorium` - The Thorium client used to apply updates
+/// * `existing_images` - Images from the manifest that already exist in Thorium
+/// * `conf` - The Thorctl config (used for the default editor)
+/// * `editor_override` - Optional editor command that overrides `conf.default_editor`
+/// * `progress` - The progress bar (suspended during interactive prompts)
 pub async fn interactive_merge_images(
     thorium: &Thorium,
     existing_images: Vec<&CategorizedImage>,
@@ -325,14 +321,9 @@ pub async fn interactive_merge_images(
         match action {
             MergeAction::Edit => {
                 // open the editor for this image
-                let image_update = progress.suspend(|| {
-                    merge_image_interactive(
-                        existing,
-                        &img.request,
-                        conf,
-                        editor_override,
-                    )
-                })?;
+                let image_update = progress
+                    .suspend_async(merge_image_interactive(existing, &img.request, conf, editor_override))
+                    .await?;
                 if let Some(image_update) = image_update {
                     thorium
                         .images
@@ -399,6 +390,14 @@ pub async fn interactive_merge_images(
 
 /// Interactively handle existing pipelines that have changes, prompting the user
 /// for each one
+///
+/// # Arguments
+///
+/// * `thorium` - The Thorium client used to apply updates
+/// * `existing_pipelines` - Pipelines from the manifest that already exist in Thorium
+/// * `conf` - The Thorctl config (used for the default editor)
+/// * `editor_override` - Optional editor command that overrides `conf.default_editor`
+/// * `progress` - The progress bar (suspended during interactive prompts)
 pub async fn interactive_merge_pipelines(
     thorium: &Thorium,
     existing_pipelines: Vec<&CategorizedPipeline>,
@@ -425,14 +424,9 @@ pub async fn interactive_merge_pipelines(
         })?;
         match action {
             MergeAction::Edit => {
-                let pipeline_update = progress.suspend(|| {
-                    merge_pipeline_interactive(
-                        existing,
-                        &pipe.request,
-                        conf,
-                        editor_override,
-                    )
-                })?;
+                let pipeline_update = progress
+                    .suspend_async(merge_pipeline_interactive(existing, &pipe.request, conf, editor_override))
+                    .await?;
                 if let Some(pipeline_update) = pipeline_update {
                     thorium
                         .pipelines

@@ -4,8 +4,8 @@
 //! editor, validating the resolved YAML, and presenting error recovery options.
 
 use colored::Colorize;
+use serde::de::DeserializeOwned;
 use similar::{ChangeTag, TextDiff};
-use std::io::Write;
 use thorium::Error;
 use uuid::Uuid;
 
@@ -45,7 +45,15 @@ pub fn generate_conflict_yaml(current_yaml: &str, incoming_yaml: &str) -> String
     output
 }
 
-/// Flush buffered conflict lines into the output with git-style markers
+/// Flush buffered conflict lines into the output string with git-style markers.
+/// Drains `current_lines` and `incoming_lines` in place; does nothing if both
+/// are empty.
+///
+/// # Arguments
+///
+/// * `output` - The output string to append conflict markers and lines to
+/// * `current_lines` - Buffered lines from the current (Thorium) side
+/// * `incoming_lines` - Buffered lines from the incoming (manifest) side
 fn flush_conflict(output: &mut String, current_lines: &mut Vec<&str>, incoming_lines: &mut Vec<&str>) {
     if current_lines.is_empty() && incoming_lines.is_empty() {
         return;
@@ -68,7 +76,11 @@ fn flush_conflict(output: &mut String, current_lines: &mut Vec<&str>, incoming_l
 }
 
 /// Check if the content contains any unresolved merge conflict markers.
-/// Returns the line number of the first conflict marker found, if any.
+/// Returns the 1-based line number of the first conflict marker found, if any.
+///
+/// # Arguments
+///
+/// * `content` - The file content to scan for conflict markers
 fn find_conflict_markers(content: &str) -> Option<usize> {
     for (line_num, line) in content.lines().enumerate() {
         let trimmed = line.trim();
@@ -109,22 +121,27 @@ enum ErrorAction {
     Cancel,
 }
 
-/// Open a merge conflict file in the user's editor with a validation loop.
-/// Displays helpful error messages for unresolved conflict markers or YAML
-/// syntax errors, then prompts the user to reopen the editor or cancel.
+/// Open a file in the user's editor with a validation loop, deserializing the
+/// result to `T` on success. Displays helpful error messages for unresolved
+/// conflict markers or YAML parse/schema errors, then prompts the user to
+/// reopen the editor or cancel.
 ///
 /// # Arguments
 ///
-/// * `content` - The initial content with merge conflict markers
-/// * `label` - A label for the temp file (e.g., "image-group-name")
-/// * `editor` - The editor command to use
+/// * `content` - The initial file content (e.g., YAML with merge conflict markers)
+/// * `label` - A label used when naming the temp file (e.g., "image-group-name")
+/// * `editor` - The editor command to open
 ///
-/// Returns the validated, resolved YAML content as a string, or `None` if
-/// the user chose to cancel
-pub fn editor_loop(content: &str, label: &str, editor: &str) -> Result<Option<String>, Error> {
+/// # Returns
+///
+/// Returns the validated and deserialized `T`, or `None` if the user cancelled.
+pub async fn editor_loop<T>(content: &str, label: &str, editor: &str) -> Result<Option<T>, Error>
+where
+    T: DeserializeOwned,
+{
     // create a temp directory
     let temp_dir = std::env::temp_dir().join("thorium");
-    std::fs::create_dir_all(&temp_dir).map_err(|err| {
+    tokio::fs::create_dir_all(&temp_dir).await.map_err(|err| {
         Error::new(format!(
             "Failed to create temporary directory '{}': {}",
             temp_dir.to_string_lossy(),
@@ -133,28 +150,35 @@ pub fn editor_loop(content: &str, label: &str, editor: &str) -> Result<Option<St
     })?;
     let temp_path = temp_dir.join(format!("merge-{}-{}.yml", label, Uuid::new_v4()));
     // write initial content
-    write_temp_file(&temp_path, content)?;
+    write_temp_file(&temp_path, content).await?;
     loop {
         // open the editor
-        let status = std::process::Command::new(editor)
+        let status = match tokio::process::Command::new(editor)
             .arg(&temp_path)
             .status()
-            .map_err(|err| {
-                let _ = std::fs::remove_file(&temp_path);
-                Error::new(format!("Unable to open editor '{editor}': {err}"))
-            })?;
+            .await
+        {
+            Ok(status) => status,
+            Err(err) => {
+                let _ = tokio::fs::remove_file(&temp_path).await;
+                return Err(Error::new(format!("Unable to open editor '{editor}': {err}")));
+            }
+        };
         if !status.success() {
-            let _ = std::fs::remove_file(&temp_path);
+            let _ = tokio::fs::remove_file(&temp_path).await;
             return Err(match status.code() {
                 Some(code) => Error::new(format!("Editor '{editor}' exited with error code: {code}")),
                 None => Error::new(format!("Editor '{editor}' exited with error!")),
             });
         }
         // read back the file
-        let resolved = std::fs::read_to_string(&temp_path).map_err(|err| {
-            let _ = std::fs::remove_file(&temp_path);
-            Error::new(format!("Failed to read temporary file: {err}"))
-        })?;
+        let resolved = match tokio::fs::read_to_string(&temp_path).await {
+            Ok(content) => content,
+            Err(err) => {
+                let _ = tokio::fs::remove_file(&temp_path).await;
+                return Err(Error::new(format!("Failed to read temporary file: {err}")));
+            }
+        };
         // check for unresolved conflict markers
         if let Some(line) = find_conflict_markers(&resolved) {
             eprintln!(
@@ -165,24 +189,25 @@ pub fn editor_loop(content: &str, label: &str, editor: &str) -> Result<Option<St
             match prompt_error_action()? {
                 ErrorAction::Edit => continue,
                 ErrorAction::Cancel => {
-                    let _ = std::fs::remove_file(&temp_path);
+                    let _ = tokio::fs::remove_file(&temp_path).await;
                     return Ok(None);
                 }
             }
         }
-        // validate YAML syntax by attempting to parse as serde_yaml::Value
-        match serde_yaml::from_str::<serde_yaml::Value>(&resolved) {
-            Ok(_) => {
-                // valid YAML — clean up and return
-                let _ = std::fs::remove_file(&temp_path);
-                return Ok(Some(resolved));
+        // parse and validate by deserializing directly to T — catches both
+        // YAML syntax errors and schema mismatches
+        match serde_yaml::from_str::<T>(&resolved) {
+            Ok(parsed) => {
+                // valid — clean up and return the deserialized value
+                let _ = tokio::fs::remove_file(&temp_path).await;
+                return Ok(Some(parsed));
             }
             Err(err) => {
                 // extract location info from the error
                 let location = err.location();
                 if let Some(loc) = location {
                     eprintln!(
-                        "{} YAML syntax error at line {}, column {}: {}",
+                        "{} YAML error at line {}, column {}: {}",
                         "Error:".bright_red().bold(),
                         loc.line().to_string().bright_yellow(),
                         loc.column().to_string().bright_yellow(),
@@ -190,7 +215,7 @@ pub fn editor_loop(content: &str, label: &str, editor: &str) -> Result<Option<St
                     );
                 } else {
                     eprintln!(
-                        "{} YAML syntax error: {}",
+                        "{} YAML error: {}",
                         "Error:".bright_red().bold(),
                         err,
                     );
@@ -198,7 +223,7 @@ pub fn editor_loop(content: &str, label: &str, editor: &str) -> Result<Option<St
                 match prompt_error_action()? {
                     ErrorAction::Edit => continue,
                     ErrorAction::Cancel => {
-                        let _ = std::fs::remove_file(&temp_path);
+                        let _ = tokio::fs::remove_file(&temp_path).await;
                         return Ok(None);
                     }
                 }
@@ -208,17 +233,17 @@ pub fn editor_loop(content: &str, label: &str, editor: &str) -> Result<Option<St
 }
 
 /// Write content to a temp file, creating or overwriting it
-fn write_temp_file(path: &std::path::Path, content: &str) -> Result<(), Error> {
-    let mut file = std::fs::File::create(path).map_err(|err| {
+///
+/// # Arguments
+///
+/// * `path` - The path of the temporary file to write
+/// * `content` - The content to write to the file
+async fn write_temp_file(path: &std::path::Path, content: &str) -> Result<(), Error> {
+    tokio::fs::write(path, content).await.map_err(|err| {
         Error::new(format!(
-            "Failed to create temporary file '{}': {}",
+            "Failed to write temporary file '{}': {}",
             path.to_string_lossy(),
             err
         ))
-    })?;
-    file.write_all(content.as_bytes()).map_err(|err| {
-        let _ = std::fs::remove_file(path);
-        Error::new(format!("Failed to write temporary file: {err}"))
-    })?;
-    Ok(())
+    })
 }

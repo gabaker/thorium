@@ -298,6 +298,10 @@ pub struct User {
     pub verification_token: Option<String>,
     /// When a verification email was last sent
     pub verification_sent: Option<DateTime<Utc>>,
+    /// The password reset token to check against if one has been set
+    pub password_reset_token: Option<String>,
+    /// When a password reset email was last sent
+    pub password_reset_sent: Option<DateTime<Utc>>,
 }
 
 /// A user within Thorium that does not have its password
@@ -363,4 +367,24 @@ pub struct AuthResponse {
     pub token: String,
     /// The date/time this token expires
     pub expires: DateTime<Utc>,
+}
+
+/// Request a password reset email
+#[derive(Serialize, Deserialize, Debug, Clone)]
+#[cfg_attr(feature = "api", derive(utoipa::ToSchema))]
+pub struct PasswordResetRequest {
+    /// The username of the user requesting a password reset
+    pub username: String,
+}
+
+/// Reset password with token
+#[derive(Serialize, Deserialize, Debug, Clone)]
+#[cfg_attr(feature = "api", derive(utoipa::ToSchema))]
+pub struct PasswordReset {
+    /// The username of the user resetting their password
+    pub username: String,
+    /// The reset token from the email
+    pub token: String,
+    /// The new password to set
+    pub password: String,
 }

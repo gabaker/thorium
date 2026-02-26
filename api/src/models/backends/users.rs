@@ -20,8 +20,8 @@ use tracing::{Level, Span, event, instrument};
 use super::db;
 use crate::conf::Ldap;
 use crate::models::{
-    AuthResponse, Group, ImageScaler, Key, ScrubbedUser, UnixInfo, User, UserCreate, UserRole,
-    UserSettingsUpdate, UserUpdate,
+    AuthResponse, Group, ImageScaler, Key, PasswordReset, PasswordResetRequest, ScrubbedUser,
+    UnixInfo, User, UserCreate, UserRole, UserSettingsUpdate, UserUpdate,
 };
 use crate::utils::shared::EmailClient;
 use crate::utils::{ApiError, AppState, Shared, bounder};
@@ -511,6 +511,8 @@ impl User {
             verified: false,
             verification_token: None,
             verification_sent: None,
+            password_reset_token: None,
+            password_reset_sent: None,
         };
         // send a verification email if needed
         match (req.skip_verification, &shared.email) {
@@ -980,6 +982,101 @@ impl User {
                 Ok(())
             }
         }
+    }
+
+    /// Send a password reset email to a user
+    ///
+    /// # Arguments
+    ///
+    /// * `req` - The password reset request containing the username
+    /// * `shared` - Shared Thorium objects
+    #[instrument(name = "User::send_password_reset_email", skip_all, err(Debug))]
+    pub async fn send_password_reset_email(
+        req: PasswordResetRequest,
+        shared: &Shared,
+    ) -> Result<(), ApiError> {
+        // try to get the user - if they don't exist just return Ok to prevent enumeration
+        let mut user = match db::users::get(&req.username, shared).await {
+            Ok(user) => user,
+            Err(_) => return Ok(()),
+        };
+        // only allow password reset for local users (users with a password set)
+        if user.password.is_none() {
+            return Ok(());
+        }
+        // make sure we have an email client
+        let client = match &shared.email {
+            Some(client) => client,
+            None => return unavailable!("Email is not configured".to_owned()),
+        };
+        // make sure we have email verification settings for the base_url
+        let email_conf = match &shared.config.thorium.auth.email {
+            Some(email_conf) => email_conf,
+            None => return unavailable!("Email is not configured".to_owned()),
+        };
+        // rate limit using the password_reset_sent timestamp (reuse verification rate limit)
+        if let Some(sent) = user.password_reset_sent {
+            let limit_ts = Utc::now() - chrono::Duration::seconds(email_conf.rate_limit as i64);
+            if sent > limit_ts {
+                return Ok(());
+            }
+        }
+        // generate a reset token
+        let reset_token = token!();
+        // save this reset token to redis
+        db::users::set_password_reset_token(&req.username, &reset_token, shared).await?;
+        // update our user object
+        user.password_reset_token = Some(reset_token.clone());
+        user.password_reset_sent = Some(Utc::now());
+        // build our reset link to embed in the email
+        let link = format!(
+            "{}/auth?reset={}&token={}",
+            email_conf.base_url, req.username, reset_token
+        );
+        // build the subject for the password reset email
+        let subject = "Thorium Password Reset".to_owned();
+        // build a body with our reset link
+        let body = format!(
+            "A password reset was requested for your Thorium account.\n\nPlease reset your password by clicking on the following link:\n\n{link}\n\nIf you did not request this, please ignore this email."
+        );
+        // send our password reset email
+        client.send(&user.email, subject, body).await
+    }
+
+    /// Reset a user's password using a reset token
+    ///
+    /// # Arguments
+    ///
+    /// * `req` - The password reset containing the username, token, and new password
+    /// * `shared` - Shared Thorium objects
+    #[instrument(name = "User::reset_password", skip_all, err(Debug))]
+    pub async fn reset_password(
+        req: PasswordReset,
+        shared: &Shared,
+    ) -> Result<(), ApiError> {
+        // get the user
+        let mut user = db::users::get(&req.username, shared).await?;
+        // only allow password reset for local users
+        if user.password.is_none() {
+            return unauthorized!();
+        }
+        // validate the reset token matches
+        match &user.password_reset_token {
+            Some(stored_token) if stored_token == &req.token => {}
+            _ => return unauthorized!("Invalid or expired reset token".to_owned()),
+        }
+        // hash the new password
+        let key = &shared.config.thorium.secret_key;
+        user.password = Some(hash_pw!(req.password, key));
+        // clear the reset token
+        db::users::clear_password_reset_token(&req.username, shared).await?;
+        user.password_reset_token = None;
+        user.password_reset_sent = None;
+        // regenerate the auth token
+        user.regen_token(shared).await?;
+        // save the updated user
+        db::users::save(&user, shared).await?;
+        Ok(())
     }
 
     /// Sync all ldap users info

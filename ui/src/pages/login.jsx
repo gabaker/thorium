@@ -1,16 +1,18 @@
 import React, { useState, useEffect } from 'react';
-import { Link, useNavigate, useLocation } from 'react-router-dom';
+import { Link, useNavigate, useLocation, useSearchParams } from 'react-router-dom';
 import { Alert, Button, Col, Card, Form, Modal, Row } from 'react-bootstrap';
 
 // project imports
 import { LoadingSpinner, SimpleTitle, SimpleSubtitle, Subtitle, Title, Page } from '@components';
 import { useAuth } from '@utilities';
-import { getBanner } from '@thorpi';
+import { getBanner, requestPasswordReset, resetPassword } from '@thorpi';
 
 const LoginContainer = () => {
   const [showRegModal, setShowRegModal] = useState(false);
   const handleCloseRegModal = () => setShowRegModal(false);
   const handleShowRegModal = () => setShowRegModal(true);
+  const [showForgotModal, setShowForgotModal] = useState(false);
+  const [showResetModal, setShowResetModal] = useState(false);
   const [username, setUsername] = useState('');
   const [password, setPassword] = useState('');
   const [loginErr, setLoginErr] = useState('');
@@ -18,7 +20,12 @@ const LoginContainer = () => {
   const [loggingIn, setLoggingIn] = useState(false);
   const navigate = useNavigate();
   const { state } = useLocation();
+  const [searchParams] = useSearchParams();
   const { login } = useAuth();
+
+  // state for reset modal when coming from email link
+  const [resetUsername, setResetUsername] = useState('');
+  const [resetToken, setResetToken] = useState('');
 
   // login to Thorium and redirect if successful
   const handleAuthFormSubmit = async (username, password, handleAuthErr) => {
@@ -47,9 +54,17 @@ const LoginContainer = () => {
     }
   };
 
-  // async grab banner on page load
+  // async grab banner on page load and check for reset params
   useEffect(() => {
     fetchBanner();
+    // check if we have reset params from an email link
+    const resetParam = searchParams.get('reset');
+    const tokenParam = searchParams.get('token');
+    if (resetParam && tokenParam) {
+      setResetUsername(resetParam);
+      setResetToken(tokenParam);
+      setShowResetModal(true);
+    }
   }, []);
 
   const RegisterModal = () => {
@@ -203,6 +218,194 @@ const LoginContainer = () => {
     );
   };
 
+  const ForgotPasswordModal = () => {
+    const [forgotUsername, setForgotUsername] = useState('');
+    const [forgotError, setForgotError] = useState('');
+    const [forgotSuccess, setForgotSuccess] = useState(false);
+    const [submitting, setSubmitting] = useState(false);
+
+    const handleSubmit = async () => {
+      setForgotError('');
+      setSubmitting(true);
+      const success = await requestPasswordReset(forgotUsername, setForgotError);
+      if (success) {
+        setForgotSuccess(true);
+      }
+      setSubmitting(false);
+    };
+
+    const checkEnterSubmit = async (e) => {
+      if (e.keyCode === 13) {
+        handleSubmit();
+      }
+    };
+
+    return (
+      <Modal show={showForgotModal} onHide={() => setShowForgotModal(false)}>
+        <Modal.Header closeButton>
+          <Modal.Title>
+            <Title>Forgot Password</Title>
+          </Modal.Title>
+        </Modal.Header>
+        <Modal.Body>
+          {forgotSuccess ? (
+            <Alert variant="success">
+              <center>If an account with that username exists, a password reset email has been sent.</center>
+            </Alert>
+          ) : (
+            <Form>
+              <Row>
+                <Col>
+                  <Form.Group>
+                    <Form.Label>
+                      <Subtitle>Username</Subtitle>
+                    </Form.Label>
+                    <Form.Control
+                      type="text"
+                      placeholder="Enter Username"
+                      value={forgotUsername}
+                      onKeyDown={(e) => checkEnterSubmit(e)}
+                      onChange={(e) => setForgotUsername(String(e.target.value))}
+                    />
+                  </Form.Group>
+                </Col>
+              </Row>
+              {forgotError != '' && (
+                <Row className="mt-2">
+                  <Alert variant="danger">
+                    <center>{forgotError}</center>
+                  </Alert>
+                </Row>
+              )}
+              {submitting ? (
+                <LoadingSpinner loading={submitting}></LoadingSpinner>
+              ) : (
+                <Row className="mt-3">
+                  <Col className="d-flex justify-content-center">
+                    <Button className="ok-btn" onClick={() => handleSubmit()}>
+                      Send Reset Email
+                    </Button>
+                  </Col>
+                </Row>
+              )}
+            </Form>
+          )}
+        </Modal.Body>
+      </Modal>
+    );
+  };
+
+  const ResetPasswordModal = () => {
+    const [newPassword, setNewPassword] = useState('');
+    const [confirmPassword, setConfirmPassword] = useState('');
+    const [resetError, setResetError] = useState('');
+    const [resetWarning, setResetWarning] = useState('');
+    const [resetSuccess, setResetSuccess] = useState(false);
+    const [submitting, setSubmitting] = useState(false);
+
+    const handleSubmit = async () => {
+      setResetError('');
+      setResetWarning('');
+      if (!newPassword) {
+        setResetWarning('You must enter a new password');
+        return;
+      }
+      if (newPassword !== confirmPassword) {
+        setResetWarning('Passwords do not match');
+        return;
+      }
+      setSubmitting(true);
+      const success = await resetPassword(resetUsername, resetToken, newPassword, setResetError);
+      if (success) {
+        setResetSuccess(true);
+      }
+      setSubmitting(false);
+    };
+
+    const checkEnterSubmit = async (e) => {
+      if (e.keyCode === 13) {
+        handleSubmit();
+      }
+    };
+
+    return (
+      <Modal show={showResetModal} onHide={() => setShowResetModal(false)}>
+        <Modal.Header closeButton>
+          <Modal.Title>
+            <Title>Reset Password</Title>
+          </Modal.Title>
+        </Modal.Header>
+        <Modal.Body>
+          {resetSuccess ? (
+            <Alert variant="success">
+              <center>Your password has been reset. You can now log in with your new password.</center>
+            </Alert>
+          ) : (
+            <Form>
+              <Row>
+                <Col>
+                  <Form.Group>
+                    <Form.Label>
+                      <Subtitle>New Password</Subtitle>
+                    </Form.Label>
+                    <Form.Control
+                      type="password"
+                      placeholder="Enter New Password"
+                      value={newPassword}
+                      onKeyDown={(e) => checkEnterSubmit(e)}
+                      onChange={(e) => setNewPassword(String(e.target.value))}
+                    />
+                  </Form.Group>
+                </Col>
+              </Row>
+              <Row className="mt-2">
+                <Col>
+                  <Form.Group>
+                    <Form.Label>
+                      <Subtitle>Confirm Password</Subtitle>
+                    </Form.Label>
+                    <Form.Control
+                      type="password"
+                      placeholder="Confirm New Password"
+                      value={confirmPassword}
+                      onKeyDown={(e) => checkEnterSubmit(e)}
+                      onChange={(e) => setConfirmPassword(String(e.target.value))}
+                    />
+                  </Form.Group>
+                </Col>
+              </Row>
+              {resetWarning != '' && (
+                <Row className="mt-2">
+                  <Alert variant="warning">
+                    <center>{resetWarning}</center>
+                  </Alert>
+                </Row>
+              )}
+              {resetError != '' && (
+                <Row className="mt-2">
+                  <Alert variant="danger">
+                    <center>{resetError}</center>
+                  </Alert>
+                </Row>
+              )}
+              {submitting ? (
+                <LoadingSpinner loading={submitting}></LoadingSpinner>
+              ) : (
+                <Row className="mt-3">
+                  <Col className="d-flex justify-content-center">
+                    <Button className="ok-btn" onClick={() => handleSubmit()}>
+                      Reset Password
+                    </Button>
+                  </Col>
+                </Row>
+              )}
+            </Form>
+          )}
+        </Modal.Body>
+      </Modal>
+    );
+  };
+
   return (
     <Page title="Login · Thorium">
       <Row>
@@ -261,6 +464,15 @@ const LoginContainer = () => {
                     </Col>
                   </Row>
                   <Row>
+                    <Col className="d-flex justify-content-center align-items-center">
+                      <SimpleSubtitle>
+                        <Link to="/auth" onClick={() => setShowForgotModal(true)}>
+                          Forgot password?
+                        </Link>
+                      </SimpleSubtitle>
+                    </Col>
+                  </Row>
+                  <Row>
                     {loginErr != '' && (
                       <center>
                         <Alert variant="danger">{loginErr}</Alert>
@@ -282,6 +494,8 @@ const LoginContainer = () => {
               )}
             </Card.Body>
             <RegisterModal />
+            <ForgotPasswordModal />
+            <ResetPasswordModal />
           </Card>
         </Col>
       </Row>

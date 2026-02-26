@@ -230,6 +230,81 @@ export async function whoami(): Promise<UserInfo | null> {
 }
 
 /**
+ * Request a password reset email for a user
+ * @async
+ * @function
+ * @param {string} username - name of the user requesting password reset
+ * @param {(error: string) => void} errorHandler - error handler function
+ * @returns {Promise<boolean>} - whether the request was successful
+ */
+export async function requestPasswordReset(username: string, errorHandler: (error: string) => void): Promise<boolean> {
+  return client
+    .post('/users/password/reset/request', { username })
+    .then((res) => {
+      if (res?.status == 200) {
+        return true;
+      }
+      return false;
+    })
+    .catch((error) => {
+      parseRequestError(error, errorHandler, 'Password Reset Request');
+      return false;
+    });
+}
+
+/**
+ * Reset a user's password with a reset token
+ * @async
+ * @function
+ * @param {string} username - name of the user resetting password
+ * @param {string} token - the password reset token from the email
+ * @param {string} password - the new password to set
+ * @param {(error: string) => void} errorHandler - error handler function
+ * @returns {Promise<boolean>} - whether the reset was successful
+ */
+export async function resetPassword(
+  username: string,
+  token: string,
+  password: string,
+  errorHandler: (error: string) => void,
+): Promise<boolean> {
+  return client
+    .post('/users/password/reset', { username, token, password })
+    .then((res) => {
+      if (res?.status == 200) {
+        return true;
+      }
+      return false;
+    })
+    .catch((error) => {
+      parseRequestError(error, errorHandler, 'Password Reset');
+      return false;
+    });
+}
+
+/**
+ * Trigger an LDAP sync to update user unix info and group membership
+ * @async
+ * @function
+ * @param {(error: string) => void} errorHandler - error handler function
+ * @returns {Promise<boolean>} - whether the sync was successful
+ */
+export async function syncLdap(errorHandler: (error: string) => void): Promise<boolean> {
+  return client
+    .post('/users/sync/ldap')
+    .then((res) => {
+      if (res?.status == 204) {
+        return true;
+      }
+      return false;
+    })
+    .catch((error) => {
+      parseRequestError(error, errorHandler, 'LDAP Sync');
+      return false;
+    });
+}
+
+/**
  * Delete a user by name.
  * @async
  * @function

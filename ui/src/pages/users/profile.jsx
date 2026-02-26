@@ -1,6 +1,6 @@
 import React, { useState } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { Badge, Button, Col, Container, Form, Modal, Row } from 'react-bootstrap';
+import { Alert, Badge, Button, Col, Container, Form, Modal, Row } from 'react-bootstrap';
 import styled from 'styled-components';
 import Avatar from '@mui/material/Avatar';
 
@@ -206,6 +206,87 @@ const Theme = ({ theme }) => {
   );
 };
 
+const ChangePassword = () => {
+  const [newPassword, setNewPassword] = useState('');
+  const [confirmPassword, setConfirmPassword] = useState('');
+  const [error, setError] = useState('');
+  const [warning, setWarning] = useState('');
+  const [success, setSuccess] = useState(false);
+  const navigate = useNavigate();
+
+  const handleChangePassword = async () => {
+    setError('');
+    setWarning('');
+    setSuccess(false);
+    if (!newPassword) {
+      setWarning('You must enter a new password');
+      return;
+    }
+    if (newPassword !== confirmPassword) {
+      setWarning('Passwords do not match');
+      return;
+    }
+    const result = await updateUser({ password: newPassword }, setError);
+    if (result) {
+      setSuccess(true);
+      setNewPassword('');
+      setConfirmPassword('');
+    }
+  };
+
+  return (
+    <Container>
+      <Row>
+        <Col xs={2}>
+          <Subtitle>Password</Subtitle>
+        </Col>
+        <Col>
+          <Form>
+            <Form.Group className="mb-2">
+              <Form.Control
+                type="password"
+                placeholder="New Password"
+                value={newPassword}
+                onChange={(e) => setNewPassword(e.target.value)}
+              />
+            </Form.Group>
+            <Form.Group className="mb-2">
+              <Form.Control
+                type="password"
+                placeholder="Confirm Password"
+                value={confirmPassword}
+                onChange={(e) => setConfirmPassword(e.target.value)}
+              />
+            </Form.Group>
+          </Form>
+          {warning != '' && (
+            <Alert variant="warning">
+              <center>{warning}</center>
+            </Alert>
+          )}
+          {error != '' && (
+            <Alert variant="danger">
+              <center>{error}</center>
+            </Alert>
+          )}
+          {success && (
+            <Alert variant="success">
+              <center>Password changed successfully. You will need to log in again.</center>
+            </Alert>
+          )}
+        </Col>
+      </Row>
+      <Row>
+        <Col className="d-flex justify-content-center pt-2">
+          <Button className="primary-btn" onClick={() => handleChangePassword()}>
+            Change Password
+          </Button>
+        </Col>
+      </Row>
+    </Container>
+  );
+};
+
 const ProfileContainer = () => {
   const { userInfo } = useAuth();
 
@@ -230,6 +311,13 @@ const ProfileContainer = () => {
         <hr />
         {/* UI Theme */}
         <Theme theme={userInfo?.settings?.theme} />
+        {/* Change Password (only for local users) */}
+        {userInfo?.local && (
+          <>
+            <hr />
+            <ChangePassword />
+          </>
+        )}
       </ProfileCard>
     </Page>
   );

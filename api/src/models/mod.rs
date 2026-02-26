@@ -134,8 +134,8 @@ pub use trees::{
     TreeRelatedQuery, TreeRelationships, TreeSupport,
 };
 pub use users::{
-    AuthResponse, Key, ScrubbedUser, Theme, UnixInfo, User, UserCreate, UserRole, UserSettings,
-    UserSettingsUpdate, UserUpdate,
+    AuthResponse, Key, PasswordReset, PasswordResetRequest, ScrubbedUser, Theme, UnixInfo, User,
+    UserCreate, UserRole, UserSettings, UserSettingsUpdate, UserUpdate,
 };
 pub use version::{Arch, Component, Os, Version};
 pub use volumes::{ConfigMap, HostPath, HostPathTypes, NFS, Secret, Volume, VolumeTypes};

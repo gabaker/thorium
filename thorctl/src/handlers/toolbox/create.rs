@@ -11,6 +11,12 @@ use super::update;
 use crate::handlers::progress::{Bar, BarKind};
 
 /// Import new images (ones that don't already exist in Thorium)
+///
+/// # Arguments
+///
+/// * `thorium` - The Thorium client used to create images
+/// * `new_images` - Images from the manifest that do not yet exist in Thorium
+/// * `progress` - The progress bar to increment as images are created
 pub async fn import_new_images(
     thorium: &Thorium,
     new_images: Vec<&CategorizedImage>,
@@ -39,6 +45,12 @@ pub async fn import_new_images(
 }
 
 /// Import new pipelines (ones that don't already exist in Thorium)
+///
+/// # Arguments
+///
+/// * `thorium` - The Thorium client used to create pipelines
+/// * `new_pipelines` - Pipelines from the manifest that do not yet exist in Thorium
+/// * `progress` - The progress bar to increment as pipelines are created
 pub async fn import_new_pipelines(
     thorium: &Thorium,
     new_pipelines: Vec<&CategorizedPipeline>,
@@ -71,6 +83,12 @@ pub async fn import_new_pipelines(
 }
 
 /// Force-update all existing images without the editor
+///
+/// # Arguments
+///
+/// * `thorium` - The Thorium client used to apply updates
+/// * `existing_images` - Images from the manifest that already exist in Thorium
+/// * `progress` - The progress bar to increment as updates are applied
 pub async fn force_update_images(
     thorium: &Thorium,
     existing_images: Vec<&CategorizedImage>,
@@ -111,6 +129,12 @@ pub async fn force_update_images(
 }
 
 /// Force-update all existing pipelines without the editor
+///
+/// # Arguments
+///
+/// * `thorium` - The Thorium client used to apply updates
+/// * `existing_pipelines` - Pipelines from the manifest that already exist in Thorium
+/// * `progress` - The progress bar to increment as updates are applied
 pub async fn force_update_pipelines(
     thorium: &Thorium,
     existing_pipelines: Vec<&CategorizedPipeline>,
