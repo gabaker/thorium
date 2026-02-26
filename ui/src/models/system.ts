@@ -41,3 +41,31 @@ export type Stats = {
   external: ScalerStats;
   groups: GroupsStats;
 };
+
+export type SystemSettings = {
+  reserved_cpu: number;
+  reserved_memory: number;
+  reserved_storage: number;
+  fairshare_cpu: number;
+  fairshare_memory: number;
+  fairshare_storage: number;
+  host_path_whitelist: string[];
+  allow_unrestricted_host_paths: boolean;
+};
+
+export type HostPathWhitelistUpdate = {
+  add_paths: string[];
+  remove_paths: string[];
+};
+
+export type SystemSettingsUpdate = {
+  reserved_cpu?: string;
+  reserved_memory?: string;
+  reserved_storage?: string;
+  fairshare_cpu?: string;
+  fairshare_memory?: string;
+  fairshare_storage?: string;
+  host_path_whitelist?: HostPathWhitelistUpdate;
+  clear_host_path_whitelist?: boolean;
+  allow_unrestricted_host_paths?: boolean;
+};
