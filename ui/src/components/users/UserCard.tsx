@@ -4,7 +4,7 @@ import { ThoriumRole } from '@models';
 import { getThoriumRole } from '@utilities';
 import EditUserPanel from './EditUserPanel';
 import UserActions from './UserActions';
-import { GroupsContainer, RoleBadge, UserCardWrapper, UserHeaderRow, Username } from './styles';
+import { GroupsContainer, RoleBadge, RoleCol, UserCardWrapper, UserHeaderRow, Username, UsernameCol } from './styles';
 
 interface UserCardProps {
   username: string;
@@ -39,8 +39,12 @@ const UserCard: React.FC<UserCardProps> = ({
   return (
     <UserCardWrapper className="panel">
       <UserHeaderRow>
-        <Username className="text">{username}</Username>
-        <RoleBadge>{getThoriumRole(currentRole)}</RoleBadge>
+        <UsernameCol>
+          <Username className="text">{username}</Username>
+        </UsernameCol>
+        <RoleCol>
+          <RoleBadge>{getThoriumRole(currentRole)}</RoleBadge>
+        </RoleCol>
         <GroupsContainer>
           {[...groups].sort().map((group) => (
             <Badge bg="" key={group} className="bg-cadet">

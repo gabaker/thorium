@@ -187,6 +187,8 @@ pub struct UserUpdate {
     pub role: Option<UserRole>,
     /// The settings to set for this user
     pub settings: Option<UserSettingsUpdate>,
+    /// Override the verified status for this user
+    pub verified: Option<bool>,
 }
 
 /// The info to inject about this user on a Unix/Linx system

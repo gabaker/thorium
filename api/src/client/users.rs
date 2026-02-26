@@ -127,6 +127,7 @@ impl Users {
     ///     email: Some("email@email.com".to_owned()),
     ///     role: Some(UserRole::Admin),
     ///     settings: None,
+    ///     verified: None,
     /// };
     /// let thorium = Thorium::build("http://127.0.0.1").token("<token>").build().await?;
     /// // create a user in Thorium

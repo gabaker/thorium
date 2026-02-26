@@ -1,11 +1,12 @@
 import React, { useCallback, useEffect, useState } from 'react';
 import { Alert, Button, Form } from 'react-bootstrap';
+import { FaEye, FaShieldAlt } from 'react-icons/fa';
 import { ThoriumRole } from '@models';
 import { getThoriumRole } from '@utilities';
 import { logoutUser, updateSingleUser } from '@thorpi';
 import RoleEditor, { DeveloperOptions, getDeveloperDefaults } from './RoleEditor';
 import RevokeTokenModal from './RevokeTokenModal';
-import { EditPanelActions, EditPanelContent, EditPanelWrapper, EditSection } from './styles';
+import { EditPanelActions, EditPanelContent, EditPanelWrapper, EditSection, EditSubSection, PasswordInputWrapper } from './styles';
 
 const THEMES = ['Dark', 'Light', 'Ocean', 'Automatic'];
 
@@ -29,6 +30,7 @@ const EditUserPanel: React.FC<EditUserPanelProps> = ({ username, role, email, th
   const [editTheme, setEditTheme] = useState(theme || 'Automatic');
   const [editVerified, setEditVerified] = useState(verified);
   const [newPassword, setNewPassword] = useState('');
+  const [showPassword, setShowPassword] = useState(false);
   const [error, setError] = useState('');
   const [success, setSuccess] = useState('');
   const [revokeError, setRevokeError] = useState('');
@@ -43,6 +45,7 @@ const EditUserPanel: React.FC<EditUserPanelProps> = ({ username, role, email, th
       setEditTheme(theme || 'Automatic');
       setEditVerified(verified);
       setNewPassword('');
+      setShowPassword(false);
       setError('');
       setSuccess('');
       setRevokeError('');
@@ -127,6 +130,7 @@ const EditUserPanel: React.FC<EditUserPanelProps> = ({ username, role, email, th
             onDeveloperOptionChange={(key) => setDevOptions((prev) => ({ ...prev, [key]: !prev[key] }))}
           />
         </EditSection>
+        <hr className="my-3" />
 
         <EditSection>
           <label>Email</label>
@@ -137,6 +141,9 @@ const EditUserPanel: React.FC<EditUserPanelProps> = ({ username, role, email, th
             onChange={(e) => setEditEmail(e.target.value)}
             style={{ maxWidth: '300px' }}
           />
+        </EditSection>
+
+        <EditSubSection>
           <Form.Check
             type="switch"
             id={`verified-${username}`}
@@ -144,7 +151,8 @@ const EditUserPanel: React.FC<EditUserPanelProps> = ({ username, role, email, th
             checked={editVerified}
             onChange={() => setEditVerified(!editVerified)}
           />
-        </EditSection>
+        </EditSubSection>
+        <hr className="my-3" />
 
         <EditSection>
           <label>Theme</label>
@@ -156,19 +164,27 @@ const EditUserPanel: React.FC<EditUserPanelProps> = ({ username, role, email, th
             ))}
           </Form.Select>
         </EditSection>
+        <hr className="my-3" />
 
         {local && (
-          <EditSection>
-            <label>Password</label>
-            <Form.Control
-              type="password"
-              size="sm"
-              placeholder="New password"
-              value={newPassword}
-              onChange={(e) => setNewPassword(e.target.value)}
-              style={{ maxWidth: '300px' }}
-            />
-          </EditSection>
+          <>
+            <EditSection>
+              <label>Password</label>
+              <PasswordInputWrapper>
+                <Form.Control
+                  type={showPassword ? 'text' : 'password'}
+                  size="sm"
+                  placeholder="New password"
+                  value={newPassword}
+                  onChange={(e) => setNewPassword(e.target.value)}
+                />
+                <button type="button" className="password-toggle" onClick={() => setShowPassword((prev) => !prev)}>
+                  {showPassword ? <FaShieldAlt size={14} /> : <FaEye size={14} />}
+                </button>
+              </PasswordInputWrapper>
+            </EditSection>
+            <hr className="my-3" />
+          </>
         )}
 
         <EditSection>

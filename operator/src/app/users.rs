@@ -68,6 +68,7 @@ pub async fn create_or_auth_user(
                                 email: None,
                                 role: if admin { Some(UserRole::Admin) } else { None },
                                 settings: None,
+                                verified: None,
                             };
                             // update the user via the Thorium client
                             thorium_api.users.update(username, update).await?;

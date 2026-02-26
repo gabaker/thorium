@@ -901,12 +901,16 @@ impl User {
                 return unavailable!("Cannot update password when ldap is enabled".to_string());
             }
         }
+        // update our email
+        crate::update!(target.email, update.email);
         // update our role
         crate::update!(target.role, update.role);
         // apply any settings updates
         if let Some(settings) = update.settings {
             settings.apply(&mut target);
         }
+        // update verified status
+        crate::update!(target.verified, update.verified);
         // save update user to the backend
         db::users::save(&target, shared).await?;
         Ok(())

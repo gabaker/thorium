@@ -1,5 +1,5 @@
 import React, { useEffect, useState } from 'react';
-import { Alert, Button, Col, Row } from 'react-bootstrap';
+import { Alert, Button, ButtonToolbar, Col, Row } from 'react-bootstrap';
 
 import { LoadingSpinner, Title, Page } from '@components';
 import { useAuth } from '@utilities';
@@ -43,14 +43,18 @@ const Users: React.FC = () => {
 
   return (
     <Page title="Users · Thorium">
-      <Row className="d-flex justify-content-md-center align-items-center">
-        <Col xs={1} sm={1} md={1}>
+      <Row className="d-flex justify-content-md-center">
+        <Col xs="auto">
           <Title>Users</Title>
         </Col>
+      </Row>
+      <Row className="d-flex justify-content-md-center">
         <Col xs="auto">
-          <Button className="secondary-btn" size="sm" disabled={syncing} onClick={handleSyncLdap}>
-            {syncing ? 'Syncing...' : 'LDAP Sync'}
-          </Button>
+          <ButtonToolbar className="mb-2">
+            <Button className="secondary-btn" size="sm" disabled={syncing} onClick={handleSyncLdap}>
+              {syncing ? 'Syncing...' : 'LDAP Sync'}
+            </Button>
+          </ButtonToolbar>
         </Col>
       </Row>
       {syncSuccess && (

@@ -3,10 +3,6 @@ import { Card } from 'react-bootstrap';
 
 export const UserCardWrapper = styled(Card)`
   margin-top: 0.25rem;
-
-  &:hover {
-    background-color: var(--thorium-card-hover-bg, rgba(0, 0, 0, 0.03));
-  }
 `;
 
 export const UserHeaderRow = styled.div`
@@ -14,12 +10,23 @@ export const UserHeaderRow = styled.div`
   align-items: center;
   padding: 0.5rem;
   gap: 0.75rem;
-  flex-wrap: wrap;
+`;
+
+export const UsernameCol = styled.div`
+  width: 160px;
+  flex-shrink: 0;
+`;
+
+export const RoleCol = styled.div`
+  width: 80px;
+  flex-shrink: 0;
 `;
 
 export const Username = styled.h5`
   margin: 0;
   white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 `;
 
 export const RoleBadge = styled.small`
@@ -32,12 +39,14 @@ export const GroupsContainer = styled.div`
   display: flex;
   flex-wrap: wrap;
   gap: 0.25rem;
+  min-width: 0;
 `;
 
 export const ActionsContainer = styled.div`
   display: flex;
   gap: 0.25rem;
   margin-left: auto;
+  flex-shrink: 0;
 `;
 
 const slideDown = keyframes`
@@ -103,17 +112,48 @@ export const EditSection = styled.div`
   }
 `;
 
+export const EditSubSection = styled.div`
+  padding-left: calc(80px + 0.75rem);
+`;
+
 export const DeveloperOptionsRow = styled.div`
   display: flex;
   gap: 1.5rem;
   flex-wrap: wrap;
-  padding-left: 80px;
+  padding-left: calc(80px + 0.75rem);
+`;
+
+export const PasswordInputWrapper = styled.div`
+  position: relative;
+  max-width: 300px;
+
+  .password-toggle {
+    position: absolute;
+    right: 6px;
+    top: 50%;
+    transform: translateY(-50%);
+    background: none;
+    border: none;
+    padding: 2px 4px;
+    cursor: pointer;
+    color: var(--thorium-secondary-text);
+    display: flex;
+    align-items: center;
+
+    &:hover {
+      color: var(--thorium-text);
+    }
+  }
+
+  input {
+    padding-right: 30px;
+  }
 `;
 
 export const EditPanelActions = styled.div`
   display: flex;
-  justify-content: flex-end;
-  gap: 0.5rem;
+  justify-content: center;
+  gap: 0.25rem;
   padding-top: 0.5rem;
   border-top: 1px solid var(--thorium-border-color, #dee2e6);
 `;
