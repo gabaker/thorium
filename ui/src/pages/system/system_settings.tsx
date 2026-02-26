@@ -183,7 +183,7 @@ const SystemSettings: React.FC = () => {
             <Row className="mb-2">
               <Col>
                 <Form.Label>CPU</Form.Label>
-                <Row>
+                <Row className="g-1">
                   <Col>
                     <Form.Control
                       type="text"
@@ -202,7 +202,7 @@ const SystemSettings: React.FC = () => {
               </Col>
               <Col>
                 <Form.Label>Memory</Form.Label>
-                <Row>
+                <Row className="g-1">
                   <Col>
                     <Form.Control
                       type="text"
@@ -221,7 +221,7 @@ const SystemSettings: React.FC = () => {
               </Col>
               <Col>
                 <Form.Label>Storage</Form.Label>
-                <Row>
+                <Row className="g-1">
                   <Col>
                     <Form.Control
                       type="text"
@@ -246,7 +246,7 @@ const SystemSettings: React.FC = () => {
             <Row className="mb-2">
               <Col>
                 <Form.Label>CPU</Form.Label>
-                <Row>
+                <Row className="g-1">
                   <Col>
                     <Form.Control
                       type="text"
@@ -265,7 +265,7 @@ const SystemSettings: React.FC = () => {
               </Col>
               <Col>
                 <Form.Label>Memory</Form.Label>
-                <Row>
+                <Row className="g-1">
                   <Col>
                     <Form.Control
                       type="text"
@@ -284,7 +284,7 @@ const SystemSettings: React.FC = () => {
               </Col>
               <Col>
                 <Form.Label>Storage</Form.Label>
-                <Row>
+                <Row className="g-1">
                   <Col>
                     <Form.Control
                       type="text"
