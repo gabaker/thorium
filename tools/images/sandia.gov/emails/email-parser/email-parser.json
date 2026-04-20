@@ -1,7 +1,6 @@
 {
   "name": "email-parser",
   "group": "static",
-  "description": "Parse emails",
   "scaler": "K8s",
   "image": "",
   "timeout": 300,

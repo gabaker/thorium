@@ -1,9 +1,9 @@
 {
-  "name": "surfactant",
   "group": "static",
+  "name": "autovolatility3",
   "order": [
     [
-      "surfactant"
+      "autovolatility3"
     ]
   ],
   "sla": 640800,

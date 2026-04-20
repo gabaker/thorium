@@ -6,7 +6,6 @@
       "python-uncompyle6"
     ]
   ],
-  "description": null,
   "sla": 640800,
   "triggers": {}
 }

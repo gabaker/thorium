@@ -6,7 +6,6 @@
       "auto-volatility3"
     ]
   ],
-  "description": null,
   "sla": 640800,
   "triggers": {}
 }

@@ -1,7 +1,6 @@
 {
   "name": "strings",
   "group": "static",
-  "description": "Run the linux/binutils `strings` command to identify sequences of printable characters. There are several instantiations of this tool that look for different character encodings:\n\n * `strings`: single-7-bit-byte characters (default)\n * `strings-16be`: 16-bit bigendian\n * `strings-16le`: 16-bit littleendian\n * `strings-32be`: 32-bit bigendian\n * `strings-32le`: 32-bit littleendian",
   "scaler": "K8s",
   "image": "",
   "timeout": 60,

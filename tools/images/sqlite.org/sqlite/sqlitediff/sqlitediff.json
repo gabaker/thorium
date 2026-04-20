@@ -1,7 +1,6 @@
 {
   "name": "sqlitediff",
   "group": "static",
-  "description": "Diff two sqlite databases",
   "scaler": "K8s",
   "image": "",
   "timeout": 300,

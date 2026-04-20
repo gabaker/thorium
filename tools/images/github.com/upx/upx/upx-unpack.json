@@ -1,7 +1,6 @@
 {
   "name": "upx-unpack",
   "group": "static",
-  "description": "Unpack a sample that is UPX packed",
   "scaler": "K8s",
   "image": "",
   "timeout": 30,

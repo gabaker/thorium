@@ -13,7 +13,6 @@
       "magika"
     ]
   ],
-  "description": "Identify file type info using an ensemble of tools",
   "sla": 640800,
   "triggers": {
     "RunOnNewSamples": "NewSample"

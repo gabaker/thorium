@@ -1,7 +1,6 @@
 {
   "name": "pdf-preview",
   "group": "static",
-  "description": "Turns pdfs into pngs to allow users to preview them",
   "scaler": "K8s",
   "image": "",
   "timeout": 300,

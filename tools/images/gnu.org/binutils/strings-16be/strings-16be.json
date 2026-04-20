@@ -1,7 +1,6 @@
 {
   "name": "strings-16be",
   "group": "static",
-  "description": "See `strings` image description.",
   "scaler": "K8s",
   "image": "",
   "timeout": 60,

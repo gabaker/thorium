@@ -1,7 +1,6 @@
 {
   "name": "trivy",
   "group": "static",
-  "description": "The all in one code scanner\n\nhttps://trivy.dev/",
   "scaler": "K8s",
   "image": "",
   "timeout": 300,

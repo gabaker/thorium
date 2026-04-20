@@ -1,32 +1,23 @@
----
+# Balbuzard
 
-`Balbuzard` is an older open source tool used to extract patterns of interest from suspicious files including IP addresses, domain names, headers, and strings. It is part of a package of tools with the same name (Balbuzzard) and was written by Philippe Lagadec.
+Balbuzard is a package of Python malware-analysis tools that extract patterns of interest from suspicious files (IP addresses, domain names, known file headers, interesting strings, etc.). This image runs the `balbuzard` extraction tool against the submitted file.
 
----
-##### Usage
+## Overview
 
-Run `balbuzard` on any binary executable to extract embedded strings and headers. 
+Written by Philippe Lagadec, `balbuzard` scans a file for patterns of interest such as IP addresses, URLs, embedded files, and typical malware strings, and is easily extensible with new patterns, regular expressions, and YARA rules. The broader Balbuzard package also ships companion tools not invoked by this image: `bbcrack` (bruteforces typical malware obfuscation such as XOR, ROL, ADD and combinations to guess algorithms/keys), `bbharvest` (extracts all patterns found across all possible obfuscation transforms and keys), and `bbtrans` (applies those transforms to a file).
 
----
-##### Status
+## Supported File Types
 
-This tool last received updates to its open source code repository 6 years ago.
+- Any file / arbitrary binary data (suspicious files, executables, documents, etc.)
 
----
-##### Documentation
+## Usage
 
-[https://github.com/decalage2/balbuzard](https://github.com/decalage2/balbuzard)
+Run `balbuzard` as an early triage step on a new or suspicious file to extract strings and patterns of interest (IPs, domains, URLs, file headers, malware strings) and to detect embedded files in cleartext. It is most useful when you want a quick inventory of indicators before deeper analysis; if the file appears to hide data behind obfuscation such as XOR, the companion `bbcrack`/`bbharvest` tools (not run by this image) are the recommended follow-up.
 
----
-##### License: 
+## Documentation
 
-This license applies to the whole Balbuzard package including balbuzard, bbcrack, bbharvest and bbtrans, apart from the thirdparty and plugins folders which contain third-party files published with their own license.
+[Balbuzard on GitHub](https://github.com/decalage2/balbuzard)
 
-The Balbuzard package is copyright (c) 2007-2019, Philippe Lagadec (http://www.decalage.info) All rights reserved.
+## License
 
-Redistribution and use in source and binary forms, with or without modification, are permitted provided that the following conditions are met:
-
- - Redistributions of source code must retain the above copyright notice, this list of conditions and the following disclaimer.
- - Redistributions in binary form must reproduce the above copyright notice, this list of conditions and the following disclaimer in the documentation and/or other materials provided with the distribution.
-
----
+BSD-2-Clause. Copyright (c) 2007-2019, Philippe Lagadec. The license applies to the whole Balbuzard package (balbuzard, bbcrack, bbharvest, bbtrans) except the thirdparty and plugins folders, which contain third-party files under their own licenses.

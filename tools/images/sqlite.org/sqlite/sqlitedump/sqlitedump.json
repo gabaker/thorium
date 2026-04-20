@@ -1,7 +1,6 @@
 {
   "name": "sqlitedump",
   "group": "static",
-  "description": "Dump metadata from an Sqlite database",
   "scaler": "K8s",
   "image": "",
   "timeout": 60,

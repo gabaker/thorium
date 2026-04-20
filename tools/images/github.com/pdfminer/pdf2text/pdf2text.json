@@ -1,7 +1,6 @@
 {
   "name": "pdf2text",
   "group": "static",
-  "description": "Converts pdf documents to text.",
   "scaler": "K8s",
   "image": "",
   "timeout": 300,

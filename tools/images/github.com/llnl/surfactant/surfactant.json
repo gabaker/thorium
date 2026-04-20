@@ -1,7 +1,6 @@
 {
   "name": "surfactant",
   "group": "static",
-  "description": "https://github.com/LLNL/Surfactant",
   "scaler": "K8s",
   "image": "",
   "timeout": 1200,

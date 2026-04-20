@@ -1,9 +1,15 @@
----
-The `byte-frequency` tool graphs how often unicode characters occur within a binary file and provides a variance that can be compared across samples.
+# Byte Frequency
 
----
-##### Usage
+Generates a byte frequency distribution graph and a normalized variance statistic for a submitted file to help identify high-entropy data indicative of packing, compression, or encryption.
 
-Use this tool on any sample that you suspect may be packed or encrypted to verify if it exhibits high entropy. High entropy in files is an indicator that they have been obfuscated. For executable files that the `byte-frequency` graph suggests are packed, you can try using static unpackers like `upx-unpack` or dynamic analysis tools such as `CAPEv2` to obtain an unpacked version of the sample. Additionally, you can analyze the variance shown below the graph to compare multiple samples and identify any outliers within a group of samples that are likely packed.
+## Images Run
 
----
+- **byte-frequency** — Counts how often each of the 256 possible byte values (0x00-0xFF) occurs in the sample, computes a size-normalized variance statistic, and renders a log-scaled PNG bar chart of the distribution along with the raw per-byte counts as JSON.
+
+## Supported File Types
+
+Any file / arbitrary binary data. The tool reads the sample byte-by-byte and does not depend on a specific file format.
+
+## Usage
+
+Run this pipeline on any sample you suspect may be packed, compressed, or encrypted to check whether it exhibits high entropy, since a near-uniform byte distribution is a common indicator of obfuscation. For executables whose byte-frequency graph suggests packing, follow up with static unpackers (such as `upx-unpack`) or dynamic analysis to recover an unpacked sample. Because the variance value is normalized across file sizes, it is also useful for comparing samples and spotting outliers within a group of related files.
