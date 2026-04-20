@@ -433,4 +433,23 @@ impl Bar {
             None => f(),
         }
     }
+
+    /// Suspend the progress bar while the future `f` is executing.
+    /// Uses [`tokio::task::block_in_place`] to bridge indicatif's sync
+    /// `suspend` with an async future.
+    ///
+    /// # Arguments
+    ///
+    /// * `f` - The future to execute while the progress bar is suspended
+    pub async fn suspend_async<F, R>(&self, f: F) -> R
+    where
+        F: std::future::Future<Output = R>,
+    {
+        match &self.bar {
+            Some(bar) => tokio::task::block_in_place(|| {
+                bar.suspend(|| tokio::runtime::Handle::current().block_on(f))
+            }),
+            None => f.await,
+        }
+    }
 }

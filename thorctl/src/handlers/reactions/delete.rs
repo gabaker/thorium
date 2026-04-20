@@ -6,36 +6,10 @@ use thorium::{CtlConf, Thorium};
 
 use crate::Args;
 use crate::args::reactions::DeleteReactions;
-use crate::handlers::progress::{Bar, BarKind, MultiBar};
-use crate::handlers::{Monitor, MonitorMsg, Worker};
+use crate::handlers::progress::{Bar, BarKind};
+use crate::handlers::{MonitorMsg, SimpleMonitor, Worker};
 
-/// The files download monitor
-pub struct ReactionsDeleteMonitor;
-
-impl Monitor for ReactionsDeleteMonitor {
-    /// The update type to use
-    type Update = ();
-
-    /// build this monitors progress bar
-    ///
-    /// # Arguments
-    ///
-    /// * `multi` - The multibar to add a bar too
-    /// * `msg`- The message to set for our monitor bar
-    fn build_bar(multi: &MultiBar, msg: &str) -> Bar {
-        multi.add(msg, BarKind::Bound(0))
-    }
-
-    /// Apply an update to our global progress bar
-    ///
-    /// # Arguments
-    ///
-    /// * `bar` - The bar to apply updates too
-    /// * `update` - The update to apply
-    fn apply(bar: &Bar, _: Self::Update) {
-        bar.inc(1);
-    }
-}
+type ReactionsDeleteMonitor = SimpleMonitor;
 
 macro_rules! check {
     ($bar:expr, $func:expr) => {

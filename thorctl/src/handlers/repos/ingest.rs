@@ -20,10 +20,10 @@ use tokio::task::JoinHandle;
 use url::Url;
 use uuid::Uuid;
 
-use super::progress::{Bar, BarKind, MultiBar};
+use super::progress::{Bar, BarKind};
 use crate::args::{repos::IngestRepos, Args};
 use crate::check;
-use crate::handlers::{Monitor, MonitorMsg, Worker};
+use crate::handlers::{MonitorMsg, Worker};
 use crate::{CtlConf, Error};
 
 /// Fix a remote to not be an ssh clone or contain an ending "/" or ".git"
@@ -527,23 +527,9 @@ impl CommitishIngestor {
     }
 }
 
-/// The repo ingest monitor
-pub struct RepoIngestMonitor;
+use crate::handlers::SimpleMonitor;
 
-impl Monitor for RepoIngestMonitor {
-    /// The update type to use
-    type Update = ();
-
-    /// build this monitors progress bar
-    fn build_bar(multi: &MultiBar, msg: &str) -> Bar {
-        multi.add(msg, BarKind::Bound(0))
-    }
-
-    /// Apply an update to our global progress bar
-    fn apply(bar: &Bar, _: Self::Update) {
-        bar.inc(1);
-    }
-}
+type RepoIngestMonitor = SimpleMonitor;
 
 // A worker that ingests repos into Thorium
 pub struct IngestWorker {

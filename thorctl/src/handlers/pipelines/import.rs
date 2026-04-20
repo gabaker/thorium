@@ -5,27 +5,11 @@ use thorium::models::PipelineRequest;
 use thorium::{CtlConf, Error, Thorium};
 
 use crate::args::pipelines::ImportPipelines;
-use crate::handlers::progress::{Bar, BarKind, MultiBar};
-use crate::handlers::{Monitor, MonitorMsg, Worker};
+use crate::handlers::progress::{Bar, BarKind};
+use crate::handlers::{MonitorMsg, SimpleMonitor, Worker};
 use crate::Args;
 
-/// The pipeline export monitor
-pub struct PipelineImportMonitor;
-
-impl Monitor for PipelineImportMonitor {
-    /// The update type to use
-    type Update = ();
-
-    /// build this monitors progress bar
-    fn build_bar(multi: &MultiBar, msg: &str) -> Bar {
-        multi.add(msg, BarKind::Bound(0))
-    }
-
-    /// Apply an update to our global progress bar
-    fn apply(bar: &Bar, _: Self::Update) {
-        bar.inc(1);
-    }
-}
+type PipelineImportMonitor = SimpleMonitor;
 
 pub struct PipelineImportWorker {
     /// The Thorium client for this worker
@@ -41,18 +25,19 @@ pub struct PipelineImportWorker {
 impl PipelineImportWorker {
     /// Import an pipeline from a specific group by name
     pub async fn import(&mut self, name: &str) -> Result<(), Error> {
-        // log that we are exporting this pipelines config
-        self.bar.set_message("Importing Pipeline");
-        // add our pipeline name
-        let file_path = self.cmd.import.join(format!("{name}.json"));
-        // try to load this pipeline from disk
-        let pipeline_str = tokio::fs::read_to_string(&file_path).await?;
-        // parse this pipeline request
-        let mut pipeline_req: PipelineRequest = serde_json::from_str(&pipeline_str)?;
-        // update the group for this pipeline
+        self.bar.set_message("Importing pipeline");
+        let file_path = self.cmd.import.join("pipelines").join(format!("{name}.json"));
+        let pipeline_str = tokio::fs::read_to_string(&file_path)
+            .await
+            .map_err(|e| Error::new(format!("Failed to read pipeline '{name}': {e}")))?;
+        let mut pipeline_req: PipelineRequest = serde_json::from_str(&pipeline_str)
+            .map_err(|e| Error::new(format!("Failed to parse pipeline '{name}': {e}")))?;
         pipeline_req.group = self.cmd.group.clone();
-        // create this pipeline in Thorium
-        self.thorium.pipelines.create(&pipeline_req).await?;
+        self.thorium
+            .pipelines
+            .create(&pipeline_req)
+            .await
+            .map_err(|e| Error::new(format!("Failed to create pipeline '{name}': {e}")))?;
         Ok(())
     }
 }

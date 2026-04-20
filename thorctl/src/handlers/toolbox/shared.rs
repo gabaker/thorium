@@ -58,14 +58,8 @@ async fn get_manifest_from_url(url: &Url, progress: &Bar) -> Result<ToolboxManif
             if let Some(content_length) = resp.content_length().or(resp
                 .headers()
                 .get(CONTENT_LENGTH)
-                .and_then(|content_length_header| {
-                    println!("Got content length header");
-                    content_length_header.to_str().ok()
-                })
-                .and_then(|content_length_str| {
-                    println!("Got content length str: {content_length_str}");
-                    content_length_str.parse::<u64>().ok()
-                }))
+                .and_then(|content_length_header| content_length_header.to_str().ok())
+                .and_then(|content_length_str| content_length_str.parse::<u64>().ok()))
             {
                 progress.refresh("Downloading manifest...", BarKind::IO(content_length));
             } else {
@@ -202,30 +196,3 @@ where
     Ok(())
 }
 
-/// See which groups in the manifest are missing from Thorium and create them
-///
-/// # Arguments
-///
-/// * `thorium` - The Thorium client
-/// * `manifest_groups` - The groups the manifest expects to exist
-/// * `progress` - The progress bar
-pub async fn get_and_create_missing_groups(
-    thorium: &Thorium,
-    manifest_groups: HashSet<String>,
-    progress: &Bar,
-) -> Result<(), Error> {
-    // calculate which groups are missing
-    let missing_groups = get_missing_groups(thorium, manifest_groups).await?;
-    // create the missing groups if we have any
-    if !missing_groups.is_empty() {
-        progress.refresh(
-            "Importing groups",
-            BarKind::Bound(missing_groups.len() as u64),
-        );
-        // create all the missing groups;
-        // we only want to create the groups that are needed because group create
-        // returns a 401 rather than a 409 if the group already exists
-        create_groups(thorium, missing_groups, progress).await?;
-    }
-    Ok(())
-}

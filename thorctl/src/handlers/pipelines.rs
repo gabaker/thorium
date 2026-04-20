@@ -145,8 +145,8 @@ async fn get_import_images(cmd: &ImportPipelines) -> Result<Vec<String>, Error> 
     let mut images = HashSet::with_capacity(cmd.pipelines.len());
     // step over and get the images for each pipeline we want to import
     for name in &cmd.pipelines {
-        // build the path to this pipelines request data
-        let file_path = cmd.import.join(format!("{name}.json"));
+        // build the path to this pipelines request data inside the pipelines/ subdirectory
+        let file_path = cmd.import.join("pipelines").join(format!("{name}.json"));
         // read this pipelines request to a string
         let pipeline_str = tokio::fs::read_to_string(&file_path).await?;
         // parse our pipeline data
@@ -187,7 +187,7 @@ async fn import(
     let image_cmd = ImportImages {
         images,
         group: cmd.group.clone(),
-        import: cmd.import.join("images"),
+        import: cmd.import.clone(),
         registry: cmd.registry.clone(),
         registry_override: cmd.registry_override.clone(),
         skip_push: cmd.skip_push,
@@ -259,15 +259,11 @@ async fn export(
     }
     // wait for all our workers to complete
     controller.finish().await?;
-    // build the output path for our images
-    let mut image_output = cmd.output.clone();
-    // nest our images in a directory called images
-    image_output.push("images");
-    // build the correct image export command
+    // build the correct image export command (image export worker handles images/ nesting)
     let image_cmd = ExportImages {
         images: images.into_iter().collect(),
         group: cmd.group.clone(),
-        output: image_output,
+        output: cmd.output.clone(),
         config_only: cmd.config_only,
     };
     // export all of the required images

@@ -21,5 +21,5 @@ pub mod update;
 mod worker;
 
 pub(crate) use controllers::Controller;
-pub(crate) use monitor::{Monitor, MonitorHandler, MonitorMsg};
+pub(crate) use monitor::{Monitor, MonitorHandler, MonitorMsg, SimpleMonitor};
 pub(crate) use worker::{JobMsg, Worker, WorkerWrapper};

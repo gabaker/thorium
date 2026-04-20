@@ -12,26 +12,10 @@ use tokio::process::Command;
 
 use crate::Args;
 use crate::args::images::ExportImages;
-use crate::handlers::progress::{Bar, BarKind, MultiBar};
-use crate::handlers::{Monitor, MonitorMsg, Worker};
+use crate::handlers::progress::{Bar, BarKind};
+use crate::handlers::{MonitorMsg, SimpleMonitor, Worker};
 
-/// The image export monitor
-pub struct ImageExportMonitor;
-
-impl Monitor for ImageExportMonitor {
-    /// The update type to use
-    type Update = ();
-
-    /// build this monitors progress bar
-    fn build_bar(multi: &MultiBar, msg: &str) -> Bar {
-        multi.add(msg, BarKind::Bound(0))
-    }
-
-    /// Apply an update to our global progress bar
-    fn apply(bar: &Bar, _: Self::Update) {
-        bar.inc(1);
-    }
-}
+type ImageExportMonitor = SimpleMonitor;
 
 pub struct ImageExportWorker {
     /// The Thorium client for this worker
@@ -52,64 +36,77 @@ impl ImageExportWorker {
         image_url: &str,
         mut export_path: PathBuf,
     ) -> Result<(), Error> {
-        // log that we are exporting this images config
         self.bar.set_message("Pulling image");
-        // build the arguments to pull this image
-        let pull_args = ["pull", image_url];
-        // pull this images docker info
-        Command::new("docker").args(pull_args).output().await?;
-        // log that we are exporting this images config
+        let pull_output = Command::new("docker")
+            .args(["pull", image_url])
+            .output()
+            .await
+            .map_err(|e| Error::new(format!("Failed to run docker pull: {e}")))?;
+        if !pull_output.status.success() {
+            let stderr = String::from_utf8_lossy(&pull_output.stderr);
+            return Err(Error::new(format!("docker pull failed for '{image_url}': {stderr}")));
+        }
+
         self.bar.set_message("Saving image");
-        // build the arguments to save this file to disk
-        let save_args = ["save", image_url];
-        // pull this images data and feed it into a pipe
         let mut save_child = Command::new("docker")
-            .args(save_args)
+            .args(["save", image_url])
             .stdout(Stdio::piped())
-            .spawn()?;
-        // get the pipe for saves stdout
-        let save_stdout: Stdio = save_child.stdout.take().unwrap().try_into().unwrap();
-        // build the path to save our docker image too
+            .spawn()
+            .map_err(|e| Error::new(format!("Failed to run docker save: {e}")))?;
+
+        // Pipe docker save stdout through gzip into a .tar.gz file
+        let save_stdout: Stdio = save_child
+            .stdout
+            .take()
+            .ok_or_else(|| Error::new("docker save did not produce stdout"))?
+            .try_into()
+            .map_err(|e| Error::new(format!("Failed to convert stdout to Stdio: {e}")))?;
+
         export_path.push(format!("{name}.tar.gz"));
-        // create the file to write our docker image too or truncate it if it already exists
-        let gz_file = File::create(&export_path).await?.into_std().await;
-        // build the name of the file to save our docker image too
-        // build the command to write the data form our docker pull pipe to disk
+        let gz_file = File::create(&export_path)
+            .await
+            .map_err(|e| Error::new(format!("Failed to create '{}': {e}", export_path.display())))?
+            .into_std()
+            .await;
+
         let mut gzip_child = Command::new("gzip")
             .arg("--stdout")
             .stdin(save_stdout)
             .stdout(gz_file)
-            .spawn()?;
-        save_child.wait().await?;
-        gzip_child.wait().await?;
+            .spawn()
+            .map_err(|e| Error::new(format!("Failed to run gzip: {e}")))?;
+
+        save_child.wait().await
+            .map_err(|e| Error::new(format!("docker save failed: {e}")))?;
+        gzip_child.wait().await
+            .map_err(|e| Error::new(format!("gzip failed: {e}")))?;
         Ok(())
     }
 
-    /// Export an image from a specific group by name
     pub async fn export(&mut self, name: &str) -> Result<(), Error> {
-        // log that we are exporting this images config
         self.bar.set_message("Exporting config");
-        // create our export folder if it doesn't already exist
-        tokio::fs::create_dir_all(&self.cmd.output).await?;
-        // get this images data
-        let image = self.thorium.images.get(&self.cmd.group, name).await?;
-        // build the path to write our exported image info to
-        let mut export_path = self.cmd.output.clone();
-        // build the file name to write this images exported config too
-        export_path.push(format!("{}.json", &image.name));
-        // conver this image into an image request
+        let images_dir = self.cmd.output.join("images");
+        tokio::fs::create_dir_all(&images_dir)
+            .await
+            .map_err(|e| Error::new(format!("Failed to create export directory: {e}")))?;
+        let image = self
+            .thorium
+            .images
+            .get(&self.cmd.group, name)
+            .await
+            .map_err(|e| Error::new(format!("Failed to get image '{name}': {e}")))?;
+        let export_path = images_dir.join(format!("{}.json", &image.name));
         let image_req = ImageRequest::from(image.clone());
-        // serialize this images request
-        let serialized = serde_json::to_string_pretty(&image_req)?;
-        // write this image request to disk
-        tokio::fs::write(&export_path, &serialized).await?;
-        // pop our file name from our path
-        export_path.pop();
-        // save this images docker file to disk
+        let serialized = serde_json::to_string_pretty(&image_req)
+            .map_err(|e| Error::new(format!("Failed to serialize image '{name}': {e}")))?;
+        tokio::fs::write(&export_path, &serialized)
+            .await
+            .map_err(|e| Error::new(format!("Failed to write image config '{name}': {e}")))?;
+
         if !self.cmd.config_only
             && let Some(image_url) = &image.image
         {
-            self.export_docker(&image.name, image_url, export_path)
+            self.export_docker(&image.name, image_url, images_dir)
                 .await?;
         }
         Ok(())

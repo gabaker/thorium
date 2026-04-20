@@ -3,7 +3,7 @@
 use kanal::AsyncReceiver;
 use tokio::task::JoinHandle;
 
-use super::progress::{Bar, MultiBar};
+use super::progress::{Bar, BarKind, MultiBar};
 
 /// The messages to send new jobs to workers with
 pub enum MonitorMsg<M: Monitor> {
@@ -13,6 +13,24 @@ pub enum MonitorMsg<M: Monitor> {
     Extend(u64),
     /// There are no more jobs so this worker should shutdown
     Finished,
+}
+
+/// A simple monitor that increments a bounded progress bar on each update.
+///
+/// Use as `type MyMonitor = SimpleMonitor;` instead of writing a custom impl
+/// when the only behavior needed is `bar.inc(1)` per update.
+pub struct SimpleMonitor;
+
+impl Monitor for SimpleMonitor {
+    type Update = ();
+
+    fn build_bar(multi: &MultiBar, msg: &str) -> Bar {
+        multi.add(msg, BarKind::Bound(0))
+    }
+
+    fn apply(bar: &Bar, _: Self::Update) {
+        bar.inc(1);
+    }
 }
 
 pub trait Monitor: Send + 'static {

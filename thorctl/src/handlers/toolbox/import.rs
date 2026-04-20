@@ -1,162 +1,115 @@
-//! Handlers for importing a toolbox to Thorium
+//! Main entry point for toolbox imports
+//!
+//! Orchestrates the import workflow: loading the manifest, categorizing
+//! resources, confirming with the user, and delegating to the appropriate
+//! creation or merge handlers.
 
 use colored::Colorize;
-use futures::{StreamExt, TryStreamExt, stream};
-use itertools::Itertools;
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 use thorium::models::ScrubbedUser;
 use thorium::{CtlConf, Error, Thorium};
 
-use super::manifest::{ImageManifest, PipelineManifest, ToolboxManifest};
+use super::{categorize, create, merge, shared};
+use super::categorize::{CategorizedImage, CategorizedPipeline};
 use crate::args::toolbox::ImportToolbox;
-use crate::handlers::progress::{Bar, BarKind};
-use crate::handlers::toolbox::shared;
+use crate::handlers::progress::BarKind;
 
-/// Proceed on 409 CONFLICT errors, printing the given
-/// message to stdout if we get a 409
-macro_rules! proceed_on_conflict {
-    ($fallible:expr, $progress:expr, $($arg:tt)*) => {{
-        match $fallible {
-            Ok(_) => Ok(()),
-            Err(err) => match err.status() {
-                Some(status) => {
-                    if status == http::StatusCode::CONFLICT {
-                        // print a log line to the progress bar
-                        $progress.info_anonymous(format!($($arg)*));
-                        Ok(())
-                    } else {
-                        Err(err)
-                    }
-                }
-                None => Err(err),
-            },
-        }
-    }};
-}
+// ─── Confirmation ────────────────────────────────────────────────────────────
 
-/// Import the manifest's images
+/// Confirm the import with the user, showing what will be created and what
+/// already exists
 ///
 /// # Arguments
 ///
-/// * `thorium` - The Thorium client
-/// * `images` - The images to import
-/// * `progress` - The progress bar
-async fn import_images(
-    thorium: &Thorium,
-    images: &HashMap<String, ImageManifest>,
-    progress: &Bar,
-) -> Result<(), Error> {
-    // make an iterator over each image to create
-    let image_iter = images.iter().flat_map(|(image_name, manifest)| {
-        manifest
-            .versions
-            .iter()
-            .map(move |(version_name, image)| (image_name, version_name, image))
-    });
-    progress.refresh(
-        "Importing images",
-        BarKind::Bound(image_iter.clone().count() as u64),
-    );
-    // create the images concurrently
-    stream::iter(image_iter)
-        .map(Ok::<_, Error>)
-        .try_for_each_concurrent(10, |(image_name, version_name, image)| async move {
-            proceed_on_conflict!(
-                thorium.images.create(&image.config).await,
-                progress,
-                "image '{}:{}' already exists in group '{}'! Skipping import...",
-                image_name.bright_yellow(),
-                version_name.bright_yellow(),
-                image.config.group.bright_yellow()
-            )
-            .map_err(|err| {
-                Error::new(format!(
-                    "Error importing image '{image_name}:{version_name}': {err}"
-                ))
-            })?;
-            progress.inc(1);
-            Ok(())
-        })
-        .await?;
-    Ok(())
-}
-
-/// Import the manifest's pipelines
-///
-/// # Arguments
-///
-/// * `thorium` - The Thorium client
-/// * `pipelines` - The pipelines to import
-/// * `progress` - The progress bar
-async fn import_pipelines(
-    thorium: &Thorium,
-    pipelines: &HashMap<String, PipelineManifest>,
-    progress: &Bar,
-) -> Result<(), Error> {
-    // make an iterator over each pipeline to create
-    let pipeline_iter = pipelines.iter().flat_map(|(pipeline_name, manifest)| {
-        manifest
-            .versions
-            .iter()
-            .map(move |(version_name, pipeline)| (pipeline_name, version_name, pipeline))
-    });
-    progress.refresh(
-        "Importing pipelines",
-        BarKind::Bound(pipeline_iter.clone().count() as u64),
-    );
-    // create the pipelines concurrently
-    stream::iter(pipeline_iter)
-        .map(Ok::<_, Error>)
-        .try_for_each_concurrent(10, |(pipeline_name, version_name, pipeline)| async move {
-            proceed_on_conflict!(
-                thorium.pipelines.create(&pipeline.config).await,
-                progress,
-                "Pipeline '{}:{}' already exists in group '{}'! Skipping import...",
-                pipeline_name.bright_yellow(),
-                version_name.bright_yellow(),
-                pipeline.config.group.bright_yellow()
-            )
-            .map_err(|err| {
-                Error::new(format!(
-                    "Error importing pipeline '{pipeline_name}:{version_name}': {err}"
-                ))
-            })?;
-            progress.inc(1);
-            Ok(())
-        })
-        .await?;
-    Ok(())
-}
-
-/// Confirm the manifest with the user
-///
-/// # Arguments
-///
-/// * `conf` - The Thorctl config
-/// * `manifest` - The manifest to confirm
-/// * `manifest_groups` - The groups the manifest expects to exist
-/// * `current_user` - The user importing the manifest
-fn confirm_manifest(
+/// * `conf` - The Thorctl config (used to display the API URL)
+/// * `new_images` - Images that will be created fresh
+/// * `existing_images` - Images that already exist and will be updated or prompted
+/// * `new_pipelines` - Pipelines that will be created fresh
+/// * `existing_pipelines` - Pipelines that already exist and will be updated or prompted
+/// * `missing_groups` - Groups that will be created before resources are imported
+/// * `current_user` - The currently authenticated user (shown in the confirmation prompt)
+/// * `force` - Whether existing resources will be force-updated without prompting
+fn confirm_import(
     conf: &CtlConf,
-    manifest: &ToolboxManifest,
-    manifest_groups: &HashSet<String>,
+    new_images: &[&CategorizedImage],
+    existing_images: &[&CategorizedImage],
+    new_pipelines: &[&CategorizedPipeline],
+    existing_pipelines: &[&CategorizedPipeline],
+    missing_groups: &[String],
     current_user: &ScrubbedUser,
+    force: bool,
 ) -> Result<bool, Error> {
-    // display the manifest's info
-    println!("{}", "Images:".bright_yellow());
-    for image_name in manifest.images.keys().sorted_unstable() {
-        println!("  {image_name}");
+    if !new_images.is_empty() {
+        println!("{}", "New Images:".bright_green());
+        for img in new_images {
+            println!(
+                "  {}:{} (group: {})",
+                img.image_name, img.version_name, img.request.group
+            );
+        }
     }
-    println!("\n{}", "Pipelines:".bright_yellow());
-    for pipeline_name in manifest.pipelines.keys().sorted_unstable() {
-        println!("  {pipeline_name}");
+    if !existing_images.is_empty() {
+        let label = if force {
+            "Existing Images (will be force-updated):".bright_yellow()
+        } else {
+            "Existing Images (will prompt for action):".bright_yellow()
+        };
+        println!("{label}");
+        for img in existing_images {
+            let changed = img
+                .existing
+                .as_ref()
+                .is_some_and(|existing| existing != &img.request);
+            let status = if changed {
+                "changed".bright_yellow()
+            } else {
+                "unchanged".bright_blue()
+            };
+            println!(
+                "  {}:{} (group: {}) [{}]",
+                img.image_name, img.version_name, img.request.group, status
+            );
+        }
     }
-    println!("\n{}", "Groups:".bright_yellow());
-    for group in manifest_groups.iter().sorted_unstable() {
-        println!("  {group}");
+    if !new_pipelines.is_empty() {
+        println!("{}", "New Pipelines:".bright_green());
+        for pipe in new_pipelines {
+            println!(
+                "  {}:{} (group: {})",
+                pipe.pipeline_name, pipe.version_name, pipe.request.group
+            );
+        }
+    }
+    if !existing_pipelines.is_empty() {
+        let label = if force {
+            "Existing Pipelines (will be force-updated):".bright_yellow()
+        } else {
+            "Existing Pipelines (will prompt for action):".bright_yellow()
+        };
+        println!("{label}");
+        for pipe in existing_pipelines {
+            let changed = pipe
+                .existing
+                .as_ref()
+                .is_some_and(|existing| existing != &pipe.request);
+            let status = if changed {
+                "changed".bright_yellow()
+            } else {
+                "unchanged".bright_blue()
+            };
+            println!(
+                "  {}:{} (group: {}) [{}]",
+                pipe.pipeline_name, pipe.version_name, pipe.request.group, status
+            );
+        }
+    }
+    if !missing_groups.is_empty() {
+        println!("{}", "New Groups:".bright_green());
+        for group in missing_groups {
+            println!("  {group}");
+        }
     }
     println!();
-    // confirm with the user that they want to import
     let response = dialoguer::Confirm::new()
         .with_prompt(format!(
             "Import the above items to Thorium instance at '{}' as user '{}'?",
@@ -167,7 +120,13 @@ fn confirm_manifest(
     Ok(response)
 }
 
-/// Import a toolbox into Thorium by the given manifest file
+// ─── Main Import Entry Point ─────────────────────────────────────────────────
+
+/// Import a toolbox into Thorium by the given manifest file.
+///
+/// When images or pipelines already exist, the user is prompted interactively
+/// to Edit (merge editor), Skip, Apply (accept incoming), or Quit for each
+/// changed resource. Use `--force` to skip the editor and auto-apply all changes.
 ///
 /// # Arguments
 ///
@@ -190,9 +149,7 @@ pub async fn import(thorium: Thorium, conf: CtlConf, cmd: &ImportToolbox) -> Res
             "Overriding all image/pipeline import groups to '{}'",
             group_override.bright_yellow()
         ));
-        // replace all groups in the manifest with the override and get the modified manifest
         manifest = manifest.override_group(group_override);
-        // validate the manifest again after overriding groups
         if let Err(err) = manifest.validate() {
             return Err(Error::new(format!(
                 "Invalid toolbox manifest after group override '{}': {}",
@@ -200,37 +157,83 @@ pub async fn import(thorium: Thorium, conf: CtlConf, cmd: &ImportToolbox) -> Res
                 err.msg().unwrap_or_else(|| "Unknown error".to_string())
             )));
         }
-        // return a set with just our group override since we replaced it
         HashSet::from([group_override.to_string()])
     } else {
-        // get all of the groups the manifest refers to
         manifest.groups()
     };
-    // confirm with the user that it's okay to import the manifest
+    // categorize images and pipelines by checking what already exists in Thorium
+    let images = categorize::categorize_images(&thorium, &manifest.images, &progress).await?;
+    let pipelines =
+        categorize::categorize_pipelines(&thorium, &manifest.pipelines, &progress).await?;
+    // partition into new vs existing
+    let (new_images, existing_images): (Vec<_>, Vec<_>) = images
+        .iter()
+        .partition(|img| img.existing.is_none());
+    let (new_pipelines, existing_pipelines): (Vec<_>, Vec<_>) = pipelines
+        .iter()
+        .partition(|pipe| pipe.existing.is_none());
+    // check which groups are missing
+    let missing_groups = shared::get_missing_groups(&thorium, manifest_groups.clone())
+        .await
+        .map_err(|err| Error::new(format!("Error retrieving missing groups: {err}")))?;
+    // confirm with the user that it's okay to import
     if !cmd.skip_confirm {
-        // get info on the current user
         let current_user = thorium
             .users
             .info()
             .await
             .map_err(|err| Error::new(format!("Error getting current user info: {err}")))?;
-        let confirmed = progress
-            .suspend(|| confirm_manifest(&conf, &manifest, &manifest_groups, &current_user))?;
+        let confirmed = progress.suspend(|| {
+            confirm_import(
+                &conf,
+                &new_images,
+                &existing_images,
+                &new_pipelines,
+                &existing_pipelines,
+                &missing_groups,
+                &current_user,
+                cmd.force,
+            )
+        })?;
         if !confirmed {
             return Ok(());
         }
     }
-    // create any groups the manifest expects that Thorium doesn't yet have
-    shared::get_and_create_missing_groups(&thorium, manifest_groups, &progress).await?;
-    // first import the manifest's images
-    import_images(&thorium, &manifest.images, &progress)
-        .await
-        .map_err(|err| Error::new(format!("Error importing images: {err}")))?;
-    // then import the manifest's pipelines
-    import_pipelines(&thorium, &manifest.pipelines, &progress)
-        .await
-        .map_err(|err| Error::new(format!("Error importing pipelines: {err}")))?;
-    // inform the user the import is complete
+    // create any missing groups
+    if !missing_groups.is_empty() {
+        progress.refresh(
+            "Creating groups",
+            BarKind::Bound(missing_groups.len() as u64),
+        );
+        shared::create_groups(&thorium, missing_groups, &progress).await?;
+    }
+    // import new resources
+    create::import_new_images(&thorium, new_images, &progress).await?;
+    create::import_new_pipelines(&thorium, new_pipelines, &progress).await?;
+    // handle existing resources
+    if cmd.force {
+        // force-update all existing resources without the editor
+        create::force_update_images(&thorium, existing_images, &progress).await?;
+        create::force_update_pipelines(&thorium, existing_pipelines, &progress).await?;
+    } else {
+        // interactively merge existing resources
+        merge::interactive_merge_images(
+            &thorium,
+            existing_images,
+            &conf,
+            cmd.editor.as_deref(),
+            &progress,
+        )
+        .await?;
+        merge::interactive_merge_pipelines(
+            &thorium,
+            existing_pipelines,
+            &conf,
+            cmd.editor.as_deref(),
+            &progress,
+        )
+        .await?;
+    }
     progress.refresh("Import complete!", BarKind::Timer);
     progress.finish();
     Ok(())

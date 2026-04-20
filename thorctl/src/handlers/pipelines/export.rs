@@ -5,27 +5,11 @@ use thorium::models::PipelineRequest;
 use thorium::{CtlConf, Error, Thorium};
 
 use crate::args::pipelines::ExportPipelines;
-use crate::handlers::progress::{Bar, BarKind, MultiBar};
-use crate::handlers::{Monitor, MonitorMsg, Worker};
+use crate::handlers::progress::{Bar, BarKind};
+use crate::handlers::{MonitorMsg, SimpleMonitor, Worker};
 use crate::Args;
 
-/// The pipeline export monitor
-pub struct PipelineExportMonitor;
-
-impl Monitor for PipelineExportMonitor {
-    /// The update type to use
-    type Update = ();
-
-    /// build this monitors progress bar
-    fn build_bar(multi: &MultiBar, msg: &str) -> Bar {
-        multi.add(msg, BarKind::Bound(0))
-    }
-
-    /// Apply an update to our global progress bar
-    fn apply(bar: &Bar, _: Self::Update) {
-        bar.inc(1);
-    }
-}
+type PipelineExportMonitor = SimpleMonitor;
 
 pub struct PipelineExportWorker {
     /// The Thorium client for this worker
@@ -41,22 +25,24 @@ pub struct PipelineExportWorker {
 impl PipelineExportWorker {
     /// Export an pipeline from a specific group by name
     pub async fn export(&mut self, name: &str) -> Result<(), Error> {
-        // log that we are exporting this pipelines config
-        self.bar.set_message("Exporting Config");
-        // create our export folder if it doesn't already exist
-        tokio::fs::create_dir_all(&self.cmd.output).await?;
-        // get this pipelines data
-        let pipeline = self.thorium.pipelines.get(&self.cmd.group, name).await?;
-        // build the path to write our exported pipeline info to
-        let mut export_path = self.cmd.output.clone();
-        // build the file name to write this pipelines exported config too
-        export_path.push(format!("{}.json", &pipeline.name));
-        // conver this pipeline into an pipeline request
+        self.bar.set_message("Exporting config");
+        let pipelines_dir = self.cmd.output.join("pipelines");
+        tokio::fs::create_dir_all(&pipelines_dir)
+            .await
+            .map_err(|e| Error::new(format!("Failed to create export directory: {e}")))?;
+        let pipeline = self
+            .thorium
+            .pipelines
+            .get(&self.cmd.group, name)
+            .await
+            .map_err(|e| Error::new(format!("Failed to get pipeline '{name}': {e}")))?;
+        let export_path = pipelines_dir.join(format!("{}.json", &pipeline.name));
         let pipeline_req = PipelineRequest::from(pipeline);
-        // serialize this pipelines request
-        let serialized = serde_json::to_string_pretty(&pipeline_req)?;
-        // write this pipeline request to disk
-        tokio::fs::write(&export_path, &serialized).await?;
+        let serialized = serde_json::to_string_pretty(&pipeline_req)
+            .map_err(|e| Error::new(format!("Failed to serialize pipeline '{name}': {e}")))?;
+        tokio::fs::write(&export_path, &serialized)
+            .await
+            .map_err(|e| Error::new(format!("Failed to write pipeline '{name}': {e}")))?;
         Ok(())
     }
 }

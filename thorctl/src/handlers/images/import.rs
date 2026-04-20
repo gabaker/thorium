@@ -10,27 +10,11 @@ use thorium::{CtlConf, Error, Thorium};
 use tokio::process::Command;
 
 use crate::args::images::ImportImages;
-use crate::handlers::progress::{Bar, BarKind, MultiBar};
-use crate::handlers::{Monitor, MonitorMsg, Worker};
+use crate::handlers::progress::{Bar, BarKind};
+use crate::handlers::{MonitorMsg, SimpleMonitor, Worker};
 use crate::Args;
 
-/// The image export monitor
-pub struct ImageImportMonitor;
-
-impl Monitor for ImageImportMonitor {
-    /// The update type to use
-    type Update = ();
-
-    /// build this monitors progress bar
-    fn build_bar(multi: &MultiBar, msg: &str) -> Bar {
-        multi.add(msg, BarKind::Bound(0))
-    }
-
-    /// Apply an update to our global progress bar
-    fn apply(bar: &Bar, _: Self::Update) {
-        bar.inc(1);
-    }
-}
+type ImageImportMonitor = SimpleMonitor;
 
 fn check_command(bar: &Bar, output: Output, msg: &str) -> Result<(), Error> {
     // check if this command failed
@@ -81,8 +65,8 @@ impl ImageImportWorker {
     ///
     /// * `name` - The name of the image whose config we are loading from disk
     async fn load_request(&self, name: &str) -> Result<ImageRequest, Error> {
-        // add our image name
-        let file_path = self.cmd.import.join(format!("{name}.json"));
+        // add our image name inside the images/ subdirectory
+        let file_path = self.cmd.import.join("images").join(format!("{name}.json"));
         // try to load this image from disk
         let image_str = match tokio::fs::read_to_string(&file_path).await {
             Ok(image_str) => image_str,
@@ -100,7 +84,7 @@ impl ImageImportWorker {
             Err(error) => {
                 // log that we failed to load an image at some path
                 self.bar.error(format!(
-                    "Faile to parse image data for {name} with {error:?}"
+                    "Failed to parse image data for {name} with {error:?}"
                 ));
                 // reraise our error
                 return Err(Error::from(error));
@@ -117,19 +101,18 @@ impl ImageImportWorker {
     ///
     /// * `name` - The name of the image we are loading from disk
     async fn load_image(&self, name: &str) -> Result<(), Error> {
-        // add our image name
-        let file_path = self.cmd.import.join(format!("{name}.tar.gz"));
+        // add our image name inside the images/ subdirectory
+        let file_path = self.cmd.import.join("images").join(format!("{name}.tar.gz"));
         // log that we are loading this image
         self.bar.set_message("loading image");
         // load this image from disk
-        let output = Command::new("sh")
-            .arg("-c")
-            .arg("docker")
+        let output = Command::new("docker")
             .arg("load")
-            .arg("<")
-            .arg(file_path)
+            .arg("-i")
+            .arg(&file_path)
             .output()
-            .await?;
+            .await
+            .map_err(|e| Error::new(format!("Failed to run docker load: {e}")))?;
         // make sure this command succeeded
         check_command(&self.bar, output, "Failed to load docker image")?;
         Ok(())
@@ -141,19 +124,18 @@ impl ImageImportWorker {
     ///
     /// * `image_url` - Our original image url that may need to be retagged
     async fn retag_if_needed(&self, image: &mut ImageRequest) -> Result<(), Error> {
-        // override our push registry if needed
-        if let Some(retag_url) = override_registry(&image, &self.cmd.registry) {
-            // log that we are exporting this images config
+        if let Some(retag_url) = override_registry(image, &self.cmd.registry) {
             self.bar.set_message("retagging image");
-            // get our old url
-            let old_url = image.image.as_ref().unwrap();
-            // build the arguments to retag this image
-            let retag_args = ["tag", &old_url, &retag_url];
-            // retag this image
-            let output = Command::new("docker").args(retag_args).output().await?;
-            // make sure this command succeeded
+            // override_registry only returns Some when image.image is Some
+            let old_url = image.image.as_deref().ok_or_else(|| {
+                Error::new("Cannot retag image without an image URL")
+            })?;
+            let output = Command::new("docker")
+                .args(["tag", old_url, &retag_url])
+                .output()
+                .await
+                .map_err(|e| Error::new(format!("Failed to run docker tag: {e}")))?;
             check_command(&self.bar, output, "Failed to retag docker image")?;
-            // update our images url
             image.image = Some(retag_url);
         }
         Ok(())
@@ -165,15 +147,13 @@ impl ImageImportWorker {
     ///
     /// * `image` - The image request to push to a docker registry
     async fn push_image(&self, image: &ImageRequest) -> Result<(), Error> {
-        // only upload this docker image if there is one
         if let Some(image_url) = &image.image {
-            // log that we are exporting this images config
             self.bar.set_message("Uploading image");
-            // build the arguments to push this image
-            let push_args = ["push", image_url];
-            // push this images docker info
-            let output = Command::new("docker").args(push_args).output().await?;
-            // make sure this command succeeded
+            let output = Command::new("docker")
+                .args(["push", image_url])
+                .output()
+                .await
+                .map_err(|e| Error::new(format!("Failed to run docker push: {e}")))?;
             check_command(&self.bar, output, "Failed to push docker image")?;
         }
         Ok(())
