@@ -1,525 +1,299 @@
-//! Handlers for updating a toolbox already imported to Thorium
+//! Update calculation for images and pipelines
+//!
+//! Pure functions that compute `ImageUpdate`/`PipelineUpdate` structs by
+//! diffing the current Thorium state against an incoming or editor-resolved
+//! state. Used by both force-update and interactive merge paths.
 
-use colored::Colorize;
-use futures::{StreamExt, TryStreamExt, stream};
-use http::StatusCode;
-use std::collections::HashSet;
-use std::fmt;
-use thorium::models::ScrubbedUser;
-use thorium::{CtlConf, Error, Thorium};
+use std::collections::HashMap;
+use thorium::models::{
+    BurstableResourcesUpdate, EventTrigger, Image, ImageBanUpdate, ImageRequest, ImageUpdate,
+    Pipeline, PipelineBanUpdate, PipelineRequest, PipelineUpdate, Resources, ResourcesRequest,
+    ResourcesUpdate, SecurityContext, SecurityContextUpdate,
+};
 
-use crate::args::toolbox::UpdateToolbox;
-use crate::handlers::progress::{Bar, BarKind};
-use crate::handlers::toolbox::manifest::{ImageVersion, PipelineVersion, ToolboxManifest};
-use crate::handlers::toolbox::shared;
+use super::merge::MergeableImage;
+use super::merge::MergeablePipeline;
+use crate::utils::diff;
+use crate::{
+    calc_remove_add_map, calc_remove_add_vec, set_clear, set_modified, set_modified_new_opt,
+    set_modified_opt,
+};
 
-mod images;
-mod pipelines;
+// ─── Image Update Calculation ────────────────────────────────────────────────
 
-use images::{ToolboxImageUpdate, ToolboxImageUpdateOp};
-use pipelines::{ToolboxPipelineUpdate, ToolboxPipelineUpdateOp};
-
-/// Concurrently calculate updates for items in a manifest using the given
-/// helper function
-macro_rules! calculate_updates {
-    ($manifest_items:expr, $helper_fn:path, $thorium:expr) => {
-        async {
-            stream::iter($manifest_items.into_iter().flat_map(|(name, manifest)| {
-                manifest
-                    .versions
-                    .into_iter()
-                    .map(move |(version_name, version)| {
-                        (name.clone(), version_name.clone(), version)
-                    })
-            }))
-            .map(|(name, version_name, version)| $helper_fn($thorium, name, version_name, version))
-            .buffer_unordered(10)
-            .collect::<Vec<Result<_, _>>>()
-            .await
-            .into_iter()
-            .collect::<Result<Vec<_>, _>>()
-        }
-    };
-}
-
-/// All the updates that need to be performed in Thorium
-/// to update a toolbox
-#[derive(Debug)]
-struct ToolboxUpdate {
-    /// The image updates that need to be done
-    images: Vec<ToolboxImageUpdate>,
-    /// The pipeline updates that need to be done
-    pipelines: Vec<ToolboxPipelineUpdate>,
-    /// The groups that need to be created
-    groups: Vec<String>,
-}
-
-impl ToolboxUpdate {
-    /// Based on a image in the manifest and the state in Thorium,
-    /// calculate what needs to be done to update the image in Thorium
-    /// to match the manifest
-    ///
-    /// # Arguments
-    ///
-    /// * `thorium` - The Thorium client
-    /// * `image_name` - The name of the image in the manifest
-    /// * `image_version_name` - The name of the image's version in the manifest
-    /// * `image_version` - The manifest for the image version
-    async fn calculate_image_update(
-        thorium: &Thorium,
-        image_name: String,
-        image_version_name: String,
-        image_version: ImageVersion,
-    ) -> Result<ToolboxImageUpdate, Error> {
-        match thorium
-            .images
-            .get(&image_version.config.group, &image_version.config.name)
-            .await
-        {
-            Ok(image) => {
-                let group = image_version.config.group.clone();
-                match images::calculate_image_update(image, image_version.config) {
-                    Some(image_update) => Ok(ToolboxImageUpdate::new(
-                        image_name,
-                        image_version_name,
-                        group,
-                        ToolboxImageUpdateOp::Update(Box::new(image_update)),
-                    )),
-                    None => Ok(ToolboxImageUpdate::new(
-                        image_name,
-                        image_version_name,
-                        group,
-                        ToolboxImageUpdateOp::Unchanged,
-                    )),
-                }
-            }
-            Err(err) => {
-                if err
-                    .status()
-                    .is_some_and(|status| status == StatusCode::NOT_FOUND)
-                {
-                    Ok(ToolboxImageUpdate::new(
-                        image_name,
-                        image_version_name,
-                        image_version.config.group.clone(),
-                        ToolboxImageUpdateOp::Create(Box::new(image_version.config)),
-                    ))
-                } else {
-                    Err(Error::new(format!(
-                        "Error diffing image '{image_name}:{image_version_name}': {err}"
-                    )))
-                }
-            }
-        }
-    }
-
-    /// Based on a pipeline in the manifest and the state in Thorium,
-    /// calculate what needs to be done to update the pipeline in Thorium
-    /// to match the manifest
-    ///
-    /// # Arguments
-    ///
-    /// * `thorium` - The Thorium client
-    /// * `pipeline_name` - The name of the pipeline in the manifest
-    /// * `pipeline_version_name` - The name of the pipeline's version in the manifest
-    /// * `pipeline_version` - The manifest for the pipeline version
-    async fn calculate_pipeline_update(
-        thorium: &Thorium,
-        pipeline_name: String,
-        pipeline_version_name: String,
-        pipeline_version: PipelineVersion,
-    ) -> Result<ToolboxPipelineUpdate, Error> {
-        match thorium
-            .pipelines
-            .get(
-                &pipeline_version.config.group,
-                &pipeline_version.config.name,
-            )
-            .await
-        {
-            Ok(pipeline) => {
-                let group = pipeline_version.config.group.clone();
-                match pipelines::calculate_pipeline_update(pipeline, pipeline_version.config) {
-                    Some(pipeline_update) => Ok(ToolboxPipelineUpdate::new(
-                        pipeline_name,
-                        pipeline_version_name,
-                        group,
-                        ToolboxPipelineUpdateOp::Update(Box::new(pipeline_update)),
-                    )),
-                    None => Ok(ToolboxPipelineUpdate::new(
-                        pipeline_name,
-                        pipeline_version_name,
-                        group,
-                        ToolboxPipelineUpdateOp::Unchanged,
-                    )),
-                }
-            }
-            Err(err) => {
-                if err
-                    .status()
-                    .is_some_and(|status| status == StatusCode::NOT_FOUND)
-                {
-                    Ok(ToolboxPipelineUpdate::new(
-                        pipeline_name,
-                        pipeline_version_name,
-                        pipeline_version.config.group.clone(),
-                        ToolboxPipelineUpdateOp::Create(Box::new(pipeline_version.config)),
-                    ))
-                } else {
-                    Err(Error::new(format!(
-                        "Error diffing pipeline '{pipeline_name}:{pipeline_version_name}': {err}"
-                    )))
-                }
-            }
-        }
-    }
-
-    /// Based on a new toolbox manifest and the state in Thorium,
-    /// calculate what needs to be done to update Thorium
-    /// to match the manifest
-    ///
-    /// # Arguments
-    ///
-    /// * `thorium` - The Thorium client
-    /// * `manifest` - The toolbox manifest we're updating with
-    /// * `manifest_groups` - All the groups the manifest expects, previously calculated
-    async fn calculate(
-        thorium: &Thorium,
-        manifest: ToolboxManifest,
-        manifest_groups: HashSet<String>,
-    ) -> Result<Self, Error> {
-        // calculate updates for images
-        let images =
-            calculate_updates!(manifest.images, Self::calculate_image_update, thorium).await?;
-        // calculate updates for pipelines
-        let pipelines =
-            calculate_updates!(manifest.pipelines, Self::calculate_pipeline_update, thorium)
-                .await?;
-        // see which groups are missing in Thorium
-        let groups = shared::get_missing_groups(thorium, manifest_groups)
-            .await
-            .map_err(|err| {
-                Error::new(format!("Error retrieving missing groups in Thorium: {err}"))
-            })?;
-        Ok(Self {
-            images,
-            pipelines,
-            groups,
-        })
-    }
-
-    /// Returns true if the toolbox update has no updates
-    fn is_unchanged(&self) -> bool {
-        self.images
-            .iter()
-            .all(|update_image| matches!(update_image.op, ToolboxImageUpdateOp::Unchanged))
-            && self.pipelines.iter().all(|update_pipeline| {
-                matches!(update_pipeline.op, ToolboxPipelineUpdateOp::Unchanged)
-            })
-            && self.groups.is_empty()
-    }
-
-    /// Have the user confirm the update
-    ///
-    /// # Arguments
-    ///
-    /// * `conf` - The Thorctl conf
-    /// * `current_user` - The user updating the toolbox
-    fn confirm(&self, conf: &CtlConf, current_user: &ScrubbedUser) -> Result<bool, Error> {
-        // print out the update to stdout
-        println!("{self}\n");
-        // confirm with the user that they want to import
-        let response = dialoguer::Confirm::new()
-            .with_prompt(format!(
-                "Perform the above updates to Thorium instance at '{}' as user '{}'?",
-                conf.keys.api.bright_green(),
-                current_user.username.bright_green()
-            ))
-            .interact()?;
-        Ok(response)
-    }
-
-    /// Apply image updates
-    ///
-    /// # Arguments
-    ///
-    /// * `thorium` - The Thorium client
-    /// * `progress` - The progress bar
-    async fn apply_images(&mut self, thorium: &Thorium, progress: &Bar) -> Result<(), Error> {
-        // remove all the noops from the image updates
-        self.images
-            .retain(|update_image| !matches!(update_image.op, ToolboxImageUpdateOp::Unchanged));
-        // if we still have updates, proceed
-        if !self.images.is_empty() {
-            progress.refresh("Updating images", BarKind::Bound(self.images.len() as u64));
-            stream::iter(self.images.drain(..))
-                .map(Ok::<_, Error>)
-                .try_for_each_concurrent(10, |update_image| async move {
-                    match update_image.op {
-                        ToolboxImageUpdateOp::Create(image_request) => {
-                            thorium.images.create(&image_request).await.map_err(|err| {
-                                Error::new(format!(
-                                    "Error creating image '{}:{}': {}",
-                                    update_image.image_name, update_image.image_version, err
-                                ))
-                            })?;
-                        }
-                        ToolboxImageUpdateOp::Update(image_update) => {
-                            thorium
-                                .images
-                                .update(
-                                    &update_image.group,
-                                    &update_image.image_name,
-                                    &image_update,
-                                )
-                                .await
-                                .map_err(|err| {
-                                    Error::new(format!(
-                                        "Error updating image '{}:{}': {}",
-                                        update_image.image_name, update_image.image_version, err
-                                    ))
-                                })?;
-                        }
-                        ToolboxImageUpdateOp::Unchanged => (),
-                    }
-                    Ok(())
-                })
-                .await?;
-        }
-        Ok(())
-    }
-
-    /// Apply pipeline updates
-    ///
-    /// # Arguments
-    ///
-    /// * `thorium` - The Thorium client
-    /// * `progress` - The progress bar
-    async fn apply_pipelines(&mut self, thorium: &Thorium, progress: &Bar) -> Result<(), Error> {
-        // remove all the noops from the pipeline updates
-        self.pipelines.retain(|update_pipeline| {
-            !matches!(update_pipeline.op, ToolboxPipelineUpdateOp::Unchanged)
-        });
-        // if we still have updates, proceed
-        if !self.pipelines.is_empty() {
-            progress.refresh(
-                "Updating pipelines",
-                BarKind::Bound(self.pipelines.len() as u64),
-            );
-            stream::iter(self.pipelines.drain(..))
-                .map(Ok::<_, Error>)
-                .try_for_each_concurrent(10, |update_pipeline| async move {
-                    match update_pipeline.op {
-                        ToolboxPipelineUpdateOp::Create(pipeline_request) => {
-                            thorium
-                                .pipelines
-                                .create(&pipeline_request)
-                                .await
-                                .map_err(|err| {
-                                    Error::new(format!(
-                                        "Error creating pipeline '{}:{}': {}",
-                                        update_pipeline.pipeline_name,
-                                        update_pipeline.pipeline_version,
-                                        err
-                                    ))
-                                })?;
-                        }
-                        ToolboxPipelineUpdateOp::Update(pipeline_update) => {
-                            thorium
-                                .pipelines
-                                .update(
-                                    &update_pipeline.group,
-                                    &update_pipeline.pipeline_name,
-                                    &pipeline_update,
-                                )
-                                .await
-                                .map_err(|err| {
-                                    Error::new(format!(
-                                        "Error updating pipeline '{}:{}': {}",
-                                        update_pipeline.pipeline_name,
-                                        update_pipeline.pipeline_version,
-                                        err
-                                    ))
-                                })?;
-                        }
-                        ToolboxPipelineUpdateOp::Unchanged => (),
-                    }
-                    Ok(())
-                })
-                .await?;
-        }
-        Ok(())
-    }
-
-    /// Apply updates to Thorium
-    ///
-    /// # Arguments
-    ///
-    /// * `thorium` - The Thorium client
-    /// * `progress` - The progress bar
-    async fn apply(mut self, thorium: &Thorium, progress: &Bar) -> Result<(), Error> {
-        // first create groups
-        if !self.groups.is_empty() {
-            progress.refresh("Creating groups", BarKind::Bound(self.groups.len() as u64));
-            let groups = std::mem::take(&mut self.groups);
-            shared::create_groups(thorium, groups, progress).await?;
-        }
-        // apply image updates
-        self.apply_images(thorium, progress).await?;
-        // apply pipeline updates
-        self.apply_pipelines(thorium, progress).await?;
-        Ok(())
-    }
-}
-
-impl fmt::Display for ToolboxUpdate {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        // separate image updates into creates and updates
-        let (new_images, updated_images): (Vec<&ToolboxImageUpdate>, Vec<&ToolboxImageUpdate>) =
-            self.images
-                .iter()
-                // filter out noops
-                .filter(|update| !matches!(update.op, ToolboxImageUpdateOp::Unchanged))
-                .partition(|update| matches!(update.op, ToolboxImageUpdateOp::Create(_)));
-        // separate pipeline updates into creates and updates
-        let (new_pipelines, updated_pipelines): (
-            Vec<&ToolboxPipelineUpdate>,
-            Vec<&ToolboxPipelineUpdate>,
-        ) = self
-            .pipelines
-            .iter()
-            .filter(|update| !matches!(update.op, ToolboxPipelineUpdateOp::Unchanged))
-            .partition(|update| matches!(update.op, ToolboxPipelineUpdateOp::Create(_)));
-        // display images
-        if !new_images.is_empty() || !updated_images.is_empty() {
-            writeln!(f, "{}", "Images:".bright_blue().bold())?;
-        }
-        if !new_images.is_empty() {
-            writeln!(f, "  {}", "New Images:".bright_green())?;
-            for image in new_images {
-                writeln!(
-                    f,
-                    "    {}:{}",
-                    image.image_name.bright_green(),
-                    image.image_version.bright_green()
-                )?;
-            }
-        }
-        if !updated_images.is_empty() {
-            writeln!(f, "  {}", "Updated Images:".bright_yellow())?;
-            for image in updated_images {
-                writeln!(
-                    f,
-                    "    {}:{}",
-                    image.image_name.bright_yellow(),
-                    image.image_version.bright_yellow()
-                )?;
-            }
-        }
-        // display pipelines
-        if !new_pipelines.is_empty() || !updated_pipelines.is_empty() {
-            writeln!(f, "{}", "Pipelines:".bright_blue().bold())?;
-        }
-        if !new_pipelines.is_empty() {
-            writeln!(f, "  {}", "New Pipelines:".bright_green())?;
-            for pipeline in new_pipelines {
-                writeln!(
-                    f,
-                    "    {}:{}",
-                    pipeline.pipeline_name.bright_green(),
-                    pipeline.pipeline_version.bright_green()
-                )?;
-            }
-        }
-        if !updated_pipelines.is_empty() {
-            writeln!(f, "  {}", "Updated Pipelines:".bright_yellow())?;
-            for pipeline in updated_pipelines {
-                writeln!(
-                    f,
-                    "    {}:{}",
-                    pipeline.pipeline_name.bright_yellow(),
-                    pipeline.pipeline_version.bright_yellow()
-                )?;
-            }
-        }
-        // display groups
-        if !self.groups.is_empty() {
-            writeln!(f, "{}", "Groups:".bright_blue().bold())?;
-            writeln!(f, "  {}", "New Groups:".bright_green())?;
-            for group in &self.groups {
-                writeln!(f, "    {}", group.bright_green())?;
-            }
-        }
-        Ok(())
-    }
-}
-
-/// Update a toolbox already imported into Thorium by updating the tool/pipeline configurations
-/// based on the newer manifest
+/// Calculate an image update from the current image state and a resolved
+/// mergeable image from the editor
 ///
 /// # Arguments
 ///
-/// * `thorium` - The Thorium client
-/// * `conf` - The Thorctl config
-/// * `cmd` - The toolbox update command that was run
-pub async fn update(thorium: Thorium, conf: CtlConf, cmd: &UpdateToolbox) -> Result<(), Error> {
-    // get the new manifest at the given location as well as a progress bar
-    let (mut manifest, progress) = shared::get_manifest(&cmd.manifest).await?;
-    // validate the manifest
-    if let Err(err) = manifest.validate() {
-        return Err(Error::new(format!(
-            "Invalid toolbox manifest: {}",
-            err.msg().unwrap_or_else(|| "Unknown error".to_string())
-        )));
+/// * `image` - The current image as stored in Thorium
+/// * `resolved` - The editor-resolved [`MergeableImage`] to diff against
+pub fn calculate_image_update_from_mergeable(
+    mut image: Image,
+    mut resolved: MergeableImage,
+) -> Option<ImageUpdate> {
+    // check if nothing changed by comparing the resolved against current
+    let current = MergeableImage::from(image.clone());
+    let current_yaml = serde_yaml::to_string(&current).unwrap_or_default();
+    let resolved_yaml = serde_yaml::to_string(&resolved).unwrap_or_default();
+    if current_yaml == resolved_yaml {
+        return None;
     }
-    // get all the groups the manifest expects to exist, overriding them if we're set to
-    let manifest_groups = if let Some(group_override) = &cmd.group_override {
-        progress.info_anonymous(format!(
-            "Overriding all image/pipeline update groups to '{}'",
-            group_override.bright_yellow()
-        ));
-        // replace all groups in the manifest with the override and get the modified manifest
-        manifest = manifest.override_group(group_override);
-        // validate the manifest again after overriding groups
-        if let Err(err) = manifest.validate() {
-            return Err(Error::new(format!(
-                "Invalid toolbox manifest after group override '{}': {}",
-                group_override.bright_yellow(),
-                err.msg().unwrap_or_else(|| "Unknown error".to_string())
-            )));
-        }
-        // return a set with just our group override since we replaced it
-        HashSet::from([group_override.clone()])
-    } else {
-        // get all of the groups the manifest refers to
-        manifest.groups()
+    // build an ImageRequest-like struct from the resolved for diff calculation
+    let (remove_volumes, add_volumes) =
+        calc_remove_add_vec!(image.volumes, |vol| vol.name, resolved.volumes, |vol| vol);
+    let (remove_env, add_env) = calc_remove_add_map!(image.env, resolved.env);
+    Some(ImageUpdate {
+        external: None,
+        scaler: set_modified!(image.scaler, resolved.scaler),
+        timeout: set_modified_opt!(image.timeout, resolved.timeout),
+        resources: calculate_resource_update(image.resources, resolved.resources),
+        spawn_limit: set_modified!(image.spawn_limit, resolved.spawn_limit),
+        add_volumes,
+        remove_volumes,
+        add_env,
+        remove_env,
+        clear_version: set_clear!(image.version, resolved.version),
+        version: set_modified_opt!(image.version, resolved.version),
+        clear_image: set_clear!(image.image, resolved.image),
+        image: set_modified_opt!(image.image, resolved.image),
+        clear_lifetime: set_clear!(image.lifetime, resolved.lifetime),
+        lifetime: set_modified_opt!(image.lifetime, resolved.lifetime),
+        clear_description: set_clear!(image.description, resolved.description),
+        args: diff::images::calculate_image_args_update(image.args, resolved.args),
+        modifiers: set_modified_opt!(image.modifiers, resolved.modifiers),
+        description: set_modified_opt!(image.description, resolved.description),
+        security_context: {
+            let resolved_sc = resolved.security_context.unwrap_or_default();
+            calculate_security_context_update(image.security_context, Some(resolved_sc))
+        },
+        collect_logs: set_modified!(image.collect_logs, resolved.collect_logs),
+        generator: set_modified!(image.generator, resolved.generator),
+        dependencies: diff::images::calculate_dependencies_update(
+            image.dependencies,
+            resolved.dependencies,
+        ),
+        display_type: set_modified!(image.display_type, resolved.display_type),
+        output_collection: diff::images::calculate_output_collection_update(
+            image.output_collection,
+            resolved.output_collection,
+        ),
+        child_filters: diff::images::calculate_child_filters_update(
+            image.child_filters,
+            resolved.child_filters,
+        ),
+        clean_up: diff::images::calculate_clean_up_update(image.clean_up, resolved.clean_up),
+        kvm: diff::images::calculate_kvm_update(image.kvm, resolved.kvm),
+        bans: ImageBanUpdate::default(),
+        network_policies: diff::images::calculate_network_policies_update(
+            image.network_policies,
+            resolved.network_policies,
+        ),
+    })
+}
+
+/// Calculate what updates need to be made to an image based on the image's
+/// current state and the request from the toolbox manifest
+///
+/// # Arguments
+///
+/// * `image` - The current image as stored in Thorium
+/// * `req` - The incoming [`ImageRequest`] from the manifest
+#[allow(clippy::needless_pass_by_value)]
+pub fn calculate_image_update(mut image: Image, mut req: ImageRequest) -> Option<ImageUpdate> {
+    if image == req {
+        return None;
+    }
+    let (remove_volumes, add_volumes) =
+        calc_remove_add_vec!(image.volumes, |vol| vol.name, req.volumes, |vol| vol);
+    let (remove_env, add_env) = calc_remove_add_map!(image.env, req.env);
+    let update = ImageUpdate {
+        clear_version: set_clear!(image.version, req.version),
+        clear_image: set_clear!(image.image, req.image),
+        clear_lifetime: set_clear!(image.lifetime, req.lifetime),
+        clear_description: set_clear!(image.description, req.description),
+        version: set_modified_opt!(image.version, req.version),
+        external: None,
+        image: set_modified_opt!(image.image, req.image),
+        scaler: set_modified!(image.scaler, req.scaler),
+        lifetime: set_modified_opt!(image.lifetime, req.lifetime),
+        timeout: set_modified_opt!(image.timeout, req.timeout),
+        resources: calculate_resource_update(image.resources, req.resources),
+        spawn_limit: set_modified!(image.spawn_limit, req.spawn_limit),
+        add_volumes,
+        remove_volumes,
+        add_env,
+        remove_env,
+        args: diff::images::calculate_image_args_update(image.args, req.args),
+        modifiers: set_modified_opt!(image.modifiers, req.modifiers),
+        description: set_modified_opt!(image.description, req.description),
+        security_context: calculate_security_context_update(
+            image.security_context,
+            req.security_context,
+        ),
+        collect_logs: set_modified!(image.collect_logs, req.collect_logs),
+        generator: set_modified!(image.generator, req.generator),
+        dependencies: diff::images::calculate_dependencies_update(
+            image.dependencies,
+            req.dependencies,
+        ),
+        display_type: set_modified!(image.display_type, req.display_type),
+        output_collection: diff::images::calculate_output_collection_update(
+            image.output_collection,
+            req.output_collection,
+        ),
+        child_filters: diff::images::calculate_child_filters_update(
+            image.child_filters,
+            req.child_filters,
+        ),
+        clean_up: diff::images::calculate_clean_up_update(image.clean_up, req.clean_up),
+        kvm: diff::images::calculate_kvm_update(image.kvm, req.kvm),
+        bans: ImageBanUpdate::default(),
+        network_policies: diff::images::calculate_network_policies_update(
+            image.network_policies,
+            req.network_policies,
+        ),
     };
-    // calculate what needs to be done to update based on Thorium's current state
-    progress.refresh("Calculating updates", BarKind::Timer);
-    let update = ToolboxUpdate::calculate(&thorium, manifest, manifest_groups).await?;
-    if update.is_unchanged() {
-        // exit early if the update has nothing to do
-        progress.finish_with_message("No update needed!");
-        return Ok(());
+    Some(update)
+}
+
+// ─── Pipeline Update Calculation ─────────────────────────────────────────────
+
+/// Calculate a pipeline update from the current pipeline state and a resolved
+/// mergeable pipeline from the editor
+///
+/// # Arguments
+///
+/// * `pipeline` - The current pipeline as stored in Thorium
+/// * `resolved` - The editor-resolved [`MergeablePipeline`] to diff against
+pub fn calculate_pipeline_update_from_mergeable(
+    pipeline: Pipeline,
+    resolved: MergeablePipeline,
+) -> Option<PipelineUpdate> {
+    // check if nothing changed
+    let current = MergeablePipeline::from(pipeline.clone());
+    let current_yaml = serde_yaml::to_string(&current).unwrap_or_default();
+    let resolved_yaml = serde_yaml::to_string(&resolved).unwrap_or_default();
+    if current_yaml == resolved_yaml {
+        return None;
     }
-    if !cmd.skip_confirm {
-        // get info on the current user
-        let current_user = thorium
-            .users
-            .info()
-            .await
-            .map_err(|err| Error::new(format!("Error getting current user info: {err}")))?;
-        // confirm with the user to proceed and suspend the progress bar while we do so
-        let confirm = progress.suspend(|| update.confirm(&conf, &current_user))?;
-        if !confirm {
-            // exit early if the user didn't confirm
-            return Ok(());
-        }
+    // deserialize triggers back to the correct type
+    let mut resolved_triggers: HashMap<String, EventTrigger> = resolved
+        .triggers
+        .into_iter()
+        .filter_map(|(k, v)| {
+            serde_json::from_value(v).ok().map(|trigger| (k, trigger))
+        })
+        .collect();
+    let (remove_triggers, triggers) =
+        calc_remove_add_map!(pipeline.triggers, resolved_triggers);
+    Some(PipelineUpdate {
+        order: if pipeline.order == resolved.order {
+            None
+        } else {
+            Some(serde_json::to_value(&resolved.order).unwrap_or_default())
+        },
+        sla: set_modified_new_opt!(pipeline.sla, Some(resolved.sla)),
+        triggers,
+        remove_triggers,
+        clear_description: set_clear!(pipeline.description, resolved.description),
+        description: set_modified_opt!(pipeline.description, resolved.description),
+        bans: PipelineBanUpdate::default(),
+    })
+}
+
+/// Calculate what updates need to be made to a pipeline based on the pipeline's
+/// current state and the request from the toolbox manifest
+///
+/// # Arguments
+///
+/// * `pipeline` - The current pipeline as stored in Thorium
+/// * `req` - The incoming [`PipelineRequest`] from the manifest
+#[allow(clippy::needless_pass_by_value)]
+pub fn calculate_pipeline_update(
+    pipeline: Pipeline,
+    mut req: PipelineRequest,
+) -> Option<PipelineUpdate> {
+    if pipeline == req {
+        return None;
     }
-    // apply the update
-    update.apply(&thorium, &progress).await?;
-    // inform the user the update is complete
-    progress.refresh("Update complete!", BarKind::Timer);
-    progress.finish();
-    Ok(())
+    let (remove_triggers, triggers) = calc_remove_add_map!(pipeline.triggers, req.triggers);
+    Some(PipelineUpdate {
+        order: (!req.compare_order(&pipeline.order)).then_some(req.order),
+        sla: set_modified_new_opt!(pipeline.sla, req.sla),
+        triggers,
+        remove_triggers,
+        clear_description: set_clear!(pipeline.description, req.description),
+        description: set_modified_opt!(pipeline.description, req.description),
+        bans: PipelineBanUpdate::default(),
+    })
+}
+
+// ─── Resource & Security Context Updates ─────────────────────────────────────
+
+/// Calculate the updates for image resources
+///
+/// # Arguments
+///
+/// * `old` - The current resource allocation on the image
+/// * `new` - The incoming resource request from the manifest or editor
+#[allow(clippy::needless_pass_by_value)]
+fn calculate_resource_update(
+    old: Resources,
+    new: ResourcesRequest,
+) -> Option<ResourcesUpdate> {
+    let new_cast = Resources::from(new.clone());
+    if old == new_cast {
+        return None;
+    }
+    let mut burstable = BurstableResourcesUpdate::default();
+    if new_cast.burstable.cpu != old.burstable.cpu {
+        burstable.cpu = Some(new.burstable.cpu);
+    }
+    if new_cast.burstable.memory != old.burstable.memory {
+        burstable.memory = Some(new.burstable.memory);
+    }
+    let new: ResourcesRequest = new_cast.into();
+    let old: ResourcesRequest = old.into();
+    Some(ResourcesUpdate {
+        cpu: set_modified!(old.cpu, new.cpu),
+        memory: set_modified!(old.memory, new.memory),
+        ephemeral_storage: set_modified!(old.ephemeral_storage, new.ephemeral_storage),
+        nvidia_gpu: set_modified!(old.nvidia_gpu, new.nvidia_gpu),
+        amd_gpu: set_modified!(old.amd_gpu, new.amd_gpu),
+        burstable,
+    })
+}
+
+/// Calculate the updates to a security context
+///
+/// # Arguments
+///
+/// * `old` - The current security context on the image
+/// * `new` - The incoming security context, or `None` to reset to defaults
+#[allow(clippy::needless_pass_by_value)]
+fn calculate_security_context_update(
+    old: SecurityContext,
+    new: Option<SecurityContext>,
+) -> Option<SecurityContextUpdate> {
+    match new {
+        Some(new) if old == new => None,
+        Some(new) => Some(SecurityContextUpdate {
+            user: set_modified_opt!(old.user, new.user),
+            group: set_modified_opt!(old.group, new.group),
+            allow_privilege_escalation: set_modified!(
+                old.allow_privilege_escalation,
+                new.allow_privilege_escalation
+            ),
+            clear_user: set_clear!(old.user, new.user),
+            clear_group: set_clear!(old.group, new.group),
+        }),
+        None if old == SecurityContext::default() => None,
+        None => Some(
+            SecurityContextUpdate::default()
+                .clear_user()
+                .clear_group()
+                .disallow_escalation(),
+        ),
+    }
 }

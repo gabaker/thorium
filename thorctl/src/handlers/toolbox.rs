@@ -2,8 +2,12 @@
 
 use thorium::Error;
 
+mod categorize;
+mod create;
+mod editor;
 mod import;
 mod manifest;
+mod merge;
 mod shared;
 mod update;
 
@@ -24,6 +28,5 @@ pub async fn handle(args: &Args, toolbox: &Toolbox) -> Result<(), Error> {
     }
     match toolbox {
         Toolbox::Import(cmd) => import::import(thorium, conf, cmd).await,
-        Toolbox::Update(cmd) => update::update(thorium, conf, cmd).await,
     }
 }

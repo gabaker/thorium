@@ -46,6 +46,7 @@ rand = "0.9.1"
 kanal = "0.1.1"
 semver = { version = "1", features = ["serde"] }
 dialoguer = "0.11"
+similar = "2"
 dirs = "6"
 cfg-if = "1"
 reqwest = { workspace = true , default-features = false, features = ["rustls-tls"] }
