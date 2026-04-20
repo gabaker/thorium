@@ -5,9 +5,9 @@ edition = "2024"
 
 [dependencies]
 clap = { version = "4", features = ["derive", "wrap_help", "string"] }
-thorium-api = { git="https://github.com/cisagov/thorium.git", default-features = false, features = ["client"] }
+#thorium-api = { git="https://github.com/cisagov/thorium.git", default-features = false, features = ["client", "vendored-openssl"] }
+thorium-api = { path="thorium/api", default-features = false, features = ["client", "vendored-openssl"] }
 tokio = { version = "1.45", features = ["full"] }
-yara-x = "1.8"
 sha2 = "0.10"
 hex = "0.4"
 bytesize = "2"
@@ -15,3 +15,4 @@ dirs = "6"
 uuid = "1"
 serde = "1"
 serde_json = "1"
+chrono = { version = "0.4", features = ["serde"] }

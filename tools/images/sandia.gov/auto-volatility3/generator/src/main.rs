@@ -6,15 +6,15 @@ use std::path::PathBuf;
 use thorium::models::{Reaction, ReactionRequest};
 use thorium::{Thorium, models::GenericJobArgs};
 use uuid::Uuid;
-use yara_x::{Rule, Rules};
 
 mod args;
+mod extractors;
 
 pub struct VolFan {
     /// A Thorium client for spawning sub reactions
     thorium: Thorium,
-    /// The rules to scan with
-    rules: Rules,
+    /// The canary modules that have already been run
+    canaries: Vec<String>,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord)]
@@ -45,7 +45,6 @@ impl OsKinds {
                 modules.push("windows.filescan");
                 modules.push("windows.netscan");
                 modules.push("windows.cmdline");
-                modules.push("windows.sockets");
                 modules.push("windows.malfind");
                 modules.push("windows.getsids");
                 modules.push("windows.scheduled_tasks");
@@ -55,7 +54,6 @@ impl OsKinds {
                 modules.push("windows.svcscan");
                 modules.push("windows.netstat");
                 modules.push("windows.privileges");
-                modules.push("windows.vaddump");
                 modules.push("windows.envars.Envars");
                 modules.push("windows.scheduled_tasks.ScheduledTasks");
                 modules.push("windows.truecrypt.Passphrase");
@@ -159,16 +157,23 @@ impl OsKinds {
         }
         modules
     }
-}
 
-impl From<Rule<'_, '_>> for OsKinds {
-    /// Convert a rule hit to an ``OsKind``
-    fn from(rule: Rule) -> Self {
-        match rule.identifier() {
-            "Windows_Memory_Image" => OsKinds::Windows,
-            "Linux_Memory_Image" => OsKinds::Linux,
-            "Mac_Memory_Image" => OsKinds::Mac,
-            unknown => panic!("Unknown Rule: {unknown}"),
+    /// Get an ```OsKind``` from a module
+    ///
+    /// # Arguments
+    ///
+    /// * `module` - The module to convert from
+    ///
+    /// # Panics
+    ///
+    /// Will panic if it recieves an module that does not start with windows, linux, or mac
+    #[must_use]
+    pub fn from_module(module: &str) -> OsKinds {
+        match module.split_once('.') {
+            Some(("windows", _)) => OsKinds::Windows,
+            Some(("linux", _)) => OsKinds::Linux,
+            Some(("mac", _)) => OsKinds::Mac,
+            _ => panic!("Unable to convert module to os: {module}"),
         }
     }
 }
@@ -185,19 +190,11 @@ impl VolFan {
                 .await
                 .expect("Failed to create Thorium client from ctlconf"),
         };
-        // compile our yara rules from disk
-        let mut compiler = yara_x::Compiler::new();
-        // go through and read in all of our rule files
-        let win_rule =
-            std::fs::read_to_string("rules/windows.yar").expect("Failed to load windows rules");
-        compiler.add_source(win_rule.as_str()).unwrap();
-        let linux_rule =
-            std::fs::read_to_string("rules/linux.yar").expect("Failed to load linux rules");
-        compiler.add_source(linux_rule.as_str()).unwrap();
-        // compile our rules
-        let rules = compiler.build();
         // build our volatility fanner
-        VolFan { thorium, rules }
+        VolFan {
+            thorium,
+            canaries: Vec::with_capacity(6),
+        }
     }
 
     /// Get our reaction info
@@ -205,47 +202,87 @@ impl VolFan {
         // get our reaction info
         self.thorium
             .reactions
-            .get(&group, reaction)
+            .get(group, reaction)
             .await
             .expect("Failed to get reaction info")
     }
 
     /// Probe a memory image for the correct os
-    fn probe(&self, target: &PathBuf) -> Vec<OsKinds> {
+    async fn probe(&mut self, target: &PathBuf) -> Option<OsKinds> {
         println!("Probing {}", target.display());
-        // build a yara scanner with our rules
-        let mut scanner = yara_x::Scanner::new(&self.rules);
-        // scan our target memory image and try to determine what OS its from
-        let scan_res = scanner
-            .scan_file(target)
-            .unwrap_or_else(|_| panic!("Failed to scan {}", target.display()));
-        // convert our rule hits into the os kinds
-        scan_res.matching_rules().map(OsKinds::from).collect()
+        // build the initial args for running volatility
+        let base_args = [
+            "-q",
+            "--remote-isf-url",
+            "'https://github.com/Abyss-W4tcher/volatility3-symbols/raw/master/banners/banners.json'",
+            "-f",
+        ];
+        // keep a map of our canary failures
+        let mut canary_failures = Vec::default();
+        // try each os kind in order of likeliness
+        // we test two modules for each in case one module fails
+        for module in [
+            "windows.info",
+            "windows.pslist",
+            "linux.bash.Bash",
+            "linux.boottime.Boottime",
+            "mac.bash.Bash",
+            "mac.lsof.Lsof",
+        ] {
+            // log what module we are using as a canary
+            println!("Trying {module} as a canary");
+            // try to run volatility assuming this is a windows memory dump
+            let output = tokio::process::Command::new("vol")
+                .args(&base_args)
+                .arg(target)
+                .arg(module)
+                .output()
+                .await;
+            // check if this command failed or not
+            match output {
+                Ok(output) => {
+                    // check if volatility return a successful exit code or not
+                    if output.status.success() {
+                        // get the detected os kind
+                        let os_kind = OsKinds::from_module(module);
+                        println!("Detected {os_kind:?} with {module} canary");
+                        // add successful modules as already being run
+                        // this mean that we will retry failed canary modules but maybe they will succeed that time
+                        self.canaries.push(module.to_owned());
+                        // replace any periods in this module name with a '_'
+                        let replaced = module.replace('.', "_");
+                        // build the path to write our module info too
+                        let path = format!("/tmp/thorium/cache/files/{replaced}.txt",);
+                        // write our modules results off to cache
+                        tokio::fs::write(path, &output.stdout)
+                            .await
+                            .expect(&format!("Failed to write {module} results to cache"));
+                        // return this os kind
+                        return Some(os_kind);
+                    } else {
+                        // get this canaries stderr
+                        let failure = format!(
+                            "{module} canary failed with: {}\n{}",
+                            String::from_utf8_lossy(&output.stdout),
+                            String::from_utf8_lossy(&output.stderr)
+                        );
+                        // add this failure to our canary failure list
+                        canary_failures.push(failure);
+                    }
+                }
+                Err(error) => println!("{module} canary died: {error:#?}"),
+            }
+        }
+        // log that we failed to find the os type
+        println!("--- Canary Failures ---");
+        for failure in canary_failures {
+            println!("{failure}\n");
+        }
+        None
     }
 
-    /// Write our detected os kinds to disk
-    pub async fn write_os_kinds(&self, os_kinds: &Vec<OsKinds>) {
-        // serialize our list of os kinds
-        let serialize = serde_json::to_string(os_kinds).expect("Failed to serialize os kind list");
-        // instance a map with space for our os kinds
-        let mut map = HashMap::with_capacity(1);
-        // add our ous kinds to our generic cache map
-        map.insert("OsKinds", serialize);
-        // serialize our map
-        let serialized_map =
-            serde_json::to_string(&map).expect("Failed to serialize generic cache");
-        // write our serialized map to our cache on disk
-        tokio::fs::write("/tmp/thorium/cache/generic.json", serialized_map.as_bytes())
-            .await
-            .expect("Failed to write generic cache to disk");
-    }
-
-    /// Analyze and fan out jobs for this memory image
-    ///
-    /// # Panics
-    ///
-    /// Panics if we can't create reactions.
-    pub async fn analyze(&self, target: &PathBuf, reaction: Reaction, job: Uuid) {
+    /// Spawn reactions for the target os
+    async fn spawn_reactions(&self, os_kind: OsKinds, reaction: Reaction) {
         // get our target sha2x56
         let sha256 = reaction.samples.first().expect("Reaction has no samples?");
         // pre allocate a vec for our bulk spawned reactions
@@ -255,26 +292,26 @@ impl VolFan {
             .sample(sha256)
             .tag(sha256)
             .parent(reaction.id);
-        // probe this memory image to determine the os kind
-        let os_kinds = self.probe(target);
-        // spawn jobs for all of our detected os kind
-        for os_kind in &os_kinds {
-            println!("Detected: {os_kind:?}");
-            // get the modules to run for each os kind
-            for module in os_kind.modules() {
-                println!("Building reaction request for {module}");
-                // build the file name to write our results too
-                let output = format!("{}.txt", module.replace('.', "_"));
-                // set the module for this sub reaction
-                let specific = reaction_req.clone().args(
-                    "auto-volatility3-worker",
-                    GenericJobArgs::default().positionals(vec![module, &output]),
-                );
-                // add this specific request to our list of reactions to create
-                reqs.push(specific);
+        // get the modules to run for each os kind
+        for module in os_kind.modules() {
+            // skip any canary modules that already completed
+            if self.canaries.contains(&module.to_owned()) {
+                // skip this module
+                continue;
             }
-
+            // log that we are building a reaction request for this module
+            println!("Building reaction request for {module}");
+            // build the file name to write our results too
+            let output = format!("{}.txt", module.replace('.', "_"));
+            // set the module for this sub reaction
+            let specific = reaction_req.clone().args(
+                "auto-volatility3-worker",
+                GenericJobArgs::default().positionals(vec![module, &output]),
+            );
+            // add this specific request to our list of reactions to create
+            reqs.push(specific);
         }
+        // log how many reactions we are creating
         println!("Creating {} reactions", reqs.len());
         // create sub reactions for all of the requested modules
         let create_resp = self
@@ -300,18 +337,52 @@ impl VolFan {
                 reqs.len()
             );
         }
-        // save our os kinds to our generic cache
-        self.write_os_kinds(&os_kinds).await;
-        // sleep our reaction
-        self.thorium
-            .jobs
-            .sleep(&job, "Analyzed")
+    }
+
+    /// Write our detected os kinds to disk
+    pub async fn write_os_kinds(&self, os_kinds: &Vec<OsKinds>) {
+        // serialize our list of os kinds
+        let serialize = serde_json::to_string(os_kinds).expect("Failed to serialize os kind list");
+        // instance a map with space for our os kinds
+        let mut map = HashMap::with_capacity(1);
+        // add our ous kinds to our generic cache map
+        map.insert("OsKinds", serialize);
+        // serialize our map
+        let serialized_map =
+            serde_json::to_string(&map).expect("Failed to serialize generic cache");
+        // write our serialized map to our cache on disk
+        tokio::fs::write("/tmp/thorium/cache/generic.json", serialized_map.as_bytes())
             .await
-            .expect("Failed to sleep reaction");
+            .expect("Failed to write generic cache to disk");
+    }
+
+    /// Analyze and fan out jobs for this memory image
+    ///
+    /// # Panics
+    ///
+    /// Panics if we can't create reactions.
+    pub async fn analyze(&mut self, target: &PathBuf, reaction: Reaction, job: Uuid) {
+        // probe this memory image to determine the os kind
+        match self.probe(target).await {
+            Some(os_kind) => {
+                // save our os kinds to our generic cache
+                self.write_os_kinds(&vec![os_kind]).await;
+                // create the sub reactions for this module
+                self.spawn_reactions(os_kind, reaction).await;
+                // sleep our reaction
+                self.thorium
+                    .jobs
+                    .sleep(&job, "Analyzed")
+                    .await
+                    .expect("Failed to sleep reaction");
+            }
+            // fail this reaction
+            None => panic!("Failed to detect os kind!"),
+        }
     }
 
     /// Write our results to disk for Thorium to pickup
-    pub async fn submit(&self) {
+    pub async fn submit(&self) -> Vec<OsKinds> {
         // load our cache from disk
         let cache_str = tokio::fs::read_to_string("/tmp/thorium/cache/generic.json")
             .await
@@ -344,23 +415,41 @@ impl VolFan {
             let path = entry.path();
             // skip anything thats not a file
             if path.is_file() {
+                // get our cache files name
+                let name = path.file_name().unwrap();
                 // build the new path to write this file too
-                let new = result_file_path.join(path.file_name().unwrap());
+                let new = result_file_path.join(name);
+                println!("Adding {} to results at {}", name.display(), new.display()); 
                 // move this result file from our cache to result files
                 tokio::fs::rename(path, new)
                     .await
                     .expect("Failed to write result file");
             }
         }
+        // return the kinds of operating systems that we have results for
+        os_kinds
     }
 
     /// Analyze or submit results for a specific reaction
-    pub async fn process(&self, target: &PathBuf, reaction: Uuid, job: Uuid, group: &str) {
+    pub async fn process(&mut self, target: &PathBuf, reaction: Uuid, job: Uuid, group: &str) {
+        // clear any previous canaries
+        self.canaries.clear();
         // get our reaction info
         let reaction = self.get_reaction_info(reaction, group).await;
         // if we have cache info then we have already ran
         if reaction.has_cache {
-            self.submit().await;
+            // write our results to disk
+            let os_kinds = self.submit().await;
+            // get the name of the file we are analyzing
+            let name = target
+                .file_name()
+                .expect("Failed to get target file name")
+                .to_string_lossy()
+                .to_string();
+            // extract any entities from our on disk results
+            extractors::entities(os_kinds, &name, "/tmp/thorium/result-files")
+                .await
+                .expect("Failed to extract entities");
         } else {
             // determine the right os type for thismemory image and then start up analysis jobs
             self.analyze(target, reaction, job).await;
@@ -373,7 +462,9 @@ async fn main() {
     // get the args to use
     let args = Args::parse();
     // build a volatility fan outer
-    let volfan = VolFan::new(&args).await;
+    let mut volfan = VolFan::new(&args).await;
     // process this memory image
-    volfan.process(&args.target, args.reaction, args.job, &args.group).await;
+    volfan
+        .process(&args.target, args.reaction, args.job, &args.group)
+        .await;
 }
