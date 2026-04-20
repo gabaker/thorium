@@ -7,6 +7,6 @@ RUN pip install --upgrade pip && \
     pip install magika && \
     rm -rf /root/.cache/pip
 
-COPY wrapper.bash /app/.
+COPY wrapper.bash tag.py /app/
 
 ENTRYPOINT ["bash", "/app/wrapper.bash"]
