@@ -6,7 +6,6 @@
       "upx-unpack"
     ]
   ],
-  "description": "Unpack a UPX packed file",
   "sla": 640800,
   "triggers": {
     "RunOnUpxPacked": {

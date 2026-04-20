@@ -7,6 +7,5 @@
     ]
   ],
   "sla": 640800,
-  "triggers": {},
-  "description": null
+  "triggers": {}
 }

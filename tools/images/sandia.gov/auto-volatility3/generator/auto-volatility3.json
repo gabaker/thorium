@@ -1,7 +1,6 @@
 {
   "name": "auto-volatility3",
   "group": "static",
-  "description": "Automatically determines the correct OS type for a memory dump and then fans out analyzing it with different modules.",
   "scaler": "K8s",
   "image": "",
   "timeout": 300,

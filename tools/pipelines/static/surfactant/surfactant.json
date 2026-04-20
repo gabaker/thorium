@@ -6,7 +6,6 @@
       "surfactant"
     ]
   ],
-  "description": "https://github.com/LLNL/Surfactant",
   "sla": 640800,
   "triggers": {}
 }

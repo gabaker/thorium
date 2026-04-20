@@ -6,7 +6,6 @@
       "pefile"
     ]
   ],
-  "description": null,
   "sla": 30,
   "triggers": {
     "RunOnDll": {

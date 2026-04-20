@@ -1,32 +1,15 @@
----
+# Balbuzard
 
-`Balbuzard` is an older open source tool used to extract patterns of interest from suspicious files including IP addresses, domain names, headers, and strings. It is part of a package of tools with the same name (Balbuzzard) and was written by Philippe Lagadec.
+Runs the `balbuzard` extraction tool against a submitted file to surface patterns of interest such as IP addresses, domain names, URLs, embedded file headers, and typical malware strings.
 
----
-##### Usage
+## Images Run
 
-Run `balbuzard` on any binary executable to extract embedded strings and headers. 
+- **balbuzard** — Python-based extraction tool that scans a file for patterns of interest (IP addresses, URLs, embedded files, known file headers, typical malware strings); extensible with custom patterns, regular expressions, and YARA rules.
 
----
-##### Status
+## Supported File Types
 
-This tool last received updates to its open source code repository 6 years ago.
+Any file / arbitrary binary data. Balbuzard operates on suspicious files of any kind, including executables, documents, and other binary artifacts.
 
----
-##### Documentation
+## Usage
 
-[https://github.com/decalage2/balbuzard](https://github.com/decalage2/balbuzard)
-
----
-##### License: 
-
-This license applies to the whole Balbuzard package including balbuzard, bbcrack, bbharvest and bbtrans, apart from the thirdparty and plugins folders which contain third-party files published with their own license.
-
-The Balbuzard package is copyright (c) 2007-2019, Philippe Lagadec (http://www.decalage.info) All rights reserved.
-
-Redistribution and use in source and binary forms, with or without modification, are permitted provided that the following conditions are met:
-
- - Redistributions of source code must retain the above copyright notice, this list of conditions and the following disclaimer.
- - Redistributions in binary form must reproduce the above copyright notice, this list of conditions and the following disclaimer in the documentation and/or other materials provided with the distribution.
-
----
+Run this pipeline as an early triage step on a new or suspicious file to extract strings and indicators of interest (IPs, domains, URLs, file headers, malware strings) and to detect embedded files in cleartext. It is most useful when you want a quick inventory of indicators before deeper analysis. If the file appears to hide data behind obfuscation such as XOR, the broader Balbuzard package's companion tools (bbcrack/bbharvest, not invoked by this pipeline) are the recommended follow-up.

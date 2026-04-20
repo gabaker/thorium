@@ -6,7 +6,6 @@
       "trivy"
     ]
   ],
-  "description": "An all-in-one security scanning tool.",
   "sla": 640800,
   "triggers": {}
 }

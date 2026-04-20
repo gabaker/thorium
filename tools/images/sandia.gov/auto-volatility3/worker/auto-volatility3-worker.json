@@ -1,7 +1,6 @@
 {
   "name": "auto-volatility3-worker",
   "group": "static",
-  "description": "Analyzes a memory image as directed by an auto-volatility3 generator.",
   "scaler": "K8s",
   "image": "",
   "timeout": 300,

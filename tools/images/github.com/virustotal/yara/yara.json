@@ -1,7 +1,6 @@
 {
   "name": "yara",
   "group": "static",
-  "description": "Yara signature scanning using open source rules",
   "scaler": "K8s",
   "image": "",
   "timeout": 300,

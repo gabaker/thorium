@@ -9,7 +9,6 @@
       "pharos-ooanalyzer"
     ]
   ],
-  "description": null,
   "sla": 640800,
   "triggers": {}
 }

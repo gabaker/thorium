@@ -1,28 +1,16 @@
----
-`Binwalk (v3)` is a file extraction (file carving) tool. It is used for identifying and/or extracting files and data that have been embedded inside of other files. It was originally written to analyze firmware files by ReFirmLabs, which was aquired by Microsoft.
+# Binwalk
 
----
-##### Usage
+Identifies and extracts files and data embedded inside other files using the Binwalk file-carving tool, carving any recovered content as child samples for further analysis.
 
-Use `binwalk` on any sample with suspected embedded files. Valid target samples may include disk images, archive files, or PCAPs. This tool will not work on samples that have been encrypted. You can see a full list of supported signatures used for extraction here: [https://github.com/ReFirmLabs/binwalk/wiki/Supported-Signatures](https://github.com/ReFirmLabs/binwalk/wiki/Supported-Signatures).
+## Images Run
 
----
-##### Status
+- **binwalk** — Binwalk (v3), a firmware analysis and file-carving tool re-written in Rust; runs in extraction mode to identify and carve embedded files and data from the submitted sample.
 
-Binwalk is actively maintained and the project receives daily updates.
+## Supported File Types
 
----
-#### Documentation
+- Firmware images
+- Any binary containing embedded files or data that matches Binwalk's signatures (a wide variety of file and data types is supported; see the Supported Signatures wiki). Common targets include firmware images, disk images, and archives. It will not recover content from samples that are themselves encrypted.
 
-[https://github.com/ReFirmLabs/binwalk](https://github.com/ReFirmLabs/binwalk)
+## Usage
 
----
-#### License
-
-MIT License
-
-&nbsp;
-
-Copyright (c) 2024 devttys0
-
----
+Run this pipeline on any sample suspected of containing embedded files or data, such as firmware images, disk images, archives, or other binaries with embedded content. It is typically used as an early step in firmware reverse engineering to extract filesystem contents, bootloaders, and other embedded components, and its entropy analysis can flag regions of unknown compression or encryption. Carved files are emitted as child samples for downstream analysis. Encrypted samples cannot be carved.

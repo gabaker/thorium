@@ -6,7 +6,6 @@
       "yara"
     ]
   ],
-  "description": null,
   "sla": 640800,
   "triggers": {
     "RunOnNewSamples": "NewSample"

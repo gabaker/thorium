@@ -1,7 +1,6 @@
 {
   "name": "trufflehog",
   "group": "static",
-  "description": "null",
   "scaler": "K8s",
   "image": "",
   "timeout": 900,

@@ -7,7 +7,6 @@
       "pdf-preview"
     ]
   ],
-  "description": "Analyze PDF files",
   "sla": 640800,
   "triggers": {
     "RunOnPDF": {

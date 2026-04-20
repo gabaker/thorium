@@ -6,7 +6,6 @@
       "auto-volatility3-worker"
     ]
   ],
-  "description": null,
   "sla": 640800,
   "triggers": {}
 }
