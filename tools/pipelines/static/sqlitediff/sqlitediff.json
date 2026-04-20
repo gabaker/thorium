@@ -1,12 +1,12 @@
 {
   "group": "static",
-  "name": "sqldiff",
+  "name": "sqlitediff",
   "order": [
     [
-      "sqldiff"
+      "sqlitediff"
     ]
   ],
   "sla": 640800,
   "triggers": {},
-  "description": null
+  "description": "# sqlitediff\n\nComputes the content differences between two SQLite database files, emitting the SQL statements needed to transform one into the other.\n\n## Images Run\n\n- **sqlitediff** \u2014 Runs the official SQLite `sqldiff` utility to compare two SQLite databases, producing a forward diff (A to B), a reverse diff (B to A), and a textual summary of the differences as INSERT, UPDATE, DELETE, and schema-change SQL statements.\n\n## Supported File Types\n\n- SQLite database files (two databases are compared)\n\n## Usage\n\nRun this pipeline to identify how one SQLite database differs from another, such as when comparing snapshots of the same database taken at different points in time. It is useful for forensic analysis of SQLite databases that commonly appear in browser profiles, mobile device backups, and application data, and for detecting modifications or tampering in application databases."
 }

@@ -22,5 +22,5 @@
       }
     }
   },
-  "description": null
+  "description": "# Unzip\n\nExtracts the contents of ZIP archives, including password-protected ones, by detecting encryption and attempting password recovery with a bundled dictionary before unpacking. Recovered files are emitted as child artifacts for downstream analysis.\n\n## Images Run\n\n- **unzip** \u2014 Runs the fcrackzip image, which detects ZipCrypto-encrypted ZIPs, recovers their password via a dictionary attack, and extracts the archive contents (encrypted archives are tagged and recovered files emitted as children).\n\n## Supported File Types\n\n- ZIP archives (encrypted and unencrypted)\n\nThis pipeline is triggered specifically on samples tagged with the `ZIP` file type.\n\n## Usage\n\nRun this pipeline on ZIP archives to unpack their contents for further analysis, and especially when a sample is a password-protected ZIP. It is well suited to malware samples distributed as encrypted ZIPs that use common, well-known passwords, since the bundled dictionary targets those conventions (e.g. \"infected\", \"malware\", \"password\"). Note that password recovery is limited to the dictionary provided in the image, so archives with strong or unusual passwords will not be cracked."
 }

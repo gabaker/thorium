@@ -48,5 +48,5 @@
       }
     }
   },
-  "description": null
+  "description": "# capa\n\nDetects the capabilities of executable files by matching their behaviors against capa's community-contributed rule set, mapping results to the MITRE ATT&CK framework and the Malware Behavior Catalog.\n\n## Images Run\n\n- **capa** \u2014 Runs capa's static analysis against the submitted file to identify behaviors and capabilities (such as C2/HTTP communication, persistence via services, data encoding, and process interaction), maps them to ATT&CK tactics/techniques and MBC, and flags samples that appear to be packed.\n\n## Supported File Types\n\n- PE executables\n- ELF executables\n- .NET modules\n- Shellcode files\n- Sandbox analysis reports (e.g. CAPE, DRAKVUF, VMRay) for dynamic capability detection\n\n## Usage\n\nRun this pipeline for initial triage of suspicious or unknown executables to quickly determine what a program is capable of without manual reverse engineering. It is well suited to PE, ELF, .NET, and shellcode samples, and reports ATT&CK tactics/techniques alongside fine-grained capability matches like \"connect to HTTP server\" or \"persist via Windows service\". Static analysis is limited against packed or obfuscated samples; in those cases unpack the file first, or run it in a supported sandbox and submit the resulting report instead."
 }

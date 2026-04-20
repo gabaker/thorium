@@ -1,93 +1,93 @@
 {
-  "group": "static",
-  "name": "exiftool",
-  "scaler": "K8s",
-  "image": "",
-  "timeout": 900,
-  "resources": {
-    "cpu": "1000m",
-    "memory": "4096Mi",
-    "ephemeral_storage": "0Mi",
-    "nvidia_gpu": 0,
-    "amd_gpu": 0
-  },
-  "spawn_limit": "Unlimited",
-  "volumes": [],
-  "env": {},
   "args": {
-    "entrypoint": null,
     "command": null,
-    "reaction": null,
-    "repo": null,
     "commit": null,
-    "output": "None"
+    "entrypoint": null,
+    "output": "None",
+    "reaction": null,
+    "repo": null
   },
-  "description": null,
-  "security_context": {
-    "user": null,
-    "group": null,
-    "allow_privilege_escalation": false
+  "child_filters": {
+    "file_extension": [],
+    "file_name": [],
+    "mime": [],
+    "submit_non_matches": false
   },
+  "clean_up": null,
   "collect_logs": true,
-  "generator": false,
   "dependencies": {
-    "samples": {
-      "location": "/tmp/thorium/samples",
+    "children": {
+      "enabled": false,
+      "images": [],
       "kwarg": null,
+      "location": "/tmp/thorium/prior-children",
       "strategy": "Paths"
     },
     "ephemeral": {
-      "location": "/tmp/thorium/ephemeral",
       "kwarg": null,
-      "strategy": "Paths",
-      "names": []
+      "location": "/tmp/thorium/ephemeral",
+      "names": [],
+      "strategy": "Paths"
+    },
+    "repos": {
+      "kwarg": null,
+      "location": "/tmp/thorium/repos",
+      "strategy": "Paths"
     },
     "results": {
       "images": [],
-      "location": "/tmp/thorium/prior-results",
       "kwarg": "None",
-      "strategy": "Paths",
-      "names": []
+      "location": "/tmp/thorium/prior-results",
+      "names": [],
+      "strategy": "Paths"
     },
-    "repos": {
-      "location": "/tmp/thorium/repos",
+    "samples": {
       "kwarg": null,
+      "location": "/tmp/thorium/samples",
       "strategy": "Paths"
     },
     "tags": {
       "enabled": false,
+      "kwarg": null,
       "location": "/tmp/thorium/prior-tags",
-      "kwarg": null,
-      "strategy": "Paths"
-    },
-    "children": {
-      "enabled": false,
-      "images": [],
-      "location": "/tmp/thorium/prior-children",
-      "kwarg": null,
       "strategy": "Paths"
     }
   },
-  "display_type": "JSON",
-  "output_collection": {
-    "handler": "Files",
-    "files": {
-      "results": "/tmp/thorium/results",
-      "result_files": "/tmp/thorium/result-files",
-      "tags": "/tmp/thorium/tags",
-      "names": []
-    },
-    "children": "/tmp/thorium/children",
-    "auto_tag": {},
-    "groups": []
-  },
-  "child_filters": {
-    "mime": [],
-    "file_name": [],
-    "file_extension": [],
-    "submit_non_matches": false
-  },
-  "clean_up": null,
+  "description": "# ExifTool\n\nExifTool by Phil Harvey is a platform-independent Perl library plus command-line application for reading, writing, and editing meta information in a wide variety of files.\n\n## Overview\n\nExifTool reads and extracts many different metadata formats, including EXIF, GPS, IPTC, XMP, and maker notes, from a broad range of file types. In this Thorium deployment it is run in read-only mode and emits the extracted metadata as structured JSON. Notable tags such as file type, MIME type, and (for executables) PE type, machine type, and entry point are surfaced as Thorium tags.\n\n## Supported File Types\n\n- A wide variety of files: ExifTool reads metadata from many image, audio, video, and document formats, among others.\n- Because the wrapper passes any submitted file to ExifTool, arbitrary files are accepted; ExifTool reports the detected file type and any metadata it can parse.\n\n## Usage\n\nRun ExifTool whenever you want to extract embedded metadata from a sample, for example to determine the true file type and MIME type, recover timestamps, GPS coordinates, camera or device details, software/version strings, and other provenance or authorship indicators. It is a fast, low-cost first pass for almost any artifact and is especially useful for triaging documents, media files, and executables where embedded metadata can reveal origin or tooling.\n\n## Documentation\n\n[ExifTool homepage](https://exiftool.org/)\n\n## License\n\nFree software released under the same terms as Perl itself (the Perl Artistic License or the GNU General Public License). The authoritative documentation references a License section but does not include its full text in the retrieved copy, so the exact terms should be confirmed at the project homepage.",
+  "display_type": "Json",
+  "env": {},
+  "generator": false,
+  "group": "static",
+  "image": "",
   "kvm": null,
-  "network_policies": []
+  "name": "exiftool",
+  "network_policies": [],
+  "output_collection": {
+    "auto_tag": {},
+    "children": "/tmp/thorium/children",
+    "files": {
+      "names": [],
+      "result_files": "/tmp/thorium/result-files",
+      "results": "/tmp/thorium/results",
+      "tags": "/tmp/thorium/tags"
+    },
+    "groups": [],
+    "handler": "Files"
+  },
+  "resources": {
+    "amd_gpu": 0,
+    "cpu": "1000m",
+    "ephemeral_storage": "0Mi",
+    "memory": "1024Mi",
+    "nvidia_gpu": 0
+  },
+  "scaler": "K8s",
+  "security_context": {
+    "allow_privilege_escalation": false,
+    "group": null,
+    "user": null
+  },
+  "spawn_limit": "Unlimited",
+  "timeout": 300,
+  "volumes": []
 }

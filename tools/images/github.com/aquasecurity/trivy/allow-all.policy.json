@@ -1,0 +1,10 @@
+{
+  "name": "allow-all",
+  "groups": [
+    "static"
+  ],
+  "ingress": [],
+  "egress": null,
+  "forced_policy": false,
+  "default_policy": false
+}

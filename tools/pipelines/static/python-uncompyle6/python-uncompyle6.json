@@ -8,5 +8,5 @@
   ],
   "sla": 640800,
   "triggers": {},
-  "description": null
+  "description": "# python-uncompyle6\n\nDecompiles compiled Python bytecode (`.pyc`/`.pyo`) back into equivalent Python source code so analysts can read and reason about the original program logic.\n\n## Images Run\n\n- **python-uncompyle6** \u2014 Native Python cross-version decompiler (and fragment decompiler) that uses compiler technology to build a parse tree from bytecode instructions and recover the original Python source.\n\n## Supported File Types\n\nCompiled Python bytecode files (`.pyc`, `.pyo`). The submitted sample is treated as a Python bytecode file and decompiled with `uncompyle6`, which accepts bytecode from Python 1.0 through 3.8 (including Dropbox's Python 2.5 bytecode and some PyPy bytecodes).\n\n## Usage\n\nRun this pipeline on Python `.pyc`/`.pyo` bytecode files to recover the original Python source code. It is valuable when analyzing Python-based malware, inspecting bytecode extracted from packaged or embedded Python applications, or recovering source where the original `.py` files are unavailable. Note that it does not handle obfuscated or encrypted bytecode or non-CPython bytecode (e.g., Cython, MicroPython), and decompilation quality is strongest for Python 2 and Python 3 around versions 3.3-3.4, dropping off for versions further from that range."
 }

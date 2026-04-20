@@ -213,11 +213,14 @@ Config is stored at `~/.thorium/config.yml`.
 | `thorctl cart` | Cart (encrypt/neuter) files locally |
 | `thorctl uncart` | Uncart files locally |
 | `thorctl run` | Create a reaction, monitor it, and download results in one step |
-| `thorctl toolbox` | Import and update toolboxes (pre-configured tool/pipeline collections) |
+| `thorctl toolbox` | Scaffold (`init`), build, import, export, diff, and remove toolboxes — pre-configured tool/pipeline collections (see Step 10) |
 | `thorctl config` | Modify thorctl configuration settings |
 | `thorctl update` | Update thorctl binary |
 
 Use `thorctl -h` or `thorctl <subcommand> -h` for detailed help on any command.
+
+> Building, integrating, or distributing your own tools? See **Step 10** for the developer
+> workflow (image/pipeline `import`/`export` vs the `toolbox` subcommands, with tradeoffs).
 
 ## Step 6: thoradm CLI (Admin Tool)
 
@@ -369,6 +372,97 @@ Entities support tags, images, and group-based access control.
 **Associations** are directional (or bidirectional) relationships that link entities, files, and repos to each other. Association kinds include: FileFor, DocumentationFor, FirmwareFor, AssociatedWith, DevelopedBy, ContainsCVE, ContainsCWE, BasedIn, EmployedBy, ParentCompanyOf, UsedBy, UsedIn, PerformedBy, FileSystemIn, FolderIn, and FileIn.
 
 **Trees** build relationship graphs across samples, repos, and entities to visualize how data is connected.
+
+## Step 10: Building, Integrating & Testing Tools (Developer Workflow)
+
+This section is for developers **building, integrating, and testing their own tools (images) and pipelines** in Thorium — packaging them as Thorium images, wiring them into pipelines, and distributing them as reusable toolboxes. It builds on the container registry (Step 7) and the images-vs-pipelines model (Step 9); see those rather than re-reading them here.
+
+### When to use which
+
+- **`thorctl images` / `thorctl pipelines` `import`/`export`** — round-trip a **single** image or pipeline that is **already integrated** into Thorium. Pull one existing tool's config (and its container image) out to disk, move it, and push it back. These operate on what already exists; they do **not** scaffold a new tool's config.
+- **`thorctl toolbox` (`init` + `build`/`import`/`export`)** — **integrate brand-new tools** (toolbox `init` is the only command that *scaffolds* image/pipeline config files from scratch) and **curate, version, and distribute larger collections** of tools as a single unit (`toolbox.json`).
+- **Both support offline bundling** for moving tools between segmented/air-gapped networks (via different mechanisms — see Tradeoffs).
+
+### Single tools as code — `images`/`pipelines import`/`export`
+
+Export an existing image/pipeline (config plus, by default, its container image) to disk:
+
+```sh
+thorctl images export -g <group> -o ./exports                 # all images in the group
+thorctl images export -g <group> -o ./exports --config-only   # configs only, no docker images
+thorctl pipelines export -g <group> -o ./exports
+```
+
+Import on-disk configs back into an instance, pushing images to a registry as needed:
+
+```sh
+thorctl images import -g <group> -i ./exports \
+    --registry localhost:5000 [--registry-override <url>] [--skip-push]
+thorctl pipelines import -g <group> -i ./exports
+```
+
+By default `import` opens an interactive editor to resolve differences with existing resources; use `--overwrite` (apply incoming) or `--skip-conflicts` (skip differing resources, CI-safe), and `--rollback-on-failure` to undo a partial apply. `--migrate-registry` only updates the registry path.
+
+### Toolboxes — `thorctl toolbox`
+
+A toolbox is a directory of tools compiled into one `toolbox.json`:
+
+```
+config.toml             # toolbox-wide: name, registry, registries, image_path_prefix, bundled_images
+<tool>/manifest.toml    # per image/pipeline: name, image_name, version, build/config_from
+<tool>/<name>.json      # the Thorium image/pipeline config
+<tool>/description.md   # markdown description injected at build
+toolbox.json            # produced by `toolbox build`
+```
+
+**Scaffold** new configs (the part import/export can't do):
+
+```sh
+# whole toolbox: image dirs (comma-separated) + a pipeline binding images
+thorctl toolbox init toolbox -i images/clamav,images/yara -p pipelines/av:clamav,yara -g <group>
+# add a single image in a later run; --image-name overrides the registry tag leaf
+thorctl toolbox init image images/peid -g <group> [--image-name path/peid]
+# add a single pipeline in a later run
+thorctl toolbox init pipeline pipelines/triage -i clamav,yara -g <group>
+```
+
+These runs are **interoperable**: `build` walks the whole tree, so you can init a toolbox and add more images/pipelines in separate runs and they're all picked up. Add `-n` for non-interactive defaults.
+
+**Build** the manifest (registry tags derive as `<registry>/[<image_path_prefix>/]<name>:<version>`):
+
+```sh
+thorctl toolbox build                        # writes ./toolbox.json
+thorctl toolbox build --flatten-image-paths  # force the bare tool name as the tag leaf
+thorctl toolbox build-images ./toolbox.json --push   # build & push the container images
+```
+
+`--flatten-image-paths` only matters when a manifest's `image_name` is a path; with the default scaffolding `image_name` equals the tool name, so it's a no-op.
+
+**Distribute / apply**:
+
+```sh
+thorctl toolbox export -g <group> -o ./tb [--with-images]    # pull a collection from an instance
+thorctl toolbox import ./tb/toolbox.json \                    # or a directory / URL
+    [--group-override <group>] [--image-path-prefix <reg/base>] [--overwrite|--skip-conflicts] [--rollback-on-failure]
+thorctl toolbox diff ./tb     # preview what an import would change
+thorctl toolbox remove ./tb   # remove a toolbox's pipelines/images from an instance
+```
+
+For registry addresses (e.g. `localhost:5000` vs `registry.thorium.svc.cluster.local:5000`), see Step 7.
+
+### Tradeoffs
+
+- **Scaffolding:** only `toolbox init` creates a *new* tool's config; `images`/`pipelines export` can only extract something already in Thorium (and `import` needs a hand-written config). New tool → toolbox; existing tool → image/pipeline.
+- **Scope & structure:** image/pipeline import/export is a flat, low-overhead per-resource round-trip; toolbox adds `config.toml`/`manifest.toml` and a build step — more setup, but you get shared registry config, collection-level versioning, `diff`, `--group-override`, and a single distributable `toolbox.json`.
+- **Offline bundling (both, opposite defaults):** `images export` bundles the container image **by default** (opt out with `--config-only`), and `import` repoints it via `--registry`/`--registry-override`. `toolbox export` is **config-only by default** and bundles image tarballs only with `--with-images`, which `toolbox import` then pushes using `--image-path-prefix`. Mind this default-polarity difference when moving tools across networks.
+
+### Typical dev loop
+
+1. Write your tool; build and push its container image (Step 7).
+2. Scaffold its Thorium config — `toolbox init image` (or `init pipeline`) for a new tool.
+3. Apply it — `toolbox build` + `toolbox import`, or `images`/`pipelines import` for a one-off.
+4. Run it — `thorctl run` or `thorctl reactions create` against a sample/repo.
+5. Iterate — `thorctl images edit` or re-import after changes.
 
 ## Where to Go Next
 
