@@ -1,53 +1,120 @@
-ARG IMAGE="ubuntu:22.04"
-FROM $IMAGE
+# syntax=docker/dockerfile:1
+
+ARG IMAGE="ubuntu:24.04"
+ARG YARA_VERSION="4.5.8"
+
+############################
+# Stage 1: Build YARA
+############################
+FROM ${IMAGE} AS yara-builder
+
+ARG YARA_VERSION
+
+SHELL ["/bin/bash", "-o", "pipefail", "-c"]
+
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends \
+      ca-certificates \
+      curl \
+      automake \
+      libtool \
+      make \
+      gcc \
+      pkg-config \
+      flex \
+      bison \
+      openssl \
+      libssl-dev && \
+    rm -rf /var/lib/apt/lists/*
+
+WORKDIR /tmp/yara-build
+
+RUN curl -fsSL \
+      "https://github.com/VirusTotal/yara/archive/refs/tags/v${YARA_VERSION}.tar.gz" \
+      -o yara.tar.gz && \
+    tar -xzf yara.tar.gz --strip-components=1 && \
+    rm yara.tar.gz && \
+    ./bootstrap.sh && \
+    ./configure \
+      --prefix=/usr/local \
+      --disable-static && \
+    make -j"$(nproc)" && \
+    make DESTDIR=/tmp/yara-root install && \
+    strip /tmp/yara-root/usr/local/bin/yara || true && \
+    strip /tmp/yara-root/usr/local/bin/yarac || true && \
+    find /tmp/yara-root/usr/local/lib -type f -name "*.so*" -exec strip {} \; || true
+
+
+############################
+# Stage 2: Build and compile rules
+############################
+FROM ${IMAGE} AS rules-builder
+
+SHELL ["/bin/bash", "-o", "pipefail", "-c"]
+
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends \
+      ca-certificates \
+      curl \
+      unzip \
+      python3 \
+      libssl3 && \
+    rm -rf /var/lib/apt/lists/*
+
+COPY --from=yara-builder /tmp/yara-root/ /
+
+RUN echo "/usr/local/lib" > /etc/ld.so.conf.d/yara.conf && \
+    ldconfig && \
+    yara --version && \
+    yarac --version
 
 WORKDIR /app
 
-RUN apt update && \
-    apt install -y python3 python3-pip automake libtool make gcc pkg-config flex bison git openssl libssl3 libssl-dev && \
-    apt clean && \
+COPY . .
+
+RUN mkdir -p /app/rules/yara-forge /app/rules/custom && \
+    curl -fsSL "https://github.com/YARAHQ/yara-forge/releases/latest/download/yara-forge-rules-extended.zip" -o /tmp/yara-forge-rules-extended.zip && \
+    unzip -oj /tmp/yara-forge-rules-extended.zip "*.yar" -d /app/rules/yara-forge && \
+    rm -f /tmp/yara-forge-rules-extended.zip && \
+    python3 /app/validate_rules.py && \
+    mapfile -d '' rule_files < <( \
+      find /app/rules/yara-forge /app/rules/custom \
+        -maxdepth 1 \
+        -type f \
+        \( -iname '*.yar' -o -iname '*.yara' \) \
+        -print0 | sort -z \
+    ) && \
+    if (( ${#rule_files[@]} == 0 )); then \
+      echo "[ERROR] No .yar or .yara files found for compilation." >&2; \
+      exit 1; \
+    fi && \
+    yarac "${rule_files[@]}" /app/rules.bin && \
+    yara -C /app/rules.bin /bin/bash && \
+    rm -rf /app/rules
+
+
+############################
+# Stage 3: Runtime image
+############################
+FROM ${IMAGE} AS runtime
+
+SHELL ["/bin/bash", "-o", "pipefail", "-c"]
+
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends \
+      python3 \
+      libssl3 \
+      ca-certificates && \
     rm -rf /var/lib/apt/lists/*
 
-ADD https://github.com/VirusTotal/yara/archive/refs/tags/v4.5.5.tar.gz /app/
+COPY --from=yara-builder /tmp/yara-root/ /
+COPY --from=rules-builder /app /app
 
-RUN tar -xzvf v4.5.5.tar.gz && \
-    rm v4.5.5.tar.gz
+RUN echo "/usr/local/lib" > /etc/ld.so.conf.d/yara.conf && \
+    ldconfig && \
+    yara --version && \
+    test -f /app/rules.bin
 
-WORKDIR /app/yara-4.5.5
-
-RUN ./bootstrap.sh && \
-    ./configure && \
-    make && \
-    make install
-
-# solve cannot open shared object file error
-RUN cp /usr/local/lib/libyara* /usr/lib/
-
-# install yara python library
-#RUN python3 -m pip install -U pip && \
-#    python3 -m pip install yara
-
-# copy yara rules to the image
-COPY . /app/.
-
-WORKDIR "/app/rules"
-RUN mkdir -p /app/rules/allRules
-RUN git clone https://github.com/kevoreilly/CAPEv2
-RUN git clone https://github.com/Yara-Rules/rules
-RUN git clone https://github.com/Neo23x0/signature-base
-# No longer maintained rule repos but could still be useful
-RUN git clone https://github.com/reversinglabs/reversinglabs-yara-rules
-RUN git clone https://github.com/CyberDefenses/CDI_yara
-RUN git clone https://github.com/nccgroup/Cyber-Defence
-
-RUN find /app/rules -name "*.yar*" ! -path "/app/rules/allRules/*" -exec cp "{}" /app/rules/allRules \;
-
-# compile yara rules
-RUN python3 renameRules.py allRules
-RUN ./compile.sh /app/rules.bin
-# clean up rules projects that were cloned
-RUN rm -rf /app/rules
-
-WORKDIR "/app"
+WORKDIR /app
 
 ENTRYPOINT ["python3", "/app/run_yara.py"]

@@ -1,4 +1,4 @@
-ARG IMAGE="rust:bullseye"
+ARG IMAGE="rust:bookworm"
 FROM $IMAGE
 
 WORKDIR /app
