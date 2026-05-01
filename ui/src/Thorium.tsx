@@ -46,6 +46,10 @@ const Login = lazy(() => import('./pages/Login'));
 const Profile = lazy(() => import('./pages/users/UserProfile'));
 const SystemStats = lazy(() => import('./pages/system/SystemStats'));
 const SystemSettings = lazy(() => import('./pages/system/SystemSettings'));
+const SigmaTest = lazy(() => import('./pages/test/SigmaTest'));
+const YaraTest = lazy(() => import('./pages/test/YaraTest'));
+const AlertBannerTest = lazy(() => import('./pages/test/AlertBannerTest'));
+const IncidentSummary = lazy(() => import('./dashboards/IncidentSummary'));
 
 // Data loading ui empty for now
 const FallbackView = <h1 />;
@@ -88,6 +92,10 @@ const Resources = () => (
     <Route path="/users" element={<PageWrapper admin Contents={Users} />} />
     <Route path="/settings" element={<PageWrapper admin Contents={SystemSettings} />} />
     <Route path="/stats" element={<PageWrapper Contents={SystemStats} />} />
+    <Route path="/dashboard/incident" element={<PageWrapper Contents={IncidentSummary} />} />
+    <Route path="/test/sigma" element={<PageWrapper Contents={SigmaTest} />} />
+    <Route path="/test/yara" element={<PageWrapper Contents={YaraTest} />} />
+    <Route path="/test/alerts" element={<PageWrapper Contents={AlertBannerTest} />} />
     <Route path="/auth" element={<PageWrapper auth={false} Contents={Login} />} />
     <Route path="/" element={<PageWrapper Contents={Home} />} />
     <Route path="*" element={<PageWrapper Contents={NotFound} />} />

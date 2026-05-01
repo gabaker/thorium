@@ -1,13 +1,14 @@
 import React, { useEffect, useState, createContext, useContext, Fragment, JSX, useMemo } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
-import { Alert, Button, Card, Row, Col, Form, Modal } from 'react-bootstrap';
+import { Button, Card, Row, Col, Form, Modal } from 'react-bootstrap';
+import AlertBanner from '@components/shared/alerts/AlertBanner';
 import { FaBackspace, FaRegEdit, FaSave, FaTrash } from 'react-icons/fa';
 import { FaFileCirclePlus, FaSquarePlus } from 'react-icons/fa6';
 import styled from 'styled-components';
 
 // project imports
-const AssociationTree = React.lazy(() => import('../../associations/AssociationTree'));
-const AssociationGraph = React.lazy(() => import('../../associations/graph/AssociationGraph'));
+const AssociationGraph3D = React.lazy(() => import('../../associations/graph/AssociationGraph'));
+import { GraphDataProvider } from '../../associations/data/GraphDataContext';
 import { buildUpdateEntityForm } from '../utilities';
 import InfoHeader from '../shared/InfoHeader';
 import InfoValue from '../shared/InfoValue';
@@ -395,28 +396,20 @@ const EntityDetails: React.FC<EntityDetailsProps> = ({ getEntityDetails, blank, 
       <Page className="full-min-width" title={`${entity.kind} · ${entity.name}`}>
         <EntityHeader icon={icon} />
         <EntityButtons className="py-3" />
-        {error != '' && (
-          <Alert variant="danger" className="text-center mb-3">
-            {error}
-          </Alert>
-        )}
+        {error != '' && <AlertBanner className="mb-3">{error}</AlertBanner>}
         <EntityInfo />
-        <Card className="panel mt-4">
-          <Card.Body>
-            <div className="d-flex justify-content-center">
-              <Subtitle>Graph</Subtitle>
-            </div>
-            {entityID && <AssociationGraph inView initial={associationInitial} />}
-          </Card.Body>
-        </Card>
-        <Card className="panel mt-4">
-          <Card.Body>
-            <div className="text-center">
-              <Subtitle>Associations</Subtitle>
-            </div>
-            {entityID && <AssociationTree initial={associationInitial} />}
-          </Card.Body>
-        </Card>
+        {entityID && (
+          <GraphDataProvider initial={associationInitial}>
+            <Card className="panel mt-4">
+              <Card.Body>
+                <div className="d-flex justify-content-center">
+                  <Subtitle>Associations</Subtitle>
+                </div>
+                <AssociationGraph3D inView />
+              </Card.Body>
+            </Card>
+          </GraphDataProvider>
+        )}
       </Page>
     </EntityDetailsContext.Provider>
   );

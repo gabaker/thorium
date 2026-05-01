@@ -1,12 +1,12 @@
-import React, { Fragment, useEffect, useState } from 'react';
+import React, { Fragment, useEffect, useMemo, useState } from 'react';
 import { useParams, useLocation } from 'react-router-dom';
 import { Badge, Button, Card, Col, Form, Modal, Nav, Row, Tab } from 'react-bootstrap';
 import Select from 'react-select';
 import { FaFileAlt, FaTrash } from 'react-icons/fa';
 
 // project imports
-const AssociationTree = React.lazy(() => import('@components/associations/AssociationTree'));
-const AssociationGraph = React.lazy(() => import('@components/associations/graph/AssociationGraph'));
+const AssociationGraph3D = React.lazy(() => import('@components/associations/graph/AssociationGraph'));
+import { GraphDataProvider } from '@components/associations/data/GraphDataContext';
 const Results = React.lazy(() => import('@components/pages/files/Results'));
 const RunPipelines = React.lazy(() => import('@components/pages/files/reactions/RunPipelines'));
 import ReactionStatus from '@components/pages/files/reactions/ReactionStatus';
@@ -15,7 +15,7 @@ import Subtitle from '@components/shared/titles/Subtitle';
 import Time from '@components/shared/Time';
 import Download from '@components/pages/files/Download';
 import Comments from '@components/pages/files/Comments';
-import AlertBanner from '@components/shared/alerts/AlertBanner';
+import AlertBanner, { Severity } from '@components/shared/alerts/AlertBanner';
 import { OverlayTipTop } from '@components/shared/overlay/tips';
 import EditableTags from '@components/tags/EditableTags';
 import { LoadingSpinner } from '@components/shared/fallback/LoadingSpinner';
@@ -41,6 +41,7 @@ const FileDetails = () => {
   const section =
     location.hash && ValidTabs.includes(location.hash.replace('#', '').split('-')[0]) ? location.hash.replace('#', '').split('-') : [];
   const [allowResultsHashUpdate, setAllowResultsHashUpdate] = useState(false);
+  const associationInitial = useMemo(() => ({ samples: [sha256] }), [sha256]);
 
   // jump to correct tab/subsection when page is loaded
   useEffect(() => {
@@ -157,18 +158,11 @@ const FileDetails = () => {
       {!loading &&
         deletionStatus &&
         (deletionStatus == 'Success' ? (
-          <AlertBanner variant="success" errorStatus="Submission deleted successfully!" />
+          <AlertBanner severity={Severity.Success}>Submission deleted successfully!</AlertBanner>
         ) : (
-          <AlertBanner variant="danger" errorStatus={deletionStatus} />
+          <AlertBanner>{deletionStatus}</AlertBanner>
         ))}
-      {!loading &&
-        deletionStatus &&
-        (deletionStatus == 'Success' ? (
-          <AlertBanner variant="success" errorStatus="Submission deleted successfully!" />
-        ) : (
-          <AlertBanner variant="danger" errorStatus={deletionStatus} />
-        ))}
-      {!loading && getFileError && getFileError != '' && <AlertBanner variant="danger" errorStatus={getFileError} />}
+      {!loading && getFileError && getFileError != '' && <AlertBanner>{getFileError}</AlertBanner>}
       <FileInfo
         details={details}
         setDetails={setDetails}
@@ -186,12 +180,7 @@ const FileDetails = () => {
           </Nav.Item>
           <Nav.Item className="details-navitem">
             <Nav.Link className="details-navlink" eventKey="related">
-              Related
-            </Nav.Link>
-          </Nav.Item>
-          <Nav.Item className="details-navitem">
-            <Nav.Link className="details-navlink" eventKey="tree">
-              File Tree
+              Associations
             </Nav.Link>
           </Nav.Item>
           <Nav.Item className="details-navitem">
@@ -214,36 +203,35 @@ const FileDetails = () => {
           </Nav.Link>
         </Nav>
         <Nav.Item className="details-navitem"></Nav.Item>
-        <Tab.Content>
-          <Tab.Pane eventKey="results" className="mt-4">
-            <Results
-              sha256={sha256}
-              results={results}
-              setResults={setResults}
-              numResults={numResults}
-              allowHashUpdate={allowResultsHashUpdate}
-              setNumResults={(num) => setNumResults(num)}
-            />
-          </Tab.Pane>
-          <Tab.Pane eventKey="related" className="mt-4">
-            <AssociationGraph inView={viewGraph} initial={{ samples: [sha256] }} />
-          </Tab.Pane>
-          <Tab.Pane eventKey="tree" className="mt-4">
-            <AssociationTree initial={{ samples: [sha256] }} />
-          </Tab.Pane>
-          <Tab.Pane eventKey="comments" className="mt-4">
-            <Comments sha256={sha256} />
-          </Tab.Pane>
-          <Tab.Pane eventKey="reactionstatus" className="mt-4">
-            <ReactionStatus sha256={sha256} autoRefresh={reactionsTabSelected} />
-          </Tab.Pane>
-          <Tab.Pane eventKey="runpipelines" className="mt-4">
-            <RunPipelines sha256={sha256} />
-          </Tab.Pane>
-          <Tab.Pane eventKey="download" className="mt-4">
-            <Download sha256={sha256} />
-          </Tab.Pane>
-        </Tab.Content>
+        <GraphDataProvider initial={associationInitial}>
+          <Tab.Content>
+            <Tab.Pane eventKey="results" className="mt-4">
+              <Results
+                sha256={sha256}
+                results={results}
+                setResults={setResults}
+                numResults={numResults}
+                allowHashUpdate={allowResultsHashUpdate}
+                setNumResults={(num) => setNumResults(num)}
+              />
+            </Tab.Pane>
+            <Tab.Pane eventKey="related" className="mt-4">
+              <AssociationGraph3D inView={viewGraph} />
+            </Tab.Pane>
+            <Tab.Pane eventKey="comments" className="mt-4">
+              <Comments sha256={sha256} />
+            </Tab.Pane>
+            <Tab.Pane eventKey="reactionstatus" className="mt-4">
+              <ReactionStatus sha256={sha256} autoRefresh={reactionsTabSelected} />
+            </Tab.Pane>
+            <Tab.Pane eventKey="runpipelines" className="mt-4">
+              <RunPipelines sha256={sha256} />
+            </Tab.Pane>
+            <Tab.Pane eventKey="download" className="mt-4">
+              <Download sha256={sha256} />
+            </Tab.Pane>
+          </Tab.Content>
+        </GraphDataProvider>
       </Tab.Container>
     </Page>
   );

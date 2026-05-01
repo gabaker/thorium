@@ -60,7 +60,7 @@ function useAuthProvider() {
           fetchLocalStorageTags();
         } else {
           clearTagDataFromLocalStorage();
-          document.cookie = 'THORIUM_TOKEN=; max-age=0;';
+          document.cookie = 'THORIUM_TOKEN=; max-age=0; path=/; Secure';
           setToken('');
         }
       });
@@ -114,7 +114,7 @@ function useAuthProvider() {
               setLastUpdateDate(Date.now());
               resolve(response);
             } else {
-              document.cookie = 'THORIUM_TOKEN=; max-age=0;';
+              document.cookie = 'THORIUM_TOKEN=; max-age=0; path=/; Secure';
               setUserInfo(null);
               setToken(undefined);
               resolve(null);
@@ -144,7 +144,7 @@ function useAuthProvider() {
       return new Promise((resolve) => {
         setToken(undefined);
         setUserInfo(null);
-        document.cookie = 'THORIUM_TOKEN=; max-age=0;';
+        document.cookie = 'THORIUM_TOKEN=; max-age=0; path=/; Secure';
         resolve(true);
       });
     },
@@ -182,7 +182,7 @@ function useAuthProvider() {
         handleRevoke().then(() => {
           setToken(undefined);
           setUserInfo(null);
-          document.cookie = 'THORIUM_TOKEN=; max-age=0;';
+          document.cookie = 'THORIUM_TOKEN=; max-age=0; path=/; Secure';
           resolve(null);
         });
       });

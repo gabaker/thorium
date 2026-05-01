@@ -1,290 +1,138 @@
-import { StylesheetJson } from 'cytoscape';
+import * as THREE from 'three';
+import FileSVG from '@assets/icons/file.svg?raw';
+import FileSearchSVG from '@assets/icons/file-add.svg?raw';
+import TagSVG from '@assets/icons/tag.svg?raw';
+import TagSearchSVG from '@assets/icons/tag-add.svg?raw';
+import RepoSVG from '@assets/icons/git.svg?raw';
+import VendorSVG from '@assets/icons/vendor.svg?raw';
+import VendorSearchSVG from '@assets/icons/vendor-add.svg?raw';
+import DeviceSVG from '@assets/icons/device.svg?raw';
+import CollectionSVG from '@assets/icons/collection.svg?raw';
+import FileSystemSVG from '@assets/icons/filesystem.svg?raw';
+import FolderSVG from '@assets/icons/folder.svg?raw';
+import FolderSearchSVG from '@assets/icons/folder-add.svg?raw';
+import OtherSVG from '@assets/icons/other.svg?raw';
 
-// Project imports
-import FileSVG from '@assets/icons/file.svg';
-import FileSearchSVG from '@assets/icons/file-add.svg';
-import TagSVG from '@assets/icons/tag.svg';
-import TagSearchSVG from '@assets/icons/tag-add.svg';
-import RepoSVG from '@assets/icons/git.svg';
-import VendorSVG from '@assets/icons/vendor.svg';
-import VendorSearchSVG from '@assets/icons/vendor-add.svg';
-import DeviceSVG from '@assets/icons/device.svg';
-import CollectionSVG from '@assets/icons/collection.svg';
-import FolderSearchSVG from '@assets/icons/folder-add.svg';
-import FolderSVG from '@assets/icons/folder.svg';
-import FileSystemSVG from '@assets/icons/filesystem.svg';
-import OtherSVG from '@assets/icons/other.svg';
+// project imports
+import type { NodeType, VisualState } from './types';
 
-// replace hardcoded key in SVG with actual colors
-export const DeviceGrowableIcon = DeviceSVG.replace('REPLACEME', '64cc66');
-export const FileGrowableIcon = FileSearchSVG.replace('REPLACEME', '64cc66');
-export const OtherGrowableIcon = OtherSVG.replace('REPLACEME', '64cc66');
-export const RepoGrowableIcon = RepoSVG.replace('REPLACEME', '64cc66');
-export const TagGrowableIcon = TagSearchSVG.replace('REPLACEME', '64cc66');
-export const VendorGrowableIcon = VendorSearchSVG.replace('REPLACEME', '64cc66');
-export const CollectionGrowableIcon = CollectionSVG.replace('REPLACEME', '64cc66');
-export const FileSystemGrowableIcon = FileSystemSVG.replace('REPLACEME', '64cc66');
-export const FolderGrowableIcon = FolderSearchSVG.replace('REPLACEME', '64cc66');
-export const DeviceIcon = DeviceSVG.replace('REPLACEME', 'ed9624');
-export const FileIcon = FileSVG.replace('REPLACEME', 'f1d592');
-export const OtherIcon = OtherSVG.replace('REPLACEME', 'cacfca');
-export const RepoIcon = RepoSVG.replace('REPLACEME', 'f03c2e');
-export const TagIcon = TagSVG.replace('REPLACEME', '427d8c');
-export const VendorIcon = VendorSVG.replace('REPLACEME', '8f30b8');
-export const CollectionIcon = CollectionSVG.replace('REPLACEME', '8f30b8');
-export const FileSystemIcon = FileSystemSVG.replace('REPLACEME', '8f30b8');
-export const FolderIcon = FolderSVG.replace('REPLACEME', 'f1d592');
-export const InitialDeviceIcon = DeviceSVG.replace('REPLACEME', '00998C');
-export const InitialFileIcon = FileSVG.replace('REPLACEME', '00998C');
-export const InitialOtherIcon = OtherSVG.replace('REPLACEME', '00998C');
-export const InitialRepoIcon = RepoSVG.replace('REPLACEME', '00998C');
-export const InitialTagIcon = TagSVG.replace('REPLACEME', '00998C');
-export const InitialVendorIcon = VendorSVG.replace('REPLACEME', '00998C');
-export const InitialCollectionIcon = CollectionSVG.replace('REPLACEME', '00998C');
-export const InitialFileSystemIcon = FileSystemSVG.replace('REPLACEME', '00998C');
-export const InitialFolderIcon = FolderSVG.replace('REPLACEME', '00998C');
+const NODE_COLORS: Record<NodeType, Record<VisualState, string>> = {
+  file: { basic: '#f1d592', growable: '#64cc66', initial: '#00998C' },
+  repo: { basic: '#f03c2e', growable: '#64cc66', initial: '#00998C' },
+  tag: { basic: '#427d8c', growable: '#64cc66', initial: '#00998C' },
+  device: { basic: '#ed9624', growable: '#64cc66', initial: '#00998C' },
+  vendor: { basic: '#8f30b8', growable: '#64cc66', initial: '#00998C' },
+  collection: { basic: '#8f30b8', growable: '#64cc66', initial: '#00998C' },
+  filesystem: { basic: '#8f30b8', growable: '#64cc66', initial: '#00998C' },
+  folder: { basic: '#f1d592', growable: '#64cc66', initial: '#00998C' },
+  other: { basic: '#cacfca', growable: '#64cc66', initial: '#00998C' },
+};
 
-// get edge color based on theme
-const getEdgeColor = (style: CSSStyleDeclaration) => {
+export const getNodeColor = (nodeType: NodeType, visualState: VisualState): string => {
+  return NODE_COLORS[nodeType]?.[visualState] ?? NODE_COLORS.other.basic;
+};
+
+const SVG_MAP: Record<NodeType, Record<VisualState, string>> = {
+  file: {
+    basic: FileSVG.replace('REPLACEME', 'f1d592'),
+    growable: FileSearchSVG.replace('REPLACEME', '64cc66'),
+    initial: FileSVG.replace('REPLACEME', '00998C'),
+  },
+  repo: {
+    basic: RepoSVG.replace('REPLACEME', 'f03c2e'),
+    growable: RepoSVG.replace('REPLACEME', '64cc66'),
+    initial: RepoSVG.replace('REPLACEME', '00998C'),
+  },
+  tag: {
+    basic: TagSVG.replace('REPLACEME', '427d8c'),
+    growable: TagSearchSVG.replace('REPLACEME', '64cc66'),
+    initial: TagSVG.replace('REPLACEME', '00998C'),
+  },
+  device: {
+    basic: DeviceSVG.replace('REPLACEME', 'ed9624'),
+    growable: DeviceSVG.replace('REPLACEME', '64cc66'),
+    initial: DeviceSVG.replace('REPLACEME', '00998C'),
+  },
+  vendor: {
+    basic: VendorSVG.replace('REPLACEME', '8f30b8'),
+    growable: VendorSearchSVG.replace('REPLACEME', '64cc66'),
+    initial: VendorSVG.replace('REPLACEME', '00998C'),
+  },
+  collection: {
+    basic: CollectionSVG.replace('REPLACEME', '8f30b8'),
+    growable: CollectionSVG.replace('REPLACEME', '64cc66'),
+    initial: CollectionSVG.replace('REPLACEME', '00998C'),
+  },
+  filesystem: {
+    basic: FileSystemSVG.replace('REPLACEME', '8f30b8'),
+    growable: FileSystemSVG.replace('REPLACEME', '64cc66'),
+    initial: FileSystemSVG.replace('REPLACEME', '00998C'),
+  },
+  folder: {
+    basic: FolderSVG.replace('REPLACEME', 'f1d592'),
+    growable: FolderSearchSVG.replace('REPLACEME', '64cc66'),
+    initial: FolderSVG.replace('REPLACEME', '00998C'),
+  },
+  other: {
+    basic: OtherSVG.replace('REPLACEME', 'cacfca'),
+    growable: OtherSVG.replace('REPLACEME', '64cc66'),
+    initial: OtherSVG.replace('REPLACEME', '00998C'),
+  },
+};
+
+export const getNodeSvg = (nodeType: NodeType, visualState: VisualState): string => {
+  return SVG_MAP[nodeType]?.[visualState] ?? SVG_MAP.other.basic;
+};
+
+const textureCache = new Map<string, THREE.Texture>();
+
+export const svgToTexture = (svgString: string, size = 64): THREE.Texture => {
+  const cacheKey = `${svgString}_${size}`;
+  const cached = textureCache.get(cacheKey);
+  if (cached) return cached;
+
+  const canvas = document.createElement('canvas');
+  canvas.width = size;
+  canvas.height = size;
+  const ctx = canvas.getContext('2d')!;
+
+  const img = new Image();
+  const dataUri = `data:image/svg+xml;base64,${btoa(svgString)}`;
+
+  const texture = new THREE.Texture(canvas);
+  img.onload = () => {
+    ctx.drawImage(img, 0, 0, size, size);
+    texture.needsUpdate = true;
+  };
+  img.src = dataUri;
+
+  textureCache.set(cacheKey, texture);
+  return texture;
+};
+
+let cachedEdgeColor: string | null = null;
+
+const computeEdgeColor = (): string => {
   const rootTheme = document.getElementById('root')?.getAttribute('theme');
-  const theme = rootTheme ? rootTheme : '';
-  // dark/colored modes
-  if (theme == 'Dark' || theme == 'Ocean') {
-    return style.getPropertyValue('--thorium-text-secondary');
+  const theme = rootTheme ?? '';
+  if (theme === 'Dark' || theme === 'Ocean') {
+    return getComputedStyle(document.documentElement).getPropertyValue('--thorium-secondary-text').trim() || 'darkgray';
   }
-  // light mode
   return 'darkgray';
 };
 
-export const buildStyleSheet = (rootNodes: string[]): StylesheetJson => {
-  const computedStyle = getComputedStyle(document.documentElement);
+if (typeof MutationObserver !== 'undefined') {
+  const rootEl = document.getElementById('root');
+  if (rootEl) {
+    new MutationObserver(() => {
+      cachedEdgeColor = null;
+    }).observe(rootEl, { attributes: true, attributeFilter: ['theme'] });
+  }
+}
 
-  return [
-    {
-      selector: 'node',
-      style: {
-        'min-zoomed-font-size': 2,
-        'background-fit': 'cover',
-        'background-image-opacity': 1,
-        'background-opacity': 0,
-        'text-valign': 'bottom',
-        'text-halign': 'center',
-        width: 'data(diameter)',
-        height: 'data(diameter)',
-        color: computedStyle.getPropertyValue('--thorium-text'),
-      },
-    },
-    {
-      selector: 'node[type="Tag"]',
-      style: {},
-    },
-    {
-      selector: 'node[type="Repo"]',
-      style: {},
-    },
-    {
-      selector: 'edge',
-      style: {
-        width: 1,
-        'line-color': getEdgeColor(computedStyle),
-        'target-arrow-color': getEdgeColor(computedStyle),
-        color: computedStyle.getPropertyValue('--thorium-text'),
-        'min-zoomed-font-size': 3,
-        'target-arrow-shape': 'triangle',
-        'arrow-scale': 0.7,
-        'curve-style': 'bezier',
-      },
-    },
-    {
-      selector: '.bidirectional',
-      style: {
-        width: 1,
-        'source-arrow-color': getEdgeColor(computedStyle),
-        'source-arrow-shape': 'triangle',
-      },
-    },
-    {
-      selector: 'edge:selected',
-      style: {
-        'line-color': '#007BFF',
-        'target-arrow-color': '#007BFF',
-      },
-    },
-    {
-      selector: '.basic-repo',
-      style: {
-        'background-image': `url(${RepoIcon})`,
-      },
-    },
-    {
-      selector: '.growable-repo',
-      style: {
-        'background-image': `url(${RepoGrowableIcon})`,
-      },
-    },
-    {
-      selector: '.basic-file',
-      style: {
-        'background-image': `url(${FileIcon})`,
-      },
-    },
-    {
-      selector: '.growable-file',
-      style: {
-        'background-image': `url(${FileGrowableIcon})`,
-      },
-    },
-    {
-      selector: '.basic-other',
-      style: {
-        'background-image': `url(${OtherIcon})`,
-      },
-    },
-    {
-      selector: '.growable-other',
-      style: {
-        'background-image': `url(${OtherGrowableIcon})`,
-      },
-    },
-    {
-      selector: '.basic-tag',
-      style: {
-        'background-image': `url(${TagIcon})`,
-      },
-    },
-    {
-      selector: '.growable-tag',
-      style: {
-        'background-image': `url(${TagGrowableIcon})`,
-      },
-    },
-    {
-      selector: '.basic-vendor',
-      style: {
-        'background-image': `url(${VendorIcon})`,
-      },
-    },
-    {
-      selector: '.growable-vendor',
-      style: {
-        'background-image': `url(${VendorGrowableIcon})`,
-      },
-    },
-    {
-      selector: '.basic-device',
-      style: {
-        'background-image': `url(${DeviceIcon})`,
-      },
-    },
-    {
-      selector: '.growable-device',
-      style: {
-        'background-image': `url(${DeviceGrowableIcon})`,
-      },
-    },
-    {
-      selector: '.basic-collection',
-      style: {
-        'background-image': `url(${CollectionIcon})`,
-      },
-    },
-    {
-      selector: '.growable-collection',
-      style: {
-        'background-image': `url(${CollectionGrowableIcon})`,
-      },
-    },
-    {
-      selector: '.basic-filesystem',
-      style: {
-        'background-image': `url(${FileSystemIcon})`,
-      },
-    },
-    {
-      selector: '.growable-filesystem',
-      style: {
-        'background-image': `url(${FileSystemGrowableIcon})`,
-      },
-    },
-    {
-      selector: '.basic-folder',
-      style: {
-        'background-image': `url(${FolderIcon})`,
-      },
-    },
-    {
-      selector: '.growable-folder',
-      style: {
-        'background-image': `url(${FolderGrowableIcon})`,
-      },
-    },
-    {
-      selector: '.has-node-label',
-      style: {
-        label: 'data(label)',
-      },
-    },
-    {
-      selector: '.has-edge-label',
-      style: {
-        label: 'data(label)',
-        color: getEdgeColor(computedStyle),
-        opacity: 0.7,
-      },
-    },
-    {
-      selector: `.initial-file`,
-      style: {
-        'background-image': `url(${InitialFileIcon})`,
-      },
-    },
-    {
-      selector: `.initial-other`,
-      style: {
-        'background-image': `url(${InitialOtherIcon})`,
-      },
-    },
-    {
-      selector: `.initial-repo`,
-      style: {
-        'background-image': `url(${InitialRepoIcon})`,
-      },
-    },
-    {
-      selector: `.initial-tag`,
-      style: {
-        'background-image': `url(${InitialTagIcon})`,
-      },
-    },
-    {
-      selector: `.initial-vendor`,
-      style: {
-        'background-image': `url(${InitialVendorIcon})`,
-      },
-    },
-    {
-      selector: `.initial-device`,
-      style: {
-        'background-image': `url(${InitialDeviceIcon})`,
-      },
-    },
-    {
-      selector: `.initial-collection`,
-      style: {
-        'background-image': `url(${InitialCollectionIcon})`,
-      },
-    },
-    {
-      selector: `.initial-filesystem`,
-      style: {
-        'background-image': `url(${InitialFileSystemIcon})`,
-      },
-    },
-    {
-      selector: `.initial-folder`,
-      style: {
-        'background-image': `url(${InitialFolderIcon})`,
-      },
-    },
-  ];
+export const getEdgeColor = (): string => {
+  if (cachedEdgeColor === null) {
+    cachedEdgeColor = computeEdgeColor();
+  }
+  return cachedEdgeColor;
 };
