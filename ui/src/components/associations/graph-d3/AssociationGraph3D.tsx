@@ -10,7 +10,7 @@ import RenderErrorAlert from '@components/shared/alerts/RenderErrorAlert';
 import { getInitialTree, growTree } from '@thorpi/trees';
 import { getEdgeLabel } from '../utilities';
 import { getNodeColor, getEdgeColor, getNodeSvg, svgToTexture } from './styles';
-import { GraphControlsPanel, DisplayAction, GraphControls, SelectedElement, NodeRenderMode } from './GraphControls';
+import { GraphControlsPanel, DisplayAction, GraphControls, SelectedElement, NodeRenderMode, DagMode } from './GraphControls';
 import NodeInfo from '../graph/NodeInfo';
 import EdgeInfo from '../graph/EdgeInfo';
 import { buildGraphNode, processInitialGraphData } from './data';
@@ -95,19 +95,37 @@ const AssociationGraph3DInner: React.FC<AssociationGraphProps> = ({ initial, inV
     showNodeInfo: true,
     nodeRenderMode: 'spheres' as NodeRenderMode,
     focusOnClick: true,
+    // edges
     edgeWidth: 1,
     edgeLength: 30,
+    edgeOpacity: 0.2,
+    arrowLength: 3.5,
+    directionalParticles: 0,
+    particleSpeed: 0.01,
+    // nodes
+    nodeRelSize: 4,
+    nodeOpacity: 0.75,
+    enableNodeDrag: true,
+    // forces
+    chargeStrength: -200,
+    velocityDecay: 0.4,
+    warmupTicks: 0,
+    cooldownTime: 15000,
+    // layout
+    dagMode: null as DagMode,
+    dagLevelDistance: null as number | null,
+    numDimensions: 3 as 2 | 3,
   });
 
   function controlsReducer(state: GraphControls, action: DisplayAction): GraphControls {
+    const gi = graphInstanceRef.current;
     switch (action.type) {
+      // --- existing ---
       case 'showEdgeLabels': {
-        const gi = graphInstanceRef.current;
         if (gi) gi.linkLabel(action.state ? (link: any) => (link as GraphLink).label : '');
         return { ...state, showEdgeLabels: action.state };
       }
       case 'showNodeLabels': {
-        const gi = graphInstanceRef.current;
         if (gi) {
           gi.nodeThreeObject(buildNodeObject(state.nodeRenderMode, action.state) as any);
           gi.nodeThreeObjectExtend(state.nodeRenderMode === 'spheres');
@@ -126,30 +144,96 @@ const AssociationGraph3DInner: React.FC<AssociationGraphProps> = ({ initial, inV
       case 'focusOnClick':
         focusOnClickRef.current = action.state;
         return { ...state, focusOnClick: action.state };
-      case 'edgeWidth': {
-        const gi = graphInstanceRef.current;
-        if (gi) gi.linkWidth(action.state);
-        return { ...state, edgeWidth: action.state };
-      }
-      case 'edgeLength': {
-        const gi = graphInstanceRef.current;
-        if (gi) {
-          const linkForce = gi.d3Force('link');
-          if (linkForce && 'distance' in linkForce) {
-            (linkForce as any).distance(action.state);
-          }
-          gi.d3ReheatSimulation();
-        }
-        return { ...state, edgeLength: action.state };
-      }
       case 'nodeRenderMode': {
-        const gi = graphInstanceRef.current;
         if (gi) {
           gi.nodeThreeObject(buildNodeObject(action.state, state.showNodeLabels) as any);
           gi.nodeThreeObjectExtend(action.state === 'spheres');
           gi.refresh();
         }
         return { ...state, nodeRenderMode: action.state };
+      }
+
+      // --- edge controls ---
+      case 'edgeWidth': {
+        if (gi) gi.linkWidth(action.state);
+        return { ...state, edgeWidth: action.state };
+      }
+      case 'edgeLength': {
+        if (gi) {
+          const linkForce = gi.d3Force('link');
+          if (linkForce && 'distance' in linkForce) (linkForce as any).distance(action.state);
+          gi.d3ReheatSimulation();
+        }
+        return { ...state, edgeLength: action.state };
+      }
+      case 'edgeOpacity': {
+        if (gi) gi.linkOpacity(action.state);
+        return { ...state, edgeOpacity: action.state };
+      }
+      case 'arrowLength': {
+        if (gi) gi.linkDirectionalArrowLength(action.state);
+        return { ...state, arrowLength: action.state };
+      }
+      case 'directionalParticles': {
+        if (gi) gi.linkDirectionalParticles(action.state);
+        return { ...state, directionalParticles: action.state };
+      }
+      case 'particleSpeed': {
+        if (gi) gi.linkDirectionalParticleSpeed(action.state);
+        return { ...state, particleSpeed: action.state };
+      }
+
+      // --- node controls ---
+      case 'nodeRelSize': {
+        if (gi) gi.nodeRelSize(action.state);
+        return { ...state, nodeRelSize: action.state };
+      }
+      case 'nodeOpacity': {
+        if (gi) gi.nodeOpacity(action.state);
+        return { ...state, nodeOpacity: action.state };
+      }
+      case 'enableNodeDrag': {
+        if (gi) gi.enableNodeDrag(action.state);
+        return { ...state, enableNodeDrag: action.state };
+      }
+
+      // --- force controls ---
+      case 'chargeStrength': {
+        if (gi) {
+          const charge = gi.d3Force('charge');
+          if (charge && 'strength' in charge) (charge as any).strength(action.state);
+          gi.d3ReheatSimulation();
+        }
+        return { ...state, chargeStrength: action.state };
+      }
+      case 'velocityDecay': {
+        if (gi) {
+          gi.d3VelocityDecay(action.state);
+          gi.d3ReheatSimulation();
+        }
+        return { ...state, velocityDecay: action.state };
+      }
+      case 'warmupTicks': {
+        if (gi) gi.warmupTicks(action.state);
+        return { ...state, warmupTicks: action.state };
+      }
+      case 'cooldownTime': {
+        if (gi) gi.cooldownTime(action.state);
+        return { ...state, cooldownTime: action.state };
+      }
+
+      // --- layout controls ---
+      case 'dagMode': {
+        if (gi) gi.dagMode(action.state as any);
+        return { ...state, dagMode: action.state };
+      }
+      case 'dagLevelDistance': {
+        if (gi) gi.dagLevelDistance(action.state as any);
+        return { ...state, dagLevelDistance: action.state };
+      }
+      case 'numDimensions': {
+        if (gi) gi.numDimensions(action.state);
+        return { ...state, numDimensions: action.state };
       }
     }
   }
@@ -161,10 +245,8 @@ const AssociationGraph3DInner: React.FC<AssociationGraphProps> = ({ initial, inV
     });
 
     if (focusOnClickRef.current && graphInstanceRef.current && node.x !== undefined && node.y !== undefined && node.z !== undefined) {
-      const distance = 150;
-      const distRatio = 1 + distance / Math.hypot(node.x, node.y, node.z || 1);
       graphInstanceRef.current.cameraPosition(
-        { x: node.x * distRatio, y: node.y * distRatio, z: node.z * distRatio },
+        graphInstanceRef.current.cameraPosition(),
         { x: node.x, y: node.y, z: node.z },
         1000,
       );
@@ -282,28 +364,51 @@ const AssociationGraph3DInner: React.FC<AssociationGraphProps> = ({ initial, inV
       graphInstanceRef.current = null;
     }
 
-    const graph = new ForceGraph3D(containerRef.current)
+    const graph = new ForceGraph3D(containerRef.current, { controlType: 'orbit' })
       .graphData(graphDataRef.current)
       .backgroundColor('rgba(0,0,0,0)')
       .width(containerRef.current.clientWidth)
       .height(containerRef.current.clientHeight || window.innerHeight * 0.9)
+      // nodes
       .nodeVal((node: any) => (node as GraphNode).diameter)
       .nodeColor((node: any) => getNodeColor((node as GraphNode).nodeType, (node as GraphNode).visualState))
       .nodeLabel((node: any) => (node as GraphNode).label)
       .nodeThreeObject(buildNodeObject(controls.nodeRenderMode, controls.showNodeLabels) as any)
       .nodeThreeObjectExtend(controls.nodeRenderMode === 'spheres')
-      .linkDirectionalArrowLength(3.5)
+      .nodeRelSize(controls.nodeRelSize)
+      .nodeOpacity(controls.nodeOpacity)
+      // edges
+      .linkDirectionalArrowLength(controls.arrowLength)
       .linkDirectionalArrowRelPos(1)
       .linkLabel(controls.showEdgeLabels ? (link: any) => (link as GraphLink).label : '')
       .linkColor(() => getEdgeColor())
       .linkWidth(controls.edgeWidth)
+      .linkOpacity(controls.edgeOpacity)
       .linkCurvature((link: any) => ((link as GraphLink).bidirectional ? 0.2 : 0))
+      .linkDirectionalParticles(controls.directionalParticles)
+      .linkDirectionalParticleSpeed(controls.particleSpeed)
+      // interaction
+      .enableNodeDrag(controls.enableNodeDrag)
       .onNodeClick((node: any) => handleNodeSelect(node as GraphNode))
-      .onLinkClick((link: any) => handleEdgeSelect(link as GraphLink));
+      .onLinkClick((link: any) => handleEdgeSelect(link as GraphLink))
+      // layout
+      .numDimensions(controls.numDimensions)
+      .warmupTicks(controls.warmupTicks)
+      .cooldownTime(controls.cooldownTime)
+      .d3VelocityDecay(controls.velocityDecay);
 
+    // DAG mode
+    if (controls.dagMode) {
+      graph.dagMode(controls.dagMode as any);
+      if (controls.dagLevelDistance !== null) {
+        graph.dagLevelDistance(controls.dagLevelDistance as any);
+      }
+    }
+
+    // Forces
     const chargeForce = graph.d3Force('charge');
     if (chargeForce && 'strength' in chargeForce) {
-      (chargeForce as any).strength(-200);
+      (chargeForce as any).strength(controls.chargeStrength);
     }
 
     const linkForce = graph.d3Force('link');
@@ -312,6 +417,9 @@ const AssociationGraph3DInner: React.FC<AssociationGraphProps> = ({ initial, inV
     }
 
     graphInstanceRef.current = graph;
+
+    const orbitControls = graph.controls();
+    if (orbitControls) (orbitControls as any).zoomToCursor = true;
 
     if (graphDataRef.current.nodes.length > 100) {
       graph.cooldownTicks(200);
