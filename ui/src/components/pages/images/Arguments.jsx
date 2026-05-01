@@ -1,5 +1,6 @@
 import { Fragment, useEffect, useState } from 'react';
-import { Alert, Col, Form, Row } from 'react-bootstrap';
+import { Col, Form, Row } from 'react-bootstrap';
+import AlertBanner from '@components/shared/alerts/AlertBanner';
 import { FaQuestionCircle } from 'react-icons/fa';
 
 // project imports
@@ -359,11 +360,7 @@ const ArgumentFields = ({ initialArgs, setRequestArguments, errors }) => {
           </Form.Group>
         </OverlayTipRight>
       )}
-      {errors && 'output' in errors && (
-        <Alert variant="danger" className="d-flex justify-content-center m-2">
-          {errors.output}
-        </Alert>
-      )}
+      {errors && 'output' in errors && <AlertBanner className="m-2">{errors.output}</AlertBanner>}
     </div>
   );
 };

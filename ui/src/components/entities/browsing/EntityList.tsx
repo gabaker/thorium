@@ -1,5 +1,6 @@
 import React, { useEffect, useState, Fragment, useRef } from 'react';
-import { Alert, Col, Pagination, Row } from 'react-bootstrap';
+import { Col, Pagination, Row } from 'react-bootstrap';
+import AlertBanner, { Severity } from '@components/shared/alerts/AlertBanner';
 
 // project imports
 import { DEFAULT_LIST_LIMIT } from '../utilities';
@@ -99,16 +100,12 @@ const EntityList: React.FC<EntityListProps> = ({ type, displayEntity, entityHead
       <LoadingSpinner loading={loading} />
       {entities.length == 0 && !loading && isMountingRef.current && (
         <Row>
-          <Alert variant="info" className="d-flex justify-content-center m-1">
+          <AlertBanner severity={Severity.Info} className="m-1">
             {type ? <>No {type} Found</> : <>None Found</>}
-          </Alert>
+          </AlertBanner>
         </Row>
       )}
-      {listError != '' && (
-        <Alert variant="danger" className="d-flex justify-content-center m-1">
-          {listError}
-        </Alert>
-      )}
+      {listError != '' && <AlertBanner className="m-1">{listError}</AlertBanner>}
       {entities.length > 0 && (
         <Row className="mt-3">
           <Col className="d-flex justify-content-center">

@@ -1,6 +1,7 @@
 import { useState, createContext, useContext, JSX } from 'react';
 import { useNavigate, useLocation } from 'react-router-dom';
-import { Alert, Button, Card, Row, Form } from 'react-bootstrap';
+import { Button, Card, Row, Form } from 'react-bootstrap';
+import AlertBanner from '@components/shared/alerts/AlertBanner';
 import styled from 'styled-components';
 
 // project imports
@@ -167,7 +168,7 @@ const EntityCreate: React.FC<EntityDetailsProps> = ({ blank, kind, metadata }) =
           <Title className="title">New {`${kind}`}</Title>
         </CreateEntityTitle>
         <EntityInfo />
-        {error != '' && <Alert variant="danger text-center">{error}</Alert>}
+        {error != '' && <AlertBanner>{error}</AlertBanner>}
         <EntityCreateButton />
       </Page>
     </EntityCreateContext.Provider>

@@ -1,5 +1,6 @@
 import { Fragment, useEffect, useState } from 'react';
-import { Alert, Badge, Col, Form, Row } from 'react-bootstrap';
+import { Badge, Col, Form, Row } from 'react-bootstrap';
+import AlertBanner from '@components/shared/alerts/AlertBanner';
 import { FaQuestionCircle } from 'react-icons/fa';
 
 // project imports
@@ -436,11 +437,7 @@ const OutputCollectionInputs = ({ initialOutputCollection, updateRequestOutputCo
             valuePlaceholder={'updated key (optional)'}
           />
         </OverlayTipRight>
-        {errors && errors['auto_tag'] && (
-          <center>
-            <Alert variant="danger">{errors.auto_tag}</Alert>
-          </center>
-        )}
+        {errors && errors['auto_tag'] && <AlertBanner>{errors.auto_tag}</AlertBanner>}
       </Row>
       <Row className="mt-2 mb-2">
         <Col>

@@ -17,3 +17,12 @@
   --bs-tooltip-bg: var(--thorium-secondary-panel-bg);
   opacity: 0.97; // slight transparency
 }
+
+.float-tooltip-kap {
+  background: var(--thorium-secondary-panel-bg) !important;
+  color: var(--thorium-text) !important;
+  border: 1px solid var(--thorium-panel-border);
+  border-radius: 6px;
+  font: 12px sans-serif;
+  padding: 4px 8px;
+}
