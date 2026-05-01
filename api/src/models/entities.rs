@@ -1,18 +1,16 @@
 //! Structures related to Thorium "Entities"
 
 use chrono::{DateTime, Utc};
-use futures::stream::{self, StreamExt};
 use gxhash::GxHasher;
 use std::collections::HashSet;
 use std::hash::Hasher;
-use std::net::IpAddr;
 use strum::{AsRefStr, EnumDiscriminants, EnumIter, EnumString, IntoEnumIterator};
 use uuid::Uuid;
 
 use super::Association;
 use crate::models::{
-    CollectionEntity, CollectionEntityRequest, CollectionKind, Country, DeviceEntityRequest,
-    TagMap, TreeSupport, VendorEntity, VendorEntityRequest,
+    CollectionEntity, CollectionEntityRequest, DeviceEntityRequest, TagMap, TreeSupport,
+    VendorEntity, VendorEntityRequest,
 };
 
 pub mod collections;
@@ -46,10 +44,11 @@ cfg_if::cfg_if! {
 // api/client imports
 cfg_if::cfg_if! {
     if #[cfg(any(feature = "api", feature = "client"))] {
-        use crate::models::scylla_utils::keys::KeySupport;
-        use super::backends::TagSupport;
-        use super::TagType;
         use std::collections::HashMap;
+
+        use super::TagType;
+        use super::backends::TagSupport;
+        use crate::models::scylla_utils::keys::KeySupport;
         use crate::{multipart_list, multipart_text, multipart_set};
     }
 }
@@ -57,6 +56,20 @@ cfg_if::cfg_if! {
 cfg_if::cfg_if! {
     if #[cfg(feature = "api")] {
         use std::collections::BTreeSet;
+        use chrono::TimeZone;
+        use network_activity::{NetConState, TransportLayerProtocol};
+        use rules::{SigmaActionToTake, SigmaRuleAppliesTo};
+        use shared::CriticalSector;
+        use futures::stream::{self, StreamExt};
+        use std::net::IpAddr;
+
+        use super::{
+            TagRequest, User, TagDeleteRequest, Group, GroupAllowAction, UnhashedTreeBranch,
+            CollectionKind, Country,
+        };
+        use crate::utils::{ApiError, Shared};
+        use crate::models::Tree;
+
 
         /// The form for entity metadata
         #[derive(Debug, Default)]
