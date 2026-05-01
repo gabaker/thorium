@@ -16,15 +16,19 @@ export interface GraphControls {
   selectedElement: SelectedElement | null;
   showNodeInfo: boolean;
   nodeRenderMode: NodeRenderMode;
+  focusOnClick: boolean;
+  edgeWidth: number;
+  edgeLength: number;
 }
 
 export type SelectedElement = { kind: 'node'; id: string; label: string } | { kind: 'link'; source: string; target: string; label: string };
 
 export type DisplayAction =
   | { type: 'depth'; state: number }
-  | { type: 'filterChildless' | 'showEdgeLabels' | 'showNodeLabels' | 'showNodeInfo'; state: boolean }
+  | { type: 'filterChildless' | 'showEdgeLabels' | 'showNodeLabels' | 'showNodeInfo' | 'focusOnClick'; state: boolean }
   | { type: 'selected'; state: SelectedElement | null }
-  | { type: 'nodeRenderMode'; state: NodeRenderMode };
+  | { type: 'nodeRenderMode'; state: NodeRenderMode }
+  | { type: 'edgeWidth' | 'edgeLength'; state: number };
 
 type GraphControlsProps = {
   graphId: string;
@@ -142,6 +146,44 @@ export const GraphControlsPanel: React.FC<GraphControlsProps> = ({ graphId, cont
             state: !controls.showEdgeLabels,
           })
         }
+      />
+      <Form.Check
+        type="switch"
+        id="form-focus-on-click"
+        label="Focus on Click"
+        checked={controls.focusOnClick}
+        onChange={() =>
+          updateControls({
+            type: 'focusOnClick',
+            state: !controls.focusOnClick,
+          })
+        }
+      />
+    </ControlGroup>
+    <ControlGroup className="mb-4">
+      <Form.Label htmlFor="form-edge-width" style={{ whiteSpace: 'nowrap' }}>
+        Edge Width ({controls.edgeWidth})
+      </Form.Label>
+      <Form.Range
+        id="form-edge-width"
+        min={0.5}
+        max={10}
+        step={0.5}
+        value={controls.edgeWidth}
+        onChange={(e) => updateControls({ type: 'edgeWidth', state: parseFloat(e.target.value) })}
+        style={{ width: '100px' }}
+      />
+      <Form.Label htmlFor="form-edge-length" style={{ whiteSpace: 'nowrap' }}>
+        Edge Length ({controls.edgeLength})
+      </Form.Label>
+      <Form.Range
+        id="form-edge-length"
+        min={10}
+        max={200}
+        step={10}
+        value={controls.edgeLength}
+        onChange={(e) => updateControls({ type: 'edgeLength', state: parseInt(e.target.value, 10) })}
+        style={{ width: '100px' }}
       />
     </ControlGroup>
   </Controls>

@@ -81,6 +81,7 @@ const AssociationGraph3DInner: React.FC<AssociationGraphProps> = ({ initial, inV
   const graphRootRef = useRef<string[]>(['']);
   const graphRef = useRef<Graph>(BlankGraph);
   const graphDataRef = useRef<GraphData>({ nodes: [], links: [] });
+  const focusOnClickRef = useRef(true);
 
   const [nodeCount, setNodeCount] = useState(0);
   const [graphId, setGraphId] = useState<string>('');
@@ -93,6 +94,9 @@ const AssociationGraph3DInner: React.FC<AssociationGraphProps> = ({ initial, inV
     selectedElement: null,
     showNodeInfo: true,
     nodeRenderMode: 'spheres' as NodeRenderMode,
+    focusOnClick: true,
+    edgeWidth: 1,
+    edgeLength: 30,
   });
 
   function controlsReducer(state: GraphControls, action: DisplayAction): GraphControls {
@@ -119,6 +123,25 @@ const AssociationGraph3DInner: React.FC<AssociationGraphProps> = ({ initial, inV
         return { ...state, depth: action.state };
       case 'filterChildless':
         return { ...state, filterChildless: action.state };
+      case 'focusOnClick':
+        focusOnClickRef.current = action.state;
+        return { ...state, focusOnClick: action.state };
+      case 'edgeWidth': {
+        const gi = graphInstanceRef.current;
+        if (gi) gi.linkWidth(action.state);
+        return { ...state, edgeWidth: action.state };
+      }
+      case 'edgeLength': {
+        const gi = graphInstanceRef.current;
+        if (gi) {
+          const linkForce = gi.d3Force('link');
+          if (linkForce && 'distance' in linkForce) {
+            (linkForce as any).distance(action.state);
+          }
+          gi.d3ReheatSimulation();
+        }
+        return { ...state, edgeLength: action.state };
+      }
       case 'nodeRenderMode': {
         const gi = graphInstanceRef.current;
         if (gi) {
@@ -137,7 +160,7 @@ const AssociationGraph3DInner: React.FC<AssociationGraphProps> = ({ initial, inV
       state: { kind: 'node', id: node.id, label: node.label },
     });
 
-    if (graphInstanceRef.current && node.x !== undefined && node.y !== undefined && node.z !== undefined) {
+    if (focusOnClickRef.current && graphInstanceRef.current && node.x !== undefined && node.y !== undefined && node.z !== undefined) {
       const distance = 150;
       const distRatio = 1 + distance / Math.hypot(node.x, node.y, node.z || 1);
       graphInstanceRef.current.cameraPosition(
@@ -273,7 +296,7 @@ const AssociationGraph3DInner: React.FC<AssociationGraphProps> = ({ initial, inV
       .linkDirectionalArrowRelPos(1)
       .linkLabel(controls.showEdgeLabels ? (link: any) => (link as GraphLink).label : '')
       .linkColor(() => getEdgeColor())
-      .linkWidth(1)
+      .linkWidth(controls.edgeWidth)
       .linkCurvature((link: any) => ((link as GraphLink).bidirectional ? 0.2 : 0))
       .onNodeClick((node: any) => handleNodeSelect(node as GraphNode))
       .onLinkClick((link: any) => handleEdgeSelect(link as GraphLink));
@@ -281,6 +304,11 @@ const AssociationGraph3DInner: React.FC<AssociationGraphProps> = ({ initial, inV
     const chargeForce = graph.d3Force('charge');
     if (chargeForce && 'strength' in chargeForce) {
       (chargeForce as any).strength(-200);
+    }
+
+    const linkForce = graph.d3Force('link');
+    if (linkForce && 'distance' in linkForce) {
+      (linkForce as any).distance(controls.edgeLength);
     }
 
     graphInstanceRef.current = graph;
