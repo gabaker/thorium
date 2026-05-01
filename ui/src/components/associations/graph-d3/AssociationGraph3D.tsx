@@ -137,6 +137,16 @@ const AssociationGraph3DInner: React.FC<AssociationGraphProps> = ({ initial, inV
       state: { kind: 'node', id: node.id, label: node.label },
     });
 
+    if (graphInstanceRef.current && node.x !== undefined && node.y !== undefined && node.z !== undefined) {
+      const distance = 150;
+      const distRatio = 1 + distance / Math.hypot(node.x, node.y, node.z || 1);
+      graphInstanceRef.current.cameraPosition(
+        { x: node.x * distRatio, y: node.y * distRatio, z: node.z * distRatio },
+        { x: node.x, y: node.y, z: node.z },
+        1000,
+      );
+    }
+
     const growable = graphRef.current.growable.map((n) => n.toString());
     if (!growable.includes(node.id) || !graphId) return;
 

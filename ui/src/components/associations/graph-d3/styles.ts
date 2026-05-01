@@ -1,19 +1,19 @@
 import * as THREE from 'three';
 import type { NodeType, VisualState } from './types';
 
-import FileSVG from '@assets/icons/file.svg';
-import FileSearchSVG from '@assets/icons/file-add.svg';
-import TagSVG from '@assets/icons/tag.svg';
-import TagSearchSVG from '@assets/icons/tag-add.svg';
-import RepoSVG from '@assets/icons/git.svg';
-import VendorSVG from '@assets/icons/vendor.svg';
-import VendorSearchSVG from '@assets/icons/vendor-add.svg';
-import DeviceSVG from '@assets/icons/device.svg';
-import CollectionSVG from '@assets/icons/collection.svg';
-import FileSystemSVG from '@assets/icons/filesystem.svg';
-import FolderSVG from '@assets/icons/folder.svg';
-import FolderSearchSVG from '@assets/icons/folder-add.svg';
-import OtherSVG from '@assets/icons/other.svg';
+import FileSVG from '@assets/icons/file.svg?raw';
+import FileSearchSVG from '@assets/icons/file-add.svg?raw';
+import TagSVG from '@assets/icons/tag.svg?raw';
+import TagSearchSVG from '@assets/icons/tag-add.svg?raw';
+import RepoSVG from '@assets/icons/git.svg?raw';
+import VendorSVG from '@assets/icons/vendor.svg?raw';
+import VendorSearchSVG from '@assets/icons/vendor-add.svg?raw';
+import DeviceSVG from '@assets/icons/device.svg?raw';
+import CollectionSVG from '@assets/icons/collection.svg?raw';
+import FileSystemSVG from '@assets/icons/filesystem.svg?raw';
+import FolderSVG from '@assets/icons/folder.svg?raw';
+import FolderSearchSVG from '@assets/icons/folder-add.svg?raw';
+import OtherSVG from '@assets/icons/other.svg?raw';
 
 const NODE_COLORS: Record<NodeType, Record<VisualState, string>> = {
   file: { basic: '#f1d592', growable: '#64cc66', initial: '#00998C' },

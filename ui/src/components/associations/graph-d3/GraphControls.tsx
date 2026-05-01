@@ -85,6 +85,15 @@ export const GraphControlsPanel: React.FC<GraphControlsProps> = ({ graphId, cont
     >
       Reheat
     </Button>
+    <Button
+      variant=""
+      className="secondary-btn mb-5"
+      onClick={() => {
+        graphInstance?.zoomToFit(1000, 50);
+      }}
+    >
+      Fit All
+    </Button>
     <Dropdown as={ButtonGroup} className="mb-5">
       <Dropdown.Toggle className="secondary-btn" variant="" id="download-dropdown">
         Download
