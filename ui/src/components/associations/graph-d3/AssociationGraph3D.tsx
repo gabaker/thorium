@@ -436,7 +436,37 @@ const AssociationGraph3DInner: React.FC<AssociationGraphProps> = ({ initial, inV
       graph.cooldownTicks(200);
     }
 
+    // Double-click on canvas zooms toward the mouse position
+    const container = containerRef.current;
+    const handleDblClick = (event: MouseEvent) => {
+      const gi = graphInstanceRef.current;
+      if (!gi || !container) return;
+
+      const rect = container.getBoundingClientRect();
+      const mouse = new THREE.Vector2(
+        ((event.clientX - rect.left) / rect.width) * 2 - 1,
+        -((event.clientY - rect.top) / rect.height) * 2 + 1,
+      );
+
+      const camera = gi.camera();
+      const raycaster = new THREE.Raycaster();
+      raycaster.setFromCamera(mouse, camera);
+
+      const currentPos = gi.cameraPosition();
+      const dir = raycaster.ray.direction;
+      const dist = Math.hypot(currentPos.x, currentPos.y, currentPos.z);
+      const step = dist * 0.4;
+
+      gi.cameraPosition(
+        { x: currentPos.x + dir.x * step, y: currentPos.y + dir.y * step, z: currentPos.z + dir.z * step },
+        { x: currentPos.x + dir.x * dist, y: currentPos.y + dir.y * dist, z: currentPos.z + dir.z * dist },
+        500,
+      );
+    };
+    container.addEventListener('dblclick', handleDblClick);
+
     return () => {
+      container.removeEventListener('dblclick', handleDblClick);
       graph._destructor();
       graphInstanceRef.current = null;
     };
