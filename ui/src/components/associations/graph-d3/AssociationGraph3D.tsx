@@ -93,7 +93,7 @@ const AssociationGraph3DInner: React.FC<AssociationGraphProps> = ({ initial, inV
     showNodeLabels: true,
     selectedElement: null,
     showNodeInfo: true,
-    nodeRenderMode: 'spheres' as NodeRenderMode,
+    nodeRenderMode: 'icons' as NodeRenderMode,
     focusOnClick: true,
     // edges
     edgeWidth: 1,
@@ -122,7 +122,7 @@ const AssociationGraph3DInner: React.FC<AssociationGraphProps> = ({ initial, inV
     switch (action.type) {
       // --- existing ---
       case 'showEdgeLabels': {
-        if (gi) gi.linkLabel(action.state ? (link: any) => (link as GraphLink).label : '');
+        if (gi) gi.linkLabel(action.state ? 'label' : () => '');
         return { ...state, showEdgeLabels: action.state };
       }
       case 'showNodeLabels': {
@@ -391,7 +391,7 @@ const AssociationGraph3DInner: React.FC<AssociationGraphProps> = ({ initial, inV
       // edges
       .linkDirectionalArrowLength(controls.arrowLength)
       .linkDirectionalArrowRelPos(1)
-      .linkLabel(controls.showEdgeLabels ? (link: any) => (link as GraphLink).label : '')
+      .linkLabel(controls.showEdgeLabels ? 'label' : () => '')
       .linkColor(() => getEdgeColor())
       .linkWidth(controls.edgeWidth)
       .linkOpacity(controls.edgeOpacity)
