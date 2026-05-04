@@ -1,5 +1,5 @@
 import React, { useCallback, useEffect, useRef, useState } from 'react';
-import { FaCog, FaProjectDiagram, FaBolt, FaCircle, FaCamera, FaLongArrowAltRight } from 'react-icons/fa';
+import { FaCog, FaProjectDiagram, FaBolt, FaCircle, FaCamera, FaArrowRight } from 'react-icons/fa';
 import type { ForceGraph3DInstance } from '3d-force-graph';
 
 import type { GraphControls, DisplayAction, SectionKey } from './types';
@@ -74,7 +74,7 @@ const GraphControlsToolbar: React.FC<GraphControlsToolbarProps> = ({ graphId, co
             <NodesSection controls={controls} updateControls={updateControls} />
           </ToolbarButton>
 
-          <ToolbarButton sectionKey="edges" activeSection={activeSection} onToggle={handleToggleSection} icon={<FaLongArrowAltRight size={14} />} title="Edges">
+          <ToolbarButton sectionKey="edges" activeSection={activeSection} onToggle={handleToggleSection} icon={<FaArrowRight size={14} style={{ transform: 'rotate(-45deg)' }} />} title="Edges">
             <EdgesSection controls={controls} updateControls={updateControls} />
           </ToolbarButton>
 

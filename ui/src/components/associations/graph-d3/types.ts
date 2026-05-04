@@ -10,6 +10,7 @@ export interface GraphNode extends NodeObject {
   visualState: VisualState;
   score: number;
   diameter: number;
+  degree: number;
 }
 
 export interface GraphLink extends LinkObject<GraphNode> {

@@ -26,6 +26,15 @@ const EdgesSection: React.FC<SectionProps> = ({ controls, updateControls }) => (
       onChange={(v) => updateControls({ type: 'edgeLength', state: v })}
     />
     <LabeledRange
+      id="form-link-strength"
+      label="Strength"
+      value={controls.edgeLinkStrength}
+      min={0.1}
+      max={2.0}
+      step={0.1}
+      onChange={(v) => updateControls({ type: 'edgeLinkStrength', state: v })}
+    />
+    <LabeledRange
       id="form-edge-opacity"
       label="Opacity"
       value={controls.edgeOpacity}

@@ -15,6 +15,7 @@ export interface GraphControls {
   // edges
   edgeWidth: number;
   edgeLength: number;
+  edgeLinkStrength: number;
   edgeOpacity: number;
   arrowLength: number;
   directionalParticles: number;
@@ -43,7 +44,7 @@ export type DisplayAction =
   | { type: 'filterChildless' | 'showEdgeLabels' | 'showNodeLabels' | 'showNodeInfo' | 'focusOnClick' | 'enableNodeDrag'; state: boolean }
   | { type: 'selected'; state: SelectedElement | null }
   | { type: 'nodeRenderMode'; state: NodeRenderMode }
-  | { type: 'edgeWidth' | 'edgeLength' | 'edgeOpacity' | 'arrowLength' | 'directionalParticles' | 'particleSpeed'; state: number }
+  | { type: 'edgeWidth' | 'edgeLength' | 'edgeLinkStrength' | 'edgeOpacity' | 'arrowLength' | 'directionalParticles' | 'particleSpeed'; state: number }
   | { type: 'nodeRelSize' | 'nodeOpacity'; state: number }
   | { type: 'chargeStrength' | 'velocityDecay' | 'warmupTicks' | 'cooldownTime'; state: number }
   | { type: 'dagMode'; state: DagMode }

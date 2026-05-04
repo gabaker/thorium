@@ -29,7 +29,7 @@ export const classifyNode = (nodeId: string, graph: Graph): { nodeType: NodeType
   return { nodeType: 'other', visualState, label: 'Unknown' };
 };
 
-export const buildGraphNode = (nodeId: string, graph: Graph, nodeCount: number): GraphNode => {
+export const buildGraphNode = (nodeId: string, graph: Graph, nodeCount: number, degree = 0): GraphNode => {
   const { nodeType, visualState, label } = classifyNode(nodeId, graph);
   const score = scoreNode(graph.data_map[nodeId]);
   return {
@@ -39,6 +39,7 @@ export const buildGraphNode = (nodeId: string, graph: Graph, nodeCount: number):
     visualState,
     score,
     diameter: getNodeSize(score, nodeCount),
+    degree,
   };
 };
 
@@ -49,10 +50,21 @@ export const processInitialGraphData = (graph: Graph): GraphData => {
   const links: GraphLink[] = [];
   const nodeCount = Object.keys(graph.data_map).length;
 
+  // Count connections per node before building node objects
+  const degreeCounts = new Map<string, number>();
+  const incrementDegree = (id: string) => degreeCounts.set(id, (degreeCounts.get(id) ?? 0) + 1);
+
+  Object.keys(graph.branches).forEach((nodeKey) => {
+    graph.branches[nodeKey].forEach((descendant: BranchNode) => {
+      incrementDegree(nodeKey);
+      incrementDegree(descendant.node.toString());
+    });
+  });
+
   const addNode = (nodeId: string) => {
     if (seenNodes.has(nodeId)) return;
     seenNodes.add(nodeId);
-    nodes.push(buildGraphNode(nodeId, graph, nodeCount));
+    nodes.push(buildGraphNode(nodeId, graph, nodeCount, degreeCounts.get(nodeId) ?? 0));
   };
 
   const addEdge = (source: string, target: BranchNode) => {

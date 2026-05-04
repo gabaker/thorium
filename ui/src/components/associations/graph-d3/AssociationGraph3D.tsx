@@ -16,7 +16,10 @@ import EdgeInfo from '../graph/EdgeInfo';
 import { buildGraphNode, processInitialGraphData } from './data';
 import type { GraphNode, GraphLink, GraphData } from './types';
 
-const buildNodeObject = (renderMode: NodeRenderMode, showLabels: boolean) => {
+// SpriteText extends THREE.Sprite but its type declarations omit inherited properties
+type LabelEntry = { sprite: THREE.Object3D; degree: number; baseScale: THREE.Vector3 };
+
+const buildNodeObject = (renderMode: NodeRenderMode, showLabels: boolean, labelMap?: Map<string, LabelEntry>) => {
   return (node: GraphNode): THREE.Object3D => {
     const group = new THREE.Group();
 
@@ -38,6 +41,12 @@ const buildNodeObject = (renderMode: NodeRenderMode, showLabels: boolean) => {
       // @ts-ignore — depthWrite exists on SpriteMaterial
       labelSprite.material.depthWrite = false;
       group.add(labelSprite);
+      if (labelMap) {
+        const obj = labelSprite as unknown as THREE.Object3D;
+        labelMap.set(node.id, { sprite: obj, degree: node.degree, baseScale: obj.scale.clone() });
+      }
+    } else if (labelMap) {
+      labelMap.delete(node.id);
     }
 
     return group;
@@ -81,7 +90,8 @@ const AssociationGraph3DInner: React.FC<AssociationGraphProps> = ({ initial, inV
   const graphRootRef = useRef<string[]>(['']);
   const graphRef = useRef<Graph>(BlankGraph);
   const graphDataRef = useRef<GraphData>({ nodes: [], links: [] });
-  const focusOnClickRef = useRef(true);
+  const labelSpritesRef = useRef<Map<string, LabelEntry>>(new Map());
+  const animFrameRef = useRef<number>(0);
 
   const [nodeCount, setNodeCount] = useState(0);
   const [graphId, setGraphId] = useState<string>('');
@@ -98,6 +108,7 @@ const AssociationGraph3DInner: React.FC<AssociationGraphProps> = ({ initial, inV
     // edges
     edgeWidth: 1,
     edgeLength: 30,
+    edgeLinkStrength: 0.5,
     edgeOpacity: 0.2,
     arrowLength: 3.5,
     directionalParticles: 0,
@@ -127,7 +138,8 @@ const AssociationGraph3DInner: React.FC<AssociationGraphProps> = ({ initial, inV
       }
       case 'showNodeLabels': {
         if (gi) {
-          gi.nodeThreeObject(buildNodeObject(state.nodeRenderMode, action.state) as any);
+          labelSpritesRef.current.clear();
+          gi.nodeThreeObject(buildNodeObject(state.nodeRenderMode, action.state, labelSpritesRef.current) as any);
           gi.nodeThreeObjectExtend(state.nodeRenderMode === 'spheres');
           gi.refresh();
         }
@@ -142,11 +154,11 @@ const AssociationGraph3DInner: React.FC<AssociationGraphProps> = ({ initial, inV
       case 'filterChildless':
         return { ...state, filterChildless: action.state };
       case 'focusOnClick':
-        focusOnClickRef.current = action.state;
         return { ...state, focusOnClick: action.state };
       case 'nodeRenderMode': {
         if (gi) {
-          gi.nodeThreeObject(buildNodeObject(action.state, state.showNodeLabels) as any);
+          labelSpritesRef.current.clear();
+          gi.nodeThreeObject(buildNodeObject(action.state, state.showNodeLabels, labelSpritesRef.current) as any);
           gi.nodeThreeObjectExtend(action.state === 'spheres');
           gi.refresh();
         }
@@ -165,6 +177,14 @@ const AssociationGraph3DInner: React.FC<AssociationGraphProps> = ({ initial, inV
           gi.d3ReheatSimulation();
         }
         return { ...state, edgeLength: action.state };
+      }
+      case 'edgeLinkStrength': {
+        if (gi) {
+          const linkForce = gi.d3Force('link');
+          if (linkForce && 'strength' in linkForce) (linkForce as any).strength(action.state);
+          gi.d3ReheatSimulation();
+        }
+        return { ...state, edgeLinkStrength: action.state };
       }
       case 'edgeOpacity': {
         if (gi) gi.linkOpacity(action.state);
@@ -244,14 +264,6 @@ const AssociationGraph3DInner: React.FC<AssociationGraphProps> = ({ initial, inV
       state: { kind: 'node', id: node.id, label: node.label },
     });
 
-    if (focusOnClickRef.current && graphInstanceRef.current && node.x !== undefined && node.y !== undefined && node.z !== undefined) {
-      graphInstanceRef.current.cameraPosition(
-        graphInstanceRef.current.cameraPosition(),
-        { x: node.x, y: node.y, z: node.z },
-        1000,
-      );
-    }
-
     const growable = graphRef.current.growable.map((n) => n.toString());
     if (!growable.includes(node.id) || !graphId) return;
 
@@ -288,6 +300,18 @@ const AssociationGraph3DInner: React.FC<AssociationGraphProps> = ({ initial, inV
       });
     }
 
+    // Count degrees for new nodes from incoming branches
+    const degreeCounts = new Map<string, number>();
+    const incDeg = (id: string) => degreeCounts.set(id, (degreeCounts.get(id) ?? 0) + 1);
+    if (data.branches) {
+      Object.keys(data.branches).forEach((branch) => {
+        data.branches[branch].forEach((target: BranchNode) => {
+          incDeg(branch);
+          incDeg(target.node.toString());
+        });
+      });
+    }
+
     const newNodes: GraphNode[] = [];
     const newLinks: GraphLink[] = [];
 
@@ -295,7 +319,7 @@ const AssociationGraph3DInner: React.FC<AssociationGraphProps> = ({ initial, inV
       const totalCount = Object.keys(graphRef.current.data_map).length;
       Object.keys(data.data_map).forEach((newNodeId) => {
         if (!existingNodeIds.has(newNodeId)) {
-          newNodes.push(buildGraphNode(newNodeId, graphRef.current, totalCount));
+          newNodes.push(buildGraphNode(newNodeId, graphRef.current, totalCount, degreeCounts.get(newNodeId) ?? 0));
           existingNodeIds.add(newNodeId);
         }
       });
@@ -318,6 +342,11 @@ const AssociationGraph3DInner: React.FC<AssociationGraphProps> = ({ initial, inV
           }
         });
       });
+      // Update degree on existing nodes that gained new connections
+      existingData.nodes.forEach((n) => {
+        const added = degreeCounts.get(n.id);
+        if (added) n.degree += added;
+      });
     }
 
     if (!graphRef.current.growable.includes(node.id)) {
@@ -336,6 +365,7 @@ const AssociationGraph3DInner: React.FC<AssociationGraphProps> = ({ initial, inV
 
     if (graphInstanceRef.current) {
       graphInstanceRef.current.graphData(updatedData);
+      labelSpritesRef.current.clear();
       graphInstanceRef.current.nodeThreeObject(graphInstanceRef.current.nodeThreeObject());
       graphInstanceRef.current.refresh();
     }
@@ -374,6 +404,7 @@ const AssociationGraph3DInner: React.FC<AssociationGraphProps> = ({ initial, inV
       graphInstanceRef.current._destructor();
       graphInstanceRef.current = null;
     }
+    labelSpritesRef.current.clear();
 
     const graph = new ForceGraph3D(containerRef.current, { controlType: 'orbit' })
       .graphData(graphDataRef.current)
@@ -384,7 +415,7 @@ const AssociationGraph3DInner: React.FC<AssociationGraphProps> = ({ initial, inV
       .nodeVal((node: any) => (node as GraphNode).diameter)
       .nodeColor((node: any) => getNodeColor((node as GraphNode).nodeType, (node as GraphNode).visualState))
       .nodeLabel((node: any) => (node as GraphNode).label)
-      .nodeThreeObject(buildNodeObject(controls.nodeRenderMode, controls.showNodeLabels) as any)
+      .nodeThreeObject(buildNodeObject(controls.nodeRenderMode, controls.showNodeLabels, labelSpritesRef.current) as any)
       .nodeThreeObjectExtend(controls.nodeRenderMode === 'spheres')
       .nodeRelSize(controls.nodeRelSize)
       .nodeOpacity(controls.nodeOpacity)
@@ -425,6 +456,7 @@ const AssociationGraph3DInner: React.FC<AssociationGraphProps> = ({ initial, inV
     const linkForce = graph.d3Force('link');
     if (linkForce && 'distance' in linkForce) {
       (linkForce as any).distance(controls.edgeLength);
+      (linkForce as any).strength(controls.edgeLinkStrength);
     }
 
     graphInstanceRef.current = graph;
@@ -436,7 +468,52 @@ const AssociationGraph3DInner: React.FC<AssociationGraphProps> = ({ initial, inV
       graph.cooldownTicks(200);
     }
 
-    // Double-click on canvas zooms toward the mouse position
+    // Scale labels dynamically based on camera distance and node degree.
+    // High-degree nodes keep visible labels when zoomed out; low-degree labels fade.
+    const updateLabelScaling = () => {
+      const gi = graphInstanceRef.current;
+      if (gi && labelSpritesRef.current.size > 0) {
+        const camPos = gi.cameraPosition();
+        const target = (gi.controls() as any)?.target;
+        if (target) {
+          const dist = Math.hypot(camPos.x - target.x, camPos.y - target.y, camPos.z - target.z);
+
+          let maxDegree = 1;
+          labelSpritesRef.current.forEach((entry) => {
+            if (entry.degree > maxDegree) maxDegree = entry.degree;
+          });
+
+          const distFactor = Math.max(1, dist / 300);
+          const filterStart = 150;
+          const filterEnd = 1000;
+          const filterProgress = Math.min(1, Math.max(0, (dist - filterStart) / (filterEnd - filterStart)));
+          const degreeThreshold = filterProgress * maxDegree * 0.6;
+
+          labelSpritesRef.current.forEach((entry) => {
+            if (entry.degree >= degreeThreshold) {
+              entry.sprite.visible = true;
+              const degreeBoost = 1 + (entry.degree / maxDegree) * 0.5;
+              const s = distFactor * degreeBoost;
+              entry.sprite.scale.set(entry.baseScale.x * s, entry.baseScale.y * s, entry.baseScale.z);
+            } else {
+              entry.sprite.visible = false;
+            }
+          });
+        }
+      }
+      animFrameRef.current = requestAnimationFrame(updateLabelScaling);
+    };
+    animFrameRef.current = requestAnimationFrame(updateLabelScaling);
+
+    // Auto-fit the graph to fill the canvas once the layout settles
+    const fitTimeout = setTimeout(() => {
+      if (graphInstanceRef.current) {
+        graphInstanceRef.current.zoomToFit(1000, 50);
+      }
+    }, 1500);
+
+    // Double-click zooms toward the mouse position using the orbit
+    // target as the distance reference rather than the world origin.
     const container = containerRef.current;
     const handleDblClick = (event: MouseEvent) => {
       const gi = graphInstanceRef.current;
@@ -452,20 +529,24 @@ const AssociationGraph3DInner: React.FC<AssociationGraphProps> = ({ initial, inV
       const raycaster = new THREE.Raycaster();
       raycaster.setFromCamera(mouse, camera);
 
-      const currentPos = gi.cameraPosition();
+      const camPos = gi.cameraPosition();
+      const target = (gi.controls() as any).target;
+      const dist = Math.hypot(camPos.x - target.x, camPos.y - target.y, camPos.z - target.z);
       const dir = raycaster.ray.direction;
-      const dist = Math.hypot(currentPos.x, currentPos.y, currentPos.z);
       const step = dist * 0.4;
 
-      gi.cameraPosition(
-        { x: currentPos.x + dir.x * step, y: currentPos.y + dir.y * step, z: currentPos.z + dir.z * step },
-        { x: currentPos.x + dir.x * dist, y: currentPos.y + dir.y * dist, z: currentPos.z + dir.z * dist },
-        500,
-      );
+      const newPos = { x: camPos.x + dir.x * step, y: camPos.y + dir.y * step, z: camPos.z + dir.z * step };
+      // Place the new lookAt along the ray, at the remaining distance from the new camera position
+      const lookDist = dist - step;
+      const newLookAt = { x: newPos.x + dir.x * lookDist, y: newPos.y + dir.y * lookDist, z: newPos.z + dir.z * lookDist };
+
+      gi.cameraPosition(newPos, newLookAt, 500);
     };
     container.addEventListener('dblclick', handleDblClick);
 
     return () => {
+      cancelAnimationFrame(animFrameRef.current);
+      clearTimeout(fitTimeout);
       container.removeEventListener('dblclick', handleDblClick);
       graph._destructor();
       graphInstanceRef.current = null;
