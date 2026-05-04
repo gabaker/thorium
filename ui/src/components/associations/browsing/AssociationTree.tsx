@@ -10,22 +10,8 @@ import RenderErrorAlert from '../../shared/alerts/RenderErrorAlert';
 import { BranchNode, Graph, TreeNode } from '@models/trees';
 import { getNodeName, formatTagNames } from '../utilities';
 import { classifyNode } from '../graph-d3/data';
+import { getNodeSvg } from '../graph-d3/styles';
 import { useGraphData } from '../data';
-import ArrowSVG from '@assets/icons/arrow_drop_up.svg';
-
-export const ArrowIcon = ArrowSVG.replace('REPLACEME', '64cc66');
-
-const NODE_TYPE_COLORS: Record<string, string> = {
-  file: '#f1d592',
-  repo: '#f03c2e',
-  tag: '#427d8c',
-  device: '#ed9624',
-  vendor: '#8f30b8',
-  collection: '#8f30b8',
-  filesystem: '#8f30b8',
-  folder: '#f1d592',
-  other: '#cacfca',
-};
 
 const NODE_TYPE_LABELS: Record<string, string> = {
   file: 'File',
@@ -84,7 +70,7 @@ const Tree = styled.div`
 
   .treeitem.folder:before {
     content: url(data:image/svg+xml;base64,PHN2ZyB2ZXJzaW9uPSIxLjEiIHhtbG5zPSJodHRwOi8vd3d3LnczLm9yZy8yMDAwL3N2ZyIgeG1sbnM6eGxpbms9Imh0dHA6Ly93d3cudzMub3JnLzE5OTkveGxpbmsiIHg9IjBweCIgeT0iMHB4IiB2aWV3Qm94PSIwIDAgMTYgMTYiIGVuYWJsZS1iYWNrZ3JvdW5kPSJuZXcgMCAwIDE2IDE2IiB4bWw6c3BhY2U9InByZXNlcnZlIj48Zz48Zz48cGF0aCBmaWxsLXJ1bGU9ImV2ZW5vZGQiIGNsaXAtcnVsZT0iZXZlbm9kZCIgZD0iTTQuNjQ2IDEuNjQ2YS41LjUgMCAwIDEgLjcwOCAwbDYgNmEuNS41IDAgMCAxIDAgLjcwOGwtNiA2YS41LjUgMCAwIDEtLjcwOC0uNzA4TDEwLjI5MyA4IDQuNjQ2IDIuMzU0YS41LjUgMCAwIDEgMC0uNzA4eiIgY2xhc3M9InJjdC10cmVlLWl0ZW0tYXJyb3ctcGF0aCI+PC9wYXRoPjwvZz48L2c+PC9zdmc+);
-    background-color: white;
+    background-color: transparent;
     width: 10px;
     display: inline-block;
     z-index: 1;
@@ -131,16 +117,18 @@ const Tree = styled.div`
     height: 80%;
   }
 
-  .node-type-badge {
+  .node-type-icon {
     display: inline-block;
-    font-size: 0.65rem;
-    font-weight: 600;
-    padding: 1px 5px;
-    border-radius: 4px;
+    width: 18px;
+    height: 18px;
     margin-right: 6px;
-    color: #fff;
     vertical-align: middle;
-    letter-spacing: 0.3px;
+    flex-shrink: 0;
+  }
+
+  .node-type-icon img {
+    width: 100%;
+    height: 100%;
   }
 
   .duplicate-indicator {
@@ -441,11 +429,10 @@ const AssociationTreeComponent: React.FC = () => {
                 >
                   {typeInfo && (
                     <span
-                      className="node-type-badge"
-                      style={{ backgroundColor: NODE_TYPE_COLORS[typeInfo.nodeType] ?? NODE_TYPE_COLORS.other }}
-                    >
-                      {NODE_TYPE_LABELS[typeInfo.nodeType] ?? 'Other'}
-                    </span>
+                      className="node-type-icon"
+                      title={NODE_TYPE_LABELS[typeInfo.nodeType] ?? 'Other'}
+                      dangerouslySetInnerHTML={{ __html: getNodeSvg(typeInfo.nodeType, typeInfo.visualState) }}
+                    />
                   )}
                   {item.getItemName()}
                   {isDuplicate && <span className="duplicate-indicator" title="Appears multiple times in graph">loop</span>}

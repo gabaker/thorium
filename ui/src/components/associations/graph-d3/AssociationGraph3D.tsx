@@ -258,7 +258,6 @@ const AssociationGraph3DInner: React.FC<AssociationGraphProps> = () => {
     const gi = graphInstanceRef.current;
     if (!gi) return;
 
-    const existingNodeIds = new Set(prevData.nodes.map((n) => n.id));
     const existingEdgeKeys = new Set(
       prevData.links.map((l) => {
         const src = typeof l.source === 'object' ? (l.source as GraphNode).id : l.source;
@@ -267,17 +266,30 @@ const AssociationGraph3DInner: React.FC<AssociationGraphProps> = () => {
       }),
     );
 
-    const addedNodes = newData.nodes.filter((n) => !existingNodeIds.has(n.id));
     const addedLinks = newData.links.filter((l) => {
       const src = typeof l.source === 'object' ? (l.source as GraphNode).id : l.source;
       const tgt = typeof l.target === 'object' ? (l.target as GraphNode).id : l.target;
       return !existingEdgeKeys.has(`${src}-${tgt}`);
     });
 
-    if (addedNodes.length === 0 && addedLinks.length === 0) return;
+    const newNodeMap = new Map(newData.nodes.map((n) => [n.id, n]));
+    const existingNodeIds = new Set(prevData.nodes.map((n) => n.id));
+    const addedNodes = newData.nodes.filter((n) => !existingNodeIds.has(n.id));
+
+    let stateChanged = false;
+    const mergedNodes = prevData.nodes.map((n) => {
+      const updated = newNodeMap.get(n.id);
+      if (updated && updated.visualState !== n.visualState) {
+        stateChanged = true;
+        return { ...n, visualState: updated.visualState };
+      }
+      return n;
+    });
+
+    if (addedNodes.length === 0 && addedLinks.length === 0 && !stateChanged) return;
 
     const updatedData: GraphData = {
-      nodes: [...prevData.nodes, ...addedNodes],
+      nodes: [...mergedNodes, ...addedNodes],
       links: [...prevData.links, ...addedLinks],
     };
     graphDataRef.current = updatedData;

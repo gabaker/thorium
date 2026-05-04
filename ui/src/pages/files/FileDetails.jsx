@@ -6,7 +6,7 @@ import { FaFileAlt, FaTrash } from 'react-icons/fa';
 
 // project imports
 const AssociationTree = React.lazy(() => import('@components/associations/browsing/AssociationTree'));
-const AssociationGraph = React.lazy(() => import('@components/associations/graph/AssociationGraph'));
+const AssociationGraph3D = React.lazy(() => import('@components/associations/graph-d3/AssociationGraph3D'));
 import { GraphDataProvider } from '@components/associations/data';
 const Results = React.lazy(() => import('@components/pages/files/Results'));
 const RunPipelines = React.lazy(() => import('@components/pages/files/reactions/RunPipelines'));
@@ -227,7 +227,9 @@ const FileDetails = () => {
             />
           </Tab.Pane>
           <Tab.Pane eventKey="related" className="mt-4">
-            <AssociationGraph inView={viewGraph} initial={{ samples: [sha256] }} />
+            <GraphDataProvider initial={{ samples: [sha256] }}>
+              <AssociationGraph3D inView={viewGraph} />
+            </GraphDataProvider>
           </Tab.Pane>
           <Tab.Pane eventKey="tree" className="mt-4">
             <GraphDataProvider initial={{ samples: [sha256] }}>

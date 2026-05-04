@@ -50,7 +50,7 @@ const UploadStatusTable: React.FC<UploadStatusTableProps> = ({
       <Row className="mt-1">
         {Object.entries(uploadStatus).map(([key, value]) => (
           <Fragment key={key}>
-            <Card>
+            <Card className="panel">
               <Row>
                 <Col className="status-dropdown" md={1}>
                   <Button

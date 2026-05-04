@@ -1,9 +1,8 @@
-import React, { useRef } from 'react';
-import { Overlay, Popover } from 'react-bootstrap';
+import React, { useRef, useState } from 'react';
+import { Overlay, Popover, Tooltip } from 'react-bootstrap';
 
 import type { SectionKey } from './types';
 import { ToolbarIconButton, StyledPopover } from './Toolbar.styled';
-import { OverlayTipTop } from '@components/shared/overlay/tips';
 
 interface ToolbarButtonProps {
   sectionKey: SectionKey;
@@ -16,17 +15,28 @@ interface ToolbarButtonProps {
 
 const ToolbarButton: React.FC<ToolbarButtonProps> = ({ sectionKey, activeSection, onToggle, icon, title, children }) => {
   const buttonRef = useRef<HTMLButtonElement>(null);
+  const [hovered, setHovered] = useState(false);
   const isOpen = activeSection === sectionKey;
-
-  const button = (
-    <ToolbarIconButton ref={buttonRef} $active={isOpen} onClick={() => onToggle(sectionKey)}>
-      {icon}
-    </ToolbarIconButton>
-  );
 
   return (
     <>
-      {isOpen ? button : <OverlayTipTop tip={title}>{button}</OverlayTipTop>}
+      <ToolbarIconButton
+        ref={buttonRef}
+        $active={isOpen}
+        onClick={() => onToggle(sectionKey)}
+        onMouseEnter={() => setHovered(true)}
+        onMouseLeave={() => setHovered(false)}
+      >
+        {icon}
+      </ToolbarIconButton>
+
+      <Overlay target={buttonRef.current} show={!isOpen && hovered} placement="top">
+        {(props) => (
+          <Tooltip {...props} id={`tooltip-${sectionKey}`}>
+            {title}
+          </Tooltip>
+        )}
+      </Overlay>
 
       <Overlay target={buttonRef.current} show={isOpen} placement="top">
         {(props) => (
