@@ -9,6 +9,8 @@ interface GraphDataContextType {
   loading: boolean;
   error: string | null;
   growable: Set<string>;
+  /** Read the latest Graph directly from the ref — safe inside async callbacks that outlive a render. */
+  getGraph: () => Graph;
   grow: (nodeId: string) => Promise<void>;
   growMultiple: (nodeIds: string[], limit?: number) => Promise<void>;
   growToDepth: (depth: number) => Promise<void>;
@@ -220,6 +222,8 @@ export const GraphDataProvider: React.FC<GraphDataProviderProps> = ({
     [graphVersion],
   );
 
+  const getGraph = useCallback(() => graphRef.current, []);
+
   const value = useMemo<GraphDataContextType>(
     () => ({
       graph: graphRef.current,
@@ -228,13 +232,14 @@ export const GraphDataProvider: React.FC<GraphDataProviderProps> = ({
       loading,
       error,
       growable,
+      getGraph,
       grow,
       growMultiple,
       growToDepth,
       reload,
     }),
     // eslint-disable-next-line react-hooks/exhaustive-deps
-    [graphId, graphVersion, loading, error, growable, grow, growMultiple, growToDepth, reload],
+    [graphId, graphVersion, loading, error, growable, getGraph, grow, growMultiple, growToDepth, reload],
   );
 
   return <GraphDataContext.Provider value={value}>{children}</GraphDataContext.Provider>;

@@ -302,7 +302,7 @@ function findDuplicateNodeIds(graph: Graph): Set<string> {
 }
 
 const AssociationTreeComponent: React.FC = () => {
-  const { graph, graphVersion, grow, growable } = useGraphData();
+  const { graph, graphVersion, grow, growable, getGraph } = useGraphData();
   const [loadingItemData, setLoadingItemData] = useState<string[]>([]);
   const [loadingItemChildrens, setLoadingItemChildrens] = useState<string[]>([]);
   const [highlightedNodeId, setHighlightedNodeId] = useState<string | null>(null);
@@ -320,31 +320,36 @@ const AssociationTreeComponent: React.FC = () => {
     rootItemId: 'root',
     getItemName: (node) => {
       const nodeId = node.getId();
-      if (graph.data_map && nodeId in graph.data_map) {
-        return getNodeName(graph.data_map[nodeId], 100);
+      const g = getGraph();
+      if (g.data_map && nodeId in g.data_map) {
+        return getNodeName(g.data_map[nodeId], 100);
       }
       return node.getItemData();
     },
     isItemFolder: (node) => {
       const nodeId = node.getId();
-      const branches = graph.branches ? Object.keys(graph.branches) : [];
-      return !!(growable.has(nodeId) || branches.includes(nodeId));
+      const g = getGraph();
+      const branches = g.branches ? Object.keys(g.branches) : [];
+      return !!(g.growable?.includes(nodeId) || branches.includes(nodeId));
     },
     createLoadingItemData: () => 'loading...',
     dataLoader: {
       getItem: (nodeId) => nodeId,
       getChildren: async (nodeId) => {
         if (nodeId == 'root') {
-          return graph.initial;
+          return getGraph().initial;
         }
 
         if (growable.has(nodeId)) {
           await grow(nodeId);
         }
 
+        // Read from getGraph() — not the closure `graph` — so we see
+        // data that was merged by grow() or by the 3D graph's growth.
+        const latest = getGraph();
         const children: string[] = [];
-        if (graph.branches && nodeId in graph.branches) {
-          graph.branches[nodeId].forEach((node: BranchNode) => children.push(node.node));
+        if (latest.branches && nodeId in latest.branches) {
+          latest.branches[nodeId].forEach((node: BranchNode) => children.push(node.node));
         }
         return children;
       },
@@ -456,9 +461,10 @@ const AssociationTreeComponent: React.FC = () => {
 };
 
 export const AssociationTree: React.FC = () => {
+  const { graph } = useGraphData();
   return (
     <ErrorBoundary fallback={<RenderErrorAlert page={false} />}>
-      <AssociationTreeComponent />
+      {graph.id ? <AssociationTreeComponent key={graph.id} /> : <Spinner animation="border" />}
     </ErrorBoundary>
   );
 };

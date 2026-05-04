@@ -3,6 +3,7 @@ import { Overlay, Popover } from 'react-bootstrap';
 
 import type { SectionKey } from './types';
 import { ToolbarIconButton, StyledPopover } from './Toolbar.styled';
+import { OverlayTipTop } from '@components/shared/overlay/tips';
 
 interface ToolbarButtonProps {
   sectionKey: SectionKey;
@@ -13,18 +14,19 @@ interface ToolbarButtonProps {
   children: React.ReactNode;
 }
 
-// Each button owns a ref for Overlay positioning; visibility is driven
-// entirely by the parent's activeSection state so clicking between
-// buttons works without rootClose swallowing events.
 const ToolbarButton: React.FC<ToolbarButtonProps> = ({ sectionKey, activeSection, onToggle, icon, title, children }) => {
   const buttonRef = useRef<HTMLButtonElement>(null);
   const isOpen = activeSection === sectionKey;
 
+  const button = (
+    <ToolbarIconButton ref={buttonRef} $active={isOpen} onClick={() => onToggle(sectionKey)}>
+      {icon}
+    </ToolbarIconButton>
+  );
+
   return (
     <>
-      <ToolbarIconButton ref={buttonRef} $active={isOpen} onClick={() => onToggle(sectionKey)} title={title}>
-        {icon}
-      </ToolbarIconButton>
+      {isOpen ? button : <OverlayTipTop tip={title}>{button}</OverlayTipTop>}
 
       <Overlay target={buttonRef.current} show={isOpen} placement="top">
         {(props) => (

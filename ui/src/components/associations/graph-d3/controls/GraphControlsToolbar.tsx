@@ -6,6 +6,7 @@ import type { ForceGraph3DInstance } from '3d-force-graph';
 
 import type { GraphControls, DisplayAction, SectionKey } from './types';
 import { ToolbarContainer, ToolbarIconButton, NodeCount } from './Toolbar.styled';
+import { OverlayTipTop } from '@components/shared/overlay/tips';
 import ToolbarButton from './ToolbarButton';
 import GraphSection from './GraphSection';
 import ForcesSection from './ForcesSection';
@@ -59,9 +60,11 @@ const GraphControlsToolbar: React.FC<GraphControlsToolbarProps> = ({ graphId, co
 
   return (
     <ToolbarContainer ref={toolbarRef}>
-      <ToolbarIconButton $active={isOpen} onClick={handleGearToggle} title="Toggle controls">
-        <FaCog size={16} />
-      </ToolbarIconButton>
+      <OverlayTipTop tip="Controls">
+        <ToolbarIconButton $active={isOpen} onClick={handleGearToggle}>
+          <FaCog size={16} />
+        </ToolbarIconButton>
+      </OverlayTipTop>
 
       {isOpen && (
         <>
