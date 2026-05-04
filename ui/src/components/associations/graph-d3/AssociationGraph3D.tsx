@@ -13,7 +13,7 @@ import { getNodeColor, getEdgeColor, getNodeSvg, svgToTexture } from './styles';
 import { GraphControlsToolbar, DisplayAction, GraphControls, SelectedElement, NodeRenderMode, DagMode } from './controls';
 import NodeInfo from '../graph/NodeInfo';
 import EdgeInfo from '../graph/EdgeInfo';
-import { buildGraphNode, processInitialGraphData } from './data';
+import { buildGraphNode, processInitialGraphData, computeDistancesFromInitial } from './data';
 import type { GraphNode, GraphLink, GraphData } from './types';
 
 // SpriteText extends THREE.Sprite but its type declarations omit inherited properties
@@ -258,18 +258,7 @@ const AssociationGraph3DInner: React.FC<AssociationGraphProps> = ({ initial, inV
     }
   }
 
-  const handleNodeSelect = async (node: GraphNode) => {
-    updateControls({
-      type: 'selected',
-      state: { kind: 'node', id: node.id, label: node.label },
-    });
-
-    const growable = graphRef.current.growable.map((n) => n.toString());
-    if (!growable.includes(node.id) || !graphId) return;
-
-    const data = await growTree(graphId, [node.id], console.log);
-    if (!data) return;
-
+  const mergeGrowthData = (data: Graph, grownNodeIds: string[]) => {
     const existingData = graphDataRef.current;
     const existingNodeIds = new Set(existingData.nodes.map((n) => n.id));
     const existingEdgeKeys = new Set(
@@ -280,14 +269,15 @@ const AssociationGraph3DInner: React.FC<AssociationGraphProps> = ({ initial, inV
       }),
     );
 
-    // Update growable list BEFORE building nodes so classifyNode sees correct visual states
+    const oldGrowable = graphRef.current.growable.map((n) => n.toString());
+    const grownSet = new Set(grownNodeIds);
+    const notGrown = oldGrowable.filter((g) => !grownSet.has(g));
     if (data.growable) {
-      graphRef.current.growable = [...data.growable, ...growable.filter((g) => g !== node.id)];
+      graphRef.current.growable = [...data.growable.map((n) => n.toString()), ...notGrown];
     } else {
-      graphRef.current.growable = growable.filter((g) => g !== node.id);
+      graphRef.current.growable = notGrown;
     }
 
-    // Update data_map before building nodes so classifyNode can read node data
     if (data.data_map) {
       Object.keys(data.data_map).forEach((newNodeId) => {
         graphRef.current.data_map[newNodeId] = data.data_map[newNodeId];
@@ -300,7 +290,6 @@ const AssociationGraph3DInner: React.FC<AssociationGraphProps> = ({ initial, inV
       });
     }
 
-    // Count degrees for new nodes from incoming branches
     const degreeCounts = new Map<string, number>();
     const incDeg = (id: string) => degreeCounts.set(id, (degreeCounts.get(id) ?? 0) + 1);
     if (data.branches) {
@@ -342,19 +331,21 @@ const AssociationGraph3DInner: React.FC<AssociationGraphProps> = ({ initial, inV
           }
         });
       });
-      // Update degree on existing nodes that gained new connections
       existingData.nodes.forEach((n) => {
         const added = degreeCounts.get(n.id);
         if (added) n.degree += added;
       });
     }
 
-    if (!graphRef.current.growable.includes(node.id)) {
-      const existingNode = existingData.nodes.find((n) => n.id === node.id);
-      if (existingNode && existingNode.visualState === 'growable') {
-        existingNode.visualState = 'basic';
+    const newGrowableSet = new Set(graphRef.current.growable.map((n) => n.toString()));
+    grownNodeIds.forEach((nodeId) => {
+      if (!newGrowableSet.has(nodeId)) {
+        const existingNode = existingData.nodes.find((n) => n.id === nodeId);
+        if (existingNode && existingNode.visualState === 'growable') {
+          existingNode.visualState = 'basic';
+        }
       }
-    }
+    });
 
     const updatedData: GraphData = {
       nodes: [...existingData.nodes, ...newNodes],
@@ -371,6 +362,19 @@ const AssociationGraph3DInner: React.FC<AssociationGraphProps> = ({ initial, inV
     }
   };
 
+  const handleNodeSelect = async (node: GraphNode) => {
+    updateControls({
+      type: 'selected',
+      state: { kind: 'node', id: node.id, label: node.label },
+    });
+
+    const growable = graphRef.current.growable.map((n) => n.toString());
+    if (!growable.includes(node.id) || !graphId) return;
+
+    const data = await growTree(graphId, [node.id], console.log);
+    if (data) mergeGrowthData(data, [node.id]);
+  };
+
   const handleEdgeSelect = (link: GraphLink) => {
     const src = typeof link.source === 'object' ? (link.source as GraphNode).id : link.source;
     const tgt = typeof link.target === 'object' ? (link.target as GraphNode).id : link.target;
@@ -383,7 +387,7 @@ const AssociationGraph3DInner: React.FC<AssociationGraphProps> = ({ initial, inV
   useEffect(() => {
     updateControls({ type: 'selected', state: null });
 
-    getInitialTree(initial, controls.filterChildless, controls.depth, console.log).then((data) => {
+    getInitialTree(initial, controls.filterChildless, 1, console.log).then((data) => {
       if (data) {
         setGraphId(data.id);
         if (data.initial.length > 0) {
@@ -395,7 +399,7 @@ const AssociationGraph3DInner: React.FC<AssociationGraphProps> = ({ initial, inV
         setNodeCount(graphData.nodes.length);
       }
     });
-  }, [controls.filterChildless, controls.depth, initial]);
+  }, [controls.filterChildless, initial]);
 
   useEffect(() => {
     if (!containerRef.current || !graphId) return;
@@ -560,6 +564,40 @@ const AssociationGraph3DInner: React.FC<AssociationGraphProps> = ({ initial, inV
         .height(containerRef.current.clientHeight || window.innerHeight * 0.9);
     }
   }, [inView]);
+
+  // Grow frontier nodes incrementally when depth increases
+  useEffect(() => {
+    if (!graphId || controls.depth <= 1) return;
+    let aborted = false;
+
+    const growToDepth = async () => {
+      const distances = computeDistancesFromInitial(graphRef.current);
+      const growable = graphRef.current.growable.map((n) => n.toString());
+
+      const groups = new Map<number, string[]>();
+      for (const nodeId of growable) {
+        const dist = distances.get(nodeId);
+        if (dist !== undefined && dist < controls.depth) {
+          const limit = controls.depth - dist;
+          if (!groups.has(limit)) groups.set(limit, []);
+          groups.get(limit)!.push(nodeId);
+        }
+      }
+      if (groups.size === 0) return;
+
+      for (const [limit, nodes] of groups) {
+        if (aborted) return;
+        const data = await growTree(graphId, nodes, console.log, limit);
+        if (aborted) return;
+        if (data) mergeGrowthData(data, nodes);
+      }
+    };
+
+    growToDepth();
+    return () => {
+      aborted = true;
+    };
+  }, [controls.depth, graphId]);
 
   return (
     <GraphWindow>

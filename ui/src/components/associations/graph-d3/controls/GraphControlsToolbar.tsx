@@ -1,5 +1,6 @@
 import React, { useCallback, useEffect, useRef, useState } from 'react';
-import { FaCog, FaProjectDiagram, FaBolt, FaCircle, FaCamera, FaArrowRight } from 'react-icons/fa';
+import { FaCog, FaProjectDiagram, FaBolt, FaCamera, FaArrowRight } from 'react-icons/fa';
+import { FaHexagonNodes } from 'react-icons/fa6';
 import type { ForceGraph3DInstance } from '3d-force-graph';
 
 import type { GraphControls, DisplayAction, SectionKey } from './types';
@@ -70,7 +71,7 @@ const GraphControlsToolbar: React.FC<GraphControlsToolbarProps> = ({ graphId, co
             <ForcesSection controls={controls} updateControls={updateControls} />
           </ToolbarButton>
 
-          <ToolbarButton sectionKey="nodes" activeSection={activeSection} onToggle={handleToggleSection} icon={<FaCircle size={14} />} title="Nodes">
+          <ToolbarButton sectionKey="nodes" activeSection={activeSection} onToggle={handleToggleSection} icon={<FaHexagonNodes size={14} />} title="Nodes">
             <NodesSection controls={controls} updateControls={updateControls} />
           </ToolbarButton>
 
