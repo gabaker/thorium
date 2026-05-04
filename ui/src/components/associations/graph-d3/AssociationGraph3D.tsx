@@ -10,7 +10,7 @@ import RenderErrorAlert from '@components/shared/alerts/RenderErrorAlert';
 import { getInitialTree, growTree } from '@thorpi/trees';
 import { getEdgeLabel } from '../utilities';
 import { getNodeColor, getEdgeColor, getNodeSvg, svgToTexture } from './styles';
-import { GraphControlsPanel, DisplayAction, GraphControls, SelectedElement, NodeRenderMode, DagMode } from './GraphControls';
+import { GraphControlsToolbar, DisplayAction, GraphControls, SelectedElement, NodeRenderMode, DagMode } from './controls';
 import NodeInfo from '../graph/NodeInfo';
 import EdgeInfo from '../graph/EdgeInfo';
 import { buildGraphNode, processInitialGraphData } from './data';
@@ -268,14 +268,33 @@ const AssociationGraph3DInner: React.FC<AssociationGraphProps> = ({ initial, inV
       }),
     );
 
+    // Update growable list BEFORE building nodes so classifyNode sees correct visual states
+    if (data.growable) {
+      graphRef.current.growable = [...data.growable, ...growable.filter((g) => g !== node.id)];
+    } else {
+      graphRef.current.growable = growable.filter((g) => g !== node.id);
+    }
+
+    // Update data_map before building nodes so classifyNode can read node data
+    if (data.data_map) {
+      Object.keys(data.data_map).forEach((newNodeId) => {
+        graphRef.current.data_map[newNodeId] = data.data_map[newNodeId];
+      });
+    }
+
+    if (data.branches) {
+      Object.keys(data.branches).forEach((branch) => {
+        graphRef.current.branches[branch] = data.branches[branch];
+      });
+    }
+
     const newNodes: GraphNode[] = [];
     const newLinks: GraphLink[] = [];
 
     if (data.data_map) {
+      const totalCount = Object.keys(graphRef.current.data_map).length;
       Object.keys(data.data_map).forEach((newNodeId) => {
-        graphRef.current.data_map[newNodeId] = data.data_map[newNodeId];
         if (!existingNodeIds.has(newNodeId)) {
-          const totalCount = Object.keys(graphRef.current.data_map).length;
           newNodes.push(buildGraphNode(newNodeId, graphRef.current, totalCount));
           existingNodeIds.add(newNodeId);
         }
@@ -284,7 +303,6 @@ const AssociationGraph3DInner: React.FC<AssociationGraphProps> = ({ initial, inV
 
     if (data.branches) {
       Object.keys(data.branches).forEach((branch) => {
-        graphRef.current.branches[branch] = data.branches[branch];
         data.branches[branch].forEach((target: BranchNode) => {
           const targetNode = target.direction === Direction.To ? target.node.toString() : branch;
           const sourceNode = target.direction === Direction.To ? branch : target.node.toString();
@@ -300,13 +318,6 @@ const AssociationGraph3DInner: React.FC<AssociationGraphProps> = ({ initial, inV
           }
         });
       });
-    }
-
-    if (data.growable) {
-      const newGrowable = [...data.growable, ...growable.filter((g) => g !== node.id)];
-      graphRef.current.growable = newGrowable;
-    } else {
-      graphRef.current.growable = growable.filter((g) => g !== node.id);
     }
 
     if (!graphRef.current.growable.includes(node.id)) {
@@ -442,8 +453,13 @@ const AssociationGraph3DInner: React.FC<AssociationGraphProps> = ({ initial, inV
   return (
     <GraphWindow>
       <GraphDiv ref={containerRef} />
-      <div className="ps-4 ms-2">Node Count: {nodeCount}</div>
-      <GraphControlsPanel graphId={graphId} controls={controls} updateControls={updateControls} graphInstance={graphInstanceRef.current} />
+      <GraphControlsToolbar
+        graphId={graphId}
+        controls={controls}
+        updateControls={updateControls}
+        graphInstance={graphInstanceRef.current}
+        nodeCount={nodeCount}
+      />
       <DataPreview>
         {controls.selectedElement?.kind === 'node' && controls.selectedElement.id !== '' && (
           <NodeInfo node={graphRef.current.data_map[controls.selectedElement.id]} />
