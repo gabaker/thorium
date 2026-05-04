@@ -72,20 +72,6 @@ const GraphControlsToolbar: React.FC<GraphControlsToolbarProps> = ({
 
       {isOpen && (
         <>
-          <OverlayTipTop tip="Depth">
-            <ToolbarSelect
-              size="sm"
-              value={controls.depth}
-              onChange={(e) => updateControls({ type: 'depth', state: parseInt(e.target.value, 10) })}
-            >
-              {Array.from({ length: 10 }, (_, i) => i + 1).map((d) => (
-                <option key={d} value={d}>
-                  {d}
-                </option>
-              ))}
-            </ToolbarSelect>
-          </OverlayTipTop>
-
           <ToolbarButton
             sectionKey="graph"
             activeSection={activeSection}
@@ -150,6 +136,20 @@ const GraphControlsToolbar: React.FC<GraphControlsToolbarProps> = ({
               graphInstance={graphInstance}
             />
           </ToolbarButton>
+
+          <OverlayTipTop tip="Depth">
+            <ToolbarSelect
+              size="sm"
+              value={controls.depth}
+              onChange={(e) => updateControls({ type: 'depth', state: parseInt(e.target.value, 10) })}
+            >
+              {Array.from({ length: 10 }, (_, i) => i + 1).map((d) => (
+                <option key={d} value={d}>
+                  {d}
+                </option>
+              ))}
+            </ToolbarSelect>
+          </OverlayTipTop>
         </>
       )}
 

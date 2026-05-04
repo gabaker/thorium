@@ -8,7 +8,13 @@ import type { GraphNode } from '../types';
 
 export type LabelEntry = { sprite: THREE.Object3D; degree: number; isInitial: boolean; baseScale: THREE.Vector3 };
 
-export const buildNodeObject = (renderMode: NodeRenderMode, showLabels: boolean, labelMap?: Map<string, LabelEntry>) => {
+export const buildNodeObject = (
+  renderMode: NodeRenderMode,
+  showLabels: boolean,
+  nodeRelSize: number,
+  labelMap?: Map<string, LabelEntry>,
+) => {
+  const sizeFactor = nodeRelSize / 4;
   return (node: GraphNode): THREE.Object3D => {
     const group = new THREE.Group();
 
@@ -17,7 +23,7 @@ export const buildNodeObject = (renderMode: NodeRenderMode, showLabels: boolean,
       const texture = svgToTexture(svgString, 64);
       const spriteMaterial = new THREE.SpriteMaterial({ map: texture, transparent: true });
       const sprite = new THREE.Sprite(spriteMaterial);
-      const scale = Math.max(6, node.diameter / 3);
+      const scale = Math.max(6, node.diameter / 3) * sizeFactor;
       sprite.scale.set(scale, scale, 1);
       group.add(sprite);
     }
@@ -26,7 +32,7 @@ export const buildNodeObject = (renderMode: NodeRenderMode, showLabels: boolean,
       const labelSprite = new SpriteText(node.label);
       labelSprite.color = getNodeColor(node.nodeType, node.visualState);
       labelSprite.textHeight = 3;
-      (labelSprite as any).position.y = renderMode === 'icons' ? -(node.diameter / 5 + 4) : -(node.diameter / 5 + 2);
+      (labelSprite as any).position.y = renderMode === 'icons' ? -(node.diameter / 5 + 4) * sizeFactor : -(node.diameter / 5 + 2);
       // @ts-ignore — depthWrite exists on SpriteMaterial
       labelSprite.material.depthWrite = false;
       group.add(labelSprite);
@@ -56,7 +62,7 @@ export const createControlsReducer = (
       case 'showNodeLabels': {
         if (gi) {
           labelSpritesRef.current.clear();
-          gi.nodeThreeObject(buildNodeObject(state.nodeRenderMode, action.state, labelSpritesRef.current) as any);
+          gi.nodeThreeObject(buildNodeObject(state.nodeRenderMode, action.state, state.nodeRelSize, labelSpritesRef.current) as any);
           gi.nodeThreeObjectExtend(state.nodeRenderMode === 'spheres');
           gi.refresh();
         }
@@ -75,7 +81,7 @@ export const createControlsReducer = (
       case 'nodeRenderMode': {
         if (gi) {
           labelSpritesRef.current.clear();
-          gi.nodeThreeObject(buildNodeObject(action.state, state.showNodeLabels, labelSpritesRef.current) as any);
+          gi.nodeThreeObject(buildNodeObject(action.state, state.showNodeLabels, state.nodeRelSize, labelSpritesRef.current) as any);
           gi.nodeThreeObjectExtend(action.state === 'spheres');
           gi.refresh();
         }
@@ -118,7 +124,14 @@ export const createControlsReducer = (
         return { ...state, particleSpeed: action.state };
       }
       case 'nodeRelSize': {
-        if (gi) gi.nodeRelSize(action.state);
+        if (gi) {
+          gi.nodeRelSize(action.state);
+          if (state.nodeRenderMode === 'icons') {
+            labelSpritesRef.current.clear();
+            gi.nodeThreeObject(buildNodeObject(state.nodeRenderMode, state.showNodeLabels, action.state, labelSpritesRef.current) as any);
+            gi.refresh();
+          }
+        }
         return { ...state, nodeRelSize: action.state };
       }
       case 'nodeOpacity': {

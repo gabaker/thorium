@@ -126,7 +126,7 @@ const AssociationGraph3DInner: React.FC<AssociationGraphProps> = () => {
       .nodeVal((node: any) => (node as GraphNode).diameter)
       .nodeColor((node: any) => getNodeColor((node as GraphNode).nodeType, (node as GraphNode).visualState))
       .nodeLabel((node: any) => (node as GraphNode).label)
-      .nodeThreeObject(buildNodeObject(controls.nodeRenderMode, controls.showNodeLabels, labelSpritesRef.current) as any)
+      .nodeThreeObject(buildNodeObject(controls.nodeRenderMode, controls.showNodeLabels, controls.nodeRelSize, labelSpritesRef.current) as any)
       .nodeThreeObjectExtend(controls.nodeRenderMode === 'spheres')
       .nodeRelSize(controls.nodeRelSize)
       .nodeOpacity(controls.nodeOpacity)

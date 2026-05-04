@@ -9,7 +9,7 @@ export const applyGrowthToInstance = (
   newData: GraphData,
   graphInstanceRef: React.RefObject<ForceGraph3DInstance | null>,
   labelSpritesRef: React.RefObject<Map<string, LabelEntry>>,
-  graphDataRef: React.MutableRefObject<GraphData>,
+  graphDataRef: React.RefObject<GraphData>,
   setNodeCount: (count: number) => void,
 ) => {
   const gi = graphInstanceRef.current;
