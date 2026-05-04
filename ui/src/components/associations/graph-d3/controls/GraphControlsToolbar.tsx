@@ -1,4 +1,5 @@
 import React, { useCallback, useEffect, useRef, useState } from 'react';
+import { Spinner } from 'react-bootstrap';
 import { FaCog, FaProjectDiagram, FaBolt, FaCamera, FaArrowRight } from 'react-icons/fa';
 import { FaHexagonNodes } from 'react-icons/fa6';
 import type { ForceGraph3DInstance } from '3d-force-graph';
@@ -18,9 +19,10 @@ interface GraphControlsToolbarProps {
   updateControls: React.ActionDispatch<[action: DisplayAction]>;
   graphInstance: ForceGraph3DInstance | null;
   nodeCount: number;
+  loading: boolean;
 }
 
-const GraphControlsToolbar: React.FC<GraphControlsToolbarProps> = ({ graphId, controls, updateControls, graphInstance, nodeCount }) => {
+const GraphControlsToolbar: React.FC<GraphControlsToolbarProps> = ({ graphId, controls, updateControls, graphInstance, nodeCount, loading }) => {
   const [isOpen, setIsOpen] = useState(false);
   const [activeSection, setActiveSection] = useState<SectionKey | null>(null);
   const toolbarRef = useRef<HTMLDivElement>(null);
@@ -85,7 +87,10 @@ const GraphControlsToolbar: React.FC<GraphControlsToolbarProps> = ({ graphId, co
         </>
       )}
 
-      <NodeCount>Nodes: {nodeCount}</NodeCount>
+      <NodeCount>
+        {loading && <Spinner animation="border" size="sm" variant="secondary" style={{ width: 12, height: 12, marginRight: 6, borderWidth: 2 }} />}
+        Nodes: {nodeCount}
+      </NodeCount>
     </ToolbarContainer>
   );
 };

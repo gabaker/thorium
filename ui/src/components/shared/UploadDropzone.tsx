@@ -5,7 +5,7 @@ import { useDropzone } from 'react-dropzone';
 import Subtitle from '@components/shared/titles/Subtitle';
 
 interface DropzoneProperties {
-  width: string; // width of dropzone area
+  width?: string; // width of dropzone area
   onChange: (files: any[]) => void;
   onError?: (errors: string[]) => void;
   selectedFiles: any[];

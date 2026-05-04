@@ -1,5 +1,6 @@
 import React, { useEffect, useReducer, useRef, useState } from 'react';
 import { ErrorBoundary } from 'react-error-boundary';
+import { Spinner } from 'react-bootstrap';
 import ForceGraph3D, { ForceGraph3DInstance } from '3d-force-graph';
 import * as THREE from 'three';
 import SpriteText from 'three-spritetext';
@@ -53,14 +54,24 @@ const buildNodeObject = (renderMode: NodeRenderMode, showLabels: boolean, labelM
 const GraphWindow = styled.div`
   position: relative;
   background-color: var(--thorium-panel-bg);
+  overflow: hidden;
 `;
 
 const GraphDiv = styled.div`
   z-index: 200;
-  overflow: visible;
+  overflow: hidden;
   min-height: 90vh;
   max-height: 90vh;
-  padding-top: 1rem;
+`;
+
+const LoadingOverlay = styled.div`
+  position: absolute;
+  inset: 0;
+  z-index: 400;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  pointer-events: none;
 `;
 
 const DataPreview = styled.div`
@@ -81,7 +92,7 @@ interface AssociationGraphProps {
 }
 
 const AssociationGraph3DInner: React.FC<AssociationGraphProps> = () => {
-  const { graph, graphId, graphVersion, grow, growToDepth, growable } = useGraphData();
+  const { graph, graphId, graphVersion, loading, grow, growToDepth, growable } = useGraphData();
 
   const containerRef = useRef<HTMLDivElement>(null);
   const graphInstanceRef = useRef<ForceGraph3DInstance | null>(null);
@@ -506,12 +517,18 @@ const AssociationGraph3DInner: React.FC<AssociationGraphProps> = () => {
   return (
     <GraphWindow>
       <GraphDiv ref={containerRef} />
+      {loading && (
+        <LoadingOverlay>
+          <Spinner animation="border" variant="secondary" />
+        </LoadingOverlay>
+      )}
       <GraphControlsToolbar
         graphId={graphId}
         controls={controls}
         updateControls={updateControls}
         graphInstance={graphInstanceRef.current}
         nodeCount={nodeCount}
+        loading={loading}
       />
       <DataPreview>
         {controls.selectedElement?.kind === 'node' && controls.selectedElement.id !== '' && (

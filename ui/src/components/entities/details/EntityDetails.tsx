@@ -7,7 +7,7 @@ import styled from 'styled-components';
 
 // project imports
 const AssociationTree = React.lazy(() => import('../../associations/browsing/AssociationTree'));
-const AssociationGraph = React.lazy(() => import('../../associations/graph/AssociationGraph'));
+const AssociationGraph3D = React.lazy(() => import('../../associations/graph-d3/AssociationGraph3D'));
 import { GraphDataProvider } from '../../associations/data';
 import { buildUpdateEntityForm } from '../utilities';
 import InfoHeader from '../shared/InfoHeader';
@@ -402,16 +402,16 @@ const EntityDetails: React.FC<EntityDetailsProps> = ({ getEntityDetails, blank, 
           </Alert>
         )}
         <EntityInfo />
-        <Card className="panel mt-4">
-          <Card.Body>
-            <div className="d-flex justify-content-center">
-              <Subtitle>Graph</Subtitle>
-            </div>
-            {entityID && <AssociationGraph inView initial={associationInitial} />}
-          </Card.Body>
-        </Card>
         {entityID && (
           <GraphDataProvider initial={associationInitial}>
+            <Card className="panel mt-4">
+              <Card.Body>
+                <div className="d-flex justify-content-center">
+                  <Subtitle>Graph</Subtitle>
+                </div>
+                <AssociationGraph3D inView />
+              </Card.Body>
+            </Card>
             <Card className="panel mt-4">
               <Card.Body>
                 <div className="text-center">

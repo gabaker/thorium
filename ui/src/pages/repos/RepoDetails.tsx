@@ -6,7 +6,7 @@ import styled from 'styled-components';
 
 // project imports
 const AssociationTree = React.lazy(() => import('../../components/associations/browsing/AssociationTree'));
-const AssociationGraph = React.lazy(() => import('../../components/associations/graph/AssociationGraph'));
+const AssociationGraph3D = React.lazy(() => import('../../components/associations/graph-d3/AssociationGraph3D'));
 import { GraphDataProvider } from '../../components/associations/data';
 import Page from '@components/pages/Page';
 import Subtitle from '@components/shared/titles/Subtitle';
@@ -57,13 +57,13 @@ const RepoDetails = () => {
     <RepoContext.Provider value={{ repo }}>
       <Page className="full-min-width" title={`Repo · ${repo}`}>
         <RepoHeader />
-        <Card className="panel">
-          <Card.Body>
-            <Subtitle className="text-center">Association Graph</Subtitle>
-            <AssociationGraph inView initial={seed} />
-          </Card.Body>
-        </Card>
         <GraphDataProvider initial={seed}>
+          <Card className="panel">
+            <Card.Body>
+              <Subtitle className="text-center">Association Graph</Subtitle>
+              <AssociationGraph3D inView />
+            </Card.Body>
+          </Card>
           <Card className="panel">
             <Card.Body>
               <Subtitle className="text-center">Association Tree</Subtitle>
