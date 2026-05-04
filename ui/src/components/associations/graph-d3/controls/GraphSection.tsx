@@ -1,11 +1,10 @@
 import React from 'react';
 import { Button, Form, Dropdown, ButtonGroup } from 'react-bootstrap';
 
-import { exportJPEG, exportPNG } from '../export';
 import type { GraphSectionProps } from './types';
 import { PopoverBody } from './Toolbar.styled';
 
-const GraphSection: React.FC<GraphSectionProps> = ({ graphId, controls, updateControls, graphInstance }) => (
+const GraphSection: React.FC<GraphSectionProps> = ({ controls, updateControls, graphInstance }) => (
   <PopoverBody>
     <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
       <Form.Label htmlFor="form-select-depth" style={{ margin: 0, fontSize: '0.8rem', whiteSpace: 'nowrap' }}>
@@ -45,16 +44,6 @@ const GraphSection: React.FC<GraphSectionProps> = ({ graphId, controls, updateCo
         Fit All
       </Button>
     </div>
-
-    <Dropdown as={ButtonGroup} style={{ width: '100%' }}>
-      <Dropdown.Toggle className="secondary-btn" variant="" size="sm" id="download-dropdown" style={{ width: '100%' }}>
-        Download
-      </Dropdown.Toggle>
-      <Dropdown.Menu>
-        <Dropdown.Item onClick={() => exportPNG(graphId, graphInstance)}>PNG</Dropdown.Item>
-        <Dropdown.Item onClick={() => exportJPEG(graphId, graphInstance)}>JPEG</Dropdown.Item>
-      </Dropdown.Menu>
-    </Dropdown>
   </PopoverBody>
 );
 

@@ -2,7 +2,7 @@ import React, { useRef } from 'react';
 import { Overlay, Popover } from 'react-bootstrap';
 
 import type { SectionKey } from './types';
-import { ToolbarIconButton } from './Toolbar.styled';
+import { ToolbarIconButton, StyledPopover } from './Toolbar.styled';
 
 interface ToolbarButtonProps {
   sectionKey: SectionKey;
@@ -13,6 +13,9 @@ interface ToolbarButtonProps {
   children: React.ReactNode;
 }
 
+// Each button owns a ref for Overlay positioning; visibility is driven
+// entirely by the parent's activeSection state so clicking between
+// buttons works without rootClose swallowing events.
 const ToolbarButton: React.FC<ToolbarButtonProps> = ({ sectionKey, activeSection, onToggle, icon, title, children }) => {
   const buttonRef = useRef<HTMLButtonElement>(null);
   const isOpen = activeSection === sectionKey;
@@ -23,12 +26,12 @@ const ToolbarButton: React.FC<ToolbarButtonProps> = ({ sectionKey, activeSection
         {icon}
       </ToolbarIconButton>
 
-      <Overlay target={buttonRef.current} show={isOpen} placement="top" rootClose onHide={() => onToggle(sectionKey)}>
+      <Overlay target={buttonRef.current} show={isOpen} placement="top">
         {(props) => (
-          <Popover {...props} id={`popover-${sectionKey}`} className="panel">
+          <StyledPopover {...props} id={`popover-${sectionKey}`}>
             <Popover.Header as="h6">{title}</Popover.Header>
             <Popover.Body>{children}</Popover.Body>
-          </Popover>
+          </StyledPopover>
         )}
       </Overlay>
     </>

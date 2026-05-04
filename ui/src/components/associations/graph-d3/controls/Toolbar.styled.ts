@@ -1,4 +1,5 @@
 import styled, { css } from 'styled-components';
+import { Popover } from 'react-bootstrap';
 
 export const ToolbarContainer = styled.div`
   position: absolute;
@@ -41,6 +42,20 @@ export const NodeCount = styled.span`
   padding: 0 8px;
   white-space: nowrap;
   user-select: none;
+`;
+
+export const StyledPopover = styled(Popover)`
+  --bs-popover-bg: var(--thorium-secondary-panel-bg);
+  --bs-popover-border-color: var(--thorium-panel-border);
+  --bs-popover-header-bg: var(--thorium-highlight-panel-bg);
+  --bs-popover-header-color: var(--thorium-text);
+  --bs-popover-body-color: var(--thorium-text);
+  --bs-popover-arrow-border: var(--thorium-panel-border);
+
+  .popover-header {
+    color: var(--thorium-text);
+    border-bottom: 1px solid var(--thorium-panel-border);
+  }
 `;
 
 export const PopoverBody = styled.div`

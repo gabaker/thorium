@@ -1,5 +1,5 @@
-import React, { useState } from 'react';
-import { FaCog, FaProjectDiagram, FaBolt, FaCircle } from 'react-icons/fa';
+import React, { useCallback, useEffect, useRef, useState } from 'react';
+import { FaCog, FaProjectDiagram, FaBolt, FaCircle, FaCamera } from 'react-icons/fa';
 import { FaGripLines } from 'react-icons/fa6';
 import type { ForceGraph3DInstance } from '3d-force-graph';
 
@@ -10,6 +10,7 @@ import GraphSection from './GraphSection';
 import ForcesSection from './ForcesSection';
 import NodesSection from './NodesSection';
 import EdgesSection from './EdgesSection';
+import ExportSection from './ExportSection';
 
 interface GraphControlsToolbarProps {
   graphId: string;
@@ -22,6 +23,7 @@ interface GraphControlsToolbarProps {
 const GraphControlsToolbar: React.FC<GraphControlsToolbarProps> = ({ graphId, controls, updateControls, graphInstance, nodeCount }) => {
   const [isOpen, setIsOpen] = useState(false);
   const [activeSection, setActiveSection] = useState<SectionKey | null>(null);
+  const toolbarRef = useRef<HTMLDivElement>(null);
 
   const handleToggleSection = (key: SectionKey) => {
     setActiveSection((prev) => (prev === key ? null : key));
@@ -34,8 +36,27 @@ const GraphControlsToolbar: React.FC<GraphControlsToolbarProps> = ({ graphId, co
     setIsOpen((prev) => !prev);
   };
 
+  // Close the active popover when clicking outside the toolbar
+  const handleClickOutside = useCallback(
+    (e: MouseEvent) => {
+      if (activeSection && toolbarRef.current && !toolbarRef.current.contains(e.target as Node)) {
+        // Don't close if the click is inside a popover (they render in a portal)
+        const popover = (e.target as Element).closest('.popover');
+        if (!popover) {
+          setActiveSection(null);
+        }
+      }
+    },
+    [activeSection],
+  );
+
+  useEffect(() => {
+    document.addEventListener('mousedown', handleClickOutside);
+    return () => document.removeEventListener('mousedown', handleClickOutside);
+  }, [handleClickOutside]);
+
   return (
-    <ToolbarContainer>
+    <ToolbarContainer ref={toolbarRef}>
       <ToolbarIconButton $active={isOpen} onClick={handleGearToggle} title="Toggle controls">
         <FaCog size={16} />
       </ToolbarIconButton>
@@ -56,6 +77,10 @@ const GraphControlsToolbar: React.FC<GraphControlsToolbarProps> = ({ graphId, co
 
           <ToolbarButton sectionKey="edges" activeSection={activeSection} onToggle={handleToggleSection} icon={<FaGripLines size={14} />} title="Edges">
             <EdgesSection controls={controls} updateControls={updateControls} />
+          </ToolbarButton>
+
+          <ToolbarButton sectionKey="export" activeSection={activeSection} onToggle={handleToggleSection} icon={<FaCamera size={14} />} title="Export">
+            <ExportSection graphId={graphId} controls={controls} updateControls={updateControls} graphInstance={graphInstance} />
           </ToolbarButton>
         </>
       )}

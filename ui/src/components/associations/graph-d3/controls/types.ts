@@ -50,7 +50,7 @@ export type DisplayAction =
   | { type: 'dagLevelDistance'; state: number | null }
   | { type: 'numDimensions'; state: 2 | 3 };
 
-export type SectionKey = 'graph' | 'forces' | 'nodes' | 'edges';
+export type SectionKey = 'graph' | 'forces' | 'nodes' | 'edges' | 'export';
 
 export type SectionProps = {
   controls: GraphControls;
