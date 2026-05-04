@@ -8,17 +8,41 @@ import RenderErrorAlert from '@components/shared/alerts/RenderErrorAlert';
 import { getNodeColor, getEdgeColor } from './styles';
 import { GraphControlsToolbar, NodeRenderMode, DagMode, createControlsReducer, buildNodeObject } from './controls';
 import type { LabelEntry } from './controls';
-import NodeInfo from '../graph/NodeInfo';
-import EdgeInfo from '../graph/EdgeInfo';
 import { processInitialGraphData, getLinkEndpoints } from './data';
 import { useGraphData } from '../data';
 import type { GraphNode, GraphLink, GraphData } from './types';
 import { applyGrowthToInstance } from './applyGrowth';
-import { GraphWindow, GraphDiv, LoadingOverlay, DataPreview } from './AssociationGraph3D.styled';
+import DataPreviewPanel from './DataPreviewPanel';
+import { GraphWindow, GraphDiv, LoadingOverlay } from './AssociationGraph3D.styled';
 
 interface AssociationGraphProps {
   inView: boolean;
 }
+
+const focusCameraOn = (
+  gi: ForceGraph3DInstance,
+  target: { x: number; y: number; z: number },
+  durationMs = 2000,
+) => {
+  const camPos = gi.cameraPosition();
+  const orbitTarget = (gi.controls() as any)?.target;
+  const currentDist = orbitTarget
+    ? Math.hypot(
+        camPos.x - orbitTarget.x,
+        camPos.y - orbitTarget.y,
+        camPos.z - orbitTarget.z,
+      )
+    : 150;
+
+  const hypot = Math.hypot(target.x, target.y, target.z);
+  const ratio = hypot > 0 ? 1 + currentDist / hypot : 1;
+
+  gi.cameraPosition(
+    { x: target.x * ratio, y: target.y * ratio, z: target.z * ratio },
+    target,
+    durationMs,
+  );
+};
 
 const AssociationGraph3DInner: React.FC<AssociationGraphProps> = () => {
   const {
@@ -35,7 +59,9 @@ const AssociationGraph3DInner: React.FC<AssociationGraphProps> = () => {
 
   const [nodeCount, setNodeCount] = useState(0);
   const [mounted, setMounted] = useState(false);
+  const [previewMinimized, setPreviewMinimized] = useState(false);
   const handleNodeSelectRef = useRef<(node: GraphNode) => Promise<void>>(null as any);
+  const handleEdgeSelectRef = useRef<(link: GraphLink) => void>(null as any);
 
   const controlsReducer = createControlsReducer(graphInstanceRef, labelSpritesRef);
 
@@ -47,7 +73,7 @@ const AssociationGraph3DInner: React.FC<AssociationGraphProps> = () => {
     selectedElement: null,
     showNodeInfo: true,
     nodeRenderMode: 'icons' as NodeRenderMode,
-    focusOnClick: true,
+    focusOnClick: false,
     edgeWidth: 1,
     edgeLength: 30,
     edgeLinkStrength: 0.5,
@@ -93,7 +119,14 @@ const AssociationGraph3DInner: React.FC<AssociationGraphProps> = () => {
       type: 'selected',
       state: { kind: 'node', id: node.id, label: node.label },
     });
-    setFocusedNode(node.id, 'graph');
+
+    if (controls.focusOnClick) {
+      setFocusedNode(node.id, 'graph');
+      const gi = graphInstanceRef.current;
+      if (gi && node.x !== undefined && node.y !== undefined) {
+        focusCameraOn(gi, { x: node.x, y: node.y, z: node.z ?? 0 });
+      }
+    }
 
     if (!growable.has(node.id) || !graphId) return;
     await grow(node.id);
@@ -106,7 +139,23 @@ const AssociationGraph3DInner: React.FC<AssociationGraphProps> = () => {
       type: 'selected',
       state: { kind: 'link', source, target, label: link.label },
     });
+
+    if (controls.focusOnClick) {
+      const gi = graphInstanceRef.current;
+      if (gi) {
+        const srcNode = graphDataRef.current.nodes.find((n) => n.id === source);
+        const tgtNode = graphDataRef.current.nodes.find((n) => n.id === target);
+        if (srcNode?.x !== undefined && tgtNode?.x !== undefined) {
+          focusCameraOn(gi, {
+            x: (srcNode.x + tgtNode.x) / 2,
+            y: ((srcNode.y ?? 0) + (tgtNode.y ?? 0)) / 2,
+            z: ((srcNode.z ?? 0) + (tgtNode.z ?? 0)) / 2,
+          });
+        }
+      }
+    }
   };
+  handleEdgeSelectRef.current = handleEdgeSelect;
 
   // Mount the ForceGraph3D instance once data is ready
   useEffect(() => {
@@ -141,7 +190,7 @@ const AssociationGraph3DInner: React.FC<AssociationGraphProps> = () => {
       .linkDirectionalParticleSpeed(controls.particleSpeed)
       .enableNodeDrag(controls.enableNodeDrag)
       .onNodeClick((node: any) => void handleNodeSelectRef.current?.(node as GraphNode))
-      .onLinkClick((link: any) => handleEdgeSelect(link as GraphLink))
+      .onLinkClick((link: any) => handleEdgeSelectRef.current?.(link as GraphLink))
       .numDimensions(controls.numDimensions)
       .warmupTicks(controls.warmupTicks)
       .cooldownTime(controls.cooldownTime)
@@ -290,27 +339,22 @@ const AssociationGraph3DInner: React.FC<AssociationGraphProps> = () => {
   // Animate camera to focused node when focus originates from tree
   useEffect(() => {
     if (!focusedNodeId || focusSource !== 'tree') return;
-    const gi = graphInstanceRef.current;
-    if (!gi) return;
 
     const node = graphDataRef.current.nodes.find((n) => n.id === focusedNodeId);
     if (!node || node.x === undefined || node.y === undefined) return;
-
-    const distance = 150;
-    const nodeHypot = Math.hypot(node.x, node.y, node.z ?? 0);
-    const distRatio = nodeHypot > 0 ? 1 + distance / nodeHypot : 1;
-
-    gi.cameraPosition(
-      { x: node.x * distRatio, y: node.y * distRatio, z: (node.z ?? 0) * distRatio },
-      { x: node.x, y: node.y, z: node.z ?? 0 },
-      1000,
-    );
 
     updateControls({
       type: 'selected',
       state: { kind: 'node', id: node.id, label: node.label },
     });
-  }, [focusedNodeId, focusSource]);
+
+    if (controls.focusOnClick) {
+      const gi = graphInstanceRef.current;
+      if (gi) {
+        focusCameraOn(gi, { x: node.x, y: node.y, z: node.z ?? 0 });
+      }
+    }
+  }, [focusedNodeId, focusSource, controls.focusOnClick]);
 
   return (
     <GraphWindow>
@@ -328,22 +372,16 @@ const AssociationGraph3DInner: React.FC<AssociationGraphProps> = () => {
         nodeCount={nodeCount}
         loading={loading}
       />
-      <DataPreview>
-        {controls.selectedElement?.kind === 'node' && controls.selectedElement.id !== '' && (
-          <NodeInfo node={graph.data_map[controls.selectedElement.id]} />
-        )}
-        {controls.selectedElement?.kind === 'link' && (
-          <EdgeInfo
-            edge={{
-              data: {
-                source: controls.selectedElement.source,
-                target: controls.selectedElement.target,
-                label: controls.selectedElement.label,
-              },
-            }}
-          />
-        )}
-      </DataPreview>
+      <DataPreviewPanel
+        selectedElement={controls.selectedElement}
+        nodeData={
+          controls.selectedElement?.kind === 'node'
+            ? graph.data_map[controls.selectedElement.id]
+            : undefined
+        }
+        minimized={previewMinimized}
+        onToggleMinimize={() => setPreviewMinimized((m) => !m)}
+      />
     </GraphWindow>
   );
 };

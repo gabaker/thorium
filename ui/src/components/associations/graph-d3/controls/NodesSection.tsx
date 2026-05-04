@@ -59,13 +59,6 @@ const NodesSection: React.FC<SectionProps> = ({ controls, updateControls }) => (
       checked={controls.enableNodeDrag}
       onChange={() => updateControls({ type: 'enableNodeDrag', state: !controls.enableNodeDrag })}
     />
-    <Form.Check
-      type="switch"
-      id="form-focus-on-click"
-      label="Focus on Click"
-      checked={controls.focusOnClick}
-      onChange={() => updateControls({ type: 'focusOnClick', state: !controls.focusOnClick })}
-    />
   </PopoverBody>
 );
 

@@ -200,7 +200,7 @@ const AssociationTreeComponent: React.FC = () => {
           return (
             <OverlayTrigger
               key={nodeId}
-              placement="auto"
+              placement="right-start"
               delay={{ show: 400, hide: 100 }}
               overlay={renderNodePreview(nodeId) ?? <span />}
               popperConfig={{ modifiers: [{ name: 'offset', options: { offset: [0, 8] } }] }}
@@ -223,7 +223,7 @@ const AssociationTreeComponent: React.FC = () => {
                 }}
               >
                 <div
-                  className={cn('treeitem pt-1 pb-0', {
+                  className={cn('treeitem', {
                     focused: item.isFocused(),
                     expanded: item.isExpanded(),
                     selected: item.isSelected(),

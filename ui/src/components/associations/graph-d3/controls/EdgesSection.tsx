@@ -11,9 +11,9 @@ const EdgesSection: React.FC<SectionProps> = ({ controls, updateControls }) => (
       id="form-edge-width"
       label="Width"
       value={controls.edgeWidth}
-      min={0.5}
-      max={10}
-      step={0.5}
+      min={0.1}
+      max={2}
+      step={0.1}
       onChange={(v) => updateControls({ type: 'edgeWidth', state: v })}
     />
     <LabeledRange
