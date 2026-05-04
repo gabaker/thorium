@@ -145,6 +145,10 @@ const Tree = styled.div`
 
 const PreviewPopover = styled(Popover)`
   --bs-popover-max-width: 360px;
+  --bs-popover-bg: var(--thorium-secondary-panel-bg);
+  --bs-popover-border-color: var(--thorium-panel-border);
+  --bs-popover-body-color: var(--thorium-text);
+  --bs-popover-arrow-border: var(--thorium-panel-border);
 
   .popover-body {
     padding: 10px 14px;
@@ -154,15 +158,16 @@ const PreviewPopover = styled(Popover)`
   .preview-type {
     font-weight: 600;
     margin-bottom: 4px;
+    color: var(--thorium-text);
   }
 
   .preview-field {
     margin-bottom: 2px;
-    color: var(--thorium-text-secondary, #666);
+    color: var(--thorium-secondary-text, var(--thorium-text));
   }
 
   .preview-field strong {
-    color: var(--thorium-text, #333);
+    color: var(--thorium-text);
   }
 
   .preview-tags {
@@ -398,9 +403,10 @@ const AssociationTreeComponent: React.FC = () => {
           return (
             <OverlayTrigger
               key={nodeId}
-              placement="right"
+              placement="auto"
               delay={{ show: 400, hide: 100 }}
               overlay={renderNodePreview(nodeId) ?? <span />}
+              popperConfig={{ modifiers: [{ name: 'offset', options: { offset: [0, 8] } }] }}
             >
               <button
                 {...item.getProps()}

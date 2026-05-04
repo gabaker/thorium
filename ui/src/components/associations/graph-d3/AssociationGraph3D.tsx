@@ -277,19 +277,18 @@ const AssociationGraph3DInner: React.FC<AssociationGraphProps> = () => {
     const addedNodes = newData.nodes.filter((n) => !existingNodeIds.has(n.id));
 
     let stateChanged = false;
-    const mergedNodes = prevData.nodes.map((n) => {
+    for (const n of prevData.nodes) {
       const updated = newNodeMap.get(n.id);
       if (updated && updated.visualState !== n.visualState) {
         stateChanged = true;
-        return { ...n, visualState: updated.visualState };
+        n.visualState = updated.visualState;
       }
-      return n;
-    });
+    }
 
     if (addedNodes.length === 0 && addedLinks.length === 0 && !stateChanged) return;
 
     const updatedData: GraphData = {
-      nodes: [...mergedNodes, ...addedNodes],
+      nodes: [...prevData.nodes, ...addedNodes],
       links: [...prevData.links, ...addedLinks],
     };
     graphDataRef.current = updatedData;
