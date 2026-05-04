@@ -6,8 +6,9 @@ import { FaFileCirclePlus, FaSquarePlus } from 'react-icons/fa6';
 import styled from 'styled-components';
 
 // project imports
-const AssociationTree = React.lazy(() => import('../../associations/AssociationTree'));
+const AssociationTree = React.lazy(() => import('../../associations/browsing/AssociationTree'));
 const AssociationGraph = React.lazy(() => import('../../associations/graph/AssociationGraph'));
+import { GraphDataProvider } from '../../associations/data';
 import { buildUpdateEntityForm } from '../utilities';
 import InfoHeader from '../shared/InfoHeader';
 import InfoValue from '../shared/InfoValue';
@@ -409,14 +410,18 @@ const EntityDetails: React.FC<EntityDetailsProps> = ({ getEntityDetails, blank, 
             {entityID && <AssociationGraph inView initial={associationInitial} />}
           </Card.Body>
         </Card>
-        <Card className="panel mt-4">
-          <Card.Body>
-            <div className="text-center">
-              <Subtitle>Associations</Subtitle>
-            </div>
-            {entityID && <AssociationTree initial={associationInitial} />}
-          </Card.Body>
-        </Card>
+        {entityID && (
+          <GraphDataProvider initial={associationInitial}>
+            <Card className="panel mt-4">
+              <Card.Body>
+                <div className="text-center">
+                  <Subtitle>Associations</Subtitle>
+                </div>
+                <AssociationTree />
+              </Card.Body>
+            </Card>
+          </GraphDataProvider>
+        )}
       </Page>
     </EntityDetailsContext.Provider>
   );

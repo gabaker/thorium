@@ -1,12 +1,13 @@
-import React, { createContext, useContext } from 'react';
+import React, { createContext, useContext, useMemo } from 'react';
 import { Card } from 'react-bootstrap';
 import { useParams } from 'react-router';
 import { FaServer } from 'react-icons/fa';
 import styled from 'styled-components';
 
 // project imports
-const AssociationTree = React.lazy(() => import('../../components/associations/AssociationTree'));
+const AssociationTree = React.lazy(() => import('../../components/associations/browsing/AssociationTree'));
 const AssociationGraph = React.lazy(() => import('../../components/associations/graph/AssociationGraph'));
+import { GraphDataProvider } from '../../components/associations/data';
 import Page from '@components/pages/Page';
 import Subtitle from '@components/shared/titles/Subtitle';
 import Title from '@components/shared/titles/Title';
@@ -50,6 +51,7 @@ const RepoHeader = () => {
 
 const RepoDetails = () => {
   const { '*': repo } = useParams<{ '*': string }>();
+  const seed = useMemo(() => ({ repos: [repo ? repo : ''] }), [repo]);
 
   return (
     <RepoContext.Provider value={{ repo }}>
@@ -58,15 +60,17 @@ const RepoDetails = () => {
         <Card className="panel">
           <Card.Body>
             <Subtitle className="text-center">Association Graph</Subtitle>
-            <AssociationGraph inView initial={{ repos: [repo ? repo : ''] }} />
+            <AssociationGraph inView initial={seed} />
           </Card.Body>
         </Card>
-        <Card className="panel">
-          <Card.Body>
-            <Subtitle className="text-center">Association Tree</Subtitle>
-            <AssociationTree initial={{ repos: [repo ? repo : ''] }} />
-          </Card.Body>
-        </Card>
+        <GraphDataProvider initial={seed}>
+          <Card className="panel">
+            <Card.Body>
+              <Subtitle className="text-center">Association Tree</Subtitle>
+              <AssociationTree />
+            </Card.Body>
+          </Card>
+        </GraphDataProvider>
       </Page>
     </RepoContext.Provider>
   );

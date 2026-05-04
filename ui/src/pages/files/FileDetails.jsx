@@ -5,8 +5,9 @@ import Select from 'react-select';
 import { FaFileAlt, FaTrash } from 'react-icons/fa';
 
 // project imports
-const AssociationTree = React.lazy(() => import('@components/associations/AssociationTree'));
+const AssociationTree = React.lazy(() => import('@components/associations/browsing/AssociationTree'));
 const AssociationGraph = React.lazy(() => import('@components/associations/graph/AssociationGraph'));
+import { GraphDataProvider } from '@components/associations/data';
 const Results = React.lazy(() => import('@components/pages/files/Results'));
 const RunPipelines = React.lazy(() => import('@components/pages/files/reactions/RunPipelines'));
 import ReactionStatus from '@components/pages/files/reactions/ReactionStatus';
@@ -229,7 +230,9 @@ const FileDetails = () => {
             <AssociationGraph inView={viewGraph} initial={{ samples: [sha256] }} />
           </Tab.Pane>
           <Tab.Pane eventKey="tree" className="mt-4">
-            <AssociationTree initial={{ samples: [sha256] }} />
+            <GraphDataProvider initial={{ samples: [sha256] }}>
+              <AssociationTree />
+            </GraphDataProvider>
           </Tab.Pane>
           <Tab.Pane eventKey="comments" className="mt-4">
             <Comments sha256={sha256} />

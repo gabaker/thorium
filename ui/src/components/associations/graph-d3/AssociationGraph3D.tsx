@@ -5,19 +5,16 @@ import * as THREE from 'three';
 import SpriteText from 'three-spritetext';
 import styled from 'styled-components';
 
-import { Seed, Graph, BranchNode, Direction, BlankGraph } from '@models/trees';
 import RenderErrorAlert from '@components/shared/alerts/RenderErrorAlert';
-import { getInitialTree, growTree } from '@thorpi/trees';
-import { getEdgeLabel } from '../utilities';
 import { getNodeColor, getEdgeColor, getNodeSvg, svgToTexture } from './styles';
-import { GraphControlsToolbar, DisplayAction, GraphControls, SelectedElement, NodeRenderMode, DagMode } from './controls';
+import { GraphControlsToolbar, DisplayAction, GraphControls, NodeRenderMode, DagMode } from './controls';
 import NodeInfo from '../graph/NodeInfo';
 import EdgeInfo from '../graph/EdgeInfo';
-import { buildGraphNode, processInitialGraphData, computeDistancesFromInitial } from './data';
+import { processInitialGraphData } from './data';
+import { useGraphData } from '../data';
 import type { GraphNode, GraphLink, GraphData } from './types';
 
-// SpriteText extends THREE.Sprite but its type declarations omit inherited properties
-type LabelEntry = { sprite: THREE.Object3D; degree: number; baseScale: THREE.Vector3 };
+type LabelEntry = { sprite: THREE.Object3D; degree: number; isInitial: boolean; baseScale: THREE.Vector3 };
 
 const buildNodeObject = (renderMode: NodeRenderMode, showLabels: boolean, labelMap?: Map<string, LabelEntry>) => {
   return (node: GraphNode): THREE.Object3D => {
@@ -43,7 +40,7 @@ const buildNodeObject = (renderMode: NodeRenderMode, showLabels: boolean, labelM
       group.add(labelSprite);
       if (labelMap) {
         const obj = labelSprite as unknown as THREE.Object3D;
-        labelMap.set(node.id, { sprite: obj, degree: node.degree, baseScale: obj.scale.clone() });
+        labelMap.set(node.id, { sprite: obj, degree: node.degree, isInitial: node.visualState === 'initial', baseScale: obj.scale.clone() });
       }
     } else if (labelMap) {
       labelMap.delete(node.id);
@@ -62,7 +59,7 @@ const GraphDiv = styled.div`
   z-index: 200;
   overflow: visible;
   min-height: 90vh;
-  max-height: 90vw;
+  max-height: 90vh;
   padding-top: 1rem;
 `;
 
@@ -80,21 +77,22 @@ const DataPreview = styled.div`
 `;
 
 interface AssociationGraphProps {
-  initial: Seed;
   inView: boolean;
 }
 
-const AssociationGraph3DInner: React.FC<AssociationGraphProps> = ({ initial, inView }) => {
+const AssociationGraph3DInner: React.FC<AssociationGraphProps> = () => {
+  const { graph, graphId, graphVersion, grow, growToDepth, growable } = useGraphData();
+
   const containerRef = useRef<HTMLDivElement>(null);
   const graphInstanceRef = useRef<ForceGraph3DInstance | null>(null);
   const graphRootRef = useRef<string[]>(['']);
-  const graphRef = useRef<Graph>(BlankGraph);
   const graphDataRef = useRef<GraphData>({ nodes: [], links: [] });
   const labelSpritesRef = useRef<Map<string, LabelEntry>>(new Map());
   const animFrameRef = useRef<number>(0);
+  const mountedVersionRef = useRef<number>(-1);
 
   const [nodeCount, setNodeCount] = useState(0);
-  const [graphId, setGraphId] = useState<string>('');
+  const [mounted, setMounted] = useState(false);
 
   const [controls, updateControls] = useReducer(controlsReducer, {
     filterChildless: false,
@@ -105,7 +103,6 @@ const AssociationGraph3DInner: React.FC<AssociationGraphProps> = ({ initial, inV
     showNodeInfo: true,
     nodeRenderMode: 'icons' as NodeRenderMode,
     focusOnClick: true,
-    // edges
     edgeWidth: 1,
     edgeLength: 30,
     edgeLinkStrength: 0.5,
@@ -113,16 +110,13 @@ const AssociationGraph3DInner: React.FC<AssociationGraphProps> = ({ initial, inV
     arrowLength: 3.5,
     directionalParticles: 0,
     particleSpeed: 0.01,
-    // nodes
     nodeRelSize: 4,
     nodeOpacity: 0.75,
     enableNodeDrag: true,
-    // forces
     chargeStrength: -200,
     velocityDecay: 0.4,
     warmupTicks: 0,
     cooldownTime: 15000,
-    // layout
     dagMode: null as DagMode,
     dagLevelDistance: null as number | null,
     numDimensions: 3 as 2 | 3,
@@ -131,7 +125,6 @@ const AssociationGraph3DInner: React.FC<AssociationGraphProps> = ({ initial, inV
   function controlsReducer(state: GraphControls, action: DisplayAction): GraphControls {
     const gi = graphInstanceRef.current;
     switch (action.type) {
-      // --- existing ---
       case 'showEdgeLabels': {
         if (gi) gi.linkLabel(action.state ? 'label' : () => '');
         return { ...state, showEdgeLabels: action.state };
@@ -164,8 +157,6 @@ const AssociationGraph3DInner: React.FC<AssociationGraphProps> = ({ initial, inV
         }
         return { ...state, nodeRenderMode: action.state };
       }
-
-      // --- edge controls ---
       case 'edgeWidth': {
         if (gi) gi.linkWidth(action.state);
         return { ...state, edgeWidth: action.state };
@@ -202,8 +193,6 @@ const AssociationGraph3DInner: React.FC<AssociationGraphProps> = ({ initial, inV
         if (gi) gi.linkDirectionalParticleSpeed(action.state);
         return { ...state, particleSpeed: action.state };
       }
-
-      // --- node controls ---
       case 'nodeRelSize': {
         if (gi) gi.nodeRelSize(action.state);
         return { ...state, nodeRelSize: action.state };
@@ -216,8 +205,6 @@ const AssociationGraph3DInner: React.FC<AssociationGraphProps> = ({ initial, inV
         if (gi) gi.enableNodeDrag(action.state);
         return { ...state, enableNodeDrag: action.state };
       }
-
-      // --- force controls ---
       case 'chargeStrength': {
         if (gi) {
           const charge = gi.d3Force('charge');
@@ -241,8 +228,6 @@ const AssociationGraph3DInner: React.FC<AssociationGraphProps> = ({ initial, inV
         if (gi) gi.cooldownTime(action.state);
         return { ...state, cooldownTime: action.state };
       }
-
-      // --- layout controls ---
       case 'dagMode': {
         if (gi) gi.dagMode(action.state as any);
         return { ...state, dagMode: action.state };
@@ -258,109 +243,66 @@ const AssociationGraph3DInner: React.FC<AssociationGraphProps> = ({ initial, inV
     }
   }
 
-  const mergeGrowthData = (data: Graph, grownNodeIds: string[]) => {
-    const existingData = graphDataRef.current;
-    const existingNodeIds = new Set(existingData.nodes.map((n) => n.id));
+  const applyGrowthToInstance = (prevData: GraphData, newData: GraphData) => {
+    const gi = graphInstanceRef.current;
+    if (!gi) return;
+
+    const existingNodeIds = new Set(prevData.nodes.map((n) => n.id));
     const existingEdgeKeys = new Set(
-      existingData.links.map((l) => {
+      prevData.links.map((l) => {
         const src = typeof l.source === 'object' ? (l.source as GraphNode).id : l.source;
         const tgt = typeof l.target === 'object' ? (l.target as GraphNode).id : l.target;
         return `${src}-${tgt}`;
       }),
     );
 
-    const oldGrowable = graphRef.current.growable.map((n) => n.toString());
-    const grownSet = new Set(grownNodeIds);
-    const notGrown = oldGrowable.filter((g) => !grownSet.has(g));
-    if (data.growable) {
-      graphRef.current.growable = [...data.growable.map((n) => n.toString()), ...notGrown];
-    } else {
-      graphRef.current.growable = notGrown;
-    }
-
-    if (data.data_map) {
-      Object.keys(data.data_map).forEach((newNodeId) => {
-        graphRef.current.data_map[newNodeId] = data.data_map[newNodeId];
-      });
-    }
-
-    if (data.branches) {
-      Object.keys(data.branches).forEach((branch) => {
-        graphRef.current.branches[branch] = data.branches[branch];
-      });
-    }
-
-    const degreeCounts = new Map<string, number>();
-    const incDeg = (id: string) => degreeCounts.set(id, (degreeCounts.get(id) ?? 0) + 1);
-    if (data.branches) {
-      Object.keys(data.branches).forEach((branch) => {
-        data.branches[branch].forEach((target: BranchNode) => {
-          incDeg(branch);
-          incDeg(target.node.toString());
-        });
-      });
-    }
-
-    const newNodes: GraphNode[] = [];
-    const newLinks: GraphLink[] = [];
-
-    if (data.data_map) {
-      const totalCount = Object.keys(graphRef.current.data_map).length;
-      Object.keys(data.data_map).forEach((newNodeId) => {
-        if (!existingNodeIds.has(newNodeId)) {
-          newNodes.push(buildGraphNode(newNodeId, graphRef.current, totalCount, degreeCounts.get(newNodeId) ?? 0));
-          existingNodeIds.add(newNodeId);
-        }
-      });
-    }
-
-    if (data.branches) {
-      Object.keys(data.branches).forEach((branch) => {
-        data.branches[branch].forEach((target: BranchNode) => {
-          const targetNode = target.direction === Direction.To ? target.node.toString() : branch;
-          const sourceNode = target.direction === Direction.To ? branch : target.node.toString();
-          const edgeKey = `${sourceNode}-${targetNode}`;
-          if (!existingEdgeKeys.has(edgeKey) || target.direction === Direction.Bidirectional) {
-            newLinks.push({
-              source: sourceNode,
-              target: targetNode,
-              label: getEdgeLabel(targetNode, sourceNode, target, graphRef.current),
-              bidirectional: target.direction === Direction.Bidirectional,
-            });
-            existingEdgeKeys.add(edgeKey);
-          }
-        });
-      });
-      existingData.nodes.forEach((n) => {
-        const added = degreeCounts.get(n.id);
-        if (added) n.degree += added;
-      });
-    }
-
-    const newGrowableSet = new Set(graphRef.current.growable.map((n) => n.toString()));
-    grownNodeIds.forEach((nodeId) => {
-      if (!newGrowableSet.has(nodeId)) {
-        const existingNode = existingData.nodes.find((n) => n.id === nodeId);
-        if (existingNode && existingNode.visualState === 'growable') {
-          existingNode.visualState = 'basic';
-        }
-      }
+    const addedNodes = newData.nodes.filter((n) => !existingNodeIds.has(n.id));
+    const addedLinks = newData.links.filter((l) => {
+      const src = typeof l.source === 'object' ? (l.source as GraphNode).id : l.source;
+      const tgt = typeof l.target === 'object' ? (l.target as GraphNode).id : l.target;
+      return !existingEdgeKeys.has(`${src}-${tgt}`);
     });
 
+    if (addedNodes.length === 0 && addedLinks.length === 0) return;
+
     const updatedData: GraphData = {
-      nodes: [...existingData.nodes, ...newNodes],
-      links: [...existingData.links, ...newLinks],
+      nodes: [...prevData.nodes, ...addedNodes],
+      links: [...prevData.links, ...addedLinks],
     };
     graphDataRef.current = updatedData;
     setNodeCount(updatedData.nodes.length);
 
-    if (graphInstanceRef.current) {
-      graphInstanceRef.current.graphData(updatedData);
-      labelSpritesRef.current.clear();
-      graphInstanceRef.current.nodeThreeObject(graphInstanceRef.current.nodeThreeObject());
-      graphInstanceRef.current.refresh();
-    }
+    gi.graphData(updatedData);
+    labelSpritesRef.current.clear();
+    gi.nodeThreeObject(gi.nodeThreeObject());
+    gi.refresh();
   };
+
+  // React to graph changes from the shared context
+  useEffect(() => {
+    if (!graphId || graphVersion === 0) return;
+
+    const newGraphData = processInitialGraphData(graph);
+
+    // First load — store data and trigger mount
+    if (!mounted) {
+      if (graph.initial.length > 0) {
+        graphRootRef.current = graph.initial;
+      }
+      graphDataRef.current = newGraphData;
+      setNodeCount(newGraphData.nodes.length);
+      setMounted(true);
+      mountedVersionRef.current = graphVersion;
+      return;
+    }
+
+    // Incremental update — diff and apply to existing ForceGraph3D instance
+    if (graphVersion > mountedVersionRef.current) {
+      const prevData = graphDataRef.current;
+      applyGrowthToInstance(prevData, newGraphData);
+      mountedVersionRef.current = graphVersion;
+    }
+  }, [graphId, graphVersion]);
 
   const handleNodeSelect = async (node: GraphNode) => {
     updateControls({
@@ -368,11 +310,8 @@ const AssociationGraph3DInner: React.FC<AssociationGraphProps> = ({ initial, inV
       state: { kind: 'node', id: node.id, label: node.label },
     });
 
-    const growable = graphRef.current.growable.map((n) => n.toString());
-    if (!growable.includes(node.id) || !graphId) return;
-
-    const data = await growTree(graphId, [node.id], console.log);
-    if (data) mergeGrowthData(data, [node.id]);
+    if (!growable.has(node.id) || !graphId) return;
+    await grow(node.id);
   };
 
   const handleEdgeSelect = (link: GraphLink) => {
@@ -384,25 +323,9 @@ const AssociationGraph3DInner: React.FC<AssociationGraphProps> = ({ initial, inV
     });
   };
 
+  // Mount the ForceGraph3D instance once data is ready
   useEffect(() => {
-    updateControls({ type: 'selected', state: null });
-
-    getInitialTree(initial, controls.filterChildless, 1, console.log).then((data) => {
-      if (data) {
-        setGraphId(data.id);
-        if (data.initial.length > 0) {
-          graphRootRef.current = data.initial;
-        }
-        graphRef.current = data;
-        const graphData = processInitialGraphData(data);
-        graphDataRef.current = graphData;
-        setNodeCount(graphData.nodes.length);
-      }
-    });
-  }, [controls.filterChildless, initial]);
-
-  useEffect(() => {
-    if (!containerRef.current || !graphId) return;
+    if (!containerRef.current || !mounted) return;
 
     if (graphInstanceRef.current) {
       graphInstanceRef.current._destructor();
@@ -410,12 +333,11 @@ const AssociationGraph3DInner: React.FC<AssociationGraphProps> = ({ initial, inV
     }
     labelSpritesRef.current.clear();
 
-    const graph = new ForceGraph3D(containerRef.current, { controlType: 'orbit' })
+    const fg = new ForceGraph3D(containerRef.current, { controlType: 'orbit' })
       .graphData(graphDataRef.current)
       .backgroundColor('rgba(0,0,0,0)')
       .width(containerRef.current.clientWidth)
       .height(containerRef.current.clientHeight || window.innerHeight * 0.9)
-      // nodes
       .nodeVal((node: any) => (node as GraphNode).diameter)
       .nodeColor((node: any) => getNodeColor((node as GraphNode).nodeType, (node as GraphNode).visualState))
       .nodeLabel((node: any) => (node as GraphNode).label)
@@ -423,7 +345,6 @@ const AssociationGraph3DInner: React.FC<AssociationGraphProps> = ({ initial, inV
       .nodeThreeObjectExtend(controls.nodeRenderMode === 'spheres')
       .nodeRelSize(controls.nodeRelSize)
       .nodeOpacity(controls.nodeOpacity)
-      // edges
       .linkDirectionalArrowLength(controls.arrowLength)
       .linkDirectionalArrowRelPos(1)
       .linkLabel(controls.showEdgeLabels ? 'label' : () => '')
@@ -433,47 +354,41 @@ const AssociationGraph3DInner: React.FC<AssociationGraphProps> = ({ initial, inV
       .linkCurvature((link: any) => ((link as GraphLink).bidirectional ? 0.2 : 0))
       .linkDirectionalParticles(controls.directionalParticles)
       .linkDirectionalParticleSpeed(controls.particleSpeed)
-      // interaction
       .enableNodeDrag(controls.enableNodeDrag)
       .onNodeClick((node: any) => handleNodeSelect(node as GraphNode))
       .onLinkClick((link: any) => handleEdgeSelect(link as GraphLink))
-      // layout
       .numDimensions(controls.numDimensions)
       .warmupTicks(controls.warmupTicks)
       .cooldownTime(controls.cooldownTime)
       .d3VelocityDecay(controls.velocityDecay);
 
-    // DAG mode
     if (controls.dagMode) {
-      graph.dagMode(controls.dagMode as any);
+      fg.dagMode(controls.dagMode as any);
       if (controls.dagLevelDistance !== null) {
-        graph.dagLevelDistance(controls.dagLevelDistance as any);
+        fg.dagLevelDistance(controls.dagLevelDistance as any);
       }
     }
 
-    // Forces
-    const chargeForce = graph.d3Force('charge');
+    const chargeForce = fg.d3Force('charge');
     if (chargeForce && 'strength' in chargeForce) {
       (chargeForce as any).strength(controls.chargeStrength);
     }
 
-    const linkForce = graph.d3Force('link');
+    const linkForce = fg.d3Force('link');
     if (linkForce && 'distance' in linkForce) {
       (linkForce as any).distance(controls.edgeLength);
       (linkForce as any).strength(controls.edgeLinkStrength);
     }
 
-    graphInstanceRef.current = graph;
+    graphInstanceRef.current = fg;
 
-    const orbitControls = graph.controls();
+    const orbitControls = fg.controls();
     if (orbitControls) (orbitControls as any).zoomToCursor = true;
 
     if (graphDataRef.current.nodes.length > 100) {
-      graph.cooldownTicks(200);
+      fg.cooldownTicks(200);
     }
 
-    // Scale labels dynamically based on camera distance and node degree.
-    // High-degree nodes keep visible labels when zoomed out; low-degree labels fade.
     const updateLabelScaling = () => {
       const gi = graphInstanceRef.current;
       if (gi && labelSpritesRef.current.size > 0) {
@@ -494,9 +409,9 @@ const AssociationGraph3DInner: React.FC<AssociationGraphProps> = ({ initial, inV
           const degreeThreshold = filterProgress * maxDegree * 0.6;
 
           labelSpritesRef.current.forEach((entry) => {
-            if (entry.degree >= degreeThreshold) {
+            if (entry.isInitial || entry.degree >= degreeThreshold) {
               entry.sprite.visible = true;
-              const degreeBoost = 1 + (entry.degree / maxDegree) * 0.5;
+              const degreeBoost = entry.isInitial ? 1.5 : 1 + (entry.degree / maxDegree) * 0.5;
               const s = distFactor * degreeBoost;
               entry.sprite.scale.set(entry.baseScale.x * s, entry.baseScale.y * s, entry.baseScale.z);
             } else {
@@ -509,15 +424,12 @@ const AssociationGraph3DInner: React.FC<AssociationGraphProps> = ({ initial, inV
     };
     animFrameRef.current = requestAnimationFrame(updateLabelScaling);
 
-    // Auto-fit the graph to fill the canvas once the layout settles
     const fitTimeout = setTimeout(() => {
       if (graphInstanceRef.current) {
         graphInstanceRef.current.zoomToFit(1000, 50);
       }
     }, 1500);
 
-    // Double-click zooms toward the mouse position using the orbit
-    // target as the distance reference rather than the world origin.
     const container = containerRef.current;
     const handleDblClick = (event: MouseEvent) => {
       const gi = graphInstanceRef.current;
@@ -529,18 +441,16 @@ const AssociationGraph3DInner: React.FC<AssociationGraphProps> = ({ initial, inV
         -((event.clientY - rect.top) / rect.height) * 2 + 1,
       );
 
-      const camera = gi.camera();
+      const camera = gi.cameraPosition();
       const raycaster = new THREE.Raycaster();
-      raycaster.setFromCamera(mouse, camera);
+      raycaster.setFromCamera(mouse, gi.camera());
 
-      const camPos = gi.cameraPosition();
       const target = (gi.controls() as any).target;
-      const dist = Math.hypot(camPos.x - target.x, camPos.y - target.y, camPos.z - target.z);
+      const dist = Math.hypot(camera.x - target.x, camera.y - target.y, camera.z - target.z);
       const dir = raycaster.ray.direction;
       const step = dist * 0.4;
 
-      const newPos = { x: camPos.x + dir.x * step, y: camPos.y + dir.y * step, z: camPos.z + dir.z * step };
-      // Place the new lookAt along the ray, at the remaining distance from the new camera position
+      const newPos = { x: camera.x + dir.x * step, y: camera.y + dir.y * step, z: camera.z + dir.z * step };
       const lookDist = dist - step;
       const newLookAt = { x: newPos.x + dir.x * lookDist, y: newPos.y + dir.y * lookDist, z: newPos.z + dir.z * lookDist };
 
@@ -548,56 +458,50 @@ const AssociationGraph3DInner: React.FC<AssociationGraphProps> = ({ initial, inV
     };
     container.addEventListener('dblclick', handleDblClick);
 
+    const resizeObserver = new ResizeObserver((entries) => {
+      const gi = graphInstanceRef.current;
+      if (!gi) return;
+      for (const entry of entries) {
+        const { width, height } = entry.contentRect;
+        if (width > 0 && height > 0) {
+          gi.width(width).height(height);
+        }
+      }
+    });
+    resizeObserver.observe(container);
+
     return () => {
       cancelAnimationFrame(animFrameRef.current);
       clearTimeout(fitTimeout);
       container.removeEventListener('dblclick', handleDblClick);
-      graph._destructor();
+      resizeObserver.disconnect();
+      fg._destructor();
       graphInstanceRef.current = null;
     };
-  }, [graphId]);
+  }, [mounted]);
 
-  useEffect(() => {
-    if (inView && graphInstanceRef.current && containerRef.current) {
-      graphInstanceRef.current
-        .width(containerRef.current.clientWidth)
-        .height(containerRef.current.clientHeight || window.innerHeight * 0.9);
-    }
-  }, [inView]);
-
-  // Grow frontier nodes incrementally when depth increases
+  // Grow frontier nodes when depth increases
   useEffect(() => {
     if (!graphId || controls.depth <= 1) return;
     let aborted = false;
 
-    const growToDepth = async () => {
-      const distances = computeDistancesFromInitial(graphRef.current);
-      const growable = graphRef.current.growable.map((n) => n.toString());
-
-      const groups = new Map<number, string[]>();
-      for (const nodeId of growable) {
-        const dist = distances.get(nodeId);
-        if (dist !== undefined && dist < controls.depth) {
-          const limit = controls.depth - dist;
-          if (!groups.has(limit)) groups.set(limit, []);
-          groups.get(limit)!.push(nodeId);
-        }
-      }
-      if (groups.size === 0) return;
-
-      for (const [limit, nodes] of groups) {
-        if (aborted) return;
-        const data = await growTree(graphId, nodes, console.log, limit);
-        if (aborted) return;
-        if (data) mergeGrowthData(data, nodes);
-      }
+    const doGrow = async () => {
+      if (aborted) return;
+      await growToDepth(controls.depth);
     };
 
-    growToDepth();
+    doGrow();
     return () => {
       aborted = true;
     };
   }, [controls.depth, graphId]);
+
+  // Re-fetch when filterChildless changes
+  const { reload } = useGraphData();
+  useEffect(() => {
+    if (!graphId) return;
+    reload({ filterChildless: controls.filterChildless });
+  }, [controls.filterChildless]);
 
   return (
     <GraphWindow>
@@ -611,7 +515,7 @@ const AssociationGraph3DInner: React.FC<AssociationGraphProps> = ({ initial, inV
       />
       <DataPreview>
         {controls.selectedElement?.kind === 'node' && controls.selectedElement.id !== '' && (
-          <NodeInfo node={graphRef.current.data_map[controls.selectedElement.id]} />
+          <NodeInfo node={graph.data_map[controls.selectedElement.id]} />
         )}
         {controls.selectedElement?.kind === 'link' && (
           <EdgeInfo
@@ -629,10 +533,10 @@ const AssociationGraph3DInner: React.FC<AssociationGraphProps> = ({ initial, inV
   );
 };
 
-export const AssociationGraph3D: React.FC<AssociationGraphProps> = ({ initial, inView }) => {
+export const AssociationGraph3D: React.FC<AssociationGraphProps> = ({ inView }) => {
   return (
     <ErrorBoundary fallback={<RenderErrorAlert page={false} />}>
-      {inView && <AssociationGraph3DInner inView={inView} initial={initial} />}
+      {inView && <AssociationGraph3DInner inView={inView} />}
     </ErrorBoundary>
   );
 };

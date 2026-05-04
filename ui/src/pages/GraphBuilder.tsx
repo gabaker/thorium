@@ -3,9 +3,10 @@ import { Card, Form } from 'react-bootstrap';
 import styled from 'styled-components';
 
 // project imports
-const AssociationTree = React.lazy(() => import('../components/associations/AssociationTree'));
+const AssociationTree = React.lazy(() => import('../components/associations/browsing/AssociationTree'));
 const AssociationGraph = React.lazy(() => import('../components/associations/graph/AssociationGraph'));
 const AssociationGraph3D = React.lazy(() => import('../components/associations/graph-d3/AssociationGraph3D'));
+import { GraphDataProvider } from '../components/associations/data';
 import Page from '@components/pages/Page';
 import Subtitle from '@components/shared/titles/Subtitle';
 import { Seed } from '@models/trees';
@@ -57,18 +58,22 @@ const GraphBuilder = () => {
             {seed != null && <AssociationGraph inView initial={seed} />}
           </Card.Body>
         </Card>
-        <Card className="panel">
-          <Card.Body>
-            <Subtitle className="text-center">Association Graph 3D</Subtitle>
-            {seed != null && <AssociationGraph3D inView initial={seed} />}
-          </Card.Body>
-        </Card>
-        <Card className="panel">
-          <Card.Body>
-            <Subtitle className="text-center">Association Tree</Subtitle>
-            {seed != null && <AssociationTree initial={seed} />}
-          </Card.Body>
-        </Card>
+        {seed != null && (
+          <GraphDataProvider initial={seed}>
+            <Card className="panel">
+              <Card.Body>
+                <Subtitle className="text-center">Association Graph 3D</Subtitle>
+                <AssociationGraph3D inView />
+              </Card.Body>
+            </Card>
+            <Card className="panel">
+              <Card.Body>
+                <Subtitle className="text-center">Association Tree</Subtitle>
+                <AssociationTree />
+              </Card.Body>
+            </Card>
+          </GraphDataProvider>
+        )}
       </Page>
     </GraphContext.Provider>
   );
