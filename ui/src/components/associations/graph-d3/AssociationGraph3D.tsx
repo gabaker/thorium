@@ -3,100 +3,31 @@ import { ErrorBoundary } from 'react-error-boundary';
 import { Spinner } from 'react-bootstrap';
 import ForceGraph3D, { ForceGraph3DInstance } from '3d-force-graph';
 import * as THREE from 'three';
-import SpriteText from 'three-spritetext';
-import styled from 'styled-components';
 
 import RenderErrorAlert from '@components/shared/alerts/RenderErrorAlert';
-import { getNodeColor, getEdgeColor, getNodeSvg, svgToTexture } from './styles';
-import { GraphControlsToolbar, DisplayAction, GraphControls, NodeRenderMode, DagMode } from './controls';
+import { getNodeColor, getEdgeColor } from './styles';
+import { GraphControlsToolbar, NodeRenderMode, DagMode, createControlsReducer, buildNodeObject } from './controls';
+import type { LabelEntry } from './controls';
 import NodeInfo from '../graph/NodeInfo';
 import EdgeInfo from '../graph/EdgeInfo';
-import { processInitialGraphData } from './data';
+import { processInitialGraphData, getLinkEndpoints } from './data';
 import { useGraphData } from '../data';
 import type { GraphNode, GraphLink, GraphData } from './types';
-
-type LabelEntry = { sprite: THREE.Object3D; degree: number; isInitial: boolean; baseScale: THREE.Vector3 };
-
-const buildNodeObject = (renderMode: NodeRenderMode, showLabels: boolean, labelMap?: Map<string, LabelEntry>) => {
-  return (node: GraphNode): THREE.Object3D => {
-    const group = new THREE.Group();
-
-    if (renderMode === 'icons') {
-      const svgString = getNodeSvg(node.nodeType, node.visualState);
-      const texture = svgToTexture(svgString, 64);
-      const spriteMaterial = new THREE.SpriteMaterial({ map: texture, transparent: true });
-      const sprite = new THREE.Sprite(spriteMaterial);
-      const scale = Math.max(6, node.diameter / 3);
-      sprite.scale.set(scale, scale, 1);
-      group.add(sprite);
-    }
-
-    if (showLabels) {
-      const labelSprite = new SpriteText(node.label);
-      labelSprite.color = getNodeColor(node.nodeType, node.visualState);
-      labelSprite.textHeight = 3;
-      (labelSprite as any).position.y = renderMode === 'icons' ? -(node.diameter / 5 + 4) : -(node.diameter / 5 + 2);
-      // @ts-ignore — depthWrite exists on SpriteMaterial
-      labelSprite.material.depthWrite = false;
-      group.add(labelSprite);
-      if (labelMap) {
-        const obj = labelSprite as unknown as THREE.Object3D;
-        labelMap.set(node.id, { sprite: obj, degree: node.degree, isInitial: node.visualState === 'initial', baseScale: obj.scale.clone() });
-      }
-    } else if (labelMap) {
-      labelMap.delete(node.id);
-    }
-
-    return group;
-  };
-};
-
-const GraphWindow = styled.div`
-  position: relative;
-  background-color: var(--thorium-panel-bg);
-  overflow: hidden;
-`;
-
-const GraphDiv = styled.div`
-  z-index: 200;
-  overflow: hidden;
-  min-height: 90vh;
-  max-height: 90vh;
-`;
-
-const LoadingOverlay = styled.div`
-  position: absolute;
-  inset: 0;
-  z-index: 400;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  pointer-events: none;
-`;
-
-const DataPreview = styled.div`
-  position: absolute;
-  z-index: 300;
-  top: 0px;
-  right: 0px;
-  background-color: rgba(255, 255, 255, 0.01) !important;
-  padding: 10px;
-  max-width: 40vw;
-  max-height: 30vh;
-  overflow-y: auto;
-  overflow-x: auto;
-`;
+import { applyGrowthToInstance } from './applyGrowth';
+import { GraphWindow, GraphDiv, LoadingOverlay, DataPreview } from './AssociationGraph3D.styled';
 
 interface AssociationGraphProps {
   inView: boolean;
 }
 
 const AssociationGraph3DInner: React.FC<AssociationGraphProps> = () => {
-  const { graph, graphId, graphVersion, loading, grow, growToDepth, growable } = useGraphData();
+  const {
+    graph, graphId, graphVersion, loading, grow, growToDepth,
+    growable, reload, focusedNodeId, focusSource, setFocusedNode,
+  } = useGraphData();
 
   const containerRef = useRef<HTMLDivElement>(null);
   const graphInstanceRef = useRef<ForceGraph3DInstance | null>(null);
-  const graphRootRef = useRef<string[]>(['']);
   const graphDataRef = useRef<GraphData>({ nodes: [], links: [] });
   const labelSpritesRef = useRef<Map<string, LabelEntry>>(new Map());
   const animFrameRef = useRef<number>(0);
@@ -104,6 +35,9 @@ const AssociationGraph3DInner: React.FC<AssociationGraphProps> = () => {
 
   const [nodeCount, setNodeCount] = useState(0);
   const [mounted, setMounted] = useState(false);
+  const handleNodeSelectRef = useRef<(node: GraphNode) => Promise<void>>(null as any);
+
+  const controlsReducer = createControlsReducer(graphInstanceRef, labelSpritesRef);
 
   const [controls, updateControls] = useReducer(controlsReducer, {
     filterChildless: false,
@@ -133,184 +67,13 @@ const AssociationGraph3DInner: React.FC<AssociationGraphProps> = () => {
     numDimensions: 3 as 2 | 3,
   });
 
-  function controlsReducer(state: GraphControls, action: DisplayAction): GraphControls {
-    const gi = graphInstanceRef.current;
-    switch (action.type) {
-      case 'showEdgeLabels': {
-        if (gi) gi.linkLabel(action.state ? 'label' : () => '');
-        return { ...state, showEdgeLabels: action.state };
-      }
-      case 'showNodeLabels': {
-        if (gi) {
-          labelSpritesRef.current.clear();
-          gi.nodeThreeObject(buildNodeObject(state.nodeRenderMode, action.state, labelSpritesRef.current) as any);
-          gi.nodeThreeObjectExtend(state.nodeRenderMode === 'spheres');
-          gi.refresh();
-        }
-        return { ...state, showNodeLabels: action.state };
-      }
-      case 'showNodeInfo':
-        return { ...state, showNodeInfo: action.state };
-      case 'selected':
-        return { ...state, selectedElement: action.state };
-      case 'depth':
-        return { ...state, depth: action.state };
-      case 'filterChildless':
-        return { ...state, filterChildless: action.state };
-      case 'focusOnClick':
-        return { ...state, focusOnClick: action.state };
-      case 'nodeRenderMode': {
-        if (gi) {
-          labelSpritesRef.current.clear();
-          gi.nodeThreeObject(buildNodeObject(action.state, state.showNodeLabels, labelSpritesRef.current) as any);
-          gi.nodeThreeObjectExtend(action.state === 'spheres');
-          gi.refresh();
-        }
-        return { ...state, nodeRenderMode: action.state };
-      }
-      case 'edgeWidth': {
-        if (gi) gi.linkWidth(action.state);
-        return { ...state, edgeWidth: action.state };
-      }
-      case 'edgeLength': {
-        if (gi) {
-          const linkForce = gi.d3Force('link');
-          if (linkForce && 'distance' in linkForce) (linkForce as any).distance(action.state);
-          gi.d3ReheatSimulation();
-        }
-        return { ...state, edgeLength: action.state };
-      }
-      case 'edgeLinkStrength': {
-        if (gi) {
-          const linkForce = gi.d3Force('link');
-          if (linkForce && 'strength' in linkForce) (linkForce as any).strength(action.state);
-          gi.d3ReheatSimulation();
-        }
-        return { ...state, edgeLinkStrength: action.state };
-      }
-      case 'edgeOpacity': {
-        if (gi) gi.linkOpacity(action.state);
-        return { ...state, edgeOpacity: action.state };
-      }
-      case 'arrowLength': {
-        if (gi) gi.linkDirectionalArrowLength(action.state);
-        return { ...state, arrowLength: action.state };
-      }
-      case 'directionalParticles': {
-        if (gi) gi.linkDirectionalParticles(action.state);
-        return { ...state, directionalParticles: action.state };
-      }
-      case 'particleSpeed': {
-        if (gi) gi.linkDirectionalParticleSpeed(action.state);
-        return { ...state, particleSpeed: action.state };
-      }
-      case 'nodeRelSize': {
-        if (gi) gi.nodeRelSize(action.state);
-        return { ...state, nodeRelSize: action.state };
-      }
-      case 'nodeOpacity': {
-        if (gi) gi.nodeOpacity(action.state);
-        return { ...state, nodeOpacity: action.state };
-      }
-      case 'enableNodeDrag': {
-        if (gi) gi.enableNodeDrag(action.state);
-        return { ...state, enableNodeDrag: action.state };
-      }
-      case 'chargeStrength': {
-        if (gi) {
-          const charge = gi.d3Force('charge');
-          if (charge && 'strength' in charge) (charge as any).strength(action.state);
-          gi.d3ReheatSimulation();
-        }
-        return { ...state, chargeStrength: action.state };
-      }
-      case 'velocityDecay': {
-        if (gi) {
-          gi.d3VelocityDecay(action.state);
-          gi.d3ReheatSimulation();
-        }
-        return { ...state, velocityDecay: action.state };
-      }
-      case 'warmupTicks': {
-        if (gi) gi.warmupTicks(action.state);
-        return { ...state, warmupTicks: action.state };
-      }
-      case 'cooldownTime': {
-        if (gi) gi.cooldownTime(action.state);
-        return { ...state, cooldownTime: action.state };
-      }
-      case 'dagMode': {
-        if (gi) gi.dagMode(action.state as any);
-        return { ...state, dagMode: action.state };
-      }
-      case 'dagLevelDistance': {
-        if (gi) gi.dagLevelDistance(action.state as any);
-        return { ...state, dagLevelDistance: action.state };
-      }
-      case 'numDimensions': {
-        if (gi) gi.numDimensions(action.state);
-        return { ...state, numDimensions: action.state };
-      }
-    }
-  }
-
-  const applyGrowthToInstance = (prevData: GraphData, newData: GraphData) => {
-    const gi = graphInstanceRef.current;
-    if (!gi) return;
-
-    const existingEdgeKeys = new Set(
-      prevData.links.map((l) => {
-        const src = typeof l.source === 'object' ? (l.source as GraphNode).id : l.source;
-        const tgt = typeof l.target === 'object' ? (l.target as GraphNode).id : l.target;
-        return `${src}-${tgt}`;
-      }),
-    );
-
-    const addedLinks = newData.links.filter((l) => {
-      const src = typeof l.source === 'object' ? (l.source as GraphNode).id : l.source;
-      const tgt = typeof l.target === 'object' ? (l.target as GraphNode).id : l.target;
-      return !existingEdgeKeys.has(`${src}-${tgt}`);
-    });
-
-    const newNodeMap = new Map(newData.nodes.map((n) => [n.id, n]));
-    const existingNodeIds = new Set(prevData.nodes.map((n) => n.id));
-    const addedNodes = newData.nodes.filter((n) => !existingNodeIds.has(n.id));
-
-    let stateChanged = false;
-    for (const n of prevData.nodes) {
-      const updated = newNodeMap.get(n.id);
-      if (updated && updated.visualState !== n.visualState) {
-        stateChanged = true;
-        n.visualState = updated.visualState;
-      }
-    }
-
-    if (addedNodes.length === 0 && addedLinks.length === 0 && !stateChanged) return;
-
-    const updatedData: GraphData = {
-      nodes: [...prevData.nodes, ...addedNodes],
-      links: [...prevData.links, ...addedLinks],
-    };
-    graphDataRef.current = updatedData;
-    setNodeCount(updatedData.nodes.length);
-
-    gi.graphData(updatedData);
-    labelSpritesRef.current.clear();
-    gi.nodeThreeObject(gi.nodeThreeObject());
-    gi.refresh();
-  };
-
   // React to graph changes from the shared context
   useEffect(() => {
     if (!graphId || graphVersion === 0) return;
 
     const newGraphData = processInitialGraphData(graph);
 
-    // First load — store data and trigger mount
     if (!mounted) {
-      if (graph.initial.length > 0) {
-        graphRootRef.current = graph.initial;
-      }
       graphDataRef.current = newGraphData;
       setNodeCount(newGraphData.nodes.length);
       setMounted(true);
@@ -318,10 +81,9 @@ const AssociationGraph3DInner: React.FC<AssociationGraphProps> = () => {
       return;
     }
 
-    // Incremental update — diff and apply to existing ForceGraph3D instance
     if (graphVersion > mountedVersionRef.current) {
       const prevData = graphDataRef.current;
-      applyGrowthToInstance(prevData, newGraphData);
+      applyGrowthToInstance(prevData, newGraphData, graphInstanceRef, labelSpritesRef, graphDataRef, setNodeCount);
       mountedVersionRef.current = graphVersion;
     }
   }, [graphId, graphVersion]);
@@ -331,17 +93,18 @@ const AssociationGraph3DInner: React.FC<AssociationGraphProps> = () => {
       type: 'selected',
       state: { kind: 'node', id: node.id, label: node.label },
     });
+    setFocusedNode(node.id, 'graph');
 
     if (!growable.has(node.id) || !graphId) return;
     await grow(node.id);
   };
+  handleNodeSelectRef.current = handleNodeSelect;
 
   const handleEdgeSelect = (link: GraphLink) => {
-    const src = typeof link.source === 'object' ? (link.source as GraphNode).id : link.source;
-    const tgt = typeof link.target === 'object' ? (link.target as GraphNode).id : link.target;
+    const { source, target } = getLinkEndpoints(link);
     updateControls({
       type: 'selected',
-      state: { kind: 'link', source: src, target: tgt, label: link.label },
+      state: { kind: 'link', source, target, label: link.label },
     });
   };
 
@@ -377,7 +140,7 @@ const AssociationGraph3DInner: React.FC<AssociationGraphProps> = () => {
       .linkDirectionalParticles(controls.directionalParticles)
       .linkDirectionalParticleSpeed(controls.particleSpeed)
       .enableNodeDrag(controls.enableNodeDrag)
-      .onNodeClick((node: any) => handleNodeSelect(node as GraphNode))
+      .onNodeClick((node: any) => void handleNodeSelectRef.current?.(node as GraphNode))
       .onLinkClick((link: any) => handleEdgeSelect(link as GraphLink))
       .numDimensions(controls.numDimensions)
       .warmupTicks(controls.warmupTicks)
@@ -512,18 +275,42 @@ const AssociationGraph3DInner: React.FC<AssociationGraphProps> = () => {
       await growToDepth(controls.depth);
     };
 
-    doGrow();
+    void doGrow();
     return () => {
       aborted = true;
     };
   }, [controls.depth, graphId]);
 
   // Re-fetch when filterChildless changes
-  const { reload } = useGraphData();
   useEffect(() => {
     if (!graphId) return;
-    reload({ filterChildless: controls.filterChildless });
+    void reload({ filterChildless: controls.filterChildless });
   }, [controls.filterChildless]);
+
+  // Animate camera to focused node when focus originates from tree
+  useEffect(() => {
+    if (!focusedNodeId || focusSource !== 'tree') return;
+    const gi = graphInstanceRef.current;
+    if (!gi) return;
+
+    const node = graphDataRef.current.nodes.find((n) => n.id === focusedNodeId);
+    if (!node || node.x === undefined || node.y === undefined) return;
+
+    const distance = 150;
+    const nodeHypot = Math.hypot(node.x, node.y, node.z ?? 0);
+    const distRatio = nodeHypot > 0 ? 1 + distance / nodeHypot : 1;
+
+    gi.cameraPosition(
+      { x: node.x * distRatio, y: node.y * distRatio, z: (node.z ?? 0) * distRatio },
+      { x: node.x, y: node.y, z: node.z ?? 0 },
+      1000,
+    );
+
+    updateControls({
+      type: 'selected',
+      state: { kind: 'node', id: node.id, label: node.label },
+    });
+  }, [focusedNodeId, focusSource]);
 
   return (
     <GraphWindow>

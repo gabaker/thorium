@@ -1,0 +1,56 @@
+import type { ForceGraph3DInstance } from '3d-force-graph';
+
+import { getLinkEndpoints } from './data';
+import type { GraphData } from './types';
+import type { LabelEntry } from './controls/controlsReducer';
+
+export const applyGrowthToInstance = (
+  prevData: GraphData,
+  newData: GraphData,
+  graphInstanceRef: React.RefObject<ForceGraph3DInstance | null>,
+  labelSpritesRef: React.RefObject<Map<string, LabelEntry>>,
+  graphDataRef: React.MutableRefObject<GraphData>,
+  setNodeCount: (count: number) => void,
+) => {
+  const gi = graphInstanceRef.current;
+  if (!gi) return;
+
+  const existingEdgeKeys = new Set(
+    prevData.links.map((l) => {
+      const { source, target } = getLinkEndpoints(l);
+      return `${source}-${target}`;
+    }),
+  );
+
+  const addedLinks = newData.links.filter((l) => {
+    const { source, target } = getLinkEndpoints(l);
+    return !existingEdgeKeys.has(`${source}-${target}`);
+  });
+
+  const newNodeMap = new Map(newData.nodes.map((n) => [n.id, n]));
+  const existingNodeIds = new Set(prevData.nodes.map((n) => n.id));
+  const addedNodes = newData.nodes.filter((n) => !existingNodeIds.has(n.id));
+
+  let stateChanged = false;
+  for (const n of prevData.nodes) {
+    const updated = newNodeMap.get(n.id);
+    if (updated && updated.visualState !== n.visualState) {
+      stateChanged = true;
+      n.visualState = updated.visualState;
+    }
+  }
+
+  if (addedNodes.length === 0 && addedLinks.length === 0 && !stateChanged) return;
+
+  const updatedData: GraphData = {
+    nodes: [...prevData.nodes, ...addedNodes],
+    links: [...prevData.links, ...addedLinks],
+  };
+  graphDataRef.current = updatedData;
+  setNodeCount(updatedData.nodes.length);
+
+  gi.graphData(updatedData);
+  labelSpritesRef.current.clear();
+  gi.nodeThreeObject(gi.nodeThreeObject());
+  gi.refresh();
+};

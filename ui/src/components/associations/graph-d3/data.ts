@@ -1,48 +1,13 @@
 import { Graph, BranchNode, Direction } from '@models/trees';
 import { Entities } from '@models/entities/entities';
 import { formatSubmissionNames, formatTagNames, getEdgeLabel } from '../utilities';
-import { getNodeSize, scoreNode } from './scaling';
+import { getNodeSize, scoreNode } from '../graph/scaling';
 import type { GraphNode, GraphLink, GraphData, NodeType, VisualState } from './types';
 
-export const computeDistancesFromInitial = (graph: Graph): Map<string, number> => {
-  const distances = new Map<string, number>();
-  const queue: [string, number][] = [];
-
-  for (const id of graph.initial) {
-    const nodeId = id.toString();
-    if (!distances.has(nodeId)) {
-      distances.set(nodeId, 0);
-      queue.push([nodeId, 0]);
-    }
-  }
-
-  const adj = new Map<string, Set<string>>();
-  const addEdge = (a: string, b: string) => {
-    if (!adj.has(a)) adj.set(a, new Set());
-    if (!adj.has(b)) adj.set(b, new Set());
-    adj.get(a)!.add(b);
-    adj.get(b)!.add(a);
-  };
-  for (const nodeKey of Object.keys(graph.branches)) {
-    for (const branch of graph.branches[nodeKey]) {
-      addEdge(nodeKey, branch.node.toString());
-    }
-  }
-
-  let idx = 0;
-  while (idx < queue.length) {
-    const [current, dist] = queue[idx++];
-    const neighbors = adj.get(current);
-    if (!neighbors) continue;
-    for (const neighbor of neighbors) {
-      if (!distances.has(neighbor)) {
-        distances.set(neighbor, dist + 1);
-        queue.push([neighbor, dist + 1]);
-      }
-    }
-  }
-
-  return distances;
+export const getLinkEndpoints = (link: GraphLink): { source: string; target: string } => {
+  const source = typeof link.source === 'object' ? (link.source as GraphNode).id : link.source;
+  const target = typeof link.target === 'object' ? (link.target as GraphNode).id : link.target;
+  return { source, target };
 };
 
 export const classifyNode = (nodeId: string, graph: Graph): { nodeType: NodeType; visualState: VisualState; label: string } => {

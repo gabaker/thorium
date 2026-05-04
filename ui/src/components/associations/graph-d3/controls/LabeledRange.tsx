@@ -1,7 +1,6 @@
 import React from 'react';
-import { Form } from 'react-bootstrap';
 
-import { ControlRow, ControlLabel } from './Toolbar.styled';
+import { ControlRow, ControlLabel, RangeInput } from './Toolbar.styled';
 
 interface LabeledRangeProps {
   id: string;
@@ -19,15 +18,7 @@ const LabeledRange: React.FC<LabeledRangeProps> = ({ id, label, value, min, max,
     <ControlLabel htmlFor={id}>
       {label} ({formatValue ? formatValue(value) : value})
     </ControlLabel>
-    <Form.Range
-      id={id}
-      min={min}
-      max={max}
-      step={step}
-      value={value}
-      onChange={(e) => onChange(parseFloat(e.target.value))}
-      style={{ flex: 1, minWidth: '100px' }}
-    />
+    <RangeInput id={id} min={min} max={max} step={step} value={value} onChange={(e) => onChange(parseFloat(e.target.value))} />
   </ControlRow>
 );
 

@@ -1,21 +1,28 @@
 import React from 'react';
-import { Form, Dropdown, ButtonGroup } from 'react-bootstrap';
+import { Dropdown, Form } from 'react-bootstrap';
 
 import type { SectionProps } from './types';
-import { PopoverBody, Divider } from './Toolbar.styled';
+import { PopoverBody, Divider, MenuList, MenuDropdown } from './Toolbar.styled';
 import LabeledRange from './LabeledRange';
+
+const NODE_STYLE_LABELS: Record<string, string> = {
+  spheres: 'Spheres',
+  icons: 'Icons',
+};
 
 const NodesSection: React.FC<SectionProps> = ({ controls, updateControls }) => (
   <PopoverBody>
-    <Dropdown as={ButtonGroup} style={{ width: '100%' }}>
-      <Dropdown.Toggle className="secondary-btn" variant="" size="sm" id="node-style-dropdown" style={{ width: '100%' }}>
-        Style: {controls.nodeRenderMode}
-      </Dropdown.Toggle>
-      <Dropdown.Menu>
-        <Dropdown.Item onClick={() => updateControls({ type: 'nodeRenderMode', state: 'spheres' })}>Spheres</Dropdown.Item>
-        <Dropdown.Item onClick={() => updateControls({ type: 'nodeRenderMode', state: 'icons' })}>Icons</Dropdown.Item>
-      </Dropdown.Menu>
-    </Dropdown>
+    <MenuList $inset>
+      <MenuDropdown>
+        <Dropdown.Toggle variant="" size="sm" id="node-style-dropdown">
+          {NODE_STYLE_LABELS[controls.nodeRenderMode]}
+        </Dropdown.Toggle>
+        <Dropdown.Menu>
+          <Dropdown.Item onClick={() => updateControls({ type: 'nodeRenderMode', state: 'spheres' })}>Spheres</Dropdown.Item>
+          <Dropdown.Item onClick={() => updateControls({ type: 'nodeRenderMode', state: 'icons' })}>Icons</Dropdown.Item>
+        </Dropdown.Menu>
+      </MenuDropdown>
+    </MenuList>
 
     <LabeledRange
       id="form-node-size"

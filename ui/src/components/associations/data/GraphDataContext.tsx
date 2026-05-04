@@ -1,6 +1,9 @@
 import React, { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState } from 'react';
 import { Seed, Graph, BlankGraph } from '@models/trees';
 import { getInitialTree, growTree } from '@thorpi/trees';
+import { mergeGrowthInto, computeDistances } from './graphMerge';
+
+type FocusSource = 'tree' | 'graph';
 
 interface GraphDataContextType {
   graph: Graph;
@@ -9,12 +12,15 @@ interface GraphDataContextType {
   loading: boolean;
   error: string | null;
   growable: Set<string>;
+  focusedNodeId: string | null;
+  focusSource: FocusSource | null;
   /** Read the latest Graph directly from the ref — safe inside async callbacks that outlive a render. */
   getGraph: () => Graph;
   grow: (nodeId: string) => Promise<void>;
   growMultiple: (nodeIds: string[], limit?: number) => Promise<void>;
   growToDepth: (depth: number) => Promise<void>;
   reload: (opts?: { filterChildless?: boolean; depth?: number }) => Promise<void>;
+  setFocusedNode: (nodeId: string | null, source: FocusSource) => void;
 }
 
 const GraphDataContext = createContext<GraphDataContextType | undefined>(undefined);
@@ -26,76 +32,6 @@ export const useGraphData = (): GraphDataContextType => {
   }
   return context;
 };
-
-function mergeGrowthInto(base: Graph, data: Graph, grownNodeIds: string[]): Graph {
-  const merged = structuredClone(base);
-
-  if (data.data_map) {
-    for (const nodeId of Object.keys(data.data_map)) {
-      merged.data_map[nodeId] = data.data_map[nodeId];
-    }
-  }
-
-  if (data.branches) {
-    for (const source of Object.keys(data.branches)) {
-      if (source in merged.branches) {
-        merged.branches[source].push(...data.branches[source]);
-      } else {
-        merged.branches[source] = data.branches[source];
-      }
-    }
-  }
-
-  const grownSet = new Set(grownNodeIds);
-  const remaining = merged.growable.filter((id) => !grownSet.has(id));
-  if (data.growable) {
-    remaining.push(...data.growable);
-  }
-  merged.growable = remaining;
-
-  return merged;
-}
-
-function computeDistances(graph: Graph): Map<string, number> {
-  const distances = new Map<string, number>();
-  const queue: [string, number][] = [];
-
-  for (const id of graph.initial) {
-    const nodeId = id.toString();
-    if (!distances.has(nodeId)) {
-      distances.set(nodeId, 0);
-      queue.push([nodeId, 0]);
-    }
-  }
-
-  const adj = new Map<string, Set<string>>();
-  const addEdge = (a: string, b: string) => {
-    if (!adj.has(a)) adj.set(a, new Set());
-    if (!adj.has(b)) adj.set(b, new Set());
-    adj.get(a)!.add(b);
-    adj.get(b)!.add(a);
-  };
-  for (const nodeKey of Object.keys(graph.branches)) {
-    for (const branch of graph.branches[nodeKey]) {
-      addEdge(nodeKey, branch.node.toString());
-    }
-  }
-
-  let idx = 0;
-  while (idx < queue.length) {
-    const [current, dist] = queue[idx++];
-    const neighbors = adj.get(current);
-    if (!neighbors) continue;
-    for (const neighbor of neighbors) {
-      if (!distances.has(neighbor)) {
-        distances.set(neighbor, dist + 1);
-        queue.push([neighbor, dist + 1]);
-      }
-    }
-  }
-
-  return distances;
-}
 
 interface GraphDataProviderProps {
   initial: Seed;
@@ -115,6 +51,14 @@ export const GraphDataProvider: React.FC<GraphDataProviderProps> = ({
   const [graphVersion, setGraphVersion] = useState(0);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+
+  const [focusedNodeId, setFocusedNodeId] = useState<string | null>(null);
+  const [focusSource, setFocusSource] = useState<FocusSource | null>(null);
+
+  const setFocusedNode = useCallback((nodeId: string | null, source: FocusSource) => {
+    setFocusedNodeId(nodeId);
+    setFocusSource(source);
+  }, []);
 
   const growChainRef = useRef<Promise<void>>(Promise.resolve());
 
@@ -232,14 +176,18 @@ export const GraphDataProvider: React.FC<GraphDataProviderProps> = ({
       loading,
       error,
       growable,
+      focusedNodeId,
+      focusSource,
       getGraph,
       grow,
       growMultiple,
       growToDepth,
       reload,
+      setFocusedNode,
     }),
     // eslint-disable-next-line react-hooks/exhaustive-deps
-    [graphId, graphVersion, loading, error, growable, getGraph, grow, growMultiple, growToDepth, reload],
+    [graphId, graphVersion, loading, error, growable, focusedNodeId, focusSource,
+      getGraph, grow, growMultiple, growToDepth, reload, setFocusedNode],
   );
 
   return <GraphDataContext.Provider value={value}>{children}</GraphDataContext.Provider>;

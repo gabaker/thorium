@@ -41,7 +41,6 @@ const ToolbarButton: React.FC<ToolbarButtonProps> = ({ sectionKey, activeSection
       <Overlay target={buttonRef.current} show={isOpen} placement="top">
         {(props) => (
           <StyledPopover {...props} id={`popover-${sectionKey}`}>
-            <Popover.Header as="h6">{title}</Popover.Header>
             <Popover.Body>{children}</Popover.Body>
           </StyledPopover>
         )}

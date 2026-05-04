@@ -1,8 +1,8 @@
 import React from 'react';
-import { Dropdown, ButtonGroup } from 'react-bootstrap';
+import { Dropdown } from 'react-bootstrap';
 
-import type { DagMode, SectionProps } from './types';
-import { PopoverBody, Divider } from './Toolbar.styled';
+import type { DagMode, GraphSectionProps } from './types';
+import { PopoverBody, Divider, MenuList, MenuItem, MenuDropdown } from './Toolbar.styled';
 import LabeledRange from './LabeledRange';
 
 const DAG_MODE_LABELS: Record<string, string> = {
@@ -17,7 +17,7 @@ const DAG_MODE_LABELS: Record<string, string> = {
   radialin: 'Radial In',
 };
 
-const ForcesSection: React.FC<SectionProps> = ({ controls, updateControls }) => (
+const ForcesSection: React.FC<GraphSectionProps> = ({ controls, updateControls, graphInstance }) => (
   <PopoverBody>
     <LabeledRange
       id="form-charge"
@@ -59,18 +59,21 @@ const ForcesSection: React.FC<SectionProps> = ({ controls, updateControls }) => 
 
     <Divider />
 
-    <Dropdown as={ButtonGroup} style={{ width: '100%' }}>
-      <Dropdown.Toggle className="secondary-btn" variant="" size="sm" id="dag-mode-dropdown" style={{ width: '100%' }}>
-        DAG: {DAG_MODE_LABELS[controls.dagMode ?? 'none']}
-      </Dropdown.Toggle>
-      <Dropdown.Menu>
-        {Object.entries(DAG_MODE_LABELS).map(([key, label]) => (
-          <Dropdown.Item key={key} onClick={() => updateControls({ type: 'dagMode', state: key === 'none' ? null : (key as DagMode) })}>
-            {label}
-          </Dropdown.Item>
-        ))}
-      </Dropdown.Menu>
-    </Dropdown>
+    <MenuList $inset>
+      <MenuDropdown>
+        <Dropdown.Toggle variant="" size="sm" id="dag-mode-dropdown">
+          DAG: {DAG_MODE_LABELS[controls.dagMode ?? 'none']}
+        </Dropdown.Toggle>
+        <Dropdown.Menu>
+          {Object.entries(DAG_MODE_LABELS).map(([key, label]) => (
+            <Dropdown.Item key={key} onClick={() => updateControls({ type: 'dagMode', state: key === 'none' ? null : (key as DagMode) })}>
+              {label}
+            </Dropdown.Item>
+          ))}
+        </Dropdown.Menu>
+      </MenuDropdown>
+      <MenuItem onClick={() => graphInstance?.d3ReheatSimulation()}>Reheat</MenuItem>
+    </MenuList>
 
     {controls.dagMode && (
       <LabeledRange
