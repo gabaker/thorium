@@ -451,15 +451,13 @@ const AssociationGraph3DInner: React.FC<AssociationGraphProps> = () => {
       state: { kind: 'node', id: node.id, label: node.label },
     });
 
-    const settings = focusSettingsRef.current;
-    if (settings.focusOnClick) {
-      const gi = graphInstanceRef.current;
-      if (gi) {
-        focusCameraOn(gi, { x: node.x, y: node.y, z: node.z ?? 0 }, {
-          adjustDistance: settings.adjustDistance,
-          distanceRatio: settings.distanceRatio,
-        });
-      }
+    const gi = graphInstanceRef.current;
+    if (gi) {
+      const settings = focusSettingsRef.current;
+      focusCameraOn(gi, { x: node.x, y: node.y, z: node.z ?? 0 }, {
+        adjustDistance: settings.adjustDistance,
+        distanceRatio: settings.distanceRatio,
+      });
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [focusedNodeId, focusSource]);

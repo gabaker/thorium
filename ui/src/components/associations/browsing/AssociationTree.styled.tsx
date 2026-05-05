@@ -8,24 +8,23 @@ export const TreeContainer = styled.div`
     border: none;
     width: 100%;
     padding: 0 0 2px 0;
+    border-radius: 8px;
+    transition: background-color 0.2s ease;
+    cursor: pointer;
+    color: var(--thorium-text);
+  }
+
+  .tree button[role='treeitem']:hover {
+    background-color: rgb(0, 102, 255, 0.1);
   }
 
   .treeitem {
-    width: 100%;
     text-align: left;
-    color: var(--thorium-text);
+    color: inherit;
     padding: 6px 10px;
     position: relative;
-    border-radius: 8px;
-    transition: background-color 0.2s ease, outline-color 0.2s ease;
-    cursor: pointer;
-    display: flex;
+    display: inline-flex;
     align-items: center;
-  }
-  .treeitem:hover {
-    background-color: rgb(0, 102, 255, 0.1);
-    color: var(--thorium-text);
-    border-color: var(--thorium-text);
   }
 
   .tree button[role='treeitem']:focus {

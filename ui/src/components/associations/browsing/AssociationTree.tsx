@@ -303,14 +303,8 @@ const AssociationTreeComponent: React.FC = () => {
           const isHighlighted = highlightedNodeId !== null && highlightedNodeId === nodeId;
 
           return (
-            <OverlayTrigger
-              key={nodeId}
-              placement="right-start"
-              delay={{ show: 400, hide: 100 }}
-              overlay={renderNodePreview(nodeId) ?? <span />}
-              popperConfig={{ modifiers: [{ name: 'offset', options: { offset: [0, 8] } }] }}
-            >
               <button
+                key={nodeId}
                 {...item.getProps()}
                 style={{ paddingLeft: `${item.getItemMeta().level * 20}px` }}
                 onMouseEnter={() => {
@@ -338,28 +332,34 @@ const AssociationTreeComponent: React.FC = () => {
                   }
                 }}
               >
-                <div
-                  className={cn('treeitem', {
-                    focused: item.isFocused(),
-                    expanded: item.isExpanded(),
-                    selected: item.isSelected(),
-                    folder: item.isFolder(),
-                    'duplicate-highlight': isDuplicate && isHighlighted,
-                  })}
+                <OverlayTrigger
+                  placement="right"
+                  delay={{ show: 400, hide: 100 }}
+                  overlay={renderNodePreview(nodeId) ?? <span />}
+                  popperConfig={{ modifiers: [{ name: 'offset', options: { offset: [0, 8] } }] }}
                 >
-                  {typeInfo && (
-                    <span
-                      className="node-type-icon"
-                      title={NODE_TYPE_LABELS[typeInfo.nodeType] ?? 'Other'}
-                      dangerouslySetInnerHTML={{ __html: getNodeSvg(typeInfo.nodeType, typeInfo.visualState) }}
-                    />
-                  )}
-                  {item.getItemName()}
-                  {isDuplicate && <span className="duplicate-indicator" title="Duplicate: has multiple parents in graph">Duplicate</span>}
-                  {item.isLoading() && <Spinner animation="border" size="sm" className="loading" style={{ width: 14, height: 14, marginLeft: 6, borderWidth: 2 }} />}
-                </div>
+                  <span
+                    className={cn('treeitem', {
+                      focused: item.isFocused(),
+                      expanded: item.isExpanded(),
+                      selected: item.isSelected(),
+                      folder: item.isFolder(),
+                      'duplicate-highlight': isDuplicate && isHighlighted,
+                    })}
+                  >
+                    {typeInfo && (
+                      <span
+                        className="node-type-icon"
+                        title={NODE_TYPE_LABELS[typeInfo.nodeType] ?? 'Other'}
+                        dangerouslySetInnerHTML={{ __html: getNodeSvg(typeInfo.nodeType, typeInfo.visualState) }}
+                      />
+                    )}
+                    {item.getItemName()}
+                    {isDuplicate && <span className="duplicate-indicator" title="Duplicate: has multiple parents in graph">Duplicate</span>}
+                    {item.isLoading() && <Spinner animation="border" size="sm" className="loading" style={{ width: 14, height: 14, marginLeft: 6, borderWidth: 2 }} />}
+                  </span>
+                </OverlayTrigger>
               </button>
-            </OverlayTrigger>
           );
         })}
       </div>
