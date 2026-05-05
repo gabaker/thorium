@@ -203,8 +203,6 @@ const AssociationTreeComponent: React.FC = () => {
         const initialId = graph.initial[0].toString();
         const item = tree.getItemInstance(initialId);
         item.select();
-        item.setFocused();
-        void item.scrollTo({ block: 'nearest' });
       } catch {
         // Node not yet available
       }
@@ -267,8 +265,6 @@ const AssociationTreeComponent: React.FC = () => {
       try {
         const targetItem = tree.getItemInstance(focusedNodeId);
         targetItem.select();
-        targetItem.setFocused();
-        void targetItem.scrollTo({ block: 'nearest' });
       } catch {
         // Node not yet visible in tree — will sync when tree rebuilds
       }
@@ -288,8 +284,6 @@ const AssociationTreeComponent: React.FC = () => {
       try {
         const item = tree.getItemInstance(pending);
         item.select();
-        item.setFocused();
-        void item.scrollTo({ block: 'nearest' });
       } catch {
         // Still not available
       }
