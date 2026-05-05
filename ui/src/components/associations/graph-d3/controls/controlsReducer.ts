@@ -82,7 +82,7 @@ export const createControlsReducer = (
     switch (action.type) {
       case 'showEdgeLabels': {
         if (gi) {
-          gi.linkLabel(action.state ? 'label' : () => '');
+          gi.linkLabel(() => '');
           if (action.state) {
             edgeLabelSpritesRef.current.clear();
             gi.linkThreeObjectExtend(true);
@@ -117,6 +117,8 @@ export const createControlsReducer = (
         return { ...state, focusOnClick: action.state };
       case 'adjustDistanceOnFocus':
         return { ...state, adjustDistanceOnFocus: action.state };
+      case 'refitOnGrow':
+        return { ...state, refitOnGrow: action.state };
       case 'focusDistanceRatio':
         return { ...state, focusDistanceRatio: action.state };
       case 'labelScale': {

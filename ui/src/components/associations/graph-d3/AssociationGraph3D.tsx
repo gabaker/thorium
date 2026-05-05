@@ -92,6 +92,7 @@ const AssociationGraph3DInner: React.FC<AssociationGraphProps> = () => {
   const handleEdgeSelectRef = useRef<(link: GraphLink) => void>(null as any);
   const focusSettingsRef = useRef({ focusOnClick: false, adjustDistance: false, distanceRatio: 1 });
   const labelScaleRef = useRef(1);
+  const refitOnGrowRef = useRef(true);
 
   const controlsReducer = createControlsReducer(graphInstanceRef, labelSpritesRef, edgeLabelSpritesRef);
 
@@ -105,6 +106,7 @@ const AssociationGraph3DInner: React.FC<AssociationGraphProps> = () => {
     nodeRenderMode: 'icons' as NodeRenderMode,
     focusOnClick: false,
     adjustDistanceOnFocus: false,
+    refitOnGrow: true,
     focusDistanceRatio: 1,
     labelScale: 1,
     edgeWidth: 1,
@@ -132,6 +134,7 @@ const AssociationGraph3DInner: React.FC<AssociationGraphProps> = () => {
     distanceRatio: controls.focusDistanceRatio,
   };
   labelScaleRef.current = controls.labelScale;
+  refitOnGrowRef.current = controls.refitOnGrow;
 
   // React to graph changes from the shared context
   useEffect(() => {
@@ -151,6 +154,12 @@ const AssociationGraph3DInner: React.FC<AssociationGraphProps> = () => {
       const prevData = graphDataRef.current;
       applyGrowthToInstance(prevData, newGraphData, graphInstanceRef, labelSpritesRef, graphDataRef, setNodeCount);
       mountedVersionRef.current = graphVersion;
+
+      if (refitOnGrowRef.current && graphInstanceRef.current) {
+        setTimeout(() => {
+          graphInstanceRef.current?.zoomToFit(1000, 50);
+        }, 800);
+      }
     }
   }, [graphId, graphVersion]);
 
@@ -228,7 +237,7 @@ const AssociationGraph3DInner: React.FC<AssociationGraphProps> = () => {
       .nodeOpacity(controls.nodeOpacity)
       .linkDirectionalArrowLength(controls.arrowLength)
       .linkDirectionalArrowRelPos(1)
-      .linkLabel(controls.showEdgeLabels ? 'label' : () => '')
+      .linkLabel(() => '')
       .linkThreeObjectExtend(controls.showEdgeLabels)
       .linkThreeObject(controls.showEdgeLabels
         ? ((link: any) => buildEdgeLabelFactory(controls.labelScale, edgeLabelSpritesRef.current)(link as GraphLink) as any)

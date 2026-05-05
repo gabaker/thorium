@@ -13,6 +13,7 @@ export interface GraphControls {
   nodeRenderMode: NodeRenderMode;
   focusOnClick: boolean;
   adjustDistanceOnFocus: boolean;
+  refitOnGrow: boolean;
   focusDistanceRatio: number;
   labelScale: number;
   // edges
@@ -44,7 +45,7 @@ export type SelectedElement =
 
 export type DisplayAction =
   | { type: 'depth'; state: number }
-  | { type: 'filterChildless' | 'showEdgeLabels' | 'showNodeLabels' | 'showNodeInfo' | 'focusOnClick' | 'enableNodeDrag' | 'adjustDistanceOnFocus'; state: boolean }
+  | { type: 'filterChildless' | 'showEdgeLabels' | 'showNodeLabels' | 'showNodeInfo' | 'focusOnClick' | 'enableNodeDrag' | 'adjustDistanceOnFocus' | 'refitOnGrow'; state: boolean }
   | { type: 'selected'; state: SelectedElement | null }
   | { type: 'nodeRenderMode'; state: NodeRenderMode }
   | { type: 'edgeWidth' | 'edgeLength' | 'edgeLinkStrength' | 'edgeOpacity' | 'arrowLength' | 'directionalParticles' | 'particleSpeed'; state: number }

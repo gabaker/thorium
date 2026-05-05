@@ -67,6 +67,16 @@ const GraphSection: React.FC<GraphSectionProps> = ({ controls, updateControls, g
         )}
       </>
     )}
+
+    <Divider />
+
+    <Form.Check
+      type="switch"
+      id="form-refit-on-grow"
+      label="Refit on Grow"
+      checked={controls.refitOnGrow}
+      onChange={() => updateControls({ type: 'refitOnGrow', state: !controls.refitOnGrow })}
+    />
   </PopoverBody>
 );
 

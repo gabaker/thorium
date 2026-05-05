@@ -215,40 +215,38 @@ const FileDetails = () => {
           </Nav.Link>
         </Nav>
         <Nav.Item className="details-navitem"></Nav.Item>
-        <Tab.Content>
-          <Tab.Pane eventKey="results" className="mt-4">
-            <Results
-              sha256={sha256}
-              results={results}
-              setResults={setResults}
-              numResults={numResults}
-              allowHashUpdate={allowResultsHashUpdate}
-              setNumResults={(num) => setNumResults(num)}
-            />
-          </Tab.Pane>
-          <Tab.Pane eventKey="related" className="mt-4">
-            <GraphDataProvider initial={{ samples: [sha256] }}>
+        <GraphDataProvider initial={{ samples: [sha256] }}>
+          <Tab.Content>
+            <Tab.Pane eventKey="results" className="mt-4">
+              <Results
+                sha256={sha256}
+                results={results}
+                setResults={setResults}
+                numResults={numResults}
+                allowHashUpdate={allowResultsHashUpdate}
+                setNumResults={(num) => setNumResults(num)}
+              />
+            </Tab.Pane>
+            <Tab.Pane eventKey="related" className="mt-4">
               <AssociationGraph3D inView={viewGraph} />
-            </GraphDataProvider>
-          </Tab.Pane>
-          <Tab.Pane eventKey="tree" className="mt-4">
-            <GraphDataProvider initial={{ samples: [sha256] }}>
+            </Tab.Pane>
+            <Tab.Pane eventKey="tree" className="mt-4">
               <AssociationTree />
-            </GraphDataProvider>
-          </Tab.Pane>
-          <Tab.Pane eventKey="comments" className="mt-4">
-            <Comments sha256={sha256} />
-          </Tab.Pane>
-          <Tab.Pane eventKey="reactionstatus" className="mt-4">
-            <ReactionStatus sha256={sha256} autoRefresh={reactionsTabSelected} />
-          </Tab.Pane>
-          <Tab.Pane eventKey="runpipelines" className="mt-4">
-            <RunPipelines sha256={sha256} />
-          </Tab.Pane>
-          <Tab.Pane eventKey="download" className="mt-4">
-            <Download sha256={sha256} />
-          </Tab.Pane>
-        </Tab.Content>
+            </Tab.Pane>
+            <Tab.Pane eventKey="comments" className="mt-4">
+              <Comments sha256={sha256} />
+            </Tab.Pane>
+            <Tab.Pane eventKey="reactionstatus" className="mt-4">
+              <ReactionStatus sha256={sha256} autoRefresh={reactionsTabSelected} />
+            </Tab.Pane>
+            <Tab.Pane eventKey="runpipelines" className="mt-4">
+              <RunPipelines sha256={sha256} />
+            </Tab.Pane>
+            <Tab.Pane eventKey="download" className="mt-4">
+              <Download sha256={sha256} />
+            </Tab.Pane>
+          </Tab.Content>
+        </GraphDataProvider>
       </Tab.Container>
     </Page>
   );
