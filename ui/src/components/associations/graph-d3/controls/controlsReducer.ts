@@ -82,7 +82,6 @@ export const createControlsReducer = (
     switch (action.type) {
       case 'showEdgeLabels': {
         if (gi) {
-          gi.linkLabel(() => '');
           if (action.state) {
             edgeLabelSpritesRef.current.clear();
             gi.linkThreeObjectExtend(true);
