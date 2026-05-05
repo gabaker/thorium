@@ -1,6 +1,6 @@
 import React from 'react';
 
-import { Graph, TreeNode } from '@models/trees';
+import { Direction, Graph, TreeNode } from '@models/trees';
 import { formatTagNames } from '../utilities';
 
 const NODE_TYPE_LABELS: Record<string, string> = {
@@ -97,15 +97,59 @@ export function findMultiParentNodeIds(graph: Graph): Set<string> {
     counts.set(nodeId, (counts.get(nodeId) ?? 0) + 1);
     if (visited.has(nodeId)) return;
     visited.add(nodeId);
-    const children = graph.branches[nodeId];
-    if (children) {
-      for (const child of children) {
-        walk(child.node);
+    const branches = graph.branches[nodeId];
+    if (branches) {
+      for (const branch of branches) {
+        if (branch.direction === Direction.To || branch.direction === Direction.Bidirectional) {
+          walk(branch.node);
+        }
+      }
+    }
+    // Also walk nodes that have Direction.From pointing to this node (they are children)
+    for (const [otherId, otherBranches] of Object.entries(graph.branches)) {
+      if (otherId === nodeId) continue;
+      for (const branch of otherBranches) {
+        if (branch.node === nodeId && branch.direction === Direction.From) {
+          walk(otherId);
+        }
       }
     }
   }
 
-  for (const root of graph.initial) {
+  // Start from the topmost roots (walk up from initial nodes)
+  const roots = new Set<string>();
+  for (const initialId of graph.initial) {
+    let current = initialId;
+    const chain = new Set<string>();
+    chain.add(current);
+    const branches = graph.branches[current];
+    let parent: string | null = null;
+    if (branches) {
+      for (const b of branches) {
+        if (b.direction === Direction.From && !chain.has(b.node)) {
+          parent = b.node;
+          break;
+        }
+      }
+    }
+    while (parent) {
+      chain.add(parent);
+      current = parent;
+      parent = null;
+      const parentBranches = graph.branches[current];
+      if (parentBranches) {
+        for (const b of parentBranches) {
+          if (b.direction === Direction.From && !chain.has(b.node)) {
+            parent = b.node;
+            break;
+          }
+        }
+      }
+    }
+    roots.add(current);
+  }
+
+  for (const root of roots) {
     walk(root);
   }
 

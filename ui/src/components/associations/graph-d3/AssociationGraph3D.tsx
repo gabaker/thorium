@@ -334,7 +334,11 @@ const AssociationGraph3DInner: React.FC<AssociationGraphProps> = () => {
       };
 
       nodeLabels.forEach(applyScaling);
-      edgeLabels.forEach(applyScaling);
+      edgeLabels.forEach((entry) => {
+        entry.sprite.visible = true;
+        const s = distFactor;
+        entry.sprite.scale.set(entry.baseScale.x * s, entry.baseScale.y * s, entry.baseScale.z);
+      });
 
       animFrameRef.current = requestAnimationFrame(updateLabelScaling);
     };

@@ -6,13 +6,73 @@ import { OverlayTrigger, Popover, Spinner } from 'react-bootstrap';
 import { ErrorBoundary } from 'react-error-boundary';
 
 import RenderErrorAlert from '../../shared/alerts/RenderErrorAlert';
-import { BranchNode } from '@models/trees';
+import { BranchNode, Direction, Graph } from '@models/trees';
 import { getNodeName } from '../utilities';
 import { classifyNode } from '../graph-d3/data';
 import { getNodeSvg } from '../graph-d3/styles';
 import { useGraphData } from '../data';
 import { TreeContainer, PreviewPopover } from './AssociationTree.styled';
 import { NODE_TYPE_LABELS, getNodePreviewData, renderTagPreview, findMultiParentNodeIds } from './treeHelpers';
+
+const isChildDirection = (dir: Direction) => dir === Direction.To || dir === Direction.Bidirectional;
+
+function findParent(graph: Graph, nodeId: string): string | null {
+  if (!graph.branches || !(nodeId in graph.branches)) return null;
+  for (const branch of graph.branches[nodeId]) {
+    if (branch.direction === Direction.From) return branch.node;
+  }
+  return null;
+}
+
+function buildTreeRoots(graph: Graph): string[] {
+  const roots: string[] = [];
+  for (const initialId of graph.initial) {
+    let current = initialId;
+    const visited = new Set<string>();
+    visited.add(current);
+    let parent = findParent(graph, current);
+    while (parent && !visited.has(parent)) {
+      visited.add(parent);
+      current = parent;
+      parent = findParent(graph, current);
+    }
+    if (!roots.includes(current)) roots.push(current);
+  }
+  return roots;
+}
+
+function getDirectChildren(graph: Graph, nodeId: string): string[] {
+  const children: string[] = [];
+  if (graph.branches && nodeId in graph.branches) {
+    for (const branch of graph.branches[nodeId]) {
+      if (isChildDirection(branch.direction)) {
+        children.push(branch.node);
+      }
+    }
+  }
+  for (const [otherId, branches] of Object.entries(graph.branches)) {
+    if (otherId === nodeId) continue;
+    for (const branch of branches) {
+      if (branch.node === nodeId && branch.direction === Direction.From) {
+        if (!children.includes(otherId)) children.push(otherId);
+      }
+    }
+  }
+  return children;
+}
+
+function hasDirectChildren(graph: Graph, nodeId: string): boolean {
+  if (graph.branches && nodeId in graph.branches) {
+    if (graph.branches[nodeId].some((b: BranchNode) => isChildDirection(b.direction))) return true;
+  }
+  for (const [otherId, branches] of Object.entries(graph.branches)) {
+    if (otherId === nodeId) continue;
+    for (const branch of branches) {
+      if (branch.node === nodeId && branch.direction === Direction.From) return true;
+    }
+  }
+  return false;
+}
 
 const AssociationTreeComponent: React.FC = () => {
   const { graph, graphVersion, grow, growable, getGraph, focusedNodeId, focusSource, setFocusedNode } = useGraphData();
@@ -43,27 +103,21 @@ const AssociationTreeComponent: React.FC = () => {
     isItemFolder: (node) => {
       const nodeId = node.getId();
       const g = getGraph();
-      const branches = g.branches ? Object.keys(g.branches) : [];
-      return !!(g.growable?.includes(nodeId) || branches.includes(nodeId));
+      return !!(g.growable?.includes(nodeId) || hasDirectChildren(g, nodeId));
     },
     createLoadingItemData: () => 'loading...',
     dataLoader: {
       getItem: (nodeId) => nodeId,
       getChildren: async (nodeId) => {
-        if (nodeId == 'root') {
-          return getGraph().initial;
+        if (nodeId === 'root') {
+          return buildTreeRoots(getGraph());
         }
 
         if (growable.has(nodeId)) {
           await grow(nodeId);
         }
 
-        const latest = getGraph();
-        const children: string[] = [];
-        if (latest.branches && nodeId in latest.branches) {
-          latest.branches[nodeId].forEach((node: BranchNode) => children.push(node.node));
-        }
-        return children;
+        return getDirectChildren(getGraph(), nodeId);
       },
     },
     indent: 20,
@@ -120,11 +174,21 @@ const AssociationTreeComponent: React.FC = () => {
       const g = getGraph();
       if (!g.branches) return;
 
-      // Build child→parent map
+      // Build child→parent map (only Direction.To/Bidirectional edges define parent→child)
       const parentMap = new Map<string, string>();
-      for (const [parent, children] of Object.entries(g.branches)) {
+      for (const [parentId, children] of Object.entries(g.branches)) {
         for (const child of children) {
-          parentMap.set(child.node, parent);
+          if (isChildDirection(child.direction)) {
+            parentMap.set(child.node, parentId);
+          }
+        }
+      }
+      // Direction.From edges: the branch node is the parent, the key node is the child
+      for (const [childId, branches] of Object.entries(g.branches)) {
+        for (const branch of branches) {
+          if (branch.direction === Direction.From) {
+            parentMap.set(childId, branch.node);
+          }
         }
       }
 
