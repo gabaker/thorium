@@ -66,6 +66,60 @@ export const PreviewToggleButton = styled.button`
   }
 `;
 
+export const TreeOverlayToggle = styled.button`
+  position: absolute;
+  z-index: 300;
+  top: 8px;
+  left: 8px;
+  width: 32px;
+  height: 32px;
+  border-radius: 8px;
+  border: 1px solid var(--thorium-panel-border);
+  background: var(--thorium-secondary-panel-bg);
+  color: var(--thorium-text);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  transition: background 0.15s;
+
+  &:hover {
+    background: var(--thorium-highlight-panel-bg);
+  }
+`;
+
+export const TreeOverlayPanel = styled.div`
+  position: absolute;
+  z-index: 300;
+  top: 8px;
+  left: 8px;
+  max-width: 35vw;
+  max-height: 60vh;
+  min-width: 250px;
+  background: color-mix(in srgb, var(--thorium-secondary-panel-bg) 88%, transparent);
+  backdrop-filter: blur(8px);
+  border: 1px solid var(--thorium-panel-border);
+  border-radius: 8px;
+  overflow-y: auto;
+  overflow-x: hidden;
+  display: flex;
+  flex-direction: column;
+`;
+
+export const TreeOverlayHeader = styled.div`
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 8px 10px 4px;
+  font-size: 0.8rem;
+  font-weight: 600;
+  color: var(--thorium-text);
+  position: sticky;
+  top: 0;
+  background: inherit;
+  z-index: 1;
+`;
+
 export const MinimizeButton = styled.button`
   background: none;
   border: none;

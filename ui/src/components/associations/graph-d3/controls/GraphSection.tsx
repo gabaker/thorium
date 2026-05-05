@@ -42,7 +42,11 @@ const GraphSection: React.FC<GraphSectionProps> = ({ controls, updateControls, g
       id="form-focus-on-click"
       label="Focus on Click"
       checked={controls.focusOnClick}
-      onChange={() => updateControls({ type: 'focusOnClick', state: !controls.focusOnClick })}
+      onChange={() => {
+        const next = !controls.focusOnClick;
+        updateControls({ type: 'focusOnClick', state: next });
+        if (next) updateControls({ type: 'refitOnGrow', state: false });
+      }}
     />
     {controls.focusOnClick && (
       <>
@@ -75,7 +79,11 @@ const GraphSection: React.FC<GraphSectionProps> = ({ controls, updateControls, g
       id="form-refit-on-grow"
       label="Refit on Grow"
       checked={controls.refitOnGrow}
-      onChange={() => updateControls({ type: 'refitOnGrow', state: !controls.refitOnGrow })}
+      onChange={() => {
+        const next = !controls.refitOnGrow;
+        updateControls({ type: 'refitOnGrow', state: next });
+        if (next) updateControls({ type: 'focusOnClick', state: false });
+      }}
     />
   </PopoverBody>
 );

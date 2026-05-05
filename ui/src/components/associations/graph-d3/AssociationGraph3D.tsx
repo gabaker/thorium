@@ -6,6 +6,7 @@ import * as THREE from 'three';
 
 import RenderErrorAlert from '@components/shared/alerts/RenderErrorAlert';
 import { getNodeColor, getEdgeColor } from './styles';
+import { FaSitemap, FaTimes } from 'react-icons/fa';
 import { GraphControlsToolbar, NodeRenderMode, DagMode, createControlsReducer, buildNodeObject, buildEdgeLabelFactory, iconNodeVal } from './controls';
 import type { LabelEntry } from './controls';
 import { processInitialGraphData, getLinkEndpoints } from './data';
@@ -13,7 +14,8 @@ import { useGraphData } from '../data';
 import type { GraphNode, GraphLink, GraphData } from './types';
 import { applyGrowthToInstance } from './applyGrowth';
 import DataPreviewPanel from './DataPreviewPanel';
-import { GraphWindow, GraphDiv, LoadingOverlay } from './AssociationGraph3D.styled';
+import { AssociationTree } from '../browsing/AssociationTree';
+import { GraphWindow, GraphDiv, LoadingOverlay, TreeOverlayToggle, TreeOverlayPanel, TreeOverlayHeader, MinimizeButton } from './AssociationGraph3D.styled';
 
 interface AssociationGraphProps {
   inView: boolean;
@@ -88,6 +90,7 @@ const AssociationGraph3DInner: React.FC<AssociationGraphProps> = () => {
   const [nodeCount, setNodeCount] = useState(0);
   const [mounted, setMounted] = useState(false);
   const [previewMinimized, setPreviewMinimized] = useState(false);
+  const [treeOverlayOpen, setTreeOverlayOpen] = useState(false);
   const handleNodeSelectRef = useRef<(node: GraphNode) => Promise<void>>(null as any);
   const handleEdgeSelectRef = useRef<(link: GraphLink) => void>(null as any);
   const focusSettingsRef = useRef({ focusOnClick: false, adjustDistance: false, distanceRatio: 1 });
@@ -104,9 +107,9 @@ const AssociationGraph3DInner: React.FC<AssociationGraphProps> = () => {
     selectedElement: null,
     showNodeInfo: true,
     nodeRenderMode: 'icons' as NodeRenderMode,
-    focusOnClick: false,
+    focusOnClick: true,
     adjustDistanceOnFocus: false,
-    refitOnGrow: true,
+    refitOnGrow: false,
     focusDistanceRatio: 1,
     labelScale: 1,
     edgeWidth: 1,
@@ -114,8 +117,8 @@ const AssociationGraph3DInner: React.FC<AssociationGraphProps> = () => {
     edgeLinkStrength: 0.5,
     edgeOpacity: 0.2,
     arrowLength: 3.5,
-    directionalParticles: 0,
-    particleSpeed: 0.01,
+    directionalParticles: 1,
+    particleSpeed: 0.006,
     nodeRelSize: 4,
     nodeOpacity: 0.75,
     enableNodeDrag: true,
@@ -469,6 +472,21 @@ const AssociationGraph3DInner: React.FC<AssociationGraphProps> = () => {
         <LoadingOverlay>
           <Spinner animation="border" variant="secondary" />
         </LoadingOverlay>
+      )}
+      {treeOverlayOpen ? (
+        <TreeOverlayPanel>
+          <TreeOverlayHeader>
+            <span>Browsing</span>
+            <MinimizeButton onClick={() => setTreeOverlayOpen(false)}>
+              <FaTimes size={12} />
+            </MinimizeButton>
+          </TreeOverlayHeader>
+          <AssociationTree />
+        </TreeOverlayPanel>
+      ) : (
+        <TreeOverlayToggle onClick={() => setTreeOverlayOpen(true)}>
+          <FaSitemap size={14} />
+        </TreeOverlayToggle>
       )}
       <GraphControlsToolbar
         graphId={graphId}

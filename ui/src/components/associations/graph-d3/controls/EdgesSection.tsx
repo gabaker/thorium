@@ -68,11 +68,11 @@ const EdgesSection: React.FC<SectionProps> = ({ controls, updateControls }) => (
       <LabeledRange
         id="form-particle-speed"
         label="Speed"
-        value={controls.particleSpeed}
-        min={0.001}
-        max={0.05}
-        step={0.001}
-        onChange={(v) => updateControls({ type: 'particleSpeed', state: v })}
+        value={Math.round(controls.particleSpeed / 0.002)}
+        min={1}
+        max={10}
+        step={1}
+        onChange={(v) => updateControls({ type: 'particleSpeed', state: v * 0.002 })}
       />
     )}
 
