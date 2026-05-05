@@ -25,7 +25,7 @@ export const TreeContainer = styled.div`
   .treeitem:hover {
     background-color: rgb(0, 102, 255, 0.1);
     color: var(--thorium-text);
-    border-color: black;
+    border-color: var(--thorium-text);
   }
 
   .tree button[role='treeitem']:focus {
@@ -34,7 +34,7 @@ export const TreeContainer = styled.div`
 
   button:focus-visible .treeitem.focused,
   .treeitem.searchmatch.focused {
-    outline: 2px solid black;
+    outline: 2px solid var(--thorium-text);
   }
 
   .treeitem.drop {
@@ -47,12 +47,16 @@ export const TreeContainer = styled.div`
   }
 
   .treeitem.folder:before {
-    content: url(data:image/svg+xml;base64,PHN2ZyB2ZXJzaW9uPSIxLjEiIHhtbG5zPSJodHRwOi8vd3d3LnczLm9yZy8yMDAwL3N2ZyIgeG1sbnM6eGxpbms9Imh0dHA6Ly93d3cudzMub3JnLzE5OTkveGxpbmsiIHg9IjBweCIgeT0iMHB4IiB2aWV3Qm94PSIwIDAgMTYgMTYiIGVuYWJsZS1iYWNrZ3JvdW5kPSJuZXcgMCAwIDE2IDE2IiB4bWw6c3BhY2U9InByZXNlcnZlIj48Zz48Zz48cGF0aCBmaWxsLXJ1bGU9ImV2ZW5vZGQiIGNsaXAtcnVsZT0iZXZlbm9kZCIgZD0iTTQuNjQ2IDEuNjQ2YS41LjUgMCAwIDEgLjcwOCAwbDYgNmEuNS41IDAgMCAxIDAgLjcwOGwtNiA2YS41LjUgMCAwIDEtLjcwOC0uNzA4TDEwLjI5MyA4IDQuNjQ2IDIuMzU0YS41LjUgMCAwIDEgMC0uNzA4eiIgY2xhc3M9InJjdC10cmVlLWl0ZW0tYXJyb3ctcGF0aCI+PC9wYXRoPjwvZz48L2c+PC9zdmc+);
-    background-color: transparent;
-    width: 10px;
+    content: '';
     display: inline-block;
-    z-index: 1;
-    margin-right: 4px;
+    width: 0;
+    height: 0;
+    border-style: solid;
+    border-width: 4px 0 4px 6px;
+    border-color: transparent transparent transparent currentColor;
+    opacity: 0.7;
+    margin-right: 6px;
+    flex-shrink: 0;
     transition: transform 0.1s ease-in-out;
   }
 

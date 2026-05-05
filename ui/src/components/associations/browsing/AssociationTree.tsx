@@ -80,6 +80,27 @@ const AssociationTreeComponent: React.FC = () => {
   const [loadingItemChildrens, setLoadingItemChildrens] = useState<string[]>([]);
   const [highlightedNodeId, setHighlightedNodeId] = useState<string | null>(null);
 
+  const [expandedItems, setExpandedItems] = useState<string[]>(() => {
+    const items: string[] = [];
+    for (const initialId of graph.initial) {
+      let current = initialId.toString();
+      const chain: string[] = [];
+      const visited = new Set<string>();
+      visited.add(current);
+      let parent = findParent(graph, current);
+      while (parent && !visited.has(parent)) {
+        chain.push(parent);
+        visited.add(parent);
+        current = parent;
+        parent = findParent(graph, current);
+      }
+      items.push(...chain, initialId.toString());
+    }
+    return [...new Set(items)];
+  });
+
+  const grownNodesRef = useRef(new Set<string>());
+
   const multiParentNodes = useMemo(() => {
     if (!graph.id) return new Set<string>();
     return findMultiParentNodeIds(graph);
@@ -88,9 +109,10 @@ const AssociationTreeComponent: React.FC = () => {
   }, [graphVersion]);
 
   const tree = useTree<string>({
-    state: { loadingItemData, loadingItemChildrens },
+    state: { loadingItemData, loadingItemChildrens, expandedItems },
     setLoadingItemData,
     setLoadingItemChildrens,
+    setExpandedItems,
     rootItemId: 'root',
     getItemName: (node) => {
       const nodeId = node.getId();
@@ -113,11 +135,14 @@ const AssociationTreeComponent: React.FC = () => {
           return buildTreeRoots(getGraph());
         }
 
-        if (growable.has(nodeId)) {
+        const g = getGraph();
+        const existingChildren = getDirectChildren(g, nodeId);
+        if (existingChildren.length === 0 && growable.has(nodeId)) {
           await grow(nodeId);
+          grownNodesRef.current.add(nodeId);
+          return getDirectChildren(getGraph(), nodeId);
         }
-
-        return getDirectChildren(getGraph(), nodeId);
+        return existingChildren;
       },
     },
     indent: 20,
@@ -165,6 +190,28 @@ const AssociationTreeComponent: React.FC = () => {
   );
 
   const pendingFocusRef = useRef<string | null>(null);
+  const initialFocusDone = useRef(false);
+
+  useEffect(() => {
+    if (initialFocusDone.current) return;
+    if (!graph.initial?.length) return;
+    initialFocusDone.current = true;
+
+    const selectInitial = async () => {
+      await new Promise((r) => setTimeout(r, 150));
+      try {
+        const initialId = graph.initial[0].toString();
+        const item = tree.getItemInstance(initialId);
+        item.select();
+        item.setFocused();
+        void item.scrollTo({ block: 'nearest' });
+      } catch {
+        // Node not yet available
+      }
+    };
+
+    void selectInitial();
+  }, [graphVersion]);
 
   // When graph clicks a node, expand ancestors in tree, select it, and scroll to it
   useEffect(() => {
@@ -279,6 +326,17 @@ const AssociationTreeComponent: React.FC = () => {
                   if (highlightedNodeId === nodeId) setHighlightedNodeId(null);
                 }}
                 onClick={(e) => {
+                  const isGrowable = growable.has(nodeId);
+                  const isExpanded = item.isExpanded();
+
+                  if (isGrowable && isExpanded && !grownNodesRef.current.has(nodeId)) {
+                    e.stopPropagation();
+                    grownNodesRef.current.add(nodeId);
+                    void grow(nodeId);
+                    setFocusedNode(nodeId, 'tree');
+                    return;
+                  }
+
                   item.getProps().onClick?.(e);
                   setFocusedNode(nodeId, 'tree');
                   if (isDuplicate) {

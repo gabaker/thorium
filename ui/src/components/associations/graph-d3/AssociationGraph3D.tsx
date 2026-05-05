@@ -6,7 +6,7 @@ import * as THREE from 'three';
 
 import RenderErrorAlert from '@components/shared/alerts/RenderErrorAlert';
 import { getNodeColor, getEdgeColor } from './styles';
-import { GraphControlsToolbar, NodeRenderMode, DagMode, createControlsReducer, buildNodeObject, buildEdgeLabelFactory } from './controls';
+import { GraphControlsToolbar, NodeRenderMode, DagMode, createControlsReducer, buildNodeObject, buildEdgeLabelFactory, iconNodeVal } from './controls';
 import type { LabelEntry } from './controls';
 import { processInitialGraphData, getLinkEndpoints } from './data';
 import { useGraphData } from '../data';
@@ -228,7 +228,9 @@ const AssociationGraph3DInner: React.FC<AssociationGraphProps> = () => {
       .backgroundColor('rgba(0,0,0,0)')
       .width(containerRef.current.clientWidth)
       .height(containerRef.current.clientHeight || window.innerHeight * 0.9)
-      .nodeVal((node: any) => (node as GraphNode).diameter)
+      .nodeVal(controls.nodeRenderMode === 'icons'
+        ? (iconNodeVal(controls.nodeRelSize) as any)
+        : ((node: any) => (node as GraphNode).diameter))
       .nodeColor((node: any) => getNodeColor((node as GraphNode).nodeType, (node as GraphNode).visualState))
       .nodeLabel(() => '')
       .nodeThreeObject(buildNodeObject(controls.nodeRenderMode, controls.showNodeLabels, controls.nodeRelSize, controls.labelScale, labelSpritesRef.current) as any)

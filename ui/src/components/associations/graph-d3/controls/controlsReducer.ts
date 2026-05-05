@@ -8,6 +8,12 @@ import type { GraphNode, GraphLink } from '../types';
 
 export type LabelEntry = { sprite: THREE.Object3D; degree: number; isInitial: boolean; baseScale: THREE.Vector3 };
 
+export const iconNodeVal = (nodeRelSize: number) => (node: GraphNode): number => {
+  const iconHalf = (Math.max(6, node.diameter / 3) * (nodeRelSize / 4)) / 2;
+  const r = iconHalf / nodeRelSize;
+  return r * r * r;
+};
+
 export const buildNodeObject = (
   renderMode: NodeRenderMode,
   showLabels: boolean,
@@ -140,6 +146,9 @@ export const createControlsReducer = (
           labelSpritesRef.current.clear();
           gi.nodeThreeObject(buildNodeObject(action.state, state.showNodeLabels, state.nodeRelSize, state.labelScale, labelSpritesRef.current) as any);
           gi.nodeThreeObjectExtend(action.state === 'spheres');
+          gi.nodeVal(action.state === 'icons'
+            ? (iconNodeVal(state.nodeRelSize) as any)
+            : ((node: any) => (node as GraphNode).diameter));
           gi.refresh();
         }
         return { ...state, nodeRenderMode: action.state };
@@ -186,6 +195,7 @@ export const createControlsReducer = (
           if (state.nodeRenderMode === 'icons') {
             labelSpritesRef.current.clear();
             gi.nodeThreeObject(buildNodeObject(state.nodeRenderMode, state.showNodeLabels, action.state, state.labelScale, labelSpritesRef.current) as any);
+            gi.nodeVal(iconNodeVal(action.state) as any);
             gi.refresh();
           }
         }
