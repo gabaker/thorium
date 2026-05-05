@@ -63,7 +63,7 @@ export const buildEdgeLabelFactory = (
     if (!link.label) return undefined;
     const sprite = new SpriteText(link.label);
     sprite.color = getEdgeColor();
-    sprite.textHeight = 1.5 * labelScale;
+    sprite.textHeight = 2.5 * labelScale;
     // @ts-ignore — depthWrite exists on SpriteMaterial
     sprite.material.depthWrite = false;
 
@@ -209,6 +209,10 @@ export const createControlsReducer = (
         if (gi) gi.enableNodeDrag(action.state);
         return { ...state, enableNodeDrag: action.state };
       }
+      case 'labelDensity':
+        return { ...state, labelDensity: action.state };
+      case 'labelMinSize':
+        return { ...state, labelMinSize: action.state };
       case 'chargeStrength': {
         if (gi) {
           const charge = gi.d3Force('charge');

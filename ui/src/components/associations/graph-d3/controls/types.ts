@@ -28,6 +28,8 @@ export interface GraphControls {
   nodeRelSize: number;
   nodeOpacity: number;
   enableNodeDrag: boolean;
+  labelDensity: number;
+  labelMinSize: number;
   // forces
   chargeStrength: number;
   velocityDecay: number;
@@ -49,7 +51,7 @@ export type DisplayAction =
   | { type: 'selected'; state: SelectedElement | null }
   | { type: 'nodeRenderMode'; state: NodeRenderMode }
   | { type: 'edgeWidth' | 'edgeLength' | 'edgeLinkStrength' | 'edgeOpacity' | 'arrowLength' | 'directionalParticles' | 'particleSpeed'; state: number }
-  | { type: 'nodeRelSize' | 'nodeOpacity' | 'focusDistanceRatio' | 'labelScale'; state: number }
+  | { type: 'nodeRelSize' | 'nodeOpacity' | 'focusDistanceRatio' | 'labelScale' | 'labelDensity' | 'labelMinSize'; state: number }
   | { type: 'chargeStrength' | 'velocityDecay' | 'warmupTicks' | 'cooldownTime'; state: number }
   | { type: 'dagMode'; state: DagMode }
   | { type: 'dagLevelDistance'; state: number | null }

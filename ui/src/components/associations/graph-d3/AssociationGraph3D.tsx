@@ -1,12 +1,13 @@
 import React, { useEffect, useReducer, useRef, useState } from 'react';
 import { ErrorBoundary } from 'react-error-boundary';
-import { Spinner } from 'react-bootstrap';
+import { Spinner, OverlayTrigger, Tooltip } from 'react-bootstrap';
 import ForceGraph3D, { ForceGraph3DInstance } from '3d-force-graph';
 import * as THREE from 'three';
 
 import RenderErrorAlert from '@components/shared/alerts/RenderErrorAlert';
 import { getNodeColor, getEdgeColor } from './styles';
-import { FaSitemap, FaTimes } from 'react-icons/fa';
+import { FaTimes } from 'react-icons/fa';
+import { FaFolderTree } from 'react-icons/fa6';
 import { GraphControlsToolbar, NodeRenderMode, DagMode, createControlsReducer, buildNodeObject, buildEdgeLabelFactory, iconNodeVal } from './controls';
 import type { LabelEntry } from './controls';
 import { processInitialGraphData, getLinkEndpoints } from './data';
@@ -95,6 +96,8 @@ const AssociationGraph3DInner: React.FC<AssociationGraphProps> = () => {
   const handleEdgeSelectRef = useRef<(link: GraphLink) => void>(null as any);
   const focusSettingsRef = useRef({ focusOnClick: false, adjustDistance: false, distanceRatio: 1 });
   const labelScaleRef = useRef(1);
+  const labelDensityRef = useRef(0.4);
+  const labelMinSizeRef = useRef(1);
   const refitOnGrowRef = useRef(true);
 
   const controlsReducer = createControlsReducer(graphInstanceRef, labelSpritesRef, edgeLabelSpritesRef);
@@ -122,6 +125,8 @@ const AssociationGraph3DInner: React.FC<AssociationGraphProps> = () => {
     nodeRelSize: 4,
     nodeOpacity: 0.75,
     enableNodeDrag: true,
+    labelDensity: 0.4,
+    labelMinSize: 1,
     chargeStrength: -200,
     velocityDecay: 0.4,
     warmupTicks: 0,
@@ -137,6 +142,8 @@ const AssociationGraph3DInner: React.FC<AssociationGraphProps> = () => {
     distanceRatio: controls.focusDistanceRatio,
   };
   labelScaleRef.current = controls.labelScale;
+  labelDensityRef.current = controls.labelDensity;
+  labelMinSizeRef.current = controls.labelMinSize;
   refitOnGrowRef.current = controls.refitOnGrow;
 
   // React to graph changes from the shared context
@@ -337,16 +344,17 @@ const AssociationGraph3DInner: React.FC<AssociationGraphProps> = () => {
 
       const scale = labelScaleRef.current;
       const distFactor = Math.max(1, dist / 300);
-      const filterStart = 150 * scale;
-      const filterEnd = 1000 * scale;
+      const filterStart = 300 * scale;
+      const filterEnd = 2000 * scale;
       const filterProgress = Math.min(1, Math.max(0, (dist - filterStart) / (filterEnd - filterStart)));
-      const degreeThreshold = filterProgress * maxDegree * 0.6;
+      const degreeThreshold = filterProgress * maxDegree * labelDensityRef.current;
 
+      const minSize = labelMinSizeRef.current;
       const applyScaling = (entry: LabelEntry) => {
         if (entry.isInitial || entry.degree >= degreeThreshold) {
           entry.sprite.visible = true;
           const degreeBoost = entry.isInitial ? 1.5 : 1 + (entry.degree / maxDegree) * 0.5;
-          const s = distFactor * degreeBoost;
+          const s = Math.max(minSize, distFactor * degreeBoost);
           entry.sprite.scale.set(entry.baseScale.x * s, entry.baseScale.y * s, entry.baseScale.z);
         } else {
           entry.sprite.visible = false;
@@ -356,7 +364,7 @@ const AssociationGraph3DInner: React.FC<AssociationGraphProps> = () => {
       nodeLabels.forEach(applyScaling);
       edgeLabels.forEach((entry) => {
         entry.sprite.visible = true;
-        const s = distFactor;
+        const s = Math.max(minSize, distFactor);
         entry.sprite.scale.set(entry.baseScale.x * s, entry.baseScale.y * s, entry.baseScale.z);
       });
 
@@ -484,9 +492,11 @@ const AssociationGraph3DInner: React.FC<AssociationGraphProps> = () => {
           <AssociationTree />
         </TreeOverlayPanel>
       ) : (
-        <TreeOverlayToggle onClick={() => setTreeOverlayOpen(true)}>
-          <FaSitemap size={14} />
-        </TreeOverlayToggle>
+        <OverlayTrigger placement="right" overlay={<Tooltip>File Browser</Tooltip>}>
+          <TreeOverlayToggle onClick={() => setTreeOverlayOpen(true)}>
+            <FaFolderTree size={14} />
+          </TreeOverlayToggle>
+        </OverlayTrigger>
       )}
       <GraphControlsToolbar
         graphId={graphId}

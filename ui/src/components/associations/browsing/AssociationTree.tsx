@@ -100,6 +100,7 @@ const AssociationTreeComponent: React.FC = () => {
   });
 
   const grownNodesRef = useRef(new Set<string>());
+  const [manuallyGrowing, setManuallyGrowing] = useState<Set<string>>(new Set());
 
   const multiParentNodes = useMemo(() => {
     if (!graph.id) return new Set<string>();
@@ -320,7 +321,8 @@ const AssociationTreeComponent: React.FC = () => {
                   if (isGrowable && isExpanded && !grownNodesRef.current.has(nodeId)) {
                     e.stopPropagation();
                     grownNodesRef.current.add(nodeId);
-                    void grow(nodeId);
+                    setManuallyGrowing((s) => new Set(s).add(nodeId));
+                    grow(nodeId).finally(() => setManuallyGrowing((s) => { const next = new Set(s); next.delete(nodeId); return next; }));
                     setFocusedNode(nodeId, 'tree');
                     return;
                   }
@@ -356,7 +358,7 @@ const AssociationTreeComponent: React.FC = () => {
                     )}
                     {item.getItemName()}
                     {isDuplicate && <span className="duplicate-indicator" title="Duplicate: has multiple parents in graph">Duplicate</span>}
-                    {item.isLoading() && <Spinner animation="border" size="sm" className="loading" style={{ width: 14, height: 14, marginLeft: 6, borderWidth: 2 }} />}
+                    {(item.isLoading() || manuallyGrowing.has(nodeId)) && <Spinner animation="border" size="sm" className="loading" style={{ width: 14, height: 14, marginLeft: 6, borderWidth: 2 }} />}
                   </span>
                 </OverlayTrigger>
               </button>

@@ -118,5 +118,5 @@ export const getEdgeLabel = (target: string, source: string, node: BranchNode, g
     //const nodeId: string = node.direction == Direction.To ? node.node: branchId;
     return `${pairs}`;
   }
-  return '';
+  return '→';
 };

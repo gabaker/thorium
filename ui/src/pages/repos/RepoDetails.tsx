@@ -5,7 +5,6 @@ import { FaServer } from 'react-icons/fa';
 import styled from 'styled-components';
 
 // project imports
-const AssociationTree = React.lazy(() => import('../../components/associations/browsing/AssociationTree'));
 const AssociationGraph3D = React.lazy(() => import('../../components/associations/graph-d3/AssociationGraph3D'));
 import { GraphDataProvider } from '../../components/associations/data';
 import Page from '@components/pages/Page';
@@ -60,14 +59,8 @@ const RepoDetails = () => {
         <GraphDataProvider initial={seed}>
           <Card className="panel">
             <Card.Body>
-              <Subtitle className="text-center">Association Graph</Subtitle>
+              <Subtitle className="text-center">Associations</Subtitle>
               <AssociationGraph3D inView />
-            </Card.Body>
-          </Card>
-          <Card className="panel">
-            <Card.Body>
-              <Subtitle className="text-center">Association Tree</Subtitle>
-              <AssociationTree />
             </Card.Body>
           </Card>
         </GraphDataProvider>

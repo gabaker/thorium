@@ -6,7 +6,6 @@ import { FaFileCirclePlus, FaSquarePlus } from 'react-icons/fa6';
 import styled from 'styled-components';
 
 // project imports
-const AssociationTree = React.lazy(() => import('../../associations/browsing/AssociationTree'));
 const AssociationGraph3D = React.lazy(() => import('../../associations/graph-d3/AssociationGraph3D'));
 import { GraphDataProvider } from '../../associations/data';
 import { buildUpdateEntityForm } from '../utilities';
@@ -407,17 +406,9 @@ const EntityDetails: React.FC<EntityDetailsProps> = ({ getEntityDetails, blank, 
             <Card className="panel mt-4">
               <Card.Body>
                 <div className="d-flex justify-content-center">
-                  <Subtitle>Graph</Subtitle>
-                </div>
-                <AssociationGraph3D inView />
-              </Card.Body>
-            </Card>
-            <Card className="panel mt-4">
-              <Card.Body>
-                <div className="text-center">
                   <Subtitle>Associations</Subtitle>
                 </div>
-                <AssociationTree />
+                <AssociationGraph3D inView />
               </Card.Body>
             </Card>
           </GraphDataProvider>

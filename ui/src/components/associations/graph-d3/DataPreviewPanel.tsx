@@ -1,4 +1,5 @@
 import React from 'react';
+import { OverlayTrigger, Tooltip } from 'react-bootstrap';
 import { GoSidebarExpand, GoSidebarCollapse } from 'react-icons/go';
 
 import NodeInfo from '../graph/NodeInfo';
@@ -24,18 +25,22 @@ const DataPreviewPanel: React.FC<DataPreviewPanelProps> = ({
 
   if (minimized) {
     return (
-      <PreviewToggleButton onClick={onToggleMinimize}>
-        <GoSidebarExpand size={14} />
-      </PreviewToggleButton>
+      <OverlayTrigger placement="left" overlay={<Tooltip>Show Node Info</Tooltip>}>
+        <PreviewToggleButton onClick={onToggleMinimize}>
+          <GoSidebarExpand size={14} />
+        </PreviewToggleButton>
+      </OverlayTrigger>
     );
   }
 
   return (
     <PreviewContainer>
       <PreviewHeader>
-        <MinimizeButton onClick={onToggleMinimize}>
-          <GoSidebarCollapse size={14} />
-        </MinimizeButton>
+        <OverlayTrigger placement="left" overlay={<Tooltip>Minimize</Tooltip>}>
+          <MinimizeButton onClick={onToggleMinimize}>
+            <GoSidebarCollapse size={14} />
+          </MinimizeButton>
+        </OverlayTrigger>
       </PreviewHeader>
       {selectedElement.kind === 'node' && nodeData && <NodeInfo node={nodeData} />}
       {selectedElement.kind === 'link' && (

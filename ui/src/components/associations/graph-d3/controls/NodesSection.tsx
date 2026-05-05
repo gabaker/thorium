@@ -52,6 +52,30 @@ const NodesSection: React.FC<SectionProps> = ({ controls, updateControls }) => (
       checked={controls.showNodeLabels}
       onChange={() => updateControls({ type: 'showNodeLabels', state: !controls.showNodeLabels })}
     />
+    {controls.showNodeLabels && (
+      <>
+        <LabeledRange
+          id="form-label-density"
+          label="Label Density"
+          value={controls.labelDensity}
+          min={0.1}
+          max={1.0}
+          step={0.1}
+          formatValue={(v) => `${(v * 100).toFixed(0)}%`}
+          onChange={(v) => updateControls({ type: 'labelDensity', state: v })}
+        />
+        <LabeledRange
+          id="form-label-min-size"
+          label="Min Font Size"
+          value={controls.labelMinSize}
+          min={0.5}
+          max={5}
+          step={0.5}
+          formatValue={(v) => `${v.toFixed(1)}x`}
+          onChange={(v) => updateControls({ type: 'labelMinSize', state: v })}
+        />
+      </>
+    )}
     <Form.Check
       type="switch"
       id="form-node-drag"

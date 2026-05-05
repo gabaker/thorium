@@ -5,7 +5,6 @@ import Select from 'react-select';
 import { FaFileAlt, FaTrash } from 'react-icons/fa';
 
 // project imports
-const AssociationTree = React.lazy(() => import('@components/associations/browsing/AssociationTree'));
 const AssociationGraph3D = React.lazy(() => import('@components/associations/graph-d3/AssociationGraph3D'));
 import { GraphDataProvider } from '@components/associations/data';
 const Results = React.lazy(() => import('@components/pages/files/Results'));
@@ -187,12 +186,7 @@ const FileDetails = () => {
           </Nav.Item>
           <Nav.Item className="details-navitem">
             <Nav.Link className="details-navlink" eventKey="related">
-              Related
-            </Nav.Link>
-          </Nav.Item>
-          <Nav.Item className="details-navitem">
-            <Nav.Link className="details-navlink" eventKey="tree">
-              File Tree
+              Associations
             </Nav.Link>
           </Nav.Item>
           <Nav.Item className="details-navitem">
@@ -229,9 +223,6 @@ const FileDetails = () => {
             </Tab.Pane>
             <Tab.Pane eventKey="related" className="mt-4">
               <AssociationGraph3D inView={viewGraph} />
-            </Tab.Pane>
-            <Tab.Pane eventKey="tree" className="mt-4">
-              <AssociationTree />
             </Tab.Pane>
             <Tab.Pane eventKey="comments" className="mt-4">
               <Comments sha256={sha256} />
