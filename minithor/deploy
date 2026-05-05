@@ -738,11 +738,7 @@ curl -k -X POST -u elastic:$ESPASS "https://localhost:9200/_security/user/thoriu
   "password" : "INSECURE_DEV_PASSWORD",
   "roles" : ["thorium"],
   "full_name" : "Thorium",
-<<<<<<< HEAD
-  "email" : "<Thorium Entity account or dummy email>"
-=======
   "email" : "thorium@localhost"
->>>>>>> bf811126 (feat(minithor): Improved deploy script automation)
 }
 '
 ESEOF

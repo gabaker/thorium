@@ -2,69 +2,120 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-PID_DIR="$SCRIPT_DIR/.expose-pids"
+LOG_DIR="$SCRIPT_DIR/.expose-logs"
 DEV_MODE=false
 STOP_MODE=false
 STATUS_MODE=false
+API_PORT=8080
+CURRENT_USER="$(id -un)"
 
 usage() {
-    echo "Usage: $0 [--dev] [--stop] [--status]"
-    echo "  --dev     Also forward database ports (Elastic, Kibana, Redis, MinIO, Scylla)"
-    echo "  --stop    Stop all running port-forwards"
-    echo "  --status  Show which port-forwards are running"
+    echo "Usage: $0 [--dev] [--port <port>] [--stop] [--status]"
+    echo "  --dev          Also forward database ports (Elastic, Kibana, Redis, MinIO, Scylla)"
+    echo "  --port <port>  Local port for the Thorium API (default: 8080)"
+    echo "  --stop         Stop all running port-forwards"
+    echo "  --status       Show which port-forwards are running"
     exit 0
 }
 
-for arg in "$@"; do
-    case "$arg" in
+while [ $# -gt 0 ]; do
+    case "$1" in
         --dev)    DEV_MODE=true ;;
         --stop)   STOP_MODE=true ;;
         --status) STATUS_MODE=true ;;
+        --port)
+            shift
+            if [ $# -eq 0 ] || ! [[ "$1" =~ ^[0-9]+$ ]]; then
+                echo "ERROR: --port requires a numeric argument" >&2
+                exit 1
+            fi
+            API_PORT="$1"
+            ;;
         -h|--help) usage ;;
-        *) echo "Unknown option: $arg"; usage ;;
+        *) echo "Unknown option: $1"; usage ;;
     esac
+    shift
 done
 
-mkdir -p "$PID_DIR"
+# Ensure minikube IP bypasses any configured HTTP proxy
+if [ -n "${HTTP_PROXY:-}${HTTPS_PROXY:-}${http_proxy:-}${https_proxy:-}" ]; then
+    MINIKUBE_IP=$(minikube ip 2>/dev/null || true)
+    if [ -n "$MINIKUBE_IP" ]; then
+        export NO_PROXY="${NO_PROXY:+$NO_PROXY,}$MINIKUBE_IP"
+        export no_proxy="${no_proxy:+$no_proxy,}$MINIKUBE_IP"
+    fi
+fi
+
+# Verify minikube is running
+if ! minikube status --format='{{.Host}}' 2>/dev/null | grep -q Running; then
+    echo "ERROR: minikube is not running. Start it with: minithor/start" >&2
+    exit 1
+fi
+
+mkdir -p "$LOG_DIR"
+
+########################################
+# Process inspection helpers
+########################################
+
+find_forwards() {
+    ps -eo user:20,pid,args 2>/dev/null \
+        | grep 'minikube kubectl.*[p]ort-forward svc/' \
+        || true
+}
+
+# Extract the service name from a port-forward command line
+# e.g. "minikube kubectl -- port-forward svc/thorium-api -n thorium 8080:80" -> "thorium-api"
+parse_service() {
+    echo "$1" | grep -oP 'svc/\K[^ ]+'
+}
+
+# Extract port mapping (last whitespace-delimited token(s) after the namespace)
+parse_ports() {
+    echo "$1" | grep -oP '(\d+:\d+|\d+)(?=\s*$)'
+}
+
+kill_process() {
+    local pid=$1 owner=$2
+    if [ "$owner" = "$CURRENT_USER" ]; then
+        pkill -P "$pid" 2>/dev/null || true
+        kill "$pid" 2>/dev/null || true
+    else
+        echo "  Port-forward owned by $owner, using sudo to stop"
+        sudo pkill -P "$pid" 2>/dev/null || true
+        sudo kill "$pid" 2>/dev/null || true
+    fi
+}
 
 is_forward_alive() {
-    local name=$1
-    local pid_file="$PID_DIR/$name.pid"
-    if [ -f "$pid_file" ]; then
-        local pid
-        pid=$(cat "$pid_file")
-        if kill -0 "$pid" 2>/dev/null; then
-            return 0
-        fi
-        rm -f "$pid_file"
-    fi
-    return 1
+    local service=$1
+    find_forwards | grep -q "svc/$service"
 }
 
 stop_forward() {
-    local name=$1
-    local pid_file="$PID_DIR/$name.pid"
-    if [ -f "$pid_file" ]; then
-        local pid
-        pid=$(cat "$pid_file")
-        if kill -0 "$pid" 2>/dev/null; then
-            pkill -P "$pid" 2>/dev/null || true
-            kill "$pid" 2>/dev/null || true
-            echo "Stopped $name (PID $pid)"
-        fi
-        rm -f "$pid_file" "$PID_DIR/$name.ports"
-    fi
+    local service=$1
+    local line owner pid
+    while IFS= read -r line; do
+        [ -n "$line" ] || continue
+        owner=$(echo "$line" | awk '{print $1}')
+        pid=$(echo "$line" | awk '{print $2}')
+        kill_process "$pid" "$owner"
+        echo "Stopped $service (PID $pid, owner $owner)"
+    done < <(find_forwards | grep "svc/$service")
 }
 
 stop_all() {
     local found=false
-    for pid_file in "$PID_DIR"/*.pid; do
-        [ -f "$pid_file" ] || continue
+    local line owner pid service
+    while IFS= read -r line; do
+        [ -n "$line" ] || continue
         found=true
-        local name
-        name=$(basename "$pid_file" .pid)
-        stop_forward "$name"
-    done
+        owner=$(echo "$line" | awk '{print $1}')
+        pid=$(echo "$line" | awk '{print $2}')
+        service=$(parse_service "$line")
+        kill_process "$pid" "$owner"
+        echo "Stopped $service (PID $pid, owner $owner)"
+    done < <(find_forwards)
     if [ "$found" = false ]; then
         echo "No port-forwards running"
     fi
@@ -72,20 +123,16 @@ stop_all() {
 
 show_status() {
     local found=false
-    for pid_file in "$PID_DIR"/*.pid; do
-        [ -f "$pid_file" ] || continue
-        local name pid
-        name=$(basename "$pid_file" .pid)
-        pid=$(cat "$pid_file")
-        if kill -0 "$pid" 2>/dev/null; then
-            local ports
-            ports=$(cat "$PID_DIR/$name.ports" 2>/dev/null || echo "unknown")
-            echo "  $name: running (PID $pid) -> $ports"
-            found=true
-        else
-            rm -f "$pid_file" "$PID_DIR/$name.ports"
-        fi
-    done
+    local line owner pid service ports
+    while IFS= read -r line; do
+        [ -n "$line" ] || continue
+        found=true
+        owner=$(echo "$line" | awk '{print $1}')
+        pid=$(echo "$line" | awk '{print $2}')
+        service=$(parse_service "$line")
+        ports=$(parse_ports "$line")
+        echo "  $service: running as $owner (PID $pid) -> $ports"
+    done < <(find_forwards)
     if [ "$found" = false ]; then
         echo "  No port-forwards running"
     fi
@@ -96,39 +143,55 @@ start_forward() {
     shift 3
     local ports=("$@")
 
-    if is_forward_alive "$name"; then
-        echo "  $name: already running (PID $(cat "$PID_DIR/$name.pid")), skipping"
+    if is_forward_alive "$service"; then
+        local existing
+        existing=$(find_forwards | grep "svc/$service" | head -1)
+        local owner pid
+        owner=$(echo "$existing" | awk '{print $1}')
+        pid=$(echo "$existing" | awk '{print $2}')
+        echo "  $name: already running as $owner (PID $pid), skipping"
         return
+    fi
+
+    if ! minikube kubectl -- get svc "$service" -n "$namespace" &>/dev/null; then
+        echo "  $name: SKIPPED (service $service not found in namespace $namespace)"
+        return 1
     fi
 
     # Kill any stale process holding the local port (e.g. orphaned kubectl child)
     local local_port="${ports[0]%%:*}"
-    local stale_pid
+    local stale_pid stale_owner
     if command -v ss &>/dev/null; then
         stale_pid=$(ss -tlnp "sport = :$local_port" 2>/dev/null | grep -oP 'pid=\K[0-9]+' | head -1 || true)
     else
         stale_pid=$(lsof -nP -ti "TCP:$local_port" -sTCP:LISTEN 2>/dev/null | head -1 || true)
     fi
     if [ -n "$stale_pid" ]; then
-        echo "  $name: killing stale process on port $local_port (PID $stale_pid)"
-        kill "$stale_pid" 2>/dev/null || true
+        stale_owner=$(ps -o user= -p "$stale_pid" 2>/dev/null | awk '{print $1}' || true)
+        echo "  $name: killing stale process on port $local_port (PID $stale_pid, owner ${stale_owner:-unknown})"
+        kill_process "$stale_pid" "${stale_owner:-$CURRENT_USER}"
         sleep 1
     fi
 
-    minikube kubectl -- port-forward "svc/$service" -n "$namespace" "${ports[@]}" &>/dev/null &
+    local log_file="$LOG_DIR/$name.log"
+    minikube kubectl -- port-forward "svc/$service" -n "$namespace" "${ports[@]}" >/dev/null 2>"$log_file" &
     local pid=$!
-    echo "$pid" > "$PID_DIR/$name.pid"
-    echo "${ports[*]}" > "$PID_DIR/$name.ports"
 
     sleep 1
-    if kill -0 "$pid" 2>/dev/null; then
+    if is_forward_alive "$service"; then
         echo "  $name: forwarding ${ports[*]} (PID $pid)"
     else
         echo "  $name: FAILED to start (port-forward exited immediately)"
-        rm -f "$PID_DIR/$name.pid" "$PID_DIR/$name.ports"
+        if [ -s "$log_file" ]; then
+            echo "  $name: log: $(cat "$log_file")"
+        fi
         return 1
     fi
 }
+
+########################################
+# Main
+########################################
 
 if [ "$STOP_MODE" = true ]; then
     echo "Stopping all port-forwards..."
@@ -144,7 +207,7 @@ fi
 
 echo "Starting port-forwards..."
 
-start_forward thorium-api thorium thorium-api 8080:80
+start_forward thorium-api thorium thorium-api "$API_PORT:80"
 
 if [ "$DEV_MODE" = true ]; then
     start_forward elastic elastic-system elastic-es-http 9200
@@ -158,7 +221,7 @@ echo ""
 echo "Port-forward status:"
 show_status
 echo ""
-echo "Thorium API available at http://localhost:8080"
+echo "Thorium API available at http://localhost:$API_PORT"
 if [ "$DEV_MODE" = true ]; then
     echo "Elasticsearch at https://localhost:9200"
     echo "Kibana at https://localhost:5601"
