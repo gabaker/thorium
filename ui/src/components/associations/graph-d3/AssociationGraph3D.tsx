@@ -296,10 +296,26 @@ const AssociationGraph3DInner: React.FC<AssociationGraphProps> = () => {
       }
 
       const camPos = gi.cameraPosition();
-      const target = (gi.controls() as any)?.target;
+      const controls = gi.controls() as any;
+      const target = controls?.target;
       if (!target) {
         animFrameRef.current = requestAnimationFrame(updateLabelScaling);
         return;
+      }
+
+      // Keep orbit target in front of camera so zoom speed stays responsive.
+      // After a focus animation the target can end up behind the camera when the
+      // user scrolls toward a different cluster, collapsing the orbit radius and
+      // making further zoom increments tiny.
+      const cam = gi.camera();
+      if (cam && controls) {
+        const fwd = new THREE.Vector3(0, 0, -1).applyQuaternion(cam.quaternion);
+        const toTarget = new THREE.Vector3(target.x - camPos.x, target.y - camPos.y, target.z - camPos.z);
+        const proj = toTarget.dot(fwd);
+        if (proj < 5) {
+          const minDist = 50;
+          target.set(camPos.x + fwd.x * minDist, camPos.y + fwd.y * minDist, camPos.z + fwd.z * minDist);
+        }
       }
 
       const dist = Math.hypot(camPos.x - target.x, camPos.y - target.y, camPos.z - target.z);
