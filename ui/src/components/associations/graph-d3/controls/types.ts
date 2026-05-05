@@ -12,6 +12,9 @@ export interface GraphControls {
   showNodeInfo: boolean;
   nodeRenderMode: NodeRenderMode;
   focusOnClick: boolean;
+  adjustDistanceOnFocus: boolean;
+  focusDistanceRatio: number;
+  labelScale: number;
   // edges
   edgeWidth: number;
   edgeLength: number;
@@ -41,11 +44,11 @@ export type SelectedElement =
 
 export type DisplayAction =
   | { type: 'depth'; state: number }
-  | { type: 'filterChildless' | 'showEdgeLabels' | 'showNodeLabels' | 'showNodeInfo' | 'focusOnClick' | 'enableNodeDrag'; state: boolean }
+  | { type: 'filterChildless' | 'showEdgeLabels' | 'showNodeLabels' | 'showNodeInfo' | 'focusOnClick' | 'enableNodeDrag' | 'adjustDistanceOnFocus'; state: boolean }
   | { type: 'selected'; state: SelectedElement | null }
   | { type: 'nodeRenderMode'; state: NodeRenderMode }
   | { type: 'edgeWidth' | 'edgeLength' | 'edgeLinkStrength' | 'edgeOpacity' | 'arrowLength' | 'directionalParticles' | 'particleSpeed'; state: number }
-  | { type: 'nodeRelSize' | 'nodeOpacity'; state: number }
+  | { type: 'nodeRelSize' | 'nodeOpacity' | 'focusDistanceRatio' | 'labelScale'; state: number }
   | { type: 'chargeStrength' | 'velocityDecay' | 'warmupTicks' | 'cooldownTime'; state: number }
   | { type: 'dagMode'; state: DagMode }
   | { type: 'dagLevelDistance'; state: number | null }

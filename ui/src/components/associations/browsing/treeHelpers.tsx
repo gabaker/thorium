@@ -89,7 +89,7 @@ export function renderTagPreview(tags: Record<string, Record<string, string[]>> 
   );
 }
 
-export function findDuplicateNodeIds(graph: Graph): Set<string> {
+export function findMultiParentNodeIds(graph: Graph): Set<string> {
   const counts = new Map<string, number>();
   const visited = new Set<string>();
 
@@ -109,9 +109,9 @@ export function findDuplicateNodeIds(graph: Graph): Set<string> {
     walk(root);
   }
 
-  const duplicates = new Set<string>();
+  const multiParent = new Set<string>();
   for (const [id, count] of counts) {
-    if (count > 1) duplicates.add(id);
+    if (count > 1) multiParent.add(id);
   }
-  return duplicates;
+  return multiParent;
 }

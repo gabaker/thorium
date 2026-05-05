@@ -50,7 +50,10 @@ export const applyGrowthToInstance = (
   setNodeCount(updatedData.nodes.length);
 
   gi.graphData(updatedData);
-  labelSpritesRef.current.clear();
-  gi.nodeThreeObject(gi.nodeThreeObject());
-  gi.refresh();
+
+  if (stateChanged) {
+    labelSpritesRef.current.clear();
+    gi.nodeThreeObject(gi.nodeThreeObject());
+    gi.refresh();
+  }
 };

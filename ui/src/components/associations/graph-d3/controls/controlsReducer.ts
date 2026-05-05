@@ -2,9 +2,9 @@ import * as THREE from 'three';
 import SpriteText from 'three-spritetext';
 import type { ForceGraph3DInstance } from '3d-force-graph';
 
-import { getNodeColor, getNodeSvg, svgToTexture } from '../styles';
+import { getNodeColor, getNodeSvg, svgToTexture, getEdgeColor } from '../styles';
 import type { GraphControls, DisplayAction, NodeRenderMode } from './types';
-import type { GraphNode } from '../types';
+import type { GraphNode, GraphLink } from '../types';
 
 export type LabelEntry = { sprite: THREE.Object3D; degree: number; isInitial: boolean; baseScale: THREE.Vector3 };
 
@@ -12,6 +12,7 @@ export const buildNodeObject = (
   renderMode: NodeRenderMode,
   showLabels: boolean,
   nodeRelSize: number,
+  labelScale: number,
   labelMap?: Map<string, LabelEntry>,
 ) => {
   const sizeFactor = nodeRelSize / 4;
@@ -31,7 +32,7 @@ export const buildNodeObject = (
     if (showLabels) {
       const labelSprite = new SpriteText(node.label);
       labelSprite.color = getNodeColor(node.nodeType, node.visualState);
-      labelSprite.textHeight = 3;
+      labelSprite.textHeight = 3 * labelScale;
       (labelSprite as any).position.y = renderMode === 'icons' ? -(node.diameter / 5 + 4) * sizeFactor : -(node.diameter / 5 + 2);
       // @ts-ignore — depthWrite exists on SpriteMaterial
       labelSprite.material.depthWrite = false;
@@ -48,21 +49,57 @@ export const buildNodeObject = (
   };
 };
 
+export const buildEdgeLabelFactory = (
+  labelScale: number,
+  edgeLabelMap?: Map<string, LabelEntry>,
+) => {
+  return (link: GraphLink): THREE.Object3D | undefined => {
+    if (!link.label) return undefined;
+    const sprite = new SpriteText(link.label);
+    sprite.color = getEdgeColor();
+    sprite.textHeight = 1.5 * labelScale;
+    // @ts-ignore — depthWrite exists on SpriteMaterial
+    sprite.material.depthWrite = false;
+
+    if (edgeLabelMap) {
+      const src = typeof link.source === 'object' ? (link.source as GraphNode).id : link.source;
+      const tgt = typeof link.target === 'object' ? (link.target as GraphNode).id : link.target;
+      const obj = sprite as unknown as THREE.Object3D;
+      edgeLabelMap.set(`${src}-${tgt}`, { sprite: obj, degree: 0, isInitial: false, baseScale: obj.scale.clone() });
+    }
+
+    return sprite;
+  };
+};
+
 export const createControlsReducer = (
   graphInstanceRef: React.RefObject<ForceGraph3DInstance | null>,
   labelSpritesRef: React.RefObject<Map<string, LabelEntry>>,
+  edgeLabelSpritesRef: React.RefObject<Map<string, LabelEntry>>,
 ) => {
   return (state: GraphControls, action: DisplayAction): GraphControls => {
     const gi = graphInstanceRef.current;
     switch (action.type) {
       case 'showEdgeLabels': {
-        if (gi) gi.linkLabel(action.state ? 'label' : () => '');
+        if (gi) {
+          gi.linkLabel(action.state ? 'label' : () => '');
+          if (action.state) {
+            edgeLabelSpritesRef.current.clear();
+            gi.linkThreeObjectExtend(true);
+            gi.linkThreeObject((link: any) => buildEdgeLabelFactory(state.labelScale, edgeLabelSpritesRef.current)(link as GraphLink) as any);
+          } else {
+            edgeLabelSpritesRef.current.clear();
+            gi.linkThreeObjectExtend(false);
+            gi.linkThreeObject(undefined as any);
+          }
+          gi.refresh();
+        }
         return { ...state, showEdgeLabels: action.state };
       }
       case 'showNodeLabels': {
         if (gi) {
           labelSpritesRef.current.clear();
-          gi.nodeThreeObject(buildNodeObject(state.nodeRenderMode, action.state, state.nodeRelSize, labelSpritesRef.current) as any);
+          gi.nodeThreeObject(buildNodeObject(state.nodeRenderMode, action.state, state.nodeRelSize, state.labelScale, labelSpritesRef.current) as any);
           gi.nodeThreeObjectExtend(state.nodeRenderMode === 'spheres');
           gi.refresh();
         }
@@ -78,10 +115,29 @@ export const createControlsReducer = (
         return { ...state, filterChildless: action.state };
       case 'focusOnClick':
         return { ...state, focusOnClick: action.state };
+      case 'adjustDistanceOnFocus':
+        return { ...state, adjustDistanceOnFocus: action.state };
+      case 'focusDistanceRatio':
+        return { ...state, focusDistanceRatio: action.state };
+      case 'labelScale': {
+        if (gi) {
+          if (state.showNodeLabels) {
+            labelSpritesRef.current.clear();
+            gi.nodeThreeObject(buildNodeObject(state.nodeRenderMode, true, state.nodeRelSize, action.state, labelSpritesRef.current) as any);
+            gi.nodeThreeObjectExtend(state.nodeRenderMode === 'spheres');
+          }
+          if (state.showEdgeLabels) {
+            edgeLabelSpritesRef.current.clear();
+            gi.linkThreeObject((link: any) => buildEdgeLabelFactory(action.state, edgeLabelSpritesRef.current)(link as GraphLink) as any);
+          }
+          gi.refresh();
+        }
+        return { ...state, labelScale: action.state };
+      }
       case 'nodeRenderMode': {
         if (gi) {
           labelSpritesRef.current.clear();
-          gi.nodeThreeObject(buildNodeObject(action.state, state.showNodeLabels, state.nodeRelSize, labelSpritesRef.current) as any);
+          gi.nodeThreeObject(buildNodeObject(action.state, state.showNodeLabels, state.nodeRelSize, state.labelScale, labelSpritesRef.current) as any);
           gi.nodeThreeObjectExtend(action.state === 'spheres');
           gi.refresh();
         }
@@ -128,7 +184,7 @@ export const createControlsReducer = (
           gi.nodeRelSize(action.state);
           if (state.nodeRenderMode === 'icons') {
             labelSpritesRef.current.clear();
-            gi.nodeThreeObject(buildNodeObject(state.nodeRenderMode, state.showNodeLabels, action.state, labelSpritesRef.current) as any);
+            gi.nodeThreeObject(buildNodeObject(state.nodeRenderMode, state.showNodeLabels, action.state, state.labelScale, labelSpritesRef.current) as any);
             gi.refresh();
           }
         }

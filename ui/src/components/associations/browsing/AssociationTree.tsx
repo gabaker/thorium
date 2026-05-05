@@ -12,7 +12,7 @@ import { classifyNode } from '../graph-d3/data';
 import { getNodeSvg } from '../graph-d3/styles';
 import { useGraphData } from '../data';
 import { TreeContainer, PreviewPopover } from './AssociationTree.styled';
-import { NODE_TYPE_LABELS, getNodePreviewData, renderTagPreview, findDuplicateNodeIds } from './treeHelpers';
+import { NODE_TYPE_LABELS, getNodePreviewData, renderTagPreview, findMultiParentNodeIds } from './treeHelpers';
 
 const AssociationTreeComponent: React.FC = () => {
   const { graph, graphVersion, grow, growable, getGraph, focusedNodeId, focusSource, setFocusedNode } = useGraphData();
@@ -20,9 +20,9 @@ const AssociationTreeComponent: React.FC = () => {
   const [loadingItemChildrens, setLoadingItemChildrens] = useState<string[]>([]);
   const [highlightedNodeId, setHighlightedNodeId] = useState<string | null>(null);
 
-  const duplicateNodes = useMemo(() => {
+  const multiParentNodes = useMemo(() => {
     if (!graph.id) return new Set<string>();
-    return findDuplicateNodeIds(graph);
+    return findMultiParentNodeIds(graph);
     // graphVersion drives recomputation when the underlying ref changes
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [graphVersion]);
@@ -84,7 +84,7 @@ const AssociationTreeComponent: React.FC = () => {
       if (!(nodeId in graph.data_map)) return null;
       const nodeData = graph.data_map[nodeId];
       const preview = getNodePreviewData(nodeData);
-      const isDuplicate = duplicateNodes.has(nodeId);
+      const isDuplicate = multiParentNodes.has(nodeId);
 
       return (
         <PreviewPopover id={`preview-${nodeId}`}>
@@ -100,14 +100,14 @@ const AssociationTreeComponent: React.FC = () => {
             )}
             {renderTagPreview(preview.tags)}
             {isDuplicate && (
-              <div className="preview-duplicate-warn">Appears in multiple locations in this graph (loop)</div>
+              <div className="preview-duplicate-warn">Duplicate: appears under multiple parents in this tree</div>
             )}
           </Popover.Body>
         </PreviewPopover>
       );
     },
     // eslint-disable-next-line react-hooks/exhaustive-deps
-    [graphVersion, duplicateNodes],
+    [graphVersion, multiParentNodes],
   );
 
   const pendingFocusRef = useRef<string | null>(null);
@@ -194,7 +194,7 @@ const AssociationTreeComponent: React.FC = () => {
         {tree.getItems().map((item) => {
           const nodeId = item.getId();
           const typeInfo = getNodeTypeInfo(nodeId);
-          const isDuplicate = duplicateNodes.has(nodeId);
+          const isDuplicate = multiParentNodes.has(nodeId);
           const isHighlighted = highlightedNodeId !== null && highlightedNodeId === nodeId;
 
           return (
@@ -239,7 +239,7 @@ const AssociationTreeComponent: React.FC = () => {
                     />
                   )}
                   {item.getItemName()}
-                  {isDuplicate && <span className="duplicate-indicator" title="Appears multiple times in graph">loop</span>}
+                  {isDuplicate && <span className="duplicate-indicator" title="Duplicate: has multiple parents in graph">Duplicate</span>}
                   {item.isLoading() && <Spinner animation="border" size="sm" className="loading" style={{ width: 14, height: 14, marginLeft: 6, borderWidth: 2 }} />}
                 </div>
               </button>
