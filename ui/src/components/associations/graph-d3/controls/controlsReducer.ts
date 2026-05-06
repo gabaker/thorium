@@ -62,7 +62,8 @@ export const buildEdgeLabelFactory = (
   return (link: GraphLink): THREE.Object3D | undefined => {
     if (!link.label) return undefined;
     const sprite = new SpriteText(link.label);
-    sprite.color = getEdgeColor();
+    const srcNode = typeof link.source === 'object' ? (link.source as GraphNode) : null;
+    sprite.color = srcNode ? getNodeColor(srcNode.nodeType, srcNode.visualState) : getEdgeColor();
     sprite.textHeight = 2.5 * labelScale;
     // @ts-ignore — depthWrite exists on SpriteMaterial
     sprite.material.depthWrite = false;

@@ -302,6 +302,27 @@ const AssociationGraph3DInner: React.FC<AssociationGraphProps> = () => {
     const orbitControls = fg.controls();
     if (orbitControls) (orbitControls as any).zoomToCursor = true;
 
+    const MIN_ORBIT_RADIUS = 40;
+
+    const enforceMinOrbitRadius = () => {
+      const gi = graphInstanceRef.current;
+      if (!gi) return;
+      const ctrl = gi.controls() as any;
+      if (!ctrl?.target) return;
+      const cam = gi.camera();
+      const target = ctrl.target as THREE.Vector3;
+      const radius = cam.position.distanceTo(target);
+      if (radius < MIN_ORBIT_RADIUS) {
+        const fwd = new THREE.Vector3(0, 0, -1).applyQuaternion(cam.quaternion);
+        target.set(
+          cam.position.x + fwd.x * MIN_ORBIT_RADIUS,
+          cam.position.y + fwd.y * MIN_ORBIT_RADIUS,
+          cam.position.z + fwd.z * MIN_ORBIT_RADIUS,
+        );
+      }
+    };
+    containerRef.current!.addEventListener('wheel', enforceMinOrbitRadius, { capture: true, passive: true });
+
     if (graphDataRef.current.nodes.length > 100) {
       fg.cooldownTicks(200);
     }
@@ -325,18 +346,19 @@ const AssociationGraph3DInner: React.FC<AssociationGraphProps> = () => {
         return;
       }
 
-      // Keep orbit target in front of camera so zoom speed stays responsive.
-      // After a focus animation the target can end up behind the camera when the
-      // user scrolls toward a different cluster, collapsing the orbit radius and
-      // making further zoom increments tiny.
+      // Fallback: smoothly push orbit target forward if radius collapses
+      // (covers touch pinch and other non-wheel zoom)
       const cam = gi.camera();
       if (cam && controls) {
-        const fwd = new THREE.Vector3(0, 0, -1).applyQuaternion(cam.quaternion);
-        const toTarget = new THREE.Vector3(target.x - camPos.x, target.y - camPos.y, target.z - camPos.z);
-        const proj = toTarget.dot(fwd);
-        if (proj < 5) {
-          const minDist = 50;
-          target.set(camPos.x + fwd.x * minDist, camPos.y + fwd.y * minDist, camPos.z + fwd.z * minDist);
+        const radius = Math.hypot(target.x - camPos.x, target.y - camPos.y, target.z - camPos.z);
+        if (radius < MIN_ORBIT_RADIUS) {
+          const fwd = new THREE.Vector3(0, 0, -1).applyQuaternion(cam.quaternion);
+          const desired = new THREE.Vector3(
+            camPos.x + fwd.x * MIN_ORBIT_RADIUS,
+            camPos.y + fwd.y * MIN_ORBIT_RADIUS,
+            camPos.z + fwd.z * MIN_ORBIT_RADIUS,
+          );
+          target.lerp(desired, 0.15);
         }
       }
 
@@ -355,29 +377,42 @@ const AssociationGraph3DInner: React.FC<AssociationGraphProps> = () => {
       });
 
       const scale = labelScaleRef.current;
-      const distFactor = Math.max(1, dist / 300);
       const filterStart = 300 * scale;
       const filterEnd = 2000 * scale;
-      const filterProgress = Math.min(1, Math.max(0, (dist - filterStart) / (filterEnd - filterStart)));
-      const degreeThreshold = filterProgress * maxDegree * labelDensityRef.current;
-
+      const density = labelDensityRef.current;
       const minSize = labelMinSizeRef.current;
-      const applyScaling = (entry: LabelEntry) => {
-        if (entry.isInitial || entry.degree >= degreeThreshold) {
+      const camVec = new THREE.Vector3(camPos.x, camPos.y, camPos.z);
+
+      const computeVisibility = (nodeDist: number, degree: number, isInitial: boolean) => {
+        const progress = Math.min(1, Math.max(0, (nodeDist - filterStart) / (filterEnd - filterStart)));
+        const threshold = progress * maxDegree * density;
+        return isInitial || degree >= threshold;
+      };
+
+      nodeLabels.forEach((entry) => {
+        const parent = entry.sprite.parent;
+        const nodeDist = parent ? camVec.distanceTo(parent.position) : dist;
+        if (computeVisibility(nodeDist, entry.degree, entry.isInitial)) {
           entry.sprite.visible = true;
+          const nodeDistFactor = Math.max(1, nodeDist / 300);
           const degreeBoost = entry.isInitial ? 1.5 : 1 + (entry.degree / maxDegree) * 0.5;
-          const s = Math.max(minSize, distFactor * degreeBoost);
+          const s = Math.max(minSize, nodeDistFactor * degreeBoost);
           entry.sprite.scale.set(entry.baseScale.x * s, entry.baseScale.y * s, entry.baseScale.z);
         } else {
           entry.sprite.visible = false;
         }
-      };
-
-      nodeLabels.forEach(applyScaling);
+      });
       edgeLabels.forEach((entry) => {
-        entry.sprite.visible = true;
-        const s = Math.max(minSize, distFactor);
-        entry.sprite.scale.set(entry.baseScale.x * s, entry.baseScale.y * s, entry.baseScale.z);
+        const parent = entry.sprite.parent;
+        const edgeDist = parent ? camVec.distanceTo(parent.position) : dist;
+        if (computeVisibility(edgeDist, 0, false)) {
+          entry.sprite.visible = true;
+          const edgeDistFactor = Math.max(1, edgeDist / 300);
+          const s = Math.max(minSize, edgeDistFactor);
+          entry.sprite.scale.set(entry.baseScale.x * s, entry.baseScale.y * s, entry.baseScale.z);
+        } else {
+          entry.sprite.visible = false;
+        }
       });
 
       animFrameRef.current = requestAnimationFrame(updateLabelScaling);
@@ -433,6 +468,7 @@ const AssociationGraph3DInner: React.FC<AssociationGraphProps> = () => {
     return () => {
       cancelAnimationFrame(animFrameRef.current);
       clearTimeout(fitTimeout);
+      container.removeEventListener('wheel', enforceMinOrbitRadius, { capture: true });
       container.removeEventListener('dblclick', handleDblClick);
       resizeObserver.disconnect();
       fg._destructor();
