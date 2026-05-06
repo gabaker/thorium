@@ -84,12 +84,7 @@ const UploadStatusDashboard: React.FC<UploadStatusDashboardProps> = ({
             {uploadReactionFailures > 0 && (
               <div>
                 {uploadReactionFailures} Reaction Submission(s) Failed
-                <Button
-                  size={'xsm' as any}
-                  variant="no-outline-secondary"
-                  className="retry-button"
-                  onClick={onRetryAllReactionSubmissions}
-                >
+                <Button size={'xsm' as any} variant="no-outline-secondary" className="retry-button" onClick={onRetryAllReactionSubmissions}>
                   {' '}
                   <FaRedo />
                 </Button>

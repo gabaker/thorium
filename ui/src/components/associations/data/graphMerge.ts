@@ -12,7 +12,14 @@ export function mergeGrowthInto(base: Graph, data: Graph, grownNodeIds: string[]
   if (data.branches) {
     for (const source of Object.keys(data.branches)) {
       if (source in merged.branches) {
-        merged.branches[source].push(...data.branches[source]);
+        const existingKeys = new Set(merged.branches[source].map((b) => `${b.node}-${b.direction}-${b.relationship_hash ?? ''}`));
+        for (const branch of data.branches[source]) {
+          const key = `${branch.node}-${branch.direction}-${branch.relationship_hash ?? ''}`;
+          if (!existingKeys.has(key)) {
+            merged.branches[source].push(branch);
+            existingKeys.add(key);
+          }
+        }
       } else {
         merged.branches[source] = data.branches[source];
       }

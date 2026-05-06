@@ -21,11 +21,7 @@ export function handleAssociationUpdate(
   }
 }
 
-export async function createFileAssociations(
-  sha256: string,
-  groups: string[],
-  associations: AssociationCreate[],
-): Promise<void> {
+export async function createFileAssociations(sha256: string, groups: string[], associations: AssociationCreate[]): Promise<void> {
   for (let i = 0; i < associations.length; i++) {
     associations[i].groups = groups;
     associations[i].targets = [

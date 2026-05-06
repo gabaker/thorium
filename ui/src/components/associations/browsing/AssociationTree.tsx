@@ -6,72 +6,43 @@ import { OverlayTrigger, Popover, Spinner } from 'react-bootstrap';
 import { ErrorBoundary } from 'react-error-boundary';
 
 import RenderErrorAlert from '../../shared/alerts/RenderErrorAlert';
-import { BranchNode, Direction, Graph } from '@models/trees';
+import { Graph } from '@models/trees';
 import { getNodeName } from '../utilities';
 import { classifyNode } from '../graph-d3/data';
 import { getNodeSvg } from '../graph-d3/styles';
 import { useGraphData } from '../data';
 import { TreeContainer, PreviewPopover } from './AssociationTree.styled';
-import { NODE_TYPE_LABELS, getNodePreviewData, renderTagPreview, findMultiParentNodeIds } from './treeHelpers';
+import { NODE_TYPE_LABELS, getNodePreviewData, renderTagPreview, findMultiParentNodeIds, buildTreeIndex, TreeIndex } from './treeHelpers';
 
-const isChildDirection = (dir: Direction) => dir === Direction.To || dir === Direction.Bidirectional;
-
-function findParent(graph: Graph, nodeId: string): string | null {
-  if (!graph.branches || !(nodeId in graph.branches)) return null;
-  for (const branch of graph.branches[nodeId]) {
-    if (branch.direction === Direction.From) return branch.node;
-  }
-  return null;
+function findParentFromIndex(index: TreeIndex, nodeId: string): string | null {
+  const parents = index.parentsOf.get(nodeId);
+  return parents?.[0] ?? null;
 }
 
-function buildTreeRoots(graph: Graph): string[] {
+function buildTreeRoots(graph: Graph, index: TreeIndex): string[] {
   const roots: string[] = [];
   for (const initialId of graph.initial) {
     let current = initialId;
     const visited = new Set<string>();
     visited.add(current);
-    let parent = findParent(graph, current);
+    let parent = findParentFromIndex(index, current);
     while (parent && !visited.has(parent)) {
       visited.add(parent);
       current = parent;
-      parent = findParent(graph, current);
+      parent = findParentFromIndex(index, current);
     }
     if (!roots.includes(current)) roots.push(current);
   }
   return roots;
 }
 
-function getDirectChildren(graph: Graph, nodeId: string): string[] {
-  const children: string[] = [];
-  if (graph.branches && nodeId in graph.branches) {
-    for (const branch of graph.branches[nodeId]) {
-      if (isChildDirection(branch.direction)) {
-        children.push(branch.node);
-      }
-    }
-  }
-  for (const [otherId, branches] of Object.entries(graph.branches)) {
-    if (otherId === nodeId) continue;
-    for (const branch of branches) {
-      if (branch.node === nodeId && branch.direction === Direction.From) {
-        if (!children.includes(otherId)) children.push(otherId);
-      }
-    }
-  }
-  return children;
+function getDirectChildren(index: TreeIndex, nodeId: string): string[] {
+  return index.childrenOf.get(nodeId) ?? [];
 }
 
-function hasDirectChildren(graph: Graph, nodeId: string): boolean {
-  if (graph.branches && nodeId in graph.branches) {
-    if (graph.branches[nodeId].some((b: BranchNode) => isChildDirection(b.direction))) return true;
-  }
-  for (const [otherId, branches] of Object.entries(graph.branches)) {
-    if (otherId === nodeId) continue;
-    for (const branch of branches) {
-      if (branch.node === nodeId && branch.direction === Direction.From) return true;
-    }
-  }
-  return false;
+function hasDirectChildren(index: TreeIndex, nodeId: string): boolean {
+  const children = index.childrenOf.get(nodeId);
+  return children !== undefined && children.length > 0;
 }
 
 const AssociationTreeComponent: React.FC = () => {
@@ -80,19 +51,26 @@ const AssociationTreeComponent: React.FC = () => {
   const [loadingItemChildrens, setLoadingItemChildrens] = useState<string[]>([]);
   const [highlightedNodeId, setHighlightedNodeId] = useState<string | null>(null);
 
+  const treeIndex = useMemo(() => {
+    if (!graph.id) return buildTreeIndex({ ...graph, branches: {} });
+    return buildTreeIndex(graph);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [graphVersion]);
+
   const [expandedItems, setExpandedItems] = useState<string[]>(() => {
+    const initIdx = buildTreeIndex(graph);
     const items: string[] = [];
     for (const initialId of graph.initial) {
       let current = initialId.toString();
       const chain: string[] = [];
       const visited = new Set<string>();
       visited.add(current);
-      let parent = findParent(graph, current);
+      let parent = findParentFromIndex(initIdx, current);
       while (parent && !visited.has(parent)) {
         chain.push(parent);
         visited.add(parent);
         current = parent;
-        parent = findParent(graph, current);
+        parent = findParentFromIndex(initIdx, current);
       }
       items.push(...chain, initialId.toString());
     }
@@ -104,10 +82,9 @@ const AssociationTreeComponent: React.FC = () => {
 
   const multiParentNodes = useMemo(() => {
     if (!graph.id) return new Set<string>();
-    return findMultiParentNodeIds(graph);
-    // graphVersion drives recomputation when the underlying ref changes
+    return findMultiParentNodeIds(graph, treeIndex);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [graphVersion]);
+  }, [graphVersion, treeIndex]);
 
   const tree = useTree<string>({
     state: { loadingItemData, loadingItemChildrens, expandedItems },
@@ -126,22 +103,22 @@ const AssociationTreeComponent: React.FC = () => {
     isItemFolder: (node) => {
       const nodeId = node.getId();
       const g = getGraph();
-      return !!(g.growable?.includes(nodeId) || hasDirectChildren(g, nodeId));
+      return !!(g.growable?.includes(nodeId) || hasDirectChildren(treeIndex, nodeId));
     },
     createLoadingItemData: () => 'loading...',
     dataLoader: {
       getItem: (nodeId) => nodeId,
       getChildren: async (nodeId) => {
         if (nodeId === 'root') {
-          return buildTreeRoots(getGraph());
+          return buildTreeRoots(getGraph(), treeIndex);
         }
 
-        const g = getGraph();
-        const existingChildren = getDirectChildren(g, nodeId);
+        const existingChildren = getDirectChildren(treeIndex, nodeId);
         if (existingChildren.length === 0 && growable.has(nodeId)) {
           await grow(nodeId);
           grownNodesRef.current.add(nodeId);
-          return getDirectChildren(getGraph(), nodeId);
+          const freshIndex = buildTreeIndex(getGraph());
+          return getDirectChildren(freshIndex, nodeId);
         }
         return existingChildren;
       },
@@ -179,9 +156,7 @@ const AssociationTreeComponent: React.FC = () => {
                 ),
             )}
             {renderTagPreview(preview.tags)}
-            {isDuplicate && (
-              <div className="preview-duplicate-warn">Duplicate: appears under multiple parents in this tree</div>
-            )}
+            {isDuplicate && <div className="preview-duplicate-warn">Duplicate: appears under multiple parents in this tree</div>}
           </Popover.Body>
         </PreviewPopover>
       );
@@ -198,8 +173,10 @@ const AssociationTreeComponent: React.FC = () => {
     if (!graph.initial?.length) return;
     initialFocusDone.current = true;
 
+    let aborted = false;
     const selectInitial = async () => {
       await new Promise((r) => setTimeout(r, 150));
+      if (aborted) return;
       try {
         const initialId = graph.initial[0].toString();
         const item = tree.getItemInstance(initialId);
@@ -210,6 +187,9 @@ const AssociationTreeComponent: React.FC = () => {
     };
 
     void selectInitial();
+    return () => {
+      aborted = true;
+    };
   }, [graphVersion]);
 
   // When graph clicks a node, expand ancestors in tree, select it, and scroll to it
@@ -220,30 +200,15 @@ const AssociationTreeComponent: React.FC = () => {
       const g = getGraph();
       if (!g.branches) return;
 
-      // Build child→parent map (only Direction.To/Bidirectional edges define parent→child)
-      const parentMap = new Map<string, string>();
-      for (const [parentId, children] of Object.entries(g.branches)) {
-        for (const child of children) {
-          if (isChildDirection(child.direction)) {
-            parentMap.set(child.node, parentId);
-          }
-        }
-      }
-      // Direction.From edges: the branch node is the parent, the key node is the child
-      for (const [childId, branches] of Object.entries(g.branches)) {
-        for (const branch of branches) {
-          if (branch.direction === Direction.From) {
-            parentMap.set(childId, branch.node);
-          }
-        }
-      }
+      const currentIndex = buildTreeIndex(g);
 
-      // Walk up to build ancestor chain (root-first)
       const ancestors: string[] = [];
       let current = focusedNodeId;
-      while (parentMap.has(current)) {
-        current = parentMap.get(current)!;
-        ancestors.unshift(current);
+      let parent = findParentFromIndex(currentIndex, current);
+      while (parent) {
+        ancestors.unshift(parent);
+        current = parent;
+        parent = findParentFromIndex(currentIndex, current);
       }
 
       // Expand each ancestor sequentially, loading children as needed
@@ -304,64 +269,82 @@ const AssociationTreeComponent: React.FC = () => {
           const isHighlighted = highlightedNodeId !== null && highlightedNodeId === nodeId;
 
           return (
-              <button
-                key={nodeId}
-                {...item.getProps()}
-                style={{ paddingLeft: `${item.getItemMeta().level * 20}px` }}
-                onMouseEnter={() => {
-                  if (isDuplicate) setHighlightedNodeId(nodeId);
-                }}
-                onMouseLeave={() => {
-                  if (highlightedNodeId === nodeId) setHighlightedNodeId(null);
-                }}
-                onClick={(e) => {
-                  const isGrowable = growable.has(nodeId);
-                  const isExpanded = item.isExpanded();
+            <button
+              key={nodeId}
+              {...item.getProps()}
+              style={{ paddingLeft: `${item.getItemMeta().level * 20}px` }}
+              onMouseEnter={() => {
+                if (isDuplicate) setHighlightedNodeId(nodeId);
+              }}
+              onMouseLeave={() => {
+                if (highlightedNodeId === nodeId) setHighlightedNodeId(null);
+              }}
+              onClick={(e) => {
+                const isGrowable = growable.has(nodeId);
+                const isExpanded = item.isExpanded();
 
-                  if (isGrowable && isExpanded && !grownNodesRef.current.has(nodeId)) {
-                    e.stopPropagation();
-                    grownNodesRef.current.add(nodeId);
-                    setManuallyGrowing((s) => new Set(s).add(nodeId));
-                    grow(nodeId).finally(() => setManuallyGrowing((s) => { const next = new Set(s); next.delete(nodeId); return next; }));
-                    setFocusedNode(nodeId, 'tree');
-                    return;
-                  }
-
-                  item.getProps().onClick?.(e);
+                if (isGrowable && isExpanded && !grownNodesRef.current.has(nodeId)) {
+                  e.stopPropagation();
+                  grownNodesRef.current.add(nodeId);
+                  setManuallyGrowing((s) => new Set(s).add(nodeId));
+                  grow(nodeId).finally(() =>
+                    setManuallyGrowing((s) => {
+                      const next = new Set(s);
+                      next.delete(nodeId);
+                      return next;
+                    }),
+                  );
                   setFocusedNode(nodeId, 'tree');
-                  if (isDuplicate) {
-                    setHighlightedNodeId((prev) => (prev === nodeId ? null : nodeId));
-                  }
-                }}
+                  return;
+                }
+
+                item.getProps().onClick?.(e);
+                setFocusedNode(nodeId, 'tree');
+                if (isDuplicate) {
+                  setHighlightedNodeId((prev) => (prev === nodeId ? null : nodeId));
+                }
+              }}
+            >
+              <OverlayTrigger
+                placement="right"
+                delay={{ show: 400, hide: 100 }}
+                overlay={renderNodePreview(nodeId) ?? <span />}
+                popperConfig={{ modifiers: [{ name: 'offset', options: { offset: [0, 8] } }] }}
               >
-                <OverlayTrigger
-                  placement="right"
-                  delay={{ show: 400, hide: 100 }}
-                  overlay={renderNodePreview(nodeId) ?? <span />}
-                  popperConfig={{ modifiers: [{ name: 'offset', options: { offset: [0, 8] } }] }}
+                <span
+                  className={cn('treeitem', {
+                    focused: item.isFocused(),
+                    expanded: item.isExpanded(),
+                    selected: item.isSelected(),
+                    folder: item.isFolder(),
+                    'duplicate-highlight': isDuplicate && isHighlighted,
+                  })}
                 >
-                  <span
-                    className={cn('treeitem', {
-                      focused: item.isFocused(),
-                      expanded: item.isExpanded(),
-                      selected: item.isSelected(),
-                      folder: item.isFolder(),
-                      'duplicate-highlight': isDuplicate && isHighlighted,
-                    })}
-                  >
-                    {typeInfo && (
-                      <span
-                        className="node-type-icon"
-                        title={NODE_TYPE_LABELS[typeInfo.nodeType] ?? 'Other'}
-                        dangerouslySetInnerHTML={{ __html: getNodeSvg(typeInfo.nodeType, typeInfo.visualState) }}
-                      />
-                    )}
-                    {item.getItemName()}
-                    {isDuplicate && <span className="duplicate-indicator" title="Duplicate: has multiple parents in graph">Duplicate</span>}
-                    {(item.isLoading() || manuallyGrowing.has(nodeId)) && <Spinner animation="border" size="sm" className="loading" style={{ width: 14, height: 14, marginLeft: 6, borderWidth: 2 }} />}
-                  </span>
-                </OverlayTrigger>
-              </button>
+                  {typeInfo && (
+                    <img
+                      className="node-type-icon"
+                      title={NODE_TYPE_LABELS[typeInfo.nodeType] ?? 'Other'}
+                      alt={NODE_TYPE_LABELS[typeInfo.nodeType] ?? 'Other'}
+                      src={`data:image/svg+xml;base64,${btoa(getNodeSvg(typeInfo.nodeType, typeInfo.visualState))}`}
+                    />
+                  )}
+                  {item.getItemName()}
+                  {isDuplicate && (
+                    <span className="duplicate-indicator" title="Duplicate: has multiple parents in graph">
+                      Duplicate
+                    </span>
+                  )}
+                  {(item.isLoading() || manuallyGrowing.has(nodeId)) && (
+                    <Spinner
+                      animation="border"
+                      size="sm"
+                      className="loading"
+                      style={{ width: 14, height: 14, marginLeft: 6, borderWidth: 2 }}
+                    />
+                  )}
+                </span>
+              </OverlayTrigger>
+            </button>
           );
         })}
       </div>

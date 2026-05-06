@@ -44,17 +44,41 @@ export interface GraphControls {
   numDimensions: 2 | 3;
 }
 
-export type SelectedElement =
-  | { kind: 'node'; id: string; label: string }
-  | { kind: 'link'; source: string; target: string; label: string };
+export type SelectedElement = { kind: 'node'; id: string; label: string } | { kind: 'link'; source: string; target: string; label: string };
 
 export type DisplayAction =
   | { type: 'depth'; state: number }
-  | { type: 'filterChildless' | 'showEdgeLabels' | 'showNodeLabels' | 'showNodeInfo' | 'focusOnClick' | 'enableNodeDrag' | 'adjustDistanceOnFocus' | 'refitOnGrow'; state: boolean }
+  | {
+      type:
+        | 'filterChildless'
+        | 'showEdgeLabels'
+        | 'showNodeLabels'
+        | 'showNodeInfo'
+        | 'focusOnClick'
+        | 'enableNodeDrag'
+        | 'adjustDistanceOnFocus'
+        | 'refitOnGrow';
+      state: boolean;
+    }
   | { type: 'selected'; state: SelectedElement | null }
   | { type: 'nodeRenderMode'; state: NodeRenderMode }
-  | { type: 'edgeWidth' | 'edgeLength' | 'edgeLinkStrength' | 'edgeOpacity' | 'arrowLength' | 'directionalParticles' | 'particleSpeed'; state: number }
-  | { type: 'nodeRelSize' | 'nodeOpacity' | 'focusDistanceRatio' | 'nodeLabelScale' | 'edgeLabelScale' | 'nodeLabelDensity' | 'nodeLabelMinSize' | 'edgeLabelDensity' | 'edgeLabelMinSize'; state: number }
+  | {
+      type: 'edgeWidth' | 'edgeLength' | 'edgeLinkStrength' | 'edgeOpacity' | 'arrowLength' | 'directionalParticles' | 'particleSpeed';
+      state: number;
+    }
+  | {
+      type:
+        | 'nodeRelSize'
+        | 'nodeOpacity'
+        | 'focusDistanceRatio'
+        | 'nodeLabelScale'
+        | 'edgeLabelScale'
+        | 'nodeLabelDensity'
+        | 'nodeLabelMinSize'
+        | 'edgeLabelDensity'
+        | 'edgeLabelMinSize';
+      state: number;
+    }
   | { type: 'chargeStrength' | 'velocityDecay' | 'warmupTicks' | 'cooldownTime'; state: number }
   | { type: 'dagMode'; state: DagMode }
   | { type: 'dagLevelDistance'; state: number | null }

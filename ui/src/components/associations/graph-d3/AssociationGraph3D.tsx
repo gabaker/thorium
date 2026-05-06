@@ -8,7 +8,15 @@ import RenderErrorAlert from '@components/shared/alerts/RenderErrorAlert';
 import { getNodeColor, getEdgeColor } from './styles';
 import { FaFolderTree } from 'react-icons/fa6';
 import { GoSidebarCollapse } from 'react-icons/go';
-import { GraphControlsToolbar, NodeRenderMode, DagMode, createControlsReducer, buildNodeObject, buildEdgeLabelFactory, iconNodeVal } from './controls';
+import {
+  GraphControlsToolbar,
+  NodeRenderMode,
+  DagMode,
+  createControlsReducer,
+  buildNodeObject,
+  buildEdgeLabelFactory,
+  iconNodeVal,
+} from './controls';
 import type { LabelEntry } from './controls';
 import { processInitialGraphData, getLinkEndpoints } from './data';
 import { useGraphData } from '../data';
@@ -16,8 +24,15 @@ import type { GraphNode, GraphLink, GraphData } from './types';
 import { applyGrowthToInstance } from './applyGrowth';
 import DataPreviewPanel from './DataPreviewPanel';
 import { AssociationTree } from '../browsing/AssociationTree';
-import { GraphWindow, GraphDiv, LoadingOverlay, TreeOverlayToggle, TreeOverlayPanel, TreeOverlayHeader, MinimizeButton } from './AssociationGraph3D.styled';
-
+import {
+  GraphWindow,
+  GraphDiv,
+  LoadingOverlay,
+  TreeOverlayToggle,
+  TreeOverlayPanel,
+  TreeOverlayHeader,
+  MinimizeButton,
+} from './AssociationGraph3D.styled';
 
 interface AssociationGraphProps {
   inView: boolean;
@@ -28,6 +43,21 @@ interface FocusDistanceOpts {
   distanceRatio: number;
 }
 
+const MIN_FOCUS_DISTANCE = 120;
+const MIN_ORBIT_RADIUS = 40;
+const ORBIT_LERP_FACTOR = 0.15;
+const ZOOM_SPEED = 1.5;
+const LABEL_BASE_DISTANCE = 300;
+const NODE_FILTER_START_FACTOR = 600;
+const NODE_FILTER_END_FACTOR = 4000;
+const EDGE_FILTER_START_FACTOR = 600;
+const EDGE_FILTER_END_FACTOR = 4000;
+const CAM_DIST_THRESHOLD_RATIO = 0.005;
+const CAM_DIST_THRESHOLD_MIN = 0.1;
+const INITIAL_FIT_DELAY_MS = 1500;
+const LARGE_GRAPH_THRESHOLD = 100;
+const LARGE_GRAPH_COOLDOWN_TICKS = 200;
+
 const focusCameraOn = (
   gi: ForceGraph3DInstance,
   target: { x: number; y: number; z: number },
@@ -36,17 +66,9 @@ const focusCameraOn = (
 ) => {
   const camPos = gi.cameraPosition();
   const orbitTarget = (gi.controls() as any)?.target;
-  const currentDist = orbitTarget
-    ? Math.hypot(
-        camPos.x - orbitTarget.x,
-        camPos.y - orbitTarget.y,
-        camPos.z - orbitTarget.z,
-      )
-    : 150;
+  const currentDist = orbitTarget ? Math.hypot(camPos.x - orbitTarget.x, camPos.y - orbitTarget.y, camPos.z - orbitTarget.z) : 150;
 
-  const MIN_FOCUS_DISTANCE = 120;
-  const dist = Math.max(MIN_FOCUS_DISTANCE,
-    distOpts.adjustDistance ? currentDist * distOpts.distanceRatio : currentDist);
+  const dist = Math.max(MIN_FOCUS_DISTANCE, distOpts.adjustDistance ? currentDist * distOpts.distanceRatio : currentDist);
 
   // Direction from target toward current camera — preserves viewing angle
   const dx = camPos.x - target.x;
@@ -65,11 +87,7 @@ const focusCameraOn = (
     uz = 1;
   }
 
-  gi.cameraPosition(
-    { x: target.x + ux * dist, y: target.y + uy * dist, z: target.z + uz * dist },
-    target,
-    durationMs,
-  );
+  gi.cameraPosition({ x: target.x + ux * dist, y: target.y + uy * dist, z: target.z + uz * dist }, target, durationMs);
 
   if (distOpts.adjustDistance && distOpts.distanceRatio >= 2) {
     setTimeout(() => gi.zoomToFit(durationMs, 50), durationMs);
@@ -77,10 +95,8 @@ const focusCameraOn = (
 };
 
 const AssociationGraph3DInner: React.FC<AssociationGraphProps> = () => {
-  const {
-    graph, graphId, graphVersion, loading, grow, growToDepth,
-    growable, reload, focusedNodeId, focusSource, setFocusedNode,
-  } = useGraphData();
+  const { graph, graphId, graphVersion, loading, grow, growToDepth, growable, reload, focusedNodeId, focusSource, setFocusedNode } =
+    useGraphData();
 
   const containerRef = useRef<HTMLDivElement>(null);
   const graphInstanceRef = useRef<ForceGraph3DInstance | null>(null);
@@ -106,7 +122,8 @@ const AssociationGraph3DInner: React.FC<AssociationGraphProps> = () => {
   const edgeLabelMinSizeRef = useRef(1);
   const refitOnGrowRef = useRef(true);
 
-  const controlsReducer = createControlsReducer(graphInstanceRef, labelSpritesRef, edgeLabelSpritesRef, lastCamDistRef);
+  const controlsReducerRef = useRef(createControlsReducer(graphInstanceRef, labelSpritesRef, edgeLabelSpritesRef, lastCamDistRef));
+  const controlsReducer = controlsReducerRef.current;
 
   const [controls, updateControls] = useReducer(controlsReducer, {
     filterChildless: false,
@@ -192,14 +209,19 @@ const AssociationGraph3DInner: React.FC<AssociationGraphProps> = () => {
       state: { kind: 'node', id: node.id, label: node.label },
     });
 
-    if (controls.focusOnClick) {
+    const settings = focusSettingsRef.current;
+    if (settings.focusOnClick) {
       setFocusedNode(node.id, 'graph');
       const gi = graphInstanceRef.current;
       if (gi && node.x !== undefined && node.y !== undefined) {
-        focusCameraOn(gi, { x: node.x, y: node.y, z: node.z ?? 0 }, {
-          adjustDistance: controls.adjustDistanceOnFocus,
-          distanceRatio: controls.focusDistanceRatio,
-        });
+        focusCameraOn(
+          gi,
+          { x: node.x, y: node.y, z: node.z ?? 0 },
+          {
+            adjustDistance: settings.adjustDistance,
+            distanceRatio: settings.distanceRatio,
+          },
+        );
       }
     }
 
@@ -215,20 +237,25 @@ const AssociationGraph3DInner: React.FC<AssociationGraphProps> = () => {
       state: { kind: 'link', source, target, label: link.label },
     });
 
-    if (controls.focusOnClick) {
+    const settings = focusSettingsRef.current;
+    if (settings.focusOnClick) {
       const gi = graphInstanceRef.current;
       if (gi) {
         const srcNode = graphDataRef.current.nodes.find((n) => n.id === source);
         const tgtNode = graphDataRef.current.nodes.find((n) => n.id === target);
         if (srcNode?.x !== undefined && tgtNode?.x !== undefined) {
-          focusCameraOn(gi, {
-            x: (srcNode.x + tgtNode.x) / 2,
-            y: ((srcNode.y ?? 0) + (tgtNode.y ?? 0)) / 2,
-            z: ((srcNode.z ?? 0) + (tgtNode.z ?? 0)) / 2,
-          }, {
-            adjustDistance: controls.adjustDistanceOnFocus,
-            distanceRatio: controls.focusDistanceRatio,
-          });
+          focusCameraOn(
+            gi,
+            {
+              x: (srcNode.x + tgtNode.x) / 2,
+              y: ((srcNode.y ?? 0) + (tgtNode.y ?? 0)) / 2,
+              z: ((srcNode.z ?? 0) + (tgtNode.z ?? 0)) / 2,
+            },
+            {
+              adjustDistance: settings.adjustDistance,
+              distanceRatio: settings.distanceRatio,
+            },
+          );
         }
       }
     }
@@ -251,32 +278,40 @@ const AssociationGraph3DInner: React.FC<AssociationGraphProps> = () => {
       .backgroundColor('rgba(0,0,0,0)')
       .width(containerRef.current.clientWidth)
       .height(containerRef.current.clientHeight || window.innerHeight * 0.9)
-      .nodeVal(controls.nodeRenderMode === 'icons'
-        ? (iconNodeVal(controls.nodeRelSize) as any)
-        : ((node: any) => (node as GraphNode).diameter))
+      .nodeVal(
+        controls.nodeRenderMode === 'icons' ? (iconNodeVal(controls.nodeRelSize) as any) : (node: any) => (node as GraphNode).diameter,
+      )
       .nodeColor((node: any) => getNodeColor((node as GraphNode).nodeType, (node as GraphNode).visualState))
       .nodeLabel(() => '')
-      .nodeThreeObject(buildNodeObject(controls.nodeRenderMode, controls.showNodeLabels, controls.nodeRelSize, controls.nodeLabelScale, labelSpritesRef.current) as any)
+      .nodeThreeObject(
+        buildNodeObject(
+          controls.nodeRenderMode,
+          controls.showNodeLabels,
+          controls.nodeRelSize,
+          controls.nodeLabelScale,
+          labelSpritesRef.current,
+        ) as any,
+      )
       .nodeThreeObjectExtend(controls.nodeRenderMode === 'spheres')
       .nodeRelSize(controls.nodeRelSize)
       .nodeOpacity(controls.nodeOpacity)
       .linkDirectionalArrowLength(controls.arrowLength)
       .linkDirectionalArrowRelPos(1)
       .linkThreeObjectExtend(controls.showEdgeLabels)
-      .linkThreeObject(controls.showEdgeLabels
-        ? ((link: any) => buildEdgeLabelFactory(controls.edgeLabelScale, edgeLabelSpritesRef.current)(link as GraphLink) as any)
-        : (undefined as any))
-      .linkPositionUpdate(controls.showEdgeLabels
-        ? ((sprite: any, { start, end }: any) => {
-            if (!sprite) return false;
-            sprite.position.set(
-              (start.x + end.x) / 2,
-              (start.y + end.y) / 2,
-              (start.z + end.z) / 2,
-            );
-            return false;
-          })
-        : (null as any))
+      .linkThreeObject(
+        controls.showEdgeLabels
+          ? (link: any) => buildEdgeLabelFactory(controls.edgeLabelScale, edgeLabelSpritesRef.current)(link as GraphLink) as any
+          : (undefined as any),
+      )
+      .linkPositionUpdate(
+        controls.showEdgeLabels
+          ? (sprite: any, { start, end }: any) => {
+              if (!sprite) return false;
+              sprite.position.set((start.x + end.x) / 2, (start.y + end.y) / 2, (start.z + end.z) / 2);
+              return false;
+            }
+          : (null as any),
+      )
       .linkColor(() => getEdgeColor())
       .linkWidth(controls.edgeWidth)
       .linkOpacity(controls.edgeOpacity)
@@ -314,10 +349,8 @@ const AssociationGraph3DInner: React.FC<AssociationGraphProps> = () => {
     const orbitControls = fg.controls();
     if (orbitControls) {
       (orbitControls as any).zoomToCursor = true;
-      (orbitControls as any).zoomSpeed = 1.5;
+      (orbitControls as any).zoomSpeed = ZOOM_SPEED;
     }
-
-    const MIN_ORBIT_RADIUS = 40;
 
     const enforceMinOrbitRadius = () => {
       const gi = graphInstanceRef.current;
@@ -338,8 +371,8 @@ const AssociationGraph3DInner: React.FC<AssociationGraphProps> = () => {
     };
     containerRef.current!.addEventListener('wheel', enforceMinOrbitRadius, { capture: true, passive: true });
 
-    if (graphDataRef.current.nodes.length > 100) {
-      fg.cooldownTicks(200);
+    if (graphDataRef.current.nodes.length > LARGE_GRAPH_THRESHOLD) {
+      fg.cooldownTicks(LARGE_GRAPH_COOLDOWN_TICKS);
     }
 
     const updateLabelScaling = () => {
@@ -373,14 +406,15 @@ const AssociationGraph3DInner: React.FC<AssociationGraphProps> = () => {
             camPos.y + fwd.y * MIN_ORBIT_RADIUS,
             camPos.z + fwd.z * MIN_ORBIT_RADIUS,
           );
-          target.lerp(desired, 0.15);
+          target.lerp(desired, ORBIT_LERP_FACTOR);
         }
       }
 
       const dist = Math.hypot(camPos.x - target.x, camPos.y - target.y, camPos.z - target.z);
 
       // Skip recalculation if camera hasn't moved significantly
-      if (lastCamDistRef.current >= 0 && Math.abs(dist - lastCamDistRef.current) < lastCamDistRef.current * 0.005 + 0.1) {
+      const camThreshold = lastCamDistRef.current * CAM_DIST_THRESHOLD_RATIO + CAM_DIST_THRESHOLD_MIN;
+      if (lastCamDistRef.current >= 0 && Math.abs(dist - lastCamDistRef.current) < camThreshold) {
         animFrameRef.current = requestAnimationFrame(updateLabelScaling);
         return;
       }
@@ -394,8 +428,12 @@ const AssociationGraph3DInner: React.FC<AssociationGraphProps> = () => {
       const camVec = new THREE.Vector3(camPos.x, camPos.y, camPos.z);
 
       const computeVisibility = (
-        itemDist: number, degree: number, isInitial: boolean,
-        filterStart: number, filterEnd: number, density: number,
+        itemDist: number,
+        degree: number,
+        isInitial: boolean,
+        filterStart: number,
+        filterEnd: number,
+        density: number,
       ) => {
         const progress = Math.min(1, Math.max(0, (itemDist - filterStart) / (filterEnd - filterStart)));
         const threshold = progress * maxDegree * density;
@@ -403,8 +441,8 @@ const AssociationGraph3DInner: React.FC<AssociationGraphProps> = () => {
       };
 
       const nodeScale = nodeLabelScaleRef.current;
-      const nodeFilterStart = 600 * nodeScale;
-      const nodeFilterEnd = 4000 * nodeScale;
+      const nodeFilterStart = NODE_FILTER_START_FACTOR * nodeScale;
+      const nodeFilterEnd = NODE_FILTER_END_FACTOR * nodeScale;
       const nodeDensity = nodeLabelDensityRef.current;
       const nodeMinSize = nodeLabelMinSizeRef.current;
 
@@ -413,7 +451,7 @@ const AssociationGraph3DInner: React.FC<AssociationGraphProps> = () => {
         const nodeDist = parent ? camVec.distanceTo(parent.position) : dist;
         if (computeVisibility(nodeDist, entry.degree, entry.isInitial, nodeFilterStart, nodeFilterEnd, nodeDensity)) {
           entry.sprite.visible = true;
-          const nodeDistFactor = Math.max(1, nodeDist / 300);
+          const nodeDistFactor = Math.max(1, nodeDist / LABEL_BASE_DISTANCE);
           const degreeBoost = entry.isInitial ? 1.5 : 1 + (entry.degree / maxDegree) * 0.5;
           const s = Math.max(nodeMinSize, nodeDistFactor * degreeBoost);
           entry.sprite.scale.set(entry.baseScale.x * s, entry.baseScale.y * s, entry.baseScale.z);
@@ -423,8 +461,8 @@ const AssociationGraph3DInner: React.FC<AssociationGraphProps> = () => {
       });
 
       const edgeScale = edgeLabelScaleRef.current;
-      const edgeFilterStart = 600 * edgeScale;
-      const edgeFilterEnd = 4000 * edgeScale;
+      const edgeFilterStart = EDGE_FILTER_START_FACTOR * edgeScale;
+      const edgeFilterEnd = EDGE_FILTER_END_FACTOR * edgeScale;
       const edgeDensity = edgeLabelDensityRef.current;
       const edgeMinSize = edgeLabelMinSizeRef.current;
 
@@ -433,7 +471,7 @@ const AssociationGraph3DInner: React.FC<AssociationGraphProps> = () => {
         const edgeDist = parent ? camVec.distanceTo(parent.position) : dist;
         if (computeVisibility(edgeDist, entry.degree, entry.isInitial, edgeFilterStart, edgeFilterEnd, edgeDensity)) {
           entry.sprite.visible = true;
-          const edgeDistFactor = Math.max(1, edgeDist / 300);
+          const edgeDistFactor = Math.max(1, edgeDist / LABEL_BASE_DISTANCE);
           const s = Math.max(edgeMinSize, edgeDistFactor);
           entry.sprite.scale.set(entry.baseScale.x * s, entry.baseScale.y * s, entry.baseScale.z);
         } else {
@@ -449,7 +487,7 @@ const AssociationGraph3DInner: React.FC<AssociationGraphProps> = () => {
       if (graphInstanceRef.current) {
         graphInstanceRef.current.zoomToFit(1000, 50);
       }
-    }, 1500);
+    }, INITIAL_FIT_DELAY_MS);
 
     const container = containerRef.current;
     const handleDblClick = (event: MouseEvent) => {
@@ -539,10 +577,14 @@ const AssociationGraph3DInner: React.FC<AssociationGraphProps> = () => {
     const gi = graphInstanceRef.current;
     if (gi) {
       const settings = focusSettingsRef.current;
-      focusCameraOn(gi, { x: node.x, y: node.y, z: node.z ?? 0 }, {
-        adjustDistance: settings.adjustDistance,
-        distanceRatio: settings.distanceRatio,
-      });
+      focusCameraOn(
+        gi,
+        { x: node.x, y: node.y, z: node.z ?? 0 },
+        {
+          adjustDistance: settings.adjustDistance,
+          distanceRatio: settings.distanceRatio,
+        },
+      );
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [focusedNodeId, focusSource]);
@@ -581,11 +623,7 @@ const AssociationGraph3DInner: React.FC<AssociationGraphProps> = () => {
       />
       <DataPreviewPanel
         selectedElement={controls.selectedElement}
-        nodeData={
-          controls.selectedElement?.kind === 'node'
-            ? graph.data_map[controls.selectedElement.id]
-            : undefined
-        }
+        nodeData={controls.selectedElement?.kind === 'node' ? graph.data_map[controls.selectedElement.id] : undefined}
         minimized={previewMinimized}
         onToggleMinimize={() => setPreviewMinimized((m) => !m)}
       />
@@ -595,9 +633,7 @@ const AssociationGraph3DInner: React.FC<AssociationGraphProps> = () => {
 
 export const AssociationGraph3D: React.FC<AssociationGraphProps> = ({ inView }) => {
   return (
-    <ErrorBoundary fallback={<RenderErrorAlert page={false} />}>
-      {inView && <AssociationGraph3DInner inView={inView} />}
-    </ErrorBoundary>
+    <ErrorBoundary fallback={<RenderErrorAlert page={false} />}>{inView && <AssociationGraph3DInner inView={inView} />}</ErrorBoundary>
   );
 };
 

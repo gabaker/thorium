@@ -1,9 +1,7 @@
 import { useReducer } from 'react';
 import { OriginState, DEFAULT_ORIGIN_STATE } from './types';
 
-type OriginAction =
-  | { type: 'SET_FIELD'; field: keyof OriginState; value: string }
-  | { type: 'RESET' };
+type OriginAction = { type: 'SET_FIELD'; field: keyof OriginState; value: string } | { type: 'RESET' };
 
 function originReducer(state: OriginState, action: OriginAction): OriginState {
   switch (action.type) {

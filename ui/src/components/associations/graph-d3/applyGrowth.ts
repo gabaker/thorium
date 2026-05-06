@@ -32,18 +32,19 @@ export const applyGrowthToInstance = (
   const addedNodes = newData.nodes.filter((n) => !existingNodeIds.has(n.id));
 
   let stateChanged = false;
-  for (const n of prevData.nodes) {
+  const updatedExistingNodes = prevData.nodes.map((n) => {
     const updated = newNodeMap.get(n.id);
     if (updated && updated.visualState !== n.visualState) {
       stateChanged = true;
-      n.visualState = updated.visualState;
+      return { ...n, visualState: updated.visualState };
     }
-  }
+    return n;
+  });
 
   if (addedNodes.length === 0 && addedLinks.length === 0 && !stateChanged) return;
 
   const updatedData: GraphData = {
-    nodes: [...prevData.nodes, ...addedNodes],
+    nodes: [...updatedExistingNodes, ...addedNodes],
     links: [...prevData.links, ...addedLinks],
   };
   graphDataRef.current = updatedData;

@@ -45,11 +45,7 @@ export function useFileUpload() {
     return Math.floor((totalUploaded / totalUploadSize) * 100);
   };
 
-  const trackAndSubmitReactions = (
-    sha256: string,
-    submission: { path: string; size: number },
-    submitReactionsList: any[],
-  ) => {
+  const trackAndSubmitReactions = (sha256: string, submission: { path: string; size: number }, submitReactionsList: any[]) => {
     const allRunReactionsRes: ReactionSubmitResult[] = [];
     return submitReactions(sha256, submitReactionsList).then((submitRes: any[]) => {
       let error = false;
@@ -129,12 +125,7 @@ export function useFileUpload() {
     });
   };
 
-  const trackAndUploadFile = (
-    form: FormData,
-    selectedGroups: string[],
-    associations: AssociationCreate[],
-    reactionsList: any[],
-  ) => {
+  const trackAndUploadFile = (form: FormData, selectedGroups: string[], associations: AssociationCreate[], reactionsList: any[]) => {
     const allResSha256: string[] = [];
     const allResErrors: string[] = [];
     const submission = form.get('data') as DropzoneFile;
@@ -284,23 +275,12 @@ export function useFileUpload() {
     });
   };
 
-  const retryFileUpload = (
-    fileName: string,
-    selectedGroups: string[],
-    associations: AssociationCreate[],
-    reactionsList: any[],
-  ) => {
+  const retryFileUpload = (fileName: string, selectedGroups: string[], associations: AssociationCreate[], reactionsList: any[]) => {
     setUploadInProgress(true);
-    trackAndUploadFile(uploadFailures[fileName], selectedGroups, associations, reactionsList).then(() =>
-      setUploadInProgress(false),
-    );
+    trackAndUploadFile(uploadFailures[fileName], selectedGroups, associations, reactionsList).then(() => setUploadInProgress(false));
   };
 
-  const retryAllFileUploads = async (
-    selectedGroups: string[],
-    associations: AssociationCreate[],
-    reactionsList: any[],
-  ) => {
+  const retryAllFileUploads = async (selectedGroups: string[], associations: AssociationCreate[], reactionsList: any[]) => {
     setUploadInProgress(true);
     const failureSnapshot = { ...uploadFailures };
     setUploadFailures({});

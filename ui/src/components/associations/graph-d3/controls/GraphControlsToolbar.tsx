@@ -79,12 +79,7 @@ const GraphControlsToolbar: React.FC<GraphControlsToolbarProps> = ({
             icon={<FaProjectDiagram size={14} />}
             title="View"
           >
-            <GraphSection
-              graphId={graphId}
-              controls={controls}
-              updateControls={updateControls}
-              graphInstance={graphInstance}
-            />
+            <GraphSection graphId={graphId} controls={controls} updateControls={updateControls} graphInstance={graphInstance} />
           </ToolbarButton>
 
           <ToolbarButton
@@ -94,12 +89,7 @@ const GraphControlsToolbar: React.FC<GraphControlsToolbarProps> = ({
             icon={<FaBolt size={14} />}
             title="Forces"
           >
-            <ForcesSection
-              graphId={graphId}
-              controls={controls}
-              updateControls={updateControls}
-              graphInstance={graphInstance}
-            />
+            <ForcesSection graphId={graphId} controls={controls} updateControls={updateControls} graphInstance={graphInstance} />
           </ToolbarButton>
 
           <ToolbarButton
@@ -129,12 +119,7 @@ const GraphControlsToolbar: React.FC<GraphControlsToolbarProps> = ({
             icon={<FaCamera size={14} />}
             title="Export"
           >
-            <ExportSection
-              graphId={graphId}
-              controls={controls}
-              updateControls={updateControls}
-              graphInstance={graphInstance}
-            />
+            <ExportSection graphId={graphId} controls={controls} updateControls={updateControls} graphInstance={graphInstance} />
           </ToolbarButton>
 
           <OverlayTipTop tip="Depth">

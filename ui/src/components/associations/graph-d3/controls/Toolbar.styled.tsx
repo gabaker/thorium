@@ -22,7 +22,9 @@ export const ToolbarIconButton = styled.button<{ $active?: boolean }>`
   align-items: center;
   justify-content: center;
   cursor: pointer;
-  transition: background 0.15s, border-color 0.15s;
+  transition:
+    background 0.15s,
+    border-color 0.15s;
 
   &:hover {
     background: var(--thorium-highlight-panel-bg);

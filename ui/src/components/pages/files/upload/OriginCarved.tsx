@@ -11,8 +11,7 @@ interface OriginCarvedProps {
 }
 
 const OriginCarved: React.FC<OriginCarvedProps> = ({ originState, onOriginChange, onResetStatus }) => {
-  const isValidProtocol = (proto: string) =>
-    ['TCP', 'Tcp', 'tcp', 'UDP', 'Udp', 'udp'].includes(proto);
+  const isValidProtocol = (proto: string) => ['TCP', 'Tcp', 'tcp', 'UDP', 'Udp', 'udp'].includes(proto);
 
   return (
     <>

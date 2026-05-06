@@ -17,9 +17,7 @@ export const TLP_COLORS: Record<string, string> = {
 
 export type TLPSelection = Record<string, boolean>;
 
-export const DEFAULT_TLP_SELECTION: TLPSelection = Object.fromEntries(
-  Object.keys(TLP_COLORS).map((key) => [key, false]),
-);
+export const DEFAULT_TLP_SELECTION: TLPSelection = Object.fromEntries(Object.keys(TLP_COLORS).map((key) => [key, false]));
 
 export type OriginType = 'Downloaded' | 'Transformed' | 'Unpacked' | 'Carved' | 'Wire' | 'Incident' | 'MemoryDump';
 export type CarvedSubType = 'Pcap' | 'Unknown';

@@ -8,11 +8,13 @@ import type { GraphNode, GraphLink } from '../types';
 
 export type LabelEntry = { sprite: THREE.Object3D; degree: number; isInitial: boolean; baseScale: THREE.Vector3 };
 
-export const iconNodeVal = (nodeRelSize: number) => (node: GraphNode): number => {
-  const iconHalf = (Math.max(6, node.diameter / 3) * (nodeRelSize / 4)) / 2;
-  const r = iconHalf / nodeRelSize;
-  return r * r * r;
-};
+export const iconNodeVal =
+  (nodeRelSize: number) =>
+  (node: GraphNode): number => {
+    const iconHalf = (Math.max(6, node.diameter / 3) * (nodeRelSize / 4)) / 2;
+    const r = iconHalf / nodeRelSize;
+    return r * r * r;
+  };
 
 export const buildNodeObject = (
   renderMode: NodeRenderMode,
@@ -45,7 +47,12 @@ export const buildNodeObject = (
       group.add(labelSprite);
       if (labelMap) {
         const obj = labelSprite as unknown as THREE.Object3D;
-        labelMap.set(node.id, { sprite: obj, degree: node.degree, isInitial: node.visualState === 'initial', baseScale: obj.scale.clone() });
+        labelMap.set(node.id, {
+          sprite: obj,
+          degree: node.degree,
+          isInitial: node.visualState === 'initial',
+          baseScale: obj.scale.clone(),
+        });
       }
     } else if (labelMap) {
       labelMap.delete(node.id);
@@ -55,10 +62,7 @@ export const buildNodeObject = (
   };
 };
 
-export const buildEdgeLabelFactory = (
-  labelScale: number,
-  edgeLabelMap?: Map<string, LabelEntry>,
-) => {
+export const buildEdgeLabelFactory = (labelScale: number, edgeLabelMap?: Map<string, LabelEntry>) => {
   return (link: GraphLink): THREE.Object3D | undefined => {
     if (!link.label) return undefined;
     const sprite = new SpriteText(link.label);
@@ -79,6 +83,10 @@ export const buildEdgeLabelFactory = (
   };
 };
 
+// Impure reducer: mutates the ForceGraph3D instance imperatively via refs.
+// This is intentional — the 3d-force-graph API is imperative, and syncing
+// control state with graph properties inside the reducer keeps them atomic.
+// Do not call this reducer outside of React's useReducer.
 export const createControlsReducer = (
   graphInstanceRef: React.RefObject<ForceGraph3DInstance | null>,
   labelSpritesRef: React.RefObject<Map<string, LabelEntry>>,
@@ -94,14 +102,12 @@ export const createControlsReducer = (
           if (action.state) {
             edgeLabelSpritesRef.current.clear();
             gi.linkThreeObjectExtend(true);
-            gi.linkThreeObject((link: any) => buildEdgeLabelFactory(state.edgeLabelScale, edgeLabelSpritesRef.current)(link as GraphLink) as any);
+            gi.linkThreeObject(
+              (link: any) => buildEdgeLabelFactory(state.edgeLabelScale, edgeLabelSpritesRef.current)(link as GraphLink) as any,
+            );
             gi.linkPositionUpdate((sprite: any, { start, end }: any) => {
               if (!sprite) return false;
-              sprite.position.set(
-                (start.x + end.x) / 2,
-                (start.y + end.y) / 2,
-                (start.z + end.z) / 2,
-              );
+              sprite.position.set((start.x + end.x) / 2, (start.y + end.y) / 2, (start.z + end.z) / 2);
               return false;
             });
           } else {
@@ -118,7 +124,9 @@ export const createControlsReducer = (
         if (lastCamDistRef) lastCamDistRef.current = -1;
         if (gi) {
           labelSpritesRef.current.clear();
-          gi.nodeThreeObject(buildNodeObject(state.nodeRenderMode, action.state, state.nodeRelSize, state.nodeLabelScale, labelSpritesRef.current) as any);
+          gi.nodeThreeObject(
+            buildNodeObject(state.nodeRenderMode, action.state, state.nodeRelSize, state.nodeLabelScale, labelSpritesRef.current) as any,
+          );
           gi.nodeThreeObjectExtend(state.nodeRenderMode === 'spheres');
           gi.refresh();
         }
@@ -163,11 +171,11 @@ export const createControlsReducer = (
         if (lastCamDistRef) lastCamDistRef.current = -1;
         if (gi) {
           labelSpritesRef.current.clear();
-          gi.nodeThreeObject(buildNodeObject(action.state, state.showNodeLabels, state.nodeRelSize, state.nodeLabelScale, labelSpritesRef.current) as any);
+          gi.nodeThreeObject(
+            buildNodeObject(action.state, state.showNodeLabels, state.nodeRelSize, state.nodeLabelScale, labelSpritesRef.current) as any,
+          );
           gi.nodeThreeObjectExtend(action.state === 'spheres');
-          gi.nodeVal(action.state === 'icons'
-            ? (iconNodeVal(state.nodeRelSize) as any)
-            : ((node: any) => (node as GraphNode).diameter));
+          gi.nodeVal(action.state === 'icons' ? (iconNodeVal(state.nodeRelSize) as any) : (node: any) => (node as GraphNode).diameter);
           gi.refresh();
         }
         return { ...state, nodeRenderMode: action.state };
@@ -214,7 +222,15 @@ export const createControlsReducer = (
           gi.nodeRelSize(action.state);
           if (state.nodeRenderMode === 'icons') {
             labelSpritesRef.current.clear();
-            gi.nodeThreeObject(buildNodeObject(state.nodeRenderMode, state.showNodeLabels, action.state, state.nodeLabelScale, labelSpritesRef.current) as any);
+            gi.nodeThreeObject(
+              buildNodeObject(
+                state.nodeRenderMode,
+                state.showNodeLabels,
+                action.state,
+                state.nodeLabelScale,
+                labelSpritesRef.current,
+              ) as any,
+            );
             gi.nodeVal(iconNodeVal(action.state) as any);
             gi.refresh();
           }

@@ -86,7 +86,7 @@ export const getNodeSvg = (nodeType: NodeType, visualState: VisualState): string
 const textureCache = new Map<string, THREE.Texture>();
 
 export const svgToTexture = (svgString: string, size = 64): THREE.Texture => {
-  const cacheKey = `${svgString.substring(0, 100)}_${size}`;
+  const cacheKey = `${svgString}_${size}`;
   const cached = textureCache.get(cacheKey);
   if (cached) return cached;
 
@@ -96,26 +96,42 @@ export const svgToTexture = (svgString: string, size = 64): THREE.Texture => {
   const ctx = canvas.getContext('2d')!;
 
   const img = new Image();
-  const blob = new Blob([svgString], { type: 'image/svg+xml;charset=utf-8' });
-  const url = URL.createObjectURL(blob);
+  const dataUri = `data:image/svg+xml;base64,${btoa(svgString)}`;
 
   const texture = new THREE.Texture(canvas);
   img.onload = () => {
     ctx.drawImage(img, 0, 0, size, size);
     texture.needsUpdate = true;
-    URL.revokeObjectURL(url);
   };
-  img.src = url;
+  img.src = dataUri;
 
   textureCache.set(cacheKey, texture);
   return texture;
 };
 
-export const getEdgeColor = (): string => {
+let cachedEdgeColor: string | null = null;
+
+const computeEdgeColor = (): string => {
   const rootTheme = document.getElementById('root')?.getAttribute('theme');
   const theme = rootTheme ?? '';
   if (theme === 'Dark' || theme === 'Ocean') {
     return getComputedStyle(document.documentElement).getPropertyValue('--thorium-text-secondary');
   }
   return 'darkgray';
+};
+
+if (typeof MutationObserver !== 'undefined') {
+  const rootEl = document.getElementById('root');
+  if (rootEl) {
+    new MutationObserver(() => {
+      cachedEdgeColor = null;
+    }).observe(rootEl, { attributes: true, attributeFilter: ['theme'] });
+  }
+}
+
+export const getEdgeColor = (): string => {
+  if (cachedEdgeColor === null) {
+    cachedEdgeColor = computeEdgeColor();
+  }
+  return cachedEdgeColor;
 };

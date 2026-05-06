@@ -10,14 +10,7 @@ import ProgressBarContainer from './ProgressBarContainer';
 import TLPSelection from './TLPSelection';
 import OriginForm from './OriginForm';
 import UploadAlertBanner from './UploadAlertBanner';
-import {
-  DropzoneFile,
-  FileUploadStatus,
-  OriginState,
-  ReactionSubmitResult,
-  TagEntry,
-  TLPSelection as TLPSelectionState,
-} from './types';
+import { DropzoneFile, FileUploadStatus, OriginState, ReactionSubmitResult, TagEntry, TLPSelection as TLPSelectionState } from './types';
 
 interface UploadFormProps {
   uploadInProgress: boolean;

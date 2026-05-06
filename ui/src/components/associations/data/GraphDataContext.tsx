@@ -6,6 +6,8 @@ import { mergeGrowthInto, computeDistances } from './graphMerge';
 type FocusSource = 'tree' | 'graph';
 
 interface GraphDataContextType {
+  /** Snapshot of the graph ref at the last version bump. Use for render-time reads.
+   *  For async callbacks that may fire after the next render, prefer `getGraph()`. */
   graph: Graph;
   graphId: string;
   graphVersion: number;
@@ -40,12 +42,7 @@ interface GraphDataProviderProps {
   children: React.ReactNode;
 }
 
-export const GraphDataProvider: React.FC<GraphDataProviderProps> = ({
-  initial,
-  filterChildless = false,
-  depth = 1,
-  children,
-}) => {
+export const GraphDataProvider: React.FC<GraphDataProviderProps> = ({ initial, filterChildless = false, depth = 1, children }) => {
   const graphRef = useRef<Graph>(BlankGraph);
   const [graphId, setGraphId] = useState('');
   const [graphVersion, setGraphVersion] = useState(0);
@@ -186,8 +183,21 @@ export const GraphDataProvider: React.FC<GraphDataProviderProps> = ({
       setFocusedNode,
     }),
     // eslint-disable-next-line react-hooks/exhaustive-deps
-    [graphId, graphVersion, loading, error, growable, focusedNodeId, focusSource,
-      getGraph, grow, growMultiple, growToDepth, reload, setFocusedNode],
+    [
+      graphId,
+      graphVersion,
+      loading,
+      error,
+      growable,
+      focusedNodeId,
+      focusSource,
+      getGraph,
+      grow,
+      growMultiple,
+      growToDepth,
+      reload,
+      setFocusedNode,
+    ],
   );
 
   return <GraphDataContext.Provider value={value}>{children}</GraphDataContext.Provider>;

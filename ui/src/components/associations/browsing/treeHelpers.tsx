@@ -3,6 +3,46 @@ import React from 'react';
 import { Direction, Graph, TreeNode } from '@models/trees';
 import { formatTagNames } from '../utilities';
 
+export interface TreeIndex {
+  childrenOf: Map<string, string[]>;
+  parentsOf: Map<string, string[]>;
+}
+
+export function buildTreeIndex(graph: Graph): TreeIndex {
+  const childrenOf = new Map<string, string[]>();
+  const parentsOf = new Map<string, string[]>();
+
+  const addChild = (parent: string, child: string) => {
+    let list = childrenOf.get(parent);
+    if (!list) {
+      list = [];
+      childrenOf.set(parent, list);
+    }
+    if (!list.includes(child)) list.push(child);
+
+    let parents = parentsOf.get(child);
+    if (!parents) {
+      parents = [];
+      parentsOf.set(child, parents);
+    }
+    if (!parents.includes(parent)) parents.push(parent);
+  };
+
+  if (graph.branches) {
+    for (const [nodeId, branches] of Object.entries(graph.branches)) {
+      for (const branch of branches) {
+        if (branch.direction === Direction.To || branch.direction === Direction.Bidirectional) {
+          addChild(nodeId, branch.node);
+        } else if (branch.direction === Direction.From) {
+          addChild(branch.node, nodeId);
+        }
+      }
+    }
+  }
+
+  return { childrenOf, parentsOf };
+}
+
 const NODE_TYPE_LABELS: Record<string, string> = {
   file: 'File',
   repo: 'Repository',
@@ -82,80 +122,16 @@ export function renderTagPreview(tags: Record<string, Record<string, string[]>> 
           {t.key}: {t.value}
         </span>
       ))}
-      {Object.keys(tags).reduce((n, k) => n + Object.keys(tags[k]).length, 0) > limit && (
-        <span className="preview-tag">...</span>
-      )}
+      {Object.keys(tags).reduce((n, k) => n + Object.keys(tags[k]).length, 0) > limit && <span className="preview-tag">...</span>}
     </div>
   );
 }
 
-export function findMultiParentNodeIds(graph: Graph): Set<string> {
-  const counts = new Map<string, number>();
-  const visited = new Set<string>();
-
-  function walk(nodeId: string) {
-    counts.set(nodeId, (counts.get(nodeId) ?? 0) + 1);
-    if (visited.has(nodeId)) return;
-    visited.add(nodeId);
-    const branches = graph.branches[nodeId];
-    if (branches) {
-      for (const branch of branches) {
-        if (branch.direction === Direction.To || branch.direction === Direction.Bidirectional) {
-          walk(branch.node);
-        }
-      }
-    }
-    // Also walk nodes that have Direction.From pointing to this node (they are children)
-    for (const [otherId, otherBranches] of Object.entries(graph.branches)) {
-      if (otherId === nodeId) continue;
-      for (const branch of otherBranches) {
-        if (branch.node === nodeId && branch.direction === Direction.From) {
-          walk(otherId);
-        }
-      }
-    }
-  }
-
-  // Start from the topmost roots (walk up from initial nodes)
-  const roots = new Set<string>();
-  for (const initialId of graph.initial) {
-    let current = initialId;
-    const chain = new Set<string>();
-    chain.add(current);
-    const branches = graph.branches[current];
-    let parent: string | null = null;
-    if (branches) {
-      for (const b of branches) {
-        if (b.direction === Direction.From && !chain.has(b.node)) {
-          parent = b.node;
-          break;
-        }
-      }
-    }
-    while (parent) {
-      chain.add(parent);
-      current = parent;
-      parent = null;
-      const parentBranches = graph.branches[current];
-      if (parentBranches) {
-        for (const b of parentBranches) {
-          if (b.direction === Direction.From && !chain.has(b.node)) {
-            parent = b.node;
-            break;
-          }
-        }
-      }
-    }
-    roots.add(current);
-  }
-
-  for (const root of roots) {
-    walk(root);
-  }
-
+export function findMultiParentNodeIds(graph: Graph, index?: TreeIndex): Set<string> {
+  const idx = index ?? buildTreeIndex(graph);
   const multiParent = new Set<string>();
-  for (const [id, count] of counts) {
-    if (count > 1) multiParent.add(id);
+  for (const [nodeId, parents] of idx.parentsOf) {
+    if (parents.length > 1) multiParent.add(nodeId);
   }
   return multiParent;
 }

@@ -15,12 +15,7 @@ interface DataPreviewPanelProps {
   onToggleMinimize: () => void;
 }
 
-const DataPreviewPanel: React.FC<DataPreviewPanelProps> = ({
-  selectedElement,
-  nodeData,
-  minimized,
-  onToggleMinimize,
-}) => {
+const DataPreviewPanel: React.FC<DataPreviewPanelProps> = ({ selectedElement, nodeData, minimized, onToggleMinimize }) => {
   if (!selectedElement) return null;
 
   if (minimized) {

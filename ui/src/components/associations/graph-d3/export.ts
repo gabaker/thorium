@@ -5,6 +5,7 @@ const captureDataUrl = (graphInstance: ForceGraph3DInstance, mimeType: string): 
   const scene = graphInstance.scene();
   const camera = graphInstance.camera();
   if (!renderer || !scene || !camera) return null;
+  // Re-render immediately before capture to ensure the buffer contains current frame data
   renderer.render(scene, camera);
   return renderer.domElement.toDataURL(mimeType);
 };
