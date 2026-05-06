@@ -85,6 +85,40 @@ const EdgesSection: React.FC<SectionProps> = ({ controls, updateControls }) => (
       checked={controls.showEdgeLabels}
       onChange={() => updateControls({ type: 'showEdgeLabels', state: !controls.showEdgeLabels })}
     />
+    {controls.showEdgeLabels && (
+      <>
+        <LabeledRange
+          id="form-edge-label-scale"
+          label="Label Size"
+          value={controls.edgeLabelScale}
+          min={0.5}
+          max={3}
+          step={0.1}
+          formatValue={(v) => `${v.toFixed(1)}x`}
+          onChange={(v) => updateControls({ type: 'edgeLabelScale', state: v })}
+        />
+        <LabeledRange
+          id="form-edge-label-density"
+          label="Label Density"
+          value={controls.edgeLabelDensity}
+          min={0.1}
+          max={1.0}
+          step={0.1}
+          formatValue={(v) => `${(v * 100).toFixed(0)}%`}
+          onChange={(v) => updateControls({ type: 'edgeLabelDensity', state: v })}
+        />
+        <LabeledRange
+          id="form-edge-label-min-size"
+          label="Min Font Size"
+          value={controls.edgeLabelMinSize}
+          min={0.5}
+          max={5}
+          step={0.5}
+          formatValue={(v) => `${v.toFixed(1)}x`}
+          onChange={(v) => updateControls({ type: 'edgeLabelMinSize', state: v })}
+        />
+      </>
+    )}
   </PopoverBody>
 );
 

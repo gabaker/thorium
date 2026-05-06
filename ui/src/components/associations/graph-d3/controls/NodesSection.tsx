@@ -55,24 +55,34 @@ const NodesSection: React.FC<SectionProps> = ({ controls, updateControls }) => (
     {controls.showNodeLabels && (
       <>
         <LabeledRange
-          id="form-label-density"
+          id="form-node-label-scale"
+          label="Label Size"
+          value={controls.nodeLabelScale}
+          min={0.5}
+          max={3}
+          step={0.1}
+          formatValue={(v) => `${v.toFixed(1)}x`}
+          onChange={(v) => updateControls({ type: 'nodeLabelScale', state: v })}
+        />
+        <LabeledRange
+          id="form-node-label-density"
           label="Label Density"
-          value={controls.labelDensity}
+          value={controls.nodeLabelDensity}
           min={0.1}
           max={1.0}
           step={0.1}
           formatValue={(v) => `${(v * 100).toFixed(0)}%`}
-          onChange={(v) => updateControls({ type: 'labelDensity', state: v })}
+          onChange={(v) => updateControls({ type: 'nodeLabelDensity', state: v })}
         />
         <LabeledRange
-          id="form-label-min-size"
+          id="form-node-label-min-size"
           label="Min Font Size"
-          value={controls.labelMinSize}
+          value={controls.nodeLabelMinSize}
           min={0.5}
           max={5}
           step={0.5}
           formatValue={(v) => `${v.toFixed(1)}x`}
-          onChange={(v) => updateControls({ type: 'labelMinSize', state: v })}
+          onChange={(v) => updateControls({ type: 'nodeLabelMinSize', state: v })}
         />
       </>
     )}

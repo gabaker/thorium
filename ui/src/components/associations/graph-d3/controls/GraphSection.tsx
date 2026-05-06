@@ -22,21 +22,6 @@ const GraphSection: React.FC<GraphSectionProps> = ({ controls, updateControls, g
 
     <Divider />
 
-    {(controls.showNodeLabels || controls.showEdgeLabels) && (
-      <LabeledRange
-        id="form-label-scale"
-        label="Label Size"
-        value={controls.labelScale}
-        min={0.5}
-        max={3}
-        step={0.1}
-        formatValue={(v) => `${v.toFixed(1)}x`}
-        onChange={(v) => updateControls({ type: 'labelScale', state: v })}
-      />
-    )}
-
-    <Divider />
-
     <Form.Check
       type="switch"
       id="form-focus-on-click"

@@ -15,7 +15,8 @@ export interface GraphControls {
   adjustDistanceOnFocus: boolean;
   refitOnGrow: boolean;
   focusDistanceRatio: number;
-  labelScale: number;
+  nodeLabelScale: number;
+  edgeLabelScale: number;
   // edges
   edgeWidth: number;
   edgeLength: number;
@@ -28,8 +29,10 @@ export interface GraphControls {
   nodeRelSize: number;
   nodeOpacity: number;
   enableNodeDrag: boolean;
-  labelDensity: number;
-  labelMinSize: number;
+  nodeLabelDensity: number;
+  nodeLabelMinSize: number;
+  edgeLabelDensity: number;
+  edgeLabelMinSize: number;
   // forces
   chargeStrength: number;
   velocityDecay: number;
@@ -51,7 +54,7 @@ export type DisplayAction =
   | { type: 'selected'; state: SelectedElement | null }
   | { type: 'nodeRenderMode'; state: NodeRenderMode }
   | { type: 'edgeWidth' | 'edgeLength' | 'edgeLinkStrength' | 'edgeOpacity' | 'arrowLength' | 'directionalParticles' | 'particleSpeed'; state: number }
-  | { type: 'nodeRelSize' | 'nodeOpacity' | 'focusDistanceRatio' | 'labelScale' | 'labelDensity' | 'labelMinSize'; state: number }
+  | { type: 'nodeRelSize' | 'nodeOpacity' | 'focusDistanceRatio' | 'nodeLabelScale' | 'edgeLabelScale' | 'nodeLabelDensity' | 'nodeLabelMinSize' | 'edgeLabelDensity' | 'edgeLabelMinSize'; state: number }
   | { type: 'chargeStrength' | 'velocityDecay' | 'warmupTicks' | 'cooldownTime'; state: number }
   | { type: 'dagMode'; state: DagMode }
   | { type: 'dagLevelDistance'; state: number | null }

@@ -98,9 +98,12 @@ const AssociationGraph3DInner: React.FC<AssociationGraphProps> = () => {
   const handleNodeSelectRef = useRef<(node: GraphNode) => Promise<void>>(null as any);
   const handleEdgeSelectRef = useRef<(link: GraphLink) => void>(null as any);
   const focusSettingsRef = useRef({ focusOnClick: false, adjustDistance: false, distanceRatio: 1 });
-  const labelScaleRef = useRef(1);
-  const labelDensityRef = useRef(0.4);
-  const labelMinSizeRef = useRef(1);
+  const nodeLabelScaleRef = useRef(1);
+  const edgeLabelScaleRef = useRef(1);
+  const nodeLabelDensityRef = useRef(0.7);
+  const edgeLabelDensityRef = useRef(0.7);
+  const nodeLabelMinSizeRef = useRef(1);
+  const edgeLabelMinSizeRef = useRef(1);
   const refitOnGrowRef = useRef(true);
 
   const controlsReducer = createControlsReducer(graphInstanceRef, labelSpritesRef, edgeLabelSpritesRef, lastCamDistRef);
@@ -117,7 +120,8 @@ const AssociationGraph3DInner: React.FC<AssociationGraphProps> = () => {
     adjustDistanceOnFocus: false,
     refitOnGrow: false,
     focusDistanceRatio: 1,
-    labelScale: 1,
+    nodeLabelScale: 1,
+    edgeLabelScale: 1,
     edgeWidth: 1,
     edgeLength: 30,
     edgeLinkStrength: 0.5,
@@ -128,8 +132,10 @@ const AssociationGraph3DInner: React.FC<AssociationGraphProps> = () => {
     nodeRelSize: 4,
     nodeOpacity: 0.75,
     enableNodeDrag: true,
-    labelDensity: 0.4,
-    labelMinSize: 1,
+    nodeLabelDensity: 0.7,
+    nodeLabelMinSize: 1,
+    edgeLabelDensity: 0.7,
+    edgeLabelMinSize: 1,
     chargeStrength: -200,
     velocityDecay: 0.4,
     warmupTicks: 0,
@@ -144,9 +150,12 @@ const AssociationGraph3DInner: React.FC<AssociationGraphProps> = () => {
     adjustDistance: controls.adjustDistanceOnFocus,
     distanceRatio: controls.focusDistanceRatio,
   };
-  labelScaleRef.current = controls.labelScale;
-  labelDensityRef.current = controls.labelDensity;
-  labelMinSizeRef.current = controls.labelMinSize;
+  nodeLabelScaleRef.current = controls.nodeLabelScale;
+  edgeLabelScaleRef.current = controls.edgeLabelScale;
+  nodeLabelDensityRef.current = controls.nodeLabelDensity;
+  edgeLabelDensityRef.current = controls.edgeLabelDensity;
+  nodeLabelMinSizeRef.current = controls.nodeLabelMinSize;
+  edgeLabelMinSizeRef.current = controls.edgeLabelMinSize;
   refitOnGrowRef.current = controls.refitOnGrow;
 
   // React to graph changes from the shared context
@@ -247,7 +256,7 @@ const AssociationGraph3DInner: React.FC<AssociationGraphProps> = () => {
         : ((node: any) => (node as GraphNode).diameter))
       .nodeColor((node: any) => getNodeColor((node as GraphNode).nodeType, (node as GraphNode).visualState))
       .nodeLabel(() => '')
-      .nodeThreeObject(buildNodeObject(controls.nodeRenderMode, controls.showNodeLabels, controls.nodeRelSize, controls.labelScale, labelSpritesRef.current) as any)
+      .nodeThreeObject(buildNodeObject(controls.nodeRenderMode, controls.showNodeLabels, controls.nodeRelSize, controls.nodeLabelScale, labelSpritesRef.current) as any)
       .nodeThreeObjectExtend(controls.nodeRenderMode === 'spheres')
       .nodeRelSize(controls.nodeRelSize)
       .nodeOpacity(controls.nodeOpacity)
@@ -255,7 +264,7 @@ const AssociationGraph3DInner: React.FC<AssociationGraphProps> = () => {
       .linkDirectionalArrowRelPos(1)
       .linkThreeObjectExtend(controls.showEdgeLabels)
       .linkThreeObject(controls.showEdgeLabels
-        ? ((link: any) => buildEdgeLabelFactory(controls.labelScale, edgeLabelSpritesRef.current)(link as GraphLink) as any)
+        ? ((link: any) => buildEdgeLabelFactory(controls.edgeLabelScale, edgeLabelSpritesRef.current)(link as GraphLink) as any)
         : (undefined as any))
       .linkPositionUpdate(controls.showEdgeLabels
         ? ((sprite: any, { start, end }: any) => {
@@ -382,39 +391,50 @@ const AssociationGraph3DInner: React.FC<AssociationGraphProps> = () => {
         if (entry.degree > maxDegree) maxDegree = entry.degree;
       });
 
-      const scale = labelScaleRef.current;
-      const filterStart = 300 * scale;
-      const filterEnd = 2000 * scale;
-      const density = labelDensityRef.current;
-      const minSize = labelMinSizeRef.current;
       const camVec = new THREE.Vector3(camPos.x, camPos.y, camPos.z);
 
-      const computeVisibility = (nodeDist: number, degree: number, isInitial: boolean) => {
-        const progress = Math.min(1, Math.max(0, (nodeDist - filterStart) / (filterEnd - filterStart)));
+      const computeVisibility = (
+        itemDist: number, degree: number, isInitial: boolean,
+        filterStart: number, filterEnd: number, density: number,
+      ) => {
+        const progress = Math.min(1, Math.max(0, (itemDist - filterStart) / (filterEnd - filterStart)));
         const threshold = progress * maxDegree * density;
         return isInitial || degree >= threshold;
       };
 
+      const nodeScale = nodeLabelScaleRef.current;
+      const nodeFilterStart = 600 * nodeScale;
+      const nodeFilterEnd = 4000 * nodeScale;
+      const nodeDensity = nodeLabelDensityRef.current;
+      const nodeMinSize = nodeLabelMinSizeRef.current;
+
       nodeLabels.forEach((entry) => {
         const parent = entry.sprite.parent;
         const nodeDist = parent ? camVec.distanceTo(parent.position) : dist;
-        if (computeVisibility(nodeDist, entry.degree, entry.isInitial)) {
+        if (computeVisibility(nodeDist, entry.degree, entry.isInitial, nodeFilterStart, nodeFilterEnd, nodeDensity)) {
           entry.sprite.visible = true;
           const nodeDistFactor = Math.max(1, nodeDist / 300);
           const degreeBoost = entry.isInitial ? 1.5 : 1 + (entry.degree / maxDegree) * 0.5;
-          const s = Math.max(minSize, nodeDistFactor * degreeBoost);
+          const s = Math.max(nodeMinSize, nodeDistFactor * degreeBoost);
           entry.sprite.scale.set(entry.baseScale.x * s, entry.baseScale.y * s, entry.baseScale.z);
         } else {
           entry.sprite.visible = false;
         }
       });
+
+      const edgeScale = edgeLabelScaleRef.current;
+      const edgeFilterStart = 600 * edgeScale;
+      const edgeFilterEnd = 4000 * edgeScale;
+      const edgeDensity = edgeLabelDensityRef.current;
+      const edgeMinSize = edgeLabelMinSizeRef.current;
+
       edgeLabels.forEach((entry) => {
         const parent = entry.sprite.parent;
         const edgeDist = parent ? camVec.distanceTo(parent.position) : dist;
-        if (computeVisibility(edgeDist, 0, false)) {
+        if (computeVisibility(edgeDist, entry.degree, entry.isInitial, edgeFilterStart, edgeFilterEnd, edgeDensity)) {
           entry.sprite.visible = true;
           const edgeDistFactor = Math.max(1, edgeDist / 300);
-          const s = Math.max(minSize, edgeDistFactor);
+          const s = Math.max(edgeMinSize, edgeDistFactor);
           entry.sprite.scale.set(entry.baseScale.x * s, entry.baseScale.y * s, entry.baseScale.z);
         } else {
           entry.sprite.visible = false;
