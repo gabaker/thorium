@@ -10,17 +10,16 @@ import Subtitle from '@components/shared/titles/Subtitle';
 import { Seed } from '@models/trees';
 
 interface GraphBuilderContextType {
-  updateSeed: (seed: Seed) => void | undefined;
+  updateSeed: (seed: Seed) => void;
 }
 
 // Page context
 const GraphContext = createContext<GraphBuilderContextType | undefined>(undefined);
 
-// custom device create context hook
 const useGraphContext = () => {
   const context = useContext(GraphContext);
   if (context === undefined) {
-    throw new Error('useRepoContext must be used within a RepoContextProvider');
+    throw new Error('useGraphContext must be used within a GraphBuilder');
   }
   return context;
 };
@@ -38,7 +37,15 @@ const RepoHeader = () => {
     <Card className="panel">
       <Card.Body>
         <InputTitle>Graph Seed</InputTitle>
-        <Form.Control onChange={(e) => updateSeed(JSON.parse(e.target.value) as unknown as Seed)} />
+        <Form.Control
+          onChange={(e) => {
+            try {
+              updateSeed(JSON.parse(e.target.value) as Seed);
+            } catch {
+              // Wait for valid JSON
+            }
+          }}
+        />
       </Card.Body>
     </Card>
   );
@@ -50,7 +57,7 @@ const GraphBuilder = () => {
     <GraphContext.Provider value={{ updateSeed }}>
       <Page className="full-min-width" title={`Graph Builder`}>
         <RepoHeader />
-        {seed != null && (
+        {seed !== null && (
           <GraphDataProvider initial={seed}>
             <Card className="panel">
               <Card.Body>

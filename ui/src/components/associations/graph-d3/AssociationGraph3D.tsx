@@ -49,10 +49,10 @@ const MIN_ORBIT_RADIUS = 40;
 const ORBIT_LERP_FACTOR = 0.15;
 const ZOOM_SPEED = 1.5;
 const LABEL_BASE_DISTANCE = 300;
-const NODE_FILTER_START_FACTOR = 600;
-const NODE_FILTER_END_FACTOR = 4000;
-const EDGE_FILTER_START_FACTOR = 600;
-const EDGE_FILTER_END_FACTOR = 4000;
+const NODE_FILTER_START_FACTOR = 100;
+const NODE_FILTER_END_FACTOR = 800;
+const EDGE_FILTER_START_FACTOR = 80;
+const EDGE_FILTER_END_FACTOR = 600;
 const CAM_DIST_THRESHOLD_RATIO = 0.005;
 const CAM_DIST_THRESHOLD_MIN = 0.1;
 const INITIAL_FIT_DELAY_MS = 1500;
@@ -95,7 +95,7 @@ const focusCameraOn = (
   }
 };
 
-const AssociationGraph3DInner: React.FC<AssociationGraphProps> = () => {
+const AssociationGraph3DInner: React.FC = () => {
   const { graph, graphId, graphVersion, loading, grow, growToDepth, growable, reload, focusedNodeId, focusSource, setFocusedNode } =
     useGraphData();
 
@@ -109,14 +109,14 @@ const AssociationGraph3DInner: React.FC<AssociationGraphProps> = () => {
   const lastCamDistRef = useRef<number>(-1);
 
   const tooltipRef = useRef<HTMLDivElement>(null);
-  const gridRef = useRef<THREE.GridHelper | null>(null);
+  const gridRef = useRef<THREE.Group | null>(null);
 
   const [nodeCount, setNodeCount] = useState(0);
   const [mounted, setMounted] = useState(false);
   const [previewMinimized, setPreviewMinimized] = useState(false);
   const [treeOverlayOpen, setTreeOverlayOpen] = useState(false);
-  const handleNodeSelectRef = useRef<(node: GraphNode) => Promise<void>>(null as any);
-  const handleEdgeSelectRef = useRef<(link: GraphLink) => void>(null as any);
+  const handleNodeSelectRef = useRef<((node: GraphNode) => Promise<void>) | null>(null);
+  const handleEdgeSelectRef = useRef<((link: GraphLink) => void) | null>(null);
   const focusSettingsRef = useRef({ focusOnClick: false, adjustDistance: false, distanceRatio: 1 });
   const nodeLabelScaleRef = useRef(1);
   const edgeLabelScaleRef = useRef(1);
@@ -373,12 +373,21 @@ const AssociationGraph3DInner: React.FC<AssociationGraphProps> = () => {
       (orbitControls as any).zoomSpeed = ZOOM_SPEED;
     }
 
-    const grid = new THREE.GridHelper(2000, 40);
-    (grid.material as THREE.Material).opacity = 0.15;
-    (grid.material as THREE.Material).transparent = true;
-    grid.visible = controls.showGrid;
-    fg.scene().add(grid);
-    gridRef.current = grid;
+    const gridGroup = new THREE.Group();
+    const xzGrid = new THREE.GridHelper(2000, 40);
+    (xzGrid.material as THREE.Material).opacity = 0.15;
+    (xzGrid.material as THREE.Material).transparent = true;
+    gridGroup.add(xzGrid);
+
+    const xyGrid = new THREE.GridHelper(2000, 40);
+    (xyGrid.material as THREE.Material).opacity = 0.1;
+    (xyGrid.material as THREE.Material).transparent = true;
+    xyGrid.rotation.x = Math.PI / 2;
+    gridGroup.add(xyGrid);
+
+    gridGroup.visible = controls.showGrid;
+    fg.scene().add(gridGroup);
+    gridRef.current = gridGroup;
 
     const enforceMinOrbitRadius = () => {
       const gi = graphInstanceRef.current;
@@ -422,22 +431,6 @@ const AssociationGraph3DInner: React.FC<AssociationGraphProps> = () => {
         return;
       }
 
-      // Fallback: smoothly push orbit target forward if radius collapses
-      // (covers touch pinch and other non-wheel zoom)
-      const cam = gi.camera();
-      if (cam && controls) {
-        const radius = Math.hypot(target.x - camPos.x, target.y - camPos.y, target.z - camPos.z);
-        if (radius < MIN_ORBIT_RADIUS) {
-          const fwd = new THREE.Vector3(0, 0, -1).applyQuaternion(cam.quaternion);
-          const desired = new THREE.Vector3(
-            camPos.x + fwd.x * MIN_ORBIT_RADIUS,
-            camPos.y + fwd.y * MIN_ORBIT_RADIUS,
-            camPos.z + fwd.z * MIN_ORBIT_RADIUS,
-          );
-          target.lerp(desired, ORBIT_LERP_FACTOR);
-        }
-      }
-
       const dist = Math.hypot(camPos.x - target.x, camPos.y - target.y, camPos.z - target.z);
 
       // Skip recalculation if camera hasn't moved significantly
@@ -463,8 +456,9 @@ const AssociationGraph3DInner: React.FC<AssociationGraphProps> = () => {
         filterEnd: number,
         density: number,
       ) => {
+        if (density >= 1) return true;
         const progress = Math.min(1, Math.max(0, (itemDist - filterStart) / (filterEnd - filterStart)));
-        const threshold = progress * maxDegree * density;
+        const threshold = progress * maxDegree * (1 - density);
         return isInitial || degree >= threshold;
       };
 
@@ -667,7 +661,7 @@ const AssociationGraph3DInner: React.FC<AssociationGraphProps> = () => {
 
 export const AssociationGraph3D: React.FC<AssociationGraphProps> = ({ inView }) => {
   return (
-    <ErrorBoundary fallback={<RenderErrorAlert page={false} />}>{inView && <AssociationGraph3DInner inView={inView} />}</ErrorBoundary>
+    <ErrorBoundary fallback={<RenderErrorAlert page={false} />}>{inView && <AssociationGraph3DInner />}</ErrorBoundary>
   );
 };
 

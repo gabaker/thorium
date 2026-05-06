@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import { useLocation } from 'react-router';
 
 import Page from '@components/pages/Page';
@@ -36,10 +36,11 @@ const FileUpload = () => {
   const { originState, setOriginField } = useOriginState();
 
   const fileUpload = useFileUpload();
+  const sortedGroups = useMemo(() => (userInfo?.groups ? [...userInfo.groups].sort() : []), [userInfo?.groups]);
 
   useEffect(() => {
     handleAssociationUpdate([AssociationKind.AssociatedWith], entity, selectedGroups, setAssociations);
-  }, []);
+  }, [entity, selectedGroups]);
 
   const tlpTags = (): TagEntry[] => {
     return Object.keys(selectedTLP)
@@ -115,7 +116,7 @@ const FileUpload = () => {
           setFilesArray={setFilesArray}
           selectedGroups={selectedGroups}
           setSelectedGroups={setSelectedGroups}
-          userGroups={userInfo?.groups ? userInfo.groups.sort() : []}
+          userGroups={sortedGroups}
           description={description}
           setDescription={setDescription}
           tags={tags}

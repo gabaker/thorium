@@ -10,7 +10,7 @@ export function handleAssociationUpdate(
 ): void {
   const newAssociationList: AssociationCreate[] = [];
   if (entity) {
-    associationKeys.map((type) => {
+    associationKeys.forEach((type) => {
       const newAssociation = structuredClone(BlankAssociationCreate);
       newAssociation.kind = type.replaceAll(' ', '') as unknown as AssociationKind;
       newAssociation.source = { Entity: { id: entity.id, name: entity.name } };
@@ -22,13 +22,8 @@ export function handleAssociationUpdate(
 }
 
 export async function createFileAssociations(sha256: string, groups: string[], associations: AssociationCreate[]): Promise<void> {
-  for (let i = 0; i < associations.length; i++) {
-    associations[i].groups = groups;
-    associations[i].targets = [
-      {
-        File: sha256,
-      },
-    ];
-    await createAssociation(associations[i], console.log);
+  for (const association of associations) {
+    const copy = { ...association, groups, targets: [{ File: sha256 }] };
+    await createAssociation(copy, console.log);
   }
 }

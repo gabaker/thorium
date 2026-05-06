@@ -10,12 +10,16 @@ export const getLinkEndpoints = (link: GraphLink): { source: string; target: str
   return { source, target };
 };
 
-export const classifyNode = (nodeId: string, graph: Graph): { nodeType: NodeType; visualState: VisualState; label: string } => {
+export const classifyNode = (
+  nodeId: string,
+  graph: Graph,
+  precomputed?: { growableSet: Set<string>; initialSet: Set<string> },
+): { nodeType: NodeType; visualState: VisualState; label: string } => {
   const nodeData = graph.data_map[nodeId];
-  const growable = graph.growable.map((n) => n.toString());
-  const initial = graph.initial.map((n) => n.toString());
-  const isGrowable = growable.includes(nodeId);
-  const isInitial = initial.includes(nodeId);
+  const growableSet = precomputed?.growableSet ?? new Set(graph.growable.map((n) => n.toString()));
+  const initialSet = precomputed?.initialSet ?? new Set(graph.initial.map((n) => n.toString()));
+  const isGrowable = growableSet.has(nodeId);
+  const isInitial = initialSet.has(nodeId);
   const visualState: VisualState = isGrowable ? 'growable' : isInitial ? 'initial' : 'basic';
 
   if ('Sample' in nodeData) {
@@ -35,8 +39,14 @@ export const classifyNode = (nodeId: string, graph: Graph): { nodeType: NodeType
   return { nodeType: 'other', visualState, label: 'Unknown' };
 };
 
-export const buildGraphNode = (nodeId: string, graph: Graph, nodeCount: number, degree = 0): GraphNode => {
-  const { nodeType, visualState, label } = classifyNode(nodeId, graph);
+export const buildGraphNode = (
+  nodeId: string,
+  graph: Graph,
+  nodeCount: number,
+  degree = 0,
+  precomputed?: { growableSet: Set<string>; initialSet: Set<string> },
+): GraphNode => {
+  const { nodeType, visualState, label } = classifyNode(nodeId, graph, precomputed);
   const score = scoreNode(graph.data_map[nodeId]);
   return {
     id: nodeId,
@@ -56,7 +66,11 @@ export const processInitialGraphData = (graph: Graph): GraphData => {
   const links: GraphLink[] = [];
   const nodeCount = Object.keys(graph.data_map).length;
 
-  // Count connections per node before building node objects
+  const precomputed = {
+    growableSet: new Set(graph.growable.map((n) => n.toString())),
+    initialSet: new Set(graph.initial.map((n) => n.toString())),
+  };
+
   const degreeCounts = new Map<string, number>();
   const incrementDegree = (id: string) => degreeCounts.set(id, (degreeCounts.get(id) ?? 0) + 1);
 
@@ -70,7 +84,7 @@ export const processInitialGraphData = (graph: Graph): GraphData => {
   const addNode = (nodeId: string) => {
     if (seenNodes.has(nodeId)) return;
     seenNodes.add(nodeId);
-    nodes.push(buildGraphNode(nodeId, graph, nodeCount, degreeCounts.get(nodeId) ?? 0));
+    nodes.push(buildGraphNode(nodeId, graph, nodeCount, degreeCounts.get(nodeId) ?? 0, precomputed));
   };
 
   const addEdge = (source: string, target: BranchNode) => {

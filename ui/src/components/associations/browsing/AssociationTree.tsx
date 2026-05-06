@@ -287,7 +287,7 @@ const AssociationTreeComponent: React.FC = () => {
                   e.stopPropagation();
                   grownNodesRef.current.add(nodeId);
                   setManuallyGrowing((s) => new Set(s).add(nodeId));
-                  grow(nodeId).finally(() =>
+                  void grow(nodeId).finally(() =>
                     setManuallyGrowing((s) => {
                       const next = new Set(s);
                       next.delete(nodeId);

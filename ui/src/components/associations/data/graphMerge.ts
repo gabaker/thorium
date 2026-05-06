@@ -1,39 +1,44 @@
 import { Graph } from '@models/trees';
 
 export function mergeGrowthInto(base: Graph, data: Graph, grownNodeIds: string[]): Graph {
-  const merged = structuredClone(base);
-
+  const mergedDataMap = { ...base.data_map };
   if (data.data_map) {
     for (const nodeId of Object.keys(data.data_map)) {
-      merged.data_map[nodeId] = data.data_map[nodeId];
+      mergedDataMap[nodeId] = data.data_map[nodeId];
     }
   }
 
+  const mergedBranches = { ...base.branches };
   if (data.branches) {
     for (const source of Object.keys(data.branches)) {
-      if (source in merged.branches) {
-        const existingKeys = new Set(merged.branches[source].map((b) => `${b.node}-${b.direction}-${b.relationship_hash ?? ''}`));
-        for (const branch of data.branches[source]) {
+      if (source in mergedBranches) {
+        const existing = mergedBranches[source];
+        const existingKeys = new Set(existing.map((b) => `${b.node}-${b.direction}-${b.relationship_hash ?? ''}`));
+        const newBranches = data.branches[source].filter((branch) => {
           const key = `${branch.node}-${branch.direction}-${branch.relationship_hash ?? ''}`;
-          if (!existingKeys.has(key)) {
-            merged.branches[source].push(branch);
-            existingKeys.add(key);
-          }
+          return !existingKeys.has(key);
+        });
+        if (newBranches.length > 0) {
+          mergedBranches[source] = [...existing, ...newBranches];
         }
       } else {
-        merged.branches[source] = data.branches[source];
+        mergedBranches[source] = data.branches[source];
       }
     }
   }
 
   const grownSet = new Set(grownNodeIds);
-  const remaining = merged.growable.filter((id) => !grownSet.has(id));
+  const remaining = base.growable.filter((id) => !grownSet.has(id));
   if (data.growable) {
     remaining.push(...data.growable);
   }
-  merged.growable = remaining;
 
-  return merged;
+  return {
+    ...base,
+    data_map: mergedDataMap,
+    branches: mergedBranches,
+    growable: remaining,
+  };
 }
 
 export function computeDistances(graph: Graph): Map<string, number> {

@@ -42,7 +42,7 @@ export const buildNodeObject = (
       labelSprite.color = getNodeColor(node.nodeType, node.visualState);
       labelSprite.textHeight = 3 * labelScale;
       (labelSprite as any).position.y = renderMode === 'icons' ? -(node.diameter / 5 + 4) * sizeFactor : -(node.diameter / 5 + 2);
-      // @ts-ignore — depthWrite exists on SpriteMaterial
+      // @ts-expect-error depthWrite exists on SpriteMaterial
       labelSprite.material.depthWrite = false;
       group.add(labelSprite);
       if (labelMap) {
@@ -69,7 +69,7 @@ export const buildEdgeLabelFactory = (labelScale: number, edgeLabelMap?: Map<str
     const srcNode = typeof link.source === 'object' ? (link.source as GraphNode) : null;
     sprite.color = srcNode ? getNodeColor(srcNode.nodeType, srcNode.visualState) : getEdgeColor();
     sprite.textHeight = 2.5 * labelScale;
-    // @ts-ignore — depthWrite exists on SpriteMaterial
+    // @ts-expect-error depthWrite exists on SpriteMaterial
     sprite.material.depthWrite = false;
 
     if (edgeLabelMap) {

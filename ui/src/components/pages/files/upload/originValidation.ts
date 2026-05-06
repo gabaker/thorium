@@ -18,7 +18,7 @@ export function buildUploadFormBase(
   if (selectedGroups.length === 0) {
     return { errors: ['At least one group must be selected to submit a file'] };
   }
-  selectedGroups.map((group) => form.append('groups', group));
+  selectedGroups.forEach((group) => form.append('groups', group));
 
   if (tlpTags) {
     tlpTags.forEach((tag) => {

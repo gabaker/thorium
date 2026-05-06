@@ -18,7 +18,7 @@ const TLPSelection: React.FC<TLPSelectionProps> = ({ selectedTLP, onTLPChange })
             key={tlp}
             onClick={() => {
               const tempSelection: TLPSelectionState = {};
-              Object.keys(TLP_COLORS).map((color) => {
+              Object.keys(TLP_COLORS).forEach((color) => {
                 tempSelection[color] = color === tlp ? !selectedTLP[color] : false;
               });
               onTLPChange(tempSelection);
