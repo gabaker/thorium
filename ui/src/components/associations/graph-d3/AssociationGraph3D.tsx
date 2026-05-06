@@ -44,7 +44,9 @@ const focusCameraOn = (
       )
     : 150;
 
-  const dist = distOpts.adjustDistance ? currentDist * distOpts.distanceRatio : currentDist;
+  const MIN_FOCUS_DISTANCE = 120;
+  const dist = Math.max(MIN_FOCUS_DISTANCE,
+    distOpts.adjustDistance ? currentDist * distOpts.distanceRatio : currentDist);
 
   // Direction from target toward current camera — preserves viewing angle
   const dx = camPos.x - target.x;
@@ -165,6 +167,7 @@ const AssociationGraph3DInner: React.FC<AssociationGraphProps> = () => {
       const prevData = graphDataRef.current;
       applyGrowthToInstance(prevData, newGraphData, graphInstanceRef, labelSpritesRef, graphDataRef, setNodeCount);
       mountedVersionRef.current = graphVersion;
+      lastCamDistRef.current = -1;
 
       if (refitOnGrowRef.current && graphInstanceRef.current) {
         setTimeout(() => {
@@ -300,7 +303,10 @@ const AssociationGraph3DInner: React.FC<AssociationGraphProps> = () => {
     graphInstanceRef.current = fg;
 
     const orbitControls = fg.controls();
-    if (orbitControls) (orbitControls as any).zoomToCursor = true;
+    if (orbitControls) {
+      (orbitControls as any).zoomToCursor = true;
+      (orbitControls as any).zoomSpeed = 1.5;
+    }
 
     const MIN_ORBIT_RADIUS = 40;
 

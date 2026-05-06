@@ -223,7 +223,10 @@ export const createControlsReducer = (
         return { ...state, nodeOpacity: action.state };
       }
       case 'enableNodeDrag': {
-        if (gi) gi.enableNodeDrag(action.state);
+        if (gi) {
+          gi.enableNodeDrag(action.state);
+          gi.refresh();
+        }
         return { ...state, enableNodeDrag: action.state };
       }
       case 'labelDensity':
