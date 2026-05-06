@@ -6,8 +6,8 @@ import * as THREE from 'three';
 
 import RenderErrorAlert from '@components/shared/alerts/RenderErrorAlert';
 import { getNodeColor, getEdgeColor } from './styles';
-import { FaTimes } from 'react-icons/fa';
 import { FaFolderTree } from 'react-icons/fa6';
+import { GoSidebarCollapse } from 'react-icons/go';
 import { GraphControlsToolbar, NodeRenderMode, DagMode, createControlsReducer, buildNodeObject, buildEdgeLabelFactory, iconNodeVal } from './controls';
 import type { LabelEntry } from './controls';
 import { processInitialGraphData, getLinkEndpoints } from './data';
@@ -17,6 +17,7 @@ import { applyGrowthToInstance } from './applyGrowth';
 import DataPreviewPanel from './DataPreviewPanel';
 import { AssociationTree } from '../browsing/AssociationTree';
 import { GraphWindow, GraphDiv, LoadingOverlay, TreeOverlayToggle, TreeOverlayPanel, TreeOverlayHeader, MinimizeButton } from './AssociationGraph3D.styled';
+
 
 interface AssociationGraphProps {
   inView: boolean;
@@ -253,6 +254,17 @@ const AssociationGraph3DInner: React.FC<AssociationGraphProps> = () => {
       .linkThreeObject(controls.showEdgeLabels
         ? ((link: any) => buildEdgeLabelFactory(controls.labelScale, edgeLabelSpritesRef.current)(link as GraphLink) as any)
         : (undefined as any))
+      .linkPositionUpdate(controls.showEdgeLabels
+        ? ((sprite: any, { start, end }: any) => {
+            if (!sprite) return false;
+            sprite.position.set(
+              (start.x + end.x) / 2,
+              (start.y + end.y) / 2,
+              (start.z + end.z) / 2,
+            );
+            return false;
+          })
+        : (null as any))
       .linkColor(() => getEdgeColor())
       .linkWidth(controls.edgeWidth)
       .linkOpacity(controls.edgeOpacity)
@@ -484,9 +496,8 @@ const AssociationGraph3DInner: React.FC<AssociationGraphProps> = () => {
       {treeOverlayOpen ? (
         <TreeOverlayPanel>
           <TreeOverlayHeader>
-            <span>Browsing</span>
             <MinimizeButton onClick={() => setTreeOverlayOpen(false)}>
-              <FaTimes size={12} />
+              <GoSidebarCollapse size={14} />
             </MinimizeButton>
           </TreeOverlayHeader>
           <AssociationTree />

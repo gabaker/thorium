@@ -92,10 +92,20 @@ export const createControlsReducer = (
             edgeLabelSpritesRef.current.clear();
             gi.linkThreeObjectExtend(true);
             gi.linkThreeObject((link: any) => buildEdgeLabelFactory(state.labelScale, edgeLabelSpritesRef.current)(link as GraphLink) as any);
+            gi.linkPositionUpdate((sprite: any, { start, end }: any) => {
+              if (!sprite) return false;
+              sprite.position.set(
+                (start.x + end.x) / 2,
+                (start.y + end.y) / 2,
+                (start.z + end.z) / 2,
+              );
+              return false;
+            });
           } else {
             edgeLabelSpritesRef.current.clear();
             gi.linkThreeObjectExtend(false);
             gi.linkThreeObject(undefined as any);
+            gi.linkPositionUpdate(null as any);
           }
           gi.refresh();
         }
