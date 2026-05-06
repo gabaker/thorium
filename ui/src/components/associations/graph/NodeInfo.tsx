@@ -20,7 +20,7 @@ type FilteredTagsProp = {
   tags: any; // arbitrary tags data
 };
 
-const FilteredNodeTags: React.FC<FilteredTagsProp> = ({ tags }) => {
+export const FilteredNodeTags: React.FC<FilteredTagsProp> = ({ tags }) => {
   const excludeTags = [...FormattedFileInfoTagKeys, 'RESULTS', 'ATT&CK', 'MBC', 'PARENT', 'SUBMITTER', ...DangerTagKeys];
   const dangerTags = filterIncludedTags(tags, DangerTagKeys);
   const generalTags = filterExcludedTags(tags, excludeTags);

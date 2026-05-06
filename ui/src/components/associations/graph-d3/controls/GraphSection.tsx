@@ -70,6 +70,16 @@ const GraphSection: React.FC<GraphSectionProps> = ({ controls, updateControls, g
         if (next) updateControls({ type: 'focusOnClick', state: false });
       }}
     />
+
+    <Divider />
+
+    <Form.Check
+      type="switch"
+      id="form-show-grid"
+      label="Show Grid"
+      checked={controls.showGrid}
+      onChange={() => updateControls({ type: 'showGrid', state: !controls.showGrid })}
+    />
   </PopoverBody>
 );
 

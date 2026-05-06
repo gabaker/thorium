@@ -32,6 +32,7 @@ import {
   TreeOverlayPanel,
   TreeOverlayHeader,
   MinimizeButton,
+  HoverTooltip,
 } from './AssociationGraph3D.styled';
 
 interface AssociationGraphProps {
@@ -107,6 +108,9 @@ const AssociationGraph3DInner: React.FC<AssociationGraphProps> = () => {
   const mountedVersionRef = useRef<number>(-1);
   const lastCamDistRef = useRef<number>(-1);
 
+  const tooltipRef = useRef<HTMLDivElement>(null);
+  const gridRef = useRef<THREE.GridHelper | null>(null);
+
   const [nodeCount, setNodeCount] = useState(0);
   const [mounted, setMounted] = useState(false);
   const [previewMinimized, setPreviewMinimized] = useState(false);
@@ -160,6 +164,7 @@ const AssociationGraph3DInner: React.FC<AssociationGraphProps> = () => {
     dagMode: null as DagMode,
     dagLevelDistance: null as number | null,
     numDimensions: 3 as 2 | 3,
+    showGrid: false,
   });
 
   focusSettingsRef.current = {
@@ -321,6 +326,22 @@ const AssociationGraph3DInner: React.FC<AssociationGraphProps> = () => {
       .enableNodeDrag(controls.enableNodeDrag)
       .onNodeClick((node: any) => void handleNodeSelectRef.current?.(node as GraphNode))
       .onLinkClick((link: any) => handleEdgeSelectRef.current?.(link as GraphLink))
+      .onNodeHover((node: any) => {
+        const tip = tooltipRef.current;
+        if (!tip) return;
+        if (node) {
+          const gn = node as GraphNode;
+          tip.textContent = gn.label;
+          if (gn.x !== undefined && gn.y !== undefined && graphInstanceRef.current) {
+            const coords = graphInstanceRef.current.graph2ScreenCoords(gn.x, gn.y, gn.z ?? 0);
+            tip.style.left = `${coords.x + 15}px`;
+            tip.style.top = `${coords.y + 15}px`;
+          }
+          tip.style.display = 'block';
+        } else {
+          tip.style.display = 'none';
+        }
+      })
       .numDimensions(controls.numDimensions)
       .warmupTicks(controls.warmupTicks)
       .cooldownTime(controls.cooldownTime)
@@ -351,6 +372,13 @@ const AssociationGraph3DInner: React.FC<AssociationGraphProps> = () => {
       (orbitControls as any).zoomToCursor = true;
       (orbitControls as any).zoomSpeed = ZOOM_SPEED;
     }
+
+    const grid = new THREE.GridHelper(2000, 40);
+    (grid.material as THREE.Material).opacity = 0.15;
+    (grid.material as THREE.Material).transparent = true;
+    grid.visible = controls.showGrid;
+    fg.scene().add(grid);
+    gridRef.current = grid;
 
     const enforceMinOrbitRadius = () => {
       const gi = graphInstanceRef.current;
@@ -465,10 +493,11 @@ const AssociationGraph3DInner: React.FC<AssociationGraphProps> = () => {
       const edgeFilterEnd = EDGE_FILTER_END_FACTOR * edgeScale;
       const edgeDensity = edgeLabelDensityRef.current;
       const edgeMinSize = edgeLabelMinSizeRef.current;
+      const worldPos = new THREE.Vector3();
 
       edgeLabels.forEach((entry) => {
-        const parent = entry.sprite.parent;
-        const edgeDist = parent ? camVec.distanceTo(parent.position) : dist;
+        entry.sprite.getWorldPosition(worldPos);
+        const edgeDist = camVec.distanceTo(worldPos);
         if (computeVisibility(edgeDist, entry.degree, entry.isInitial, edgeFilterStart, edgeFilterEnd, edgeDensity)) {
           entry.sprite.visible = true;
           const edgeDistFactor = Math.max(1, edgeDist / LABEL_BASE_DISTANCE);
@@ -562,6 +591,10 @@ const AssociationGraph3DInner: React.FC<AssociationGraphProps> = () => {
     void reload({ filterChildless: controls.filterChildless });
   }, [controls.filterChildless]);
 
+  useEffect(() => {
+    if (gridRef.current) gridRef.current.visible = controls.showGrid;
+  }, [controls.showGrid]);
+
   // Animate camera to focused node when focus originates from tree
   useEffect(() => {
     if (!focusedNodeId || focusSource !== 'tree') return;
@@ -592,6 +625,7 @@ const AssociationGraph3DInner: React.FC<AssociationGraphProps> = () => {
   return (
     <GraphWindow>
       <GraphDiv ref={containerRef} />
+      <HoverTooltip ref={tooltipRef} />
       {loading && (
         <LoadingOverlay>
           <Spinner animation="border" variant="secondary" />

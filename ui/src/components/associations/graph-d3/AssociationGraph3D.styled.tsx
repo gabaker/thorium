@@ -28,11 +28,14 @@ export const PreviewContainer = styled.div`
   z-index: 300;
   top: 8px;
   right: 8px;
-  background-color: var(--thorium-secondary-panel-bg);
+  background: color-mix(in srgb, var(--thorium-secondary-panel-bg) 90%, transparent);
+  backdrop-filter: blur(8px);
   border: 1px solid var(--thorium-panel-border);
   border-radius: 8px;
   padding: 10px;
-  max-width: 40vw;
+  width: fit-content;
+  min-width: 240px;
+  max-width: min(400px, 35vw);
   max-height: 30vh;
   overflow-y: auto;
   overflow-x: hidden;
@@ -96,7 +99,7 @@ export const TreeOverlayPanel = styled.div`
   max-width: 35vw;
   max-height: 60vh;
   min-width: 250px;
-  background: color-mix(in srgb, var(--thorium-secondary-panel-bg) 88%, transparent);
+  background: color-mix(in srgb, var(--thorium-secondary-panel-bg) 82%, transparent);
   backdrop-filter: blur(8px);
   border: 1px solid var(--thorium-panel-border);
   border-radius: 8px;
@@ -134,4 +137,19 @@ export const MinimizeButton = styled.button`
   &:hover {
     background: var(--thorium-highlight-panel-bg);
   }
+`;
+
+export const HoverTooltip = styled.div`
+  position: absolute;
+  z-index: 350;
+  pointer-events: none;
+  display: none;
+  padding: 4px 8px;
+  font-size: 0.75rem;
+  white-space: nowrap;
+  border-radius: 4px;
+  background: color-mix(in srgb, var(--thorium-secondary-panel-bg) 92%, transparent);
+  backdrop-filter: blur(6px);
+  border: 1px solid var(--thorium-panel-border);
+  color: var(--thorium-text);
 `;

@@ -157,21 +157,9 @@ export const PreviewPopover = styled(Popover)`
   .preview-tags {
     display: flex;
     flex-wrap: wrap;
-    gap: 3px;
+    gap: 4px;
     margin-top: 6px;
     overflow: hidden;
-    max-width: 100%;
-  }
-
-  .preview-tag {
-    font-size: 0.7rem;
-    padding: 1px 6px;
-    border-radius: 4px;
-    background-color: rgba(66, 125, 140, 0.15);
-    color: #427d8c;
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
     max-width: 100%;
   }
 

@@ -2,6 +2,7 @@ import React from 'react';
 
 import { Direction, Graph, TreeNode } from '@models/trees';
 import { formatTagNames } from '../utilities';
+import { FilteredNodeTags } from '../graph/NodeInfo';
 
 export interface TreeIndex {
   childrenOf: Map<string, string[]>;
@@ -104,25 +105,11 @@ export function getNodePreviewData(nodeData: TreeNode) {
   return { type: 'Unknown', fields: [], tags: undefined };
 }
 
-export function renderTagPreview(tags: Record<string, Record<string, string[]>> | undefined, limit = 8) {
-  if (!tags) return null;
-  const entries: { key: string; value: string }[] = [];
-  for (const key of Object.keys(tags)) {
-    for (const value of Object.keys(tags[key])) {
-      entries.push({ key, value });
-      if (entries.length >= limit) break;
-    }
-    if (entries.length >= limit) break;
-  }
-  if (entries.length === 0) return null;
+export function renderTagPreview(tags: Record<string, Record<string, string[]>> | undefined) {
+  if (!tags || Object.keys(tags).length === 0) return null;
   return (
     <div className="preview-tags">
-      {entries.map((t, i) => (
-        <span key={i} className="preview-tag">
-          {t.key}: {t.value}
-        </span>
-      ))}
-      {Object.keys(tags).reduce((n, k) => n + Object.keys(tags[k]).length, 0) > limit && <span className="preview-tag">...</span>}
+      <FilteredNodeTags tags={tags} />
     </div>
   );
 }

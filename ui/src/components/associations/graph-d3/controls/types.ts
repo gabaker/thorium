@@ -42,6 +42,7 @@ export interface GraphControls {
   dagMode: DagMode;
   dagLevelDistance: number | null;
   numDimensions: 2 | 3;
+  showGrid: boolean;
 }
 
 export type SelectedElement = { kind: 'node'; id: string; label: string } | { kind: 'link'; source: string; target: string; label: string };
@@ -57,7 +58,8 @@ export type DisplayAction =
         | 'focusOnClick'
         | 'enableNodeDrag'
         | 'adjustDistanceOnFocus'
-        | 'refitOnGrow';
+        | 'refitOnGrow'
+        | 'showGrid';
       state: boolean;
     }
   | { type: 'selected'; state: SelectedElement | null }

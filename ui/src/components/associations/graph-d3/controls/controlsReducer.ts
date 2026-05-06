@@ -295,6 +295,8 @@ export const createControlsReducer = (
         if (gi) gi.numDimensions(action.state);
         return { ...state, numDimensions: action.state };
       }
+      case 'showGrid':
+        return { ...state, showGrid: action.state };
     }
   };
 };
