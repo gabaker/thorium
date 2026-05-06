@@ -43,9 +43,16 @@ export const applyGrowthToInstance = (
 
   if (addedNodes.length === 0 && addedLinks.length === 0 && !stateChanged) return;
 
+  const normalizedLinks = stateChanged
+    ? prevData.links.map((l) => {
+        const { source, target } = getLinkEndpoints(l);
+        return { ...l, source, target };
+      })
+    : prevData.links;
+
   const updatedData: GraphData = {
     nodes: [...updatedExistingNodes, ...addedNodes],
-    links: [...prevData.links, ...addedLinks],
+    links: [...normalizedLinks, ...addedLinks],
   };
   graphDataRef.current = updatedData;
   setNodeCount(updatedData.nodes.length);
