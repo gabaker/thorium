@@ -101,7 +101,7 @@ const AssociationGraph3DInner: React.FC<AssociationGraphProps> = () => {
   const labelMinSizeRef = useRef(1);
   const refitOnGrowRef = useRef(true);
 
-  const controlsReducer = createControlsReducer(graphInstanceRef, labelSpritesRef, edgeLabelSpritesRef);
+  const controlsReducer = createControlsReducer(graphInstanceRef, labelSpritesRef, edgeLabelSpritesRef, lastCamDistRef);
 
   const [controls, updateControls] = useReducer(controlsReducer, {
     filterChildless: false,

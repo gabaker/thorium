@@ -83,11 +83,13 @@ export const createControlsReducer = (
   graphInstanceRef: React.RefObject<ForceGraph3DInstance | null>,
   labelSpritesRef: React.RefObject<Map<string, LabelEntry>>,
   edgeLabelSpritesRef: React.RefObject<Map<string, LabelEntry>>,
+  lastCamDistRef?: React.RefObject<number>,
 ) => {
   return (state: GraphControls, action: DisplayAction): GraphControls => {
     const gi = graphInstanceRef.current;
     switch (action.type) {
       case 'showEdgeLabels': {
+        if (lastCamDistRef) lastCamDistRef.current = -1;
         if (gi) {
           if (action.state) {
             edgeLabelSpritesRef.current.clear();
@@ -113,6 +115,7 @@ export const createControlsReducer = (
         return { ...state, showEdgeLabels: action.state };
       }
       case 'showNodeLabels': {
+        if (lastCamDistRef) lastCamDistRef.current = -1;
         if (gi) {
           labelSpritesRef.current.clear();
           gi.nodeThreeObject(buildNodeObject(state.nodeRenderMode, action.state, state.nodeRelSize, state.labelScale, labelSpritesRef.current) as any);
@@ -138,6 +141,7 @@ export const createControlsReducer = (
       case 'focusDistanceRatio':
         return { ...state, focusDistanceRatio: action.state };
       case 'labelScale': {
+        if (lastCamDistRef) lastCamDistRef.current = -1;
         if (gi) {
           if (state.showNodeLabels) {
             labelSpritesRef.current.clear();
@@ -153,6 +157,7 @@ export const createControlsReducer = (
         return { ...state, labelScale: action.state };
       }
       case 'nodeRenderMode': {
+        if (lastCamDistRef) lastCamDistRef.current = -1;
         if (gi) {
           labelSpritesRef.current.clear();
           gi.nodeThreeObject(buildNodeObject(action.state, state.showNodeLabels, state.nodeRelSize, state.labelScale, labelSpritesRef.current) as any);
@@ -201,6 +206,7 @@ export const createControlsReducer = (
         return { ...state, particleSpeed: action.state };
       }
       case 'nodeRelSize': {
+        if (lastCamDistRef) lastCamDistRef.current = -1;
         if (gi) {
           gi.nodeRelSize(action.state);
           if (state.nodeRenderMode === 'icons') {
@@ -221,8 +227,10 @@ export const createControlsReducer = (
         return { ...state, enableNodeDrag: action.state };
       }
       case 'labelDensity':
+        if (lastCamDistRef) lastCamDistRef.current = -1;
         return { ...state, labelDensity: action.state };
       case 'labelMinSize':
+        if (lastCamDistRef) lastCamDistRef.current = -1;
         return { ...state, labelMinSize: action.state };
       case 'chargeStrength': {
         if (gi) {
