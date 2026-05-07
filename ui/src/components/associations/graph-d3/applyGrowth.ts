@@ -29,6 +29,7 @@ export const applyGrowthToInstance = (
 
   const newNodeMap = new Map(newData.nodes.map((n) => [n.id, n]));
   const existingNodeIds = new Set(prevData.nodes.map((n) => n.id));
+  const existingNodeMap = new Map(prevData.nodes.map((n) => [n.id, n]));
   const addedNodes = newData.nodes.filter((n) => !existingNodeIds.has(n.id));
 
   let stateChanged = false;
@@ -42,6 +43,23 @@ export const applyGrowthToInstance = (
   });
 
   if (addedNodes.length === 0 && addedLinks.length === 0 && !stateChanged) return;
+
+  const POSITION_JITTER = 30;
+  for (const node of addedNodes) {
+    const link = addedLinks.find((l) => {
+      const { source, target } = getLinkEndpoints(l);
+      return (source === node.id && existingNodeMap.has(target)) || (target === node.id && existingNodeMap.has(source));
+    });
+    if (link) {
+      const { source, target } = getLinkEndpoints(link);
+      const parent = existingNodeMap.get(source === node.id ? target : source);
+      if (parent?.x !== undefined) {
+        node.x = parent.x + (Math.random() - 0.5) * POSITION_JITTER;
+        node.y = (parent.y ?? 0) + (Math.random() - 0.5) * POSITION_JITTER;
+        node.z = (parent.z ?? 0) + (Math.random() - 0.5) * POSITION_JITTER;
+      }
+    }
+  }
 
   const normalizedLinks = stateChanged
     ? prevData.links.map((l) => {

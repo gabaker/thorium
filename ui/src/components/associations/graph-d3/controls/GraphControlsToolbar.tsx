@@ -128,7 +128,7 @@ const GraphControlsToolbar: React.FC<GraphControlsToolbarProps> = ({
               value={controls.depth}
               onChange={(e) => updateControls({ type: 'depth', state: parseInt(e.target.value, 10) })}
             >
-              {Array.from({ length: 10 }, (_, i) => i + 1).map((d) => (
+              {Array.from({ length: 50 }, (_, i) => i + 1).map((d) => (
                 <option key={d} value={d}>
                   {d}
                 </option>

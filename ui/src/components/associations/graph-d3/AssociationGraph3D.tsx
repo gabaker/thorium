@@ -367,10 +367,30 @@ const AssociationGraph3DInner: React.FC = () => {
 
     graphInstanceRef.current = fg;
 
-    const orbitControls = fg.controls();
+    const orbitControls = fg.controls() as any;
+    const freezeNodes = () => {
+      const data = fg.graphData() as GraphData;
+      for (const n of data.nodes) {
+        if (n.x !== undefined) {
+          (n as any).fx = n.x;
+          (n as any).fy = n.y;
+          (n as any).fz = n.z;
+        }
+      }
+    };
+    const unfreezeNodes = () => {
+      const data = fg.graphData() as GraphData;
+      for (const n of data.nodes) {
+        (n as any).fx = undefined;
+        (n as any).fy = undefined;
+        (n as any).fz = undefined;
+      }
+    };
     if (orbitControls) {
-      (orbitControls as any).zoomToCursor = true;
-      (orbitControls as any).zoomSpeed = ZOOM_SPEED;
+      orbitControls.zoomToCursor = true;
+      orbitControls.zoomSpeed = ZOOM_SPEED;
+      orbitControls.addEventListener('start', freezeNodes);
+      orbitControls.addEventListener('end', unfreezeNodes);
     }
 
     const gridGroup = new THREE.Group();
@@ -555,6 +575,10 @@ const AssociationGraph3DInner: React.FC = () => {
     return () => {
       cancelAnimationFrame(animFrameRef.current);
       clearTimeout(fitTimeout);
+      if (orbitControls) {
+        orbitControls.removeEventListener('start', freezeNodes);
+        orbitControls.removeEventListener('end', unfreezeNodes);
+      }
       container.removeEventListener('wheel', enforceMinOrbitRadius, { capture: true });
       container.removeEventListener('dblclick', handleDblClick);
       resizeObserver.disconnect();
