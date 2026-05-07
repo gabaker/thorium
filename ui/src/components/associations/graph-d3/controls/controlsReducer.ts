@@ -8,11 +8,13 @@ import type { GraphNode, GraphLink } from '../types';
 
 export type LabelEntry = { sprite: THREE.Object3D; degree: number; isInitial: boolean; baseScale: THREE.Vector3 };
 
+const ICON_EDGE_PAD = 1.3;
+
 export const iconNodeVal =
   (nodeRelSize: number) =>
   (node: GraphNode): number => {
     const iconHalf = (Math.max(6, node.diameter / 3) * (nodeRelSize / 4)) / 2;
-    const r = iconHalf / nodeRelSize;
+    const r = (iconHalf * ICON_EDGE_PAD) / nodeRelSize;
     return r * r * r;
   };
 
@@ -22,6 +24,7 @@ export const buildNodeObject = (
   nodeRelSize: number,
   labelScale: number,
   labelMap?: Map<string, LabelEntry>,
+  nodeOpacity = 1,
 ) => {
   const sizeFactor = nodeRelSize / 4;
   return (node: GraphNode): THREE.Object3D => {
@@ -30,7 +33,7 @@ export const buildNodeObject = (
     if (renderMode === 'icons') {
       const svgString = getNodeSvg(node.nodeType, node.visualState);
       const texture = svgToTexture(svgString, 64);
-      const spriteMaterial = new THREE.SpriteMaterial({ map: texture, transparent: true });
+      const spriteMaterial = new THREE.SpriteMaterial({ map: texture, transparent: true, depthWrite: false, opacity: nodeOpacity });
       const sprite = new THREE.Sprite(spriteMaterial);
       const scale = Math.max(6, node.diameter / 3) * sizeFactor;
       sprite.scale.set(scale, scale, 1);
@@ -125,7 +128,7 @@ export const createControlsReducer = (
         if (gi) {
           labelSpritesRef.current.clear();
           gi.nodeThreeObject(
-            buildNodeObject(state.nodeRenderMode, action.state, state.nodeRelSize, state.nodeLabelScale, labelSpritesRef.current) as any,
+            buildNodeObject(state.nodeRenderMode, action.state, state.nodeRelSize, state.nodeLabelScale, labelSpritesRef.current, state.nodeOpacity) as any,
           );
           gi.nodeThreeObjectExtend(state.nodeRenderMode === 'spheres');
           gi.refresh();
@@ -152,7 +155,7 @@ export const createControlsReducer = (
         if (lastCamDistRef) lastCamDistRef.current = -1;
         if (gi && state.showNodeLabels) {
           labelSpritesRef.current.clear();
-          gi.nodeThreeObject(buildNodeObject(state.nodeRenderMode, true, state.nodeRelSize, action.state, labelSpritesRef.current) as any);
+          gi.nodeThreeObject(buildNodeObject(state.nodeRenderMode, true, state.nodeRelSize, action.state, labelSpritesRef.current, state.nodeOpacity) as any);
           gi.nodeThreeObjectExtend(state.nodeRenderMode === 'spheres');
           gi.refresh();
         }
@@ -172,7 +175,7 @@ export const createControlsReducer = (
         if (gi) {
           labelSpritesRef.current.clear();
           gi.nodeThreeObject(
-            buildNodeObject(action.state, state.showNodeLabels, state.nodeRelSize, state.nodeLabelScale, labelSpritesRef.current) as any,
+            buildNodeObject(action.state, state.showNodeLabels, state.nodeRelSize, state.nodeLabelScale, labelSpritesRef.current, state.nodeOpacity) as any,
           );
           gi.nodeThreeObjectExtend(action.state === 'spheres');
           gi.nodeVal(action.state === 'icons' ? (iconNodeVal(state.nodeRelSize) as any) : (node: any) => (node as GraphNode).diameter);
@@ -229,6 +232,7 @@ export const createControlsReducer = (
                 action.state,
                 state.nodeLabelScale,
                 labelSpritesRef.current,
+                state.nodeOpacity,
               ) as any,
             );
             gi.nodeVal(iconNodeVal(action.state) as any);
@@ -238,7 +242,16 @@ export const createControlsReducer = (
         return { ...state, nodeRelSize: action.state };
       }
       case 'nodeOpacity': {
-        if (gi) gi.nodeOpacity(action.state);
+        if (gi) {
+          gi.nodeOpacity(action.state);
+          if (state.nodeRenderMode === 'icons') {
+            labelSpritesRef.current.clear();
+            gi.nodeThreeObject(
+              buildNodeObject(state.nodeRenderMode, state.showNodeLabels, state.nodeRelSize, state.nodeLabelScale, labelSpritesRef.current, action.state) as any,
+            );
+            gi.refresh();
+          }
+        }
         return { ...state, nodeOpacity: action.state };
       }
       case 'enableNodeDrag': {

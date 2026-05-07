@@ -295,6 +295,7 @@ const AssociationGraph3DInner: React.FC = () => {
           controls.nodeRelSize,
           controls.nodeLabelScale,
           labelSpritesRef.current,
+          controls.nodeOpacity,
         ) as any,
       )
       .nodeThreeObjectExtend(controls.nodeRenderMode === 'spheres')
