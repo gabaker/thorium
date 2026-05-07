@@ -3,13 +3,13 @@ import { Button, Card, Col, Row } from 'react-bootstrap';
 import { Link } from 'react-router-dom';
 import { FaChevronDown, FaChevronUp, FaRedo } from 'react-icons/fa';
 import Subtitle from '@components/shared/titles/Subtitle';
-import { FileUploadStatus, ReactionResultEntry } from './types';
+import { FileUploadStatus, ReactionResultEntry, ReactionSubmitResult } from './types';
 
 interface UploadStatusTableProps {
   uploadStatus: Record<string, FileUploadStatus>;
   uploadStatusDropdown: Record<string, boolean>;
   setUploadStatusDropdown: React.Dispatch<React.SetStateAction<Record<string, boolean>>>;
-  uploadReactions: Record<string, any[]>;
+  uploadReactions: Record<string, ReactionSubmitResult[]>;
   uploadReactionRes: ReactionResultEntry[];
   uploadInProgress: boolean;
   onRetryFileUpload: (fileName: string) => void;
@@ -54,7 +54,7 @@ const UploadStatusTable: React.FC<UploadStatusTableProps> = ({
               <Row>
                 <Col className="status-dropdown" md={1}>
                   <Button
-                    size={'xsm' as any}
+                    size={'xsm' as 'sm'}
                     variant="no-outline-secondary"
                     onClick={() =>
                       setUploadStatusDropdown((prev) => ({
@@ -82,7 +82,7 @@ const UploadStatusTable: React.FC<UploadStatusTableProps> = ({
                 )}
                 {!value.sha256 && !uploadInProgress && (
                   <Col className="status-sha">
-                    <Button size={'xsm' as any} variant="no-outline-secondary" className="redo-btn" onClick={() => onRetryFileUpload(key)}>
+                    <Button size={'xsm' as 'sm'} variant="no-outline-secondary" className="redo-btn" onClick={() => onRetryFileUpload(key)}>
                       <FaRedo />
                     </Button>
                   </Col>
@@ -126,7 +126,7 @@ const UploadStatusTable: React.FC<UploadStatusTableProps> = ({
                           <Col>
                             {val.result.error && !uploadInProgress && (
                               <Button
-                                size={'xsm' as any}
+                                size={'xsm' as 'sm'}
                                 variant="no-outline-secondary"
                                 className="redo-btn"
                                 onClick={() => onRetrySubmitReaction(val)}

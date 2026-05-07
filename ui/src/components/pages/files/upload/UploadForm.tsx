@@ -11,6 +11,8 @@ import TLPSelection from './TLPSelection';
 import OriginForm from './OriginForm';
 import UploadAlertBanner from './UploadAlertBanner';
 import { DropzoneFile, FileUploadStatus, OriginState, ReactionSubmitResult, TagEntry, TLPSelection as TLPSelectionState } from './types';
+import { ReactionSelection } from '@models/reactions';
+import { UserInfo } from '@models/users';
 
 interface UploadFormProps {
   uploadInProgress: boolean;
@@ -27,9 +29,9 @@ interface UploadFormProps {
   onTLPChange: (selection: TLPSelectionState) => void;
   originState: OriginState;
   onOriginChange: (field: keyof OriginState, value: string) => void;
-  reactionsList: any[];
-  setReactionsList: (reactions: any[]) => void;
-  userInfo: any;
+  reactionsList: ReactionSelection[];
+  setReactionsList: (reactions: ReactionSelection[]) => void;
+  userInfo: UserInfo | null;
   onUpload: () => void;
   uploadStatus: Record<string, FileUploadStatus>;
   uploadError: string[];

@@ -9,6 +9,8 @@ import {
 } from './types';
 import { createFileAssociations } from './associations';
 import { uploadFile } from '@thorpi/files';
+import { SampleSubmissionResponse } from '@models/files';
+import { ReactionSelection } from '@models/reactions';
 import { submitReactions } from '../reactions/reactions';
 
 function createSemaphore(limit: number) {
@@ -69,11 +71,11 @@ export function useFileUpload() {
     return Math.floor((totalUploaded / totalUploadSize) * 100);
   };
 
-  const trackAndSubmitReactions = (sha256: string, submission: { path: string; size: number }, submitReactionsList: any[]) => {
+  const trackAndSubmitReactions = (sha256: string, submission: { path: string; size: number }, submitReactionsList: ReactionSelection[]) => {
     const allRunReactionsRes: ReactionSubmitResult[] = [];
-    return submitReactions(sha256, submitReactionsList).then((submitRes: any[]) => {
+    return submitReactions(sha256, submitReactionsList).then((submitRes: ReactionSubmitResult[]) => {
       let error = false;
-      submitRes.forEach((value: any, index: number) => {
+      submitRes.forEach((value: ReactionSubmitResult, index: number) => {
         if (value.error !== '') {
           error = true;
         } else {
@@ -135,7 +137,7 @@ export function useFileUpload() {
     });
   };
 
-  const trackAndUploadFile = (form: FormData, selectedGroups: string[], associations: AssociationCreate[], reactionsList: any[]) => {
+  const trackAndUploadFile = (form: FormData, selectedGroups: string[], associations: AssociationCreate[], reactionsList: ReactionSelection[]) => {
     const allResSha256: string[] = [];
     const allResErrors: string[] = [];
     const submission = form.get('data') as DropzoneFile;
@@ -175,7 +177,7 @@ export function useFileUpload() {
       }));
     };
 
-    return uploadFile(form, addUploadErrorMsg, uploadFileProgressHandler, controller).then(async (response: any) => {
+    return uploadFile(form, addUploadErrorMsg, uploadFileProgressHandler, controller).then(async (response: SampleSubmissionResponse | false) => {
       if (response) {
         allResSha256.push(response.sha256);
         setUploadStatus((prev) => ({
@@ -219,7 +221,7 @@ export function useFileUpload() {
     formBase: FormData,
     selectedGroups: string[],
     associations: AssociationCreate[],
-    reactionsList: any[],
+    reactionsList: ReactionSelection[],
   ) => {
     setUploadStatus({});
     setUploadReactions({});
@@ -285,13 +287,13 @@ export function useFileUpload() {
     setUploadInProgress(false);
   };
 
-  const retryFileUpload = async (fileName: string, selectedGroups: string[], associations: AssociationCreate[], reactionsList: any[]) => {
+  const retryFileUpload = async (fileName: string, selectedGroups: string[], associations: AssociationCreate[], reactionsList: ReactionSelection[]) => {
     setUploadInProgress(true);
     await trackAndUploadFile(uploadFailures[fileName], selectedGroups, associations, reactionsList);
     setUploadInProgress(false);
   };
 
-  const retryAllFileUploads = async (selectedGroups: string[], associations: AssociationCreate[], reactionsList: any[]) => {
+  const retryAllFileUploads = async (selectedGroups: string[], associations: AssociationCreate[], reactionsList: ReactionSelection[]) => {
     setUploadInProgress(true);
     const failureSnapshot = { ...uploadFailures };
     setUploadFailures({});
@@ -313,7 +315,7 @@ export function useFileUpload() {
     setUploadInProgress(false);
   };
 
-  const retrySubmitReaction = async (status: ReactionResultEntry, reactionsList: any[]) => {
+  const retrySubmitReaction = async (status: ReactionResultEntry, reactionsList: ReactionSelection[]) => {
     setUploadInProgress(true);
     setUploadStatus((prev) => ({
       ...prev,
@@ -331,12 +333,12 @@ export function useFileUpload() {
     await trackAndSubmitReactions(
       status.sha256,
       failedReaction.submission,
-      reactionsList.filter((reaction: any) => reaction.pipeline === failedReaction.result.pipeline),
+      reactionsList.filter((reaction: ReactionSelection) => reaction.pipeline === failedReaction.result.pipeline),
     );
     setUploadInProgress(false);
   };
 
-  const retryAllReactionSubmissions = async (reactionsList: any[]) => {
+  const retryAllReactionSubmissions = async (reactionsList: ReactionSelection[]) => {
     setUploadInProgress(true);
     const submissionPromises: Promise<void>[] = [];
     uploadReactionRes.forEach((value) => {
@@ -346,7 +348,7 @@ export function useFileUpload() {
           trackAndSubmitReactions(
             value.sha256,
             failedReaction.submission,
-            reactionsList.filter((reaction: any) => reaction.pipeline === failedReaction.result.pipeline),
+            reactionsList.filter((reaction: ReactionSelection) => reaction.pipeline === failedReaction.result.pipeline),
           ),
         );
       }

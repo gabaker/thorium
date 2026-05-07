@@ -19,6 +19,7 @@ import {
   TagEntry,
   TLPSelection,
 } from '@components/pages/files/upload';
+import { ReactionSelection } from '@models/reactions';
 
 const FileUpload = () => {
   const { state } = useLocation();
@@ -30,7 +31,7 @@ const FileUpload = () => {
   const [tags, setTags] = useState<TagEntry[]>([]);
   const [selectedGroups, setSelectedGroups] = useState<string[]>(entity ? entity.groups : []);
   const [selectedTLP, setSelectedTLP] = useState<TLPSelection>({ ...DEFAULT_TLP_SELECTION });
-  const [reactionsList, setReactionsList] = useState<any[]>([]);
+  const [reactionsList, setReactionsList] = useState<ReactionSelection[]>([]);
   const [associations, setAssociations] = useState<AssociationCreate[]>([]);
 
   const { originState, setOriginField } = useOriginState();

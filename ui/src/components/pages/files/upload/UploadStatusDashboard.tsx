@@ -4,7 +4,7 @@ import { FaRedo } from 'react-icons/fa';
 import { OverlayTipTop } from '@components/shared/overlay/tips';
 import ProgressBarContainer from './ProgressBarContainer';
 import UploadStatusTable from './UploadStatusTable';
-import { FileUploadStatus, ReactionResultEntry } from './types';
+import { FileUploadStatus, ReactionResultEntry, ReactionSubmitResult } from './types';
 
 interface UploadStatusDashboardProps {
   uploadInProgress: boolean;
@@ -14,7 +14,7 @@ interface UploadStatusDashboardProps {
   uploadStatusDropdown: Record<string, boolean>;
   setUploadStatusDropdown: React.Dispatch<React.SetStateAction<Record<string, boolean>>>;
   uploadReactionRes: ReactionResultEntry[];
-  uploadReactions: Record<string, any[]>;
+  uploadReactions: Record<string, ReactionSubmitResult[]>;
   uploadReactionFailures: number;
   uploadError: string[];
   totalProgress: number;
@@ -74,7 +74,7 @@ const UploadStatusDashboard: React.FC<UploadStatusDashboardProps> = ({
             {Object.keys(uploadFailures).length > 0 && (
               <div>
                 {Object.keys(uploadFailures).length} File Upload Failure(s)
-                <Button size={'xsm' as any} variant="no-outline-secondary" className="retry-button" onClick={onRetryAllFileUploads}>
+                <Button size={'xsm' as 'sm'} variant="no-outline-secondary" className="retry-button" onClick={onRetryAllFileUploads}>
                   {' '}
                   <FaRedo />
                 </Button>
@@ -84,7 +84,7 @@ const UploadStatusDashboard: React.FC<UploadStatusDashboardProps> = ({
             {uploadReactionFailures > 0 && (
               <div>
                 {uploadReactionFailures} Reaction Submission(s) Failed
-                <Button size={'xsm' as any} variant="no-outline-secondary" className="retry-button" onClick={onRetryAllReactionSubmissions}>
+                <Button size={'xsm' as 'sm'} variant="no-outline-secondary" className="retry-button" onClick={onRetryAllReactionSubmissions}>
                   {' '}
                   <FaRedo />
                 </Button>
