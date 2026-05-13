@@ -289,7 +289,7 @@ If `minithor` is not found, this environment may be using a different deployment
 | Command | Description |
 |---------|-------------|
 | `minithor minikube install` | Install minikube and start a Kubernetes cluster |
-| `minithor deploy` | Deploy all Thorium services and backing infrastructure |
+| `minithor deploy` | Deploy all Thorium services and backing infrastructure (includes a container registry) |
 | `minithor expose` | Port-forward Thorium API to localhost:8080 |
 | `minithor expose --port <port>` | Port-forward to a custom local port |
 | `minithor expose --dev` | Also forward database ports (Elastic, Redis, MinIO, Scylla) |
@@ -299,6 +299,29 @@ If `minithor` is not found, this environment may be using a different deployment
 | `minithor stop` | Stop the cluster (preserves state) |
 | `minithor get-config` | Extract running config to ~/thorium.yml |
 | `minithor cleanup --confirm` | Remove all Thorium resources for a fresh deploy |
+
+### Container Registry
+
+`minithor deploy` deploys a container registry in the `thorium` namespace. Use `--registry` to enable it, or `--registry-user <name>` to enable it with basic auth.
+
+| Context | Registry Address |
+|---------|-----------------|
+| From the host (push/pull) | `localhost:5000` (requires `minithor expose`) |
+| From within Thorium (image references) | `registry.thorium.svc.cluster.local:5000` |
+
+To push an image and reference it in Thorium:
+
+```sh
+# Tag and push from the host
+docker tag myimage:latest localhost:5000/path/to/image:tag
+docker push localhost:5000/path/to/image:tag
+```
+
+When configuring a Thorium image/tool to use it, reference the in-cluster address:
+
+```
+registry.thorium.svc.cluster.local:5000/path/to/image:tag
+```
 
 ## Step 8: Python Client
 
