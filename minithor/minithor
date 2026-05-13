@@ -77,14 +77,14 @@ ensure_minikube_running() {
     local status_output
     status_output="$(minikube status 2>/dev/null)" || true
     local host_status
-    host_status="$(echo "$status_output" | grep -oP '^host: \K\S+')" || true
+    host_status="$(echo "$status_output" | awk '/^host:/ {print $2}')" || true
     if [[ "$host_status" != "Running" ]]; then
         echo "ERROR: minikube is not running. Start it with: minithor start" >&2
         exit 1
     fi
     # Auto-fix stale kubeconfig (e.g. after host reboot changed the container port mapping)
     local kube_status
-    kube_status="$(echo "$status_output" | grep -oP '^kubeconfig: \K\S+')" || true
+    kube_status="$(echo "$status_output" | awk '/^kubeconfig:/ {print $2}')" || true
     if [[ "$kube_status" != "Configured" ]]; then
         echo "Kubeconfig is stale, updating context..." >&2
         minikube update-context >/dev/null 2>&1
@@ -99,12 +99,16 @@ wait_for_rollout() {
 wait_for_resource() {
     local resource_type=$1 resource_name=$2 namespace=$3 timeout=${4:-300}
     local elapsed=0
-    echo "Waiting for $resource_type/$resource_name in $namespace (timeout: ${timeout}s)..."
-    until kctl get "$resource_type" "$resource_name" -n "$namespace" &>/dev/null; do
+    local ns_flag=()
+    if [ -n "$namespace" ]; then
+        ns_flag=(-n "$namespace")
+    fi
+    echo "Waiting for $resource_type/$resource_name${namespace:+ in $namespace} (timeout: ${timeout}s)..."
+    until kctl get "$resource_type" "$resource_name" ${ns_flag[@]+"${ns_flag[@]}"} &>/dev/null; do
         sleep 5
         elapsed=$((elapsed + 5))
         if [ "$elapsed" -ge "$timeout" ]; then
-            echo "ERROR: Timed out waiting for $resource_type/$resource_name in $namespace" >&2
+            echo "ERROR: Timed out waiting for $resource_type/$resource_name${namespace:+ in $namespace}" >&2
             return 1
         fi
     done
@@ -125,6 +129,45 @@ run_step() {
     if ! "$@"; then
         FAILURES=$((FAILURES + 1))
         echo "ERROR: Command failed (continuing): $*" >&2
+    fi
+}
+
+tune_kernel_params() {
+    local target="${1:-host}"
+    local params=(
+        "fs.inotify.max_user_instances=1024"
+        "fs.file-max=2097152"
+        "fs.nr_open=1048576"
+        "vm.max_map_count=262144"
+    )
+    for param in "${params[@]}"; do
+        local key="${param%%=*}"
+        local desired="${param#*=}"
+        local current
+        if [ "$target" = "minikube" ]; then
+            current=$(minikube ssh -- /sbin/sysctl -n "$key" 2>/dev/null | tr -d '\r') || true
+        else
+            current=$(sysctl -n "$key" 2>/dev/null) || true
+        fi
+        if [ -z "$current" ]; then
+            echo "  $key: could not read current value, skipping"
+            continue
+        fi
+        if [ "$current" -ge "$desired" ] 2>/dev/null; then
+            echo "  $key = $current (already >= $desired)"
+        else
+            echo "  $key: $current -> $desired"
+            if [ "$target" = "minikube" ]; then
+                minikube ssh -- sudo /sbin/sysctl -w "$param" >/dev/null 2>&1 || echo "    WARNING: failed to set $key on minikube node"
+            else
+                sudo sysctl -w "$param" >/dev/null 2>&1 || echo "    WARNING: failed to set $key (may require root)"
+            fi
+        fi
+    done
+    if [ "$target" = "host" ] && [ "$OS" = "Linux" ]; then
+        local conf="/etc/sysctl.d/99-minithor.conf"
+        echo "  Persisting to $conf"
+        printf '%s\n' "${params[@]}" | sudo tee "$conf" >/dev/null 2>&1 || echo "    WARNING: failed to write $conf"
     fi
 }
 
@@ -290,6 +333,8 @@ Options:
   --registry              Deploy a container registry in the thorium namespace
   --registry-user <name>  Enable registry basic auth for this user (implies --registry,
                           password is auto-generated and printed to stdout)
+  --timeout <seconds>     Timeout in seconds for each service rollout/wait
+                          (default: 600)
   -h, --help              Show this help message
 
 Deploys the full stack: Redis, Elasticsearch (ECK), cert-manager,
@@ -344,8 +389,10 @@ minithor cleanup — remove all Thorium resources for a fresh deploy
 Usage: minithor cleanup --confirm
 
 Options:
-  --confirm        Required. Confirms you want to remove all resources.
-  -h, --help       Show this help message
+  --confirm            Required. Confirms you want to remove all resources.
+  --timeout <seconds>  Timeout in seconds for each delete/wait operation
+                       (default: 300)
+  -h, --help           Show this help message
 
 Removes all Thorium services, backing infrastructure, Helm releases,
 namespaces, and CRDs. The minikube cluster itself is preserved — use
@@ -570,6 +617,9 @@ cmd_start() {
     minikube_start
     fix_container_config
 
+    log "Tuning minikube node kernel parameters"
+    tune_kernel_params minikube
+
     sleep 30
 
     # Delete pods stuck in terminal failure states
@@ -610,6 +660,7 @@ cmd_deploy() {
     local deploy_pass="INSECURE_DEV_PASSWORD"
     local deploy_registry=false
     local registry_user=""
+    local deploy_timeout=600
 
     while [ $# -gt 0 ]; do
         case "$1" in
@@ -661,6 +712,13 @@ cmd_deploy() {
                 registry_user="$1"
                 deploy_registry=true
                 ;;
+            --timeout)
+                shift
+                if [ $# -eq 0 ] || ! [[ "$1" =~ ^[0-9]+$ ]]; then
+                    echo "ERROR: --timeout requires a numeric argument (seconds)" >&2; exit 1
+                fi
+                deploy_timeout="$1"
+                ;;
             *) echo "Unknown option: $1"; usage_deploy; exit 1 ;;
         esac
         shift
@@ -709,6 +767,19 @@ cmd_deploy() {
         fi
         sleep "$retry_delay"
     done
+
+    ########################################
+    # Kernel parameter tuning
+    ########################################
+    CURRENT_SECTION="Kernel parameter tuning"
+
+    if [ "$OS" = "Linux" ]; then
+        log "Tuning host kernel parameters"
+        tune_kernel_params host
+    fi
+
+    log "Tuning minikube node kernel parameters"
+    tune_kernel_params minikube
 
     ########################################
     # Helm setup
@@ -885,7 +956,12 @@ EOF
     log "Deploying ECK Operator"
     helm upgrade --install elastic-operator elastic/eck-operator \
         --namespace elastic-system --create-namespace
-    wait_for_rollout statefulset/elastic-operator elastic-system 300
+    wait_for_rollout statefulset/elastic-operator elastic-system "$deploy_timeout"
+    wait_for_resource crd elasticsearches.elasticsearch.k8s.elastic.co "" "$deploy_timeout"
+    wait_for_resource crd kibanas.kibana.k8s.elastic.co "" "$deploy_timeout"
+    kctl wait --for condition=established \
+        crd/elasticsearches.elasticsearch.k8s.elastic.co \
+        crd/kibanas.kibana.k8s.elastic.co --timeout="${deploy_timeout}s"
 
     log "Deploying Elasticsearch and Kibana"
     kctl apply -f - <<'EOF'
@@ -961,17 +1037,20 @@ EOF
     helm upgrade --install cert-manager jetstack/cert-manager \
         --namespace cert-manager --create-namespace \
         --set crds.enabled=true
+    wait_for_resource crd certificates.cert-manager.io "" "$deploy_timeout"
+    wait_for_resource crd issuers.cert-manager.io "" "$deploy_timeout"
     kctl wait --for condition=established \
-        crd/certificates.cert-manager.io crd/issuers.cert-manager.io --timeout=120s
-    kctl -n cert-manager rollout status deployment.apps/cert-manager-webhook -w --timeout=120s
+        crd/certificates.cert-manager.io crd/issuers.cert-manager.io --timeout="${deploy_timeout}s"
+    kctl -n cert-manager rollout status deployment.apps/cert-manager-webhook -w --timeout="${deploy_timeout}s"
 
     log "Deploying Scylla Operator"
     helm upgrade --install scylla-operator scylla/scylla-operator \
         --namespace scylla-operator --create-namespace
+    wait_for_resource crd scyllaclusters.scylla.scylladb.com "" "$deploy_timeout"
     kctl wait --for condition=established \
-        crd/scyllaclusters.scylla.scylladb.com --timeout=120s
-    kctl -n scylla-operator rollout status deployment.apps/scylla-operator -w --timeout=120s
-    kctl -n scylla-operator rollout status deployment.apps/webhook-server -w --timeout=120s
+        crd/scyllaclusters.scylla.scylladb.com --timeout="${deploy_timeout}s"
+    kctl -n scylla-operator rollout status deployment.apps/scylla-operator -w --timeout="${deploy_timeout}s"
+    kctl -n scylla-operator rollout status deployment.apps/webhook-server -w --timeout="${deploy_timeout}s"
     sleep 10
 
     log "Deploying Scylla Cluster"
@@ -1023,8 +1102,9 @@ spec:
           - mountPath: /tmp/coredumps
             name: coredumpfs
 EOF
-    wait_for_resource statefulset scylla-us-east-1-us-east-1a scylla 300
-    wait_for_rollout statefulset/scylla-us-east-1-us-east-1a scylla 600
+    wait_for_resource statefulset scylla-us-east-1-us-east-1a scylla "$deploy_timeout"
+    kctl wait --for=condition=Ready pod -l scylla/cluster=scylla \
+        -n scylla --timeout="${deploy_timeout}s"
 
     kctl apply -f - <<'EOF'
 apiVersion: v1
@@ -1065,7 +1145,8 @@ data:
     force_schema_commit_log: true
 EOF
     kctl rollout restart -n scylla statefulset.apps/scylla-us-east-1-us-east-1a
-    wait_for_rollout statefulset/scylla-us-east-1-us-east-1a scylla 600
+    kctl wait --for=condition=Ready pod -l scylla/cluster=scylla \
+        -n scylla --timeout="${deploy_timeout}s"
 
     ########################################
     # MinIO
@@ -1216,7 +1297,9 @@ EOF
 
     log "Deploying Kubegres"
     kctl apply -f https://raw.githubusercontent.com/reactive-tech/kubegres/v1.19/kubegres.yaml
-    wait_for_rollout deployment.apps/kubegres-controller-manager kubegres-system 300
+    kctl wait --for condition=established \
+        crd/kubegres.kubegres.reactive-tech.io --timeout="${deploy_timeout}s"
+    wait_for_rollout deployment.apps/kubegres-controller-manager kubegres-system "$deploy_timeout"
 
     log "Deploying Quickwit Postgres"
     kctl apply -f - <<EOF
@@ -1266,10 +1349,25 @@ spec:
           name: postgres-cluster-auth
           key: replicationUserPassword
 EOF
-    wait_for_resource statefulset postgres-1 quickwit 120
-    wait_for_rollout statefulset/postgres-1 quickwit 120
+    wait_for_resource statefulset postgres-1 quickwit "$deploy_timeout"
+    kctl wait --for=condition=Ready pod -l app=postgres \
+        -n quickwit --timeout="${deploy_timeout}s"
 
     log "Creating Quickwit metastore database"
+    local pg_ready=false
+    for attempt in $(seq 1 30); do
+        if kctl -n quickwit exec pod/postgres-1-0 -- \
+            /bin/bash -c "PGPASSWORD=$PG_PASS psql -U postgres -c 'SELECT 1'" &>/dev/null; then
+            pg_ready=true
+            break
+        fi
+        echo "Waiting for Postgres to accept connections (attempt $attempt/30)..."
+        sleep 5
+    done
+    if [ "$pg_ready" = false ]; then
+        echo "ERROR: Postgres not accepting connections after 150s" >&2
+        exit 1
+    fi
     kctl -n quickwit exec pod/postgres-1-0 -- \
         /bin/bash -c "PGPASSWORD=$PG_PASS psql -U postgres -c \"SELECT 1 FROM pg_database WHERE datname='quickwit-metastore'\" | grep -q 1 || PGPASSWORD=$PG_PASS createdb -U postgres quickwit-metastore"
 
@@ -1306,12 +1404,17 @@ EOF
     ########################################
     CURRENT_SECTION="Wait for all rollouts"
     log "Waiting for all services"
-    wait_for_rollout statefulset/scylla-us-east-1-us-east-1a scylla 600
-    wait_for_rollout statefulset/minio minio 300
-    wait_for_rollout statefulset/redis redis 300
-    wait_for_rollout statefulset/postgres-1 quickwit 300
-    wait_for_rollout statefulset/quickwit-searcher quickwit 300
-    wait_for_rollout statefulset/quickwit-indexer quickwit 300
+    kctl wait --for=condition=Ready pod -l scylla/cluster=scylla \
+        -n scylla --timeout="${deploy_timeout}s"
+    wait_for_rollout statefulset/minio minio "$deploy_timeout"
+    wait_for_rollout statefulset/redis redis "$deploy_timeout"
+    kctl wait --for=condition=Ready pod -l app=postgres \
+        -n quickwit --timeout="${deploy_timeout}s"
+    wait_for_rollout statefulset/quickwit-searcher quickwit "$deploy_timeout"
+    wait_for_rollout statefulset/quickwit-indexer quickwit "$deploy_timeout"
+    wait_for_resource statefulset elastic-es-default elastic-system "$deploy_timeout"
+    kctl wait --for=condition=Ready pod -l elasticsearch.k8s.elastic.co/cluster-name=elastic \
+        -n elastic-system --timeout="${deploy_timeout}s"
 
     ########################################
     # Post-deploy configuration
@@ -1347,6 +1450,7 @@ EOF
 
     ### Elastic index/role/user
     log "Configuring Elasticsearch"
+    wait_for_resource secret elastic-es-elastic-user elastic-system "$deploy_timeout"
     ESPASS=$(kctl get secret -n elastic-system elastic-es-elastic-user -o go-template='{{index .data "elastic" | base64decode}}')
     kctl -n elastic-system exec -i --tty=false pod/elastic-es-default-0 -- /bin/bash <<ESEOF
 # Create index (ignore 400 = already exists)
@@ -1403,7 +1507,7 @@ spec:
           mc alias set myminio http://minio.minio.svc.cluster.local:9000 $MINIO_AK $MINIO_SK
           mc mb --ignore-existing myminio/quickwit
 EOF
-    kctl wait --for=condition=complete job/create-quickwit-bucket -n minio --timeout=120s
+    kctl wait --for=condition=complete job/create-quickwit-bucket -n minio --timeout="${deploy_timeout}s"
 
     ########################################
     # Thorium
@@ -1589,7 +1693,12 @@ spec:
                   number: 80
 EOF
 
-    wait_for_rollout deployment.apps/operator thorium 300
+    wait_for_rollout deployment.apps/operator thorium "$deploy_timeout"
+
+    log "Waiting for operator to register ThoriumCluster CRD"
+    wait_for_resource crd thoriumclusters.sandia.gov "" "$deploy_timeout"
+    kctl wait --for condition=established \
+        crd/thoriumclusters.sandia.gov --timeout="${deploy_timeout}s"
 
     ########################################
     # ThoriumCluster CRD
@@ -1609,8 +1718,8 @@ metadata:
   name: dev
   namespace: thorium
 spec:
-  registry: "ghcr.io/gabaker/thorium/infrastructure/thorium"
-  version: "FixMinithorDeploy"
+  registry: "ghcr.io/cisagov/thorium/infrastructure/thorium"
+  version: "latest"
   image_pull_policy: Always
   components:
     api:
@@ -1715,20 +1824,20 @@ DEFEOF
     log "Waiting for Thorium components to start"
 
     echo "Waiting for API deployment..."
-    wait_for_resource deployment api thorium 300
-    wait_for_rollout deployment.apps/api thorium 300
+    wait_for_resource deployment api thorium "$deploy_timeout"
+    wait_for_rollout deployment.apps/api thorium "$deploy_timeout"
 
     echo "Waiting for scaler deployment..."
-    wait_for_resource deployment scaler thorium 300
-    wait_for_rollout deployment.apps/scaler thorium 300
+    wait_for_resource deployment scaler thorium "$deploy_timeout"
+    wait_for_rollout deployment.apps/scaler thorium "$deploy_timeout"
 
     echo "Waiting for event-handler deployment..."
-    wait_for_resource deployment event-handler thorium 300
-    wait_for_rollout deployment.apps/event-handler thorium 300
+    wait_for_resource deployment event-handler thorium "$deploy_timeout"
+    wait_for_rollout deployment.apps/event-handler thorium "$deploy_timeout"
 
     echo "Waiting for search-streamer deployment..."
-    wait_for_resource deployment search-streamer thorium 300
-    wait_for_rollout deployment.apps/search-streamer thorium 300
+    wait_for_resource deployment search-streamer thorium "$deploy_timeout"
+    wait_for_rollout deployment.apps/search-streamer thorium "$deploy_timeout"
 
     log "All Thorium components are running"
 
@@ -1972,7 +2081,7 @@ spec:
             storage: 20Gi
 REGEOF
 
-        wait_for_rollout statefulset/registry thorium 180
+        wait_for_rollout statefulset/registry thorium "$deploy_timeout"
 
         log "Verifying registry"
         local catalog_response
@@ -2085,11 +2194,11 @@ cmd_expose() {
     }
 
     parse_service() {
-        echo "$1" | grep -oP 'svc/\K[^ ]+'
+        echo "$1" | sed -n 's/.*svc\/\([^ ]*\).*/\1/p'
     }
 
     parse_ports() {
-        echo "$1" | grep -oP '(\d+:\d+|\d+)(?=\s*$)'
+        echo "$1" | awk '{print $NF}'
     }
 
     kill_process() {
@@ -2179,7 +2288,7 @@ cmd_expose() {
         local local_port="${ports[0]%%:*}"
         local stale_pid stale_owner
         if command -v ss &>/dev/null; then
-            stale_pid=$(ss -tlnp "sport = :$local_port" 2>/dev/null | grep -oP 'pid=\K[0-9]+' | head -1 || true)
+            stale_pid=$(ss -tlnp "sport = :$local_port" 2>/dev/null | sed -n 's/.*pid=\([0-9]*\).*/\1/p' | head -1 || true)
         else
             stale_pid=$(lsof -nP -ti "TCP:$local_port" -sTCP:LISTEN 2>/dev/null | head -1 || true)
         fi
@@ -2259,14 +2368,23 @@ cmd_expose() {
 
 cmd_cleanup() {
     local confirm=false
+    local cleanup_timeout=300
     FAILURES=0
 
-    for arg in "$@"; do
-        case "$arg" in
+    while [ $# -gt 0 ]; do
+        case "$1" in
             -h|--help) usage_cleanup; return 0 ;;
             --confirm) confirm=true ;;
-            *) echo "Unknown option: $arg"; usage_cleanup; exit 1 ;;
+            --timeout)
+                shift
+                if [ $# -eq 0 ] || ! [[ "$1" =~ ^[0-9]+$ ]]; then
+                    echo "ERROR: --timeout requires a numeric argument (seconds)" >&2; exit 1
+                fi
+                cleanup_timeout="$1"
+                ;;
+            *) echo "Unknown option: $1"; usage_cleanup; exit 1 ;;
         esac
+        shift
     done
 
     if [ "$confirm" = false ]; then
@@ -2286,22 +2404,22 @@ cmd_cleanup() {
     ########################################
     CURRENT_SECTION="Removing Container Registry"
     log "Removing Container Registry"
-    run_step kctl delete statefulset registry -n thorium --ignore-not-found --timeout=60s
-    run_step kctl delete svc registry -n thorium --ignore-not-found --timeout=60s
-    run_step kctl delete secret registry-auth -n thorium --ignore-not-found --timeout=60s
-    run_step kctl delete configmap registry-config -n thorium --ignore-not-found --timeout=60s
-    run_step kctl delete pvc registry-data-registry-0 -n thorium --ignore-not-found --timeout=60s
+    run_step kctl delete statefulset registry -n thorium --ignore-not-found --timeout="${cleanup_timeout}s"
+    run_step kctl delete svc registry -n thorium --ignore-not-found --timeout="${cleanup_timeout}s"
+    run_step kctl delete secret registry-auth -n thorium --ignore-not-found --timeout="${cleanup_timeout}s"
+    run_step kctl delete configmap registry-config -n thorium --ignore-not-found --timeout="${cleanup_timeout}s"
+    run_step kctl delete pvc registry-data-registry-0 -n thorium --ignore-not-found --timeout="${cleanup_timeout}s"
 
     ########################################
     # Thorium
     ########################################
     CURRENT_SECTION="Removing Thorium"
     log "Removing Thorium"
-    run_step kctl delete deployment operator -n thorium --ignore-not-found --timeout=60s
+    run_step kctl delete deployment operator -n thorium --ignore-not-found --timeout="${cleanup_timeout}s"
     clear_finalizers_and_delete thoriumclusters.sandia.gov thoriumclusters.sandia.gov thorium
-    run_step kctl delete ns thorium --ignore-not-found --timeout=300s
-    run_step kctl delete clusterrole thorium-operator --ignore-not-found --timeout=60s
-    run_step kctl delete clusterrolebinding thorium-operator-binding --ignore-not-found --timeout=60s
+    run_step kctl delete ns thorium --ignore-not-found --timeout="${cleanup_timeout}s"
+    run_step kctl delete clusterrole thorium-operator --ignore-not-found --timeout="${cleanup_timeout}s"
+    run_step kctl delete clusterrolebinding thorium-operator-binding --ignore-not-found --timeout="${cleanup_timeout}s"
 
     ########################################
     # Quickwit
@@ -2315,40 +2433,40 @@ cmd_cleanup() {
     ########################################
     CURRENT_SECTION="Removing Kubegres + Postgres"
     log "Removing Kubegres + Postgres"
-    run_step kctl delete deployment kubegres-controller-manager -n kubegres-system --ignore-not-found --timeout=60s
-    clear_finalizers_and_delete kubegres.reactive-tech.io kubegres.reactive-tech.io quickwit
-    run_step kctl delete statefulsets,deployments,services,pods --all -n quickwit --force --grace-period=0 --ignore-not-found --timeout=60s
-    run_step kctl delete ns quickwit --ignore-not-found --timeout=300s
-    run_step kctl delete ns kubegres-system --ignore-not-found --timeout=60s
-    run_step kctl delete clusterrole kubegres-kubegres-editor-role kubegres-kubegres-viewer-role kubegres-manager-role kubegres-metrics-auth-role kubegres-metrics-reader --ignore-not-found --timeout=60s
-    run_step kctl delete clusterrolebinding kubegres-manager-rolebinding kubegres-metrics-auth-rolebinding --ignore-not-found --timeout=60s
+    run_step kctl delete deployment kubegres-controller-manager -n kubegres-system --ignore-not-found --timeout="${cleanup_timeout}s"
+    clear_finalizers_and_delete kubegres.kubegres.reactive-tech.io kubegres.kubegres.reactive-tech.io quickwit
+    run_step kctl delete statefulsets,deployments,services,pods --all -n quickwit --force --grace-period=0 --ignore-not-found --timeout="${cleanup_timeout}s"
+    run_step kctl delete ns quickwit --ignore-not-found --timeout="${cleanup_timeout}s"
+    run_step kctl delete ns kubegres-system --ignore-not-found --timeout="${cleanup_timeout}s"
+    run_step kctl delete clusterrole kubegres-kubegres-editor-role kubegres-kubegres-viewer-role kubegres-manager-role kubegres-metrics-auth-role kubegres-metrics-reader --ignore-not-found --timeout="${cleanup_timeout}s"
+    run_step kctl delete clusterrolebinding kubegres-manager-rolebinding kubegres-metrics-auth-rolebinding --ignore-not-found --timeout="${cleanup_timeout}s"
 
     ########################################
     # Jaeger
     ########################################
     CURRENT_SECTION="Removing Jaeger"
     log "Removing Jaeger"
-    run_step kctl delete ns jaeger --ignore-not-found --timeout=300s
+    run_step kctl delete ns jaeger --ignore-not-found --timeout="${cleanup_timeout}s"
 
     ########################################
     # MinIO
     ########################################
     CURRENT_SECTION="Removing MinIO"
     log "Removing MinIO"
-    run_step kctl delete ns minio --ignore-not-found --timeout=300s
+    run_step kctl delete ns minio --ignore-not-found --timeout="${cleanup_timeout}s"
 
     ########################################
     # Scylla
     ########################################
     CURRENT_SECTION="Removing Scylla"
     log "Removing Scylla"
-    run_step kctl delete deployment scylla-operator -n scylla-operator --ignore-not-found --timeout=60s
-    run_step kctl delete deployment webhook-server -n scylla-operator --ignore-not-found --timeout=60s
+    run_step kctl delete deployment scylla-operator -n scylla-operator --ignore-not-found --timeout="${cleanup_timeout}s"
+    run_step kctl delete deployment webhook-server -n scylla-operator --ignore-not-found --timeout="${cleanup_timeout}s"
     clear_finalizers_and_delete scyllaclusters.scylla.scylladb.com scyllaclusters.scylla.scylladb.com scylla
-    run_step kctl delete statefulsets,deployments,services,pods --all -n scylla --force --grace-period=0 --ignore-not-found --timeout=60s
-    run_step kctl delete ns scylla --ignore-not-found --timeout=300s
+    run_step kctl delete statefulsets,deployments,services,pods --all -n scylla --force --grace-period=0 --ignore-not-found --timeout="${cleanup_timeout}s"
+    run_step kctl delete ns scylla --ignore-not-found --timeout="${cleanup_timeout}s"
     helm_uninstall scylla-operator scylla-operator
-    run_step kctl delete ns scylla-operator --ignore-not-found --timeout=300s
+    run_step kctl delete ns scylla-operator --ignore-not-found --timeout="${cleanup_timeout}s"
 
     ########################################
     # cert-manager
@@ -2356,7 +2474,7 @@ cmd_cleanup() {
     CURRENT_SECTION="Removing cert-manager"
     log "Removing cert-manager"
     helm_uninstall cert-manager cert-manager
-    run_step kctl delete ns cert-manager --ignore-not-found --timeout=300s
+    run_step kctl delete ns cert-manager --ignore-not-found --timeout="${cleanup_timeout}s"
 
     ########################################
     # Elasticsearch
@@ -2366,15 +2484,15 @@ cmd_cleanup() {
     helm_uninstall elastic-operator elastic-system
     clear_finalizers_and_delete elasticsearches.elasticsearch.k8s.elastic.co elasticsearches.elasticsearch.k8s.elastic.co elastic-system
     clear_finalizers_and_delete kibanas.kibana.k8s.elastic.co kibanas.kibana.k8s.elastic.co elastic-system
-    run_step kctl delete statefulsets,deployments,services,pods --all -n elastic-system --force --grace-period=0 --ignore-not-found --timeout=60s
-    run_step kctl delete ns elastic-system --ignore-not-found --timeout=300s
+    run_step kctl delete statefulsets,deployments,services,pods --all -n elastic-system --force --grace-period=0 --ignore-not-found --timeout="${cleanup_timeout}s"
+    run_step kctl delete ns elastic-system --ignore-not-found --timeout="${cleanup_timeout}s"
 
     ########################################
     # Redis
     ########################################
     CURRENT_SECTION="Removing Redis"
     log "Removing Redis"
-    run_step kctl delete ns redis --ignore-not-found --timeout=300s
+    run_step kctl delete ns redis --ignore-not-found --timeout="${cleanup_timeout}s"
 
     ########################################
     # Leftover CRDs
@@ -2383,7 +2501,7 @@ cmd_cleanup() {
     log "Cleaning up leftover CRDs"
     CRDS=$(kctl get crds -o name 2>/dev/null | grep -E 'cert-manager|elastic|scylla|kubegres|sandia' || true)
     if [ -n "$CRDS" ]; then
-        run_step kctl delete $CRDS --timeout=300s
+        run_step kctl delete $CRDS --timeout="${cleanup_timeout}s"
     fi
 
     ########################################
@@ -2391,7 +2509,7 @@ cmd_cleanup() {
     ########################################
     CURRENT_SECTION="Waiting for namespace termination"
     log "Waiting for namespaces to terminate"
-    run_step wait_for_ns_termination 300
+    run_step wait_for_ns_termination "$cleanup_timeout"
 
     ########################################
     # Summary
