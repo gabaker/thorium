@@ -18,10 +18,26 @@ import {
 } from '@components/pages/images';
 import Page from '@components/pages/Page';
 import LoadingSpinner from '@components/shared/fallback/LoadingSpinner';
+import ImagePipelineEditor from '@components/shared/inputs/code/ImagePipelineEditor';
+import FormatToggle from '@components/shared/inputs/code/FormatToggle';
+import ViewModeToggle from '@components/shared/inputs/code/ViewModeToggle';
 import { OverlayTipRight } from '@components/shared/overlay/tips';
 import { useAuth } from '@utilities/auth';
 import { fetchImages, fetchGroups } from '@utilities/fetch';
+import { ImageChecker } from '@utilities/rules/image';
+import { imageToEditorObject, editorObjectToImageCreate } from '@utilities/transforms/image';
 import { createImage } from '@thorpi/images';
+
+const imageChecker = new ImageChecker();
+
+const IMAGE_CREATE_TEMPLATE = {
+  group: '',
+  name: '',
+  scaler: 'K8s',
+  image: '',
+  timeout: 300,
+  display_type: 'JSON',
+};
 
 const ImageCreate = () => {
   const [hideAdvanced, setHideAdvanced] = useState(true);
@@ -53,6 +69,32 @@ const ImageCreate = () => {
   const [loading, setLoading] = useState(false);
   let cancelUpdate = false;
 
+  // Editor mode state
+  const [viewMode, setViewMode] = useState('form');
+  const [editorObj, setEditorObj] = useState(state ? imageToEditorObject(state) : IMAGE_CREATE_TEMPLATE);
+  const [editorFormat, setEditorFormat] = useState('yaml');
+  const [editorParseValid, setEditorParseValid] = useState(false);
+
+  const handleViewModeChange = (mode) => {
+    if (mode === viewMode) return;
+    if (mode === 'editor' && viewMode === 'form') {
+      setViewMode('editor');
+    } else if (mode === 'form' && viewMode === 'editor') {
+      if (window.confirm('Switching to form view will reset any unsaved changes from the editor. Continue?')) {
+        setViewMode('form');
+      }
+    }
+  };
+
+  const handleEditorChange = (obj) => {
+    if (obj) {
+      setEditorObj(obj);
+      setEditorParseValid(true);
+    } else {
+      setEditorParseValid(false);
+    }
+  };
+
   // need user's group roles to validate permissions to create/edit/delete pipelines
   useEffect(() => {
     fetchGroups(setGroups, null, false);
@@ -75,92 +117,78 @@ const ImageCreate = () => {
     }
   }, [imageFieldErrors, volumeErrors, dependencyErrors, outputCollectionErrors, resourceErrors]);
 
-  /**
-   * Create a new Thorium image
-   * @returns {void}
-   */
   async function handleImageCreate() {
+    // Editor mode: submit from editor object
+    if (viewMode === 'editor') {
+      const data = editorObjectToImageCreate(editorObj);
+      if (!data) {
+        setCreateImageErrors('Image group and name are required');
+        return;
+      }
+      if (await createImage(data, setCreateImageErrors)) {
+        navigate('/images');
+      }
+      return;
+    }
+
+    // Form mode: existing behavior
     let data = {};
 
-    // set image fields
     if (Object.keys(imageFields).length) {
       data = structuredClone(imageFields);
     }
 
-    // ------------------- resources --------------------
     if (Object.keys(resources).length && data.scaler != 'External') {
       data['resources'] = resources;
     }
 
-    // ------------------- network policies -------------
     if (Object.keys(networkPolicies).length && data.scaler == 'K8s') {
       data['network_policies'] = networkPolicies;
     }
 
-    // ------------------- arguments --------------------
     if (Object.keys(args).length) {
       data['args'] = args;
     }
 
-    // ------------------------ volumes ----------------------------
     if (volumes && volumes.length && data.scaler == 'K8s') {
       data['volumes'] = volumes;
     }
 
-    // ------------------------ output collection ----------------------------
     if (Object.keys(outputCollection).length && data.scaler != 'External') {
       data['output_collection'] = outputCollection;
     }
 
-    // ------------------------ dependencies ----------------------------
     if (Object.keys(dependencies).length) {
       data['dependencies'] = dependencies;
     }
 
-    // -------------------- security_context -----------------------
-    // Only Admins can set security_context values, so don't include request for other roles
     if (Object.keys(securityContext).length && userInfo && userInfo.role == 'Admin' && data.scaler != 'External') {
       data['security_context'] = securityContext;
     }
 
-    // --------------------------- tags ----------------------------
     const environmentVarsJson = {};
-    // tags are key/value pairs where the values are strings
     if (environmentVars) {
-      // convert envVariables list into a dictionary of env key/value pairs
       environmentVars.map((variable) => {
-        // a valid key and value must be set for each uploaded tag
         if (variable['key']) {
           environmentVarsJson[variable['key']] = variable['value'] == '' ? null : variable['value'];
         }
       });
-
-      // only append environment variables json if it is not empty
       if (Object.keys(environmentVarsJson).length && (data.scaler == 'K8s' || data.scaler == 'BareMetal')) {
         data['env'] = environmentVarsJson;
       }
     }
 
-    // check if there are fields that are missing or invalid
-    // this is used to put an alert by the create button
-    // so that users aren't confused why their image wasn't created
-    // when there are errors but the optionals are expanded so they
-    // don't see the errors at the top of the page
     if (imageFieldErrors || resourceErrors || argErrors || outputCollectionErrors || dependencyErrors || volumeErrors) {
       setCreateImageErrors('Please resolve missing fields or invalid entries');
       setDisplayErrors(true);
       return;
     } else {
-      // this is really only needed if we aren't redirecting on success
       setCreateImageErrors('');
     }
 
-    // redirect back to the images display page if the image was created successfully
     if (await createImage(data, setCreateImageErrors)) {
       navigate('/images');
     } else {
-      // if a user makes an invalid change to the form field after an initial request failure,
-      // display those error alerts
       setDisplayErrors(true);
     }
   }
@@ -172,91 +200,116 @@ const ImageCreate = () => {
           <h3>Create An Image</h3>
         </center>
       </Row>
-      <Row className="mt-4">
-        <Col className="title-col">
-          <h5>Image</h5>
-        </Col>
-        <Col className="field-col">
-          <Fields
-            image={state ? state : imageFields}
-            groups={groups ? groups : []}
-            setRequestImageFields={setImageFields}
-            setHasErrors={setImageFieldErrors}
-            showErrors={state ? true : displayErrors}
-            mode={state ? 'Copy' : 'Create'}
-          />
-        </Col>
-      </Row>
-      <Row>
+      <Row className="mt-2 mb-3">
         <Col className="d-flex justify-content-center">
-          <OverlayTipRight tip={`${hideAdvanced ? 'Expand' : 'Hide'} optional fields`}>
-            <div className="icon-btn" onClick={() => setHideAdvanced(!hideAdvanced)}>
-              {hideAdvanced ? <FaAngleDown size="36" /> : <FaAngleUp size="36" />}
-            </div>
-          </OverlayTipRight>
+          <ViewModeToggle viewMode={viewMode} onViewModeChange={handleViewModeChange} />
         </Col>
       </Row>
-      <hr className="mt-0" />
-      <div className={`${hideAdvanced ? 'advanced-hidden' : ''}`}>
-        <Resources
-          resources={state && state.resources ? state.resources : {}}
-          setRequestResources={setResources}
-          setHasErrors={setResourceErrors}
-          mode={state ? 'Copy' : 'Create'}
-        />
-        <hr />
-        <Arguments
-          args={state && state.args ? state.args : {}}
-          setRequestArguments={setArgs}
-          setHasErrors={setArgErrors}
-          mode={state ? 'Copy' : 'Create'}
-        />
-        <hr />
-        <OutputCollection
-          outputCollection={state && state.output_collection ? state.output_collection : {}}
-          setRequestOutputCollection={setOutputCollection}
-          groups={userInfo && userInfo.groups ? userInfo.groups : []}
-          mode={state ? 'Copy' : 'Create'}
-          setHasErrors={setOutputCollectionErrors}
-          disabled={imageFields['scaler'] && imageFields.scaler == 'External'}
-        />
-        <hr />
-        <Dependencies
-          images={images}
-          dependencies={state && state.dependencies ? state.dependencies : {}}
-          setErrors={setDependencyErrors}
-          setRequestDependencies={setDependencies}
-          mode={state ? 'Copy' : 'Create'}
-          disabled={imageFields['scaler'] && imageFields.scaler == 'External'}
-        />
-        <hr />
-        <EnvironmentVariables
-          environmentVars={state && state.env ? state.env : {}}
-          setRequestEnvironmentVars={setEnvironmentVars}
-          mode={state ? 'Copy' : 'Create'}
-        />
-        <hr />
-        <Volumes
-          volumes={state && state.volumes ? state.volumes : []}
-          setRequestVolumes={setVolumes}
-          mode={state ? 'Copy' : 'Create'}
-          setHasErrors={setVolumeErrors}
-          disabled={imageFields['scaler'] && imageFields.scaler != 'K8s'}
-        />
-        <hr />
-        <NetworkPolicies
-          policies={state && state.network_policies ? state.network_policies : {}}
-          setRequestNetworkPolicies={setNetworkPolicies}
-          mode={state ? 'Copy' : 'Create'}
-        />
-        <hr />
-        <SecurityContext
-          securityContext={state && state.security_context ? state.security_context : {}}
-          setRequestSecurityContext={setSecurityContext}
-          mode={state ? 'Copy' : 'Create'}
-          disabled={(imageFields['scaler'] && imageFields.scaler == 'External') || !userInfo || userInfo.role != 'Admin'}
-        />
-      </div>
+      {viewMode === 'editor' ? (
+        <>
+          <Row className="mb-2">
+            <Col>
+              <FormatToggle format={editorFormat} onFormatChange={setEditorFormat} />
+            </Col>
+          </Row>
+          <ImagePipelineEditor
+            key={editorFormat}
+            value={editorObj}
+            onChange={handleEditorChange}
+            checker={imageChecker}
+            format={editorFormat}
+            height="600px"
+          />
+        </>
+      ) : (
+        <>
+          <Row className="mt-4">
+            <Col className="title-col">
+              <h5>Image</h5>
+            </Col>
+            <Col className="field-col">
+              <Fields
+                image={state ? state : imageFields}
+                groups={groups ? groups : []}
+                setRequestImageFields={setImageFields}
+                setHasErrors={setImageFieldErrors}
+                showErrors={state ? true : displayErrors}
+                mode={state ? 'Copy' : 'Create'}
+              />
+            </Col>
+          </Row>
+          <Row>
+            <Col className="d-flex justify-content-center">
+              <OverlayTipRight tip={`${hideAdvanced ? 'Expand' : 'Hide'} optional fields`}>
+                <div className="icon-btn" onClick={() => setHideAdvanced(!hideAdvanced)}>
+                  {hideAdvanced ? <FaAngleDown size="36" /> : <FaAngleUp size="36" />}
+                </div>
+              </OverlayTipRight>
+            </Col>
+          </Row>
+          <hr className="mt-0" />
+          <div className={`${hideAdvanced ? 'advanced-hidden' : ''}`}>
+            <Resources
+              resources={state && state.resources ? state.resources : {}}
+              setRequestResources={setResources}
+              setHasErrors={setResourceErrors}
+              mode={state ? 'Copy' : 'Create'}
+            />
+            <hr />
+            <Arguments
+              args={state && state.args ? state.args : {}}
+              setRequestArguments={setArgs}
+              setHasErrors={setArgErrors}
+              mode={state ? 'Copy' : 'Create'}
+            />
+            <hr />
+            <OutputCollection
+              outputCollection={state && state.output_collection ? state.output_collection : {}}
+              setRequestOutputCollection={setOutputCollection}
+              groups={userInfo && userInfo.groups ? userInfo.groups : []}
+              mode={state ? 'Copy' : 'Create'}
+              setHasErrors={setOutputCollectionErrors}
+              disabled={imageFields['scaler'] && imageFields.scaler == 'External'}
+            />
+            <hr />
+            <Dependencies
+              images={images}
+              dependencies={state && state.dependencies ? state.dependencies : {}}
+              setErrors={setDependencyErrors}
+              setRequestDependencies={setDependencies}
+              mode={state ? 'Copy' : 'Create'}
+              disabled={imageFields['scaler'] && imageFields.scaler == 'External'}
+            />
+            <hr />
+            <EnvironmentVariables
+              environmentVars={state && state.env ? state.env : {}}
+              setRequestEnvironmentVars={setEnvironmentVars}
+              mode={state ? 'Copy' : 'Create'}
+            />
+            <hr />
+            <Volumes
+              volumes={state && state.volumes ? state.volumes : []}
+              setRequestVolumes={setVolumes}
+              mode={state ? 'Copy' : 'Create'}
+              setHasErrors={setVolumeErrors}
+              disabled={imageFields['scaler'] && imageFields.scaler != 'K8s'}
+            />
+            <hr />
+            <NetworkPolicies
+              policies={state && state.network_policies ? state.network_policies : {}}
+              setRequestNetworkPolicies={setNetworkPolicies}
+              mode={state ? 'Copy' : 'Create'}
+            />
+            <hr />
+            <SecurityContext
+              securityContext={state && state.security_context ? state.security_context : {}}
+              setRequestSecurityContext={setSecurityContext}
+              mode={state ? 'Copy' : 'Create'}
+              disabled={(imageFields['scaler'] && imageFields.scaler == 'External') || !userInfo || userInfo.role != 'Admin'}
+            />
+          </div>
+        </>
+      )}
       <Row className="d-flex justify-content-center">
         <Col>{createImageErrors && <AlertBanner className="m-2">{createImageErrors}</AlertBanner>}</Col>
       </Row>
@@ -268,7 +321,11 @@ const ImageCreate = () => {
           <Button className="secondary-btn" onClick={() => navigate(-1)}>
             Cancel
           </Button>
-          <Button className="ok-btn" onClick={() => handleImageCreate()}>
+          <Button
+            className="ok-btn"
+            disabled={viewMode === 'editor' && !editorParseValid}
+            onClick={() => handleImageCreate()}
+          >
             Create
           </Button>
         </Col>

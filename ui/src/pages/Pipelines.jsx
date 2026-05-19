@@ -11,12 +11,26 @@ import Title from '@components/shared/titles/Title';
 import FieldBadge from '@components/shared/badges/FieldBadge';
 import LoadingSpinner from '@components/shared/fallback/LoadingSpinner';
 import SimpleSubtitle from '@components/shared/titles/SimpleSubtitle';
+import ImagePipelineEditor from '@components/shared/inputs/code/ImagePipelineEditor';
+import FormatToggle from '@components/shared/inputs/code/FormatToggle';
 import { OverlayTipBottom, OverlayTipLeft, OverlayTipRight } from '@components/shared/overlay/tips';
 import { orderComparePipeline } from '@components/pages/files/reactions/pipelines';
 import { useAuth } from '@utilities/auth';
 import { getThoriumRole, getGroupRole } from '@utilities/role';
 import { fetchGroups } from '@utilities/fetch';
+import { PipelineChecker } from '@utilities/rules/image';
+import { pipelineToEditorObject, editorObjectToPipelineCreate, editorObjectToPipelineUpdate } from '@utilities/transforms/pipeline';
 import { createPipeline, deletePipeline, listPipelines, updatePipeline } from '@thorpi/pipelines';
+
+const pipelineChecker = new PipelineChecker();
+
+const PIPELINE_CREATE_TEMPLATE = {
+  group: '',
+  name: '',
+  order: [],
+  sla: 604800,
+  description: '',
+};
 
 const Pipelines = () => {
   const [loading, setLoading] = useState(false);
@@ -49,42 +63,13 @@ const Pipelines = () => {
     fetchPipelines();
   }, [groups]);
 
-  /**
-   * Update a Thorium pipeline
-   * @param {string} name The name of the pipeline
-   * @param {string} group The target pipeline's group
-   * @param {object} pipelineOrder Json formatted image order
-   * @param {number} pipelineSla The pipeline SLA in seconds
-   * @param {string} pipelineDescription Description of the pipeline
-   * @param {object} setUpdateError hook for setting request update errors
-   * @returns {object} async promise for pending request
-   */
-  async function handlePipelineUpdate(name, group, pipelineOrder, pipelineSla, pipelineDescription, setUpdateError) {
-    // build update request body
-    const data = {};
-    if (pipelineSla) {
-      if (!isNaN(pipelineSla) && parseInt(pipelineSla) > 0) {
-        data['sla'] = parseInt(pipelineSla);
-      } else {
-        setUpdateError('SLA must be a positive integer value');
-        return;
-      }
+  async function handlePipelineUpdate(editorObj, originalPipeline, setUpdateError) {
+    const result = editorObjectToPipelineUpdate(editorObj, originalPipeline);
+    if (!result) {
+      setUpdateError('Invalid pipeline data');
+      return;
     }
-    if (pipelineOrder) {
-      try {
-        data['order'] = JSON.parse(pipelineOrder);
-      } catch (err) {
-        setUpdateError('Image order must be valid JSON');
-        return;
-      }
-    }
-    if (pipelineDescription != '') {
-      data['description'] = pipelineDescription;
-    } else {
-      data['clear_description'] = true;
-    }
-
-    if (await updatePipeline(group, name, data, setUpdateError)) {
+    if (await updatePipeline(result.group, result.name, result.data, setUpdateError)) {
       fetchPipelines();
     }
   }
@@ -162,216 +147,218 @@ const Pipelines = () => {
     );
   };
 
-  // Get and display info about pipeline and allow editing by
-  // privileged users.
   const PipelineInfo = ({ pipeline }) => {
     const [updateError, setUpdateError] = useState('');
-    // set default pipeline
-    const [pipelineOrder, setPipelineOrder] = useState(JSON.stringify(pipeline.order, null, ''));
-    const [pipelineSla, setPipelineSla] = useState(pipeline.sla);
-    const [pipelineDescription, setPipelineDescription] = useState(pipeline.description ? pipeline.description : '');
     const [inEditMode, setInEditMode] = useState(false);
+    const [editorObj, setEditorObj] = useState(null);
+    const [format, setFormat] = useState('yaml');
+    const [parseValid, setParseValid] = useState(false);
     const pipelineTriggers = pipeline.triggers;
 
-    // get the users role within the pipeline group
     const groupRole = getGroupRole(groups[pipeline.group], userInfo.username);
     const thoriumRole = getThoriumRole(userInfo.role);
-    // user can modify if they created the pipeline or have a privileged role in Thorium
     const userCanModify =
       (((userInfo !== null && pipeline.creator == userInfo.username) || ['Manager', 'Owner'].includes(groupRole)) &&
         thoriumRole == 'Developer') ||
       thoriumRole == 'Admin';
-    // creators or group managers/owners can delete pipelines even if they are not developers
     const userCanDelete = pipeline.creator == userInfo.username || ['Manager', 'Owner'].includes(groupRole) || thoriumRole == 'Admin';
 
-    // calculate height of description field
-    let descriptionHeight = pipelineDescription.split(/\r\n|\r|\n/).length * 32;
-    if (descriptionHeight < 200) {
-      descriptionHeight = 200;
-    }
+    const enterEditMode = () => {
+      setEditorObj(pipelineToEditorObject(pipeline));
+      setParseValid(true);
+      setInEditMode(true);
+    };
+
+    const exitEditMode = () => {
+      setInEditMode(false);
+      setEditorObj(null);
+      setUpdateError('');
+    };
+
+    const handleEditorChange = (obj) => {
+      if (obj) {
+        setEditorObj(obj);
+        setParseValid(true);
+      } else {
+        setParseValid(false);
+      }
+    };
+
+    const pipelineDescription = pipeline.description ? pipeline.description : '';
+    const pipelineOrder = JSON.stringify(pipeline.order, null, '');
 
     return (
       <Form>
-        <Row>
-          <Col className="pipeline-header-col">
-            <SimpleSubtitle>
-              <b>Creator</b>
-            </SimpleSubtitle>
-          </Col>
-          <Col className="pipeline-detail-col">
-            <Badge bg="" className="bg-blue">
-              {pipeline.creator}
-            </Badge>
-          </Col>
-        </Row>
-        <Row className="mt-2">
-          <Col className="pipeline-header-col">
-            <SimpleSubtitle>
-              <b>Description</b>
-            </SimpleSubtitle>
-          </Col>
-          <Col className="pipeline-detail-col">
-            {inEditMode ? (
-              <Form.Control
-                as="textarea"
-                style={{ minHeight: `${descriptionHeight}px` }}
-                className="description-field"
-                value={pipelineDescription}
-                placeholder="describe this pipeline"
-                onChange={(e) => setPipelineDescription(String(e.target.value))}
-              />
-            ) : (
-              <MarkdownHtml remarkPlugins={[remarkGfm]}>{pipelineDescription}</MarkdownHtml>
-            )}
-          </Col>
-        </Row>
-        <Row className="mt-2">
-          <Col className="pipeline-header-col">
-            <OverlayTipRight
-              tip={`The order of images to run. Image order must be
-              formatted as a JSON array of strings and/or string arrays.`}
-            >
-              <SimpleSubtitle>
-                <b>Order</b> <FaQuestionCircle />
-              </SimpleSubtitle>
-            </OverlayTipRight>
-          </Col>
-          <Col className="pipeline-detail-col">
-            {inEditMode ? (
-              <Form.Control
-                as="textarea"
-                value={pipelineOrder}
-                placeholder="order"
-                onChange={(e) => setPipelineOrder(String(e.target.value))}
-              />
-            ) : (
-              <p>{pipelineOrder.toString()}</p>
-            )}
-          </Col>
-        </Row>
-        <Row className="mt-2">
-          <Col className="pipeline-header-col">
-            <OverlayTipRight tip={`The length of the SLA in seconds.`}>
-              <SimpleSubtitle>
-                <b>SLA</b> <FaQuestionCircle />
-              </SimpleSubtitle>
-            </OverlayTipRight>
-          </Col>
-          <Col className="pipeline-detail-col">
-            {inEditMode ? (
-              <Form.Control
-                className="pipeline-field"
-                type="text"
-                value={pipelineSla}
-                placeholder="SLA in seconds"
-                onChange={(e) => setPipelineSla(String(e.target.value))}
-              />
-            ) : (
-              <p>{pipelineSla}</p>
-            )}
-          </Col>
-        </Row>
-        <Row className="mt-2">
-          <Col className="pipeline-header-col">
-            <OverlayTipRight
-              tip={`Automatic triggers that will cause this pipeline to run.
-                Events can be configured to trigger when samples are initially uploaded or
-                upon the creation of metadata tags.`}
-            >
-              <b>Event Triggers</b> <FaQuestionCircle />
-            </OverlayTipRight>
-          </Col>
-          {Object.keys(pipelineTriggers).length == 0 && (
-            <Col className="pipeline-detail-col">
-              <FieldBadge field={'None'} color={'#7e7c7c'} />
-            </Col>
-          )}
-        </Row>
-        {Object.keys(pipelineTriggers).length > 0 &&
-          Object.keys(pipelineTriggers).map((triggerName, idx) => (
-            <div key={triggerName}>
-              <Row>
-                <Col className="trigger-indent" />
-                <Col className="trigger-field">
-                  <em>Trigger Name:</em>
+        {inEditMode ? (
+          <>
+            <Row className="mb-2">
+              <Col>
+                <FormatToggle format={format} onFormatChange={setFormat} />
+              </Col>
+            </Row>
+            <ImagePipelineEditor
+              key={format}
+              value={editorObj || {}}
+              onChange={handleEditorChange}
+              checker={pipelineChecker}
+              format={format}
+              height="400px"
+            />
+          </>
+        ) : (
+          <>
+            <Row>
+              <Col className="pipeline-header-col">
+                <SimpleSubtitle>
+                  <b>Creator</b>
+                </SimpleSubtitle>
+              </Col>
+              <Col className="pipeline-detail-col">
+                <Badge bg="" className="bg-blue">
+                  {pipeline.creator}
+                </Badge>
+              </Col>
+            </Row>
+            <Row className="mt-2">
+              <Col className="pipeline-header-col">
+                <SimpleSubtitle>
+                  <b>Description</b>
+                </SimpleSubtitle>
+              </Col>
+              <Col className="pipeline-detail-col">
+                <MarkdownHtml remarkPlugins={[remarkGfm]}>{pipelineDescription}</MarkdownHtml>
+              </Col>
+            </Row>
+            <Row className="mt-2">
+              <Col className="pipeline-header-col">
+                <OverlayTipRight
+                  tip={`The order of images to run. Image order must be
+                  formatted as a JSON array of strings and/or string arrays.`}
+                >
+                  <SimpleSubtitle>
+                    <b>Order</b> <FaQuestionCircle />
+                  </SimpleSubtitle>
+                </OverlayTipRight>
+              </Col>
+              <Col className="pipeline-detail-col">
+                <p>{pipelineOrder.toString()}</p>
+              </Col>
+            </Row>
+            <Row className="mt-2">
+              <Col className="pipeline-header-col">
+                <OverlayTipRight tip={`The length of the SLA in seconds.`}>
+                  <SimpleSubtitle>
+                    <b>SLA</b> <FaQuestionCircle />
+                  </SimpleSubtitle>
+                </OverlayTipRight>
+              </Col>
+              <Col className="pipeline-detail-col">
+                <p>{pipeline.sla}</p>
+              </Col>
+            </Row>
+            <Row className="mt-2">
+              <Col className="pipeline-header-col">
+                <OverlayTipRight
+                  tip={`Automatic triggers that will cause this pipeline to run.
+                    Events can be configured to trigger when samples are initially uploaded or
+                    upon the creation of metadata tags.`}
+                >
+                  <b>Event Triggers</b> <FaQuestionCircle />
+                </OverlayTipRight>
+              </Col>
+              {Object.keys(pipelineTriggers).length == 0 && (
+                <Col className="pipeline-detail-col">
+                  <FieldBadge field={'None'} color={'#7e7c7c'} />
                 </Col>
-                <Col className="trigger-value">
-                  <FieldBadge field={triggerName} color={'#7e7c7c'} />
-                </Col>
-              </Row>
-              {Object.keys(pipelineTriggers[triggerName]).length > 0 && Object.keys(pipelineTriggers[triggerName]).includes('Tag') && (
-                <>
-                  <Row>
-                    <Col className="trigger-indent" />
-                    <Col className="trigger-field">
-                      <em>Trigger Type:</em>
-                    </Col>
-                    <Col className="trigger-value">
-                      <FieldBadge field={'Tag'} color={'#7e7c7c'} />
-                    </Col>
-                  </Row>
-                  <Row>
-                    <Col className="trigger-indent" />
-                    <Col className="trigger-field">
-                      <em>Tag Types:</em>
-                    </Col>
-                    <Col className="trigger-value">
-                      <FieldBadge field={pipelineTriggers[triggerName]['Tag']['tag_types']} color={'#7e7c7c'} />
-                    </Col>
-                  </Row>
-                  <Row>
-                    <Col className="trigger-indent" />
-                    <Col className="trigger-field">
-                      <em>Required:</em>
-                    </Col>
-                    <Col className="trigger-value">
-                      {Object.keys(pipelineTriggers[triggerName]['Tag']['required']).length == 0 && (
-                        <FieldBadge field={'None'} color={'#7e7c7c'} />
-                      )}
-                      {Object.keys(pipelineTriggers[triggerName]['Tag']['required'])
-                        .sort()
-                        .map((key) =>
-                          pipelineTriggers[triggerName]['Tag']['required'][key].map((value) => (
-                            <FieldBadge key={key} field={`${key}: ${value}`} color={'#7e7c7c'} />
-                          )),
-                        )}
-                    </Col>
-                  </Row>
-                  <Row>
-                    <Col className="trigger-indent" />
-                    <Col className="trigger-field">
-                      <em>Not:</em>
-                    </Col>
-                    <Col className="trigger-value">
-                      {Object.keys(pipelineTriggers[triggerName]['Tag']['not']).length == 0 && (
-                        <FieldBadge field={'None'} color={'#7e7c7c'} />
-                      )}
-                      {Object.keys(pipelineTriggers[triggerName]['Tag']['not'])
-                        .sort()
-                        .map((key) =>
-                          pipelineTriggers[triggerName]['Tag']['not'][key].map((value) => (
-                            <FieldBadge key={key} field={`${key}: ${value}`} color={'#7e7c7c'} />
-                          )),
-                        )}
-                    </Col>
-                  </Row>
-                </>
               )}
-              {pipelineTriggers[triggerName] == 'NewSample' && (
-                <Row>
-                  <Col className="trigger-indent" />
-                  <Col className="trigger-field">
-                    <em>Trigger Type:</em>
-                  </Col>
-                  <Col className="trigger-value">
-                    <FieldBadge field={'NewSample'} color={'#7e7c7c'} />
-                  </Col>
-                </Row>
-              )}
-              {/* no hr for last element */}
-              {Object.keys(pipelineTriggers).length - 1 != idx && <hr className="tagshr" />}
-            </div>
-          ))}
+            </Row>
+            {Object.keys(pipelineTriggers).length > 0 &&
+              Object.keys(pipelineTriggers).map((triggerName, idx) => (
+                <div key={triggerName}>
+                  <Row>
+                    <Col className="trigger-indent" />
+                    <Col className="trigger-field">
+                      <em>Trigger Name:</em>
+                    </Col>
+                    <Col className="trigger-value">
+                      <FieldBadge field={triggerName} color={'#7e7c7c'} />
+                    </Col>
+                  </Row>
+                  {Object.keys(pipelineTriggers[triggerName]).length > 0 &&
+                    Object.keys(pipelineTriggers[triggerName]).includes('Tag') && (
+                      <>
+                        <Row>
+                          <Col className="trigger-indent" />
+                          <Col className="trigger-field">
+                            <em>Trigger Type:</em>
+                          </Col>
+                          <Col className="trigger-value">
+                            <FieldBadge field={'Tag'} color={'#7e7c7c'} />
+                          </Col>
+                        </Row>
+                        <Row>
+                          <Col className="trigger-indent" />
+                          <Col className="trigger-field">
+                            <em>Tag Types:</em>
+                          </Col>
+                          <Col className="trigger-value">
+                            <FieldBadge field={pipelineTriggers[triggerName]['Tag']['tag_types']} color={'#7e7c7c'} />
+                          </Col>
+                        </Row>
+                        <Row>
+                          <Col className="trigger-indent" />
+                          <Col className="trigger-field">
+                            <em>Required:</em>
+                          </Col>
+                          <Col className="trigger-value">
+                            {Object.keys(pipelineTriggers[triggerName]['Tag']['required']).length == 0 && (
+                              <FieldBadge field={'None'} color={'#7e7c7c'} />
+                            )}
+                            {Object.keys(pipelineTriggers[triggerName]['Tag']['required'])
+                              .sort()
+                              .map((key) =>
+                                pipelineTriggers[triggerName]['Tag']['required'][key].map((value) => (
+                                  <FieldBadge key={key} field={`${key}: ${value}`} color={'#7e7c7c'} />
+                                )),
+                              )}
+                          </Col>
+                        </Row>
+                        <Row>
+                          <Col className="trigger-indent" />
+                          <Col className="trigger-field">
+                            <em>Not:</em>
+                          </Col>
+                          <Col className="trigger-value">
+                            {Object.keys(pipelineTriggers[triggerName]['Tag']['not']).length == 0 && (
+                              <FieldBadge field={'None'} color={'#7e7c7c'} />
+                            )}
+                            {Object.keys(pipelineTriggers[triggerName]['Tag']['not'])
+                              .sort()
+                              .map((key) =>
+                                pipelineTriggers[triggerName]['Tag']['not'][key].map((value) => (
+                                  <FieldBadge key={key} field={`${key}: ${value}`} color={'#7e7c7c'} />
+                                )),
+                              )}
+                          </Col>
+                        </Row>
+                      </>
+                    )}
+                  {pipelineTriggers[triggerName] == 'NewSample' && (
+                    <Row>
+                      <Col className="trigger-indent" />
+                      <Col className="trigger-field">
+                        <em>Trigger Type:</em>
+                      </Col>
+                      <Col className="trigger-value">
+                        <FieldBadge field={'NewSample'} color={'#7e7c7c'} />
+                      </Col>
+                    </Row>
+                  )}
+                  {Object.keys(pipelineTriggers).length - 1 != idx && <hr className="tagshr" />}
+                </div>
+              ))}
+          </>
+        )}
         {userCanDelete && (
           <Row className="mt-2">
             {updateError != '' && <AlertBanner>{updateError}</AlertBanner>}
@@ -382,12 +369,12 @@ const Pipelines = () => {
                     <OverlayTipBottom
                       tip={
                         inEditMode
-                          ? `Edit this pipeline. Only Thorium admins or
+                          ? `Cancel editing this pipeline.`
+                          : `Edit this pipeline. Only Thorium admins or
                             developers with group permissions may edit pipelines.`
-                          : `Cancel editing this pipeline.`
                       }
                     >
-                      <Button className="secondary-btn me-1" onClick={() => setInEditMode(!inEditMode)}>
+                      <Button className="secondary-btn me-1" onClick={inEditMode ? exitEditMode : enterEditMode}>
                         {inEditMode ? 'Cancel' : 'Edit'}
                       </Button>
                     </OverlayTipBottom>
@@ -398,16 +385,8 @@ const Pipelines = () => {
                       >
                         <Button
                           className="ok-btn"
-                          onClick={() =>
-                            handlePipelineUpdate(
-                              pipeline.name,
-                              pipeline.group,
-                              pipelineOrder,
-                              pipelineSla,
-                              pipelineDescription,
-                              setUpdateError,
-                            )
-                          }
+                          disabled={!parseValid}
+                          onClick={() => handlePipelineUpdate(editorObj, pipeline, setUpdateError)}
                         >
                           Update
                         </Button>
@@ -425,51 +404,38 @@ const Pipelines = () => {
     );
   };
 
-  // Container for create pipeline button and modal form
   const CreatePipeline = () => {
-    const handleCloseCreateModal = () => setShowCreateModal(false);
-    const handleShowCreateModal = () => setShowCreateModal(true);
     const [showCreateModal, setShowCreateModal] = useState(false);
-    const [newPipelineName, setNewPipelineName] = useState('');
-    const [newPipelineDescription, setNewPipelineDescription] = useState('');
-    const [newPipelineSla, setNewPipelineSla] = useState('');
-    const [newPipelineOrder, setNewPipelineOrder] = useState('');
-    const [newPipelineGroup, setNewPipelineGroup] = useState('');
+    const [pipelineObj, setPipelineObj] = useState(PIPELINE_CREATE_TEMPLATE);
+    const [format, setFormat] = useState('yaml');
+    const [parseValid, setParseValid] = useState(false);
     const [createError, setCreateError] = useState('');
 
-    /**
-     * Create a new Thorium pipeline
-     * @returns {object} async promise for pipeline creation request
-     */
-    async function handlePipelineCreate() {
-      const data = {};
-      // pipeline name, order and group are required to create a pipeline
-      if (newPipelineName && newPipelineOrder && newPipelineGroup) {
-        data['name'] = newPipelineName;
-        if (newPipelineDescription) {
-          data['description'] = newPipelineDescription;
-        }
-        // add optional SLA arguement to request body
-        if (newPipelineSla != '') {
-          if (!isNaN(newPipelineSla) && parseInt(newPipelineSla) > 0) {
-            data['sla'] = parseInt(newPipelineSla);
-          } else {
-            setCreateError('SLA must be a positive integer value');
-            return;
-          }
-        }
-        try {
-          data['order'] = JSON.parse(newPipelineOrder);
-        } catch (err) {
-          setCreateError('Image order must be valid JSON');
-          return;
-        }
-        data['group'] = newPipelineGroup;
-        if (await createPipeline(data, setCreateError)) {
-          fetchPipelines();
-        }
+    const handleCloseCreateModal = () => {
+      setShowCreateModal(false);
+      setCreateError('');
+      setPipelineObj(PIPELINE_CREATE_TEMPLATE);
+      setParseValid(false);
+    };
+
+    const handleEditorChange = (obj) => {
+      if (obj) {
+        setPipelineObj(obj);
+        setParseValid(true);
       } else {
-        setCreateError('Pipeline name, group and order must be specified');
+        setParseValid(false);
+      }
+    };
+
+    async function handlePipelineCreate() {
+      const data = editorObjectToPipelineCreate(pipelineObj);
+      if (!data) {
+        setCreateError('Pipeline group, name, and order are required');
+        return;
+      }
+      if (await createPipeline(data, setCreateError)) {
+        handleCloseCreateModal();
+        fetchPipelines();
       }
     }
 
@@ -483,76 +449,30 @@ const Pipelines = () => {
     return (
       <Fragment>
         <OverlayTipLeft tip={CreatePipelineTipMessage}>
-          <Button className="ok-btn" onClick={handleShowCreateModal} disabled={!canCreatePipeline}>
+          <Button className="ok-btn" onClick={() => setShowCreateModal(true)} disabled={!canCreatePipeline}>
             +
           </Button>
         </OverlayTipLeft>
-        <Modal show={showCreateModal} onHide={handleCloseCreateModal} backdrop="static" keyboard={false}>
+        <Modal show={showCreateModal} onHide={handleCloseCreateModal} backdrop="static" keyboard={false} size="lg">
           <Modal.Header closeButton>
             <Modal.Title>Create New Pipeline</Modal.Title>
           </Modal.Header>
           <Modal.Body>
-            <Form.Group className="mb-4">
-              <Form.Label>Name</Form.Label>
-              <Form.Control
-                type="text"
-                value={newPipelineName}
-                placeholder="name"
-                onChange={(e) => setNewPipelineName(String(e.target.value))}
-              />
-              <Form.Text className="text-muted">Pipeline name can contain alpha-numeric characters and dashes.</Form.Text>
-            </Form.Group>
-            <Form.Group className="mb-4">
-              <Form.Label>Description</Form.Label>
-              <Form.Control
-                as="textarea"
-                className="description-field"
-                value={newPipelineDescription}
-                placeholder="describe this pipeline"
-                onChange={(e) => {
-                  setNewPipelineDescription(String(e.target.value));
-                }}
-              />
-              <Form.Text className="text-muted">{`Describe this pipeline's functionality and intended use.`}</Form.Text>
-            </Form.Group>
-            <Form.Group className="mb-4 sla">
-              <Form.Label>SLA</Form.Label>
-              <Form.Control
-                type="text"
-                value={newPipelineSla}
-                placeholder="640800"
-                onChange={(e) => setNewPipelineSla(String(e.target.value))}
-              />
-              <Form.Text className="text-muted">Service level agreement in Seconds.</Form.Text>
-            </Form.Group>
-            <Form.Group className="mb-4">
-              <Form.Label>Image Order</Form.Label>
-              <Form.Control
-                type="text"
-                value={newPipelineOrder}
-                placeholder='["tool1", ["parallel1", "parallel2"], "tool4"]'
-                onChange={(e) => setNewPipelineOrder(String(e.target.value))}
-              />
-              <Form.Text className="text-muted">Format order as a JSON array of strings and/or string arrays.</Form.Text>
-            </Form.Group>
-            <Form.Group className="mb-4">
-              <Form.Label>Group</Form.Label>
-              <Form.Select onChange={(e) => setNewPipelineGroup(String(e.target.value))}>
-                <option value="">Select a group</option>
-                {Object.keys(groups)
-                  .sort()
-                  .map((group) => (
-                    <option key={group} value={group}>
-                      {group}
-                    </option>
-                  ))}
-              </Form.Select>
-              <Form.Text className="text-muted">Existing group that can access pipeline.</Form.Text>
-            </Form.Group>
+            <div className="mb-3">
+              <FormatToggle format={format} onFormatChange={setFormat} />
+            </div>
+            <ImagePipelineEditor
+              key={format}
+              value={pipelineObj}
+              onChange={handleEditorChange}
+              checker={pipelineChecker}
+              format={format}
+              height="350px"
+            />
             {createError != '' && <AlertBanner className="mt-4">{createError}</AlertBanner>}
           </Modal.Body>
           <Modal.Footer className="d-flex justify-content-center">
-            <Button className="ok-btn" onClick={() => handlePipelineCreate()}>
+            <Button className="ok-btn" disabled={!parseValid} onClick={() => handlePipelineCreate()}>
               Create
             </Button>
           </Modal.Footer>

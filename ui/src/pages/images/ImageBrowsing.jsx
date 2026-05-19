@@ -18,11 +18,18 @@ import {
 import Page from '@components/pages/Page';
 import Title from '@components/shared/titles/Title';
 import LoadingSpinner from '@components/shared/fallback/LoadingSpinner';
+import ImagePipelineEditor from '@components/shared/inputs/code/ImagePipelineEditor';
+import FormatToggle from '@components/shared/inputs/code/FormatToggle';
+import ViewModeToggle from '@components/shared/inputs/code/ViewModeToggle';
 import { OverlayTipRight, OverlayTipLeft, OverlayTipBottom } from '@components/shared/overlay/tips';
 import { getGroupRole, getThoriumRole } from '@utilities/role';
 import { fetchImages, fetchSingleImage, fetchGroups } from '@utilities/fetch';
 import { useAuth } from '@utilities/auth';
+import { ImageChecker } from '@utilities/rules/image';
+import { imageToEditorObject, editorObjectToImageUpdate } from '@utilities/transforms/image';
 import { deleteImage, updateImage } from '@thorpi/images';
+
+const imageChecker = new ImageChecker();
 
 const ImageBrowsing = () => {
   const [loading, setLoading] = useState(false);
@@ -142,6 +149,35 @@ const ImageInfo = ({ images, image, groups, setImages }) => {
   const [networkPolicies, setNetworkPolicies] = useState([]);
   const { userInfo, checkCookie } = useAuth();
 
+  // Editor mode state
+  const [viewMode, setViewMode] = useState('form');
+  const [editorObj, setEditorObj] = useState(null);
+  const [editorFormat, setEditorFormat] = useState('yaml');
+  const [editorParseValid, setEditorParseValid] = useState(false);
+
+  const handleViewModeChange = (mode) => {
+    if (mode === viewMode) return;
+    if (mode === 'editor') {
+      setEditorObj(imageToEditorObject(currentImage));
+      setEditorParseValid(true);
+      setViewMode('editor');
+    } else {
+      if (window.confirm('Switching to form view will reset any unsaved changes from the editor. Continue?')) {
+        setViewMode('form');
+        setEditorObj(null);
+      }
+    }
+  };
+
+  const handleEditorChange = (obj) => {
+    if (obj) {
+      setEditorObj(obj);
+      setEditorParseValid(true);
+    } else {
+      setEditorParseValid(false);
+    }
+  };
+
   const thoriumRole = getThoriumRole(userInfo.role);
   // get the users role within the image group
   const groupRole = getGroupRole(groups[image.group], userInfo.username);
@@ -160,74 +196,70 @@ const ImageInfo = ({ images, image, groups, setImages }) => {
     }
   }, [stringFieldsError, resourceError, argError, volumesFieldsError, dependenciesFieldsError, outputCollectionError]);
 
-  // patches image fields
   const sendFieldsUpdate = async (image) => {
+    // Editor mode: submit from editor object
+    if (viewMode === 'editor') {
+      const result = editorObjectToImageUpdate(editorObj, currentImage);
+      if (!result) {
+        setUpdateError('Invalid image data');
+        return;
+      }
+      if (await updateImage(result.group, result.name, result.data, setUpdateError)) {
+        fetchSingleImage(image, setCurrentImage, setLoading);
+        setEditMode(false);
+        setViewMode('form');
+        setEditorObj(null);
+        setUpdateError('');
+      }
+      return;
+    }
+
+    // Form mode: existing behavior
     let newFields = {};
 
-    // check if there are fields that are missing or invalid
-    // this is used to put an alert by the create button
-    // so that users aren't confused why their image is not updating
-    // when there are errors
     if (stringFieldsError || resourceError || argError || volumesFieldsError || dependenciesFieldsError || outputCollectionError) {
       setUpdateError('Please resolve missing fields or invalid entries');
       return;
     } else setUpdateError('');
 
-    //        STRING FIELDS
     if (Object.keys(imageFields).length) {
       newFields = { ...imageFields };
     }
-    //        RESOURCES
     if (Object.keys(resources).length) {
       newFields['resources'] = resources;
     }
-    //        ARGUMENTS
     if (Object.keys(args).length) {
       newFields['args'] = args;
     }
-    //        VOLUMES
     if (volumes.remove_volumes.length > 0) {
       newFields = { ...newFields, remove_volumes: volumes.remove_volumes };
     }
     if (volumes.add_volumes.length > 0) {
       newFields = { ...newFields, add_volumes: volumes.add_volumes };
     }
-
-    //        DEPENDENCIES
     if (Object.keys(dependencies).length) {
       const tempdepend = { dependencies: dependencies };
       newFields = { ...newFields, ...tempdepend };
     }
-    //        OUTPUT COLLECTION
     if (Object.keys(outputCollection).length) {
       const output = { output_collection: outputCollection };
       newFields = { ...newFields, ...output };
     }
-    // Only Admins can set security_context values, so don't include request for other roles
     if (Object.keys(securityContext).length && userInfo && userInfo.role == 'Admin') {
       const tempSecContext = { security_context: securityContext };
       newFields = { ...newFields, ...tempSecContext };
     }
-    //        ENVIRONMENT VARIABLES
     if (Object.keys(environmentVars).length) {
       newFields = { ...newFields, ...environmentVars };
     }
-    //        NETWORK POLICIES
-    // if network policies were not modified, they'll still be an array,
-    // so only update if network policies are not an array
     if (!Array.isArray(networkPolicies)) {
       newFields['network_policies'] = networkPolicies;
     }
 
-    // if there exists data to patch
     if (Object.keys(newFields).length) {
-      // patch the image using API if successful
       if (await updateImage(image.group, image.name, newFields, setUpdateError)) {
-        // current image info page with updated image fields
         fetchSingleImage(image, setCurrentImage, setLoading);
-        // go back to non editing mode
         setEditMode(false);
-        // clear errors when exiting edit mode
         setUpdateError('');
       }
     }
@@ -302,66 +334,93 @@ const ImageInfo = ({ images, image, groups, setImages }) => {
 
   return (
     <Form>
-      <Fields
-        image={currentImage}
-        setRequestImageFields={setImageFields}
-        showErrors={true}
-        setHasErrors={setStringFieldsError}
-        mode={inEditMode ? 'Edit' : 'View'}
-      />
-      <Resources
-        resources={currentImage.resources ? currentImage.resources : {}}
-        setRequestResources={setResources}
-        setHasErrors={setResourceError}
-        mode={inEditMode ? 'Edit' : 'View'}
-      />
-      <Arguments
-        args={currentImage.args ? currentImage.args : {}}
-        setRequestArguments={setArgs}
-        setHasErrors={setArgError}
-        mode={inEditMode ? 'Edit' : 'View'}
-      />
-      <OutputCollection
-        outputCollection={currentImage.output_collection}
-        setRequestOutputCollection={setOutputCollection}
-        groups={userInfo && userInfo.groups ? userInfo.groups : []}
-        mode={inEditMode ? 'Edit' : 'View'}
-        setHasErrors={setOutputCollectionError}
-        disabled={currentImage.scaler == 'External'}
-      />
-      <Dependencies
-        dependencies={currentImage.dependencies ? currentImage.dependencies : {}}
-        images={imageNames}
-        mode={inEditMode ? 'Edit' : 'View'}
-        setRequestDependencies={setDependencies}
-        setErrors={setDependenciesFieldError}
-        disabled={currentImage.scaler == 'External'}
-      />
-      <EnvironmentVariables
-        environmentVars={currentImage.env ? currentImage.env : {}}
-        setRequestEnvironmentVars={setEnvironmentVars}
-        mode={inEditMode ? 'Edit' : 'View'}
-      />
-      <Volumes
-        volumes={currentImage.volumes}
-        setRequestVolumes={setVolumes}
-        mode={inEditMode ? 'Edit' : 'View'}
-        setHasErrors={setVolumeFieldsError}
-        disabled={currentImage.scaler != 'K8s'}
-      />
-      {currentImage['scaler'] == 'K8s' && (
-        <NetworkPolicies
-          policies={currentImage.network_policies ? currentImage.network_policies : []}
-          setRequestNetworkPolicies={setNetworkPolicies}
-          mode={inEditMode ? 'Edit' : 'View'}
-        />
+      {inEditMode && (
+        <Row className="mb-3">
+          <Col className="d-flex justify-content-center">
+            <ViewModeToggle viewMode={viewMode} onViewModeChange={handleViewModeChange} />
+          </Col>
+        </Row>
       )}
-      <SecurityContext
-        securityContext={currentImage.security_context ? currentImage.security_context : {}}
-        setRequestSecurityContext={setSecurityContext}
-        mode={inEditMode && userInfo.role == 'Admin' ? 'Edit' : 'View'}
-        disabled={(Object.keys(imageFields).includes('scaler') && imageFields.scaler == 'External') || userInfo.role != 'Admin'}
-      />
+      {inEditMode && viewMode === 'editor' ? (
+        <>
+          <Row className="mb-2">
+            <Col>
+              <FormatToggle format={editorFormat} onFormatChange={setEditorFormat} />
+            </Col>
+          </Row>
+          <ImagePipelineEditor
+            key={editorFormat}
+            value={editorObj || {}}
+            onChange={handleEditorChange}
+            checker={imageChecker}
+            format={editorFormat}
+            height="600px"
+          />
+        </>
+      ) : (
+        <>
+          <Fields
+            image={currentImage}
+            setRequestImageFields={setImageFields}
+            showErrors={true}
+            setHasErrors={setStringFieldsError}
+            mode={inEditMode ? 'Edit' : 'View'}
+          />
+          <Resources
+            resources={currentImage.resources ? currentImage.resources : {}}
+            setRequestResources={setResources}
+            setHasErrors={setResourceError}
+            mode={inEditMode ? 'Edit' : 'View'}
+          />
+          <Arguments
+            args={currentImage.args ? currentImage.args : {}}
+            setRequestArguments={setArgs}
+            setHasErrors={setArgError}
+            mode={inEditMode ? 'Edit' : 'View'}
+          />
+          <OutputCollection
+            outputCollection={currentImage.output_collection}
+            setRequestOutputCollection={setOutputCollection}
+            groups={userInfo && userInfo.groups ? userInfo.groups : []}
+            mode={inEditMode ? 'Edit' : 'View'}
+            setHasErrors={setOutputCollectionError}
+            disabled={currentImage.scaler == 'External'}
+          />
+          <Dependencies
+            dependencies={currentImage.dependencies ? currentImage.dependencies : {}}
+            images={imageNames}
+            mode={inEditMode ? 'Edit' : 'View'}
+            setRequestDependencies={setDependencies}
+            setErrors={setDependenciesFieldError}
+            disabled={currentImage.scaler == 'External'}
+          />
+          <EnvironmentVariables
+            environmentVars={currentImage.env ? currentImage.env : {}}
+            setRequestEnvironmentVars={setEnvironmentVars}
+            mode={inEditMode ? 'Edit' : 'View'}
+          />
+          <Volumes
+            volumes={currentImage.volumes}
+            setRequestVolumes={setVolumes}
+            mode={inEditMode ? 'Edit' : 'View'}
+            setHasErrors={setVolumeFieldsError}
+            disabled={currentImage.scaler != 'K8s'}
+          />
+          {currentImage['scaler'] == 'K8s' && (
+            <NetworkPolicies
+              policies={currentImage.network_policies ? currentImage.network_policies : []}
+              setRequestNetworkPolicies={setNetworkPolicies}
+              mode={inEditMode ? 'Edit' : 'View'}
+            />
+          )}
+          <SecurityContext
+            securityContext={currentImage.security_context ? currentImage.security_context : {}}
+            setRequestSecurityContext={setSecurityContext}
+            mode={inEditMode && userInfo.role == 'Admin' ? 'Edit' : 'View'}
+            disabled={(Object.keys(imageFields).includes('scaler') && imageFields.scaler == 'External') || userInfo.role != 'Admin'}
+          />
+        </>
+      )}
       <Row className="d-flex justify-content-center">
         <Col>{updateError && <AlertBanner className="m-2">{updateError}</AlertBanner>}</Col>
       </Row>
@@ -387,7 +446,8 @@ const ImageInfo = ({ images, image, groups, setImages }) => {
                   className="primary-btn"
                   onClick={() => {
                     setEditMode(false);
-                    // clear errors when exiting edit mode
+                    setViewMode('form');
+                    setEditorObj(null);
                     setUpdateError('');
                   }}
                 >
@@ -397,7 +457,11 @@ const ImageInfo = ({ images, image, groups, setImages }) => {
             )}
             {userCanModify && inEditMode && (
               <OverlayTipRight tip={`Submit pending updates.`}>
-                <Button className="ok-btn" onClick={() => sendFieldsUpdate(image)}>
+                <Button
+                  className="ok-btn"
+                  disabled={viewMode === 'editor' && !editorParseValid}
+                  onClick={() => sendFieldsUpdate(image)}
+                >
                   Update
                 </Button>
               </OverlayTipRight>

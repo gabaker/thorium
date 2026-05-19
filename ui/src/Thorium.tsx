@@ -49,6 +49,7 @@ const SystemSettings = lazy(() => import('./pages/system/SystemSettings'));
 const SigmaTest = lazy(() => import('./pages/test/SigmaTest'));
 const YaraTest = lazy(() => import('./pages/test/YaraTest'));
 const AlertBannerTest = lazy(() => import('./pages/test/AlertBannerTest'));
+const ImagePipelineTest = lazy(() => import('./pages/test/ImagePipelineTest'));
 const IncidentSummary = lazy(() => import('./dashboards/IncidentSummary'));
 
 // Data loading ui empty for now
@@ -96,6 +97,7 @@ const Resources = () => (
     <Route path="/test/sigma" element={<PageWrapper Contents={SigmaTest} />} />
     <Route path="/test/yara" element={<PageWrapper Contents={YaraTest} />} />
     <Route path="/test/alerts" element={<PageWrapper Contents={AlertBannerTest} />} />
+    <Route path="/test/image-pipeline" element={<PageWrapper Contents={ImagePipelineTest} />} />
     <Route path="/auth" element={<PageWrapper auth={false} Contents={Login} />} />
     <Route path="/" element={<PageWrapper Contents={Home} />} />
     <Route path="*" element={<PageWrapper Contents={NotFound} />} />
