@@ -2,8 +2,8 @@ import React from 'react';
 import { Button, Col, Form, Row } from 'react-bootstrap';
 import Subtitle from '@components/shared/titles/Subtitle';
 import UploadDropzone from '@components/shared/UploadDropzone';
-import { TagSelect } from '@components/tags/TagSelect';
-import SelectInputArray from '@components/shared/selectable/SelectInputArray';
+import { TagSelect } from '@components/shared/inputs/tags/TagSelect';
+import SelectInputArray from '@components/shared/inputs/selectable/SelectInputArray';
 import { OverlayTipTop } from '@components/shared/overlay/tips';
 import SelectPipelines from '../reactions/SelectPipelines';
 import ProgressBarContainer from './ProgressBarContainer';
@@ -96,7 +96,7 @@ const UploadForm: React.FC = () => {
         </Col>
         <Col className={disabledClass + 'upload-field'}>
           <Form.Control
-            className="description-field"
+            style={{ minHeight: '200px' }}
             as="textarea"
             placeholder="Add Description"
             value={description}
@@ -215,7 +215,7 @@ const UploadForm: React.FC = () => {
               <Row className="d-flex justify-content-center upload-btn">
                 <Col className="upload-field">
                   <center>
-                    <Button className="ok-btn" onClick={handleUpload}>
+                    <Button className="ok-btn" onClick={() => void handleUpload()}>
                       Upload
                     </Button>
                   </center>

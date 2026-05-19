@@ -10,7 +10,7 @@ import LoadingSpinner from '@components/shared/fallback/LoadingSpinner';
 import { useAuth } from '@utilities/auth';
 import { getThoriumRole } from '@utilities/role';
 import { deleteUser, listUsers, updateSingleUser } from '@thorpi/users';
-import { RoleKey, ThoriumRole, UserInfo } from '@models/users';
+import { RoleKey, UserInfo } from '@models/users';
 
 type SingleUserInfoProps = {
   user: UserInfo;
@@ -76,8 +76,8 @@ const ManipulateUserButtons: React.FC<ManipulateUserButtonsProps> = ({ impersona
   return (
     <ButtonGroup>
       <OverlayTipLeft
-        tip={`Admins have the ability to change user's role
-        to Admin, User, or Developer.`}
+        tip={`Admins have the ability to change a user's role
+        to Admin, Analyst, Developer, or User.`}
       >
         <EditRoles role={role} username={username} user={user} setRole={setSingleUserRole} />
       </OverlayTipLeft>
@@ -126,11 +126,13 @@ const ManipulateUserButtons: React.FC<ManipulateUserButtonsProps> = ({ impersona
         <Modal.Footer className="d-flex justify-content-center">
           <Button
             className="danger-btn"
-            onClick={async () => {
-              if (await deleteUser(username, setDeleteError)) {
-                handleCloseDeleteModal();
-              }
-            }}
+            onClick={() =>
+              void deleteUser(username, setDeleteError).then((success) => {
+                if (success) {
+                  handleCloseDeleteModal();
+                }
+              })
+            }
           >
             Confirm
           </Button>
@@ -180,7 +182,7 @@ const EditRoles: React.FC<EditRolesProps> = ({ role, username, user, setRole }) 
   const updateRole = async () => {
     let roleInfo = {};
     // if role is developer send configuration changes
-    if (editRole == 'Developer') {
+    if (editRole == RoleKey.Developer) {
       roleInfo = {
         role: {
           Developer: {
@@ -250,7 +252,7 @@ const EditRoles: React.FC<EditRolesProps> = ({ role, username, user, setRole }) 
                       id="collect-logs"
                       label=""
                       checked={newBareMetal}
-                      onChange={(e) => setNewBareMetal(!newBareMetal)}
+                      onChange={() => setNewBareMetal(!newBareMetal)}
                     />
                   </h6>
                 </Form.Group>
@@ -261,13 +263,7 @@ const EditRoles: React.FC<EditRolesProps> = ({ role, username, user, setRole }) 
                     <b>Windows</b>
                   </Form.Label>
                   <h6>
-                    <Form.Check
-                      type="switch"
-                      id="collect-logs"
-                      label=""
-                      checked={newWindows}
-                      onChange={(e) => setNewWindows(!newWindows)}
-                    />
+                    <Form.Check type="switch" id="collect-logs" label="" checked={newWindows} onChange={() => setNewWindows(!newWindows)} />
                   </h6>
                 </Form.Group>
               </Col>
@@ -282,7 +278,7 @@ const EditRoles: React.FC<EditRolesProps> = ({ role, username, user, setRole }) 
                       id="collect-logs"
                       label=""
                       checked={newExternal}
-                      onChange={(e) => setNewExternal(!newExternal)}
+                      onChange={() => setNewExternal(!newExternal)}
                     />
                   </h6>
                 </Form.Group>
@@ -292,7 +288,7 @@ const EditRoles: React.FC<EditRolesProps> = ({ role, username, user, setRole }) 
           {updateRoleError != '' && updateRoleError != 'Successful' && <AlertBanner>{updateRoleError}</AlertBanner>}
         </Modal.Body>
         <Modal.Footer className="d-flex justify-content-center">
-          <Button className="ok-btn" disabled={role == editRole && role != RoleKey.Developer} onClick={() => updateRole()}>
+          <Button className="ok-btn" disabled={role == editRole && role != RoleKey.Developer} onClick={() => void updateRole()}>
             Update
           </Button>
         </Modal.Footer>
@@ -310,7 +306,7 @@ const UserBrowsing = () => {
   // get user details
   const getUserInfo = async () => {
     setLoading(true);
-    const reqUsers = await listUsers(checkCookie, true);
+    const reqUsers = (await listUsers(() => void checkCookie(), true)) as UserInfo[] | null;
     if (reqUsers) {
       setUsers(reqUsers);
     }
@@ -319,7 +315,7 @@ const UserBrowsing = () => {
 
   // need user info to validate creator permissions
   useEffect(() => {
-    getUserInfo();
+    void getUserInfo();
   }, []);
 
   return (
@@ -334,7 +330,9 @@ const UserBrowsing = () => {
         {users.length > 0 &&
           users
             .sort((a, b) => a.username.localeCompare(b.username))
-            .map((user) => <SingleUserInfo key={user.username} user={user} impersonate={impersonate} />)}
+            .map((user) => (
+              <SingleUserInfo key={user.username} user={user} impersonate={(token, expires) => void impersonate(token, expires)} />
+            ))}
       </Row>
     </Page>
   );

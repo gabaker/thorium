@@ -12,7 +12,7 @@ import EntityList from '@entities/browsing/EntityList';
 import BrowsingFilters from '@entities/browsing/filters/BrowsingFilters';
 import { useAuth } from '@utilities/auth';
 import { search } from '@thorpi/search';
-import { SearchFilters, ElasticIndex, Filters, FilterTypes } from '@models/search';
+import { SearchFilters, ElasticIndex, ElasticDoc, Filters, FilterTypes } from '@models/search';
 import { scaling } from '@styles';
 
 // get hash of a file from result ID
@@ -114,7 +114,7 @@ const SearchResultsHeaders = () => {
 };
 
 interface SearchResultItemProps {
-  result: any;
+  result: ElasticDoc;
   idx: number;
 }
 
@@ -137,7 +137,7 @@ const SearchResultItem: React.FC<SearchResultItemProps> = ({ result, idx }) => {
               <Row key={`${getSha256(result.id)}_${idx}_${key}`}>
                 <Col>
                   <span>
-                    {key}: {highlightResult(result.highlight[key])}
+                    {key}: {highlightResult(String(result.highlight?.[key]))}
                   </span>
                 </Col>
               </Row>
@@ -154,7 +154,7 @@ const getSearchResults = async (
   filters: Filters,
   setSearchError: (error: string) => void,
   cursor: string | null,
-): Promise<{ entitiesList: any[]; entitiesCursor: string | null }> => {
+): Promise<{ entitiesList: ElasticDoc[]; entitiesCursor: string | null }> => {
   if (query !== '') {
     // get files list from API
     const { entityList, entityCursor } = await search(
@@ -265,7 +265,6 @@ const Search = () => {
     setFilters(pendingSearchFilters);
   };
 
-  // eslint-disable-next-line react-hooks/exhaustive-deps -- debounce: only re-run when query changes
   useEffect(() => {
     const handleSetQuery = setTimeout(() => {
       setDebouncedQuery(query);
@@ -285,7 +284,6 @@ const Search = () => {
     return () => clearTimeout(handleSetQuery);
   }, [query]);
 
-  // eslint-disable-next-line react-hooks/exhaustive-deps -- run once on mount
   useEffect(() => {
     readURLSearchParams();
     setSearching(false);
@@ -299,12 +297,12 @@ const Search = () => {
             type="text"
             value={query}
             placeholder="Search data in Thorium"
-            onChange={(e) => {
+            onChange={(e: React.ChangeEvent<HTMLInputElement>) => {
               setQuery(String(e.target.value));
               e.preventDefault();
             }}
-            onKeyDown={(e) => {
-              e.key === 'Enter' && e.preventDefault();
+            onKeyDown={(e: React.KeyboardEvent<HTMLInputElement>) => {
+              if (e.key === 'Enter') e.preventDefault();
             }}
           />
           <IndexSelect index={selectedIndex} onChange={updateSelectedIndex} />
@@ -322,7 +320,7 @@ const Search = () => {
           <EntityList
             type="Results"
             entityHeaders={<SearchResultsHeaders />}
-            displayEntity={(result, idx) => <SearchResultItem result={result} idx={idx} />}
+            displayEntity={(result, idx) => <SearchResultItem result={result as ElasticDoc} idx={idx} />}
             filters={filters}
             fetchEntities={(filters, cursor) => getSearchResults(debouncedQuery, indexes, filters, setSearchError, cursor)}
             setLoading={setSearching}

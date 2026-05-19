@@ -1,87 +1,114 @@
 import * as THREE from 'three';
-import FileSVG from '@assets/icons/file.svg?raw';
-import FileSearchSVG from '@assets/icons/file-add.svg?raw';
-import TagSVG from '@assets/icons/tag.svg?raw';
-import TagSearchSVG from '@assets/icons/tag-add.svg?raw';
-import RepoSVG from '@assets/icons/git.svg?raw';
-import VendorSVG from '@assets/icons/vendor.svg?raw';
-import VendorSearchSVG from '@assets/icons/vendor-add.svg?raw';
-import DeviceSVG from '@assets/icons/device.svg?raw';
-import CollectionSVG from '@assets/icons/collection.svg?raw';
-import FileSystemSVG from '@assets/icons/filesystem.svg?raw';
-import FolderSVG from '@assets/icons/folder.svg?raw';
-import FolderSearchSVG from '@assets/icons/folder-add.svg?raw';
-import OtherSVG from '@assets/icons/other.svg?raw';
 
 // project imports
-import type { NodeType, VisualState } from './types';
+import CrabSVG from '@assets/icons/crab.svg?raw';
+import CollectionSVG from '@assets/icons/collection.svg?raw';
+import CollectionGrowableSVG from '@assets/icons/collection-add.svg?raw';
+import DeviceSVG from '@assets/icons/device.svg?raw';
+import DeviceGrowableSVG from '@assets/icons/device-add.svg?raw';
+import FileSVG from '@assets/icons/file.svg?raw';
+import FileGrowableSVG from '@assets/icons/file-add.svg?raw';
+import FileSystemSVG from '@assets/icons/filesystem.svg?raw';
+import FileSystemGrowableSVG from '@assets/icons/filesystem-add.svg?raw';
+import FolderSVG from '@assets/icons/folder.svg?raw';
+import FolderGrowableSVG from '@assets/icons/folder-add.svg?raw';
+import RepoSVG from '@assets/icons/git.svg?raw';
+import RepoGrowableSVG from '@assets/icons/git-add.svg?raw';
+import NetworkConnectionSVG from '@assets/icons/network-connection.svg?raw';
+import NetworkConnectionGrowableSVG from '@assets/icons/network-connection-add.svg?raw';
+import OtherSVG from '@assets/icons/other.svg?raw';
+import OtherGrowableSVG from '@assets/icons/other-add.svg?raw';
+import ProcessTreeSVG from '@assets/icons/process-tree.svg?raw';
+import ProcessTreeGrowableSVG from '@assets/icons/process-tree-add.svg?raw';
+import ProcessSVG from '@assets/icons/process.svg?raw';
+import ProcessGrowableSVG from '@assets/icons/process-add.svg?raw';
+import SigmaSVG from '@assets/icons/sigma.svg?raw';
+import SigmaGrowableSVG from '@assets/icons/sigma-add.svg?raw';
+import TagGrowableSVG from '@assets/icons/tag-add.svg?raw';
+import TagSVG from '@assets/icons/tag.svg?raw';
+import VendorGrowableSVG from '@assets/icons/vendor-add.svg?raw';
+import VendorSVG from '@assets/icons/vendor.svg?raw';
+import { VisualState } from './types';
+import { NodeType } from '@models/trees';
+
+const LIGHT_DARKEN_FACTOR = 0.5;
+
+const darkenHex = (hex: string, factor: number): string => {
+  const r = Math.round(parseInt(hex.slice(1, 3), 16) * factor);
+  const g = Math.round(parseInt(hex.slice(3, 5), 16) * factor);
+  const b = Math.round(parseInt(hex.slice(5, 7), 16) * factor);
+  return `#${r.toString(16).padStart(2, '0')}${g.toString(16).padStart(2, '0')}${b.toString(16).padStart(2, '0')}`;
+};
+
+let cachedIsLight: boolean | null = null;
+
+const isLightTheme = (): boolean => {
+  if (cachedIsLight === null) {
+    const theme = document.getElementById('root')?.getAttribute('theme') ?? '';
+    cachedIsLight = theme === 'Light' || theme === 'Crab';
+  }
+  return cachedIsLight;
+};
+
+// default node state colors
+const InitialNodeColor = '#00998C';
+const GrowableNodeColor = '#64cc66';
+// node type colors
+const CollectionColor = '#8f30b8';
+const DeviceColor = '#ed9624';
+const FileColor = '#f1d592';
+const FileSystemColor = '#8f30b8';
+const FolderColor = '#D2B48C';
+const NetworkConnectionColor = '#acc22e';
+const OtherColor = '#cacfca';
+const RepoColor = '#f03c2e';
+const TagColor = '#427d8c';
+const RuleColor = '#c60d00';
+const VendorColor = '#8f30b8';
+const WindowsProcessColor = '#fa8072';
+const WindowsProcessTreeColor = '#808000';
 
 const NODE_COLORS: Record<NodeType, Record<VisualState, string>> = {
-  file: { basic: '#f1d592', growable: '#64cc66', initial: '#00998C' },
-  repo: { basic: '#f03c2e', growable: '#64cc66', initial: '#00998C' },
-  tag: { basic: '#427d8c', growable: '#64cc66', initial: '#00998C' },
-  device: { basic: '#ed9624', growable: '#64cc66', initial: '#00998C' },
-  vendor: { basic: '#8f30b8', growable: '#64cc66', initial: '#00998C' },
-  collection: { basic: '#8f30b8', growable: '#64cc66', initial: '#00998C' },
-  filesystem: { basic: '#8f30b8', growable: '#64cc66', initial: '#00998C' },
-  folder: { basic: '#f1d592', growable: '#64cc66', initial: '#00998C' },
-  other: { basic: '#cacfca', growable: '#64cc66', initial: '#00998C' },
+  Collection: { basic: CollectionColor, growable: GrowableNodeColor, initial: InitialNodeColor },
+  Device: { basic: DeviceColor, growable: GrowableNodeColor, initial: InitialNodeColor },
+  File: { basic: FileColor, growable: GrowableNodeColor, initial: InitialNodeColor },
+  FileSystem: { basic: FileSystemColor, growable: GrowableNodeColor, initial: InitialNodeColor },
+  Folder: { basic: FolderColor, growable: GrowableNodeColor, initial: InitialNodeColor },
+  NetworkConnection: { basic: NetworkConnectionColor, growable: GrowableNodeColor, initial: InitialNodeColor },
+  Other: { basic: OtherColor, growable: GrowableNodeColor, initial: InitialNodeColor },
+  Repo: { basic: RepoColor, growable: GrowableNodeColor, initial: InitialNodeColor },
+  SigmaRule: { basic: RuleColor, growable: GrowableNodeColor, initial: InitialNodeColor },
+  Tag: { basic: TagColor, growable: GrowableNodeColor, initial: InitialNodeColor },
+  Vendor: { basic: VendorColor, growable: GrowableNodeColor, initial: InitialNodeColor },
+  WindowsProcess: { basic: WindowsProcessColor, growable: GrowableNodeColor, initial: InitialNodeColor },
+  WindowsProcessTree: { basic: WindowsProcessTreeColor, growable: GrowableNodeColor, initial: InitialNodeColor },
 };
 
 export const getNodeColor = (nodeType: NodeType, visualState: VisualState): string => {
-  return NODE_COLORS[nodeType]?.[visualState] ?? NODE_COLORS.other.basic;
+  const color = NODE_COLORS[nodeType]?.[visualState] ?? NODE_COLORS.Other.basic;
+  return isLightTheme() ? darkenHex(color, LIGHT_DARKEN_FACTOR) : color;
 };
 
-const SVG_MAP: Record<NodeType, Record<VisualState, string>> = {
-  file: {
-    basic: FileSVG.replace('REPLACEME', 'f1d592'),
-    growable: FileSearchSVG.replace('REPLACEME', '64cc66'),
-    initial: FileSVG.replace('REPLACEME', '00998C'),
-  },
-  repo: {
-    basic: RepoSVG.replace('REPLACEME', 'f03c2e'),
-    growable: RepoSVG.replace('REPLACEME', '64cc66'),
-    initial: RepoSVG.replace('REPLACEME', '00998C'),
-  },
-  tag: {
-    basic: TagSVG.replace('REPLACEME', '427d8c'),
-    growable: TagSearchSVG.replace('REPLACEME', '64cc66'),
-    initial: TagSVG.replace('REPLACEME', '00998C'),
-  },
-  device: {
-    basic: DeviceSVG.replace('REPLACEME', 'ed9624'),
-    growable: DeviceSVG.replace('REPLACEME', '64cc66'),
-    initial: DeviceSVG.replace('REPLACEME', '00998C'),
-  },
-  vendor: {
-    basic: VendorSVG.replace('REPLACEME', '8f30b8'),
-    growable: VendorSearchSVG.replace('REPLACEME', '64cc66'),
-    initial: VendorSVG.replace('REPLACEME', '00998C'),
-  },
-  collection: {
-    basic: CollectionSVG.replace('REPLACEME', '8f30b8'),
-    growable: CollectionSVG.replace('REPLACEME', '64cc66'),
-    initial: CollectionSVG.replace('REPLACEME', '00998C'),
-  },
-  filesystem: {
-    basic: FileSystemSVG.replace('REPLACEME', '8f30b8'),
-    growable: FileSystemSVG.replace('REPLACEME', '64cc66'),
-    initial: FileSystemSVG.replace('REPLACEME', '00998C'),
-  },
-  folder: {
-    basic: FolderSVG.replace('REPLACEME', 'f1d592'),
-    growable: FolderSearchSVG.replace('REPLACEME', '64cc66'),
-    initial: FolderSVG.replace('REPLACEME', '00998C'),
-  },
-  other: {
-    basic: OtherSVG.replace('REPLACEME', 'cacfca'),
-    growable: OtherSVG.replace('REPLACEME', '64cc66'),
-    initial: OtherSVG.replace('REPLACEME', '00998C'),
-  },
+// raw SVG templates keyed by node type and visual state (still contain #REPLACEME)
+const RAW_SVG_MAP: Record<NodeType, Record<VisualState, string>> = {
+  Collection: { basic: CollectionSVG, growable: CollectionGrowableSVG, initial: CollectionSVG },
+  Device: { basic: DeviceSVG, growable: DeviceGrowableSVG, initial: DeviceSVG },
+  File: { basic: FileSVG, growable: FileGrowableSVG, initial: FileSVG },
+  FileSystem: { basic: FileSystemSVG, growable: FileSystemGrowableSVG, initial: FileSystemSVG },
+  Folder: { basic: FolderSVG, growable: FolderGrowableSVG, initial: FolderSVG },
+  NetworkConnection: { basic: NetworkConnectionSVG, growable: NetworkConnectionGrowableSVG, initial: NetworkConnectionSVG },
+  Other: { basic: OtherSVG, growable: OtherGrowableSVG, initial: OtherSVG },
+  Repo: { basic: RepoSVG, growable: RepoGrowableSVG, initial: RepoSVG },
+  SigmaRule: { basic: SigmaSVG, growable: SigmaGrowableSVG, initial: SigmaSVG },
+  Tag: { basic: TagSVG, growable: TagGrowableSVG, initial: TagSVG },
+  Vendor: { basic: VendorSVG, growable: VendorGrowableSVG, initial: VendorSVG },
+  WindowsProcess: { basic: ProcessSVG, growable: ProcessGrowableSVG, initial: ProcessSVG },
+  WindowsProcessTree: { basic: ProcessTreeSVG, growable: ProcessTreeGrowableSVG, initial: ProcessTreeSVG },
 };
 
 export const getNodeSvg = (nodeType: NodeType, visualState: VisualState): string => {
-  return SVG_MAP[nodeType]?.[visualState] ?? SVG_MAP.other.basic;
+  const raw = RAW_SVG_MAP[nodeType]?.[visualState] ?? RAW_SVG_MAP.Other.basic;
+  return raw.replaceAll('#REPLACEME', getNodeColor(nodeType, visualState));
 };
 
 const textureCache = new Map<string, THREE.Texture>();
@@ -94,16 +121,15 @@ export const svgToTexture = (svgString: string, size = 64): THREE.Texture => {
   const canvas = document.createElement('canvas');
   canvas.width = size;
   canvas.height = size;
-  const ctx = canvas.getContext('2d')!;
 
+  const context = canvas.getContext('2d')!;
   const img = new Image();
-  const dataUri = `data:image/svg+xml;base64,${btoa(svgString)}`;
-
   const texture = new THREE.Texture(canvas);
   img.onload = () => {
-    ctx.drawImage(img, 0, 0, size, size);
+    context.drawImage(img, 0, 0, size, size);
     texture.needsUpdate = true;
   };
+  const dataUri = `data:image/svg+xml;base64,${btoa(svgString)}`;
   img.src = dataUri;
 
   textureCache.set(cacheKey, texture);
@@ -112,13 +138,19 @@ export const svgToTexture = (svgString: string, size = 64): THREE.Texture => {
 
 let cachedEdgeColor: string | null = null;
 
+// Navy used for edges in light themes so lines read clearly against the light
+// graph background. Matches the nav menu ($snl-dark-blue-700, the Light theme's
+// --thorium-nav-panel-bg); hardcoded rather than read from the var because Crab's
+// nav-panel-bg is amber and we want a consistent blue across both light themes.
+const LIGHT_EDGE_COLOR = '#00243e';
+
 const computeEdgeColor = (): string => {
-  const rootTheme = document.getElementById('root')?.getAttribute('theme');
-  const theme = rootTheme ?? '';
-  if (theme === 'Dark' || theme === 'Ocean') {
-    return getComputedStyle(document.documentElement).getPropertyValue('--thorium-secondary-text').trim() || 'darkgray';
+  // darkgray reads well on dark backgrounds but washes out on light ones, so
+  // light themes get the high-contrast navy instead.
+  if (isLightTheme()) {
+    return LIGHT_EDGE_COLOR;
   }
-  return 'darkgray';
+  return getComputedStyle(document.documentElement).getPropertyValue('--thorium-secondary-text').trim() || 'darkgray';
 };
 
 if (typeof MutationObserver !== 'undefined') {
@@ -126,6 +158,8 @@ if (typeof MutationObserver !== 'undefined') {
   if (rootEl) {
     new MutationObserver(() => {
       cachedEdgeColor = null;
+      cachedIsLight = null;
+      textureCache.clear();
     }).observe(rootEl, { attributes: true, attributeFilter: ['theme'] });
   }
 }
@@ -135,4 +169,18 @@ export const getEdgeColor = (): string => {
     cachedEdgeColor = computeEdgeColor();
   }
   return cachedEdgeColor;
+};
+
+export const isCrabTheme = (): boolean => {
+  const theme = document.getElementById('root')?.getAttribute('theme') ?? '';
+  return theme === 'Crab';
+};
+
+const CRAB_PARTICLE_SIZE = 4;
+
+export const buildCrabParticle = (): THREE.Mesh => {
+  const texture = svgToTexture(CrabSVG, 64);
+  const material = new THREE.MeshBasicMaterial({ map: texture, transparent: true, depthWrite: false, side: THREE.DoubleSide });
+  const geometry = new THREE.PlaneGeometry(CRAB_PARTICLE_SIZE, CRAB_PARTICLE_SIZE * (20 / 24));
+  return new THREE.Mesh(geometry, material);
 };

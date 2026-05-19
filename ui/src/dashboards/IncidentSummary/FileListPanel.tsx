@@ -41,7 +41,7 @@ const FileListPanel: React.FC = () => {
             </thead>
             <tbody>
               {files.map((file) => (
-                <TrClickable key={file.sha256} as={Link as any} to={`/file/${file.sha256}`}>
+                <TrClickable key={file.sha256} as={Link as React.ElementType} to={`/file/${file.sha256}`}>
                   <Td>{formatNames(file.submissions)}</Td>
                   <Td>
                     <Mono title={file.sha256}>{truncateHash(file.sha256)}</Mono>

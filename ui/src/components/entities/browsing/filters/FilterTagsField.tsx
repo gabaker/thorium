@@ -1,6 +1,6 @@
 // project imports
 import FilterDiv from './FilterDiv';
-import TagSelect from '@components/tags/TagSelect/TagSelect';
+import TagSelect from '@components/shared/inputs/tags/TagSelect/TagSelect';
 import { RequestTags } from '@models/tags';
 import { requestTagsToTagEntryList, tagEntriesToRequestTags } from '@utilities/tags';
 
@@ -10,7 +10,7 @@ interface FilterTagsProps {
   onChange: (tags: RequestTags) => void;
 }
 
-const FilterTagsField: React.FC<FilterTagsProps> = ({ selected, onChange, disabled }) => {
+const FilterTagsField: React.FC<FilterTagsProps> = ({ selected, onChange }) => {
   return (
     <FilterDiv>
       <TagSelect

@@ -1,5 +1,4 @@
-import { Tags } from '@models/tags';
-import { Entity, Entities } from '@models/entities/entities';
+import { EntityTypes } from '@models/entities/entities';
 import { Sample } from '@models/files';
 
 export interface IncidentTag {
@@ -24,7 +23,7 @@ export interface IncidentMeta {
   closed?: string;
 }
 
-export interface Incident extends Omit<Entity, 'kind' | 'metadata'> {
+export interface Incident extends Omit<EntityTypes, 'kind' | 'metadata'> {
   kind: 'Incident';
   metadata: IncidentMeta;
 }

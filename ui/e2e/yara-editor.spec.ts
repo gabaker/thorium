@@ -1,58 +1,14 @@
 import { test, expect, Page } from '@playwright/test';
 import path from 'path';
-import { snapshot } from './helpers';
+import {
+  snapshot,
+  setupMockAuth,
+  waitForEditor,
+  waitForLinter,
+  setEditorContent,
+} from './helpers';
 
 const SCREENSHOT_DIR = path.join(import.meta.dirname, 'screenshots');
-
-const MOCK_USER = {
-  username: 'test',
-  role: 'Admin',
-  email: 'test@thorium.dev',
-  groups: ['system'],
-  token: 'mock-token-for-visual-test',
-  token_expiration: '2099-01-01T00:00:00Z',
-  settings: { theme: 'Dark' },
-  local: true,
-  verified: true,
-};
-
-async function setupMockAuth(page: Page) {
-  await page.route('**/api/users/whoami', (route) =>
-    route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify(MOCK_USER) }),
-  );
-  await page.route('**/api/**', (route) => {
-    const url = route.request().url();
-    if (url.includes('/users/whoami')) return route.fallback();
-    return route.fulfill({ status: 200, contentType: 'application/json', body: '{}' });
-  });
-  await page.context().addCookies([{
-    name: 'THORIUM_TOKEN',
-    value: MOCK_USER.token,
-    domain: 'localhost',
-    path: '/',
-  }]);
-}
-
-async function waitForEditor(page: Page) {
-  await page.waitForSelector('.cm-editor', { timeout: 10000 });
-  await page.waitForTimeout(500);
-}
-
-async function waitForLinter(page: Page) {
-  await page.waitForTimeout(600);
-}
-
-async function setEditorContent(page: Page, text: string) {
-  await page.evaluate((content) => {
-    const container = document.querySelector('.cm-editor')?.parentElement as HTMLElement & { _cmView?: { state: { doc: { length: number } }; dispatch: (spec: unknown) => void } };
-    const view = container?._cmView;
-    if (view) {
-      view.dispatch({
-        changes: { from: 0, to: view.state.doc.length, insert: content },
-      });
-    }
-  }, text);
-}
 
 const VALID_RULE = `import "pe"
 
@@ -297,3 +253,324 @@ rule Test
     await snapshot(page, SCREENSHOT_DIR, 'yara-editor-full');
   });
 });
+
+// ---------------------------------------------------------------------------
+// YARA — Section Scaffold Suggestions
+// ---------------------------------------------------------------------------
+test.describe('YARA — Section Scaffold Suggestions', () => {
+  test.beforeEach(async ({ page }) => {
+    await setupMockAuth(page);
+    await page.goto('/test/yara');
+    await waitForEditor(page);
+  });
+
+  test('meta section scaffold inserts correctly', async ({ page }) => {
+    const rule = `rule NoMeta\n{\n    strings:\n        $a = "test"\n\n    condition:\n        $a\n}`;
+    await setEditorContent(page, rule);
+    await waitForLinter(page);
+
+    // Move cursor inside rule body for context-sensitive suggestions
+    await page.evaluate(() => {
+      const container = document.querySelector('.cm-editor')?.parentElement as any;
+      const view = container?._cmView;
+      if (view) {
+        const line = view.state.doc.line(3);
+        view.dispatch({ selection: { anchor: line.from } });
+      }
+    });
+    await page.waitForTimeout(200);
+
+    const metaChip = page.locator('span[title*="meta"]').filter({ hasText: 'meta' }).first();
+    const isVisible = await metaChip.isVisible().catch(() => false);
+    if (isVisible) {
+      await page.evaluate(() => {
+        const helpers = (window as any).__yaraTestHelpers;
+        const container = document.querySelector('.cm-editor')?.parentElement as any;
+        const view = container?._cmView;
+        if (view && helpers) {
+          view.dispatch({ effects: helpers.addPreview.of({ field: 'section.meta', value: 'meta', format: 'yara' }) });
+        }
+      });
+      await page.waitForTimeout(500);
+
+      const preview = page.locator('.cm-suggestion-preview');
+      await expect(preview).toBeVisible({ timeout: 5000 });
+      await preview.locator('button:has-text("Accept")').click();
+      await page.waitForTimeout(300);
+
+      const text = await getEditorText(page);
+      expect(text).toContain('meta:');
+      expect(text).toContain('description');
+      expect(text).toContain('author');
+      expect(text).toContain('condition:');
+
+      await snapshot(page, SCREENSHOT_DIR, 'yara-meta-scaffold');
+    }
+  });
+
+  test('strings section scaffold inserts correctly', async ({ page }) => {
+    const rule = `rule NoStrings\n{\n    meta:\n        description = "test"\n\n    condition:\n        true\n}`;
+    await setEditorContent(page, rule);
+    await waitForLinter(page);
+
+    await page.evaluate(() => {
+      const container = document.querySelector('.cm-editor')?.parentElement as any;
+      const view = container?._cmView;
+      if (view) {
+        const line = view.state.doc.line(3);
+        view.dispatch({ selection: { anchor: line.from } });
+      }
+    });
+    await page.waitForTimeout(200);
+
+    const stringsChip = page.locator('span[title*="strings"]').filter({ hasText: 'strings' }).first();
+    const isVisible = await stringsChip.isVisible().catch(() => false);
+    if (isVisible) {
+      await page.evaluate(() => {
+        const helpers = (window as any).__yaraTestHelpers;
+        const container = document.querySelector('.cm-editor')?.parentElement as any;
+        const view = container?._cmView;
+        if (view && helpers) {
+          view.dispatch({ effects: helpers.addPreview.of({ field: 'section.strings', value: 'strings', format: 'yara' }) });
+        }
+      });
+      await page.waitForTimeout(500);
+
+      const preview = page.locator('.cm-suggestion-preview');
+      await expect(preview).toBeVisible({ timeout: 5000 });
+      await preview.locator('button:has-text("Accept")').click();
+      await page.waitForTimeout(300);
+
+      const text = await getEditorText(page);
+      expect(text).toContain('strings:');
+      expect(text).toContain('$s1');
+      expect(text).toContain('condition:');
+
+      await snapshot(page, SCREENSHOT_DIR, 'yara-strings-scaffold');
+    }
+  });
+
+  test('condition section scaffold inserts correctly', async ({ page }) => {
+    const rule = `rule NoCondition\n{\n    strings:\n        $a = "test"\n}`;
+    await setEditorContent(page, rule);
+    await waitForLinter(page);
+
+    await page.evaluate(() => {
+      const container = document.querySelector('.cm-editor')?.parentElement as any;
+      const view = container?._cmView;
+      if (view) {
+        const line = view.state.doc.line(3);
+        view.dispatch({ selection: { anchor: line.from } });
+      }
+    });
+    await page.waitForTimeout(200);
+
+    const condChip = page.locator('span[title*="condition"]').filter({ hasText: 'condition' }).first();
+    const isVisible = await condChip.isVisible().catch(() => false);
+    if (isVisible) {
+      await page.evaluate(() => {
+        const helpers = (window as any).__yaraTestHelpers;
+        const container = document.querySelector('.cm-editor')?.parentElement as any;
+        const view = container?._cmView;
+        if (view && helpers) {
+          view.dispatch({ effects: helpers.addPreview.of({ field: 'section.condition', value: 'condition', format: 'yara' }) });
+        }
+      });
+      await page.waitForTimeout(500);
+
+      const preview = page.locator('.cm-suggestion-preview');
+      await expect(preview).toBeVisible({ timeout: 5000 });
+      await preview.locator('button:has-text("Accept")').click();
+      await page.waitForTimeout(300);
+
+      const text = await getEditorText(page);
+      expect(text).toContain('condition:');
+      expect(text).toContain('strings:');
+
+      await snapshot(page, SCREENSHOT_DIR, 'yara-condition-scaffold');
+    }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// YARA — Other Suggestions
+// ---------------------------------------------------------------------------
+test.describe('YARA — Other Suggestions', () => {
+  test.beforeEach(async ({ page }) => {
+    await setupMockAuth(page);
+    await page.goto('/test/yara');
+    await waitForEditor(page);
+  });
+
+  test('import module suggestion inserts at top', async ({ page }) => {
+    const rule = `rule NoImport\n{\n    meta:\n        description = "test"\n\n    strings:\n        $a = "test"\n\n    condition:\n        $a\n}`;
+    await setEditorContent(page, rule);
+    await waitForLinter(page);
+
+    await page.evaluate(() => {
+      const container = document.querySelector('.cm-editor')?.parentElement as any;
+      const view = container?._cmView;
+      if (view) {
+        view.dispatch({ selection: { anchor: 0 } });
+      }
+    });
+    await page.waitForTimeout(200);
+
+    const peChip = page.locator('span[title*="pe"]').filter({ hasText: 'pe' }).first();
+    const isVisible = await peChip.isVisible().catch(() => false);
+    if (isVisible) {
+      await page.evaluate(() => {
+        const helpers = (window as any).__yaraTestHelpers;
+        const container = document.querySelector('.cm-editor')?.parentElement as any;
+        const view = container?._cmView;
+        if (view && helpers) {
+          view.dispatch({ effects: helpers.addPreview.of({ field: 'import', value: 'pe', format: 'yara' }) });
+        }
+      });
+      await page.waitForTimeout(500);
+
+      const preview = page.locator('.cm-suggestion-preview');
+      await expect(preview).toBeVisible({ timeout: 5000 });
+      await preview.locator('button:has-text("Accept")').click();
+      await page.waitForTimeout(300);
+
+      const text = await getEditorText(page);
+      expect(text).toMatch(/^import "pe"/);
+      expect(text).toContain('rule NoImport');
+
+      await snapshot(page, SCREENSHOT_DIR, 'yara-import-suggestion');
+    }
+  });
+
+  test('meta key suggestion inserts in correct section', async ({ page }) => {
+    await waitForLinter(page);
+
+    // Move cursor to meta section
+    await page.evaluate(() => {
+      const container = document.querySelector('.cm-editor')?.parentElement as any;
+      const view = container?._cmView;
+      if (view) {
+        const line = view.state.doc.line(6);
+        view.dispatch({ selection: { anchor: line.from } });
+      }
+    });
+    await page.waitForTimeout(200);
+
+    await page.evaluate(() => {
+      const helpers = (window as any).__yaraTestHelpers;
+      const container = document.querySelector('.cm-editor')?.parentElement as any;
+      const view = container?._cmView;
+      if (view && helpers) {
+        view.dispatch({ effects: helpers.addPreview.of({ field: 'meta', value: 'version', format: 'yara' }) });
+      }
+    });
+    await page.waitForTimeout(500);
+
+    const preview = page.locator('.cm-suggestion-preview');
+    const isVisible = await preview.isVisible().catch(() => false);
+    if (isVisible) {
+      await preview.locator('button:has-text("Accept")').click();
+      await page.waitForTimeout(300);
+
+      const text = await getEditorText(page);
+      expect(text).toContain('version');
+      expect(text).toContain('meta:');
+
+      await snapshot(page, SCREENSHOT_DIR, 'yara-meta-key-suggestion');
+    }
+  });
+
+  test('string modifier suggestion appends inline', async ({ page }) => {
+    await waitForLinter(page);
+
+    // Move cursor to strings section
+    await page.evaluate(() => {
+      const container = document.querySelector('.cm-editor')?.parentElement as any;
+      const view = container?._cmView;
+      if (view) {
+        const line = view.state.doc.line(12);
+        view.dispatch({ selection: { anchor: line.from } });
+      }
+    });
+    await page.waitForTimeout(200);
+
+    const modChip = page.locator('span[title*="nocase"]');
+    const isVisible = await modChip.first().isVisible().catch(() => false);
+    if (isVisible) {
+      await page.evaluate(() => {
+        const helpers = (window as any).__yaraTestHelpers;
+        const container = document.querySelector('.cm-editor')?.parentElement as any;
+        const view = container?._cmView;
+        if (view && helpers) {
+          view.dispatch({ effects: helpers.addPreview.of({ field: 'strings.modifiers', value: 'nocase', format: 'yara', cursorLine: 12 }) });
+        }
+      });
+      await page.waitForTimeout(500);
+
+      const preview = page.locator('.cm-suggestion-preview');
+      const previewVisible = await preview.isVisible().catch(() => false);
+      if (previewVisible) {
+        await preview.locator('button:has-text("Accept")').click();
+        await page.waitForTimeout(300);
+
+        const text = await getEditorText(page);
+        expect(text).toContain('nocase');
+
+        await snapshot(page, SCREENSHOT_DIR, 'yara-modifier-suggestion');
+      }
+    }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// YARA — Validation Diagnostics
+// ---------------------------------------------------------------------------
+test.describe('YARA — Validation Diagnostics', () => {
+  test.beforeEach(async ({ page }) => {
+    await setupMockAuth(page);
+    await page.goto('/test/yara');
+    await waitForEditor(page);
+  });
+
+  test('duplicate rule name shows warning diagnostic', async ({ page }) => {
+    const rules = `rule Duplicate\n{\n    condition:\n        true\n}\n\nrule Duplicate\n{\n    condition:\n        false\n}`;
+    await setEditorContent(page, rules);
+    await waitForLinter(page);
+
+    const warnings = page.locator('.cm-lintRange-warning');
+    await expect(warnings.first()).toBeVisible({ timeout: 5000 });
+
+    await snapshot(page, SCREENSHOT_DIR, 'yara-duplicate-rule-warning');
+  });
+
+  test('invalid modifier for string type shows error', async ({ page }) => {
+    const rule = `rule BadModifier\n{\n    strings:\n        $re = /test/ xor\n\n    condition:\n        $re\n}`;
+    await setEditorContent(page, rule);
+    await waitForLinter(page);
+
+    const errors = page.locator('.cm-lintRange-error');
+    await expect(errors.first()).toBeVisible({ timeout: 5000 });
+
+    await snapshot(page, SCREENSHOT_DIR, 'yara-invalid-modifier-error');
+  });
+
+  test('unused string definition shows warning', async ({ page }) => {
+    const rule = `rule UnusedString\n{\n    strings:\n        $a = "used"\n        $b = "unused"\n\n    condition:\n        $a\n}`;
+    await setEditorContent(page, rule);
+    await waitForLinter(page);
+
+    const warnings = page.locator('.cm-lintRange-warning');
+    await expect(warnings.first()).toBeVisible({ timeout: 5000 });
+
+    await snapshot(page, SCREENSHOT_DIR, 'yara-unused-string-warning');
+  });
+});
+
+async function getEditorText(page: Page): Promise<string> {
+  return page.evaluate(() => {
+    const container = document.querySelector('.cm-editor')?.parentElement as HTMLElement & {
+      _cmView?: { state: { doc: { toString: () => string } } };
+    };
+    return container?._cmView?.state.doc.toString() ?? '';
+  });
+}

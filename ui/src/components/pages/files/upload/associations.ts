@@ -1,4 +1,6 @@
-import type { AssociationCreate, EntityTypes } from './types';
+// project imports
+import { EntityTypes } from '@models/entities';
+import type { AssociationCreate } from './types';
 import { AssociationKind, BlankAssociationCreate } from './types';
 import { createAssociation } from '@thorpi/associations';
 

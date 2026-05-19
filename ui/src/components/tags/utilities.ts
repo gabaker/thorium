@@ -8,7 +8,7 @@ export const filterIncludedTags = (tags: Tags, includeList: string[]): Tags => {
     return tag.toUpperCase();
   });
   if (tags) {
-    return Object.fromEntries(Object.entries(tags).filter(([k, v]) => upperIncludeList.includes(k.toUpperCase())));
+    return Object.fromEntries(Object.entries(tags).filter(([k]) => upperIncludeList.includes(k.toUpperCase())));
   }
   return {};
 };
@@ -18,7 +18,7 @@ export const filterExcludedTags = (tags: Tags, excludeList: string[]): Tags => {
   const upperExcludedList = excludeList.map((tag) => {
     return tag.toUpperCase();
   });
-  return Object.fromEntries(Object.entries(tags).filter(([k, v]) => !upperExcludedList.includes(k.toUpperCase())));
+  return Object.fromEntries(Object.entries(tags).filter(([k]) => !upperExcludedList.includes(k.toUpperCase())));
 };
 
 export enum TagUpperKeyEnum {

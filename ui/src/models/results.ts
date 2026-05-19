@@ -2,7 +2,7 @@
 import { ImageVersion } from './images';
 
 /// Represents any valid JSON value.
-export type Value = null | boolean | number | string | Value[] | { [key: string]: Value } | {};
+export type Value = null | boolean | number | string | Value[] | { [key: string]: Value };
 
 /// The type of display class to use in the UI for this output
 export enum OutputDisplayType {
@@ -50,4 +50,9 @@ export type Output = {
   display_type: OutputDisplayType;
   /// The children that were found when generating this result
   children: { [child: string]: string };
+};
+
+/// A map of results grouped by tool name
+export type OutputMap = {
+  results: { [tool: string]: Output[] };
 };

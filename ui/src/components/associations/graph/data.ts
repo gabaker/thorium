@@ -1,9 +1,10 @@
 // project imports
-import { Graph, BranchNode, Direction } from '@models/trees';
+import { Graph, BranchNode, Direction, NodeType, TreeNodeKey } from '@models/trees';
 import { Entities } from '@models/entities/entities';
 import { formatSubmissionNames, formatTagNames, getEdgeLabel } from '../utilities';
 import { getNodeSize, scoreNode } from '../shared/scaling';
-import type { GraphNode, GraphLink, GraphData, NodeType, VisualState } from './types';
+import { VisualState } from './types';
+import type { GraphNode, GraphLink, GraphData } from './types';
 
 export const getLinkEndpoints = (link: GraphLink): { source: string; target: string } => {
   const source = typeof link.source === 'object' ? (link.source as GraphNode).id : link.source;
@@ -21,23 +22,22 @@ export const classifyNode = (
   const initialSet = precomputed?.initialSet ?? new Set(graph.initial.map((n) => n.toString()));
   const isGrowable = growableSet.has(nodeId);
   const isInitial = initialSet.has(nodeId);
-  const visualState: VisualState = isGrowable ? 'growable' : isInitial ? 'initial' : 'basic';
+  const visualState: VisualState = isGrowable ? VisualState.Growable : isInitial ? VisualState.Initial : VisualState.Basic;
 
-  if ('Sample' in nodeData) {
+  if (TreeNodeKey.Sample in nodeData) {
     let label = formatSubmissionNames(nodeData.Sample?.submissions ?? []);
     if (label.length > 30) {
       label = label.substring(0, 15) + '...' + label.substring(label.length - 15);
     }
-    return { nodeType: 'file', visualState, label };
-  } else if ('Repo' in nodeData) {
-    return { nodeType: 'repo', visualState, label: nodeData.Repo?.url ?? '' };
-  } else if ('Tag' in nodeData) {
-    return { nodeType: 'tag', visualState, label: formatTagNames(nodeData.Tag?.tags ?? {}, true) };
-  } else if (nodeData.Entity?.kind && Object.keys(Entities).includes(nodeData.Entity.kind)) {
-    const nodeType = nodeData.Entity.kind.toLowerCase() as NodeType;
-    return { nodeType, visualState, label: nodeData.Entity.name };
+    return { nodeType: NodeType.File, visualState, label };
+  } else if (TreeNodeKey.Repo in nodeData) {
+    return { nodeType: NodeType.Repo, visualState, label: nodeData.Repo?.url ?? '' };
+  } else if (TreeNodeKey.Tag in nodeData) {
+    return { nodeType: NodeType.Tag, visualState, label: formatTagNames(nodeData.Tag?.tags ?? {}, true) };
+  } else if (nodeData.Entity?.kind && Object.values(Entities).includes(nodeData.Entity.kind)) {
+    return { nodeType: nodeData.Entity.kind, visualState, label: nodeData.Entity.name };
   }
-  return { nodeType: 'other', visualState, label: 'Unknown' };
+  return { nodeType: NodeType.Other, visualState, label: 'Unknown' };
 };
 
 export const buildGraphNode = (

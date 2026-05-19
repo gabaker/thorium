@@ -71,13 +71,14 @@ const FilterFields: React.FC<FilterWindowProps> = ({ disabled, onChange, groups,
     }
     // reformat fields to work with request format
     switch (key) {
-      case 'limit':
+      case 'limit': {
         // limit updates the search without applying any pending filter changes
         const newAppliedFilters = structuredClone(filters);
         newAppliedFilters[key] = value;
         newFilters[key] = value;
         onChange(newAppliedFilters);
         break;
+      }
       case 'end':
       case 'start':
       case 'groups':

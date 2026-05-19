@@ -1,9 +1,9 @@
 import { AssociationCreate, AssociationKind, AssociationTarget, BlankAssociationCreate } from '@models/associations';
-import { EntityTypes } from '@models/entities';
+import { EntityTypes } from '@models/entities/entities';
 import { TagEntry } from '@models/tags';
 
 export { AssociationKind, BlankAssociationCreate };
-export type { AssociationCreate, AssociationTarget, EntityTypes, TagEntry };
+export type { AssociationCreate, AssociationTarget, TagEntry };
 
 export const PARALLEL_UPLOAD_LIMIT = 5;
 

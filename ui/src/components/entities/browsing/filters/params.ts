@@ -40,19 +40,19 @@ export function encodeFiltersToParams(filters: Filters) {
     });
   }
   // start (earliest) filter date range
-  if (filters.hasOwnProperty('start')) {
+  if (Object.hasOwn(filters, 'start')) {
     encodedFilters.push(`start=${filters.start}`);
   }
   // end (latest) filter date range
-  if (filters.hasOwnProperty('end')) {
+  if (Object.hasOwn(filters, 'end')) {
     encodedFilters.push(`end=${filters.end}`);
   }
   // add tag filters case sensitivity flag only if false (default is true)
-  if (filters.hasOwnProperty('tags_case_insensitive') && filters.tags_case_insensitive == false) {
+  if (Object.hasOwn(filters, 'tags_case_insensitive') && filters.tags_case_insensitive == false) {
     encodedFilters.push(`tags_case_insensitive=false`);
   }
   // add exclude display tags only if those tags are not defaults
-  if (filters.hasOwnProperty('hideTags') && filters.hideTags != undefined && !excludeKeysAreDefault(filters.hideTags)) {
+  if (Object.hasOwn(filters, 'hideTags') && filters.hideTags != undefined && !excludeKeysAreDefault(filters.hideTags)) {
     filters.hideTags.map((key: string) => {
       encodedFilters.push(`hide=${encodeURIComponent(key)}`);
     });
@@ -76,7 +76,7 @@ export function decodeParamsToFilters(searchParams: URLSearchParams) {
       // break up tags keys from tags prefix
       const keyTokens = key.split(/\[|\]/).filter(Boolean);
       if (keyTokens.length == 2) {
-        if (tags.hasOwnProperty(keyTokens[1])) {
+        if (Object.hasOwn(tags, keyTokens[1])) {
           // don't save duplicate tags
           if (!tags[keyTokens[1]].includes(value)) {
             tags[keyTokens[1]].push(value);

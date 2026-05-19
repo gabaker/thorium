@@ -1,7 +1,7 @@
 import React from 'react';
 import { Col, Row } from 'react-bootstrap';
 import Subtitle from '@components/shared/titles/Subtitle';
-import SelectableArray from '@components/shared/selectable/SelectableArray';
+import SelectableArray from '@components/shared/inputs/selectable/SelectableArray';
 import { useUpload } from './UploadContext';
 import OriginField from './OriginField';
 
@@ -28,7 +28,7 @@ const OriginMemoryDump: React.FC = () => {
         <Col xs={5}>
           <SelectableArray
             initialEntries={[]}
-            setEntries={(val: string) => origin.setMemoryDumpField('reconstructed', val)}
+            setEntries={(entries: string[]) => origin.setMemoryDumpField('reconstructed', entries.join(','))}
             disabled={false}
             placeholder="optional"
             trim={false}

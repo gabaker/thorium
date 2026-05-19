@@ -288,21 +288,22 @@ If `minithor` is not found, this environment may be using a different deployment
 
 | Command | Description |
 |---------|-------------|
-| `minithor minikube install` | Install minikube and start a Kubernetes cluster |
-| `minithor deploy` | Deploy all Thorium services and backing infrastructure (includes a container registry) |
+| `minithor minikube install` | Install minikube, start the k8s cluster, and enable addons (first-time only) |
+| `minithor deploy` | Deploy all Thorium services and backing infrastructure (creates test user `test`/`INSECURE_DEV_PASSWORD`) |
+| `minithor start` | Restart the cluster after a stop or reboot |
 | `minithor expose` | Port-forward Thorium API to localhost:8080 |
 | `minithor expose --port <port>` | Port-forward to a custom local port |
 | `minithor expose --dev` | Also forward database ports (Elastic, Redis, MinIO, Scylla) |
 | `minithor expose --status` | Show which port-forwards are running |
 | `minithor expose --stop` | Stop all port-forwards |
-| `minithor start` | Start a previously stopped cluster |
 | `minithor stop` | Stop the cluster (preserves state) |
 | `minithor get-config` | Extract running config to ~/thorium.yml |
+| `minithor minikube delete --confirm` | Delete the minikube cluster |
 | `minithor cleanup --confirm` | Remove all Thorium resources for a fresh deploy |
 
 ### Container Registry
 
-`minithor deploy` deploys a container registry in the `thorium` namespace. Use `--registry` to enable it, or `--registry-user <name>` to enable it with basic auth.
+`minithor deploy` can optionally deploy a container registry in the `thorium` namespace. Use `--registry` to enable it, or `--registry-user <name>` to enable it with basic auth.
 
 | Context | Registry Address |
 |---------|-----------------|

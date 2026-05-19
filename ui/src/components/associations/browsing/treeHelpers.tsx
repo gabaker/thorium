@@ -1,7 +1,8 @@
 // project imports
 import { formatTagNames } from '../utilities';
 import { FilteredNodeTags } from '../shared/NodeInfo';
-import { Direction, Graph, TreeNode } from '@models/trees';
+import { Direction, Graph, NodeType, TreeNode, TreeNodeKey } from '@models/trees';
+import { Entities } from '@models/entities/entities';
 
 export interface TreeIndex {
   childrenOf: Map<string, string[]>;
@@ -11,7 +12,6 @@ export interface TreeIndex {
 export function buildTreeIndex(graph: Graph): TreeIndex {
   const childrenOf = new Map<string, string[]>();
   const parentsOf = new Map<string, string[]>();
-
   const addChild = (parent: string, child: string) => {
     let list = childrenOf.get(parent);
     if (!list) {
@@ -27,7 +27,6 @@ export function buildTreeIndex(graph: Graph): TreeIndex {
     }
     if (!parents.includes(parent)) parents.push(parent);
   };
-
   if (graph.branches) {
     for (const [nodeId, branches] of Object.entries(graph.branches)) {
       for (const branch of branches) {
@@ -39,29 +38,24 @@ export function buildTreeIndex(graph: Graph): TreeIndex {
       }
     }
   }
-
   return { childrenOf, parentsOf };
 }
 
-const NODE_TYPE_LABELS: Record<string, string> = {
-  file: 'File',
-  repo: 'Repository',
-  tag: 'Tag',
-  device: 'Device',
-  vendor: 'Vendor',
-  collection: 'Collection',
-  filesystem: 'File System',
-  folder: 'Folder',
-  other: 'Other',
-};
+export function nodeTypeKeyToLabel(key: string): string {
+  return key.replace(/([a-z0-9])([A-Z])/g, '$1 $2').replace(/([A-Z])([A-Z][a-z])/g, '$1 $2');
+}
 
-export { NODE_TYPE_LABELS };
+export interface NodePreviewData {
+  type: string;
+  fields: { label: string; value: string | undefined }[];
+  tags: Record<string, Record<string, string[]>> | undefined;
+}
 
-export function getNodePreviewData(nodeData: TreeNode) {
-  if ('Sample' in nodeData && nodeData.Sample) {
+export function getNodePreviewData(nodeData: TreeNode): NodePreviewData {
+  if (TreeNodeKey.Sample in nodeData && nodeData.Sample) {
     const s = nodeData.Sample;
     return {
-      type: 'File',
+      type: Entities.File,
       fields: [
         { label: 'SHA256', value: s.sha256 ? s.sha256.substring(0, 16) + '...' : undefined },
         { label: 'MD5', value: s.md5 },
@@ -70,10 +64,10 @@ export function getNodePreviewData(nodeData: TreeNode) {
       tags: s.tags,
     };
   }
-  if ('Repo' in nodeData && nodeData.Repo) {
+  if (TreeNodeKey.Repo in nodeData && nodeData.Repo) {
     const r = nodeData.Repo;
     return {
-      type: 'Repository',
+      type: Entities.Repo,
       fields: [
         { label: 'URL', value: r.url },
         { label: 'Provider', value: r.provider },
@@ -81,23 +75,19 @@ export function getNodePreviewData(nodeData: TreeNode) {
       tags: r.tags,
     };
   }
-  if ('Tag' in nodeData && nodeData.Tag) {
+  if (TreeNodeKey.Tag in nodeData && nodeData.Tag) {
     const tagStr = formatTagNames(nodeData.Tag.tags, false);
     return {
-      type: 'Tag',
+      type: NodeType.Tag,
       fields: [{ label: 'Tags', value: tagStr }],
       tags: undefined,
     };
   }
-  if ('Entity' in nodeData && nodeData.Entity) {
+  if (TreeNodeKey.Entity in nodeData && nodeData.Entity) {
     const e = nodeData.Entity;
     return {
-      type: NODE_TYPE_LABELS[e.kind.toLowerCase()] ?? e.kind,
-      fields: [
-        { label: 'Name', value: e.name },
-        { label: 'Kind', value: e.kind },
-        ...(e.description ? [{ label: 'Description', value: e.description }] : []),
-      ],
+      type: nodeTypeKeyToLabel(e.kind),
+      fields: [{ label: 'Name', value: e.name }, ...(e.description ? [{ label: 'Description', value: e.description }] : [])],
       tags: e.tags,
     };
   }
