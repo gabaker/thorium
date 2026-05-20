@@ -1,4 +1,5 @@
-import { includes, type Diagnostic } from '../types';
+// project imports
+import { Severity, includes, type Diagnostic } from '../types';
 import type { YaraParseResult } from './parse';
 import { KNOWN_MODULES, RULE_NAME_PATTERN, TEXT_STRING_MODIFIERS, REGEX_STRING_MODIFIERS, HEX_STRING_MODIFIERS } from './schema';
 
@@ -23,7 +24,7 @@ export function validateYaraRules(result: YaraParseResult): Diagnostic[] {
         line: imp.line,
         column: imp.moduleColumn,
         endColumn: imp.moduleColumn + imp.module.length,
-        severity: 'warning',
+        severity: Severity.Warning,
         message: `Unknown YARA module: '${imp.module}'. Known modules: ${KNOWN_MODULES.join(', ')}`,
       });
     }
@@ -36,7 +37,7 @@ export function validateYaraRules(result: YaraParseResult): Diagnostic[] {
         line: rule.nameLine,
         column: rule.nameColumn,
         endColumn: rule.nameColumn + rule.name.length,
-        severity: 'error',
+        severity: Severity.Error,
         message: `Invalid rule name: '${rule.name}'. Must start with a letter or underscore and contain only alphanumerics and underscores`,
       });
     }
@@ -48,7 +49,7 @@ export function validateYaraRules(result: YaraParseResult): Diagnostic[] {
           line: prevRule.line,
           column: prevRule.column,
           endColumn: prevRule.column + rule.name.length,
-          severity: 'warning',
+          severity: Severity.Warning,
           message: `Duplicate rule name: '${rule.name}' (also defined on line ${rule.nameLine})`,
         });
         prevRule.flagged = true;
@@ -57,7 +58,7 @@ export function validateYaraRules(result: YaraParseResult): Diagnostic[] {
         line: rule.nameLine,
         column: rule.nameColumn,
         endColumn: rule.nameColumn + rule.name.length,
-        severity: 'warning',
+        severity: Severity.Warning,
         message: `Duplicate rule name: '${rule.name}' (previously defined on line ${prevRule.line})`,
       });
     } else {
@@ -73,7 +74,7 @@ export function validateYaraRules(result: YaraParseResult): Diagnostic[] {
             line: prev.line,
             column: prev.column,
             endColumn: prev.column + tp.tag.length,
-            severity: 'error',
+            severity: Severity.Error,
             message: `Duplicate tag: '${tp.tag}' (also specified on line ${tp.line})`,
           });
           prev.flagged = true;
@@ -82,7 +83,7 @@ export function validateYaraRules(result: YaraParseResult): Diagnostic[] {
           line: tp.line,
           column: tp.column,
           endColumn: tp.column + tp.tag.length,
-          severity: 'error',
+          severity: Severity.Error,
           message: `Duplicate tag: '${tp.tag}' (already specified on line ${prev.line})`,
         });
       } else {
@@ -95,7 +96,7 @@ export function validateYaraRules(result: YaraParseResult): Diagnostic[] {
         line: us.line,
         column: us.column,
         endColumn: us.column + us.name.length,
-        severity: 'error',
+        severity: Severity.Error,
         message: `Unknown section '${us.name}:'. Valid sections are: meta, strings, condition`,
       });
     }
@@ -107,7 +108,7 @@ export function validateYaraRules(result: YaraParseResult): Diagnostic[] {
           line: ds.prevLine,
           column: ds.prevColumn,
           endColumn: ds.prevColumn + ds.name.length,
-          severity: 'error',
+          severity: Severity.Error,
           message: `Duplicate section '${ds.name}:' (also defined on line ${ds.line})`,
         });
         flaggedSections.add(ds.name);
@@ -116,7 +117,7 @@ export function validateYaraRules(result: YaraParseResult): Diagnostic[] {
         line: ds.line,
         column: ds.column,
         endColumn: ds.column + ds.name.length,
-        severity: 'error',
+        severity: Severity.Error,
         message: `Duplicate section '${ds.name}:' (previously defined on line ${ds.prevLine})`,
       });
     }
@@ -126,7 +127,7 @@ export function validateYaraRules(result: YaraParseResult): Diagnostic[] {
         line: rule.nameLine,
         column: rule.nameColumn,
         endColumn: rule.nameColumn + rule.name.length,
-        severity: 'error',
+        severity: Severity.Error,
         message: `Rule '${rule.name}' is missing required 'condition:' section`,
       });
     }
@@ -135,7 +136,7 @@ export function validateYaraRules(result: YaraParseResult): Diagnostic[] {
       diagnostics.push({
         line: rule.conditionLine ?? rule.nameLine,
         column: 1,
-        severity: 'error',
+        severity: Severity.Error,
         message: `Rule '${rule.name}' has an empty condition`,
       });
     }
@@ -149,7 +150,7 @@ export function validateYaraRules(result: YaraParseResult): Diagnostic[] {
             line: prev.line,
             column: prev.column,
             endColumn: prev.column + mk.key.length,
-            severity: 'error',
+            severity: Severity.Error,
             message: `Duplicate meta key '${mk.key}' (also defined on line ${mk.line})`,
           });
           prev.flagged = true;
@@ -158,7 +159,7 @@ export function validateYaraRules(result: YaraParseResult): Diagnostic[] {
           line: mk.line,
           column: mk.column,
           endColumn: mk.column + mk.key.length,
-          severity: 'error',
+          severity: Severity.Error,
           message: `Duplicate meta key '${mk.key}' (previously defined on line ${prev.line})`,
         });
       } else {
@@ -175,7 +176,7 @@ export function validateYaraRules(result: YaraParseResult): Diagnostic[] {
             line: prev.line,
             column: prev.column,
             endColumn: prev.column + sd.id.length,
-            severity: 'error',
+            severity: Severity.Error,
             message: `Duplicate string identifier '${sd.id}' (also defined on line ${sd.line})`,
           });
           prev.flagged = true;
@@ -184,7 +185,7 @@ export function validateYaraRules(result: YaraParseResult): Diagnostic[] {
           line: sd.line,
           column: sd.column,
           endColumn: sd.column + sd.id.length,
-          severity: 'error',
+          severity: Severity.Error,
           message: `Duplicate string identifier '${sd.id}' (previously defined on line ${prev.line})`,
         });
       } else {
@@ -196,7 +197,7 @@ export function validateYaraRules(result: YaraParseResult): Diagnostic[] {
       diagnostics.push({
         line: rule.stringsLine ?? rule.nameLine,
         column: 1,
-        severity: 'warning',
+        severity: Severity.Warning,
         message: `Rule '${rule.name}' has a 'strings:' section with no string definitions`,
       });
     }
@@ -212,7 +213,7 @@ export function validateYaraRules(result: YaraParseResult): Diagnostic[] {
             line: sd.line,
             column: mp.column,
             endColumn: mp.column + mp.modifier.length,
-            severity: 'error',
+            severity: Severity.Error,
             message: `Duplicate modifier '${mp.modifier}' on string '${sd.id}'`,
           });
         }
@@ -224,7 +225,7 @@ export function validateYaraRules(result: YaraParseResult): Diagnostic[] {
             line: sd.line,
             column: mp.column,
             endColumn: mp.column + mp.modifier.length,
-            severity: 'error',
+            severity: Severity.Error,
             message: `Modifier '${mp.modifier}' is not valid for ${TYPE_LABELS[sd.type]}s (${sd.id}). Allowed: ${[...allowed].join(', ')}`,
           });
         }
@@ -237,7 +238,7 @@ export function validateYaraRules(result: YaraParseResult): Diagnostic[] {
         line: rule.stringsLine,
         column: col,
         endColumn: col + 'strings'.length,
-        severity: 'error',
+        severity: Severity.Error,
         message: `Section contains errors`,
       });
     }
@@ -257,7 +258,7 @@ export function validateYaraRules(result: YaraParseResult): Diagnostic[] {
               line: cl.line,
               column: m.index + 1,
               endColumn: m.index + 1 + 'entrypoint'.length,
-              severity: 'warning',
+              severity: Severity.Warning,
               message: `'entrypoint' is deprecated. Use 'pe.entry_point' or 'elf.entry_point' instead`,
             });
           }
@@ -273,7 +274,7 @@ export function validateYaraRules(result: YaraParseResult): Diagnostic[] {
             line: ref.line,
             column: ref.column,
             endColumn: ref.column + ref.ref.length,
-            severity: 'error',
+            severity: Severity.Error,
             message: `String '${ref.ref}' referenced in condition but not defined in strings section`,
           });
         }
@@ -287,7 +288,7 @@ export function validateYaraRules(result: YaraParseResult): Diagnostic[] {
               line: sd.line,
               column: sd.column,
               endColumn: sd.column + sd.id.length,
-              severity: 'warning',
+              severity: Severity.Warning,
               message: `String '${sd.id}' is defined but never referenced in condition`,
             });
           }
@@ -302,7 +303,7 @@ export function validateYaraRules(result: YaraParseResult): Diagnostic[] {
             line: ref.line,
             column: ref.column,
             endColumn: ref.column + ref.ref.length,
-            severity: 'error',
+            severity: Severity.Error,
             message: `Condition references '${ref.ref}' but rule '${rule.name}' has no 'strings:' section`,
           });
         }
@@ -315,7 +316,7 @@ export function validateYaraRules(result: YaraParseResult): Diagnostic[] {
         line: rule.conditionLine,
         column: col,
         endColumn: col + 'condition'.length,
-        severity: 'error',
+        severity: Severity.Error,
         message: `Section contains errors`,
       });
     }

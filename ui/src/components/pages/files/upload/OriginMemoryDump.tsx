@@ -1,7 +1,7 @@
 import React from 'react';
 import { Col, Row } from 'react-bootstrap';
 import Subtitle from '@components/shared/titles/Subtitle';
-import SelectableArray from '@components/shared/selectable/SelectableArray';
+import SelectableArray from '@components/shared/inputs/selectable/SelectableArray';
 import { useUpload } from './UploadContext';
 import OriginField from './OriginField';
 

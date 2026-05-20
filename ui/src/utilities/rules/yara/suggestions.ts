@@ -1,3 +1,4 @@
+// project imports
 import type { Suggestion } from '../types';
 import type { YaraParseResult, YaraRuleInfo } from './parse';
 import { COMMON_META_KEYS, KNOWN_MODULES, STRING_MODIFIERS } from './schema';

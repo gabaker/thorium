@@ -1,3 +1,4 @@
+// project imports
 import { RULE_NAME_PATTERN } from './schema';
 
 const META_RE = /^meta\s*:/;
@@ -15,7 +16,11 @@ export interface YaraImport {
   moduleColumn: number;
 }
 
-export type YaraStringType = 'text' | 'regex' | 'hex';
+export enum YaraStringType {
+  Text = 'text',
+  Regex = 'regex',
+  Hex = 'hex',
+}
 
 export interface YaraStringDef {
   id: string;
@@ -118,9 +123,9 @@ function stripLineComments(line: string): string {
 
 function detectStringType(valuePart: string): YaraStringType {
   const v = valuePart.trim();
-  if (v.startsWith('{')) return 'hex';
-  if (v.startsWith('/')) return 'regex';
-  return 'text';
+  if (v.startsWith('{')) return YaraStringType.Hex;
+  if (v.startsWith('/')) return YaraStringType.Regex;
+  return YaraStringType.Text;
 }
 
 function parseModifiers(afterValue: string, lineColumn: number): Array<{ modifier: string; column: number }> {

@@ -18,10 +18,10 @@ import {
 } from '@components/pages/images';
 import Page from '@components/pages/Page';
 import LoadingSpinner from '@components/shared/fallback/LoadingSpinner';
-import ImagePipelineEditor from '@components/shared/inputs/code/ImagePipelineEditor';
-import FormatToggle from '@components/shared/inputs/code/FormatToggle';
-import ViewModeToggle from '@components/shared/inputs/code/ViewModeToggle';
-import type { ViewMode } from '@components/shared/inputs/code/ViewModeToggle';
+import ImagePipelineEditor from '@components/shared/inputs/code/CodeEditor/ImagePipelineEditor';
+import FormatToggle from '@components/shared/inputs/code/CodeEditor/FormatToggle';
+import ViewModeToggle from '@components/shared/inputs/code/CodeEditor/ViewModeToggle';
+import type { ViewMode } from '@components/shared/inputs/code/CodeEditor/ViewModeToggle';
 import { OverlayTipRight } from '@components/shared/overlay/tips';
 import { useAuth } from '@utilities/auth';
 import { fetchImages, fetchGroups } from '@utilities/fetch';
@@ -32,7 +32,7 @@ import type { Image } from '@models/images';
 import type { Group } from '@models/groups';
 import { RoleKey } from '@models/users';
 import { getThoriumRole } from '@utilities/role';
-import type { FormatType } from '@utilities/rules/types';
+import { FormatType } from '@utilities/rules/types';
 
 const imageChecker = new ImageChecker();
 
@@ -76,7 +76,7 @@ const ImageCreate: React.FC = () => {
   const [editorObj, setEditorObj] = useState<Record<string, unknown>>(
     state ? imageToEditorObject(state as unknown as Record<string, unknown>) : IMAGE_CREATE_TEMPLATE,
   );
-  const [editorFormat, setEditorFormat] = useState<FormatType>('yaml');
+  const [editorFormat, setEditorFormat] = useState<FormatType>(FormatType.YAML);
   const [editorParseValid, setEditorParseValid] = useState(false);
 
   const handleViewModeChange = (mode: ViewMode) => {

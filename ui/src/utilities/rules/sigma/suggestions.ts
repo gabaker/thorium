@@ -1,5 +1,7 @@
 import type { Document } from 'yaml';
 import { isMap, isPair, isScalar } from 'yaml';
+
+// project imports
 import type { Suggestion } from '../types';
 import { buildLineIndex, offsetToLineCol, type LineIndex } from '../yaml';
 import {

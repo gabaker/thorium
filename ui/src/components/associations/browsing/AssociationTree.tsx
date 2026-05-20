@@ -13,7 +13,7 @@ import { getNodeSvg } from '../graph/styles';
 import { useGraphData } from '../data/GraphDataContext';
 import { PreviewPopover } from './PreviewPopover';
 import { TreeContainer } from './TreeContainer';
-import { NODE_TYPE_LABELS, findMultiParentNodeIds, buildTreeIndex, TreeIndex } from './treeHelpers';
+import { findMultiParentNodeIds, buildTreeIndex, TreeIndex, nodeTypeKeyToLabel } from './treeHelpers';
 import NodePreviewContent from './NodePreviewContent';
 import { Graph, TreeNode } from '@models/trees';
 
@@ -348,8 +348,8 @@ const AssociationTreeComponent: React.FC = () => {
                   {typeInfo && (
                     <img
                       className="node-type-icon"
-                      title={NODE_TYPE_LABELS[typeInfo.nodeType] ?? 'Other'}
-                      alt={NODE_TYPE_LABELS[typeInfo.nodeType] ?? 'Other'}
+                      title={nodeTypeKeyToLabel(typeInfo.nodeType)}
+                      alt={nodeTypeKeyToLabel(typeInfo.nodeType)}
                       src={`data:image/svg+xml;base64,${btoa(getNodeSvg(typeInfo.nodeType, typeInfo.visualState))}`}
                     />
                   )}

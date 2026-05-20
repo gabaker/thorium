@@ -119,7 +119,7 @@ const NodeInfo: React.FC<NodeTagsProps> = ({ node }) => {
         return (
           <>
             <Subtitle className="mt-2">Vendor(s)</Subtitle>
-            {entity.metadata.Device.vendors.length > 0 ? (
+            {entity.metadata.Device.vendors && entity.metadata.Device.vendors.length > 0 ? (
               <FieldBadge
                 color="Gray"
                 noNull={true}
@@ -137,7 +137,7 @@ const NodeInfo: React.FC<NodeTagsProps> = ({ node }) => {
                 <FieldBadge color="Gray" noNull={true} field={'no'} />
               )}
             </Subtitle>
-            {entity.metadata.Device.critical_sectors.length > 0 && (
+            {entity.metadata.Device.critical_sectors && entity.metadata.Device.critical_sectors.length > 0 && (
               <Subtitle className="mt-2">
                 {`Critical Sectors: `}
                 <FieldBadge color="DarkRed" noNull={true} field={entity.metadata.Device.critical_sectors} />
@@ -178,13 +178,13 @@ const NodeInfo: React.FC<NodeTagsProps> = ({ node }) => {
             <FieldBadge color="Gray" noNull={true} field={entity.metadata.Collection.collection_kind} />
             <Subtitle className="mt-2">Collection Tags</Subtitle>
             <FieldBadge color="Gray" noNull={true} field={entity.metadata.Collection.collection_tags} />
-            {entity.metadata.start != null && (
+            {entity.metadata.Collection.end != null && (
               <>
                 <Subtitle className="mt-2">Newest</Subtitle>
                 <FieldBadge color="Gray" field={entity.metadata.Collection.start} />
               </>
             )}
-            {entity.metadata.end != null && (
+            {entity.metadata.Collection.end != null && (
               <>
                 <Subtitle className="mt-2">Oldest</Subtitle>
                 <FieldBadge color="Gray" field={entity.metadata.Collection.end} />

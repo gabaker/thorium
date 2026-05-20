@@ -1,4 +1,3 @@
-import React from 'react';
 import { IconType } from 'react-icons';
 import {
   FaUpload,
@@ -20,6 +19,9 @@ import {
 } from 'react-icons/fa';
 import { FaHardDrive, FaFolderTree } from 'react-icons/fa6';
 import { MdBusinessCenter } from 'react-icons/md';
+// project imports
+import { getBrowsingPathByEntity } from '@components/entities/browsing/EntityBrowsingRoutes';
+import { Entities } from '@models/entities/entities';
 import SigmaIcon from '@components/shared/icons/SigmaIcon';
 
 export type NavIcon = IconType | React.ComponentType<{ size?: number }>;
@@ -45,13 +47,13 @@ export const NAV_ITEMS: NavCategory[] = [
     label: 'Browse',
     icon: FaLayerGroup,
     children: [
-      { label: 'Files', icon: FaFolderOpen, path: '/files' },
-      { label: 'Repos', icon: FaCodeBranch, path: '/repos' },
-      { label: 'Collections', icon: FaFolder, path: '/collections' },
-      { label: 'Devices', icon: FaHardDrive, path: '/devices' },
-      { label: 'Vendors', icon: MdBusinessCenter, path: '/vendors' },
-      { label: 'File Systems', icon: FaFolderTree, path: '/filesystems' },
-      { label: 'Sigma Rules', icon: SigmaIcon, path: '/sigma-rules' },
+      { label: 'Files', icon: FaFolderOpen, path: getBrowsingPathByEntity(Entities.File) },
+      { label: 'File Systems', icon: FaFolderTree, path: getBrowsingPathByEntity(Entities.FileSystem) },
+      { label: 'Repos', icon: FaCodeBranch, path: getBrowsingPathByEntity(Entities.Repo) },
+      { label: 'Collections', icon: FaFolder, path: getBrowsingPathByEntity(Entities.Collection) },
+      { label: 'Devices', icon: FaHardDrive, path: getBrowsingPathByEntity(Entities.Device) },
+      { label: 'Vendors', icon: MdBusinessCenter, path: getBrowsingPathByEntity(Entities.Vendor) },
+      { label: 'Sigma Rules', icon: SigmaIcon, path: getBrowsingPathByEntity(Entities.SigmaRule) },
     ],
   },
   {
@@ -63,11 +65,6 @@ export const NAV_ITEMS: NavCategory[] = [
       { label: 'Stats', icon: FaChartLine, path: '/stats' },
     ],
   },
-  {
-    label: 'Dashboards',
-    icon: FaTachometerAlt,
-    children: [{ label: 'Incident', icon: FaExclamationTriangle, path: '/dashboard/incident' }],
-  },
   { label: 'Groups', icon: FaUsers, path: '/groups' },
   {
     label: 'Admin',
@@ -77,5 +74,10 @@ export const NAV_ITEMS: NavCategory[] = [
       { label: 'Users', icon: FaUser, path: '/users' },
       { label: 'Settings', icon: FaCog, path: '/settings' },
     ],
+  },
+  {
+    label: 'Dashboards',
+    icon: FaTachometerAlt,
+    children: [{ label: 'Incident', icon: FaExclamationTriangle, path: '/dashboard/incident' }],
   },
 ];

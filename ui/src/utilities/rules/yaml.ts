@@ -1,5 +1,5 @@
 import { parseDocument, isMap, isPair, isScalar, isSeq, type Document, type YAMLMap } from 'yaml';
-import type { Diagnostic } from './types';
+import { Severity, type Diagnostic } from './types';
 
 interface LineIndex {
   offsets: number[];
@@ -54,7 +54,7 @@ export function parseYaml(text: string): YamlParseResult {
       column: start.column,
       endLine: end.line,
       endColumn: end.column,
-      severity: 'error',
+      severity: Severity.Error,
       message: err.message,
     });
   }
@@ -69,7 +69,7 @@ export function parseYaml(text: string): YamlParseResult {
       column: start.column,
       endLine: end.line,
       endColumn: end.column,
-      severity: 'warning',
+      severity: Severity.Warning,
       message: warn.message,
     });
   }
@@ -101,7 +101,7 @@ function walkMap(map: YAMLMap, lineIndex: LineIndex, diagnostics: Diagnostic[]):
           line: prev.line,
           column: prev.column,
           endColumn: prev.column + prev.keyLen,
-          severity: 'error',
+          severity: Severity.Error,
           message: `Duplicate key '${key}' (also defined on line ${pos.line})`,
         });
         prev.flagged = true;
@@ -110,7 +110,7 @@ function walkMap(map: YAMLMap, lineIndex: LineIndex, diagnostics: Diagnostic[]):
         line: pos.line,
         column: pos.column,
         endColumn: pos.column + key.length,
-        severity: 'error',
+        severity: Severity.Error,
         message: `Duplicate key '${key}' (previously defined on line ${prev.line})`,
       });
     } else {

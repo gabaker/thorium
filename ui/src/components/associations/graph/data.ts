@@ -1,9 +1,9 @@
 // project imports
-import { Graph, BranchNode, Direction } from '@models/trees';
+import { Graph, BranchNode, Direction, NodeType } from '@models/trees';
 import { Entities } from '@models/entities/entities';
 import { formatSubmissionNames, formatTagNames, getEdgeLabel } from '../utilities';
 import { getNodeSize, scoreNode } from '../shared/scaling';
-import type { GraphNode, GraphLink, GraphData, NodeType, VisualState } from './types';
+import type { GraphNode, GraphLink, GraphData, VisualState } from './types';
 
 export const getLinkEndpoints = (link: GraphLink): { source: string; target: string } => {
   const source = typeof link.source === 'object' ? (link.source as GraphNode).id : link.source;
@@ -28,16 +28,15 @@ export const classifyNode = (
     if (label.length > 30) {
       label = label.substring(0, 15) + '...' + label.substring(label.length - 15);
     }
-    return { nodeType: 'file', visualState, label };
+    return { nodeType: NodeType.File, visualState, label };
   } else if ('Repo' in nodeData) {
-    return { nodeType: 'repo', visualState, label: nodeData.Repo?.url ?? '' };
+    return { nodeType: NodeType.Repo, visualState, label: nodeData.Repo?.url ?? '' };
   } else if ('Tag' in nodeData) {
-    return { nodeType: 'tag', visualState, label: formatTagNames(nodeData.Tag?.tags ?? {}, true) };
+    return { nodeType: NodeType.Tag, visualState, label: formatTagNames(nodeData.Tag?.tags ?? {}, true) };
   } else if (nodeData.Entity?.kind && Object.keys(Entities).includes(nodeData.Entity.kind)) {
-    const nodeType = nodeData.Entity.kind.toLowerCase() as NodeType;
-    return { nodeType, visualState, label: nodeData.Entity.name };
+    return { nodeType: nodeData.Entity.kind as Entities, visualState, label: nodeData.Entity.name };
   }
-  return { nodeType: 'other', visualState, label: 'Unknown' };
+  return { nodeType: NodeType.Other, visualState, label: 'Unknown' };
 };
 
 export const buildGraphNode = (

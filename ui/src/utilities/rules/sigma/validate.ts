@@ -1,6 +1,8 @@
 import type { Document } from 'yaml';
 import { isMap, isPair, isScalar, isSeq } from 'yaml';
-import { includes, type Diagnostic } from '../types';
+
+// project imports
+import { Severity, includes, type Diagnostic } from '../types';
 import { buildLineIndex, offsetToLineCol, type LineIndex } from '../yaml';
 import {
   REQUIRED_FIELDS,
@@ -72,7 +74,7 @@ export function validateSigmaRule(doc: Document, text: string, parsed: Record<st
         line: 1,
         column: 1,
         endLine: lastLine,
-        severity: 'error',
+        severity: Severity.Error,
         message: `Missing required field: '${field}'`,
       });
     }
@@ -84,7 +86,7 @@ export function validateSigmaRule(doc: Document, text: string, parsed: Record<st
       const pos = node ? nodeLineCol(node, lineIndex) : { line: 1, column: 1 };
       diagnostics.push({
         ...pos,
-        severity: 'warning',
+        severity: Severity.Info,
         message: `Unknown Sigma field: '${key}'. Known fields: ${KNOWN_TOP_LEVEL_FIELDS.join(', ')}`,
       });
     }
@@ -95,7 +97,7 @@ export function validateSigmaRule(doc: Document, text: string, parsed: Record<st
     const pos = node ? nodeLineCol(node, lineIndex) : { line: 1, column: 1 };
     diagnostics.push({
       ...pos,
-      severity: 'warning',
+      severity: Severity.Warning,
       message: `Title exceeds maximum length of ${TITLE_MAX_LENGTH} characters (currently ${parsed['title'].length})`,
     });
   }
@@ -105,7 +107,7 @@ export function validateSigmaRule(doc: Document, text: string, parsed: Record<st
     const pos = node ? nodeLineCol(node, lineIndex) : { line: 1, column: 1 };
     diagnostics.push({
       ...pos,
-      severity: 'warning',
+      severity: Severity.Warning,
       message: `Name exceeds maximum length of ${NAME_MAX_LENGTH} characters (currently ${parsed['name'].length})`,
     });
   }
@@ -115,7 +117,7 @@ export function validateSigmaRule(doc: Document, text: string, parsed: Record<st
     const pos = node ? nodeLineCol(node, lineIndex) : { line: 1, column: 1 };
     diagnostics.push({
       ...pos,
-      severity: 'warning',
+      severity: Severity.Warning,
       message: `Taxonomy exceeds maximum length of ${TAXONOMY_MAX_LENGTH} characters (currently ${parsed['taxonomy'].length})`,
     });
   }
@@ -125,7 +127,7 @@ export function validateSigmaRule(doc: Document, text: string, parsed: Record<st
     const pos = node ? nodeLineCol(node, lineIndex) : { line: 1, column: 1 };
     diagnostics.push({
       ...pos,
-      severity: 'warning',
+      severity: Severity.Warning,
       message: `Description exceeds maximum length of ${DESCRIPTION_MAX_LENGTH} characters`,
     });
   }
@@ -135,8 +137,8 @@ export function validateSigmaRule(doc: Document, text: string, parsed: Record<st
     const pos = nodePosition(node, lineIndex);
     diagnostics.push({
       ...pos,
-      severity: 'warning',
-      message: `id should be a UUID v4 (e.g. 929a690e-bef0-4204-a928-ef5e620d6fcc)`,
+      severity: Severity.Warning,
+      message: `id should be a UUIDv4 (e.g. 929a690e-bef0-4204-a928-ef5e620d6fcc)`,
     });
   }
 
@@ -146,7 +148,7 @@ export function validateSigmaRule(doc: Document, text: string, parsed: Record<st
       const pos = nodePosition(node, lineIndex);
       diagnostics.push({
         ...pos,
-        severity: 'error',
+        severity: Severity.Error,
         message: `Invalid status value: '${parsed['status']}'. Must be one of: ${STATUS_VALUES.join(', ')}`,
       });
     }
@@ -158,7 +160,7 @@ export function validateSigmaRule(doc: Document, text: string, parsed: Record<st
       const pos = nodePosition(node, lineIndex);
       diagnostics.push({
         ...pos,
-        severity: 'error',
+        severity: Severity.Error,
         message: `Invalid level value: '${parsed['level']}'. Must be one of: ${LEVEL_VALUES.join(', ')}`,
       });
     }
@@ -176,7 +178,7 @@ export function validateSigmaRule(doc: Document, text: string, parsed: Record<st
         const pos = nodePosition(node, lineIndex);
         diagnostics.push({
           ...pos,
-          severity: 'error',
+          severity: Severity.Error,
           message: `Invalid ${dateField} format: '${rawValue}'. Must be YYYY-MM-DD`,
         });
       }
@@ -185,7 +187,7 @@ export function validateSigmaRule(doc: Document, text: string, parsed: Record<st
       const pos = nodePosition(node, lineIndex);
       diagnostics.push({
         ...pos,
-        severity: 'error',
+        severity: Severity.Error,
         message: `${dateField} must be a string in YYYY-MM-DD format`,
       });
     }
@@ -200,7 +202,7 @@ export function validateSigmaRule(doc: Document, text: string, parsed: Record<st
           const pos = item.range ? nodeLineCol(item, lineIndex) : { line: 1, column: 1 };
           diagnostics.push({
             ...pos,
-            severity: 'warning',
+            severity: Severity.Warning,
             message: `Tag '${item.value}' does not match expected pattern (lowercase, dot-separated namespaces)`,
           });
         }
@@ -226,7 +228,7 @@ export function validateSigmaRule(doc: Document, text: string, parsed: Record<st
                     const pos = pair.value.range ? nodeLineCol(pair.value, lineIndex) : { line: 1, column: 1 };
                     diagnostics.push({
                       ...pos,
-                      severity: 'error',
+                      severity: Severity.Error,
                       message: `Invalid related type: '${pair.value.value}'. Must be one of: ${RELATED_TYPES.join(', ')}`,
                     });
                   }
@@ -237,10 +239,10 @@ export function validateSigmaRule(doc: Document, text: string, parsed: Record<st
           if (!hasId || !hasType) {
             const pos = nodePosition(entry, lineIndex);
             if (!hasId) {
-              diagnostics.push({ ...pos, severity: 'error', message: `related entry is missing required field: 'id'` });
+              diagnostics.push({ ...pos, severity: Severity.Error, message: `related entry is missing required field: 'id'` });
             }
             if (!hasType) {
-              diagnostics.push({ ...pos, severity: 'error', message: `related entry is missing required field: 'type'` });
+              diagnostics.push({ ...pos, severity: Severity.Error, message: `related entry is missing required field: 'type'` });
             }
           }
         }
@@ -256,7 +258,7 @@ export function validateSigmaRule(doc: Document, text: string, parsed: Record<st
       const pos = node ? nodeLineCol(node, lineIndex) : { line: 1, column: 1 };
       diagnostics.push({
         ...pos,
-        severity: 'warning',
+        severity: Severity.Warning,
         message: 'logsource should have at least one of: category, product, service',
       });
     }
@@ -271,7 +273,7 @@ export function validateSigmaRule(doc: Document, text: string, parsed: Record<st
         const pos = node ? nodeLineCol(node, lineIndex) : { line: 1, column: 1 };
         diagnostics.push({
           ...pos,
-          severity: 'error',
+          severity: Severity.Error,
           message: `detection is missing required field: '${field}'`,
         });
       }
@@ -309,7 +311,7 @@ export function validateSigmaRule(doc: Document, text: string, parsed: Record<st
                   const pos = nodePosition(pair.value, lineIndex);
                   diagnostics.push({
                     ...pos,
-                    severity: 'warning',
+                    severity: Severity.Warning,
                     message: `Condition references '${token}' which is not defined as a search identifier`,
                   });
                   break;
@@ -337,7 +339,7 @@ export function validateSigmaRule(doc: Document, text: string, parsed: Record<st
                       const pos = fieldPair.key.range ? nodeLineCol(fieldPair.key, lineIndex) : { line: 1, column: 1 };
                       diagnostics.push({
                         ...pos,
-                        severity: 'error',
+                        severity: Severity.Error,
                         message: `Unknown value modifier '${mod}' in search identifier '${searchId}'`,
                       });
                     }
@@ -360,7 +362,7 @@ export function validateSigmaRule(doc: Document, text: string, parsed: Record<st
           const pos = item.range ? nodeLineCol(item, lineIndex) : { line: 1, column: 1 };
           diagnostics.push({
             ...pos,
-            severity: 'warning',
+            severity: Severity.Warning,
             message: `False positive entry should be at least ${FALSEPOSITIVES_MIN_LENGTH} characters`,
           });
         }
@@ -377,7 +379,7 @@ export function validateSigmaRule(doc: Document, text: string, parsed: Record<st
           const pos = item.range ? nodeLineCol(item, lineIndex) : { line: 1, column: 1 };
           diagnostics.push({
             ...pos,
-            severity: 'warning',
+            severity: Severity.Warning,
             message: `Scope entry should be at least ${SCOPE_MIN_LENGTH} characters`,
           });
         }
@@ -390,7 +392,7 @@ export function validateSigmaRule(doc: Document, text: string, parsed: Record<st
     const pos = node ? nodeLineCol(node, lineIndex) : { line: 1, column: 1 };
     diagnostics.push({
       ...pos,
-      severity: 'error',
+      severity: Severity.Error,
       message: `'references' must be a list of strings`,
     });
   }
@@ -400,7 +402,7 @@ export function validateSigmaRule(doc: Document, text: string, parsed: Record<st
     const pos = node ? nodeLineCol(node, lineIndex) : { line: 1, column: 1 };
     diagnostics.push({
       ...pos,
-      severity: 'error',
+      severity: Severity.Error,
       message: `'fields' must be a list of strings`,
     });
   }

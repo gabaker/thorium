@@ -18,7 +18,7 @@ import {
   TagEntry,
   TLPSelection as TLPSelectionState,
 } from './types';
-import { EntityTypes } from '@models/entities';
+import { EntityTypes } from '@models/entities/entities';
 import { ReactionSelection } from '@models/reactions';
 import { UserInfo } from '@models/users';
 

@@ -3,7 +3,7 @@ import { Card, Form } from 'react-bootstrap';
 import styled from 'styled-components';
 
 // project imports
-const AssociationGraph3D = React.lazy(() => import('../components/associations/graph/AssociationGraph'));
+const AssociationGraph = React.lazy(() => import('../components/associations/graph/AssociationGraph'));
 import { GraphDataProvider } from '../components/associations/data/GraphDataContext';
 import Page from '@components/pages/Page';
 import Subtitle from '@components/shared/titles/Subtitle';
@@ -31,7 +31,7 @@ const InputTitle = styled.div`
   gap: 8px;
 `;
 
-const RepoHeader = () => {
+const GraphHeader = () => {
   const { updateSeed } = useGraphContext();
   return (
     <Card className="panel">
@@ -56,13 +56,13 @@ const GraphBuilder = () => {
   return (
     <GraphContext.Provider value={{ updateSeed }}>
       <Page className="full-min-width" title={`Graph Builder`}>
-        <RepoHeader />
+        <GraphHeader />
         {seed !== null && (
           <GraphDataProvider initial={seed}>
             <Card className="panel">
               <Card.Body>
                 <Subtitle className="text-center">Associations</Subtitle>
-                <AssociationGraph3D inView />
+                <AssociationGraph inView />
               </Card.Body>
             </Card>
           </GraphDataProvider>

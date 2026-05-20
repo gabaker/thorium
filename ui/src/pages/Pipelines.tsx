@@ -11,8 +11,8 @@ import Title from '@components/shared/titles/Title';
 import FieldBadge from '@components/shared/badges/FieldBadge';
 import LoadingSpinner from '@components/shared/fallback/LoadingSpinner';
 import SimpleSubtitle from '@components/shared/titles/SimpleSubtitle';
-import ImagePipelineEditor from '@components/shared/inputs/code/ImagePipelineEditor';
-import FormatToggle from '@components/shared/inputs/code/FormatToggle';
+import ImagePipelineEditor from '@components/shared/inputs/code/CodeEditor/ImagePipelineEditor';
+import FormatToggle from '@components/shared/inputs/code/CodeEditor/FormatToggle';
 import { OverlayTipBottom, OverlayTipLeft, OverlayTipRight } from '@components/shared/overlay/tips';
 import { orderComparePipeline } from '@components/pages/files/reactions/pipelines';
 import { useAuth } from '@utilities/auth';
@@ -24,7 +24,7 @@ import { createPipeline, deletePipeline, listPipelines, updatePipeline } from '@
 import type { Pipeline } from '@models/pipelines';
 import type { Group } from '@models/groups';
 import { RoleKey } from '@models/users';
-import type { FormatType } from '@utilities/rules/types';
+import { FormatType } from '@utilities/rules/types';
 
 const pipelineChecker = new PipelineChecker();
 
@@ -149,7 +149,7 @@ const Pipelines: React.FC = () => {
     const [updateError, setUpdateError] = useState('');
     const [inEditMode, setInEditMode] = useState(false);
     const [editorObj, setEditorObj] = useState<Record<string, unknown> | null>(null);
-    const [format, setFormat] = useState<FormatType>('yaml');
+    const [format, setFormat] = useState<FormatType>(FormatType.YAML);
     const [parseValid, setParseValid] = useState(false);
     const pipelineTriggers = (pipeline.triggers || {}) as Record<string, any>;
 
@@ -407,7 +407,7 @@ const Pipelines: React.FC = () => {
   const CreatePipeline: React.FC = () => {
     const [showCreateModal, setShowCreateModal] = useState(false);
     const [pipelineObj, setPipelineObj] = useState<Record<string, unknown>>(PIPELINE_CREATE_TEMPLATE);
-    const [format, setFormat] = useState<FormatType>('yaml');
+    const [format, setFormat] = useState<FormatType>(FormatType.YAML);
     const [parseValid, setParseValid] = useState(false);
     const [createError, setCreateError] = useState('');
 

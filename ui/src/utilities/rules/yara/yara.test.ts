@@ -1,4 +1,6 @@
 import { describe, test, expect } from 'vitest';
+
+// project imports
 import { YaraRuleChecker } from './index';
 
 const VALID_RULE = `import "pe"

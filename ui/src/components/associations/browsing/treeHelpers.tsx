@@ -1,7 +1,7 @@
 // project imports
 import { formatTagNames } from '../utilities';
 import { FilteredNodeTags } from '../shared/NodeInfo';
-import { Direction, Graph, TreeNode } from '@models/trees';
+import { Direction, Graph, NodeType, TreeNode } from '@models/trees';
 
 export interface TreeIndex {
   childrenOf: Map<string, string[]>;
@@ -11,7 +11,6 @@ export interface TreeIndex {
 export function buildTreeIndex(graph: Graph): TreeIndex {
   const childrenOf = new Map<string, string[]>();
   const parentsOf = new Map<string, string[]>();
-
   const addChild = (parent: string, child: string) => {
     let list = childrenOf.get(parent);
     if (!list) {
@@ -27,7 +26,6 @@ export function buildTreeIndex(graph: Graph): TreeIndex {
     }
     if (!parents.includes(parent)) parents.push(parent);
   };
-
   if (graph.branches) {
     for (const [nodeId, branches] of Object.entries(graph.branches)) {
       for (const branch of branches) {
@@ -39,23 +37,12 @@ export function buildTreeIndex(graph: Graph): TreeIndex {
       }
     }
   }
-
   return { childrenOf, parentsOf };
 }
 
-const NODE_TYPE_LABELS: Record<string, string> = {
-  file: 'File',
-  repo: 'Repository',
-  tag: 'Tag',
-  device: 'Device',
-  vendor: 'Vendor',
-  collection: 'Collection',
-  filesystem: 'File System',
-  folder: 'Folder',
-  other: 'Other',
-};
-
-export { NODE_TYPE_LABELS };
+export function nodeTypeKeyToLabel(key: string): string {
+  return key.replace(/([a-z0-9])([A-Z])/g, '$1 $2').replace(/([A-Z])([A-Z][a-z])/g, '$1 $2');
+}
 
 export function getNodePreviewData(nodeData: TreeNode) {
   if ('Sample' in nodeData && nodeData.Sample) {
@@ -92,12 +79,8 @@ export function getNodePreviewData(nodeData: TreeNode) {
   if ('Entity' in nodeData && nodeData.Entity) {
     const e = nodeData.Entity;
     return {
-      type: NODE_TYPE_LABELS[e.kind.toLowerCase()] ?? e.kind,
-      fields: [
-        { label: 'Name', value: e.name },
-        { label: 'Kind', value: e.kind },
-        ...(e.description ? [{ label: 'Description', value: e.description }] : []),
-      ],
+      type: nodeTypeKeyToLabel(e.kind),
+      fields: [{ label: 'Name', value: e.name }, ...(e.description ? [{ label: 'Description', value: e.description }] : [])],
       tags: e.tags,
     };
   }

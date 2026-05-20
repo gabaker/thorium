@@ -1,10 +1,12 @@
-import type { RuleChecker, CheckResult, FormatType } from '../types';
+// project imports
+import type { RuleChecker, CheckResult } from '../types';
+import { FormatType, Severity } from '../types';
 import { parseYaraText } from './parse';
 import { validateYaraRules } from './validate';
 import { generateYaraSuggestions } from './suggestions';
 
 export class YaraRuleChecker implements RuleChecker {
-  format: FormatType = 'yara';
+  format = FormatType.YARA;
 
   check(text: string): CheckResult {
     if (!text.trim()) {
@@ -15,7 +17,7 @@ export class YaraRuleChecker implements RuleChecker {
 
     const parseDiagnostics = parseResult.errors.map((e) => ({
       line: e.line,
-      severity: 'error' as const,
+      severity: Severity.Error,
       message: e.message,
     }));
 

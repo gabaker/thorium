@@ -18,10 +18,10 @@ import {
 import Page from '@components/pages/Page';
 import Title from '@components/shared/titles/Title';
 import LoadingSpinner from '@components/shared/fallback/LoadingSpinner';
-import ImagePipelineEditor from '@components/shared/inputs/code/ImagePipelineEditor';
-import FormatToggle from '@components/shared/inputs/code/FormatToggle';
-import ViewModeToggle from '@components/shared/inputs/code/ViewModeToggle';
-import type { ViewMode } from '@components/shared/inputs/code/ViewModeToggle';
+import ImagePipelineEditor from '@components/shared/inputs/code/CodeEditor/ImagePipelineEditor';
+import FormatToggle from '@components/shared/inputs/code/CodeEditor/FormatToggle';
+import ViewModeToggle from '@components/shared/inputs/code/CodeEditor/ViewModeToggle';
+import type { ViewMode } from '@components/shared/inputs/code/CodeEditor/ViewModeToggle';
 import { OverlayTipRight, OverlayTipLeft, OverlayTipBottom } from '@components/shared/overlay/tips';
 import { getGroupRole, getThoriumRole } from '@utilities/role';
 import { fetchImages, fetchSingleImage, fetchGroups } from '@utilities/fetch';
@@ -32,7 +32,7 @@ import { deleteImage, updateImage } from '@thorpi/images';
 import type { Image } from '@models/images';
 import type { Group } from '@models/groups';
 import { RoleKey } from '@models/users';
-import type { FormatType } from '@utilities/rules/types';
+import { FormatType } from '@utilities/rules/types';
 
 const imageChecker = new ImageChecker();
 
@@ -162,7 +162,7 @@ const ImageInfo: React.FC<ImageInfoProps> = ({ images, image, groups, setImages 
 
   const [viewMode, setViewMode] = useState<ViewMode>('form');
   const [editorObj, setEditorObj] = useState<Record<string, unknown> | null>(null);
-  const [editorFormat, setEditorFormat] = useState<FormatType>('yaml');
+  const [editorFormat, setEditorFormat] = useState<FormatType>(FormatType.YAML);
   const [editorParseValid, setEditorParseValid] = useState(false);
 
   const handleViewModeChange = (mode: ViewMode) => {

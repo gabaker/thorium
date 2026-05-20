@@ -2,14 +2,18 @@ export function includes<T extends string>(arr: readonly T[], val: string): val 
   return (arr as readonly string[]).includes(val);
 }
 
-export type DiagnosticSeverity = 'error' | 'warning' | 'info';
+export enum Severity {
+  Error = 'error',
+  Warning = 'warning',
+  Info = 'info',
+}
 
 export interface Diagnostic {
   line: number;
   column?: number;
   endLine?: number;
   endColumn?: number;
-  severity: DiagnosticSeverity;
+  severity: Severity;
   message: string;
 }
 
@@ -27,7 +31,11 @@ export interface CheckResult {
   suggestions: Suggestion[];
 }
 
-export type FormatType = 'yaml' | 'json' | 'yara';
+export enum FormatType {
+  YAML = 'yaml',
+  JSON = 'json',
+  YARA = 'yara',
+}
 
 export interface RuleChecker {
   format: FormatType;

@@ -1,6 +1,6 @@
 import type { Document } from 'yaml';
 import { isMap, isPair, isScalar, isSeq } from 'yaml';
-import { includes, type Diagnostic } from '../types';
+import { includes, Severity, type Diagnostic } from '../types';
 import { buildLineIndex, offsetToLineCol, type LineIndex } from '../yaml';
 import {
   REQUIRED_IMAGE_FIELDS,
@@ -90,7 +90,7 @@ function validateUnknownFields(
       const pos = node ? nodeLineCol(node, lineIndex) : { line: 1, column: 1 };
       diagnostics.push({
         ...pos,
-        severity: 'warning',
+        severity: Severity.Warning,
         message: `Unknown ${parentLabel} field: '${fieldName}'. Known fields: ${fieldList}`,
       });
     }
@@ -115,7 +115,7 @@ function validateEnumField(
       const pos = nodePosition(node, lineIndex);
       diagnostics.push({
         ...pos,
-        severity: 'error',
+        severity: Severity.Error,
         message: `Invalid ${field} value: '${strVal}'. Must be one of: ${valueList}`,
       });
     }
@@ -135,7 +135,7 @@ function validateNumberField(
     const pos = nodePosition(node, lineIndex);
     diagnostics.push({
       ...pos,
-      severity: 'error',
+      severity: Severity.Error,
       message: `'${field}' must be a number`,
     });
   }
@@ -154,7 +154,7 @@ function validateBooleanField(
     const pos = nodePosition(node, lineIndex);
     diagnostics.push({
       ...pos,
-      severity: 'error',
+      severity: Severity.Error,
       message: `'${field}' must be a boolean (true/false)`,
     });
   }
@@ -173,7 +173,7 @@ function validateStringField(
     const pos = nodePosition(node, lineIndex);
     diagnostics.push({
       ...pos,
-      severity: 'error',
+      severity: Severity.Error,
       message: `'${field}' must be a string`,
     });
   }
@@ -193,7 +193,7 @@ function validateObjectField(
     const pos = nodePosition(node, lineIndex);
     diagnostics.push({
       ...pos,
-      severity: 'error',
+      severity: Severity.Error,
       message: `'${field}' must be an object`,
     });
     return null;
@@ -295,7 +295,7 @@ function validateVolumes(parentMap: unknown, parsed: Record<string, unknown>, li
   if (!Array.isArray(parsed['volumes'])) {
     const node = findMapValue(parentMap, 'volumes');
     const pos = nodePosition(node, lineIndex);
-    diagnostics.push({ ...pos, severity: 'error', message: "'volumes' must be an array" });
+    diagnostics.push({ ...pos, severity: Severity.Error, message: "'volumes' must be an array" });
     return;
   }
   const volsNode = findMapValue(parentMap, 'volumes');
@@ -306,18 +306,18 @@ function validateVolumes(parentMap: unknown, parsed: Record<string, unknown>, li
     const vol = volumes[i];
     if (typeof vol !== 'object' || vol === null || Array.isArray(vol)) {
       const pos = nodePosition(item, lineIndex);
-      diagnostics.push({ ...pos, severity: 'error', message: 'Each volume entry must be an object' });
+      diagnostics.push({ ...pos, severity: Severity.Error, message: 'Each volume entry must be an object' });
       continue;
     }
     const volObj = vol as Record<string, unknown>;
     validateUnknownFields(item, KNOWN_VOLUME_FIELDS, 'volume', volObj, lineIndex, diagnostics);
     if (!('name' in volObj)) {
       const pos = nodePosition(item, lineIndex);
-      diagnostics.push({ ...pos, severity: 'error', message: "Volume is missing required field: 'name'" });
+      diagnostics.push({ ...pos, severity: Severity.Error, message: "Volume is missing required field: 'name'" });
     }
     if (!('mount_path' in volObj)) {
       const pos = nodePosition(item, lineIndex);
-      diagnostics.push({ ...pos, severity: 'error', message: "Volume is missing required field: 'mount_path'" });
+      diagnostics.push({ ...pos, severity: Severity.Error, message: "Volume is missing required field: 'mount_path'" });
     }
     if ('archetype' in volObj) {
       validateEnumField(item, volObj, 'archetype', VOLUME_TYPE_VALUES, lineIndex, diagnostics);
@@ -355,7 +355,7 @@ export function validateImageRequest(doc: Document, text: string, parsed: Record
         line: 1,
         column: 1,
         endLine: lastLine,
-        severity: 'error',
+        severity: Severity.Error,
         message: `Missing required field: '${field}'`,
       });
     }
@@ -389,7 +389,7 @@ export function validateImageRequest(doc: Document, text: string, parsed: Record
   if ('network_policies' in parsed && !Array.isArray(parsed['network_policies'])) {
     const node = findMapValue(contents, 'network_policies');
     const pos = nodePosition(node, lineIndex);
-    diagnostics.push({ ...pos, severity: 'error', message: "'network_policies' must be an array of strings" });
+    diagnostics.push({ ...pos, severity: Severity.Error, message: "'network_policies' must be an array of strings" });
   }
 
   if ('env' in parsed) {
@@ -403,7 +403,7 @@ export function validateImageRequest(doc: Document, text: string, parsed: Record
       if (!('script' in cu)) {
         const node = findMapKey(contents, 'clean_up');
         const pos = node ? nodeLineCol(node, lineIndex) : { line: 1, column: 1 };
-        diagnostics.push({ ...pos, severity: 'error', message: "clean_up is missing required field: 'script'" });
+        diagnostics.push({ ...pos, severity: Severity.Error, message: "clean_up is missing required field: 'script'" });
       }
     }
   }
@@ -415,11 +415,11 @@ export function validateImageRequest(doc: Document, text: string, parsed: Record
       const kvmMap = findMapValue(contents, 'kvm');
       if (!('xml' in kvm)) {
         const pos = nodePosition(kvmMap, lineIndex);
-        diagnostics.push({ ...pos, severity: 'error', message: "kvm is missing required field: 'xml'" });
+        diagnostics.push({ ...pos, severity: Severity.Error, message: "kvm is missing required field: 'xml'" });
       }
       if (!('qcow2' in kvm)) {
         const pos = nodePosition(kvmMap, lineIndex);
-        diagnostics.push({ ...pos, severity: 'error', message: "kvm is missing required field: 'qcow2'" });
+        diagnostics.push({ ...pos, severity: Severity.Error, message: "kvm is missing required field: 'qcow2'" });
       }
     }
   }
@@ -439,7 +439,7 @@ export function validatePipelineRequest(doc: Document, text: string, parsed: Rec
         line: 1,
         column: 1,
         endLine: lastLine,
-        severity: 'error',
+        severity: Severity.Error,
         message: `Missing required field: '${field}'`,
       });
     }
@@ -456,7 +456,7 @@ export function validatePipelineRequest(doc: Document, text: string, parsed: Rec
     if (!Array.isArray(parsed['order'])) {
       const node = findMapValue(contents, 'order');
       const pos = nodePosition(node, lineIndex);
-      diagnostics.push({ ...pos, severity: 'error', message: "'order' must be an array" });
+      diagnostics.push({ ...pos, severity: Severity.Error, message: "'order' must be an array" });
     } else {
       const orderNode = findMapValue(contents, 'order');
       const orderArr = parsed['order'] as unknown[];
@@ -471,7 +471,7 @@ export function validatePipelineRequest(doc: Document, text: string, parsed: Rec
                 const pos = nodePosition(item, lineIndex);
                 diagnostics.push({
                   ...pos,
-                  severity: 'error',
+                  severity: Severity.Error,
                   message: `order[${i}][${j}] must be a string (image name)`,
                 });
               }
@@ -480,7 +480,7 @@ export function validatePipelineRequest(doc: Document, text: string, parsed: Rec
             const pos = nodePosition(item, lineIndex);
             diagnostics.push({
               ...pos,
-              severity: 'error',
+              severity: Severity.Error,
               message: `order[${i}] must be a string or array of strings`,
             });
           }

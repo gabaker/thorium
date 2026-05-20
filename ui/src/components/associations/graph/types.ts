@@ -1,6 +1,8 @@
 import type { NodeObject, LinkObject } from '3d-force-graph';
 
-export type NodeType = 'file' | 'repo' | 'tag' | 'device' | 'vendor' | 'collection' | 'filesystem' | 'folder' | 'other';
+// project imports
+import { NodeType } from '@models/trees';
+
 export type VisualState = 'basic' | 'growable' | 'initial';
 
 export interface GraphNode extends NodeObject {

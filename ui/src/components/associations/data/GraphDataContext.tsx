@@ -50,19 +50,15 @@ export const GraphDataProvider: React.FC<GraphDataProviderProps> = ({ initial, f
   const [graphVersion, setGraphVersion] = useState(0);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
-
   const [focusedNodeId, setFocusedNodeId] = useState<string | null>(null);
   const [focusSource, setFocusSource] = useState<FocusSource | null>(null);
-
+  // update in focus node when clicking graph
   const setFocusedNode = useCallback((nodeId: string | null, source: FocusSource) => {
     setFocusedNodeId(nodeId);
     setFocusSource(source);
   }, []);
-
   const growChainRef = useRef<Promise<void>>(Promise.resolve());
-
   const bumpVersion = useCallback(() => setGraphVersion((v) => v + 1), []);
-
   const handleError = useCallback((err: string) => setError(err), []);
 
   const fetchInitial = useCallback(
@@ -116,36 +112,37 @@ export const GraphDataProvider: React.FC<GraphDataProviderProps> = ({ initial, f
 
       const doGrowToDepth = async () => {
         let iterations = 0;
+        // limit the max loops of "BFS -> grow by depth group" we will execute in case
+        // we are returned continuous stream of nodes that can also be grown
         const maxIterations = 20;
-
         while (iterations < maxIterations) {
           const distances = computeDistances(graphRef.current);
           const growableSet = graphRef.current.growable.map((n) => n.toString());
-
+          // group nodes that need to be grown by depth
           const groups = new Map<number, string[]>();
           for (const nodeId of growableSet) {
             const dist = distances.get(nodeId);
             if (dist !== undefined && dist < targetDepth) {
               const limit = targetDepth - dist;
+              // add empty depth group to depth map
               if (!groups.has(limit)) groups.set(limit, []);
               groups.get(limit)!.push(nodeId);
             }
           }
-
+          // no groups to grow this iteration
           if (groups.size === 0) break;
-
+          // grow the group nodes for each depth together
           for (const [limit, nodes] of groups) {
             const data = await growTree(graphId, nodes, handleError, limit);
             if (data) {
+              // merge any returned graph data into the existing graph
               graphRef.current = mergeGrowthInto(graphRef.current, data, nodes);
               bumpVersion();
             }
           }
-
           iterations++;
         }
       };
-
       growChainRef.current = growChainRef.current.then(doGrowToDepth, doGrowToDepth);
       await growChainRef.current;
     },
@@ -159,15 +156,9 @@ export const GraphDataProvider: React.FC<GraphDataProviderProps> = ({ initial, f
     [initial, filterChildless, depth, fetchInitial],
   );
 
-  const growable = useMemo(
-    () => new Set(graphRef.current.growable.map((n) => n.toString())),
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-    [graphVersion],
-  );
-
+  const growable = useMemo(() => new Set(graphRef.current.growable.map((n) => n.toString())), [graphVersion]);
   const getGraph = useCallback(() => graphRef.current, []);
-
-  const value = useMemo<GraphDataContextType>(
+  const contextValues = useMemo<GraphDataContextType>(
     () => ({
       graph: graphRef.current,
       graphId,
@@ -184,7 +175,6 @@ export const GraphDataProvider: React.FC<GraphDataProviderProps> = ({ initial, f
       reload,
       setFocusedNode,
     }),
-    // eslint-disable-next-line react-hooks/exhaustive-deps
     [
       graphId,
       graphVersion,
@@ -201,6 +191,5 @@ export const GraphDataProvider: React.FC<GraphDataProviderProps> = ({ initial, f
       setFocusedNode,
     ],
   );
-
-  return <GraphDataContext.Provider value={value}>{children}</GraphDataContext.Provider>;
+  return <GraphDataContext.Provider value={contextValues}>{children}</GraphDataContext.Provider>;
 };

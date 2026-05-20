@@ -6,7 +6,7 @@ import type { ForceGraph3DInstance } from '3d-force-graph';
 import type { GraphControls, DisplayAction, SectionKey } from './types';
 import { ToolbarContainer, ToolbarIconButton, NodeCount, ToolbarSpinner } from './Toolbar.styled';
 import { OverlayTipTop } from '@components/shared/overlay/tips';
-import ScrollableSelect from '@components/shared/ScrollableSelect';
+import ScrollableSelect from '@components/shared/inputs/ScrollableSelect';
 import ToolbarButton from './ToolbarButton';
 import GraphSection from './GraphSection';
 import ForcesSection from './ForcesSection';

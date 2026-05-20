@@ -1,15 +1,15 @@
-import type { RuleChecker, CheckResult, FormatType } from '../types';
+import { type RuleChecker, type CheckResult, FormatType, Severity } from '../types';
 import { parseYaml } from '../yaml';
 import { validateImageRequest, validatePipelineRequest } from './validate';
 import { generateImageSuggestions, generatePipelineSuggestions } from './suggestions';
 
 export class ImageChecker implements RuleChecker {
-  format: FormatType = 'yaml';
+  format = FormatType.YAML;
 
   check(text: string): CheckResult {
     const { doc, value, diagnostics: syntaxDiagnostics } = parseYaml(text);
 
-    if (syntaxDiagnostics.some((d) => d.severity === 'error') || !doc || !value) {
+    if (syntaxDiagnostics.some((d) => d.severity === Severity.Error) || !doc || !value) {
       return { diagnostics: syntaxDiagnostics, suggestions: [] };
     }
 
@@ -20,7 +20,7 @@ export class ImageChecker implements RuleChecker {
           {
             line: 1,
             column: 1,
-            severity: 'error',
+            severity: Severity.Error,
             message: 'Image request must be a YAML mapping (key-value pairs), not a list or scalar',
           },
         ],
@@ -40,12 +40,12 @@ export class ImageChecker implements RuleChecker {
 }
 
 export class PipelineChecker implements RuleChecker {
-  format: FormatType = 'yaml';
+  format = FormatType.YAML;
 
   check(text: string): CheckResult {
     const { doc, value, diagnostics: syntaxDiagnostics } = parseYaml(text);
 
-    if (syntaxDiagnostics.some((d) => d.severity === 'error') || !doc || !value) {
+    if (syntaxDiagnostics.some((d) => d.severity === Severity.Error) || !doc || !value) {
       return { diagnostics: syntaxDiagnostics, suggestions: [] };
     }
 
@@ -56,7 +56,7 @@ export class PipelineChecker implements RuleChecker {
           {
             line: 1,
             column: 1,
-            severity: 'error',
+            severity: Severity.Error,
             message: 'Pipeline request must be a YAML mapping (key-value pairs), not a list or scalar',
           },
         ],
