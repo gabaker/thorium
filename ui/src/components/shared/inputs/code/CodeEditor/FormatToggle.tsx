@@ -37,10 +37,10 @@ export interface FormatToggleProps {
 const FormatToggle: React.FC<FormatToggleProps> = ({ format, onFormatChange }) => (
   <Wrapper>
     <Label>Format:</Label>
-    <Btn $active={format === 'yaml'} onClick={() => onFormatChange(FormatType.YAML)}>
+    <Btn $active={format === FormatType.YAML} onClick={() => onFormatChange(FormatType.YAML)}>
       YAML
     </Btn>
-    <Btn $active={format === 'json'} onClick={() => onFormatChange(FormatType.YAML)}>
+    <Btn $active={format === FormatType.JSON} onClick={() => onFormatChange(FormatType.JSON)}>
       JSON
     </Btn>
   </Wrapper>

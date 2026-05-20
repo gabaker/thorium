@@ -1,20 +1,8 @@
 import { test, expect, Page } from '@playwright/test';
 import path from 'path';
-import { snapshot } from './helpers';
+import { snapshot, MOCK_USER, waitForEditor } from './helpers';
 
 const SCREENSHOT_DIR = path.join(import.meta.dirname, 'screenshots');
-
-const MOCK_USER = {
-  username: 'test',
-  role: 'Admin',
-  email: 'test@thorium.dev',
-  groups: ['system'],
-  token: 'mock-token-for-pipeline-test',
-  token_expiration: '2099-01-01T00:00:00Z',
-  settings: { theme: 'Dark' },
-  local: true,
-  verified: true,
-};
 
 const MOCK_GROUP = {
   name: 'system',
@@ -95,11 +83,6 @@ async function setupPipelineMocks(page: Page, pipelines = [MOCK_PIPELINE, MOCK_P
     }
     return route.fulfill({ status: 200, contentType: 'application/json', body: '{}' });
   });
-}
-
-async function waitForEditor(page: Page) {
-  await page.waitForSelector('.cm-editor', { timeout: 10000 });
-  await page.waitForTimeout(500);
 }
 
 test.describe('Pipelines Page', () => {

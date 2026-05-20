@@ -1,5 +1,6 @@
 import { describe, test, expect } from 'vitest';
 import { SigmaRuleChecker } from './index';
+import { removeLine, removeBlock, replaceLine } from '../test-helpers';
 
 const VALID_OKTA_RULE = `title: Okta User Account Locked Out
 id: 14701da0-4b0f-4ee6-9c95-2ffb4e73bb9a
@@ -34,41 +35,14 @@ function warnings(text: string) {
   return checker.check(text).diagnostics.filter((d) => d.severity === 'warning');
 }
 
+function infos(text: string) {
+  return checker.check(text).diagnostics.filter((d) => d.severity === 'info');
+}
+
 function suggestions(text: string) {
   return checker.check(text).suggestions;
 }
 
-function removeLine(text: string, prefix: string): string {
-  return text
-    .split('\n')
-    .filter((line) => !line.trimStart().startsWith(prefix))
-    .join('\n');
-}
-
-function removeBlock(text: string, key: string): string {
-  const lines = text.split('\n');
-  const result: string[] = [];
-  let skipping = false;
-  for (const line of lines) {
-    if (line.startsWith(`${key}:`)) {
-      skipping = true;
-      continue;
-    }
-    if (skipping && (line.startsWith('    ') || line.startsWith('\t') || line.trim() === '')) {
-      continue;
-    }
-    skipping = false;
-    result.push(line);
-  }
-  return result.join('\n');
-}
-
-function replaceLine(text: string, prefix: string, replacement: string): string {
-  return text
-    .split('\n')
-    .map((line) => (line.trimStart().startsWith(prefix) ? replacement : line))
-    .join('\n');
-}
 
 describe('SigmaRuleChecker', () => {
   describe('valid rule', () => {
@@ -170,15 +144,15 @@ describe('SigmaRuleChecker', () => {
     test('invalid id (not UUID v4)', () => {
       const text = replaceLine(VALID_OKTA_RULE, 'id:', "id: 'not-a-uuid'");
       const warns = warnings(text);
-      expect(warns.some((w) => w.message.includes('UUID v4'))).toBe(true);
+      expect(warns.some((w) => w.message.includes('UUIDv4'))).toBe(true);
     });
   });
 
   describe('unknown fields and tags', () => {
     test('unknown top-level field', () => {
       const text = VALID_OKTA_RULE + '\nfoobar: baz';
-      const warns = warnings(text);
-      expect(warns.some((w) => w.message.includes("Unknown Sigma field: 'foobar'"))).toBe(true);
+      const infs = infos(text);
+      expect(infs.some((w) => w.message.includes("Unknown Sigma field: 'foobar'"))).toBe(true);
     });
 
     test('invalid tag pattern (uppercase)', () => {

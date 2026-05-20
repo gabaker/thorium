@@ -16,23 +16,23 @@ Before running tests you need:
 cd ui
 
 # Run all E2E tests
-REACT_APP_API_URL=http://localhost:8080/api npm run test:e2e
+THORIUM_API_URL=http://localhost:8080 npm run test:e2e
 
 # Run a single test by name
-REACT_APP_API_URL=http://localhost:8080/api npx playwright test -g "seeded entity"
+THORIUM_API_URL=http://localhost:8080 npx playwright test -g "seeded entity"
 
 # Watch the browser (headed mode)
-REACT_APP_API_URL=http://localhost:8080/api npm run test:e2e:headed
+THORIUM_API_URL=http://localhost:8080 npm run test:e2e:headed
 
 # Interactive UI debugger (timeline, DOM snapshots, network log)
-REACT_APP_API_URL=http://localhost:8080/api npx playwright test --ui
+THORIUM_API_URL=http://localhost:8080 npx playwright test --ui
 
 # Record a trace for step-by-step replay
-REACT_APP_API_URL=http://localhost:8080/api npx playwright test --trace on
+THORIUM_API_URL=http://localhost:8080 npx playwright test --trace on
 npx playwright show-trace test-results/*/trace.zip
 ```
 
-The `REACT_APP_API_URL` env var tells the Vite dev server where the API lives. Without it the frontend defaults to `http://localhost/api` (port 80) which won't reach the API.
+The `THORIUM_API_URL` env var tells the Playwright config where the API lives. It is mapped to `REACT_APP_API_URL` for the Vite dev server internally. Without it the frontend defaults to `http://localhost/api` (port 80) which won't reach the API.
 
 ## Test Structure
 
@@ -40,9 +40,18 @@ The `REACT_APP_API_URL` env var tells the Vite dev server where the API lives. W
 
 ```
 e2e/
-  helpers.ts          # API client for test setup/teardown (auth, CRUD)
-  graph.spec.ts       # Visual tests for the graph page
-  screenshots/        # Output directory for PNGs (gitignored)
+  helpers.ts                 # Shared utilities: API client, auth (loginViaUI, setupMockAuth),
+                             #   editor helpers (waitForEditor, setEditorContent), snapshot
+  graph.spec.ts              # 3D graph visual validation (real API)
+  data-manager.spec.ts       # Shared data manager / tree sync (real API)
+  upload.spec.ts             # File upload flow (real API)
+  upload-components.spec.ts  # Upload form components detailed testing (real API)
+  sidebar.spec.ts            # Sidebar navigation (mock API)
+  sigma-editor.spec.ts       # Sigma rule CodeMirror editor (mock API)
+  yara-editor.spec.ts        # YARA rule CodeMirror editor (mock API)
+  images.spec.ts             # Image browsing and create pages (mock API)
+  pipelines.spec.ts          # Pipelines page (mock API)
+  screenshots/               # Output directory for PNGs (gitignored)
     .gitkeep
 ```
 
@@ -78,11 +87,26 @@ Default credentials for minithor dev deployments: `test` / `INSECURE_DEV_PASSWOR
 `e2e/helpers.ts` provides reusable functions for API interaction. All calls go to `THORIUM_API_URL` (default `http://localhost:8080`).
 
 Available helpers:
+
+**API functions:**
 - `authenticate(username, password)` — Returns a token string
 - `createEntity(token, name, kind, groups)` — Returns entity UUID
 - `deleteEntity(token, id)` — Deletes an entity
 - `uploadFile(token, content, filename, groups)` — Returns `{ sha256, id }`, handles 409 (already exists)
 - `createAssociation(token, request)` — Creates an association between entities/files
+- `buildTree(token, seed)` — Builds a relationship tree, returns `{ id, initial, growable }`
+- `snapshot(page, dir, name)` — Captures paired screenshot + HTML snapshot
+
+**Auth helpers:**
+- `loginViaUI(page)` — Logs in via the UI with `TEST_USER`/`TEST_PASS` credentials
+- `setupMockAuth(page)` — Sets up mock auth routes (whoami, generic API fallback, cookie)
+- `TEST_USER`, `TEST_PASS` — Default credentials (`test` / `INSECURE_DEV_PASSWORD`)
+- `MOCK_USER` — Mock user object for route interception
+
+**CodeMirror editor helpers:**
+- `waitForEditor(page)` — Waits for `.cm-editor` to appear
+- `waitForLinter(page)` — Waits for linter to process
+- `setEditorContent(page, text)` — Replaces CodeMirror editor content programmatically
 
 The `buildClient(token?)` function creates an axios instance with the correct base URL and auth header. Use it for any new API endpoints.
 
@@ -100,20 +124,18 @@ Create a new file in `e2e/` named `<feature>.spec.ts`:
 ```ts
 import { test, expect } from '@playwright/test';
 import path from 'path';
-import { authenticate, createEntity, deleteEntity } from './helpers';
+import {
+  authenticate, createEntity, deleteEntity, snapshot,
+  loginViaUI, setupMockAuth, TEST_USER, TEST_PASS,
+} from './helpers';
 
 const SCREENSHOT_DIR = path.join(import.meta.dirname, 'screenshots');
-const USER = process.env.THORIUM_USER || 'test';
-const PASS = process.env.THORIUM_PASS || 'INSECURE_DEV_PASSWORD';
-
-// Reuse the loginViaUI pattern from graph.spec.ts
-async function loginViaUI(page) { /* ... */ }
 
 test.describe('Feature Name', () => {
   let token: string;
 
   test.beforeAll(async () => {
-    token = await authenticate(USER, PASS);
+    token = await authenticate(TEST_USER, TEST_PASS);
     // Seed test data via API
   });
 
@@ -129,11 +151,7 @@ test.describe('Feature Name', () => {
     // Interact with the page
     // ...
 
-    // Take a screenshot
-    await page.screenshot({
-      path: path.join(SCREENSHOT_DIR, 'your-feature.png'),
-      fullPage: true,
-    });
+    await snapshot(page, SCREENSHOT_DIR, 'your-feature');
 
     // DOM assertions
     await expect(page.locator('.your-selector')).toBeVisible();
@@ -234,13 +252,12 @@ The file already exists (same content was uploaded before). The `uploadFile` hel
 | File | Purpose |
 |------|---------|
 | `playwright.config.ts` | Test runner config: test dir, timeouts, base URL, dev server auto-start |
-| `e2e/helpers.ts` | API client: auth, entity/file/association CRUD |
-| `e2e/graph.spec.ts` | Visual tests for the graph page |
+| `e2e/helpers.ts` | Shared test utilities: API client, auth helpers, editor helpers, snapshot |
+| `e2e/*.spec.ts` | Test specs (see File Layout above for full inventory) |
 | `e2e/screenshots/` | Screenshot output (gitignored) |
 
 | Env Var | Default | Purpose |
 |---------|---------|---------|
-| `REACT_APP_API_URL` | `http://localhost/api` | API URL for the frontend (must be set to `http://localhost:8080/api`) |
-| `THORIUM_API_URL` | `http://localhost:8080` | API URL for test helpers (direct API calls) |
+| `THORIUM_API_URL` | `http://localhost:8080` | API URL for test helpers and Vite dev server (mapped to `REACT_APP_API_URL` internally) |
 | `THORIUM_USER` | `test` | Login username |
 | `THORIUM_PASS` | `INSECURE_DEV_PASSWORD` | Login password |

@@ -1,20 +1,9 @@
 import { test, expect } from '@playwright/test';
 import path from 'path';
 import fs from 'fs';
-import { authenticate, snapshot } from './helpers';
+import { authenticate, snapshot, loginViaUI, TEST_USER, TEST_PASS } from './helpers';
 
 const SCREENSHOT_DIR = path.join(import.meta.dirname, 'screenshots');
-const USER = process.env.THORIUM_USER || 'test';
-const PASS = process.env.THORIUM_PASS || 'INSECURE_DEV_PASSWORD';
-
-async function loginViaUI(page: import('@playwright/test').Page) {
-  await page.goto('/');
-  await page.waitForLoadState('networkidle');
-  await page.locator('input[placeholder="username"]').fill(USER);
-  await page.locator('input[placeholder="password"]').fill(PASS);
-  await page.locator('button:has-text("Login")').click();
-  await page.waitForURL((url) => !url.pathname.includes('/auth'), { timeout: 15000 });
-}
 
 function createTempFile(suffix: string, content?: string): string {
   const filePath = path.join(import.meta.dirname, `upload-test-${suffix}-${Date.now()}.bin`);
@@ -59,7 +48,7 @@ test.describe('Upload Page — Form Rendering', () => {
   let token: string;
 
   test.beforeAll(async () => {
-    token = await authenticate(USER, PASS);
+    token = await authenticate(TEST_USER, TEST_PASS);
   });
 
   test('renders upload form with all required sections', async ({ page }) => {
@@ -94,7 +83,7 @@ test.describe('Upload Page — TLP Selection', () => {
   let token: string;
 
   test.beforeAll(async () => {
-    token = await authenticate(USER, PASS);
+    token = await authenticate(TEST_USER, TEST_PASS);
   });
 
   test('toggles TLP buttons exclusively', async ({ page }) => {
@@ -131,7 +120,7 @@ test.describe('Upload Page — Origin Tabs', () => {
   let token: string;
 
   test.beforeAll(async () => {
-    token = await authenticate(USER, PASS);
+    token = await authenticate(TEST_USER, TEST_PASS);
   });
 
   test('Downloaded tab — renders URL and Site Name fields', async ({ page }) => {
@@ -350,7 +339,7 @@ test.describe('Upload Page — Validation', () => {
   let token: string;
 
   test.beforeAll(async () => {
-    token = await authenticate(USER, PASS);
+    token = await authenticate(TEST_USER, TEST_PASS);
   });
 
   test('shows error when uploading without selecting a file', async ({ page }) => {
@@ -397,7 +386,7 @@ test.describe('Upload Page — Downloaded Origin Full Upload', () => {
   let token: string;
 
   test.beforeAll(async () => {
-    token = await authenticate(USER, PASS);
+    token = await authenticate(TEST_USER, TEST_PASS);
   });
 
   test('uploads a file with Downloaded origin and verifies success', async ({ page }) => {
@@ -440,7 +429,7 @@ test.describe('Upload Page — Transformed Origin Upload', () => {
   let token: string;
 
   test.beforeAll(async () => {
-    token = await authenticate(USER, PASS);
+    token = await authenticate(TEST_USER, TEST_PASS);
   });
 
   test('uploads a file with Transformed origin', async ({ page }) => {
@@ -483,7 +472,7 @@ test.describe('Upload Page — Wire Origin Upload', () => {
   let token: string;
 
   test.beforeAll(async () => {
-    token = await authenticate(USER, PASS);
+    token = await authenticate(TEST_USER, TEST_PASS);
   });
 
   test('uploads a file with Wire origin', async ({ page }) => {
@@ -525,7 +514,7 @@ test.describe('Upload Page — Incident Origin Upload', () => {
   let token: string;
 
   test.beforeAll(async () => {
-    token = await authenticate(USER, PASS);
+    token = await authenticate(TEST_USER, TEST_PASS);
   });
 
   test('uploads a file with Incident origin', async ({ page }) => {
@@ -570,7 +559,7 @@ test.describe('Upload Page — Multi-file Upload with Status Dashboard', () => {
   let token: string;
 
   test.beforeAll(async () => {
-    token = await authenticate(USER, PASS);
+    token = await authenticate(TEST_USER, TEST_PASS);
   });
 
   test('uploads multiple files and shows the status dashboard', async ({ page }) => {
@@ -628,7 +617,7 @@ test.describe('Upload Page — Carved Origin with PCAP Fields', () => {
   let token: string;
 
   test.beforeAll(async () => {
-    token = await authenticate(USER, PASS);
+    token = await authenticate(TEST_USER, TEST_PASS);
   });
 
   test('uploads a file with Carved/PCAP origin', async ({ page }) => {
@@ -668,7 +657,7 @@ test.describe('Upload Page — Carved Origin Validation', () => {
   let token: string;
 
   test.beforeAll(async () => {
-    token = await authenticate(USER, PASS);
+    token = await authenticate(TEST_USER, TEST_PASS);
   });
 
   test('shows validation feedback for invalid PCAP IP fields', async ({ page }) => {
@@ -698,7 +687,7 @@ test.describe('Upload Page — Description and Tags', () => {
   let token: string;
 
   test.beforeAll(async () => {
-    token = await authenticate(USER, PASS);
+    token = await authenticate(TEST_USER, TEST_PASS);
   });
 
   test('can add description and tags to upload form', async ({ page }) => {
@@ -736,7 +725,7 @@ test.describe('Upload Page — Memory Dump Origin Upload', () => {
   let token: string;
 
   test.beforeAll(async () => {
-    token = await authenticate(USER, PASS);
+    token = await authenticate(TEST_USER, TEST_PASS);
   });
 
   test('uploads a file with Memory Dump origin', async ({ page }) => {

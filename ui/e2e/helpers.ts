@@ -3,6 +3,68 @@ import type { Page } from '@playwright/test';
 import fs from 'fs';
 import path from 'path';
 
+export const TEST_USER = process.env.THORIUM_USER || 'test';
+export const TEST_PASS = process.env.THORIUM_PASS || 'INSECURE_DEV_PASSWORD';
+
+export const MOCK_USER = {
+  username: 'test',
+  role: 'Admin',
+  email: 'test@thorium.dev',
+  groups: ['system'],
+  token: 'mock-token-for-visual-test',
+  token_expiration: '2099-01-01T00:00:00Z',
+  settings: { theme: 'Dark' },
+  local: true,
+  verified: true,
+};
+
+export async function loginViaUI(page: Page) {
+  await page.goto('/');
+  await page.waitForLoadState('networkidle');
+  await page.locator('input[placeholder="username"]').fill(TEST_USER);
+  await page.locator('input[placeholder="password"]').fill(TEST_PASS);
+  await page.locator('button:has-text("Login")').click();
+  await page.waitForURL((url) => !url.pathname.includes('/auth'), { timeout: 15000 });
+}
+
+export async function setupMockAuth(page: Page) {
+  await page.route('**/api/users/whoami', (route) =>
+    route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify(MOCK_USER) }),
+  );
+  await page.route('**/api/**', (route) => {
+    const url = route.request().url();
+    if (url.includes('/users/whoami')) return route.fallback();
+    return route.fulfill({ status: 200, contentType: 'application/json', body: '{}' });
+  });
+  await page.context().addCookies([{
+    name: 'THORIUM_TOKEN',
+    value: MOCK_USER.token,
+    domain: 'localhost',
+    path: '/',
+  }]);
+}
+
+export async function waitForEditor(page: Page) {
+  await page.waitForSelector('.cm-editor', { timeout: 10000 });
+  await page.waitForTimeout(500);
+}
+
+export async function waitForLinter(page: Page) {
+  await page.waitForTimeout(600);
+}
+
+export async function setEditorContent(page: Page, text: string) {
+  await page.evaluate((content) => {
+    const container = document.querySelector('.cm-editor')?.parentElement as HTMLElement & { _cmView?: { state: { doc: { length: number } }; dispatch: (spec: unknown) => void } };
+    const view = container?._cmView;
+    if (view) {
+      view.dispatch({
+        changes: { from: 0, to: view.state.doc.length, insert: content },
+      });
+    }
+  }, text);
+}
+
 const API_URL = process.env.THORIUM_API_URL || 'http://localhost:8080';
 
 function buildClient(token?: string): AxiosInstance {

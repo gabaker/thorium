@@ -7,6 +7,7 @@ node_modules/
 coverage/
 e2e/screenshots/*.png
 e2e/screenshots/*.html
+e2e/*.bin
 test-results/
 playwright-report/
 

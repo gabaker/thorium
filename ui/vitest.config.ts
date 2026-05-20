@@ -16,8 +16,13 @@ export default defineConfig({
     },
   },
   test: {
-    include: ['src/**/*.test.ts'],
+    include: ['src/**/*.test.{ts,tsx}'],
     environment: 'node',
     testTimeout: 30000,
+    coverage: {
+      provider: 'v8',
+      reporter: ['text', 'lcov'],
+      include: ['src/utilities/**', 'src/models/**'],
+    },
   },
 });

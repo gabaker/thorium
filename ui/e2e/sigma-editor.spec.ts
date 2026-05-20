@@ -1,58 +1,14 @@
 import { test, expect, Page } from '@playwright/test';
 import path from 'path';
-import { snapshot } from './helpers';
+import {
+  snapshot,
+  setupMockAuth,
+  waitForEditor,
+  waitForLinter,
+  setEditorContent,
+} from './helpers';
 
 const SCREENSHOT_DIR = path.join(import.meta.dirname, 'screenshots');
-
-const MOCK_USER = {
-  username: 'test',
-  role: 'Admin',
-  email: 'test@thorium.dev',
-  groups: ['system'],
-  token: 'mock-token-for-visual-test',
-  token_expiration: '2099-01-01T00:00:00Z',
-  settings: { theme: 'Dark' },
-  local: true,
-  verified: true,
-};
-
-async function setupMockAuth(page: Page) {
-  await page.route('**/api/users/whoami', (route) =>
-    route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify(MOCK_USER) }),
-  );
-  await page.route('**/api/**', (route) => {
-    const url = route.request().url();
-    if (url.includes('/users/whoami')) return route.fallback();
-    return route.fulfill({ status: 200, contentType: 'application/json', body: '{}' });
-  });
-  await page.context().addCookies([{
-    name: 'THORIUM_TOKEN',
-    value: MOCK_USER.token,
-    domain: 'localhost',
-    path: '/',
-  }]);
-}
-
-async function waitForEditor(page: Page) {
-  await page.waitForSelector('.cm-editor', { timeout: 10000 });
-  await page.waitForTimeout(500);
-}
-
-async function waitForLinter(page: Page) {
-  await page.waitForTimeout(600);
-}
-
-async function setEditorContent(page: Page, text: string) {
-  await page.evaluate((content) => {
-    const container = document.querySelector('.cm-editor')?.parentElement as HTMLElement & { _cmView?: { state: { doc: { length: number } }; dispatch: (spec: unknown) => void } };
-    const view = container?._cmView;
-    if (view) {
-      view.dispatch({
-        changes: { from: 0, to: view.state.doc.length, insert: content },
-      });
-    }
-  }, text);
-}
 
 const VALID_RULE = `title: Okta User Account Locked Out
 id: 14701da0-4b0f-4ee6-9c95-2ffb4e73bb9a
