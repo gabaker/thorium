@@ -340,6 +340,25 @@ a.dropdown-toggle.nav-link {
   }
 }
 
+.form-range {
+  &::-webkit-slider-runnable-track {
+    background: var(--thorium-panel-border);
+  }
+
+  &::-moz-range-track {
+    background: var(--thorium-panel-border);
+  }
+
+  &::-webkit-slider-thumb {
+    background: var(--thorium-highlight-text);
+  }
+
+  &::-moz-range-thumb {
+    background: var(--thorium-highlight-text);
+    border: none;
+  }
+}
+
 // -----------------------------------------------------------------------------
 // ----------------------------------- Modal -----------------------------------
 

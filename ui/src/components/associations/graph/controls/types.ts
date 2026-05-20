@@ -1,7 +1,20 @@
 import type { ForceGraph3DInstance } from '3d-force-graph';
 
-export type NodeRenderMode = 'spheres' | 'icons';
-export type DagMode = 'td' | 'bu' | 'lr' | 'rl' | 'zout' | 'zin' | 'radialout' | 'radialin' | null;
+export enum NodeRenderMode {
+  Spheres = 'spheres',
+  Icons = 'icons',
+}
+
+export enum DagMode {
+  TopDown = 'td',
+  BottomUp = 'bu',
+  LeftRight = 'lr',
+  RightLeft = 'rl',
+  ZOut = 'zout',
+  ZIn = 'zin',
+  RadialOut = 'radialout',
+  RadialIn = 'radialin',
+}
 
 export interface GraphControls {
   filterChildless: boolean;
@@ -39,7 +52,7 @@ export interface GraphControls {
   warmupTicks: number;
   cooldownTime: number;
   // layout
-  dagMode: DagMode;
+  dagMode: DagMode | null;
   dagLevelDistance: number | null;
   numDimensions: 2 | 3;
   showGrid: boolean;
@@ -82,11 +95,17 @@ export type DisplayAction =
       state: number;
     }
   | { type: 'chargeStrength' | 'velocityDecay' | 'warmupTicks' | 'cooldownTime'; state: number }
-  | { type: 'dagMode'; state: DagMode }
+  | { type: 'dagMode'; state: DagMode | null }
   | { type: 'dagLevelDistance'; state: number | null }
   | { type: 'numDimensions'; state: 2 | 3 };
 
-export type SectionKey = 'graph' | 'forces' | 'nodes' | 'edges' | 'export';
+export enum SectionKey {
+  Graph = 'graph',
+  Forces = 'forces',
+  Nodes = 'nodes',
+  Edges = 'edges',
+  Export = 'export',
+}
 
 export type SectionProps = {
   controls: GraphControls;

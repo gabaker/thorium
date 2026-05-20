@@ -1,7 +1,10 @@
 import React from 'react';
 import styled from 'styled-components';
 
-export type ViewMode = 'form' | 'editor';
+export enum ViewMode {
+  Form = 'form',
+  Editor = 'editor',
+}
 
 const Wrapper = styled.div`
   display: flex;
@@ -37,10 +40,10 @@ export interface ViewModeToggleProps {
 const ViewModeToggle: React.FC<ViewModeToggleProps> = ({ viewMode, onViewModeChange }) => (
   <Wrapper>
     <Label>View:</Label>
-    <Btn $active={viewMode === 'form'} onClick={() => onViewModeChange('form')}>
+    <Btn $active={viewMode === ViewMode.Form} onClick={() => onViewModeChange(ViewMode.Form)}>
       Form
     </Btn>
-    <Btn $active={viewMode === 'editor'} onClick={() => onViewModeChange('editor')}>
+    <Btn $active={viewMode === ViewMode.Editor} onClick={() => onViewModeChange(ViewMode.Editor)}>
       Editor
     </Btn>
   </Wrapper>

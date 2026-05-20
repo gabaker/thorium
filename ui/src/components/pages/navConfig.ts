@@ -42,7 +42,7 @@ export interface NavCategory {
 
 export const NAV_ITEMS: NavCategory[] = [
   { label: 'Search', icon: FaSearch, path: '/' },
-  { label: 'Analyze', icon: FaUpload, path: '/upload' },
+  { label: 'Upload', icon: FaUpload, path: '/upload' },
   {
     label: 'Browse',
     icon: FaLayerGroup,

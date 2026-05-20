@@ -19,8 +19,7 @@ import { BlankCollection, Collection, CollectionMeta, CollectionMetaFields } fro
 
 const CollectionTips = {
   kind: `The type of items this collection contains`,
-  collectionTags: `The tags on items in this collection; all items in the collection
-    must have at least one of the given tags`,
+  collectionTags: `Tags that define which items belong to this collection. Entity tags (below) help users find the collection itself.`,
   tagsCaseInsensitive: `If true, tags on items can match tags regardless of case`,
   ignoreGroups: `If true, items from all of the user's groups will be included in the collection.
   Otherwise, collection items are restricted to the groups of the collection itself.`,
@@ -47,7 +46,7 @@ const CollectionMetaInfo = ({ entity, pendingEntity, handleUpdate, editing }: De
         </Row>
       )}
       <Row className="mt-3">
-        <EntityDetailsLabel label="Collection Tags" tip={CollectionTips.collectionTags} />
+        <EntityDetailsLabel label="Collection Tags" tip={CollectionTips.collectionTags} bold />
         <InfoValue>
           {editing ? (
             <TagSelect

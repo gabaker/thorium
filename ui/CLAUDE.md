@@ -49,7 +49,7 @@ Configured in both `vite.config.ts` and `tsconfig.base.json`:
 | `@thorpi` | `src/thorpi` |
 | `@utilities` | `src/utilities` |
 
-Always use these aliases in imports rather than relative paths.
+Always use these aliases in imports from outside of the local component directory/subdirectory rather than relative paths.
 
 ### Where Code Goes
 
@@ -75,8 +75,51 @@ Frontend models in `src/models/` should stay aligned with the Rust types in `api
 
 All new code must be written in **TypeScript + React + styled-components**. No exceptions.
 
-- **Do not introduce new Bootstrap usage.** The codebase has legacy Bootstrap/SCSS from earlier development — do not add to it. New styling must use styled-components.
-- There are legacy `.jsx` files in the codebase (see list below). When you touch these files, convert them to `.tsx` as part of the change.
+- **Do not introduce new Bootstrap usage.** The codebase has legacy Bootstrap/SCSS from earlier development — do not add to it. Prefer custom styled-components over Bootstrap components for new UI.
+- There are legacy `.jsx` files in the codebase (see list below). When you touch these files, convert them to `.tsx` as part of the change unless the user explicitly states otherwise.
+
+### TypeScript Conventions
+
+- **Prefer `enum` over string union types.** Use string-valued enums (`enum Foo { Bar = 'bar' }`) instead of union types (`type Foo = 'bar' | 'baz'`). Enums provide better refactoring support, autocomplete, and exhaustiveness checking.
+- **API and model types** (`interface`, `type`, `enum`) that represent API data shapes or are shared across multiple components go in `src/models/`. Each API resource has its own file.
+- **Internal component types** (`interface`, `type`, `enum`) that are only used for local state, controls, or display logic should be colocated with the component(s) that depend on them — typically in a `types.ts` file next to the component.
+
+### Imports
+
+Separate imports into two sections: **library imports** first, then **project imports** preceded by a `// project imports` comment. Within each section, sort named imports from a single module alphabetically.
+
+Order project imports from most local to most global:
+1. Local relative paths (`./types`, `./Toolbar.styled`, `../shared/scaling`)
+2. `@components/`
+3. `@thorpi/`, `@utilities/`
+4. `@models/`
+
+```ts
+import React, { useCallback, useState } from 'react';
+import styled from 'styled-components';
+
+// project imports
+import { GraphNode } from './types';
+import { ToolbarContainer } from './Toolbar.styled';
+import { OverlayTipTop } from '@components/shared/overlay/tips';
+import { fetchImages } from '@utilities/fetch';
+import { NodeType } from '@models/trees';
+```
+
+### Styling
+
+Styling follows a hierarchy based on scope and purpose:
+
+1. **Theme variables and library overrides** go in `src/styles/` (SCSS). This includes color variables, theme definitions, and overrides for third-party library components (Bootstrap, react-bootstrap) and built-in HTML elements. This is the only place global styles belong.
+2. **Component styles use styled-components.** All new component styling must use styled-components, colocated with the component (in the same file or a companion `.styled.tsx`). Avoid creating new SCSS files or adding to existing ones outside `src/styles/`.
+3. **Avoid styled-components when CSS variation would cause very large stylesheets** — for example, highly dynamic styles with many prop-driven variants. In these cases, use inline styles or CSS custom properties.
+4. **Inline styles** should be used sparingly: only when a single property (or very small number) must be adjusted on an existing component. If you need more than 2-3 inline style properties, create a styled wrapper instead.
+
+### Code Quality
+
+- **Prefer custom components over Bootstrap components** for new UI. Wrap or replace Bootstrap usage with styled-components when modifying existing code.
+- **Write clean, DRY code.** Extract shared logic into reusable components, hooks, and utilities. Deduplicate repeated patterns. Avoid copy-pasting code between components — factor out the common parts.
+- **Comment sections within functions** that define related behavior. Always add a brief comment to functions explaining their purpose. Keep comments concise — one line is ideal.
 
 ### Skills
 
@@ -88,6 +131,156 @@ When writing new components or refactoring existing ones, load the Vercel engine
 For Thorium-specific API interaction, instance discovery, and CLI usage, the base skill is at [skills/THORIUM.md](../skills/THORIUM.md).
 
 New development skills go in `skills/developer/`, user workflow skills in `skills/user/`, and admin skills in `skills/admin/`.
+
+### Naming Conventions
+
+**Files:**
+- **Standalone component files**: PascalCase matching the component name (`AlertBanner.tsx`, `EntityBrowsing.tsx`).
+- **Combined files** containing styled-components and small related visual primitives: lowercase (`shared.tsx`, `types.ts`, `config.ts`).
+- **Styled-component companion files**: `.styled.tsx` suffix (`Toolbar.styled.tsx`).
+- **Config files** follow `{EntityName}{View}Config.tsx` (`DeviceBrowsingConfig.tsx`, `CollectionDetailsConfig.tsx`).
+- **Test files**: co-located with source using `*.test.ts` / `*.test.tsx`.
+
+**Code:**
+- **Components**: PascalCase (`AlertBanner`, `EntityBrowsing`).
+- **Styled-components**: PascalCase, descriptive (`BrowsingCard`, `LinkFields`, `ControlRow`). Use `$` prefix for transient props (`$bold`, `$active`).
+- **Constants**: UPPER_SNAKE_CASE for true constants (`NODE_COLORS`, `ICON_EDGE_PAD`). PascalCase for blank/default model constants (`BlankDevice`, `BlankCreateDevice`).
+- **Hooks**: `use` prefix, camelCase (`useAuth`, `useGraphData`).
+- **Thorpi functions**: CRUD verb prefix (`createEntity`, `getFile`, `updateImage`, `deleteReaction`, `listPipelines`).
+- **Model types**: bare name for API response (`Device`), `Create` prefix for create requests (`CreateDevice`), `{Entity}MetaFields` / `{Entity}CreateMetaFields` for metadata subtypes.
+
+## Patterns and Architecture
+
+### Resource Data Models
+
+Thorium resources (files, images, entities, etc.) often have **separate models for each operation**. A resource's API response shape, create request, and update request may all differ. Components reference the model matching their action:
+
+- **Response/display types** mirror the API response (e.g., `Device`, `Image`, `Pipeline`).
+- **Create types** mirror the create request body (e.g., `CreateDevice`, `ImageCreate`). These often use IDs (`string[]`) where response types embed full objects.
+- **Blank constants** (`BlankDevice`, `BlankCreateDevice`) provide empty defaults for initializing forms.
+
+When building components, use the type that matches the operation — don't reuse a response type for a create form or vice versa.
+
+### Entity System
+
+The entity system is **config-driven**: browsing, create, and details pages are generated from configuration objects. Three registries drive the three views:
+
+- **Browsing configs** (`components/entities/browsing/configs/`): `EntityBrowseConfig<T>` with `renderEntity`, `entityHeaders`, `fetchEntities`.
+- **Details configs** (`components/entities/details/configs/`): `EntityDetailsConfig<T>` with `getEntityDetails`, `EntityMetaInfo` component, `BlankEntity`.
+- **Create configs** (`components/entities/create/configs/`): `EntityCreateConfig<K>` with `EntityMetadata` form component, `BlankCreateEntity`.
+
+Factory functions (`createEntityBrowsingPage`, `createEntityDetailsPage`, `createEntityCreatePage`) produce React components from these configs. The factory handles common UI (name, groups, description, tags, buttons) while the config provides type-specific content.
+
+**Adding a new entity type:**
+1. Add the variant to the `Entities` enum in `src/models/entities/entities.ts`
+2. Create a model file in `src/models/entities/` with response type, create type, meta types, and blank constants
+3. Add re-exports in `src/models/entities/index.ts` and update union types in `entities.ts`
+4. Create browsing, details, and (optionally) create configs in their respective `configs/` directories
+5. Register configs in each config registry (`config.ts` / `configs.ts`)
+6. Add route entries in `EntityBrowsingRoutes`, `EntityDetailsRoutes`, and optionally `EntityCreateRoutes`
+7. Add a nav item in `src/components/pages/navConfig.ts`
+
+Routes are generated dynamically from these route maps — `Thorium.tsx` does not need to be modified.
+
+### API Client (thorpi)
+
+Every thorpi module follows the same pattern:
+
+```ts
+export const createThing = async (
+  data: FormData,
+  errorHandler: (error: string) => void,
+): Promise<ThingResponse | null> => {
+  return client
+    .post('/things/', data)
+    .then((res) => {
+      if (res?.status && res.status == 200 && res.data) {
+        return res.data;
+      }
+      return null;
+    })
+    .catch((error) => {
+      parseRequestError(error, errorHandler, 'Create Thing');
+      return null;
+    });
+};
+```
+
+Key rules:
+- Every function takes an `errorHandler` callback — never throws.
+- On failure, returns `null` (or `false` / empty array) — callers check the return value, not try/catch.
+- Uses `parseRequestError(error, errorHandler, 'Label')` for consistent error formatting.
+- Two axios instances: `client` (default) for standard JSON, `bigIntClient` for responses with BigInt values.
+
+`src/utilities/fetch.ts` contains higher-level wrappers that orchestrate thorpi calls with loading state management.
+
+### Routing and Auth
+
+**Route structure** in `Thorium.tsx`:
+- `BrowserRouter` > `Auth` context > `WindowManager` > `Site` (nav + sidebar + routes).
+- Entity routes are generated dynamically from route maps (no hardcoded entity paths).
+- All other routes are `React.lazy()` loaded with dynamic imports.
+
+**Auth gating** via `PageWrapper` (`components/pages/Page.tsx`):
+- `auth={true}` (default): wraps in `RequireAuth` — redirects to `/auth` if no token.
+- `admin={true}`: wraps in `RequireAuth` + `RequireAdmin` — redirects if not admin.
+- `auth={false}`: no protection (login page only).
+
+**Page-level components must use `React.lazy()`** with dynamic imports for code splitting. This is required for all route-level pages in `src/pages/`.
+
+### State Management
+
+- **React Context** for cross-cutting state shared across component trees: `Auth` (app-wide), `GraphDataContext` (per graph), `UploadContext` (per upload flow). Every context follows: `createContext<T | undefined>(undefined)` + a `useXxx()` hook that throws if undefined + a `XxxProvider` component.
+- **`useReducer`** only for complex imperative state machines (e.g., 3D graph controls that must synchronize with the ForceGraph3D imperative API).
+- **`useState`** for everything else — page state, form state, loading flags, errors.
+
+### Shared Components
+
+Reuse these existing components instead of creating new ones:
+
+| Component | Location | Purpose |
+|-----------|----------|---------|
+| `AlertBanner` | `shared/alerts/AlertBanner.tsx` | Themed alert with `Severity` enum (Error, Warning, Info, Success) |
+| `OverlayTipTop/Right/Bottom/Left` | `shared/overlay/tips.tsx` | Tooltip wrappers — preferred over raw OverlayTrigger |
+| `FieldBadge` | `shared/badges/FieldBadge.tsx` | Display badge for entity fields (arrays, objects, booleans) |
+| `LinkBadge` | `shared/badges/LinkBadge.tsx` | Clickable badge for URLs with external link confirmation |
+| `LoadingSpinner` | `shared/fallback/LoadingSpinner.tsx` | Bootstrap spinner with `loading` prop |
+| `SelectInput` | `shared/inputs/selectable/SelectInput.tsx` | Single-value creatable select (react-select) |
+| `SelectInputArray` | `shared/inputs/selectable/SelectInputArray.tsx` | Multi-value select with `valuesMap` for ID-to-label |
+| `ScrollableSelect` | `shared/inputs/ScrollableSelect.tsx` | Compact numeric select with scroll |
+| `TagSelect` | `shared/inputs/tags/TagSelect/TagSelect.tsx` | Tag key-value entry with autocomplete |
+| `CodeEditor` | `shared/inputs/code/CodeEditor/CodeEditor.tsx` | CodeMirror editor with yara/sigma support |
+| `Card` | `shared/Card.tsx` | Themed card wrapper (`panel` prop) |
+| `Time` | `shared/Time.tsx` | Date/time formatter (`verbose` prop for long format) |
+| `UploadDropzone` | `shared/UploadDropzone.tsx` | File drag-and-drop (react-dropzone) |
+| `InfoHeader` / `InfoValue` | `entities/shared/` | Label + value columns for entity detail rows |
+| Browsing primitives | `entities/browsing/shared.tsx` | `BrowsingCard`, `LinkFields`, `EntityName`, `EntityGroups` |
+
+### Theme Variables
+
+Themes (`Dark`, `Light`, `Ocean`, `Crab`) are defined in `src/styles/colors.scss`. The active theme is set via a `[theme]` attribute on the root element, toggled by the auth context from `userInfo.settings.theme`. Always use `--thorium-*` CSS variables for theme-aware colors:
+
+| Variable | Purpose |
+|----------|---------|
+| `--thorium-body-bg` | Page background |
+| `--thorium-text` | Primary text |
+| `--thorium-secondary-text` | Muted text |
+| `--thorium-highlight-text` | Highlighted/accent text |
+| `--thorium-link-text` | Link color |
+| `--thorium-panel-bg` | Panel/card background |
+| `--thorium-secondary-panel-bg` | Form field/secondary panel background |
+| `--thorium-highlight-panel-bg` | Hover/highlight background |
+| `--thorium-nav-panel-bg` | Navigation background |
+| `--thorium-panel-border` | Panel border |
+| `--thorium-highlight-panel-border` | Highlighted border |
+| `--thorium-danger-bg` | Danger/delete |
+| `--thorium-error-bg` | Error alert background |
+| `--thorium-warning-bg` / `--thorium-warning-secondary-bg` | Warning colors |
+| `--thorium-info-bg` / `--thorium-info-secondary-bg` | Info colors |
+| `--thorium-ok-bg` | Success color |
+| `--thorium-button-text` | Button text |
+
+TypeScript spacing/scaling utilities are exported from `src/styles/index.ts` (`scaling` enum for breakpoints, `spacers` enum for spacing values).
 
 ### Legacy JSX Files
 

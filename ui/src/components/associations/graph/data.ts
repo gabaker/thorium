@@ -3,7 +3,8 @@ import { Graph, BranchNode, Direction, NodeType } from '@models/trees';
 import { Entities } from '@models/entities/entities';
 import { formatSubmissionNames, formatTagNames, getEdgeLabel } from '../utilities';
 import { getNodeSize, scoreNode } from '../shared/scaling';
-import type { GraphNode, GraphLink, GraphData, VisualState } from './types';
+import { VisualState } from './types';
+import type { GraphNode, GraphLink, GraphData } from './types';
 
 export const getLinkEndpoints = (link: GraphLink): { source: string; target: string } => {
   const source = typeof link.source === 'object' ? (link.source as GraphNode).id : link.source;
@@ -21,7 +22,7 @@ export const classifyNode = (
   const initialSet = precomputed?.initialSet ?? new Set(graph.initial.map((n) => n.toString()));
   const isGrowable = growableSet.has(nodeId);
   const isInitial = initialSet.has(nodeId);
-  const visualState: VisualState = isGrowable ? 'growable' : isInitial ? 'initial' : 'basic';
+  const visualState: VisualState = isGrowable ? VisualState.Growable : isInitial ? VisualState.Initial : VisualState.Basic;
 
   if ('Sample' in nodeData) {
     let label = formatSubmissionNames(nodeData.Sample?.submissions ?? []);

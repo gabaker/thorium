@@ -3,7 +3,9 @@ import SpriteText from 'three-spritetext';
 import type { ForceGraph3DInstance } from '3d-force-graph';
 
 import { getNodeColor, getNodeSvg, svgToTexture, getEdgeColor } from '../styles';
-import type { GraphControls, DisplayAction, NodeRenderMode } from './types';
+import { NodeRenderMode } from './types';
+import type { GraphControls, DisplayAction } from './types';
+import { VisualState } from '../types';
 import type { GraphNode, GraphLink } from '../types';
 
 export type LabelEntry = { sprite: THREE.Object3D; degree: number; isInitial: boolean; baseScale: THREE.Vector3 };
@@ -30,7 +32,7 @@ export const buildNodeObject = (
   return (node: GraphNode): THREE.Object3D => {
     const group = new THREE.Group();
 
-    if (renderMode === 'icons') {
+    if (renderMode === NodeRenderMode.Icons) {
       const svgString = getNodeSvg(node.nodeType, node.visualState);
       const texture = svgToTexture(svgString, 64);
       const spriteMaterial = new THREE.SpriteMaterial({ map: texture, transparent: true, depthWrite: false, opacity: nodeOpacity });
@@ -44,7 +46,7 @@ export const buildNodeObject = (
       const labelSprite = new SpriteText(node.label);
       labelSprite.color = getNodeColor(node.nodeType, node.visualState);
       labelSprite.textHeight = 3 * labelScale;
-      (labelSprite as any).position.y = renderMode === 'icons' ? -(node.diameter / 5 + 4) * sizeFactor : -(node.diameter / 5 + 2);
+      (labelSprite as any).position.y = renderMode === NodeRenderMode.Icons ? -(node.diameter / 5 + 4) * sizeFactor : -(node.diameter / 5 + 2);
       // @ts-expect-error depthWrite exists on SpriteMaterial
       labelSprite.material.depthWrite = false;
       group.add(labelSprite);
@@ -53,7 +55,7 @@ export const buildNodeObject = (
         labelMap.set(node.id, {
           sprite: obj,
           degree: node.degree,
-          isInitial: node.visualState === 'initial',
+          isInitial: node.visualState === VisualState.Initial,
           baseScale: obj.scale.clone(),
         });
       }
@@ -136,7 +138,7 @@ export const createControlsReducer = (
               state.nodeOpacity,
             ) as any,
           );
-          gi.nodeThreeObjectExtend(state.nodeRenderMode === 'spheres');
+          gi.nodeThreeObjectExtend(state.nodeRenderMode === NodeRenderMode.Spheres);
           gi.refresh();
         }
         return { ...state, showNodeLabels: action.state };
@@ -164,7 +166,7 @@ export const createControlsReducer = (
           gi.nodeThreeObject(
             buildNodeObject(state.nodeRenderMode, true, state.nodeRelSize, action.state, labelSpritesRef.current, state.nodeOpacity) as any,
           );
-          gi.nodeThreeObjectExtend(state.nodeRenderMode === 'spheres');
+          gi.nodeThreeObjectExtend(state.nodeRenderMode === NodeRenderMode.Spheres);
           gi.refresh();
         }
         return { ...state, nodeLabelScale: action.state };
@@ -192,8 +194,8 @@ export const createControlsReducer = (
               state.nodeOpacity,
             ) as any,
           );
-          gi.nodeThreeObjectExtend(action.state === 'spheres');
-          gi.nodeVal(action.state === 'icons' ? (iconNodeVal(state.nodeRelSize) as any) : (node: any) => (node as GraphNode).diameter);
+          gi.nodeThreeObjectExtend(action.state === NodeRenderMode.Spheres);
+          gi.nodeVal(action.state === NodeRenderMode.Icons ? (iconNodeVal(state.nodeRelSize) as any) : (node: any) => (node as GraphNode).diameter);
           gi.refresh();
         }
         return { ...state, nodeRenderMode: action.state };
@@ -238,7 +240,7 @@ export const createControlsReducer = (
         if (lastCamDistRef) lastCamDistRef.current = -1;
         if (gi) {
           gi.nodeRelSize(action.state);
-          if (state.nodeRenderMode === 'icons') {
+          if (state.nodeRenderMode === NodeRenderMode.Icons) {
             labelSpritesRef.current.clear();
             gi.nodeThreeObject(
               buildNodeObject(
@@ -259,7 +261,7 @@ export const createControlsReducer = (
       case 'nodeOpacity': {
         if (gi) {
           gi.nodeOpacity(action.state);
-          if (state.nodeRenderMode === 'icons') {
+          if (state.nodeRenderMode === NodeRenderMode.Icons) {
             labelSpritesRef.current.clear();
             gi.nodeThreeObject(
               buildNodeObject(

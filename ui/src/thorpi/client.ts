@@ -25,19 +25,19 @@ function getCookie(cname: string): string {
   return '';
 }
 
-// API should either be set with REACT_APP_API_URL or defined by the URL that
-// was used to navigate to the frontend
-let apiURL = '';
+// Resolve the Thorium base URL, then append /api.
+// THORIUM_API_URL should be the instance root (e.g. http://localhost:8080).
+let baseURL = '';
 if (window.location.hostname == 'localhost' || window.location.hostname == '127.0.0.1') {
-  // Used in when running local dev instance and pointed to a remote API
-  if (process.env.REACT_APP_API_URL && process.env.REACT_APP_API_URL !== '') {
-    apiURL = `${process.env.REACT_APP_API_URL}`;
+  if (process.env.THORIUM_API_URL && process.env.THORIUM_API_URL !== '') {
+    baseURL = process.env.THORIUM_API_URL.replace(/\/+$/, '');
   } else {
-    apiURL = `${window.location.protocol}//${window.location.hostname}/api`;
+    baseURL = `${window.location.protocol}//${window.location.hostname}`;
   }
 } else {
-  apiURL = `${window.location.protocol}//${window.location.hostname}/api`;
+  baseURL = `${window.location.protocol}//${window.location.hostname}`;
 }
+const apiURL = `${baseURL}/api`;
 // Create axios instance using config file opts
 const client = axios.create({
   baseURL: apiURL,

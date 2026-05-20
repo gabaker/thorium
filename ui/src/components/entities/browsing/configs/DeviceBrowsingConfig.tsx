@@ -84,12 +84,14 @@ const DeviceItem: React.FC<DeviceItemProps> = ({ device }) => {
             </EntitySubmitters>
           </LinkFields>
         </Link>
-        {device.tags != undefined && <hr />}
-        <Row>
-          {device.tags && Object.keys(device.tags).length > 1 ? (
-            <CondensedEntityTags resource={Entities.Device} tags={device.tags} />
-          ) : null}
-        </Row>
+        {device.tags && Object.keys(device.tags).length > 1 && (
+          <>
+            <hr />
+            <Row>
+              <CondensedEntityTags resource={Entities.Device} tags={device.tags} />
+            </Row>
+          </>
+        )}
       </BrowsingContents>
     </BrowsingCard>
   );

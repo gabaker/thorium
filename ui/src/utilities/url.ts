@@ -1,13 +1,9 @@
-/**
- * Get the API URL path as a string
- * @returns {string} API URL path
- */
+/** Get the API URL path as a string. */
 export function getApiUrl() {
-  if (window.location.hostname == 'localhost') {
-    return process.env.REACT_APP_API_URL;
-  } else {
-    return `${window.location.protocol}//${window.location.hostname}/api`;
+  if (window.location.hostname == 'localhost' && process.env.THORIUM_API_URL) {
+    return `${process.env.THORIUM_API_URL.replace(/\/+$/, '')}/api`;
   }
+  return `${window.location.protocol}//${window.location.hostname}/api`;
 }
 
 // Update url hash location with section string

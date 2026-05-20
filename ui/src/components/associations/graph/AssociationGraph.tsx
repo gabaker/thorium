@@ -10,11 +10,11 @@ import * as THREE from 'three';
 // project imports
 import { getNodeColor, getEdgeColor } from './styles';
 import GraphControlsToolbar from './controls/GraphControlsToolbar';
-import type { NodeRenderMode, DagMode } from './controls/types';
+import { NodeRenderMode, DagMode } from './controls/types';
 import { createControlsReducer, buildNodeObject, buildEdgeLabelFactory, iconNodeVal } from './controls/controlsReducer';
 import type { LabelEntry } from './controls/controlsReducer';
 import { processInitialGraphData, getLinkEndpoints } from './data';
-import { useGraphData } from '../data/GraphDataContext';
+import { useGraphData, FocusSource } from '../data/GraphDataContext';
 import type { GraphNode, GraphLink, GraphData } from './types';
 import { applyGrowthToInstance } from './applyGrowth';
 import DataPreviewPanel from './DataPreviewPanel';
@@ -90,7 +90,7 @@ const AssociationGraph3DInner: React.FC = () => {
     showNodeLabels: true,
     selectedElement: null,
     showNodeInfo: true,
-    nodeRenderMode: 'icons' as NodeRenderMode,
+    nodeRenderMode: NodeRenderMode.Icons,
     focusOnClick: true,
     adjustDistanceOnFocus: false,
     refitOnGrow: false,
@@ -115,7 +115,7 @@ const AssociationGraph3DInner: React.FC = () => {
     velocityDecay: 0.4,
     warmupTicks: 0,
     cooldownTime: 15000,
-    dagMode: null as DagMode,
+    dagMode: null as DagMode | null,
     dagLevelDistance: null as number | null,
     numDimensions: 3 as 2 | 3,
     showGrid: false,
@@ -257,9 +257,9 @@ const AssociationGraph3DInner: React.FC = () => {
 
     const settings = focusSettingsRef.current;
     if (settings.focusOnClick) {
-      setFocusedNode(node.id, 'graph');
+      setFocusedNode(node.id, FocusSource.Graph);
       const gi = graphInstanceRef.current;
-      if (gi && node.x !== undefined && node.y !== undefined) {
+      if (gi && node.x !== undefined && node.y !== undefined && isFinite(node.x) && isFinite(node.y)) {
         focusCameraOn(
           gi,
           { x: node.x, y: node.y, z: node.z ?? 0 },
@@ -325,7 +325,7 @@ const AssociationGraph3DInner: React.FC = () => {
       .width(containerRef.current.clientWidth)
       .height(containerRef.current.clientHeight || window.innerHeight * 0.9)
       .nodeVal(
-        controls.nodeRenderMode === 'icons' ? (iconNodeVal(controls.nodeRelSize) as any) : (node: any) => (node as GraphNode).diameter,
+        controls.nodeRenderMode === NodeRenderMode.Icons ? (iconNodeVal(controls.nodeRelSize) as any) : (node: any) => (node as GraphNode).diameter,
       )
       .nodeColor((node: any) => getNodeColor((node as GraphNode).nodeType, (node as GraphNode).visualState))
       .nodeLabel(() => '')
@@ -339,7 +339,7 @@ const AssociationGraph3DInner: React.FC = () => {
           controls.nodeOpacity,
         ) as any,
       )
-      .nodeThreeObjectExtend(controls.nodeRenderMode === 'spheres')
+      .nodeThreeObjectExtend(controls.nodeRenderMode === NodeRenderMode.Spheres)
       .nodeRelSize(controls.nodeRelSize)
       .nodeOpacity(controls.nodeOpacity)
       .linkDirectionalArrowLength(controls.arrowLength)
@@ -374,6 +374,7 @@ const AssociationGraph3DInner: React.FC = () => {
           const gn = node as GraphNode;
           if (gn.x !== undefined && gn.y !== undefined && graphInstanceRef.current && containerRef.current) {
             const coords = graphInstanceRef.current.graph2ScreenCoords(gn.x, gn.y, gn.z ?? 0);
+            if (!isFinite(coords.x) || !isFinite(coords.y)) return;
             const rect = containerRef.current.getBoundingClientRect();
             setHoveredNode({ id: gn.id, x: rect.left + coords.x + 15, y: rect.top + coords.y + 15 });
           }
@@ -694,7 +695,7 @@ const AssociationGraph3DInner: React.FC = () => {
 
   // Animate camera to focused node when focus originates from tree
   useEffect(() => {
-    if (!focusedNodeId || focusSource !== 'tree') return;
+    if (!focusedNodeId || focusSource !== FocusSource.Tree) return;
 
     const node = graphDataRef.current.nodes.find((n) => n.id === focusedNodeId);
     if (!node || node.x === undefined || node.y === undefined) return;

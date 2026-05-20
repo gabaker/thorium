@@ -3,7 +3,8 @@ import { FaCog, FaProjectDiagram, FaBolt, FaCamera, FaArrowRight } from 'react-i
 import { FaHexagonNodes } from 'react-icons/fa6';
 import type { ForceGraph3DInstance } from '3d-force-graph';
 
-import type { GraphControls, DisplayAction, SectionKey } from './types';
+import { SectionKey } from './types';
+import type { GraphControls, DisplayAction } from './types';
 import { ToolbarContainer, ToolbarIconButton, NodeCount, ToolbarSpinner } from './Toolbar.styled';
 import { OverlayTipTop } from '@components/shared/overlay/tips';
 import ScrollableSelect from '@components/shared/inputs/ScrollableSelect';
@@ -80,7 +81,7 @@ const GraphControlsToolbar: React.FC<GraphControlsToolbarProps> = ({
       {isOpen && (
         <>
           <ToolbarButton
-            sectionKey="graph"
+            sectionKey={SectionKey.Graph}
             activeSection={activeSection}
             onToggle={handleToggleSection}
             icon={<FaProjectDiagram size={14} />}
@@ -90,7 +91,7 @@ const GraphControlsToolbar: React.FC<GraphControlsToolbarProps> = ({
           </ToolbarButton>
 
           <ToolbarButton
-            sectionKey="forces"
+            sectionKey={SectionKey.Forces}
             activeSection={activeSection}
             onToggle={handleToggleSection}
             icon={<FaBolt size={14} />}
@@ -100,7 +101,7 @@ const GraphControlsToolbar: React.FC<GraphControlsToolbarProps> = ({
           </ToolbarButton>
 
           <ToolbarButton
-            sectionKey="nodes"
+            sectionKey={SectionKey.Nodes}
             activeSection={activeSection}
             onToggle={handleToggleSection}
             icon={<FaHexagonNodes size={14} />}
@@ -110,7 +111,7 @@ const GraphControlsToolbar: React.FC<GraphControlsToolbarProps> = ({
           </ToolbarButton>
 
           <ToolbarButton
-            sectionKey="edges"
+            sectionKey={SectionKey.Edges}
             activeSection={activeSection}
             onToggle={handleToggleSection}
             icon={<FaArrowRight size={14} style={{ transform: 'rotate(-45deg)' }} />}
@@ -120,7 +121,7 @@ const GraphControlsToolbar: React.FC<GraphControlsToolbarProps> = ({
           </ToolbarButton>
 
           <ToolbarButton
-            sectionKey="export"
+            sectionKey={SectionKey.Export}
             activeSection={activeSection}
             onToggle={handleToggleSection}
             icon={<FaCamera size={14} />}
@@ -129,7 +130,9 @@ const GraphControlsToolbar: React.FC<GraphControlsToolbarProps> = ({
             <ExportSection graphId={graphId} controls={controls} updateControls={updateControls} graphInstance={graphInstance} />
           </ToolbarButton>
 
-          <ScrollableSelect value={controls.depth} onChange={(v) => updateControls({ type: 'depth', state: v })} min={1} windowSize={5} />
+          <OverlayTipTop tip="Depth">
+            <ScrollableSelect value={controls.depth} onChange={(v) => updateControls({ type: 'depth', state: v })} min={1} windowSize={5} />
+          </OverlayTipTop>
         </>
       )}
 

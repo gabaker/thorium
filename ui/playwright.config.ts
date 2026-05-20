@@ -21,7 +21,7 @@ export default defineConfig({
     port: 8000,
     reuseExistingServer: true,
     env: {
-      REACT_APP_API_URL: process.env.THORIUM_API_URL || 'http://localhost:8080/api',
+      THORIUM_API_URL: process.env.THORIUM_API_URL || 'http://localhost:8080',
     },
   },
 });

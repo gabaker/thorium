@@ -32,7 +32,7 @@ THORIUM_API_URL=http://localhost:8080 npx playwright test --trace on
 npx playwright show-trace test-results/*/trace.zip
 ```
 
-The `THORIUM_API_URL` env var tells the Playwright config where the API lives. It is mapped to `REACT_APP_API_URL` for the Vite dev server internally. Without it the frontend defaults to `http://localhost/api` (port 80) which won't reach the API.
+The `THORIUM_API_URL` env var tells the Playwright config and the Vite dev server where the API lives. Without it the frontend defaults to `http://localhost/api` (port 80) which won't reach the API.
 
 ## Test Structure
 
@@ -230,7 +230,7 @@ cd minithor && ./expose
 ```
 
 **Login redirects instead of reaching the page:**
-The `REACT_APP_API_URL` env var is missing. The frontend defaults to `http://localhost/api` (port 80), which doesn't reach the API on port 8080.
+The `THORIUM_API_URL` env var is missing. The frontend defaults to `http://localhost/api` (port 80), which doesn't reach the API on port 8080.
 
 **Entity creation returns 404 with "groups must exist":**
 The group name doesn't exist in this deployment. Check available groups:
@@ -258,6 +258,6 @@ The file already exists (same content was uploaded before). The `uploadFile` hel
 
 | Env Var | Default | Purpose |
 |---------|---------|---------|
-| `THORIUM_API_URL` | `http://localhost:8080` | API URL for test helpers and Vite dev server (mapped to `REACT_APP_API_URL` internally) |
+| `THORIUM_API_URL` | `http://localhost:8080` | API URL for test helpers and Vite dev server |
 | `THORIUM_USER` | `test` | Login username |
 | `THORIUM_PASS` | `INSECURE_DEV_PASSWORD` | Login password |

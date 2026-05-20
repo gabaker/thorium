@@ -21,6 +21,7 @@ export const BrowsingContents = styled(Card.Body)`
 export const LinkFields = styled(Row)`
   display: flex;
   flex-wrap: wrap;
+  cursor: pointer;
   color: var(--thorium-text);
   background-color: var(--thorium-panel-bg);
 

@@ -20,8 +20,7 @@ import Title from '@components/shared/titles/Title';
 import LoadingSpinner from '@components/shared/fallback/LoadingSpinner';
 import ImagePipelineEditor from '@components/shared/inputs/code/CodeEditor/ImagePipelineEditor';
 import FormatToggle from '@components/shared/inputs/code/CodeEditor/FormatToggle';
-import ViewModeToggle from '@components/shared/inputs/code/CodeEditor/ViewModeToggle';
-import type { ViewMode } from '@components/shared/inputs/code/CodeEditor/ViewModeToggle';
+import ViewModeToggle, { ViewMode } from '@components/shared/inputs/code/CodeEditor/ViewModeToggle';
 import { OverlayTipRight, OverlayTipLeft, OverlayTipBottom } from '@components/shared/overlay/tips';
 import { getGroupRole, getThoriumRole } from '@utilities/role';
 import { fetchImages, fetchSingleImage, fetchGroups } from '@utilities/fetch';
@@ -160,20 +159,20 @@ const ImageInfo: React.FC<ImageInfoProps> = ({ images, image, groups, setImages 
   const [networkPolicies, setNetworkPolicies] = useState<any[]>([]);
   const { userInfo, checkCookie } = useAuth();
 
-  const [viewMode, setViewMode] = useState<ViewMode>('form');
+  const [viewMode, setViewMode] = useState<ViewMode>(ViewMode.Form);
   const [editorObj, setEditorObj] = useState<Record<string, unknown> | null>(null);
   const [editorFormat, setEditorFormat] = useState<FormatType>(FormatType.YAML);
   const [editorParseValid, setEditorParseValid] = useState(false);
 
   const handleViewModeChange = (mode: ViewMode) => {
     if (mode === viewMode) return;
-    if (mode === 'editor') {
+    if (mode === ViewMode.Editor) {
       setEditorObj(imageToEditorObject(currentImage as unknown as Record<string, unknown>));
       setEditorParseValid(true);
-      setViewMode('editor');
+      setViewMode(ViewMode.Editor);
     } else {
       if (window.confirm('Switching to form view will reset any unsaved changes from the editor. Continue?')) {
-        setViewMode('form');
+        setViewMode(ViewMode.Form);
         setEditorObj(null);
       }
     }
@@ -207,7 +206,7 @@ const ImageInfo: React.FC<ImageInfoProps> = ({ images, image, groups, setImages 
   }, [stringFieldsError, resourceError, argError, volumesFieldsError, dependenciesFieldsError, outputCollectionError]);
 
   const sendFieldsUpdate = async (image: Image) => {
-    if (viewMode === 'editor') {
+    if (viewMode === ViewMode.Editor) {
       const result = editorObjectToImageUpdate(editorObj!, currentImage as unknown as Record<string, unknown>);
       if (!result) {
         setUpdateError('Invalid image data');
@@ -216,7 +215,7 @@ const ImageInfo: React.FC<ImageInfoProps> = ({ images, image, groups, setImages 
       if (await updateImage(result.group, result.name, result.data, setUpdateError)) {
         fetchSingleImage(image, setCurrentImage, setLoading);
         setEditMode(false);
-        setViewMode('form');
+        setViewMode(ViewMode.Form);
         setEditorObj(null);
         setUpdateError('');
       }
@@ -347,7 +346,7 @@ const ImageInfo: React.FC<ImageInfoProps> = ({ images, image, groups, setImages 
           </Col>
         </Row>
       )}
-      {inEditMode && viewMode === 'editor' ? (
+      {inEditMode && viewMode === ViewMode.Editor ? (
         <>
           <Row className="mb-2">
             <Col>
@@ -456,7 +455,7 @@ const ImageInfo: React.FC<ImageInfoProps> = ({ images, image, groups, setImages 
                   className="primary-btn"
                   onClick={() => {
                     setEditMode(false);
-                    setViewMode('form');
+                    setViewMode(ViewMode.Form);
                     setEditorObj(null);
                     setUpdateError('');
                   }}
@@ -467,7 +466,7 @@ const ImageInfo: React.FC<ImageInfoProps> = ({ images, image, groups, setImages 
             )}
             {userCanModify && inEditMode && (
               <OverlayTipRight tip={`Submit pending updates.`}>
-                <Button className="ok-btn" disabled={viewMode === 'editor' && !editorParseValid} onClick={() => sendFieldsUpdate(image)}>
+                <Button className="ok-btn" disabled={viewMode === ViewMode.Editor && !editorParseValid} onClick={() => sendFieldsUpdate(image)}>
                   Update
                 </Button>
               </OverlayTipRight>

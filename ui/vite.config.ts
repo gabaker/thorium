@@ -131,7 +131,7 @@ export default defineConfig(({ mode }) => {
       },
     },
     define: {
-      'process.env.REACT_APP_API_URL': env && env.REACT_APP_API_URL ? JSON.stringify(env.REACT_APP_API_URL) : undefined,
+      'process.env.THORIUM_API_URL': env && env.THORIUM_API_URL ? JSON.stringify(env.THORIUM_API_URL) : undefined,
     }
   };
 });

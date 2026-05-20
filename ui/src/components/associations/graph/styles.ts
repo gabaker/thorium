@@ -19,7 +19,7 @@ import TagGrowableSVG from '@assets/icons/tag-add.svg?raw';
 import TagSVG from '@assets/icons/tag.svg?raw';
 import VendorGrowableSVG from '@assets/icons/vendor-add.svg?raw';
 import VendorSVG from '@assets/icons/vendor.svg?raw';
-import type { VisualState } from './types';
+import { VisualState } from './types';
 import { NodeType } from '@models/trees';
 
 // default node state colors
@@ -62,69 +62,69 @@ export const getNodeColor = (nodeType: NodeType, visualState: VisualState): stri
 
 const SVG_MAP: Record<NodeType, Record<VisualState, string>> = {
   Collection: {
-    basic: CollectionSVG.replace('#REPLACEME', getNodeColor(NodeType.Collection, 'basic')),
-    growable: CollectionSVG.replace('#REPLACEME', getNodeColor(NodeType.Collection, 'growable')),
-    initial: CollectionSVG.replace('#REPLACEME', getNodeColor(NodeType.Collection, 'initial')),
+    basic: CollectionSVG.replace('#REPLACEME', getNodeColor(NodeType.Collection, VisualState.Basic)),
+    growable: CollectionSVG.replace('#REPLACEME', getNodeColor(NodeType.Collection, VisualState.Growable)),
+    initial: CollectionSVG.replace('#REPLACEME', getNodeColor(NodeType.Collection, VisualState.Initial)),
   },
   Device: {
-    basic: DeviceSVG.replace('#REPLACEME', getNodeColor(NodeType.Device, 'basic')),
-    growable: DeviceSVG.replace('#REPLACEME', getNodeColor(NodeType.Device, 'growable')),
-    initial: DeviceSVG.replace('#REPLACEME', getNodeColor(NodeType.Device, 'initial')),
+    basic: DeviceSVG.replace('#REPLACEME', getNodeColor(NodeType.Device, VisualState.Basic)),
+    growable: DeviceSVG.replace('#REPLACEME', getNodeColor(NodeType.Device, VisualState.Growable)),
+    initial: DeviceSVG.replace('#REPLACEME', getNodeColor(NodeType.Device, VisualState.Initial)),
   },
   File: {
-    basic: FileSVG.replace('#REPLACEME', getNodeColor(NodeType.File, 'basic')),
-    growable: FileGrowableSVG.replace('#REPLACEME', getNodeColor(NodeType.File, 'growable')),
-    initial: FileSVG.replace('#REPLACEME', getNodeColor(NodeType.File, 'initial')),
+    basic: FileSVG.replace('#REPLACEME', getNodeColor(NodeType.File, VisualState.Basic)),
+    growable: FileGrowableSVG.replace('#REPLACEME', getNodeColor(NodeType.File, VisualState.Growable)),
+    initial: FileSVG.replace('#REPLACEME', getNodeColor(NodeType.File, VisualState.Initial)),
   },
   FileSystem: {
-    basic: FileSystemSVG.replace('#REPLACEME', getNodeColor(NodeType.FileSystem, 'basic')),
-    growable: FileSystemSVG.replace('#REPLACEME', getNodeColor(NodeType.FileSystem, 'growable')),
-    initial: FileSystemSVG.replace('#REPLACEME', getNodeColor(NodeType.FileSystem, 'initial')),
+    basic: FileSystemSVG.replace('#REPLACEME', getNodeColor(NodeType.FileSystem, VisualState.Basic)),
+    growable: FileSystemSVG.replace('#REPLACEME', getNodeColor(NodeType.FileSystem, VisualState.Growable)),
+    initial: FileSystemSVG.replace('#REPLACEME', getNodeColor(NodeType.FileSystem, VisualState.Initial)),
   },
   Folder: {
-    basic: FolderSVG.replace('#REPLACEME', getNodeColor(NodeType.Folder, 'basic')),
-    growable: FolderGrowableSVG.replace('#REPLACEME', getNodeColor(NodeType.Folder, 'growable')),
-    initial: FolderSVG.replace('#REPLACEME', getNodeColor(NodeType.Folder, 'initial')),
+    basic: FolderSVG.replace('#REPLACEME', getNodeColor(NodeType.Folder, VisualState.Basic)),
+    growable: FolderGrowableSVG.replace('#REPLACEME', getNodeColor(NodeType.Folder, VisualState.Growable)),
+    initial: FolderSVG.replace('#REPLACEME', getNodeColor(NodeType.Folder, VisualState.Initial)),
   },
   NetworkConnection: {
-    basic: NetworkConnectionSVG.replace('#REPLACEME', getNodeColor(NodeType.NetworkConnection, 'basic')),
-    growable: NetworkConnectionSVG.replace('#REPLACEME', getNodeColor(NodeType.NetworkConnection, 'growable')),
-    initial: NetworkConnectionSVG.replace('#REPLACEME', getNodeColor(NodeType.NetworkConnection, 'initial')),
+    basic: NetworkConnectionSVG.replace('#REPLACEME', getNodeColor(NodeType.NetworkConnection, VisualState.Basic)),
+    growable: NetworkConnectionSVG.replace('#REPLACEME', getNodeColor(NodeType.NetworkConnection, VisualState.Growable)),
+    initial: NetworkConnectionSVG.replace('#REPLACEME', getNodeColor(NodeType.NetworkConnection, VisualState.Initial)),
   },
   Other: {
-    basic: OtherSVG.replace('#REPLACEME', getNodeColor(NodeType.Other, 'basic')),
-    growable: OtherSVG.replace('#REPLACEME', getNodeColor(NodeType.Other, 'growable')),
-    initial: OtherSVG.replace('#REPLACEME', getNodeColor(NodeType.Other, 'initial')),
+    basic: OtherSVG.replace('#REPLACEME', getNodeColor(NodeType.Other, VisualState.Basic)),
+    growable: OtherSVG.replace('#REPLACEME', getNodeColor(NodeType.Other, VisualState.Growable)),
+    initial: OtherSVG.replace('#REPLACEME', getNodeColor(NodeType.Other, VisualState.Initial)),
   },
   Repo: {
-    basic: RepoSVG.replace('#REPLACEME', getNodeColor(NodeType.Repo, 'basic')),
-    growable: RepoSVG.replace('#REPLACEME', getNodeColor(NodeType.Repo, 'growable')),
-    initial: RepoSVG.replace('#REPLACEME', getNodeColor(NodeType.Repo, 'initial')),
+    basic: RepoSVG.replace('#REPLACEME', getNodeColor(NodeType.Repo, VisualState.Basic)),
+    growable: RepoSVG.replace('#REPLACEME', getNodeColor(NodeType.Repo, VisualState.Growable)),
+    initial: RepoSVG.replace('#REPLACEME', getNodeColor(NodeType.Repo, VisualState.Initial)),
   },
   SigmaRule: {
-    basic: SigmaSVG.replace('#REPLACEME', getNodeColor(NodeType.SigmaRule, 'basic')),
-    growable: SigmaGrowableSVG.replace('#REPLACEME', getNodeColor(NodeType.SigmaRule, 'growable')),
-    initial: SigmaSVG.replace('#REPLACEME', getNodeColor(NodeType.SigmaRule, 'initial')),
+    basic: SigmaSVG.replace('#REPLACEME', getNodeColor(NodeType.SigmaRule, VisualState.Basic)),
+    growable: SigmaGrowableSVG.replace('#REPLACEME', getNodeColor(NodeType.SigmaRule, VisualState.Growable)),
+    initial: SigmaSVG.replace('#REPLACEME', getNodeColor(NodeType.SigmaRule, VisualState.Initial)),
   },
   Tag: {
-    basic: TagSVG.replace('#REPLACEME', getNodeColor(NodeType.Tag, 'basic')),
-    growable: TagGrowableSVG.replace('#REPLACEME', getNodeColor(NodeType.Tag, 'growable')),
-    initial: TagSVG.replace('#REPLACEME', getNodeColor(NodeType.Tag, 'initial')),
+    basic: TagSVG.replace('#REPLACEME', getNodeColor(NodeType.Tag, VisualState.Basic)),
+    growable: TagGrowableSVG.replace('#REPLACEME', getNodeColor(NodeType.Tag, VisualState.Growable)),
+    initial: TagSVG.replace('#REPLACEME', getNodeColor(NodeType.Tag, VisualState.Initial)),
   },
   Vendor: {
-    basic: VendorSVG.replace('#REPLACEME', getNodeColor(NodeType.Vendor, 'basic')),
-    growable: VendorGrowableSVG.replace('#REPLACEME', getNodeColor(NodeType.Vendor, 'growable')),
-    initial: VendorSVG.replace('#REPLACEME', getNodeColor(NodeType.Vendor, 'initial')),
+    basic: VendorSVG.replace('#REPLACEME', getNodeColor(NodeType.Vendor, VisualState.Basic)),
+    growable: VendorGrowableSVG.replace('#REPLACEME', getNodeColor(NodeType.Vendor, VisualState.Growable)),
+    initial: VendorSVG.replace('#REPLACEME', getNodeColor(NodeType.Vendor, VisualState.Initial)),
   },
   WindowsProcess: {
-    basic: ProcessSVG.replace('#REPLACEME', getNodeColor(NodeType.WindowsProcess, 'basic')),
-    growable: ProcessSVG.replace('#REPLACEME', getNodeColor(NodeType.WindowsProcess, 'growable')),
-    initial: ProcessSVG.replace('#REPLACEME', getNodeColor(NodeType.WindowsProcess, 'initial')),
+    basic: ProcessSVG.replace('#REPLACEME', getNodeColor(NodeType.WindowsProcess, VisualState.Basic)),
+    growable: ProcessSVG.replace('#REPLACEME', getNodeColor(NodeType.WindowsProcess, VisualState.Growable)),
+    initial: ProcessSVG.replace('#REPLACEME', getNodeColor(NodeType.WindowsProcess, VisualState.Initial)),
   },
   WindowsProcessTree: {
-    basic: ProcessTreeSVG.replace('#REPLACEME', getNodeColor(NodeType.WindowsProcessTree, 'basic')),
-    growable: ProcessTreeSVG.replace('#REPLACEME', getNodeColor(NodeType.WindowsProcessTree, 'growable')),
-    initial: ProcessTreeSVG.replace('#REPLACEME', getNodeColor(NodeType.WindowsProcessTree, 'initial')),
+    basic: ProcessTreeSVG.replace('#REPLACEME', getNodeColor(NodeType.WindowsProcessTree, VisualState.Basic)),
+    growable: ProcessTreeSVG.replace('#REPLACEME', getNodeColor(NodeType.WindowsProcessTree, VisualState.Growable)),
+    initial: ProcessTreeSVG.replace('#REPLACEME', getNodeColor(NodeType.WindowsProcessTree, VisualState.Initial)),
   },
 };
 

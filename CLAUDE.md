@@ -45,7 +45,7 @@ npm run test:e2e           # playwright E2E tests (headless)
 npm run test:e2e:headed    # playwright E2E tests (visible browser)
 ```
 
-E2E tests require `THORIUM_API_URL=http://localhost:8080` and a running API (see [E2E Testing Guide](ui/e2e/TESTING.md)). The Playwright config maps this to `REACT_APP_API_URL` internally for the Vite dev server.
+E2E tests require `THORIUM_API_URL=http://localhost:8080` and a running API (see [E2E Testing Guide](ui/e2e/TESTING.md)).
 
 ### Cross-compilation
 
@@ -95,24 +95,31 @@ THORIUM_API_URL=http://localhost:8080 npm run test:e2e
 
 | Command | Purpose |
 |---------|---------|
-| `minithor/minithor minikube install` | Install minikube and prerequisites |
-| `minithor/minithor start` | Start the minikube cluster |
+| `minithor/minithor minikube install` | Install minikube, start the k8s cluster, and enable addons (first-time only) |
 | `minithor/minithor deploy` | Deploy all Thorium services (creates test user `test`/`INSECURE_DEV_PASSWORD`) |
+| `minithor/minithor start` | Restart the cluster after a stop or reboot |
 | `minithor/minithor expose` | Port-forward the API to `localhost:8080` |
 | `minithor/minithor expose --dev` | Also forward Elastic, Kibana, Redis, MinIO, Scylla |
 | `minithor/minithor expose --status` | Check which port-forwards are running |
 | `minithor/minithor expose --stop` | Stop all port-forwards |
 | `minithor/minithor get-config` | Extract `thorium.yml` from cluster secret to `~/thorium.yml` |
 | `minithor/minithor stop` | Stop minikube |
-| `minithor/minithor minikube delete` | Delete the minikube cluster |
-| `minithor/minithor cleanup` | Full cleanup |
+| `minithor/minithor minikube delete --confirm` | Delete the minikube cluster |
+| `minithor/minithor cleanup --confirm` | Remove all Thorium resources for a fresh deploy |
 
-**Typical dev workflow:**
+**First-time setup:**
 ```bash
-minithor/minithor start
-minithor/minithor deploy           # one-time setup
-minithor/minithor expose           # start API port-forward
-cd ui && npm run dev               # start frontend dev server on port 8000
+minithor/minithor minikube install  # install minikube and start the k8s cluster
+minithor/minithor deploy            # deploy Thorium services (creates test user test/INSECURE_DEV_PASSWORD)
+minithor/minithor expose            # port-forward API to localhost:8080
+cd ui && npm run dev                # start frontend dev server on port 8000
+```
+
+**After a reboot or `minithor stop`:**
+```bash
+minithor/minithor start             # restart the cluster
+minithor/minithor expose            # re-establish port-forwards
+cd ui && npm run dev
 ```
 
 **Minikube kubeconfig note:** When using the docker driver, `minikube update-context` sets the server to the container's internal IP which is unreachable from the host. The `minithor/start` script fixes this by running `docker port minikube 8443/tcp` to get the correct localhost port mapping.

@@ -20,8 +20,7 @@ import Page from '@components/pages/Page';
 import LoadingSpinner from '@components/shared/fallback/LoadingSpinner';
 import ImagePipelineEditor from '@components/shared/inputs/code/CodeEditor/ImagePipelineEditor';
 import FormatToggle from '@components/shared/inputs/code/CodeEditor/FormatToggle';
-import ViewModeToggle from '@components/shared/inputs/code/CodeEditor/ViewModeToggle';
-import type { ViewMode } from '@components/shared/inputs/code/CodeEditor/ViewModeToggle';
+import ViewModeToggle, { ViewMode } from '@components/shared/inputs/code/CodeEditor/ViewModeToggle';
 import { OverlayTipRight } from '@components/shared/overlay/tips';
 import { useAuth } from '@utilities/auth';
 import { fetchImages, fetchGroups } from '@utilities/fetch';
@@ -72,7 +71,7 @@ const ImageCreate: React.FC = () => {
   const [loading, setLoading] = useState(false);
   let cancelUpdate = false;
 
-  const [viewMode, setViewMode] = useState<ViewMode>('form');
+  const [viewMode, setViewMode] = useState<ViewMode>(ViewMode.Form);
   const [editorObj, setEditorObj] = useState<Record<string, unknown>>(
     state ? imageToEditorObject(state as unknown as Record<string, unknown>) : IMAGE_CREATE_TEMPLATE,
   );
@@ -81,11 +80,11 @@ const ImageCreate: React.FC = () => {
 
   const handleViewModeChange = (mode: ViewMode) => {
     if (mode === viewMode) return;
-    if (mode === 'editor' && viewMode === 'form') {
-      setViewMode('editor');
-    } else if (mode === 'form' && viewMode === 'editor') {
+    if (mode === ViewMode.Editor && viewMode === ViewMode.Form) {
+      setViewMode(ViewMode.Editor);
+    } else if (mode === ViewMode.Form && viewMode === ViewMode.Editor) {
       if (window.confirm('Switching to form view will reset any unsaved changes from the editor. Continue?')) {
-        setViewMode('form');
+        setViewMode(ViewMode.Form);
       }
     }
   };
@@ -118,7 +117,7 @@ const ImageCreate: React.FC = () => {
   }, [imageFieldErrors, volumeErrors, dependencyErrors, outputCollectionErrors, resourceErrors]);
 
   async function handleImageCreate() {
-    if (viewMode === 'editor') {
+    if (viewMode === ViewMode.Editor) {
       const data = editorObjectToImageCreate(editorObj);
       if (!data) {
         setCreateImageErrors('Image group and name are required');
@@ -203,7 +202,7 @@ const ImageCreate: React.FC = () => {
           <ViewModeToggle viewMode={viewMode} onViewModeChange={handleViewModeChange} />
         </Col>
       </Row>
-      {viewMode === 'editor' ? (
+      {viewMode === ViewMode.Editor ? (
         <>
           <Row className="mb-2">
             <Col>
@@ -320,7 +319,7 @@ const ImageCreate: React.FC = () => {
           <Button className="secondary-btn" onClick={() => navigate(-1)}>
             Cancel
           </Button>
-          <Button className="ok-btn" disabled={viewMode === 'editor' && !editorParseValid} onClick={() => handleImageCreate()}>
+          <Button className="ok-btn" disabled={viewMode === ViewMode.Editor && !editorParseValid} onClick={() => handleImageCreate()}>
             Create
           </Button>
         </Col>

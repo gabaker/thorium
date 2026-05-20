@@ -3,7 +3,11 @@ import type { NodeObject, LinkObject } from '3d-force-graph';
 // project imports
 import { NodeType } from '@models/trees';
 
-export type VisualState = 'basic' | 'growable' | 'initial';
+export enum VisualState {
+  Basic = 'basic',
+  Growable = 'growable',
+  Initial = 'initial',
+}
 
 export interface GraphNode extends NodeObject {
   id: string;

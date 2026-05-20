@@ -10,7 +10,7 @@ import RenderErrorAlert from '../../shared/alerts/RenderErrorAlert';
 import { getNodeName } from '../utilities';
 import { classifyNode } from '../graph/data';
 import { getNodeSvg } from '../graph/styles';
-import { useGraphData } from '../data/GraphDataContext';
+import { useGraphData, FocusSource } from '../data/GraphDataContext';
 import { PreviewPopover } from './PreviewPopover';
 import { TreeContainer } from './TreeContainer';
 import { findMultiParentNodeIds, buildTreeIndex, TreeIndex, nodeTypeKeyToLabel } from './treeHelpers';
@@ -221,7 +221,7 @@ const AssociationTreeComponent: React.FC = () => {
 
   // When graph clicks a node, expand ancestors in tree, select it, and scroll to it
   useEffect(() => {
-    if (!focusedNodeId || focusSource !== 'graph') return;
+    if (!focusedNodeId || focusSource !== FocusSource.Graph) return;
 
     const expandAndSelect = async () => {
       const g = getGraph();
@@ -320,12 +320,12 @@ const AssociationTreeComponent: React.FC = () => {
                       return next;
                     }),
                   );
-                  setFocusedNode(nodeId, 'tree');
+                  setFocusedNode(nodeId, FocusSource.Tree);
                   return;
                 }
 
                 item.getProps().onClick?.(e);
-                setFocusedNode(nodeId, 'tree');
+                setFocusedNode(nodeId, FocusSource.Tree);
                 if (isDuplicate) {
                   setHighlightedNodeId((prev) => (prev === nodeId ? null : nodeId));
                 }
