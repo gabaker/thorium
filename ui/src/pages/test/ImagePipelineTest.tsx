@@ -49,11 +49,7 @@ const SAMPLE_IMAGE: Record<string, unknown> = {
 const SAMPLE_PIPELINE: Record<string, unknown> = {
   group: 'analysis',
   name: 'triage',
-  order: [
-    'file-info',
-    ['yara-scanner', 'clamav'],
-    'report-generator',
-  ],
+  order: ['file-info', ['yara-scanner', 'clamav'], 'report-generator'],
   sla: 604800,
   description: 'Standard triage pipeline for submitted files',
 };
@@ -82,7 +78,6 @@ const Tab = styled.button<{ $active: boolean }>`
     background: ${(props) => (props.$active ? 'var(--thorium-panel-bg)' : 'var(--thorium-info-secondary-bg)')};
   }
 `;
-
 
 type EditorTab = 'image' | 'pipeline';
 

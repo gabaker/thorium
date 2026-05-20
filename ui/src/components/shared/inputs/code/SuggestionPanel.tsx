@@ -132,7 +132,11 @@ const SuggestionPanel: React.FC<SuggestionPanelProps> = ({ suggestions, onValueC
             {suggestion.values && suggestion.values.length > 0 ? (
               <ValuesContainer>
                 {suggestion.values.map((val) => (
-                  <ValueChip key={val} onClick={() => onValueClick?.(suggestion.field, val, suggestion.isList)} title={`Click to use '${val}'`}>
+                  <ValueChip
+                    key={val}
+                    onClick={() => onValueClick?.(suggestion.field, val, suggestion.isList)}
+                    title={`Click to use '${val}'`}
+                  >
                     {val}
                   </ValueChip>
                 ))}

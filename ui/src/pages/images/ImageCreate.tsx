@@ -21,16 +21,22 @@ import LoadingSpinner from '@components/shared/fallback/LoadingSpinner';
 import ImagePipelineEditor from '@components/shared/inputs/code/ImagePipelineEditor';
 import FormatToggle from '@components/shared/inputs/code/FormatToggle';
 import ViewModeToggle from '@components/shared/inputs/code/ViewModeToggle';
+import type { ViewMode } from '@components/shared/inputs/code/ViewModeToggle';
 import { OverlayTipRight } from '@components/shared/overlay/tips';
 import { useAuth } from '@utilities/auth';
 import { fetchImages, fetchGroups } from '@utilities/fetch';
 import { ImageChecker } from '@utilities/rules/image';
 import { imageToEditorObject, editorObjectToImageCreate } from '@utilities/transforms/image';
 import { createImage } from '@thorpi/images';
+import type { Image } from '@models/images';
+import type { Group } from '@models/groups';
+import { RoleKey } from '@models/users';
+import { getThoriumRole } from '@utilities/role';
+import type { FormatType } from '@utilities/rules/types';
 
 const imageChecker = new ImageChecker();
 
-const IMAGE_CREATE_TEMPLATE = {
+const IMAGE_CREATE_TEMPLATE: Record<string, unknown> = {
   group: '',
   name: '',
   scaler: 'K8s',
@@ -39,43 +45,41 @@ const IMAGE_CREATE_TEMPLATE = {
   display_type: 'JSON',
 };
 
-const ImageCreate = () => {
+const ImageCreate: React.FC = () => {
   const [hideAdvanced, setHideAdvanced] = useState(true);
-  // Image set state functions
-  const [groups, setGroups] = useState([]);
-  const [images, setImages] = useState([]);
-  const [imageFields, setImageFields] = useState({});
-  const [volumes, setVolumes] = useState({}); // optional
-  const [environmentVars, setEnvironmentVars] = useState([{ key: '', value: '' }]); // optional
-  const [securityContext, setSecurityContext] = useState({}); // optional
-  const [resources, setResources] = useState({}); // optional
-  const [args, setArgs] = useState({}); // optional
+  const [groups, setGroups] = useState<string[]>([]);
+  const [images, setImages] = useState<any[]>([]);
+  const [imageFields, setImageFields] = useState<Record<string, any>>({});
+  const [volumes, setVolumes] = useState<any>({});
+  const [environmentVars, setEnvironmentVars] = useState<{ key: string; value: string }[]>([{ key: '', value: '' }]);
+  const [securityContext, setSecurityContext] = useState<Record<string, any>>({});
+  const [resources, setResources] = useState<Record<string, any>>({});
+  const [args, setArgs] = useState<Record<string, any>>({});
   const [argErrors, setArgErrors] = useState(false);
-  const [dependencies, setDependencies] = useState({});
-  const [outputCollection, setOutputCollection] = useState({});
-  const [networkPolicies, setNetworkPolicies] = useState([]); // optional
-  // Set error state functions
+  const [dependencies, setDependencies] = useState<Record<string, any>>({});
+  const [outputCollection, setOutputCollection] = useState<Record<string, any>>({});
+  const [networkPolicies, setNetworkPolicies] = useState<any[]>([]);
   const [displayErrors, setDisplayErrors] = useState(false);
-  // required fields are blank at start
-  const [imageFieldErrors, setImageFieldErrors] = useState(true); // this is true at start
+  const [imageFieldErrors, setImageFieldErrors] = useState(true);
   const [resourceErrors, setResourceErrors] = useState(false);
   const [createImageErrors, setCreateImageErrors] = useState('');
   const [dependencyErrors, setDependencyErrors] = useState(false);
   const [volumeErrors, setVolumeErrors] = useState(false);
   const [outputCollectionErrors, setOutputCollectionErrors] = useState(false);
   const navigate = useNavigate();
-  const { state } = useLocation();
+  const { state } = useLocation() as { state: Image | null };
   const { userInfo, checkCookie } = useAuth();
   const [loading, setLoading] = useState(false);
   let cancelUpdate = false;
 
-  // Editor mode state
-  const [viewMode, setViewMode] = useState('form');
-  const [editorObj, setEditorObj] = useState(state ? imageToEditorObject(state) : IMAGE_CREATE_TEMPLATE);
-  const [editorFormat, setEditorFormat] = useState('yaml');
+  const [viewMode, setViewMode] = useState<ViewMode>('form');
+  const [editorObj, setEditorObj] = useState<Record<string, unknown>>(
+    state ? imageToEditorObject(state as unknown as Record<string, unknown>) : IMAGE_CREATE_TEMPLATE,
+  );
+  const [editorFormat, setEditorFormat] = useState<FormatType>('yaml');
   const [editorParseValid, setEditorParseValid] = useState(false);
 
-  const handleViewModeChange = (mode) => {
+  const handleViewModeChange = (mode: ViewMode) => {
     if (mode === viewMode) return;
     if (mode === 'editor' && viewMode === 'form') {
       setViewMode('editor');
@@ -86,7 +90,7 @@ const ImageCreate = () => {
     }
   };
 
-  const handleEditorChange = (obj) => {
+  const handleEditorChange = (obj: Record<string, unknown> | null) => {
     if (obj) {
       setEditorObj(obj);
       setEditorParseValid(true);
@@ -95,14 +99,11 @@ const ImageCreate = () => {
     }
   };
 
-  // need user's group roles to validate permissions to create/edit/delete pipelines
   useEffect(() => {
-    fetchGroups(setGroups, null, false);
+    fetchGroups(setGroups as (groups: { [name: string]: Group } | Group[] | string[]) => void, null as any, false);
   }, []);
 
-  // get list of images for the selected group for use in dependencies drop downs
   useEffect(() => {
-    // if state is passed, use that
     const group = state && state.group ? state.group : imageFields.group;
     if (group) fetchImages([group], setImages, cancelUpdate, checkCookie, setLoading, false);
     return () => {
@@ -110,7 +111,6 @@ const ImageCreate = () => {
     };
   }, [imageFields.group]);
 
-  // clear the create error if all others have been resolved
   useEffect(() => {
     if (!(imageFieldErrors || volumeErrors || dependencyErrors || outputCollectionErrors || resourceErrors)) {
       setCreateImageErrors('');
@@ -118,7 +118,6 @@ const ImageCreate = () => {
   }, [imageFieldErrors, volumeErrors, dependencyErrors, outputCollectionErrors, resourceErrors]);
 
   async function handleImageCreate() {
-    // Editor mode: submit from editor object
     if (viewMode === 'editor') {
       const data = editorObjectToImageCreate(editorObj);
       if (!data) {
@@ -131,8 +130,7 @@ const ImageCreate = () => {
       return;
     }
 
-    // Form mode: existing behavior
-    let data = {};
+    let data: Record<string, any> = {};
 
     if (Object.keys(imageFields).length) {
       data = structuredClone(imageFields);
@@ -162,11 +160,11 @@ const ImageCreate = () => {
       data['dependencies'] = dependencies;
     }
 
-    if (Object.keys(securityContext).length && userInfo && userInfo.role == 'Admin' && data.scaler != 'External') {
+    if (Object.keys(securityContext).length && userInfo && getThoriumRole(userInfo.role) == RoleKey.Admin && data.scaler != 'External') {
       data['security_context'] = securityContext;
     }
 
-    const environmentVarsJson = {};
+    const environmentVarsJson: Record<string, string | null> = {};
     if (environmentVars) {
       environmentVars.map((variable) => {
         if (variable['key']) {
@@ -275,7 +273,6 @@ const ImageCreate = () => {
             <Dependencies
               images={images}
               dependencies={state && state.dependencies ? state.dependencies : {}}
-              setErrors={setDependencyErrors}
               setRequestDependencies={setDependencies}
               mode={state ? 'Copy' : 'Create'}
               disabled={imageFields['scaler'] && imageFields.scaler == 'External'}
@@ -305,7 +302,9 @@ const ImageCreate = () => {
               securityContext={state && state.security_context ? state.security_context : {}}
               setRequestSecurityContext={setSecurityContext}
               mode={state ? 'Copy' : 'Create'}
-              disabled={(imageFields['scaler'] && imageFields.scaler == 'External') || !userInfo || userInfo.role != 'Admin'}
+              disabled={
+                (imageFields['scaler'] && imageFields.scaler == 'External') || !userInfo || getThoriumRole(userInfo.role) != RoleKey.Admin
+              }
             />
           </div>
         </>
@@ -321,11 +320,7 @@ const ImageCreate = () => {
           <Button className="secondary-btn" onClick={() => navigate(-1)}>
             Cancel
           </Button>
-          <Button
-            className="ok-btn"
-            disabled={viewMode === 'editor' && !editorParseValid}
-            onClick={() => handleImageCreate()}
-          >
+          <Button className="ok-btn" disabled={viewMode === 'editor' && !editorParseValid} onClick={() => handleImageCreate()}>
             Create
           </Button>
         </Col>

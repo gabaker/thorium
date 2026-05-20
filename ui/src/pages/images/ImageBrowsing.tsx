@@ -21,6 +21,7 @@ import LoadingSpinner from '@components/shared/fallback/LoadingSpinner';
 import ImagePipelineEditor from '@components/shared/inputs/code/ImagePipelineEditor';
 import FormatToggle from '@components/shared/inputs/code/FormatToggle';
 import ViewModeToggle from '@components/shared/inputs/code/ViewModeToggle';
+import type { ViewMode } from '@components/shared/inputs/code/ViewModeToggle';
 import { OverlayTipRight, OverlayTipLeft, OverlayTipBottom } from '@components/shared/overlay/tips';
 import { getGroupRole, getThoriumRole } from '@utilities/role';
 import { fetchImages, fetchSingleImage, fetchGroups } from '@utilities/fetch';
@@ -28,24 +29,25 @@ import { useAuth } from '@utilities/auth';
 import { ImageChecker } from '@utilities/rules/image';
 import { imageToEditorObject, editorObjectToImageUpdate } from '@utilities/transforms/image';
 import { deleteImage, updateImage } from '@thorpi/images';
+import type { Image } from '@models/images';
+import type { Group } from '@models/groups';
+import { RoleKey } from '@models/users';
+import type { FormatType } from '@utilities/rules/types';
 
 const imageChecker = new ImageChecker();
 
-const ImageBrowsing = () => {
+const ImageBrowsing: React.FC = () => {
   const [loading, setLoading] = useState(false);
-  const [images, setImages] = useState([]);
-  const [groups, setGroups] = useState({});
+  const [images, setImages] = useState<Image[]>([]);
+  const [groups, setGroups] = useState<Record<string, Group>>({});
   const { userInfo, checkCookie } = useAuth();
   let cancelUpdate = false;
 
-  // need user's group roles to validate permissions to create/edit/delete images
   useEffect(() => {
-    fetchGroups(setGroups, null, true);
+    fetchGroups(setGroups as (groups: { [name: string]: Group } | Group[] | string[]) => void, null as any, true);
   }, []);
 
-  // need groups to get list of images
   useEffect(() => {
-    // only fetch images once groups has been populated
     if (groups && Object.keys(groups).length) {
       fetchImages(Object.keys(groups), setImages, cancelUpdate, checkCookie, setLoading, true);
     }
@@ -54,9 +56,11 @@ const ImageBrowsing = () => {
     };
   }, [groups]);
 
-  const CreateImage = () => {
+  const CreateImage: React.FC = () => {
     const navigate = useNavigate();
-    const userCanCreateImage = ['Developer', 'Analyst', 'Admin'].includes(getThoriumRole(userInfo.role));
+    const userCanCreateImage = userInfo
+      ? ([RoleKey.Developer, RoleKey.Analyst, RoleKey.Admin] as string[]).includes(getThoriumRole(userInfo.role))
+      : false;
     const CreateImageMessage = userCanCreateImage
       ? `Create a new Image. You must be a
     Thorium developer, analyst, or admin to create an image.`
@@ -77,7 +81,7 @@ const ImageBrowsing = () => {
   };
 
   const ImageCountTipMessage =
-    getThoriumRole(userInfo.role) == 'Admin'
+    userInfo && getThoriumRole(userInfo.role) == RoleKey.Admin
       ? `There are a total of ${images.length} Thorium images.`
       : `There are a total of ${images.length} Thorium images owned by your groups.`;
 
@@ -127,38 +131,44 @@ const ImageBrowsing = () => {
   );
 };
 
-const ImageInfo = ({ images, image, groups, setImages }) => {
+interface ImageInfoProps {
+  images: Image[];
+  image: Image;
+  groups: Record<string, Group>;
+  setImages: (images: Image[]) => void;
+}
+
+const ImageInfo: React.FC<ImageInfoProps> = ({ images, image, groups, setImages }) => {
   const [inEditMode, setEditMode] = useState(false);
   const [updateError, setUpdateError] = useState('');
   const [loading, setLoading] = useState(false);
-  const [imageFields, setImageFields] = useState({});
+  const [imageFields, setImageFields] = useState<Record<string, any>>({});
   const [stringFieldsError, setStringFieldsError] = useState(false);
-  const [resources, setResources] = useState({});
+  const [resources, setResources] = useState<Record<string, any>>({});
   const [resourceError, setResourceError] = useState(false);
-  const [args, setArgs] = useState({});
+  const [args, setArgs] = useState<Record<string, any>>({});
   const [argError, setArgError] = useState(false);
-  const [volumes, setVolumes] = useState([]);
+  const [volumes, setVolumes] = useState<any>([]);
   const [volumesFieldsError, setVolumeFieldsError] = useState(false);
-  const [dependencies, setDependencies] = useState({});
+  const [dependencies, setDependencies] = useState<Record<string, any>>({});
   const [dependenciesFieldsError, setDependenciesFieldError] = useState(false);
-  const [outputCollection, setOutputCollection] = useState({});
+  const [outputCollection, setOutputCollection] = useState<Record<string, any>>({});
   const [outputCollectionError, setOutputCollectionError] = useState(false);
-  const [currentImage, setCurrentImage] = useState(image);
-  const [securityContext, setSecurityContext] = useState({}); // optional
-  const [environmentVars, setEnvironmentVars] = useState([{ key: '', value: '' }]); // optional
-  const [networkPolicies, setNetworkPolicies] = useState([]);
+  const [currentImage, setCurrentImage] = useState<Image>(image);
+  const [securityContext, setSecurityContext] = useState<Record<string, any>>({});
+  const [environmentVars, setEnvironmentVars] = useState<any>([{ key: '', value: '' }]);
+  const [networkPolicies, setNetworkPolicies] = useState<any[]>([]);
   const { userInfo, checkCookie } = useAuth();
 
-  // Editor mode state
-  const [viewMode, setViewMode] = useState('form');
-  const [editorObj, setEditorObj] = useState(null);
-  const [editorFormat, setEditorFormat] = useState('yaml');
+  const [viewMode, setViewMode] = useState<ViewMode>('form');
+  const [editorObj, setEditorObj] = useState<Record<string, unknown> | null>(null);
+  const [editorFormat, setEditorFormat] = useState<FormatType>('yaml');
   const [editorParseValid, setEditorParseValid] = useState(false);
 
-  const handleViewModeChange = (mode) => {
+  const handleViewModeChange = (mode: ViewMode) => {
     if (mode === viewMode) return;
     if (mode === 'editor') {
-      setEditorObj(imageToEditorObject(currentImage));
+      setEditorObj(imageToEditorObject(currentImage as unknown as Record<string, unknown>));
       setEditorParseValid(true);
       setViewMode('editor');
     } else {
@@ -169,7 +179,7 @@ const ImageInfo = ({ images, image, groups, setImages }) => {
     }
   };
 
-  const handleEditorChange = (obj) => {
+  const handleEditorChange = (obj: Record<string, unknown> | null) => {
     if (obj) {
       setEditorObj(obj);
       setEditorParseValid(true);
@@ -178,28 +188,27 @@ const ImageInfo = ({ images, image, groups, setImages }) => {
     }
   };
 
-  const thoriumRole = getThoriumRole(userInfo.role);
-  // get the users role within the image group
-  const groupRole = getGroupRole(groups[image.group], userInfo.username);
-  // user can modify if they created the image or have a privileged role in Thorium
+  const thoriumRole = userInfo ? getThoriumRole(userInfo.role) : ('' as RoleKey);
+  const groupRole = userInfo ? getGroupRole(groups[image.group], userInfo.username) : '';
   const userCanModify =
-    ((image.creator == userInfo.username || ['Manager', 'Owner'].includes(groupRole)) && thoriumRole == 'Developer') ||
-    thoriumRole == 'Admin';
-  // creators or group managers/owners can delete image even if they are not developers
-  const userCanDelete = image.creator == userInfo.username || ['Manager', 'Owner'].includes(groupRole) || thoriumRole == 'Admin';
-  const userCanCreateImage = (['User', 'Manager', 'Owner'].includes(groupRole) && thoriumRole == 'Developer') || thoriumRole == 'Admin';
+    ((userInfo !== null && image.creator == userInfo.username) || ['Manager', 'Owner'].includes(groupRole)) &&
+    thoriumRole == RoleKey.Developer
+      ? true
+      : thoriumRole == RoleKey.Admin;
+  const userCanDelete =
+    (userInfo !== null && image.creator == userInfo.username) || ['Manager', 'Owner'].includes(groupRole) || thoriumRole == RoleKey.Admin;
+  const userCanCreateImage =
+    (['User', 'Manager', 'Owner'].includes(groupRole) && thoriumRole == RoleKey.Developer) || thoriumRole == RoleKey.Admin;
 
-  // clear the create error if all others have been resolved
   useEffect(() => {
     if (!(stringFieldsError || resourceError || argError || volumesFieldsError || dependenciesFieldsError || outputCollectionError)) {
       setUpdateError('');
     }
   }, [stringFieldsError, resourceError, argError, volumesFieldsError, dependenciesFieldsError, outputCollectionError]);
 
-  const sendFieldsUpdate = async (image) => {
-    // Editor mode: submit from editor object
+  const sendFieldsUpdate = async (image: Image) => {
     if (viewMode === 'editor') {
-      const result = editorObjectToImageUpdate(editorObj, currentImage);
+      const result = editorObjectToImageUpdate(editorObj!, currentImage as unknown as Record<string, unknown>);
       if (!result) {
         setUpdateError('Invalid image data');
         return;
@@ -214,8 +223,7 @@ const ImageInfo = ({ images, image, groups, setImages }) => {
       return;
     }
 
-    // Form mode: existing behavior
-    let newFields = {};
+    let newFields: Record<string, any> = {};
 
     if (stringFieldsError || resourceError || argError || volumesFieldsError || dependenciesFieldsError || outputCollectionError) {
       setUpdateError('Please resolve missing fields or invalid entries');
@@ -245,7 +253,7 @@ const ImageInfo = ({ images, image, groups, setImages }) => {
       const output = { output_collection: outputCollection };
       newFields = { ...newFields, ...output };
     }
-    if (Object.keys(securityContext).length && userInfo && userInfo.role == 'Admin') {
+    if (Object.keys(securityContext).length && userInfo && getThoriumRole(userInfo.role) == RoleKey.Admin) {
       const tempSecContext = { security_context: securityContext };
       newFields = { ...newFields, ...tempSecContext };
     }
@@ -265,8 +273,7 @@ const ImageInfo = ({ images, image, groups, setImages }) => {
     }
   };
 
-  // Display the delete images button and implement deletion
-  const DeleteImageButton = ({ image }) => {
+  const DeleteImageButton: React.FC<{ image: Image }> = ({ image }) => {
     const [showDeleteModal, setShowDeleteModal] = useState(false);
     const [deleteError, setDeleteError] = useState('');
     const handleCloseDeleteModal = () => {
@@ -297,7 +304,7 @@ const ImageInfo = ({ images, image, groups, setImages }) => {
               className="danger-btn"
               onClick={async () => {
                 if (await deleteImage(image.group, image.name, setDeleteError)) {
-                  fetchImages(Object.keys(groups), setImages, false, checkCookie, null, true);
+                  fetchImages(Object.keys(groups), setImages, false, checkCookie, null as any, true);
                   handleCloseDeleteModal();
                 }
               }}
@@ -310,7 +317,7 @@ const ImageInfo = ({ images, image, groups, setImages }) => {
     );
   };
 
-  const CopyImageButton = ({ image }) => {
+  const CopyImageButton: React.FC<{ image: Image }> = ({ image }) => {
     const navigate = useNavigate();
     return (
       <OverlayTipBottom tip={`Click to create a new image using ${image.name} as a template.`}>
@@ -325,9 +332,8 @@ const ImageInfo = ({ images, image, groups, setImages }) => {
     );
   };
 
-  // image names will be needed for ephemeral dependencies image list options
   const groupImages = images.filter((someImage) => currentImage.group == someImage.group);
-  let imageNames = groupImages.map((image) => {
+  let imageNames: string[] = groupImages.map((image) => {
     return image.name;
   });
   imageNames = [...new Set(imageNames)];
@@ -361,6 +367,7 @@ const ImageInfo = ({ images, image, groups, setImages }) => {
         <>
           <Fields
             image={currentImage}
+            groups={[]}
             setRequestImageFields={setImageFields}
             showErrors={true}
             setHasErrors={setStringFieldsError}
@@ -391,7 +398,6 @@ const ImageInfo = ({ images, image, groups, setImages }) => {
             images={imageNames}
             mode={inEditMode ? 'Edit' : 'View'}
             setRequestDependencies={setDependencies}
-            setErrors={setDependenciesFieldError}
             disabled={currentImage.scaler == 'External'}
           />
           <EnvironmentVariables
@@ -416,8 +422,12 @@ const ImageInfo = ({ images, image, groups, setImages }) => {
           <SecurityContext
             securityContext={currentImage.security_context ? currentImage.security_context : {}}
             setRequestSecurityContext={setSecurityContext}
-            mode={inEditMode && userInfo.role == 'Admin' ? 'Edit' : 'View'}
-            disabled={(Object.keys(imageFields).includes('scaler') && imageFields.scaler == 'External') || userInfo.role != 'Admin'}
+            mode={inEditMode && userInfo && getThoriumRole(userInfo.role) == RoleKey.Admin ? 'Edit' : 'View'}
+            disabled={
+              (Object.keys(imageFields).includes('scaler') && imageFields.scaler == 'External') ||
+              !userInfo ||
+              getThoriumRole(userInfo.role) != RoleKey.Admin
+            }
           />
         </>
       )}
@@ -457,11 +467,7 @@ const ImageInfo = ({ images, image, groups, setImages }) => {
             )}
             {userCanModify && inEditMode && (
               <OverlayTipRight tip={`Submit pending updates.`}>
-                <Button
-                  className="ok-btn"
-                  disabled={viewMode === 'editor' && !editorParseValid}
-                  onClick={() => sendFieldsUpdate(image)}
-                >
+                <Button className="ok-btn" disabled={viewMode === 'editor' && !editorParseValid} onClick={() => sendFieldsUpdate(image)}>
                   Update
                 </Button>
               </OverlayTipRight>

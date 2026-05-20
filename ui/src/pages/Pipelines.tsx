@@ -21,10 +21,14 @@ import { fetchGroups } from '@utilities/fetch';
 import { PipelineChecker } from '@utilities/rules/image';
 import { pipelineToEditorObject, editorObjectToPipelineCreate, editorObjectToPipelineUpdate } from '@utilities/transforms/pipeline';
 import { createPipeline, deletePipeline, listPipelines, updatePipeline } from '@thorpi/pipelines';
+import type { Pipeline } from '@models/pipelines';
+import type { Group } from '@models/groups';
+import { RoleKey } from '@models/users';
+import type { FormatType } from '@utilities/rules/types';
 
 const pipelineChecker = new PipelineChecker();
 
-const PIPELINE_CREATE_TEMPLATE = {
+const PIPELINE_CREATE_TEMPLATE: Record<string, unknown> = {
   group: '',
   name: '',
   order: [],
@@ -32,50 +36,45 @@ const PIPELINE_CREATE_TEMPLATE = {
   description: '',
 };
 
-const Pipelines = () => {
+const Pipelines: React.FC = () => {
   const [loading, setLoading] = useState(false);
-  const [pipelines, setPipelines] = useState([]);
-  const [groups, setGroups] = useState({});
+  const [pipelines, setPipelines] = useState<Pipeline[]>([]);
+  const [groups, setGroups] = useState<Record<string, Group>>({});
   const { userInfo, checkCookie } = useAuth();
 
-  // get detailed pipeline info for pipelines in each group
-  const fetchPipelines = async () => {
+  const fetchPipelinesData = async () => {
     setLoading(true);
-    const allPipelines = [];
-    // loop through each group to get owned pipelines
+    const allPipelines: Pipeline[] = [];
     for (const group of Object.keys(groups)) {
       const groupPipelines = await listPipelines(group, checkCookie, true, null, 1000);
       if (groupPipelines) {
-        allPipelines.push(...groupPipelines);
+        allPipelines.push(...(groupPipelines as Pipeline[]));
       }
     }
     setPipelines(allPipelines);
     setLoading(false);
   };
 
-  // need user's group roles to validate permissions to create/edit/delete pipelines
   useEffect(() => {
-    fetchGroups(setGroups, null, true);
+    fetchGroups(setGroups as (groups: { [name: string]: Group } | Group[] | string[]) => void, null as any, true);
   }, []);
 
-  // need groups to get a list of pipelines
   useEffect(() => {
-    fetchPipelines();
+    fetchPipelinesData();
   }, [groups]);
 
-  async function handlePipelineUpdate(editorObj, originalPipeline, setUpdateError) {
+  async function handlePipelineUpdate(editorObj: Record<string, unknown>, originalPipeline: Pipeline, setUpdateError: (e: string) => void) {
     const result = editorObjectToPipelineUpdate(editorObj, originalPipeline);
     if (!result) {
       setUpdateError('Invalid pipeline data');
       return;
     }
-    if (await updatePipeline(result.group, result.name, result.data, setUpdateError)) {
-      fetchPipelines();
+    if (await updatePipeline(result.group, result.name, result.data as any, setUpdateError)) {
+      fetchPipelinesData();
     }
   }
 
-  // Display the delete pipeline button and implement deletion
-  const DeletePipelineButton = ({ pipeline }) => {
+  const DeletePipelineButton: React.FC<{ pipeline: Pipeline }> = ({ pipeline }) => {
     const [showDeleteModal, setShowDeleteModal] = useState(false);
     const [deleteError, setDeleteError] = useState('');
     const handleCloseDeleteModal = () => {
@@ -107,7 +106,7 @@ const Pipelines = () => {
               className="danger-btn"
               onClick={async () => {
                 if (await deletePipeline(pipeline.group, pipeline.name, setDeleteError)) {
-                  fetchPipelines();
+                  fetchPipelinesData();
                 }
               }}
             >
@@ -120,12 +119,11 @@ const Pipelines = () => {
   };
 
   const PipelineCountTipMessage =
-    getThoriumRole(userInfo ? userInfo.role : '') == 'Admin'
+    userInfo && getThoriumRole(userInfo.role) == RoleKey.Admin
       ? `There are a total of ${pipelines.length} Thorium pipelines.`
       : `There are a total of ${pipelines.length} Thorium pipelines owned by your groups.`;
 
-  // Display pipeline accordion page headers
-  const PipelineHeader = () => {
+  const PipelineHeader: React.FC = () => {
     return (
       <div className="d-flex justify-content-between ">
         <div>
@@ -147,24 +145,27 @@ const Pipelines = () => {
     );
   };
 
-  const PipelineInfo = ({ pipeline }) => {
+  const PipelineInfo: React.FC<{ pipeline: Pipeline }> = ({ pipeline }) => {
     const [updateError, setUpdateError] = useState('');
     const [inEditMode, setInEditMode] = useState(false);
-    const [editorObj, setEditorObj] = useState(null);
-    const [format, setFormat] = useState('yaml');
+    const [editorObj, setEditorObj] = useState<Record<string, unknown> | null>(null);
+    const [format, setFormat] = useState<FormatType>('yaml');
     const [parseValid, setParseValid] = useState(false);
-    const pipelineTriggers = pipeline.triggers;
+    const pipelineTriggers = (pipeline.triggers || {}) as Record<string, any>;
 
-    const groupRole = getGroupRole(groups[pipeline.group], userInfo.username);
-    const thoriumRole = getThoriumRole(userInfo.role);
+    const groupRole = userInfo ? getGroupRole(groups[pipeline.group], userInfo.username) : '';
+    const thoriumRole = userInfo ? getThoriumRole(userInfo.role) : ('' as RoleKey);
     const userCanModify =
       (((userInfo !== null && pipeline.creator == userInfo.username) || ['Manager', 'Owner'].includes(groupRole)) &&
-        thoriumRole == 'Developer') ||
-      thoriumRole == 'Admin';
-    const userCanDelete = pipeline.creator == userInfo.username || ['Manager', 'Owner'].includes(groupRole) || thoriumRole == 'Admin';
+        thoriumRole == RoleKey.Developer) ||
+      thoriumRole == RoleKey.Admin;
+    const userCanDelete =
+      (userInfo !== null && pipeline.creator == userInfo.username) ||
+      ['Manager', 'Owner'].includes(groupRole) ||
+      thoriumRole == RoleKey.Admin;
 
     const enterEditMode = () => {
-      setEditorObj(pipelineToEditorObject(pipeline));
+      setEditorObj(pipelineToEditorObject(pipeline as unknown as Record<string, unknown>));
       setParseValid(true);
       setInEditMode(true);
     };
@@ -175,7 +176,7 @@ const Pipelines = () => {
       setUpdateError('');
     };
 
-    const handleEditorChange = (obj) => {
+    const handleEditorChange = (obj: Record<string, unknown> | null) => {
       if (obj) {
         setEditorObj(obj);
         setParseValid(true);
@@ -284,65 +285,64 @@ const Pipelines = () => {
                       <FieldBadge field={triggerName} color={'#7e7c7c'} />
                     </Col>
                   </Row>
-                  {Object.keys(pipelineTriggers[triggerName]).length > 0 &&
-                    Object.keys(pipelineTriggers[triggerName]).includes('Tag') && (
-                      <>
-                        <Row>
-                          <Col className="trigger-indent" />
-                          <Col className="trigger-field">
-                            <em>Trigger Type:</em>
-                          </Col>
-                          <Col className="trigger-value">
-                            <FieldBadge field={'Tag'} color={'#7e7c7c'} />
-                          </Col>
-                        </Row>
-                        <Row>
-                          <Col className="trigger-indent" />
-                          <Col className="trigger-field">
-                            <em>Tag Types:</em>
-                          </Col>
-                          <Col className="trigger-value">
-                            <FieldBadge field={pipelineTriggers[triggerName]['Tag']['tag_types']} color={'#7e7c7c'} />
-                          </Col>
-                        </Row>
-                        <Row>
-                          <Col className="trigger-indent" />
-                          <Col className="trigger-field">
-                            <em>Required:</em>
-                          </Col>
-                          <Col className="trigger-value">
-                            {Object.keys(pipelineTriggers[triggerName]['Tag']['required']).length == 0 && (
-                              <FieldBadge field={'None'} color={'#7e7c7c'} />
+                  {Object.keys(pipelineTriggers[triggerName]).length > 0 && Object.keys(pipelineTriggers[triggerName]).includes('Tag') && (
+                    <>
+                      <Row>
+                        <Col className="trigger-indent" />
+                        <Col className="trigger-field">
+                          <em>Trigger Type:</em>
+                        </Col>
+                        <Col className="trigger-value">
+                          <FieldBadge field={'Tag'} color={'#7e7c7c'} />
+                        </Col>
+                      </Row>
+                      <Row>
+                        <Col className="trigger-indent" />
+                        <Col className="trigger-field">
+                          <em>Tag Types:</em>
+                        </Col>
+                        <Col className="trigger-value">
+                          <FieldBadge field={pipelineTriggers[triggerName]['Tag']['tag_types']} color={'#7e7c7c'} />
+                        </Col>
+                      </Row>
+                      <Row>
+                        <Col className="trigger-indent" />
+                        <Col className="trigger-field">
+                          <em>Required:</em>
+                        </Col>
+                        <Col className="trigger-value">
+                          {Object.keys(pipelineTriggers[triggerName]['Tag']['required']).length == 0 && (
+                            <FieldBadge field={'None'} color={'#7e7c7c'} />
+                          )}
+                          {Object.keys(pipelineTriggers[triggerName]['Tag']['required'])
+                            .sort()
+                            .map((key: string) =>
+                              pipelineTriggers[triggerName]['Tag']['required'][key].map((value: string) => (
+                                <FieldBadge key={key} field={`${key}: ${value}`} color={'#7e7c7c'} />
+                              )),
                             )}
-                            {Object.keys(pipelineTriggers[triggerName]['Tag']['required'])
-                              .sort()
-                              .map((key) =>
-                                pipelineTriggers[triggerName]['Tag']['required'][key].map((value) => (
-                                  <FieldBadge key={key} field={`${key}: ${value}`} color={'#7e7c7c'} />
-                                )),
-                              )}
-                          </Col>
-                        </Row>
-                        <Row>
-                          <Col className="trigger-indent" />
-                          <Col className="trigger-field">
-                            <em>Not:</em>
-                          </Col>
-                          <Col className="trigger-value">
-                            {Object.keys(pipelineTriggers[triggerName]['Tag']['not']).length == 0 && (
-                              <FieldBadge field={'None'} color={'#7e7c7c'} />
+                        </Col>
+                      </Row>
+                      <Row>
+                        <Col className="trigger-indent" />
+                        <Col className="trigger-field">
+                          <em>Not:</em>
+                        </Col>
+                        <Col className="trigger-value">
+                          {Object.keys(pipelineTriggers[triggerName]['Tag']['not']).length == 0 && (
+                            <FieldBadge field={'None'} color={'#7e7c7c'} />
+                          )}
+                          {Object.keys(pipelineTriggers[triggerName]['Tag']['not'])
+                            .sort()
+                            .map((key: string) =>
+                              pipelineTriggers[triggerName]['Tag']['not'][key].map((value: string) => (
+                                <FieldBadge key={key} field={`${key}: ${value}`} color={'#7e7c7c'} />
+                              )),
                             )}
-                            {Object.keys(pipelineTriggers[triggerName]['Tag']['not'])
-                              .sort()
-                              .map((key) =>
-                                pipelineTriggers[triggerName]['Tag']['not'][key].map((value) => (
-                                  <FieldBadge key={key} field={`${key}: ${value}`} color={'#7e7c7c'} />
-                                )),
-                              )}
-                          </Col>
-                        </Row>
-                      </>
-                    )}
+                        </Col>
+                      </Row>
+                    </>
+                  )}
                   {pipelineTriggers[triggerName] == 'NewSample' && (
                     <Row>
                       <Col className="trigger-indent" />
@@ -386,7 +386,7 @@ const Pipelines = () => {
                         <Button
                           className="ok-btn"
                           disabled={!parseValid}
-                          onClick={() => handlePipelineUpdate(editorObj, pipeline, setUpdateError)}
+                          onClick={() => handlePipelineUpdate(editorObj!, pipeline, setUpdateError)}
                         >
                           Update
                         </Button>
@@ -404,10 +404,10 @@ const Pipelines = () => {
     );
   };
 
-  const CreatePipeline = () => {
+  const CreatePipeline: React.FC = () => {
     const [showCreateModal, setShowCreateModal] = useState(false);
-    const [pipelineObj, setPipelineObj] = useState(PIPELINE_CREATE_TEMPLATE);
-    const [format, setFormat] = useState('yaml');
+    const [pipelineObj, setPipelineObj] = useState<Record<string, unknown>>(PIPELINE_CREATE_TEMPLATE);
+    const [format, setFormat] = useState<FormatType>('yaml');
     const [parseValid, setParseValid] = useState(false);
     const [createError, setCreateError] = useState('');
 
@@ -418,7 +418,7 @@ const Pipelines = () => {
       setParseValid(false);
     };
 
-    const handleEditorChange = (obj) => {
+    const handleEditorChange = (obj: Record<string, unknown> | null) => {
       if (obj) {
         setPipelineObj(obj);
         setParseValid(true);
@@ -433,13 +433,15 @@ const Pipelines = () => {
         setCreateError('Pipeline group, name, and order are required');
         return;
       }
-      if (await createPipeline(data, setCreateError)) {
+      if (await createPipeline(data as any, setCreateError)) {
         handleCloseCreateModal();
-        fetchPipelines();
+        fetchPipelinesData();
       }
     }
 
-    const canCreatePipeline = ['Developer', 'Analyst', 'Admin'].includes(getThoriumRole(userInfo.role));
+    const canCreatePipeline = userInfo
+      ? ([RoleKey.Developer, RoleKey.Analyst, RoleKey.Admin] as string[]).includes(getThoriumRole(userInfo.role))
+      : false;
     const CreatePipelineTipMessage = canCreatePipeline
       ? `Create a new pipeline. You must be a
       Thorium developer, analyst, or admin to create a pipeline.`

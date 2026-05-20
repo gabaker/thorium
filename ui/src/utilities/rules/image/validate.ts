@@ -215,12 +215,7 @@ function validateSubObject(
   validateUnknownFields(subMap, knownFields, field, obj, lineIndex, diagnostics);
 }
 
-function validateResources(
-  parentMap: unknown,
-  parsed: Record<string, unknown>,
-  lineIndex: LineIndex,
-  diagnostics: Diagnostic[],
-) {
+function validateResources(parentMap: unknown, parsed: Record<string, unknown>, lineIndex: LineIndex, diagnostics: Diagnostic[]) {
   const obj = validateObjectField(parentMap, parsed, 'resources', lineIndex, diagnostics);
   if (!obj) return;
   const subMap = findMapValue(parentMap, 'resources');
@@ -239,12 +234,7 @@ function validateResources(
   }
 }
 
-function validateArgs(
-  parentMap: unknown,
-  parsed: Record<string, unknown>,
-  lineIndex: LineIndex,
-  diagnostics: Diagnostic[],
-) {
+function validateArgs(parentMap: unknown, parsed: Record<string, unknown>, lineIndex: LineIndex, diagnostics: Diagnostic[]) {
   const obj = validateObjectField(parentMap, parsed, 'args', lineIndex, diagnostics);
   if (!obj) return;
   const subMap = findMapValue(parentMap, 'args');
@@ -271,12 +261,7 @@ function validateDepSubSection(
   }
 }
 
-function validateDependencies(
-  parentMap: unknown,
-  parsed: Record<string, unknown>,
-  lineIndex: LineIndex,
-  diagnostics: Diagnostic[],
-) {
+function validateDependencies(parentMap: unknown, parsed: Record<string, unknown>, lineIndex: LineIndex, diagnostics: Diagnostic[]) {
   const obj = validateObjectField(parentMap, parsed, 'dependencies', lineIndex, diagnostics);
   if (!obj) return;
   const depMap = findMapValue(parentMap, 'dependencies');
@@ -290,12 +275,7 @@ function validateDependencies(
   validateDepSubSection(depMap, obj, 'cache', KNOWN_CACHE_DEP_FIELDS, lineIndex, diagnostics);
 }
 
-function validateOutputCollection(
-  parentMap: unknown,
-  parsed: Record<string, unknown>,
-  lineIndex: LineIndex,
-  diagnostics: Diagnostic[],
-) {
+function validateOutputCollection(parentMap: unknown, parsed: Record<string, unknown>, lineIndex: LineIndex, diagnostics: Diagnostic[]) {
   const obj = validateObjectField(parentMap, parsed, 'output_collection', lineIndex, diagnostics);
   if (!obj) return;
   const subMap = findMapValue(parentMap, 'output_collection');
@@ -306,21 +286,11 @@ function validateOutputCollection(
   }
 }
 
-function validateChildFilters(
-  parentMap: unknown,
-  parsed: Record<string, unknown>,
-  lineIndex: LineIndex,
-  diagnostics: Diagnostic[],
-) {
+function validateChildFilters(parentMap: unknown, parsed: Record<string, unknown>, lineIndex: LineIndex, diagnostics: Diagnostic[]) {
   validateSubObject(parentMap, parsed, 'child_filters', KNOWN_CHILD_FILTERS_FIELDS, lineIndex, diagnostics);
 }
 
-function validateVolumes(
-  parentMap: unknown,
-  parsed: Record<string, unknown>,
-  lineIndex: LineIndex,
-  diagnostics: Diagnostic[],
-) {
+function validateVolumes(parentMap: unknown, parsed: Record<string, unknown>, lineIndex: LineIndex, diagnostics: Diagnostic[]) {
   if (!('volumes' in parsed)) return;
   if (!Array.isArray(parsed['volumes'])) {
     const node = findMapValue(parentMap, 'volumes');
@@ -362,12 +332,7 @@ function validateVolumes(
   }
 }
 
-function validateLifetime(
-  parentMap: unknown,
-  parsed: Record<string, unknown>,
-  lineIndex: LineIndex,
-  diagnostics: Diagnostic[],
-) {
+function validateLifetime(parentMap: unknown, parsed: Record<string, unknown>, lineIndex: LineIndex, diagnostics: Diagnostic[]) {
   const obj = validateObjectField(parentMap, parsed, 'lifetime', lineIndex, diagnostics);
   if (!obj) return;
   const subMap = findMapValue(parentMap, 'lifetime');
@@ -378,11 +343,7 @@ function validateLifetime(
   validateNumberField(subMap, obj, 'amount', lineIndex, diagnostics);
 }
 
-export function validateImageRequest(
-  doc: Document,
-  text: string,
-  parsed: Record<string, unknown>,
-): Diagnostic[] {
+export function validateImageRequest(doc: Document, text: string, parsed: Record<string, unknown>): Diagnostic[] {
   const diagnostics: Diagnostic[] = [];
   const lineIndex = buildLineIndex(text);
   const contents = doc.contents;
@@ -466,11 +427,7 @@ export function validateImageRequest(
   return diagnostics;
 }
 
-export function validatePipelineRequest(
-  doc: Document,
-  text: string,
-  parsed: Record<string, unknown>,
-): Diagnostic[] {
+export function validatePipelineRequest(doc: Document, text: string, parsed: Record<string, unknown>): Diagnostic[] {
   const diagnostics: Diagnostic[] = [];
   const lineIndex = buildLineIndex(text);
   const contents = doc.contents;

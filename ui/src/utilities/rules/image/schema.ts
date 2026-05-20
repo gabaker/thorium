@@ -29,14 +29,7 @@ export const KNOWN_IMAGE_FIELDS = [
   'network_policies',
 ] as const;
 
-export const KNOWN_PIPELINE_FIELDS = [
-  'group',
-  'name',
-  'order',
-  'sla',
-  'triggers',
-  'description',
-] as const;
+export const KNOWN_PIPELINE_FIELDS = ['group', 'name', 'order', 'sla', 'triggers', 'description'] as const;
 
 export const IMAGE_SCALER_VALUES = ['K8s', 'BareMetal', 'Windows', 'Kvm', 'External'] as const;
 
@@ -75,35 +68,11 @@ export const HOST_PATH_TYPE_VALUES = [
 
 export const LIFETIME_COUNTER_VALUES = ['jobs', 'time'] as const;
 
-export const KNOWN_RESOURCES_FIELDS = [
-  'cpu',
-  'memory',
-  'ephemeral_storage',
-  'worker_slots',
-  'nvidia_gpu',
-  'amd_gpu',
-  'burstable',
-] as const;
+export const KNOWN_RESOURCES_FIELDS = ['cpu', 'memory', 'ephemeral_storage', 'worker_slots', 'nvidia_gpu', 'amd_gpu', 'burstable'] as const;
 
-export const KNOWN_ARGS_FIELDS = [
-  'entrypoint',
-  'command',
-  'reaction',
-  'repo',
-  'commit',
-  'output',
-  'output_files',
-] as const;
+export const KNOWN_ARGS_FIELDS = ['entrypoint', 'command', 'reaction', 'repo', 'commit', 'output', 'output_files'] as const;
 
-export const KNOWN_DEPENDENCIES_FIELDS = [
-  'samples',
-  'ephemeral',
-  'results',
-  'repos',
-  'tags',
-  'children',
-  'cache',
-] as const;
+export const KNOWN_DEPENDENCIES_FIELDS = ['samples', 'ephemeral', 'results', 'repos', 'tags', 'children', 'cache'] as const;
 
 export const KNOWN_SAMPLE_DEP_FIELDS = ['location', 'kwarg', 'strategy', 'naming'] as const;
 
@@ -119,14 +88,7 @@ export const KNOWN_RESULT_DEP_FIELDS = ['images', 'location', 'kwarg', 'strategy
 
 export const KNOWN_CACHE_DEP_FIELDS = ['location', 'generic', 'use_parent_cache', 'enabled'] as const;
 
-export const KNOWN_OUTPUT_COLLECTION_FIELDS = [
-  'handler',
-  'files',
-  'as_filesystem',
-  'children',
-  'auto_tag',
-  'groups',
-] as const;
+export const KNOWN_OUTPUT_COLLECTION_FIELDS = ['handler', 'files', 'as_filesystem', 'children', 'auto_tag', 'groups'] as const;
 
 export const KNOWN_FILES_HANDLER_FIELDS = ['results', 'result_files', 'tags', 'names'] as const;
 

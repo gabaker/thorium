@@ -17,7 +17,12 @@ export class ImageChecker implements RuleChecker {
       return {
         diagnostics: [
           ...syntaxDiagnostics,
-          { line: 1, column: 1, severity: 'error', message: 'Image request must be a YAML mapping (key-value pairs), not a list or scalar' },
+          {
+            line: 1,
+            column: 1,
+            severity: 'error',
+            message: 'Image request must be a YAML mapping (key-value pairs), not a list or scalar',
+          },
         ],
         suggestions: [],
       };
@@ -48,7 +53,12 @@ export class PipelineChecker implements RuleChecker {
       return {
         diagnostics: [
           ...syntaxDiagnostics,
-          { line: 1, column: 1, severity: 'error', message: 'Pipeline request must be a YAML mapping (key-value pairs), not a list or scalar' },
+          {
+            line: 1,
+            column: 1,
+            severity: 'error',
+            message: 'Pipeline request must be a YAML mapping (key-value pairs), not a list or scalar',
+          },
         ],
         suggestions: [],
       };

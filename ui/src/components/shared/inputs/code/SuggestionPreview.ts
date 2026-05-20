@@ -113,7 +113,13 @@ function buildYaraInsertText(
   return { text: `${value}\n`, pos: docText.length };
 }
 
-function buildYamlInsertText(field: string, value: string, docText: string, lines: string[], isList?: boolean): { text: string; pos: number } {
+function buildYamlInsertText(
+  field: string,
+  value: string,
+  docText: string,
+  lines: string[],
+  isList?: boolean,
+): { text: string; pos: number } {
   const parts = field.split('.');
   if (parts.length === 1) {
     const trailing = docText.endsWith('\n') ? '' : '\n';
@@ -470,7 +476,14 @@ export const previewState = StateField.define<ProposalState>({
     for (const effect of tr.effects) {
       if (effect.is(addPreview)) {
         const docText = tr.state.doc.toString();
-        const result = buildInsertText(effect.value.field, effect.value.value, docText, effect.value.format, effect.value.cursorLine, effect.value.isList);
+        const result = buildInsertText(
+          effect.value.field,
+          effect.value.value,
+          docText,
+          effect.value.format,
+          effect.value.cursorLine,
+          effect.value.isList,
+        );
         return { proposal: effect.value, insertText: result.text, insertPos: result.pos, inline: result.inline ?? false };
       }
       if (effect.is(clearPreview)) return empty;

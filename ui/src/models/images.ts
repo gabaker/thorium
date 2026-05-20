@@ -341,4 +341,3 @@ export type Image = {
   bans: { [uuid: string]: ImageBan };
   network_policies: string[];
 };
-

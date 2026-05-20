@@ -27,11 +27,7 @@ function lastDocLine(lineIndex: LineIndex): number {
   return lineIndex.offsets.length;
 }
 
-export function generateImageSuggestions(
-  doc: Document,
-  text: string,
-  parsed: Record<string, unknown>,
-): Suggestion[] {
+export function generateImageSuggestions(doc: Document, text: string, parsed: Record<string, unknown>): Suggestion[] {
   const suggestions: Suggestion[] = [];
   const lineIndex = buildLineIndex(text);
   const endLine = lastDocLine(lineIndex);
@@ -178,11 +174,7 @@ export function generateImageSuggestions(
   return suggestions;
 }
 
-export function generatePipelineSuggestions(
-  doc: Document,
-  text: string,
-  parsed: Record<string, unknown>,
-): Suggestion[] {
+export function generatePipelineSuggestions(doc: Document, text: string, parsed: Record<string, unknown>): Suggestion[] {
   const suggestions: Suggestion[] = [];
   const lineIndex = buildLineIndex(text);
   const endLine = lastDocLine(lineIndex);

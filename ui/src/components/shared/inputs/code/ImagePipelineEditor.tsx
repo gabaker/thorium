@@ -41,16 +41,7 @@ const ImagePipelineEditor: React.FC<ImagePipelineEditorProps> = ({
     [onChange],
   );
 
-  return (
-    <CodeEditor
-      value={serialized}
-      onChange={handleChange}
-      checker={checker}
-      format={format}
-      height={height}
-      disabled={disabled}
-    />
-  );
+  return <CodeEditor value={serialized} onChange={handleChange} checker={checker} format={format} height={height} disabled={disabled} />;
 };
 
 export default ImagePipelineEditor;
