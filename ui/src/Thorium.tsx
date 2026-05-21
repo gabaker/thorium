@@ -41,6 +41,7 @@ const SigmaTest = lazy(() => import('./pages/test/code/SigmaTest'));
 const YaraTest = lazy(() => import('./pages/test/code/YaraTest'));
 const AlertBannerTest = lazy(() => import('./pages/test/AlertBannerTest'));
 const ImagePipelineTest = lazy(() => import('./pages/test/code/ImagePipelineTest'));
+const OverlayWindowTest = lazy(() => import('./pages/test/OverlayWindowTest'));
 // dashboards
 const IncidentSummary = lazy(() => import('./dashboards/IncidentSummary'));
 
@@ -93,6 +94,7 @@ const Resources = () => (
     <Route path="/test/yara" element={<PageWrapper Contents={YaraTest} />} />
     <Route path="/test/alerts" element={<PageWrapper Contents={AlertBannerTest} />} />
     <Route path="/test/image-pipeline" element={<PageWrapper Contents={ImagePipelineTest} />} />
+    <Route path="/test/overlay-window" element={<PageWrapper Contents={OverlayWindowTest} />} />
     // Basic
     <Route path="/" element={<PageWrapper Contents={Home} />} />
     <Route path="*" element={<PageWrapper Contents={NotFound} />} />

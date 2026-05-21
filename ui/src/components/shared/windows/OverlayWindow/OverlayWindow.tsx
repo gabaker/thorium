@@ -1,11 +1,10 @@
-import { useRef, useState, useEffect, useLayoutEffect } from 'react';
+import { useCallback, useRef, useState, useEffect, useLayoutEffect } from 'react';
 
 // project imports
-import { boundElementSize } from '../utilities';
+import { boundElementSize, clamp } from '../utilities';
 import { calculateCanvasResizeWindowPosition, calculateWindowResizeState, ElementSize, getMarginRatios } from '../resize';
 import { getCanvasType, getCanvasBounds, Padding, PositionType } from '../bounds';
 import { ElementPosition, getInitialPosition, Placement } from '../placement';
-import { clamp } from '../utilities';
 import { useWindowNode } from '../WindowManager/use_window_node';
 import CloseButton from './CloseButton';
 import OverlayBody from './OverlayBody';
@@ -13,23 +12,23 @@ import OverlayHeader from './OverlayHeader';
 import OverlayWrapper from './OverlayWrapper';
 import ResizeButtons from './ResizeButtons';
 
-const DEFAULT_EDGE_PADDING = { start: 4, end: 4, top: 4, bottom: 4 };
+const DEFAULT_EDGE_PADDING: Padding = { start: 4, end: 4, top: 4, bottom: 4 };
 
 const OverlayWindow: React.FC<{
-  className?: string; // any classes to apply to Modal wrapper
-  children: React.ReactNode; // children within box
-  show: boolean; // whether box is visible
-  title?: string; // optional modal header title
-  placement?: Placement | string; // initial placement of box
-  fixed?: boolean; // box is draggable
-  width?: number; // initial width of box
-  height?: number; // initial height of box
+  className?: string;
+  children: React.ReactNode;
+  show: boolean;
+  title?: string;
+  placement?: Placement;
+  locked?: boolean;
+  width?: number;
+  height?: number;
   positioning?: PositionType;
   customPosition?: ElementPosition;
-  onHide?: () => void; // callback for when box is "exited"
-  padding?: Padding; // padding between window and relative placed element
-  parentRef?: React.RefObject<HTMLElement | null>; // optional parent ref to override default relative positioning for absolute positioned windows
-  id?: string; // string id for use when window is rendered directly by window manager
+  onHide?: () => void;
+  padding?: Padding;
+  parentRef?: React.RefObject<HTMLElement | null>;
+  id?: string;
 }> = ({
   className,
   children,
@@ -37,51 +36,48 @@ const OverlayWindow: React.FC<{
   title,
   width = 500,
   height = 500,
-  fixed = false,
+  locked = false,
   positioning = PositionType.Absolute,
-  placement = Placement.Bottom, // initial placement compared to ancestor
+  placement = Placement.Bottom,
   customPosition,
   onHide,
   padding = DEFAULT_EDGE_PADDING,
-  parentRef = undefined,
+  parentRef,
   id,
 }) => {
   const { nodeRef, windowRef, windowZRange, onWindowClick, onWindowClose, margin: managerMargin } = useWindowNode<HTMLDivElement>(id);
   const [bounds, setBounds] = useState(() => getCanvasBounds(getCanvasType(positioning), managerMargin));
-  // position is relative to next ancestor when PositionType is not fixed to viewport or when using Fixed positioning with a passed in valid parentRef
-  const isInitialRelative = positioning == PositionType.Fixed && parentRef == undefined ? false : true;
+  const usesReferenceElement = positioning !== PositionType.Fixed || parentRef !== undefined;
   const [position, setPosition] = useState<ElementPosition>(() => {
-    if (placement == Placement.Custom && customPosition) {
+    if (placement === Placement.Custom && customPosition) {
       return customPosition;
     }
-    return getInitialPosition({ width, height }, placement, bounds, padding, isInitialRelative, parentRef, nodeRef);
+    return getInitialPosition({ width, height }, placement, bounds, padding, usesReferenceElement, parentRef, nodeRef);
   });
   const [size, setSize] = useState<ElementSize>(boundElementSize({ width, height }, bounds, padding));
   const [resizing, setResizing] = useState(false);
   const [dragging, setDragging] = useState(false);
-  // start ref position info for moving and resizing
   const windowStateRef = useRef({
-    size, // current size of window
-    position, // current position of window
-    marginRatio: getMarginRatios(position, size), // margin ratios at start of render
-    clickedLocation: Placement.Center, // position of element initiating window resize
-    start: { width: 0, height: 0, top: position.top, left: position.left, pointerX: 0, pointerY: 0 }, // start dimensions, position and mouse location before actions
+    size,
+    position,
+    marginRatio: getMarginRatios(position, size),
+    clickedLocation: Placement.Center,
+    start: { width: 0, height: 0, top: position.top, left: position.left, pointerX: 0, pointerY: 0 },
     bounds: bounds,
-    resized: false, // window has changed size
-    moved: false, // window has been repositioned
+    resized: false,
+    moved: false,
   });
 
-  // force repositioning after parentRef current set on initial render
+  // Reposition after parentRef.current is set on initial render (custom placement uses explicit coordinates)
   useLayoutEffect(() => {
-    setPosition(getInitialPosition({ width, height }, placement, bounds, padding, isInitialRelative, parentRef, nodeRef));
+    if (placement === Placement.Custom && customPosition) return;
+    setPosition(getInitialPosition({ width, height }, placement, bounds, padding, usesReferenceElement, parentRef, nodeRef));
   }, []);
 
   const onDragMouseDown = (e: React.MouseEvent<HTMLButtonElement>) => {
     e.stopPropagation();
-    if (resizing || fixed) return;
-    // Only start drag when clicking the header area
+    if (resizing || locked) return;
     setDragging(true);
-    // Start values change only when mousing down
     windowStateRef.current = {
       ...windowStateRef.current,
       start: {
@@ -98,10 +94,8 @@ const OverlayWindow: React.FC<{
 
   const onResizeMouseDown = (e: React.MouseEvent<HTMLButtonElement>, clickedLocation: Placement) => {
     e.stopPropagation();
-    // disable resize when dragging or when configured for a fixed position
-    if (dragging || fixed) return;
+    if (dragging || locked) return;
     setResizing(true);
-    // start values change only when mousing down
     windowStateRef.current = {
       ...windowStateRef.current,
       clickedLocation: clickedLocation,
@@ -117,34 +111,29 @@ const OverlayWindow: React.FC<{
     };
   };
 
-  const handleWindowDrag = (dx: number, dy: number) => {
-    const { start, bounds, size: windowSize } = windowStateRef.current;
-    // we no longer want to change location with window resizing
+  const handleWindowDrag = useCallback((dx: number, dy: number) => {
+    const { start, bounds: currentBounds } = windowStateRef.current;
     windowStateRef.current.moved = true;
     const updatedPosition = {
-      top: clamp(start.top - dy, bounds.top, bounds.height - start.height),
-      left: clamp(start.left - dx, bounds.start, bounds.width - start.width),
+      top: clamp(start.top - dy, currentBounds.top, currentBounds.height - start.height),
+      left: clamp(start.left - dx, currentBounds.start, currentBounds.width - start.width),
     };
-    // apply bounds of document
     setPosition(updatedPosition);
     windowStateRef.current = {
       ...windowStateRef.current,
       position: updatedPosition,
-      marginRatio: getMarginRatios(updatedPosition, windowSize),
+      marginRatio: getMarginRatios(updatedPosition, windowStateRef.current.size),
     };
-  };
+  }, []);
 
-  const handleWindowResize = (dx: number, dy: number) => {
-    const { start, bounds, clickedLocation } = windowStateRef.current;
-    // calculate resized window dimensions and location
+  const handleWindowResize = useCallback((dx: number, dy: number) => {
+    const { start, bounds: currentBounds, clickedLocation } = windowStateRef.current;
     const {
       position: updatedPosition,
       size: updatedSize,
       resized,
-    } = calculateWindowResizeState(start, { width: width, height: height }, dx, dy, bounds, clickedLocation);
-    // if window dimensions changed, it was been resized
+    } = calculateWindowResizeState(start, { width, height }, dx, dy, currentBounds, clickedLocation);
     windowStateRef.current.resized = resized;
-    // update position and changed ref values
     setPosition(updatedPosition);
     setSize(updatedSize);
     windowStateRef.current = {
@@ -153,11 +142,9 @@ const OverlayWindow: React.FC<{
       position: updatedPosition,
       marginRatio: getMarginRatios(updatedPosition, updatedSize),
     };
-  };
+  }, [width, height]);
 
-  // Handle mouse moves that occur when dragging or resizing the target window
-  const handleMouseMove = (e: MouseEvent) => {
-    // calculate the change in X/Y for cursor: down/right positive, up/left negative
+  const handleMouseMove = useCallback((e: MouseEvent) => {
     const dx = windowStateRef.current.start.pointerX - e.clientX;
     const dy = windowStateRef.current.start.pointerY - e.clientY;
     if (dragging) {
@@ -165,21 +152,19 @@ const OverlayWindow: React.FC<{
     } else if (resizing) {
       handleWindowResize(dx, dy);
     }
-  };
+  }, [dragging, resizing, handleWindowDrag, handleWindowResize]);
 
-  // Resize and reposition the window based on changes to the display canvas size (viewport or document)
-  const handleCanvasResize = () => {
-    // get updated canvas (viewport or document) size
+  const handleCanvasResize = useCallback(() => {
     const canvasBounds = getCanvasBounds(getCanvasType(positioning), managerMargin);
-    // bound element size to updated canvas dimensions
     const updatedSize = boundElementSize(
-      windowStateRef.current.resized ? windowStateRef.current.size : { width: width, height: height },
+      windowStateRef.current.resized ? windowStateRef.current.size : { width, height },
       canvasBounds,
       padding,
     );
-    // default position is the initial position when not moved
-    let updatedPosition = getInitialPosition(updatedSize, placement, canvasBounds, padding, isInitialRelative, parentRef, nodeRef);
-    // only update location on resize when window was not initially moved or resized
+    let updatedPosition =
+      placement === Placement.Custom && customPosition
+        ? customPosition
+        : getInitialPosition(updatedSize, placement, canvasBounds, padding, usesReferenceElement, parentRef, nodeRef);
     if (windowStateRef.current.moved) {
       updatedPosition = calculateCanvasResizeWindowPosition(
         windowStateRef.current.bounds,
@@ -190,7 +175,6 @@ const OverlayWindow: React.FC<{
         windowStateRef.current.position,
       );
     }
-    // update window ref state
     windowStateRef.current = {
       ...windowStateRef.current,
       position: updatedPosition,
@@ -200,18 +184,17 @@ const OverlayWindow: React.FC<{
     setSize(updatedSize);
     setPosition(updatedPosition);
     setBounds(canvasBounds);
-  };
+  }, [positioning, managerMargin, width, height, padding, placement, customPosition, usesReferenceElement, parentRef, nodeRef]);
 
   useEffect(() => {
     window.visualViewport?.addEventListener('resize', handleCanvasResize);
     return () => {
       window.visualViewport?.removeEventListener('resize', handleCanvasResize);
     };
-  }, []);
+  }, [handleCanvasResize]);
 
   // Attach global listeners while dragging/resizing
   useEffect(() => {
-    // Reset actions when mouse is no longer clicked
     const onMouseUp = () => {
       setResizing(false);
       setDragging(false);
@@ -224,14 +207,14 @@ const OverlayWindow: React.FC<{
         window.removeEventListener('mouseup', onMouseUp);
       };
     }
-  }, [dragging, resizing]);
+  }, [dragging, resizing, handleMouseMove]);
 
   return (
     <OverlayWrapper
       show={show}
       ref={windowRef}
       zIndex={windowZRange.start}
-      className={`${className ? className : ''}`}
+      className={className}
       position={position}
       bounds={bounds}
       size={size}
@@ -247,31 +230,31 @@ const OverlayWindow: React.FC<{
       <OverlayHeader
         $zindex={windowZRange.start + 2 * windowZRange.step}
         onClick={onWindowClick}
-        onMouseDown={(e: any) => {
-          onDragMouseDown(e);
+        onMouseDown={(e: React.MouseEvent<HTMLDivElement>) => {
+          onDragMouseDown(e as unknown as React.MouseEvent<HTMLButtonElement>);
           onWindowClick();
         }}
       >
         {title ? <div style={{ width: 'calc(100% - 30px)' }}>{title}</div> : null}
         <CloseButton
           onClick={() => {
-            // Reset position back to initial
-            const updatedPosition = getInitialPosition(size, placement, bounds, padding, isInitialRelative, parentRef, nodeRef);
+            const updatedPosition =
+              placement === Placement.Custom && customPosition
+                ? customPosition
+                : getInitialPosition(size, placement, bounds, padding, usesReferenceElement, parentRef, nodeRef);
             setPosition(updatedPosition);
-            // Update window ref state when resetting back to original position
             windowStateRef.current = {
               ...windowStateRef.current,
-              ...updatedPosition,
+              position: updatedPosition,
             };
             onWindowClose();
-            // Execute user callback when hiding
             if (onHide) onHide();
           }}
         >
           X
-        </CloseButton>{' '}
+        </CloseButton>
       </OverlayHeader>
-      <OverlayBody $zindex={windowZRange.start + 1 * windowZRange.step}>{children}</OverlayBody>
+      <OverlayBody $zindex={windowZRange.start + windowZRange.step}>{children}</OverlayBody>
     </OverlayWrapper>
   );
 };

@@ -17,6 +17,23 @@ export interface Diagnostic {
   message: string;
 }
 
+export enum FieldValueType {
+  String = 'string',
+  Number = 'number',
+  Boolean = 'boolean',
+  Enum = 'enum',
+  Object = 'object',
+  StringArray = 'string_array',
+}
+
+export interface FieldSchema {
+  type: FieldValueType;
+  required?: boolean;
+  placeholder?: string;
+  enumValues?: readonly string[];
+  fields?: Record<string, FieldSchema>;
+}
+
 export interface Suggestion {
   line: number;
   lineEnd?: number;
@@ -24,6 +41,7 @@ export interface Suggestion {
   message: string;
   values?: readonly string[];
   isList?: boolean;
+  schema?: FieldSchema;
 }
 
 export interface CheckResult {

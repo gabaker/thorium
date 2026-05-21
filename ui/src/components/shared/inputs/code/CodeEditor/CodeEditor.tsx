@@ -13,7 +13,7 @@ import styled from 'styled-components';
 import { thoriumEditorTheme, thoriumHighlighting } from './CodeEditorTheme';
 import SuggestionPanel from './SuggestionPanel';
 import { createPreviewExtensions, addPreview } from './SuggestionPreview';
-import { type RuleChecker, FormatType, type Suggestion, Severity } from '@utilities/rules/types';
+import { type RuleChecker, type FieldSchema, FormatType, type Suggestion, Severity } from '@utilities/rules/types';
 
 const EditorContainer = styled.div<{ $height: string }>`
   width: 100%;
@@ -215,11 +215,11 @@ const CodeEditor: React.FC<CodeEditorProps> = ({ value, onChange, checker, forma
   }, [value]);
 
   const handleValueClick = useCallback(
-    (field: string, clickedValue: string, isList?: boolean) => {
+    (field: string, clickedValue: string, isList?: boolean, schema?: FieldSchema) => {
       const view = viewRef.current;
       if (!view) return;
       view.dispatch({
-        effects: addPreview.of({ field, value: clickedValue, format, cursorLine: cursorLineRef.current, isList }),
+        effects: addPreview.of({ field, value: clickedValue, format, cursorLine: cursorLineRef.current, isList, schema }),
       });
       view.focus();
     },

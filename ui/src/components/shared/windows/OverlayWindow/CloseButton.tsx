@@ -2,11 +2,10 @@ import styled from 'styled-components';
 
 const CloseButton = styled.button`
   width: 20px;
-  height: 20px;
+  height: auto;
   display: flex;
   flex-direction: column;
   justify-content: center;
-  height: auto;
   background: transparent;
   border: none;
   font-size: 15px;

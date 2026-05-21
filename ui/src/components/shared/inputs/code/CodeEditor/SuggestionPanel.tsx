@@ -1,6 +1,7 @@
 import React, { useState } from 'react';
 import styled from 'styled-components';
-import type { Suggestion } from '@utilities/rules/types';
+import type { Suggestion, FieldSchema } from '@utilities/rules/types';
+import { FieldValueType } from '@utilities/rules/types';
 
 const Panel = styled.div`
   background-color: var(--thorium-panel-bg);
@@ -83,6 +84,40 @@ const AddButton = styled.span`
   }
 `;
 
+const TypeBadge = styled.span`
+  display: inline-block;
+  font-size: 9px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  padding: 1px 5px;
+  border-radius: 3px;
+  background-color: var(--thorium-highlight-panel-bg);
+  color: var(--thorium-secondary-text);
+  border: 1px solid var(--thorium-panel-border);
+  flex-shrink: 0;
+`;
+
+function typeLabel(schema?: FieldSchema): string | null {
+  if (!schema) return null;
+  switch (schema.type) {
+    case FieldValueType.String:
+      return 'string';
+    case FieldValueType.Number:
+      return 'number';
+    case FieldValueType.Boolean:
+      return 'bool';
+    case FieldValueType.Enum:
+      return 'enum';
+    case FieldValueType.Object:
+      return 'object';
+    case FieldValueType.StringArray:
+      return 'list';
+    default:
+      return null;
+  }
+}
+
 const ToggleButton = styled.button`
   background: none;
   border: none;
@@ -110,7 +145,7 @@ const headerLabelStyle: React.CSSProperties = {
 
 interface SuggestionPanelProps {
   suggestions: Suggestion[];
-  onValueClick?: (field: string, value: string, isList?: boolean) => void;
+  onValueClick?: (field: string, value: string, isList?: boolean, schema?: FieldSchema) => void;
 }
 
 const SuggestionPanel: React.FC<SuggestionPanelProps> = ({ suggestions, onValueClick }) => {
@@ -125,29 +160,36 @@ const SuggestionPanel: React.FC<SuggestionPanelProps> = ({ suggestions, onValueC
         <ToggleButton onClick={() => setCollapsed((prev) => !prev)}>{collapsed ? 'Show' : 'Hide'}</ToggleButton>
       </div>
       {!collapsed &&
-        suggestions.map((suggestion, idx) => (
-          <SuggestionRow key={`${suggestion.field}-${idx}`}>
-            <FieldLabel>{suggestion.field}</FieldLabel>
-            <Message>{suggestion.message}</Message>
-            {suggestion.values && suggestion.values.length > 0 ? (
-              <ValuesContainer>
-                {suggestion.values.map((val) => (
-                  <ValueChip
-                    key={val}
-                    onClick={() => onValueClick?.(suggestion.field, val, suggestion.isList)}
-                    title={`Click to use '${val}'`}
-                  >
-                    {val}
-                  </ValueChip>
-                ))}
-              </ValuesContainer>
-            ) : (
-              <AddButton onClick={() => onValueClick?.(suggestion.field, '', suggestion.isList)} title={`Add '${suggestion.field}' field`}>
-                Add
-              </AddButton>
-            )}
-          </SuggestionRow>
-        ))}
+        suggestions.map((suggestion, idx) => {
+          const badge = typeLabel(suggestion.schema);
+          return (
+            <SuggestionRow key={`${suggestion.field}-${idx}`}>
+              <FieldLabel>{suggestion.field}</FieldLabel>
+              {badge && <TypeBadge>{badge}</TypeBadge>}
+              <Message>{suggestion.message}</Message>
+              {suggestion.values && suggestion.values.length > 0 ? (
+                <ValuesContainer>
+                  {suggestion.values.map((val) => (
+                    <ValueChip
+                      key={val}
+                      onClick={() => onValueClick?.(suggestion.field, val, suggestion.isList, suggestion.schema)}
+                      title={`Click to use '${val}'`}
+                    >
+                      {val}
+                    </ValueChip>
+                  ))}
+                </ValuesContainer>
+              ) : (
+                <AddButton
+                  onClick={() => onValueClick?.(suggestion.field, '', suggestion.isList, suggestion.schema)}
+                  title={`Add '${suggestion.field}' field`}
+                >
+                  Add
+                </AddButton>
+              )}
+            </SuggestionRow>
+          );
+        })}
     </Panel>
   );
 };

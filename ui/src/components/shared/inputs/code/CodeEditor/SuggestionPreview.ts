@@ -1,6 +1,6 @@
 import { EditorView, Decoration, type DecorationSet, WidgetType } from '@codemirror/view';
 import { EditorState, StateField, StateEffect } from '@codemirror/state';
-import { FormatType } from '@utilities/rules/types';
+import { FormatType, FieldValueType, type FieldSchema } from '@utilities/rules/types';
 
 export interface PreviewProposal {
   field: string;
@@ -8,6 +8,7 @@ export interface PreviewProposal {
   format: FormatType;
   cursorLine?: number;
   isList?: boolean;
+  schema?: FieldSchema;
 }
 
 export const addPreview = StateEffect.define<PreviewProposal>();
@@ -113,24 +114,79 @@ function buildYaraInsertText(
   return { text: `${value}\n`, pos: docText.length };
 }
 
+function defaultValueForType(schema: FieldSchema): string {
+  switch (schema.type) {
+    case FieldValueType.Number:
+      return schema.placeholder ?? '';
+    case FieldValueType.Boolean:
+      return 'false';
+    case FieldValueType.Enum:
+      return schema.enumValues?.[0] ?? '';
+    case FieldValueType.String:
+      return '';
+    default:
+      return '';
+  }
+}
+
+function formatValueForYaml(value: string, schema?: FieldSchema): string {
+  if (!schema || !value) return `'${value}'`;
+  switch (schema.type) {
+    case FieldValueType.Number:
+      return value;
+    case FieldValueType.Boolean:
+      return value;
+    case FieldValueType.Enum:
+      return value;
+    default:
+      return `'${value}'`;
+  }
+}
+
+function buildObjectYamlText(field: string, schema: FieldSchema, values: Record<string, string>, indent: string = ''): string {
+  if (!schema.fields) return `${indent}${field}: ''\n`;
+  let text = `${indent}${field}:\n`;
+  for (const [subKey, subSchema] of Object.entries(schema.fields)) {
+    const val = values[subKey] ?? '';
+    if (!val && !subSchema.required) continue;
+    if (subSchema.type === FieldValueType.Object) continue;
+    text += `${indent}    ${subKey}: ${formatValueForYaml(val, subSchema)}\n`;
+  }
+  return text;
+}
+
 function buildYamlInsertText(
   field: string,
   value: string,
   docText: string,
   lines: string[],
   isList?: boolean,
+  schema?: FieldSchema,
 ): { text: string; pos: number } {
   const parts = field.split('.');
   if (parts.length === 1) {
     const trailing = docText.endsWith('\n') ? '' : '\n';
-    if (isList) {
+
+    if (schema?.type === FieldValueType.Object && schema.fields) {
+      const defaults: Record<string, string> = {};
+      for (const [k, s] of Object.entries(schema.fields)) {
+        defaults[k] = s.required ? defaultValueForType(s) : '';
+      }
+      return {
+        text: `${trailing}${buildObjectYamlText(field, schema, defaults)}`,
+        pos: docText.length,
+      };
+    }
+
+    if (schema?.type === FieldValueType.StringArray || isList) {
       return {
         text: `${trailing}${field}:\n    - '${value}'\n`,
         pos: docText.length,
       };
     }
+
     return {
-      text: `${trailing}${field}: '${value}'\n`,
+      text: `${trailing}${field}: ${formatValueForYaml(value, schema)}\n`,
       pos: docText.length,
     };
   }
@@ -162,14 +218,14 @@ function buildYamlInsertText(
     const pos = Math.min(lineOffset(lines, insertAfterIdx + 1), docText.length);
     const needsNewline = insertAfterIdx < lines.length - 1 || !docText.endsWith('\n');
     return {
-      text: `    ${childKey}: '${value}'${needsNewline ? '\n' : ''}`,
+      text: `    ${childKey}: ${formatValueForYaml(value, schema)}${needsNewline ? '\n' : ''}`,
       pos,
     };
   }
 
   const trailing = docText.endsWith('\n') ? '' : '\n';
   return {
-    text: `${trailing}${parentKey}:\n    ${childKey}: '${value}'\n`,
+    text: `${trailing}${parentKey}:\n    ${childKey}: ${formatValueForYaml(value, schema)}\n`,
     pos: docText.length,
   };
 }
@@ -181,6 +237,7 @@ function buildInsertText(
   format: FormatType,
   cursorLine?: number,
   isList?: boolean,
+  schema?: FieldSchema,
 ): { text: string; pos: number; inline?: boolean } {
   const lines = docText.split('\n');
 
@@ -190,7 +247,7 @@ function buildInsertText(
     case FormatType.YARA:
       return buildYaraInsertText(field, value, docText, lines, cursorLine);
     default:
-      return buildYamlInsertText(field, value, docText, lines, isList);
+      return buildYamlInsertText(field, value, docText, lines, isList, schema);
   }
 }
 
@@ -238,21 +295,98 @@ function makeBtn(label: string, title: string, bgVar: string, onClick: () => voi
   return btn;
 }
 
+function validateSchemaValue(value: string, schema: FieldSchema): boolean {
+  if (schema.required && !value) return false;
+  if (!value) return true;
+  switch (schema.type) {
+    case FieldValueType.Number:
+      return /^-?\d+(\.\d+)?$/.test(value.trim());
+    case FieldValueType.Boolean:
+      return value === 'true' || value === 'false';
+    case FieldValueType.Enum:
+      return schema.enumValues ? schema.enumValues.includes(value) : true;
+    default:
+      return true;
+  }
+}
+
+function validateObjectSchema(values: Record<string, string>, schema: FieldSchema): { valid: boolean; errors: string[] } {
+  if (!schema.fields) return { valid: true, errors: [] };
+  const errors: string[] = [];
+  for (const [key, subSchema] of Object.entries(schema.fields)) {
+    const val = values[key] ?? '';
+    if (subSchema.required && !val) {
+      errors.push(`${key} is required`);
+    } else if (val && !validateSchemaValue(val, subSchema)) {
+      errors.push(`${key}: invalid ${subSchema.type} value`);
+    }
+  }
+  return { valid: errors.length === 0, errors };
+}
+
+const inputBaseStyle = [
+  'background: var(--thorium-highlight-panel-bg)',
+  'color: var(--thorium-text)',
+  'border: 1px solid var(--thorium-panel-border)',
+  'border-radius: 3px',
+  'padding: 0 4px',
+  'font-family: monospace',
+  'font-size: 13px',
+  'line-height: 18px',
+  'height: 20px',
+  'box-sizing: border-box',
+  'outline: none',
+].join(';');
+
+function makeFormInput(schema: FieldSchema, initialValue: string): HTMLInputElement {
+  const input = document.createElement('input');
+  input.type = 'text';
+  if (schema.type === FieldValueType.Number) input.inputMode = 'numeric';
+  input.value = initialValue;
+  input.placeholder = schema.placeholder ?? '';
+  input.style.cssText = `${inputBaseStyle};min-width:80px;max-width:200px;`;
+  return input;
+}
+
+function makeFormSelect(options: readonly string[], initialValue: string): HTMLSelectElement {
+  const select = document.createElement('select');
+  select.style.cssText = `${inputBaseStyle};cursor:pointer;min-width:80px;`;
+  const emptyOpt = document.createElement('option');
+  emptyOpt.value = '';
+  emptyOpt.textContent = '-- select --';
+  select.appendChild(emptyOpt);
+  for (const opt of options) {
+    const option = document.createElement('option');
+    option.value = opt;
+    option.textContent = opt;
+    if (opt === initialValue) option.selected = true;
+    select.appendChild(option);
+  }
+  if (initialValue) select.value = initialValue;
+  return select;
+}
+
+function makeBoolSelect(initialValue: string): HTMLSelectElement {
+  return makeFormSelect(['true', 'false'] as const, initialValue);
+}
+
 class PreviewWidget extends WidgetType {
   constructor(
     readonly insertText: string,
     readonly viewRef: { current: EditorView | null },
     readonly inline: boolean = false,
+    readonly schema?: FieldSchema,
   ) {
     super();
   }
 
   eq(other: PreviewWidget): boolean {
-    return this.insertText === other.insertText && this.inline === other.inline;
+    return this.insertText === other.insertText && this.inline === other.inline && this.schema === other.schema;
   }
 
   toDOM(): HTMLElement {
     if (this.inline) return this.toInlineDOM();
+    if (this.schema?.type === FieldValueType.Object && this.schema.fields) return this.toObjectDOM();
 
     const firstLine = this.insertText.split('\n').find((l) => l.trim().length > 0) ?? this.insertText;
     const leadingSpaces = firstLine.match(/^(\s*)/)?.[1].length ?? 0;
@@ -280,6 +414,13 @@ class PreviewWidget extends WidgetType {
     const contentContainer = document.createElement('span');
     contentContainer.style.cssText = ['flex: 1 1 auto', 'min-width: 0'].join(';');
 
+    const acceptBtn = makeBtn('Accept', 'Insert this field (Enter)', '--thorium-ok-bg', () => {
+      this.viewRef.current?.dispatch({ effects: acceptPreview.of() });
+    });
+    const dismissBtn = makeBtn('Dismiss', 'Cancel (Escape)', '--thorium-info-bg', () => {
+      this.viewRef.current?.dispatch({ effects: clearPreview.of() });
+    });
+
     if (editable) {
       const labelStyle = ['color: var(--thorium-info-secondary-bg)', 'font-style: italic', 'white-space: pre', 'line-height: 20px'].join(
         ';',
@@ -287,7 +428,7 @@ class PreviewWidget extends WidgetType {
 
       const trimmedText = this.insertText.trim();
       const editMatch = trimmedText.match(EDITABLE_RE);
-      const editLineIdx = editMatch ? trimmedText.slice(0, editMatch.index!).split('\n').length - 1 : 0;
+      const editLineIdx = editMatch ? trimmedText.slice(0, editMatch.index).split('\n').length - 1 : 0;
       const allLines = trimmedText.split('\n');
 
       const headerLines = allLines.slice(0, editLineIdx);
@@ -312,26 +453,38 @@ class PreviewWidget extends WidgetType {
       const lineMatch = editableLine.match(EDITABLE_RE);
       prefixSpan.textContent = lineMatch ? editableLine.slice(0, lineMatch.index! + lineMatch[1].length) : editable.before;
 
-      const input = document.createElement('input');
-      input.type = 'text';
-      input.value = editable.value === '<value>' ? '' : editable.value;
-      input.placeholder = 'value';
-      input.style.cssText = [
-        'background: var(--thorium-highlight-panel-bg)',
-        'color: var(--thorium-text)',
-        'border: 1px solid var(--thorium-panel-border)',
-        'border-radius: 3px',
-        'padding: 0 4px',
-        'font-family: monospace',
-        'font-size: 13px',
-        'line-height: 18px',
-        'height: 20px',
-        'box-sizing: border-box',
-        'min-width: 80px',
-        'max-width: 300px',
-        'outline: none',
-        'vertical-align: baseline',
-      ].join(';');
+      let inputEl: HTMLInputElement | HTMLSelectElement;
+
+      if (this.schema?.type === FieldValueType.Enum && this.schema.enumValues) {
+        inputEl = makeFormSelect(this.schema.enumValues, editable.value === '<value>' ? '' : editable.value);
+        inputEl.style.cssText += ';vertical-align:baseline;';
+      } else if (this.schema?.type === FieldValueType.Boolean) {
+        inputEl = makeBoolSelect(editable.value === '<value>' ? '' : editable.value);
+        inputEl.style.cssText += ';vertical-align:baseline;';
+      } else {
+        const input = document.createElement('input');
+        input.type = 'text';
+        input.value = editable.value === '<value>' ? '' : editable.value;
+        input.placeholder = this.schema?.placeholder ?? 'value';
+        input.style.cssText = [
+          'background: var(--thorium-highlight-panel-bg)',
+          'color: var(--thorium-text)',
+          'border: 1px solid var(--thorium-panel-border)',
+          'border-radius: 3px',
+          'padding: 0 4px',
+          'font-family: monospace',
+          'font-size: 13px',
+          'line-height: 18px',
+          'height: 20px',
+          'box-sizing: border-box',
+          'min-width: 80px',
+          'max-width: 300px',
+          'outline: none',
+          'vertical-align: baseline',
+        ].join(';');
+        if (this.schema?.type === FieldValueType.Number) input.inputMode = 'numeric';
+        inputEl = input;
+      }
 
       const suffixSpan = document.createElement('span');
       suffixSpan.style.cssText = labelStyle;
@@ -342,20 +495,41 @@ class PreviewWidget extends WidgetType {
         const rest = this.insertText.trimStart();
         const m = rest.match(EDITABLE_RE);
         if (m) {
-          const newRest = rest.slice(0, m.index! + m[1].length) + input.value + rest.slice(m.index! + m[1].length + m[2].length);
+          const val = inputEl.value;
+          const formatted = this.schema ? formatValueForYaml(val, this.schema) : `${m[3]}${val}${m[3]}`;
+          const mIdx = m.index ?? 0;
+          const prefix = rest.slice(0, mIdx) + rest.slice(mIdx, mIdx + m[1].length).replace(/['"]$/, '');
+          const suffix = rest.slice(mIdx + m[0].length).replace(/^['"]/, '');
+          const newRest =
+            m[3] === '"' || m[3] === "'"
+              ? rest.slice(0, m.index! + m[1].length) + val + rest.slice(m.index! + m[1].length + m[2].length)
+              : prefix + formatted + suffix;
           return indent + newRest;
         }
         return this.insertText;
       };
 
-      input.addEventListener('input', () => {
-        this.viewRef.current?.dispatch({ effects: updateInsertText.of(rebuildText()) });
-      });
+      const updateValidation = () => {
+        if (!this.schema) return;
+        const isValid = validateSchemaValue(inputEl.value, this.schema);
+        inputEl.style.borderColor = isValid ? 'var(--thorium-panel-border)' : 'var(--thorium-danger-bg)';
+        acceptBtn.style.opacity = isValid ? '1' : '0.4';
+        acceptBtn.style.pointerEvents = isValid ? 'auto' : 'none';
+      };
 
-      input.addEventListener('keydown', (e) => {
+      const onInputChange = () => {
+        this.viewRef.current?.dispatch({ effects: updateInsertText.of(rebuildText()) });
+        updateValidation();
+      };
+
+      inputEl.addEventListener('input', onInputChange);
+      inputEl.addEventListener('change', onInputChange);
+
+      inputEl.addEventListener('keydown', ((e: KeyboardEvent) => {
         if (e.key === 'Enter') {
           e.preventDefault();
           e.stopPropagation();
+          if (this.schema && !validateSchemaValue(inputEl.value, this.schema)) return;
           this.viewRef.current?.dispatch({ effects: updateInsertText.of(rebuildText()) });
           setTimeout(() => this.viewRef.current?.dispatch({ effects: acceptPreview.of() }), 0);
         }
@@ -364,10 +538,10 @@ class PreviewWidget extends WidgetType {
           e.stopPropagation();
           this.viewRef.current?.dispatch({ effects: clearPreview.of() });
         }
-      });
+      }) as EventListener);
 
       editableRow.appendChild(prefixSpan);
-      editableRow.appendChild(input);
+      editableRow.appendChild(inputEl);
       editableRow.appendChild(suffixSpan);
       contentContainer.appendChild(editableRow);
 
@@ -385,7 +559,10 @@ class PreviewWidget extends WidgetType {
         contentContainer.appendChild(footerSpan);
       }
 
-      setTimeout(() => input.focus(), 0);
+      setTimeout(() => {
+        inputEl.focus();
+        updateValidation();
+      }, 0);
     } else {
       const textSpan = document.createElement('span');
       textSpan.style.cssText = [
@@ -401,17 +578,156 @@ class PreviewWidget extends WidgetType {
     const btnContainer = document.createElement('span');
     btnContainer.style.cssText = ['display: flex', 'gap: 6px', 'flex-shrink: 0'].join(';');
 
+    btnContainer.appendChild(acceptBtn);
+    btnContainer.appendChild(dismissBtn);
+    wrapper.appendChild(contentContainer);
+    wrapper.appendChild(btnContainer);
+    return wrapper;
+  }
+
+  private toObjectDOM(): HTMLElement {
+    const schema = this.schema!;
+    const fields = schema.fields!;
+    const fieldName = this.insertText.trim().split(':')[0].trim();
+
+    const wrapper = document.createElement('div');
+    wrapper.className = 'cm-suggestion-preview';
+    wrapper.style.cssText = [
+      'display: flex',
+      'flex-direction: column',
+      'gap: 6px',
+      'padding: 8px 12px',
+      'margin: 0 4px',
+      'background-color: var(--thorium-panel-bg)',
+      'border: 1px solid var(--thorium-panel-border)',
+      'border-left: 3px solid var(--thorium-info-secondary-bg)',
+      'border-radius: 6px',
+      'font-family: monospace',
+      'font-size: 13px',
+      'box-shadow: 0 1px 3px rgba(0, 0, 0, 0.15)',
+    ].join(';');
+
+    const headerSpan = document.createElement('div');
+    headerSpan.style.cssText = 'color:var(--thorium-info-secondary-bg);font-style:italic;font-weight:600;line-height:20px;';
+    headerSpan.textContent = `${fieldName}:`;
+    wrapper.appendChild(headerSpan);
+
+    const formContainer = document.createElement('div');
+    formContainer.style.cssText = 'display:flex;flex-direction:column;gap:4px;padding-left:16px;';
+
+    const inputs = new Map<string, HTMLInputElement | HTMLSelectElement>();
+
+    const errorArea = document.createElement('div');
+    errorArea.style.cssText = 'font-size:11px;color:var(--thorium-danger-bg);min-height:14px;padding-left:16px;';
+
     const acceptBtn = makeBtn('Accept', 'Insert this field (Enter)', '--thorium-ok-bg', () => {
-      this.viewRef.current?.dispatch({ effects: acceptPreview.of() });
+      const values = collectValues();
+      const { valid } = validateObjectSchema(values, schema);
+      if (valid) {
+        this.viewRef.current?.dispatch({ effects: acceptPreview.of() });
+      }
     });
     const dismissBtn = makeBtn('Dismiss', 'Cancel (Escape)', '--thorium-info-bg', () => {
       this.viewRef.current?.dispatch({ effects: clearPreview.of() });
     });
 
+    const collectValues = (): Record<string, string> => {
+      const values: Record<string, string> = {};
+      for (const [key, el] of inputs) {
+        values[key] = el.value;
+      }
+      return values;
+    };
+
+    const rebuildAndValidate = () => {
+      const values = collectValues();
+      const indent = this.insertText.match(/^(\s*)/)?.[1] ?? '';
+      const text = indent + buildObjectYamlText(fieldName, schema, values);
+      this.viewRef.current?.dispatch({ effects: updateInsertText.of(text) });
+
+      const { valid, errors } = validateObjectSchema(values, schema);
+      errorArea.textContent = errors.length > 0 ? errors[0] : '';
+      acceptBtn.style.opacity = valid ? '1' : '0.4';
+      acceptBtn.style.pointerEvents = valid ? 'auto' : 'none';
+
+      for (const [key, el] of inputs) {
+        const subSchema = fields[key];
+        if (!subSchema) continue;
+        const isFieldValid = validateSchemaValue(el.value, subSchema);
+        el.style.borderColor = isFieldValid ? 'var(--thorium-panel-border)' : 'var(--thorium-danger-bg)';
+      }
+    };
+
+    let firstInput: HTMLInputElement | HTMLSelectElement | null = null;
+
+    for (const [subKey, subSchema] of Object.entries(fields)) {
+      if (subSchema.type === FieldValueType.Object) continue;
+
+      const row = document.createElement('div');
+      row.style.cssText = 'display:flex;align-items:baseline;gap:6px;';
+
+      const label = document.createElement('span');
+      label.style.cssText = 'color:var(--thorium-info-secondary-bg);font-style:italic;white-space:nowrap;min-width:90px;';
+      label.textContent = `${subKey}:`;
+      if (subSchema.required) {
+        const req = document.createElement('span');
+        req.style.cssText = 'color:var(--thorium-danger-bg);margin-left:2px;';
+        req.textContent = '*';
+        label.appendChild(req);
+      }
+
+      let inputEl: HTMLInputElement | HTMLSelectElement;
+      const initialValue = defaultValueForType(subSchema);
+
+      if (subSchema.type === FieldValueType.Enum && subSchema.enumValues) {
+        inputEl = makeFormSelect(subSchema.enumValues, initialValue);
+      } else if (subSchema.type === FieldValueType.Boolean) {
+        inputEl = makeBoolSelect(initialValue);
+      } else {
+        inputEl = makeFormInput(subSchema, initialValue === subSchema.placeholder ? '' : initialValue);
+      }
+
+      inputEl.addEventListener('input', rebuildAndValidate);
+      inputEl.addEventListener('change', rebuildAndValidate);
+      inputEl.addEventListener('keydown', ((e: KeyboardEvent) => {
+        if (e.key === 'Enter') {
+          e.preventDefault();
+          e.stopPropagation();
+          const values = collectValues();
+          const { valid } = validateObjectSchema(values, schema);
+          if (valid) {
+            setTimeout(() => this.viewRef.current?.dispatch({ effects: acceptPreview.of() }), 0);
+          }
+        }
+        if (e.key === 'Escape') {
+          e.preventDefault();
+          e.stopPropagation();
+          this.viewRef.current?.dispatch({ effects: clearPreview.of() });
+        }
+      }) as EventListener);
+
+      inputs.set(subKey, inputEl);
+      if (!firstInput) firstInput = inputEl;
+
+      row.appendChild(label);
+      row.appendChild(inputEl);
+      formContainer.appendChild(row);
+    }
+
+    wrapper.appendChild(formContainer);
+    wrapper.appendChild(errorArea);
+
+    const btnContainer = document.createElement('div');
+    btnContainer.style.cssText = 'display:flex;gap:6px;justify-content:flex-end;';
     btnContainer.appendChild(acceptBtn);
     btnContainer.appendChild(dismissBtn);
-    wrapper.appendChild(contentContainer);
     wrapper.appendChild(btnContainer);
+
+    setTimeout(() => {
+      if (firstInput) firstInput.focus();
+      rebuildAndValidate();
+    }, 0);
+
     return wrapper;
   }
 
@@ -483,6 +799,7 @@ export const previewState = StateField.define<ProposalState>({
           effect.value.format,
           effect.value.cursorLine,
           effect.value.isList,
+          effect.value.schema,
         );
         return { proposal: effect.value, insertText: result.text, insertPos: result.pos, inline: result.inline ?? false };
       }
@@ -518,7 +835,7 @@ const previewDecoField = StateField.define<{ decos: DecorationSet; viewRef: { cu
     }
 
     const iPos = Math.min(curr.insertPos, tr.state.doc.length);
-    const widget = new PreviewWidget(curr.insertText, state.viewRef, curr.inline);
+    const widget = new PreviewWidget(curr.insertText, state.viewRef, curr.inline, curr.proposal?.schema);
 
     if (curr.inline) {
       const widgetDeco = Decoration.widget({ widget, side: 1, block: false }).range(iPos);

@@ -1,6 +1,7 @@
 import { describe, test, expect } from 'vitest';
 import { ImageChecker, PipelineChecker } from './index';
 import { removeLine, removeBlock, replaceLine } from '../test-helpers';
+import { FieldValueType } from '../types';
 
 const VALID_IMAGE = `group: analysis
 name: yara-scanner
@@ -275,6 +276,87 @@ describe('PipelineChecker', () => {
       expect(fields).toContain('description');
       expect(fields).toContain('sla');
       expect(fields).toContain('triggers');
+    });
+
+    test('pipeline suggestions carry schemas', () => {
+      const minimal = `group: test\nname: minimal\norder:\n    - tool1`;
+      const s = pipelineSuggestions(minimal);
+      const slaSugg = s.find((sg) => sg.field === 'sla');
+      expect(slaSugg?.schema).toBeDefined();
+      expect(slaSugg!.schema!.type).toBe(FieldValueType.Number);
+
+      const descSugg = s.find((sg) => sg.field === 'description');
+      expect(descSugg?.schema).toBeDefined();
+      expect(descSugg!.schema!.type).toBe(FieldValueType.String);
+    });
+  });
+});
+
+describe('suggestion schemas', () => {
+  describe('image suggestion schemas', () => {
+    test('enum suggestions carry enum schema with values', () => {
+      const minimal = `group: test\nname: minimal`;
+      const s = imageSuggestions(minimal);
+      const scalerSugg = s.find((sg) => sg.field === 'scaler');
+      expect(scalerSugg?.schema).toBeDefined();
+      expect(scalerSugg!.schema!.type).toBe(FieldValueType.Enum);
+      expect(scalerSugg!.schema!.enumValues).toContain('K8s');
+    });
+
+    test('string suggestions carry string schema', () => {
+      const minimal = `group: test\nname: minimal`;
+      const s = imageSuggestions(minimal);
+      const descSugg = s.find((sg) => sg.field === 'description');
+      expect(descSugg?.schema).toBeDefined();
+      expect(descSugg!.schema!.type).toBe(FieldValueType.String);
+    });
+
+    test('number suggestions carry number schema', () => {
+      const minimal = `group: test\nname: minimal`;
+      const s = imageSuggestions(minimal);
+      const timeoutSugg = s.find((sg) => sg.field === 'timeout');
+      expect(timeoutSugg?.schema).toBeDefined();
+      expect(timeoutSugg!.schema!.type).toBe(FieldValueType.Number);
+    });
+
+    test('object suggestions carry object schema with fields', () => {
+      const minimal = `group: test\nname: minimal`;
+      const s = imageSuggestions(minimal);
+      const lifetimeSugg = s.find((sg) => sg.field === 'lifetime');
+      expect(lifetimeSugg?.schema).toBeDefined();
+      expect(lifetimeSugg!.schema!.type).toBe(FieldValueType.Object);
+      expect(lifetimeSugg!.schema!.fields).toBeDefined();
+      expect(lifetimeSugg!.schema!.fields!['counter']).toBeDefined();
+      expect(lifetimeSugg!.schema!.fields!['counter'].type).toBe(FieldValueType.Enum);
+      expect(lifetimeSugg!.schema!.fields!['amount']).toBeDefined();
+      expect(lifetimeSugg!.schema!.fields!['amount'].type).toBe(FieldValueType.Number);
+    });
+
+    test('resources suggestion has object schema with number sub-fields', () => {
+      const minimal = `group: test\nname: minimal`;
+      const s = imageSuggestions(minimal);
+      const resourcesSugg = s.find((sg) => sg.field === 'resources');
+      expect(resourcesSugg?.schema).toBeDefined();
+      expect(resourcesSugg!.schema!.type).toBe(FieldValueType.Object);
+      expect(resourcesSugg!.schema!.fields!['cpu'].type).toBe(FieldValueType.Number);
+      expect(resourcesSugg!.schema!.fields!['memory'].type).toBe(FieldValueType.Number);
+    });
+
+    test('empty enum field carries schema', () => {
+      const text = replaceLine(VALID_IMAGE, 'scaler:', 'scaler:');
+      const s = imageSuggestions(text);
+      const scalerSugg = s.find((sg) => sg.field === 'scaler');
+      expect(scalerSugg?.schema).toBeDefined();
+      expect(scalerSugg!.schema!.type).toBe(FieldValueType.Enum);
+    });
+
+    test('nested enum suggestions carry enum schema', () => {
+      const text = replaceLine(VALID_IMAGE, 'strategy: Paths', '        strategy:');
+      const s = imageSuggestions(text);
+      const strategySugg = s.find((sg) => sg.field.endsWith('.strategy'));
+      expect(strategySugg?.schema).toBeDefined();
+      expect(strategySugg!.schema!.type).toBe(FieldValueType.Enum);
+      expect(strategySugg!.schema!.enumValues).toContain('Paths');
     });
   });
 });

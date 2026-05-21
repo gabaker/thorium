@@ -116,3 +116,121 @@ export const KNOWN_VOLUME_FIELDS = [
 export const KNOWN_KVM_FIELDS = ['xml', 'qcow2'] as const;
 
 export const KNOWN_BURSTABLE_FIELDS = ['cpu', 'memory'] as const;
+
+import { FieldValueType, type FieldSchema } from '../types';
+
+export const IMAGE_FIELD_SCHEMAS: Record<string, FieldSchema> = {
+  group: { type: FieldValueType.String, required: true, placeholder: 'group-name' },
+  name: { type: FieldValueType.String, required: true, placeholder: 'image-name' },
+  version: { type: FieldValueType.String, placeholder: '1.0.0' },
+  image: { type: FieldValueType.String, placeholder: 'registry/image:tag' },
+  description: { type: FieldValueType.String, placeholder: 'Image description' },
+  modifiers: { type: FieldValueType.String, placeholder: 'modifier string' },
+  scaler: { type: FieldValueType.Enum, enumValues: IMAGE_SCALER_VALUES },
+  display_type: { type: FieldValueType.Enum, enumValues: OUTPUT_DISPLAY_TYPE_VALUES },
+  timeout: { type: FieldValueType.Number, placeholder: '300' },
+  spawn_limit: { type: FieldValueType.Number, placeholder: '1' },
+  collect_logs: { type: FieldValueType.Boolean },
+  generator: { type: FieldValueType.Boolean },
+  kvm: {
+    type: FieldValueType.Object,
+    fields: {
+      xml: { type: FieldValueType.String, required: true, placeholder: '/path/to/vm.xml' },
+      qcow2: { type: FieldValueType.String, required: true, placeholder: '/path/to/disk.qcow2' },
+    },
+  },
+  lifetime: {
+    type: FieldValueType.Object,
+    fields: {
+      counter: { type: FieldValueType.Enum, required: true, enumValues: LIFETIME_COUNTER_VALUES },
+      amount: { type: FieldValueType.Number, required: true, placeholder: '32' },
+    },
+  },
+  resources: {
+    type: FieldValueType.Object,
+    fields: {
+      cpu: { type: FieldValueType.Number, placeholder: '1000' },
+      memory: { type: FieldValueType.Number, placeholder: '512' },
+      ephemeral_storage: { type: FieldValueType.Number, placeholder: '1024' },
+      worker_slots: { type: FieldValueType.Number, placeholder: '1' },
+      nvidia_gpu: { type: FieldValueType.Number, placeholder: '0' },
+      amd_gpu: { type: FieldValueType.Number, placeholder: '0' },
+    },
+  },
+  args: {
+    type: FieldValueType.Object,
+    fields: {
+      entrypoint: { type: FieldValueType.String, placeholder: '/entrypoint.sh' },
+      command: { type: FieldValueType.String, placeholder: 'run' },
+      reaction: { type: FieldValueType.String, placeholder: 'reaction-kwarg' },
+      repo: { type: FieldValueType.String, placeholder: 'repo-kwarg' },
+      commit: { type: FieldValueType.String, placeholder: 'commit-kwarg' },
+      output: { type: FieldValueType.Enum, enumValues: ARG_STRATEGY_VALUES },
+      output_files: { type: FieldValueType.Enum, enumValues: ARG_STRATEGY_VALUES },
+    },
+  },
+  dependencies: {
+    type: FieldValueType.Object,
+    fields: {
+      samples: { type: FieldValueType.Object, placeholder: 'sample dependency config' },
+      ephemeral: { type: FieldValueType.Object, placeholder: 'ephemeral dependency config' },
+      results: { type: FieldValueType.Object, placeholder: 'result dependency config' },
+      repos: { type: FieldValueType.Object, placeholder: 'repo dependency config' },
+      tags: { type: FieldValueType.Object, placeholder: 'tag dependency config' },
+      children: { type: FieldValueType.Object, placeholder: 'children dependency config' },
+      cache: { type: FieldValueType.Object, placeholder: 'cache config' },
+    },
+  },
+  security_context: {
+    type: FieldValueType.Object,
+    fields: {
+      user: { type: FieldValueType.Number, placeholder: '1000' },
+      group: { type: FieldValueType.Number, placeholder: '1000' },
+      allow_privilege_escalation: { type: FieldValueType.Boolean },
+    },
+  },
+  output_collection: {
+    type: FieldValueType.Object,
+    fields: {
+      handler: { type: FieldValueType.Enum, required: true, enumValues: OUTPUT_HANDLER_VALUES },
+      files: { type: FieldValueType.Object, placeholder: 'file handler config' },
+      as_filesystem: { type: FieldValueType.Boolean },
+      children: { type: FieldValueType.Boolean },
+      auto_tag: { type: FieldValueType.Boolean },
+      groups: { type: FieldValueType.StringArray, placeholder: 'group-name' },
+    },
+  },
+  child_filters: {
+    type: FieldValueType.Object,
+    fields: {
+      mime: { type: FieldValueType.StringArray, placeholder: 'application/pdf' },
+      file_name: { type: FieldValueType.StringArray, placeholder: '*.exe' },
+      file_extension: { type: FieldValueType.StringArray, placeholder: '.dll' },
+      submit_non_matches: { type: FieldValueType.Boolean },
+    },
+  },
+  clean_up: {
+    type: FieldValueType.Object,
+    fields: {
+      job_id: { type: FieldValueType.String, placeholder: 'job-id-kwarg' },
+      results: { type: FieldValueType.String, placeholder: '/tmp/thorium/results' },
+      result_files_dir: { type: FieldValueType.String, placeholder: '/tmp/thorium/result-files' },
+      script: { type: FieldValueType.String, required: true, placeholder: '/cleanup.sh' },
+    },
+  },
+  env: { type: FieldValueType.Object, placeholder: 'KEY: value' },
+  volumes: { type: FieldValueType.StringArray, placeholder: 'volume entry' },
+  network_policies: { type: FieldValueType.StringArray, placeholder: 'policy-name' },
+};
+
+export const PIPELINE_FIELD_SCHEMAS: Record<string, FieldSchema> = {
+  group: { type: FieldValueType.String, required: true, placeholder: 'group-name' },
+  name: { type: FieldValueType.String, required: true, placeholder: 'pipeline-name' },
+  description: { type: FieldValueType.String, placeholder: 'Pipeline description' },
+  sla: { type: FieldValueType.Number, placeholder: '604800' },
+  order: { type: FieldValueType.StringArray, placeholder: 'image-name' },
+  triggers: {
+    type: FieldValueType.Object,
+    placeholder: 'event trigger config',
+  },
+};

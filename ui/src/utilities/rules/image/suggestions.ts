@@ -1,6 +1,6 @@
 import type { Document } from 'yaml';
 import { isMap, isPair, isScalar } from 'yaml';
-import type { Suggestion } from '../types';
+import { FieldValueType, type Suggestion, type FieldSchema } from '../types';
 import { buildLineIndex, offsetToLineCol, type LineIndex } from '../yaml';
 import {
   IMAGE_SCALER_VALUES,
@@ -10,7 +10,22 @@ import {
   VOLUME_TYPE_VALUES,
   LIFETIME_COUNTER_VALUES,
   OUTPUT_HANDLER_VALUES,
+  IMAGE_FIELD_SCHEMAS,
+  PIPELINE_FIELD_SCHEMAS,
 } from './schema';
+
+function lookupSchema(schemas: Record<string, FieldSchema>, dottedField: string): FieldSchema | undefined {
+  const parts = dottedField.split('.');
+  let schema = schemas[parts[0]];
+  for (let i = 1; i < parts.length && schema; i++) {
+    if (schema.type === FieldValueType.Object && schema.fields) {
+      schema = schema.fields[parts[i]];
+    } else {
+      return undefined;
+    }
+  }
+  return schema;
+}
 
 function findKeyLine(map: unknown, key: string, lineIndex: LineIndex): number {
   if (!isMap(map)) return 1;
@@ -35,7 +50,13 @@ export function generateImageSuggestions(doc: Document, text: string, parsed: Re
   if ('scaler' in parsed) {
     const line = findKeyLine(doc.contents, 'scaler', lineIndex);
     if (typeof parsed['scaler'] !== 'string' || parsed['scaler'] === '') {
-      suggestions.push({ line, field: 'scaler', message: 'Valid scaler values', values: IMAGE_SCALER_VALUES });
+      suggestions.push({
+        line,
+        field: 'scaler',
+        message: 'Valid scaler values',
+        values: IMAGE_SCALER_VALUES,
+        schema: lookupSchema(IMAGE_FIELD_SCHEMAS, 'scaler'),
+      });
     }
   }
 
@@ -47,6 +68,7 @@ export function generateImageSuggestions(doc: Document, text: string, parsed: Re
         field: 'display_type',
         message: 'Valid display type values',
         values: OUTPUT_DISPLAY_TYPE_VALUES,
+        schema: lookupSchema(IMAGE_FIELD_SCHEMAS, 'display_type'),
       });
     }
   }
@@ -60,6 +82,7 @@ export function generateImageSuggestions(doc: Document, text: string, parsed: Re
         field: 'lifetime.counter',
         message: 'Valid lifetime counter values',
         values: LIFETIME_COUNTER_VALUES,
+        schema: lookupSchema(IMAGE_FIELD_SCHEMAS, 'lifetime.counter'),
       });
     }
   }
@@ -78,6 +101,7 @@ export function generateImageSuggestions(doc: Document, text: string, parsed: Re
             field: `dependencies.${section}.strategy`,
             message: 'Valid dependency pass strategy values',
             values: DEPENDENCY_PASS_STRATEGY_VALUES,
+            schema: { type: FieldValueType.Enum, enumValues: DEPENDENCY_PASS_STRATEGY_VALUES },
           });
         }
       }
@@ -91,6 +115,7 @@ export function generateImageSuggestions(doc: Document, text: string, parsed: Re
           field: 'dependencies.samples.naming',
           message: 'Valid file naming strategy values',
           values: FILE_NAMING_STRATEGY_VALUES,
+          schema: { type: FieldValueType.Enum, enumValues: FILE_NAMING_STRATEGY_VALUES },
         });
       }
     }
@@ -105,6 +130,7 @@ export function generateImageSuggestions(doc: Document, text: string, parsed: Re
         field: 'output_collection.handler',
         message: 'Valid output handler values',
         values: OUTPUT_HANDLER_VALUES,
+        schema: lookupSchema(IMAGE_FIELD_SCHEMAS, 'output_collection.handler'),
       });
     }
   }
@@ -120,6 +146,7 @@ export function generateImageSuggestions(doc: Document, text: string, parsed: Re
             field: 'volumes[].archetype',
             message: 'Valid volume type values',
             values: VOLUME_TYPE_VALUES,
+            schema: { type: FieldValueType.Enum, enumValues: VOLUME_TYPE_VALUES },
           });
           break;
         }
@@ -127,22 +154,35 @@ export function generateImageSuggestions(doc: Document, text: string, parsed: Re
     }
   }
 
-  const missingOptional: Array<{ field: string; message: string; values?: readonly string[] }> = [];
+  const missingOptional: Array<{ field: string; message: string; values?: readonly string[]; schema?: FieldSchema }> = [];
 
   if (!('description' in parsed)) {
-    missingOptional.push({ field: 'description', message: 'Consider adding a description for this image' });
+    missingOptional.push({
+      field: 'description',
+      message: 'Consider adding a description for this image',
+      schema: lookupSchema(IMAGE_FIELD_SCHEMAS, 'description'),
+    });
   }
   if (!('image' in parsed)) {
-    missingOptional.push({ field: 'image', message: 'Consider specifying the Docker image URL or tag' });
+    missingOptional.push({
+      field: 'image',
+      message: 'Consider specifying the Docker image URL or tag',
+      schema: lookupSchema(IMAGE_FIELD_SCHEMAS, 'image'),
+    });
   }
   if (!('timeout' in parsed)) {
-    missingOptional.push({ field: 'timeout', message: 'Consider setting a job timeout in seconds' });
+    missingOptional.push({
+      field: 'timeout',
+      message: 'Consider setting a job timeout in seconds',
+      schema: lookupSchema(IMAGE_FIELD_SCHEMAS, 'timeout'),
+    });
   }
   if (!('scaler' in parsed)) {
     missingOptional.push({
       field: 'scaler',
       message: 'Consider specifying the scaler type',
       values: IMAGE_SCALER_VALUES,
+      schema: lookupSchema(IMAGE_FIELD_SCHEMAS, 'scaler'),
     });
   }
   if (!('display_type' in parsed)) {
@@ -150,16 +190,29 @@ export function generateImageSuggestions(doc: Document, text: string, parsed: Re
       field: 'display_type',
       message: 'Consider specifying the output display type',
       values: OUTPUT_DISPLAY_TYPE_VALUES,
+      schema: lookupSchema(IMAGE_FIELD_SCHEMAS, 'display_type'),
     });
   }
   if (!('lifetime' in parsed)) {
-    missingOptional.push({ field: 'lifetime', message: 'Consider adding a pod lifetime (jobs or time based)' });
+    missingOptional.push({
+      field: 'lifetime',
+      message: 'Consider adding a pod lifetime (jobs or time based)',
+      schema: lookupSchema(IMAGE_FIELD_SCHEMAS, 'lifetime'),
+    });
   }
   if (!('resources' in parsed)) {
-    missingOptional.push({ field: 'resources', message: 'Consider specifying resource requirements (cpu, memory)' });
+    missingOptional.push({
+      field: 'resources',
+      message: 'Consider specifying resource requirements (cpu, memory)',
+      schema: lookupSchema(IMAGE_FIELD_SCHEMAS, 'resources'),
+    });
   }
   if (!('dependencies' in parsed)) {
-    missingOptional.push({ field: 'dependencies', message: 'Consider configuring dependency settings' });
+    missingOptional.push({
+      field: 'dependencies',
+      message: 'Consider configuring dependency settings',
+      schema: lookupSchema(IMAGE_FIELD_SCHEMAS, 'dependencies'),
+    });
   }
 
   for (const opt of missingOptional) {
@@ -168,6 +221,7 @@ export function generateImageSuggestions(doc: Document, text: string, parsed: Re
       field: opt.field,
       message: opt.message,
       values: opt.values,
+      schema: opt.schema,
     });
   }
 
@@ -179,16 +233,28 @@ export function generatePipelineSuggestions(doc: Document, text: string, parsed:
   const lineIndex = buildLineIndex(text);
   const endLine = lastDocLine(lineIndex);
 
-  const missingOptional: Array<{ field: string; message: string }> = [];
+  const missingOptional: Array<{ field: string; message: string; schema?: FieldSchema }> = [];
 
   if (!('description' in parsed)) {
-    missingOptional.push({ field: 'description', message: 'Consider adding a pipeline description' });
+    missingOptional.push({
+      field: 'description',
+      message: 'Consider adding a pipeline description',
+      schema: lookupSchema(PIPELINE_FIELD_SCHEMAS, 'description'),
+    });
   }
   if (!('sla' in parsed)) {
-    missingOptional.push({ field: 'sla', message: 'Consider setting an SLA in seconds (defaults to 1 week)' });
+    missingOptional.push({
+      field: 'sla',
+      message: 'Consider setting an SLA in seconds (defaults to 1 week)',
+      schema: lookupSchema(PIPELINE_FIELD_SCHEMAS, 'sla'),
+    });
   }
   if (!('triggers' in parsed)) {
-    missingOptional.push({ field: 'triggers', message: 'Consider adding event triggers for automatic pipeline execution' });
+    missingOptional.push({
+      field: 'triggers',
+      message: 'Consider adding event triggers for automatic pipeline execution',
+      schema: lookupSchema(PIPELINE_FIELD_SCHEMAS, 'triggers'),
+    });
   }
 
   for (const opt of missingOptional) {
@@ -196,6 +262,7 @@ export function generatePipelineSuggestions(doc: Document, text: string, parsed:
       line: endLine,
       field: opt.field,
       message: opt.message,
+      schema: opt.schema,
     });
   }
 
