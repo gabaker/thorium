@@ -15,7 +15,7 @@ test.describe('File Upload', () => {
   test('uploads a file with origin, tags, and pipeline reaction', async ({ page }) => {
     test.setTimeout(120_000);
     await loginViaUI(page);
-    await page.goto('/upload');
+    await page.goto('/analyze');
     await page.waitForLoadState('networkidle');
 
     await snapshot(page, SCREENSHOT_DIR, 'upload-initial');

@@ -229,7 +229,7 @@ export function createEntityDetailsPage<T extends keyof EntityTypeMap>(config: E
 
     return (
       <OverlayTipBottom tip={`Upload files associated with this ${entity.kind}.`}>
-        <Button className="icon-btn mx-1" variant="" disabled={disabled} onClick={() => navigate('/upload', { state: { entity } })}>
+        <Button className="icon-btn mx-1" variant="" disabled={disabled} onClick={() => navigate('/analyze', { state: { entity } })}>
           <FaFileCirclePlus size={20} />
         </Button>
       </OverlayTipBottom>
