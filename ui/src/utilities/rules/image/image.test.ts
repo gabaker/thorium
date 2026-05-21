@@ -64,8 +64,6 @@ function pipelineSuggestions(text: string) {
   return pipelineChecker.check(text).suggestions;
 }
 
-
-
 describe('ImageChecker', () => {
   describe('valid image', () => {
     test('produces no errors for valid image request', () => {

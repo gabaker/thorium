@@ -17,7 +17,14 @@ const NodePreviewContent: React.FC<NodePreviewContentProps> = ({ nodeData, isDup
         (f, i) =>
           f.value && (
             <div key={i} className="preview-field">
-              {f.label ? <><strong>{f.label}: </strong>{f.value}</> : f.value}
+              {f.label ? (
+                <>
+                  <strong>{f.label}: </strong>
+                  {f.value}
+                </>
+              ) : (
+                f.value
+              )}
             </div>
           ),
       )}

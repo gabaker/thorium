@@ -43,7 +43,6 @@ function suggestions(text: string) {
   return checker.check(text).suggestions;
 }
 
-
 describe('SigmaRuleChecker', () => {
   describe('valid rule', () => {
     test('produces no errors or warnings for valid Okta rule', () => {
