@@ -29,8 +29,8 @@ function getCookie(cname: string): string {
 // THORIUM_API_URL should be the instance root (e.g. http://localhost:8080).
 let baseURL = '';
 if (window.location.hostname == 'localhost' || window.location.hostname == '127.0.0.1') {
-  if (process.env.THORIUM_API_URL && process.env.THORIUM_API_URL !== '') {
-    baseURL = process.env.THORIUM_API_URL.replace(/\/+$/, '');
+  if (import.meta.env.THORIUM_API_URL && import.meta.env.THORIUM_API_URL !== '') {
+    baseURL = import.meta.env.THORIUM_API_URL.replace(/\/+$/, '');
   } else {
     baseURL = `${window.location.protocol}//${window.location.hostname}`;
   }

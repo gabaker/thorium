@@ -1,7 +1,7 @@
 /** Get the API URL path as a string. */
 export function getApiUrl() {
-  if (window.location.hostname == 'localhost' && process.env.THORIUM_API_URL) {
-    return `${process.env.THORIUM_API_URL.replace(/\/+$/, '')}/api`;
+  if (window.location.hostname == 'localhost' && import.meta.env.THORIUM_API_URL) {
+    return `${import.meta.env.THORIUM_API_URL.replace(/\/+$/, '')}/api`;
   }
   return `${window.location.protocol}//${window.location.hostname}/api`;
 }
