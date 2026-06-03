@@ -55,20 +55,13 @@ cfg_if::cfg_if! {
 
 cfg_if::cfg_if! {
     if #[cfg(feature = "api")] {
+        // The remaining `api`-only imports (the rest are brought in by the unconditional imports above
+        // and the first `api` cfg_if block).
         use std::collections::BTreeSet;
-        use chrono::TimeZone;
-        use network_activity::{NetConState, TransportLayerProtocol};
-        use rules::{SigmaActionToTake, SigmaRuleAppliesTo};
-        use shared::CriticalSector;
         use futures::stream::{self, StreamExt};
         use std::net::IpAddr;
 
-        use super::{
-            TagRequest, User, TagDeleteRequest, Group, GroupAllowAction, UnhashedTreeBranch,
-            CollectionKind, Country,
-        };
-        use crate::utils::{ApiError, Shared};
-        use crate::models::Tree;
+        use super::{CollectionKind, Country};
 
 
         /// The form for entity metadata

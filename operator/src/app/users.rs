@@ -1,8 +1,8 @@
 use reqwest::{self, StatusCode};
 use thorium::{
+    Error,
     client::{self, Users},
     models::{AuthResponse, UserCreate, UserRole, UserUpdate},
-    Error,
 };
 
 use crate::k8s::clusters::ClusterMeta;
@@ -76,13 +76,13 @@ pub async fn create_or_auth_user(
                             println!("Password reset successful for {}", username);
                             println!("Attempting basic auth with {}'s password", username);
                             // attempt basic auth with password and return AuthResponse
-                            Users::auth_basic(url, username, &password, &client).await
+                            Users::auth_basic(url, username, password, &client).await
                         }
                         // user exists and no admin token was provided, lets just auth with user's pass
                         None => {
                             println!("Attempting basic auth with {}'s password", username);
                             // attempt basic auth with password and return AuthResponse
-                            Users::auth_basic(url, username, &password, &client).await
+                            Users::auth_basic(url, username, password, &client).await
                         }
                     }
                 }
@@ -141,9 +141,9 @@ pub async fn create_operator(meta: &ClusterMeta, url: &str) -> Result<String, Er
                 }
             }
         }
-        None => Err(Error::new(format!(
-            "Could not generate new or get existing operator password"
-        ))),
+        None => Err(Error::new(
+            "Could not generate new or get existing operator password",
+        )),
     }
 }
 

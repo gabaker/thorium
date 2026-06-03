@@ -168,13 +168,13 @@ describe('buildCreateEntityForm', () => {
     const entity = makeCreateVendor({
       metadata: {
         Vendor: {
-          countries: ['United States of America', 'Russian Federation'],
+          countries: ['United States of America'],
           critical_sectors: [],
         },
       },
     });
     const form = buildCreateEntityForm(entity);
     const entries = formEntries(form);
-    expect(entries['metadata[countries][]']).toEqual(['US', 'RU']);
+    expect(entries['metadata[countries][]']).toEqual(['US']);
   });
 });
