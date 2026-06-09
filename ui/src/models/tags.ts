@@ -58,6 +58,20 @@ export type TagCounts = {
 };
 
 /// Available tag keys and their values for autocomplete
-export type TagOptions = {
-  [key: string]: string[];
-};
+export type TagOptions = Record<string, string[]>;
+
+export enum TagUpperKeyEnum {
+  TLP = 'TLP',
+  RESULTS = 'RESULTS',
+  ATTACK = 'ATT&CK',
+  MBC = 'MBC',
+}
+
+export enum TagValueEnum {
+  RED = 'RED',
+  AMBER = 'AMBER',
+  AMBER_STRICT = 'AMBER+STRICT',
+  GREEN = 'GREEN',
+  WHITE = 'WHITE',
+  CLEAR = 'CLEAR',
+}

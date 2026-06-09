@@ -1,5 +1,6 @@
+
 // project imports
-import { Group } from '@models/groups';
+import { Group, GroupUsers } from '@models/groups';
 
 /**
  * Count the total number of members in a group across every role.
@@ -32,4 +33,14 @@ export function getUniqueSubmissionGroups(submissions: { groups: string[] }[]): 
     uniqueGroupsList.push(...submission.groups.filter((group: string) => !uniqueGroupsList.includes(group)));
   }
   return uniqueGroupsList;
+}
+
+export function getAllGroupUsers(userObj: GroupUsers): string[] {
+  const allUsers = [...userObj.combined, ...userObj.direct, ...userObj.metagroups];
+  return [...new Set(allUsers)].sort();
+}
+
+export function hasOverlap(a: string[], b: string[]): boolean {
+  const setB = new Set(b);
+  return a.some((x) => setB.has(x));
 }

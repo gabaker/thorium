@@ -2,7 +2,9 @@
 import { ImageVersion } from './images';
 
 /// Represents any valid JSON value.
-export type Value = null | boolean | number | string | Value[] | { [key: string]: Value };
+export type Value = null | boolean | number | string | Value[] | { [key: string]: Value } | {};
+
+type OutputHandler = 'Files';
 
 /// The type of display class to use in the UI for this output
 export enum OutputDisplayType {
@@ -51,6 +53,42 @@ export type Output = {
   /// The children that were found when generating this result
   children: { [child: string]: string };
 };
+
+export type OutputCollection = {
+  /// The handler used to collect output
+  handler: OutputHandler;
+  /// The file Handler settings
+  files: FilesHandler;
+  /// Whether any children files should be ingested as a filesystem
+  as_filesystem: boolean;
+  /// Where to look for child files to ingest,
+  children: string;
+  /// Settings for automatically extracting a tag from results
+  auto_tag: Record<string, AutoTag>;
+  /// The groups we should restrict our result uploads too
+  groups: string[];
+};
+
+type FilesHandler = {
+  /// The location to look for small renderable results at on disk
+  results: string;
+  /// The location to look for files that should be uploaded as result files
+  result_files: string;
+  /// The location to look for entities
+  entities: string;
+  /// The location to load tags to set from
+  tags: string;
+  /// Any file names to restrict our handler to
+  names: string[];
+};
+
+type AutoTag = {
+  /// The logic to use when deciding whether to apply this tag
+  logic: any;
+  /// What to rename this tags key too
+  key?: string;
+
+}
 
 /// A map of results grouped by tool name
 export type OutputMap = {

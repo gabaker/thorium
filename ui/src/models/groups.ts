@@ -74,3 +74,5 @@ export type GroupUpdate = {
   users?: GroupRoleUpdate;
   monitors?: GroupRoleUpdate;
 };
+
+export type GroupUserCategory = 'owners' | 'managers' | 'users' | 'monitors';

@@ -1,5 +1,6 @@
 import { SemVer } from './semver';
-import { OutputDisplayType } from './results';
+import { OutputCollection, OutputDisplayType } from './results';
+import { Volume } from './volumes';
 
 export type ImageVersion = {
   SemVer?: SemVer;
@@ -61,56 +62,6 @@ export type AutoTagLogicValue =
   | { Lesser: unknown }
   | { In: unknown[] }
   | { NotIn: unknown[] };
-
-export enum VolumeTypes {
-  HostPath = 'HostPath',
-  ConfigMap = 'ConfigMap',
-  Secret = 'Secret',
-  NFS = 'NFS',
-}
-
-export enum HostPathTypes {
-  DirectoryOrCreate = 'DirectoryOrCreate',
-  Directory = 'Directory',
-  FileOrCreate = 'FileOrCreate',
-  File = 'File',
-  Socket = 'Socket',
-  CharDevice = 'CharDevice',
-  BlockDevice = 'BlockDevice',
-}
-
-export type HostPath = {
-  path: string;
-  path_type?: HostPathTypes;
-};
-
-export type ConfigMap = {
-  default_mode?: number;
-  optional?: boolean;
-};
-
-export type Secret = {
-  default_mode?: number;
-  optional?: boolean;
-};
-
-export type NFS = {
-  path: string;
-  server: string;
-};
-
-export type Volume = {
-  name: string;
-  archetype: VolumeTypes;
-  mount_path: string;
-  sub_path?: string;
-  read_only?: boolean;
-  kustomize?: boolean;
-  host_path?: HostPath;
-  config_map?: ConfigMap;
-  secret?: Secret;
-  nfs?: NFS;
-};
 
 /// The requested burstable resources to spawn the container with
 export type BurstableResourcesRequest = {
@@ -271,15 +222,6 @@ export type FilesHandler = {
   entities?: string;
   tags?: string;
   names?: string[];
-};
-
-export type OutputCollection = {
-  handler?: OutputHandler;
-  files?: FilesHandler;
-  as_filesystem?: boolean;
-  children?: string;
-  auto_tag?: { [name: string]: AutoTag };
-  groups?: string[];
 };
 
 export type ChildFilters = {

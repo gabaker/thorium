@@ -1,5 +1,5 @@
 // project imports
-import { Tags } from '@models/tags';
+import { Tags, TagUpperKeyEnum, TagValueEnum } from '@models/tags';
 import { DangerTagKeys, FormattedFileInfoTagKeys } from './tag_groups';
 
 // filter tags to only include specific tags
@@ -20,22 +20,6 @@ export const filterExcludedTags = (tags: Tags, excludeList: string[]): Tags => {
   });
   return Object.fromEntries(Object.entries(tags).filter(([k]) => !upperExcludedList.includes(k.toUpperCase())));
 };
-
-export enum TagUpperKeyEnum {
-  TLP = 'TLP',
-  RESULTS = 'RESULTS',
-  ATTACK = 'ATT&CK',
-  MBC = 'MBC',
-}
-
-export enum TagValueEnum {
-  RED = 'RED',
-  AMBER = 'AMBER',
-  AMBER_STRICT = 'AMBER+STRICT',
-  GREEN = 'GREEN',
-  WHITE = 'WHITE',
-  CLEAR = 'CLEAR',
-}
 
 export function getTagColorClass(key: string, value: string): string {
   const upperKey = key.toUpperCase() as TagUpperKeyEnum;

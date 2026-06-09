@@ -64,9 +64,7 @@ const EntityList = <T,>({ type, displayEntity, entityHeaders, filters, fetchEnti
 
   useEffect(() => {
     if (isMountingRef.current) {
-      if (filters != null && Object.keys(filters).length > 0 && !loading) {
-        void getEntityPage(true);
-      }
+      void getEntityPage(true);
     } else {
       isMountingRef.current = true;
     }
