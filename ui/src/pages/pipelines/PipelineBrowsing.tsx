@@ -8,6 +8,9 @@ import CreatePipelineModal from '@components/pages/pipelines/CreatePipelineModal
 import { PIPELINE_CREATE_TEMPLATE } from '@components/pages/pipelines/CreatePipelineModal';
 import { orderComparePipeline } from '@components/pages/files/reactions/pipelines';
 import Page from '@components/pages/Page';
+import { OmnibarPipelines } from '@components/pages/search/omnibar/Bars';
+import type { Clause } from '@components/pages/search/omnibar/ClauseTypes';
+import { getGroupsFromClauses, matchesStringClauses } from '@components/pages/search/omnibar/utils';
 import Title from '@components/shared/titles/Title';
 import LoadingSpinner from '@components/shared/fallback/LoadingSpinner';
 import { OverlayTipRight, OverlayTipLeft } from '@components/shared/overlay/tips';
@@ -21,14 +24,29 @@ import type { Group } from '@models/groups';
 import type { Pipeline, PipelineUpdate } from '@models/pipelines';
 import { RoleKey } from '@models/users';
 
+/** Filter pipelines client-side by the omnibar clauses (name, creator, group). */
+const filterPipelines = (pipelines: Pipeline[], clauses: Clause[]): Pipeline[] => {
+  const groups = getGroupsFromClauses(clauses);
+
+  return pipelines.filter((pipeline) => {
+    const nameFilter = matchesStringClauses(clauses, 'name', pipeline.name);
+    const creatorFilter = matchesStringClauses(clauses, 'creator', pipeline.creator);
+    const groupFilter = groups.length > 0 ? groups.includes(pipeline.group) : true;
+    return nameFilter && creatorFilter && groupFilter;
+  });
+};
+
 const PipelineBrowsing: FC = () => {
   const [loading, setLoading] = useState(false);
   const [pipelines, setPipelines] = useState<Pipeline[]>([]);
   const [groups, setGroups] = useState<Record<string, Group>>({});
   const [activeKeys, setActiveKeys] = useState<string[]>([]);
+  const [clauses, setClauses] = useState<Clause[]>([]);
   const [showCreateModal, setShowCreateModal] = useState(false);
   const [copySource, setCopySource] = useState<Pipeline | null>(null);
   const { userInfo, checkCookie } = useAuth();
+
+  const filteredPipelines = filterPipelines(pipelines, clauses);
 
   const handleAccordionSelect = useCallback((eventKey: string | string[] | null | undefined) => {
     if (eventKey === null || eventKey === undefined) {
@@ -134,9 +152,12 @@ const PipelineBrowsing: FC = () => {
           </h2>
         </div>
       </div>
+      <div className="d-flex justify-content-center">
+        <OmnibarPipelines clauses={clauses} setClauses={setClauses} pipelines={pipelines} />
+      </div>
       <LoadingSpinner loading={loading}></LoadingSpinner>
       <Accordion alwaysOpen activeKey={activeKeys} onSelect={handleAccordionSelect}>
-        {pipelines
+        {filteredPipelines
           .sort((a, b) => orderComparePipeline(a, b))
           .map((pipeline) => (
             <PipelineAccordionItem

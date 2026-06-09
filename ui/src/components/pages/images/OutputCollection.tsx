@@ -22,8 +22,9 @@ import ToggleSwitch from '@components/shared/inputs/ToggleSwitch';
 import SelectGroups from '@components/pages/groups/SelectGroups';
 import { OverlayTipRight } from '@components/shared/overlay/tips';
 import { AUTO_TAG_LOGIC_VALUES } from '@utilities/rules/tools/image/schema';
-import type { OutputCollection as OutputCollectionType, AutoTag } from '@models/images';
+import type { AutoTag } from '@models/images';
 import { OutputHandler } from '@models/images';
+import type { OutputCollection as OutputCollectionType } from '@models/results';
 
 const TOOLTIPS = {
   self: `Configurations that determine how the Thorium agent will intake analysis artifacts after running this image.`,
@@ -189,7 +190,7 @@ function apiToForm(oc: OutputCollectionType, availableGroups: string[]): FormOut
       names: oc.files?.names ?? [],
       tags: oc.files?.tags ?? '',
     },
-    children: (oc.children as string) ?? '',
+    children: oc.children ?? '',
     as_filesystem: oc.as_filesystem ?? false,
     select_auto_tag: autoTagEntries,
     select_groups: selectedGroups,
@@ -197,7 +198,16 @@ function apiToForm(oc: OutputCollectionType, availableGroups: string[]): FormOut
 }
 
 function formToApi(form: FormOutputCollection): OutputCollectionType {
-  const result: OutputCollectionType = { handler: OutputHandler.Files };
+  // Seed all API-required fields with their defaults; the blocks below override with form values
+  // and the empty defaults are stripped/replaced as needed.
+  const result: OutputCollectionType = {
+    handler: OutputHandler.Files,
+    files: {},
+    as_filesystem: form.as_filesystem,
+    children: '',
+    auto_tag: {},
+    groups: [],
+  };
 
   const files: Partial<NonNullable<OutputCollectionType['files']>> = {};
   if (form.files.results) files.results = form.files.results;
@@ -208,7 +218,6 @@ function formToApi(form: FormOutputCollection): OutputCollectionType {
   if (Object.keys(files).length > 0) result.files = files;
 
   if (form.children) result.children = form.children;
-  result.as_filesystem = form.as_filesystem;
 
   const autoTag: Record<string, AutoTag> = {};
   for (const entry of form.select_auto_tag) {

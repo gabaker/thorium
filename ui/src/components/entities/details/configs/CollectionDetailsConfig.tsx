@@ -7,7 +7,7 @@ import { EntityDetailsConfig } from './configs';
 import { DetailsMetadataProps } from '../EntityDetails';
 import InfoValue from '@entities/shared/InfoValue';
 import EntityDetailsLabel from '@entities/details/EntityDetailsLabel';
-import FilterDatePicker from '@entities/browsing/filters/FilterDatePicker';
+import DatePicker from '@components/shared/inputs/DatePicker';
 import { buildCollectionsBrowsingUrl } from '@entities/details/ListCollectionsButton';
 import { TagSelect } from '@components/shared/inputs/tags/TagSelect';
 import FieldBadge from '@components/shared/badges/FieldBadge';
@@ -106,7 +106,7 @@ const CollectionMetaInfo = ({ entity, pendingEntity, handleUpdate, editing }: De
         <EntityDetailsLabel label="Newest" tip={CollectionTips.start} />
         <InfoValue>
           {editing ? (
-            <FilterDatePicker
+            <DatePicker
               max={maxDate}
               min={pendingEntity.metadata.Collection.end}
               selected={pendingEntity.metadata.Collection.start}
@@ -124,7 +124,7 @@ const CollectionMetaInfo = ({ entity, pendingEntity, handleUpdate, editing }: De
         <EntityDetailsLabel label="Oldest" tip={CollectionTips.end} />
         <InfoValue>
           {editing ? (
-            <FilterDatePicker
+            <DatePicker
               max={pendingEntity.metadata.Collection.start ? pendingEntity.metadata.Collection.start : maxDate}
               selected={pendingEntity.metadata.Collection.end}
               disabled={false}

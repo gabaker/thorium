@@ -39,26 +39,26 @@ export enum HostPathTypes {
   BlockDevice = 'BlockDevice',
 }
 
-type HostPath = {
+export type HostPath = {
   path: string;
   path_type?: HostPathTypes;
 };
 
-type ConfigMap = {
+export type ConfigMap = {
   /// The mode bits to set on files in this volume
   default_mode?: number;
   /// Whether this configmap is optional or not
   optional?: boolean;
 };
 
-type Secret = {
+export type Secret = {
   /// The mode bits to set on files in this volume
   default_mode?: number;
   /// Whether this secret is optional or not
   optional?: boolean;
 };
 
-type NFS = {
+export type NFS = {
   /// The path that is exported by the NFS server
   path: string;
   /// The host/ip:port of the NFS server

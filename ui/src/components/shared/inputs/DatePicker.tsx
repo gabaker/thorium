@@ -1,9 +1,9 @@
-import DatePicker from 'react-datepicker';
+import ReactDatePicker from 'react-datepicker';
 
 // project imports
 import { safeStringToDateConversion } from '@utilities/inputs';
 
-interface FilterDateProps {
+interface DatePickerProps {
   max?: string | Date | null | undefined;
   min?: string | Date | null | undefined;
   selected: string | Date | null | undefined;
@@ -11,7 +11,17 @@ interface FilterDateProps {
   onChange: (date: Date | null) => void;
 }
 
-const FilterDatePicker: React.FC<FilterDateProps> = ({ max = null, min = null, selected = null, disabled, onChange }) => {
+/**
+ * A `react-datepicker` wrapper that accepts either ISO date strings or `Date` values and safely
+ * coerces them to `Date` before rendering, clearing invalid/unparseable values.
+ *
+ * @param max - Latest selectable date (string or Date); ignored if unparseable.
+ * @param min - Earliest selectable date (string or Date); ignored if unparseable.
+ * @param selected - The currently selected date (string or Date), or null/undefined.
+ * @param disabled - Whether the picker is disabled.
+ * @param onChange - Called with the selected `Date`, or `null` when cleared.
+ */
+const DatePicker: React.FC<DatePickerProps> = ({ max = null, min = null, selected = null, disabled, onChange }) => {
   let safeMax: Date | undefined = undefined;
   let safeMin: Date | undefined = undefined;
   let safeSelected: Date | undefined = undefined;
@@ -40,16 +50,15 @@ const FilterDatePicker: React.FC<FilterDateProps> = ({ max = null, min = null, s
     safeSelected = selected;
   }
   return (
-    <DatePicker
-      //className="date-picker-input"
+    <ReactDatePicker
       isClearable={true}
       maxDate={safeMax}
       minDate={safeMin}
       selected={safeSelected}
       disabled={disabled}
-      onChange={(date: any) => onChange(date instanceof Date ? date : null)}
+      onChange={(date) => onChange(date instanceof Date ? date : null)}
     />
   );
 };
 
-export default FilterDatePicker;
+export default DatePicker;

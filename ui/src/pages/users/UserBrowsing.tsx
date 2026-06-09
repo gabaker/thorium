@@ -4,13 +4,45 @@ import AlertBanner from '@components/shared/alerts/AlertBanner';
 
 // project imports
 import Page from '@components/pages/Page';
+import { OmnibarUsers } from '@components/pages/search/omnibar/Bars';
+import { Clause } from '@components/pages/search/omnibar/ClauseTypes';
+import {
+  getGroupsFromClauses,
+  getStringFieldFromClauses,
+  getStringFieldListFromClauses,
+  matchesStringClauses,
+} from '@components/pages/search/omnibar/utils';
 import Title from '@components/shared/titles/Title';
 import { OverlayTipLeft } from '@components/shared/overlay/tips';
 import LoadingSpinner from '@components/shared/fallback/LoadingSpinner';
 import { useAuth } from '@utilities/auth';
 import { getThoriumRole } from '@utilities/role';
+import { hasOverlap } from '@utilities/groups';
 import { deleteUser, listUsers, updateSingleUser } from '@thorpi/users';
 import { RoleKey, UserInfo } from '@models/users';
+
+/**
+ * Filter users client-side by the omnibar clauses: username/email (substring for `includes`, exact
+ * for `is`), group membership overlap, Thorium role (the resolved string role from
+ * {@link getThoriumRole}), and the boolean `verified`/`local` flags (clause value `'true'`/`'false'`;
+ * empty means no filter).
+ */
+export const filterUsers = (users: UserInfo[], clauses: Clause[]): UserInfo[] => {
+  const groups = getGroupsFromClauses(clauses);
+  const roles = getStringFieldListFromClauses(clauses, 'role');
+  const verified = getStringFieldFromClauses(clauses, 'verified');
+  const local = getStringFieldFromClauses(clauses, 'local');
+
+  return users.filter((user) => {
+    const usernameFilter = matchesStringClauses(clauses, 'username', user.username);
+    const emailFilter = matchesStringClauses(clauses, 'email', user.email);
+    const groupFilter = groups.length > 0 ? hasOverlap(user.groups, groups) : true;
+    const roleFilter = roles.length > 0 ? roles.includes(getThoriumRole(user.role)) : true;
+    const verifiedFilter = verified === '' ? true : user.verified === (verified === 'true');
+    const localFilter = local === '' ? true : user.local === (local === 'true');
+    return usernameFilter && emailFilter && groupFilter && roleFilter && verifiedFilter && localFilter;
+  });
+};
 
 type SingleUserInfoProps = {
   user: UserInfo;
@@ -301,7 +333,10 @@ const EditRoles: React.FC<EditRolesProps> = ({ role, username, user, setRole }) 
 const UserBrowsing = () => {
   const [loading, setLoading] = useState<boolean>(false);
   const [users, setUsers] = useState<UserInfo[]>([]);
+  const [clauses, setClauses] = useState<Clause[]>([]);
   const { checkCookie, impersonate } = useAuth();
+
+  const filteredUsers = filterUsers(users, clauses);
 
   // get user details
   const getUserInfo = async () => {
@@ -325,10 +360,13 @@ const UserBrowsing = () => {
           <Title>Users</Title>
         </Col>
       </Row>
+      <Row className="d-flex justify-content-center">
+        <OmnibarUsers clauses={clauses} setClauses={setClauses} users={users} />
+      </Row>
       <LoadingSpinner loading={loading}></LoadingSpinner>
       <Row>
-        {users.length > 0 &&
-          users
+        {filteredUsers.length > 0 &&
+          filteredUsers
             .sort((a, b) => a.username.localeCompare(b.username))
             .map((user) => (
               <SingleUserInfo key={user.username} user={user} impersonate={(token, expires) => void impersonate(token, expires)} />

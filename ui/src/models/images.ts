@@ -219,9 +219,23 @@ export type AutoTag = {
 export type FilesHandler = {
   results?: string;
   result_files?: string;
+  // Deliberate divergence from the Rust `FilesHandler` (api/src/models/results.rs), which has no
+  // `entities` field. Reserved for a planned future feature; keep until the backend adds it.
   entities?: string;
   tags?: string;
   names?: string[];
+};
+
+// Defined here rather than results.ts so the `OutputHandler` enum value is available without a
+// runtime circular import (results.ts only imports image types, never values).
+/// A blank OutputCollection with all fields defaulted, for initializing image forms.
+export const BlankOutputCollection: OutputCollection = {
+  handler: OutputHandler.Files,
+  files: {},
+  as_filesystem: false,
+  children: '',
+  auto_tag: {},
+  groups: [],
 };
 
 export type ChildFilters = {

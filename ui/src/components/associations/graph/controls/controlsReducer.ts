@@ -18,6 +18,23 @@ export type LabelEntry = { sprite: THREE.Object3D; degree: number; isInitial: bo
 // so arrows stop right before the icon instead of floating in the transparent gap.
 const ICON_EDGE_PAD = 0.9;
 
+// Per-node depth occluder. The library draws links center-to-center, so the
+// segment between the arrow tip (at ICON_EDGE_PAD * iconHalf) and the node center
+// keeps rendering. Opaque sphere nodes would hide that stub; our 2D icon sprites
+// (depthWrite: false) don't, so it shows through/over the icon. We add an
+// invisible sphere that writes depth but not color, sized to the arrow-tip
+// radius, so the GPU depth-culls the stub (which lies entirely inside that radius)
+// in every camera direction. One geometry/material is shared across all nodes.
+const OCCLUDER_GEOMETRY = new THREE.SphereGeometry(1, 8, 6);
+// transparent: true keeps this in the transparent pass so renderOrder sequences
+// it AFTER the icon sprite; an opaque occluder would render first and hide the icon.
+const OCCLUDER_MATERIAL = new THREE.MeshBasicMaterial({
+  colorWrite: false,
+  depthWrite: true,
+  depthTest: true,
+  transparent: true,
+});
+
 export const iconNodeVal =
   (nodeRelSize: number) =>
   (node: GraphNode): number => {
@@ -46,6 +63,15 @@ export const buildNodeObject = (
       const scale = Math.max(6, node.diameter / 3) * sizeFactor;
       sprite.scale.set(scale, scale, 1);
       group.add(sprite);
+
+      // Invisible depth occluder sized to the arrow-tip radius, so the line stub
+      // between the arrow and the node center is depth-culled. renderOrder must
+      // sit between the icon sprite (0, drawn first so it survives) and the links
+      // (10, depth-tested against this and culled where they enter the sphere).
+      const occluder = new THREE.Mesh(OCCLUDER_GEOMETRY, OCCLUDER_MATERIAL);
+      occluder.scale.setScalar((scale / 2) * ICON_EDGE_PAD);
+      occluder.renderOrder = 1;
+      group.add(occluder);
     }
 
     if (showLabels) {

@@ -6,7 +6,7 @@ import { EntityCreateConfig } from './config';
 import { CreateMetadataProps } from '../EntityCreate';
 import InfoHeader from '@entities/shared/InfoHeader';
 import InfoValue from '@entities/shared/InfoValue';
-import FilterDatePicker from '@entities/browsing/filters/FilterDatePicker';
+import DatePicker from '@components/shared/inputs/DatePicker';
 import { TagSelect } from '@components/shared/inputs/tags/TagSelect';
 import SelectInput from '@components/shared/inputs/selectable/SelectInput';
 import { safeDateToStringConversion } from '@utilities/inputs';
@@ -73,7 +73,7 @@ const CollectionMetaInfo = ({ entity, onChange }: CreateMetadataProps<Entities.C
       <Row className="mt-3">
         <InfoHeader>Newest</InfoHeader>
         <InfoValue>
-          <FilterDatePicker
+          <DatePicker
             max={maxDate}
             min={entity.metadata.Collection.end}
             selected={entity.metadata.Collection.start}
@@ -85,7 +85,7 @@ const CollectionMetaInfo = ({ entity, onChange }: CreateMetadataProps<Entities.C
       <Row className="mt-3">
         <InfoHeader>Oldest</InfoHeader>
         <InfoValue>
-          <FilterDatePicker
+          <DatePicker
             max={entity.metadata.Collection.start ? entity.metadata.Collection.start : maxDate}
             selected={entity.metadata.Collection.end}
             disabled={false}

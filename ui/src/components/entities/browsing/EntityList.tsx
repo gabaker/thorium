@@ -64,7 +64,11 @@ const EntityList = <T,>({ type, displayEntity, entityHeaders, filters, fetchEnti
 
   useEffect(() => {
     if (isMountingRef.current) {
-      void getEntityPage(true);
+      // Skip the initial empty-filter render; fetch only once BrowsingFilters/omnibar
+      // pushes real filters, so the list loads on first paint without a double-fetch.
+      if (filters != null && Object.keys(filters).length > 0 && !loading) {
+        void getEntityPage(true);
+      }
     } else {
       isMountingRef.current = true;
     }

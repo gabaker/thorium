@@ -6,6 +6,9 @@ import { Accordion, Badge, Button, Col, Row } from 'react-bootstrap';
 // project imports
 import ImageAccordionItem from '@components/pages/images/ImageAccordionItem';
 import Page from '@components/pages/Page';
+import { OmnibarImages } from '@components/pages/search/omnibar/Bars';
+import type { Clause } from '@components/pages/search/omnibar/ClauseTypes';
+import { getGroupsFromClauses, getSearchTextFromClauses, matchesStringClauses } from '@components/pages/search/omnibar/utils';
 import Title from '@components/shared/titles/Title';
 import LoadingSpinner from '@components/shared/fallback/LoadingSpinner';
 import { OverlayTipRight, OverlayTipBottom } from '@components/shared/overlay/tips';
@@ -16,6 +19,20 @@ import type { Image } from '@models/images';
 import type { Group } from '@models/groups';
 import { RoleKey } from '@models/users';
 import type { UserInfo } from '@models/users';
+
+/** Filter images client-side by the omnibar clauses (group, creator, name, free text). */
+const filterImages = (images: Image[], clauses: Clause[]): Image[] => {
+  const groups = getGroupsFromClauses(clauses);
+  const text = getSearchTextFromClauses(clauses);
+
+  return images.filter((image) => {
+    const groupFilter = groups.length > 0 ? groups.includes(image.group) : true;
+    const creatorFilter = matchesStringClauses(clauses, 'creator', image.creator);
+    const nameFilter = matchesStringClauses(clauses, 'name', image.name);
+    const textFilter = image.name.includes(text) || (image.description?.includes(text) ?? false);
+    return groupFilter && creatorFilter && nameFilter && textFilter;
+  });
+};
 
 interface CreateImageButtonProps {
   userInfo: UserInfo | null;
@@ -50,8 +67,11 @@ const ImageBrowsing: FC = () => {
   const [images, setImages] = useState<Image[]>([]);
   const [groups, setGroups] = useState<Record<string, Group>>({});
   const [activeKeys, setActiveKeys] = useState<string[]>([]);
+  const [clauses, setClauses] = useState<Clause[]>([]);
   const { userInfo, checkCookie } = useAuth();
   const cancelUpdateRef = useRef(false);
+
+  const filteredImages = filterImages(images, clauses);
 
   const handleAccordionSelect = useCallback((eventKey: string | string[] | null | undefined) => {
     if (eventKey === null || eventKey === undefined) {
@@ -103,9 +123,12 @@ const ImageBrowsing: FC = () => {
           <CreateImageButton userInfo={userInfo} />
         </Col>
       </Row>
+      <Row className="d-flex justify-content-center">
+        <OmnibarImages clauses={clauses} setClauses={setClauses} images={images} />
+      </Row>
       <LoadingSpinner loading={loading}></LoadingSpinner>
       <Accordion alwaysOpen activeKey={activeKeys} onSelect={handleAccordionSelect}>
-        {images.map((image) => (
+        {filteredImages.map((image) => (
           <ImageAccordionItem
             key={`${image.name}_${image.group}`}
             image={image}

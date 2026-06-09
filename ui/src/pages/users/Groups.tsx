@@ -61,7 +61,7 @@ const managerStyles = createReactSelectStyles('White', 'CornFlowerBlue');
 const userStyles = createReactSelectStyles('White', 'CadetBlue');
 const monitorStyles = createReactSelectStyles('White', 'DimGray');
 
-const filterGroups = (groups, clauses) => {
+const filterGroups = (groups: Record<string, Group>, clauses: Clause[]): Record<string, Group> => {
   const clauseGroups = getGroupsFromClauses(clauses);
   const clauseUsers = getStringFieldListFromClauses(clauses, 'Users');
   const clauseOwners = getStringFieldListFromClauses(clauses, 'Owners');
@@ -1184,7 +1184,7 @@ const Groups = () => {
                     </small>
                   </Col>
                   <Col className="accordion-item-ownership d-flex justify-content-center">
-                    <GroupRoleBadge group={filteredGroups[group]} user={userInfo} />
+                    {userInfo && <GroupRoleBadge group={filteredGroups[group]} user={userInfo} />}
                   </Col>
                 </Accordion.Header>
                 <Accordion.Body>

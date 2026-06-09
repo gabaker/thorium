@@ -19,8 +19,8 @@ import AlertBanner from '@components/shared/alerts/AlertBanner';
 import FieldBadge from '@components/shared/badges/FieldBadge';
 import ToggleSwitch from '@components/shared/inputs/ToggleSwitch';
 import { OverlayTipRight } from '@components/shared/overlay/tips';
-import type { Volume, ConfigMap, Secret } from '@models/images';
-import { VolumeTypes, HostPathTypes } from '@models/images';
+import type { Volume, ConfigMap, Secret } from '@models/volumes';
+import { VolumeTypes, HostPathTypes } from '@models/volumes';
 
 const TOOLTIPS = {
   self: `Kubernetes volumes to map in during image run. Volumes can be host paths or configuration files.`,
@@ -213,10 +213,11 @@ function cleanVolume(vol: FormVolume): Volume {
     name: vol.name,
     archetype: vol.archetype,
     mount_path: vol.mount_path,
+    // required by the API; default false matches the Rust serde defaults
+    read_only: vol.read_only,
+    kustomize: vol.kustomize,
   };
   if (vol.sub_path) clean.sub_path = vol.sub_path;
-  if (vol.read_only) clean.read_only = vol.read_only;
-  if (vol.kustomize) clean.kustomize = vol.kustomize;
 
   switch (vol.archetype) {
     case VolumeTypes.ConfigMap:

@@ -52,13 +52,13 @@ import type {
   ImageArgs,
   ImageBan,
   Dependencies as DependenciesType,
-  Volume,
   SecurityContext as SecurityContextType,
-  OutputCollection as OutputCollectionType,
   ChildFilters as ChildFiltersType,
   Kvm,
 } from '@models/images';
-import { ImageScaler } from '@models/images';
+import { BlankOutputCollection, ImageScaler } from '@models/images';
+import type { Volume } from '@models/volumes';
+import type { OutputCollection as OutputCollectionType } from '@models/results';
 import { RoleKey } from '@models/users';
 
 export interface ImageInfoHandle {
@@ -234,7 +234,7 @@ const ImageInfo: FC<ImageInfoProps> = ({ ref, images, image, inEditMode, onExitE
           />
           <hr className="my-3" />
           <OutputCollection
-            value={editorObj.output_collection ?? {}}
+            value={(editorObj.output_collection as OutputCollectionType | undefined) ?? BlankOutputCollection}
             resetKey={formResetKey}
             onChange={(oc: OutputCollectionType) => setEditorObj((prev) => ({ ...prev, output_collection: oc }))}
             groups={userInfo?.groups ?? []}

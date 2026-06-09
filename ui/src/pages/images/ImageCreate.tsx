@@ -37,14 +37,14 @@ import type {
   Image,
   ImageArgs,
   Dependencies as DependenciesType,
-  Volume,
   SecurityContext as SecurityContextType,
-  OutputCollection as OutputCollectionType,
   ChildFilters as ChildFiltersType,
   Kvm,
   ImageRequest,
 } from '@models/images';
-import { ImageScaler } from '@models/images';
+import { BlankOutputCollection, ImageScaler } from '@models/images';
+import type { Volume } from '@models/volumes';
+import type { OutputCollection as OutputCollectionType } from '@models/results';
 import type { Group } from '@models/groups';
 import { RoleKey } from '@models/users';
 import { getThoriumRole } from '@utilities/role';
@@ -240,7 +240,7 @@ const ImageCreate: React.FC = () => {
               />
               <hr />
               <OutputCollection
-                value={editorObj.output_collection ?? {}}
+                value={(editorObj.output_collection as OutputCollectionType | undefined) ?? BlankOutputCollection}
                 onChange={(oc: OutputCollectionType) => setEditorObj((prev) => ({ ...prev, output_collection: oc }))}
                 groups={userInfo?.groups ?? []}
                 mode={formMode}
