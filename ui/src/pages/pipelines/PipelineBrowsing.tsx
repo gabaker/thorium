@@ -11,6 +11,7 @@ import Page from '@components/pages/Page';
 import { OmnibarPipelines } from '@components/pages/search/omnibar/Bars';
 import type { Clause } from '@components/pages/search/omnibar/ClauseTypes';
 import { getGroupsFromClauses, matchesStringClauses } from '@components/pages/search/omnibar/utils';
+import NoResultsBanner from '@components/shared/alerts/NoResultsBanner';
 import Title from '@components/shared/titles/Title';
 import LoadingSpinner from '@components/shared/fallback/LoadingSpinner';
 import { OverlayTipRight, OverlayTipLeft } from '@components/shared/overlay/tips';
@@ -156,6 +157,7 @@ const PipelineBrowsing: FC = () => {
         <OmnibarPipelines clauses={clauses} setClauses={setClauses} pipelines={pipelines} />
       </div>
       <LoadingSpinner loading={loading}></LoadingSpinner>
+      {!loading && filteredPipelines.length === 0 && <NoResultsBanner type="Pipelines" />}
       <Accordion alwaysOpen activeKey={activeKeys} onSelect={handleAccordionSelect}>
         {filteredPipelines
           .sort((a, b) => orderComparePipeline(a, b))

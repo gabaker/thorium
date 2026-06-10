@@ -121,6 +121,22 @@ test.describe('Image Browsing Page', () => {
     await snapshot(page, SCREENSHOT_DIR, 'images-list');
   });
 
+  test('shows a no-results banner when a filter matches nothing', async ({ page }) => {
+    await page.goto('/images');
+    await page.waitForSelector('.accordion', { timeout: 10000 });
+    await expect(page.locator('.accordion-item')).toHaveCount(2);
+
+    // type a free-text filter that matches no image name/description
+    const input = page.getByPlaceholder('Enter a filter...');
+    await input.click();
+    await input.fill('zzz-no-such-image');
+    await input.press('Enter');
+
+    await expect(page.getByText('No Images Found')).toBeVisible();
+    await expect(page.locator('.accordion-item')).toHaveCount(0);
+    await snapshot(page, SCREENSHOT_DIR, 'images-no-results');
+  });
+
   test('image names and groups display correctly', async ({ page }) => {
     await page.goto('/images');
     await page.waitForSelector('.accordion', { timeout: 10000 });

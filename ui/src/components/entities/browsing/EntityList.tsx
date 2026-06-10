@@ -5,7 +5,8 @@ import { Col, Pagination, Row } from 'react-bootstrap';
 import { DEFAULT_LIST_LIMIT } from '../utilities';
 import { LoadingSpinner } from '../../shared/fallback/LoadingSpinner';
 import { Filters, SearchFilters } from '@models/search';
-import AlertBanner, { Severity } from '@components/shared/alerts/AlertBanner';
+import AlertBanner from '@components/shared/alerts/AlertBanner';
+import NoResultsBanner from '@components/shared/alerts/NoResultsBanner';
 
 interface EntityListProps<T> {
   type: string;
@@ -96,9 +97,7 @@ const EntityList = <T,>({ type, displayEntity, entityHeaders, filters, fetchEnti
       <LoadingSpinner loading={loading} />
       {entities.length === 0 && !loading && isMountingRef.current && (
         <Row>
-          <AlertBanner severity={Severity.Info} className="m-1">
-            {type ? <>No {type} Found</> : <>None Found</>}
-          </AlertBanner>
+          <NoResultsBanner type={type} />
         </Row>
       )}
       {listError != '' && <AlertBanner className="m-1">{listError}</AlertBanner>}

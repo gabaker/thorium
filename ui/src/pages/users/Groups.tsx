@@ -12,6 +12,7 @@ import Subtitle from '@components/shared/titles/Subtitle';
 import Title from '@components/shared/titles/Title';
 import GroupMemberCount from '@components/pages/groups/GroupMemberCount';
 import GroupRoleBadge from '@components/pages/groups/GroupRoleBadge';
+import NoResultsBanner from '@components/shared/alerts/NoResultsBanner';
 import LoadingSpinner from '@components/shared/fallback/LoadingSpinner';
 import { OverlayTipRight, OverlayTipTop, OverlayTipLeft } from '@components/shared/overlay/tips';
 import { OmnibarGroups } from '@components/pages/search/omnibar/Bars';
@@ -1166,6 +1167,7 @@ const Groups = () => {
         <OmnibarGroups clauses={clauses} setClauses={setClauses} groups={groups} />
       </div>
       <LoadingSpinner loading={loading}></LoadingSpinner>
+      {!loading && Object.keys(filteredGroups).length === 0 && <NoResultsBanner type="Groups" />}
       <Accordion alwaysOpen>
         {filteredGroups &&
           Object.keys(filteredGroups)

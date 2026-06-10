@@ -9,6 +9,7 @@ import Page from '@components/pages/Page';
 import { OmnibarImages } from '@components/pages/search/omnibar/Bars';
 import type { Clause } from '@components/pages/search/omnibar/ClauseTypes';
 import { getGroupsFromClauses, getSearchTextFromClauses, matchesStringClauses } from '@components/pages/search/omnibar/utils';
+import NoResultsBanner from '@components/shared/alerts/NoResultsBanner';
 import Title from '@components/shared/titles/Title';
 import LoadingSpinner from '@components/shared/fallback/LoadingSpinner';
 import { OverlayTipRight, OverlayTipBottom } from '@components/shared/overlay/tips';
@@ -127,6 +128,7 @@ const ImageBrowsing: FC = () => {
         <OmnibarImages clauses={clauses} setClauses={setClauses} images={images} />
       </Row>
       <LoadingSpinner loading={loading}></LoadingSpinner>
+      {!loading && filteredImages.length === 0 && <NoResultsBanner type="Images" />}
       <Accordion alwaysOpen activeKey={activeKeys} onSelect={handleAccordionSelect}>
         {filteredImages.map((image) => (
           <ImageAccordionItem

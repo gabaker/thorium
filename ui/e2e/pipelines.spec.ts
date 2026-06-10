@@ -109,6 +109,16 @@ test.describe('Pipelines Page', () => {
     await snapshot(page, SCREENSHOT_DIR, 'pipelines-list');
   });
 
+  test('shows a no-results banner when there are no pipelines', async ({ page }) => {
+    // re-register the pipeline mocks with an empty list (last route registered wins)
+    await setupPipelineMocks(page, []);
+    await page.goto('/pipelines');
+
+    await expect(page.getByText('No Pipelines Found')).toBeVisible();
+    await expect(page.locator('.accordion-item')).toHaveCount(0);
+    await snapshot(page, SCREENSHOT_DIR, 'pipelines-no-results');
+  });
+
   test('pipeline names and groups display correctly', async ({ page }) => {
     await page.goto('/pipelines');
     await page.waitForSelector('.accordion', { timeout: 10000 });

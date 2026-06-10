@@ -12,6 +12,7 @@ import {
   getStringFieldListFromClauses,
   matchesStringClauses,
 } from '@components/pages/search/omnibar/utils';
+import NoResultsBanner from '@components/shared/alerts/NoResultsBanner';
 import Title from '@components/shared/titles/Title';
 import { OverlayTipLeft } from '@components/shared/overlay/tips';
 import LoadingSpinner from '@components/shared/fallback/LoadingSpinner';
@@ -364,6 +365,7 @@ const UserBrowsing = () => {
         <OmnibarUsers clauses={clauses} setClauses={setClauses} users={users} />
       </Row>
       <LoadingSpinner loading={loading}></LoadingSpinner>
+      {!loading && filteredUsers.length === 0 && <NoResultsBanner type="Users" />}
       <Row>
         {filteredUsers.length > 0 &&
           filteredUsers
