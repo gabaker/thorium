@@ -100,6 +100,13 @@ const ImageBrowsing: FC = () => {
     };
   }, [groups]);
 
+  // Full list reload (with the loading spinner) used after a delete removes an image.
+  const reloadImages = useCallback(() => {
+    if (Object.keys(groups).length) {
+      void fetchImages(Object.keys(groups), setImages, false, () => void checkCookie(), setLoading, true);
+    }
+  }, [groups, checkCookie]);
+
   const imageCountTip =
     userInfo && getThoriumRole(userInfo.role) == RoleKey.Admin
       ? `There are a total of ${images.length} Thorium images.`
@@ -137,6 +144,7 @@ const ImageBrowsing: FC = () => {
             images={images}
             groups={groups}
             setImages={setImages}
+            onRefresh={reloadImages}
             onExpand={expandAccordionKey}
           />
         ))}

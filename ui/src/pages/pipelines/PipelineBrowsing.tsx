@@ -15,7 +15,7 @@ import NoResultsBanner from '@components/shared/alerts/NoResultsBanner';
 import Title from '@components/shared/titles/Title';
 import LoadingSpinner from '@components/shared/fallback/LoadingSpinner';
 import { OverlayTipRight, OverlayTipLeft } from '@components/shared/overlay/tips';
-import { listPipelines, updatePipeline } from '@thorpi/pipelines';
+import { getPipeline, listPipelines, updatePipeline } from '@thorpi/pipelines';
 import { useAuth } from '@utilities/auth';
 import { fetchGroups } from '@utilities/fetch';
 import { generateCopyName } from '@utilities/naming';
@@ -68,6 +68,15 @@ const PipelineBrowsing: FC = () => {
     setLoading(false);
   };
 
+  // Refetch a single pipeline and replace just that entry in place, so an edit re-renders only
+  // the changed pipeline without reloading the whole list or collapsing the open accordion.
+  const refreshPipeline = useCallback(async (group: string, name: string) => {
+    const fresh = await getPipeline(group, name, () => {});
+    if (fresh) {
+      setPipelines((prev) => prev.map((p) => (p.group === group && p.name === name ? fresh : p)));
+    }
+  }, []);
+
   useEffect(() => {
     void fetchGroups(setGroups as (groups: { [name: string]: Group } | Group[] | string[]) => void, () => {}, true);
   }, []);
@@ -87,7 +96,8 @@ const PipelineBrowsing: FC = () => {
       return false;
     }
     if (await updatePipeline(result.group, result.name, result.data as PipelineUpdate, setUpdateError)) {
-      void fetchPipelinesData();
+      // Refresh only the edited pipeline so the open accordion stays put and only its content rerenders.
+      void refreshPipeline(originalPipeline.group, originalPipeline.name);
       return true;
     }
     return false;
@@ -169,6 +179,7 @@ const PipelineBrowsing: FC = () => {
               canCreatePipeline={canCreatePipeline}
               onUpdate={handlePipelineUpdate}
               onRefresh={() => void fetchPipelinesData()}
+              refreshPipeline={(group, name) => void refreshPipeline(group, name)}
               onExpand={expandAccordionKey}
               onCopy={handleCopyPipeline}
             />

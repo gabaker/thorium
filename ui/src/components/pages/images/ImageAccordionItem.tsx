@@ -12,7 +12,6 @@ import { ButtonVariant } from '@components/shared/buttons';
 import { OverlayTipBottom, OverlayTipLeft, OverlayTipRight } from '@components/shared/overlay/tips';
 import { deleteImage } from '@thorpi/images';
 import { useAuth } from '@utilities/auth';
-import { fetchImages } from '@utilities/fetch';
 import { generateCopyName } from '@utilities/naming';
 import { canDeleteImage, canDevelopAnyInGroup, canModifyImage } from '@utilities/permissions';
 import type { Group } from '@models/groups';
@@ -23,12 +22,14 @@ interface ImageAccordionItemProps {
   images: Image[];
   groups: Record<string, Group>;
   setImages: (images: Image[]) => void;
+  // Full list reload (with spinner) used after this image is deleted.
+  onRefresh: () => void;
   onExpand: (key: string) => void;
 }
 
-const ImageAccordionItem: FC<ImageAccordionItemProps> = ({ image, images, groups, setImages, onExpand }) => {
+const ImageAccordionItem: FC<ImageAccordionItemProps> = ({ image, images, groups, setImages, onRefresh, onExpand }) => {
   const navigate = useNavigate();
-  const { userInfo, checkCookie } = useAuth();
+  const { userInfo } = useAuth();
   const [inEditMode, setEditMode] = useState(false);
   const [showDeleteModal, setShowDeleteModal] = useState(false);
   const [deleteError, setDeleteError] = useState('');
@@ -49,7 +50,8 @@ const ImageAccordionItem: FC<ImageAccordionItemProps> = ({ image, images, groups
 
   const handleDelete = async () => {
     if (await deleteImage(image.group, image.name, setDeleteError)) {
-      void fetchImages(Object.keys(groups), setImages, false, () => void checkCookie(), null as never, true);
+      // Reload the whole list (deleting changes the set of images); onRefresh drives the spinner.
+      onRefresh();
       handleCloseDeleteModal();
     }
   };

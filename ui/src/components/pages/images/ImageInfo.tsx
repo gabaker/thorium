@@ -76,7 +76,7 @@ interface ImageInfoProps {
   userCanModify: boolean;
 }
 
-const ImageInfo: FC<ImageInfoProps> = ({ ref, images, image, inEditMode, onExitEditMode }) => {
+const ImageInfo: FC<ImageInfoProps> = ({ ref, images, image, setImages, inEditMode, onExitEditMode }) => {
   const [updateError, setUpdateError] = useState('');
   const [loading, setLoading] = useState(false);
   const [currentImage, setCurrentImage] = useState<Image>(image);
@@ -156,14 +156,17 @@ const ImageInfo: FC<ImageInfoProps> = ({ ref, images, image, inEditMode, onExitE
     }
 
     if (await updateImage(result.group, result.name, result.data, setUpdateError)) {
-      // Refetch the saved image and re-seed both the view (currentImage) and the form
+      // Refetch only the saved image and re-seed both the view (currentImage) and the form
       // (editorObj) from the fresh data before leaving edit mode, so re-opening the form
-      // shows the saved values instead of the pre-save snapshot.
+      // shows the saved values instead of the pre-save snapshot. Also replace just this
+      // image in the parent list so the accordion header/count/filters reflect the edit
+      // without reloading the whole list or collapsing the open accordion.
       await fetchSingleImage(
         image,
         (fresh) => {
           setCurrentImage(fresh);
           setEditorObj(imageToEditorObject(fresh));
+          setImages(images.map((img) => (img.group === image.group && img.name === image.name ? fresh : img)));
         },
         setLoading,
       );

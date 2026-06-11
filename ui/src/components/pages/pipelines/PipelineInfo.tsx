@@ -37,10 +37,11 @@ interface PipelineInfoProps {
   inEditMode: boolean;
   onExitEditMode: () => void;
   onUpdate: (editorObj: Record<string, unknown>, pipeline: Pipeline, setError: (e: string) => void) => Promise<boolean>;
-  onRefresh: () => void;
+  // Refresh only this pipeline's content in place (no full list reload / accordion collapse).
+  refreshPipeline: (group: string, name: string) => void;
 }
 
-const PipelineInfo: FC<PipelineInfoProps> = ({ ref, pipeline, groups, inEditMode, onExitEditMode, onUpdate, onRefresh }) => {
+const PipelineInfo: FC<PipelineInfoProps> = ({ ref, pipeline, groups, inEditMode, onExitEditMode, onUpdate, refreshPipeline }) => {
   const { userInfo } = useAuth();
   const [updateError, setUpdateError] = useState('');
   const [editorObj, setEditorObj] = useState<Record<string, unknown> | null>(null);
@@ -97,7 +98,8 @@ const PipelineInfo: FC<PipelineInfoProps> = ({ ref, pipeline, groups, inEditMode
     if (await updatePipeline(pipeline.group, pipeline.name, { order: pendingOrder } as PipelineUpdate, setOrderUpdateError)) {
       setPendingOrder(null);
       setOrderUpdateError('');
-      onRefresh();
+      // Refresh only this pipeline so the reordered content rerenders without collapsing the accordion.
+      refreshPipeline(pipeline.group, pipeline.name);
     }
   };
 

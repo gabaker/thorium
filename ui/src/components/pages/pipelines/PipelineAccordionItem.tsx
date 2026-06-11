@@ -19,7 +19,10 @@ interface PipelineAccordionItemProps {
   groups: Record<string, Group>;
   canCreatePipeline: boolean;
   onUpdate: (editorObj: Record<string, unknown>, pipeline: Pipeline, setError: (e: string) => void) => Promise<boolean>;
+  // Full list reload (with spinner) used after this pipeline is deleted.
   onRefresh: () => void;
+  // Single-pipeline content refresh used after an in-place edit (e.g. order change).
+  refreshPipeline: (group: string, name: string) => void;
   onExpand: (key: string) => void;
   onCopy: (pipeline: Pipeline) => void;
 }
@@ -30,6 +33,7 @@ const PipelineAccordionItem: FC<PipelineAccordionItemProps> = ({
   canCreatePipeline,
   onUpdate,
   onRefresh,
+  refreshPipeline,
   onExpand,
   onCopy,
 }) => {
@@ -132,7 +136,7 @@ const PipelineAccordionItem: FC<PipelineAccordionItemProps> = ({
           inEditMode={inEditMode}
           onExitEditMode={() => setEditMode(false)}
           onUpdate={onUpdate}
-          onRefresh={onRefresh}
+          refreshPipeline={refreshPipeline}
         />
       </Accordion.Body>
       <DeleteConfirmModal

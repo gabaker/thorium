@@ -24,7 +24,7 @@ import { createReactSelectStyles } from '@utilities/select';
 import { canModifyGroup, isGroupOwner } from '@utilities/permissions';
 import { fetchGroups } from '@utilities/fetch';
 import { listUsers } from '@thorpi/users';
-import { createGroup, deleteGroup, updateGroup } from '@thorpi/groups';
+import { createGroup, deleteGroup, getGroup, updateGroup } from '@thorpi/groups';
 import { GroupRoleKey, type Group, type GroupUpdate, type GroupRoleUpdate } from '@models/groups';
 
 interface SelectOption {
@@ -96,6 +96,16 @@ const Groups = () => {
     const reqUsers = await listUsers(console.log, false);
     if (reqUsers) {
       setAllUSers((reqUsers as string[]).sort());
+    }
+  };
+
+  // Refetch a single group and replace just that entry in place. Used after an edit so only the
+  // changed group's content rerenders, without reloading the whole list or toggling the page
+  // spinner (which keeps every other open accordion untouched).
+  const refreshSingleGroup = async (name: string) => {
+    const fresh = await getGroup(name, console.log);
+    if (fresh) {
+      setGroups((prev) => ({ ...prev, [name]: fresh }));
     }
   };
 
@@ -401,7 +411,9 @@ const Groups = () => {
               onClick={() => {
                 void (async () => {
                   if (await updateGroup(group.name, changes, setUpdateError)) {
-                    void fetchGroups(setGroups as (groups: Record<string, Group> | Group[] | string[]) => void, setLoading, true);
+                    // Refresh only the edited group so its accordion stays open and just its content rerenders.
+                    handleCloseUpdateModal();
+                    await refreshSingleGroup(group.name);
                   }
                 })();
               }}

@@ -48,10 +48,12 @@ export const filterUsers = (users: UserInfo[], clauses: Clause[]): UserInfo[] =>
 type SingleUserInfoProps = {
   user: UserInfo;
   impersonate: (userToken: string, tokenExpires: string) => void;
+  // reload the full user list (shows the loading spinner) after an update or delete
+  reloadUsers: () => void;
 };
 
 // component to represent each user's info
-const SingleUserInfo: React.FC<SingleUserInfoProps> = ({ user, impersonate }) => {
+const SingleUserInfo: React.FC<SingleUserInfoProps> = ({ user, impersonate, reloadUsers }) => {
   const [singleUserRole, setSingleUserRole] = useState(getThoriumRole(user.role));
   return (
     <Card key={user.username} className="panel mt-1">
@@ -79,6 +81,7 @@ const SingleUserInfo: React.FC<SingleUserInfoProps> = ({ user, impersonate }) =>
             role={singleUserRole}
             user={user}
             setSingleUserRole={setSingleUserRole}
+            reloadUsers={reloadUsers}
           />
         </Col>
       </Row>
@@ -93,10 +96,19 @@ type ManipulateUserButtonsProps = {
   role: RoleKey;
   user: UserInfo;
   setSingleUserRole: (role: RoleKey) => void;
+  reloadUsers: () => void;
 };
 
 // component for buttons related to each user
-const ManipulateUserButtons: React.FC<ManipulateUserButtonsProps> = ({ impersonate, username, token, role, user, setSingleUserRole }) => {
+const ManipulateUserButtons: React.FC<ManipulateUserButtonsProps> = ({
+  impersonate,
+  username,
+  token,
+  role,
+  user,
+  setSingleUserRole,
+  reloadUsers,
+}) => {
   const [deleteError, setDeleteError] = useState('');
   // Delete user modal state manipulation
   const [showDeleteModal, setShowDeleteModal] = useState(false);
@@ -112,7 +124,7 @@ const ManipulateUserButtons: React.FC<ManipulateUserButtonsProps> = ({ impersona
         tip={`Admins have the ability to change a user's role
         to Admin, Analyst, Developer, or User.`}
       >
-        <EditRoles role={role} username={username} user={user} setRole={setSingleUserRole} />
+        <EditRoles role={role} username={username} user={user} setRole={setSingleUserRole} reloadUsers={reloadUsers} />
       </OverlayTipLeft>
       <OverlayTipLeft
         tip={`Masquerade as ${username} after logging out of
@@ -163,6 +175,8 @@ const ManipulateUserButtons: React.FC<ManipulateUserButtonsProps> = ({ impersona
               void deleteUser(username, setDeleteError).then((success) => {
                 if (success) {
                   handleCloseDeleteModal();
+                  // refresh the list so the deleted user is removed (shows the loading spinner)
+                  reloadUsers();
                 }
               })
             }
@@ -180,10 +194,11 @@ type EditRolesProps = {
   username: string;
   user: UserInfo;
   setRole: (role: RoleKey) => void;
+  reloadUsers: () => void;
 };
 
 // component to edit role
-const EditRoles: React.FC<EditRolesProps> = ({ role, username, user, setRole }) => {
+const EditRoles: React.FC<EditRolesProps> = ({ role, username, user, setRole, reloadUsers }) => {
   const [showEditRoleModal, setShowEditRoleModal] = useState(false);
   const [updateRoleError, setUpdateRoleError] = useState('');
   const [editRole, setEditRole] = useState(role);
@@ -234,6 +249,8 @@ const EditRoles: React.FC<EditRolesProps> = ({ role, username, user, setRole }) 
       if (response) {
         // close the modal
         handleCloseEditRoleModal(response);
+        // refresh the list so the updated role is reflected (shows the loading spinner)
+        reloadUsers();
       }
     }
   };
@@ -367,11 +384,17 @@ const UserBrowsing = () => {
       <LoadingSpinner loading={loading}></LoadingSpinner>
       {!loading && filteredUsers.length === 0 && <NoResultsBanner type="Users" />}
       <Row>
-        {filteredUsers.length > 0 &&
+        {!loading &&
+          filteredUsers.length > 0 &&
           filteredUsers
             .sort((a, b) => a.username.localeCompare(b.username))
             .map((user) => (
-              <SingleUserInfo key={user.username} user={user} impersonate={(token, expires) => void impersonate(token, expires)} />
+              <SingleUserInfo
+                key={user.username}
+                user={user}
+                impersonate={(token, expires) => void impersonate(token, expires)}
+                reloadUsers={() => void getUserInfo()}
+              />
             ))}
       </Row>
     </Page>
