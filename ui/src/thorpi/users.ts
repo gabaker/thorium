@@ -184,11 +184,7 @@ export async function resendVerificationEmail(username: string, errorHandler: (e
  * @param errorHandler - Called with a formatted message only on an unexpected (non-401) failure.
  * @returns An {@link EmailVerifyStatus}: `Verified` (204), `Expired` (401), or `Error`.
  */
-export async function verifyEmail(
-  username: string,
-  token: string,
-  errorHandler: (error: string) => void,
-): Promise<EmailVerifyStatus> {
+export async function verifyEmail(username: string, token: string, errorHandler: (error: string) => void): Promise<EmailVerifyStatus> {
   const url = `/users/verify/${encodeURIComponent(username)}/email/${encodeURIComponent(token)}`;
   return client
     .get(url)
@@ -346,6 +342,62 @@ export async function whoami(): Promise<UserInfo | null> {
       parseRequestError(error, console.log, 'Who Am I');
       return null;
     });
+}
+
+/**
+ * Upload (or replace) the current user's profile icon (`POST /users/image`).
+ *
+ * The icon is sent as multipart form data in an `image` field. The backend streams it to S3
+ * and stores only the path on the user, so subsequent `whoami` calls stay lightweight.
+ *
+ * @param image - The (already resized) image blob to upload.
+ * @param errorHandler - Called with a formatted message if the request fails.
+ * @returns `true` if the upload succeeded (HTTP 204), otherwise `false`.
+ */
+export async function uploadUserImage(image: Blob, errorHandler: (error: string) => void): Promise<boolean> {
+  const form = new FormData();
+  form.set('image', image, 'icon.png');
+  return client
+    .post('/users/image', form)
+    .then((res) => res?.status == 204)
+    .catch((error: unknown) => {
+      parseRequestError(error, errorHandler, 'Upload User Image');
+      return false;
+    });
+}
+
+/**
+ * Remove the current user's profile icon (`DELETE /users/image`).
+ *
+ * @param errorHandler - Called with a formatted message if the request fails.
+ * @returns `true` if the icon was removed (HTTP 204), otherwise `false`.
+ */
+export async function deleteUserImage(errorHandler: (error: string) => void): Promise<boolean> {
+  return client
+    .delete('/users/image')
+    .then((res) => res?.status == 204)
+    .catch((error: unknown) => {
+      parseRequestError(error, errorHandler, 'Delete User Image');
+      return false;
+    });
+}
+
+/**
+ * Fetch a user's profile icon as a browser-displayable object URL
+ * (`GET /users/user/{username}/image`).
+ *
+ * The blob is wrapped in an object URL via `URL.createObjectURL`; callers are responsible for
+ * revoking it with `URL.revokeObjectURL` when done to avoid leaking memory. This function
+ * intentionally swallows errors (returns `null`) since a missing icon is an expected outcome.
+ *
+ * @param username - The username whose icon to fetch.
+ * @returns An object URL for the icon, or `null` if the user has no icon or the request failed.
+ */
+export async function fetchUserImage(username: string): Promise<string | null> {
+  return client
+    .get<Blob>(`/users/user/${encodeURIComponent(username)}/image`, { responseType: 'blob' })
+    .then((res) => (res?.status == 200 && res.data ? URL.createObjectURL(res.data) : null))
+    .catch(() => null);
 }
 
 /**

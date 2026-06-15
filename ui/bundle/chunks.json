@@ -34,6 +34,12 @@
     "@headless-tree/core",
     "@headless-tree/react"
   ],
+  "diff": [
+    "@emotion/css",
+    "diff",
+    "js-yaml",
+    "react-diff-viewer-continued"
+  ],
   "xyflow": [
     "@types/d3-color",
     "@types/d3-drag",
@@ -65,13 +71,16 @@
   "codemirror": [
     "@codemirror/autocomplete",
     "@codemirror/commands",
+    "@codemirror/lang-cpp",
     "@codemirror/lang-json",
     "@codemirror/lang-yaml",
     "@codemirror/language",
+    "@codemirror/legacy-modes",
     "@codemirror/lint",
     "@codemirror/state",
     "@codemirror/view",
     "@lezer/common",
+    "@lezer/cpp",
     "@lezer/highlight",
     "@lezer/json",
     "@lezer/lr",

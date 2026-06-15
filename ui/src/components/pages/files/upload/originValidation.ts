@@ -1,6 +1,8 @@
 import { OriginState, TagEntry } from './types';
 import { hasInvalidTags } from '@utilities/tags';
 
+// spec: ./upload.spec.md
+
 type ValidationResult = { success: true } | { success: false; error: string };
 
 export function buildUploadFormBase(

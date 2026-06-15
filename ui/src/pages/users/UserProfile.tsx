@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useRef, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { Badge, Button, Col, Container, Form, Modal, Row } from 'react-bootstrap';
 import styled from 'styled-components';
@@ -6,10 +6,13 @@ import { FaCircleUser } from 'react-icons/fa6';
 
 // project imports
 import Page from '@components/pages/Page';
+import AlertBanner, { Severity } from '@components/shared/alerts/AlertBanner';
 import Subtitle from '@components/shared/titles/Subtitle';
 import { useAuth } from '@utilities/auth';
+import { fileToResizedBlob } from '@utilities/image';
 import { getThoriumRoleBadge } from '@utilities/role';
-import { updateUser } from '@thorpi/users';
+import { useUserImage } from '@utilities/useUserImage';
+import { deleteUserImage, updateUser, uploadUserImage } from '@thorpi/users';
 import { ThoriumRole } from '@models/users';
 
 const ProfileCard = styled.div`
@@ -256,6 +259,105 @@ const SignInMethods: React.FC<{ local?: boolean; verified?: boolean }> = ({ loca
   );
 };
 
+// Longest-edge bound (px) the uploaded icon is downscaled to before upload, keeping the
+// stored S3 object small.
+const PROFILE_ICON_MAX_PX = 256;
+
+const AvatarColumn = styled.div`
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 0.5rem;
+`;
+
+const AvatarImage = styled.img`
+  width: 150px;
+  height: 150px;
+  border-radius: 50%;
+  object-fit: cover;
+  border: 1px solid var(--thorium-panel-border);
+`;
+
+const AvatarActions = styled.div`
+  display: flex;
+  gap: 0.5rem;
+`;
+
+const HiddenFileInput = styled.input`
+  display: none;
+`;
+
+// Profile icon with upload/remove controls. The icon is resized client-side and uploaded as
+// multipart form data; the backend stores it in S3 and the avatar is fetched lazily via
+// useUserImage (so whoami stays lightweight).
+const ProfileImage = () => {
+  const { userInfo, refreshUserInfo } = useAuth();
+  const { imageUrl, reload } = useUserImage(userInfo?.username, userInfo?.has_image);
+  const fileInputRef = useRef<HTMLInputElement>(null);
+  const [error, setError] = useState<string | null>(null);
+  const [busy, setBusy] = useState(false);
+
+  // refetch the icon (after an upload/remove) and refresh has_image on the cached user
+  const refresh = async () => {
+    await refreshUserInfo(true);
+    reload();
+  };
+
+  // resize the selected image and upload it as this user's icon
+  const handleFileSelected = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    // reset the input so selecting the same file again re-triggers onChange
+    e.target.value = '';
+    if (!file) {
+      return;
+    }
+    if (!file.type.startsWith('image/')) {
+      setError('Please choose an image file.');
+      return;
+    }
+    setError(null);
+    setBusy(true);
+    try {
+      const image = await fileToResizedBlob(file, PROFILE_ICON_MAX_PX);
+      if (await uploadUserImage(image, setError)) {
+        await refresh();
+      }
+    } catch {
+      setError('Failed to process the selected image.');
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  // clear this user's icon
+  const handleRemove = async () => {
+    setError(null);
+    setBusy(true);
+    if (await deleteUserImage(setError)) {
+      await refresh();
+    }
+    setBusy(false);
+  };
+
+  return (
+    <AvatarColumn>
+      {imageUrl ? <AvatarImage src={imageUrl} alt="Profile icon" /> : <FaCircleUser size={150} />}
+      <AvatarActions>
+        <Button className="primary-btn" disabled={busy} onClick={() => fileInputRef.current?.click()}>
+          {userInfo?.has_image ? 'Change' : 'Upload'}
+        </Button>
+        {userInfo?.has_image && (
+          <Button className="danger-btn" disabled={busy} onClick={() => void handleRemove()}>
+            Remove
+          </Button>
+        )}
+      </AvatarActions>
+      <HiddenFileInput ref={fileInputRef} type="file" accept="image/*" onChange={(e) => void handleFileSelected(e)} />
+      {error && <AlertBanner severity={Severity.Error}>{error}</AlertBanner>}
+    </AvatarColumn>
+  );
+};
+
 const UserProfile = () => {
   const { userInfo } = useAuth();
 
@@ -263,7 +365,7 @@ const UserProfile = () => {
     <Page title="Profile · Thorium" className="d-flex justify-content-center">
       <ProfileCard>
         <Row className="d-flex justify-content-center">
-          <FaCircleUser size={150} />
+          <ProfileImage />
         </Row>
         <Row className="d-flex justify-content-center">
           <h2 className="pt-3 d-flex justify-content-center">{userInfo?.username}</h2>

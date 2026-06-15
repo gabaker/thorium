@@ -4,6 +4,8 @@ import type { AssociationCreate } from './types';
 import { AssociationKind, BlankAssociationCreate } from './types';
 import { createAssociation } from '@thorpi/associations';
 
+// spec: ./upload.spec.md
+
 export function handleAssociationUpdate(
   associationKeys: string[],
   entity: EntityTypes | undefined,

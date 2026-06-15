@@ -36,12 +36,14 @@ export async function setupMockAuth(page: Page) {
     if (url.includes('/users/whoami')) return route.fallback();
     return route.fulfill({ status: 200, contentType: 'application/json', body: '{}' });
   });
-  await page.context().addCookies([{
-    name: 'THORIUM_TOKEN',
-    value: MOCK_USER.token,
-    domain: 'localhost',
-    path: '/',
-  }]);
+  await page.context().addCookies([
+    {
+      name: 'THORIUM_TOKEN',
+      value: MOCK_USER.token,
+      domain: 'localhost',
+      path: '/',
+    },
+  ]);
 }
 
 export async function waitForEditor(page: Page) {
@@ -55,7 +57,9 @@ export async function waitForLinter(page: Page) {
 
 export async function setEditorContent(page: Page, text: string) {
   await page.evaluate((content) => {
-    const container = document.querySelector('.cm-editor')?.parentElement as HTMLElement & { _cmView?: { state: { doc: { length: number } }; dispatch: (spec: unknown) => void } };
+    const container = document.querySelector('.cm-editor')?.parentElement as HTMLElement & {
+      _cmView?: { state: { doc: { length: number } }; dispatch: (spec: unknown) => void };
+    };
     const view = container?._cmView;
     if (view) {
       view.dispatch({
@@ -85,18 +89,17 @@ export async function healthCheck(): Promise<boolean> {
 export async function authenticate(username: string, password: string): Promise<string> {
   const client = buildClient();
   const encoded = Buffer.from(`${username}:${password}`).toString('base64');
-  const res = await client.post('/users/auth', {}, {
-    headers: { Authorization: `basic ${encoded}` },
-  });
+  const res = await client.post(
+    '/users/auth',
+    {},
+    {
+      headers: { Authorization: `basic ${encoded}` },
+    },
+  );
   return res.data.token;
 }
 
-export async function createEntity(
-  token: string,
-  name: string,
-  kind: string,
-  groups: string[],
-): Promise<string> {
+export async function createEntity(token: string, name: string, kind: string, groups: string[]): Promise<string> {
   const client = buildClient(token);
   const form = new FormData();
   form.set('name', name);
@@ -157,6 +160,50 @@ export async function uploadFile(
   }
 }
 
+export interface ResultFileSeed {
+  name: string;
+  content: Buffer;
+  contentType?: string;
+}
+
+export interface UploadResultsOptions {
+  tool: string;
+  result: string;
+  groups: string[];
+  displayType?: string;
+  version?: string;
+  cmd?: string;
+  files?: ResultFileSeed[];
+}
+
+/**
+ * Seed a tool result on a file via `POST /files/results/{sha256}` (the route thorctl/agents use).
+ *
+ * Sends the metadata text fields (`tool`, `result`, `display_type`, `groups`, ...) followed by one
+ * multipart `files` entry per result file. Lets E2E tests exercise the tool-result tile without a
+ * running analysis agent.
+ *
+ * @returns The created result's id.
+ */
+export async function uploadResults(token: string, sha256: string, opts: UploadResultsOptions): Promise<string> {
+  const client = buildClient(token);
+  const form = new FormData();
+  for (const group of opts.groups) {
+    form.append('groups', group);
+  }
+  form.set('tool', opts.tool);
+  if (opts.version) form.set('tool_version', opts.version);
+  if (opts.cmd) form.set('cmd', opts.cmd);
+  form.set('result', opts.result);
+  // NOTE: the multipart field uses the FromStr spelling ("Json"), not the serialized "JSON"
+  form.set('display_type', opts.displayType ?? 'Json');
+  for (const file of opts.files ?? []) {
+    form.append('files', new Blob([file.content], { type: file.contentType ?? 'application/octet-stream' }), file.name);
+  }
+  const res = await client.post(`/files/results/${sha256}`, form);
+  return res.data.id;
+}
+
 export interface AssociationTarget {
   Entity?: { id: string; name: string };
   File?: string;
@@ -182,28 +229,18 @@ export async function buildTree(
   return res.data;
 }
 
-export async function createAssociation(
-  token: string,
-  request: AssociationRequest,
-): Promise<void> {
+export async function createAssociation(token: string, request: AssociationRequest): Promise<void> {
   const client = buildClient(token);
   await client.post('/associations/', request);
 }
 
-export async function createImageViaAPI(
-  token: string,
-  imageRequest: Record<string, unknown>,
-): Promise<boolean> {
+export async function createImageViaAPI(token: string, imageRequest: Record<string, unknown>): Promise<boolean> {
   const client = buildClient(token);
   const res = await client.post('/images/', imageRequest);
   return res.status === 200 || res.status === 204;
 }
 
-export async function getImageViaAPI(
-  token: string,
-  group: string,
-  name: string,
-): Promise<Record<string, unknown> | null> {
+export async function getImageViaAPI(token: string, group: string, name: string): Promise<Record<string, unknown> | null> {
   const client = buildClient(token);
   try {
     const res = await client.get(`/images/data/${group}/${name}`);
@@ -213,22 +250,13 @@ export async function getImageViaAPI(
   }
 }
 
-export async function updateImageViaAPI(
-  token: string,
-  group: string,
-  name: string,
-  update: Record<string, unknown>,
-): Promise<boolean> {
+export async function updateImageViaAPI(token: string, group: string, name: string, update: Record<string, unknown>): Promise<boolean> {
   const client = buildClient(token);
   const res = await client.patch(`/images/${group}/${name}`, update);
   return res.status === 200 || res.status === 204;
 }
 
-export async function deleteImageViaAPI(
-  token: string,
-  group: string,
-  name: string,
-): Promise<boolean> {
+export async function deleteImageViaAPI(token: string, group: string, name: string): Promise<boolean> {
   const client = buildClient(token);
   try {
     const res = await client.delete(`/images/${group}/${name}`);
@@ -238,20 +266,13 @@ export async function deleteImageViaAPI(
   }
 }
 
-export async function createPipelineViaAPI(
-  token: string,
-  pipelineRequest: Record<string, unknown>,
-): Promise<boolean> {
+export async function createPipelineViaAPI(token: string, pipelineRequest: Record<string, unknown>): Promise<boolean> {
   const client = buildClient(token);
   const res = await client.post('/pipelines/', pipelineRequest);
   return res.status === 200 || res.status === 204;
 }
 
-export async function getPipelineViaAPI(
-  token: string,
-  group: string,
-  name: string,
-): Promise<Record<string, unknown> | null> {
+export async function getPipelineViaAPI(token: string, group: string, name: string): Promise<Record<string, unknown> | null> {
   const client = buildClient(token);
   try {
     const res = await client.get(`/pipelines/data/${group}/${name}`);
@@ -261,22 +282,13 @@ export async function getPipelineViaAPI(
   }
 }
 
-export async function updatePipelineViaAPI(
-  token: string,
-  group: string,
-  name: string,
-  update: Record<string, unknown>,
-): Promise<boolean> {
+export async function updatePipelineViaAPI(token: string, group: string, name: string, update: Record<string, unknown>): Promise<boolean> {
   const client = buildClient(token);
   const res = await client.patch(`/pipelines/${group}/${name}`, update);
   return res.status === 200 || res.status === 204;
 }
 
-export async function deletePipelineViaAPI(
-  token: string,
-  group: string,
-  name: string,
-): Promise<boolean> {
+export async function deletePipelineViaAPI(token: string, group: string, name: string): Promise<boolean> {
   const client = buildClient(token);
   try {
     const res = await client.delete(`/pipelines/${group}/${name}`);
@@ -300,9 +312,6 @@ export async function deletePipelineViaAPI(
 export async function snapshot(page: Page, dir: string, name: string): Promise<void> {
   const pngPath = path.join(dir, `${name}.png`);
   const htmlPath = path.join(dir, `${name}.html`);
-  const [, html] = await Promise.all([
-    page.screenshot({ path: pngPath, fullPage: true }),
-    page.content(),
-  ]);
+  const [, html] = await Promise.all([page.screenshot({ path: pngPath, fullPage: true }), page.content()]);
   fs.writeFileSync(htmlPath, html, 'utf-8');
 }

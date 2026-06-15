@@ -57,15 +57,22 @@ export const getInitialTree = async (
 export const growTree = async (id: string, nodes: string[], errorHandler: (error: string) => void, limit = 1): Promise<Graph | null> => {
   const url = `/trees/${id}`;
   const params: { limit: number } = { limit };
+  // DEBUG (remove after diagnosing 400s): the exact PATCH payload sent over the wire and id value types
+  console.warn('[thorpi-debug] growTree request', { tree: id, limit, nodes, nodeTypes: Array.from(new Set(nodes.map((n) => typeof n))) });
   return client
     .patch<string>(url, { growable: nodes }, { transformResponse: [(data: string) => data], params: params })
     .then((res) => {
       if (res?.status && res.status == 200 && res.data) {
-        return JSONBigString.parse(res.data) as Graph;
+        const parsed = JSONBigString.parse(res.data) as Graph;
+        // DEBUG (remove): compare the requested tree id with the id the server actually returned
+        console.warn('[thorpi-debug] growTree response', { requestedTree: id, responseTree: parsed.id });
+        return parsed;
       }
       return null;
     })
     .catch((error: unknown) => {
+      // DEBUG (remove): surface the failing request (this is where the "not a valid growable node" 400 lands)
+      console.warn('[thorpi-debug] growTree ERROR', { tree: id, nodes });
       parseRequestError(error, errorHandler, 'Grow Tree');
       return null;
     });

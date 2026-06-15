@@ -6,6 +6,8 @@ import { FaDownload } from 'react-icons/fa';
 // project imports
 import { getFile } from '@thorpi/files';
 
+// spec: ./files.spec.md
+
 type ArchiveFormat = 'CaRT' | 'Encrypted ZIP';
 const Formats: ArchiveFormat[] = ['CaRT', 'Encrypted ZIP'];
 

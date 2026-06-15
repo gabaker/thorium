@@ -1,12 +1,15 @@
 import React, { useState } from 'react';
 import { Button, Modal } from 'react-bootstrap';
-import { useSearchParams } from 'react-router';
+import { useNavigate, useSearchParams } from 'react-router';
 
 // project imports
-import { getTagBadgeText, getTagColorClass } from '@components/tags/utilities';
+import { getBrowsingPathByEntity } from '@components/entities/browsing/EntityBrowsingRoutes';
+import { buildTagBrowseHref, getTagBadgeText, getTagColorClass } from '@components/tags/utilities';
 import { OverlayTipBottom } from '@components/shared/overlay/tips';
 import { Entities } from '@models/entities';
 import { TagUpperKeyEnum } from '@models/tags';
+
+// spec: ./tags.spec.md
 
 interface TagBadgeProps {
   tag: string; // tag key string
@@ -20,6 +23,7 @@ const TagBadge: React.FC<TagBadgeProps> = ({ tag, value, condensed, action, reso
   const [showRedirectModal, setShowRedirectModal] = useState(false);
   const badgeClass = getTagColorClass(tag, value);
   const [, setSearchParams] = useSearchParams();
+  const navigate = useNavigate();
   const tagText = getTagBadgeText(tag, value, condensed);
   const upperTag = tag.toUpperCase() as TagUpperKeyEnum;
 
@@ -139,30 +143,37 @@ const TagBadge: React.FC<TagBadgeProps> = ({ tag, value, condensed, action, reso
       </>
     );
   } else if (action == 'link') {
-    // built the URL search query params from the tag key and value
+    // resolve the resource's browse route once; both the append-in-place check and the href need it
+    const base = resource ? getBrowsingPathByEntity(resource) : undefined;
+    const href = resource ? buildTagBrowseHref(resource, tag, value) : undefined;
+    // no browse route → render a plain, non-clickable badge rather than a dead anchor
+    if (!base || !href) {
+      return (
+        <div>
+          <div className={`${badgeClass} ms-1 mb-1 tag-item tags-hide`}>{tagText}</div>
+          <div className={`${badgeClass} ms-1 mb-1 tag-item short-tag`}>
+            {tagText.length > 30 ? tagText.substring(0, 30) + '...' : tagText}
+          </div>
+        </div>
+      );
+    }
+    const onClick = (e: React.MouseEvent) => {
+      // let the browser handle modified clicks (new tab, etc.) via the real href
+      if (e.metaKey || e.ctrlKey || e.shiftKey || e.altKey || e.button !== 0) return;
+      e.preventDefault();
+      // already on this resource's browse page → append the tag to the current filters (no reload);
+      // otherwise SPA-navigate to the browse page pre-filtered by this tag
+      if (window.location.pathname.startsWith(base)) {
+        const query = new URLSearchParams(window.location.search);
+        query.append(`tags[${tag}]`, value);
+        setSearchParams(query, { replace: true });
+      } else {
+        void navigate(href);
+      }
+    };
     return (
       <OverlayTipBottom tip={`Click to browse ${resource}s with tag: ${tagText}`}>
-        <a
-          className="no-decoration"
-          onClick={() => {
-            if (resource === undefined) {
-              console.log('Error: No resource type provided for link');
-              return;
-            }
-            // we need to change locations in addition to adding query params
-            if (window.location.pathname.startsWith(resource.toLowerCase() + 's', 1)) {
-              const query = new URLSearchParams(window.location.search);
-              query.append(`tags[${tag}]`, value);
-              setSearchParams(query, { replace: true });
-              // we are already browsing and want to append tags to current search params
-            } else {
-              const query = new URLSearchParams();
-              query.append('limit', '10');
-              query.append(`tags[${tag}]`, value);
-              window.location.href = `/${resource.toLowerCase()}s?${query.toString()}`;
-            }
-          }}
-        >
+        <a className="no-decoration" href={href} onClick={onClick}>
           <div className={`${badgeClass} ms-1 mb-1 tag-item clickable tags-hide`}>{tagText}</div>
           <div className={`${badgeClass} ms-1 mb-1 tag-item clickable short-tag`}>
             {tagText.length > 30 ? tagText.substring(0, 30) + '...' : tagText}

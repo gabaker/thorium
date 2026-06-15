@@ -6,6 +6,8 @@ import { useNavigate } from 'react-router-dom';
 import { OverlayTipBottom } from '@components/shared/overlay/tips';
 import { Collection, CollectionMeta } from '@models/entities/collections';
 
+// spec: ./EntityDetails.spec.md
+
 export const buildCollectionsBrowsingUrl = (collection: Collection): string => {
   const params = new URLSearchParams();
   const metadata: CollectionMeta = collection.metadata;

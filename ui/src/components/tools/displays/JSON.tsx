@@ -6,32 +6,9 @@ import { JSONTree } from 'react-json-tree';
 // project imports
 import String from './String';
 import { getAlerts } from '../alerts';
-import ResultsFiles from './files/ResultsFiles';
-import ChildrenFiles from './files/ChildrenFiles';
 import { ResultRenderProps } from '../props';
+import { OceanJsonTheme } from '@components/shared/renderers/jsonTheme';
 import { Value } from '@models/results';
-
-const OceanJsonTheme = {
-  scheme: 'Ocean',
-  author: 'Chris Kempson (http://chriskempson.com)',
-  // this value is pulled from styles/colors.scss
-  base00: 'var(--thorium-panel-color)',
-  base01: '#343d46',
-  base02: '#4f5b66',
-  base03: '#65737e',
-  base04: '#a7adba',
-  base05: '#c0c5ce',
-  base06: '#dfe1e8',
-  base07: '#eff1f5',
-  base08: '#bf616a',
-  base09: '#d08770',
-  base0A: '#ebcb8b',
-  base0B: '#a3be8c',
-  base0C: '#96b5b4',
-  base0D: '#8fa1b3',
-  base0E: '#b48ead',
-  base0F: '#ab7967',
-};
 
 // generic json dump using react-json-view library
 const JSON: React.FC<ResultRenderProps> = ({ result, sha256, tool }) => {
@@ -72,8 +49,6 @@ const JSON: React.FC<ResultRenderProps> = ({ result, sha256, tool }) => {
               </Col>
             </Row>
           )}
-          <ResultsFiles result={result} sha256={sha256} tool={tool} />
-          <ChildrenFiles result={result} sha256={sha256} tool={tool} />
         </Card>
       ) : (
         <String result={result} sha256={sha256} tool={tool} warnings={warnings} errors={errors} />

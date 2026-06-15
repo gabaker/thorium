@@ -4,6 +4,8 @@ import { Overlay, Popover, Tooltip } from 'react-bootstrap';
 import type { SectionKey } from './types';
 import { ToolbarIconButton, StyledPopover } from './Toolbar.styled';
 
+// spec: ./GraphControlsToolbar.spec.md
+
 interface ToolbarButtonProps {
   sectionKey: SectionKey;
   activeSection: SectionKey | null;

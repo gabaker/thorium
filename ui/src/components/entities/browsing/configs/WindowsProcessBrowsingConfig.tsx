@@ -21,6 +21,8 @@ import { Entities } from '@models/entities/entities';
 import { WindowsProcess } from '@models/entities/processes';
 import { getDetailsBasePathByEntity } from '@components/entities/details/EntityDetailsRoutes';
 
+// spec: ../EntityBrowsing.spec.md
+
 // get files using filters and and an optional cursor
 const getWindowsProcesses = async (filters: Filters, cursor: string | null, errorHandler: (error: string) => void) => {
   // reset cursor when filters have changed, caller must know this

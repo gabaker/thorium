@@ -1,5 +1,5 @@
 import React, { useState, useMemo, useCallback, useEffect, useRef } from 'react';
-import { Overlay, Popover, Spinner } from 'react-bootstrap';
+import { Spinner } from 'react-bootstrap';
 import { asyncDataLoaderFeature, hotkeysCoreFeature, selectionFeature } from '@headless-tree/core';
 import { useTree } from '@headless-tree/react';
 import { ErrorBoundary } from 'react-error-boundary';
@@ -9,11 +9,14 @@ import { getNodeName } from '../utilities';
 import { classifyNode } from '../graph/data';
 import { getNodeSvg } from '../graph/styles';
 import { useGraphData, FocusSource } from '../data/GraphDataContext';
-import { PreviewPopover } from './PreviewPopover';
 import { TreeContainer } from './TreeContainer';
-import { findMultiParentNodeIds, buildTreeIndex, TreeIndex, nodeTypeKeyToLabel } from './treeHelpers';
-import NodePreviewContent from './NodePreviewContent';
+import { childIdsOf, findMultiParentNodeIds, buildTreeIndex, TreeIndex } from './treeHelpers';
+import EntitySummaryHover from '@components/shared/info/EntitySummaryHover';
+import { treeNodeToInfo } from '@components/shared/info/info';
+import { entityLabel } from '@models/entities';
 import { Graph, TreeNode } from '@models/trees';
+
+// spec: ./AssociationTree.spec.md
 
 function findParentFromIndex(index: TreeIndex, nodeId: string): string | null {
   const parents = index.parentsOf.get(nodeId);
@@ -38,7 +41,7 @@ function buildTreeRoots(graph: Graph, index: TreeIndex): string[] {
 }
 
 function getDirectChildren(index: TreeIndex, nodeId: string): string[] {
-  return index.childrenOf.get(nodeId) ?? [];
+  return childIdsOf(index, nodeId);
 }
 
 function hasDirectChildren(index: TreeIndex, nodeId: string): boolean {
@@ -47,58 +50,22 @@ function hasDirectChildren(index: TreeIndex, nodeId: string): boolean {
 }
 
 interface TreeItemOverlayProps {
-  nodeId: string;
   nodeData: TreeNode | undefined;
   isDuplicate: boolean;
-  children: React.ReactNode;
+  children: React.ReactElement;
 }
 
-const SHOW_DELAY = 400;
-const HIDE_DELAY = 200;
-
-const TreeItemOverlay: React.FC<TreeItemOverlayProps> = ({ nodeId, nodeData, isDuplicate, children }) => {
-  const [show, setShow] = useState(false);
-  const triggerRef = useRef<HTMLSpanElement>(null);
-  const showTimer = useRef<number | undefined>(undefined);
-  const hideTimer = useRef<number | undefined>(undefined);
-
-  const scheduleShow = () => {
-    window.clearTimeout(hideTimer.current);
-    showTimer.current = window.setTimeout(() => setShow(true), SHOW_DELAY);
-  };
-  const scheduleHide = () => {
-    window.clearTimeout(showTimer.current);
-    hideTimer.current = window.setTimeout(() => setShow(false), HIDE_DELAY);
-  };
-  const cancelHide = () => window.clearTimeout(hideTimer.current);
-
-  useEffect(
-    () => () => {
-      window.clearTimeout(showTimer.current);
-      window.clearTimeout(hideTimer.current);
-    },
-    [],
-  );
-
+/**
+ * Show the shared {@link EntitySummaryHover} preview for a tree row. Falls back to the bare row when the
+ * node has no describable info (matching the graph's behavior of suppressing the hover for such nodes).
+ */
+const TreeItemOverlay: React.FC<TreeItemOverlayProps> = ({ nodeData, isDuplicate, children }) => {
+  const model = nodeData ? treeNodeToInfo(nodeData) : null;
+  if (!model) return children;
   return (
-    <>
-      <span ref={triggerRef} onMouseEnter={scheduleShow} onMouseLeave={scheduleHide} className="overlay-trigger">
-        {children}
-      </span>
-      <Overlay
-        target={triggerRef.current}
-        show={show && !!nodeData}
-        placement="right"
-        container={document.body}
-        popperConfig={{ modifiers: [{ name: 'offset', options: { offset: [0, 8] } }] }}
-      >
-        {(props) => (
-          <PreviewPopover {...props} id={`preview-${nodeId}`} onMouseEnter={cancelHide} onMouseLeave={scheduleHide}>
-            <Popover.Body>{nodeData && <NodePreviewContent nodeData={nodeData} isDuplicate={isDuplicate} />}</Popover.Body>
-          </PreviewPopover>
-        )}
-      </Overlay>
-    </>
+    <EntitySummaryHover model={model} duplicate={isDuplicate} placement="right">
+      {children}
+    </EntitySummaryHover>
   );
 };
 
@@ -165,17 +132,19 @@ const AssociationTreeComponent: React.FC = () => {
       getItem: (nodeId) => nodeId,
       getChildren: async (nodeId) => {
         if (nodeId === 'root') {
-          return buildTreeRoots(getGraph(), treeIndex);
+          return buildTreeRoots(getGraph(), buildTreeIndex(getGraph()));
         }
 
-        const existingChildren = getDirectChildren(treeIndex, nodeId);
+        // Grow only once per node id (a node can appear multiple times when it has multiple parents).
         if (growable.has(nodeId) && !grownNodesRef.current.has(nodeId)) {
           grownNodesRef.current.add(nodeId);
           await grow(nodeId);
-          const freshIndex = buildTreeIndex(getGraph());
-          return getDirectChildren(freshIndex, nodeId);
         }
-        return existingChildren;
+        // Always derive children from a fresh index of the current graph. Using the memoized closure
+        // index here returned stale children for a *duplicate* occurrence of an already-grown node
+        // (e.g. a multi-parent windows process), hiding children grown via the other occurrence — so
+        // grown sigma rules never appeared under the duplicate.
+        return getDirectChildren(buildTreeIndex(getGraph()), nodeId);
       },
     },
     indent: 20,
@@ -329,19 +298,15 @@ const AssociationTreeComponent: React.FC = () => {
                 }
               }}
             >
-              <TreeItemOverlay
-                nodeId={nodeId}
-                nodeData={nodeId in graph.data_map ? graph.data_map[nodeId] : undefined}
-                isDuplicate={isDuplicate}
-              >
+              <TreeItemOverlay nodeData={nodeId in graph.data_map ? graph.data_map[nodeId] : undefined} isDuplicate={isDuplicate}>
                 <span
                   className={`treeitem${item.isFocused() ? ' focused' : ''}${item.isExpanded() ? ' expanded' : ''}${item.isSelected() ? ' selected' : ''}${item.isFolder() ? ' folder' : ''}${isDuplicate && isHighlighted ? ' duplicate-highlight' : ''}`}
                 >
                   {typeInfo && (
                     <img
                       className="node-type-icon"
-                      title={nodeTypeKeyToLabel(typeInfo.nodeType)}
-                      alt={nodeTypeKeyToLabel(typeInfo.nodeType)}
+                      title={entityLabel(typeInfo.nodeType)}
+                      alt={entityLabel(typeInfo.nodeType)}
                       src={`data:image/svg+xml;base64,${btoa(getNodeSvg(typeInfo.nodeType, typeInfo.visualState))}`}
                     />
                   )}

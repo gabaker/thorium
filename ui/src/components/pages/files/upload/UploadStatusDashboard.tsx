@@ -6,6 +6,8 @@ import ProgressBarContainer from './ProgressBarContainer';
 import UploadStatusTable from './UploadStatusTable';
 import { useUpload } from './UploadContext';
 
+// spec: ./upload.spec.md
+
 const UploadStatusDashboard: React.FC = () => {
   const {
     uploadInProgress,

@@ -22,6 +22,8 @@ import { EntityTypes } from '@models/entities/entities';
 import { ReactionSelection } from '@models/reactions';
 import { UserInfo } from '@models/users';
 
+// spec: ./upload.spec.md
+
 interface OriginActions {
   setOriginType: (originType: OriginType) => void;
   setDownloadedField: (field: 'url' | 'name', value: string) => void;

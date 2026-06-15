@@ -4,11 +4,18 @@ import { BaseEdge, type EdgeProps } from '@xyflow/react';
 // project imports
 import CrabSVG from '@assets/icons/crab.svg?raw';
 
+// spec: ./PipelineOrderFlow.spec.md
+
 const CRAB_DATA_URI = `data:image/svg+xml;base64,${btoa(CrabSVG)}`;
 const CRAB_SIZE = { w: 14, h: 12 };
 
 const CORNER_RADIUS = 5;
 const FLAT_THRESHOLD = 5;
+// Fixed distance from the shared endpoint at which flat-routed edges turn vertical.
+// Constant (not proportional to edge length) so that edges leaving differently-sized
+// parallel boxes — whose source x-positions vary with box width — all converge on the
+// same vertical line before merging into a barrier or terminal.
+const FLAT_TURN_GAP = 24;
 
 interface ThemedEdgeData {
   routeFlat?: 'source' | 'target';
@@ -23,8 +30,8 @@ function getOrthogonalPath(sx: number, sy: number, tx: number, ty: number, route
 
   // 3-segment Z-path: vertical turn near source
   if (routeFlat === 'source') {
-    const turnX = sx + gap;
-    const r = Math.min(CORNER_RADIUS, gap, Math.abs(ty - sy) / 2);
+    const turnX = sx + FLAT_TURN_GAP;
+    const r = Math.min(CORNER_RADIUS, FLAT_TURN_GAP, Math.abs(ty - sy) / 2);
     return [
       `M ${sx} ${sy}`,
       `L ${turnX - r} ${sy}`,
@@ -37,8 +44,8 @@ function getOrthogonalPath(sx: number, sy: number, tx: number, ty: number, route
 
   // 3-segment Z-path: vertical turn near target
   if (routeFlat === 'target') {
-    const turnX = tx - gap;
-    const r = Math.min(CORNER_RADIUS, gap, Math.abs(ty - sy) / 2);
+    const turnX = tx - FLAT_TURN_GAP;
+    const r = Math.min(CORNER_RADIUS, FLAT_TURN_GAP, Math.abs(ty - sy) / 2);
     return [
       `M ${sx} ${sy}`,
       `L ${turnX - r} ${sy}`,

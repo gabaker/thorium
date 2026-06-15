@@ -5,6 +5,8 @@ import type { Sample } from '@models/files';
 import { TreeNodeKey, type TreeNode } from '@models/trees';
 import type { IncidentSummaryData, NodeTypeCounts, FileExtensionCount } from './types';
 
+// spec: ./SPEC.md
+
 const IncidentDataContext = createContext<IncidentSummaryData | undefined>(undefined);
 
 export const useIncidentData = (): IncidentSummaryData => {

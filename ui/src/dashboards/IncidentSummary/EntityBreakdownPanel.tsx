@@ -21,6 +21,8 @@ import {
   SectionDivider,
 } from './styles';
 
+// spec: ./SPEC.md
+
 const TYPE_COLORS: Record<string, string> = {
   files: '#f1d592',
   repos: '#f03c2e',

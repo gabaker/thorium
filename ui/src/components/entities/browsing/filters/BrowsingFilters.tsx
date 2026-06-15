@@ -10,8 +10,10 @@ import { useOmnibarUrlState } from '@components/shared/inputs/omnibar/useOmnibar
 import { OverlayTipLeft } from '@components/shared/overlay/tips';
 import Title from '@components/shared/titles/Title';
 import { OmniClauseAndTimeToFilter } from '@utilities/search';
-import { Entities } from '@models/entities';
+import { Entities, entityLabel } from '@models/entities';
 import { Filters } from '@models/search';
+
+// spec: ../EntityBrowsing.spec.md
 
 interface BrowsingFiltersProps {
   onChange: (filters: Filters) => void; // call back to change filters
@@ -43,7 +45,7 @@ const BrowsingFilters: React.FC<BrowsingFiltersProps> = ({ onChange, disabled = 
         </Col>
         <Col className="d-flex justify-content-end">
           {creatable && (
-            <OverlayTipLeft tip={`Create a new ${kind}.`}>
+            <OverlayTipLeft tip={`Create a new ${entityLabel(kind ?? Entities.Other)}.`}>
               <Button
                 className="ok-btn my-3"
                 variant=""

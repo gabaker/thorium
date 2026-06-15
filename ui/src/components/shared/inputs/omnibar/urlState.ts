@@ -17,6 +17,8 @@ import { Clause, ClauseCondition, ClauseIsMulti, CondIsMulti, NewTextClause, par
 import { RelativeUnit, TimeSelection } from './timepicker/utils';
 import type { ParamCodec } from '@utilities/url/codecs';
 
+// spec: ./SPEC.md
+
 export type OmniState = { clauses: Clause[]; time: TimeSelection };
 
 // Param keys owned by the clause codec (excluding the dynamic `tags[KEY]` keys). `nohide` is the

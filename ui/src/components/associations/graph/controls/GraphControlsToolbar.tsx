@@ -14,6 +14,8 @@ import NodesSection from './NodesSection';
 import EdgesSection from './EdgesSection';
 import ExportSection from './ExportSection';
 
+// spec: ./GraphControlsToolbar.spec.md
+
 interface GraphControlsToolbarProps {
   graphId: string;
   controls: GraphControls;

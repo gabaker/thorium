@@ -1,5 +1,7 @@
 import React, { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState } from 'react';
 
+// spec: ./GraphDataContext.spec.md
+
 // project imports
 import { mergeGrowthInto, computeDistances } from './graphMerge';
 import { Seed, Graph, BlankGraph } from '@models/trees';
@@ -61,18 +63,38 @@ export const GraphDataProvider: React.FC<GraphDataProviderProps> = ({ initial, f
     setFocusSource(source);
   }, []);
   const growChainRef = useRef<Promise<void>>(Promise.resolve());
+  // DEBUG (remove after diagnosing graph data-provider bugs): counts initial fetches so StrictMode / reload
+  // double-fetches (which create multiple server trees with different ids) are visible in the console.
+  const fetchSeqRef = useRef(0);
   const bumpVersion = useCallback(() => setGraphVersion((v) => v + 1), []);
   const handleError = useCallback((err: string) => setError(err), []);
 
   const fetchInitial = useCallback(
     async (seed: Seed, fc: boolean, d: number) => {
+      // DEBUG (remove after diagnosing graph data-provider bugs): tag each initial fetch to expose
+      // StrictMode/reload double-fetches creating multiple server trees.
+      const seq = ++fetchSeqRef.current;
+      console.warn('[dp-debug] fetchInitial START', { seq, filterChildless: fc, depth: d, prevGraphId: graphRef.current.id, seed });
       setLoading(true);
       setError(null);
       const data = await getInitialTree(seed, fc, d, handleError);
       if (data) {
+        // DEBUG (remove): detect a fetch replacing an already-populated graph with a DIFFERENT tree id
+        console.warn('[dp-debug] fetchInitial DONE', {
+          seq,
+          newGraphId: data.id,
+          replacingGraphId: graphRef.current.id,
+          replacedDifferentTree: !!graphRef.current.id && graphRef.current.id !== data.id,
+          nodeCount: Object.keys(data.data_map ?? {}).length,
+          growableCount: data.growable?.length ?? 0,
+          growableTypes: Array.from(new Set((data.growable ?? []).map((g) => typeof g))),
+        });
         graphRef.current = data;
         setGraphId(data.id);
         bumpVersion();
+      } else {
+        // DEBUG (remove)
+        console.warn('[dp-debug] fetchInitial returned no data', { seq });
       }
       setLoading(false);
     },
@@ -86,13 +108,46 @@ export const GraphDataProvider: React.FC<GraphDataProviderProps> = ({ initial, f
   const growMultiple = useCallback(
     async (nodeIds: string[], limit = 1) => {
       const id = graphId;
-      if (!id) return;
+      if (!id) {
+        // DEBUG (remove after diagnosing grow bugs): a grow requested before the tree id is set
+        console.warn('[dp-debug] growMultiple SKIPPED (no graphId yet)', { nodeIds });
+        return;
+      }
 
       const doGrow = async () => {
+        // DEBUG (remove after diagnosing 400/cross-tree bugs): log target tree, id types, and whether each
+        // requested id is present in the CURRENT client data_map (an id missing here will 400 server-side).
+        const currentMap = graphRef.current.data_map ?? {};
+        console.warn('[dp-debug] growMultiple -> growTree', {
+          targetGraphId: id,
+          liveGraphId: graphRef.current.id,
+          targetMatchesLive: id === graphRef.current.id,
+          limit,
+          nodeIds,
+          idTypes: Array.from(new Set(nodeIds.map((n) => typeof n))),
+          idsMissingFromClientDataMap: nodeIds.filter((n) => !(String(n) in currentMap)),
+        });
         const data = await growTree(id, nodeIds, handleError, limit);
         if (data) {
+          // DEBUG (remove): a response from a DIFFERENT tree than the live graph = StrictMode/reload race
+          if (data.id && graphRef.current.id && data.id !== graphRef.current.id) {
+            console.warn('[dp-debug] growTree response tree MISMATCH (cross-tree merge!)', {
+              requestedTree: id,
+              responseTree: data.id,
+              liveGraphId: graphRef.current.id,
+            });
+          }
+          // DEBUG (remove)
+          console.warn('[dp-debug] growTree OK', {
+            responseTree: data.id,
+            addedNodes: Object.keys(data.data_map ?? {}).length,
+            returnedGrowable: data.growable?.length ?? 0,
+          });
           graphRef.current = mergeGrowthInto(graphRef.current, data, nodeIds);
           bumpVersion();
+        } else {
+          // DEBUG (remove): a null response is where the "not a valid growable node" 400 surfaces
+          console.warn('[dp-debug] growTree FAILED (null) — likely a 400 for one of these ids', { targetGraphId: id, nodeIds });
         }
       };
 
@@ -114,6 +169,8 @@ export const GraphDataProvider: React.FC<GraphDataProviderProps> = ({ initial, f
       if (!graphId || targetDepth <= 1) return;
 
       const doGrowToDepth = async () => {
+        // DEBUG (remove after diagnosing entities-tab depth 400s)
+        console.warn('[dp-debug] growToDepth START', { targetDepth, graphId, liveGraphId: graphRef.current.id });
         let iterations = 0;
         // limit the max loops of "BFS -> grow by depth group" we will execute in case
         // we are returned continuous stream of nodes that can also be grown
@@ -134,6 +191,14 @@ export const GraphDataProvider: React.FC<GraphDataProviderProps> = ({ initial, f
           }
           // no groups to grow this iteration
           if (groups.size === 0) break;
+          // DEBUG (remove): show what each iteration will grow — identical groups repeating => stuck loop
+          console.warn('[dp-debug] growToDepth iteration', {
+            iterations,
+            graphId,
+            liveGraphId: graphRef.current.id,
+            growableCount: growableSet.length,
+            groups: Array.from(groups.entries()).map(([lim, ns]) => ({ limit: lim, count: ns.length })),
+          });
           // grow the group nodes for each depth together
           for (const [limit, nodes] of groups) {
             const data = await growTree(graphId, nodes, handleError, limit);
@@ -141,10 +206,15 @@ export const GraphDataProvider: React.FC<GraphDataProviderProps> = ({ initial, f
               // merge any returned graph data into the existing graph
               graphRef.current = mergeGrowthInto(graphRef.current, data, nodes);
               bumpVersion();
+            } else {
+              // DEBUG (remove): failed grow within depth expansion — the repeating 400
+              console.warn('[dp-debug] growToDepth grow FAILED', { limit, nodes, graphId, liveGraphId: graphRef.current.id });
             }
           }
           iterations++;
         }
+        // DEBUG (remove)
+        console.warn('[dp-debug] growToDepth END', { iterations, graphId, liveGraphId: graphRef.current.id });
       };
       growChainRef.current = growChainRef.current.then(doGrowToDepth, doGrowToDepth);
       await growChainRef.current;

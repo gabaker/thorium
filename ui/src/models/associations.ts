@@ -1,4 +1,5 @@
 // project imports
+import { humanize } from '@utilities/humanize';
 import { Direction } from './trees';
 
 /// The different possible associations
@@ -39,7 +40,71 @@ export enum AssociationKind {
   ProcessTreeIn = 'ProcessTreeIn',
   /// A Process in a process tree or a child process
   ChildProcess = 'ChildProcess',
+  /// Opens or receives data from a network connection
+  HasNetworkConnection = 'HasNetworkConnection',
+  /// A Sigma rule hit
+  SigmaRuleHit = 'SigmaRuleHit',
+  /// A PE section within a file/binary
+  SectionIn = 'SectionIn',
+  /// A library imported by a file/binary
+  ImportIn = 'ImportIn',
 }
+
+/**
+ * Human-readable display labels for each association kind, colocated with the {@link AssociationKind}
+ * enum. Typed as an exhaustive `Record<AssociationKind, string>`: adding a new kind without a label is
+ * a compile-time error. Acronyms (CVE/CWE) are preserved. Use for DISPLAY only — the raw enum value is
+ * still the API/select value.
+ */
+export const ASSOCIATION_KIND_LABELS: Record<AssociationKind, string> = {
+  [AssociationKind.FileFor]: 'File For',
+  [AssociationKind.DocumentationFor]: 'Documentation For',
+  [AssociationKind.FirmwareFor]: 'Firmware For',
+  [AssociationKind.AssociatedWith]: 'Associated With',
+  [AssociationKind.DevelopedBy]: 'Developed By',
+  [AssociationKind.ContainsCVE]: 'Contains CVE',
+  [AssociationKind.ContainsCWE]: 'Contains CWE',
+  [AssociationKind.BasedIn]: 'Based In',
+  [AssociationKind.EmployedBy]: 'Employed By',
+  [AssociationKind.ParentCompanyOf]: 'Parent Company Of',
+  [AssociationKind.UsedBy]: 'Used By',
+  [AssociationKind.UsedIn]: 'Used In',
+  [AssociationKind.PerformedBy]: 'Performed By',
+  [AssociationKind.FileSystemIn]: 'File System In',
+  [AssociationKind.FolderIn]: 'Folder In',
+  [AssociationKind.FileIn]: 'File In',
+  [AssociationKind.ProcessTreeIn]: 'Process Tree In',
+  [AssociationKind.ChildProcess]: 'Child Process',
+  [AssociationKind.HasNetworkConnection]: 'Has Network Connection',
+  [AssociationKind.SigmaRuleHit]: 'Sigma Rule Hit',
+  [AssociationKind.SectionIn]: 'Section In',
+  [AssociationKind.ImportIn]: 'Import In',
+};
+
+/**
+ * Get the human-readable label for an association kind.
+ *
+ * @param kind - An {@link AssociationKind} value, or a raw kind string (some call sites carry `string`).
+ * @returns The mapped label, falling back to {@link humanize} for an unknown/unmapped kind.
+ */
+export function associationKindLabel(kind: AssociationKind | string): string {
+  return ASSOCIATION_KIND_LABELS[kind as AssociationKind] ?? humanize(String(kind));
+}
+
+/**
+ * Containment ("… In …") association kinds whose relationship badge should name the container it links to
+ * (e.g. "File In somefolder Folder"). These are created source→target with the **source as the container**
+ * (see the filesystem entity builders in the API), so the container is the association's counterpart. Kept
+ * as an explicit set — NOT an `endsWith('In')` heuristic, which would wrongly match `BasedIn`/`UsedIn`.
+ */
+export const CONTAINER_ASSOCIATION_KINDS: ReadonlySet<AssociationKind> = new Set([
+  AssociationKind.FileSystemIn,
+  AssociationKind.FolderIn,
+  AssociationKind.FileIn,
+  AssociationKind.ProcessTreeIn,
+  AssociationKind.SectionIn,
+  AssociationKind.ImportIn,
+]);
 
 export type AssociationTarget = {
   /// This association is associated with another entity

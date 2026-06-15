@@ -13,6 +13,8 @@ import type { Pipeline } from '@models/pipelines';
 import type { ReactionSelection } from '@models/reactions';
 import type { UserInfo } from '@models/users';
 
+// spec: ../files.spec.md
+
 interface SelectPipelinesProps {
   userInfo: UserInfo | null;
   setReactionsList: (list: ReactionSelection[]) => void;
@@ -100,7 +102,7 @@ const SelectPipelines = ({ userInfo, setReactionsList, setError, currentSelectio
                         {pipelines[group]
                           .sort((a, b) => orderComparePipelineName(a, b))
                           .map((pipeline) =>
-                            pipeline.description != null ? (
+                            pipeline.description != null && pipeline.description !== 'null' ? (
                               <OverlayTipTop
                                 key={`${pipeline.group}_${pipeline.name}`}
                                 wide

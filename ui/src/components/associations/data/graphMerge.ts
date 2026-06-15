@@ -1,6 +1,14 @@
+// spec: ./GraphDataContext.spec.md
+
 import { Graph } from '@models/trees';
 
 export function mergeGrowthInto(initial: Graph, grown: Graph, grownNodeIds: string[]): Graph {
+  // DEBUG (remove after diagnosing cross-tree/400 bugs): merging a response from a different tree id than the
+  // live graph means a StrictMode/reload race produced a second tree; the merged graph then holds ids the
+  // live server tree lacks (the source of "not a valid growable node" 400s).
+  if (initial.id && grown.id && initial.id !== grown.id) {
+    console.warn('[merge-debug] mergeGrowthInto across DIFFERENT tree ids', { initialTree: initial.id, grownTree: grown.id, grownNodeIds });
+  }
   const mergedDataMap = { ...initial.data_map };
   // merge nodes from grown graph into initial
   // override in case we get info for an existing node
@@ -30,6 +38,13 @@ export function mergeGrowthInto(initial: Graph, grown: Graph, grownNodeIds: stri
   }
   // get unique set of nodes that are still growable
   const grownSet = new Set(grownNodeIds);
+  // DEBUG (remove after diagnosing re-send storm): grownNodeIds are strings, but initial.growable may hold
+  // JS numbers for short (<10^15) hashes, so the filter below fails to remove a grown numeric id
+  // (number !== string) and it gets re-sent on the next growToDepth pass. This logs those ids.
+  const notRemovedDueToType = (initial.growable as unknown[]).filter((id) => typeof id !== 'string' && grownSet.has(String(id)));
+  if (notRemovedDueToType.length) {
+    console.warn('[merge-debug] grown ids NOT removed from growable (number/string mismatch)', { notRemovedDueToType, grownNodeIds });
+  }
   // in the future when we page the returned values growing a node we may need to update this logic
   const remaining = initial.growable.filter((id) => !grownSet.has(id));
   if (grown.growable) {

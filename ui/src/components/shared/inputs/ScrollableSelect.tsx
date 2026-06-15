@@ -2,6 +2,8 @@ import React, { useEffect, useRef, useState } from 'react';
 import { Dropdown } from 'react-bootstrap';
 import { FaChevronUp, FaChevronDown } from 'react-icons/fa';
 
+// spec: ./ScrollableSelect.spec.md
+
 interface ScrollableSelectProps {
   value: number;
   onChange: (value: number) => void;
@@ -128,7 +130,8 @@ const ScrollableSelect: React.FC<ScrollableSelectProps> = ({
             style={n === value ? activeItemStyle : itemStyle}
             onClick={() => {
               onChange(n);
-              setOpen(false);
+              // Route close through handleToggle so onOpenChange fires (spec: closing notifies the caller)
+              handleToggle(false);
             }}
           >
             {n}

@@ -9,6 +9,8 @@ import { OverlayTipBottom } from '@components/shared/overlay/tips';
 import { useAuth } from '@utilities/auth';
 import { getReactionStageLogs } from '@thorpi/reactions';
 
+// spec: ./ReactionStatus.spec.md
+
 const ReactionStageLogs = () => {
   const { reactionID, group, stage } = useParams<{ reactionID: string; group: string; stage: string }>();
   const [cursor, setCursor] = useState(0);

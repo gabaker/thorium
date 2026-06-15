@@ -1,4 +1,7 @@
+// spec: ./utilities.spec.md
+
 // project imports
+import { associationKindLabel } from '@models/associations';
 import { RequestTags } from '@models/tags';
 import { SubmissionChunk } from '@models/files';
 import { BranchNode, Graph, TreeNode, TreeNodeKey } from '@models/trees';
@@ -105,7 +108,7 @@ export const getEdgeLabel = (target: string, _source: string, node: BranchNode, 
       return `Commit: ${origin.Source.commit.slice(0, 8)}`;
     }
   } else if (node.relationship.Association) {
-    return `Association: ${node.relationship.Association.kind}`;
+    return `Association: ${associationKindLabel(node.relationship.Association.kind)}`;
   } else if (node.relationship) {
     const tags = graph.data_map[target].Tag?.tags;
     if (tags === undefined) return '';

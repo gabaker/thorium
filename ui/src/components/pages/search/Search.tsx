@@ -11,12 +11,19 @@ import { OmnibarMainSearch } from '../../shared/inputs/omnibar/Bars';
 import { Clause } from '../../shared/inputs/omnibar/ClauseTypes';
 import { TimeSelection, TimeSelectionToStrings, defaultTimeSelection } from '../../shared/inputs/omnibar/timepicker/utils';
 import { useOmnibarUrlState } from '../../shared/inputs/omnibar/useOmnibarUrlState';
-import { getGroupsFromClauses, getIndexesFromClauses, getLimitFromClauses, getSearchTextFromClauses } from '../../shared/inputs/omnibar/utils';
+import {
+  getGroupsFromClauses,
+  getIndexesFromClauses,
+  getLimitFromClauses,
+  getSearchTextFromClauses,
+} from '../../shared/inputs/omnibar/utils';
 import EntityList from '@entities/browsing/EntityList';
 import { search } from '@thorpi/search';
 import { OmniClauseAndTimeToFilter } from '@utilities/search';
 import { ElasticDoc, SearchFilters } from '@models/search';
 import { scaling } from '@styles';
+
+// spec: ./Search.spec.md
 
 // get hash of a file from result ID
 const getSha256 = (id: string) => {

@@ -6,6 +6,8 @@ import { authUserPass, createUser, logout, whoami } from '@thorpi/users';
 import { UserInfo, RoleKey } from '@models/users';
 import { clearTagDataFromLocalStorage, fetchLocalStorageTags } from './tags';
 
+// spec: ./auth.spec.md
+
 /// The outcome of a password login attempt.
 export enum LoginOutcome {
   /// Authenticated; the session token has been stored.

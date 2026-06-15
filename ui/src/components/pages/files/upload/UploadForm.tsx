@@ -12,6 +12,8 @@ import OriginForm from './OriginForm';
 import UploadAlertBanner from './UploadAlertBanner';
 import { useUpload } from './UploadContext';
 
+// spec: ./upload.spec.md
+
 const UploadForm: React.FC = () => {
   const {
     uploadInProgress,
@@ -78,7 +80,7 @@ const UploadForm: React.FC = () => {
         <Col className={disabledClass + 'upload-field'}>
           <SelectInputArray
             isCreatable={false}
-            options={userGroups}
+            options={[...userGroups].sort((a, b) => a.localeCompare(b))}
             values={selectedGroups.sort()}
             onChange={(groups: string[]) => setSelectedGroups(groups)}
           />

@@ -1,6 +1,8 @@
 // Pure helper functions for pipeline order manipulation.
 // Extracted from PipelineOrderFlow.tsx for testability without DOM dependencies.
 
+// spec: ./PipelineOrderFlow.spec.md
+
 export const STEP_WIDTH = 200;
 export const TERMINAL_OFFSET = 70;
 export const CLUSTER_THRESHOLD = STEP_WIDTH * 0.6;

@@ -1,4 +1,3 @@
-// Validation spec: see VALIDATION_SPEC.md in this directory
 import type { Document } from 'yaml';
 import { isSeq } from 'yaml';
 import { Severity, type Diagnostic } from '../../types';
@@ -12,6 +11,8 @@ import {
   validateObjectField,
 } from '../shared';
 import { REQUIRED_PIPELINE_FIELDS, KNOWN_PIPELINE_FIELDS } from './schema';
+
+// spec: ./validate.spec.md
 
 export function validatePipelineRequest(
   doc: Document,

@@ -22,6 +22,8 @@ import { Vendor } from '@models/entities/vendors';
 import { Device } from '@models/entities/devices';
 import { getDetailsBasePathByEntity } from '@components/entities/details/EntityDetailsRoutes';
 
+// spec: ../EntityBrowsing.spec.md
+
 // get files using filters and and an optional cursor
 const getDevices = async (filters: Filters, cursor: string | null, errorHandler: (error: string) => void) => {
   // reset cursor when filters have changed, caller must know this

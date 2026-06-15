@@ -670,6 +670,11 @@ pub enum OutputDisplayType {
     /// Result to render is XML formatted
     #[serde(rename = "XML", alias = "Xml")]
     Xml,
+    /// Result to render is YAML formatted
+    #[serde(rename = "YAML", alias = "Yaml")]
+    Yaml,
+    /// Result to render is a decompilation, shown with the shared decomp syntax renderer
+    Decomposition,
 }
 
 impl OutputDisplayType {
@@ -687,6 +692,8 @@ impl OutputDisplayType {
             OutputDisplayType::Markdown => "Markdown",
             OutputDisplayType::Hidden => "Hidden",
             OutputDisplayType::Xml => "Xml",
+            OutputDisplayType::Yaml => "Yaml",
+            OutputDisplayType::Decomposition => "Decomposition",
         }
     }
 
@@ -703,6 +710,8 @@ impl OutputDisplayType {
             OutputDisplayType::Markdown => true,
             OutputDisplayType::Hidden => true,
             OutputDisplayType::Xml => true,
+            OutputDisplayType::Yaml => true,
+            OutputDisplayType::Decomposition => true,
         }
     }
 }
@@ -736,6 +745,8 @@ impl From<OutputDisplayType> for Cow<'static, str> {
             OutputDisplayType::Markdown => Cow::Borrowed("Markdown"),
             OutputDisplayType::Hidden => Cow::Borrowed("Hidden"),
             OutputDisplayType::Xml => Cow::Borrowed("Xml"),
+            OutputDisplayType::Yaml => Cow::Borrowed("Yaml"),
+            OutputDisplayType::Decomposition => Cow::Borrowed("Decomposition"),
         }
     }
 }
@@ -755,6 +766,8 @@ impl FromStr for OutputDisplayType {
             "Markdown" => Ok(OutputDisplayType::Markdown),
             "Hidden" => Ok(OutputDisplayType::Hidden),
             "Xml" => Ok(OutputDisplayType::Xml),
+            "Yaml" => Ok(OutputDisplayType::Yaml),
+            "Decomposition" => Ok(OutputDisplayType::Decomposition),
             _ => Err(InvalidEnum(format!("Unknown OutputDisplayType: {raw}"))),
         }
     }

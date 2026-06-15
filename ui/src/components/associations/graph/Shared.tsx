@@ -1,5 +1,7 @@
 import styled from 'styled-components';
 
+// spec: ./AssociationGraph.spec.md
+
 export const GraphWindow = styled.div<{ $bordered?: boolean }>`
   position: relative;
   background-color: var(--thorium-panel-bg);
@@ -74,19 +76,46 @@ export const PreviewContainer = styled.div`
   backdrop-filter: blur(8px);
   border: 1px solid var(--thorium-panel-border);
   border-radius: 8px;
-  padding: 10px;
   width: fit-content;
   min-width: 240px;
   max-width: min(400px, 35vw);
+`;
+
+// scrollable content region of the preview overlay. Scrolling lives here (not on PreviewContainer) so
+// the absolutely-positioned collapse button stays pinned to the corner instead of scrolling with content
+export const PreviewScroll = styled.div`
+  padding: 2px;
   max-height: 30vh;
   overflow-y: auto;
   overflow-x: auto;
 `;
 
-export const PreviewHeader = styled.div`
+// collapse control floating above the overlay's top-right corner rather than occupying its own header
+// row. The overlay's leading line is a short uppercase kind label at the top-left, so this corner stays
+// clear and the button won't overlap the title
+export const PreviewCollapseButton = styled.button`
+  position: absolute;
+  /* nudged down to visually align with the summary's first subtitle, which is inset by the
+     EntitySummary wrapper's 0.5rem top margin */
+  top: 8px;
+  right: 4px;
+  z-index: 1;
+  width: 20px;
+  height: 20px;
+  background: none;
+  border: none;
+  color: var(--thorium-secondary-text, var(--thorium-text));
+  cursor: pointer;
+  padding: 2px;
   display: flex;
-  justify-content: flex-end;
-  margin-bottom: 4px;
+  align-items: center;
+  justify-content: center;
+  border-radius: 4px;
+  transition: background 0.15s;
+
+  &:hover {
+    background: var(--thorium-highlight-panel-bg);
+  }
 `;
 
 export const PreviewToggleButton = styled.button`

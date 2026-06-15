@@ -20,10 +20,13 @@ import type { GraphNode, GraphLink, GraphData, GraphInstance, GraphOrbitControls
 import { applyGrowthToInstance } from './applyGrowth';
 import DataPreviewPanel from './DataPreviewPanel';
 import { AssociationTree } from '../browsing/AssociationTree';
-import NodePreviewContent from '../browsing/NodePreviewContent';
-import { PreviewPopover } from '../browsing/PreviewPopover';
+import EntitySummary, { SummaryVariant } from '@components/shared/info/EntitySummary';
+import { SummaryPopover } from '@components/shared/info/SummaryPopover';
+import { treeNodeToInfo } from '@components/shared/info/info';
 import { GraphWindow, GraphDiv, LoadingOverlay, TreeOverlayToggle, TreeOverlayPanel, TreeOverlayHeader, MinimizeButton } from './Shared';
 import RenderErrorAlert from '@components/shared/alerts/RenderErrorAlert';
+
+// spec: ./AssociationGraph.spec.md
 
 interface AssociationGraphProps {
   inView: boolean;
@@ -282,6 +285,9 @@ const AssociationGraph3DInner: React.FC<{ bordered?: boolean }> = ({ bordered })
       }
     }
 
+    // DEBUG (remove after diagnosing grow bugs): the graph's per-node grow path (this view works) — compare
+    // node.id type/growable membership here against the entities-tab EntityRow path.
+    console.warn('[graph-debug] node click grow', { nodeId: node.id, nodeIdType: typeof node.id, isGrowable: growable.has(node.id), graphId });
     if (!growable.has(node.id) || !graphId) return;
     await grow(node.id);
   };
@@ -712,6 +718,8 @@ const AssociationGraph3DInner: React.FC<{ bordered?: boolean }> = ({ bordered })
 
     const doGrow = async () => {
       if (aborted) return;
+      // DEBUG (remove after diagnosing depth 400s): the graph's own depth-increase grow (user-driven only)
+      console.warn('[graph-debug] depth-increase growToDepth', { depth: controls.depth, graphId });
       await growToDepth(controls.depth);
     };
 
@@ -757,13 +765,20 @@ const AssociationGraph3DInner: React.FC<{ bordered?: boolean }> = ({ bordered })
     }
   }, [focusedNodeId, focusSource]);
 
+  // the info model for the currently hovered node (null for unknown/empty nodes)
+  const hoverModel = hoveredNode && graph.data_map[hoveredNode.id] ? treeNodeToInfo(graph.data_map[hoveredNode.id]) : null;
+
   return (
     <GraphWindow $bordered={bordered}>
       <GraphDiv ref={containerRef} />
       {hoveredNode &&
-        graph.data_map[hoveredNode.id] &&
+        hoverModel &&
+        // Cursor-anchored special case: there's no DOM element to anchor to (the node lives in the 3D
+        // canvas), so this can't use `EntitySummaryHover` (which needs a ref target). It still reuses the
+        // shared `SummaryPopover` + `EntitySummary` and keeps its own keep-open timers so the pointer can
+        // move onto the popover and scroll.
         createPortal(
-          <PreviewPopover
+          <SummaryPopover
             id="graph-hover-preview"
             style={{ position: 'fixed', left: hoveredNode.x, top: hoveredNode.y, zIndex: 9999 }}
             onMouseEnter={() => window.clearTimeout(hoverHideTimer.current)}
@@ -772,9 +787,9 @@ const AssociationGraph3DInner: React.FC<{ bordered?: boolean }> = ({ bordered })
             }}
           >
             <Popover.Body>
-              <NodePreviewContent nodeData={graph.data_map[hoveredNode.id]} />
+              <EntitySummary model={hoverModel} variant={SummaryVariant.Compact} />
             </Popover.Body>
-          </PreviewPopover>,
+          </SummaryPopover>,
           document.body,
         )}
       {loading && (

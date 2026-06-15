@@ -1,6 +1,8 @@
 // project imports
 import { Entities, ExtendedTypeMap } from '@models/entities';
 
+// spec: ./EntityBrowsing.spec.md
+
 export const EntityBrowsingRoutes: Record<string, Entities> = {
   '/collections': Entities.Collection,
   '/collections/*': Entities.Collection,
@@ -9,6 +11,18 @@ export const EntityBrowsingRoutes: Record<string, Entities> = {
   '/files': Entities.File,
   '/filesystems': Entities.FileSystem,
   '/filesystems/*': Entities.FileSystem,
+  '/flags': Entities.Flag,
+  '/flags/*': Entities.Flag,
+  '/incidents': Entities.Incident,
+  '/incidents/*': Entities.Incident,
+  '/functions/compiled': Entities.CompiledFunction,
+  '/functions/compiled/*': Entities.CompiledFunction,
+  '/functions/decompiled': Entities.DecompiledFunction,
+  '/functions/decompiled/*': Entities.DecompiledFunction,
+  '/pe/sections': Entities.PeSection,
+  '/pe/sections/*': Entities.PeSection,
+  '/pe/imports': Entities.PeImport,
+  '/pe/imports/*': Entities.PeImport,
   '/folders': Entities.Folder,
   '/folders/*': Entities.Folder,
   '/network/connections': Entities.NetworkConnection,

@@ -1,24 +1,96 @@
 // project imports
-import { formatTagNames } from '../utilities';
-import { FilteredNodeTags } from '../shared/NodeInfo';
-import { Direction, Graph, NodeType, TreeNode, TreeNodeKey } from '@models/trees';
-import { Entities } from '@models/entities/entities';
+import { classifyNode } from '../graph/data';
+import { getEdgeLabel, getNodeName } from '../utilities';
+import { CONTAINER_ASSOCIATION_KINDS } from '@models/associations';
+import { entityLabel } from '@models/entities';
+import { BranchNode, Direction, Graph, TreeRelationships } from '@models/trees';
+
+// spec: ./AssociationTree.spec.md
+
+/**
+ * A single parent→child edge in a {@link TreeIndex}, carrying the graph's relationship metadata so
+ * consumers (the entity browser's relationship badges) can describe *how* two nodes relate, not just that
+ * they do. `direction` is the raw branch direction; `relationship` is the tagged relationship union
+ * (Initial / Origin / Tags / Association); `label` is the pre-formatted display string.
+ */
+export interface TreeEdge {
+  /** The child node id this edge points to. */
+  id: string;
+  /** The raw branch direction (To / From / Bidirectional). */
+  direction: Direction;
+  /** The relationship union for this edge (Association kind / Origin / Tags / Initial). */
+  relationship: TreeRelationships;
+  /** Pre-formatted, human-readable edge label (via {@link getEdgeLabel}). */
+  label: string;
+  /**
+   * For containment ("… In …") associations, the container's `name kind` (e.g. "somefolder Folder"),
+   * appended after {@link label} in the relationship badge. Undefined for non-containment edges.
+   */
+  containerLabel?: string;
+}
 
 export interface TreeIndex {
-  childrenOf: Map<string, string[]>;
+  /** Ordered, edge-carrying children per node. Use {@link childIdsOf} for a bare unique-id view. */
+  childrenOf: Map<string, TreeEdge[]>;
   parentsOf: Map<string, string[]>;
 }
 
+/**
+ * Build a direction-aware parent/child index from a graph's branches.
+ *
+ * Each branch is resolved to a parent→child edge by direction (To/Bidirectional ⇒ owner→node;
+ * From ⇒ node→owner) and stored with its relationship metadata. Edges are deduped per parent by
+ * (childId, relationship_hash): this collapses the reverse-pair a directed association produces (stored as
+ * `To` on one endpoint and `From` on the other with the same hash) into a single edge, while still allowing
+ * genuinely distinct relationships between the same two nodes to coexist. Bidirectional edges intentionally
+ * yield *mutual* parent/child entries (A is a child of B and vice-versa); the browser's per-path cycle guard
+ * keeps that from rendering forever.
+ *
+ * @param graph - The graph to index.
+ * @returns An index of edge-carrying `childrenOf` and bare `parentsOf`.
+ */
 export function buildTreeIndex(graph: Graph): TreeIndex {
-  const childrenOf = new Map<string, string[]>();
+  const childrenOf = new Map<string, TreeEdge[]>();
   const parentsOf = new Map<string, string[]>();
-  const addChild = (parent: string, child: string) => {
-    let list = childrenOf.get(parent);
-    if (!list) {
-      list = [];
-      childrenOf.set(parent, list);
+  // dedupe keys per parent so reverse-pair branches don't produce duplicate edges
+  const edgeKeys = new Map<string, Set<string>>();
+  // built once and reused so per-edge classifyNode() doesn't reallocate the growable/initial sets
+  const precomputed = {
+    growableSet: new Set(graph.growable.map((n) => n.toString())),
+    initialSet: new Set(graph.initial.map((n) => n.toString())),
+  };
+
+  const addEdge = (parent: string, child: string, branch: BranchNode) => {
+    const key = `${child}-${branch.relationship_hash ?? ''}`;
+    let keys = edgeKeys.get(parent);
+    if (!keys) {
+      keys = new Set();
+      edgeKeys.set(parent, keys);
     }
-    if (!list.includes(child)) list.push(child);
+    if (!keys.has(key)) {
+      keys.add(key);
+      let edges = childrenOf.get(parent);
+      if (!edges) {
+        edges = [];
+        childrenOf.set(parent, edges);
+      }
+      // For containment ("… In …") associations the `parent` here is the association source = the container
+      // (folder→file, filesystem→folder, file→filesystem — true for both To and From resolutions), so name it.
+      const assocKind = branch.relationship.Association?.kind;
+      let containerLabel: string | undefined;
+      if (assocKind && CONTAINER_ASSOCIATION_KINDS.has(assocKind) && graph.data_map[parent]) {
+        const name = getNodeName(graph.data_map[parent], 40);
+        if (name) containerLabel = `${name} ${entityLabel(classifyNode(parent, graph, precomputed).nodeType)}`;
+      }
+      edges.push({
+        id: child,
+        direction: branch.direction,
+        relationship: branch.relationship,
+        // getEdgeLabel formats the label from the branch's relationship; the branch's target node is `child`
+        label: getEdgeLabel(child, parent, branch, graph),
+        containerLabel,
+      });
+    }
 
     let parents = parentsOf.get(child);
     if (!parents) {
@@ -27,80 +99,72 @@ export function buildTreeIndex(graph: Graph): TreeIndex {
     }
     if (!parents.includes(parent)) parents.push(parent);
   };
+
   if (graph.branches) {
     for (const [nodeId, branches] of Object.entries(graph.branches)) {
       for (const branch of branches) {
+        // DEBUG (remove after diagnosing duplicate-node children bug): `branch.node` should be a
+        // string, but json-bigint leaves u64 hashes <= 2^53 as JS numbers. A numeric `branch.node`
+        // becomes a numeric key/edge-id here, which string-keyed lookups (growable Set, childrenOf.get)
+        // later miss — so the node renders but its children never show.
+        if (typeof branch.node !== 'string') {
+          console.warn('[tree-debug] non-string branch.node in buildTreeIndex', {
+            parent: nodeId,
+            node: branch.node,
+            nodeType: typeof branch.node,
+            direction: branch.direction,
+          });
+        }
+        // DEBUG (remove after diagnosing self-loop crash): a branch that points back to its own parent
+        // creates a source===target link that can crash 3d-force-graph's OrbitControls.
+        if (String(branch.node) === nodeId) {
+          console.warn('[tree-debug] self-loop branch in buildTreeIndex', { node: nodeId, direction: branch.direction });
+        }
         if (branch.direction === Direction.To || branch.direction === Direction.Bidirectional) {
-          addChild(nodeId, branch.node);
+          addEdge(nodeId, branch.node, branch);
         } else if (branch.direction === Direction.From) {
-          addChild(branch.node, nodeId);
+          addEdge(branch.node, nodeId, branch);
         }
       }
     }
   }
+  // DEBUG (remove after diagnosing duplicate-node children bug): surface any numeric keys / edge ids
+  // that ended up in the index. Any output here is the smoking gun — string-keyed consumers can't find these.
+  const numericChildKeys = Array.from(childrenOf.keys()).filter((k) => typeof k !== 'string');
+  const numericParentKeys = Array.from(parentsOf.keys()).filter((k) => typeof k !== 'string');
+  const numericEdgeIds = Array.from(childrenOf.values())
+    .flat()
+    .map((e) => e.id)
+    .filter((id) => typeof id !== 'string');
+  if (numericChildKeys.length || numericParentKeys.length || numericEdgeIds.length) {
+    console.warn('[tree-debug] numeric ids in tree index (root cause of missing children)', {
+      numericChildKeys,
+      numericParentKeys,
+      numericEdgeIds,
+    });
+  }
   return { childrenOf, parentsOf };
 }
 
-export function nodeTypeKeyToLabel(key: string): string {
-  return key.replace(/([a-z0-9])([A-Z])/g, '$1 $2').replace(/([A-Z])([A-Z][a-z])/g, '$1 $2');
-}
-
-export interface NodePreviewData {
-  type: string;
-  fields: { label: string; value: string | undefined }[];
-  tags: Record<string, Record<string, string[]>> | undefined;
-}
-
-export function getNodePreviewData(nodeData: TreeNode): NodePreviewData {
-  if (TreeNodeKey.Sample in nodeData && nodeData.Sample) {
-    const s = nodeData.Sample;
-    return {
-      type: Entities.File,
-      fields: [
-        { label: 'SHA256', value: s.sha256 ? s.sha256.substring(0, 16) + '...' : undefined },
-        { label: 'MD5', value: s.md5 },
-        { label: 'Submissions', value: String(s.submissions?.length ?? 0) },
-      ],
-      tags: s.tags,
-    };
+/**
+ * Bare, unique child-id view of a node's edges (preserves first-seen order).
+ *
+ * @param index - The tree index to read.
+ * @param nodeId - The parent node id.
+ * @returns The parent's child ids, each once, in edge order.
+ */
+export function childIdsOf(index: TreeIndex, nodeId: string): string[] {
+  const edges = index.childrenOf.get(nodeId);
+  if (!edges) return [];
+  const seen = new Set<string>();
+  const ids: string[] = [];
+  for (const edge of edges) {
+    if (!seen.has(edge.id)) {
+      seen.add(edge.id);
+      ids.push(edge.id);
+    }
   }
-  if (TreeNodeKey.Repo in nodeData && nodeData.Repo) {
-    const r = nodeData.Repo;
-    return {
-      type: Entities.Repo,
-      fields: [
-        { label: 'URL', value: r.url },
-        { label: 'Provider', value: r.provider },
-      ],
-      tags: r.tags,
-    };
-  }
-  if (TreeNodeKey.Tag in nodeData && nodeData.Tag) {
-    const tagStr = formatTagNames(nodeData.Tag.tags, false);
-    return {
-      type: NodeType.Tag,
-      fields: [{ label: 'Tags', value: tagStr }],
-      tags: undefined,
-    };
-  }
-  if (TreeNodeKey.Entity in nodeData && nodeData.Entity) {
-    const e = nodeData.Entity;
-    return {
-      type: nodeTypeKeyToLabel(e.kind),
-      fields: [{ label: 'Name', value: e.name }, ...(e.description ? [{ label: 'Description', value: e.description }] : [])],
-      tags: e.tags,
-    };
-  }
-  return { type: 'Unknown', fields: [], tags: undefined };
-}
-
-export function renderTagPreview(tags: Record<string, Record<string, string[]>> | undefined) {
-  if (!tags || Object.keys(tags).length === 0) return null;
-  return (
-    <div className="preview-tags">
-      <FilteredNodeTags tags={tags} />
-    </div>
-  );
+  return ids;
 }
 
 export function findMultiParentNodeIds(graph: Graph, index?: TreeIndex): Set<string> {

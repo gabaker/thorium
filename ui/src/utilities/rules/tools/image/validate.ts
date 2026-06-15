@@ -1,4 +1,3 @@
-// Validation spec: see VALIDATION_SPEC.md in this directory
 import type { Document } from 'yaml';
 import { isSeq } from 'yaml';
 import {
@@ -53,6 +52,8 @@ import {
   KWARG_DEPENDENCY_SCHEMA,
   AUTO_TAG_LOGIC_SCHEMA,
 } from './schema';
+
+// spec: ./validate.spec.md
 
 function validateSecurityContext(parentMap: unknown, parsed: Record<string, unknown>, lineIndex: LineIndex, diagnostics: Diagnostic[]) {
   const obj = validateObjectField(parentMap, parsed, 'security_context', lineIndex, diagnostics);

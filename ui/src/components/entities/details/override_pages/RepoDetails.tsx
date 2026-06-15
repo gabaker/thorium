@@ -11,6 +11,8 @@ import Page from '@components/pages/Page';
 import Subtitle from '@components/shared/titles/Subtitle';
 import Title from '@components/shared/titles/Title';
 
+// spec: ../EntityDetails.spec.md
+
 interface RepoDetailsContextType {
   repo: string | undefined; // full url for repo page is displaying
 }

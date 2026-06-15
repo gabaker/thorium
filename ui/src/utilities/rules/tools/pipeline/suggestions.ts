@@ -15,6 +15,8 @@ import {
   pipelineFieldCategory,
 } from './schema';
 
+// spec: ./SPEC.md
+
 function suggestNullReplace(
   field: string,
   parsed: Record<string, unknown>,

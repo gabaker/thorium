@@ -4,6 +4,8 @@ import { Link } from 'react-router-dom';
 import { useIncidentData } from './IncidentDataProvider';
 import { Tile, TileHeader, ScrollableBody, Table, Th, Td, TrClickable, Mono, EmptyState, LoadingContainer, Spinner } from './styles';
 
+// spec: ./SPEC.md
+
 function formatNames(submissions: { name?: string }[]): string {
   const names = submissions.map((s) => s.name).filter(Boolean);
   const unique = [...new Set(names)];

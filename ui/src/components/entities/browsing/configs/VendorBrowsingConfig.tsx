@@ -22,6 +22,8 @@ import { Filters } from '@models/search';
 import { listEntities } from '@thorpi/entities';
 import { getDetailsBasePathByEntity } from '@components/entities/details/EntityDetailsRoutes';
 
+// spec: ../EntityBrowsing.spec.md
+
 // get files using filters and and an optional cursor
 const getVendors = async (filters: Filters, cursor: string | null, errorHandler: (error: string) => void) => {
   // reset cursor when filters have changed, caller must know this

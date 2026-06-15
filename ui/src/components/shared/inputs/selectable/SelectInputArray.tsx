@@ -5,6 +5,8 @@ import Select from 'react-select';
 // project imports
 import { createReactSelectStyles } from '@utilities/select';
 
+// spec: ./selectable.spec.md
+
 const components = {
   //DropdownIndicator: null,
 };

@@ -5,6 +5,8 @@ import type { SectionProps } from './types';
 import { PopoverBody, Divider } from './Toolbar.styled';
 import LabeledRange from './LabeledRange';
 
+// spec: ./GraphControlsToolbar.spec.md
+
 const EdgesSection: React.FC<SectionProps> = ({ controls, updateControls }) => (
   <PopoverBody>
     <LabeledRange

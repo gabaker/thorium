@@ -20,6 +20,8 @@ import { Entities } from '@models/entities/entities';
 import rawAttackTagDefaults from '../../../mitre_tags/attackTagsList.tags?raw';
 import rawMbcTagDefaults from '../../../mitre_tags/MBCTagsList.tags?raw';
 
+// spec: ./tags.spec.md
+
 interface ThoriumTagSelectOption {
   value: string;
   label: string;
@@ -31,7 +33,6 @@ interface EditableTagsProps {
   tags: Tags;
   setDetails: (details: Sample) => void;
   setUpdateError?: (error: string) => void;
-  screenWidth: number;
 }
 
 interface EditTagButtonProps {
@@ -48,8 +49,7 @@ const generalTagStyle = createReactSelectStyles('White', 'rgb(160, 162, 163)');
 const fileInfoTagStyles = createReactSelectStyles('White', '#7ba8ec');
 const mitreTagStyles = createReactSelectStyles('White', 'rgb(227, 135, 81)');
 
-// eslint-disable-next-line @typescript-eslint/no-unused-vars
-const EditableTags = ({ sha256, tags, setDetails, setUpdateError, screenWidth }: EditableTagsProps) => {
+const EditableTags = ({ sha256, tags, setDetails, setUpdateError }: EditableTagsProps) => {
   const [editing, setEditing] = useState(false);
   const [pendingTags, setPendingTags] = useState<Record<string, string[]>>({});
   const [deletedTags, setDeletedTags] = useState<Record<string, string[]>>({});

@@ -185,7 +185,7 @@ describe('getEdgeLabel', () => {
 
   it('returns association kind for Association relationships', () => {
     const node = branchWith({ Association: { kind: AssociationKind.AssociatedWith } });
-    expect(getEdgeLabel('b', 'a', node, emptyGraph)).toBe('Association: AssociatedWith');
+    expect(getEdgeLabel('b', 'a', node, emptyGraph)).toBe('Association: Associated With');
   });
 
   it('returns empty string for tag relationships with no tags', () => {

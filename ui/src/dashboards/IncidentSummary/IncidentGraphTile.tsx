@@ -3,6 +3,8 @@ import { useInView } from 'react-intersection-observer';
 
 import { GraphTile, TileHeader, LoadingContainer, Spinner } from './styles';
 
+// spec: ./SPEC.md
+
 const AssociationGraph = React.lazy(() => import('@components/associations/graph/AssociationGraph'));
 
 const GraphFallback = (

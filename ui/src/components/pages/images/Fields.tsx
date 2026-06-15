@@ -23,6 +23,8 @@ import { ImageScaler } from '@models/images';
 import { OutputDisplayType } from '@models/results';
 import type { SemVer } from '@models/semver';
 
+// spec: ./ImageInfo.spec.md
+
 const TOOLTIPS = {
   name: `Image name that contains only alpha-numeric characters and dashes.`,
   creator: `The user that created this image.`,

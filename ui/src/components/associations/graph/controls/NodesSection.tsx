@@ -6,6 +6,8 @@ import type { SectionProps } from './types';
 import { PopoverBody, Divider, MenuList, MenuDropdown } from './Toolbar.styled';
 import LabeledRange from './LabeledRange';
 
+// spec: ./GraphControlsToolbar.spec.md
+
 const NODE_STYLE_LABELS: Record<string, string> = {
   spheres: 'Spheres',
   icons: 'Icons',

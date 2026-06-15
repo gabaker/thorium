@@ -1,0 +1,101 @@
+import { JSX } from 'react';
+import { Row } from 'react-bootstrap';
+import { FaRegFileCode } from 'react-icons/fa';
+
+// project imports
+import { EntityDetailsConfig } from './configs';
+import { DetailsMetadataProps } from '../EntityDetails';
+import InfoHeader from '@entities/shared/InfoHeader';
+import InfoValue from '@entities/shared/InfoValue';
+import FieldBadge from '@components/shared/badges/FieldBadge';
+import NumberInput from '@components/shared/inputs/NumberInput';
+import SelectInputArray from '@components/shared/inputs/selectable/SelectInputArray';
+import CodeEditor from '@components/shared/inputs/code/CodeEditor/CodeEditor';
+import CodeRenderer from '@components/shared/renderers/CodeRenderer';
+import { stringToRenderableInput } from '@components/shared/renderers/detect';
+import { getEntity } from '@thorpi/entities';
+import { formatAddress } from '@utilities/disassembly';
+import { FormatType } from '@utilities/rules/types';
+import { Entities } from '@models/entities';
+import { BlankDecompiledFunction, DecompiledFunction, DecompiledFunctionMetaFields } from '@models/entities/functions';
+
+const DecompiledFunctionMetaInfo = ({
+  entity,
+  pendingEntity,
+  handleUpdate,
+  editing,
+}: DetailsMetadataProps<Entities.DecompiledFunction>): JSX.Element => {
+  // apply a single metadata field change and hand the updated metadata back to the entity update
+  function updatePendingMeta<T extends keyof DecompiledFunctionMetaFields>(field: T, value: DecompiledFunctionMetaFields[T]): void {
+    const updates: DecompiledFunctionMetaFields = structuredClone(pendingEntity.metadata.DecompiledFunction);
+    updates[field] = value;
+    handleUpdate('metadata', { DecompiledFunction: updates });
+  }
+
+  return (
+    <>
+      <Row className="mt-3">
+        <InfoHeader>Address</InfoHeader>
+        <InfoValue>
+          {editing ? (
+            <NumberInput value={pendingEntity.metadata.DecompiledFunction.address} onChange={(v) => updatePendingMeta('address', v ?? 0)} min={0} />
+          ) : (
+            formatAddress(entity.metadata.DecompiledFunction.address)
+          )}
+        </InfoValue>
+      </Row>
+      <hr className="my-3" />
+      <Row>
+        <InfoHeader>Tools</InfoHeader>
+        <InfoValue>
+          {editing ? (
+            <SelectInputArray
+              values={pendingEntity.metadata.DecompiledFunction.tools}
+              onChange={(tools) => updatePendingMeta('tools', tools)}
+            />
+          ) : (
+            <FieldBadge color="Gray" noNull field={entity.metadata.DecompiledFunction.tools} />
+          )}
+        </InfoValue>
+      </Row>
+      <hr className="my-3" />
+      <Row>
+        <InfoHeader>Content</InfoHeader>
+        <InfoValue>
+          {editing ? (
+            <CodeEditor
+              value={pendingEntity.metadata.DecompiledFunction.content}
+              onChange={(text) => updatePendingMeta('content', text)}
+              format={FormatType.Decomp}
+              height="400px"
+            />
+          ) : (
+            // view-only reuses the shared decomp renderer (same viewer as results / file preview)
+            <CodeRenderer input={stringToRenderableInput(entity.metadata.DecompiledFunction.content)} format={FormatType.Decomp} height="auto" />
+          )}
+        </InfoValue>
+      </Row>
+    </>
+  );
+};
+
+const getDecompiledFunctionDetails = (
+  entityID: string,
+  setError: (err: string) => void,
+  updateEntity: (entity: DecompiledFunction) => void,
+) => {
+  void getEntity(entityID, setError).then((data) => {
+    if (data && data.kind == Entities.DecompiledFunction) {
+      updateEntity(data);
+    }
+  });
+};
+
+const DecompiledFunctionDetailsConfig: EntityDetailsConfig<Entities.DecompiledFunction> = {
+  getEntityDetails: getDecompiledFunctionDetails,
+  EntityMetaInfo: DecompiledFunctionMetaInfo,
+  BlankEntity: BlankDecompiledFunction,
+  icon: (size: number) => <FaRegFileCode size={size} />,
+};
+
+export default DecompiledFunctionDetailsConfig;

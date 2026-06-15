@@ -1,8 +1,9 @@
-// Validation spec: see VALIDATION_SPEC.md in this directory
 // project imports
 import { Severity, includes, type Diagnostic } from '../types';
 import type { YaraParseResult } from './parse';
 import { KNOWN_MODULES, RULE_NAME_PATTERN, TEXT_STRING_MODIFIERS, REGEX_STRING_MODIFIERS, HEX_STRING_MODIFIERS } from './schema';
+
+// spec: ./validate.spec.md
 
 const MODIFIER_SETS = {
   text: TEXT_STRING_MODIFIERS,

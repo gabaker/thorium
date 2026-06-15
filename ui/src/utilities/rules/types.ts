@@ -91,6 +91,10 @@ export enum FormatType {
   YAML = 'yaml',
   JSON = 'json',
   YARA = 'yara',
+  /// C-like decompiled source (decomp entities / Decomposition results)
+  Decomp = 'decomp',
+  /// Assembly disassembly (compiled function entities)
+  Disassembly = 'disassembly',
 }
 
 export interface RuleChecker {

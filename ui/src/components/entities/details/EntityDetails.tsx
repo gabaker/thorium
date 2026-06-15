@@ -25,11 +25,13 @@ import CondensedEntityTags from '@components/tags/condensed/CondensedEntityTags'
 import { useAuth } from '@utilities/auth';
 import { deleteEntity, updateEntity, fetchEntityImage } from '@thorpi/entities';
 import { CollectionKind } from '@models/entities/collections';
-import { Entities, EntityTypeMap } from '@models/entities';
+import { Entities, entityLabel, EntityTypeMap } from '@models/entities';
 import { ButtonProps } from '@models/components';
 import { GraphDataProvider } from '@components/associations/data/GraphDataContext';
 import { getBrowsingPathByEntity } from '../browsing/EntityBrowsingRoutes';
 import AlertBanner from '@components/shared/alerts/AlertBanner';
+
+// spec: ./EntityDetails.spec.md
 
 export type DetailsMetadataProps<T extends keyof EntityTypeMap> = {
   entity: EntityTypeMap[T];
@@ -155,7 +157,7 @@ export function createEntityDetailsPage<T extends keyof EntityTypeMap>(config: E
               <>
                 <Row>
                   <InfoHeader>Type</InfoHeader>
-                  <Col>{entity.kind}</Col>
+                  <Col>{entityLabel(entity.kind)}</Col>
                 </Row>
                 <hr className="my-3" />
               </>
@@ -174,7 +176,7 @@ export function createEntityDetailsPage<T extends keyof EntityTypeMap>(config: E
                     />
                   </Form.Group>
                 ) : (
-                  <Markdown>{entity.description ?? ''}</Markdown>
+                  <Markdown>{entity.description && entity.description !== 'null' ? entity.description : ''}</Markdown>
                 )}
               </InfoValue>
             </Row>
@@ -210,7 +212,7 @@ export function createEntityDetailsPage<T extends keyof EntityTypeMap>(config: E
                 {editing ? (
                   <SelectInputArray
                     isCreatable={false}
-                    options={userInfo?.groups ?? []}
+                    options={[...(userInfo?.groups ?? [])].sort((a, b) => a.localeCompare(b))}
                     values={pendingEntity.groups}
                     onChange={(groups) => updatePendingEntity('groups', groups)}
                   />
@@ -273,7 +275,7 @@ export function createEntityDetailsPage<T extends keyof EntityTypeMap>(config: E
           </Modal.Header>
           <Modal.Body>
             <div className="text-center">
-              Do you really want to delete this {entity.kind}?
+              Do you really want to delete this {entityLabel(entity.kind)}?
               <div className="pt-4">
                 <b>{entity.name}</b>
               </div>
@@ -304,7 +306,7 @@ export function createEntityDetailsPage<T extends keyof EntityTypeMap>(config: E
     const { entity } = useEntityContext();
 
     return (
-      <OverlayTipBottom tip={`Upload files associated with this ${entity.kind}.`}>
+      <OverlayTipBottom tip={`Upload files associated with this ${entityLabel(entity.kind)}.`}>
         <Button
           className="icon-btn mx-1"
           variant=""
@@ -324,7 +326,7 @@ export function createEntityDetailsPage<T extends keyof EntityTypeMap>(config: E
     const { entity } = useEntityContext();
 
     return (
-      <OverlayTipBottom tip={`Copy this ${entity.kind}.`}>
+      <OverlayTipBottom tip={`Copy this ${entityLabel(entity.kind)}.`}>
         <Button
           className={`${className} icon-btn mx-1`}
           variant=""
@@ -432,6 +434,8 @@ export function createEntityDetailsPage<T extends keyof EntityTypeMap>(config: E
     const [clearGraphic, setClearGraphic] = useState(false);
     const [existingImageUrl, setExistingImageUrl] = useState<string | null>(null);
     const [existingImageIsSvg, setExistingImageIsSvg] = useState(false);
+    // graphic upload is on for every entity by default; a config may set supportsGraphic:false to opt out
+    const supportsGraphic = config.supportsGraphic ?? true;
 
     const toggleEditMode = () => {
       setEditing((prev) => {
@@ -463,7 +467,7 @@ export function createEntityDetailsPage<T extends keyof EntityTypeMap>(config: E
           setClearGraphic(false);
           toggleEditMode();
           config.getEntityDetails(entityID, setError, handleEntityUpdate);
-          if (config.supportsGraphic) {
+          if (supportsGraphic) {
             const img = await fetchEntityImage(entityID);
             setExistingImageUrl(img?.url ?? null);
             setExistingImageIsSvg(img?.isSvg ?? false);
@@ -475,14 +479,14 @@ export function createEntityDetailsPage<T extends keyof EntityTypeMap>(config: E
     useEffect(() => {
       if (entityID) {
         config.getEntityDetails(entityID, setError, handleEntityUpdate);
-        if (config.supportsGraphic) {
+        if (supportsGraphic) {
           void fetchEntityImage(entityID).then((img) => {
             setExistingImageUrl(img?.url ?? null);
             setExistingImageIsSvg(img?.isSvg ?? false);
           });
         }
       }
-    }, [entityID]);
+    }, [entityID, supportsGraphic]);
 
     const associationInitial = useMemo(() => ({ entities: entityID ? [entityID] : [] }), [entityID]);
 
@@ -498,7 +502,7 @@ export function createEntityDetailsPage<T extends keyof EntityTypeMap>(config: E
           toggleEditMode,
           error,
           setError,
-          supportsGraphic: config.supportsGraphic ?? false,
+          supportsGraphic,
           graphicFile,
           setGraphicFile,
           clearGraphic,
@@ -507,7 +511,7 @@ export function createEntityDetailsPage<T extends keyof EntityTypeMap>(config: E
           existingImageIsSvg,
         }}
       >
-        <Page className="full-min-width" title={`${entity.kind} · ${entity.name}`}>
+        <Page className="full-min-width" title={`${entityLabel(entity.kind)} · ${entity.name}`}>
           <EntityHeader icon={config.icon} />
           <EntityButtons className="py-3" />
           {error !== '' && <AlertBanner className="mb-3">{error}</AlertBanner>}

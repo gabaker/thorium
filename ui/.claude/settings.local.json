@@ -6,7 +6,8 @@
       "Bash(npx tsc *)",
       "Bash(curl -s -m 4 -o /dev/null -w \"%{http_code}\\\\n\" http://localhost:8080/api/)",
       "Bash(curl -s -m 4 -o /dev/null -w \"%{http_code}\\\\n\" http://localhost:8000/)",
-      "Read(//home/ubuntu/projects/thorium-gabaker/node_modules/.bin/**)"
+      "Read(//home/ubuntu/projects/thorium-gabaker/node_modules/.bin/**)",
+      "Bash(kubectl get *)"
     ]
   }
 }

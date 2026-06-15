@@ -1,4 +1,3 @@
-// Validation spec: see VALIDATION_SPEC.md in this directory
 import type { Document } from 'yaml';
 import { isMap, isPair, isScalar, isSeq } from 'yaml';
 
@@ -23,6 +22,8 @@ import {
   VALUE_MODIFIERS,
   KNOWN_TOP_LEVEL_FIELDS,
 } from './schema';
+
+// spec: ./validate.spec.md
 
 function nodeLineCol(
   node: { range?: [number, number, number] | [number, number] | null | undefined },

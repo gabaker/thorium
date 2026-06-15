@@ -12,6 +12,8 @@ import type { IncidentTag, IncidentSummaryProps } from './types';
 import AlertBanner, { Severity } from '@components/shared/alerts/AlertBanner';
 import { DashboardContainer, DashboardHeader, DashboardTitle, TagBadge, DashboardGrid } from './styles';
 
+// spec: ./SPEC.md
+
 interface InnerProps {
   incidentTag: IncidentTag;
 }

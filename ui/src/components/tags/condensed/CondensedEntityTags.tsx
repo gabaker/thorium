@@ -8,18 +8,34 @@ import { filterIncludedTags, filterExcludedTags } from '../utilities';
 import { Tags } from '@models/tags';
 import { Entities } from '@models/entities';
 
-const TagContainer = styled.div`
+// spec: ../tags.spec.md
+
+const TagContainer = styled.div<{ $align: 'left' | 'center' }>`
   display: flex;
   flex-wrap: wrap;
-  justify-content: center;
+  justify-content: ${({ $align }) => ($align === 'left' ? 'flex-start' : 'center')};
+
+  /* left variant: let long tag values wrap (breaking anywhere) within a capped width instead of
+     overflowing the row — scoped here so the global .tag-item style and other views are untouched */
+  ${({ $align }) =>
+    $align === 'left' &&
+    `
+    & .tag-item {
+      max-width: 400px;
+      white-space: normal;
+      word-break: break-all;
+      text-align: left;
+    }
+  `}
 `;
 
 interface CondensedEntityTagProps {
   tags: Tags; // tags to display in condensed non-editable view
   resource?: Entities;
+  align?: 'left' | 'center'; // tag alignment (default centered)
 }
 
-const CondensedEntityTags: React.FC<CondensedEntityTagProps> = ({ tags, resource }) => {
+const CondensedEntityTags: React.FC<CondensedEntityTagProps> = ({ tags, resource, align = 'center' }) => {
   const excludeTags: string[] = [];
   const generalTags = filterExcludedTags(tags, excludeTags);
   const tlpTags = filterIncludedTags(tags, ['TLP']);
@@ -33,7 +49,7 @@ const CondensedEntityTags: React.FC<CondensedEntityTagProps> = ({ tags, resource
           </AlertBanner>
         </div>
       )}
-      <TagContainer>
+      <TagContainer $align={align}>
         {Object.keys(tlpTags).length > 0 &&
           Object.keys(tlpTags)
             .sort()
