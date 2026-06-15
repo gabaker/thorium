@@ -1,5 +1,7 @@
 import { OmnibarOptionMap } from './options';
 
+// spec: ./SPEC.md
+
 /* Package for clause data and all clause related functions.
  *
  * */
@@ -35,7 +37,8 @@ type ClauseBase = {
 };
 
 export type Clause =
-  (ClauseBase & { condition: SingleCondition; value: SingleValue }) | (ClauseBase & { condition: MultiCondition; value: MultiValue });
+  | (ClauseBase & { condition: SingleCondition; value: SingleValue })
+  | (ClauseBase & { condition: MultiCondition; value: MultiValue });
 
 export type ClauseDraft = {
   category?: string;

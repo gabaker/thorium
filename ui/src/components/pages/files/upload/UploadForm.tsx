@@ -10,7 +10,11 @@ import ProgressBarContainer from './ProgressBarContainer';
 import TLPSelection from './TLPSelection';
 import OriginForm from './OriginForm';
 import UploadAlertBanner from './UploadAlertBanner';
+import { getGroupedAssociationKinds } from './associations';
 import { useUpload } from './UploadContext';
+import { AssociationKind, associationKindLabel } from '@models/associations';
+
+// spec: ./upload.spec.md
 
 const UploadForm: React.FC = () => {
   const {
@@ -36,9 +40,14 @@ const UploadForm: React.FC = () => {
     uploadSHA256,
     runReactionsRes,
     resetStatusMessages,
+    entity,
+    associationKind,
+    setAssociationKind,
   } = useUpload();
 
   const disabledClass = uploadInProgress ? 'disabled ' : '';
+  // association-kind options, file-relevant kinds grouped first (only shown when linking to an entity)
+  const associationKindGroups = getGroupedAssociationKinds();
 
   return (
     <>
@@ -79,11 +88,54 @@ const UploadForm: React.FC = () => {
           <SelectInputArray
             isCreatable={false}
             options={userGroups}
-            values={selectedGroups.sort()}
+            values={[...selectedGroups].sort()}
             onChange={(groups: string[]) => setSelectedGroups(groups)}
           />
         </Col>
       </Row>
+      {/* only offered when the page was opened from an entity page (an entity to link the files to) */}
+      {entity && (
+        <>
+          <Row className="mb-4 alt-label">
+            <Col className="upload-field-name"></Col>
+            <Col className="upload-field-name-alt">
+              <Subtitle>Associate With</Subtitle>
+            </Col>
+          </Row>
+          <Row className="mb-4">
+            <Col className="upload-field-name">
+              <Subtitle>Associate With</Subtitle>
+            </Col>
+            <Col className={disabledClass + 'upload-field'}>
+              <OverlayTipTop tip={`How the uploaded files relate to ${entity.name}`}>
+                <select
+                  className="form-select"
+                  value={associationKind}
+                  disabled={uploadInProgress}
+                  aria-label="Association type"
+                  onChange={(e) => {
+                    setAssociationKind(e.target.value as AssociationKind);
+                    resetStatusMessages();
+                  }}
+                >
+                  {associationKindGroups.map((group) => (
+                    <optgroup key={group.label} label={group.label}>
+                      {group.kinds.map((kind) => (
+                        <option key={kind} value={kind}>
+                          {associationKindLabel(kind)}
+                        </option>
+                      ))}
+                    </optgroup>
+                  ))}
+                </select>
+              </OverlayTipTop>
+              <p className="mt-2">
+                Uploaded files will be linked to <b>{entity.name}</b> as &quot;{associationKindLabel(associationKind)}&quot;.
+              </p>
+            </Col>
+          </Row>
+        </>
+      )}
       <Row className="mb-4 alt-label">
         <Col className="upload-field-name"></Col>
         <Col className="upload-field-name-alt">

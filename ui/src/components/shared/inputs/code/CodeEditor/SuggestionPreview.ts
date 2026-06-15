@@ -2,6 +2,8 @@ import { EditorView, Decoration, type DecorationSet, WidgetType } from '@codemir
 import { EditorState, StateField, StateEffect } from '@codemirror/state';
 import { FormatType, FieldValueType, type FieldSchema } from '@utilities/rules/types';
 
+// spec: ./CodeEditor.spec.md
+
 export interface PreviewProposal {
   field: string;
   value: string;
@@ -3749,7 +3751,7 @@ const previewDecoField = StateField.define<{ decos: DecorationSet; viewRef: { cu
       const rfrom = Math.min(curr.removeFrom, doc.length);
       const rto = Math.min(curr.removeTo, doc.length);
       const strikethrough = Decoration.line({ class: 'cm-line-strikethrough' });
-      for (let pos = rfrom; pos < rto;) {
+      for (let pos = rfrom; pos < rto; ) {
         const l = doc.lineAt(pos);
         if (l.length > 0) rangeList.push(strikethrough.range(l.from));
         pos = l.to + 1;

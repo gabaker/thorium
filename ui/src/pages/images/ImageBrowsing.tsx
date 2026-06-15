@@ -25,6 +25,8 @@ import type { Group } from '@models/groups';
 import { RoleKey } from '@models/users';
 import type { UserInfo } from '@models/users';
 
+// spec: ./SPEC.md
+
 /** Filter images client-side by the omnibar clauses (group, creator, name, free text). */
 const filterImages = (images: Image[], clauses: Clause[]): Image[] => {
   const groups = getGroupsFromClauses(clauses);
