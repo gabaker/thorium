@@ -4,13 +4,13 @@ import SyntaxHighlighter from 'react-syntax-highlighter';
 import { atomOneDark } from 'react-syntax-highlighter/dist/esm/styles/hljs';
 
 // project imports
-import ResultsFiles from './files/ResultsFiles';
 import { ResultRenderProps } from '../props';
-import { ChildrenFiles } from './files';
+
+// spec: ../ToolResult.spec.md
 
 const MAX_LENGTH = 100000;
 
-const Disassembly: React.FC<ResultRenderProps> = ({ result, sha256, tool }) => {
+const Disassembly: React.FC<ResultRenderProps> = ({ result }) => {
   const rawCodeString = result?.result && typeof result.result === 'string' ? result.result.replace(/\\n/g, '\n').replace(/["]+/g, '') : '';
   const totalCodeSize = rawCodeString.length;
   const codeString = rawCodeString.substring(0, MAX_LENGTH);
@@ -21,7 +21,6 @@ const Disassembly: React.FC<ResultRenderProps> = ({ result, sha256, tool }) => {
   }
   return (
     <Card className="scroll-log tool-result">
-      <ResultsFiles result={result} sha256={sha256} tool={tool} />
       {truncated ? (
         <Row>
           <AlertBanner severity={Severity.Warning}>
@@ -32,9 +31,6 @@ const Disassembly: React.FC<ResultRenderProps> = ({ result, sha256, tool }) => {
       ) : null}
       {/* eslint-disable-next-line @typescript-eslint/no-unsafe-assignment -- atomOneDark has mismatched types */}
       <SyntaxHighlighter style={atomOneDark}>{codeString}</SyntaxHighlighter>
-      <hr />
-      <ResultsFiles result={result} sha256={sha256} tool={tool} />
-      <ChildrenFiles result={result} sha256={sha256} tool={tool} />
     </Card>
   );
 };

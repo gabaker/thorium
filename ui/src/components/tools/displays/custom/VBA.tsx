@@ -4,6 +4,8 @@ import { Row, Col, Card } from 'react-bootstrap';
 // project imports
 import { Output, Value } from '@models/results';
 
+// spec: ../../ToolResult.spec.md
+
 interface VBAProps {
   result: Output;
 }

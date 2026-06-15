@@ -14,6 +14,8 @@ import { deletePipeline } from '@thorpi/pipelines';
 import type { Group } from '@models/groups';
 import type { Pipeline } from '@models/pipelines';
 
+// spec: ./PipelineInfo.spec.md
+
 interface PipelineAccordionItemProps {
   pipeline: Pipeline;
   groups: Record<string, Group>;

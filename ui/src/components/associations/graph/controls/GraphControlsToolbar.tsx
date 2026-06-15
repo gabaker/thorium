@@ -14,6 +14,8 @@ import NodesSection from './NodesSection';
 import EdgesSection from './EdgesSection';
 import ExportSection from './ExportSection';
 
+// spec: ./GraphControlsToolbar.spec.md
+
 interface GraphControlsToolbarProps {
   graphId: string;
   controls: GraphControls;
@@ -21,6 +23,8 @@ interface GraphControlsToolbarProps {
   graphInstance: GraphInstance | null;
   nodeCount: number;
   loading: boolean;
+  /** True while a grow/growToDepth is in flight — the depth control disables so rapid changes don't queue work. */
+  growing: boolean;
 }
 
 const GraphControlsToolbar: React.FC<GraphControlsToolbarProps> = ({
@@ -30,6 +34,7 @@ const GraphControlsToolbar: React.FC<GraphControlsToolbarProps> = ({
   graphInstance,
   nodeCount,
   loading,
+  growing,
 }) => {
   const [isOpen, setIsOpen] = useState(false);
   const [activeSection, setActiveSection] = useState<SectionKey | null>(null);
@@ -67,12 +72,12 @@ const GraphControlsToolbar: React.FC<GraphControlsToolbarProps> = ({
   return (
     <ToolbarContainer ref={toolbarRef}>
       {isOpen ? (
-        <ToolbarIconButton $active onClick={handleGearToggle}>
+        <ToolbarIconButton $active aria-label="Toggle controls" onClick={handleGearToggle}>
           <FaCog size={16} />
         </ToolbarIconButton>
       ) : (
         <OverlayTipTop tip="Controls">
-          <ToolbarIconButton onClick={handleGearToggle}>
+          <ToolbarIconButton aria-label="Toggle controls" onClick={handleGearToggle}>
             <FaCog size={16} />
           </ToolbarIconButton>
         </OverlayTipTop>
@@ -148,13 +153,14 @@ const GraphControlsToolbar: React.FC<GraphControlsToolbarProps> = ({
             />
           </ToolbarButton>
 
-          <OverlayTipTop tip="Depth" disabled={depthMenuOpen}>
+          <OverlayTipTop tip={growing ? 'Growing…' : 'Depth'} disabled={depthMenuOpen}>
             <ScrollableSelect
               value={controls.depth}
               onChange={(v) => updateControls({ type: 'depth', state: v })}
               min={1}
               windowSize={5}
               onOpenChange={setDepthMenuOpen}
+              disabled={growing}
             />
           </OverlayTipTop>
         </>

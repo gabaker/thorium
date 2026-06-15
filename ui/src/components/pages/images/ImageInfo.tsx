@@ -2,20 +2,18 @@ import { useEffect, useImperativeHandle, useState } from 'react';
 import type { FC, Ref } from 'react';
 
 // project imports
-import { imageChecker, FIELDS_KEYS, estimateRows, distributeSections, formatBanKind } from './utilities';
+import { imageChecker, FIELDS_KEYS, formatBanKind } from './utilities';
 import type { SectionItem, EnvValue } from './utilities';
 import {
-  ColumnsContainer,
-  LeftColumn,
-  RightColumn,
   ColumnCard,
-  RightColumnCard,
   FieldsRow,
   CenteredContent,
   FormWrapper,
   ErrorRow,
   CenterRow,
   ImageBansContainer,
+  SECTION_COL_WIDTH_PX,
+  SECTION_GAP,
 } from './ImageInfo.styled';
 import {
   Fields,
@@ -34,6 +32,7 @@ import {
 } from '@components/pages/images';
 import type { FieldsValue, ResourcesValue } from '@components/pages/images';
 import { BanItem } from '@components/shared/browsing';
+import { BalancedColumns } from '@components/shared/layout/BalancedColumns';
 import AlertBanner, { Severity } from '@components/shared/alerts/AlertBanner';
 import LoadingSpinner from '@components/shared/fallback/LoadingSpinner';
 import ImagePipelineEditor from '@components/shared/inputs/code/CodeEditor/ImagePipelineEditor';
@@ -60,6 +59,8 @@ import { BlankOutputCollection, ImageScaler } from '@models/images';
 import type { Volume } from '@models/volumes';
 import type { OutputCollection as OutputCollectionType } from '@models/results';
 import { RoleKey } from '@models/users';
+
+// spec: ./ImageInfo.spec.md
 
 export interface ImageInfoHandle {
   handleUpdate: () => void;
@@ -355,17 +356,9 @@ const ImageInfo: FC<ImageInfoProps> = ({ ref, images, image, setImages, inEditMo
             const vols = currentImage.volumes ?? [];
             const netPols = currentImage.network_policies ?? [];
 
-            const depsRows = 1 + 4 + 4 + 2 + (deps.results?.images?.length ? 4 : 0) + 5 + 5;
-            const ocRows = 1 + 4 + (oc.files?.names?.length ? 1 : 0) + 2 + (oc.auto_tag ? Object.keys(oc.auto_tag).length : 0);
-            const cfRows = 1 + 4;
-            const envEntries = Object.keys(env).length;
-            const envRows = envEntries > 0 ? 1 + envEntries : 1;
-            const volRows = 1 + vols.reduce((sum, v) => sum + Object.keys(v).length, 0) + Math.max(vols.length - 1, 0);
-
             const sections: SectionItem[] = [];
             sections.push({
               key: 'resources',
-              estimatedHeight: estimateRows(8),
               content: (
                 <Resources
                   value={currentImage.resources ?? {}}
@@ -377,7 +370,6 @@ const ImageInfo: FC<ImageInfoProps> = ({ ref, images, image, setImages, inEditMo
             });
             sections.push({
               key: 'arguments',
-              estimatedHeight: estimateRows(7),
               content: (
                 <Arguments
                   value={currentImage.args ?? {}}
@@ -390,7 +382,6 @@ const ImageInfo: FC<ImageInfoProps> = ({ ref, images, image, setImages, inEditMo
             if (scaler !== 'External') {
               sections.push({
                 key: 'output-collection',
-                estimatedHeight: estimateRows(ocRows),
                 content: (
                   <OutputCollection
                     value={oc}
@@ -403,7 +394,6 @@ const ImageInfo: FC<ImageInfoProps> = ({ ref, images, image, setImages, inEditMo
               });
               sections.push({
                 key: 'dependencies',
-                estimatedHeight: estimateRows(depsRows),
                 content: (
                   <Dependencies
                     value={deps}
@@ -416,7 +406,6 @@ const ImageInfo: FC<ImageInfoProps> = ({ ref, images, image, setImages, inEditMo
               });
               sections.push({
                 key: 'child-filters',
-                estimatedHeight: estimateRows(cfRows),
                 content: (
                   <ChildFilters
                     value={cf}
@@ -429,7 +418,6 @@ const ImageInfo: FC<ImageInfoProps> = ({ ref, images, image, setImages, inEditMo
             if (scaler === String(ImageScaler.K8s)) {
               sections.push({
                 key: 'environment',
-                estimatedHeight: estimateRows(envRows),
                 content: (
                   <EnvironmentVariables
                     value={env}
@@ -441,7 +429,6 @@ const ImageInfo: FC<ImageInfoProps> = ({ ref, images, image, setImages, inEditMo
             }
             sections.push({
               key: 'modifiers',
-              estimatedHeight: estimateRows(1),
               content: (
                 <Modifiers
                   value={currentImage.modifiers ?? ''}
@@ -453,7 +440,6 @@ const ImageInfo: FC<ImageInfoProps> = ({ ref, images, image, setImages, inEditMo
             if (scaler === String(ImageScaler.K8s)) {
               sections.push({
                 key: 'volumes',
-                estimatedHeight: estimateRows(volRows),
                 content: (
                   <Volumes
                     value={vols}
@@ -465,7 +451,6 @@ const ImageInfo: FC<ImageInfoProps> = ({ ref, images, image, setImages, inEditMo
               });
               sections.push({
                 key: 'network-policies',
-                estimatedHeight: estimateRows(1 + Math.max(netPols.length, 1)),
                 content: (
                   <NetworkPolicies
                     value={netPols}
@@ -478,7 +463,6 @@ const ImageInfo: FC<ImageInfoProps> = ({ ref, images, image, setImages, inEditMo
             if (scaler === String(ImageScaler.Kvm)) {
               sections.push({
                 key: 'kvm',
-                estimatedHeight: estimateRows(3),
                 content: (
                   <KVM
                     value={currentImage.kvm ?? { xml: '', qcow2: '' }}
@@ -491,7 +475,6 @@ const ImageInfo: FC<ImageInfoProps> = ({ ref, images, image, setImages, inEditMo
             if (scaler === String(ImageScaler.K8s)) {
               sections.push({
                 key: 'security-context',
-                estimatedHeight: estimateRows(4),
                 content: (
                   <SecurityContext
                     value={currentImage.security_context ?? {}}
@@ -503,21 +486,17 @@ const ImageInfo: FC<ImageInfoProps> = ({ ref, images, image, setImages, inEditMo
               });
             }
 
-            const { left, right } = distributeSections(sections);
-
+            // measured balancing: BalancedColumns derives the column count from the container
+            // width (two on normal screens, one when narrow, more when very wide) and flows
+            // each card into the currently-shortest column using real DOM heights
             return (
-              <ColumnsContainer>
-                <LeftColumn>
-                  {left.map((s) => (
-                    <ColumnCard key={s.key}>{s.content}</ColumnCard>
-                  ))}
-                </LeftColumn>
-                <RightColumn>
-                  {right.map((s) => (
-                    <RightColumnCard key={s.key}>{s.content}</RightColumnCard>
-                  ))}
-                </RightColumn>
-              </ColumnsContainer>
+              <BalancedColumns
+                columnWidth={SECTION_COL_WIDTH_PX}
+                gap={SECTION_GAP}
+                items={sections.map((s) => (
+                  <ColumnCard key={s.key}>{s.content}</ColumnCard>
+                ))}
+              />
             );
           })()}
         </>

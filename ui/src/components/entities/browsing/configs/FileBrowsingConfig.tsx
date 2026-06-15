@@ -16,6 +16,8 @@ import { Entities } from '@models/entities/entities';
 import { scaling } from '@styles';
 import { getDetailsBasePathByEntity } from '@components/entities/details/EntityDetailsRoutes';
 
+// spec: ../EntityBrowsing.spec.md
+
 // get files using filters and and an optional cursor
 const getFiles = async (filters: Filters, existingCursor: string | null) => {
   // get files list from API

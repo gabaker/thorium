@@ -14,6 +14,7 @@ import GroupMemberCount from '@components/pages/groups/GroupMemberCount';
 import GroupRoleBadge from '@components/pages/groups/GroupRoleBadge';
 import NoResultsBanner from '@components/shared/alerts/NoResultsBanner';
 import LoadingSpinner from '@components/shared/fallback/LoadingSpinner';
+import Markdown from '@components/shared/syntax/Markdown';
 import { OverlayTipRight, OverlayTipTop, OverlayTipLeft } from '@components/shared/overlay/tips';
 import { OmnibarGroups } from '@components/shared/inputs/omnibar/Bars';
 import { Clause } from '@components/shared/inputs/omnibar/ClauseTypes';
@@ -22,12 +23,15 @@ import { useOmnibarUrlState } from '@components/shared/inputs/omnibar/useOmnibar
 import { getGroupsFromClauses, getStringFieldListFromClauses } from '@components/shared/inputs/omnibar/utils';
 import { getAllGroupUsers, hasOverlap } from '@utilities/groups';
 import { useAuth } from '@utilities/auth';
+import { cleanDescription } from '@utilities/description';
 import { createReactSelectStyles } from '@utilities/select';
 import { canModifyGroup, isGroupOwner } from '@utilities/permissions';
 import { fetchGroups } from '@utilities/fetch';
 import { listUsers } from '@thorpi/users';
 import { createGroup, deleteGroup, getGroup, updateGroup } from '@thorpi/groups';
 import { GroupRoleKey, type Group, type GroupUpdate, type GroupRoleUpdate } from '@models/groups';
+
+// spec: ./Groups.spec.md
 
 interface SelectOption {
   value: string;
@@ -668,7 +672,7 @@ const Groups = () => {
               </OverlayTipRight>
             </Col>
             <Col className="edit-col descr-height">
-              <p>{description}</p>
+              <Markdown>{cleanDescription(description)}</Markdown>
             </Col>
           </Row>
           <Row className="mt-4">

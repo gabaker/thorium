@@ -1,9 +1,40 @@
-import { Graph, Seed } from '@models/trees';
+import { BranchNode, Graph, Seed } from '@models/trees';
 import client, { parseRequestError } from './client';
 import JSONBigInt from 'json-bigint';
 
 // this will force big ints to be strings
 const JSONBigString = JSONBigInt({ storeAsString: true });
+
+/**
+ * Normalize every node-id value in a parsed graph to a string.
+ *
+ * The API serializes u64 node ids as JSON numbers in `initial`/`growable`/`sent` and in each branch's
+ * `node` field, while `data_map`/`branches` object keys are always strings. `json-bigint` (storeAsString)
+ * only converts values longer than 15 digits to strings, so smaller hashes arrive as JS numbers. Downstream
+ * code keys `Set`/`Map` lookups by string ids, so a numeric id silently misses (duplicate/short-hash nodes
+ * then show no children and can't be grown). Coercing every id to a string here keeps the whole app
+ * consistent regardless of hash magnitude.
+ *
+ * @param graph - The freshly parsed graph (mutated in place).
+ * @returns The same graph with all node ids as strings.
+ */
+export const normalizeGraphIds = (graph: Graph): Graph => {
+  const toStr = (id: unknown): string => String(id);
+  if (Array.isArray(graph.initial)) graph.initial = graph.initial.map(toStr);
+  if (Array.isArray(graph.growable)) graph.growable = graph.growable.map(toStr);
+  if (Array.isArray(graph.sent)) graph.sent = graph.sent.map(toStr);
+  const normBranches = (branches?: { [nodeId: string]: BranchNode[] }): void => {
+    if (!branches) return;
+    for (const key of Object.keys(branches)) {
+      for (const branch of branches[key]) {
+        branch.node = toStr(branch.node);
+      }
+    }
+  };
+  normBranches(graph.branches);
+  normBranches(graph.hint_branches);
+  return graph;
+};
 
 /**
  * Build the initial association graph from a set of seed nodes (`POST /trees/`).
@@ -32,7 +63,8 @@ export const getInitialTree = async (
     .post<string>(url, { ...data }, { transformResponse: [(data: string) => data], params: params })
     .then((res) => {
       if (res && res.status && res.status == 200) {
-        return JSONBigString.parse(res.data) as Graph;
+        // normalize all node ids to strings at the parse boundary
+        return normalizeGraphIds(JSONBigString.parse(res.data) as Graph);
       }
       return null;
     })
@@ -61,7 +93,8 @@ export const growTree = async (id: string, nodes: string[], errorHandler: (error
     .patch<string>(url, { growable: nodes }, { transformResponse: [(data: string) => data], params: params })
     .then((res) => {
       if (res?.status && res.status == 200 && res.data) {
-        return JSONBigString.parse(res.data) as Graph;
+        // normalize all node ids to strings at the parse boundary
+        return normalizeGraphIds(JSONBigString.parse(res.data) as Graph);
       }
       return null;
     })

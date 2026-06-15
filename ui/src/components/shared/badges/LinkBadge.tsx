@@ -5,6 +5,8 @@ import styled from 'styled-components';
 // project imports
 import { OverlayTipBottom } from '@components/shared/overlay/tips';
 
+// spec: ./LinkBadge.spec.md
+
 interface LinkBadgeProps {
   url: string; // redirect url
   label?: string;

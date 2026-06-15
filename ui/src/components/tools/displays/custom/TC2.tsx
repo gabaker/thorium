@@ -4,6 +4,8 @@ import AlertBanner, { Severity } from '@components/shared/alerts/AlertBanner';
 // project imports
 import { ResultRenderProps } from '@components/tools/props';
 
+// spec: ../../ToolResult.spec.md
+
 const TC2: React.FC<ResultRenderProps> = ({ result }) => {
   // return a list of links to children files, one file per row
   if (

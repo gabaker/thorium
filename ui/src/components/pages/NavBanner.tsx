@@ -3,11 +3,14 @@ import { Link, useNavigate } from 'react-router-dom';
 import { FaQuestion } from 'react-icons/fa';
 import styled from 'styled-components';
 
+// spec: ./Page.spec.md
+
 // project imports
 import { OverlayTipRight } from '@components/shared/overlay/tips';
 import { clearTagDataFromLocalStorage } from '@utilities/tags';
 import { useAuth } from '@utilities/auth';
 import { getApiUrl } from '@utilities/url';
+import { useUserImage } from '@utilities/useUserImage';
 
 const StyledNavbar = styled.nav`
   display: flex;
@@ -65,6 +68,9 @@ const DropdownContainer = styled.div`
 `;
 
 const DropdownToggle = styled.button`
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
   color: var(--thorium-nav-text);
   background-color: var(--thorium-nav-panel-bg);
   padding: 0.25rem 0.5rem;
@@ -76,6 +82,15 @@ const DropdownToggle = styled.button`
   &:hover {
     color: var(--thorium-highlight-text);
   }
+`;
+
+// Small round profile icon shown to the left of the username; only rendered when the
+// user has set one (no placeholder when absent).
+const NavAvatar = styled.img`
+  width: 22px;
+  height: 22px;
+  border-radius: 50%;
+  object-fit: cover;
 `;
 
 const DropdownMenu = styled.div<{ $open: boolean }>`
@@ -127,6 +142,7 @@ const DropdownLink = styled(Link)`
 
 const NavBanner = () => {
   const { userInfo, logout } = useAuth();
+  const { imageUrl } = useUserImage(userInfo?.username, userInfo?.has_image);
   const navigate = useNavigate();
   const apiURL = getApiUrl();
   const [dropdownOpen, setDropdownOpen] = useState(false);
@@ -172,7 +188,9 @@ const NavBanner = () => {
         </DocsLink>
         {userInfo && userInfo.username && (
           <DropdownContainer ref={dropdownRef}>
-            <DropdownToggle onClick={() => setDropdownOpen((prev) => !prev)}>@{userInfo.username}</DropdownToggle>
+            <DropdownToggle onClick={() => setDropdownOpen((prev) => !prev)}>
+              {imageUrl && <NavAvatar src={imageUrl} alt="" />}@{userInfo.username}
+            </DropdownToggle>
             <DropdownMenu $open={dropdownOpen}>
               <DropdownLink to="/profile" onClick={() => setDropdownOpen(false)}>
                 Profile

@@ -1,5 +1,20 @@
+// spec: ./GraphDataContext.spec.md
+
 import { Graph } from '@models/trees';
 
+/**
+ * Merge a grow response into the current graph, producing a new {@link Graph}.
+ *
+ * Nodes from `grown.data_map` overwrite the initial entries (newer info wins). Branches are
+ * appended per source, deduped by `(node, direction, relationship_hash)` so a repeated edge is
+ * never drawn twice. The growable frontier becomes the previously-growable nodes minus the ones
+ * just grown, plus any newly growable nodes the response reports.
+ *
+ * @param initial - The current graph to merge into (not mutated).
+ * @param grown - The grow response to fold in.
+ * @param grownNodeIds - The node ids that were grown in this request (removed from the frontier).
+ * @returns A new merged graph; `initial` and `grown` are left unchanged.
+ */
 export function mergeGrowthInto(initial: Graph, grown: Graph, grownNodeIds: string[]): Graph {
   const mergedDataMap = { ...initial.data_map };
   // merge nodes from grown graph into initial
@@ -30,7 +45,6 @@ export function mergeGrowthInto(initial: Graph, grown: Graph, grownNodeIds: stri
   }
   // get unique set of nodes that are still growable
   const grownSet = new Set(grownNodeIds);
-  // in the future when we page the returned values growing a node we may need to update this logic
   const remaining = initial.growable.filter((id) => !grownSet.has(id));
   if (grown.growable) {
     remaining.push(...grown.growable);
@@ -43,8 +57,16 @@ export function mergeGrowthInto(initial: Graph, grown: Graph, grownNodeIds: stri
   };
 }
 
-// compute distance from seed nodes to each other node in the graph
-// used for "growToDepth" to calculate which growable nodes need to be grown
+/**
+ * Compute the shortest hop distance from the graph's seed nodes to every reachable node.
+ *
+ * Runs a BFS from `graph.initial` (each seeded at distance 0) over an undirected adjacency built
+ * from `graph.branches`, so distance ignores edge direction. `growToDepth` uses the result to pick
+ * which growable frontier nodes still need to be grown to reach a target depth.
+ *
+ * @param graph - The graph to traverse.
+ * @returns A map of node id to its shortest distance from any seed; unreachable nodes are absent.
+ */
 export function computeDistances(graph: Graph): Map<string, number> {
   const distances = new Map<string, number>();
   const queue: [string, number][] = [];

@@ -8,6 +8,8 @@ import { SIZE_SCALED_KEYS } from './sizeDefaults';
 import { VisualState } from '../types';
 import type { GraphNode, GraphLink, GraphInstance, D3ChargeForce, D3LinkForce } from '../types';
 
+// spec: ./GraphControlsToolbar.spec.md
+
 export type LabelEntry = { sprite: THREE.Object3D; degree: number; isInitial: boolean; baseScale: THREE.Vector3 };
 
 // Directional arrows land at `cbrt(nodeVal) * nodeRelSize` from the node center
@@ -47,7 +49,6 @@ export const buildNodeObject = (
   renderMode: NodeRenderMode,
   showLabels: boolean,
   nodeRelSize: number,
-  labelScale: number,
   labelMap?: Map<string, LabelEntry>,
   nodeOpacity = 1,
 ) => {
@@ -77,7 +78,7 @@ export const buildNodeObject = (
     if (showLabels) {
       const labelSprite = new SpriteText(node.label);
       labelSprite.color = getNodeColor(node.nodeType, node.visualState);
-      labelSprite.textHeight = 3 * labelScale;
+      labelSprite.textHeight = 3;
       labelSprite.position.y = renderMode === NodeRenderMode.Icons ? -(node.diameter / 5 + 4) * sizeFactor : -(node.diameter / 5 + 2);
       labelSprite.material.depthWrite = false;
       group.add(labelSprite);
@@ -98,19 +99,31 @@ export const buildNodeObject = (
   };
 };
 
-export const buildEdgeLabelFactory = (labelScale: number, edgeLabelMap?: Map<string, LabelEntry>) => {
+/**
+ * Build a link-object factory that renders edge labels as SpriteText billboards
+ * and registers them in the edge label map for the per-frame declutter loop.
+ *
+ * @param edgeLabelMap - Map to register created label sprites in, keyed by `source-target`.
+ * @param getDegree - Live lookup from node id to degree; a live lookup is required because
+ *   link endpoints may still be unresolved string ids at first digest and the factory
+ *   closure outlives graph growths that change degrees.
+ * @returns Factory producing a label sprite for a link, or `undefined` for unlabeled links.
+ */
+export const buildEdgeLabelFactory = (edgeLabelMap?: Map<string, LabelEntry>, getDegree?: (id: string) => number | undefined) => {
   return (link: GraphLink): THREE.Object3D | undefined => {
     if (!link.label) return undefined;
     const sprite = new SpriteText(link.label);
     sprite.color = getEdgeColor();
-    sprite.textHeight = 2.5 * labelScale;
+    sprite.textHeight = 2.5;
     sprite.material.depthWrite = false;
 
     if (edgeLabelMap) {
       const src = typeof link.source === 'object' ? (link.source as GraphNode).id : link.source;
       const tgt = typeof link.target === 'object' ? (link.target as GraphNode).id : link.target;
       const obj = sprite as unknown as THREE.Object3D;
-      edgeLabelMap.set(`${src}-${tgt}`, { sprite: obj, degree: 1, isInitial: false, baseScale: obj.scale.clone() });
+      // an edge is only as important as its weaker endpoint, so rank by min endpoint degree
+      const degree = Math.min(getDegree?.(src) ?? 1, getDegree?.(tgt) ?? 1);
+      edgeLabelMap.set(`${src}-${tgt}`, { sprite: obj, degree, isInitial: false, baseScale: obj.scale.clone() });
     }
 
     return sprite;
@@ -126,6 +139,7 @@ export const createControlsReducer = (
   labelSpritesRef: React.RefObject<Map<string, LabelEntry>>,
   edgeLabelSpritesRef: React.RefObject<Map<string, LabelEntry>>,
   lastCamDistRef?: React.RefObject<number>,
+  nodeDegreesRef?: React.RefObject<Map<string, number>>,
 ) => {
   const sizeScaledKeySet = new Set<string>(SIZE_SCALED_KEYS);
 
@@ -146,7 +160,8 @@ export const createControlsReducer = (
           if (action.state) {
             edgeLabelSpritesRef.current.clear();
             gi.linkThreeObjectExtend(true);
-            gi.linkThreeObject(((link: GraphLink) => buildEdgeLabelFactory(state.edgeLabelScale, edgeLabelSpritesRef.current)(link)) as (
+            gi.linkThreeObject(((link: GraphLink) =>
+              buildEdgeLabelFactory(edgeLabelSpritesRef.current, (id: string) => nodeDegreesRef?.current.get(id))(link)) as (
               link: GraphLink,
             ) => THREE.Object3D);
             gi.linkPositionUpdate(
@@ -174,14 +189,7 @@ export const createControlsReducer = (
         if (gi) {
           labelSpritesRef.current.clear();
           gi.nodeThreeObject(
-            buildNodeObject(
-              state.nodeRenderMode,
-              action.state,
-              state.nodeRelSize,
-              state.nodeLabelScale,
-              labelSpritesRef.current,
-              state.nodeOpacity,
-            ),
+            buildNodeObject(state.nodeRenderMode, action.state, state.nodeRelSize, labelSpritesRef.current, state.nodeOpacity),
           );
           gi.nodeThreeObjectExtend(state.nodeRenderMode === NodeRenderMode.Spheres);
           gi.refresh();
@@ -191,6 +199,9 @@ export const createControlsReducer = (
       case 'showNodeInfo':
         return { ...state, showNodeInfo: action.state };
       case 'selected':
+        // selection pins its label in the declutter pass; invalidate the camera cache
+        // so the per-frame label loop applies the new pin on the next frame
+        if (lastCamDistRef) lastCamDistRef.current = -1;
         return { ...state, selectedElement: action.state };
       case 'depth':
         return { ...state, depth: action.state };
@@ -198,48 +209,24 @@ export const createControlsReducer = (
         return { ...state, filterChildless: action.state };
       case 'focusOnClick':
         return { ...state, focusOnClick: action.state };
-      case 'adjustDistanceOnFocus':
-        return { ...state, adjustDistanceOnFocus: action.state };
+      case 'fitNeighborhoodOnFocus':
+        return { ...state, fitNeighborhoodOnFocus: action.state };
       case 'refitOnGrow':
         return { ...state, refitOnGrow: action.state };
-      case 'focusDistanceRatio':
-        return { ...state, focusDistanceRatio: action.state };
-      case 'nodeLabelScale': {
+      case 'nodeLabelScale':
+        // sizing is applied per-frame by the label-scaling loop; just invalidate its camera cache
         if (lastCamDistRef) lastCamDistRef.current = -1;
-        if (gi && state.showNodeLabels) {
-          labelSpritesRef.current.clear();
-          gi.nodeThreeObject(
-            buildNodeObject(state.nodeRenderMode, true, state.nodeRelSize, action.state, labelSpritesRef.current, state.nodeOpacity),
-          );
-          gi.nodeThreeObjectExtend(state.nodeRenderMode === NodeRenderMode.Spheres);
-          gi.refresh();
-        }
-        return { ...state, nodeLabelScale: action.state };
-      }
-      case 'edgeLabelScale': {
+        return { ...state, nodeLabelScale: action.state, userOverrides: markOverride(state, action.type) };
+      case 'edgeLabelScale':
+        // sizing is applied per-frame by the label-scaling loop; just invalidate its camera cache
         if (lastCamDistRef) lastCamDistRef.current = -1;
-        if (gi && state.showEdgeLabels) {
-          edgeLabelSpritesRef.current.clear();
-          gi.linkThreeObject(((link: GraphLink) => buildEdgeLabelFactory(action.state, edgeLabelSpritesRef.current)(link)) as (
-            link: GraphLink,
-          ) => THREE.Object3D);
-          gi.refresh();
-        }
-        return { ...state, edgeLabelScale: action.state };
-      }
+        return { ...state, edgeLabelScale: action.state, userOverrides: markOverride(state, action.type) };
       case 'nodeRenderMode': {
         if (lastCamDistRef) lastCamDistRef.current = -1;
         if (gi) {
           labelSpritesRef.current.clear();
           gi.nodeThreeObject(
-            buildNodeObject(
-              action.state,
-              state.showNodeLabels,
-              state.nodeRelSize,
-              state.nodeLabelScale,
-              labelSpritesRef.current,
-              state.nodeOpacity,
-            ),
+            buildNodeObject(action.state, state.showNodeLabels, state.nodeRelSize, labelSpritesRef.current, state.nodeOpacity),
           );
           gi.nodeThreeObjectExtend(action.state === NodeRenderMode.Spheres);
           gi.nodeVal(action.state === NodeRenderMode.Icons ? iconNodeVal(state.nodeRelSize) : (node: GraphNode) => node.diameter);
@@ -290,14 +277,7 @@ export const createControlsReducer = (
           if (state.nodeRenderMode === NodeRenderMode.Icons) {
             labelSpritesRef.current.clear();
             gi.nodeThreeObject(
-              buildNodeObject(
-                state.nodeRenderMode,
-                state.showNodeLabels,
-                action.state,
-                state.nodeLabelScale,
-                labelSpritesRef.current,
-                state.nodeOpacity,
-              ),
+              buildNodeObject(state.nodeRenderMode, state.showNodeLabels, action.state, labelSpritesRef.current, state.nodeOpacity),
             );
             gi.nodeVal(iconNodeVal(action.state));
             gi.refresh();
@@ -311,14 +291,7 @@ export const createControlsReducer = (
           if (state.nodeRenderMode === NodeRenderMode.Icons) {
             labelSpritesRef.current.clear();
             gi.nodeThreeObject(
-              buildNodeObject(
-                state.nodeRenderMode,
-                state.showNodeLabels,
-                state.nodeRelSize,
-                state.nodeLabelScale,
-                labelSpritesRef.current,
-                action.state,
-              ),
+              buildNodeObject(state.nodeRenderMode, state.showNodeLabels, state.nodeRelSize, labelSpritesRef.current, action.state),
             );
             gi.refresh();
           }
@@ -334,16 +307,10 @@ export const createControlsReducer = (
       }
       case 'nodeLabelDensity':
         if (lastCamDistRef) lastCamDistRef.current = -1;
-        return { ...state, nodeLabelDensity: action.state, userOverrides: markOverride(state, action.type) };
-      case 'nodeLabelMinSize':
-        if (lastCamDistRef) lastCamDistRef.current = -1;
-        return { ...state, nodeLabelMinSize: action.state };
+        return { ...state, nodeLabelDensity: action.state };
       case 'edgeLabelDensity':
         if (lastCamDistRef) lastCamDistRef.current = -1;
         return { ...state, edgeLabelDensity: action.state };
-      case 'edgeLabelMinSize':
-        if (lastCamDistRef) lastCamDistRef.current = -1;
-        return { ...state, edgeLabelMinSize: action.state };
       case 'chargeStrength': {
         if (gi) {
           const charge = gi.d3Force('charge') as D3ChargeForce | undefined;
@@ -389,6 +356,12 @@ export const createControlsReducer = (
         for (const [key, value] of Object.entries(defaults)) {
           if (state.userOverrides.has(key)) continue;
           next[key] = value;
+
+          // label scale multipliers are read live by the per-frame label loop,
+          // so no object rebuild is needed — just invalidate its camera cache
+          if ((key === 'nodeLabelScale' || key === 'edgeLabelScale') && lastCamDistRef) {
+            lastCamDistRef.current = -1;
+          }
 
           // Apply each setting imperatively to the graph instance
           if (gi) {
@@ -436,7 +409,6 @@ export const createControlsReducer = (
                       state.nodeRenderMode,
                       state.showNodeLabels,
                       value as number,
-                      state.nodeLabelScale,
                       labelSpritesRef.current,
                       state.nodeOpacity,
                     ),
@@ -447,9 +419,6 @@ export const createControlsReducer = (
                 if (lastCamDistRef) lastCamDistRef.current = -1;
                 break;
               }
-              case 'nodeLabelDensity':
-                if (lastCamDistRef) lastCamDistRef.current = -1;
-                break;
             }
           }
         }

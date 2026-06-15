@@ -1,4 +1,3 @@
-// Validation spec: see VALIDATION_SPEC.md in this directory
 import type { Document } from 'yaml';
 import { isMap, isPair, isScalar, isSeq } from 'yaml';
 
@@ -23,6 +22,8 @@ import {
   VALUE_MODIFIERS,
   KNOWN_TOP_LEVEL_FIELDS,
 } from './schema';
+
+// spec: ./validate.spec.md
 
 function nodeLineCol(
   node: { range?: [number, number, number] | [number, number] | null | undefined },
@@ -64,6 +65,18 @@ function nodePosition(node: unknown, lineIndex: LineIndex): { line: number; colu
   return { line: 1, column: 1 };
 }
 
+/**
+ * Validate a parsed Sigma rule YAML document against the Sigma schema.
+ *
+ * Checks for missing required fields, validates the `detection` block and its condition, and reports
+ * value/format issues (status, level, related types, taxonomy/description lengths, UUID/date/tag
+ * patterns, value modifiers) as line/column-anchored diagnostics.
+ *
+ * @param doc - The parsed YAML document (positional info for diagnostics).
+ * @param text - The raw YAML source, used to map node offsets to line/column.
+ * @param parsed - The plain-object form of `doc` used for value checks.
+ * @returns The list of {@link Diagnostic}s found (empty when the rule is valid).
+ */
 export function validateSigmaRule(doc: Document, text: string, parsed: Record<string, unknown>): Diagnostic[] {
   const diagnostics: Diagnostic[] = [];
   const lineIndex = buildLineIndex(text);

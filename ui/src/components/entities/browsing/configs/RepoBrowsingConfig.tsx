@@ -12,9 +12,11 @@ import { Entities } from '@models/entities/entities';
 import { getDetailsBasePathByEntity } from '@components/entities/details/EntityDetailsRoutes';
 import { Repo } from '@models/repos';
 
-// get repos using filters and and an optional cursor
+// spec: ../EntityBrowsing.spec.md
+
+// get repos using filters and an optional cursor
 const getRepos = async (filters: Filters, cursor: string | null) => {
-  // get files list from API
+  // get the repo list from the API
   const { entityList, entityCursor } = await listRepos(
     filters,
     console.log,
@@ -88,7 +90,8 @@ const RepoBrowsingConfig: EntityBrowseConfig<Entities.Repo> = {
   title: 'Repos',
   typeLabel: '',
   kind: Entities.Repo,
-  creatable: true,
+  // Repos are ingested, not hand-created in the UI (no create route exists for them)
+  creatable: false,
   entityHeaders: <RepoListHeaders />,
   renderEntity: (repo) => <RepoItem repo={repo} />,
   fetchEntities: getRepos,

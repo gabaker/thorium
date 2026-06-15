@@ -334,6 +334,7 @@ impl OAuthUserCreate {
             verification_token: None,
             verification_sent: None,
             aliases,
+            image: None,
         };
         // send a verification email if needed
         match &shared.email {

@@ -23,6 +23,8 @@ import styled from 'styled-components';
 import { getDropdownOptions } from './utils';
 import { OmnibarOptionMap } from './options';
 
+// spec: ./SPEC.md
+
 const OmnibarContainer = styled.div`
   width: 100%;
   position: relative;

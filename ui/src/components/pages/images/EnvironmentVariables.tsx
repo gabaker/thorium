@@ -18,6 +18,8 @@ import FieldBadge from '@components/shared/badges/FieldBadge';
 import SelectableDictionary from '@components/shared/inputs/selectable/SelectableDictionary';
 import { OverlayTipRight } from '@components/shared/overlay/tips';
 
+// spec: ./ImageInfo.spec.md
+
 const TOOLTIP = `Environment variables that get mapped into the running image.`;
 
 type EnvValue = Record<string, string | null>;

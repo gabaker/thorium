@@ -42,6 +42,8 @@ import {
 import { createReactSelectStyles } from '@utilities/select';
 import { listImages } from '@thorpi/images';
 
+// spec: ./PipelineOrderFlow.spec.md
+
 const TERMINAL_WIDTH = 12;
 const PARALLEL_GAP = 54;
 const STEP_HANDLE_APPROX = 14;

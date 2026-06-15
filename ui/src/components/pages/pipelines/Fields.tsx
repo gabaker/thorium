@@ -18,6 +18,7 @@ import FieldBadge from '@components/shared/badges/FieldBadge';
 import { FieldError } from '@components/shared/inputs/FieldError';
 import Markdown from '@components/shared/syntax/Markdown';
 import { OverlayTipRight } from '@components/shared/overlay/tips';
+import { cleanDescription } from '@utilities/description';
 
 // spec: ../../../pages/pipelines/SPEC.md
 
@@ -74,7 +75,7 @@ function apiToForm(value: PipelineFieldsValue): FormFields {
   return {
     name: value.name ?? '',
     group: value.group ?? '',
-    description: value.description && value.description !== 'null' ? value.description : '',
+    description: cleanDescription(value.description),
     sla: value.sla != null ? String(value.sla) : '',
   };
 }
@@ -116,7 +117,7 @@ const DisplayFields: React.FC<{ value: PipelineFieldsValue }> = ({ value }) => (
     <SectionRow>
       <FieldGroup>
         <Label>Description</Label>
-        <Markdown>{value.description && value.description !== 'null' ? value.description : ''}</Markdown>
+        <Markdown>{cleanDescription(value.description)}</Markdown>
       </FieldGroup>
     </SectionRow>
     <SectionRow>

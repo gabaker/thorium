@@ -1,6 +1,8 @@
 import React from 'react';
 import { Card } from 'react-bootstrap';
 
+// spec: ./Card.spec.md
+
 interface CardProps {
   children: React.ReactNode;
   className?: string; // custom className pass through

@@ -14,6 +14,8 @@ import { FileSystem } from '@models/entities/file_systems';
 import { scaling } from '@styles';
 import { getDetailsBasePathByEntity } from '@components/entities/details/EntityDetailsRoutes';
 
+// spec: ../EntityBrowsing.spec.md
+
 const Name = styled(Col)`
   white-space: pre-wrap;
   word-break: break-all;

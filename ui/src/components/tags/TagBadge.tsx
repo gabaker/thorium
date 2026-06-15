@@ -1,18 +1,25 @@
 import React, { useState } from 'react';
 import { Button, Modal } from 'react-bootstrap';
-import { useSearchParams } from 'react-router';
+import { useNavigate, useSearchParams } from 'react-router';
 
 // project imports
-import { getTagBadgeText, getTagColorClass } from '@components/tags/utilities';
+import { getBrowsingPathByEntity } from '@components/entities/browsing/EntityBrowsingRoutes';
+import { buildTagBrowseHref, getTagBadgeText, getTagColorClass } from '@components/tags/utilities';
 import { OverlayTipBottom } from '@components/shared/overlay/tips';
-import { Entities } from '@models/entities';
+import { Entities, entityLabel } from '@models/entities';
 import { TagUpperKeyEnum } from '@models/tags';
 
+// spec: ./tags.spec.md
+
 interface TagBadgeProps {
-  tag: string; // tag key string
-  value: string; // key value
-  condensed: boolean; // show condensed view of TLP tag that hides the key "TLP"
-  action: string; // onclick action keyword
+  // the tag key
+  tag: string;
+  // the tag value
+  value: string;
+  // render the condensed TLP view that hides the "TLP" key
+  condensed: boolean;
+  // which onclick behavior to render (scroll, docs, link)
+  action: string;
   resource?: Entities;
 }
 
@@ -20,10 +27,10 @@ const TagBadge: React.FC<TagBadgeProps> = ({ tag, value, condensed, action, reso
   const [showRedirectModal, setShowRedirectModal] = useState(false);
   const badgeClass = getTagColorClass(tag, value);
   const [, setSearchParams] = useSearchParams();
+  const navigate = useNavigate();
   const tagText = getTagBadgeText(tag, value, condensed);
   const upperTag = tag.toUpperCase() as TagUpperKeyEnum;
 
-  // returned rendered component
   if (action == 'scroll') {
     const scrollToResult = (value: string) => {
       const element = document.getElementById(`results-tab-${value}`);
@@ -139,30 +146,39 @@ const TagBadge: React.FC<TagBadgeProps> = ({ tag, value, condensed, action, reso
       </>
     );
   } else if (action == 'link') {
-    // built the URL search query params from the tag key and value
+    // resolve the resource's browse route once; both the append-in-place check and the href need it
+    const base = resource ? getBrowsingPathByEntity(resource) : undefined;
+    const href = resource ? buildTagBrowseHref(resource, tag, value) : undefined;
+    // no resource or no browse route → render a plain, non-clickable badge rather than a dead anchor
+    if (!resource || !base || !href) {
+      return (
+        <div>
+          <div className={`${badgeClass} ms-1 mb-1 tag-item tags-hide`}>{tagText}</div>
+          <div className={`${badgeClass} ms-1 mb-1 tag-item short-tag`}>
+            {tagText.length > 30 ? tagText.substring(0, 30) + '...' : tagText}
+          </div>
+        </div>
+      );
+    }
+    const onClick = (e: React.MouseEvent) => {
+      // let the browser handle modified clicks (new tab, etc.) via the real href
+      if (e.metaKey || e.ctrlKey || e.shiftKey || e.altKey || e.button !== 0) return;
+      e.preventDefault();
+      // segment-aware match so '/files' does not also match '/filesystems' (a plain startsWith would)
+      const onBrowsePage = window.location.pathname === base || window.location.pathname.startsWith(`${base}/`);
+      // already on this resource's browse page → append the tag to the current filters (no reload);
+      // otherwise SPA-navigate to the browse page pre-filtered by this tag
+      if (onBrowsePage) {
+        const query = new URLSearchParams(window.location.search);
+        query.append(`tags[${tag}]`, value);
+        setSearchParams(query, { replace: true });
+      } else {
+        void navigate(href);
+      }
+    };
     return (
-      <OverlayTipBottom tip={`Click to browse ${resource}s with tag: ${tagText}`}>
-        <a
-          className="no-decoration"
-          onClick={() => {
-            if (resource === undefined) {
-              console.log('Error: No resource type provided for link');
-              return;
-            }
-            // we need to change locations in addition to adding query params
-            if (window.location.pathname.startsWith(resource.toLowerCase() + 's', 1)) {
-              const query = new URLSearchParams(window.location.search);
-              query.append(`tags[${tag}]`, value);
-              setSearchParams(query, { replace: true });
-              // we are already browsing and want to append tags to current search params
-            } else {
-              const query = new URLSearchParams();
-              query.append('limit', '10');
-              query.append(`tags[${tag}]`, value);
-              window.location.href = `/${resource.toLowerCase()}s?${query.toString()}`;
-            }
-          }}
-        >
+      <OverlayTipBottom tip={`Click to browse ${entityLabel(resource)}s with tag: ${tagText}`}>
+        <a className="no-decoration" href={href} onClick={onClick}>
           <div className={`${badgeClass} ms-1 mb-1 tag-item clickable tags-hide`}>{tagText}</div>
           <div className={`${badgeClass} ms-1 mb-1 tag-item clickable short-tag`}>
             {tagText.length > 30 ? tagText.substring(0, 30) + '...' : tagText}

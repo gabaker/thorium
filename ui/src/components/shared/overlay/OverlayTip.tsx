@@ -1,6 +1,8 @@
 import React, { useState } from 'react';
 import { OverlayTrigger, Tooltip } from 'react-bootstrap';
 
+// spec: ./OverlayTip.spec.md
+
 export enum Placement {
   Left = 'left',
   Right = 'right',

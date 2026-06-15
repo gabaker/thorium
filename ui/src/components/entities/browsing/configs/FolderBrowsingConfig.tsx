@@ -14,6 +14,8 @@ import { Entities } from '@models/entities/entities';
 import { scaling } from '@styles';
 import { getDetailsBasePathByEntity } from '@components/entities/details/EntityDetailsRoutes';
 
+// spec: ../EntityBrowsing.spec.md
+
 const Name = styled(Col)`
   white-space: pre-wrap;
   word-break: break-all;

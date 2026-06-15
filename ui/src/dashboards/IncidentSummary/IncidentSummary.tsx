@@ -1,66 +1,108 @@
-import React, { useMemo } from 'react';
+import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import { useSearchParams } from 'react-router-dom';
 
-import { GraphDataProvider } from '@components/associations/data/GraphDataContext';
-import Page from '@components/pages/Page';
-import type { Seed } from '@models/trees';
-import { IncidentDataProvider } from './IncidentDataProvider';
-import FileListPanel from './FileListPanel';
-import EntityBreakdownPanel from './EntityBreakdownPanel';
-import IncidentGraphTile from './IncidentGraphTile';
-import type { IncidentTag, IncidentSummaryProps } from './types';
-import AlertBanner, { Severity } from '@components/shared/alerts/AlertBanner';
-import { DashboardContainer, DashboardHeader, DashboardTitle, TagBadge, DashboardGrid } from './styles';
+// spec: ./SPEC.md
 
-interface InnerProps {
-  incidentTag: IncidentTag;
+// project imports
+import IncidentPicker from './IncidentPicker';
+import { ChangeIncidentButton, IncidentHeader, IncidentTitle } from './styles';
+import { DashboardContent } from '../Dashboard';
+import Page from '@components/pages/Page';
+import { OverlayTipBottom } from '@components/shared/overlay/tips';
+import { getEntity } from '@thorpi/entities';
+import type { Seed } from '@models/trees';
+
+/// The URL query key carrying the selected incident's entity id.
+const INCIDENT_PARAM = 'incident';
+/// The crawl depth for an incident dashboard, matching the general dashboard default.
+const INCIDENT_DEPTH = 2;
+
+/// Props for {@link IncidentDashboard}.
+interface IncidentDashboardProps {
+  /// The selected incident's entity id.
+  incidentId: string;
+  /// Clears the `?incident` param to return to the picker.
+  onChangeIncident: () => void;
 }
 
-const IncidentDashboardInner: React.FC<InnerProps> = ({ incidentTag }) => {
-  const seed = useMemo<Seed>(() => ({ tags: { [incidentTag.key]: [incidentTag.value] } }), [incidentTag.key, incidentTag.value]);
+/**
+ * The incident dashboard for a selected incident.
+ *
+ * Seeds the shared {@link DashboardContent} with the incident entity (memoized on the id so unrelated
+ * URL edits never refetch the graph) and shows a header with the incident's resolved name plus a
+ * "Change incident" affordance that returns to the picker.
+ *
+ * @param props - The dashboard props (see {@link IncidentDashboardProps}).
+ * @returns The seeded dashboard.
+ */
+const IncidentDashboard: React.FC<IncidentDashboardProps> = ({ incidentId, onChangeIncident }) => {
+  // the seed is a single entity (the incident); memoized on the id so DashboardContent's graph provider
+  // is not remounted/refetched on every unrelated URL change (omnibar clauses, tab hash)
+  const seed = useMemo<Seed>(() => ({ entities: [incidentId] }), [incidentId]);
+  const [name, setName] = useState<string | null>(null);
+  useEffect(() => {
+    // resolve the incident's display name for the header; the graph seeding does not depend on this
+    let active = true;
+    setName(null);
+    void getEntity(incidentId, () => {}).then((entity) => {
+      if (active && entity && entity.name.trim() !== '') {
+        setName(entity.name);
+      }
+    });
+    return () => {
+      active = false;
+    };
+  }, [incidentId]);
 
   return (
-    <GraphDataProvider initial={seed} depth={2}>
-      <IncidentDataProvider>
-        <DashboardContainer>
-          <DashboardHeader>
-            <DashboardTitle>Incident Summary</DashboardTitle>
-            <TagBadge>
-              {incidentTag.key}: {incidentTag.value}
-            </TagBadge>
-          </DashboardHeader>
-
-          <DashboardGrid>
-            <FileListPanel />
-            <EntityBreakdownPanel />
-            <IncidentGraphTile />
-          </DashboardGrid>
-        </DashboardContainer>
-      </IncidentDataProvider>
-    </GraphDataProvider>
+    <>
+      <IncidentHeader>
+        <IncidentTitle>Incident: {name ?? incidentId}</IncidentTitle>
+        <OverlayTipBottom tip="Return to the incident picker to choose a different incident">
+          <ChangeIncidentButton type="button" onClick={onChangeIncident}>
+            Change incident
+          </ChangeIncidentButton>
+        </OverlayTipBottom>
+      </IncidentHeader>
+      <DashboardContent seed={seed} depthAtMount={INCIDENT_DEPTH} />
+    </>
   );
 };
 
-const IncidentSummary: React.FC<Partial<IncidentSummaryProps>> = (props) => {
-  const [searchParams] = useSearchParams();
+/**
+ * The incident dashboard page (`/dashboard/incident`).
+ *
+ * Reads `?incident=<uuid>` from the URL: when present it renders the seeded {@link IncidentDashboard};
+ * when absent it renders the {@link IncidentPicker}, whose selection sets the `?incident` param. All
+ * incident state lives in the URL so a dashboard is fully shareable/deep-linkable.
+ *
+ * @returns The incident dashboard page.
+ */
+const IncidentSummary: React.FC = () => {
+  const [searchParams, setSearchParams] = useSearchParams();
+  const incidentId = searchParams.get(INCIDENT_PARAM);
 
-  const incidentTag = useMemo<IncidentTag | null>(() => {
-    if (props.incidentTag) return props.incidentTag;
-    const key = searchParams.get('tag_key');
-    const value = searchParams.get('tag_value');
-    if (key && value) return { key, value };
-    return null;
-  }, [props.incidentTag, searchParams]);
+  // set the incident param (replace so the picker->dashboard step isn't a separate back-button stop)
+  const selectIncident = useCallback(
+    (id: string) => {
+      const next = new URLSearchParams(searchParams);
+      next.set(INCIDENT_PARAM, id);
+      setSearchParams(next, { replace: true });
+    },
+    [searchParams, setSearchParams],
+  );
+
+  // clear the incident param (and any leftover dashboard state) to return to the picker
+  const clearIncident = useCallback(() => {
+    setSearchParams(new URLSearchParams());
+  }, [setSearchParams]);
 
   return (
-    <Page title="Incident Summary" className="full-min-width">
-      {incidentTag ? (
-        <IncidentDashboardInner incidentTag={incidentTag} />
+    <Page title="Incident Dashboard" className="full-min-width">
+      {incidentId ? (
+        <IncidentDashboard incidentId={incidentId} onChangeIncident={clearIncident} />
       ) : (
-        <AlertBanner severity={Severity.Warning}>
-          Missing incident tag. Provide <code>tag_key</code> and <code>tag_value</code> query parameters, e.g.{' '}
-          <code>/dashboard/incident?tag_key=incident/id&amp;tag_value=INC-2024-001</code>
-        </AlertBanner>
+        <IncidentPicker onSelect={selectIncident} />
       )}
     </Page>
   );

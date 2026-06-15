@@ -4,6 +4,8 @@ import { Overlay, Popover, Tooltip } from 'react-bootstrap';
 import type { SectionKey } from './types';
 import { ToolbarIconButton, StyledPopover } from './Toolbar.styled';
 
+// spec: ./GraphControlsToolbar.spec.md
+
 interface ToolbarButtonProps {
   sectionKey: SectionKey;
   activeSection: SectionKey | null;
@@ -23,6 +25,7 @@ const ToolbarButton: React.FC<ToolbarButtonProps> = ({ sectionKey, activeSection
       <ToolbarIconButton
         ref={buttonRef}
         $active={isOpen}
+        aria-label={title}
         onClick={() => onToggle(sectionKey)}
         onMouseEnter={() => setHovered(true)}
         onMouseLeave={() => setHovered(false)}

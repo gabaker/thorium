@@ -15,6 +15,8 @@ import {
   pipelineFieldCategory,
 } from './schema';
 
+// spec: ./SPEC.md
+
 function suggestNullReplace(
   field: string,
   parsed: Record<string, unknown>,
@@ -63,6 +65,20 @@ function lastDocLine(lineIndex: LineIndex): number {
   return lineIndex.offsets.length;
 }
 
+/**
+ * Generate editor autocomplete/populate suggestions for a parsed pipeline-request YAML document.
+ *
+ * Proposes values for unset (`null`) known fields, populate actions for empty structures, trigger
+ * entries, and image-name completions within `order`. When `imageNames` is supplied, image-name
+ * suggestions are drawn from that set.
+ *
+ * @param doc - The parsed YAML document (positional info for suggestion anchors).
+ * @param text - The raw YAML source, used to map node offsets to line/column.
+ * @param parsed - The plain-object form of `doc` used to decide which fields need suggestions.
+ * @param imageNames - Optional set of image names valid for the pipeline's group, used to suggest
+ *   image completions in `order`. Omit or pass `null` to skip image-name suggestions.
+ * @returns The list of {@link Suggestion}s to surface in the editor (empty when nothing applies).
+ */
 export function generatePipelineSuggestions(
   doc: Document,
   text: string,

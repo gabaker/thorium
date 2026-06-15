@@ -1,2 +1,3 @@
 export { default } from './IncidentSummary';
-export type { IncidentSummaryProps, IncidentTag, Incident, IncidentMeta } from './types';
+export { default as IncidentPicker } from './IncidentPicker';
+export type { IncidentPickerProps } from './IncidentPicker';
