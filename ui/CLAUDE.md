@@ -472,11 +472,7 @@ Write or update a spec as a markdown file in the target component or page direct
 
 For modifications to existing components, update the existing spec rather than creating a new one. The spec is the source of truth for intended behavior.
 
-Every source file that implements a spec must include a reference to its spec file at the top of the file, immediately after the imports:
-
-```ts
-// spec: ./SPEC.md
-```
+Don't reference the spec file in the code itself, but always check for an existing spec when modifying an existing component.
 
 ### 2. Plan
 
