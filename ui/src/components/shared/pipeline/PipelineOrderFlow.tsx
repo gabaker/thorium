@@ -77,6 +77,30 @@ function orderToNodesAndEdges(order: (string | string[])[], bannedImages?: Set<s
     targetPosition: Position.Left,
   });
 
+  // Empty (editable) order: render a Start→End canvas with a clickable gap so the
+  // first image can be added via double-click / right-click like any other.
+  if (order.length === 0) {
+    nodes.push({
+      id: 'end',
+      type: 'terminal',
+      data: { label: 'End' },
+      position: { x: TERMINAL_OFFSET + STEP_WIDTH, y: 0 },
+      draggable: false,
+      sourcePosition: Position.Right,
+      targetPosition: Position.Left,
+    });
+    edges.push({
+      id: 'e-start-end',
+      source: 'start',
+      target: 'end',
+      type: 'themedStep',
+      animated: true,
+      markerEnd: MARKER_END,
+      style: EDGE_STYLE,
+    });
+    return { nodes, edges };
+  }
+
   for (let stepIdx = 0; stepIdx < order.length; stepIdx++) {
     const step = order[stepIdx];
     const images = typeof step === 'string' ? [step] : step;
@@ -488,7 +512,9 @@ const PipelineOrderFlowInner: React.FC<PipelineOrderFlowProps> = ({ order, onOrd
 };
 
 const PipelineOrderFlow: React.FC<PipelineOrderFlowProps> = ({ order, onOrderChange, bannedImages, group }) => {
-  if (!order || order.length === 0) return null;
+  // Nothing to show for an empty order in read-only mode; in edit mode we still render an
+  // empty canvas so the first image can be added directly on the diagram.
+  if ((!order || order.length === 0) && !onOrderChange) return null;
 
   return (
     <ReactFlowProvider>

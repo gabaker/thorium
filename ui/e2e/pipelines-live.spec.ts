@@ -189,6 +189,9 @@ test.describe('Pipeline Live API', () => {
     await page.waitForTimeout(1000);
 
     await minItem.locator('.secondary-btn:has-text("Edit")').click();
+    await page.waitForTimeout(300);
+    // edit opens in the form view; switch to the editor view to drive it via YAML
+    await minItem.locator('button:has-text("Editor")').click();
     await waitForEditor(page);
 
     const yaml = 'order:\n  - single-step\nsla: 7200\ndescription: Edited via UI';
@@ -221,16 +224,16 @@ test.describe('Pipeline Create via UI', () => {
     await deleteStubImages(token);
   });
 
-  test('create pipeline via UI modal', async ({ page }) => {
+  test('create pipeline via UI page', async ({ page }) => {
     await loginViaUI(page);
     await page.goto('/pipelines');
     await page.waitForSelector('.accordion', { timeout: 15000 });
 
     await page.locator('.ok-btn:has-text("+")').click();
-    await page.waitForTimeout(500);
+    await page.waitForURL('**/create/pipeline');
 
-    const modal = page.locator('.modal');
-    await expect(modal).toBeVisible();
+    // drive creation through the editor view so the whole pipeline can be set via YAML
+    await page.locator('button:has-text("Editor")').click();
     await waitForEditor(page);
 
     const yaml = [
@@ -244,7 +247,7 @@ test.describe('Pipeline Create via UI', () => {
     await setEditorContent(page, yaml);
     await page.waitForTimeout(300);
 
-    await modal.locator('.ok-btn:has-text("Create")').click();
+    await page.locator('.ok-btn:has-text("Create")').click();
     await page.waitForTimeout(2000);
 
     const apiData = await getPipelineViaAPI(token, 'system', 'e2e-pipeline-ui-created');
@@ -292,10 +295,10 @@ test.describe('Pipeline Copy via UI', () => {
     await page.waitForTimeout(500);
 
     await item.locator('.ok-btn:has-text("Copy")').click();
-    await page.waitForTimeout(500);
+    await page.waitForURL('**/create/pipeline');
 
-    const modal = page.locator('.modal');
-    await expect(modal).toBeVisible();
+    // copy seeds the create page with the source pipeline; verify via the editor view
+    await page.locator('button:has-text("Editor")').click();
     await waitForEditor(page);
 
     const content = await page.locator('.cm-content').textContent();
@@ -315,7 +318,7 @@ test.describe('Pipeline Copy via UI', () => {
     await setEditorContent(page, yaml);
     await page.waitForTimeout(300);
 
-    await modal.locator('.ok-btn:has-text("Create")').click();
+    await page.locator('.ok-btn:has-text("Create")').click();
     await page.waitForTimeout(2000);
 
     const apiData = await getPipelineViaAPI(token, 'system', 'e2e-pipeline-copy-result');
@@ -414,12 +417,13 @@ test.describe('Pipeline Discard Edit', () => {
     await page.waitForTimeout(1000);
 
     await item.locator('.secondary-btn:has-text("Edit")').click();
-    await waitForEditor(page);
+    await page.waitForTimeout(500);
+    await expect(item.locator('.secondary-btn:has-text("Discard")')).toBeVisible();
 
     await item.locator('.secondary-btn:has-text("Discard")').click();
     await page.waitForTimeout(500);
 
-    // Editor gone, view mode restored
+    // Edit form gone, view mode restored
     await expect(page.locator('.cm-editor')).not.toBeVisible();
     await expect(item.locator('text=Discard test pipeline')).toBeVisible();
     await expect(item.locator('.secondary-btn:has-text("Edit")')).toBeVisible();

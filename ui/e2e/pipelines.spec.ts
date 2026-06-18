@@ -152,36 +152,55 @@ test.describe('Pipelines Page', () => {
     await expect(page.locator('text=NewSample')).toBeVisible();
   });
 
-  test('create pipeline button opens modal', async ({ page }) => {
+  test('create pipeline button navigates to create page', async ({ page }) => {
     await page.goto('/pipelines');
     await page.waitForSelector('.accordion', { timeout: 10000 });
 
     await page.locator('.ok-btn:has-text("+")').click();
-    await page.waitForTimeout(500);
+    await page.waitForURL('**/create/pipeline');
 
-    const modal = page.locator('.modal');
-    await expect(modal).toBeVisible();
-    await expect(modal.locator('.modal-title')).toContainText('Create New Pipeline');
+    await expect(page.locator('h3:has-text("Create A Pipeline")')).toBeVisible();
+    // both views are reachable via the form/editor toggle
+    await expect(page.locator('button:has-text("Form")')).toBeVisible();
+    await expect(page.locator('button:has-text("Editor")')).toBeVisible();
 
-    await waitForEditor(page);
-
-    await snapshot(page, SCREENSHOT_DIR, 'pipeline-create-modal');
+    await snapshot(page, SCREENSHOT_DIR, 'pipeline-create-page');
   });
 
-  test('create pipeline modal has format toggle', async ({ page }) => {
+  test('create pipeline page editor view has format toggle', async ({ page }) => {
     await page.goto('/pipelines');
     await page.waitForSelector('.accordion', { timeout: 10000 });
 
     await page.locator('.ok-btn:has-text("+")').click();
-    await page.waitForTimeout(500);
+    await page.waitForURL('**/create/pipeline');
 
-    const yamlBtn = page.locator('button:has-text("YAML")');
-    const jsonBtn = page.locator('button:has-text("JSON")');
-    await expect(yamlBtn).toBeVisible();
-    await expect(jsonBtn).toBeVisible();
+    // the YAML/JSON toggle only appears in the editor view
+    await page.locator('button:has-text("Editor")').click();
+    await expect(page.locator('button:has-text("YAML")')).toBeVisible();
+    await expect(page.locator('button:has-text("JSON")')).toBeVisible();
   });
 
-  test('edit button enters editor mode', async ({ page }) => {
+  test('create pipeline page form view shows order and triggers sections', async ({ page }) => {
+    await page.goto('/pipelines');
+    await page.waitForSelector('.accordion', { timeout: 10000 });
+
+    await page.locator('.ok-btn:has-text("+")').click();
+    await page.waitForURL('**/create/pipeline');
+
+    // the form view (default) exposes the dedicated order and triggers editors
+    await expect(page.locator('h5:has-text("Order")')).toBeVisible();
+    await expect(page.locator('h5:has-text("Triggers")')).toBeVisible();
+    await expect(page.locator('button[aria-label="Add trigger"]')).toBeVisible();
+
+    // before a group is chosen the order section prompts for one (no diagram yet)
+    await expect(page.locator('text=Select a group to configure the pipeline order')).toBeVisible();
+
+    // choosing a group renders the editable xydiagram directly (no first-image dropdown)
+    await page.locator('select').first().selectOption('system');
+    await expect(page.locator('.react-flow')).toBeVisible();
+  });
+
+  test('edit button enters edit mode with form/editor toggle', async ({ page }) => {
     await page.goto('/pipelines');
     await page.waitForSelector('.accordion', { timeout: 10000 });
 
@@ -191,9 +210,12 @@ test.describe('Pipelines Page', () => {
     await page.locator('button:has-text("Edit")').first().click();
     await page.waitForTimeout(500);
 
-    await waitForEditor(page);
     await expect(page.locator('button:has-text("Discard")').first()).toBeVisible();
     await expect(page.locator('button:has-text("Accept")').first()).toBeVisible();
+
+    // edit defaults to the form view; switching to the editor view shows the code editor
+    await page.locator('button:has-text("Editor")').first().click();
+    await waitForEditor(page);
 
     await snapshot(page, SCREENSHOT_DIR, 'pipeline-edit-mode');
   });
@@ -207,7 +229,7 @@ test.describe('Pipelines Page', () => {
 
     await page.locator('button:has-text("Edit")').first().click();
     await page.waitForTimeout(500);
-    await waitForEditor(page);
+    await expect(page.locator('button:has-text("Discard")').first()).toBeVisible();
 
     await page.locator('button:has-text("Discard")').first().click();
     await page.waitForTimeout(300);
@@ -259,12 +281,14 @@ test.describe('Pipelines Page', () => {
     expect(deleteRequested).toBe(true);
   });
 
-  test('format toggle switches between YAML and JSON in create modal', async ({ page }) => {
+  test('format toggle switches between YAML and JSON on create page', async ({ page }) => {
     await page.goto('/pipelines');
     await page.waitForSelector('.accordion', { timeout: 10000 });
 
     await page.locator('.ok-btn:has-text("+")').click();
-    await page.waitForTimeout(500);
+    await page.waitForURL('**/create/pipeline');
+
+    await page.locator('button:has-text("Editor")').click();
     await waitForEditor(page);
 
     const editorContent = await page.locator('.cm-content').textContent();
@@ -354,8 +378,10 @@ test.describe('Pipelines Page', () => {
 
     await page.locator('button:has-text("Edit")').first().click();
     await page.waitForTimeout(500);
-    await waitForEditor(page);
 
+    // the editor view replaces the order diagram with the code editor
+    await page.locator('button:has-text("Editor")').first().click();
+    await waitForEditor(page);
     await expect(firstBody.locator('.react-flow')).toHaveCount(0);
 
     await page.locator('button:has-text("Discard")').first().click();
