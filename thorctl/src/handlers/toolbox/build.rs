@@ -677,25 +677,27 @@ fn build_image_version(
             "Image '{name}' has an empty version; set a non-empty 'version' in its manifest.toml"
         )));
     }
-    // surface base-image settings a tool explicitly declared that won't take effect. Only warn
-    // when this manifest sets its own [base_image] — an inherited toolbox-wide default applying
-    // broadly is not a per-tool mistake. Sub-conditions are evaluated against the merged effective
-    // config so a global-provided image still counts.
-    if manifest.base_image.is_some() {
+    // surface base-image contradictions a tool declared within its OWN [base_image]. These check
+    // the manifest's own fields (`own`), never the merged result, so an inherited toolbox-wide
+    // default can't trigger a per-tool warning.
+    if let Some(own) = manifest.base_image.as_ref() {
         if manifest.image_from.is_some() {
             // an image_from image is never built, so its [base_image] has no effect
             eprintln!(
                 "Warning: {name}: [base_image] is ignored on an image_from image (it is never built)"
             );
-        } else if let Some(over) = &base_image {
-            // an image override with allow_override = false won't be substituted
-            if over.image.is_some() && over.allow_override == Some(false) {
+        } else {
+            // this manifest both sets an override image and disables overriding
+            if own.image.is_some() && own.allow_override == Some(false) {
                 eprintln!(
                     "Warning: {name}: [base_image].image is set but allow_override = false, so the base image substitution will be skipped"
                 );
             }
-            // image_arg without an image has nothing to substitute
-            if over.image.is_none() && over.image_arg.is_some() {
+            // this manifest names a build-arg but supplies no image, and none is inherited either
+            if own.image.is_none()
+                && own.image_arg.is_some()
+                && base_image.as_ref().and_then(|base| base.image.as_ref()).is_none()
+            {
                 eprintln!(
                     "Warning: {name}: [base_image].image_arg is set without an image, so it has no effect"
                 );

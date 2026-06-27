@@ -98,7 +98,8 @@ pub struct BuildImagesToolbox {
     /// Override an image's base image: `ARG=IMAGE`, passed to the build as
     /// `--build-arg ARG=IMAGE`
     ///
-    /// Only applied to images whose manifest sets `allow_base_override = true`; images
+    /// Run-global escape hatch that overrides each image's resolved `[base_image]`. Only
+    /// applied to images whose `[base_image].allow_override` is true (the default); images
     /// that opt out are built with their default base. `ARG` is the build arg the
     /// Dockerfile reads (e.g. `IMAGE` for `FROM ${IMAGE}`). On a key collision with a
     /// `--build-arg`, this value wins for images that allow the override.
