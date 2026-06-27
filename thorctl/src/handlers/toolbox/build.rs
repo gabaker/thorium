@@ -677,15 +677,17 @@ fn build_image_version(
             "Image '{name}' has an empty version; set a non-empty 'version' in its manifest.toml"
         )));
     }
-    // surface base-image settings that won't take effect, so the issue is visible rather than
-    // silently dropped at build-images time
-    if let Some(over) = &base_image {
-        // a base_image on an image_from image is never built
+    // surface base-image settings a tool explicitly declared that won't take effect. Only warn
+    // when this manifest sets its own [base_image] — an inherited toolbox-wide default applying
+    // broadly is not a per-tool mistake. Sub-conditions are evaluated against the merged effective
+    // config so a global-provided image still counts.
+    if manifest.base_image.is_some() {
         if manifest.image_from.is_some() {
+            // an image_from image is never built, so its [base_image] has no effect
             eprintln!(
                 "Warning: {name}: [base_image] is ignored on an image_from image (it is never built)"
             );
-        } else {
+        } else if let Some(over) = &base_image {
             // an image override with allow_override = false won't be substituted
             if over.image.is_some() && over.allow_override == Some(false) {
                 eprintln!(
@@ -736,7 +738,9 @@ fn build_image_version(
             config,
             network_policies_from,
             network_policies,
-            base_image: base_image.clone(),
+            // an image_from image is never built, so it carries no base-image config (not even an
+            // inherited toolbox-wide default)
+            base_image: None,
         });
     }
 
