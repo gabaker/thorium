@@ -696,7 +696,7 @@ pub async fn export(
     // build walks the tree with synchronous std::fs, so run it off the async runtime.
     let build_cmd = BuildToolbox {
         config: cmd.output.join("config.toml"),
-        flatten_image_paths: false,
+        use_image_path: false,
         output: cmd.output.join("toolbox.json"),
         path: cmd.output.clone(),
         // an export records each image's real published url, so no tag suffix is applied

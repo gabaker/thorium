@@ -25,7 +25,7 @@
     "commit": null,
     "output": "None"
   },
-  "description": "# strings-16be (GNU Binutils)\n\nA variant of the GNU Binutils `strings` tool configured to extract 16-bit big-endian encoded character sequences from files.\n\n## Overview\n\nThis is the GNU Binutils `strings` program invoked with `-e b` to select the 16-bit big-endian character encoding. `strings` prints the printable character sequences (by default at least 4 characters long and followed by an unprintable character) that it finds in each file, making it useful for determining the contents of non-text files. The big-endian 16-bit encoding applies to wide-character text such as Unicode UTF-16/UCS-2 stored in big-endian byte order. It shares the same container image as the base `strings` tool.\n\n## Supported File Types\n\n- Any file / arbitrary binary data (object files, executables, and other non-text files)\n- Most useful for files containing 16-bit big-endian (e.g. UTF-16BE / UCS-2) wide-character text\n\n## Usage\n\nRun on binary samples when 16-bit big-endian wide-character strings (such as UTF-16BE/UCS-2 text) are expected or suspected, where the default single-byte `strings` scan would miss them. It is mainly useful for surfacing human-readable content in non-text files, and is best used alongside the default `strings` tool and other encoding variants for comprehensive string coverage.\n\n## Documentation\n\n[GNU Binutils: strings](https://sourceware.org/binutils/docs/binutils/strings.html)\n\n## License\n\nGPL-3.0-or-later \u2014 part of GNU Binutils; see the [GNU GPL v3](https://www.gnu.org/licenses/gpl-3.0.html).",
+  "description": null,
   "security_context": {
     "user": null,
     "group": null,

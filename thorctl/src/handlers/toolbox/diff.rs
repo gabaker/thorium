@@ -174,7 +174,7 @@ async fn load_manifest(location: &ManifestLocation) -> Result<(ToolboxManifest, 
         }
         let build_cmd = BuildToolbox {
             config,
-            flatten_image_paths: false,
+            use_image_path: false,
             // never written; build_in_memory ignores the output path
             output: path.join("toolbox.json"),
             path: path.clone(),

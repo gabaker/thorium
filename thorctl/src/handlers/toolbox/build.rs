@@ -112,8 +112,9 @@ pub(crate) struct ManifestToml {
     /// The version label for this entry (defaults to `latest`)
     #[serde(default = "default_version")]
     version: String,
-    /// (images) The container image repository path used to build registry tags
-    /// (`<registry>/<image_name>:<version>`). `--flatten-image-paths` uses `name` instead.
+    /// (images) A repo-style container image path used as the tag leaf only when
+    /// `toolbox build --use-image-path` is set (`<registry>/<image_name>:<version>`);
+    /// otherwise tags use the tool `name`.
     image_name: Option<String>,
     /// (images) The real registry url an export captured for this image
     ///
@@ -418,17 +419,18 @@ fn config_requires_container_image(config: Option<&serde_json::Value>) -> bool {
 
 /// Derive an image's registry tags as `<registry>/[<prefix>/]<leaf>:<version>`
 ///
-/// The leaf is the manifest `image_name` (or the tool `name` when `flatten_image_paths`
-/// is set). Empty registries are skipped (they can't anchor a real tag), as is an empty
-/// `image_name` (no tags to derive).
+/// The leaf is the tool `name` by default, or the manifest `image_name` (a repo-style path)
+/// when `use_image_path` is set. Empty registries are skipped (they can't anchor a real tag),
+/// as is an empty leaf (nothing to tag — only reachable when `use_image_path` is set and the
+/// manifest has no `image_name`).
 ///
 /// # Arguments
 ///
-/// * `image_name` - The image repository path from the manifest
-/// * `name` - The tool name, used as the leaf when `flatten_image_paths` is set
+/// * `image_name` - The image repository path from the manifest; the leaf when `use_image_path`
+/// * `name` - The tool name; the leaf by default
 /// * `version` - The image version, used as the tag
 /// * `registries` - The registries to tag for
-/// * `flatten_image_paths` - Tag with `name` instead of `image_name`
+/// * `use_image_path` - Tag with the `image_name` path instead of the tool `name`
 /// * `image_path_prefix` - Optional path inserted between the registry and the leaf
 /// * `tag_suffix` - Optional suffix appended to the version (e.g. `-mybranch`)
 fn derive_image_tags(
@@ -436,15 +438,16 @@ fn derive_image_tags(
     name: &str,
     version: &str,
     registries: &[String],
-    flatten_image_paths: bool,
+    use_image_path: bool,
     image_path_prefix: Option<&str>,
     tag_suffix: Option<&str>,
 ) -> Vec<String> {
-    if image_name.is_empty() {
+    // pick the leaf to tag with: the image_name path when opted in, else the tool name
+    let leaf = if use_image_path { image_name } else { name };
+    // an empty leaf can't anchor a tag
+    if leaf.is_empty() {
         return Vec::new();
     }
-    // pick the leaf to tag with: the tool name when flattening, else the image_name path
-    let leaf = if flatten_image_paths { name } else { image_name };
     // optionally insert a registry path prefix between the registry and the leaf
     let path = match image_path_prefix {
         Some(prefix) if !prefix.is_empty() => format!("{prefix}/{leaf}"),
@@ -649,7 +652,7 @@ fn merge_base_image(global: Option<&BaseImage>, per_tool: Option<&BaseImage>) ->
 /// * `root` - The manifest's directory
 /// * `output_dir` - The directory the `toolbox.json` is written to
 /// * `registries` - The registries to derive tags for
-/// * `flatten_image_paths` - Tag with `name` instead of `image_name`
+/// * `use_image_path` - Tag with the `image_name` path instead of the tool `name`
 /// * `image_path_prefix` - Optional registry base path to prefix derived tags with
 /// * `tag_suffix` - Optional suffix appended to each derived tag's version
 /// * `global_base_image` - The toolbox-wide `[base_image]` the per-tool one merges over
@@ -659,7 +662,7 @@ fn build_image_version(
     root: &Path,
     output_dir: &Path,
     registries: &[String],
-    flatten_image_paths: bool,
+    use_image_path: bool,
     image_path_prefix: Option<&str>,
     tag_suffix: Option<&str>,
     global_base_image: Option<&BaseImage>,
@@ -761,7 +764,7 @@ fn build_image_version(
             name,
             version,
             registries,
-            flatten_image_paths,
+            use_image_path,
             image_path_prefix,
             tag_suffix,
         );
@@ -802,7 +805,7 @@ fn build_image_version(
         vec![url]
     } else {
         // derive <registry>/[prefix/]<image_name>:<version> for each registry
-        let tags = derive_image_tags(image_name, name, version, registries, flatten_image_paths, image_path_prefix, tag_suffix);
+        let tags = derive_image_tags(image_name, name, version, registries, use_image_path, image_path_prefix, tag_suffix);
         match tags.first() {
             Some(first) => {
                 // warn if the derived tag silently replaces an image the user set in
@@ -1055,7 +1058,7 @@ fn build_output(cmd: &BuildToolbox) -> Result<BuildOutput, Error> {
                     root,
                     output_dir,
                     &registries,
-                    cmd.flatten_image_paths,
+                    cmd.use_image_path,
                     config.image_path_prefix.as_deref(),
                     cmd.tag_suffix.as_deref(),
                     config.base_image.as_ref(),
@@ -1224,10 +1227,10 @@ mod tests {
         assert_eq!(rel, "c");
     }
 
-    /// a buildable image derives `<registry>/<image_name>:<version>` (with the
-    /// optional prefix) for each non-empty registry, de-duplicated
+    /// by default a buildable image derives `<registry>/<name>:<version>` from the tool name
+    /// (with the optional prefix) for each non-empty registry, de-duplicated
     #[test]
-    fn derive_tags_from_image_name() {
+    fn derive_tags_default_uses_name() {
         let tags = derive_image_tags(
             "gnu.org/binutils/strings",
             "strings-16be",
@@ -1237,22 +1240,23 @@ mod tests {
             None,
             None,
         );
-        assert_eq!(tags, vec!["ghcr.io/o/r/gnu.org/binutils/strings:latest"]);
+        assert_eq!(tags, vec!["ghcr.io/o/r/strings-16be:latest"]);
     }
 
-    /// `flatten_image_paths` tags with the tool name and the prefix is inserted before the leaf
+    /// `use_image_path` tags with the manifest `image_name` path as the leaf, with the prefix
+    /// inserted before it
     #[test]
-    fn derive_tags_override_and_prefix() {
+    fn derive_tags_use_image_path() {
         let tags = derive_image_tags(
-            "img-name",
-            "tool",
-            "1.0",
-            &["reg".to_string()],
+            "gnu.org/binutils/strings",
+            "strings-16be",
+            "latest",
+            &["ghcr.io/o/r".to_string()],
             true,
             Some("pre"),
             None,
         );
-        assert_eq!(tags, vec!["reg/pre/tool:1.0"]);
+        assert_eq!(tags, vec!["ghcr.io/o/r/pre/gnu.org/binutils/strings:latest"]);
     }
 
     /// a tag suffix is appended to the version, so feature-branch builds don't collide
@@ -1267,14 +1271,20 @@ mod tests {
             None,
             Some("-mybranch"),
         );
-        assert_eq!(tags, vec!["reg/img-name:1.0-mybranch"]);
+        assert_eq!(tags, vec!["reg/tool:1.0-mybranch"]);
     }
 
-    /// an empty image_name yields no derived tags (the config url stands)
+    /// `use_image_path` with no `image_name` yields no tags; the default still derives from name
     #[test]
-    fn derive_tags_empty_image_name() {
+    fn derive_tags_empty_leaf() {
+        // opted into the image_name path but the manifest has none -> nothing to tag
         assert!(
-            derive_image_tags("", "tool", "1.0", &["reg".to_string()], false, None, None).is_empty()
+            derive_image_tags("", "tool", "1.0", &["reg".to_string()], true, None, None).is_empty()
+        );
+        // the default leaf is the tool name, so an absent image_name still derives a tag
+        assert_eq!(
+            derive_image_tags("", "tool", "1.0", &["reg".to_string()], false, None, None),
+            vec!["reg/tool:1.0"]
         );
     }
 

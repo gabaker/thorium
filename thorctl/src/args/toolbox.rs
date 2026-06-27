@@ -274,14 +274,14 @@ pub struct BuildToolbox {
     /// Path to the toolbox TOML config file (e.g., config.toml)
     #[clap(short = 'c', long = "config", default_value = "config.toml")]
     pub config: PathBuf,
-    /// Tag every image as `<registry>/[prefix/]<name>:<version>`, using each tool's `name`
-    /// and ignoring its manifest `image_name`
+    /// Tag every image with its manifest `image_name` (a repo-style path) as the leaf:
+    /// `<registry>/[prefix/]<image_name>:<version>`
     ///
-    /// No-op for images whose `image_name` already equals `name` (the default for
-    /// `toolbox init`); use it to flatten path-style `image_name`s in hand-authored or
-    /// exported manifests.
+    /// By default images are tagged with the tool `name`
+    /// (`<registry>/[prefix/]<name>:<version>`). Set this to use the path-style `image_name`
+    /// from each manifest instead. No effect on images pinned to an explicit url.
     #[clap(long)]
-    pub flatten_image_paths: bool,
+    pub use_image_path: bool,
     /// Output file path
     #[clap(short, long, default_value = "toolbox.json")]
     pub output: PathBuf,

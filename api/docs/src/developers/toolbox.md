@@ -176,15 +176,17 @@ When `toolbox build` assembles `toolbox.json`, each image's container url (its `
      no tag is derived (the config's own `image` url stands instead).
    - **`<image_path_prefix>`** — optional path from `config.toml`, inserted between the registry and
      the leaf when set.
-   - **`<leaf>`** — the manifest's `image_name` (a repo path), unless `toolbox build
-     --flatten-image-paths` is passed, in which case the tool `name` is used. An empty `image_name`
-     yields no derived tag.
+   - **`<leaf>`** — the tool `name`. Pass `toolbox build --use-image-path` to use the manifest's
+     `image_name` (a repo-style path) as the leaf instead; with that flag, an image with no
+     `image_name` yields no derived tag.
    - **`<version>`** — the manifest's `version` (defaults to `latest`; an empty version is rejected).
    - **`<tag_suffix>`** — optional, appended to the version via `toolbox build --tag-suffix`
      (e.g. `-mybranch`) so feature-branch builds get distinct tags.
 
-   For example `registry = "ghcr.io/o/r"` + `image_name = "gnu.org/binutils/strings"` +
-   `version = "latest"` derives `ghcr.io/o/r/gnu.org/binutils/strings:latest`.
+   For example `registry = "ghcr.io/o/r"` + tool `name = "strings"` + `version = "latest"` derives
+   `ghcr.io/o/r/strings:latest`; with `--use-image-path` and
+   `image_name = "gnu.org/binutils/strings"` it derives
+   `ghcr.io/o/r/gnu.org/binutils/strings:latest`.
 
 A K8s image that ends up with no container tag from any of these sources is unschedulable, so
 `toolbox build` fails and lists every such image. (Non-K8s scalers — `BareMetal`, `Windows`, `Kvm`,
