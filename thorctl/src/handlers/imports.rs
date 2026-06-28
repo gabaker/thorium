@@ -15,7 +15,7 @@
 use colored::Colorize;
 use futures::{StreamExt, TryStreamExt, stream};
 use std::collections::HashSet;
-use thorium::models::{GroupRequest, ScrubbedUser};
+use thorium::models::GroupRequest;
 use thorium::{CtlConf, Error, Thorium};
 
 use super::progress::Bar;
@@ -190,12 +190,12 @@ fn existing_label(kind: &str, mode: ConflictMode) -> String {
 ///
 /// * `conf` - The Thorctl config (used to display the API URL)
 /// * `plan` - The categorized resources this import will create or touch
-/// * `current_user` - The currently authenticated user (shown in the confirmation prompt)
+/// * `username` - The current user's name, shown in the confirmation prompt
 /// * `mode` - How existing resources will be handled, to label them accurately
 pub fn confirm_import(
     conf: &CtlConf,
     plan: &ImportPlan,
-    current_user: &ScrubbedUser,
+    username: &str,
     mode: ConflictMode,
 ) -> Result<bool, Error> {
     if !plan.new_images.is_empty() {
@@ -261,7 +261,7 @@ pub fn confirm_import(
         .with_prompt(format!(
             "Import the above items to Thorium instance at '{}' as user '{}'?",
             conf.keys.api.bright_green(),
-            current_user.username.bright_green()
+            username.bright_green()
         ))
         .interact()?;
     Ok(response)

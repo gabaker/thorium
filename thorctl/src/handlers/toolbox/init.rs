@@ -35,14 +35,17 @@ pub(crate) async fn write_file(path: &Path, contents: &str, overwrite: bool) -> 
     let exists = tokio::fs::try_exists(path)
         .await
         .map_err(|e| Error::new(format!("Failed to stat '{}': {e}", path.display())))?;
+    // never clobber an existing file unless the caller opted in; report the skip so
+    // the user knows a stale file was left untouched and how to force a replace
     if !overwrite && exists {
         println!(
-            "{} {} (already exists)",
-            "Skipping".bright_yellow(),
+            "{} {} (already exists; pass --overwrite to replace)",
+            "Skipped".bright_yellow(),
             path.display()
         );
         return Ok(false);
     }
+    // ensure the destination directory tree exists before writing into it
     if let Some(parent) = path.parent() {
         tokio::fs::create_dir_all(parent).await.map_err(|e| {
             Error::new(format!(
@@ -51,10 +54,13 @@ pub(crate) async fn write_file(path: &Path, contents: &str, overwrite: bool) -> 
             ))
         })?;
     }
+    // distinguish replacing a present file from creating a new one for the status line;
+    // captured before the write because the file always exists afterward
     let overwritten = overwrite && exists;
     tokio::fs::write(path, contents)
         .await
         .map_err(|e| Error::new(format!("Failed to write '{}': {e}", path.display())))?;
+    // tell the user which action happened (replaced vs newly created)
     if overwritten {
         println!("{} {}", "Overwrote".bright_yellow(), path.display());
     } else {
@@ -69,6 +75,8 @@ pub(crate) async fn write_file(path: &Path, contents: &str, overwrite: bool) -> 
 ///
 /// * `path` - The path to take the directory name from
 fn dir_name(path: &Path) -> Result<String, Error> {
+    // take the trailing path component as the resource name, erroring on a path that
+    // has no final component (e.g. `/` or one ending in `..`) or non-UTF-8 bytes
     path.file_name()
         .and_then(|n| n.to_str())
         .map(String::from)
@@ -92,6 +100,8 @@ fn dir_name(path: &Path) -> Result<String, Error> {
 /// * `kind` - The resource kind, for the error message ("group", "image", …)
 /// * `name` - The name to validate
 fn validate_resource_name(kind: &str, name: &str) -> Result<(), Error> {
+    // reuse the wizard's identifier check so interactive and non-interactive paths
+    // enforce the same regex, then prefix the error with the resource kind for context
     prompt::validate_name(name)
         .map_err(|err| Error::new(format!("Invalid {kind} name '{name}': {err}")))
 }
@@ -106,6 +116,8 @@ fn validate_resource_name(kind: &str, name: &str) -> Result<(), Error> {
 ///
 /// * `value` - The raw string to escape
 pub(crate) fn toml_escape(value: &str) -> String {
+    // backslash must be escaped first so the escapes introduced for the other
+    // characters below aren't themselves doubled by a later pass
     value
         .replace('\\', "\\\\")
         .replace('"', "\\\"")
@@ -137,6 +149,7 @@ pub(crate) fn render_config_toml(
     bundled_images: bool,
     base_image: Option<&BaseImage>,
 ) -> String {
+    // name is the one always-present required key, so it anchors the top of the file
     let mut out = format!("name = \"{}\"\n", toml_escape(name));
     // a set registry is written out; an unset one is a commented placeholder so the
     // generated config documents the knob without forcing a (possibly wrong) value
@@ -144,6 +157,8 @@ pub(crate) fn render_config_toml(
         Some(registry) => out.push_str(&format!("registry = \"{}\"\n", toml_escape(registry))),
         None => out.push_str("# registry = \"\"\n"),
     }
+    // emit extra registries as a real array only when present; otherwise a commented
+    // empty-array placeholder documents the knob
     if registries.is_empty() {
         out.push_str("# registries = []\n");
     } else {
@@ -153,9 +168,12 @@ pub(crate) fn render_config_toml(
             .collect();
         out.push_str(&format!("registries = [{}]\n", quoted.join(", ")));
     }
+    // only write bundled_images when true; the false default is left implicit rather
+    // than spelled out as a placeholder
     if bundled_images {
         out.push_str("bundled_images = true\n");
     }
+    // a set prefix is written out; an unset one is a commented placeholder
     match image_path_prefix {
         Some(prefix) => out.push_str(&format!("image_path_prefix = \"{}\"\n", toml_escape(prefix))),
         None => out.push_str("# image_path_prefix = \"\"\n"),
@@ -164,7 +182,9 @@ pub(crate) fn render_config_toml(
     // is a commented placeholder documenting the knobs
     match base_image {
         Some(base) => {
+            // open the table; the blank line keeps it visually separate from the scalars above
             out.push_str("\n[base_image]\n");
+            // each base-image field is optional, so only emit the ones that are set
             if let Some(image) = &base.image {
                 out.push_str(&format!("image = \"{}\"\n", toml_escape(image)));
             }
@@ -177,6 +197,7 @@ pub(crate) fn render_config_toml(
             if let Some(user) = &base.user {
                 out.push_str(&format!("user = \"{}\"\n", toml_escape(user)));
             }
+            // allow_override is a bool, not a string, so it is written without quoting/escaping
             if let Some(allow) = base.allow_override {
                 out.push_str(&format!("allow_override = {allow}\n"));
             }
@@ -204,6 +225,9 @@ pub(crate) fn render_config_toml(
 ///
 /// * `answers` - The wizard answers seeding the config's identity and key fields
 fn build_image_config(answers: &ImageConfigAnswers) -> String {
+    // build the full ImageRequest shape with every field spelled out (even defaulted
+    // ones) so the scaffolded file is a complete, editable reference; the wizard answers
+    // seed identity and the few interactively chosen fields
     serde_json::to_string_pretty(&serde_json::json!({
         "group": answers.group,
         "name": answers.name,
@@ -300,6 +324,7 @@ fn build_image_config(answers: &ImageConfigAnswers) -> String {
         "kvm": null,
         "network_policies": []
     }))
+    // the template is a fixed shape built from owned strings, so serialization cannot fail
     .expect("static JSON template must serialize")
 }
 
@@ -309,6 +334,7 @@ fn build_image_config(answers: &ImageConfigAnswers) -> String {
 ///
 /// * `answers` - The wizard answers seeding the config's identity and order/sla
 fn build_pipeline_config(answers: &PipelineConfigAnswers) -> String {
+    // emit the full PipelineRequest shape; triggers starts empty for the user to fill in
     serde_json::to_string_pretty(&serde_json::json!({
         "group": answers.group,
         "name": answers.name,
@@ -317,6 +343,7 @@ fn build_pipeline_config(answers: &PipelineConfigAnswers) -> String {
         "triggers": {},
         "description": answers.description
     }))
+    // the template is a fixed shape built from owned values, so serialization cannot fail
     .expect("static JSON template must serialize")
 }
 
@@ -340,6 +367,12 @@ pub(crate) fn generate_image_manifest(
     policy_files: &[String],
     exported_image_path: Option<&str>,
 ) -> String {
+    // a Thorium version is a free-form Custom(String) on export, so escape it before it
+    // goes into a TOML basic string; a stray quote/newline would otherwise corrupt the
+    // generated manifest (name/image_name_field are already validated/escaped by callers)
+    let version = toml_escape(version);
+    // lay down the required scalar keys first; config_from points at the sibling JSON
+    // named after the tool, and build_path defaults to the manifest's own directory
     let mut manifest = format!(
         "name = \"{name}\"\n\
          type = \"image\"\n\
@@ -364,6 +397,8 @@ pub(crate) fn generate_image_manifest(
             quoted.join(", ")
         ));
     }
+    // write an explicit `build = false` when the image is reference-only; otherwise leave
+    // the `true` default as a commented hint documenting how to flip it
     if no_build {
         manifest.push_str("build = false\n");
     } else {
@@ -390,16 +425,23 @@ pub(crate) fn generate_image_manifest(
 /// * `name` - The pipeline name
 /// * `images` - The (image name, version) pairs the pipeline references
 pub(crate) fn generate_pipeline_manifest(name: &str, images: &[(String, String)]) -> String {
+    // lay down the required scalar keys; config_from points at the sibling JSON config
     let mut manifest = format!(
         "name = \"{name}\"\n\
          type = \"pipeline\"\n\
-         description = \"\"\n\
          version = \"latest\"\n\
          config_from = \"{name}.json\"\n"
     );
+    // append an [images.<name>] table per referenced image so the manifest's image map
+    // mirrors the images the pipeline's order runs; the image name is emitted as a quoted
+    // key because Thorium names may contain dots (a bare `images.a.b` key would be parsed
+    // as a nested table), and both key and version are escaped so a stray quote/newline
+    // can't corrupt the generated TOML
     for (image_name, version) in images {
         manifest.push_str(&format!(
-            "\n[images.{image_name}]\nversion = \"{version}\"\n"
+            "\n[images.\"{}\"]\nversion = \"{}\"\n",
+            toml_escape(image_name),
+            toml_escape(version)
         ));
     }
     manifest
@@ -439,22 +481,38 @@ async fn write_image_files(
         )
         .await?
     } else {
-        // non-interactive: emit the default in curated order with all fields present
+        // non-interactive: emit the default in curated key order with all fields present,
+        // matching the layout the editor path would have produced
         let value: serde_json::Value = serde_json::from_str(&config_json)
             .map_err(|e| Error::new(format!("Invalid default image config: {e}")))?;
         crate::utils::curated_json(&value, IMAGE_FIELD_ORDER)?
     };
-    // re-read identity from the (possibly edited) config so the manifest + filename
-    // stay consistent with whatever the user saved
-    let value: serde_json::Value = serde_json::from_str(&final_json)
-        .map_err(|e| Error::new(format!("Edited image config is not valid JSON: {e}")))?;
-    let name = json_str_field(&value, "name")
-        .ok_or_else(|| Error::new("image config is missing a 'name' field".to_string()))?;
-    let group = json_str_field(&value, "group")
-        .ok_or_else(|| Error::new("image config is missing a 'group' field".to_string()))?;
+    // re-parse the final JSON to read identity back out; the editor path may have changed
+    // name/group, so the manifest and filename must follow the saved file, not the answers
+    let value: serde_json::Value = serde_json::from_str(&final_json).map_err(|e| {
+        Error::new(format!(
+            "image config for '{}' is not valid JSON: {e}",
+            path.display()
+        ))
+    })?;
+    // identity comes from the saved config, not the wizard answers, so a name/group the
+    // user changed in the editor still drives the manifest and filename
+    let name = json_str_field(&value, "name").ok_or_else(|| {
+        Error::new(format!(
+            "image config for '{}' is missing a 'name' field",
+            path.display()
+        ))
+    })?;
+    let group = json_str_field(&value, "group").ok_or_else(|| {
+        Error::new(format!(
+            "image config for '{}' is missing a 'group' field",
+            path.display()
+        ))
+    })?;
+    // reject names that aren't valid identifiers before interpolating them into the
+    // TOML template, since an editor-supplied name has not been through prompt validation
     validate_resource_name("image", &name)?;
     validate_resource_name("group", &group)?;
-
     let manifest = generate_image_manifest(
         &name,
         // image_name may be a path (slashes), so escape it before it lands in the
@@ -466,10 +524,12 @@ async fn write_image_files(
         // newly scaffolded images are built, not exported, so no pinned registry path
         None,
     );
+    // write the manifest and the JSON config under the config's own name so the two stay
+    // in lockstep with whatever identity the user saved
     write_file(&path.join("manifest.toml"), &manifest, overwrite).await?;
     write_file(&path.join(format!("{name}.json")), &final_json, overwrite).await?;
     // description.md is the source of truth toolbox build injects, so seed it from
-    // the (possibly edited) config description
+    // the (possibly edited) config description; an empty description yields a bare stub
     let description = json_str_field(&value, "description").filter(|d| !d.is_empty());
     let description_md = description_stub(&name, description.as_deref());
     write_file(&path.join("description.md"), &description_md, overwrite).await?;
@@ -483,6 +543,8 @@ async fn write_image_files(
 /// * `value` - The JSON config value to read from
 /// * `field` - The name of the field to read
 fn json_str_field(value: &serde_json::Value, field: &str) -> Option<String> {
+    // None unless the key exists and holds a string; a missing key or non-string value
+    // both collapse to None so callers can treat "absent" and "wrong type" alike
     value.get(field).and_then(|v| v.as_str()).map(str::to_string)
 }
 
@@ -490,23 +552,43 @@ fn json_str_field(value: &serde_json::Value, field: &str) -> Option<String> {
 /// preserving first-seen order. Used to keep the manifest's image map in sync with
 /// an order edited in the editor.
 ///
+/// Both order forms are accepted: the flat form (`["a", "b"]`, a single implicit
+/// stage) and the staged form (`[["a", "b"], ["c"]]`). A hand-edited pipeline config
+/// can legitimately use the flat form, and silently treating it as no images would
+/// leave the generated manifest's `[images.*]` map empty so the rebuilt pipeline
+/// wouldn't declare the images it actually runs.
+///
 /// # Arguments
 ///
 /// * `value` - The pipeline config value whose `order` is scanned for image names
 fn unique_order_images(value: &serde_json::Value) -> Vec<String> {
+    // `seen` dedupes while `images` preserves first-seen order, since a HashSet alone
+    // would lose the ordering the manifest map should reflect
     let mut seen = std::collections::HashSet::new();
     let mut images = Vec::new();
+    // record an image name the first time it appears; insert() is false on a repeat so
+    // duplicates within or across stages are dropped while order is preserved
+    let mut record = |name: &str| {
+        if seen.insert(name.to_string()) {
+            images.push(name.to_string());
+        }
+    };
+    // a non-array order (or an absent one) simply yields no images rather than erroring
     if let Some(order) = value.get("order").and_then(|o| o.as_array()) {
-        for stage in order {
-            let Some(stage) = stage.as_array() else {
-                continue;
-            };
-            for image in stage {
-                if let Some(image) = image.as_str()
-                    && seen.insert(image.to_string())
-                {
-                    images.push(image.to_string());
+        for entry in order {
+            match entry {
+                // a flat entry is itself an image name
+                serde_json::Value::String(name) => record(name),
+                // a staged entry is an array of image names; non-string members are skipped
+                serde_json::Value::Array(stage) => {
+                    for image in stage {
+                        if let Some(name) = image.as_str() {
+                            record(name);
+                        }
+                    }
                 }
+                // anything else is malformed; skip it rather than aborting
+                _ => {}
             }
         }
     }
@@ -522,12 +604,16 @@ fn unique_order_images(value: &serde_json::Value) -> Vec<String> {
 /// * `editor_override` - The explicit `--editor` value, if given
 /// * `args` - The top-level thorctl args (used to locate the config)
 fn resolve_editor(editor_override: Option<&str>, args: &Args) -> String {
+    // an explicit --editor always wins
     if let Some(editor) = editor_override {
         return editor.to_string();
     }
+    // fall back to the config's default_editor; init is offline so a missing/unreadable
+    // config is non-fatal — swallow the error and drop through to the built-in default
     if let Ok(conf) = thorium::CtlConf::from_path(&args.config) {
         return conf.default_editor;
     }
+    // last resort when there is no override and no usable config
     thorium::client::conf::default_default_editor()
 }
 
@@ -539,10 +625,14 @@ fn resolve_editor(editor_override: Option<&str>, args: &Args) -> String {
 /// * `non_interactive` - Whether `--non-interactive` is set (errors instead of prompting)
 fn resolve_group(group: &Option<String>, non_interactive: bool) -> Result<String, Error> {
     match group {
+        // an explicit --group is taken verbatim (it is validated later before use)
         Some(group) => Ok(group.clone()),
+        // non-interactive can't prompt, so a missing group is a hard error rather than
+        // silently defaulting to some group the user didn't choose
         None if non_interactive => Err(Error::new(
             "--group is required in non-interactive mode".to_string(),
         )),
+        // interactive: ask the user for the group
         None => prompt::prompt_group_name("Group name"),
     }
 }
@@ -557,9 +647,12 @@ fn resolve_group(group: &Option<String>, non_interactive: bool) -> Result<String
 /// * `name` - The tool's name
 /// * `description` - The description entered in the wizard, if any
 fn description_stub(name: &str, description: Option<&str>) -> String {
+    // treat a blank description as absent so an empty wizard answer doesn't add a stray
+    // empty line under the heading
     match description.filter(|d| !d.is_empty()) {
         // an existing description goes under the Overview heading
         Some(description) => format!("# {name}\n\n# Overview\n\n{description}\n"),
+        // no description: emit just the title and an empty Overview section for the user
         None => format!("# {name}\n\n# Overview\n"),
     }
 }
@@ -583,6 +676,8 @@ async fn write_pipeline_files(
     open_editor: bool,
     editor: &str,
 ) -> Result<(), Error> {
+    // build the default config, then (interactively) let the user fill it in via the
+    // editor — the editor edits exactly what is written to <name>.json
     let config_json = build_pipeline_config(answers);
     let final_json = if open_editor {
         editor::review_config_in_editor::<PipelineRequest>(
@@ -593,31 +688,53 @@ async fn write_pipeline_files(
         )
         .await?
     } else {
-        // non-interactive: emit the default in curated order with all fields present
+        // non-interactive: emit the default in curated key order with all fields present
         let value: serde_json::Value = serde_json::from_str(&config_json)
             .map_err(|e| Error::new(format!("Invalid default pipeline config: {e}")))?;
         crate::utils::curated_json(&value, PIPELINE_FIELD_ORDER)?
     };
-    let value: serde_json::Value = serde_json::from_str(&final_json)
-        .map_err(|e| Error::new(format!("Edited pipeline config is not valid JSON: {e}")))?;
-    let name = json_str_field(&value, "name")
-        .ok_or_else(|| Error::new("pipeline config is missing a 'name' field".to_string()))?;
-    let group = json_str_field(&value, "group")
-        .ok_or_else(|| Error::new("pipeline config is missing a 'group' field".to_string()))?;
+    // re-parse the saved JSON so identity and the (possibly edited) order drive the
+    // manifest, not the original wizard answers
+    let value: serde_json::Value = serde_json::from_str(&final_json).map_err(|e| {
+        Error::new(format!(
+            "pipeline config for '{}' is not valid JSON: {e}",
+            path.display()
+        ))
+    })?;
+    // identity comes from the saved config so an edited name/group still drives the
+    // manifest and filename
+    let name = json_str_field(&value, "name").ok_or_else(|| {
+        Error::new(format!(
+            "pipeline config for '{}' is missing a 'name' field",
+            path.display()
+        ))
+    })?;
+    let group = json_str_field(&value, "group").ok_or_else(|| {
+        Error::new(format!(
+            "pipeline config for '{}' is missing a 'group' field",
+            path.display()
+        ))
+    })?;
+    // reject names that aren't valid identifiers before interpolating into the TOML template
     validate_resource_name("pipeline", &name)?;
     validate_resource_name("group", &group)?;
     // derive the manifest's image map from the config's order so editing the order
-    // in the editor keeps the manifest's referenced images in sync
+    // in the editor keeps the manifest's referenced images in sync; each gets the
+    // default "latest" version since the order carries names only
     let images: Vec<(String, String)> = unique_order_images(&value)
         .into_iter()
         .map(|image| (image, "latest".to_string()))
         .collect();
+    // image names pulled from the order are interpolated into TOML table headers, so they
+    // too must be valid identifiers
     for (image, _) in &images {
         validate_resource_name("image", image)?;
     }
+    // write the manifest and JSON config keyed on the saved name so they stay in lockstep
     let manifest = generate_pipeline_manifest(&name, &images);
     write_file(&path.join("manifest.toml"), &manifest, overwrite).await?;
     write_file(&path.join(format!("{name}.json")), &final_json, overwrite).await?;
+    // seed description.md from the (possibly edited) config description, blank treated as absent
     let description = json_str_field(&value, "description").filter(|d| !d.is_empty());
     let description_md = description_stub(&name, description.as_deref());
     write_file(&path.join("description.md"), &description_md, overwrite).await?;
@@ -633,6 +750,7 @@ async fn write_pipeline_files(
 /// * `cmd` - The init subcommand (toolbox, image, or pipeline)
 /// * `args` - The top-level thorctl args
 pub async fn handle(cmd: &Init, args: &Args) -> Result<(), Error> {
+    // route each init variant to its dedicated scaffolder
     match cmd {
         Init::Toolbox(cmd) => init_toolbox(cmd, args).await,
         Init::Image(cmd) => init_image(cmd, args).await,
@@ -647,14 +765,26 @@ pub async fn handle(cmd: &Init, args: &Args) -> Result<(), Error> {
 /// * `cmd` - The `init image` args
 /// * `args` - The top-level thorctl args
 async fn init_image(cmd: &InitImage, args: &Args) -> Result<(), Error> {
+    // the tool name defaults to the target directory's basename
     let dir = dir_name(&cmd.path)?;
     // the manifest image_name defaults to the build directory name, overridable
     // via --image-name
     let default_image_name = cmd.image_name.clone().unwrap_or_else(|| dir.clone());
+    // resolve the group up front (prompt or --group) so it seeds the config answers
     let group = resolve_group(&cmd.group, cmd.non_interactive)?;
+    // seed the wizard answers from the resolved defaults; no_build flows into build=false
     let answers = ImageConfigAnswers::defaults(&dir, &group, cmd.no_build, &default_image_name);
+    // pick the editor only matters in interactive mode but is resolved unconditionally
     let editor = resolve_editor(cmd.editor.as_deref(), args);
-    write_image_files(&cmd.path, &answers, cmd.overwrite, !cmd.non_interactive, &editor).await
+    // interactive mode (the negation of --non-interactive) opens the editor before writing
+    write_image_files(&cmd.path, &answers, cmd.overwrite, !cmd.non_interactive, &editor).await?;
+    // point the user at the next step now that the image directory exists
+    println!(
+        "\n{} Add this image to a toolbox's config.toml, then run {} to produce a toolbox.json",
+        "Done!".bright_green(),
+        "thorctl toolbox build".bright_cyan()
+    );
+    Ok(())
 }
 
 /// Scaffolds a single pipeline directory from `init pipeline` args
@@ -664,20 +794,52 @@ async fn init_image(cmd: &InitImage, args: &Args) -> Result<(), Error> {
 /// * `cmd` - The `init pipeline` args
 /// * `args` - The top-level thorctl args
 async fn init_pipeline(cmd: &InitPipeline, args: &Args) -> Result<(), Error> {
+    // the pipeline name defaults to the target directory's basename
     let dir = dir_name(&cmd.path)?;
+    // resolve the group (prompt or --group) before building the answers
     let group = resolve_group(&cmd.group, cmd.non_interactive)?;
+    // non-interactive can't prompt for images and the default order is built from them,
+    // so an empty --images would scaffold an empty pipeline — reject it instead
     if cmd.non_interactive && cmd.images.is_empty() {
         return Err(Error::new(
             "--images is required in non-interactive mode".to_string(),
         ));
     }
+    // defaults put every --images entry into a single parallel stage as the order
     let mut answers = PipelineConfigAnswers::defaults(&dir, &group, &cmd.images);
+    // an explicit --order replaces that default ordering
     if let Some(order_str) = &cmd.order {
         answers.order = serde_json::from_str(order_str)
             .map_err(|e| Error::new(format!("Invalid --order JSON: {e}")))?;
+        // an order that names images outside --images leaves the manifest's image map
+        // missing those entries; warn rather than fail so the user can still scaffold
+        // flatten collapses the staged order to the set of all named images
+        let ordered: std::collections::HashSet<&str> =
+            answers.order.iter().flatten().map(String::as_str).collect();
+        let provided: std::collections::HashSet<&str> =
+            cmd.images.iter().map(String::as_str).collect();
+        // images that appear in the order but were never listed in --images
+        let unlisted: Vec<&str> = ordered.difference(&provided).copied().collect();
+        if !unlisted.is_empty() {
+            println!(
+                "{} --order references image(s) not in --images: {} (their manifest entries \
+                 will be derived from the order, with no version pinned)",
+                "Warning:".bright_yellow(),
+                unlisted.join(", ")
+            );
+        }
     }
+    // editor is only consulted in interactive mode but resolved unconditionally
     let editor = resolve_editor(cmd.editor.as_deref(), args);
-    write_pipeline_files(&cmd.path, &answers, cmd.overwrite, !cmd.non_interactive, &editor).await
+    // interactive mode (the negation of --non-interactive) opens the editor before writing
+    write_pipeline_files(&cmd.path, &answers, cmd.overwrite, !cmd.non_interactive, &editor).await?;
+    // point the user at the next step now that the pipeline directory exists
+    println!(
+        "\n{} Add this pipeline to a toolbox's config.toml, then run {} to produce a toolbox.json",
+        "Done!".bright_green(),
+        "thorctl toolbox build".bright_cyan()
+    );
+    Ok(())
 }
 
 /// Scaffolds a full toolbox directory (config.toml plus image/pipeline subdirs)
@@ -687,17 +849,19 @@ async fn init_pipeline(cmd: &InitPipeline, args: &Args) -> Result<(), Error> {
 /// * `cmd` - The `init toolbox` args
 /// * `args` - The top-level thorctl args
 async fn init_toolbox(cmd: &InitToolbox, args: &Args) -> Result<(), Error> {
+    // derive each image's tool name from its directory basename; collected eagerly so a
+    // bad path fails before anything is written, and reused as the default pipeline binding
     let image_names: Vec<String> = cmd
         .images
         .iter()
         .map(|p| dir_name(p))
         .collect::<Result<_, _>>()?;
+    // parse each --pipeline string into its path and optional colon-bound image list
     let pipeline_specs: Vec<PipelineSpec> = cmd
         .pipelines
         .iter()
         .map(|s| PipelineSpec::parse(s))
         .collect();
-
     let config_toml = if let Some(config_path) = &cmd.config {
         // seed the new toolbox from an existing config.toml (mutually exclusive with
         // --name/--registry); carries name, registry, registries, image_path_prefix,
@@ -712,38 +876,65 @@ async fn init_toolbox(cmd: &InitToolbox, args: &Args) -> Result<(), Error> {
             template.base_image.as_ref(),
         )
     } else {
+        // no --config: take name/registry from flags non-interactively, else prompt for them
         let (tb_name, tb_registry) = if cmd.non_interactive {
             (cmd.name.clone(), cmd.registry.clone())
         } else {
             let tb = prompt::prompt_toolbox_config(&cmd.name, cmd.registry.as_deref())?;
             (tb.name, tb.registry)
         };
+        // a from-scratch config has no extra registries, prefix, bundling, or base image
         render_config_toml(&tb_name, tb_registry.as_deref(), &[], None, false, None)
     };
+    // write config.toml at the toolbox root before scaffolding the per-tool dirs
     write_file(
         &cmd.toolbox_dir.join("config.toml"),
         &config_toml,
         cmd.overwrite,
     )
     .await?;
-
+    // one group is resolved once and shared by every scaffolded image and pipeline
     let group = resolve_group(&cmd.group, cmd.non_interactive)?;
+    // editor and the interactive flag are computed once and threaded into each write
     let editor = resolve_editor(cmd.editor.as_deref(), args);
     let open_editor = !cmd.non_interactive;
-
+    // scaffold each image dir, pairing the original path with its derived tool name
     for (image_path, image_name) in cmd.images.iter().zip(&image_names) {
         // the manifest image_name defaults to the image's basename (matching `init image`)
         let answers = ImageConfigAnswers::defaults(image_name, &group, false, image_name);
         write_image_files(image_path, &answers, cmd.overwrite, open_editor, &editor).await?;
     }
-
     for spec in &pipeline_specs {
+        // the pipeline name is its directory basename
         let pipeline_name = dir_name(&spec.path)?;
+        // colon-bound images from the spec take precedence; with no colon the pipeline
+        // runs every image the toolbox is scaffolding
         let pipeline_images = spec.images.clone().unwrap_or_else(|| image_names.clone());
+        // a pipeline that binds an image the toolbox isn't scaffolding (no matching
+        // --images entry) builds a pipeline referencing an image that won't exist
+        // here; warn rather than fail so the user can wire it up themselves. only the
+        // explicit colon-bound case can name a stray image, so skip the check otherwise
+        if spec.images.is_some() {
+            // bound images with no matching scaffolded --images entry
+            let unlisted: Vec<&str> = pipeline_images
+                .iter()
+                .filter(|img| !image_names.contains(img))
+                .map(String::as_str)
+                .collect();
+            if !unlisted.is_empty() {
+                println!(
+                    "{} pipeline '{}' binds image(s) not in --images: {}",
+                    "Warning:".bright_yellow(),
+                    pipeline_name,
+                    unlisted.join(", ")
+                );
+            }
+        }
+        // seed the pipeline's order from its bound images and scaffold its dir
         let answers = PipelineConfigAnswers::defaults(&pipeline_name, &group, &pipeline_images);
         write_pipeline_files(&spec.path, &answers, cmd.overwrite, open_editor, &editor).await?;
     }
-
+    // point the user at the next step now that the whole toolbox skeleton exists
     println!(
         "\n{} Run {} to produce a toolbox.json",
         "Done!".bright_green(),
@@ -752,21 +943,26 @@ async fn init_toolbox(cmd: &InitToolbox, args: &Args) -> Result<(), Error> {
     Ok(())
 }
 
+/// Unit tests for the pure rendering helpers (config TOML, default configs, and the
+/// description stub) that don't need filesystem or editor interaction
 #[cfg(test)]
 mod tests {
     use super::prompt::{ImageConfigAnswers, PipelineConfigAnswers};
     use super::{
-        BaseImage, build_image_config, build_pipeline_config, description_stub, render_config_toml,
+        BaseImage, build_image_config, build_pipeline_config, description_stub,
+        generate_image_manifest, generate_pipeline_manifest, render_config_toml,
+        unique_order_images,
     };
 
     /// The scaffolded description.md is just the tool name + an Overview section (no
     /// placeholder prose); an existing description is placed under Overview
     #[test]
     fn description_stub_uses_overview_section() {
+        // an absent description yields just the title and an empty Overview, no placeholder prose
         let empty = description_stub("clamav", None);
         assert_eq!(empty, "# clamav\n\n# Overview\n");
         assert!(!empty.contains("Describe what this tool"));
-
+        // a present description is placed under the Overview heading
         let with_desc = description_stub("clamav", Some("scans files"));
         assert_eq!(with_desc, "# clamav\n\n# Overview\n\nscans files\n");
     }
@@ -776,10 +972,13 @@ mod tests {
     /// the `version`/`lifetime`/`modifiers` fields so the saved config is complete
     #[test]
     fn image_template_deserializes_into_request() {
+        // the scaffolded default must parse as the real ImageRequest the importer/editor use
         let answers = ImageConfigAnswers::defaults("clamav", "static", false, "clamav");
         let json = build_image_config(&answers);
         serde_json::from_str::<thorium::models::ImageRequest>(&json)
             .expect("default image config must deserialize into ImageRequest");
+        // re-parse as untyped JSON to assert the explicitly-null fields are present, since
+        // ImageRequest deserialization alone wouldn't catch a dropped key
         let value: serde_json::Value = serde_json::from_str(&json).unwrap();
         for key in ["version", "lifetime", "modifiers"] {
             assert!(value.get(key).is_some(), "image template missing '{key}'");
@@ -789,6 +988,7 @@ mod tests {
     /// The scaffolded pipeline default must deserialize into the real `PipelineRequest`
     #[test]
     fn pipeline_template_deserializes_into_request() {
+        // the scaffolded default must parse as the real PipelineRequest the importer/editor use
         let answers =
             PipelineConfigAnswers::defaults("triage", "static", &["clamav".to_string()]);
         let json = build_pipeline_config(&answers);
@@ -796,10 +996,65 @@ mod tests {
             .expect("default pipeline config must deserialize into PipelineRequest");
     }
 
+    /// The order is scanned for image names in both the staged and the flat form, so a
+    /// hand-edited pipeline config using either shape keeps the generated manifest's
+    /// image map populated (first-seen order, duplicates dropped)
+    #[test]
+    fn unique_order_images_accepts_flat_and_staged() {
+        use serde_json::json;
+        // the staged form: an array of stages
+        let staged = json!({ "order": [["a", "b"], ["a", "c"]] });
+        assert_eq!(unique_order_images(&staged), vec!["a", "b", "c"]);
+        // the flat form: a single implicit stage of image names
+        let flat = json!({ "order": ["a", "b", "a", "c"] });
+        assert_eq!(unique_order_images(&flat), vec!["a", "b", "c"]);
+        // an absent or non-array order yields no images rather than erroring
+        assert!(unique_order_images(&json!({})).is_empty());
+        assert!(unique_order_images(&json!({ "order": "nope" })).is_empty());
+    }
+
+    /// A free-form version carrying TOML metacharacters (a Custom version captured on
+    /// export) must be escaped so the generated image manifest stays valid TOML and the
+    /// version round-trips intact rather than breaking out into injected keys
+    #[test]
+    fn image_manifest_escapes_version() {
+        // a version with an embedded quote and newline plus an injected key assignment
+        let nasty = "1.0\"\nmalicious = \"pwned";
+        let manifest = generate_image_manifest("clamav", "clamav", nasty, false, &[], None);
+        // the whole manifest must still parse as TOML
+        let parsed: toml::Value =
+            toml::from_str(&manifest).expect("escaped image manifest must be valid TOML");
+        // the version decodes back to exactly the original string
+        assert_eq!(parsed["version"].as_str(), Some(nasty));
+        // the injected assignment never became a real top-level key
+        assert!(parsed.get("malicious").is_none());
+    }
+
+    /// A dotted image name must be emitted as a quoted key (not a nested table) and a
+    /// version with metacharacters must be escaped, so the pipeline manifest's image map
+    /// stays valid and faithful to the referenced (name, version) pairs
+    #[test]
+    fn pipeline_manifest_quotes_and_escapes_image_entries() {
+        // a name containing a dot would be a nested table as a bare key; the version
+        // carries an embedded quote/newline and an injected assignment
+        let images = vec![("clam.av".to_string(), "1\"\nx = \"y".to_string())];
+        let manifest = generate_pipeline_manifest("triage", &images);
+        // the whole manifest must still parse as TOML
+        let parsed: toml::Value =
+            toml::from_str(&manifest).expect("escaped pipeline manifest must be valid TOML");
+        let imgs = parsed["images"].as_table().expect("images must be a table");
+        // the dotted name is a single key, not a nested images.clam.av sub-table
+        assert!(imgs.contains_key("clam.av"));
+        assert_eq!(imgs["clam.av"]["version"].as_str(), Some("1\"\nx = \"y"));
+        // the injected assignment never escaped into the images table
+        assert!(imgs.get("x").is_none());
+    }
+
     /// With no extras, registries and image_path_prefix are emitted as commented
     /// placeholders and bundled_images is omitted
     #[test]
     fn render_config_minimal() {
+        // a name + registry with no extras: registries/prefix become commented placeholders
         let toml = render_config_toml("My TB", Some("ghcr.io/o/r"), &[], None, false, None);
         assert!(toml.contains("name = \"My TB\""));
         assert!(toml.contains("registry = \"ghcr.io/o/r\""));
@@ -813,6 +1068,7 @@ mod tests {
     /// An unset registry is emitted as a commented placeholder, not `registry = ""`
     #[test]
     fn render_config_no_registry() {
+        // an unset registry must be a commented placeholder, never an active empty value
         let toml = render_config_toml("My TB", None, &[], None, false, None);
         assert!(toml.contains("# registry = \"\""));
         // the active (uncommented) registry line must not be present
@@ -823,6 +1079,7 @@ mod tests {
     /// written out
     #[test]
     fn render_config_full() {
+        // every optional knob set: each must be written out as an active key, not a placeholder
         let base = BaseImage {
             image: Some("ubuntu:22.04".to_string()),
             image_arg: Some("IMAGE".to_string()),
@@ -855,6 +1112,7 @@ mod tests {
     /// Free-form values with quotes are escaped so the TOML stays valid
     #[test]
     fn render_config_escapes() {
+        // a quote in the free-form name must be backslash-escaped so the TOML stays valid
         let toml = render_config_toml("a\"b", Some("r"), &[], None, false, None);
         assert!(toml.contains("name = \"a\\\"b\""));
     }

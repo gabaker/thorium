@@ -71,14 +71,16 @@ pub enum Toolbox {
 ///
 /// * `raw` - The raw `KEY=VALUE` argument string
 fn parse_build_arg(raw: &str) -> Result<(String, String), String> {
-    // split on the first '=' so values containing '=' are preserved
+    // split on the first '=' so a value that itself contains '=' (or a registry ref with
+    // ':' and '/') is preserved whole; a missing '=' has no key/value boundary and errors
     let (key, value) = raw
         .split_once('=')
         .ok_or_else(|| format!("expected KEY=VALUE, got '{raw}'"))?;
-    // a build arg with no key can't be passed to the runtime
+    // reject an empty key (a leading '='); a nameless build arg can't be applied to a build
     if key.is_empty() {
         return Err(format!("build arg key must not be empty in '{raw}'"));
     }
+    // own both halves so the parsed pair outlives the borrowed input string
     Ok((key.to_string(), value.to_string()))
 }
 
@@ -107,8 +109,8 @@ pub struct BuildImagesToolbox {
     pub base_image: Option<(String, String)>,
     /// Extra build arg passed to every image build: `KEY=VALUE` (repeatable)
     ///
-    /// Unlike `--base-image`, these are passed to every build regardless of
-    /// `allow_base_override`.
+    /// Unlike `--base-image`, these are passed to every build regardless of each entry's
+    /// `base_image.allow_override` gate.
     #[clap(long = "build-arg", value_parser = parse_build_arg, value_name = "KEY=VALUE")]
     pub build_args: Vec<(String, String)>,
     /// Append this suffix to every tag built and pushed, without touching toolbox.json
@@ -201,12 +203,22 @@ pub enum ManifestLocation {
 impl std::str::FromStr for ManifestLocation {
     type Err = String;
 
+    /// Parse a string into a [`ManifestLocation`]
+    ///
+    /// A URL is preferred over a path so a remote `toolbox.json` can be fetched; only
+    /// inputs that fail URL parsing are treated as local files.
+    ///
+    /// # Arguments
+    ///
+    /// * `s` - The raw manifest location string (a URL or a filesystem path)
     fn from_str(s: &str) -> Result<Self, Self::Err> {
-        // try parsing as a URL first
+        // prefer a URL interpretation so remote manifests are fetched rather than
+        // mistaken for a relative path
         if let Ok(url) = Url::parse(s) {
             return Ok(Self::Url(url));
         }
-        // if URL parsing fails, treat it as a file path
+        // anything that isn't a valid URL is taken as a local filesystem path; this
+        // parse is infallible so the location always resolves to one of the two variants
         Ok(Self::Path(PathBuf::from(s)))
     }
 }
@@ -367,12 +379,19 @@ impl PipelineSpec {
     ///
     /// * `s` - The pipeline argument string to parse
     pub fn parse(s: &str) -> Self {
+        // split on the LAST colon so a path that itself contains a colon keeps everything
+        // up to the final one as the directory and only the trailing segment is the image list
         if let Some((path, images_str)) = s.rsplit_once(':') {
+            // split the post-colon segment into individual image names, trimming
+            // whitespace and dropping empties so `capa, yara,` yields just `["capa","yara"]`
             let images: Vec<String> = images_str
                 .split(',')
                 .map(|s| s.trim().to_string())
                 .filter(|s| !s.is_empty())
                 .collect();
+            // a colon with no real image names (e.g. a trailing `:` or `: `) is treated as
+            // "no binding": fall back to the FULL original string as the path so the colon
+            // isn't silently stripped off a directory that legitimately contained one
             if images.is_empty() {
                 Self {
                     path: PathBuf::from(s),
@@ -385,6 +404,7 @@ impl PipelineSpec {
                 }
             }
         } else {
+            // no colon at all means bind every image, so record the whole string as the path
             Self {
                 path: PathBuf::from(s),
                 images: None,
@@ -518,17 +538,23 @@ impl ResourceSpec {
     /// * `s` - The resource reference to parse
     /// * `default_group` - The group to fall back to when `s` has no group prefix
     pub fn parse(s: &str, default_group: Option<&str>) -> Result<Self, String> {
+        // split on the FIRST slash so an explicit `group/name` always wins; everything
+        // after the first slash is the name (resource names may themselves contain slashes)
         if let Some((group, name)) = s.split_once('/') {
             Ok(Self {
                 group: group.to_string(),
                 name: name.to_string(),
             })
         } else {
+            // with no `group/` prefix the reference is bare, so it can only be resolved when
+            // a default group was supplied (from `--group`); otherwise the group is ambiguous
             match default_group {
                 Some(g) => Ok(Self {
                     group: g.to_string(),
                     name: s.to_string(),
                 }),
+                // reject rather than guess a group so a bare name can't silently land in the
+                // wrong place when the caller never set one
                 None => Err(format!(
                     "'{s}' must be in group/name format when --group is not set"
                 )),
@@ -544,6 +570,7 @@ mod tests {
     /// A simple `KEY=VALUE` splits into its key and value
     #[test]
     fn parse_build_arg_splits_key_value() {
+        // the `:` in the image tag lives in the value, so it must not affect the split
         assert_eq!(
             parse_build_arg("IMAGE=ubuntu:22.04"),
             Ok(("IMAGE".to_string(), "ubuntu:22.04".to_string()))
@@ -554,10 +581,12 @@ mod tests {
     /// `:` and `/`) survive intact
     #[test]
     fn parse_build_arg_splits_on_first_equals() {
+        // a value that is itself a chain of `=` keeps every `=` after the first
         assert_eq!(
             parse_build_arg("OPTS=a=b=c"),
             Ok(("OPTS".to_string(), "a=b=c".to_string()))
         );
+        // a full registry reference (with `/` and `:`) passes through untouched as the value
         assert_eq!(
             parse_build_arg("IMAGE=ghcr.io/org/base:1.0"),
             Ok(("IMAGE".to_string(), "ghcr.io/org/base:1.0".to_string()))
@@ -567,8 +596,11 @@ mod tests {
     /// An empty value is allowed; a missing `=` or empty key is rejected
     #[test]
     fn parse_build_arg_rejects_malformed() {
+        // a trailing `=` yields an empty value, which is intentionally permitted
         assert_eq!(parse_build_arg("EMPTY="), Ok(("EMPTY".to_string(), String::new())));
+        // no `=` at all has no key/value boundary, so it must error
         assert!(parse_build_arg("no-equals").is_err());
+        // an empty key (leading `=`) is rejected because a nameless build arg is unusable
         assert!(parse_build_arg("=value").is_err());
     }
 }

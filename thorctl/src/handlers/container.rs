@@ -85,6 +85,8 @@ fn detect() -> ContainerRuntime {
 
 /// The container runtime resolved for this run (docker until [`init_runtime`] runs)
 fn runtime() -> ContainerRuntime {
+    // fall back to the default (docker) when called before init_runtime so error
+    // messages still name a concrete binary instead of panicking on an unset cell
     RUNTIME.get().copied().unwrap_or_default()
 }
 
@@ -98,8 +100,9 @@ where
     I: IntoIterator<Item = S>,
     S: AsRef<std::ffi::OsStr>,
 {
-    // spawn the resolved runtime binary (docker or podman) with the given args
+    // target the resolved runtime binary (docker or podman) for this run
     let mut cmd = Command::new(runtime().binary());
+    // apply the caller's arguments; stdio handling is left to each caller
     cmd.args(args);
     cmd
 }
@@ -111,10 +114,13 @@ where
 /// * `output` - The finished command output to inspect
 /// * `ctx` - A human-readable description of what was attempted
 fn check(output: &Output, ctx: &str) -> Result<(), Error> {
+    // a successful exit needs no diagnostics
     if output.status.success() {
         return Ok(());
     }
+    // decode stderr lossily so non-UTF-8 runtime output can't itself become an error
     let stderr = String::from_utf8_lossy(&output.stderr);
+    // surface the runtime's own stderr (trimmed) alongside our context for a usable message
     Err(Error::new(format!("{ctx}: {}", stderr.trim())))
 }
 
@@ -125,11 +131,15 @@ fn check(output: &Output, ctx: &str) -> Result<(), Error> {
 /// * `url` - The fully-qualified image url to pull
 /// * `bar` - The progress bar to update with status
 pub async fn pull(url: &str, bar: &Bar) -> Result<(), Error> {
+    // reflect the current step in the shared progress bar
     bar.set_message("Pulling image");
+    // run `<runtime> pull <url>` and capture its output; a spawn failure here means the
+    // runtime binary is missing or unrunnable, distinct from a non-zero pull exit below
     let output = command(["pull", url])
         .output()
         .await
         .map_err(|e| Error::new(format!("Failed to run {} pull: {e}", runtime())))?;
+    // turn a non-zero exit into an error carrying the runtime's stderr
     check(&output, &format!("{} pull failed for '{url}'", runtime()))
 }
 
@@ -143,17 +153,22 @@ pub async fn pull(url: &str, bar: &Bar) -> Result<(), Error> {
 /// * `dest` - The `.tar.gz` path to write
 /// * `bar` - The progress bar to update with status
 pub async fn save(url: &str, dest: &Path, bar: &Bar) -> Result<(), Error> {
+    // reflect the current step in the shared progress bar
     bar.set_message("Saving image");
+    // ensure the destination's parent exists so std::fs::File::create in the blocking
+    // task doesn't fail on a missing directory
     if let Some(parent) = dest.parent() {
         tokio::fs::create_dir_all(parent)
             .await
             .map_err(|e| Error::new(format!("Failed to create '{}': {e}", parent.display())))?;
     }
-    // spawning the subprocess, reading its tar stream, gzip-compressing it (CPU-bound),
-    // and writing the file are all blocking, so run the whole pipeline on a blocking
-    // thread instead of bridging a sync compressor onto the async runtime
+    // own the inputs so they can move into the blocking closure with a 'static lifetime
     let url = url.to_string();
     let dest = dest.to_path_buf();
+    // spawning the subprocess, reading its tar stream, gzip-compressing it (CPU-bound),
+    // and writing the file are all blocking, so run the whole pipeline on a blocking
+    // thread instead of bridging a sync compressor onto the async runtime; a JoinError
+    // here means the blocking task itself panicked
     tokio::task::spawn_blocking(move || save_blocking(&url, &dest))
         .await
         .map_err(|err| Error::new(format!("Image save task panicked: {err}")))?
@@ -179,6 +194,8 @@ fn save_blocking(url: &str, dest: &Path) -> Result<(), Error> {
         .stdout(Stdio::piped())
         .spawn()
         .map_err(|e| Error::new(format!("Failed to run {} save: {e}", runtime())))?;
+    // take ownership of the piped stdout handle so we can stream it; absent only if the
+    // pipe wasn't set up, which shouldn't happen given the Stdio::piped above
     let mut stdout = child
         .stdout
         .take()
@@ -227,12 +244,16 @@ fn save_blocking(url: &str, dest: &Path) -> Result<(), Error> {
 /// * `tar` - The path to the (optionally gzipped) image tarball
 /// * `bar` - The progress bar to update with status
 pub async fn load(tar: &Path, bar: &Bar) -> Result<(), Error> {
+    // reflect the current step in the shared progress bar
     bar.set_message("Loading image");
+    // pass the tarball as a separate arg (not formatted into the string) so paths with
+    // spaces or odd bytes are forwarded verbatim; the runtime detects gzip itself
     let output = command(["load", "-i"])
         .arg(tar)
         .output()
         .await
         .map_err(|e| Error::new(format!("Failed to run {} load: {e}", runtime())))?;
+    // turn a non-zero exit into an error carrying the runtime's stderr
     check(
         &output,
         &format!("{} load failed for '{}'", runtime(), tar.display()),
@@ -247,11 +268,14 @@ pub async fn load(tar: &Path, bar: &Bar) -> Result<(), Error> {
 /// * `dst` - The new reference to apply
 /// * `bar` - The progress bar to update with status
 pub async fn tag(src: &str, dst: &str, bar: &Bar) -> Result<(), Error> {
+    // reflect the current step in the shared progress bar
     bar.set_message("Retagging image");
+    // run `<runtime> tag <src> <dst>` to add the new reference to the already-local image
     let output = command(["tag", src, dst])
         .output()
         .await
         .map_err(|e| Error::new(format!("Failed to run {} tag: {e}", runtime())))?;
+    // turn a non-zero exit into an error carrying the runtime's stderr
     check(
         &output,
         &format!("{} tag failed ('{src}' -> '{dst}')", runtime()),
@@ -265,11 +289,14 @@ pub async fn tag(src: &str, dst: &str, bar: &Bar) -> Result<(), Error> {
 /// * `url` - The fully-qualified image url to push
 /// * `bar` - The progress bar to update with status
 pub async fn push(url: &str, bar: &Bar) -> Result<(), Error> {
+    // reflect the current step in the shared progress bar
     bar.set_message("Pushing image");
+    // run `<runtime> push <url>` to upload the local image to its registry
     let output = command(["push", url])
         .output()
         .await
         .map_err(|e| Error::new(format!("Failed to run {} push: {e}", runtime())))?;
+    // turn a non-zero exit into an error carrying the runtime's stderr
     check(&output, &format!("{} push failed for '{url}'", runtime()))
 }
 
@@ -288,15 +315,20 @@ pub async fn push(url: &str, bar: &Bar) -> Result<(), Error> {
 /// * `cmd` - The configured runtime command to run
 /// * `ctx` - A human-readable description of the attempt, used in the error
 async fn run_streamed(mut cmd: Command, ctx: String) -> Result<(), Error> {
+    // inherit both stdio streams so the runtime's live build/push output reaches the
+    // user's terminal directly; `status` (not `output`) is used so nothing is captured
     let status = cmd
         .stdout(Stdio::inherit())
         .stderr(Stdio::inherit())
         .status()
         .await
         .map_err(|e| Error::new(format!("Failed to run {}: {e}", runtime())))?;
+    // a clean exit needs no error; the diagnostics already streamed to the terminal
     if status.success() {
         return Ok(());
     }
+    // stderr was inherited, so build an error from the exit status alone, distinguishing
+    // a normal non-zero exit from termination by a signal (no code available)
     Err(Error::new(match status.code() {
         Some(code) => format!("{ctx} ({} exited with code {code})", runtime()),
         None => format!("{ctx} ({} terminated by signal)", runtime()),
@@ -366,6 +398,8 @@ pub async fn build_streamed(
 ) -> Result<(), Error> {
     // assemble `<runtime> build -t <tag> [--no-cache] [--pull] [--build-arg k=v ...] <context>`
     let cmd = command(build_command_args(tag, context, build_args, opts));
+    // stream the build to the terminal; the context path is included in the error so a
+    // failed build points at exactly which build directory was attempted
     run_streamed(
         cmd,
         format!(
@@ -384,7 +418,9 @@ pub async fn build_streamed(
 /// * `src` - The existing local image reference
 /// * `dst` - The new reference to apply
 pub async fn tag_streamed(src: &str, dst: &str) -> Result<(), Error> {
+    // build `<runtime> tag <src> <dst>` to alias an extra reference onto a local image
     let cmd = command(["tag", src, dst]);
+    // stream it so it shares the same live-output framing as the surrounding build/push
     run_streamed(cmd, format!("{} tag failed ('{src}' -> '{dst}')", runtime())).await
 }
 
@@ -394,7 +430,9 @@ pub async fn tag_streamed(src: &str, dst: &str) -> Result<(), Error> {
 ///
 /// * `url` - The fully-qualified image url to push
 pub async fn push_streamed(url: &str) -> Result<(), Error> {
+    // build `<runtime> push <url>` to upload the local image to its registry
     let cmd = command(["push", url]);
+    // stream it so push progress is visible live rather than buffered until completion
     run_streamed(cmd, format!("{} push failed for '{url}'", runtime())).await
 }
 
@@ -404,12 +442,14 @@ mod tests {
     /// Each runtime maps to its expected CLI binary name
     #[test]
     fn binary_names_match_runtime() {
+        // the binary names are what every command() invocation shells out to
         assert_eq!(ContainerRuntime::Docker.binary(), "docker");
         assert_eq!(ContainerRuntime::Podman.binary(), "podman");
     }
     /// An explicit flag wins over the config value and the detected runtime
     #[test]
     fn resolve_prefers_flag() {
+        // flag, config, and detection all disagree so the result proves the flag wins
         let chosen = resolve(
             Some(ContainerRuntime::Podman),
             Some(ContainerRuntime::Docker),
@@ -420,18 +460,22 @@ mod tests {
     /// The config value is used when no flag is given
     #[test]
     fn resolve_falls_back_to_config() {
+        // with no flag, the config value should beat the detection fallback
         let chosen = resolve(None, Some(ContainerRuntime::Podman), || ContainerRuntime::Docker);
         assert_eq!(chosen, ContainerRuntime::Podman);
     }
     /// The detection fallback is used when neither flag nor config is set
     #[test]
     fn resolve_falls_back_to_detected() {
+        // with neither flag nor config, the detection closure's result is used
         let chosen = resolve(None, None, || ContainerRuntime::Podman);
         assert_eq!(chosen, ContainerRuntime::Podman);
     }
     /// The detection closure is not called when a flag or config value is set
     #[test]
     fn resolve_skips_detection_when_chosen() {
+        // a panicking closure asserts detection (PATH probing) is never invoked once a
+        // runtime is already chosen, which is what keeps detection lazy in production
         let chosen = resolve(None, Some(ContainerRuntime::Docker), || {
             panic!("detection should not run when a runtime is already chosen")
         });
@@ -439,13 +483,20 @@ mod tests {
     }
 
     /// A `(key, value)` pair as owned strings, for terse build-arg fixtures
+    ///
+    /// # Arguments
+    ///
+    /// * `key` - The build-arg key
+    /// * `value` - The build-arg value
     fn arg(key: &str, value: &str) -> (String, String) {
+        // build_command_args takes owned strings, so materialize them up front
         (key.to_string(), value.to_string())
     }
 
     /// With default options, no `--no-cache`/`--pull` are emitted and the context is last
     #[test]
     fn build_args_default_has_no_flags() {
+        // default options must produce only the base build command with no extra flags
         let args = build_command_args("reg/x:1", Path::new("ctx"), &[], BuildOptions::default());
         assert_eq!(args, vec!["build", "-t", "reg/x:1", "ctx"]);
     }
@@ -453,6 +504,7 @@ mod tests {
     /// `--no-cache` alone is emitted (and not `--pull`)
     #[test]
     fn build_args_no_cache_only() {
+        // only no_cache is set, so --no-cache appears but --pull must not
         let opts = BuildOptions { no_cache: true, pull: false };
         let args = build_command_args("reg/x:1", Path::new("ctx"), &[], opts);
         assert!(args.contains(&"--no-cache".to_string()));
@@ -462,6 +514,7 @@ mod tests {
     /// `--pull` alone is emitted (and not `--no-cache`)
     #[test]
     fn build_args_pull_only() {
+        // only pull is set, so --pull appears but --no-cache must not
         let opts = BuildOptions { no_cache: false, pull: true };
         let args = build_command_args("reg/x:1", Path::new("ctx"), &[], opts);
         assert!(args.contains(&"--pull".to_string()));
@@ -471,6 +524,7 @@ mod tests {
     /// Both flags are emitted when both options are set
     #[test]
     fn build_args_both_flags() {
+        // both options set, so both flags must be present
         let opts = BuildOptions { no_cache: true, pull: true };
         let args = build_command_args("reg/x:1", Path::new("ctx"), &[], opts);
         assert!(args.contains(&"--no-cache".to_string()));
@@ -480,14 +534,15 @@ mod tests {
     /// Build args are rendered as `--build-arg key=value` and the context stays last
     #[test]
     fn build_args_render_build_args_then_context() {
+        // two build args exercise both the rendering and the ordering guarantee
         let build_args = vec![arg("IMAGE", "ubuntu:22.04"), arg("VERSION", "1")];
         let args =
             build_command_args("reg/x:1", Path::new("ctx"), &build_args, BuildOptions::default());
-        // each pair is a `--build-arg` flag followed by `key=value`
+        // join into one string so the `--build-arg key=value` pairing can be asserted
         let joined = args.join(" ");
         assert!(joined.contains("--build-arg IMAGE=ubuntu:22.04"));
         assert!(joined.contains("--build-arg VERSION=1"));
-        // the context is the final positional argument
+        // the context must remain the final positional argument after the build args
         assert_eq!(args.last().map(String::as_str), Some("ctx"));
     }
 }

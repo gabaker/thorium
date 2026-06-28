@@ -25,9 +25,13 @@ static NAME_RE: LazyLock<Regex> =
 ///
 /// * `value` - The name to validate
 pub(super) fn validate_name(value: &str) -> Result<(), String> {
+    // reject an empty name up front: the regex would also reject it, but a dedicated
+    // message tells the user the field is required rather than malformed
     if value.is_empty() {
         return Err("Name cannot be empty".into());
     }
+    // enforce the manifest-safe pattern so the name can be interpolated unescaped into
+    // TOML manifest templates without breaking out of the surrounding structure
     if !NAME_RE.is_match(value) {
         return Err(
             "Must start with alphanumeric and contain only alphanumeric, '.', '-', or '_'".into(),
@@ -45,6 +49,8 @@ pub(super) fn validate_name(value: &str) -> Result<(), String> {
 /// * `label` - The prompt label
 /// * `default` - The value used when the user enters nothing
 fn prompt_input(label: &str, default: &str) -> Result<String, Error> {
+    // build a free-form text prompt whose empty-entry fallback is the supplied default,
+    // then surface any dialoguer failure (e.g. a closed/non-interactive stdin) as an Error
     dialoguer::Input::new()
         .with_prompt(label)
         .default(default.to_string())
@@ -58,6 +64,8 @@ fn prompt_input(label: &str, default: &str) -> Result<String, Error> {
 ///
 /// * `label` - The prompt label
 fn prompt_name_required(label: &str) -> Result<String, Error> {
+    // attach `validate_name` as the per-keystroke validator so dialoguer re-prompts in place
+    // until the entry is a manifest-safe identifier, then map a read failure to an Error
     dialoguer::Input::<String>::new()
         .with_prompt(label)
         .validate_with(|value: &String| validate_name(value))
@@ -115,6 +123,9 @@ impl ImageConfigAnswers {
     /// * `no_build` - Whether to mark the image as not built by CI
     /// * `image_name` - The manifest `image_name` (registry tag path leaf)
     pub fn defaults(name: &str, group: &str, no_build: bool, image_name: &str) -> Self {
+        // seed every field with the documented scaffold defaults; `image_tag` is left blank
+        // (filled in later by the author/build) and `description` is None so no stub text
+        // is forced into the config
         Self {
             group: group.to_string(),
             name: name.to_string(),
@@ -155,11 +166,13 @@ impl PipelineConfigAnswers {
     /// * `group` - The Thorium group the pipeline is created in
     /// * `images` - The images to run, placed in a single default stage
     pub fn defaults(name: &str, group: &str, images: &[String]) -> Self {
+        // wrap all images in a single inner vec so the default order is one parallel stage
+        // (every image runs concurrently); the author edits this to introduce sequencing
         Self {
             group: group.to_string(),
             name: name.to_string(),
             order: vec![images.to_vec()],
-            // default SLA is one week, matching the API's default
+            // one week in seconds, chosen to match the API's own default SLA
             sla: 604_800,
             description: None,
         }
@@ -190,14 +203,19 @@ pub fn prompt_toolbox_config(
     default_name: &str,
     default_registry: Option<&str>,
 ) -> Result<ToolboxConfigAnswers, Error> {
+    // print a colored section header so the toolbox-level questions stand apart from the
+    // surrounding init output
     println!(
         "\n{}\n{}",
         "Toolbox Configuration".bright_green().bold(),
         "─".repeat(30).bright_green(),
     );
+    // ask for the toolbox name, falling back to the pre-filled default on an empty entry
     let name = prompt_input("Toolbox name", default_name)?;
-    // an empty registry (default or entered) means no central registry; map it to None
+    // ask for the registry, defaulting the prompt to the supplied registry or "" when none
     let registry = prompt_input("Container registry (optional)", default_registry.unwrap_or(""))?;
+    // collapse an empty registry (default or entered) to None so the toolbox declares no
+    // central registry and each image's own `image` url is used instead
     let registry = if registry.is_empty() {
         None
     } else {

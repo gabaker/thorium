@@ -21,11 +21,13 @@ use super::manifest::{Collision, CollisionMember, SourceGroups, ToolboxManifest}
 use super::prompt;
 use crate::handlers::progress::Bar;
 
-/// The action to take on a real (non-duplicate) collision
+/// The user-chosen resolution for a real (non-duplicate) collision
 enum CollisionAction {
-    /// Keep every colliding resource by renaming the extras
+    /// Keep every colliding resource, renaming all but the one the user elects to
+    /// retain the original name
     Rename,
-    /// Skip the colliding resources (and, for images, dependent pipelines)
+    /// Drop the colliding identity entirely; for images this also drops any
+    /// pipelines that depended on it
     Skip,
 }
 
@@ -63,19 +65,50 @@ pub fn resolve_collisions(
 trait CollisionKind {
     /// The resource noun used in prompts and messages ("image"/"pipeline")
     const NOUN: &'static str;
-    /// Detect this kind's `(group, name)` collisions
+    /// Detect this kind's `(group, name)` collisions across the manifest
+    ///
+    /// # Arguments
+    ///
+    /// * `manifest` - The manifest to scan for colliding identities
+    /// * `sources` - Pre-override groups recorded so each member knows its origin
     fn detect(manifest: &ToolboxManifest, sources: &SourceGroups) -> Result<Vec<Collision>, Error>;
-    /// De-dupe a byte-identical collision down to a single entry
+    /// Collapse a byte-identical collision down to a single surviving entry
+    ///
+    /// # Arguments
+    ///
+    /// * `manifest` - The manifest to mutate in place
+    /// * `collision` - The duplicate collision whose extra copies are removed
     fn dedupe(manifest: &mut ToolboxManifest, collision: &Collision);
-    /// A suggested unused rename for a colliding member
+    /// Suggest a not-yet-used name to rename a colliding member to
+    ///
+    /// # Arguments
+    ///
+    /// * `manifest` - The manifest used to check which names are already taken
+    /// * `collision` - The collision the member belongs to (supplies the base name)
+    /// * `member` - The member a rename is being suggested for
     fn suggested_rename(
         manifest: &ToolboxManifest,
         collision: &Collision,
         member: &CollisionMember,
     ) -> String;
-    /// The names already used in `group` (a rename must avoid these)
+    /// The names already used in `group`, which a rename must avoid to not create a
+    /// fresh collision
+    ///
+    /// # Arguments
+    ///
+    /// * `manifest` - The manifest to read existing names from
+    /// * `group` - The target group whose used names are returned
     fn names_in_group(manifest: &ToolboxManifest, group: &str) -> HashSet<String>;
-    /// Rename a member and repoint anything that referenced it
+    /// Rename a member and repoint everything that referenced it (images repoint
+    /// dependent pipelines; pipelines have nothing to repoint)
+    ///
+    /// # Arguments
+    ///
+    /// * `manifest` - The manifest to mutate in place
+    /// * `collision` - The collision being resolved (supplies the original name)
+    /// * `member` - The member to rename
+    /// * `new_name` - The new name to give the member
+    /// * `sources` - Pre-override groups used to pick which dependents to repoint
     fn rename_member(
         manifest: &mut ToolboxManifest,
         collision: &Collision,
@@ -84,6 +117,12 @@ trait CollisionKind {
         sources: &SourceGroups,
     );
     /// Drop the colliding identity and warn; images also drop dependent pipelines
+    ///
+    /// # Arguments
+    ///
+    /// * `manifest` - The manifest to mutate in place
+    /// * `collision` - The collision identity being dropped
+    /// * `progress` - The progress bar the skip warnings are routed through
     fn skip(manifest: &mut ToolboxManifest, collision: &Collision, progress: &Bar);
 }
 
@@ -95,14 +134,30 @@ struct PipelineCollisions;
 impl CollisionKind for ImageCollisions {
     const NOUN: &'static str = "image";
     /// Detect colliding image identities across source groups
+    ///
+    /// # Arguments
+    ///
+    /// * `manifest` - The manifest to scan for colliding image identities
+    /// * `sources` - Pre-override groups recorded on each detected member
     fn detect(manifest: &ToolboxManifest, sources: &SourceGroups) -> Result<Vec<Collision>, Error> {
         manifest.detect_image_collisions(sources)
     }
-    /// De-dupe a byte-identical image collision down to a single entry
+    /// Collapse a byte-identical image collision down to a single entry
+    ///
+    /// # Arguments
+    ///
+    /// * `manifest` - The manifest to mutate in place
+    /// * `collision` - The duplicate image collision to de-dupe
     fn dedupe(manifest: &mut ToolboxManifest, collision: &Collision) {
         manifest.dedupe_image_collision(collision);
     }
-    /// A suggested unused rename for a colliding image member
+    /// Suggest a not-yet-used name to rename a colliding image member to
+    ///
+    /// # Arguments
+    ///
+    /// * `manifest` - The manifest used to find an unused name
+    /// * `collision` - The collision supplying the base name
+    /// * `member` - The image member a rename is suggested for
     fn suggested_rename(
         manifest: &ToolboxManifest,
         collision: &Collision,
@@ -111,10 +166,23 @@ impl CollisionKind for ImageCollisions {
         manifest.suggested_image_rename(collision, member)
     }
     /// The image names already used in `group`
+    ///
+    /// # Arguments
+    ///
+    /// * `manifest` - The manifest to read existing image names from
+    /// * `group` - The target group whose used image names are returned
     fn names_in_group(manifest: &ToolboxManifest, group: &str) -> HashSet<String> {
         manifest.image_names_in_group(group)
     }
     /// Rename an image member and repoint the pipelines that referenced it
+    ///
+    /// # Arguments
+    ///
+    /// * `manifest` - The manifest to mutate in place
+    /// * `collision` - The collision being resolved (supplies the original name)
+    /// * `member` - The image member to rename
+    /// * `new_name` - The new name to give the image
+    /// * `sources` - Pre-override groups used to pick which dependents to repoint
     fn rename_member(
         manifest: &mut ToolboxManifest,
         collision: &Collision,
@@ -122,11 +190,20 @@ impl CollisionKind for ImageCollisions {
         new_name: &str,
         sources: &SourceGroups,
     ) {
-        // repoint the pipelines that wanted each renamed image variant
+        // repointing covers both each dependent pipeline's image map and its order,
+        // and uses sources to pick the pipelines that wanted this exact variant
         manifest.rename_image_member(collision, member, new_name, sources);
     }
     /// Drop the colliding image identity (and its dependent pipelines) and warn
+    ///
+    /// # Arguments
+    ///
+    /// * `manifest` - The manifest to mutate in place
+    /// * `collision` - The image collision identity being dropped
+    /// * `progress` - The progress bar the skip warnings are routed through
     fn skip(manifest: &mut ToolboxManifest, collision: &Collision, progress: &Bar) {
+        // dropping the image identity also returns the pipelines that depended on it
+        // so the cascade can be reported, since a pipeline missing its image is invalid
         let dropped =
             manifest.remove_image_identity_and_dependents(&collision.group, &collision.name);
         warn_skipped_image(progress, collision, &dropped);
@@ -136,14 +213,30 @@ impl CollisionKind for ImageCollisions {
 impl CollisionKind for PipelineCollisions {
     const NOUN: &'static str = "pipeline";
     /// Detect colliding pipeline identities across source groups
+    ///
+    /// # Arguments
+    ///
+    /// * `manifest` - The manifest to scan for colliding pipeline identities
+    /// * `sources` - Pre-override groups recorded on each detected member
     fn detect(manifest: &ToolboxManifest, sources: &SourceGroups) -> Result<Vec<Collision>, Error> {
         manifest.detect_pipeline_collisions(sources)
     }
-    /// De-dupe a byte-identical pipeline collision down to a single entry
+    /// Collapse a byte-identical pipeline collision down to a single entry
+    ///
+    /// # Arguments
+    ///
+    /// * `manifest` - The manifest to mutate in place
+    /// * `collision` - The duplicate pipeline collision to de-dupe
     fn dedupe(manifest: &mut ToolboxManifest, collision: &Collision) {
         manifest.dedupe_pipeline_collision(collision);
     }
-    /// A suggested unused rename for a colliding pipeline member
+    /// Suggest a not-yet-used name to rename a colliding pipeline member to
+    ///
+    /// # Arguments
+    ///
+    /// * `manifest` - The manifest used to find an unused name
+    /// * `collision` - The collision supplying the base name
+    /// * `member` - The pipeline member a rename is suggested for
     fn suggested_rename(
         manifest: &ToolboxManifest,
         collision: &Collision,
@@ -152,10 +245,23 @@ impl CollisionKind for PipelineCollisions {
         manifest.suggested_pipeline_rename(collision, member)
     }
     /// The pipeline names already used in `group`
+    ///
+    /// # Arguments
+    ///
+    /// * `manifest` - The manifest to read existing pipeline names from
+    /// * `group` - The target group whose used pipeline names are returned
     fn names_in_group(manifest: &ToolboxManifest, group: &str) -> HashSet<String> {
         manifest.pipeline_names_in_group(group)
     }
-    /// Rename a pipeline member (no cascade — pipelines aren't referenced by name)
+    /// Rename a pipeline member (no cascade — nothing references a pipeline by name)
+    ///
+    /// # Arguments
+    ///
+    /// * `manifest` - The manifest to mutate in place
+    /// * `_collision` - Unused; pipelines have no dependents to disambiguate
+    /// * `member` - The pipeline member to rename
+    /// * `new_name` - The new name to give the pipeline
+    /// * `_sources` - Unused; there are no dependents to repoint
     fn rename_member(
         manifest: &mut ToolboxManifest,
         _collision: &Collision,
@@ -163,11 +269,20 @@ impl CollisionKind for PipelineCollisions {
         new_name: &str,
         _sources: &SourceGroups,
     ) {
-        // pipelines aren't referenced by name elsewhere, so there's no cascade
+        // unlike images, nothing references a pipeline by name, so renaming one needs
+        // no cascade and ignores the collision/sources args
         manifest.rename_pipeline_member(member, new_name);
     }
-    /// Drop the colliding pipeline identity and warn
+    /// Drop the colliding pipeline identity and warn (no dependents to cascade)
+    ///
+    /// # Arguments
+    ///
+    /// * `manifest` - The manifest to mutate in place
+    /// * `collision` - The pipeline collision identity being dropped
+    /// * `progress` - The progress bar the skip warning is routed through
     fn skip(manifest: &mut ToolboxManifest, collision: &Collision, progress: &Bar) {
+        // remove the colliding pipeline identity; nothing depends on a pipeline so
+        // there is no cascade to report, unlike the image skip path
         manifest.remove_pipeline_identity(&collision.group, &collision.name);
         progress.warning(format!(
             "Skipping colliding pipeline '{}:{}' ({} conflicting definitions: {})",
@@ -201,7 +316,11 @@ fn resolve_kind<K: CollisionKind>(
 ) -> Result<Vec<(String, String)>, Error> {
     // record each rename so the caller can remap artifacts keyed by the original name
     let mut renames = Vec::new();
+    // detect collisions once up front; distinct identities never affect each other, so
+    // iterating the snapshot while mutating the manifest is safe
     for collision in K::detect(manifest, sources)? {
+        // byte-identical copies aren't a real conflict, so silently collapse them to one
+        // and move on without bothering the user
         if collision.identical {
             K::dedupe(manifest, &collision);
             progress.info_anonymous(format!(
@@ -213,6 +332,8 @@ fn resolve_kind<K: CollisionKind>(
             ));
             continue;
         }
+        // a real conflict: ask the user when possible, otherwise default to skipping so
+        // an unattended run still imports the rest of the toolbox instead of aborting
         let action = if can_prompt {
             progress.suspend(|| prompt_collision_action(K::NOUN, &collision))?
         } else {
@@ -223,16 +344,20 @@ fn resolve_kind<K: CollisionKind>(
                 // let the user pick which entry keeps the original name; rename the rest
                 let keep = progress.suspend(|| prompt_keep_member(K::NOUN, &collision))?;
                 for (index, member) in collision.members.iter().enumerate() {
+                    // skip the one entry the user chose to keep under the original name
                     if index == keep {
                         continue;
                     }
+                    // prefill the prompt with a name known to be free
                     let suggested = K::suggested_rename(manifest, &collision, member);
                     // names already used in the target group are off-limits, so a
-                    // rename can't introduce a fresh collision
+                    // rename can't introduce a fresh collision; recomputed each iteration
+                    // because the prior rename may have added a new name to the group
                     let taken = K::names_in_group(manifest, &collision.group);
                     let new_name = progress.suspend(|| {
                         prompt_new_name(K::NOUN, &collision.name, member, &suggested, &taken)
                     })?;
+                    // apply the rename and cascade it to any dependents (image map + order)
                     K::rename_member(manifest, &collision, member, &new_name, sources);
                     // map the new key back to the original on-disk key (the member's
                     // manifest key) so a bundled tarball saved under it is still found
@@ -260,7 +385,7 @@ fn resolve_kind<K: CollisionKind>(
 /// * `kind` - The resource noun ("image" or "pipeline") shown in the prompt
 /// * `collision` - The collision whose members are listed for the user
 fn prompt_collision_action(kind: &str, collision: &Collision) -> Result<CollisionAction, Error> {
-    // describe the collision and list every conflicting member
+    // print a header explaining that these copies would overwrite each other
     println!(
         "\n{} {} '{}:{}' is defined {} times; the copies would overwrite each other:",
         "Collision:".bright_yellow(),
@@ -269,6 +394,7 @@ fn prompt_collision_action(kind: &str, collision: &Collision) -> Result<Collisio
         collision.name.bright_blue(),
         collision.members.len(),
     );
+    // list every conflicting member so the user can see what is in tension
     for member in &collision.members {
         println!(
             "  - manifest entry '{}' version '{}' (from group '{}')",

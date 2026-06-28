@@ -60,10 +60,13 @@ impl ToolboxManifest {
     /// `shared::resolve_manifest_configs`). Returns a [`DroppedItems`] report
     /// describing every version removed and why.
     pub fn validate_structural(&mut self) -> DroppedItems {
+        // the running tally of everything removed, returned for the caller to warn on
         let mut dropped = DroppedItems::default();
-        // drop images without a resolved config first; pipelines that depend on
-        // them then fail the manifest-membership check below
+        // drop images without a resolved config first; this must precede the pipeline
+        // pass because a pipeline that depended on a just-removed image then fails the
+        // manifest-membership check below and is dropped too
         self.drop_unconfigured_images(&mut dropped);
+        // drop pipelines whose config/order/image references are unusable
         self.drop_structurally_invalid_pipelines(&mut dropped);
         dropped
     }
@@ -74,7 +77,9 @@ impl ToolboxManifest {
     /// Run this AFTER the group override so it checks the final group layout.
     /// Returns a [`DroppedItems`] report describing every version removed.
     pub fn validate_group_coherence(&mut self) -> DroppedItems {
+        // the running tally of everything removed, returned for the caller to warn on
         let mut dropped = DroppedItems::default();
+        // drop pipelines whose order names an image not present in the pipeline's group
         self.drop_incoherent_pipelines(&mut dropped);
         dropped
     }
@@ -85,7 +90,10 @@ impl ToolboxManifest {
     ///
     /// * `dropped` - The report to record each removed image version in
     fn drop_unconfigured_images(&mut self, dropped: &mut DroppedItems) {
+        // walk every image, pruning unconfigured versions; an empty image is then removed
         self.images.retain(|name, manifest| {
+            // keep only versions that resolved a config; record the rest with the
+            // config_from they failed to resolve so the user can see what was unreachable
             manifest.versions.retain(|version, v| {
                 if v.config.is_none() {
                     dropped.images.push((
@@ -97,7 +105,7 @@ impl ToolboxManifest {
                     true
                 }
             });
-            // drop the image entirely once all of its versions are gone
+            // drop the image entry entirely once all of its versions are gone
             !manifest.versions.is_empty()
         });
     }
@@ -127,6 +135,9 @@ impl ToolboxManifest {
             .map(String::as_str)
             .chain(config_names.iter().copied())
             .collect();
+        // index every (reference-name, version) pair an image is reachable under, again
+        // accepting both the manifest key and the config name so a pipeline pinning either
+        // form resolves; used to validate the pipeline's per-image version pins
         let mut ref_versions: HashSet<(&str, &str)> = HashSet::new();
         for (key, image_manifest) in &self.images {
             for (version, v) in &image_manifest.versions {
@@ -136,12 +147,15 @@ impl ToolboxManifest {
                 }
             }
         }
-        // collect reasons per "pipeline:version" without holding a mutable borrow on self
+        // gather the reasons each pipeline version is invalid into a side map keyed
+        // "pipeline:version", since we only hold a shared borrow of self while iterating
+        // and can't mutate the pipelines until the scan finishes
         let mut invalid: HashMap<String, Vec<String>> = HashMap::new();
         for (pipeline, pipeline_manifest) in &self.pipelines {
             for (version_name, version) in &pipeline_manifest.versions {
                 let mut reasons = Vec::new();
-                // every image the pipeline names in its map must exist at the right version
+                // every image the pipeline pins in its map must exist at the pinned version;
+                // distinguish "image absent entirely" from "image present, wrong version"
                 for (image_name, image_version) in &version.images {
                     if !ref_versions
                         .contains(&(image_name.as_str(), image_version.version.as_str()))
@@ -156,12 +170,15 @@ impl ToolboxManifest {
                         }
                     }
                 }
+                // the config must have resolved and its order must parse before we can
+                // check the order entries; a missing or malformed config is itself fatal
                 match &version.config {
                     None => reasons.push("config not resolved".to_string()),
                     Some(config) => match config.deserialize_image_order() {
                         Err(err) => reasons.push(format!("malformed image order: {err}")),
                         Ok(order) => {
-                            // every order entry must name an image present in the manifest
+                            // order entries always use the config name, so check them against
+                            // config_names only (not the manifest-key alias set)
                             let mut missing: Vec<&str> = Vec::new();
                             for image in order.iter().flat_map(|sub_order| sub_order.iter()) {
                                 if !config_names.contains(image) {
@@ -176,11 +193,13 @@ impl ToolboxManifest {
                         }
                     },
                 }
+                // a version with any accumulated reason is marked invalid for removal
                 if !reasons.is_empty() {
                     invalid.insert(format!("{pipeline}:{version_name}"), reasons);
                 }
             }
         }
+        // apply the removals now that the borrow of self.pipelines has been released
         Self::remove_invalid_pipeline_versions(&mut self.pipelines, &invalid, dropped);
     }
 
@@ -216,7 +235,11 @@ impl ToolboxManifest {
                 let Ok(order) = config.deserialize_image_order() else {
                     continue;
                 };
+                // the images actually present in this pipeline's (post-override) group;
+                // None when the group has no images at all, which makes every entry missing
                 let images_in_group = group_images.get(config.group.as_str());
+                // an order entry is incoherent when its image isn't in the pipeline's group,
+                // even if that image exists elsewhere in the manifest under another group
                 let mut missing: Vec<&str> = Vec::new();
                 for image in order.iter().flat_map(|sub_order| sub_order.iter()) {
                     if !images_in_group.is_some_and(|names| names.contains(image)) {
@@ -234,6 +257,7 @@ impl ToolboxManifest {
                 }
             }
         }
+        // apply the removals now that the borrow of self.pipelines has been released
         Self::remove_invalid_pipeline_versions(&mut self.pipelines, &invalid, dropped);
     }
 
@@ -250,22 +274,31 @@ impl ToolboxManifest {
         invalid: &HashMap<String, Vec<String>>,
         dropped: &mut DroppedItems,
     ) {
+        // nothing flagged means no mutation and no report entries
         if invalid.is_empty() {
             return;
         }
+        // drop each flagged version, then drop any pipeline left with no versions
         pipelines.retain(|pipeline, pipeline_manifest| {
             pipeline_manifest
                 .versions
                 .retain(|version, _| !invalid.contains_key(&format!("{pipeline}:{version}")));
             !pipeline_manifest.versions.is_empty()
         });
+        // record every removal (with its reasons) so the caller can warn the user
         for (key, reasons) in invalid {
             dropped.pipelines.push((key.clone(), reasons.clone()));
         }
     }
 
     /// Returns all of the groups the manifest expects to exist
+    ///
+    /// Collected from every resolved image and pipeline config; unconfigured
+    /// versions contribute no group. The caller uses this to create any group
+    /// missing from the target instance before importing.
     pub fn groups(&self) -> HashSet<String> {
+        // union the group of every resolved pipeline config with that of every
+        // resolved image config; the HashSet collapses duplicates
         self.pipelines
             .values()
             .flat_map(|pipeline_manifest| pipeline_manifest.versions.values())
@@ -290,8 +323,10 @@ impl ToolboxManifest {
     ///
     /// * `group` - The group to force items to be imported to
     pub fn override_group(mut self, group: &str) -> Self {
+        // own the target group string once so each assignment below can clone from it
         let group = group.to_string();
-        // collect a mutable reference to every image and pipeline config's group
+        // chain a mutable reference to every resolved pipeline and image config's group,
+        // then point each at the target; unconfigured versions have no group to set
         self.pipelines
             .values_mut()
             .flat_map(|pipeline_manifest| pipeline_manifest.versions.values_mut())
@@ -317,6 +352,8 @@ impl ToolboxManifest {
     ///
     /// Call this BEFORE [`Self::override_group`] collapses the groups.
     pub fn capture_source_groups(&self) -> SourceGroups {
+        // record each resolved image version's group keyed by (manifest_key, version);
+        // unconfigured versions are skipped because they have no group to remember
         let images = self
             .images
             .iter()
@@ -328,6 +365,8 @@ impl ToolboxManifest {
                 })
             })
             .collect();
+        // same snapshot for pipeline versions, so a renamed image's dependents can be
+        // matched back to the variant they originally wanted by their own source group
         let pipelines = self
             .pipelines
             .iter()
@@ -352,13 +391,18 @@ impl ToolboxManifest {
         &self,
         sources: &SourceGroups,
     ) -> Result<Vec<Collision>, Error> {
+        // group members by their post-override (group, name) identity; every bucket with
+        // more than one member is an overwrite collision
         let mut buckets: HashMap<(String, String), Vec<(CollisionMember, serde_json::Value)>> =
             HashMap::new();
         for (key, manifest) in &self.images {
             for (version, v) in &manifest.versions {
+                // unconfigured versions have no identity to collide on
                 let Some(config) = &v.config else {
                     continue;
                 };
+                // recover the pre-override group from the snapshot; fall back to the
+                // current group when this version wasn't captured (e.g. no override ran)
                 let source_group = sources
                     .images
                     .get(&(key.clone(), version.clone()))
@@ -378,12 +422,15 @@ impl ToolboxManifest {
                         config.name
                     ))
                 })?;
+                // file the member under its identity alongside its serialized config so
+                // buckets_to_collisions can tell a pure duplicate from a real conflict
                 buckets
                     .entry((config.group.clone(), config.name.clone()))
                     .or_default()
                     .push((member, json));
             }
         }
+        // collapse the buckets into the multi-member collisions only
         Ok(Self::buckets_to_collisions(buckets))
     }
 
@@ -397,13 +444,18 @@ impl ToolboxManifest {
         &self,
         sources: &SourceGroups,
     ) -> Result<Vec<Collision>, Error> {
+        // group members by their post-override (group, name) identity; every bucket with
+        // more than one member is an overwrite collision
         let mut buckets: HashMap<(String, String), Vec<(CollisionMember, serde_json::Value)>> =
             HashMap::new();
         for (key, manifest) in &self.pipelines {
             for (version, v) in &manifest.versions {
+                // unconfigured versions have no identity to collide on
                 let Some(config) = &v.config else {
                     continue;
                 };
+                // recover the pre-override group from the snapshot; fall back to the
+                // current group when this version wasn't captured (e.g. no override ran)
                 let source_group = sources
                     .pipelines
                     .get(&(key.clone(), version.clone()))
@@ -422,12 +474,15 @@ impl ToolboxManifest {
                         config.name
                     ))
                 })?;
+                // file the member under its identity alongside its serialized config so
+                // buckets_to_collisions can tell a pure duplicate from a real conflict
                 buckets
                     .entry((config.group.clone(), config.name.clone()))
                     .or_default()
                     .push((member, json));
             }
         }
+        // collapse the buckets into the multi-member collisions only
         Ok(Self::buckets_to_collisions(buckets))
     }
 
@@ -442,15 +497,18 @@ impl ToolboxManifest {
     ) -> Vec<Collision> {
         let mut collisions = Vec::new();
         for ((group, name), members) in buckets {
+            // a single occupant of an identity isn't a collision
             if members.len() < 2 {
                 continue;
             }
             // a bucket where every member's config is byte-identical is a pure
-            // duplicate, safe to de-dupe without asking
+            // duplicate, safe to de-dupe without asking the user to pick
             let first = &members[0].1;
             let identical = members.iter().all(|(_, json)| json == first);
+            // the serialized configs were only needed for the identical check; drop them
             let mut members: Vec<CollisionMember> = members.into_iter().map(|(m, _)| m).collect();
-            // sort for deterministic output and a stable canonical member
+            // sort by (manifest_key, version) so the first member is a stable canonical
+            // choice and the rendered collision is reproducible across runs
             members.sort_by(|a, b| {
                 (&a.manifest_key, &a.version).cmp(&(&b.manifest_key, &b.version))
             });
@@ -461,6 +519,7 @@ impl ToolboxManifest {
                 identical,
             });
         }
+        // sort the collisions themselves so the import/diff output order is deterministic
         collisions.sort_by(|a, b| (&a.group, &a.name).cmp(&(&b.group, &b.name)));
         collisions
     }
@@ -473,10 +532,12 @@ impl ToolboxManifest {
     /// * `collision` - The collision the member belongs to (supplies the group and base name)
     /// * `member` - The colliding member to suggest a new name for (supplies the version)
     pub fn suggested_image_rename(&self, collision: &Collision, member: &CollisionMember) -> String {
+        // base the suggestion on "<name>-<version>" then ensure it's free in the group
         self.unique_image_name(&collision.group, &format!("{}-{}", collision.name, member.version))
     }
 
-    /// Suggest a unique new name for a colliding pipeline member
+    /// Suggest a unique new name for a colliding pipeline member: `<name>-<version>`,
+    /// with a numeric suffix appended if that is already taken in the group
     ///
     /// # Arguments
     ///
@@ -487,6 +548,7 @@ impl ToolboxManifest {
         collision: &Collision,
         member: &CollisionMember,
     ) -> String {
+        // base the suggestion on "<name>-<version>" then ensure it's free in the group
         self.unique_pipeline_name(
             &collision.group,
             &format!("{}-{}", collision.name, member.version),
@@ -495,6 +557,8 @@ impl ToolboxManifest {
 
     /// Every image config's `(group, name)` identity across all versions
     fn image_identities(&self) -> impl Iterator<Item = (&str, &str)> {
+        // flatten every resolved image version down to its Thorium identity; unconfigured
+        // versions are skipped because they have no identity yet
         self.images
             .values()
             .flat_map(|manifest| manifest.versions.values())
@@ -504,6 +568,8 @@ impl ToolboxManifest {
 
     /// Every pipeline config's `(group, name)` identity across all versions
     fn pipeline_identities(&self) -> impl Iterator<Item = (&str, &str)> {
+        // flatten every resolved pipeline version down to its Thorium identity; unconfigured
+        // versions are skipped because they have no identity yet
         self.pipelines
             .values()
             .flat_map(|manifest| manifest.versions.values())
@@ -522,9 +588,12 @@ impl ToolboxManifest {
     /// * `base` - The preferred name to return unchanged when it is free
     /// * `taken` - Predicate reporting whether a candidate name is already used
     fn unique_name(base: &str, mut taken: impl FnMut(&str) -> bool) -> String {
+        // prefer the unsuffixed name when it is already free
         if !taken(base) {
             return base.to_string();
         }
+        // otherwise try "base-2", "base-3", … the unbounded range guarantees a hit so the
+        // expect can never fire, but find returns Option and must be unwrapped
         (2..)
             .map(|n| format!("{base}-{n}"))
             .find(|candidate| !taken(candidate))
@@ -538,6 +607,8 @@ impl ToolboxManifest {
     /// * `group` - The group to check existing image names against
     /// * `base` - The preferred name, suffixed until it is free in the group
     fn unique_image_name(&self, group: &str, base: &str) -> String {
+        // "taken" means some image already owns this name in the same group; cross-group
+        // names never conflict because Thorium identity is (group, name)
         Self::unique_name(base, |candidate| {
             self.image_identities().any(|(g, n)| g == group && n == candidate)
         })
@@ -550,6 +621,8 @@ impl ToolboxManifest {
     /// * `group` - The group to check existing pipeline names against
     /// * `base` - The preferred name, suffixed until it is free in the group
     fn unique_pipeline_name(&self, group: &str, base: &str) -> String {
+        // "taken" means some pipeline already owns this name in the same group; cross-group
+        // names never conflict because Thorium identity is (group, name)
         Self::unique_name(base, |candidate| {
             self.pipeline_identities()
                 .any(|(g, n)| g == group && n == candidate)
@@ -565,6 +638,7 @@ impl ToolboxManifest {
     ///
     /// * `group` - The group whose image names to collect
     pub fn image_names_in_group(&self, group: &str) -> HashSet<String> {
+        // keep only the names whose identity is in the requested group
         self.image_identities()
             .filter(|(g, _)| *g == group)
             .map(|(_, n)| n.to_string())
@@ -573,10 +647,14 @@ impl ToolboxManifest {
 
     /// The set of pipeline names currently used in `group`
     ///
+    /// Used to validate a user-supplied rename so it can't introduce a fresh
+    /// collision with another pipeline in the same group.
+    ///
     /// # Arguments
     ///
     /// * `group` - The group whose pipeline names to collect
     pub fn pipeline_names_in_group(&self, group: &str) -> HashSet<String> {
+        // keep only the names whose identity is in the requested group
         self.pipeline_identities()
             .filter(|(g, _)| *g == group)
             .map(|(_, n)| n.to_string())
@@ -591,6 +669,8 @@ impl ToolboxManifest {
     ///
     /// * `collision` - The identical-config collision whose extra members to remove
     pub fn dedupe_image_collision(&mut self, collision: &Collision) {
+        // members[0] is the sorted canonical keeper; remove every other version, which is
+        // safe only because the caller guarantees this collision is byte-identical
         for member in collision.members.iter().skip(1) {
             self.remove_image_version(&member.manifest_key, &member.version);
         }
@@ -602,6 +682,8 @@ impl ToolboxManifest {
     ///
     /// * `collision` - The identical-config collision whose extra members to remove
     pub fn dedupe_pipeline_collision(&mut self, collision: &Collision) {
+        // members[0] is the sorted canonical keeper; remove every other version, which is
+        // safe only because the caller guarantees this collision is byte-identical
         for member in collision.members.iter().skip(1) {
             self.remove_pipeline_version(&member.manifest_key, &member.version);
         }
@@ -614,7 +696,10 @@ impl ToolboxManifest {
     /// * `manifest_key` - The top-level image key the version lives under
     /// * `version` - The version label to remove
     fn remove_image_version(&mut self, manifest_key: &str, version: &str) {
+        // a missing key is a no-op; only touch the entry when it exists
         if let Some(manifest) = self.images.get_mut(manifest_key) {
+            // drop the one version, then drop the whole entry if that emptied it so no
+            // version-less image lingers in the manifest
             manifest.versions.remove(version);
             if manifest.versions.is_empty() {
                 self.images.remove(manifest_key);
@@ -629,7 +714,10 @@ impl ToolboxManifest {
     /// * `manifest_key` - The top-level pipeline key the version lives under
     /// * `version` - The version label to remove
     fn remove_pipeline_version(&mut self, manifest_key: &str, version: &str) {
+        // a missing key is a no-op; only touch the entry when it exists
         if let Some(manifest) = self.pipelines.get_mut(manifest_key) {
+            // drop the one version, then drop the whole entry if that emptied it so no
+            // version-less pipeline lingers in the manifest
             manifest.versions.remove(version);
             if manifest.versions.is_empty() {
                 self.pipelines.remove(manifest_key);
@@ -648,6 +736,8 @@ impl ToolboxManifest {
     /// * `group` - The group of the image identity to remove
     /// * `name` - The name of the image identity to remove
     pub fn remove_image_identity_and_dependents(&mut self, group: &str, name: &str) -> Vec<String> {
+        // first drop every image version matching the (group, name) identity; an
+        // unconfigured version (no group/name) can never match, so it is kept
         self.images.retain(|_key, manifest| {
             manifest.versions.retain(|_version, v| {
                 v.config
@@ -656,10 +746,20 @@ impl ToolboxManifest {
             });
             !manifest.versions.is_empty()
         });
+        // then drop every pipeline version that referenced the now-removed image, since
+        // it can no longer run; collect their labels to report which dependents fell
         let mut dropped_pipelines = Vec::new();
         self.pipelines.retain(|pipeline_key, manifest| {
             manifest.versions.retain(|version_name, version| {
-                if pipeline_references_image(version, name) {
+                // image references are bare names resolved within the pipeline's own
+                // group, so only a pipeline in the removed image's group could have
+                // referenced it; a same-named image in another group is unrelated and
+                // its dependents must not be dropped
+                let in_same_group = version
+                    .config
+                    .as_ref()
+                    .is_some_and(|config| config.group == group);
+                if in_same_group && pipeline_references_image(version, name) {
                     dropped_pipelines.push(format!("{pipeline_key}:{version_name}"));
                     false
                 } else {
@@ -668,6 +768,7 @@ impl ToolboxManifest {
             });
             !manifest.versions.is_empty()
         });
+        // sort so the dropped-dependents list is deterministic for the caller's warning
         dropped_pipelines.sort();
         dropped_pipelines
     }
@@ -679,6 +780,9 @@ impl ToolboxManifest {
     /// * `group` - The group of the pipeline identity to remove
     /// * `name` - The name of the pipeline identity to remove
     pub fn remove_pipeline_identity(&mut self, group: &str, name: &str) {
+        // drop every pipeline version matching the (group, name) identity; an unconfigured
+        // version (no group/name) can never match, so it is kept. no cascade is needed
+        // because nothing else in the manifest references a pipeline by name
         self.pipelines.retain(|_key, manifest| {
             manifest.versions.retain(|_version, v| {
                 v.config
@@ -710,17 +814,22 @@ impl ToolboxManifest {
         new_name: &str,
         sources: &SourceGroups,
     ) {
+        // the identity name every dependent pipeline currently points at
         let old_name = collision.name.clone();
-        // pull the version out of its current entry and re-file it under new_name
+        // pull just the colliding version out of its current entry and re-file it under
+        // new_name, so the other versions of that entry keep the original name
         if let Some(manifest) = self.images.get_mut(&member.manifest_key)
             && let Some(mut version) = manifest.versions.remove(&member.version)
         {
+            // rewrite the config name so the imported image carries the new identity
             if let Some(config) = &mut version.config {
                 config.name = new_name.to_string();
             }
+            // remove the source entry if pulling that version emptied it
             if manifest.versions.is_empty() {
                 self.images.remove(&member.manifest_key);
             }
+            // file the moved version under the new top-level key, creating it if needed
             self.images
                 .entry(new_name.to_string())
                 .or_insert_with(|| ImageManifest {
@@ -732,13 +841,21 @@ impl ToolboxManifest {
         // do the colliding members carry distinct version labels? if so, a pipeline's
         // pinned image version tells us which variant it wanted; if not, fall back to
         // matching the pipeline's original group to the member's source group
+        // HashSet::insert returns false on a repeat, so `all` is true exactly when every
+        // member carries a distinct version label; that decides the disambiguation strategy
         let mut seen = HashSet::new();
         let versions_distinct = collision.members.iter().all(|m| seen.insert(&m.version));
+        // repoint only the dependents that wanted *this* renamed variant; the others keep
+        // pointing at old_name (which now belongs to a different surviving member)
         for (pipeline_key, manifest) in self.pipelines.iter_mut() {
             for (version_name, version) in manifest.versions.iter_mut() {
+                // skip pipelines that never referenced the colliding image at all
                 if !pipeline_references_image(version, &old_name) {
                     continue;
                 }
+                // distinct versions: the pipeline's pinned image version identifies the
+                // variant. same version: fall back to matching the pipeline's pre-override
+                // source group to the renamed member's source group
                 let wants = if versions_distinct {
                     version
                         .images
@@ -750,6 +867,7 @@ impl ToolboxManifest {
                         .get(&(pipeline_key.clone(), version_name.clone()))
                         == Some(&member.source_group)
                 };
+                // rewrite both the images map and the order so the pipeline tracks the move
                 if wants {
                     rewrite_pipeline_image_ref(version, &old_name, new_name);
                 }
@@ -765,15 +883,20 @@ impl ToolboxManifest {
     /// * `member` - The colliding pipeline member to rename
     /// * `new_name` - The new name to give the member
     pub fn rename_pipeline_member(&mut self, member: &CollisionMember, new_name: &str) {
+        // pull just the colliding version out of its current entry and re-file it under
+        // new_name, leaving the entry's other versions under the original name
         if let Some(manifest) = self.pipelines.get_mut(&member.manifest_key)
             && let Some(mut version) = manifest.versions.remove(&member.version)
         {
+            // rewrite the config name so the imported pipeline carries the new identity
             if let Some(config) = &mut version.config {
                 config.name = new_name.to_string();
             }
+            // remove the source entry if pulling that version emptied it
             if manifest.versions.is_empty() {
                 self.pipelines.remove(&member.manifest_key);
             }
+            // file the moved version under the new top-level key, creating it if needed
             self.pipelines
                 .entry(new_name.to_string())
                 .or_insert_with(|| PipelineManifest {
@@ -828,9 +951,12 @@ pub struct CollisionMember {
 /// * `version` - The pipeline version to inspect
 /// * `name` - The image name to look for
 fn pipeline_references_image(version: &PipelineVersion, name: &str) -> bool {
+    // a hit in the images map is conclusive without parsing the order
     if version.images.contains_key(name) {
         return true;
     }
+    // otherwise the order may still name it; a missing or unparsable order counts as no
+    // reference (is_some_and short-circuits both the None and the Err to false)
     version
         .config
         .as_ref()
@@ -847,11 +973,15 @@ fn pipeline_references_image(version: &PipelineVersion, name: &str) -> bool {
 /// * `old_name` - The image name currently referenced
 /// * `new_name` - The image name to replace it with
 fn rewrite_pipeline_image_ref(version: &mut PipelineVersion, old_name: &str, new_name: &str) {
+    // move the images-map pin (if any) from the old key to the new one, preserving its
+    // pinned version; the map may legitimately lack the key if only the order names it
     if let Some(pipeline_image) = version.images.remove(old_name) {
         version.images.insert(new_name.to_string(), pipeline_image);
     }
     if let Some(config) = &mut version.config {
-        // deserialize to owned strings (releasing the borrow), swap, then write back
+        // deserialize the order into owned strings so the borrow of config is released
+        // before we reassign config.order below; an unparsable order yields None and is
+        // left untouched
         let rewritten: Option<Vec<Vec<String>>> =
             config.deserialize_image_order().ok().map(|order| {
                 order
@@ -859,6 +989,7 @@ fn rewrite_pipeline_image_ref(version: &mut PipelineVersion, old_name: &str, new
                     .map(|stage| {
                         stage
                             .into_iter()
+                            // swap the renamed image, leave every other entry as-is
                             .map(|image| {
                                 if image == old_name {
                                     new_name.to_string()
@@ -870,6 +1001,8 @@ fn rewrite_pipeline_image_ref(version: &mut PipelineVersion, old_name: &str, new
                     })
                     .collect()
             });
+        // write the rewritten order back as JSON; a serialization failure leaves the
+        // original order in place rather than corrupting it
         if let Some(new_order) = rewritten
             && let Ok(value) = serde_json::to_value(new_order)
         {
@@ -953,6 +1086,8 @@ mod tests {
     /// * `name` - The name for the image config
     /// * `distinct` - The image url that makes this config distinguishable
     fn image_version(group: &str, name: &str, distinct: &str) -> ImageVersion {
+        // build the base request, then stamp a distinguishing image url so two versions of
+        // the same (group, name) serialize differently and aren't treated as duplicates
         let mut config = ImageRequest::new(group, name);
         config.image = Some(distinct.to_string());
         ImageVersion {
@@ -985,6 +1120,7 @@ mod tests {
     /// * `versions` - The version labels to build an entry for
     fn versioned_image(group: &str, name: &str, versions: &[&str]) -> ImageManifest {
         ImageManifest {
+            // give each version a "name:version" image url so the variants are distinct
             versions: versions
                 .iter()
                 .map(|v| {
@@ -1028,6 +1164,7 @@ mod tests {
         order: serde_json::Value,
         images: &[&str],
     ) -> PipelineManifest {
+        // pin every named image to "latest" and defer to the pinned builder
         let pins: Vec<(&str, &str)> = images.iter().map(|i| (*i, "latest")).collect();
         pipeline_pinned(group, name, order, &pins)
     }
@@ -1046,6 +1183,7 @@ mod tests {
         order: serde_json::Value,
         images: &[(&str, &str)],
     ) -> PipelineManifest {
+        // turn the (image, version) pairs into the pipeline's images map
         let image_map = images
             .iter()
             .map(|(image, version)| {
@@ -1080,6 +1218,7 @@ mod tests {
         images: Vec<(&str, ImageManifest)>,
         pipelines: Vec<(&str, PipelineManifest)>,
     ) -> ToolboxManifest {
+        // key each entry by its given name; the remaining fields are inert test defaults
         ToolboxManifest {
             name: "t".to_string(),
             registry: Some("r".to_string()),
@@ -1100,6 +1239,8 @@ mod tests {
     /// * `m` - The manifest to read the pipeline from
     /// * `pipeline_key` - The top-level key of the pipeline to read
     fn order_of(m: &ToolboxManifest, pipeline_key: &str) -> Vec<Vec<String>> {
+        // reach into the "latest" version's resolved config, parse its order, and own the
+        // borrowed entries so callers can compare against literal Vec<Vec<String>>
         m.pipelines[pipeline_key].versions["latest"]
             .config
             .as_ref()
@@ -1378,6 +1519,26 @@ mod tests {
         assert_eq!(dropped, vec!["dep:latest".to_string()]);
         assert!(!m.pipelines.contains_key("dep"));
         assert!(m.pipelines.contains_key("free"));
+    }
+
+    /// Removing one `(group, name)` image identity must be scoped to that group: a
+    /// same-named image in a different group, and a pipeline in that other group that
+    /// depends on it, must both survive (image references are bare names resolved within
+    /// the pipeline's own group, so a cross-group same-named image is unrelated)
+    #[test]
+    fn skip_removal_is_scoped_to_the_image_group() {
+        let mut m = manifest(
+            vec![("x-g1", image("g1", "x")), ("x-g2", image("g2", "x"))],
+            // a pipeline in g2 depending on the g2 copy of x
+            vec![("p2", pipeline("g2", "p2", json!(["x"]), &["x"]))],
+        );
+        let dropped = m.remove_image_identity_and_dependents("g1", "x");
+        // the g1 identity is removed...
+        assert!(!m.image_names_in_group("g1").contains("x"));
+        // ...while the g2 copy and its dependent pipeline are left untouched
+        assert!(m.image_names_in_group("g2").contains("x"));
+        assert!(dropped.is_empty());
+        assert!(m.pipelines.contains_key("p2"));
     }
 
     /// When the natural rename candidates are exhausted, a numeric suffix is

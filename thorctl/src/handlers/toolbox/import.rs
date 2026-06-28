@@ -1,8 +1,10 @@
 //! Main entry point for toolbox imports
 //!
-//! Orchestrates the import workflow: loading the manifest, categorizing
-//! resources, confirming with the user, and delegating to the appropriate
-//! creation or merge handlers.
+//! Orchestrates the import workflow: loading and validating the manifest, resolving
+//! `(group, name)` collisions, categorizing resources against the instance, confirming
+//! with the user, then applying — creating missing groups and network policies, pushing
+//! any bundled container images, creating new resources, and merging existing ones — with
+//! every applied change journaled so a partial import can be rolled back.
 
 use colored::Colorize;
 use std::collections::{HashMap, HashSet};
@@ -29,6 +31,8 @@ use crate::handlers::progress::{Bar, BarKind};
 pub(super) fn flatten_manifest_images(
     manifest: &ToolboxManifest,
 ) -> Vec<(String, String, ImageRequest)> {
+    // expand each image into one tuple per version, skipping versions with no
+    // embedded config (build-only entries carry tags but no request to import)
     manifest
         .images
         .iter()
@@ -55,6 +59,8 @@ pub(super) fn flatten_manifest_images(
 pub(super) fn flatten_manifest_pipelines(
     manifest: &ToolboxManifest,
 ) -> Vec<(String, String, PipelineRequest)> {
+    // expand each pipeline into one tuple per version, skipping versions with no
+    // embedded config (a version dropped by validation has no request to import)
     manifest
         .pipelines
         .iter()
@@ -103,6 +109,8 @@ fn parse_tag(image_url: &str) -> &str {
     let without_digest = last_segment
         .split_once('@')
         .map_or(last_segment, |(repo, _digest)| repo);
+    // the substring after the last `:` is the tag; a missing or empty tag (e.g. a
+    // digest-only or bare reference) falls back to "latest" rather than guessing
     match without_digest.rsplit_once(':') {
         Some((_, tag)) if !tag.is_empty() => tag,
         _ => "latest",
@@ -149,7 +157,7 @@ fn resolve_image_path_prefix(
     // prompt for a target registry base path
     progress.suspend(|| {
         dialoguer::Input::<String>::new()
-            .with_prompt("Target registry base path to push bundled images to")
+            .with_prompt("Target registry base path (e.g. registry.local/base) to push bundled images to")
             .interact_text()
             .map_err(|e| Error::new(format!("Failed to read prefix input: {e}")))
     })
@@ -188,7 +196,9 @@ fn prepare_bundled_images(
             .unwrap_or_else(|| PathBuf::from(".")),
         ManifestLocation::Url(_) => {
             return Err(Error::new(
-                "This toolbox bundles container images and must be imported from a local path, not a URL",
+                "This toolbox bundles container images and must be imported from a local path, not \
+                 a URL; download the toolbox directory (including its images/ tarballs) and import \
+                 the local toolbox.json",
             ));
         }
     };
@@ -196,15 +206,24 @@ fn prepare_bundled_images(
     let prefix = prefix.trim_end_matches('/').to_string();
     let mut pushes = Vec::new();
     for img in images.iter_mut() {
-        // skip images that have no container image url to move
+        // an image with no container url has nothing to bundle/retag; warn so it isn't a
+        // silent gap (the image is still created pointing at whatever url it carries)
         let source = match img.request.image.as_deref() {
             Some(url) if !url.is_empty() => url.to_string(),
-            _ => continue,
+            _ => {
+                progress.warning(format!(
+                    "Bundled toolbox image '{}' has no container url; nothing to push for it",
+                    img.name
+                ));
+                continue;
+            }
         };
         let tag = parse_tag(&source);
         let target = format!("{prefix}/{}/{}:{tag}", img.request.group, img.request.name);
-        // a collision rename re-keys the image but leaves its tarball under the
-        // original on-disk name, so resolve the archive dir from the original key
+        // a collision rename re-keys the image but leaves its tarball under the original on-disk
+        // name, so resolve the archive dir from the original key. `img.name` is the (possibly
+        // renamed) manifest key; `renames` maps it back to the original key the tarball was
+        // saved under.
         let source_name = renames.get(&img.name).map_or(img.name.as_str(), String::as_str);
         let tarball = base_dir
             .join("images")
@@ -222,36 +241,68 @@ fn prepare_bundled_images(
     Ok(pushes)
 }
 
-/// Load, retag, and push each bundled image to the target registry
+/// Load, retag, and push each bundled image to the target registry, best-effort
+///
+/// Each image is independent: a stat/load/tag/push failure is warned and collected, but the
+/// remaining bundled images — and the resource creation that follows — still proceed. The Thorium
+/// image is created regardless, so a push failure just means that image won't run until its
+/// container is pushed to the target registry.
+///
+/// Returns the labels of bundled images whose container could not be pushed (for the run's
+/// failure summary).
 ///
 /// # Arguments
 ///
 /// * `pushes` - The bundled images to push, as prepared by [`prepare_bundled_images`]
 /// * `progress` - The progress bar to update as images are pushed
-async fn push_bundled_images(pushes: &[BundledPush], progress: &Bar) -> Result<(), Error> {
+async fn push_bundled_images(pushes: &[BundledPush], progress: &Bar) -> Vec<String> {
     progress.refresh(
         "Pushing bundled images",
         BarKind::Bound(pushes.len() as u64),
     );
+    let mut failures = Vec::new();
     for push in pushes {
-        // make sure the archive exists before trying to load it; a stat error is
-        // surfaced rather than masked as "missing"
-        let exists = tokio::fs::try_exists(&push.tarball)
-            .await
-            .map_err(|e| Error::new(format!("Failed to stat '{}': {e}", push.tarball.display())))?;
-        if !exists {
-            return Err(Error::new(format!(
-                "Bundled image archive not found for '{}' at '{}'",
-                push.label,
-                push.tarball.display()
-            )));
+        // attempt this image's full load -> retag -> push independently so one failure doesn't
+        // abort the rest
+        let outcome: Result<(), Error> = async {
+            // make sure the archive exists before trying to load it; a stat error is surfaced
+            // rather than masked as "missing"
+            let exists = tokio::fs::try_exists(&push.tarball).await.map_err(|e| {
+                Error::new(format!("failed to stat '{}': {e}", push.tarball.display()))
+            })?;
+            if !exists {
+                return Err(Error::new(format!(
+                    "bundled image archive not found at '{}' (was the toolbox exported with \
+                     --with-images and copied whole?)",
+                    push.tarball.display()
+                )));
+            }
+            container::load(&push.tarball, progress).await?;
+            // retag from the loaded archive's tag (`source`) to the target; surface the expected
+            // source tag so a save/load naming mismatch is debuggable
+            container::tag(&push.source, &push.target, progress)
+                .await
+                .map_err(|e| {
+                    Error::new(format!(
+                        "tagging '{}' -> '{}' failed (does the loaded archive contain '{}'?): {e}",
+                        push.source, push.target, push.source
+                    ))
+                })?;
+            container::push(&push.target, progress).await?;
+            Ok(())
         }
-        container::load(&push.tarball, progress).await?;
-        container::tag(&push.source, &push.target, progress).await?;
-        container::push(&push.target, progress).await?;
+        .await;
+        if let Err(err) = outcome {
+            progress.warning(format!(
+                "Bundled image '{}' was not pushed: {err}; its Thorium image is still created but \
+                 won't run until its container is pushed to '{}'",
+                push.label, push.target
+            ));
+            failures.push(format!("{} (bundled image push)", push.label));
+        }
         progress.inc(1);
     }
-    Ok(())
+    failures
 }
 
 // ─── Apply Phase ─────────────────────────────────────────────────────────────
@@ -306,20 +357,27 @@ async fn apply_resources(
     policies::update_policies(thorium, &policy_plan.updates, progress, journal).await?;
     // existing-but-different policies left in place are surfaced (empty when updating)
     policies::warn_mismatched(policy_plan, progress);
-    // push any bundled container images to the target registry before creating resources
-    if !bundled_pushes.is_empty() {
-        push_bundled_images(bundled_pushes, progress).await?;
-    }
+    // push any bundled container images to the target registry before creating the resources
+    // that reference them; best-effort, so a failed push warns and is collected rather than
+    // aborting the rest of the import
+    let mut failures: Vec<String> = if bundled_pushes.is_empty() {
+        Vec::new()
+    } else {
+        push_bundled_images(bundled_pushes, progress).await
+    };
     // import new resources, collecting per-resource failures so one bad image/pipeline
     // doesn't abort the rest (a pipeline whose image failed will fail too, and is
     // collected the same way)
-    let mut failures =
-        create::import_new_images(thorium, plan.new_images, workers, progress, journal).await;
+    failures
+        .extend(create::import_new_images(thorium, plan.new_images, workers, progress, journal).await);
     failures.extend(
         create::import_new_pipelines(thorium, plan.new_pipelines, workers, progress, journal).await,
     );
     // handle existing resources via the shared dispatch; a Quit in the image pass
-    // stops the pipeline pass too so the rollback offer covers everything
+    // stops the pipeline pass too so the rollback offer covers everything. Note the asymmetry:
+    // this pass is fail-fast — an interactive merge apply error propagates (via `?`) to settle
+    // the journal and offer rollback — whereas the create passes above collect per-resource
+    // failures and keep going.
     let images_applied = imports::apply_existing::<ImageKind>(
         thorium,
         conf,
@@ -364,13 +422,16 @@ async fn apply_resources(
 ///
 /// When images or pipelines already exist, the user is prompted interactively
 /// to Edit (merge editor), Skip, Apply (accept incoming), or Quit for each
-/// changed resource. Use `--overwrite` to skip the editor and auto-apply all changes.
+/// changed resource. `--overwrite` skips the editor and auto-applies all changes;
+/// `--skip-conflicts` creates only new resources and leaves differing existing
+/// ones untouched with a warning.
 ///
 /// # Arguments
 ///
 /// * `thorium` - The Thorium client
 /// * `conf` - The Thorctl config
 /// * `cmd` - The toolbox import command that was run
+/// * `workers` - Max concurrent API actions in the apply phase (the global `--workers`)
 pub async fn import(
     thorium: Thorium,
     conf: CtlConf,
@@ -391,7 +452,7 @@ pub async fn import(
     // 3) apply the group override
     if let Some(group_override) = &cmd.group_override {
         progress.info_anonymous(format!(
-            "Overriding all image/pipeline import groups to '{}'",
+            "Forcing all images and pipelines into group '{}'",
             group_override.bright_yellow()
         ));
         manifest = manifest.override_group(group_override);
@@ -437,6 +498,12 @@ pub async fn import(
     let bundled_pushes = if manifest.bundled_images {
         prepare_bundled_images(cmd, &manifest, &mut images, &image_renames, can_prompt, &progress)?
     } else {
+        // --image-path-prefix only affects bundled toolboxes; warn so it isn't a silent no-op
+        if cmd.image_path_prefix.is_some() {
+            progress.warning(
+                "--image-path-prefix has no effect: this toolbox does not bundle container images",
+            );
+        }
         Vec::new()
     };
     // collect the bundled network policies and check them against the target
@@ -462,16 +529,23 @@ pub async fn import(
         && (plan.has_conflicts()
             || !policy_plan.new.is_empty()
             || !policy_plan.updates.is_empty()
+            || !policy_plan.mismatched.is_empty()
             || !plan.missing_groups.is_empty())
     {
-        let current_user = thorium
-            .users
-            .info()
-            .await
-            .map_err(|err| Error::new(format!("Error getting current user info: {err}")))?;
+        // the username is cosmetic (it's only shown in the prompt), so a lookup failure must not
+        // abort the import — fall back to a placeholder and warn instead
+        let username = match thorium.users.info().await {
+            Ok(user) => user.username,
+            Err(err) => {
+                progress.warning(format!(
+                    "Could not look up the current user ({err}); continuing"
+                ));
+                "<current user>".to_string()
+            }
+        };
         let confirmed = progress.suspend(|| {
             policies::print_plan(&policy_plan);
-            imports::confirm_import(&conf, &plan, &current_user, mode)
+            imports::confirm_import(&conf, &plan, &username, mode)
         })?;
         if !confirmed {
             return Ok(());
@@ -501,9 +575,10 @@ pub async fn import(
         Ok(applied) => (Ok(applied.outcome), applied.failures),
         Err(err) => (Err(err), Vec::new()),
     };
-    // interactive sessions can be asked about rollback; without a terminal
-    // (CI, pipes) or with confirmations skipped in a non-interactive mode,
-    // nobody can answer (`can_prompt` was computed before resolution above)
+    // only an interactive session can be asked about rollback; without a terminal
+    // (CI, pipes) or in a non-interactive mode, nobody can answer, so settle_journal
+    // falls back to --rollback-on-failure. The same `can_prompt` that gated the
+    // confirmation is reused here so the rollback offer matches the session.
     let outcome = imports::settle_journal(
         &thorium,
         &progress,
@@ -513,8 +588,16 @@ pub async fn import(
         cmd.rollback_on_failure,
     )
     .await?;
+    // pick the terminal banner from both the outcome AND whether any resource failed, so the
+    // final line never reads "Import complete!" right next to the failure list and non-zero
+    // exit below (mirrors remove.rs's "Removal finished with errors")
     match outcome {
-        ImportOutcome::Completed => progress.refresh("Import complete!", BarKind::Timer),
+        ImportOutcome::Completed if failures.is_empty() => {
+            progress.refresh("Import complete!", BarKind::Timer);
+        }
+        ImportOutcome::Completed => {
+            progress.refresh("Import finished with errors", BarKind::Timer);
+        }
         ImportOutcome::Quit => progress.refresh("Import stopped early", BarKind::Timer),
     }
     progress.finish();
@@ -522,7 +605,7 @@ pub async fn import(
     // resources that succeeded
     if !failures.is_empty() {
         return Err(Error::new(format!(
-            "Import completed with {} failed resource(s): {}",
+            "{} resource(s) failed to import: {}",
             failures.len(),
             failures.join(", ")
         )));
@@ -530,6 +613,8 @@ pub async fn import(
     Ok(())
 }
 
+/// Unit tests for tag parsing, the one piece of bundled-image url handling that
+/// is pure and testable without a registry or container runtime
 #[cfg(test)]
 mod tests {
     use super::*;

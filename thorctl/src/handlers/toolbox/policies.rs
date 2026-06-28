@@ -264,10 +264,13 @@ fn dedupe_policies(
 ///
 /// * `policies` - The bundled policies to collect target groups from
 fn unique_groups(policies: &[NetworkPolicyRequest]) -> Vec<String> {
+    // the set tracks membership for O(1) dedup while the vec preserves first-seen order,
+    // which keeps the resulting group list stable for callers (e.g. error messages)
     let mut seen = std::collections::HashSet::new();
     let mut groups = Vec::new();
     for policy in policies {
         for group in &policy.groups {
+            // push only the first sighting of each group; insert returns false on repeats
             if seen.insert(group.clone()) {
                 groups.push(group.clone());
             }
@@ -810,6 +813,7 @@ pub async fn create_policies(
         BarKind::Bound(policies.len() as u64),
     );
     for policy in policies {
+        // create the policy in the instance; the request already carries its target groups
         thorium
             .network_policies
             .create(policy.clone())
@@ -820,12 +824,16 @@ pub async fn create_policies(
                     policy.name
                 ))
             })?;
+        // journal the creation only after it succeeds so rollback never tries to delete a
+        // policy that was never actually created
         journal.created_network_policy(&policy.name);
         progress.inc(1);
     }
     Ok(())
 }
 
+/// Unit tests for the pure (no-I/O) policy logic: dedupe/conflict resolution,
+/// classification against existing state, delta construction, and update planning
 #[cfg(test)]
 mod tests {
     use super::super::manifest::{ImageManifest, ImageVersion, ToolboxManifest};

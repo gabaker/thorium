@@ -225,7 +225,12 @@ thorctl toolbox build-images ./toolbox.json -i clamav       # just one image
 ```
 
 Entries with `build = false` in their manifest or no `image_tags` are skipped with a note. Once
-the images are pushed, `toolbox import` works as usual.
+the images are pushed, `toolbox import` works as usual. If an image fails to build or push,
+`build-images` reports it, keeps going with the rest, and exits non-zero at the end listing every
+image that failed — one broken image doesn't block the others.
+
+The container runtime is selected from `--container-runtime` if given, else the `container_runtime`
+setting in your thorctl config, else an autodetected default (docker/podman).
 
 Two flags control how the underlying docker/podman build runs (both apply to every image built
 in the run):
@@ -345,12 +350,26 @@ thorctl toolbox diff ./my-toolbox --group-override sandbox
 thorctl toolbox diff ./my-toolbox/toolbox.json --exit-code
 ```
 
+`diff` runs the toolbox through the **same pre-processing as `import`** before comparing, so what
+it shows is what an import would actually apply: structural validation, group capture, any
+`--group-override`, group-coherence validation, and collision resolution (the automatic renames
+`import` performs when two toolbox resources would collide). Resources dropped by validation are
+warned about and excluded from the diff, exactly as `import` would drop them.
+
 Changed resources show unified hunks over their normalized configs (server-only fields like
-creators and bans never appear as drift); resources only in the toolbox render as new-file diffs;
-resources in the toolbox's groups that the toolbox doesn't name are listed as compact
-`only in instance` lines. Bundled network policies are included — new ones as new-file diffs,
-mismatched ones as notes (imports never update policies). A trailing summary counts
-`changed / only in toolbox / only in instance / unchanged`.
+creators and bans never appear as drift). A resource present on only one side is reported on a
+single line rather than a full-body add/delete: resources only in the toolbox as
+`only in toolbox/<group>/<name> (…) — not in <host[:port]>`, and resources in the toolbox's groups
+that the toolbox doesn't name as `only in <host[:port]>/<group>/<name> (…) — not in this toolbox`.
+The instance is named by its host (and explicit port, if any), and changed resources use that same
+`<host[:port]>/<group>/<name>` header on their instance side. Bundled network policies are included
+the same way — toolbox-only ones as a single line, mismatched ones as notes (imports never update
+policies). A trailing summary counts `changed / only in toolbox / only in <host[:port]> / unchanged`.
+
+**`--exit-code` reflects only what an import would change.** It exits `1` when there is an
+*actionable* difference — a changed resource, a toolbox-only resource that import would create, or a
+network policy that differs — and `0` otherwise. Resources that exist *only on the instance* are
+informational (import never deletes), so they do **not** trip a non-zero exit on their own.
 
 ### Network policies
 ---
@@ -360,7 +379,9 @@ Images can reference Thorium network policies by name, and a toolbox carries the
 
 - `toolbox export` writes each referenced policy to `<image dir>/<name>.policy.json` and records
   it in the image's `manifest.toml` under `network_policies_from` (the same policy referenced by
-  several images is written to each — identical duplicates dedupe on import).
+  several images is written to each — identical duplicates dedupe on import). Each exported policy's
+  `groups` are scoped to the group of the image that references it (and rewritten by
+  `--group-override`), so a bundled policy never carries groups the toolbox isn't exporting.
 - `toolbox build` bundles those files into `toolbox.json`; URL entries are fetched at import time
   like `config_from`. A toolbox carrying two *different* definitions under one policy name fails
   validation before anything is applied.
@@ -397,6 +418,13 @@ do **not** need to know the offline registry when exporting.
 thorctl toolbox export -g static --with-images -o ./offline-toolbox
 ```
 
+Bundling is best-effort: an image that can't be pulled or saved is warned about and skipped, and the
+rest of the toolbox is still written (the skipped image simply ships no tarball and keeps its
+original registry URL). Because that leaves the bundle incomplete, `export` then prints an
+`INCOMPLETE` summary and **exits non-zero** — so a scripted `export → import` handoff doesn't treat a
+toolbox with missing tarballs (or an omitted, dangling network policy) as a complete one. A clean
+export exits 0.
+
 **2. Move** the `./offline-toolbox` directory to the offline environment (it is fully
 self-contained).
 
@@ -417,9 +445,17 @@ used; otherwise you are prompted for one — and if the session can't prompt (`-
 original image URLs, so it remains re-importable to additional environments. Bundled imports
 require docker and must be run from a local path (not a URL).
 
-> Note: `--with-images`/`--image-path-prefix` require docker on the host. A toolbox exported
-> *without* `--with-images` keeps each image's original registry URL, so importing it simply points
-> Thorium at the existing registry — no image transport happens.
+Pushing the bundled images is best-effort: if an image can't be loaded, retagged, or pushed, the
+import warns and continues. The image's config is still created in Thorium pointing at the offline
+registry, so once you push that image manually (or re-run the import) the resource works — a single
+unpushable image doesn't block the rest of the import. A run that finished with any failed pushes
+exits non-zero and lists them.
+
+> Note: `--with-images`/`--image-path-prefix` need a container runtime (docker/podman) on the host
+> to actually move images. There is no up-front capability check: if no runtime is available, every
+> image is simply skipped (warned) and the export exits non-zero as incomplete, rather than failing
+> fast. A toolbox exported *without* `--with-images` keeps each image's original registry URL, so
+> importing it simply points Thorium at the existing registry — no image transport happens.
 
 > Note: KVM-scaled images round-trip their `kvm` settings, but the underlying VM disk image is not
 > part of any export — Thorium has no transport for VM disks. An imported KVM image is creatable

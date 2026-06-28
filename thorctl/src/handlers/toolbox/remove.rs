@@ -35,17 +35,30 @@ fn dedup_targets<'a, I>(entries: I) -> (Vec<Identity>, HashSet<Identity>)
 where
     I: IntoIterator<Item = (&'a str, &'a str, bool)>,
 {
+    // count every occurrence of each identity (existing or not) so any identity
+    // the manifest names more than once can be flagged as a collision later
     let mut counts: HashMap<Identity, usize> = HashMap::new();
+    // the ordered, de-duplicated identities we will actually try to delete
     let mut targets: Vec<Identity> = Vec::new();
+    // identities already pushed to `targets`, so each is deleted at most once
     let mut seen: HashSet<Identity> = HashSet::new();
     for (group, name, exists) in entries {
+        // an identity is the owned (group, name) pair; clone because it feeds
+        // both the count map and the target/seen sets below
         let key = (group.to_string(), name.to_string());
+        // tally this occurrence regardless of existence; the count drives the
+        // duplicate warning even for identities that aren't delete targets
         *counts.entry(key.clone()).or_default() += 1;
-        // keep one delete target per existing identity, in first-seen order
+        // only target identities that exist in the instance, and only the first
+        // time each is seen, so a re-listed identity isn't deleted twice (the
+        // second delete would 404/error) — first-seen order keeps output stable
         if exists && seen.insert(key.clone()) {
             targets.push(key);
         }
     }
+    // an identity counted more than once was defined multiple times in the
+    // manifest; a prior import may have renamed the extras to names we can't
+    // derive here, so the caller warns those renamed copies may remain
     let duplicates = counts
         .into_iter()
         .filter(|(_, count)| *count > 1)
@@ -66,23 +79,31 @@ fn confirm_remove(
     pipelines: &[CategorizedPipeline],
     images: &[CategorizedImage],
 ) -> Result<bool, Error> {
+    // a resource exists in the instance when categorization found a match; only
+    // these are real delete targets, so they are what we list and confirm
     let found_pipelines: Vec<_> = pipelines
         .iter()
         .filter(|pipe| pipe.existing.is_some())
         .collect();
     let found_images: Vec<_> = images.iter().filter(|img| img.existing.is_some()).collect();
+    // surface pipelines first because removal deletes them first; skip the header
+    // entirely when none exist so the prompt isn't cluttered with empty sections
     if !found_pipelines.is_empty() {
         println!("{}", "Pipelines to delete:".bright_red());
         for pipe in &found_pipelines {
             println!("  {}:{}", pipe.request.group, pipe.request.name);
         }
     }
+    // then images, which are deleted after the pipelines that may reference them
     if !found_images.is_empty() {
         println!("{}", "Images to delete:".bright_red());
         for img in &found_images {
             println!("  {}:{}", img.request.group, img.request.name);
         }
     }
+    // collect everything the manifest names but the instance doesn't have, so the
+    // user sees these are intentionally skipped (not silently dropped) — a missing
+    // resource is a no-op, never a failure
     let missing: Vec<String> = pipelines
         .iter()
         .filter(|pipe| pipe.existing.is_none())
@@ -94,13 +115,17 @@ fn confirm_remove(
                 .map(|img| format!("image {}:{}", img.request.group, img.request.name)),
         )
         .collect();
+    // only show the skipped section when there is something skipped
     if !missing.is_empty() {
         println!("{}", "Not found (skipped):".bright_blue());
         for line in missing {
             println!("  {line}");
         }
     }
+    // blank line separates the listing from the prompt for readability
     println!();
+    // default to No so a stray Enter never deletes anything; the prompt names the
+    // API url so the user can confirm they are pointed at the right instance
     let response = dialoguer::Confirm::new()
         .with_prompt(format!(
             "Delete the resources listed above from '{}'?",
@@ -119,15 +144,19 @@ fn confirm_remove(
 /// * `conf` - The Thorctl config
 /// * `cmd` - The toolbox remove command that was run
 pub async fn remove(thorium: Thorium, conf: CtlConf, cmd: &RemoveToolbox) -> Result<(), Error> {
-    // load the manifest exactly like import does, including remote configs
+    // the manifest is the source of truth for what to remove; load it the same
+    // way import does (path or URL) so removal targets exactly what was imported
     let location = &cmd.manifest;
     let (mut manifest, progress) = shared::get_manifest(location).await?;
+    // resolve any URL-backed configs/policies so flattening sees concrete entries
     shared::resolve_manifest_configs(&mut manifest, &progress).await?;
-    // removal targets the same groups an import (with the same flags) would hit
+    // apply the same group override an import would have used, so the (group, name)
+    // identities we compute match the ones actually created in the instance
     if let Some(group_override) = &cmd.group_override {
         manifest = manifest.override_group(group_override);
     }
-    // categorize so we only try to delete what actually exists
+    // categorize against the instance so each entry carries whether it exists;
+    // this is what lets us delete only what is present and skip the rest
     let images = categorize::categorize_images(
         &thorium,
         super::import::flatten_manifest_images(&manifest),
@@ -152,6 +181,8 @@ pub async fn remove(thorium: Thorium, conf: CtlConf, cmd: &RemoveToolbox) -> Res
             )
         }),
     );
+    // same de-duplication for images, computed separately so image and pipeline
+    // duplicate warnings can be labeled distinctly
     let (image_targets, image_dups) = dedup_targets(images.iter().map(|img| {
         (
             img.request.group.as_str(),
@@ -163,6 +194,8 @@ pub async fn remove(thorium: Thorium, conf: CtlConf, cmd: &RemoveToolbox) -> Res
     // we can't derive from this manifest, so those copies may still remain
     warn_duplicates("Pipeline", pipeline_dups, &progress);
     warn_duplicates("Image", image_dups, &progress);
+    // nothing from this toolbox is present, so there is nothing to delete or
+    // confirm; finish the progress bar and return success rather than prompting
     if pipeline_targets.is_empty() && image_targets.is_empty() {
         progress.finish();
         println!("Nothing to remove: no resources from this toolbox exist in the instance");
@@ -199,13 +232,19 @@ pub async fn remove(thorium: Thorium, conf: CtlConf, cmd: &RemoveToolbox) -> Res
                 failures.push(format!("pipeline {group}:{name}"));
             }
         }
+        // advance the bar whether the delete succeeded, 404'd, or failed, since
+        // every outcome is one fully-handled target
         progress.inc(1);
     }
+    // images are deleted only after all pipelines, so by now nothing this run
+    // tracked still references them; size the bar to the image target count
     progress.refresh(
         "Deleting images",
         BarKind::Bound(image_targets.len() as u64),
     );
     for (group, name) in &image_targets {
+        // as with pipelines, a 404 means the image is already gone and counts as
+        // success; only other errors are treated as failures
         match thorium.images.delete(group, name).await {
             Ok(_) => progress.info_anonymous(format!("Deleted image '{group}:{name}'")),
             Err(err) if err.status() == Some(StatusCode::NOT_FOUND) => {
@@ -218,6 +257,7 @@ pub async fn remove(thorium: Thorium, conf: CtlConf, cmd: &RemoveToolbox) -> Res
                 failures.push(format!("image {group}:{name}"));
             }
         }
+        // advance the bar for every handled image target, regardless of outcome
         progress.inc(1);
     }
     // every target was attempted; if any failed, surface them all and exit non-zero so a
@@ -231,6 +271,7 @@ pub async fn remove(thorium: Thorium, conf: CtlConf, cmd: &RemoveToolbox) -> Res
             failures.join(", ")
         )));
     }
+    // every target deleted (or already absent) with no failures, so report success
     progress.refresh("Removal complete!", BarKind::Timer);
     progress.finish();
     Ok(())
@@ -245,8 +286,12 @@ pub async fn remove(thorium: Thorium, conf: CtlConf, cmd: &RemoveToolbox) -> Res
 /// * `duplicates` - The duplicated identities
 /// * `progress` - The progress bar to warn through
 fn warn_duplicates(kind: &str, duplicates: HashSet<Identity>, progress: &Bar) {
+    // the set has no order; collect and sort so warnings are deterministic across
+    // runs (stable output for logs and tests)
     let mut duplicates: Vec<Identity> = duplicates.into_iter().collect();
     duplicates.sort();
+    // emit one warning per duplicated identity; the renamed copies a prior import
+    // may have created can't be derived here, so we can only warn, not delete them
     for (group, name) in duplicates {
         progress.warning(format!(
             "{kind} '{}:{}' is defined more than once in the toolbox; if a prior import \
@@ -257,21 +302,26 @@ fn warn_duplicates(kind: &str, duplicates: HashSet<Identity>, progress: &Bar) {
     }
 }
 
+/// Unit tests for the removal helpers that have no instance dependency
 #[cfg(test)]
 mod tests {
     use super::*;
-
     /// Existing identities are de-duplicated (kept once, in order) and repeated
     /// identities are flagged; non-existent entries are never delete targets
     #[test]
     fn dedups_existing_and_flags_duplicates() {
+        // mix of a repeated existing identity, a unique existing identity, and a
+        // non-existent one to exercise every branch of dedup_targets at once
         let entries = vec![
             ("static", "exiftool", true),
-            ("static", "exiftool", true), // same identity again -> a duplicate
+            // same identity again, so it must be counted as a duplicate
+            ("static", "exiftool", true),
             ("static", "yara", true),
-            ("static", "ghost", false), // not in the instance
+            // not present in the instance, so never a target or a duplicate
+            ("static", "ghost", false),
         ];
         let (targets, duplicates) = dedup_targets(entries);
+        // the repeated identity collapses to one target and order is preserved
         assert_eq!(
             targets,
             vec![
@@ -279,9 +329,10 @@ mod tests {
                 ("static".to_string(), "yara".to_string()),
             ]
         );
+        // the twice-listed identity is flagged; the once-listed one is not
         assert!(duplicates.contains(&("static".to_string(), "exiftool".to_string())));
         assert!(!duplicates.contains(&("static".to_string(), "yara".to_string())));
-        // ghost doesn't exist, so it's neither a delete target nor a duplicate
+        // a non-existent identity is neither a delete target nor a duplicate
         assert!(!targets.contains(&("static".to_string(), "ghost".to_string())));
     }
 }

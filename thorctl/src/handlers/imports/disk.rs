@@ -56,8 +56,8 @@ pub async fn run_disk_import(
             .info()
             .await
             .map_err(|err| Error::new(format!("Error getting current user info: {err}")))?;
-        let confirmed =
-            progress.suspend(|| super::confirm_import(conf, &plan, &current_user, opts.mode))?;
+        let confirmed = progress
+            .suspend(|| super::confirm_import(conf, &plan, &current_user.username, opts.mode))?;
         if !confirmed {
             return Ok(());
         }
