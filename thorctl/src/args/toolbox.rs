@@ -294,12 +294,18 @@ pub struct BuildToolbox {
     /// from each manifest instead. No effect on images pinned to an explicit url.
     #[clap(long)]
     pub use_image_path: bool,
-    /// Output file path
-    #[clap(short, long, default_value = "toolbox.json")]
-    pub output: PathBuf,
-    /// Root directory to walk for image/pipeline manifests (default: current directory)
-    #[clap(long, default_value = ".")]
-    pub path: PathBuf,
+    /// Output path for the generated toolbox.json
+    ///
+    /// Defaults to a `toolbox.json` beside the --config file (the toolbox root). Overriding this
+    /// only redirects the artifact; it does not change where manifests are crawled from.
+    #[clap(short, long)]
+    pub output: Option<PathBuf>,
+    /// Root directory to walk for image/pipeline manifests
+    ///
+    /// Defaults to the directory containing --config (the toolbox root). Overriding this only
+    /// changes the crawl root; it does not change where toolbox.json is written.
+    #[clap(long)]
+    pub path: Option<PathBuf>,
     /// Append this suffix to every derived image tag's version, baking it into the
     /// generated toolbox.json (tags and embedded image urls)
     ///
@@ -335,10 +341,10 @@ pub struct InitToolbox {
     #[clap(long, default_value = ".")]
     pub toolbox_dir: PathBuf,
     /// Seed the new config.toml from an existing one (name, registry, registries,
-    /// image_path_prefix, bundled_images) instead of --name/--registry
+    /// image_path_prefix, export paths, bundled_images) instead of --name/--registry
     ///
-    /// Mutually exclusive with --name and --registry.
-    #[clap(short = 'c', long = "config", conflicts_with_all = ["name", "registry"], verbatim_doc_comment)]
+    /// Mutually exclusive with --name, --registry, --image-path, and --pipeline-path.
+    #[clap(short = 'c', long = "config", conflicts_with_all = ["name", "registry", "image_path", "pipeline_path"], verbatim_doc_comment)]
     pub config: Option<PathBuf>,
     /// Toolbox name for config.toml
     #[clap(long, default_value = "My Toolbox")]
@@ -349,15 +355,37 @@ pub struct InitToolbox {
     /// image's tag is taken from the `image` url in its own config.
     #[clap(long)]
     pub registry: Option<String>,
+    /// Directory (relative to the toolbox root) `export` writes image tool dirs under
+    ///
+    /// Sets `export_image_path` in config.toml; defaults to `images` when omitted. Must be a
+    /// relative subpath (no absolute path, no `..`). Only affects where `export` places files —
+    /// `build` still discovers manifests at any depth.
+    #[clap(long)]
+    pub image_path: Option<String>,
+    /// Directory (relative to the toolbox root) `export` writes pipeline tool dirs under
+    ///
+    /// Sets `export_pipeline_path` in config.toml; defaults to `pipelines` when omitted. Must be a
+    /// relative subpath (no absolute path, no `..`).
+    #[clap(long)]
+    pub pipeline_path: Option<String>,
     /// The editor to use when filling in configs (defaults to your configured `default_editor`)
     #[clap(long)]
     pub editor: Option<String>,
     /// Skip interactive prompts and use defaults for all fields
     #[clap(short = 'n', long)]
     pub non_interactive: bool,
-    /// Overwrite existing files instead of skipping them
+    /// Overwrite existing per-tool files instead of skipping them
+    ///
+    /// Covers the scaffolded manifest.toml/JSON/description files. It does NOT touch an existing
+    /// config.toml — use --overwrite-config for that.
     #[clap(long)]
     pub overwrite: bool,
+    /// Overwrite an existing config.toml instead of preserving it
+    ///
+    /// By default an existing config.toml is kept (so re-running init in a toolbox doesn't clobber
+    /// its settings). Distinct from --overwrite, which covers per-tool files.
+    #[clap(long)]
+    pub overwrite_config: bool,
 }
 
 /// A parsed pipeline spec from the --pipeline flag
@@ -425,6 +453,13 @@ pub struct InitImage {
     /// Group name to use in the generated image config (prompted interactively if omitted)
     #[clap(short = 'g', long = "group")]
     pub group: Option<String>,
+    /// Validate against an existing toolbox's config.toml (resolution source, not placement)
+    ///
+    /// When set, scaffolding errors if an image of the same name+version already exists in that
+    /// toolbox (pass --overwrite to replace). Does not move files — the positional path is the
+    /// destination.
+    #[clap(short = 'c', long = "config")]
+    pub config: Option<PathBuf>,
     /// Skip building this image in CI/CD (image already exists in registry)
     #[clap(long)]
     pub no_build: bool,
@@ -454,6 +489,14 @@ pub struct InitPipeline {
     /// Defaults to all images in a single parallel stage.
     #[clap(long)]
     pub order: Option<String>,
+    /// Resolve the pipeline's images against an existing toolbox's config.toml (the "look here"
+    /// source, not placement)
+    ///
+    /// When set, every referenced image must exist in that toolbox (else an error — `init pipeline`
+    /// never creates images), and each is version-pinned from the toolbox instead of `latest`. Does
+    /// not move files — the positional path is the destination.
+    #[clap(short = 'c', long = "config")]
+    pub config: Option<PathBuf>,
     /// The editor to use when filling in the config (defaults to your configured `default_editor`)
     #[clap(long)]
     pub editor: Option<String>,
@@ -467,15 +510,24 @@ pub struct InitPipeline {
 
 /// Export Thorium images and pipelines into a toolbox directory
 #[derive(Parser, Debug)]
+#[allow(clippy::struct_excessive_bools)]
 pub struct ExportToolbox {
     /// Export all images and pipelines from this group
     #[clap(short = 'g', long = "group")]
     pub group: Option<String>,
     /// Export specific pipelines (format: group/name, or just name if --group is set).
     /// Images referenced by exported pipelines are auto-included.
+    ///
+    /// Append `=dir` to place a pipeline's files at a chosen directory (relative to the toolbox
+    /// root), e.g. `static/av=pipelines/av`; otherwise the configured/default layout is used. The
+    /// `=dir` is placement only — it never changes which pipeline (or its images) is selected.
     #[clap(short = 'p', long = "pipelines", value_delimiter = ',')]
     pub pipelines: Vec<String>,
     /// Export specific standalone images (format: group/name, or just name if --group is set)
+    ///
+    /// Append `=dir` to place an image's files at a chosen directory (e.g.
+    /// `static/clamav=tools/clamav`, to fold a config into an existing build-context dir); naming an
+    /// auto-pulled dependency image this way also redirects it. Placement only.
     #[clap(short = 'i', long = "images", value_delimiter = ',')]
     pub images: Vec<String>,
     /// Override the group in all exported configs to this value.
@@ -485,11 +537,14 @@ pub struct ExportToolbox {
     /// Root directory for the exported toolbox
     #[clap(short = 'o', long = "output", default_value = "./toolbox")]
     pub output: PathBuf,
-    /// Read the toolbox-wide settings (name, registry, registries, image_path_prefix,
-    /// bundled_images) from an existing config.toml instead of --name/--registry
+    /// Seed the toolbox-wide settings (name, registry, registries, image_path_prefix,
+    /// bundled_images) from *another* toolbox's config.toml instead of --name/--registry
     ///
-    /// Lets an export reuse an existing toolbox's config rather than re-specifying it.
-    /// Mutually exclusive with --name and --registry.
+    /// This is for starting a new toolbox from an existing one's settings. Appending into a
+    /// toolbox that already has a config.toml does NOT need this: an existing
+    /// <output>/config.toml is auto-detected, reused, and preserved (settings-source priority is
+    /// --config > existing <output>/config.toml > --name/--registry). Mutually exclusive with
+    /// --name and --registry.
     #[clap(short = 'c', long = "config", conflicts_with_all = ["name", "registry"])]
     pub config: Option<PathBuf>,
     /// Toolbox name for config.toml
@@ -508,42 +563,87 @@ pub struct ExportToolbox {
     /// Open each config in an editor to review/tweak it before writing
     #[clap(long)]
     pub review: bool,
-    /// Overwrite existing files instead of skipping them
+    /// Overwrite existing per-tool files instead of skipping them
+    ///
+    /// Covers the manifest.toml/JSON/description/policy files. It does NOT touch config.toml —
+    /// use --overwrite-config for that.
     #[clap(long, conflicts_with = "skip_conflicts")]
     pub overwrite: bool,
+    /// Overwrite an existing config.toml with this run's settings
+    ///
+    /// By default an existing config.toml is preserved (and its settings reused), so exporting into
+    /// an existing toolbox never clobbers its settings. Pass this to replace it. Distinct from
+    /// --overwrite, which covers per-tool files.
+    #[clap(long)]
+    pub overwrite_config: bool,
     /// Bundle each image's container image file into the toolbox for offline transfer
     ///
-    /// Downloads (docker pull) and saves (docker save) each image to
-    /// `<output>/images/<name>/<name>.tar.gz`. The resulting toolbox can be moved
-    /// to an offline environment and imported with `--image-path-prefix` to push the
-    /// images into a local registry. Requires docker.
+    /// Downloads (docker pull) and saves (docker save) each image into its tool directory as
+    /// `<dir>/<name>.tar.gz` (the configured export layout, default `images/<name>`). The resulting
+    /// toolbox can be moved to an offline environment and imported with `--image-path-prefix` to
+    /// push the images into a local registry. Requires docker.
     #[clap(long)]
     pub with_images: bool,
 }
 
-/// A parsed group/name resource reference
+/// A parsed group/name resource reference, with an optional on-disk destination
 #[derive(Debug, Clone)]
 pub struct ResourceSpec {
     /// The group the resource belongs to
     pub group: String,
     /// The name of the resource
     pub name: String,
+    /// The optional per-resource destination directory (relative to the toolbox root) parsed from
+    /// a `group/name=dest` selection; `None` uses the toolbox's configured/default export layout.
+    /// Placement only — it never affects which resource is selected.
+    pub dest: Option<String>,
 }
 
 impl ResourceSpec {
-    /// Parse "group/name" or "name" (with a default group fallback)
+    /// Parse `group/name`, `name`, or either with an optional `=dest` placement suffix
+    ///
+    /// `static/clamav=tools/clamav` selects `static/clamav` and writes its files into
+    /// `tools/clamav`; the `=dest` is placement only and is validated as a relative subpath of the
+    /// toolbox root (no absolute path, no `..`).
     ///
     /// # Arguments
     ///
     /// * `s` - The resource reference to parse
-    /// * `default_group` - The group to fall back to when `s` has no group prefix
+    /// * `default_group` - The group to fall back to when the reference has no group prefix
     pub fn parse(s: &str, default_group: Option<&str>) -> Result<Self, String> {
-        // split on the FIRST slash so an explicit `group/name` always wins; everything
+        // split off an optional `=dest` placement suffix on the FIRST `=`, so the left side is the
+        // group/name reference and the right side is the destination directory
+        let (reference, dest) = match s.split_once('=') {
+            Some((reference, dest)) => {
+                if dest.is_empty() {
+                    return Err(format!("'{s}' has an empty destination path after '='"));
+                }
+                // the destination must stay inside the toolbox root so export can't write outside it
+                let path = std::path::Path::new(dest);
+                if path.is_absolute() {
+                    return Err(format!(
+                        "destination '{dest}' must be a relative path inside the toolbox, not absolute"
+                    ));
+                }
+                if path
+                    .components()
+                    .any(|component| matches!(component, std::path::Component::ParentDir))
+                {
+                    return Err(format!(
+                        "destination '{dest}' must stay inside the toolbox (no '..' components)"
+                    ));
+                }
+                (reference, Some(dest.to_string()))
+            }
+            None => (s, None),
+        };
+        // split the reference on the FIRST slash so an explicit `group/name` always wins; everything
         // after the first slash is the name (resource names may themselves contain slashes)
-        if let Some((group, name)) = s.split_once('/') {
+        if let Some((group, name)) = reference.split_once('/') {
             Ok(Self {
                 group: group.to_string(),
                 name: name.to_string(),
+                dest,
             })
         } else {
             // with no `group/` prefix the reference is bare, so it can only be resolved when
@@ -551,12 +651,13 @@ impl ResourceSpec {
             match default_group {
                 Some(g) => Ok(Self {
                     group: g.to_string(),
-                    name: s.to_string(),
+                    name: reference.to_string(),
+                    dest,
                 }),
                 // reject rather than guess a group so a bare name can't silently land in the
                 // wrong place when the caller never set one
                 None => Err(format!(
-                    "'{s}' must be in group/name format when --group is not set"
+                    "'{reference}' must be in group/name format when --group is not set"
                 )),
             }
         }
@@ -597,10 +698,45 @@ mod tests {
     #[test]
     fn parse_build_arg_rejects_malformed() {
         // a trailing `=` yields an empty value, which is intentionally permitted
-        assert_eq!(parse_build_arg("EMPTY="), Ok(("EMPTY".to_string(), String::new())));
+        assert_eq!(
+            parse_build_arg("EMPTY="),
+            Ok(("EMPTY".to_string(), String::new()))
+        );
         // no `=` at all has no key/value boundary, so it must error
         assert!(parse_build_arg("no-equals").is_err());
         // an empty key (leading `=`) is rejected because a nameless build arg is unusable
         assert!(parse_build_arg("=value").is_err());
+    }
+
+    /// A `group/name` reference parses into its parts with no destination
+    #[test]
+    fn resource_spec_parses_group_name() {
+        let spec = ResourceSpec::parse("static/clamav", None).expect("group/name parses");
+        assert_eq!(spec.group, "static");
+        assert_eq!(spec.name, "clamav");
+        assert!(spec.dest.is_none());
+        // a bare name resolves only with a default group
+        let bare = ResourceSpec::parse("clamav", Some("static")).expect("bare name with --group");
+        assert_eq!(bare.group, "static");
+        assert_eq!(bare.name, "clamav");
+        assert!(ResourceSpec::parse("clamav", None).is_err());
+    }
+
+    /// An `=dest` suffix sets the placement directory, split on the first `=`, and is validated
+    #[test]
+    fn resource_spec_parses_destination() {
+        // the reference and destination split on the first '='
+        let spec = ResourceSpec::parse("static/clamav=tools/clamav", None).expect("dest parses");
+        assert_eq!(spec.group, "static");
+        assert_eq!(spec.name, "clamav");
+        assert_eq!(spec.dest.as_deref(), Some("tools/clamav"));
+        // a bare name with a destination still needs a default group for the reference
+        let bare = ResourceSpec::parse("clamav=tools/clamav", Some("static")).expect("bare + dest");
+        assert_eq!(bare.name, "clamav");
+        assert_eq!(bare.dest.as_deref(), Some("tools/clamav"));
+        // an absolute or parent-escaping destination is rejected, as is an empty one
+        assert!(ResourceSpec::parse("static/clamav=/abs/path", None).is_err());
+        assert!(ResourceSpec::parse("static/clamav=../escape", None).is_err());
+        assert!(ResourceSpec::parse("static/clamav=", None).is_err());
     }
 }

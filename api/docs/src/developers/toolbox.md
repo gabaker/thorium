@@ -21,6 +21,22 @@ transfer.
 | `thorctl toolbox diff` | Show what importing an on-disk toolbox would change, git-diff style |
 | `thorctl toolbox build-images` | Build (and `--push`) the container images in a toolbox locally |
 
+#### Which command/flag for which task
+
+| You want to… | Use |
+| ------------ | --- |
+| Start a brand-new toolbox by hand | `init toolbox` (creates `config.toml` + tool stubs), then `build` |
+| Add one image/pipeline stub to an existing toolbox | `init image`/`init pipeline` (positional path = where it lands); pass `-c <config.toml>` to **resolve/validate** against the toolbox without moving files |
+| Capture tools from a running instance | `export` (writes the whole repo + `toolbox.json`) |
+| **Append** more tools into an existing toolbox repo | `export -p …`/`-i …` into the same `-o <dir>`; the existing `config.toml` is reused automatically — no `--config` needed |
+| **Seed** a new toolbox's settings from another toolbox's `config.toml` | `init toolbox -c …` or `export -c …` |
+| Place one resource's files in a specific dir | `export -i group/name=dest` / `-p group/name=dest` (placement only) |
+| Set the default export layout | `init toolbox --image-path … --pipeline-path …` (writes `export_*_path` in `config.toml`) |
+| Overwrite per-tool files | `--overwrite` (export, init, import-conflict mode) |
+| Overwrite `config.toml` | `--overwrite-config` (export, init toolbox) |
+| Update existing cluster network policies | `--update-network-policy` (import) |
+| Move images to an air-gapped instance | `export --with-images`, then `import --image-path-prefix …` |
+
 ### Toolbox layout
 ---
 
@@ -77,6 +93,8 @@ name = "My Toolbox"
 registry = "ghcr.io/org/repo"
 # registries = []                 # additional registries to tag images in
 # image_path_prefix = ""          # default registry path prefix for bundled images
+# export_image_path = "images"    # where `export` places image dirs (relative to the toolbox root)
+# export_pipeline_path = "pipelines"
 # bundled_images = true           # set automatically by `export --with-images`
 
 # toolbox-wide default base-image config (see "Overriding base images" below)
@@ -87,6 +105,13 @@ registry = "ghcr.io/org/repo"
 # user = "BASE_REGISTRY_USER"     # CI/CD variable NAME (pass-through)
 # allow_override = true
 ```
+
+`export_image_path` / `export_pipeline_path` set where `export` writes each tool's directory
+(default `images/<name>` and `pipelines/<name>`); set them at scaffold time with
+`thorctl toolbox init toolbox --image-path … --pipeline-path …`. They only affect where `export`
+*places* files — `build` discovers `manifest.toml` files at any depth regardless — and a bundled
+image's tarball travels with its tool directory (each image records that directory in `toolbox.json`,
+so `import` finds the tarball wherever it was placed).
 
 #### Image manifest (`manifest.toml`)
 
@@ -206,10 +231,29 @@ thorctl toolbox init toolbox -i ./images/clamav -p ./pipelines/antivirus:clamav
 thorctl toolbox build
 ```
 
+A toolbox is anchored on its `config.toml`: `build` crawls and writes relative to the `config.toml`'s
+directory. Both `--path` (the crawl root) and `--output` (the `toolbox.json` location) **default to
+that directory**, so `build` from a toolbox root "just works" and `thorctl toolbox build -c
+sub/config.toml` builds the toolbox in `sub/` (writing `sub/toolbox.json`). The two are independent
+overrides — `-o dist/toolbox.json` redirects only the artifact, `--path ./src` redirects only the
+crawl — and `build` prints the resolved crawl root and output path when it runs. (Note: `build_path`
+is recorded relative to `--output`, so a `--output` outside the crawled tree produces `../`-style
+build contexts — fine for `import`, but a `build-images`-portable toolbox wants the default
+self-contained layout.)
+
 `init` runs interactively by default, prompting for the key fields and optionally opening your
 `$EDITOR` to review the full config. Pass `-n/--non-interactive` to accept defaults. You can also
 scaffold a single image or pipeline with `thorctl toolbox init image ./images/clamav` or
-`thorctl toolbox init pipeline ./pipelines/antivirus -i clamav`.
+`thorctl toolbox init pipeline ./pipelines/antivirus -i clamav`. The positional path is the
+destination; the stub is folded into a toolbox by `build`'s recursive walk wherever it lands.
+
+`init image`/`init pipeline` take an optional `-c <config.toml>` to validate against an existing
+toolbox (a resolution source, **not** a placement directive — it never moves files). `init pipeline`
+guarantees a dangling-free manifest: every `--order` image must be declared in `--images`, and with
+`-c` every referenced image must already exist in the toolbox (else it errors — `init` never creates
+images) and is version-pinned from the toolbox instead of defaulting to `latest`. `init image -c`
+errors if an image of the same name+version already exists in the toolbox (pass `--overwrite` to
+replace). `init toolbox` remains the command that creates a new toolbox (`config.toml` + tools).
 
 ### Building images locally
 ---
@@ -307,6 +351,39 @@ Useful flags:
 - `--review` — open each config in an editor to review/tweak it before writing (off by default,
   so configs are written as-is).
 - `--with-images` — also bundle the container image files (see below).
+- `--overwrite` — overwrite existing per-tool files (manifest/JSON/description/policies). It does
+  **not** touch `config.toml`.
+- `--overwrite-config` — replace an existing `config.toml` (otherwise it is preserved).
+
+**Appending into an existing toolbox is safe by default.** `config.toml` is the toolbox's identity:
+exporting into a directory that already has one **preserves it and reuses its settings** (announced
+in the output) rather than clobbering them, so you don't need `--config`. So
+`thorctl toolbox export -p static/newpipeline -o ./my-toolbox` adds the pipeline (and its images)
+into `./my-toolbox`, and the rebuild folds everything in. Pass `--overwrite-config` only when you
+actually want to change the toolbox's settings; if a flag like `--with-images` or `--registry`
+contradicts the preserved config, export warns that the flag is ignored. (`--config` is for *seeding*
+a brand-new toolbox from another's settings.)
+
+When appending into a toolbox that already has a `toolbox.json`, export **reconciles** against it: a
+resource whose config is unchanged is reported "Unchanged" and skipped (including its image bundle
+pull/save, avoiding redundant work), and an image whose name+version already lives at a *different*
+directory is not written as a second copy — it's warned up front instead of failing later at `build`
+time. A fresh export does none of this.
+
+**Placing a single resource (`=dir`).** A `-i`/`-p` entry may carry a `group/name=dir` suffix to
+write that resource's files into a chosen directory (relative to the toolbox root) instead of the
+configured/default layout — for example to fold a Thorium image config into a directory that already
+holds its Dockerfile:
+
+```bash
+thorctl toolbox export -i static/clamav=tools/clamav -o ./my-toolbox
+# writes tools/clamav/{manifest.toml, clamav.json, description.md, *.policy.json}
+```
+
+`=dir` is placement only — it never changes which pipeline or images are selected (a pipeline's
+membership and order come from Thorium). It must be a relative subpath (no absolute path or `..`).
+Whole-group exports and auto-pulled dependency images use the configured/default layout unless an
+image is also named with its own `=dir`.
 
 ### Importing into an instance
 ---

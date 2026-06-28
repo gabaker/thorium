@@ -859,6 +859,7 @@ mod tests {
             .into_iter()
             .map(|(key, policies)| {
                 let version = ImageVersion {
+                    dir: String::new(),
                     build_path: String::new(),
                     config_from: None,
                     config: None,

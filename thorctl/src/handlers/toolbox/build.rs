@@ -3,7 +3,7 @@
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 use std::ffi::OsStr;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::str::FromStr;
 use thorium::Error;
 use thorium::models::{ImageRequest, ImageScaler, PipelineRequest};
@@ -40,6 +40,15 @@ pub(crate) struct ToolboxConfig {
     /// `--image-path-prefix` isn't given (`<image_path_prefix>/<group>/<name>:<tag>`)
     #[serde(default)]
     pub(super) image_path_prefix: Option<String>,
+    /// Directory (relative to the toolbox root) `export` writes image tool directories under;
+    /// `None` means the default `images`. Only affects where `export` places files, not the
+    /// recursive crawl `build` does.
+    #[serde(default)]
+    pub(super) export_image_path: Option<String>,
+    /// Directory (relative to the toolbox root) `export` writes pipeline tool directories under;
+    /// `None` means the default `pipelines`.
+    #[serde(default)]
+    pub(super) export_pipeline_path: Option<String>,
     /// The toolbox-wide default base-image configuration; per-tool `[base_image]` tables
     /// override it field by field at build time
     #[serde(default)]
@@ -95,11 +104,19 @@ pub(crate) const DEFAULT_BASE_IMAGE_ARG: &str = "IMAGE";
 pub(super) fn load_config(path: &Path) -> Result<ToolboxConfig, Error> {
     // read the whole config; a missing/unreadable config.toml is fatal since build can't
     // proceed without the toolbox name and registry settings
-    let config_str = std::fs::read_to_string(path)
-        .map_err(|e| Error::new(format!("Failed to read config file '{}': {e}", path.display())))?;
+    let config_str = std::fs::read_to_string(path).map_err(|e| {
+        Error::new(format!(
+            "Failed to read config file '{}': {e}",
+            path.display()
+        ))
+    })?;
     // parse the TOML into the typed config; surface the path so a syntax error is locatable
-    toml::from_str(&config_str)
-        .map_err(|e| Error::new(format!("Failed to parse config TOML '{}': {e}", path.display())))
+    toml::from_str(&config_str).map_err(|e| {
+        Error::new(format!(
+            "Failed to parse config TOML '{}': {e}",
+            path.display()
+        ))
+    })
 }
 
 /// A single image or pipeline `manifest.toml` — one per tool/pipeline directory
@@ -226,6 +243,13 @@ struct BuildOutput {
     /// Default registry base path bundled images push under on import
     #[serde(skip_serializing_if = "Option::is_none")]
     image_path_prefix: Option<String>,
+    /// The configured `export` layout dirs (from config.toml), echoed for reference; placement
+    /// defaults, omitted when unset (the per-image `dir` is what import uses for tarballs)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    export_image_path: Option<String>,
+    /// The configured `export` pipeline layout dir (from config.toml), echoed for reference
+    #[serde(skip_serializing_if = "Option::is_none")]
+    export_pipeline_path: Option<String>,
     /// The raw toolbox-wide `[base_image]` (from config.toml), for reference; each image entry
     /// carries the resolved value
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -235,6 +259,11 @@ struct BuildOutput {
 /// One image version entry in `toolbox.json`
 #[derive(Serialize)]
 struct BuildImageVersion {
+    /// The tool directory (where this image's `manifest.toml` and any bundled tarball live),
+    /// relative to the directory holding this toolbox.json. `import` resolves a bundled image's
+    /// tarball from here; it is distinct from `build_path` (the docker build context, which may
+    /// point elsewhere) though the two coincide for the common `build_path = "./"`.
+    dir: String,
     /// The docker build context, relative to the directory holding this toolbox.json
     build_path: String,
     /// Whether CI should build this image (vs. reference an already-published one)
@@ -401,7 +430,10 @@ fn set_config_image(config: &mut Option<serde_json::Value>, name: &str, url: &st
     match config {
         // the normal case: write the url into the config object, overwriting any existing `image`
         Some(serde_json::Value::Object(map)) => {
-            map.insert("image".to_string(), serde_json::Value::String(url.to_string()));
+            map.insert(
+                "image".to_string(),
+                serde_json::Value::String(url.to_string()),
+            );
         }
         // a config that parsed as something other than an object can't hold an `image` key; warn
         // instead of silently dropping the url so the misshapen config is noticed
@@ -582,7 +614,9 @@ fn apply_description_md(root: &Path, name: &str, config: &mut Option<serde_json:
                 serde_json::Value::String(description),
             );
         }
-        Some(_) => eprintln!("Warning: {name}: config is not a JSON object; skipping description.md"),
+        Some(_) => {
+            eprintln!("Warning: {name}: config is not a JSON object; skipping description.md")
+        }
         // config_from URLs are resolved at import time, after build
         None => {
             eprintln!("Warning: {name}: description.md cannot be injected into a URL-based config")
@@ -733,7 +767,10 @@ fn build_image_version(
             // this manifest names a build-arg but supplies no image, and none is inherited either
             if own.image.is_none()
                 && own.image_arg.is_some()
-                && base_image.as_ref().and_then(|base| base.image.as_ref()).is_none()
+                && base_image
+                    .as_ref()
+                    .and_then(|base| base.image.as_ref())
+                    .is_none()
             {
                 eprintln!(
                     "Warning: {name}: [base_image].image_arg is set without an image, so it has no effect"
@@ -753,6 +790,10 @@ fn build_image_version(
     // record the context relative to the toolbox.json's directory, not the cwd, so
     // the toolbox stays movable and build-images resolves it against the manifest
     let image_build_path = build_path_relative_to_output(&context_dir, output_dir);
+    // the tool directory (where this manifest.toml and any bundled tarball live), relative to
+    // the toolbox.json's directory; import resolves a bundled image's tarball from here. It is
+    // independent of build_path (the build context) though they coincide for build_path = "./".
+    let dir = build_path_relative_to_output(root, output_dir);
 
     // resolve config_from: an inline value (local path or absent->empty object) or a deferred URL
     let loaded = load_json_config(root, manifest.config_from.as_deref())?;
@@ -772,6 +813,7 @@ fn build_image_version(
         // normalize like every other config so build matches export
         let config = canonicalize_config::<ImageRequest>(config);
         return Ok(BuildImageVersion {
+            dir,
             build_path: image_build_path,
             build_image: false,
             image_tags: Vec::new(),
@@ -814,6 +856,7 @@ fn build_image_version(
             );
         }
         return Ok(BuildImageVersion {
+            dir,
             build_path: image_build_path,
             build_image: manifest.build,
             image_tags,
@@ -850,7 +893,15 @@ fn build_image_version(
         vec![url]
     } else {
         // derive <registry>/[prefix/]<image_name>:<version> for each registry
-        let tags = derive_image_tags(image_name, name, version, registries, use_image_path, image_path_prefix, tag_suffix);
+        let tags = derive_image_tags(
+            image_name,
+            name,
+            version,
+            registries,
+            use_image_path,
+            image_path_prefix,
+            tag_suffix,
+        );
         match tags.first() {
             Some(first) => {
                 // warn if the derived tag silently replaces an image the user set in
@@ -891,6 +942,7 @@ fn build_image_version(
     let config = canonicalize_config::<ImageRequest>(config);
 
     Ok(BuildImageVersion {
+        dir,
         build_path: image_build_path,
         build_image: manifest.build,
         image_tags,
@@ -960,6 +1012,16 @@ fn build_pipeline_version(
 ///
 /// * `cmd` - The build command arguments (config path, walk root, and output path)
 pub fn build(cmd: &BuildToolbox) -> Result<(), Error> {
+    // resolve the crawl root and output path (both default to the config's directory so a
+    // toolbox is self-contained around its config.toml); announce them so the defaulted-from
+    // -config behavior is visible rather than implicit
+    let crawl = resolved_crawl(cmd);
+    let output_path = resolved_output(cmd);
+    println!(
+        "Building toolbox from '{}' (writing '{}')",
+        crawl.display(),
+        output_path.display()
+    );
     let output = build_output(cmd)?;
     // serialize through the canonical (sorted-key) form: `BuildOutput`'s image and
     // pipeline maps are `HashMap`s, so a direct `to_string_pretty` would emit keys in
@@ -967,11 +1029,49 @@ pub fn build(cmd: &BuildToolbox) -> Result<(), Error> {
     // through serde_json::Value (a sorted BTreeMap) makes the file byte-deterministic
     // so it can be committed and diffed.
     let json = crate::utils::canonical_json(&output)?;
-    std::fs::write(&cmd.output, json)
-        .map_err(|e| Error::new(format!("Failed to write '{}': {e}", cmd.output.display())))?;
-
-    println!("Wrote toolbox manifest to '{}'", cmd.output.display());
+    std::fs::write(&output_path, json)
+        .map_err(|e| Error::new(format!("Failed to write '{}': {e}", output_path.display())))?;
+    println!("Wrote toolbox manifest to '{}'", output_path.display());
     Ok(())
+}
+
+/// The directory a toolbox's `config.toml` lives in
+///
+/// Used as the default crawl root and the default `toolbox.json` location so a toolbox is
+/// self-contained around its config. A bare `config.toml` has an empty parent, which is
+/// treated as the current directory.
+///
+/// # Arguments
+///
+/// * `config` - The path to the toolbox's `config.toml`
+fn config_base_dir(config: &Path) -> PathBuf {
+    config
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .map_or_else(|| PathBuf::from("."), Path::to_path_buf)
+}
+
+/// Resolve the directory to crawl for manifests: an explicit `--path`, else the config's dir
+///
+/// # Arguments
+///
+/// * `cmd` - The build command arguments
+fn resolved_crawl(cmd: &BuildToolbox) -> PathBuf {
+    cmd.path
+        .clone()
+        .unwrap_or_else(|| config_base_dir(&cmd.config))
+}
+
+/// Resolve the `toolbox.json` output path: an explicit `--output`, else `toolbox.json` in the
+/// config's directory
+///
+/// # Arguments
+///
+/// * `cmd` - The build command arguments
+fn resolved_output(cmd: &BuildToolbox) -> PathBuf {
+    cmd.output
+        .clone()
+        .unwrap_or_else(|| config_base_dir(&cmd.config).join("toolbox.json"))
 }
 
 /// Build a toolbox manifest in memory without writing it to disk
@@ -1022,7 +1122,9 @@ fn resolve_image_from_url(
     loop {
         // re-visiting a node means the chain loops back on itself
         if !visited.insert((name.clone(), version.clone())) {
-            return Err(format!("image_from chain cycles back to '{name}:{version}'"));
+            return Err(format!(
+                "image_from chain cycles back to '{name}:{version}'"
+            ));
         }
         // if this node also reuses another image, keep following the chain
         if let Some((next_name, next_version)) = from_map.get(&(name.clone(), version.clone())) {
@@ -1063,10 +1165,12 @@ fn build_output(cmd: &BuildToolbox) -> Result<BuildOutput, Error> {
         }
     }
 
+    // resolve the crawl root and output path (both default to the config's directory)
+    let crawl = resolved_crawl(cmd);
+    let output_path = resolved_output(cmd);
     // build_path values are recorded relative to the toolbox.json's directory; an
     // output with no parent (e.g. bare "toolbox.json") anchors to the cwd
-    let output_dir = cmd
-        .output
+    let output_dir = output_path
         .parent()
         .filter(|parent| !parent.as_os_str().is_empty())
         .unwrap_or_else(|| Path::new("."));
@@ -1083,7 +1187,7 @@ fn build_output(cmd: &BuildToolbox) -> Result<BuildOutput, Error> {
     let mut image_locations: HashMap<(String, String), String> = HashMap::new();
     let mut pipeline_locations: HashMap<(String, String), String> = HashMap::new();
 
-    for entry in WalkDir::new(&cmd.path) {
+    for entry in WalkDir::new(&crawl) {
         // a path we can't read (permissions, broken symlink) shouldn't vanish
         // silently from the output — surface it and keep walking the rest
         let entry = match entry {
@@ -1147,8 +1251,7 @@ fn build_output(cmd: &BuildToolbox) -> Result<BuildOutput, Error> {
                 // record an image_from reference so it can be resolved to a concrete url
                 // after the whole tree is walked (the target may appear later)
                 if let Some(from) = &manifest.image_from {
-                    image_from_map
-                        .insert(key.clone(), (from.name.clone(), from.version.clone()));
+                    image_from_map.insert(key.clone(), (from.name.clone(), from.version.clone()));
                 }
                 // file the entry under name -> version (nested so one name can have many versions)
                 images
@@ -1248,6 +1351,8 @@ fn build_output(cmd: &BuildToolbox) -> Result<BuildOutput, Error> {
         registries,
         bundled_images: config.bundled_images,
         image_path_prefix: config.image_path_prefix,
+        export_image_path: config.export_image_path,
+        export_pipeline_path: config.export_pipeline_path,
         base_image: config.base_image,
     })
 }
@@ -1273,9 +1378,15 @@ mod tests {
         assert_eq!(out["resources"]["cpu"], serde_json::json!(1));
         assert_eq!(out["resources"]["memory"], serde_json::json!("2Gi"));
         // 512Mi is not a whole Gi, so it stays in Mi
-        assert_eq!(out["resources"]["ephemeral_storage"], serde_json::json!("512Mi"));
+        assert_eq!(
+            out["resources"]["ephemeral_storage"],
+            serde_json::json!("512Mi")
+        );
         // 1500m is not an even core count, so it stays in millicpu
-        assert_eq!(out["resources"]["burstable"]["cpu"], serde_json::json!("1500m"));
+        assert_eq!(
+            out["resources"]["burstable"]["cpu"],
+            serde_json::json!("1500m")
+        );
     }
 
     /// a stub/partial config that doesn't deserialize is left untouched so loosely
@@ -1351,7 +1462,10 @@ mod tests {
             Some("pre"),
             None,
         );
-        assert_eq!(tags, vec!["ghcr.io/o/r/pre/gnu.org/binutils/strings:latest"]);
+        assert_eq!(
+            tags,
+            vec!["ghcr.io/o/r/pre/gnu.org/binutils/strings:latest"]
+        );
     }
 
     /// a tag suffix is appended to the version, so feature-branch builds don't collide
@@ -1399,9 +1513,13 @@ mod tests {
     #[test]
     fn config_requires_container_image_only_k8s() {
         // an explicit K8s scaler requires a container image
-        assert!(config_requires_container_image(Some(&serde_json::json!({"scaler": "K8s"}))));
+        assert!(config_requires_container_image(Some(
+            &serde_json::json!({"scaler": "K8s"})
+        )));
         // an absent scaler defaults to K8s, so it requires one too
-        assert!(config_requires_container_image(Some(&serde_json::json!({"name": "x"}))));
+        assert!(config_requires_container_image(Some(
+            &serde_json::json!({"name": "x"})
+        )));
         // non-K8s scalers run without a container image
         for scaler in ["BareMetal", "Windows", "Kvm", "External"] {
             assert!(
@@ -1433,6 +1551,7 @@ mod tests {
     /// * `tags` - The derived tags to populate `image_tags` with
     fn image_entry(image: Option<&str>, tags: &[&str]) -> BuildImageVersion {
         BuildImageVersion {
+            dir: ".".to_string(),
             build_path: ".".to_string(),
             build_image: false,
             image_tags: tags.iter().map(|tag| (*tag).to_string()).collect(),
@@ -1471,7 +1590,10 @@ mod tests {
     ) -> HashMap<(String, String), (String, String)> {
         refs.into_iter()
             .map(|((rn, rv), (tn, tv))| {
-                ((rn.to_string(), rv.to_string()), (tn.to_string(), tv.to_string()))
+                (
+                    (rn.to_string(), rv.to_string()),
+                    (tn.to_string(), tv.to_string()),
+                )
             })
             .collect()
     }
@@ -1532,7 +1654,10 @@ mod tests {
         let images = images_map(vec![]);
         let from = from_map(vec![(("b", "latest"), ("missing", "1"))]);
         let err = resolve_image_from_url("b", "latest", &images, &from).unwrap_err();
-        assert!(err.contains("not found"), "expected a not-found error, got: {err}");
+        assert!(
+            err.contains("not found"),
+            "expected a not-found error, got: {err}"
+        );
     }
 
     /// A target that has no container image at all (no config url, no tags) errors
@@ -1582,7 +1707,13 @@ mod tests {
     /// inherit the global value
     #[test]
     fn merge_base_image_per_tool_over_global() {
-        let global = base(Some("global:1"), Some("ARG_G"), Some("TOK_G"), Some("USR_G"), Some(true));
+        let global = base(
+            Some("global:1"),
+            Some("ARG_G"),
+            Some("TOK_G"),
+            Some("USR_G"),
+            Some(true),
+        );
         // per-tool overrides image only; the rest inherit the global
         let per_tool = base(Some("tool:1"), None, None, None, None);
         let merged = merge_base_image(Some(&global), Some(&per_tool)).expect("merged");

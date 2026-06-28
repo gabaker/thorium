@@ -205,8 +205,8 @@ async fn load_manifest(location: &ManifestLocation) -> Result<(ToolboxManifest, 
             config,
             use_image_path: false,
             // never written; build_in_memory ignores the output path
-            output: path.join("toolbox.json"),
-            path: path.clone(),
+            output: Some(path.join("toolbox.json")),
+            path: Some(path.clone()),
             // diff compares the on-disk toolbox as-is, so no tag suffix is applied
             tag_suffix: None,
         };

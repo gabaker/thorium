@@ -217,13 +217,10 @@ impl ToolboxManifest {
             .values()
             .flat_map(|image_manifest| image_manifest.versions.values())
             .filter_map(|v| v.config.as_ref())
-            .fold(
-                HashMap::<&str, HashSet<&str>>::new(),
-                |mut map, config| {
-                    map.entry(&config.group).or_default().insert(&config.name);
-                    map
-                },
-            );
+            .fold(HashMap::<&str, HashSet<&str>>::new(), |mut map, config| {
+                map.entry(&config.group).or_default().insert(&config.name);
+                map
+            });
         let mut invalid: HashMap<String, Vec<String>> = HashMap::new();
         for (pipeline, pipeline_manifest) in &self.pipelines {
             for (version_name, version) in &pipeline_manifest.versions {
@@ -387,10 +384,7 @@ impl ToolboxManifest {
     /// # Arguments
     ///
     /// * `sources` - The pre-override group snapshot used to tag each colliding member
-    pub fn detect_image_collisions(
-        &self,
-        sources: &SourceGroups,
-    ) -> Result<Vec<Collision>, Error> {
+    pub fn detect_image_collisions(&self, sources: &SourceGroups) -> Result<Vec<Collision>, Error> {
         // group members by their post-override (group, name) identity; every bucket with
         // more than one member is an overwrite collision
         let mut buckets: HashMap<(String, String), Vec<(CollisionMember, serde_json::Value)>> =
@@ -509,9 +503,8 @@ impl ToolboxManifest {
             let mut members: Vec<CollisionMember> = members.into_iter().map(|(m, _)| m).collect();
             // sort by (manifest_key, version) so the first member is a stable canonical
             // choice and the rendered collision is reproducible across runs
-            members.sort_by(|a, b| {
-                (&a.manifest_key, &a.version).cmp(&(&b.manifest_key, &b.version))
-            });
+            members
+                .sort_by(|a, b| (&a.manifest_key, &a.version).cmp(&(&b.manifest_key, &b.version)));
             collisions.push(Collision {
                 group,
                 name,
@@ -531,9 +524,16 @@ impl ToolboxManifest {
     ///
     /// * `collision` - The collision the member belongs to (supplies the group and base name)
     /// * `member` - The colliding member to suggest a new name for (supplies the version)
-    pub fn suggested_image_rename(&self, collision: &Collision, member: &CollisionMember) -> String {
+    pub fn suggested_image_rename(
+        &self,
+        collision: &Collision,
+        member: &CollisionMember,
+    ) -> String {
         // base the suggestion on "<name>-<version>" then ensure it's free in the group
-        self.unique_image_name(&collision.group, &format!("{}-{}", collision.name, member.version))
+        self.unique_image_name(
+            &collision.group,
+            &format!("{}-{}", collision.name, member.version),
+        )
     }
 
     /// Suggest a unique new name for a colliding pipeline member: `<name>-<version>`,
@@ -610,7 +610,8 @@ impl ToolboxManifest {
         // "taken" means some image already owns this name in the same group; cross-group
         // names never conflict because Thorium identity is (group, name)
         Self::unique_name(base, |candidate| {
-            self.image_identities().any(|(g, n)| g == group && n == candidate)
+            self.image_identities()
+                .any(|(g, n)| g == group && n == candidate)
         })
     }
 
@@ -1053,6 +1054,12 @@ pub struct ImageManifest {
 /// Details for a specific image version
 #[derive(Debug, Serialize, Deserialize)]
 pub struct ImageVersion {
+    /// The tool directory (where this image's `manifest.toml` and any bundled tarball live),
+    /// relative to the `toolbox.json`'s location. Used to find a bundled image's tarball; empty
+    /// for older toolboxes that predate the field, in which case the bundled-image lookup falls
+    /// back to the default `images/<name>` layout.
+    #[serde(default)]
+    pub dir: String,
     /// The image's build path relative to the toolbox manifest's location
     pub build_path: String,
     /// URL to fetch the image config from (alternative to inline config)
@@ -1091,6 +1098,7 @@ mod tests {
         let mut config = ImageRequest::new(group, name);
         config.image = Some(distinct.to_string());
         ImageVersion {
+            dir: String::new(),
             build_path: String::new(),
             config_from: None,
             config: Some(config),
@@ -1139,6 +1147,7 @@ mod tests {
             versions: HashMap::from([(
                 "latest".to_string(),
                 ImageVersion {
+                    dir: String::new(),
                     build_path: String::new(),
                     config_from: Some("https://example/cfg.json".to_string()),
                     config: None,
@@ -1222,7 +1231,10 @@ mod tests {
         ToolboxManifest {
             name: "t".to_string(),
             registry: Some("r".to_string()),
-            images: images.into_iter().map(|(n, m)| (n.to_string(), m)).collect(),
+            images: images
+                .into_iter()
+                .map(|(n, m)| (n.to_string(), m))
+                .collect(),
             pipelines: pipelines
                 .into_iter()
                 .map(|(n, m)| (n.to_string(), m))
@@ -1297,7 +1309,12 @@ mod tests {
         // ...but incoherent: 'a' isn't in the pipeline's group
         let dropped = m.validate_group_coherence();
         assert!(!m.pipelines.contains_key("p"));
-        assert!(dropped.pipelines[0].1.iter().any(|r| r.contains("not in group 'g'")));
+        assert!(
+            dropped.pipelines[0]
+                .1
+                .iter()
+                .any(|r| r.contains("not in group 'g'"))
+        );
     }
 
     /// A pipeline validates when its images map keys by the tool name while its
@@ -1319,7 +1336,12 @@ mod tests {
             )],
             vec![(
                 "sqlitediff",
-                pipeline_pinned("g", "sqlitediff", json!(["sqldiff"]), &[("sqlitediff", "latest")]),
+                pipeline_pinned(
+                    "g",
+                    "sqlitediff",
+                    json!(["sqldiff"]),
+                    &[("sqlitediff", "latest")],
+                ),
             )],
         );
         assert!(m.validate_structural().pipelines.is_empty());
@@ -1364,7 +1386,10 @@ mod tests {
     fn detects_multi_version_collision() {
         // one image with two distinct version configs collides on (g, exiftool)
         let m = manifest(
-            vec![("exiftool", versioned_image("g", "exiftool", &["latest", "1.2"]))],
+            vec![(
+                "exiftool",
+                versioned_image("g", "exiftool", &["latest", "1.2"]),
+            )],
             vec![],
         );
         let sources = m.capture_source_groups();
@@ -1381,7 +1406,10 @@ mod tests {
     fn rename_multi_version_cascades_by_pinned_version() {
         // pipeline pins exiftool@latest; renaming the latest variant repoints it
         let m = manifest(
-            vec![("exiftool", versioned_image("g", "exiftool", &["latest", "1.2"]))],
+            vec![(
+                "exiftool",
+                versioned_image("g", "exiftool", &["latest", "1.2"]),
+            )],
             vec![(
                 "p",
                 pipeline_pinned("g", "p", json!(["exiftool"]), &[("exiftool", "latest")]),
@@ -1403,7 +1431,11 @@ mod tests {
         assert!(m.images.contains_key("exiftool-latest"));
         // the pipeline that wanted latest was repointed
         assert_eq!(order_of(&m, "p"), vec![vec!["exiftool-latest".to_string()]]);
-        assert!(m.pipelines["p"].versions["latest"].images.contains_key("exiftool-latest"));
+        assert!(
+            m.pipelines["p"].versions["latest"]
+                .images
+                .contains_key("exiftool-latest")
+        );
     }
 
     /// Renaming one of two same-named images merged from different source groups
@@ -1434,8 +1466,14 @@ mod tests {
                 ),
             ],
             vec![
-                ("p-static", pipeline("static", "p-static", json!(["exiftool"]), &["exiftool"])),
-                ("p-uur", pipeline("static-uur", "p-uur", json!(["exiftool"]), &["exiftool"])),
+                (
+                    "p-static",
+                    pipeline("static", "p-static", json!(["exiftool"]), &["exiftool"]),
+                ),
+                (
+                    "p-uur",
+                    pipeline("static-uur", "p-uur", json!(["exiftool"]), &["exiftool"]),
+                ),
             ],
         );
         // capture BEFORE the override, then collapse groups
@@ -1465,8 +1503,24 @@ mod tests {
         // distinct manifest keys, same config.name + group -> still a collision
         let m = manifest(
             vec![
-                ("a", ImageManifest { versions: HashMap::from([("latest".to_string(), image_version("g", "x", "url-a"))]) }),
-                ("b", ImageManifest { versions: HashMap::from([("latest".to_string(), image_version("g", "x", "url-b"))]) }),
+                (
+                    "a",
+                    ImageManifest {
+                        versions: HashMap::from([(
+                            "latest".to_string(),
+                            image_version("g", "x", "url-a"),
+                        )]),
+                    },
+                ),
+                (
+                    "b",
+                    ImageManifest {
+                        versions: HashMap::from([(
+                            "latest".to_string(),
+                            image_version("g", "x", "url-b"),
+                        )]),
+                    },
+                ),
             ],
             vec![],
         );
@@ -1482,10 +1536,7 @@ mod tests {
     #[test]
     fn dedupes_identical_duplicate() {
         // two manifest entries with identical configs -> pure duplicate
-        let m = manifest(
-            vec![("a", image("g", "x")), ("b", image("g", "x"))],
-            vec![],
-        );
+        let m = manifest(vec![("a", image("g", "x")), ("b", image("g", "x"))], vec![]);
         let sources = m.capture_source_groups();
         let mut m = m;
         let collisions = m.detect_image_collisions(&sources).unwrap();
@@ -1503,8 +1554,24 @@ mod tests {
     fn skip_removes_identity_and_dependents() {
         let m = manifest(
             vec![
-                ("a", ImageManifest { versions: HashMap::from([("latest".to_string(), image_version("g", "x", "url-a"))]) }),
-                ("b", ImageManifest { versions: HashMap::from([("latest".to_string(), image_version("g", "x", "url-b"))]) }),
+                (
+                    "a",
+                    ImageManifest {
+                        versions: HashMap::from([(
+                            "latest".to_string(),
+                            image_version("g", "x", "url-a"),
+                        )]),
+                    },
+                ),
+                (
+                    "b",
+                    ImageManifest {
+                        versions: HashMap::from([(
+                            "latest".to_string(),
+                            image_version("g", "x", "url-b"),
+                        )]),
+                    },
+                ),
             ],
             vec![
                 ("dep", pipeline("g", "dep", json!(["x"]), &["x"])),
@@ -1548,9 +1615,33 @@ mod tests {
         // three same-version variants force a fallback suffix on the third name
         let m = manifest(
             vec![
-                ("a", ImageManifest { versions: HashMap::from([("latest".to_string(), image_version("g", "x", "url-a"))]) }),
-                ("b", ImageManifest { versions: HashMap::from([("latest".to_string(), image_version("g", "x", "url-b"))]) }),
-                ("c", ImageManifest { versions: HashMap::from([("latest".to_string(), image_version("g", "x", "url-c"))]) }),
+                (
+                    "a",
+                    ImageManifest {
+                        versions: HashMap::from([(
+                            "latest".to_string(),
+                            image_version("g", "x", "url-a"),
+                        )]),
+                    },
+                ),
+                (
+                    "b",
+                    ImageManifest {
+                        versions: HashMap::from([(
+                            "latest".to_string(),
+                            image_version("g", "x", "url-b"),
+                        )]),
+                    },
+                ),
+                (
+                    "c",
+                    ImageManifest {
+                        versions: HashMap::from([(
+                            "latest".to_string(),
+                            image_version("g", "x", "url-c"),
+                        )]),
+                    },
+                ),
             ],
             vec![],
         );

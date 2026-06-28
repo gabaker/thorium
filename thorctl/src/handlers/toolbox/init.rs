@@ -6,9 +6,12 @@
 //! defaults with no editor.
 
 use colored::Colorize;
+use serde::Deserialize;
+use std::collections::HashMap;
 use std::path::Path;
 use thorium::Error;
 use thorium::models::{ImageRequest, PipelineRequest};
+use walkdir::WalkDir;
 
 use super::build::BaseImage;
 use super::prompt::{self, ImageConfigAnswers, PipelineConfigAnswers};
@@ -29,7 +32,11 @@ use crate::handlers::imports::merge::{IMAGE_FIELD_ORDER, PIPELINE_FIELD_ORDER};
 /// * `path` - The path to write to
 /// * `contents` - The file contents to write
 /// * `overwrite` - Overwrite an existing file instead of skipping it
-pub(crate) async fn write_file(path: &Path, contents: &str, overwrite: bool) -> Result<bool, Error> {
+pub(crate) async fn write_file(
+    path: &Path,
+    contents: &str,
+    overwrite: bool,
+) -> Result<bool, Error> {
     // stat once and surface a real IO error rather than treating it as "absent",
     // which would silently overwrite a file we couldn't read
     let exists = tokio::fs::try_exists(path)
@@ -106,6 +113,110 @@ fn validate_resource_name(kind: &str, name: &str) -> Result<(), Error> {
         .map_err(|err| Error::new(format!("Invalid {kind} name '{name}': {err}")))
 }
 
+/// Reject an export-layout path that isn't a safe relative subpath of the toolbox root
+///
+/// A configured layout dir (`export_image_path`/`export_pipeline_path`) or a per-resource
+/// `=destpath` must stay inside the toolbox, so an absolute path or one escaping via `..` is
+/// rejected before it is written into `config.toml` or used to place files.
+///
+/// # Arguments
+///
+/// * `kind` - The setting's name, for the error message
+/// * `path` - The path to validate
+pub(crate) fn validate_relative_subpath(kind: &str, path: &str) -> Result<(), Error> {
+    let candidate = Path::new(path);
+    // an absolute path would place files outside the toolbox root entirely
+    if candidate.is_absolute() {
+        return Err(Error::new(format!(
+            "{kind} '{path}' must be a relative path inside the toolbox, not an absolute path"
+        )));
+    }
+    // a `..` component would climb out of the toolbox root
+    if candidate
+        .components()
+        .any(|component| matches!(component, std::path::Component::ParentDir))
+    {
+        return Err(Error::new(format!(
+            "{kind} '{path}' must stay inside the toolbox (no '..' components)"
+        )));
+    }
+    Ok(())
+}
+
+/// A minimal view of a `manifest.toml` for discovering a toolbox's existing images
+///
+/// Only the fields needed to identify image entries are deserialized; everything else in the
+/// manifest is ignored. Used by [`collect_toolbox_images`] to validate `init pipeline -c`
+/// references and to detect an `init image -c` duplicate identity.
+#[derive(Deserialize)]
+struct ManifestProbe {
+    /// The resource name
+    name: String,
+    /// `"image"` or `"pipeline"`
+    #[serde(rename = "type")]
+    manifest_type: String,
+    /// The version label; defaults to `latest` when the manifest omits it
+    #[serde(default = "default_probe_version")]
+    version: String,
+}
+
+/// The default version label for a manifest that omits one (matches `build`'s default)
+fn default_probe_version() -> String {
+    "latest".to_string()
+}
+
+/// Walk a toolbox (the directory of its `config.toml`) for image manifests, mapping each image
+/// name to the versions found for it
+///
+/// Used by `init -c` as the toolbox's resolution source: it lets `init pipeline` confirm a
+/// referenced image exists and pin its real version, and `init image` detect a duplicate
+/// name+version. Unreadable/unparsable manifests are skipped (a best-effort discovery, not a build).
+///
+/// # Arguments
+///
+/// * `config` - The path to the toolbox's `config.toml`
+fn collect_toolbox_images(config: &Path) -> HashMap<String, Vec<String>> {
+    // the toolbox root is the config's directory (a bare `config.toml` means the cwd)
+    let root = config
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .map_or_else(|| Path::new("."), |parent| parent);
+    let mut images: HashMap<String, Vec<String>> = HashMap::new();
+    // walk every manifest.toml under the toolbox root, recording image (name, version) pairs
+    for entry in WalkDir::new(root).into_iter().filter_map(Result::ok) {
+        if entry.file_name() != "manifest.toml" {
+            continue;
+        }
+        // skip a manifest that won't read or parse; discovery is best-effort
+        let Ok(text) = std::fs::read_to_string(entry.path()) else {
+            continue;
+        };
+        let Ok(probe) = toml::from_str::<ManifestProbe>(&text) else {
+            continue;
+        };
+        // only images are a resolution source for a pipeline's references
+        if probe.manifest_type == "image" {
+            images.entry(probe.name).or_default().push(probe.version);
+        }
+    }
+    images
+}
+
+/// Pick the version to pin for a referenced image found in the toolbox: prefer `latest`, else the
+/// first discovered version
+///
+/// # Arguments
+///
+/// * `versions` - The versions discovered for the image in the toolbox
+fn pin_version(versions: &[String]) -> String {
+    versions
+        .iter()
+        .find(|version| version.as_str() == "latest")
+        .or_else(|| versions.first())
+        .cloned()
+        .unwrap_or_else(default_probe_version)
+}
+
 /// Escape a value for use inside a TOML basic (double-quoted) string
 ///
 /// `config.toml`'s `name`/`registry` are free-form (spaces, slashes), so they
@@ -129,9 +240,9 @@ pub(crate) fn toml_escape(value: &str) -> String {
 /// Render a toolbox `config.toml` from its toolbox-wide settings
 ///
 /// Shared by `toolbox init` and `toolbox export` so the two can't drift. An unset
-/// `registry`, empty `registries`, and an unset `image_path_prefix` are emitted as
-/// commented-out placeholders to document the available knobs; `bundled_images` is
-/// only written when true.
+/// `registry`, empty `registries`, an unset `image_path_prefix`, and unset
+/// `export_image_path`/`export_pipeline_path` are emitted as commented-out placeholders to
+/// document the available knobs; `bundled_images` is only written when true.
 ///
 /// # Arguments
 ///
@@ -139,13 +250,18 @@ pub(crate) fn toml_escape(value: &str) -> String {
 /// * `registry` - The primary container registry, or `None` to leave it unset
 /// * `registries` - Extra registries to additionally tag for
 /// * `image_path_prefix` - The default bundled-image registry base path, if any
+/// * `export_image_path` - The dir `export` writes image tool dirs under, or `None` for `images`
+/// * `export_pipeline_path` - The dir `export` writes pipeline tool dirs under, or `None` for `pipelines`
 /// * `bundled_images` - Whether the toolbox bundles image tarballs
 /// * `base_image` - The toolbox-wide default base-image configuration, if any
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn render_config_toml(
     name: &str,
     registry: Option<&str>,
     registries: &[String],
     image_path_prefix: Option<&str>,
+    export_image_path: Option<&str>,
+    export_pipeline_path: Option<&str>,
     bundled_images: bool,
     base_image: Option<&BaseImage>,
 ) -> String {
@@ -175,8 +291,24 @@ pub(crate) fn render_config_toml(
     }
     // a set prefix is written out; an unset one is a commented placeholder
     match image_path_prefix {
-        Some(prefix) => out.push_str(&format!("image_path_prefix = \"{}\"\n", toml_escape(prefix))),
+        Some(prefix) => out.push_str(&format!(
+            "image_path_prefix = \"{}\"\n",
+            toml_escape(prefix)
+        )),
         None => out.push_str("# image_path_prefix = \"\"\n"),
+    }
+    // export layout dirs: a set value is written out; an unset one is a commented placeholder
+    // documenting the default (export writes under `images`/`pipelines` when unset)
+    match export_image_path {
+        Some(path) => out.push_str(&format!("export_image_path = \"{}\"\n", toml_escape(path))),
+        None => out.push_str("# export_image_path = \"images\"\n"),
+    }
+    match export_pipeline_path {
+        Some(path) => out.push_str(&format!(
+            "export_pipeline_path = \"{}\"\n",
+            toml_escape(path)
+        )),
+        None => out.push_str("# export_pipeline_path = \"pipelines\"\n"),
     }
     // the base-image config is a TOML table, so it must come after every scalar key; an unset one
     // is a commented placeholder documenting the knobs
@@ -384,7 +516,10 @@ pub(crate) fn generate_image_manifest(
     // record the real registry url an export captured, so a build that doesn't
     // rebuild this image (build = false) keeps it instead of deriving a path
     if let Some(path) = exported_image_path.filter(|path| !path.is_empty()) {
-        manifest.push_str(&format!("exported_image_path = \"{}\"\n", toml_escape(path)));
+        manifest.push_str(&format!(
+            "exported_image_path = \"{}\"\n",
+            toml_escape(path)
+        ));
     }
     // reference any bundled network policy definition files
     if !policy_files.is_empty() {
@@ -545,7 +680,10 @@ async fn write_image_files(
 fn json_str_field(value: &serde_json::Value, field: &str) -> Option<String> {
     // None unless the key exists and holds a string; a missing key or non-string value
     // both collapse to None so callers can treat "absent" and "wrong type" alike
-    value.get(field).and_then(|v| v.as_str()).map(str::to_string)
+    value
+        .get(field)
+        .and_then(|v| v.as_str())
+        .map(str::to_string)
 }
 
 /// Collect the unique image names referenced across a pipeline config's `order`,
@@ -669,12 +807,16 @@ fn description_stub(name: &str, description: Option<&str>) -> String {
 /// * `overwrite` - Overwrite existing files instead of skipping them
 /// * `open_editor` - Open the config in the editor before writing (interactive mode)
 /// * `editor` - The editor command to open the config with
+/// * `toolbox` - When `-c` is set, the toolbox's `config.toml` path and its discovered images;
+///   every referenced image must exist there (else an error) and is version-pinned from it.
+///   `None` pins each referenced image to `latest` (no validation source).
 async fn write_pipeline_files(
     path: &Path,
     answers: &PipelineConfigAnswers,
     overwrite: bool,
     open_editor: bool,
     editor: &str,
+    toolbox: Option<(&Path, &HashMap<String, Vec<String>>)>,
 ) -> Result<(), Error> {
     // build the default config, then (interactively) let the user fill it in via the
     // editor — the editor edits exactly what is written to <name>.json
@@ -718,13 +860,25 @@ async fn write_pipeline_files(
     // reject names that aren't valid identifiers before interpolating into the TOML template
     validate_resource_name("pipeline", &name)?;
     validate_resource_name("group", &group)?;
-    // derive the manifest's image map from the config's order so editing the order
-    // in the editor keeps the manifest's referenced images in sync; each gets the
-    // default "latest" version since the order carries names only
+    // derive the manifest's image map from the config's order so editing the order in the editor
+    // keeps the manifest's referenced images in sync. With a toolbox (-c) each image must exist
+    // there (hard error otherwise — init never creates images) and is pinned to the toolbox's
+    // version; without one, each is pinned to "latest" since the order carries names only.
     let images: Vec<(String, String)> = unique_order_images(&value)
         .into_iter()
-        .map(|image| (image, "latest".to_string()))
-        .collect();
+        .map(|image| match toolbox {
+            Some((config, available)) => match available.get(&image) {
+                Some(versions) => Ok((image, pin_version(versions))),
+                None => Err(Error::new(format!(
+                    "pipeline references image '{image}', which is not in the toolbox at '{}'; \
+                     add it (e.g. with `thorctl toolbox init image`) before building — init does \
+                     not create it",
+                    config.display()
+                ))),
+            },
+            None => Ok((image, "latest".to_string())),
+        })
+        .collect::<Result<_, Error>>()?;
     // image names pulled from the order are interpolated into TOML table headers, so they
     // too must be valid identifiers
     for (image, _) in &images {
@@ -772,12 +926,36 @@ async fn init_image(cmd: &InitImage, args: &Args) -> Result<(), Error> {
     let default_image_name = cmd.image_name.clone().unwrap_or_else(|| dir.clone());
     // resolve the group up front (prompt or --group) so it seeds the config answers
     let group = resolve_group(&cmd.group, cmd.non_interactive)?;
+    // with -c, refuse to scaffold an image whose name+version already exists in the toolbox (unless
+    // --overwrite), catching the duplicate identity now rather than as a build-time error. The
+    // scaffold writes the `latest` version. `-c` is a resolution source only — it never moves files.
+    if let Some(config) = &cmd.config {
+        let available = collect_toolbox_images(config);
+        if !cmd.overwrite
+            && available
+                .get(&dir)
+                .is_some_and(|versions| versions.iter().any(|version| version == "latest"))
+        {
+            return Err(Error::new(format!(
+                "image '{dir}:latest' already exists in the toolbox at '{}'; pass --overwrite to \
+                 replace it",
+                config.display()
+            )));
+        }
+    }
     // seed the wizard answers from the resolved defaults; no_build flows into build=false
     let answers = ImageConfigAnswers::defaults(&dir, &group, cmd.no_build, &default_image_name);
     // pick the editor only matters in interactive mode but is resolved unconditionally
     let editor = resolve_editor(cmd.editor.as_deref(), args);
     // interactive mode (the negation of --non-interactive) opens the editor before writing
-    write_image_files(&cmd.path, &answers, cmd.overwrite, !cmd.non_interactive, &editor).await?;
+    write_image_files(
+        &cmd.path,
+        &answers,
+        cmd.overwrite,
+        !cmd.non_interactive,
+        &editor,
+    )
+    .await?;
     // point the user at the next step now that the image directory exists
     println!(
         "\n{} Add this image to a toolbox's config.toml, then run {} to produce a toolbox.json",
@@ -819,20 +997,45 @@ async fn init_pipeline(cmd: &InitPipeline, args: &Args) -> Result<(), Error> {
         let provided: std::collections::HashSet<&str> =
             cmd.images.iter().map(String::as_str).collect();
         // images that appear in the order but were never listed in --images
-        let unlisted: Vec<&str> = ordered.difference(&provided).copied().collect();
+        let mut unlisted: Vec<&str> = ordered.difference(&provided).copied().collect();
+        // every ordered image must be declared in --images, so the manifest never carries a
+        // dangling, version-less image entry; a stray order entry is a hard error
         if !unlisted.is_empty() {
-            println!(
-                "{} --order references image(s) not in --images: {} (their manifest entries \
-                 will be derived from the order, with no version pinned)",
-                "Warning:".bright_yellow(),
+            unlisted.sort_unstable();
+            return Err(Error::new(format!(
+                "--order references image(s) not in --images: {}; add them to --images (a pipeline \
+                 may only reference images it declares)",
                 unlisted.join(", ")
-            );
+            )));
         }
     }
+    // with -c, the toolbox is the resolution source: referenced images must exist in it (else an
+    // error) and are version-pinned from it. Walk it once up front and announce the source.
+    let toolbox_images = match &cmd.config {
+        Some(config) => {
+            println!(
+                "Resolving pipeline images against toolbox '{}'",
+                config.display()
+            );
+            Some((config.as_path(), collect_toolbox_images(config)))
+        }
+        None => None,
+    };
+    let toolbox = toolbox_images
+        .as_ref()
+        .map(|(config, images)| (*config, images));
     // editor is only consulted in interactive mode but resolved unconditionally
     let editor = resolve_editor(cmd.editor.as_deref(), args);
     // interactive mode (the negation of --non-interactive) opens the editor before writing
-    write_pipeline_files(&cmd.path, &answers, cmd.overwrite, !cmd.non_interactive, &editor).await?;
+    write_pipeline_files(
+        &cmd.path,
+        &answers,
+        cmd.overwrite,
+        !cmd.non_interactive,
+        &editor,
+        toolbox,
+    )
+    .await?;
     // point the user at the next step now that the pipeline directory exists
     println!(
         "\n{} Add this pipeline to a toolbox's config.toml, then run {} to produce a toolbox.json",
@@ -862,16 +1065,26 @@ async fn init_toolbox(cmd: &InitToolbox, args: &Args) -> Result<(), Error> {
         .iter()
         .map(|s| PipelineSpec::parse(s))
         .collect();
+    // the export-layout dirs are written into config.toml and later used to place files, so
+    // reject anything that would escape the toolbox root before writing the config
+    if let Some(path) = &cmd.image_path {
+        validate_relative_subpath("--image-path", path)?;
+    }
+    if let Some(path) = &cmd.pipeline_path {
+        validate_relative_subpath("--pipeline-path", path)?;
+    }
     let config_toml = if let Some(config_path) = &cmd.config {
         // seed the new toolbox from an existing config.toml (mutually exclusive with
         // --name/--registry); carries name, registry, registries, image_path_prefix,
-        // and bundled_images forward verbatim
+        // export paths, and bundled_images forward verbatim
         let template = super::build::load_config(config_path)?;
         render_config_toml(
             &template.name,
             template.registry.as_deref(),
             &template.registries,
             template.image_path_prefix.as_deref(),
+            template.export_image_path.as_deref(),
+            template.export_pipeline_path.as_deref(),
             template.bundled_images,
             template.base_image.as_ref(),
         )
@@ -883,16 +1096,46 @@ async fn init_toolbox(cmd: &InitToolbox, args: &Args) -> Result<(), Error> {
             let tb = prompt::prompt_toolbox_config(&cmd.name, cmd.registry.as_deref())?;
             (tb.name, tb.registry)
         };
-        // a from-scratch config has no extra registries, prefix, bundling, or base image
-        render_config_toml(&tb_name, tb_registry.as_deref(), &[], None, false, None)
+        // a from-scratch config has no extra registries, prefix, bundling, or base image; the
+        // export-layout dirs come from --image-path/--pipeline-path (commented defaults when unset)
+        render_config_toml(
+            &tb_name,
+            tb_registry.as_deref(),
+            &[],
+            None,
+            cmd.image_path.as_deref(),
+            cmd.pipeline_path.as_deref(),
+            false,
+            None,
+        )
     };
-    // write config.toml at the toolbox root before scaffolding the per-tool dirs
-    write_file(
-        &cmd.toolbox_dir.join("config.toml"),
-        &config_toml,
-        cmd.overwrite,
-    )
-    .await?;
+    // write config.toml at the toolbox root before scaffolding the per-tool dirs. config.toml is
+    // sticky: an existing one is preserved unless --overwrite-config, so re-running init in a
+    // toolbox doesn't clobber its settings (per-tool files use --overwrite, handled below).
+    let config_path = cmd.toolbox_dir.join("config.toml");
+    if config_path.exists() && !cmd.overwrite_config {
+        println!(
+            "{} {} (already exists; pass --overwrite-config to replace)",
+            "Skipped".bright_yellow(),
+            config_path.display()
+        );
+        // warn that the settings flags are ignored while the existing config is kept
+        if cmd.config.is_some()
+            || cmd.registry.is_some()
+            || cmd.image_path.is_some()
+            || cmd.pipeline_path.is_some()
+        {
+            println!(
+                "{} keeping the existing config.toml; --config/--registry/--image-path/\
+                 --pipeline-path are ignored (pass --overwrite-config to apply them)",
+                "Warning:".bright_yellow()
+            );
+        }
+    } else {
+        // create-on-fresh, or replace when --overwrite-config; force the write since the sticky
+        // check above already governs whether we reach here
+        write_file(&config_path, &config_toml, true).await?;
+    }
     // one group is resolved once and shared by every scaffolded image and pipeline
     let group = resolve_group(&cmd.group, cmd.non_interactive)?;
     // editor and the interactive flag are computed once and threaded into each write
@@ -930,9 +1173,19 @@ async fn init_toolbox(cmd: &InitToolbox, args: &Args) -> Result<(), Error> {
                 );
             }
         }
-        // seed the pipeline's order from its bound images and scaffold its dir
+        // seed the pipeline's order from its bound images and scaffold its dir. No toolbox
+        // resolution source here: init toolbox scaffolds the images itself in the same run, so the
+        // pipeline's references pin "latest" (the scaffolded images' version).
         let answers = PipelineConfigAnswers::defaults(&pipeline_name, &group, &pipeline_images);
-        write_pipeline_files(&spec.path, &answers, cmd.overwrite, open_editor, &editor).await?;
+        write_pipeline_files(
+            &spec.path,
+            &answers,
+            cmd.overwrite,
+            open_editor,
+            &editor,
+            None,
+        )
+        .await?;
     }
     // point the user at the next step now that the whole toolbox skeleton exists
     println!(
@@ -989,11 +1242,25 @@ mod tests {
     #[test]
     fn pipeline_template_deserializes_into_request() {
         // the scaffolded default must parse as the real PipelineRequest the importer/editor use
-        let answers =
-            PipelineConfigAnswers::defaults("triage", "static", &["clamav".to_string()]);
+        let answers = PipelineConfigAnswers::defaults("triage", "static", &["clamav".to_string()]);
         let json = build_pipeline_config(&answers);
         serde_json::from_str::<thorium::models::PipelineRequest>(&json)
             .expect("default pipeline config must deserialize into PipelineRequest");
+    }
+
+    /// Version pinning for a referenced toolbox image prefers `latest`, else the first discovered
+    #[test]
+    fn pin_version_prefers_latest() {
+        use super::pin_version;
+        // latest wins even when listed after another version
+        assert_eq!(
+            pin_version(&["1.0".to_string(), "latest".to_string()]),
+            "latest"
+        );
+        // with no latest, the first discovered version is pinned
+        assert_eq!(pin_version(&["2.1".to_string(), "2.0".to_string()]), "2.1");
+        // an empty set falls back to latest (defensive; callers pass non-empty)
+        assert_eq!(pin_version(&[]), "latest");
     }
 
     /// The order is scanned for image names in both the staged and the flat form, so a
@@ -1055,11 +1322,23 @@ mod tests {
     #[test]
     fn render_config_minimal() {
         // a name + registry with no extras: registries/prefix become commented placeholders
-        let toml = render_config_toml("My TB", Some("ghcr.io/o/r"), &[], None, false, None);
+        let toml = render_config_toml(
+            "My TB",
+            Some("ghcr.io/o/r"),
+            &[],
+            None,
+            None,
+            None,
+            false,
+            None,
+        );
         assert!(toml.contains("name = \"My TB\""));
         assert!(toml.contains("registry = \"ghcr.io/o/r\""));
         assert!(toml.contains("# registries = []"));
         assert!(toml.contains("# image_path_prefix = \"\""));
+        // unset export-layout dirs are commented placeholders documenting the defaults
+        assert!(toml.contains("# export_image_path = \"images\""));
+        assert!(toml.contains("# export_pipeline_path = \"pipelines\""));
         assert!(!toml.contains("bundled_images"));
         // an unset base image is a commented placeholder
         assert!(toml.contains("# [base_image]"));
@@ -1069,7 +1348,7 @@ mod tests {
     #[test]
     fn render_config_no_registry() {
         // an unset registry must be a commented placeholder, never an active empty value
-        let toml = render_config_toml("My TB", None, &[], None, false, None);
+        let toml = render_config_toml("My TB", None, &[], None, None, None, false, None);
         assert!(toml.contains("# registry = \"\""));
         // the active (uncommented) registry line must not be present
         assert!(!toml.contains("\nregistry = "));
@@ -1092,6 +1371,8 @@ mod tests {
             Some("reg"),
             &["reg".to_string(), "reg2".to_string()],
             Some("prefix/path"),
+            Some("tools/images"),
+            Some("tools/pipelines"),
             true,
             Some(&base),
         );
@@ -1099,6 +1380,10 @@ mod tests {
         assert!(toml.contains("bundled_images = true"));
         assert!(toml.contains("image_path_prefix = \"prefix/path\""));
         assert!(!toml.contains("# image_path_prefix"));
+        // the export-layout dirs are written out as active keys, not placeholders
+        assert!(toml.contains("export_image_path = \"tools/images\""));
+        assert!(toml.contains("export_pipeline_path = \"tools/pipelines\""));
+        assert!(!toml.contains("# export_image_path"));
         // the base image table is written out, not a commented placeholder
         assert!(toml.contains("[base_image]"));
         assert!(toml.contains("image = \"ubuntu:22.04\""));
@@ -1113,7 +1398,7 @@ mod tests {
     #[test]
     fn render_config_escapes() {
         // a quote in the free-form name must be backslash-escaped so the TOML stays valid
-        let toml = render_config_toml("a\"b", Some("r"), &[], None, false, None);
+        let toml = render_config_toml("a\"b", Some("r"), &[], None, None, None, false, None);
         assert!(toml.contains("name = \"a\\\"b\""));
     }
 }

@@ -4,20 +4,20 @@ use colored::Colorize;
 use futures::stream::{self, StreamExt};
 use std::collections::{HashMap, HashSet};
 use std::io::IsTerminal;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use thorium::models::{
     Image, ImageRequest, ImageVersion, NetworkPolicyRequest, Pipeline, PipelineRequest,
 };
 use thorium::{CtlConf, Error, Thorium};
 
 use super::init::{generate_image_manifest, generate_pipeline_manifest, render_config_toml};
-use crate::handlers::imports::editor::{resolve_editor, review_config_in_editor};
 use super::manifest::{self, ToolboxManifest};
 use super::{build, collisions, policies, shared};
 use crate::args::Args;
 use crate::args::toolbox::{BuildToolbox, ExportToolbox, ResourceSpec};
 use crate::handlers::container;
 use crate::handlers::exports::{DiskConflictResolver, WriteOutcome};
+use crate::handlers::imports::editor::{resolve_editor, review_config_in_editor};
 use crate::handlers::progress::{Bar, BarKind};
 use crate::utils::images::list_all_images;
 use crate::utils::pipelines::list_all_pipelines;
@@ -191,47 +191,199 @@ struct ToolboxSettings {
     registries: Vec<String>,
     /// Default registry base path bundled images push under on import
     image_path_prefix: Option<String>,
+    /// Directory (relative to the output root) image tool dirs are written under; `None` = `images`
+    export_image_path: Option<String>,
+    /// Directory (relative to the output root) pipeline tool dirs are written under; `None` = `pipelines`
+    export_pipeline_path: Option<String>,
     /// Whether the toolbox bundles image tarballs (driven by `--with-images`)
     bundled_images: bool,
     /// The toolbox-wide default base-image config, preserved from a reused `--config`
     base_image: Option<build::BaseImage>,
 }
 
-/// Resolve the toolbox-wide settings for an export
+/// Collect the per-resource `=destpath` placements from the `--images`/`--pipelines` selections
 ///
-/// `--config` reuses an existing toolbox's `config.toml` (name, registry,
-/// registries, image_path_prefix); otherwise the `--name`/`--registry` flags are
-/// used. Bundling is always driven by the `--with-images` export action, not
-/// inherited from a config's `bundled_images`, so the written `config.toml` never
-/// claims tarballs that weren't actually exported.
+/// Returns a map of resource name to its destination directory (relative to the toolbox root).
+/// Keyed by name (the on-disk tool-directory leaf); a resource without an explicit `=dest` is
+/// absent and falls back to the configured/default layout. Whole-group exports and auto-pulled
+/// dependency images aren't named here, so they are never overridden. Specs that fail to parse are
+/// skipped — `resolve_resources` re-parses and surfaces the error.
 ///
 /// # Arguments
 ///
 /// * `cmd` - The export command
-fn resolve_settings(cmd: &ExportToolbox) -> Result<ToolboxSettings, Error> {
-    // --config reuses an existing toolbox's config.toml verbatim except for bundling
-    if let Some(config_path) = &cmd.config {
-        let config = build::load_config(config_path)?;
-        Ok(ToolboxSettings {
-            name: config.name,
-            registry: config.registry,
-            registries: config.registries,
-            image_path_prefix: config.image_path_prefix,
-            // bundling reflects what this run actually exports, never the reused config's claim
-            bundled_images: cmd.with_images,
-            base_image: config.base_image,
-        })
-    } else {
-        // no --config: derive everything from flags; registries/prefix/base_image have no flag
-        Ok(ToolboxSettings {
-            name: cmd.name.clone(),
-            registry: cmd.registry.clone(),
-            registries: Vec::new(),
-            image_path_prefix: None,
-            bundled_images: cmd.with_images,
-            base_image: None,
-        })
+fn collect_dest_overrides(cmd: &ExportToolbox) -> HashMap<String, String> {
+    let mut overrides = HashMap::new();
+    for spec in cmd.images.iter().chain(cmd.pipelines.iter()) {
+        if let Ok(parsed) = ResourceSpec::parse(spec, cmd.group.as_deref())
+            && let Some(dest) = parsed.dest
+        {
+            overrides.insert(parsed.name, dest);
+        }
     }
+    overrides
+}
+
+/// Index an existing `toolbox.json` at the output for append reconciliation
+///
+/// Returns `(images, pipelines)` maps keyed by `(group, name, version)` — images map to their
+/// `(canonical-config JSON, dir)` and pipelines to their canonical-config JSON. Empty when there is
+/// no existing `toolbox.json` (a fresh export) or it can't be read/parsed (in which case `build`'s
+/// duplicate-manifest check still guards). Lets the write loops skip unchanged resources (config +
+/// bundle) and catch a cross-directory duplicate identity up front.
+///
+/// # Arguments
+///
+/// * `cmd` - The export command
+/// * `progress` - The progress bar, for the "found existing toolbox" notice
+#[allow(clippy::type_complexity)]
+async fn load_existing_index(
+    cmd: &ExportToolbox,
+    progress: &Bar,
+) -> (
+    HashMap<(String, String, String), (String, String)>,
+    HashMap<(String, String, String), String>,
+) {
+    let mut images = HashMap::new();
+    let mut pipelines = HashMap::new();
+    let path = cmd.output.join("toolbox.json");
+    // no existing toolbox.json → fresh export, nothing to reconcile (zero added cost)
+    let Ok(bytes) = tokio::fs::read(&path).await else {
+        return (images, pipelines);
+    };
+    // an unparsable existing toolbox.json is skipped; build's duplicate check still guards
+    let Ok(existing) = serde_json::from_slice::<ToolboxManifest>(&bytes) else {
+        return (images, pipelines);
+    };
+    progress.info_anonymous(format!(
+        "Found existing toolbox at '{}'; reconciling against it",
+        path.display()
+    ));
+    // index each embedded image config by identity, keeping its canonical JSON (for the unchanged
+    // comparison) and recorded dir (for the cross-directory duplicate check)
+    for image in existing.images.values() {
+        for (version, entry) in &image.versions {
+            if let Some(config) = &entry.config
+                && let Ok(json) = crate::utils::canonical_json(config)
+            {
+                images.insert(
+                    (config.group.clone(), config.name.clone(), version.clone()),
+                    (json, entry.dir.clone()),
+                );
+            }
+        }
+    }
+    // pipelines have no recorded dir, so they only get the unchanged comparison
+    for pipeline in existing.pipelines.values() {
+        for (version, entry) in &pipeline.versions {
+            if let Some(config) = &entry.config
+                && let Ok(json) = crate::utils::canonical_json(config)
+            {
+                pipelines.insert(
+                    (config.group.clone(), config.name.clone(), version.clone()),
+                    json,
+                );
+            }
+        }
+    }
+    (images, pipelines)
+}
+
+/// The `config.toml` at the export output root, if one already exists
+///
+/// Its presence makes the export an append into an existing toolbox: the file becomes the settings
+/// source and is preserved unless `--overwrite-config`.
+///
+/// # Arguments
+///
+/// * `cmd` - The export command
+fn existing_config_path(cmd: &ExportToolbox) -> Option<PathBuf> {
+    let path = cmd.output.join("config.toml");
+    path.exists().then_some(path)
+}
+
+/// Build [`ToolboxSettings`] from a loaded `config.toml`, with bundling driven by the run
+///
+/// # Arguments
+///
+/// * `config` - The loaded toolbox config
+/// * `with_images` - Whether this run bundles images (drives `bundled_images`, never the config's claim)
+fn settings_from_config(config: build::ToolboxConfig, with_images: bool) -> ToolboxSettings {
+    ToolboxSettings {
+        name: config.name,
+        registry: config.registry,
+        registries: config.registries,
+        image_path_prefix: config.image_path_prefix,
+        export_image_path: config.export_image_path,
+        export_pipeline_path: config.export_pipeline_path,
+        // bundling reflects what this run actually exports, never the reused config's claim
+        bundled_images: with_images,
+        base_image: config.base_image,
+    }
+}
+
+/// Resolve the toolbox-wide settings for an export
+///
+/// Priority: an explicit `--config` (seed from another toolbox); else an existing `config.toml` at
+/// the output root (append — its settings are reused and the file is preserved unless
+/// `--overwrite-config`); else the `--name`/`--registry` flags (a new toolbox). Bundling is always
+/// driven by the `--with-images` export action, not inherited from a config's `bundled_images`.
+///
+/// # Arguments
+///
+/// * `cmd` - The export command
+/// * `existing_config` - The output's `config.toml` if it already exists (the append source)
+/// * `progress` - The progress bar, for the "using existing config" notice and mismatch warnings
+fn resolve_settings(
+    cmd: &ExportToolbox,
+    existing_config: Option<&Path>,
+    progress: &Bar,
+) -> Result<ToolboxSettings, Error> {
+    // (1) an explicit --config seeds settings from another toolbox
+    if let Some(config_path) = &cmd.config {
+        return Ok(settings_from_config(
+            build::load_config(config_path)?,
+            cmd.with_images,
+        ));
+    }
+    // (2) append: an existing config.toml at the output is the settings source
+    if let Some(path) = existing_config {
+        progress.info_anonymous(format!(
+            "Using existing config.toml at '{}' for toolbox settings",
+            path.display()
+        ));
+        let config = build::load_config(path)?;
+        // warn when a run flag implies a setting the preserved config contradicts; the existing
+        // config wins unless --overwrite-config, so the flag is otherwise silently ignored
+        if !cmd.overwrite_config {
+            if cmd.with_images && !config.bundled_images {
+                progress.warning(
+                    "--with-images is set but the existing config.toml has bundled_images = false; \
+                     the existing setting is kept (pass --overwrite-config to update it)",
+                );
+            }
+            if let Some(registry) = &cmd.registry
+                && config.registry.as_deref() != Some(registry.as_str())
+            {
+                progress.warning(format!(
+                    "--registry '{registry}' differs from the existing config.toml; the existing \
+                     registry is kept (pass --overwrite-config to update it)"
+                ));
+            }
+        }
+        return Ok(settings_from_config(config, cmd.with_images));
+    }
+    // (3) new toolbox: derive from flags; registries/prefix/layout/base_image have no flag
+    Ok(ToolboxSettings {
+        name: cmd.name.clone(),
+        registry: cmd.registry.clone(),
+        registries: Vec::new(),
+        image_path_prefix: None,
+        export_image_path: None,
+        export_pipeline_path: None,
+        bundled_images: cmd.with_images,
+        base_image: None,
+    })
 }
 
 // ─── Manifest assembly ───────────────────────────────────────────────────────
@@ -279,8 +431,11 @@ fn build_manifest(
             })
             .collect();
         // build_path is "./" because the manifest sits in the tool's own dir; config is embedded
-        // inline (not config_from) and the bundled policies travel as definitions (not _from refs)
+        // inline (not config_from) and the bundled policies travel as definitions (not _from refs).
+        // dir is empty here: this in-memory manifest only drives validation/collision/reconcile —
+        // the authoritative per-image dir is computed by the auto-build that walks the written tree.
         let entry = manifest::ImageVersion {
+            dir: String::new(),
             build_path: "./".to_string(),
             config_from: None,
             config: Some(config),
@@ -345,21 +500,41 @@ fn build_manifest(
 
 // ─── File Writing ────────────────────────────────────────────────────────────
 
+/// The directory an exported pipeline's files are written to: `<output>/<layout>/<name>`, where
+/// `<layout>` is the toolbox's configured `export_pipeline_path` or the default `pipelines`
+///
+/// # Arguments
+///
+/// * `output` - The toolbox output root
+/// * `settings` - The resolved toolbox settings carrying the configured layout
+/// * `name` - The pipeline's name (its tool-directory leaf)
+fn pipeline_dest_dir(output: &Path, settings: &ToolboxSettings, name: &str) -> PathBuf {
+    output
+        .join(
+            settings
+                .export_pipeline_path
+                .as_deref()
+                .unwrap_or("pipelines"),
+        )
+        .join(name)
+}
+
 /// Write a resolved image entry to the toolbox directory, resolving on-disk
 /// conflicts; returns [`WriteOutcome::Quit`] if the user asked to stop
 ///
 /// # Arguments
 ///
-/// * `output` - The toolbox output directory
-/// * `config` - The resolved image request (its `name` is the on-disk name)
+/// * `image_dir` - The tool directory to write this image's files into (resolved by the caller)
+/// * `config` - The resolved image request (its `name` is the on-disk file stem)
 /// * `version` - The toolbox version label to record
 /// * `network_policies` - The policy definitions this image references
 /// * `review` - Open the config in an editor for review before writing
 /// * `editor` - The editor command used when `review` is set
 /// * `resolver` - The on-disk conflict resolver
 /// * `progress` - The progress bar
+#[allow(clippy::too_many_arguments)]
 async fn write_image_entry(
-    output: &Path,
+    image_dir: &Path,
     config: &ImageRequest,
     version: &str,
     network_policies: &[NetworkPolicyRequest],
@@ -368,9 +543,8 @@ async fn write_image_entry(
     resolver: &mut DiskConflictResolver,
     progress: &Bar,
 ) -> Result<WriteOutcome, Error> {
-    // the config's own name is the on-disk directory and json file stem
+    // the config's own name is the json file stem; image_dir is the caller-resolved tool directory
     let name = &config.name;
-    let image_dir = output.join("images").join(name);
     // canonical (sorted-key) JSON so reordered map fields don't churn the file
     let config_json = crate::utils::canonical_json(config)
         .map_err(|e| Error::new(format!("Failed to serialize image '{name}': {e}")))?;
@@ -390,7 +564,11 @@ async fn write_image_entry(
     };
     // short-circuit the whole export if the resolver prompt returns Quit at any write
     if resolver
-        .write_yaml::<ImageRequest>(&image_dir.join(format!("{name}.json")), &final_json, progress)
+        .write_yaml::<ImageRequest>(
+            &image_dir.join(format!("{name}.json")),
+            &final_json,
+            progress,
+        )
         .await?
         == WriteOutcome::Quit
     {
@@ -405,7 +583,10 @@ async fn write_image_entry(
         let file_name = format!("{}.policy.json", policy.name);
         // policy files are pretty-printed (not canonical) to stay human-readable on disk
         let policy_json = serde_json::to_string_pretty(policy).map_err(|e| {
-            Error::new(format!("Failed to serialize network policy '{}': {e}", policy.name))
+            Error::new(format!(
+                "Failed to serialize network policy '{}': {e}",
+                policy.name
+            ))
         })?;
         if resolver
             .write_yaml::<NetworkPolicyRequest>(&image_dir.join(&file_name), &policy_json, progress)
@@ -459,16 +640,17 @@ async fn write_image_entry(
 ///
 /// # Arguments
 ///
-/// * `output` - The toolbox output directory
-/// * `config` - The resolved pipeline request (its `name` is the on-disk name)
+/// * `pipeline_dir` - The tool directory to write this pipeline's files into (resolved by the caller)
+/// * `config` - The resolved pipeline request (its `name` is the on-disk file stem)
 /// * `description` - The pipeline description to mirror to description.md
 /// * `image_versions` - The (image name, version) pairs for the manifest's image map
 /// * `review` - Open the config in an editor for review before writing
 /// * `editor` - The editor command used when `review` is set
 /// * `resolver` - The on-disk conflict resolver
 /// * `progress` - The progress bar
+#[allow(clippy::too_many_arguments)]
 async fn write_pipeline_entry(
-    output: &Path,
+    pipeline_dir: &Path,
     config: &PipelineRequest,
     description: &str,
     image_versions: &[(String, String)],
@@ -477,9 +659,8 @@ async fn write_pipeline_entry(
     resolver: &mut DiskConflictResolver,
     progress: &Bar,
 ) -> Result<WriteOutcome, Error> {
-    // the config's own name is the on-disk directory and json file stem
+    // the config's own name is the json file stem; pipeline_dir is the caller-resolved tool directory
     let name = &config.name;
-    let pipeline_dir = output.join("pipelines").join(name);
     // canonical (sorted-key) JSON so reordered map fields don't churn the file
     let config_json = crate::utils::canonical_json(config)
         .map_err(|e| Error::new(format!("Failed to serialize pipeline '{name}': {e}")))?;
@@ -618,10 +799,12 @@ pub async fn export(
             }
         }
     }
-    // resolve the toolbox-wide settings: from --config (reuse an existing toolbox's
-    // config.toml) or the --name/--registry flags. Bundling is driven by --with-images
-    // (the export action), not inherited from a config's bundled_images.
-    let settings = resolve_settings(cmd)?;
+    // detect an existing config.toml at the output root: it makes this an append into an existing
+    // toolbox (its settings are the source, and it is preserved unless --overwrite-config)
+    let existing_config = existing_config_path(cmd);
+    // resolve the toolbox-wide settings — explicit --config seed, else an existing config.toml at
+    // the output (append), else the --name/--registry flags. Bundling is driven by --with-images.
+    let settings = resolve_settings(cmd, existing_config.as_deref(), &progress)?;
     // prompts are only possible interactively (not --skip-conflicts) AND on a real terminal;
     // this gates both collision resolution and the on-disk conflict resolver below
     let can_prompt = !cmd.skip_conflicts && IsTerminal::is_terminal(&std::io::stdin());
@@ -665,13 +848,24 @@ pub async fn export(
     collisions::resolve_collisions(&mut manifest, &sources, can_prompt, &progress)?;
     // re-check coherence: collision renames/repointing can re-break a pipeline's group view
     shared::warn_dropped(&manifest.validate_group_coherence(), &progress);
+    // map each explicitly-named resource (by tool name) to its optional `=destpath`, so the write
+    // loops can place a single resource at a chosen directory instead of the configured layout.
+    // Keyed by name because that is the on-disk tool directory leaf and names are unique after
+    // collision resolution; whole-group/auto-pulled resources aren't named here so they use the
+    // configured/default layout.
+    let dest_overrides = collect_dest_overrides(cmd);
+    // index an existing toolbox at the output (append reconciliation): lets the write loops skip
+    // unchanged resources and their bundle work, and refuse to write a second copy of an identity
+    // that already lives at a different directory (a build-duplicate). Empty for a fresh export.
+    let (existing_images, existing_pipelines) = load_existing_index(cmd, &progress).await;
     // write the resolved manifest to disk, resolving on-disk conflicts
     let mut resolver = DiskConflictResolver::new(cmd.overwrite, can_prompt, editor.to_string());
     let mut stopped = false;
-    // (image name, container url) tarballs to bundle after the config pass; the
+    // (image name, container url, tool dir) tarballs to bundle after the config pass; the
     // config writes stay sequential (the resolver prompts), but the heavy container
-    // pull/save is run bounded-parallel below
-    let mut bundle_jobs: Vec<(String, Option<String>)> = Vec::new();
+    // pull/save is run bounded-parallel below. The tool dir is carried so the tarball lands
+    // beside the image's manifest (the configured layout), matching where import looks for it.
+    let mut bundle_jobs: Vec<(String, Option<String>, PathBuf)> = Vec::new();
     'images: for image_manifest in manifest.images.values() {
         for (version, entry) in &image_manifest.versions {
             // an export always embeds a config; skip defensively so a configless entry
@@ -679,8 +873,42 @@ pub async fn export(
             let Some(config) = &entry.config else {
                 continue;
             };
+            // resolve the tool directory (relative to the output root): an explicit per-resource
+            // `=destpath` wins, else the toolbox's configured image layout (default `images/<name>`)
+            let target_rel = match dest_overrides.get(config.name.as_str()) {
+                Some(dest) => dest.clone(),
+                None => format!(
+                    "{}/{}",
+                    settings.export_image_path.as_deref().unwrap_or("images"),
+                    config.name
+                ),
+            };
+            let image_dir = cmd.output.join(&target_rel);
+            // append reconciliation against an existing toolbox: skip an unchanged image (its config
+            // and its bundle work), and refuse to write a second copy of an identity that already
+            // lives at a different directory (which would fail `build`)
+            let key = (config.group.clone(), config.name.clone(), version.clone());
+            if let Some((existing_json, existing_dir)) = existing_images.get(&key) {
+                let current_json = crate::utils::canonical_json(config)?;
+                if &current_json == existing_json {
+                    progress.info_anonymous(format!(
+                        "Unchanged: image '{}:{version}' already in the toolbox; skipping",
+                        config.name
+                    ));
+                    continue;
+                }
+                if !existing_dir.is_empty() && existing_dir != &target_rel {
+                    progress.warning(format!(
+                        "image '{}:{version}' already exists in the toolbox at '{existing_dir}' with \
+                         a different config; not writing a second copy at '{target_rel}' (it would \
+                         fail build) — update the existing copy or export to its directory",
+                        config.name
+                    ));
+                    continue;
+                }
+            }
             let outcome = write_image_entry(
-                &cmd.output,
+                &image_dir,
                 config,
                 version,
                 &entry.network_policies,
@@ -698,18 +926,31 @@ pub async fn export(
             // defer the heavy container pull/save to a bounded-parallel pass after all the
             // sequential (prompt-driven) config writes complete
             if cmd.with_images {
-                bundle_jobs.push((config.name.clone(), config.image.clone()));
+                bundle_jobs.push((config.name.clone(), config.image.clone(), image_dir));
             }
         }
     }
     // skip the pipeline pass entirely if the image pass was quit
     if !stopped {
         'pipelines: for pipeline_manifest in manifest.pipelines.values() {
-            for entry in pipeline_manifest.versions.values() {
+            for (version, entry) in &pipeline_manifest.versions {
                 // pipelines, like images, always carry a config in an export; skip defensively
                 let Some(config) = &entry.config else {
                     continue;
                 };
+                // append reconciliation: skip a pipeline whose config is unchanged from the existing
+                // toolbox (pipelines have no bundle/dir, so only the unchanged comparison applies)
+                let key = (config.group.clone(), config.name.clone(), version.clone());
+                if let Some(existing_json) = existing_pipelines.get(&key) {
+                    let current_json = crate::utils::canonical_json(config)?;
+                    if &current_json == existing_json {
+                        progress.info_anonymous(format!(
+                            "Unchanged: pipeline '{}:{version}' already in the toolbox; skipping",
+                            config.name
+                        ));
+                        continue;
+                    }
+                }
                 // the resolved image map carries the (possibly renamed) names paired
                 // with the versions we exported them under
                 let mut image_versions: Vec<(String, String)> = entry
@@ -718,8 +959,14 @@ pub async fn export(
                     .map(|(name, image)| (name.clone(), image.version.clone()))
                     .collect();
                 image_versions.sort();
+                // resolve the tool directory: an explicit per-resource `=destpath` wins, else the
+                // toolbox's configured pipeline layout (default `pipelines/<name>`)
+                let pipeline_dir = match dest_overrides.get(config.name.as_str()) {
+                    Some(dest) => cmd.output.join(dest),
+                    None => pipeline_dest_dir(&cmd.output, &settings, &config.name),
+                };
                 let outcome = write_pipeline_entry(
-                    &cmd.output,
+                    &pipeline_dir,
                     config,
                     &entry.description,
                     &image_versions,
@@ -757,10 +1004,12 @@ pub async fn export(
         // pull+save each container concurrently, pairing every result with its image name so a
         // failure can be reported even though the stream completes out of order
         let results: Vec<(String, Result<(), Error>)> = stream::iter(bundle_jobs)
-            .map(|(name, url)| {
+            .map(|(name, url, dir)| {
                 let progress = &progress;
                 async move {
-                    let outcome = bundle_image(&cmd.output, &name, url.as_deref(), progress).await;
+                    // save the tarball into the same tool directory the manifest was written to,
+                    // so import (which reads the recorded per-image dir) finds it
+                    let outcome = bundle_image(&dir, &name, url.as_deref(), progress).await;
                     progress.inc(1);
                     (name, outcome)
                 }
@@ -788,32 +1037,38 @@ pub async fn export(
             ));
         }
     }
-    // Write config.toml from the resolved settings. The real image urls are preserved
-    // in each image config (see exported_image_path), so the registry here only matters
-    // for tools a user later marks buildable; bundled toolboxes record that fact so
-    // import knows to push the bundled images to a registry.
-    let config_toml = render_config_toml(
-        &settings.name,
-        settings.registry.as_deref(),
-        &settings.registries,
-        settings.image_path_prefix.as_deref(),
-        settings.bundled_images,
-        settings.base_image.as_ref(),
-    );
-    let config_outcome = resolver
-        .write_toml::<build::ToolboxConfig>(&cmd.output.join("config.toml"), &config_toml, &progress)
-        .await?;
-    // honor a quit at this final prompt the same way the per-resource writes above do, so
-    // toolbox.json (built from config.toml below) isn't generated against a config the user
-    // declined to write
-    if config_outcome == WriteOutcome::Quit {
-        progress.refresh(
-            "Export stopped early at config.toml; no config.toml or toolbox.json was written, so \
-             the exported directory is incomplete",
-            BarKind::Timer,
+    // config.toml is the toolbox's sticky identity: an existing one is preserved (its settings were
+    // the source above) unless --overwrite-config, so an append never clobbers the toolbox's
+    // settings. A fresh export creates it (announced). The real image urls live in each image config
+    // (see exported_image_path), so the registry here only matters for tools later marked buildable.
+    let config_path = cmd.output.join("config.toml");
+    if existing_config.is_some() && !cmd.overwrite_config {
+        progress.info_anonymous(format!(
+            "Keeping existing config.toml at '{}' (pass --overwrite-config to replace it)",
+            config_path.display()
+        ));
+    } else {
+        if existing_config.is_none() {
+            progress.info_anonymous(format!(
+                "No config.toml at '{}'; creating one",
+                config_path.display()
+            ));
+        }
+        let config_toml = render_config_toml(
+            &settings.name,
+            settings.registry.as_deref(),
+            &settings.registries,
+            settings.image_path_prefix.as_deref(),
+            settings.export_image_path.as_deref(),
+            settings.export_pipeline_path.as_deref(),
+            settings.bundled_images,
+            settings.base_image.as_ref(),
         );
-        progress.finish();
-        return Ok(());
+        // written directly (not via the per-file resolver) because the sticky-config rule, not the
+        // resolver's overwrite/skip behavior, governs config.toml
+        tokio::fs::write(&config_path, config_toml)
+            .await
+            .map_err(|e| Error::new(format!("Failed to write '{}': {e}", config_path.display())))?;
     }
     // Auto-build toolbox.json, preserving the real image urls captured from Thorium.
     // build walks the tree with synchronous std::fs, so run it off the async runtime.
@@ -822,8 +1077,8 @@ pub async fn export(
         // leaf comes from the tool name, not image_name: an export pins urls via
         // exported_image_path, so the repo-path leaf is irrelevant here
         use_image_path: false,
-        output: cmd.output.join("toolbox.json"),
-        path: cmd.output.clone(),
+        output: Some(cmd.output.join("toolbox.json")),
+        path: Some(cmd.output.clone()),
         // an export records each image's real published url, so no tag suffix is applied
         tag_suffix: None,
     };
@@ -868,21 +1123,25 @@ pub async fn export(
         cmd.output.display(),
         problems.join("; ")
     );
-    Err(Error::new(format!("export incomplete: {}", problems.join("; "))))
+    Err(Error::new(format!(
+        "export incomplete: {}",
+        problems.join("; ")
+    )))
 }
 
 /// Download and save an image's container image file into the toolbox bundle
 ///
-/// Writes `<output>/images/<name>/<name>.tar.gz`. Images without a container url are skipped.
+/// Writes `<dir>/<name>.tar.gz` (the image's tool directory, beside its manifest). Images
+/// without a container url are skipped.
 ///
 /// # Arguments
 ///
-/// * `output` - The toolbox output directory
-/// * `name` - The exported image name (its on-disk directory)
+/// * `dir` - The image's tool directory (where its manifest was written)
+/// * `name` - The exported image name (the tarball's file stem)
 /// * `url` - The image's container url, if any
 /// * `progress` - The progress bar to route the skip warning through
 async fn bundle_image(
-    output: &Path,
+    dir: &Path,
     name: &str,
     url: Option<&str>,
     progress: &Bar,
@@ -892,10 +1151,9 @@ async fn bundle_image(
         // toolbox is still marked bundled, so importing this image will fail to find its tarball
         progress.warning(format!(
             "Image '{}' has no container image url; skipping its tarball — importing it from this \
-             bundled toolbox will fail to find images/{}/{}.tar.gz",
+             bundled toolbox will fail to find '{}'",
             name.bright_cyan(),
-            name,
-            name,
+            dir.join(format!("{name}.tar.gz")).display(),
         ));
         return Ok(());
     };
@@ -903,11 +1161,9 @@ async fn bundle_image(
     let bar = Bar::new(name, "Bundling image", BarKind::Timer);
     // pull the container locally first so save has a local image to export
     container::pull(url, &bar).await?;
-    // save under <output>/images/<name>/<name>.tar.gz, the path import looks for it at
-    let tar = output
-        .join("images")
-        .join(name)
-        .join(format!("{name}.tar.gz"));
+    // save the tarball into the image's tool directory (where its manifest was written); import
+    // resolves this exact location from the per-image `dir` recorded in toolbox.json
+    let tar = dir.join(format!("{name}.tar.gz"));
     container::save(url, &tar, &bar).await?;
     bar.finish_and_clear();
     Ok(())

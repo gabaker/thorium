@@ -19,7 +19,9 @@ use crate::handlers::container;
 use crate::handlers::imports::categorize;
 use crate::handlers::imports::kind::{ImageKind, PipelineKind};
 use crate::handlers::imports::rollback::Journal;
-use crate::handlers::imports::{self, ApplyOutcome, ConflictMode, ImportOutcome, ImportPlan, create};
+use crate::handlers::imports::{
+    self, ApplyOutcome, ConflictMode, ImportOutcome, ImportPlan, create,
+};
 use crate::handlers::progress::{Bar, BarKind};
 
 /// Flatten a toolbox manifest's images into (name, version, request) tuples
@@ -157,7 +159,9 @@ fn resolve_image_path_prefix(
     // prompt for a target registry base path
     progress.suspend(|| {
         dialoguer::Input::<String>::new()
-            .with_prompt("Target registry base path (e.g. registry.local/base) to push bundled images to")
+            .with_prompt(
+                "Target registry base path (e.g. registry.local/base) to push bundled images to",
+            )
             .interact_text()
             .map_err(|e| Error::new(format!("Failed to read prefix input: {e}")))
     })
@@ -220,15 +224,31 @@ fn prepare_bundled_images(
         };
         let tag = parse_tag(&source);
         let target = format!("{prefix}/{}/{}:{tag}", img.request.group, img.request.name);
-        // a collision rename re-keys the image but leaves its tarball under the original on-disk
-        // name, so resolve the archive dir from the original key. `img.name` is the (possibly
-        // renamed) manifest key; `renames` maps it back to the original key the tarball was
-        // saved under.
-        let source_name = renames.get(&img.name).map_or(img.name.as_str(), String::as_str);
-        let tarball = base_dir
-            .join("images")
-            .join(source_name)
-            .join(format!("{source_name}.tar.gz"));
+        // a collision rename re-keys the image but leaves its tarball saved under the original
+        // on-disk name, so the archive file is named for that original key. `img.name` is the
+        // (possibly renamed) manifest key; `renames` maps it back to the original key.
+        let source_name = renames
+            .get(&img.name)
+            .map_or(img.name.as_str(), String::as_str);
+        // the tool's directory is recorded per-image in toolbox.json (built for all images), so the
+        // tarball is found wherever export placed it (configured layout or a `=destpath`). The dir
+        // field travels with the version through any collision rename, so look it up by the current
+        // key `img.name`. An empty dir means an older toolbox that predates the field — fall back to
+        // the historical `images/<name>` layout.
+        let dir = manifest
+            .images
+            .get(&img.name)
+            .and_then(|image_manifest| image_manifest.versions.get(&img.version))
+            .map(|version| version.dir.as_str())
+            .unwrap_or("");
+        let tarball = if dir.is_empty() {
+            base_dir
+                .join("images")
+                .join(source_name)
+                .join(format!("{source_name}.tar.gz"))
+        } else {
+            base_dir.join(dir).join(format!("{source_name}.tar.gz"))
+        };
         pushes.push(BundledPush {
             label: img.name.clone(),
             tarball,
@@ -347,8 +367,14 @@ async fn apply_resources(
             "Creating groups",
             BarKind::Bound(plan.missing_groups.len() as u64),
         );
-        imports::create_groups(thorium, plan.missing_groups.clone(), workers, progress, journal)
-            .await?;
+        imports::create_groups(
+            thorium,
+            plan.missing_groups.clone(),
+            workers,
+            progress,
+            journal,
+        )
+        .await?;
     }
     // create missing network policies before the images that reference them
     policies::create_policies(thorium, &policy_plan.new, progress, journal).await?;
@@ -368,8 +394,9 @@ async fn apply_resources(
     // import new resources, collecting per-resource failures so one bad image/pipeline
     // doesn't abort the rest (a pipeline whose image failed will fail too, and is
     // collected the same way)
-    failures
-        .extend(create::import_new_images(thorium, plan.new_images, workers, progress, journal).await);
+    failures.extend(
+        create::import_new_images(thorium, plan.new_images, workers, progress, journal).await,
+    );
     failures.extend(
         create::import_new_pipelines(thorium, plan.new_pipelines, workers, progress, journal).await,
     );
@@ -496,7 +523,14 @@ pub async fn import(
     // each image url now so the confirmation reflects the final location; the actual
     // load/tag/push is deferred until after the user confirms
     let bundled_pushes = if manifest.bundled_images {
-        prepare_bundled_images(cmd, &manifest, &mut images, &image_renames, can_prompt, &progress)?
+        prepare_bundled_images(
+            cmd,
+            &manifest,
+            &mut images,
+            &image_renames,
+            can_prompt,
+            &progress,
+        )?
     } else {
         // --image-path-prefix only affects bundled toolboxes; warn so it isn't a silent no-op
         if cmd.image_path_prefix.is_some() {
