@@ -386,14 +386,14 @@ pub struct DeletePipelines {
 #[derive(Parser, Debug, Clone)]
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 pub struct ExportPipelines {
-    /// The pipelines to export (default: every pipeline in the group)
-    #[clap(value_parser = NonEmptyStringValueParser::new())]
+    /// The pipelines to export, by name (default: every pipeline in the group)
+    #[clap(value_name = "PIPELINE", value_parser = NonEmptyStringValueParser::new())]
     pub pipelines: Vec<String>,
     /// The group to export pipelines from
-    #[clap(short, long, required = true)]
+    #[clap(short, long, value_name = "GROUP", required = true)]
     pub group: String,
-    /// The directory to export our pipelines too
-    #[clap(short, long, default_value = "exports")]
+    /// The directory to export pipelines to (default: exports)
+    #[clap(short, long, value_name = "DIR", default_value = "exports")]
     pub output: PathBuf,
     /// Export pipeline/image configs only with no docker images
     #[clap(long)]
@@ -414,20 +414,20 @@ pub struct ExportPipelines {
 #[derive(Parser, Debug, Clone)]
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 pub struct ImportPipelines {
-    /// The pipelines to import (default: every pipeline config in the import directory)
-    #[clap(value_parser = NonEmptyStringValueParser::new())]
+    /// The pipelines to import, by name (default: every pipeline config in the import directory)
+    #[clap(value_name = "PIPELINE", value_parser = NonEmptyStringValueParser::new())]
     pub pipelines: Vec<String>,
     /// The group to import pipelines to
-    #[clap(short, long, required = true)]
+    #[clap(short, long, value_name = "GROUP", required = true)]
     pub group: String,
-    /// The directory to import our pipelines from
-    #[clap(short, long, required = true)]
+    /// The directory to import pipelines from
+    #[clap(short, long, value_name = "DIR", required = true)]
     pub import: PathBuf,
-    /// The registry to upload these images too
-    #[clap(short, long)]
+    /// The registry to upload these pipelines' images to
+    #[clap(short, long, value_name = "REGISTRY")]
     pub registry: Option<String>,
-    /// The registry url to override our domain in thorium with
-    #[clap(long)]
+    /// The registry url to override the domain stored in Thorium with
+    #[clap(long, value_name = "URL")]
     pub registry_override: Option<String>,
     /// Skip pushing images to docker
     #[clap(long)]
@@ -452,6 +452,6 @@ pub struct ImportPipelines {
     #[clap(long)]
     pub rollback_on_failure: bool,
     /// Override the default editor for reviewing merge conflicts
-    #[clap(long)]
+    #[clap(long, value_name = "EDITOR")]
     pub editor: Option<String>,
 }

@@ -12,29 +12,44 @@ use thorium::Error;
 
 // ─── Validation ─────────────────────────────────────────────────────────────
 
-// Resource names are interpolated unescaped into TOML manifest templates (e.g.
-// the `[images.<name>]` key in `generate_pipeline_manifest`), so this regex is the
-// guard that keeps a name from breaking out of the template. Both the interactive
-// and `--non-interactive` init paths must run it.
-static NAME_RE: LazyLock<Regex> =
-    LazyLock::new(|| Regex::new(r"^[a-zA-Z0-9][a-zA-Z0-9._-]*$").unwrap());
+/// The maximum length the Thorium API allows for an image or pipeline name (`bounder::string_lower`)
+pub(super) const RESOURCE_NAME_MAX: usize = 25;
 
-/// Validates a resource name against the manifest-safe identifier pattern
+/// The maximum length the Thorium API allows for a group name (`bounder::string_lower`)
+pub(super) const GROUP_NAME_MAX: usize = 50;
+
+// Guards a name to exactly the character set the Thorium API accepts (`bounder::string_lower`):
+// lowercase ASCII letters, digits, and '-'. Validating client-side with the same rule means a name
+// `init` accepts is one the API will accept too, so authoring fails fast instead of being rejected
+// later at `build`/`import`. The leading-character restriction (no leading '-') is stricter than the
+// API but keeps every name a valid k8s name and a bare TOML key. Both the interactive and
+// `--non-interactive` init paths must run it.
+static NAME_RE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"^[a-z0-9][a-z0-9-]*$").unwrap());
+
+/// Validates a resource name against the Thorium name rule (character set + length)
 ///
 /// # Arguments
 ///
 /// * `value` - The name to validate
-pub(super) fn validate_name(value: &str) -> Result<(), String> {
+/// * `max` - The maximum allowed length (e.g. [`RESOURCE_NAME_MAX`] or [`GROUP_NAME_MAX`])
+pub(super) fn validate_name(value: &str, max: usize) -> Result<(), String> {
     // reject an empty name up front: the regex would also reject it, but a dedicated
     // message tells the user the field is required rather than malformed
     if value.is_empty() {
         return Err("Name cannot be empty".into());
     }
-    // enforce the manifest-safe pattern so the name can be interpolated unescaped into
-    // TOML manifest templates without breaking out of the surrounding structure
+    // bound the length to match the API's own cap so an over-long name fails here, not at import.
+    // names are ASCII (enforced by the regex below) so byte length equals character count
+    if value.len() > max {
+        return Err(format!("Name must be at most {max} characters"));
+    }
+    // enforce the API's character set so the name round-trips to Thorium and stays a safe TOML
+    // manifest key / k8s name
     if !NAME_RE.is_match(value) {
         return Err(
-            "Must start with alphanumeric and contain only alphanumeric, '.', '-', or '_'".into(),
+            "Must start with a lowercase letter or digit and contain only lowercase letters, \
+             digits, or '-'"
+                .into(),
         );
     }
     Ok(())
@@ -63,12 +78,13 @@ fn prompt_input(label: &str, default: &str) -> Result<String, Error> {
 /// # Arguments
 ///
 /// * `label` - The prompt label
-fn prompt_name_required(label: &str) -> Result<String, Error> {
+/// * `max` - The maximum allowed name length, passed through to [`validate_name`]
+fn prompt_name_required(label: &str, max: usize) -> Result<String, Error> {
     // attach `validate_name` as the per-keystroke validator so dialoguer re-prompts in place
-    // until the entry is a manifest-safe identifier, then map a read failure to an Error
+    // until the entry is a valid Thorium name, then map a read failure to an Error
     dialoguer::Input::<String>::new()
         .with_prompt(label)
-        .validate_with(|value: &String| validate_name(value))
+        .validate_with(move |value: &String| validate_name(value, max))
         .interact_text()
         .map_err(|e| Error::new(format!("Failed to read input: {e}")))
 }
@@ -79,7 +95,7 @@ fn prompt_name_required(label: &str) -> Result<String, Error> {
 ///
 /// * `label` - The prompt label
 pub fn prompt_group_name(label: &str) -> Result<String, Error> {
-    prompt_name_required(label)
+    prompt_name_required(label, GROUP_NAME_MAX)
 }
 
 // ─── Answer Structs ──────────────────────────────────────────────────────────
@@ -213,7 +229,10 @@ pub fn prompt_toolbox_config(
     // ask for the toolbox name, falling back to the pre-filled default on an empty entry
     let name = prompt_input("Toolbox name", default_name)?;
     // ask for the registry, defaulting the prompt to the supplied registry or "" when none
-    let registry = prompt_input("Container registry (optional)", default_registry.unwrap_or(""))?;
+    let registry = prompt_input(
+        "Container registry (optional)",
+        default_registry.unwrap_or(""),
+    )?;
     // collapse an empty registry (default or entered) to None so the toolbox declares no
     // central registry and each image's own `image` url is used instead
     let registry = if registry.is_empty() {
@@ -222,4 +241,43 @@ pub fn prompt_toolbox_config(
         Some(registry)
     };
     Ok(ToolboxConfigAnswers { name, registry })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{GROUP_NAME_MAX, RESOURCE_NAME_MAX, validate_name};
+
+    /// A name made of lowercase letters, digits, and '-' (starting with a letter or digit) is valid
+    #[test]
+    fn validate_name_accepts_thorium_charset() {
+        for name in ["clamav", "detect-it-easy", "av1", "0day"] {
+            assert!(
+                validate_name(name, RESOURCE_NAME_MAX).is_ok(),
+                "'{name}' should be valid"
+            );
+        }
+    }
+
+    /// Uppercase, dots, underscores, a leading '-', and empty all violate the API name rule
+    #[test]
+    fn validate_name_rejects_non_thorium_charset() {
+        for name in ["ClamAV", "clam.av", "under_score", "-lead", ""] {
+            assert!(
+                validate_name(name, RESOURCE_NAME_MAX).is_err(),
+                "'{name}' should be rejected"
+            );
+        }
+    }
+
+    /// The length cap is enforced and is per-kind: 25 for resources, 50 for groups
+    #[test]
+    fn validate_name_enforces_length_cap() {
+        // a 26-char name exceeds the resource cap but fits the group cap
+        let name = "a".repeat(26);
+        assert!(validate_name(&name, RESOURCE_NAME_MAX).is_err());
+        assert!(validate_name(&name, GROUP_NAME_MAX).is_ok());
+        // exactly at the resource cap is allowed; one past the group cap is not
+        assert!(validate_name(&"a".repeat(RESOURCE_NAME_MAX), RESOURCE_NAME_MAX).is_ok());
+        assert!(validate_name(&"a".repeat(GROUP_NAME_MAX + 1), GROUP_NAME_MAX).is_err());
+    }
 }

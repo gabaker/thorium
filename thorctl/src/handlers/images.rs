@@ -273,8 +273,14 @@ pub async fn export(
             }
         };
         let request = ImageRequest::from(image.clone());
-        let config_json = crate::utils::canonical_json(&request)
-            .map_err(|e| Error::new(format!("Failed to serialize image '{name}': {e}")))?;
+        // curated (prioritized) field order so an exported image config matches the layout `init`
+        // and toolbox export produce — one consistent, edit-friendly format everywhere (still
+        // deterministic: curated keys first, remaining keys sorted)
+        let config_json = crate::utils::curated_json(
+            &request,
+            crate::handlers::imports::merge::IMAGE_FIELD_ORDER,
+        )
+        .map_err(|e| Error::new(format!("Failed to serialize image '{name}': {e}")))?;
         // optionally open the config in an editor for review before writing
         let config_json = if cmd.review {
             progress
@@ -375,13 +381,19 @@ pub async fn handle(args: &Args, cmd: &Images) -> Result<(), Error> {
         #[cfg(any(target_os = "linux", target_os = "macos"))]
         Images::Import(cmd) => {
             // resolve the container runtime (docker/podman) before any image work
-            crate::handlers::container::init_runtime(args.container_runtime, conf.container_runtime);
+            crate::handlers::container::init_runtime(
+                args.container_runtime,
+                conf.container_runtime,
+            );
             import(&thorium, cmd, &conf, args.workers).await
         }
         #[cfg(any(target_os = "linux", target_os = "macos"))]
         Images::Export(cmd) => {
             // resolve the container runtime (docker/podman) before any image work
-            crate::handlers::container::init_runtime(args.container_runtime, conf.container_runtime);
+            crate::handlers::container::init_runtime(
+                args.container_runtime,
+                conf.container_runtime,
+            );
             export(&thorium, cmd, args, &conf).await
         }
     }

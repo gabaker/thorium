@@ -14,7 +14,9 @@ use crate::args::images::ImportImages;
 use crate::handlers::container;
 use crate::handlers::imports::kind::ImageKind;
 use crate::handlers::imports::rollback::Journal;
-use crate::handlers::imports::{self, ApplyOutcome, ConflictMode, ImportOutcome, categorize, create};
+use crate::handlers::imports::{
+    self, ApplyOutcome, ConflictMode, ImportOutcome, categorize, create,
+};
 use crate::handlers::progress::Bar;
 
 /// The options that drive an image import pass

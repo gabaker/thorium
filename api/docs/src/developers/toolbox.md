@@ -28,9 +28,10 @@ transfer.
 | Start a brand-new toolbox by hand | `init toolbox` (creates `config.toml` + tool stubs), then `build` |
 | Add one image/pipeline stub to an existing toolbox | `init image`/`init pipeline` (positional path = where it lands); pass `-c <config.toml>` to **resolve/validate** against the toolbox without moving files |
 | Capture tools from a running instance | `export` (writes the whole repo + `toolbox.json`) |
-| **Append** more tools into an existing toolbox repo | `export -p …`/`-i …` into the same `-o <dir>`; the existing `config.toml` is reused automatically — no `--config` needed |
-| **Seed** a new toolbox's settings from another toolbox's `config.toml` | `init toolbox -c …` or `export -c …` |
+| **Append** more tools into an existing toolbox repo | `export -p …`/`-i …` with `-o <toolbox-dir>` **or** `-c <toolbox-dir>/config.toml` (which defaults the output to that dir); the existing `config.toml` is reused automatically |
+| **Seed** a new toolbox's settings from another toolbox's `config.toml` into a *different* dir | `init toolbox -c …`, or `export -c <other>/config.toml -o <new-dir>` (explicit `-o` required) |
 | Place one resource's files in a specific dir | `export -i group/name=dest` / `-p group/name=dest` (placement only) |
+| Fold an exported image into an existing Dockerfile dir | `export -i group/name=<dir-with-Dockerfile>` (auto-sets `build = true`) |
 | Set the default export layout | `init toolbox --image-path … --pipeline-path …` (writes `export_*_path` in `config.toml`) |
 | Overwrite per-tool files | `--overwrite` (export, init, import-conflict mode) |
 | Overwrite `config.toml` | `--overwrite-config` (export, init toolbox) |
@@ -338,12 +339,19 @@ ignored on `image_from` images (which are never built).
 exactly as it is in Thorium.
 
 ```bash
-# export an entire group
+# export an entire group into a new toolbox
 thorctl toolbox export -g static -o ./my-toolbox
 
 # export specific pipelines (their images are pulled in automatically) and standalone images
 thorctl toolbox export -p static/antivirus -i static/exiftool -o ./my-toolbox
+
+# append into an existing toolbox by pointing at its config.toml — output defaults to its directory
+thorctl toolbox export -c ./my-toolbox/config.toml -p static/newpipeline
 ```
+
+The `--output`/`-o` directory defaults to the `--config` directory when `--config` is given (so
+pointing at a toolbox's `config.toml` exports into that toolbox), otherwise `./toolbox` for a brand-new
+toolbox. An explicit `-o` always wins; the defaulted directory is announced in the output.
 
 Useful flags:
 
@@ -361,14 +369,22 @@ in the output) rather than clobbering them, so you don't need `--config`. So
 `thorctl toolbox export -p static/newpipeline -o ./my-toolbox` adds the pipeline (and its images)
 into `./my-toolbox`, and the rebuild folds everything in. Pass `--overwrite-config` only when you
 actually want to change the toolbox's settings; if a flag like `--with-images` or `--registry`
-contradicts the preserved config, export warns that the flag is ignored. (`--config` is for *seeding*
-a brand-new toolbox from another's settings.)
+contradicts the preserved config, export warns that the flag is ignored. (`--config` *seeds* settings
+from another toolbox **and** anchors the output to that config's directory unless `-o` is set — so
+`-c X/config.toml` appends into `X`, while seeding into a *different* directory needs an explicit `-o`.)
 
-When appending into a toolbox that already has a `toolbox.json`, export **reconciles** against it: a
-resource whose config is unchanged is reported "Unchanged" and skipped (including its image bundle
-pull/save, avoiding redundant work), and an image whose name+version already lives at a *different*
-directory is not written as a second copy — it's warned up front instead of failing later at `build`
-time. A fresh export does none of this.
+When appending into an existing toolbox, export **reconciles** against it. The existing toolbox is read
+from its committed `toolbox.json`; if that file is missing or unparsable, export falls back to crawling
+the on-disk tool manifests, so a deleted or stale `toolbox.json` doesn't make the append re-write what's
+already there. The per-tool files are **always (re)written** so they're guaranteed on disk — a recorded
+resource isn't proof its files are present (they may have been deleted, or this run may place them at a
+new `=dir`), and the writer no-ops a byte-identical existing file so re-writing causes no churn.
+Reconciliation only skips *redundant* work: an image whose config is unchanged **and** whose tarball is
+already saved skips its bundle pull/save (reported "Unchanged"); an image whose name+version already
+lives at a *different* directory is not written as a second copy — it's warned up front instead of
+failing later at `build` time; and an image whose name already exists at a *different version* is written
+but warned, since exporting (say) `latest` beside a pinned copy quietly adds a second version. A fresh
+export does none of this.
 
 **Placing a single resource (`=dir`).** A `-i`/`-p` entry may carry a `group/name=dir` suffix to
 write that resource's files into a chosen directory (relative to the toolbox root) instead of the
@@ -384,6 +400,21 @@ thorctl toolbox export -i static/clamav=tools/clamav -o ./my-toolbox
 membership and order come from Thorium). It must be a relative subpath (no absolute path or `..`).
 Whole-group exports and auto-pulled dependency images use the configured/default layout unless an
 image is also named with its own `=dir`.
+
+If the `=dir` destination already contains a `Dockerfile`, export reads it as a build context you are
+folding the config into and writes that image's `manifest.toml` with `build = true` (and no
+`exported_image_path`), so a later `build` builds the image from that context rather than referencing
+the original registry url:
+
+```bash
+# tools/clamav/ already holds a Dockerfile
+thorctl toolbox export -i static/clamav=tools/clamav -o ./my-toolbox
+# clamav.json + manifest.toml (build = true) land beside the existing Dockerfile
+```
+
+This auto-detect applies only to the explicit-`=dir` case (a default-layout dir is created fresh and
+never holds a Dockerfile); the default `build = false` reference-only manifest is used everywhere
+else. The detection is announced with a log line.
 
 ### Importing into an instance
 ---

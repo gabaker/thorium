@@ -88,11 +88,17 @@ fn parse_build_arg(raw: &str) -> Result<(String, String), String> {
 #[derive(Parser, Debug)]
 #[allow(clippy::struct_excessive_bools)]
 pub struct BuildImagesToolbox {
-    /// The path to the toolbox.json holding the build entries
-    #[clap(default_value = "toolbox.json")]
+    /// The path to the toolbox.json holding the build entries (default: ./toolbox.json)
+    #[clap(value_name = "TOOLBOX.JSON", default_value = "toolbox.json")]
     pub manifest: PathBuf,
-    /// Only build these images (default: every image with build enabled)
-    #[clap(short = 'i', long = "images", value_delimiter = ',')]
+    /// Only build these images, comma-separated. Format: `name[,name,...]`
+    /// (default: every image with build enabled)
+    #[clap(
+        short = 'i',
+        long = "images",
+        value_name = "NAME",
+        value_delimiter = ','
+    )]
     pub images: Vec<String>,
     /// Push every built tag to its registry after building
     #[clap(long)]
@@ -147,15 +153,16 @@ pub struct BuildImagesToolbox {
 /// Diff an on-disk toolbox against a running Thorium instance
 #[derive(Parser, Debug)]
 pub struct DiffToolbox {
-    /// A toolbox.json (path or URL) or a toolbox repo directory
+    /// A toolbox.json (path or URL) or a toolbox repo directory. Format: `path | url | dir`
     ///
     /// Directories are built in-memory from their manifests, so the diff
     /// reflects the current on-disk configs without regenerating toolbox.json.
+    #[clap(value_name = "PATH | URL | DIR")]
     pub manifest: ManifestLocation,
     /// Compare against this group instead of the groups recorded in the toolbox
     ///
     /// Use this when the toolbox was imported with --group-override.
-    #[clap(long)]
+    #[clap(long, value_name = "GROUP")]
     pub group_override: Option<String>,
     /// Exit with code 1 when any difference exists (git diff semantics)
     #[clap(long)]
@@ -165,12 +172,13 @@ pub struct DiffToolbox {
 /// Remove a toolbox's pipelines and images from Thorium
 #[derive(Parser, Debug)]
 pub struct RemoveToolbox {
-    /// The URL or file path on the system where the toolbox manifest is found
+    /// The toolbox manifest to use: a local file path or a URL. Format: `path | url`
+    #[clap(value_name = "PATH | URL")]
     pub manifest: ManifestLocation,
     /// Remove from this group instead of the groups recorded in the manifest
     ///
     /// Use this when the toolbox was imported with --group-override.
-    #[clap(long)]
+    #[clap(long, value_name = "GROUP")]
     pub group_override: Option<String>,
     /// Skip the confirmation dialog
     #[clap(short = 'y', long)]
@@ -227,12 +235,13 @@ impl std::str::FromStr for ManifestLocation {
 #[derive(Parser, Debug)]
 #[allow(clippy::struct_excessive_bools)]
 pub struct ImportToolbox {
-    /// The URL or file path on the system where the toolbox manifest is found
+    /// The toolbox manifest to use: a local file path or a URL. Format: `path | url`
+    #[clap(value_name = "PATH | URL")]
     pub manifest: ManifestLocation,
     /// Force the tools and pipelines to be imported to a specific group
     ///
     /// The group will be created if it doesn't already exist
-    #[clap(long)]
+    #[clap(long, value_name = "GROUP")]
     pub group_override: Option<String>,
     /// Overwrite existing images/pipelines without opening the editor
     #[clap(long, conflicts_with = "skip_conflicts")]
@@ -252,7 +261,7 @@ pub struct ImportToolbox {
     #[clap(long)]
     pub rollback_on_failure: bool,
     /// Override the default editor for reviewing merge conflicts
-    #[clap(long)]
+    #[clap(long, value_name = "EDITOR")]
     pub editor: Option<String>,
     /// Target registry base path for images bundled in the toolbox
     ///
@@ -261,7 +270,7 @@ pub struct ImportToolbox {
     /// `<image-path-prefix>/<group>/<name>:<tag>`, and its Thorium config is
     /// rewritten to point there. If omitted for a bundled toolbox, the prefix
     /// recorded in the manifest is used, otherwise you are prompted for one.
-    #[clap(long)]
+    #[clap(long, value_name = "REGISTRY/BASE")]
     pub image_path_prefix: Option<String>,
     /// Update existing Thorium network policies to match the toolbox
     ///
@@ -283,8 +292,13 @@ pub struct ImportToolbox {
 /// Build a toolbox manifest from image and pipeline manifests
 #[derive(Parser, Debug, Clone)]
 pub struct BuildToolbox {
-    /// Path to the toolbox TOML config file (e.g., config.toml)
-    #[clap(short = 'c', long = "config", default_value = "config.toml")]
+    /// Path to the toolbox TOML config file (default: config.toml in the current directory)
+    #[clap(
+        short = 'c',
+        long = "config",
+        value_name = "CONFIG.TOML",
+        default_value = "config.toml"
+    )]
     pub config: PathBuf,
     /// Tag every image with its manifest `image_name` (a repo-style path) as the leaf:
     /// `<registry>/[prefix/]<image_name>:<version>`
@@ -298,13 +312,13 @@ pub struct BuildToolbox {
     ///
     /// Defaults to a `toolbox.json` beside the --config file (the toolbox root). Overriding this
     /// only redirects the artifact; it does not change where manifests are crawled from.
-    #[clap(short, long)]
+    #[clap(short, long, value_name = "PATH")]
     pub output: Option<PathBuf>,
     /// Root directory to walk for image/pipeline manifests
     ///
     /// Defaults to the directory containing --config (the toolbox root). Overriding this only
     /// changes the crawl root; it does not change where toolbox.json is written.
-    #[clap(long)]
+    #[clap(long, value_name = "DIR")]
     pub path: Option<PathBuf>,
     /// Append this suffix to every derived image tag's version, baking it into the
     /// generated toolbox.json (tags and embedded image urls)
@@ -323,53 +337,63 @@ pub struct BuildToolbox {
 /// Initialize a full toolbox with config.toml, image, and pipeline files
 #[derive(Parser, Debug)]
 pub struct InitToolbox {
-    /// Paths to image build directories (each gets a manifest.toml + JSON config)
-    #[clap(short = 'i', long = "images", required = true, value_delimiter = ',')]
+    /// Image build directories, comma-separated. Format: `path[,path,...]` (each gets a
+    /// manifest.toml + JSON config)
+    #[clap(
+        short = 'i',
+        long = "images",
+        value_name = "PATH",
+        required = true,
+        value_delimiter = ','
+    )]
     pub images: Vec<PathBuf>,
-    /// Pipeline directories, optionally with image associations.
+    /// Pipeline directories, optionally binding images. Format: `path[:image,...]`
     ///
-    /// Use colon syntax to bind specific images: -p ./pipelines/capa:capa,yara
-    ///
-    /// Without the colon, all images are included in the pipeline.
-    #[clap(short = 'p', long = "pipeline", verbatim_doc_comment)]
+    /// Use the optional `[:image,...]` colon suffix to bind specific images, e.g.
+    /// `-p ./pipelines/capa:capa,yara`. Without it, all --images are bound. Repeat -p for
+    /// multiple pipelines.
+    #[clap(
+        short = 'p',
+        long = "pipeline",
+        value_name = "PATH[:IMAGE,...]",
+        verbatim_doc_comment
+    )]
     pub pipelines: Vec<String>,
     /// Group name to use in generated configs (prompted interactively if omitted)
-    #[clap(short = 'g', long = "group")]
+    #[clap(short = 'g', long = "group", value_name = "GROUP")]
     pub group: Option<String>,
     /// Path to the toolbox root directory where config.toml will be created
     /// (default: current directory)
-    #[clap(long, default_value = ".")]
+    #[clap(long, value_name = "DIR", default_value = ".")]
     pub toolbox_dir: PathBuf,
     /// Seed the new config.toml from an existing one (name, registry, registries,
     /// image_path_prefix, export paths, bundled_images) instead of --name/--registry
     ///
     /// Mutually exclusive with --name, --registry, --image-path, and --pipeline-path.
-    #[clap(short = 'c', long = "config", conflicts_with_all = ["name", "registry", "image_path", "pipeline_path"], verbatim_doc_comment)]
+    #[clap(short = 'c', long = "config", value_name = "CONFIG.TOML", conflicts_with_all = ["name", "registry", "image_path", "pipeline_path"], verbatim_doc_comment)]
     pub config: Option<PathBuf>,
-    /// Toolbox name for config.toml
-    #[clap(long, default_value = "My Toolbox")]
+    /// Toolbox name for config.toml (default: "My Toolbox")
+    #[clap(long, value_name = "NAME", default_value = "My Toolbox")]
     pub name: String,
-    /// Container registry for config.toml (e.g., "ghcr.io/org/repo")
+    /// Container registry for config.toml, e.g. ghcr.io/org/repo
     ///
     /// Optional: when omitted, the toolbox declares no central registry and each
     /// image's tag is taken from the `image` url in its own config.
-    #[clap(long)]
+    #[clap(long, value_name = "REGISTRY")]
     pub registry: Option<String>,
-    /// Directory (relative to the toolbox root) `export` writes image tool dirs under
+    /// Directory (relative to the toolbox root) `export` writes image tool dirs under (default: images)
     ///
-    /// Sets `export_image_path` in config.toml; defaults to `images` when omitted. Must be a
-    /// relative subpath (no absolute path, no `..`). Only affects where `export` places files —
-    /// `build` still discovers manifests at any depth.
-    #[clap(long)]
+    /// Sets `export_image_path` in config.toml. Must be a relative subpath (no absolute path, no
+    /// `..`). Only affects where `export` places files — `build` still discovers manifests at any depth.
+    #[clap(long, value_name = "DIR")]
     pub image_path: Option<String>,
-    /// Directory (relative to the toolbox root) `export` writes pipeline tool dirs under
+    /// Directory (relative to the toolbox root) `export` writes pipeline tool dirs under (default: pipelines)
     ///
-    /// Sets `export_pipeline_path` in config.toml; defaults to `pipelines` when omitted. Must be a
-    /// relative subpath (no absolute path, no `..`).
-    #[clap(long)]
+    /// Sets `export_pipeline_path` in config.toml. Must be a relative subpath (no absolute path, no `..`).
+    #[clap(long, value_name = "DIR")]
     pub pipeline_path: Option<String>,
     /// The editor to use when filling in configs (defaults to your configured `default_editor`)
-    #[clap(long)]
+    #[clap(long, value_name = "EDITOR")]
     pub editor: Option<String>,
     /// Skip interactive prompts and use defaults for all fields
     #[clap(short = 'n', long)]
@@ -444,27 +468,28 @@ impl PipelineSpec {
 /// Initialize a single image with a manifest.toml and JSON config
 #[derive(Parser, Debug)]
 pub struct InitImage {
-    /// Path to the image build directory
+    /// Path to the image build directory (the scaffolded files land here)
+    #[clap(value_name = "PATH")]
     pub path: PathBuf,
-    /// The manifest `image_name`: the registry tag path leaf used at build time
-    /// (`<registry>/<image_name>:<version>`); defaults to the build directory name
-    #[clap(long)]
+    /// The manifest `image_name`: the registry tag path leaf used at build time, formatted as a
+    /// repo-style path (`<registry>/<image_name>:<version>`); defaults to the build directory name
+    #[clap(long, value_name = "IMAGE_NAME")]
     pub image_name: Option<String>,
     /// Group name to use in the generated image config (prompted interactively if omitted)
-    #[clap(short = 'g', long = "group")]
+    #[clap(short = 'g', long = "group", value_name = "GROUP")]
     pub group: Option<String>,
     /// Validate against an existing toolbox's config.toml (resolution source, not placement)
     ///
     /// When set, scaffolding errors if an image of the same name+version already exists in that
     /// toolbox (pass --overwrite to replace). Does not move files — the positional path is the
     /// destination.
-    #[clap(short = 'c', long = "config")]
+    #[clap(short = 'c', long = "config", value_name = "CONFIG.TOML")]
     pub config: Option<PathBuf>,
     /// Skip building this image in CI/CD (image already exists in registry)
     #[clap(long)]
     pub no_build: bool,
     /// The editor to use when filling in the config (defaults to your configured `default_editor`)
-    #[clap(long)]
+    #[clap(long, value_name = "EDITOR")]
     pub editor: Option<String>,
     /// Skip interactive prompts and use defaults for all fields
     #[clap(short = 'n', long)]
@@ -477,17 +502,24 @@ pub struct InitImage {
 /// Initialize a single pipeline with a manifest.toml and JSON config
 #[derive(Parser, Debug)]
 pub struct InitPipeline {
-    /// Path to the pipeline directory
+    /// Path to the pipeline directory (the scaffolded files land here)
+    #[clap(value_name = "PATH")]
     pub path: PathBuf,
-    /// Image names to include in this pipeline (prompted interactively if omitted)
-    #[clap(short = 'i', long = "images", value_delimiter = ',')]
+    /// Image names this pipeline runs, comma-separated. Format: `image[,image,...]` (prompted
+    /// interactively if omitted)
+    #[clap(
+        short = 'i',
+        long = "images",
+        value_name = "IMAGE",
+        value_delimiter = ','
+    )]
     pub images: Vec<String>,
     /// Group name to use in the generated pipeline config (prompted interactively if omitted)
-    #[clap(short = 'g', long = "group")]
+    #[clap(short = 'g', long = "group", value_name = "GROUP")]
     pub group: Option<String>,
-    /// Pipeline order as JSON (e.g., '[["img1","img2"],["img3"]]').
-    /// Defaults to all images in a single parallel stage.
-    #[clap(long)]
+    /// Pipeline order as JSON: a list of parallel stages, e.g. `[["img1","img2"],["img3"]]`
+    /// (defaults to all images in a single parallel stage)
+    #[clap(long, value_name = "JSON")]
     pub order: Option<String>,
     /// Resolve the pipeline's images against an existing toolbox's config.toml (the "look here"
     /// source, not placement)
@@ -495,10 +527,10 @@ pub struct InitPipeline {
     /// When set, every referenced image must exist in that toolbox (else an error — `init pipeline`
     /// never creates images), and each is version-pinned from the toolbox instead of `latest`. Does
     /// not move files — the positional path is the destination.
-    #[clap(short = 'c', long = "config")]
+    #[clap(short = 'c', long = "config", value_name = "CONFIG.TOML")]
     pub config: Option<PathBuf>,
     /// The editor to use when filling in the config (defaults to your configured `default_editor`)
-    #[clap(long)]
+    #[clap(long, value_name = "EDITOR")]
     pub editor: Option<String>,
     /// Skip interactive prompts and use defaults for all fields
     #[clap(short = 'n', long)]
@@ -513,30 +545,48 @@ pub struct InitPipeline {
 #[allow(clippy::struct_excessive_bools)]
 pub struct ExportToolbox {
     /// Export all images and pipelines from this group
-    #[clap(short = 'g', long = "group")]
+    #[clap(short = 'g', long = "group", value_name = "GROUP")]
     pub group: Option<String>,
-    /// Export specific pipelines (format: group/name, or just name if --group is set).
-    /// Images referenced by exported pipelines are auto-included.
+    /// Export specific pipelines. Format: `group/name[=path]` (or `name[=path]` with --group),
+    /// comma-separated for multiple.
     ///
-    /// Append `=dir` to place a pipeline's files at a chosen directory (relative to the toolbox
-    /// root), e.g. `static/av=pipelines/av`; otherwise the configured/default layout is used. The
-    /// `=dir` is placement only — it never changes which pipeline (or its images) is selected.
-    #[clap(short = 'p', long = "pipelines", value_delimiter = ',')]
+    /// Images referenced by exported pipelines are auto-included. The optional `[=path]` suffix
+    /// writes that pipeline's files to `path` (a dir relative to the toolbox root), e.g.
+    /// `static/av=pipelines/av`; without it the configured/default layout is used. `[=path]` is
+    /// placement only — it never changes which pipeline (or its images) is selected.
+    #[clap(
+        short = 'p',
+        long = "pipelines",
+        value_name = "GROUP/NAME[=PATH]",
+        value_delimiter = ','
+    )]
     pub pipelines: Vec<String>,
-    /// Export specific standalone images (format: group/name, or just name if --group is set)
+    /// Export specific standalone images. Format: `group/name[=path]` (or `name[=path]` with
+    /// --group), comma-separated for multiple.
     ///
-    /// Append `=dir` to place an image's files at a chosen directory (e.g.
-    /// `static/clamav=tools/clamav`, to fold a config into an existing build-context dir); naming an
-    /// auto-pulled dependency image this way also redirects it. Placement only.
-    #[clap(short = 'i', long = "images", value_delimiter = ',')]
+    /// The optional `[=path]` suffix writes that image's files to `path` (a dir relative to the
+    /// toolbox root), e.g. `static/clamav=tools/clamav` to fold a config into an existing
+    /// build-context dir; naming an auto-pulled dependency image this way also redirects it.
+    /// `[=path]` is placement only.
+    #[clap(
+        short = 'i',
+        long = "images",
+        value_name = "GROUP/NAME[=PATH]",
+        value_delimiter = ','
+    )]
     pub images: Vec<String>,
     /// Override the group in all exported configs to this value.
     /// Warns if name collisions would occur across source groups.
-    #[clap(long)]
+    #[clap(long, value_name = "GROUP")]
     pub group_override: Option<String>,
     /// Root directory for the exported toolbox
-    #[clap(short = 'o', long = "output", default_value = "./toolbox")]
-    pub output: PathBuf,
+    ///
+    /// Defaults to the `--config` directory when `--config` is given (so pointing at a toolbox's
+    /// config.toml exports into that toolbox), otherwise `./toolbox` for a brand-new toolbox. An
+    /// explicit value always wins — pass it to seed settings from one toolbox into a different
+    /// output directory.
+    #[clap(short = 'o', long = "output", value_name = "DIR")]
+    pub output: Option<PathBuf>,
     /// Seed the toolbox-wide settings (name, registry, registries, image_path_prefix,
     /// bundled_images) from *another* toolbox's config.toml instead of --name/--registry
     ///
@@ -545,16 +595,20 @@ pub struct ExportToolbox {
     /// <output>/config.toml is auto-detected, reused, and preserved (settings-source priority is
     /// --config > existing <output>/config.toml > --name/--registry). Mutually exclusive with
     /// --name and --registry.
-    #[clap(short = 'c', long = "config", conflicts_with_all = ["name", "registry"])]
+    ///
+    /// Giving --config also anchors --output to the config's directory unless --output is set, so
+    /// `export -c mytb/config.toml ...` exports into `mytb/`. To seed settings from one toolbox into
+    /// a different directory, pass --output explicitly.
+    #[clap(short = 'c', long = "config", value_name = "CONFIG.TOML", conflicts_with_all = ["name", "registry"])]
     pub config: Option<PathBuf>,
-    /// Toolbox name for config.toml
-    #[clap(long, default_value = "My Toolbox")]
+    /// Toolbox name for config.toml (default: "My Toolbox")
+    #[clap(long, value_name = "NAME", default_value = "My Toolbox")]
     pub name: String,
-    /// Container registry for config.toml
+    /// Container registry for config.toml, e.g. ghcr.io/org/repo
     ///
     /// Optional: when omitted, the exported toolbox declares no central registry and
     /// relies on each image's own `image` url (always captured on export).
-    #[clap(long)]
+    #[clap(long, value_name = "REGISTRY")]
     pub registry: Option<String>,
     /// Skip on-disk conflicts: write new configs and leave differing existing ones
     /// untouched with a warning (use --overwrite to overwrite instead)

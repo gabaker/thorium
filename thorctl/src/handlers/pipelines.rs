@@ -303,8 +303,14 @@ async fn export(
         };
         images.extend(pipeline.order.iter().flatten().cloned());
         let request = PipelineRequest::from(pipeline);
-        let config_json = crate::utils::canonical_json(&request)
-            .map_err(|e| Error::new(format!("Failed to serialize pipeline '{name}': {e}")))?;
+        // curated (prioritized) field order so an exported pipeline config matches the layout `init`
+        // and toolbox export produce — one consistent, edit-friendly format everywhere (still
+        // deterministic: curated keys first, remaining keys sorted)
+        let config_json = crate::utils::curated_json(
+            &request,
+            crate::handlers::imports::merge::PIPELINE_FIELD_ORDER,
+        )
+        .map_err(|e| Error::new(format!("Failed to serialize pipeline '{name}': {e}")))?;
         // optionally open the config in an editor for review before writing
         let config_json = if cmd.review {
             progress

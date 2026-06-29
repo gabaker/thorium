@@ -107,9 +107,15 @@ fn dir_name(path: &Path) -> Result<String, Error> {
 /// * `kind` - The resource kind, for the error message ("group", "image", …)
 /// * `name` - The name to validate
 fn validate_resource_name(kind: &str, name: &str) -> Result<(), Error> {
-    // reuse the wizard's identifier check so interactive and non-interactive paths
-    // enforce the same regex, then prefix the error with the resource kind for context
-    prompt::validate_name(name)
+    // groups allow a longer name than images/pipelines, matching the API's own per-kind caps
+    let max = if kind == "group" {
+        prompt::GROUP_NAME_MAX
+    } else {
+        prompt::RESOURCE_NAME_MAX
+    };
+    // reuse the wizard's name check so interactive and non-interactive paths enforce the same
+    // rule, then prefix the error with the resource kind for context
+    prompt::validate_name(name, max)
         .map_err(|err| Error::new(format!("Invalid {kind} name '{name}': {err}")))
 }
 
@@ -235,6 +241,31 @@ pub(crate) fn toml_escape(value: &str) -> String {
         .replace('\n', "\\n")
         .replace('\r', "\\r")
         .replace('\t', "\\t")
+}
+
+/// Render a resource name as a single TOML table-key segment
+///
+/// A non-empty name composed only of TOML bare-key characters (ASCII letters, digits, `-`, `_`) is
+/// emitted unquoted — which every API-validated image/pipeline name is, since those are bounded to
+/// 1–25 lowercase alphanumeric or `-` characters. Anything else (e.g. a hand-edited manifest with a
+/// dot, space, or other special character) falls back to a quoted, escaped basic-string key so the
+/// generated TOML stays valid and unambiguous (an unquoted dot would be parsed as a table path).
+///
+/// # Arguments
+///
+/// * `name` - The resource name to render as a key segment
+pub(crate) fn toml_key(name: &str) -> String {
+    // a non-empty name of only bare-key characters can be written without quotes
+    let bare = !name.is_empty()
+        && name
+            .chars()
+            .all(|chr| chr.is_ascii_alphanumeric() || chr == '-' || chr == '_');
+    if bare {
+        name.to_string()
+    } else {
+        // fall back to a quoted basic-string key, escaping anything that would break the quoting
+        format!("\"{}\"", toml_escape(name))
+    }
 }
 
 /// Render a toolbox `config.toml` from its toolbox-wide settings
@@ -567,15 +598,15 @@ pub(crate) fn generate_pipeline_manifest(name: &str, images: &[(String, String)]
          version = \"latest\"\n\
          config_from = \"{name}.json\"\n"
     );
-    // append an [images.<name>] table per referenced image so the manifest's image map
-    // mirrors the images the pipeline's order runs; the image name is emitted as a quoted
-    // key because Thorium names may contain dots (a bare `images.a.b` key would be parsed
-    // as a nested table), and both key and version are escaped so a stray quote/newline
-    // can't corrupt the generated TOML
+    // append an [images.<name>] table per referenced image so the manifest's image map mirrors the
+    // images the pipeline's order runs. The name is rendered as a bare key when it is TOML-bare-safe
+    // (every API-validated name is — 1–25 lowercase alphanumeric or '-'), only falling back to a
+    // quoted/escaped key for a hand-edited name with a special character; the version is always a
+    // basic string, escaped defensively against a stray quote/newline
     for (image_name, version) in images {
         manifest.push_str(&format!(
-            "\n[images.\"{}\"]\nversion = \"{}\"\n",
-            toml_escape(image_name),
+            "\n[images.{}]\nversion = \"{}\"\n",
+            toml_key(image_name),
             toml_escape(version)
         ));
     }
@@ -1298,23 +1329,48 @@ mod tests {
     }
 
     /// A dotted image name must be emitted as a quoted key (not a nested table) and a
-    /// version with metacharacters must be escaped, so the pipeline manifest's image map
-    /// stays valid and faithful to the referenced (name, version) pairs
+    /// A bare-key-safe name is emitted unquoted while a name with a special character (a dot, which
+    /// would otherwise parse as a nested table) falls back to a quoted/escaped key; the version is
+    /// always escaped — so the image map stays valid and faithful to the referenced (name, version)
+    /// pairs
     #[test]
-    fn pipeline_manifest_quotes_and_escapes_image_entries() {
-        // a name containing a dot would be a nested table as a bare key; the version
-        // carries an embedded quote/newline and an injected assignment
-        let images = vec![("clam.av".to_string(), "1\"\nx = \"y".to_string())];
+    fn pipeline_manifest_quotes_only_when_needed() {
+        // a normal dashed name is bare-key-safe; a dotted name is not (it would nest as a bare key);
+        // the dotted entry's version carries an embedded quote/newline and an injected assignment
+        let images = vec![
+            ("detect-it-easy".to_string(), "latest".to_string()),
+            ("clam.av".to_string(), "1\"\nx = \"y".to_string()),
+        ];
         let manifest = generate_pipeline_manifest("triage", &images);
+        // the dashed name is written bare; only the dotted name is quoted
+        assert!(manifest.contains("[images.detect-it-easy]"));
+        assert!(manifest.contains("[images.\"clam.av\"]"));
         // the whole manifest must still parse as TOML
         let parsed: toml::Value =
             toml::from_str(&manifest).expect("escaped pipeline manifest must be valid TOML");
         let imgs = parsed["images"].as_table().expect("images must be a table");
+        // the bare name resolves to a single key with its version
+        assert_eq!(imgs["detect-it-easy"]["version"].as_str(), Some("latest"));
         // the dotted name is a single key, not a nested images.clam.av sub-table
         assert!(imgs.contains_key("clam.av"));
         assert_eq!(imgs["clam.av"]["version"].as_str(), Some("1\"\nx = \"y"));
         // the injected assignment never escaped into the images table
         assert!(imgs.get("x").is_none());
+    }
+
+    /// `toml_key` emits a bare key for bare-key-safe names and a quoted/escaped key otherwise
+    #[test]
+    fn toml_key_quotes_only_non_bare_names() {
+        // ascii alphanumerics, '-', and '_' are valid TOML bare-key characters
+        assert_eq!(super::toml_key("detect-it-easy"), "detect-it-easy");
+        assert_eq!(super::toml_key("under_score"), "under_score");
+        assert_eq!(super::toml_key("Mixed123"), "Mixed123");
+        // a dot, a space, or an embedded quote forces a quoted, escaped key
+        assert_eq!(super::toml_key("clam.av"), "\"clam.av\"");
+        assert_eq!(super::toml_key("two words"), "\"two words\"");
+        assert_eq!(super::toml_key("a\"b"), "\"a\\\"b\"");
+        // an empty name is never a valid bare key
+        assert_eq!(super::toml_key(""), "\"\"");
     }
 
     /// With no extras, registries and image_path_prefix are emitted as commented

@@ -483,8 +483,8 @@ fn prompt_new_name(
         .with_prompt(format!("New name for {}", describe_member(noun, old_name, member)))
         .default(suggested.to_string())
         .validate_with(|value: &String| {
-            // enforce the same name rules as any other resource name
-            prompt::validate_name(value)?;
+            // enforce the same name rules as any other image/pipeline name
+            prompt::validate_name(value, prompt::RESOURCE_NAME_MAX)?;
             // reject a name already used by another resource in the target group
             if taken.contains(value) {
                 return Err(format!(

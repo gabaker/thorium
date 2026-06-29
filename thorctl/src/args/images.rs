@@ -389,20 +389,20 @@ pub struct DeleteImages {
 #[derive(Parser, Debug, Clone)]
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 pub struct ImportImages {
-    /// The images to import (default: every image config in the import directory)
-    #[clap(value_parser = NonEmptyStringValueParser::new())]
+    /// The images to import, by name (default: every image config in the import directory)
+    #[clap(value_name = "IMAGE", value_parser = NonEmptyStringValueParser::new())]
     pub images: Vec<String>,
-    /// The group to import images too
-    #[clap(short, long, required = true)]
+    /// The group to import images to
+    #[clap(short, long, value_name = "GROUP", required = true)]
     pub group: String,
-    /// The directory to import our images from
-    #[clap(short, long, required = true)]
+    /// The directory to import images from
+    #[clap(short, long, value_name = "DIR", required = true)]
     pub import: PathBuf,
-    /// The registry to upload these images too
-    #[clap(short, long)]
+    /// The registry to upload these images to
+    #[clap(short, long, value_name = "REGISTRY")]
     pub registry: Option<String>,
-    /// The registry url to override our domain in thorium with
-    #[clap(long)]
+    /// The registry url to override the domain stored in Thorium with
+    #[clap(long, value_name = "URL")]
     pub registry_override: Option<String>,
     /// Skip pushing images to docker
     #[clap(long)]
@@ -427,7 +427,7 @@ pub struct ImportImages {
     #[clap(long)]
     pub rollback_on_failure: bool,
     /// Override the default editor for reviewing merge conflicts
-    #[clap(long)]
+    #[clap(long, value_name = "EDITOR")]
     pub editor: Option<String>,
 }
 
@@ -435,14 +435,14 @@ pub struct ImportImages {
 #[derive(Parser, Debug, Clone)]
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 pub struct ExportImages {
-    /// The images to export (default: every image in the group)
-    #[clap(value_parser = NonEmptyStringValueParser::new())]
+    /// The images to export, by name (default: every image in the group)
+    #[clap(value_name = "IMAGE", value_parser = NonEmptyStringValueParser::new())]
     pub images: Vec<String>,
     /// The group to export images from
-    #[clap(short, long, required = true)]
+    #[clap(short, long, value_name = "GROUP", required = true)]
     pub group: String,
-    /// The directory to export our images too
-    #[clap(short, long, default_value = "exports")]
+    /// The directory to export images to (default: exports)
+    #[clap(short, long, value_name = "DIR", default_value = "exports")]
     pub output: PathBuf,
     /// Only export image configs with no docker images
     #[clap(long)]

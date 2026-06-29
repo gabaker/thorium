@@ -1044,7 +1044,7 @@ pub fn build(cmd: &BuildToolbox) -> Result<(), Error> {
 /// # Arguments
 ///
 /// * `config` - The path to the toolbox's `config.toml`
-fn config_base_dir(config: &Path) -> PathBuf {
+pub(super) fn config_base_dir(config: &Path) -> PathBuf {
     config
         .parent()
         .filter(|parent| !parent.as_os_str().is_empty())

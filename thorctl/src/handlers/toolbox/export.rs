@@ -224,21 +224,71 @@ fn collect_dest_overrides(cmd: &ExportToolbox) -> HashMap<String, String> {
     overrides
 }
 
-/// Index an existing `toolbox.json` at the output for append reconciliation
+/// Load the existing toolbox manifest at the output for append reconciliation
 ///
-/// Returns `(images, pipelines)` maps keyed by `(group, name, version)` — images map to their
-/// `(canonical-config JSON, dir)` and pipelines to their canonical-config JSON. Empty when there is
-/// no existing `toolbox.json` (a fresh export) or it can't be read/parsed (in which case `build`'s
-/// duplicate-manifest check still guards). Lets the write loops skip unchanged resources (config +
-/// bundle) and catch a cross-directory duplicate identity up front.
+/// Prefers the committed `<output>/toolbox.json`; if that's missing or unparsable, falls back to
+/// crawling the on-disk tool manifests (when the directory is a toolbox, i.e. has a `config.toml`)
+/// so a deleted or stale `toolbox.json` doesn't make an append re-write resources already present.
+/// Returns `None` for a fresh export (neither source available); every failure is best-effort
+/// (`build`'s own duplicate-manifest check still guards).
 ///
 /// # Arguments
 ///
-/// * `cmd` - The export command
+/// * `output` - The resolved toolbox output directory
+/// * `progress` - The progress bar, for the "found existing toolbox" notice
+async fn load_existing_manifest(output: &Path, progress: &Bar) -> Option<ToolboxManifest> {
+    let json_path = output.join("toolbox.json");
+    // prefer the committed toolbox.json when it reads and parses
+    if let Ok(bytes) = tokio::fs::read(&json_path).await
+        && let Ok(existing) = serde_json::from_slice::<ToolboxManifest>(&bytes)
+    {
+        progress.info_anonymous(format!(
+            "Found existing toolbox.json at '{}'; reconciling against it",
+            json_path.display()
+        ));
+        return Some(existing);
+    }
+    // no usable toolbox.json: only crawl when the dir is actually a toolbox (has a config.toml),
+    // otherwise there's nothing meaningful to reconcile against
+    let config_path = output.join("config.toml");
+    if !config_path.exists() {
+        return None;
+    }
+    // crawl the on-disk tool manifests into the same shape as toolbox.json. build walks with
+    // synchronous std::fs, so run it off the async runtime; any crawl/parse error means no index
+    let build_cmd = BuildToolbox {
+        config: config_path,
+        use_image_path: false,
+        output: None,
+        path: Some(output.to_path_buf()),
+        tag_suffix: None,
+    };
+    let value = tokio::task::spawn_blocking(move || build::build_in_memory(&build_cmd))
+        .await
+        .ok()?
+        .ok()?;
+    let existing = serde_json::from_value::<ToolboxManifest>(value).ok()?;
+    progress.info_anonymous(format!(
+        "No toolbox.json at '{}'; reconciling against the on-disk tool manifests",
+        output.display()
+    ));
+    Some(existing)
+}
+
+/// Index the existing toolbox at the output for append reconciliation
+///
+/// Returns `(images, pipelines)` maps keyed by `(group, name, version)` — images map to their
+/// `(canonical-config JSON, dir)` and pipelines to their canonical-config JSON. Empty when there is
+/// no existing toolbox to reconcile against (see [`load_existing_manifest`]). Lets the write loops
+/// skip unchanged resources (config + bundle) and catch a cross-directory duplicate identity up front.
+///
+/// # Arguments
+///
+/// * `output` - The resolved toolbox output directory
 /// * `progress` - The progress bar, for the "found existing toolbox" notice
 #[allow(clippy::type_complexity)]
 async fn load_existing_index(
-    cmd: &ExportToolbox,
+    output: &Path,
     progress: &Bar,
 ) -> (
     HashMap<(String, String, String), (String, String)>,
@@ -246,19 +296,10 @@ async fn load_existing_index(
 ) {
     let mut images = HashMap::new();
     let mut pipelines = HashMap::new();
-    let path = cmd.output.join("toolbox.json");
-    // no existing toolbox.json → fresh export, nothing to reconcile (zero added cost)
-    let Ok(bytes) = tokio::fs::read(&path).await else {
+    // load the existing manifest (committed toolbox.json or an on-disk crawl); none → fresh export
+    let Some(existing) = load_existing_manifest(output, progress).await else {
         return (images, pipelines);
     };
-    // an unparsable existing toolbox.json is skipped; build's duplicate check still guards
-    let Ok(existing) = serde_json::from_slice::<ToolboxManifest>(&bytes) else {
-        return (images, pipelines);
-    };
-    progress.info_anonymous(format!(
-        "Found existing toolbox at '{}'; reconciling against it",
-        path.display()
-    ));
     // index each embedded image config by identity, keeping its canonical JSON (for the unchanged
     // comparison) and recorded dir (for the cross-directory duplicate check)
     for image in existing.images.values() {
@@ -289,6 +330,23 @@ async fn load_existing_index(
     (images, pipelines)
 }
 
+/// Resolve the directory the exported toolbox is written to
+///
+/// An explicit `--output` always wins. Otherwise the output anchors on `--config` (the toolbox that
+/// config lives in) so pointing at a toolbox's `config.toml` exports into it; with neither flag the
+/// default is `./toolbox` for a brand-new toolbox. Mirrors `build`'s config-anchored path resolution.
+///
+/// # Arguments
+///
+/// * `cmd` - The export command
+fn resolve_output(cmd: &ExportToolbox) -> PathBuf {
+    // an explicit --output wins; else the --config directory; else the create-new default
+    cmd.output.clone().unwrap_or_else(|| match &cmd.config {
+        Some(config) => build::config_base_dir(config),
+        None => PathBuf::from("./toolbox"),
+    })
+}
+
 /// The `config.toml` at the export output root, if one already exists
 ///
 /// Its presence makes the export an append into an existing toolbox: the file becomes the settings
@@ -296,9 +354,9 @@ async fn load_existing_index(
 ///
 /// # Arguments
 ///
-/// * `cmd` - The export command
-fn existing_config_path(cmd: &ExportToolbox) -> Option<PathBuf> {
-    let path = cmd.output.join("config.toml");
+/// * `output` - The resolved toolbox output directory
+fn existing_config_path(output: &Path) -> Option<PathBuf> {
+    let path = output.join("config.toml");
     path.exists().then_some(path)
 }
 
@@ -527,6 +585,9 @@ fn pipeline_dest_dir(output: &Path, settings: &ToolboxSettings, name: &str) -> P
 /// * `image_dir` - The tool directory to write this image's files into (resolved by the caller)
 /// * `config` - The resolved image request (its `name` is the on-disk file stem)
 /// * `version` - The toolbox version label to record
+/// * `build` - Whether the manifest should mark this image `build = true` (a Dockerfile was found
+///   in its explicit destination dir); `false` writes the default reference-only manifest pinned
+///   to the captured registry url via `exported_image_path`
 /// * `network_policies` - The policy definitions this image references
 /// * `review` - Open the config in an editor for review before writing
 /// * `editor` - The editor command used when `review` is set
@@ -537,6 +598,7 @@ async fn write_image_entry(
     image_dir: &Path,
     config: &ImageRequest,
     version: &str,
+    build: bool,
     network_policies: &[NetworkPolicyRequest],
     review: bool,
     editor: &str,
@@ -545,9 +607,12 @@ async fn write_image_entry(
 ) -> Result<WriteOutcome, Error> {
     // the config's own name is the json file stem; image_dir is the caller-resolved tool directory
     let name = &config.name;
-    // canonical (sorted-key) JSON so reordered map fields don't churn the file
-    let config_json = crate::utils::canonical_json(config)
-        .map_err(|e| Error::new(format!("Failed to serialize image '{name}': {e}")))?;
+    // curated (prioritized) field order so the written <name>.json matches what `init` scaffolds —
+    // a consistent, edit-friendly layout across every spot that writes an image config. The order
+    // is still deterministic (curated keys first, remaining keys sorted), so it stays diff-stable.
+    let config_json =
+        crate::utils::curated_json(config, crate::handlers::imports::merge::IMAGE_FIELD_ORDER)
+            .map_err(|e| Error::new(format!("Failed to serialize image '{name}': {e}")))?;
     // let the user hand-edit the config first when --review is set; otherwise write it verbatim
     let final_json = if review {
         // suspend the spinner while the editor owns the terminal
@@ -599,17 +664,19 @@ async fn write_image_entry(
     }
     // sort so regenerated manifests don't churn on set iteration order
     policy_files.sort_unstable();
-    // record the real registry url so a rebuild of this (build = false) export keeps the path the
-    // image actually lives at instead of deriving one. image_name is set to the tool name (the
-    // second arg): it's irrelevant while the image is pinned via exported_image_path, and only
-    // matters if the user later flips build = true and opts into --use-image-path.
+    // when build is set (a Dockerfile sits in this image's explicit dest dir), write a build = true
+    // manifest with no exported_image_path so the rebuild builds from that context. otherwise write
+    // the default reference-only (build = false) manifest and record the real registry url via
+    // exported_image_path so a rebuild keeps the path the image actually lives at instead of deriving
+    // one. image_name is set to the tool name (the second arg): it's irrelevant while the image is
+    // pinned via exported_image_path, and only matters under build = true + --use-image-path.
     let manifest = generate_image_manifest(
         name,
         name,
         version,
-        true,
+        !build,
         &policy_files,
-        config.image.as_deref(),
+        if build { None } else { config.image.as_deref() },
     );
     if resolver
         .write_toml::<build::ManifestToml>(&image_dir.join("manifest.toml"), &manifest, progress)
@@ -661,9 +728,14 @@ async fn write_pipeline_entry(
 ) -> Result<WriteOutcome, Error> {
     // the config's own name is the json file stem; pipeline_dir is the caller-resolved tool directory
     let name = &config.name;
-    // canonical (sorted-key) JSON so reordered map fields don't churn the file
-    let config_json = crate::utils::canonical_json(config)
-        .map_err(|e| Error::new(format!("Failed to serialize pipeline '{name}': {e}")))?;
+    // curated (prioritized) field order so the written <name>.json matches what `init` scaffolds —
+    // a consistent, edit-friendly layout across every spot that writes a pipeline config. The order
+    // is still deterministic (curated keys first, remaining keys sorted), so it stays diff-stable.
+    let config_json = crate::utils::curated_json(
+        config,
+        crate::handlers::imports::merge::PIPELINE_FIELD_ORDER,
+    )
+    .map_err(|e| Error::new(format!("Failed to serialize pipeline '{name}': {e}")))?;
     // let the user hand-edit the config first when --review is set; otherwise write it verbatim
     let final_json = if review {
         // suspend the spinner while the editor owns the terminal
@@ -737,6 +809,23 @@ pub async fn export(
              omit them to export the whole group"
         );
     }
+    // resolve the toolbox output directory once: an explicit --output, else the --config dir, else
+    // ./toolbox. Announce a defaulted output (implicit-behavior rule) so it's clear where the
+    // toolbox is written and why; an explicit --output is self-evident and gets no extra notice
+    let output = resolve_output(cmd);
+    if cmd.output.is_none() {
+        if cmd.config.is_some() {
+            println!(
+                "No --output set; exporting into the toolbox at '{}' (from --config)",
+                output.display().to_string().bright_cyan()
+            );
+        } else {
+            println!(
+                "No --output set; creating a new toolbox at '{}'",
+                output.display().to_string().bright_cyan()
+            );
+        }
+    }
     // resolve every image/pipeline to export (group export and/or named resources, deduped)
     let (images, pipelines) = resolve_resources(&thorium, cmd, args.workers).await?;
     // resolve the editor up front so --review uses a consistent command across all configs
@@ -746,7 +835,7 @@ pub async fn export(
         "Exporting {} images and {} pipelines to '{}'{}",
         images.len().to_string().bright_green(),
         pipelines.len().to_string().bright_green(),
-        cmd.output.display().to_string().bright_cyan(),
+        output.display().to_string().bright_cyan(),
         if cmd.with_images {
             " (bundling container images)".bright_yellow().to_string()
         } else {
@@ -801,7 +890,7 @@ pub async fn export(
     }
     // detect an existing config.toml at the output root: it makes this an append into an existing
     // toolbox (its settings are the source, and it is preserved unless --overwrite-config)
-    let existing_config = existing_config_path(cmd);
+    let existing_config = existing_config_path(&output);
     // resolve the toolbox-wide settings — explicit --config seed, else an existing config.toml at
     // the output (append), else the --name/--registry flags. Bundling is driven by --with-images.
     let settings = resolve_settings(cmd, existing_config.as_deref(), &progress)?;
@@ -857,7 +946,17 @@ pub async fn export(
     // index an existing toolbox at the output (append reconciliation): lets the write loops skip
     // unchanged resources and their bundle work, and refuse to write a second copy of an identity
     // that already lives at a different directory (a build-duplicate). Empty for a fresh export.
-    let (existing_images, existing_pipelines) = load_existing_index(cmd, &progress).await;
+    let (existing_images, existing_pipelines) = load_existing_index(&output, &progress).await;
+    // index existing image versions by (group, name) so the write loop can warn when exporting a
+    // version that would sit alongside a different version already in the toolbox (a silent
+    // duplicate otherwise)
+    let mut existing_image_versions: HashMap<(String, String), Vec<String>> = HashMap::new();
+    for (group, name, version) in existing_images.keys() {
+        existing_image_versions
+            .entry((group.clone(), name.clone()))
+            .or_default()
+            .push(version.clone());
+    }
     // write the resolved manifest to disk, resolving on-disk conflicts
     let mut resolver = DiskConflictResolver::new(cmd.overwrite, can_prompt, editor.to_string());
     let mut stopped = false;
@@ -883,34 +982,71 @@ pub async fn export(
                     config.name
                 ),
             };
-            let image_dir = cmd.output.join(&target_rel);
-            // append reconciliation against an existing toolbox: skip an unchanged image (its config
-            // and its bundle work), and refuse to write a second copy of an identity that already
-            // lives at a different directory (which would fail `build`)
+            let image_dir = output.join(&target_rel);
+            // when the image is pointed at an explicit `=dest` directory that already holds a
+            // Dockerfile, the user is folding this config into an existing build context and intends
+            // to build the image from source — so mark its manifest build = true (instead of the
+            // default reference-only build = false). Only the explicit-dest case is auto-detected;
+            // a default-layout export dir is freshly created and never has a Dockerfile.
+            let build = dest_overrides.contains_key(config.name.as_str())
+                && image_dir.join("Dockerfile").exists();
+            if build {
+                progress.info_anonymous(format!(
+                    "Found a Dockerfile in '{target_rel}'; marking image '{}' build = true",
+                    config.name
+                ));
+            }
+            // append reconciliation against an existing toolbox. The per-file resolver below already
+            // no-ops a byte-identical on-disk config, so the config files are always (re)written to
+            // guarantee they exist on disk — a toolbox.json that records an image is NOT proof its
+            // per-tool files are present (they may have been removed, or this run places them at a new
+            // `=dest`). Reconciliation here only: (1) refuses to write a second copy of an identity
+            // the toolbox already records at a different directory (which would fail `build`), and
+            // (2) skips the expensive container re-bundle when the config is unchanged AND its
+            // tarball is already on disk.
             let key = (config.group.clone(), config.name.clone(), version.clone());
+            let mut skip_bundle = false;
             if let Some((existing_json, existing_dir)) = existing_images.get(&key) {
-                let current_json = crate::utils::canonical_json(config)?;
-                if &current_json == existing_json {
-                    progress.info_anonymous(format!(
-                        "Unchanged: image '{}:{version}' already in the toolbox; skipping",
-                        config.name
-                    ));
-                    continue;
-                }
                 if !existing_dir.is_empty() && existing_dir != &target_rel {
                     progress.warning(format!(
-                        "image '{}:{version}' already exists in the toolbox at '{existing_dir}' with \
-                         a different config; not writing a second copy at '{target_rel}' (it would \
-                         fail build) — update the existing copy or export to its directory",
+                        "image '{}:{version}' already exists in the toolbox at '{existing_dir}'; not \
+                         writing a second copy at '{target_rel}' (it would fail build) — update the \
+                         existing copy or export to its directory",
                         config.name
                     ));
                     continue;
                 }
+                // unchanged config with its tarball already saved: no need to re-pull/save it
+                if &crate::utils::canonical_json(config)? == existing_json
+                    && (!cmd.with_images
+                        || image_dir.join(format!("{}.tar.gz", config.name)).exists())
+                {
+                    skip_bundle = true;
+                    progress.info_anonymous(format!(
+                        "Unchanged: image '{}:{version}' already current; ensuring files exist and \
+                         skipping container re-bundle",
+                        config.name
+                    ));
+                }
+            } else if let Some(versions) =
+                existing_image_versions.get(&(config.group.clone(), config.name.clone()))
+            {
+                // the exact (group, name, version) isn't in the toolbox, but the same image is there
+                // at other version(s): writing this one adds a second version entry, which is easy to
+                // do unintentionally (e.g. a 'latest' export beside a pinned copy), so warn
+                progress.warning(format!(
+                    "image '{}' is already in the toolbox at version(s) {}; exporting version \
+                     '{version}' adds a second version — pin the export version or remove the old \
+                     copy if you meant to replace it",
+                    config.name,
+                    versions.join(", ")
+                ));
             }
             let outcome = write_image_entry(
                 &image_dir,
                 config,
                 version,
+                build,
                 &entry.network_policies,
                 review,
                 editor,
@@ -924,8 +1060,9 @@ pub async fn export(
                 break 'images;
             }
             // defer the heavy container pull/save to a bounded-parallel pass after all the
-            // sequential (prompt-driven) config writes complete
-            if cmd.with_images {
+            // sequential (prompt-driven) config writes complete; skip it for an unchanged image
+            // whose tarball is already bundled (skip_bundle)
+            if cmd.with_images && !skip_bundle {
                 bundle_jobs.push((config.name.clone(), config.image.clone(), image_dir));
             }
         }
@@ -938,18 +1075,19 @@ pub async fn export(
                 let Some(config) = &entry.config else {
                     continue;
                 };
-                // append reconciliation: skip a pipeline whose config is unchanged from the existing
-                // toolbox (pipelines have no bundle/dir, so only the unchanged comparison applies)
+                // append reconciliation: the per-file resolver no-ops a byte-identical pipeline
+                // config, so its files are always (re)written to guarantee they exist on disk (a
+                // recorded pipeline in toolbox.json is not proof its files are present, and this run
+                // may place them at a new `=dest`). A pipeline already current in the toolbox just
+                // gets an informational note (pipelines have no bundle to skip).
                 let key = (config.group.clone(), config.name.clone(), version.clone());
-                if let Some(existing_json) = existing_pipelines.get(&key) {
-                    let current_json = crate::utils::canonical_json(config)?;
-                    if &current_json == existing_json {
-                        progress.info_anonymous(format!(
-                            "Unchanged: pipeline '{}:{version}' already in the toolbox; skipping",
-                            config.name
-                        ));
-                        continue;
-                    }
+                if let Some(existing_json) = existing_pipelines.get(&key)
+                    && &crate::utils::canonical_json(config)? == existing_json
+                {
+                    progress.info_anonymous(format!(
+                        "Unchanged: pipeline '{}:{version}' already current in the toolbox",
+                        config.name
+                    ));
                 }
                 // the resolved image map carries the (possibly renamed) names paired
                 // with the versions we exported them under
@@ -962,8 +1100,8 @@ pub async fn export(
                 // resolve the tool directory: an explicit per-resource `=destpath` wins, else the
                 // toolbox's configured pipeline layout (default `pipelines/<name>`)
                 let pipeline_dir = match dest_overrides.get(config.name.as_str()) {
-                    Some(dest) => cmd.output.join(dest),
-                    None => pipeline_dest_dir(&cmd.output, &settings, &config.name),
+                    Some(dest) => output.join(dest),
+                    None => pipeline_dest_dir(&output, &settings, &config.name),
                 };
                 let outcome = write_pipeline_entry(
                     &pipeline_dir,
@@ -1041,7 +1179,7 @@ pub async fn export(
     // the source above) unless --overwrite-config, so an append never clobbers the toolbox's
     // settings. A fresh export creates it (announced). The real image urls live in each image config
     // (see exported_image_path), so the registry here only matters for tools later marked buildable.
-    let config_path = cmd.output.join("config.toml");
+    let config_path = output.join("config.toml");
     if existing_config.is_some() && !cmd.overwrite_config {
         progress.info_anonymous(format!(
             "Keeping existing config.toml at '{}' (pass --overwrite-config to replace it)",
@@ -1073,12 +1211,12 @@ pub async fn export(
     // Auto-build toolbox.json, preserving the real image urls captured from Thorium.
     // build walks the tree with synchronous std::fs, so run it off the async runtime.
     let build_cmd = BuildToolbox {
-        config: cmd.output.join("config.toml"),
+        config: output.join("config.toml"),
         // leaf comes from the tool name, not image_name: an export pins urls via
         // exported_image_path, so the repo-path leaf is irrelevant here
         use_image_path: false,
-        output: Some(cmd.output.join("toolbox.json")),
-        path: Some(cmd.output.clone()),
+        output: Some(output.join("toolbox.json")),
+        path: Some(output.clone()),
         // an export records each image's real published url, so no tag suffix is applied
         tag_suffix: None,
     };
@@ -1095,8 +1233,8 @@ pub async fn export(
         println!(
             "\n{} Toolbox exported to '{}'. Import it with: thorctl toolbox import {}",
             "Done!".bright_green(),
-            cmd.output.display(),
-            cmd.output.join("toolbox.json").display()
+            output.display(),
+            output.join("toolbox.json").display()
         );
         return Ok(());
     }
@@ -1120,7 +1258,7 @@ pub async fn export(
         "\n{} Toolbox written to '{}', but it is INCOMPLETE: {}. Resolve these and re-export \
          before importing.",
         "Warning:".bright_yellow(),
-        cmd.output.display(),
+        output.display(),
         problems.join("; ")
     );
     Err(Error::new(format!(
@@ -1167,4 +1305,55 @@ async fn bundle_image(
     container::save(url, &tar, &bar).await?;
     bar.finish_and_clear();
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{ExportToolbox, resolve_output};
+    use std::path::PathBuf;
+
+    /// Build an `ExportToolbox` with only the path-relevant fields set; the rest default to a
+    /// no-op export so `resolve_output` can be exercised in isolation
+    fn export_cmd(output: Option<&str>, config: Option<&str>) -> ExportToolbox {
+        ExportToolbox {
+            group: None,
+            pipelines: Vec::new(),
+            images: Vec::new(),
+            group_override: None,
+            output: output.map(PathBuf::from),
+            config: config.map(PathBuf::from),
+            name: "My Toolbox".to_string(),
+            registry: None,
+            skip_conflicts: false,
+            review: false,
+            overwrite: false,
+            overwrite_config: false,
+            with_images: false,
+        }
+    }
+
+    /// An explicit `--output` always wins, regardless of `--config`
+    #[test]
+    fn resolve_output_prefers_explicit() {
+        let cmd = export_cmd(Some("./dist"), Some("mytb/config.toml"));
+        assert_eq!(resolve_output(&cmd), PathBuf::from("./dist"));
+    }
+
+    /// With no `--output`, the output anchors on the `--config` directory
+    #[test]
+    fn resolve_output_anchors_on_config() {
+        // a config in a subdir → that subdir
+        let cmd = export_cmd(None, Some("mytb/config.toml"));
+        assert_eq!(resolve_output(&cmd), PathBuf::from("mytb"));
+        // a bare config.toml has an empty parent → the current directory
+        let bare = export_cmd(None, Some("config.toml"));
+        assert_eq!(resolve_output(&bare), PathBuf::from("."));
+    }
+
+    /// With neither `--output` nor `--config`, the default is the create-new `./toolbox`
+    #[test]
+    fn resolve_output_defaults_to_toolbox() {
+        let cmd = export_cmd(None, None);
+        assert_eq!(resolve_output(&cmd), PathBuf::from("./toolbox"));
+    }
 }
