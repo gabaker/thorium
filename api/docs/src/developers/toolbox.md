@@ -371,7 +371,10 @@ into `./my-toolbox`, and the rebuild folds everything in. Pass `--overwrite-conf
 actually want to change the toolbox's settings; if a flag like `--with-images` or `--registry`
 contradicts the preserved config, export warns that the flag is ignored. (`--config` *seeds* settings
 from another toolbox **and** anchors the output to that config's directory unless `-o` is set — so
-`-c X/config.toml` appends into `X`, while seeding into a *different* directory needs an explicit `-o`.)
+`-c X/config.toml` appends into `X`, while seeding into a *different* directory needs an explicit `-o`.
+A `--config` that points at a **missing** file isn't fatal: export warns ("config.toml not found …;
+creating a new toolbox there instead of appending") and creates a new toolbox, so a mistyped or
+not-yet-created target shows up as a notice rather than a read error.)
 
 When appending into an existing toolbox, export **reconciles** against it. The existing toolbox is read
 from its committed `toolbox.json`; if that file is missing or unparsable, export falls back to crawling
@@ -387,19 +390,24 @@ but warned, since exporting (say) `latest` beside a pinned copy quietly adds a s
 export does none of this.
 
 **Placing a single resource (`=dir`).** A `-i`/`-p` entry may carry a `group/name=dir` suffix to
-write that resource's files into a chosen directory (relative to the toolbox root) instead of the
-configured/default layout — for example to fold a Thorium image config into a directory that already
-holds its Dockerfile:
+write that resource's files into a chosen directory instead of the configured/default layout — for
+example to fold a Thorium image config into a directory that already holds its Dockerfile:
 
 ```bash
 thorctl toolbox export -i static/clamav=tools/clamav -o ./my-toolbox
 # writes tools/clamav/{manifest.toml, clamav.json, description.md, *.policy.json}
 ```
 
+`dir` may be **relative or absolute**. A relative `dir` is interpreted against the toolbox root; an
+absolute one is taken literally; either is normalized and re-expressed relative to the root — so an
+explicit path into a toolbox elsewhere works, e.g. with `-c ../../other/tb/config.toml` you can write
+`-i static/clamav=../../other/tb/tools/clamav` (it lands at `tools/clamav` inside that toolbox). The
+only rule is that it must resolve **inside** the toolbox root; a `dir` that lands outside is rejected
+(`build` only includes files under the toolbox).
+
 `=dir` is placement only — it never changes which pipeline or images are selected (a pipeline's
-membership and order come from Thorium). It must be a relative subpath (no absolute path or `..`).
-Whole-group exports and auto-pulled dependency images use the configured/default layout unless an
-image is also named with its own `=dir`.
+membership and order come from Thorium). Whole-group exports and auto-pulled dependency images use the
+configured/default layout unless an image is also named with its own `=dir`.
 
 If the `=dir` destination already contains a `Dockerfile`, export reads it as a build context you are
 folding the config into and writes that image's `manifest.toml` with `build = true` (and no

@@ -201,27 +201,119 @@ struct ToolboxSettings {
     base_image: Option<build::BaseImage>,
 }
 
-/// Collect the per-resource `=destpath` placements from the `--images`/`--pipelines` selections
+/// Lexically normalize a path by folding `.` and `..` components without touching the filesystem
 ///
-/// Returns a map of resource name to its destination directory (relative to the toolbox root).
-/// Keyed by name (the on-disk tool-directory leaf); a resource without an explicit `=dest` is
-/// absent and falls back to the configured/default layout. Whole-group exports and auto-pulled
-/// dependency images aren't named here, so they are never overridden. Specs that fail to parse are
-/// skipped — `resolve_resources` re-parses and surfaces the error.
+/// Used to compare a placement destination against the toolbox root when neither directory need
+/// exist yet, so `..` can't be resolved by `canonicalize`. A `..` cancels a preceding normal
+/// component; one at a relative root is kept (it still escapes), and one just past an absolute root
+/// is dropped (it can't go above root). This is purely lexical — it does not follow symlinks.
+///
+/// # Arguments
+///
+/// * `path` - The path to normalize
+fn lexical_normalize(path: &Path) -> PathBuf {
+    // fold components onto a stack so a trailing `..` can pop the previous normal segment
+    let mut stack: Vec<std::path::Component> = Vec::new();
+    for comp in path.components() {
+        match comp {
+            // a bare `.` contributes nothing to the resolved path
+            std::path::Component::CurDir => {}
+            std::path::Component::ParentDir => {
+                if let Some(std::path::Component::Normal(_)) = stack.last() {
+                    // cancel the preceding real directory
+                    stack.pop();
+                } else if !matches!(
+                    stack.last(),
+                    Some(std::path::Component::RootDir | std::path::Component::Prefix(_))
+                ) {
+                    // keep a `..` that has no normal component to cancel (a relative-root escape);
+                    // drop one sitting right on an absolute root, which can't go higher
+                    stack.push(comp);
+                }
+            }
+            // root, prefix, and normal components carry through verbatim
+            other => stack.push(other),
+        }
+    }
+    // reassemble the folded components into a path
+    let mut out = PathBuf::new();
+    for comp in stack {
+        out.push(comp.as_os_str());
+    }
+    out
+}
+
+/// Resolve a per-resource `=dest` placement to a directory relative to the toolbox root
+///
+/// A relative `dest` is interpreted against the toolbox root; an absolute one is taken as given. Both
+/// it and the root are made absolute (against the current directory) and lexically normalized, then
+/// the dest is re-expressed relative to the root. The placement MUST land inside the toolbox — `build`
+/// crawls the output tree, so files written outside it would never be discovered — so a dest that
+/// resolves outside (or onto the root itself) is a hard error with an actionable message.
+///
+/// # Arguments
+///
+/// * `output` - The resolved toolbox output directory (the toolbox root)
+/// * `dest` - The raw `=dest` string from the selection
+fn resolve_dest_within(output: &Path, dest: &str) -> Result<String, Error> {
+    // both paths are made absolute against the working directory so a relative output and a relative
+    // dest are compared on equal footing
+    let cwd = std::env::current_dir()
+        .map_err(|e| Error::new(format!("Failed to read the current directory: {e}")))?;
+    let make_abs = |path: &Path| {
+        if path.is_absolute() {
+            path.to_path_buf()
+        } else {
+            cwd.join(path)
+        }
+    };
+    let output_abs = lexical_normalize(&make_abs(output));
+    let dest_path = Path::new(dest);
+    // a relative dest is rooted at the toolbox; an absolute dest is taken literally
+    let dest_abs = if dest_path.is_absolute() {
+        lexical_normalize(dest_path)
+    } else {
+        lexical_normalize(&output_abs.join(dest_path))
+    };
+    // re-express the dest relative to the toolbox root; anything that won't strip (or strips to
+    // empty, i.e. the root itself) is outside the toolbox and can't be a valid placement
+    match dest_abs.strip_prefix(&output_abs) {
+        Ok(rel) if !rel.as_os_str().is_empty() => Ok(rel.to_string_lossy().into_owned()),
+        _ => Err(Error::new(format!(
+            "destination '{dest}' resolves outside the toolbox root '{}'; a placement path must \
+             point to a subdirectory inside the toolbox (build only includes files under it)",
+            output.display()
+        ))),
+    }
+}
+
+/// Resolve the per-resource `=dest` placements from the `--images`/`--pipelines` selections
+///
+/// Returns a map of resource name to its destination directory **relative to the toolbox root** (the
+/// stored/reconciliation form), with any absolute or `..`-bearing input resolved against the root by
+/// [`resolve_dest_within`]. Keyed by name (the on-disk tool-directory leaf); a resource without an
+/// explicit `=dest` is absent and falls back to the configured/default layout. Whole-group exports
+/// and auto-pulled dependency images aren't named here, so they are never overridden. A dest that
+/// resolves outside the toolbox is a hard error.
 ///
 /// # Arguments
 ///
 /// * `cmd` - The export command
-fn collect_dest_overrides(cmd: &ExportToolbox) -> HashMap<String, String> {
+/// * `output` - The resolved toolbox output directory
+fn resolve_dest_overrides(
+    cmd: &ExportToolbox,
+    output: &Path,
+) -> Result<HashMap<String, String>, Error> {
     let mut overrides = HashMap::new();
     for spec in cmd.images.iter().chain(cmd.pipelines.iter()) {
-        if let Ok(parsed) = ResourceSpec::parse(spec, cmd.group.as_deref())
-            && let Some(dest) = parsed.dest
-        {
-            overrides.insert(parsed.name, dest);
+        // resolve_resources already parsed and validated every spec, so a parse failure here is
+        // unexpected; surface it rather than silently dropping the placement
+        let parsed = ResourceSpec::parse(spec, cmd.group.as_deref()).map_err(Error::new)?;
+        if let Some(dest) = parsed.dest {
+            overrides.insert(parsed.name, resolve_dest_within(output, &dest)?);
         }
     }
-    overrides
+    Ok(overrides)
 }
 
 /// Load the existing toolbox manifest at the output for append reconciliation
@@ -382,10 +474,12 @@ fn settings_from_config(config: build::ToolboxConfig, with_images: bool) -> Tool
 
 /// Resolve the toolbox-wide settings for an export
 ///
-/// Priority: an explicit `--config` (seed from another toolbox); else an existing `config.toml` at
-/// the output root (append — its settings are reused and the file is preserved unless
-/// `--overwrite-config`); else the `--name`/`--registry` flags (a new toolbox). Bundling is always
-/// driven by the `--with-images` export action, not inherited from a config's `bundled_images`.
+/// Priority: an explicit `--config` that exists (seed from another toolbox); else an existing
+/// `config.toml` at the output root (append — its settings are reused and the file is preserved
+/// unless `--overwrite-config`); else the `--name`/`--registry` flags (a new toolbox). A `--config`
+/// that points at a missing file warns and falls through to the new-toolbox path rather than
+/// hard-erroring, so a not-yet-created (or mistyped) target surfaces as a clear notice. Bundling is
+/// always driven by the `--with-images` export action, not inherited from a config's `bundled_images`.
 ///
 /// # Arguments
 ///
@@ -397,11 +491,20 @@ fn resolve_settings(
     existing_config: Option<&Path>,
     progress: &Bar,
 ) -> Result<ToolboxSettings, Error> {
-    // (1) an explicit --config seeds settings from another toolbox
+    // (1) an explicit --config seeds settings from another toolbox — when it exists. A --config that
+    // names a missing file means the intended toolbox isn't there (yet), so warn and fall through to
+    // creating a new toolbox from the flags instead of failing with a read error; a typo'd path
+    // surfaces as this warning rather than a silent new toolbox
     if let Some(config_path) = &cmd.config {
-        return Ok(settings_from_config(
-            build::load_config(config_path)?,
-            cmd.with_images,
+        if config_path.exists() {
+            return Ok(settings_from_config(
+                build::load_config(config_path)?,
+                cmd.with_images,
+            ));
+        }
+        progress.warning(format!(
+            "config.toml not found at '{}'; creating a new toolbox there instead of appending",
+            config_path.display()
         ));
     }
     // (2) append: an existing config.toml at the output is the settings source
@@ -937,12 +1040,13 @@ pub async fn export(
     collisions::resolve_collisions(&mut manifest, &sources, can_prompt, &progress)?;
     // re-check coherence: collision renames/repointing can re-break a pipeline's group view
     shared::warn_dropped(&manifest.validate_group_coherence(), &progress);
-    // map each explicitly-named resource (by tool name) to its optional `=destpath`, so the write
-    // loops can place a single resource at a chosen directory instead of the configured layout.
-    // Keyed by name because that is the on-disk tool directory leaf and names are unique after
-    // collision resolution; whole-group/auto-pulled resources aren't named here so they use the
-    // configured/default layout.
-    let dest_overrides = collect_dest_overrides(cmd);
+    // map each explicitly-named resource (by tool name) to its optional `=destpath`, resolved to a
+    // directory relative to the toolbox root, so the write loops can place a single resource at a
+    // chosen directory instead of the configured layout. Keyed by name because that is the on-disk
+    // tool directory leaf and names are unique after collision resolution; whole-group/auto-pulled
+    // resources aren't named here so they use the configured/default layout. A dest that resolves
+    // outside the toolbox is a hard error here, before anything is written.
+    let dest_overrides = resolve_dest_overrides(cmd, &output)?;
     // index an existing toolbox at the output (append reconciliation): lets the write loops skip
     // unchanged resources and their bundle work, and refuse to write a second copy of an identity
     // that already lives at a different directory (a build-duplicate). Empty for a fresh export.
@@ -1309,8 +1413,8 @@ async fn bundle_image(
 
 #[cfg(test)]
 mod tests {
-    use super::{ExportToolbox, resolve_output};
-    use std::path::PathBuf;
+    use super::{ExportToolbox, resolve_dest_within, resolve_output};
+    use std::path::{Path, PathBuf};
 
     /// Build an `ExportToolbox` with only the path-relevant fields set; the rest default to a
     /// no-op export so `resolve_output` can be exercised in isolation
@@ -1355,5 +1459,42 @@ mod tests {
     fn resolve_output_defaults_to_toolbox() {
         let cmd = export_cmd(None, None);
         assert_eq!(resolve_output(&cmd), PathBuf::from("./toolbox"));
+    }
+
+    /// A relative `=dest` is interpreted relative to the toolbox root
+    #[test]
+    fn resolve_dest_within_relative_is_toolbox_rooted() {
+        assert_eq!(
+            resolve_dest_within(Path::new("/tb"), "tools/clamav").unwrap(),
+            "tools/clamav"
+        );
+    }
+
+    /// An absolute `=dest` inside the toolbox is re-expressed relative to the root
+    #[test]
+    fn resolve_dest_within_absolute_inside_is_relativized() {
+        assert_eq!(
+            resolve_dest_within(Path::new("/tb"), "/tb/pipelines/static/identify-files").unwrap(),
+            "pipelines/static/identify-files"
+        );
+    }
+
+    /// A `..`-bearing dest that normalizes back inside the toolbox is accepted (the explicit-path
+    /// case: a path that re-descends into the toolbox)
+    #[test]
+    fn resolve_dest_within_dotdot_reentering_is_accepted() {
+        assert_eq!(
+            resolve_dest_within(Path::new("/a/b/tb"), "../tb/pipelines/x").unwrap(),
+            "pipelines/x"
+        );
+    }
+
+    /// A dest that lands outside the toolbox (absolute elsewhere, an escaping `..`, or the root
+    /// itself) is rejected
+    #[test]
+    fn resolve_dest_within_outside_is_rejected() {
+        assert!(resolve_dest_within(Path::new("/tb"), "/other/x").is_err());
+        assert!(resolve_dest_within(Path::new("/tb"), "../escape").is_err());
+        assert!(resolve_dest_within(Path::new("/tb"), "/tb").is_err());
     }
 }

@@ -551,9 +551,10 @@ pub struct ExportToolbox {
     /// comma-separated for multiple.
     ///
     /// Images referenced by exported pipelines are auto-included. The optional `[=path]` suffix
-    /// writes that pipeline's files to `path` (a dir relative to the toolbox root), e.g.
-    /// `static/av=pipelines/av`; without it the configured/default layout is used. `[=path]` is
-    /// placement only — it never changes which pipeline (or its images) is selected.
+    /// writes that pipeline's files to `path`, e.g. `static/av=pipelines/av`; without it the
+    /// configured/default layout is used. `path` may be relative (interpreted against the toolbox
+    /// root) or absolute, but must resolve to a directory inside the toolbox. `[=path]` is placement
+    /// only — it never changes which pipeline (or its images) is selected.
     #[clap(
         short = 'p',
         long = "pipelines",
@@ -564,9 +565,10 @@ pub struct ExportToolbox {
     /// Export specific standalone images. Format: `group/name[=path]` (or `name[=path]` with
     /// --group), comma-separated for multiple.
     ///
-    /// The optional `[=path]` suffix writes that image's files to `path` (a dir relative to the
-    /// toolbox root), e.g. `static/clamav=tools/clamav` to fold a config into an existing
-    /// build-context dir; naming an auto-pulled dependency image this way also redirects it.
+    /// The optional `[=path]` suffix writes that image's files to `path`, e.g.
+    /// `static/clamav=tools/clamav` to fold a config into an existing build-context dir; naming an
+    /// auto-pulled dependency image this way also redirects it. `path` may be relative (interpreted
+    /// against the toolbox root) or absolute, but must resolve to a directory inside the toolbox.
     /// `[=path]` is placement only.
     #[clap(
         short = 'i',
@@ -666,26 +668,14 @@ impl ResourceSpec {
     /// * `default_group` - The group to fall back to when the reference has no group prefix
     pub fn parse(s: &str, default_group: Option<&str>) -> Result<Self, String> {
         // split off an optional `=dest` placement suffix on the FIRST `=`, so the left side is the
-        // group/name reference and the right side is the destination directory
+        // group/name reference and the right side is the destination directory. The dest may be
+        // absolute or relative (a relative dest is later interpreted against the toolbox root); it is
+        // only checked for emptiness here — `export` resolves it and verifies it lands inside the
+        // toolbox once the output root is known
         let (reference, dest) = match s.split_once('=') {
             Some((reference, dest)) => {
                 if dest.is_empty() {
                     return Err(format!("'{s}' has an empty destination path after '='"));
-                }
-                // the destination must stay inside the toolbox root so export can't write outside it
-                let path = std::path::Path::new(dest);
-                if path.is_absolute() {
-                    return Err(format!(
-                        "destination '{dest}' must be a relative path inside the toolbox, not absolute"
-                    ));
-                }
-                if path
-                    .components()
-                    .any(|component| matches!(component, std::path::Component::ParentDir))
-                {
-                    return Err(format!(
-                        "destination '{dest}' must stay inside the toolbox (no '..' components)"
-                    ));
                 }
                 (reference, Some(dest.to_string()))
             }
@@ -776,7 +766,7 @@ mod tests {
         assert!(ResourceSpec::parse("clamav", None).is_err());
     }
 
-    /// An `=dest` suffix sets the placement directory, split on the first `=`, and is validated
+    /// An `=dest` suffix sets the placement directory, split on the first `=`
     #[test]
     fn resource_spec_parses_destination() {
         // the reference and destination split on the first '='
@@ -788,9 +778,22 @@ mod tests {
         let bare = ResourceSpec::parse("clamav=tools/clamav", Some("static")).expect("bare + dest");
         assert_eq!(bare.name, "clamav");
         assert_eq!(bare.dest.as_deref(), Some("tools/clamav"));
-        // an absolute or parent-escaping destination is rejected, as is an empty one
-        assert!(ResourceSpec::parse("static/clamav=/abs/path", None).is_err());
-        assert!(ResourceSpec::parse("static/clamav=../escape", None).is_err());
+        // absolute and parent-escaping destinations parse here (export resolves them against the
+        // toolbox root and rejects only those that land outside it); an empty dest is rejected
+        assert_eq!(
+            ResourceSpec::parse("static/clamav=/abs/path", None)
+                .expect("absolute dest parses")
+                .dest
+                .as_deref(),
+            Some("/abs/path")
+        );
+        assert_eq!(
+            ResourceSpec::parse("static/clamav=../rel", None)
+                .expect("parent-relative dest parses")
+                .dest
+                .as_deref(),
+            Some("../rel")
+        );
         assert!(ResourceSpec::parse("static/clamav=", None).is_err());
     }
 }
