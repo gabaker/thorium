@@ -565,6 +565,29 @@ fn dirs_by_name(
     dirs
 }
 
+/// Build a `name → set of groups` lookup from a reconciliation index keyed by `(group, name, version)`
+///
+/// Lets a write loop notice when an exported tool's *name* already exists in the toolbox under a
+/// *different* group — the tell-tale of a group rename (e.g. a tool that is `static2/<name>` in Thorium
+/// but `static1/<name>` in the toolbox) where the user forgot `--group-override`. The group set is
+/// sorted so the warning lists them deterministically.
+///
+/// # Arguments
+///
+/// * `index` - The reconciliation index (`(group, name, version) → (json, dir)`)
+fn groups_by_name(
+    index: &HashMap<(String, String, String), (String, String)>,
+) -> HashMap<String, std::collections::BTreeSet<String>> {
+    let mut by_name: HashMap<String, std::collections::BTreeSet<String>> = HashMap::new();
+    for (group, name, _version) in index.keys() {
+        by_name
+            .entry(name.clone())
+            .or_default()
+            .insert(group.clone());
+    }
+    by_name
+}
+
 /// The reconciliation outcome for one resource being exported into a (possibly existing) toolbox
 #[derive(Debug, PartialEq, Eq)]
 enum Placement {
@@ -1301,6 +1324,10 @@ pub async fn export(
     // recorded directory) instead of writing a duplicate at the default layout
     let existing_image_dirs = dirs_by_name(&existing_images);
     let existing_pipeline_dirs = dirs_by_name(&existing_pipelines);
+    // index the groups each tool name appears under, so writing a "new" tool whose name already exists
+    // under a different group (a likely group rename) can warn instead of silently duplicating
+    let existing_image_groups = groups_by_name(&existing_images);
+    let existing_pipeline_groups = groups_by_name(&existing_pipelines);
     // write the resolved manifest to disk, resolving on-disk conflicts
     let mut resolver = DiskConflictResolver::new(cmd.overwrite, can_prompt, editor.to_string());
     let mut stopped = false;
@@ -1336,6 +1363,25 @@ pub async fn export(
                 &default_rel,
                 cmd.overwrite,
             );
+            // a New tool whose NAME already exists in the toolbox under a different group is the
+            // tell-tale of a group rename the user didn't bridge (e.g. exporting `static2` into a
+            // toolbox that holds these tools under `static1`); it writes a separate copy rather than
+            // updating, so warn and point at --group-override
+            if let Placement::New(_) = placement
+                && let Some(groups) = existing_image_groups.get(&config.name)
+                && groups.iter().any(|other| other != &config.group)
+            {
+                progress.warning(format!(
+                    "image '{}' is being written under group '{}', but the toolbox already has an \
+                     image named '{}' under group(s) {}; this creates a separate copy instead of \
+                     updating it — pass --group-override <toolbox-group> to reconcile against the \
+                     existing one",
+                    config.name,
+                    config.group,
+                    config.name,
+                    groups.iter().cloned().collect::<Vec<_>>().join(", ")
+                ));
+            }
             // a skip outcome warns and moves on to the next resource (the rest still export)
             let target_rel = match &placement {
                 Placement::New(dir) | Placement::Unchanged(dir) | Placement::Update(dir) => {
@@ -1459,6 +1505,23 @@ pub async fn export(
                     &default_rel,
                     cmd.overwrite,
                 );
+                // same cross-group rename guard as images: a new pipeline whose name already exists in
+                // the toolbox under a different group likely wants --group-override, not a duplicate
+                if let Placement::New(_) = placement
+                    && let Some(groups) = existing_pipeline_groups.get(&config.name)
+                    && groups.iter().any(|other| other != &config.group)
+                {
+                    progress.warning(format!(
+                        "pipeline '{}' is being written under group '{}', but the toolbox already has \
+                         a pipeline named '{}' under group(s) {}; this creates a separate copy instead \
+                         of updating it — pass --group-override <toolbox-group> to reconcile against \
+                         the existing one",
+                        config.name,
+                        config.group,
+                        config.name,
+                        groups.iter().cloned().collect::<Vec<_>>().join(", ")
+                    ));
+                }
                 let target_rel = match &placement {
                     Placement::New(dir) | Placement::Unchanged(dir) | Placement::Update(dir) => {
                         dir.clone()
@@ -1709,8 +1772,8 @@ async fn bundle_image(
 #[cfg(test)]
 mod tests {
     use super::{
-        ExportToolbox, Placement, dirs_by_name, existing_resource_ids, manifest, plan_placement,
-        resolve_dest_within, resolve_output,
+        ExportToolbox, Placement, dirs_by_name, existing_resource_ids, groups_by_name, manifest,
+        plan_placement, resolve_dest_within, resolve_output,
     };
     use std::collections::HashMap;
     use std::path::{Path, PathBuf};
@@ -1819,6 +1882,39 @@ mod tests {
             Some("images/a")
         );
         assert!(!dirs.contains_key(&("g".into(), "b".into())));
+    }
+
+    /// `groups_by_name` maps each tool name to the set of groups it appears under, so a same-named
+    /// tool spread across groups (a rename tell-tale) is detectable
+    #[test]
+    fn groups_by_name_collects_groups_per_name() {
+        let mut index: HashMap<(String, String, String), (String, String)> = HashMap::new();
+        index.insert(
+            ("static1".into(), "clamav".into(), "latest".into()),
+            ("{}".into(), "images/clamav".into()),
+        );
+        index.insert(
+            ("static1".into(), "clamav".into(), "1.0".into()),
+            ("{}".into(), "images/clamav".into()),
+        );
+        index.insert(
+            ("other".into(), "exiftool".into(), "latest".into()),
+            ("{}".into(), "images/exiftool".into()),
+        );
+        let by_name = groups_by_name(&index);
+        // clamav appears under one group (collapsed across its two versions)
+        assert_eq!(
+            by_name
+                .get("clamav")
+                .map(|g| g.iter().cloned().collect::<Vec<_>>()),
+            Some(vec!["static1".to_string()])
+        );
+        assert_eq!(
+            by_name
+                .get("exiftool")
+                .map(|g| g.iter().cloned().collect::<Vec<_>>()),
+            Some(vec!["other".to_string()])
+        );
     }
 
     /// A tool not already in the toolbox is a fresh write at the resolved target (an explicit `=dest`

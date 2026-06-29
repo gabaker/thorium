@@ -396,6 +396,22 @@ gone), updates only tools already present (never adds new ones, never prunes), a
 untouched any tool that no longer exists in Thorium. Without `--overwrite` a no-selection run errors
 with a hint (it inherently rewrites the existing configs).
 
+**Group renames.** A tool's identity is `group/name`, so reconciliation only recognizes an existing
+tool when the incoming group matches the toolbox's. Refresh-all re-fetches by the toolbox's *own*
+group, so it can't bridge a rename — if a tool is `static1/<name>` in the toolbox but `static2/<name>`
+in Thorium, the fetch 404s and it's warned/skipped. To update across a rename, pull the source group
+and remap it onto the toolbox's group:
+
+```bash
+thorctl toolbox export -g static2 --group-override static1 -c ./my-toolbox/config.toml --overwrite
+```
+
+`--group-override` rewrites the incoming tools to `static1` *before* the existing-check, so they update
+the on-disk tools in place (it also adds any `static2` tools not yet in the toolbox, since `-g` pulls
+the whole group). As a safety net, if an exported tool would be written under one group while the
+toolbox already holds a same-named tool under a *different* group, export warns and points at
+`--group-override` instead of silently writing a duplicate.
+
 When appending into an existing toolbox, export **reconciles** against it. The existing toolbox is read
 from its committed `toolbox.json`; if that file is missing or unparsable, export falls back to crawling
 the on-disk tool manifests, so a deleted or stale `toolbox.json` doesn't make the append re-write what's
