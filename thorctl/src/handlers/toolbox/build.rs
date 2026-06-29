@@ -291,6 +291,10 @@ struct BuildImageVersion {
 /// One pipeline version entry in `toolbox.json`
 #[derive(Serialize)]
 struct BuildPipelineVersion {
+    /// The tool directory (where this pipeline's `manifest.toml` lives), relative to the directory
+    /// holding this `toolbox.json`. Mirrors an image's `dir` so `export` can find where a pipeline
+    /// already lives and update it in place instead of writing a duplicate at the default layout.
+    dir: String,
     /// The pipeline description (toolbox-facing; sourced from the manifest/description.md)
     description: String,
     /// The images this pipeline runs, mapped name -> version
@@ -963,7 +967,11 @@ fn build_image_version(
 fn build_pipeline_version(
     manifest: &ManifestToml,
     root: &Path,
+    output_dir: &Path,
 ) -> Result<BuildPipelineVersion, Error> {
+    // the tool directory (where this manifest.toml lives), relative to the toolbox.json's directory —
+    // recorded so export can find a pipeline's existing home and update it in place
+    let dir = build_path_relative_to_output(root, output_dir);
     // a pipeline's manifest description seeds the entry; a sibling description.md overrides it below
     // (the manifest value lives on the entry, the override lands in the embedded config)
     let description = manifest.description.clone().unwrap_or_default();
@@ -995,6 +1003,7 @@ fn build_pipeline_version(
     let config = canonicalize_config::<PipelineRequest>(config);
 
     Ok(BuildPipelineVersion {
+        dir,
         description,
         images,
         config_from: loaded.url,
@@ -1271,7 +1280,7 @@ fn build_output(cmd: &BuildToolbox) -> Result<BuildOutput, Error> {
                     )));
                 }
                 pipeline_locations.insert(key.clone(), root.display().to_string());
-                let version_entry = build_pipeline_version(&manifest, root)?;
+                let version_entry = build_pipeline_version(&manifest, root, output_dir)?;
                 // file the entry under name -> version, mirroring the images map
                 pipelines
                     .entry(manifest.name.clone())

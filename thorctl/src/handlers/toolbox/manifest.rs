@@ -1023,6 +1023,11 @@ pub struct PipelineManifest {
 /// Details for a specific pipeline version
 #[derive(Debug, Serialize, Deserialize)]
 pub struct PipelineVersion {
+    /// The tool directory (where this pipeline's `manifest.toml` lives), relative to the
+    /// `toolbox.json`'s location. Lets `export` find where a pipeline already lives and update it in
+    /// place; empty for older toolboxes that predate the field (the default layout is used then).
+    #[serde(default)]
+    pub dir: String,
     /// A description of the pipeline for the purpose of the toolbox, not for
     /// Thorium itself
     pub description: String,
@@ -1208,6 +1213,7 @@ mod tests {
             versions: HashMap::from([(
                 "latest".to_string(),
                 PipelineVersion {
+                    dir: String::new(),
                     description: String::new(),
                     images: image_map,
                     config_from: None,

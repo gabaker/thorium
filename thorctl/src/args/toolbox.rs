@@ -619,10 +619,13 @@ pub struct ExportToolbox {
     /// Open each config in an editor to review/tweak it before writing
     #[clap(long)]
     pub review: bool,
-    /// Overwrite existing per-tool files instead of skipping them
+    /// Update a matched in-toolbox resource that differs (otherwise it is skipped with a warning)
     ///
-    /// Covers the manifest.toml/JSON/description/policy files. It does NOT touch config.toml —
-    /// use --overwrite-config for that.
+    /// When a tool with the same group/name already exists and its config differs, this updates it in
+    /// place. For an image, only the Thorium config (JSON), description, and policy files are
+    /// rewritten — its manifest.toml build settings (build/build_path/[base_image]/image_from) are
+    /// preserved; a pipeline's manifest is regenerated. It does NOT touch config.toml — use
+    /// --overwrite-config for that.
     #[clap(long, conflicts_with = "skip_conflicts")]
     pub overwrite: bool,
     /// Overwrite an existing config.toml with this run's settings

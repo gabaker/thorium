@@ -33,7 +33,8 @@ transfer.
 | Place one resource's files in a specific dir | `export -i group/name=dest` / `-p group/name=dest` (placement only) |
 | Fold an exported image into an existing Dockerfile dir | `export -i group/name=<dir-with-Dockerfile>` (auto-sets `build = true`) |
 | Set the default export layout | `init toolbox --image-path … --pipeline-path …` (writes `export_*_path` in `config.toml`) |
-| Overwrite per-tool files | `--overwrite` (export, init, import-conflict mode) |
+| Update a matched tool that differs (export) | `--overwrite` — updates in place (image: Thorium config only, keeps `manifest.toml` build settings); without it a differing tool is skipped with a warning |
+| Overwrite per-tool files | `--overwrite` (init, import-conflict mode) |
 | Overwrite `config.toml` | `--overwrite-config` (export, init toolbox) |
 | Update existing cluster network policies | `--update-network-policy` (import) |
 | Move images to an air-gapped instance | `export --with-images`, then `import --image-path-prefix …` |
@@ -379,15 +380,24 @@ not-yet-created target shows up as a notice rather than a read error.)
 When appending into an existing toolbox, export **reconciles** against it. The existing toolbox is read
 from its committed `toolbox.json`; if that file is missing or unparsable, export falls back to crawling
 the on-disk tool manifests, so a deleted or stale `toolbox.json` doesn't make the append re-write what's
-already there. The per-tool files are **always (re)written** so they're guaranteed on disk — a recorded
-resource isn't proof its files are present (they may have been deleted, or this run may place them at a
-new `=dir`), and the writer no-ops a byte-identical existing file so re-writing causes no churn.
-Reconciliation only skips *redundant* work: an image whose config is unchanged **and** whose tarball is
-already saved skips its bundle pull/save (reported "Unchanged"); an image whose name+version already
-lives at a *different* directory is not written as a second copy — it's warned up front instead of
-failing later at `build` time; and an image whose name already exists at a *different version* is written
-but warned, since exporting (say) `latest` beside a pinned copy quietly adds a second version. A fresh
-export does none of this.
+already there. Each image and pipeline records its on-disk directory in `toolbox.json`, so a re-export
+**updates a tool where it already lives** instead of writing a duplicate at the default layout. Per
+matched tool (`group/name`):
+
+- **unchanged** (byte-identical config) → a no-op, and the container re-bundle is skipped when the
+  tarball is already saved (reported "Unchanged");
+- **differs, with `--overwrite`** → **updated in place**. For an **image** this refreshes only the
+  Thorium config (`<name>.json`), description, and policy defs and **keeps its `manifest.toml`** (so
+  hand-set `build`/`build_path`/`[base_image]`/`image_from` survive); a **pipeline** manifest is
+  regenerated;
+- **differs, without `--overwrite`** → **skipped with a warning** suggesting `--overwrite`, and the
+  rest of the export continues;
+- an explicit `=dir` pointing somewhere other than where the tool already lives → **skipped** (a second
+  copy would fail `build`); omit `=dir` to update in place.
+
+A fresh export (no existing toolbox) does none of this. *Note:* an image update preserves the manifest,
+so a change to the image's network-policy *set* in Thorium won't re-link `network_policies_from` — use
+`=dir` (a full write) or remove + re-export to pick that up.
 
 **Placing a single resource (`=dir`).** A `-i`/`-p` entry may carry a `group/name=dir` suffix to
 write that resource's files into a chosen directory instead of the configured/default layout — for
@@ -406,8 +416,11 @@ only rule is that it must resolve **inside** the toolbox root; a `dir` that land
 (`build` only includes files under the toolbox).
 
 `=dir` is placement only — it never changes which pipeline or images are selected (a pipeline's
-membership and order come from Thorium). Whole-group exports and auto-pulled dependency images use the
-configured/default layout unless an image is also named with its own `=dir`.
+membership and order come from Thorium). Placement precedence per resource is: explicit `=dir` → **the
+directory the tool already occupies in the toolbox** (so re-exports update in place) → the
+configured/default layout. Whole-group exports and auto-pulled dependency images aren't named, so they
+reuse their existing directory or the configured/default layout unless an image is also named with its
+own `=dir`.
 
 If the `=dir` destination already contains a `Dockerfile`, export reads it as a build context you are
 folding the config into and writes that image's `manifest.toml` with `build = true` (and no

@@ -369,10 +369,10 @@ async fn load_existing_manifest(output: &Path, progress: &Bar) -> Option<Toolbox
 
 /// Index the existing toolbox at the output for append reconciliation
 ///
-/// Returns `(images, pipelines)` maps keyed by `(group, name, version)` — images map to their
-/// `(canonical-config JSON, dir)` and pipelines to their canonical-config JSON. Empty when there is
-/// no existing toolbox to reconcile against (see [`load_existing_manifest`]). Lets the write loops
-/// skip unchanged resources (config + bundle) and catch a cross-directory duplicate identity up front.
+/// Returns `(images, pipelines)` maps keyed by `(group, name, version)`, each value the resource's
+/// `(canonical-config JSON, on-disk dir)`. The canonical JSON drives the unchanged/differs comparison
+/// and the recorded dir lets the write loops update a resource in place where it already lives. Empty
+/// when there is no existing toolbox to reconcile against (see [`load_existing_manifest`]).
 ///
 /// # Arguments
 ///
@@ -384,7 +384,7 @@ async fn load_existing_index(
     progress: &Bar,
 ) -> (
     HashMap<(String, String, String), (String, String)>,
-    HashMap<(String, String, String), String>,
+    HashMap<(String, String, String), (String, String)>,
 ) {
     let mut images = HashMap::new();
     let mut pipelines = HashMap::new();
@@ -393,7 +393,7 @@ async fn load_existing_index(
         return (images, pipelines);
     };
     // index each embedded image config by identity, keeping its canonical JSON (for the unchanged
-    // comparison) and recorded dir (for the cross-directory duplicate check)
+    // comparison) and recorded dir (to update it in place / catch a cross-directory duplicate)
     for image in existing.images.values() {
         for (version, entry) in &image.versions {
             if let Some(config) = &entry.config
@@ -406,7 +406,7 @@ async fn load_existing_index(
             }
         }
     }
-    // pipelines have no recorded dir, so they only get the unchanged comparison
+    // pipelines now record their dir too, so they reconcile the same way as images
     for pipeline in existing.pipelines.values() {
         for (version, entry) in &pipeline.versions {
             if let Some(config) = &entry.config
@@ -414,12 +414,107 @@ async fn load_existing_index(
             {
                 pipelines.insert(
                     (config.group.clone(), config.name.clone(), version.clone()),
-                    json,
+                    (json, entry.dir.clone()),
                 );
             }
         }
     }
     (images, pipelines)
+}
+
+/// Build a `(group, name) → dir` lookup from a reconciliation index keyed by `(group, name, version)`
+///
+/// Lets the write loops find where a tool already lives by name (regardless of version), so a
+/// re-export updates it in place instead of writing a duplicate at the default layout. When a tool
+/// has versions recorded at different directories (an unusual, near-malformed toolbox) the first
+/// non-empty dir seen wins — `build`'s duplicate check still guards a true conflict.
+///
+/// # Arguments
+///
+/// * `index` - The reconciliation index (`(group, name, version) → (json, dir)`)
+fn dirs_by_name(
+    index: &HashMap<(String, String, String), (String, String)>,
+) -> HashMap<(String, String), String> {
+    let mut dirs = HashMap::new();
+    for ((group, name, _version), (_json, dir)) in index {
+        // skip empty dirs (older toolboxes predating the field); keep the first real dir for a tool
+        if !dir.is_empty() {
+            dirs.entry((group.clone(), name.clone()))
+                .or_insert_with(|| dir.clone());
+        }
+    }
+    dirs
+}
+
+/// The reconciliation outcome for one resource being exported into a (possibly existing) toolbox
+#[derive(Debug, PartialEq, Eq)]
+enum Placement {
+    /// Write a brand-new resource at this directory (a full write, manifest generated)
+    New(String),
+    /// The resource is already current (byte-identical) at this directory — files are a resolver
+    /// no-op and a redundant container re-bundle is skipped
+    Unchanged(String),
+    /// The resource exists and differs; update it in place at this directory (`--overwrite`)
+    Update(String),
+    /// The resource exists and differs but `--overwrite` is not set — skip it with a warning
+    SkipDiffers,
+    /// An explicit `=dest` points somewhere other than where the resource already lives — skip it
+    /// (relocating would leave a duplicate); carries the existing directory for the message
+    SkipMove(String),
+}
+
+/// Decide where to write a resource and how to reconcile it against the existing toolbox
+///
+/// Target-directory precedence: an explicit `=dest` → the directory the tool already occupies (so a
+/// re-export updates it in place) → the configured/default layout. A tool is "already in the toolbox"
+/// when it has a recorded directory (`existing_dir`); an exact byte-identical config makes it
+/// `Unchanged`, a differing one is `Update` (with `--overwrite`) or `SkipDiffers` (without). An
+/// explicit `=dest` that names a different directory than the tool's home is a `SkipMove` (a second
+/// copy would fail `build`'s duplicate check).
+///
+/// # Arguments
+///
+/// * `explicit_dest` - The resolved per-resource `=dest`, if one was given
+/// * `existing_dir` - The directory this tool already occupies in the toolbox, if any
+/// * `existing_exact_json` - The canonical config of the exact `(group, name, version)` already in the
+///   toolbox, if present
+/// * `current_json` - The canonical config being exported (for the unchanged comparison)
+/// * `default_rel` - The configured/default layout directory for this resource
+/// * `overwrite` - Whether `--overwrite` is set
+fn plan_placement(
+    explicit_dest: Option<&str>,
+    existing_dir: Option<&str>,
+    existing_exact_json: Option<&str>,
+    current_json: &str,
+    default_rel: &str,
+    overwrite: bool,
+) -> Placement {
+    // target precedence: explicit =dest > the dir the tool already occupies > configured/default
+    let target_rel = explicit_dest
+        .or(existing_dir)
+        .unwrap_or(default_rel)
+        .to_string();
+    // an explicit =dest naming a different dir than where the tool lives would create a second copy
+    // (build rejects duplicate manifests), so refuse the move
+    if let (Some(dest), Some(dir)) = (explicit_dest, existing_dir)
+        && dest != dir
+    {
+        return Placement::SkipMove(dir.to_string());
+    }
+    // no recorded directory → the tool isn't in the toolbox yet → brand new
+    if existing_dir.is_none() {
+        return Placement::New(target_rel);
+    }
+    // present and byte-identical → already current
+    if existing_exact_json == Some(current_json) {
+        return Placement::Unchanged(target_rel);
+    }
+    // present but differing (a config change, or a different version into the tool's dir)
+    if overwrite {
+        Placement::Update(target_rel)
+    } else {
+        Placement::SkipDiffers
+    }
 }
 
 /// Resolve the directory the exported toolbox is written to
@@ -634,8 +729,11 @@ fn build_manifest(
                 (name, manifest::PipelineImage { version })
             })
             .collect();
-        // pipelines carry no version axis here, so every entry is keyed "latest"
+        // pipelines carry no version axis here, so every entry is keyed "latest". dir is left empty:
+        // this is the freshly-fetched in-memory entry, and its on-disk directory is resolved at write
+        // time (an explicit `=dest`, the pipeline's existing dir, or the configured/default layout)
         let entry = manifest::PipelineVersion {
+            dir: String::new(),
             description: pipeline.description.clone().unwrap_or_default(),
             images: images_map,
             config_from: None,
@@ -661,25 +759,6 @@ fn build_manifest(
 
 // ─── File Writing ────────────────────────────────────────────────────────────
 
-/// The directory an exported pipeline's files are written to: `<output>/<layout>/<name>`, where
-/// `<layout>` is the toolbox's configured `export_pipeline_path` or the default `pipelines`
-///
-/// # Arguments
-///
-/// * `output` - The toolbox output root
-/// * `settings` - The resolved toolbox settings carrying the configured layout
-/// * `name` - The pipeline's name (its tool-directory leaf)
-fn pipeline_dest_dir(output: &Path, settings: &ToolboxSettings, name: &str) -> PathBuf {
-    output
-        .join(
-            settings
-                .export_pipeline_path
-                .as_deref()
-                .unwrap_or("pipelines"),
-        )
-        .join(name)
-}
-
 /// Write a resolved image entry to the toolbox directory, resolving on-disk
 /// conflicts; returns [`WriteOutcome::Quit`] if the user asked to stop
 ///
@@ -691,6 +770,9 @@ fn pipeline_dest_dir(output: &Path, settings: &ToolboxSettings, name: &str) -> P
 /// * `build` - Whether the manifest should mark this image `build = true` (a Dockerfile was found
 ///   in its explicit destination dir); `false` writes the default reference-only manifest pinned
 ///   to the captured registry url via `exported_image_path`
+/// * `write_manifest` - Whether to (re)generate `manifest.toml`. `true` for a full write (a new tool);
+///   `false` for an in-place update, which preserves the existing manifest's toolbox-authored build
+///   settings and only writes the manifest when it is missing (so the tool stays buildable)
 /// * `network_policies` - The policy definitions this image references
 /// * `review` - Open the config in an editor for review before writing
 /// * `editor` - The editor command used when `review` is set
@@ -702,6 +784,7 @@ async fn write_image_entry(
     config: &ImageRequest,
     version: &str,
     build: bool,
+    write_manifest: bool,
     network_policies: &[NetworkPolicyRequest],
     review: bool,
     editor: &str,
@@ -767,26 +850,32 @@ async fn write_image_entry(
     }
     // sort so regenerated manifests don't churn on set iteration order
     policy_files.sort_unstable();
-    // when build is set (a Dockerfile sits in this image's explicit dest dir), write a build = true
-    // manifest with no exported_image_path so the rebuild builds from that context. otherwise write
-    // the default reference-only (build = false) manifest and record the real registry url via
-    // exported_image_path so a rebuild keeps the path the image actually lives at instead of deriving
-    // one. image_name is set to the tool name (the second arg): it's irrelevant while the image is
-    // pinned via exported_image_path, and only matters under build = true + --use-image-path.
-    let manifest = generate_image_manifest(
-        name,
-        name,
-        version,
-        !build,
-        &policy_files,
-        if build { None } else { config.image.as_deref() },
-    );
-    if resolver
-        .write_toml::<build::ManifestToml>(&image_dir.join("manifest.toml"), &manifest, progress)
-        .await?
-        == WriteOutcome::Quit
-    {
-        return Ok(WriteOutcome::Quit);
+    // (re)generate manifest.toml on a full write, or when an in-place update finds it missing (so the
+    // tool stays buildable). An update with the manifest present skips this entirely, preserving the
+    // toolbox-authored build/build_path/[base_image]/image_from that a regeneration would reset.
+    let manifest_path = image_dir.join("manifest.toml");
+    if write_manifest || !manifest_path.exists() {
+        // when build is set (a Dockerfile sits in this image's explicit dest dir), write a build = true
+        // manifest with no exported_image_path so the rebuild builds from that context. otherwise write
+        // the default reference-only (build = false) manifest and record the real registry url via
+        // exported_image_path so a rebuild keeps the path the image actually lives at instead of
+        // deriving one. image_name is set to the tool name (the second arg): it's irrelevant while the
+        // image is pinned via exported_image_path, and only matters under build = true + --use-image-path.
+        let manifest = generate_image_manifest(
+            name,
+            name,
+            version,
+            !build,
+            &policy_files,
+            if build { None } else { config.image.as_deref() },
+        );
+        if resolver
+            .write_toml::<build::ManifestToml>(&manifest_path, &manifest, progress)
+            .await?
+            == WriteOutcome::Quit
+        {
+            return Ok(WriteOutcome::Quit);
+        }
     }
     // mirror a non-empty description into description.md so the toolbox repo carries the tool
     // docs as markdown (toolbox build reads it back and treats it as the source of truth); an
@@ -1051,16 +1140,10 @@ pub async fn export(
     // unchanged resources and their bundle work, and refuse to write a second copy of an identity
     // that already lives at a different directory (a build-duplicate). Empty for a fresh export.
     let (existing_images, existing_pipelines) = load_existing_index(&output, &progress).await;
-    // index existing image versions by (group, name) so the write loop can warn when exporting a
-    // version that would sit alongside a different version already in the toolbox (a silent
-    // duplicate otherwise)
-    let mut existing_image_versions: HashMap<(String, String), Vec<String>> = HashMap::new();
-    for (group, name, version) in existing_images.keys() {
-        existing_image_versions
-            .entry((group.clone(), name.clone()))
-            .or_default()
-            .push(version.clone());
-    }
+    // index where each tool already lives by (group, name) so a re-export updates it in place (its
+    // recorded directory) instead of writing a duplicate at the default layout
+    let existing_image_dirs = dirs_by_name(&existing_images);
+    let existing_pipeline_dirs = dirs_by_name(&existing_pipelines);
     // write the resolved manifest to disk, resolving on-disk conflicts
     let mut resolver = DiskConflictResolver::new(cmd.overwrite, can_prompt, editor.to_string());
     let mut stopped = false;
@@ -1076,23 +1159,60 @@ pub async fn export(
             let Some(config) = &entry.config else {
                 continue;
             };
-            // resolve the tool directory (relative to the output root): an explicit per-resource
-            // `=destpath` wins, else the toolbox's configured image layout (default `images/<name>`)
-            let target_rel = match dest_overrides.get(config.name.as_str()) {
-                Some(dest) => dest.clone(),
-                None => format!(
-                    "{}/{}",
-                    settings.export_image_path.as_deref().unwrap_or("images"),
-                    config.name
-                ),
+            // reconcile against the existing toolbox: explicit =dest > the dir this tool already
+            // occupies > the configured/default layout, plus the conflict outcome (new / unchanged /
+            // update-with-overwrite / skip)
+            let key = (config.group.clone(), config.name.clone(), version.clone());
+            let name_key = (config.group.clone(), config.name.clone());
+            let current_json = crate::utils::canonical_json(config)?;
+            let default_rel = format!(
+                "{}/{}",
+                settings.export_image_path.as_deref().unwrap_or("images"),
+                config.name
+            );
+            let explicit_dest = dest_overrides.get(config.name.as_str()).map(String::as_str);
+            let placement = plan_placement(
+                explicit_dest,
+                existing_image_dirs.get(&name_key).map(String::as_str),
+                existing_images.get(&key).map(|(json, _dir)| json.as_str()),
+                &current_json,
+                &default_rel,
+                cmd.overwrite,
+            );
+            // a skip outcome warns and moves on to the next resource (the rest still export)
+            let target_rel = match &placement {
+                Placement::New(dir) | Placement::Unchanged(dir) | Placement::Update(dir) => {
+                    dir.clone()
+                }
+                Placement::SkipMove(existing) => {
+                    progress.warning(format!(
+                        "image '{}:{version}' already exists in the toolbox at '{existing}'; not \
+                         writing a second copy at '{}' (it would fail build) — omit =dest to update \
+                         it in place, or remove the old copy first",
+                        config.name,
+                        explicit_dest.unwrap_or_default()
+                    ));
+                    continue;
+                }
+                Placement::SkipDiffers => {
+                    progress.warning(format!(
+                        "image '{}:{version}' already exists in the toolbox and differs; not updated \
+                         — pass --overwrite to update it",
+                        config.name
+                    ));
+                    continue;
+                }
             };
             let image_dir = output.join(&target_rel);
-            // when the image is pointed at an explicit `=dest` directory that already holds a
-            // Dockerfile, the user is folding this config into an existing build context and intends
-            // to build the image from source — so mark its manifest build = true (instead of the
-            // default reference-only build = false). Only the explicit-dest case is auto-detected;
-            // a default-layout export dir is freshly created and never has a Dockerfile.
-            let build = dest_overrides.contains_key(config.name.as_str())
+            // a full write (a brand-new tool) regenerates the manifest; an in-place update preserves
+            // the existing manifest.toml (its toolbox-authored build/build_path/[base_image]/image_from)
+            // and only rewrites the Thorium-owned config/description/policy files
+            let write_manifest = matches!(placement, Placement::New(_));
+            // when a NEW image is pointed at an explicit `=dest` that already holds a Dockerfile, the
+            // user is folding this config into an existing build context, so mark its manifest
+            // build = true. Only the explicit-dest fresh-write case is auto-detected.
+            let build = write_manifest
+                && dest_overrides.contains_key(config.name.as_str())
                 && image_dir.join("Dockerfile").exists();
             if build {
                 progress.info_anonymous(format!(
@@ -1100,57 +1220,33 @@ pub async fn export(
                     config.name
                 ));
             }
-            // append reconciliation against an existing toolbox. The per-file resolver below already
-            // no-ops a byte-identical on-disk config, so the config files are always (re)written to
-            // guarantee they exist on disk — a toolbox.json that records an image is NOT proof its
-            // per-tool files are present (they may have been removed, or this run places them at a new
-            // `=dest`). Reconciliation here only: (1) refuses to write a second copy of an identity
-            // the toolbox already records at a different directory (which would fail `build`), and
-            // (2) skips the expensive container re-bundle when the config is unchanged AND its
-            // tarball is already on disk.
-            let key = (config.group.clone(), config.name.clone(), version.clone());
+            // an unchanged image skips the redundant container re-bundle when its tarball is already
+            // saved; an update refreshes the config in place (manifest kept)
             let mut skip_bundle = false;
-            if let Some((existing_json, existing_dir)) = existing_images.get(&key) {
-                if !existing_dir.is_empty() && existing_dir != &target_rel {
-                    progress.warning(format!(
-                        "image '{}:{version}' already exists in the toolbox at '{existing_dir}'; not \
-                         writing a second copy at '{target_rel}' (it would fail build) — update the \
-                         existing copy or export to its directory",
-                        config.name
-                    ));
-                    continue;
-                }
-                // unchanged config with its tarball already saved: no need to re-pull/save it
-                if &crate::utils::canonical_json(config)? == existing_json
-                    && (!cmd.with_images
-                        || image_dir.join(format!("{}.tar.gz", config.name)).exists())
-                {
-                    skip_bundle = true;
+            match &placement {
+                Placement::Unchanged(_) => {
+                    skip_bundle = !cmd.with_images
+                        || image_dir.join(format!("{}.tar.gz", config.name)).exists();
                     progress.info_anonymous(format!(
-                        "Unchanged: image '{}:{version}' already current; ensuring files exist and \
-                         skipping container re-bundle",
+                        "Unchanged: image '{}:{version}' already current in the toolbox",
                         config.name
                     ));
                 }
-            } else if let Some(versions) =
-                existing_image_versions.get(&(config.group.clone(), config.name.clone()))
-            {
-                // the exact (group, name, version) isn't in the toolbox, but the same image is there
-                // at other version(s): writing this one adds a second version entry, which is easy to
-                // do unintentionally (e.g. a 'latest' export beside a pinned copy), so warn
-                progress.warning(format!(
-                    "image '{}' is already in the toolbox at version(s) {}; exporting version \
-                     '{version}' adds a second version — pin the export version or remove the old \
-                     copy if you meant to replace it",
-                    config.name,
-                    versions.join(", ")
-                ));
+                Placement::Update(_) => {
+                    progress.info_anonymous(format!(
+                        "Updating image '{}:{version}' in place at '{target_rel}' (config only; \
+                         manifest build settings preserved)",
+                        config.name
+                    ));
+                }
+                _ => {}
             }
             let outcome = write_image_entry(
                 &image_dir,
                 config,
                 version,
                 build,
+                write_manifest,
                 &entry.network_policies,
                 review,
                 editor,
@@ -1179,20 +1275,67 @@ pub async fn export(
                 let Some(config) = &entry.config else {
                     continue;
                 };
-                // append reconciliation: the per-file resolver no-ops a byte-identical pipeline
-                // config, so its files are always (re)written to guarantee they exist on disk (a
-                // recorded pipeline in toolbox.json is not proof its files are present, and this run
-                // may place them at a new `=dest`). A pipeline already current in the toolbox just
-                // gets an informational note (pipelines have no bundle to skip).
+                // reconcile against the existing toolbox with the same precedence and conflict
+                // outcomes as images (explicit =dest > the pipeline's existing dir > default layout).
+                // A pipeline manifest carries no toolbox-authored build settings, so an update always
+                // does a full rewrite (write_pipeline_entry always regenerates it).
                 let key = (config.group.clone(), config.name.clone(), version.clone());
-                if let Some(existing_json) = existing_pipelines.get(&key)
-                    && &crate::utils::canonical_json(config)? == existing_json
-                {
-                    progress.info_anonymous(format!(
+                let name_key = (config.group.clone(), config.name.clone());
+                let current_json = crate::utils::canonical_json(config)?;
+                let default_rel = format!(
+                    "{}/{}",
+                    settings
+                        .export_pipeline_path
+                        .as_deref()
+                        .unwrap_or("pipelines"),
+                    config.name
+                );
+                let explicit_dest = dest_overrides.get(config.name.as_str()).map(String::as_str);
+                let placement = plan_placement(
+                    explicit_dest,
+                    existing_pipeline_dirs.get(&name_key).map(String::as_str),
+                    existing_pipelines
+                        .get(&key)
+                        .map(|(json, _dir)| json.as_str()),
+                    &current_json,
+                    &default_rel,
+                    cmd.overwrite,
+                );
+                let target_rel = match &placement {
+                    Placement::New(dir) | Placement::Unchanged(dir) | Placement::Update(dir) => {
+                        dir.clone()
+                    }
+                    Placement::SkipMove(existing) => {
+                        progress.warning(format!(
+                            "pipeline '{}:{version}' already exists in the toolbox at '{existing}'; \
+                             not writing a second copy at '{}' (it would fail build) — omit =dest to \
+                             update it in place, or remove the old copy first",
+                            config.name,
+                            explicit_dest.unwrap_or_default()
+                        ));
+                        continue;
+                    }
+                    Placement::SkipDiffers => {
+                        progress.warning(format!(
+                            "pipeline '{}:{version}' already exists in the toolbox and differs; not \
+                             updated — pass --overwrite to update it",
+                            config.name
+                        ));
+                        continue;
+                    }
+                };
+                match &placement {
+                    Placement::Unchanged(_) => progress.info_anonymous(format!(
                         "Unchanged: pipeline '{}:{version}' already current in the toolbox",
                         config.name
-                    ));
+                    )),
+                    Placement::Update(_) => progress.info_anonymous(format!(
+                        "Updating pipeline '{}:{version}' in place at '{target_rel}'",
+                        config.name
+                    )),
+                    _ => {}
                 }
+                let pipeline_dir = output.join(&target_rel);
                 // the resolved image map carries the (possibly renamed) names paired
                 // with the versions we exported them under
                 let mut image_versions: Vec<(String, String)> = entry
@@ -1201,12 +1344,6 @@ pub async fn export(
                     .map(|(name, image)| (name.clone(), image.version.clone()))
                     .collect();
                 image_versions.sort();
-                // resolve the tool directory: an explicit per-resource `=destpath` wins, else the
-                // toolbox's configured pipeline layout (default `pipelines/<name>`)
-                let pipeline_dir = match dest_overrides.get(config.name.as_str()) {
-                    Some(dest) => output.join(dest),
-                    None => pipeline_dest_dir(&output, &settings, &config.name),
-                };
                 let outcome = write_pipeline_entry(
                     &pipeline_dir,
                     config,
@@ -1413,7 +1550,10 @@ async fn bundle_image(
 
 #[cfg(test)]
 mod tests {
-    use super::{ExportToolbox, resolve_dest_within, resolve_output};
+    use super::{
+        ExportToolbox, Placement, dirs_by_name, plan_placement, resolve_dest_within, resolve_output,
+    };
+    use std::collections::HashMap;
     use std::path::{Path, PathBuf};
 
     /// Build an `ExportToolbox` with only the path-relevant fields set; the rest default to a
@@ -1496,5 +1636,113 @@ mod tests {
         assert!(resolve_dest_within(Path::new("/tb"), "/other/x").is_err());
         assert!(resolve_dest_within(Path::new("/tb"), "../escape").is_err());
         assert!(resolve_dest_within(Path::new("/tb"), "/tb").is_err());
+    }
+
+    /// `dirs_by_name` collapses the `(group, name, version)` index to `(group, name) → dir`, skipping
+    /// empty (legacy) dirs and keeping the first real one
+    #[test]
+    fn dirs_by_name_collapses_versions_and_skips_empty() {
+        let mut index: HashMap<(String, String, String), (String, String)> = HashMap::new();
+        index.insert(
+            ("g".into(), "a".into(), "1".into()),
+            ("{}".into(), "images/a".into()),
+        );
+        // a legacy entry with no recorded dir is ignored
+        index.insert(
+            ("g".into(), "b".into(), "1".into()),
+            ("{}".into(), String::new()),
+        );
+        let dirs = dirs_by_name(&index);
+        assert_eq!(
+            dirs.get(&("g".into(), "a".into())).map(String::as_str),
+            Some("images/a")
+        );
+        assert!(!dirs.contains_key(&("g".into(), "b".into())));
+    }
+
+    /// A tool not already in the toolbox is a fresh write at the resolved target (an explicit `=dest`
+    /// wins, else the default layout)
+    #[test]
+    fn plan_placement_new_resource() {
+        assert_eq!(
+            plan_placement(None, None, None, "{}", "images/a", false),
+            Placement::New("images/a".into())
+        );
+        assert_eq!(
+            plan_placement(Some("tools/a"), None, None, "{}", "images/a", false),
+            Placement::New("tools/a".into())
+        );
+    }
+
+    /// An existing tool with a byte-identical config is Unchanged at its own directory; without a
+    /// `=dest` the existing dir is reused regardless of the default layout
+    #[test]
+    fn plan_placement_unchanged_reuses_existing_dir() {
+        assert_eq!(
+            plan_placement(None, Some("custom/a"), Some("{}"), "{}", "images/a", false),
+            Placement::Unchanged("custom/a".into())
+        );
+    }
+
+    /// An existing tool whose config differs is an Update with `--overwrite`, else SkipDiffers — both
+    /// targeting the tool's existing directory
+    #[test]
+    fn plan_placement_differs_overwrite_vs_skip() {
+        assert_eq!(
+            plan_placement(
+                None,
+                Some("custom/a"),
+                Some("{\"old\":1}"),
+                "{\"new\":1}",
+                "images/a",
+                true
+            ),
+            Placement::Update("custom/a".into())
+        );
+        assert_eq!(
+            plan_placement(
+                None,
+                Some("custom/a"),
+                Some("{\"old\":1}"),
+                "{\"new\":1}",
+                "images/a",
+                false
+            ),
+            Placement::SkipDiffers
+        );
+        // a different version of an existing tool (no exact match) is a difference too
+        assert_eq!(
+            plan_placement(None, Some("custom/a"), None, "{}", "images/a", false),
+            Placement::SkipDiffers
+        );
+    }
+
+    /// An explicit `=dest` pointing somewhere other than where the tool already lives is a SkipMove
+    /// (relocating would leave a duplicate); the same dir falls through to the normal update path
+    #[test]
+    fn plan_placement_explicit_move_is_rejected() {
+        assert_eq!(
+            plan_placement(
+                Some("other/a"),
+                Some("custom/a"),
+                Some("{}"),
+                "{}",
+                "images/a",
+                true
+            ),
+            Placement::SkipMove("custom/a".into())
+        );
+        // =dest equal to the existing dir is fine — identical config → Unchanged
+        assert_eq!(
+            plan_placement(
+                Some("custom/a"),
+                Some("custom/a"),
+                Some("{}"),
+                "{}",
+                "images/a",
+                false
+            ),
+            Placement::Unchanged("custom/a".into())
+        );
     }
 }
