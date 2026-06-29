@@ -367,29 +367,27 @@ async fn load_existing_manifest(output: &Path, progress: &Bar) -> Option<Toolbox
     Some(existing)
 }
 
-/// Index the existing toolbox at the output for append reconciliation
+/// Index an already-loaded toolbox manifest for append reconciliation
 ///
 /// Returns `(images, pipelines)` maps keyed by `(group, name, version)`, each value the resource's
 /// `(canonical-config JSON, on-disk dir)`. The canonical JSON drives the unchanged/differs comparison
 /// and the recorded dir lets the write loops update a resource in place where it already lives. Empty
-/// when there is no existing toolbox to reconcile against (see [`load_existing_manifest`]).
+/// when `existing` is `None` (a fresh export with no toolbox to reconcile against).
 ///
 /// # Arguments
 ///
-/// * `output` - The resolved toolbox output directory
-/// * `progress` - The progress bar, for the "found existing toolbox" notice
+/// * `existing` - The loaded existing toolbox manifest, or `None` for a fresh export
 #[allow(clippy::type_complexity)]
-async fn load_existing_index(
-    output: &Path,
-    progress: &Bar,
+fn index_existing(
+    existing: Option<&ToolboxManifest>,
 ) -> (
     HashMap<(String, String, String), (String, String)>,
     HashMap<(String, String, String), (String, String)>,
 ) {
     let mut images = HashMap::new();
     let mut pipelines = HashMap::new();
-    // load the existing manifest (committed toolbox.json or an on-disk crawl); none → fresh export
-    let Some(existing) = load_existing_manifest(output, progress).await else {
+    // no existing toolbox → empty indexes (fresh export)
+    let Some(existing) = existing else {
         return (images, pipelines);
     };
     // index each embedded image config by identity, keeping its canonical JSON (for the unchanged
@@ -420,6 +418,127 @@ async fn load_existing_index(
         }
     }
     (images, pipelines)
+}
+
+/// Collect the unique `(group, name)` identities of every image and pipeline in a toolbox manifest
+///
+/// Used by the no-selection "refresh all" export to know which tools to re-fetch from Thorium.
+/// Deduplicates across version entries (a tool present at multiple versions is fetched once) and reads
+/// the identity from each entry's embedded config.
+///
+/// # Arguments
+///
+/// * `existing` - The loaded existing toolbox manifest
+fn existing_resource_ids(
+    existing: &ToolboxManifest,
+) -> (Vec<(String, String)>, Vec<(String, String)>) {
+    // a closure that flattens a name→versions map into the unique (group, name) of its configs,
+    // preserving first-seen order so the fetch list is deterministic
+    let collect = |entries: &mut dyn Iterator<Item = (String, String)>| {
+        let mut seen = HashSet::new();
+        let mut ids = Vec::new();
+        for id in entries {
+            if seen.insert(id.clone()) {
+                ids.push(id);
+            }
+        }
+        ids
+    };
+    let images = collect(
+        &mut existing
+            .images
+            .values()
+            .flat_map(|image| image.versions.values())
+            .filter_map(|entry| entry.config.as_ref())
+            .map(|config| (config.group.clone(), config.name.clone())),
+    );
+    let pipelines = collect(
+        &mut existing
+            .pipelines
+            .values()
+            .flat_map(|pipeline| pipeline.versions.values())
+            .filter_map(|entry| entry.config.as_ref())
+            .map(|config| (config.group.clone(), config.name.clone())),
+    );
+    (images, pipelines)
+}
+
+/// Re-fetch every image and pipeline a toolbox already contains, for a no-selection refresh export
+///
+/// Enumerates the toolbox's `(group, name)` tools (see [`existing_resource_ids`]) and fetches each from
+/// Thorium bounded by `workers`. A tool that no longer exists in Thorium (or otherwise fails to fetch)
+/// is **warned and skipped** rather than aborting the run, since `export` only refreshes the tools
+/// already present and never prunes ones that vanished upstream.
+///
+/// # Arguments
+///
+/// * `thorium` - The Thorium client used to fetch resources
+/// * `existing` - The loaded existing toolbox manifest to refresh
+/// * `workers` - The number of concurrent fetches to run
+/// * `progress` - The progress bar, for the refresh notice and per-tool skip warnings
+async fn refresh_existing_resources(
+    thorium: &Thorium,
+    existing: &ToolboxManifest,
+    workers: usize,
+    progress: &Bar,
+) -> Result<(Vec<Image>, Vec<Pipeline>), Error> {
+    // buffer_unordered with 0 never polls anything, so clamp to at least one worker
+    let workers = workers.max(1);
+    let (image_ids, pipeline_ids) = existing_resource_ids(existing);
+    progress.info_anonymous(format!(
+        "Refreshing {} image(s) and {} pipeline(s) already in the toolbox",
+        image_ids.len(),
+        pipeline_ids.len()
+    ));
+    // fetch the images bounded-parallel; a tool that no longer exists upstream is warned and dropped
+    let images: Vec<Image> = stream::iter(image_ids)
+        .map(|(group, name)| async move {
+            thorium
+                .images
+                .get(&group, &name)
+                .await
+                .map_err(|e| (group, name, e))
+        })
+        .buffer_unordered(workers)
+        .collect::<Vec<_>>()
+        .await
+        .into_iter()
+        .filter_map(|result| match result {
+            Ok(image) => Some(image),
+            Err((group, name, e)) => {
+                progress.warning(format!(
+                    "Image '{group}:{name}' is in the toolbox but could not be fetched from Thorium \
+                     ({e}); leaving its existing files unchanged"
+                ));
+                None
+            }
+        })
+        .collect();
+    // same lenient fetch for pipelines
+    let pipelines: Vec<Pipeline> = stream::iter(pipeline_ids)
+        .map(|(group, name)| async move {
+            thorium
+                .pipelines
+                .get(&group, &name)
+                .await
+                .map_err(|e| (group, name, e))
+        })
+        .buffer_unordered(workers)
+        .collect::<Vec<_>>()
+        .await
+        .into_iter()
+        .filter_map(|result| match result {
+            Ok(pipeline) => Some(pipeline),
+            Err((group, name, e)) => {
+                progress.warning(format!(
+                    "Pipeline '{group}:{name}' is in the toolbox but could not be fetched from \
+                     Thorium ({e}); leaving its existing files unchanged"
+                ));
+                None
+            }
+        })
+        .collect();
+    Ok((images, pipelines))
 }
 
 /// Build a `(group, name) → dir` lookup from a reconciliation index keyed by `(group, name, version)`
@@ -773,6 +892,9 @@ fn build_manifest(
 /// * `write_manifest` - Whether to (re)generate `manifest.toml`. `true` for a full write (a new tool);
 ///   `false` for an in-place update, which preserves the existing manifest's toolbox-authored build
 ///   settings and only writes the manifest when it is missing (so the tool stays buildable)
+/// * `strip_registry` - Write the config's `image` url empty and omit the manifest's
+///   `exported_image_path`, so a rebuild derives each image path from `config.toml` (a registry-agnostic
+///   release) instead of a pinned url
 /// * `network_policies` - The policy definitions this image references
 /// * `review` - Open the config in an editor for review before writing
 /// * `editor` - The editor command used when `review` is set
@@ -785,6 +907,7 @@ async fn write_image_entry(
     version: &str,
     build: bool,
     write_manifest: bool,
+    strip_registry: bool,
     network_policies: &[NetworkPolicyRequest],
     review: bool,
     editor: &str,
@@ -793,6 +916,15 @@ async fn write_image_entry(
 ) -> Result<WriteOutcome, Error> {
     // the config's own name is the json file stem; image_dir is the caller-resolved tool directory
     let name = &config.name;
+    // --strip-registry publishes a registry-agnostic toolbox: clear the container url in the written
+    // config (an empty `image`, the same form `init` scaffolds) so a rebuild derives the path from the
+    // toolbox's own config.toml rather than a pinned url. The exported_image_path is dropped below too.
+    let stripped = strip_registry.then(|| {
+        let mut cleared = config.clone();
+        cleared.image = Some(String::new());
+        cleared
+    });
+    let config = stripped.as_ref().unwrap_or(config);
     // curated (prioritized) field order so the written <name>.json matches what `init` scaffolds —
     // a consistent, edit-friendly layout across every spot that writes an image config. The order
     // is still deterministic (curated keys first, remaining keys sorted), so it stays diff-stable.
@@ -856,8 +988,9 @@ async fn write_image_entry(
     let manifest_path = image_dir.join("manifest.toml");
     if write_manifest || !manifest_path.exists() {
         // when build is set (a Dockerfile sits in this image's explicit dest dir), write a build = true
-        // manifest with no exported_image_path so the rebuild builds from that context. otherwise write
-        // the default reference-only (build = false) manifest and record the real registry url via
+        // manifest with no exported_image_path so the rebuild builds from that context. --strip-registry
+        // likewise omits exported_image_path so a rebuild derives the path from config.toml. otherwise
+        // write the default reference-only (build = false) manifest and record the real registry url via
         // exported_image_path so a rebuild keeps the path the image actually lives at instead of
         // deriving one. image_name is set to the tool name (the second arg): it's irrelevant while the
         // image is pinned via exported_image_path, and only matters under build = true + --use-image-path.
@@ -867,7 +1000,11 @@ async fn write_image_entry(
             version,
             !build,
             &policy_files,
-            if build { None } else { config.image.as_deref() },
+            if build || strip_registry {
+                None
+            } else {
+                config.image.as_deref()
+            },
         );
         if resolver
             .write_toml::<build::ManifestToml>(&manifest_path, &manifest, progress)
@@ -1018,11 +1155,31 @@ pub async fn export(
             );
         }
     }
-    // resolve every image/pipeline to export (group export and/or named resources, deduped)
-    let (images, pipelines) = resolve_resources(&thorium, cmd, args.workers).await?;
     // resolve the editor up front so --review uses a consistent command across all configs
     let editor = resolve_editor(None, conf);
     let progress = Bar::new("toolbox export", "Exporting", BarKind::Timer);
+    // load the existing toolbox once (committed toolbox.json or an on-disk crawl); it is reused both
+    // to resolve a no-selection "refresh all" and to reconcile the writes below
+    let existing_manifest = load_existing_manifest(&output, &progress).await;
+    // decide what to export: an explicit selection wins; otherwise, with no selection, a refresh of
+    // every tool already in the toolbox (gated by --overwrite since it rewrites them); otherwise error
+    let has_selection = cmd.group.is_some() || !cmd.pipelines.is_empty() || !cmd.images.is_empty();
+    let (images, pipelines) = if has_selection {
+        resolve_resources(&thorium, cmd, args.workers).await?
+    } else if let Some(existing) = &existing_manifest {
+        if cmd.overwrite {
+            refresh_existing_resources(&thorium, existing, args.workers, &progress).await?
+        } else {
+            return Err(Error::new(
+                "No resources selected. Pass --overwrite to refresh every tool already in the \
+                 toolbox, or specify --group/--pipelines/--images.",
+            ));
+        }
+    } else {
+        return Err(Error::new(
+            "No resources to export. Specify --group, --pipeline, or --image.",
+        ));
+    };
     println!(
         "Exporting {} images and {} pipelines to '{}'{}",
         images.len().to_string().bright_green(),
@@ -1136,10 +1293,10 @@ pub async fn export(
     // resources aren't named here so they use the configured/default layout. A dest that resolves
     // outside the toolbox is a hard error here, before anything is written.
     let dest_overrides = resolve_dest_overrides(cmd, &output)?;
-    // index an existing toolbox at the output (append reconciliation): lets the write loops skip
-    // unchanged resources and their bundle work, and refuse to write a second copy of an identity
-    // that already lives at a different directory (a build-duplicate). Empty for a fresh export.
-    let (existing_images, existing_pipelines) = load_existing_index(&output, &progress).await;
+    // index the existing toolbox (loaded once above) for append reconciliation: lets the write loops
+    // skip unchanged resources and their bundle work, update a tool where it already lives, and refuse
+    // to write a second copy at a different directory. Empty for a fresh export.
+    let (existing_images, existing_pipelines) = index_existing(existing_manifest.as_ref());
     // index where each tool already lives by (group, name) so a re-export updates it in place (its
     // recorded directory) instead of writing a duplicate at the default layout
     let existing_image_dirs = dirs_by_name(&existing_images);
@@ -1247,6 +1404,7 @@ pub async fn export(
                 version,
                 build,
                 write_manifest,
+                cmd.strip_registry,
                 &entry.network_policies,
                 review,
                 editor,
@@ -1551,10 +1709,12 @@ async fn bundle_image(
 #[cfg(test)]
 mod tests {
     use super::{
-        ExportToolbox, Placement, dirs_by_name, plan_placement, resolve_dest_within, resolve_output,
+        ExportToolbox, Placement, dirs_by_name, existing_resource_ids, manifest, plan_placement,
+        resolve_dest_within, resolve_output,
     };
     use std::collections::HashMap;
     use std::path::{Path, PathBuf};
+    use thorium::models::{ImageRequest, PipelineRequest};
 
     /// Build an `ExportToolbox` with only the path-relevant fields set; the rest default to a
     /// no-op export so `resolve_output` can be exercised in isolation
@@ -1573,6 +1733,7 @@ mod tests {
             overwrite: false,
             overwrite_config: false,
             with_images: false,
+            strip_registry: false,
         }
     }
 
@@ -1743,6 +1904,83 @@ mod tests {
                 false
             ),
             Placement::Unchanged("custom/a".into())
+        );
+    }
+
+    /// Build a minimal toolbox manifest from `(group, name, versions)` image specs and
+    /// `(group, name)` pipeline specs, for the enumeration test
+    fn manifest_with(
+        images: &[(&str, &str, &[&str])],
+        pipelines: &[(&str, &str)],
+    ) -> manifest::ToolboxManifest {
+        let mut image_map = HashMap::new();
+        for (group, name, versions) in images {
+            let versions = versions
+                .iter()
+                .map(|v| {
+                    (
+                        (*v).to_string(),
+                        manifest::ImageVersion {
+                            dir: String::new(),
+                            build_path: "./".to_string(),
+                            config_from: None,
+                            config: Some(ImageRequest::new(*group, *name)),
+                            network_policies_from: Vec::new(),
+                            network_policies: Vec::new(),
+                        },
+                    )
+                })
+                .collect();
+            image_map.insert((*name).to_string(), manifest::ImageManifest { versions });
+        }
+        let mut pipeline_map = HashMap::new();
+        for (group, name) in pipelines {
+            let versions = HashMap::from([(
+                "latest".to_string(),
+                manifest::PipelineVersion {
+                    dir: String::new(),
+                    description: String::new(),
+                    images: HashMap::new(),
+                    config_from: None,
+                    config: Some(PipelineRequest::new(*group, *name, serde_json::json!([]))),
+                },
+            )]);
+            pipeline_map.insert((*name).to_string(), manifest::PipelineManifest { versions });
+        }
+        manifest::ToolboxManifest {
+            name: "tb".to_string(),
+            registry: None,
+            pipelines: pipeline_map,
+            images: image_map,
+            bundled_images: false,
+            image_path_prefix: None,
+        }
+    }
+
+    /// `existing_resource_ids` lists every tool's `(group, name)` once, deduping across versions and
+    /// covering both images and pipelines (the refresh-all enumeration)
+    #[test]
+    fn existing_resource_ids_dedups_and_covers_both() {
+        let m = manifest_with(
+            &[
+                ("static", "clamav", &["1.0", "latest"]),
+                ("static", "exiftool", &["latest"]),
+            ],
+            &[("static", "triage")],
+        );
+        let (mut images, pipelines) = existing_resource_ids(&m);
+        // clamav has two versions but is enumerated once; exiftool once
+        images.sort();
+        assert_eq!(
+            images,
+            vec![
+                ("static".to_string(), "clamav".to_string()),
+                ("static".to_string(), "exiftool".to_string()),
+            ]
+        );
+        assert_eq!(
+            pipelines,
+            vec![("static".to_string(), "triage".to_string())]
         );
     }
 }

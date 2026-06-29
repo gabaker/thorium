@@ -643,6 +643,16 @@ pub struct ExportToolbox {
     /// push the images into a local registry. Requires docker.
     #[clap(long)]
     pub with_images: bool,
+    /// Write each image's container url as empty so the release carries no hard-coded registry path
+    ///
+    /// Clears the `image` url in every exported image config and omits the manifest's
+    /// `exported_image_path`, so a rebuild derives each image's path from the toolbox's own
+    /// `config.toml` registry/`image_path_prefix` instead of a pinned url. Use it to publish a
+    /// registry-agnostic toolbox a consumer points at their own registry. Pipelines carry no url, so
+    /// this only affects images. **Conflicts with `--with-images`** (a bundled import needs the url to
+    /// tag and push the saved tarball).
+    #[clap(long, conflicts_with = "with_images")]
+    pub strip_registry: bool,
 }
 
 /// A parsed group/name resource reference, with an optional on-disk destination

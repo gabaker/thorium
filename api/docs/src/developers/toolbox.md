@@ -29,6 +29,7 @@ transfer.
 | Add one image/pipeline stub to an existing toolbox | `init image`/`init pipeline` (positional path = where it lands); pass `-c <config.toml>` to **resolve/validate** against the toolbox without moving files |
 | Capture tools from a running instance | `export` (writes the whole repo + `toolbox.json`) |
 | **Append** more tools into an existing toolbox repo | `export -p …`/`-i …` with `-o <toolbox-dir>` **or** `-c <toolbox-dir>/config.toml` (which defaults the output to that dir); the existing `config.toml` is reused automatically |
+| **Refresh every tool** already in a toolbox from the instance | `export -c <toolbox-dir>/config.toml --overwrite` (no `-g`/`-p`/`-i`) — re-pulls and updates all existing tools in place |
 | **Seed** a new toolbox's settings from another toolbox's `config.toml` into a *different* dir | `init toolbox -c …`, or `export -c <other>/config.toml -o <new-dir>` (explicit `-o` required) |
 | Place one resource's files in a specific dir | `export -i group/name=dest` / `-p group/name=dest` (placement only) |
 | Fold an exported image into an existing Dockerfile dir | `export -i group/name=<dir-with-Dockerfile>` (auto-sets `build = true`) |
@@ -360,6 +361,11 @@ Useful flags:
 - `--review` — open each config in an editor to review/tweak it before writing (off by default,
   so configs are written as-is).
 - `--with-images` — also bundle the container image files (see below).
+- `--strip-registry` — publish a **registry-agnostic** toolbox: each image config's `image` url is
+  written empty and the manifest's `exported_image_path` is omitted, so a rebuild derives each image
+  path from the toolbox's own `config.toml` registry/`image_path_prefix` rather than your pinned url.
+  Images only (pipelines carry no url). Conflicts with `--with-images` (a bundled import needs the url
+  to tag and push the saved tarball).
 - `--overwrite` — overwrite existing per-tool files (manifest/JSON/description/policies). It does
   **not** touch `config.toml`.
 - `--overwrite-config` — replace an existing `config.toml` (otherwise it is preserved).
@@ -376,6 +382,19 @@ from another toolbox **and** anchors the output to that config's directory unles
 A `--config` that points at a **missing** file isn't fatal: export warns ("config.toml not found …;
 creating a new toolbox there instead of appending") and creates a new toolbox, so a mistyped or
 not-yet-created target shows up as a notice rather than a read error.)
+
+**Refreshing a whole toolbox.** Running `export` against an existing toolbox with **no**
+`--group`/`--pipelines`/`--images` and `--overwrite` **re-pulls every tool the toolbox already
+contains** from Thorium and updates them in place — a one-shot "sync this toolbox to the instance":
+
+```bash
+thorctl toolbox export -c ./my-toolbox/config.toml --overwrite   # refresh every tool in ./my-toolbox
+```
+
+It enumerates the tool list from the toolbox itself (its `toolbox.json`, or an on-disk crawl if that's
+gone), updates only tools already present (never adds new ones, never prunes), and warns + leaves
+untouched any tool that no longer exists in Thorium. Without `--overwrite` a no-selection run errors
+with a hint (it inherently rewrites the existing configs).
 
 When appending into an existing toolbox, export **reconciles** against it. The existing toolbox is read
 from its committed `toolbox.json`; if that file is missing or unparsable, export falls back to crawling
