@@ -588,6 +588,32 @@ fn groups_by_name(
     by_name
 }
 
+/// Build a `(name, version) → (group, dir)` lookup from a reconciliation index keyed by
+/// `(group, name, version)`
+///
+/// This mirrors `build`'s identity for a tool — `(name, version)`, **group-independent** — so a write
+/// loop can refuse to lay down a second `manifest.toml` for a `(name, version)` that already lives in
+/// the toolbox (under any group, at any directory). Without this, exporting a tool from a Thorium group
+/// that doesn't match the toolbox's group writes a fresh copy that `build` then rejects as a duplicate.
+/// A valid toolbox holds each `(name, version)` once, so the last writer wins on the off chance of a
+/// pre-existing on-disk duplicate.
+///
+/// # Arguments
+///
+/// * `index` - The reconciliation index (`(group, name, version) → (json, dir)`)
+fn locs_by_name_version(
+    index: &HashMap<(String, String, String), (String, String)>,
+) -> HashMap<(String, String), (String, String)> {
+    let mut locs = HashMap::new();
+    for ((group, name, version), (_json, dir)) in index {
+        locs.insert(
+            (name.clone(), version.clone()),
+            (group.clone(), dir.clone()),
+        );
+    }
+    locs
+}
+
 /// The reconciliation outcome for one resource being exported into a (possibly existing) toolbox
 #[derive(Debug, PartialEq, Eq)]
 enum Placement {
@@ -1328,6 +1354,11 @@ pub async fn export(
     // under a different group (a likely group rename) can warn instead of silently duplicating
     let existing_image_groups = groups_by_name(&existing_images);
     let existing_pipeline_groups = groups_by_name(&existing_pipelines);
+    // index each tool's build identity (name, version) → (group, dir), independent of group, so a new
+    // write that would duplicate an existing (name, version) — the exact thing `build` rejects — is
+    // skipped with a --group-override hint rather than producing a broken toolbox
+    let existing_image_locs = locs_by_name_version(&existing_images);
+    let existing_pipeline_locs = locs_by_name_version(&existing_pipelines);
     // write the resolved manifest to disk, resolving on-disk conflicts
     let mut resolver = DiskConflictResolver::new(cmd.overwrite, can_prompt, editor.to_string());
     let mut stopped = false;
@@ -1363,19 +1394,42 @@ pub async fn export(
                 &default_rel,
                 cmd.overwrite,
             );
-            // a New tool whose NAME already exists in the toolbox under a different group is the
-            // tell-tale of a group rename the user didn't bridge (e.g. exporting `static2` into a
-            // toolbox that holds these tools under `static1`); it writes a separate copy rather than
-            // updating, so warn and point at --group-override
+            // a New write whose (name, version) already lives elsewhere in the toolbox would be a
+            // build-breaking duplicate (build identifies an image by name+version, ignoring group).
+            // This is the group-mismatch case: the toolbox holds the tool under a different group than
+            // we're writing under (the `-g` group, or `--group-override` if set). With --overwrite,
+            // re-group it in place — reuse its directory and let the refreshed config carry the new
+            // group; without --overwrite, skip rather than corrupt the toolbox with a duplicate.
+            let mut placement = placement;
+            let mut regrouped_from: Option<String> = None;
+            if let Placement::New(_) = &placement
+                && let Some((existing_group, existing_dir)) =
+                    existing_image_locs.get(&(config.name.clone(), version.clone()))
+                && !existing_dir.is_empty()
+            {
+                if cmd.overwrite {
+                    regrouped_from = Some(existing_group.clone());
+                    placement = Placement::Update(existing_dir.clone());
+                } else {
+                    progress.warning(format!(
+                        "image '{}:{version}' already exists in the toolbox at '{existing_dir}' under \
+                         group '{existing_group}'; not writing a duplicate under group '{}' (it would \
+                         fail build) — re-run with --overwrite to re-group it in place",
+                        config.name, config.group
+                    ));
+                    continue;
+                }
+            }
+            // a New tool whose NAME (but not this exact version) exists under a different group is a
+            // softer signal of the same rename; warn but allow it (build keeps distinct versions)
             if let Placement::New(_) = placement
                 && let Some(groups) = existing_image_groups.get(&config.name)
                 && groups.iter().any(|other| other != &config.group)
             {
                 progress.warning(format!(
                     "image '{}' is being written under group '{}', but the toolbox already has an \
-                     image named '{}' under group(s) {}; this creates a separate copy instead of \
-                     updating it — pass --group-override <toolbox-group> to reconcile against the \
-                     existing one",
+                     image named '{}' under group(s) {}; this adds a separate copy — pass \
+                     --group-override <toolbox-group> to reconcile against the existing one",
                     config.name,
                     config.group,
                     config.name,
@@ -1436,11 +1490,19 @@ pub async fn export(
                     ));
                 }
                 Placement::Update(_) => {
-                    progress.info_anonymous(format!(
-                        "Updating image '{}:{version}' in place at '{target_rel}' (config only; \
-                         manifest build settings preserved)",
-                        config.name
-                    ));
+                    if let Some(from) = &regrouped_from {
+                        progress.info_anonymous(format!(
+                            "Re-grouping image '{}:{version}' from '{from}' to '{}' in place at \
+                             '{target_rel}'",
+                            config.name, config.group
+                        ));
+                    } else {
+                        progress.info_anonymous(format!(
+                            "Updating image '{}:{version}' in place at '{target_rel}' (config only; \
+                             manifest build settings preserved)",
+                            config.name
+                        ));
+                    }
                 }
                 _ => {}
             }
@@ -1505,17 +1567,38 @@ pub async fn export(
                     &default_rel,
                     cmd.overwrite,
                 );
-                // same cross-group rename guard as images: a new pipeline whose name already exists in
-                // the toolbox under a different group likely wants --group-override, not a duplicate
+                // build-breaking duplicate guard, same as images: a New write whose (name, version)
+                // already lives elsewhere would fail build. With --overwrite, re-group it in place;
+                // without, skip rather than corrupt the toolbox with a duplicate.
+                let mut placement = placement;
+                let mut regrouped_from: Option<String> = None;
+                if let Placement::New(_) = &placement
+                    && let Some((existing_group, existing_dir)) =
+                        existing_pipeline_locs.get(&(config.name.clone(), version.clone()))
+                    && !existing_dir.is_empty()
+                {
+                    if cmd.overwrite {
+                        regrouped_from = Some(existing_group.clone());
+                        placement = Placement::Update(existing_dir.clone());
+                    } else {
+                        progress.warning(format!(
+                            "pipeline '{}:{version}' already exists in the toolbox at '{existing_dir}' \
+                             under group '{existing_group}'; not writing a duplicate under group '{}' \
+                             (it would fail build) — re-run with --overwrite to re-group it in place",
+                            config.name, config.group
+                        ));
+                        continue;
+                    }
+                }
+                // softer rename signal: same name under a different group but a different version
                 if let Placement::New(_) = placement
                     && let Some(groups) = existing_pipeline_groups.get(&config.name)
                     && groups.iter().any(|other| other != &config.group)
                 {
                     progress.warning(format!(
                         "pipeline '{}' is being written under group '{}', but the toolbox already has \
-                         a pipeline named '{}' under group(s) {}; this creates a separate copy instead \
-                         of updating it — pass --group-override <toolbox-group> to reconcile against \
-                         the existing one",
+                         a pipeline named '{}' under group(s) {}; this adds a separate copy — pass \
+                         --group-override <toolbox-group> to reconcile against the existing one",
                         config.name,
                         config.group,
                         config.name,
@@ -1550,10 +1633,20 @@ pub async fn export(
                         "Unchanged: pipeline '{}:{version}' already current in the toolbox",
                         config.name
                     )),
-                    Placement::Update(_) => progress.info_anonymous(format!(
-                        "Updating pipeline '{}:{version}' in place at '{target_rel}'",
-                        config.name
-                    )),
+                    Placement::Update(_) => {
+                        if let Some(from) = &regrouped_from {
+                            progress.info_anonymous(format!(
+                                "Re-grouping pipeline '{}:{version}' from '{from}' to '{}' in place at \
+                                 '{target_rel}'",
+                                config.name, config.group
+                            ));
+                        } else {
+                            progress.info_anonymous(format!(
+                                "Updating pipeline '{}:{version}' in place at '{target_rel}'",
+                                config.name
+                            ));
+                        }
+                    }
                     _ => {}
                 }
                 let pipeline_dir = output.join(&target_rel);
@@ -1772,8 +1865,8 @@ async fn bundle_image(
 #[cfg(test)]
 mod tests {
     use super::{
-        ExportToolbox, Placement, dirs_by_name, existing_resource_ids, groups_by_name, manifest,
-        plan_placement, resolve_dest_within, resolve_output,
+        ExportToolbox, Placement, dirs_by_name, existing_resource_ids, groups_by_name,
+        locs_by_name_version, manifest, plan_placement, resolve_dest_within, resolve_output,
     };
     use std::collections::HashMap;
     use std::path::{Path, PathBuf};
@@ -1915,6 +2008,25 @@ mod tests {
                 .map(|g| g.iter().cloned().collect::<Vec<_>>()),
             Some(vec!["other".to_string()])
         );
+    }
+
+    /// `locs_by_name_version` maps build's identity `(name, version)` → `(group, dir)`, so a
+    /// group-mismatched write can find where the tool already lives regardless of group
+    #[test]
+    fn locs_by_name_version_maps_build_identity() {
+        let mut index: HashMap<(String, String, String), (String, String)> = HashMap::new();
+        index.insert(
+            ("toolbox-grp".into(), "clamav".into(), "1.0".into()),
+            ("{}".into(), "tools/clamav".into()),
+        );
+        let locs = locs_by_name_version(&index);
+        // looked up by (name, version) with no group, it returns the group + dir it lives at
+        assert_eq!(
+            locs.get(&("clamav".to_string(), "1.0".to_string())),
+            Some(&("toolbox-grp".to_string(), "tools/clamav".to_string()))
+        );
+        // a different version isn't a match (build identity is name+version)
+        assert!(!locs.contains_key(&("clamav".to_string(), "2.0".to_string())));
     }
 
     /// A tool not already in the toolbox is a fresh write at the resolved target (an explicit `=dest`

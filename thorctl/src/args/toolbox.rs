@@ -544,7 +544,13 @@ pub struct InitPipeline {
 #[derive(Parser, Debug)]
 #[allow(clippy::struct_excessive_bools)]
 pub struct ExportToolbox {
-    /// Export all images and pipelines from this group
+    /// Export all images and pipelines from this Thorium group (the source group to read from)
+    ///
+    /// Exported tools are written under this same group unless `--group-override` sets a different
+    /// destination group. When re-exporting into an existing toolbox whose tools live under a
+    /// different group, `--overwrite` re-groups them in place to this group (no `--group-override`
+    /// needed); without `--overwrite` a mismatched tool is skipped with a warning rather than
+    /// duplicated.
     #[clap(short = 'g', long = "group", value_name = "GROUP")]
     pub group: Option<String>,
     /// Export specific pipelines. Format: `group/name[=path]` (or `name[=path]` with --group),
@@ -577,8 +583,11 @@ pub struct ExportToolbox {
         value_delimiter = ','
     )]
     pub images: Vec<String>,
-    /// Override the group in all exported configs to this value.
-    /// Warns if name collisions would occur across source groups.
+    /// Destination group: write every exported config under this group instead of its source group
+    ///
+    /// Use it to read from one Thorium group (`-g`/`--pipelines`/`--images`) but store the tools under
+    /// a different group in the toolbox, or to align an export with an existing toolbox's group so the
+    /// tools reconcile and update in place. Warns if name collisions would occur across source groups.
     #[clap(long, value_name = "GROUP")]
     pub group_override: Option<String>,
     /// Root directory for the exported toolbox

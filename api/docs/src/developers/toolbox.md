@@ -396,21 +396,24 @@ gone), updates only tools already present (never adds new ones, never prunes), a
 untouched any tool that no longer exists in Thorium. Without `--overwrite` a no-selection run errors
 with a hint (it inherently rewrites the existing configs).
 
-**Group renames.** A tool's identity is `group/name`, so reconciliation only recognizes an existing
-tool when the incoming group matches the toolbox's. Refresh-all re-fetches by the toolbox's *own*
-group, so it can't bridge a rename — if a tool is `static1/<name>` in the toolbox but `static2/<name>`
-in Thorium, the fetch 404s and it's warned/skipped. To update across a rename, pull the source group
-and remap it onto the toolbox's group:
+**Group as source vs destination, and renames.** `-g` is the **source** group (what to read from
+Thorium); `--group-override` is the **destination** group (what to write under in the toolbox),
+defaulting to the source group. `build` identifies an image/pipeline by **`name + version`,
+ignoring group**, so a tool written under a group that doesn't match where it already lives in the
+toolbox would be a build-breaking duplicate. Export handles this automatically:
 
 ```bash
-thorctl toolbox export -g static2 --group-override static1 -c ./my-toolbox/config.toml --overwrite
+# toolbox stores these under a different group than Thorium's "static2"; re-group + update in place:
+thorctl toolbox export -g static2 -c ./my-toolbox/config.toml --overwrite
 ```
 
-`--group-override` rewrites the incoming tools to `static1` *before* the existing-check, so they update
-the on-disk tools in place (it also adds any `static2` tools not yet in the toolbox, since `-g` pulls
-the whole group). As a safety net, if an exported tool would be written under one group while the
-toolbox already holds a same-named tool under a *different* group, export warns and points at
-`--group-override` instead of silently writing a duplicate.
+With `--overwrite`, each existing tool is matched by its name+version and **re-grouped in place** to
+the destination group (the `-g` group here, or `--group-override` if you set one) — its files are
+rewritten at their existing directory, reported "Re-grouping …". **Without** `--overwrite`, a tool
+whose name+version already exists under a different group is **skipped with a warning** (suggesting
+`--overwrite`) rather than written as a duplicate. (A same *name* at a *different* version under
+another group is warned but allowed, since build keeps distinct versions.) Refresh-all (no selection)
+still fetches by the toolbox's own group, so use `-g <thorium-group> --overwrite` to bridge a rename.
 
 When appending into an existing toolbox, export **reconciles** against it. The existing toolbox is read
 from its committed `toolbox.json`; if that file is missing or unparsable, export falls back to crawling
