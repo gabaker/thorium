@@ -139,7 +139,7 @@ impl SearchParameterized for DescribePipelines {
 }
 
 /// A specific pipeline target containing an optional group in case
-/// more than one group has an image with the same name
+/// more than one group has a pipeline with the same name
 pub struct PipelineTarget {
     /// The name of the pipeline
     pub pipeline: String,
@@ -378,7 +378,7 @@ pub struct DeletePipelines {
     #[clap(short, long, required = true)]
     pub group: String,
     /// Skip the confirmation dialog
-    #[clap(short = 'y', long)]
+    #[clap(long)]
     pub skip_confirm: bool,
 }
 

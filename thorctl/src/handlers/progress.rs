@@ -467,3 +467,26 @@ impl Bar {
         }
     }
 }
+
+/// Print a warning to stderr with the same colorized prefix [`Bar::warning`] uses
+///
+/// For contexts that have no [`Bar`] (a synchronous routine, or a direct print) but should still
+/// match the canonical warning style. Goes to stderr so it isn't swallowed in quiet/non-tty runs.
+///
+/// # Arguments
+///
+/// * `msg` - The warning message to print
+pub fn warn<T: AsRef<str>>(msg: T) {
+    eprintln!("{}: {}", "Warning".bright_yellow(), msg.as_ref());
+}
+
+/// Print a note to stderr with a colorized prefix, for advisory one-off messages
+///
+/// The no-[`Bar`] companion to [`warn`], for informational notices that aren't warnings or errors.
+///
+/// # Arguments
+///
+/// * `msg` - The note message to print
+pub fn note<T: AsRef<str>>(msg: T) {
+    eprintln!("{}: {}", "Note".bright_yellow(), msg.as_ref());
+}

@@ -1,4 +1,17 @@
 //! Arguments for toolbox-related Thorctl commands
+//!
+//! Short-flag policy (applies to every toolbox subcommand, and mirrors the wider `thorctl` CLI):
+//! - Short flags are reserved for non-destructive selection/IO inputs and standard run toggles, used
+//!   consistently across commands: `-g` group, `-i` images/import, `-p` pipelines, `-o` output,
+//!   `-c` config, `-L` list, `-n` non-interactive, `-e` exit-on-error.
+//! - Destructive, "force", and scope/reconciliation flags are intentionally **long-only** (no short),
+//!   so a stray short can't trigger a less-reversible action: `--skip-confirm`, `--force`, `--forced`,
+//!   `--overwrite`, `--overwrite-config`, `--skip-conflicts`, `--group-override`,
+//!   `--update-network-policy`, `--exit-code`, `--strip-registry`, `--with-images`, `--review`,
+//!   `--rollback-on-failure`.
+//! - Known pre-existing cross-command exceptions (left as-is to avoid breaking users): `-g` vs `-G`
+//!   are both used for groups elsewhere in `thorctl`, and `-c` means `--config` here but a boolean
+//!   toggle in some other commands. Don't extend these; new flags should follow the rules above.
 
 use clap::Parser;
 use std::path::PathBuf;
@@ -181,7 +194,7 @@ pub struct RemoveToolbox {
     #[clap(long, value_name = "GROUP")]
     pub group_override: Option<String>,
     /// Skip the confirmation dialog
-    #[clap(short = 'y', long)]
+    #[clap(long)]
     pub skip_confirm: bool,
 }
 
@@ -618,7 +631,7 @@ pub struct ExportToolbox {
     /// Container registry for config.toml, e.g. ghcr.io/org/repo
     ///
     /// Optional: when omitted, the exported toolbox declares no central registry and
-    /// relies on each image's own `image` url (always captured on export).
+    /// relies on each image's own `image` url (captured on export unless `--strip-registry` is used).
     #[clap(long, value_name = "REGISTRY")]
     pub registry: Option<String>,
     /// Skip on-disk conflicts: write new configs and leave differing existing ones

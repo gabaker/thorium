@@ -231,10 +231,12 @@ fn prepare_bundled_images(
             .get(&img.name)
             .map_or(img.name.as_str(), String::as_str);
         // the tool's directory is recorded per-image in toolbox.json (built for all images), so the
-        // tarball is found wherever export placed it (configured layout or a `=destpath`). The dir
-        // field travels with the version through any collision rename, so look it up by the current
-        // key `img.name`. An empty dir means an older toolbox that predates the field — fall back to
-        // the historical `images/<name>` layout.
+        // tarball is found wherever export placed it (configured layout or a `=dir`). A collision
+        // rename moves the whole version entry (its `dir` included) under the new key in
+        // `manifest.images` (see `rename_image_member`), so the dir is looked up by the current key
+        // `img.name`. The on-disk tarball file, however, is still named for the original key, which is
+        // why `source_name` (above) is recovered from `renames`. An empty dir means an older toolbox
+        // that predates the field — fall back to the historical `images/<name>` layout.
         let dir = manifest
             .images
             .get(&img.name)

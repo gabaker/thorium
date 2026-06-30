@@ -1020,8 +1020,8 @@ async fn init_pipeline(cmd: &InitPipeline, args: &Args) -> Result<(), Error> {
     if let Some(order_str) = &cmd.order {
         answers.order = serde_json::from_str(order_str)
             .map_err(|e| Error::new(format!("Invalid --order JSON: {e}")))?;
-        // an order that names images outside --images leaves the manifest's image map
-        // missing those entries; warn rather than fail so the user can still scaffold
+        // every image named in --order must also be declared in --images; otherwise the manifest
+        // would carry a dangling, version-less image entry, so this is a hard error (below).
         // flatten collapses the staged order to the set of all named images
         let ordered: std::collections::HashSet<&str> =
             answers.order.iter().flatten().map(String::as_str).collect();
@@ -1189,12 +1189,14 @@ async fn init_toolbox(cmd: &InitToolbox, args: &Args) -> Result<(), Error> {
         // here; warn rather than fail so the user can wire it up themselves. only the
         // explicit colon-bound case can name a stray image, so skip the check otherwise
         if spec.images.is_some() {
-            // bound images with no matching scaffolded --images entry
-            let unlisted: Vec<&str> = pipeline_images
+            // bound images with no matching scaffolded --images entry; sorted so the warning lists
+            // them deterministically (matching init_pipeline's sorted unlisted output)
+            let mut unlisted: Vec<&str> = pipeline_images
                 .iter()
                 .filter(|img| !image_names.contains(img))
                 .map(String::as_str)
                 .collect();
+            unlisted.sort_unstable();
             if !unlisted.is_empty() {
                 println!(
                     "{} pipeline '{}' binds image(s) not in --images: {}",

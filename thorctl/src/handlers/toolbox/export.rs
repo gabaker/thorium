@@ -170,7 +170,7 @@ async fn resolve_resources(
     // nothing was selected by any of the three paths: fail loudly rather than write an empty toolbox
     if images.is_empty() && pipelines.is_empty() {
         return Err(Error::new(
-            "No resources to export. Specify --group, --pipeline, or --image.",
+            "No resources to export. Specify --group, --pipelines, or --images.",
         ));
     }
     Ok((images, pipelines))
@@ -348,7 +348,10 @@ async fn load_existing_manifest(output: &Path, progress: &Bar) -> Option<Toolbox
         return None;
     }
     // crawl the on-disk tool manifests into the same shape as toolbox.json. build walks with
-    // synchronous std::fs, so run it off the async runtime; any crawl/parse error means no index
+    // synchronous std::fs, so run it off the async runtime; any crawl/parse error means no index.
+    // This is an index-only crawl: `use_image_path`/`tag_suffix` only affect derived tags (irrelevant
+    // to the reconcile identity) and `output: None` because nothing is written — only `path` (the
+    // crawl root) matters here.
     let build_cmd = BuildToolbox {
         config: config_path,
         use_image_path: false,
@@ -1375,7 +1378,7 @@ pub async fn export(
         }
     } else {
         return Err(Error::new(
-            "No resources to export. Specify --group, --pipeline, or --image.",
+            "No resources to export. Specify --group, --pipelines, or --images.",
         ));
     };
     println!(
@@ -1571,9 +1574,8 @@ pub async fn export(
             // when a NEW image is pointed at an explicit `=dir` that already holds a Dockerfile, the
             // user is folding this config into an existing build context, so mark its manifest
             // build = true. Only the explicit-dest fresh-write case is auto-detected.
-            let build = full_write
-                && dest_overrides.contains_key(config.name.as_str())
-                && image_dir.join("Dockerfile").exists();
+            let build =
+                full_write && explicit_dest.is_some() && image_dir.join("Dockerfile").exists();
             if build {
                 progress.info_anonymous(format!(
                     "Found a Dockerfile in '{target_rel}'; marking image '{}' build = true",

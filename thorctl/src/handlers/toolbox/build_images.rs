@@ -13,6 +13,7 @@ use thorium::Error;
 
 use crate::args::toolbox::BuildImagesToolbox;
 use crate::handlers::container;
+use crate::handlers::progress;
 
 use super::build::{BaseImage, DEFAULT_BASE_IMAGE_ARG};
 
@@ -224,11 +225,10 @@ pub async fn build_images(cmd: &BuildImagesToolbox) -> Result<(), Error> {
         .map(String::as_str)
         .collect();
     if !unknown.is_empty() {
-        eprintln!(
-            "{} requested image(s) not found in the toolbox manifest: {}",
-            "Warning:".bright_yellow(),
+        progress::warn(format!(
+            "requested image(s) not found in the toolbox manifest: {}",
             unknown.join(", ")
-        );
+        ));
     }
     // no targets is a hard error rather than a quiet success; the message distinguishes an empty
     // manifest from a --images filter that matched nothing so the user knows which to fix
@@ -248,12 +248,10 @@ pub async fn build_images(cmd: &BuildImagesToolbox) -> Result<(), Error> {
     if let Some((base_key, _)) = &cmd.base_image
         && cmd.build_args.iter().any(|(key, _)| key == base_key)
     {
-        eprintln!(
-            "{} build arg '{base_key}' is set by both --base-image and --build-arg; the \
-             --base-image value takes precedence for images whose base_image.allow_override is \
-             true (the default)",
-            "Warning:".bright_yellow()
-        );
+        progress::warn(format!(
+            "build arg '{base_key}' is set by both --base-image and --build-arg; the --base-image \
+             value takes precedence for images whose base_image.allow_override is true (the default)"
+        ));
     }
     // token/user are pass-through for an external CI/CD pipeline; build-images does no
     // base-registry login, so note it once (rather than per image) if any target carries them
@@ -263,10 +261,9 @@ pub async fn build_images(cmd: &BuildImagesToolbox) -> Result<(), Error> {
             .as_ref()
             .is_some_and(|base| base.token.is_some() || base.user.is_some())
     }) {
-        eprintln!(
-            "{} [base_image] token/user are not used by build-images (it performs no base-registry \
+        progress::note(
+            "[base_image] token/user are not used by build-images (it performs no base-registry \
              login); run docker/podman login yourself if a base image needs auth",
-            "Note:".bright_yellow()
         );
     }
     // snapshot the build-behavior flags once; they apply uniformly to every image in the run

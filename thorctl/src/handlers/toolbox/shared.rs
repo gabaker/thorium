@@ -174,7 +174,7 @@ async fn get_manifest_from_path(path: &Path, progress: &Bar) -> Result<ToolboxMa
     }
     // parse the fully buffered file into the manifest model
     serde_json::from_slice(&manifest_bytes)
-        .map_err(|err| Error::new(format!("Malformed toolbox manifest file: {err}")))
+        .map_err(|err| Error::new(format!("Malformed toolbox manifest: {err}")))
 }
 
 /// Fetch a JSON config from a URL and deserialize it

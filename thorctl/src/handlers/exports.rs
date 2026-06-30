@@ -26,7 +26,8 @@ use thorium::Error;
 use crate::handlers::imports::editor::{self, EditorParseError};
 use crate::handlers::progress::Bar;
 
-/// What happened when a file was offered to [`DiskConflictResolver::write`]
+/// What happened when a file was offered to one of [`DiskConflictResolver`]'s
+/// `write_text`/`write_yaml`/`write_toml` methods
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum WriteOutcome {
     /// The file was written (new, or an approved overwrite)
@@ -97,8 +98,10 @@ impl DiskConflictResolver {
         progress: &Bar,
     ) -> Result<WriteOutcome, Error> {
         // markdown/plain text has no schema, so a merge only needs the marker check
-        self.write_inner(path, content, progress, |_| Ok::<(), serde_norway::Error>(()))
-            .await
+        self.write_inner(path, content, progress, |_| {
+            Ok::<(), serde_norway::Error>(())
+        })
+        .await
     }
 
     /// Write `content` to `path`, validating a "Merge" result as YAML/JSON that
@@ -185,8 +188,14 @@ impl DiskConflictResolver {
                     PromptChoice::Merge => {
                         // open a conflict view of on-disk vs new content in the editor,
                         // naming the temp file by the on-disk extension for highlighting
-                        let ext = path.extension().and_then(|ext| ext.to_str()).unwrap_or("txt");
-                        let label = path.file_stem().and_then(|stem| stem.to_str()).unwrap_or("merge");
+                        let ext = path
+                            .extension()
+                            .and_then(|ext| ext.to_str())
+                            .unwrap_or("txt");
+                        let label = path
+                            .file_stem()
+                            .and_then(|stem| stem.to_str())
+                            .unwrap_or("merge");
                         let merged = progress
                             .suspend_async(editor::merge_in_editor(
                                 existing,
@@ -370,7 +379,10 @@ mod tests {
         assert!(matches!(choice_from_selection(0), PromptChoice::Merge));
         assert!(matches!(choice_from_selection(1), PromptChoice::Overwrite));
         assert!(matches!(choice_from_selection(2), PromptChoice::Skip));
-        assert!(matches!(choice_from_selection(3), PromptChoice::OverwriteAll));
+        assert!(matches!(
+            choice_from_selection(3),
+            PromptChoice::OverwriteAll
+        ));
         assert!(matches!(choice_from_selection(4), PromptChoice::SkipAll));
         assert!(matches!(choice_from_selection(5), PromptChoice::Quit));
         assert!(matches!(choice_from_selection(99), PromptChoice::Quit));

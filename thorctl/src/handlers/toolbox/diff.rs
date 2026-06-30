@@ -25,8 +25,8 @@ use super::{build, collisions, import, policies, shared};
 use crate::args::toolbox::{BuildToolbox, DiffToolbox, ManifestLocation};
 use crate::handlers::imports::categorize;
 use crate::handlers::imports::merge::{MergeableImage, MergeablePipeline};
-use crate::utils;
 use crate::handlers::progress::Bar;
+use crate::utils;
 use crate::utils::images::list_all_images;
 use crate::utils::pipelines::list_all_pipelines;
 
@@ -170,9 +170,9 @@ fn pipeline_yaml(request: &PipelineRequest) -> Result<String, Error> {
 /// transient 5xx) is a genuine failure the caller should surface instead of
 /// silently under-reporting instance-only drift.
 ///
-/// Note the asymmetry with `categorize`, which surfaces a 403 as an error: a *named* toolbox
-/// resource in an inaccessible group is a real problem, whereas here an unlistable group merely
-/// can't contribute instance-only entries.
+/// Note the asymmetry with `categorize`, which treats any non-404 status (including a 403) as an
+/// error: a *named* toolbox resource in an inaccessible group is a real problem, whereas here an
+/// unlistable group merely can't contribute instance-only entries.
 ///
 /// # Arguments
 ///
@@ -488,12 +488,24 @@ pub async fn diff(thorium: Thorium, conf: &CtlConf, cmd: &DiffToolbox) -> Result
     // never deletes them)
     for image in &instance_only_images {
         stats.only_instance += 1;
-        print_only_in(&instance, &image.group, &image.name, "image", "this toolbox");
+        print_only_in(
+            &instance,
+            &image.group,
+            &image.name,
+            "image",
+            "this toolbox",
+        );
     }
     // instance-only pipelines: the same compact treatment
     for pipeline in &instance_only_pipelines {
         stats.only_instance += 1;
-        print_only_in(&instance, &pipeline.group, &pipeline.name, "pipeline", "this toolbox");
+        print_only_in(
+            &instance,
+            &pipeline.group,
+            &pipeline.name,
+            "pipeline",
+            "this toolbox",
+        );
     }
     // separate the instance-only block from the trailing summary with a blank line
     if stats.only_instance > 0 {
@@ -502,7 +514,15 @@ pub async fn diff(thorium: Thorium, conf: &CtlConf, cmd: &DiffToolbox) -> Result
     // trailing summary like git's diffstat footer; network-policy differences are reported
     // separately (they share none of the image/pipeline counters except "unchanged")
     let policy_note = if stats.policy_changed > 0 {
-        format!(", {} network polic{} differ", stats.policy_changed, if stats.policy_changed == 1 { "y" } else { "ies" })
+        format!(
+            ", {} network polic{} differ",
+            stats.policy_changed,
+            if stats.policy_changed == 1 {
+                "y"
+            } else {
+                "ies"
+            }
+        )
     } else {
         String::new()
     };
@@ -525,8 +545,14 @@ mod tests {
     /// default port dropped
     #[test]
     fn instance_host_strips_scheme_keeps_explicit_port() {
-        assert_eq!(instance_host("https://thorium.example.com:8443"), "thorium.example.com:8443");
-        assert_eq!(instance_host("https://thorium.example.com"), "thorium.example.com");
+        assert_eq!(
+            instance_host("https://thorium.example.com:8443"),
+            "thorium.example.com:8443"
+        );
+        assert_eq!(
+            instance_host("https://thorium.example.com"),
+            "thorium.example.com"
+        );
     }
 
     /// A path/query after the host is dropped
@@ -538,15 +564,24 @@ mod tests {
     /// A value with no scheme falls back to a manual strip and keeps host[:port]
     #[test]
     fn instance_host_handles_no_scheme() {
-        assert_eq!(instance_host("thorium.example.com:8443"), "thorium.example.com:8443");
-        assert_eq!(instance_host("thorium.example.com/api"), "thorium.example.com");
+        assert_eq!(
+            instance_host("thorium.example.com:8443"),
+            "thorium.example.com:8443"
+        );
+        assert_eq!(
+            instance_host("thorium.example.com/api"),
+            "thorium.example.com"
+        );
     }
 
     /// The no-parse fallback also drops userinfo and any query/fragment
     #[test]
     fn instance_host_fallback_strips_userinfo_and_query() {
         // no scheme + userinfo + query (won't strict-parse as a URL)
-        assert_eq!(instance_host("user:pw@thorium.example.com:8443?x=1"), "thorium.example.com:8443");
+        assert_eq!(
+            instance_host("user:pw@thorium.example.com:8443?x=1"),
+            "thorium.example.com:8443"
+        );
         assert_eq!(instance_host("svc@host/api#frag"), "host");
     }
 }

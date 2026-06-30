@@ -11,6 +11,7 @@ use url::Url;
 use walkdir::WalkDir;
 
 use crate::args::toolbox::BuildToolbox;
+use crate::handlers::progress;
 
 // ─── TOML Input Models ─────────────────────────────────────────────────────
 
@@ -243,8 +244,8 @@ struct BuildOutput {
     /// Default registry base path bundled images push under on import
     #[serde(skip_serializing_if = "Option::is_none")]
     image_path_prefix: Option<String>,
-    /// The configured `export` layout dirs (from config.toml), echoed for reference; placement
-    /// defaults, omitted when unset (the per-image `dir` is what import uses for tarballs)
+    /// The configured `export` image-layout dir (from config.toml), echoed for reference; omitted
+    /// when unset. Affects only where `export` places files, not what import reads.
     #[serde(skip_serializing_if = "Option::is_none")]
     export_image_path: Option<String>,
     /// The configured `export` pipeline layout dir (from config.toml), echoed for reference
@@ -442,7 +443,9 @@ fn set_config_image(config: &mut Option<serde_json::Value>, name: &str, url: &st
         // a config that parsed as something other than an object can't hold an `image` key; warn
         // instead of silently dropping the url so the misshapen config is noticed
         Some(_) => {
-            eprintln!("Warning: {name}: config is not a JSON object; cannot set the image url");
+            progress::warn(format!(
+                "{name}: config is not a JSON object; cannot set the image url"
+            ));
         }
         // a URL-resolved config has nothing local to set; the importer fetches and validates it
         None => {}
@@ -619,11 +622,15 @@ fn apply_description_md(root: &Path, name: &str, config: &mut Option<serde_json:
             );
         }
         Some(_) => {
-            eprintln!("Warning: {name}: config is not a JSON object; skipping description.md")
+            progress::warn(format!(
+                "{name}: config is not a JSON object; skipping description.md"
+            ));
         }
         // config_from URLs are resolved at import time, after build
         None => {
-            eprintln!("Warning: {name}: description.md cannot be injected into a URL-based config")
+            progress::warn(format!(
+                "{name}: description.md cannot be injected into a URL-based config"
+            ));
         }
     }
 }
@@ -868,7 +875,7 @@ fn build_image_version(
             config: None,
             network_policies_from,
             network_policies,
-            base_image: base_image.clone(),
+            base_image,
         });
     }
 
@@ -954,7 +961,7 @@ fn build_image_version(
         config,
         network_policies_from,
         network_policies,
-        base_image: base_image.clone(),
+        base_image,
     })
 }
 
@@ -1202,7 +1209,9 @@ fn build_output(cmd: &BuildToolbox) -> Result<BuildOutput, Error> {
         let entry = match entry {
             Ok(entry) => entry,
             Err(err) => {
-                eprintln!("Warning: skipping unreadable path during toolbox walk: {err}");
+                progress::warn(format!(
+                    "skipping unreadable path during toolbox walk: {err}"
+                ));
                 continue;
             }
         };

@@ -146,9 +146,9 @@ impl SearchParameterized for DescribeImages {
 /// A specific image target containing an optional group in case
 /// more than one group has an image with the same name
 pub struct ImageTarget {
-    /// The name of the pipeline
+    /// The name of the image
     image: String,
-    /// The optional group that the pipeline belongs to
+    /// The optional group that the image belongs to
     group: Option<String>,
 }
 
@@ -381,7 +381,7 @@ pub struct DeleteImages {
     #[clap(short, long, required = true)]
     pub group: String,
     /// Skip the confirmation dialog
-    #[clap(short = 'y', long)]
+    #[clap(long)]
     pub skip_confirm: bool,
 }
 
