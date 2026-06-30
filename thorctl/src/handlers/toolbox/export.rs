@@ -291,10 +291,11 @@ fn resolve_dest_within(output: &Path, dest: &str) -> Result<String, Error> {
 ///
 /// Returns a map of resource name to its destination directory **relative to the toolbox root** (the
 /// stored/reconciliation form), with any absolute or `..`-bearing input resolved against the root by
-/// [`resolve_dest_within`]. Keyed by name (the on-disk tool-directory leaf); a resource without an
-/// explicit `=dest` is absent and falls back to the configured/default layout. Whole-group exports
-/// and auto-pulled dependency images aren't named here, so they are never overridden. A dest that
-/// resolves outside the toolbox is a hard error.
+/// [`resolve_dest_within`]. Keyed by name alone (the on-disk tool-directory leaf), not `(group, name)`:
+/// in the rare case two selected resources share a name across groups and both carry `=dest`, the
+/// last one parsed wins. A resource without an explicit `=dest` is absent and falls back to the
+/// configured/default layout. Whole-group exports and auto-pulled dependency images aren't named here,
+/// so they are never overridden. A dest that resolves outside the toolbox is a hard error.
 ///
 /// # Arguments
 ///
@@ -429,6 +430,7 @@ fn index_existing(
 /// # Arguments
 ///
 /// * `existing` - The loaded existing toolbox manifest
+#[allow(clippy::type_complexity)]
 fn existing_resource_ids(
     existing: &ToolboxManifest,
 ) -> (Vec<(String, String)>, Vec<(String, String)>) {
@@ -545,8 +547,9 @@ async fn refresh_existing_resources(
 ///
 /// Lets the write loops find where a tool already lives by name (regardless of version), so a
 /// re-export updates it in place instead of writing a duplicate at the default layout. When a tool
-/// has versions recorded at different directories (an unusual, near-malformed toolbox) the first
-/// non-empty dir seen wins — `build`'s duplicate check still guards a true conflict.
+/// has versions recorded at different directories (an unusual, near-malformed toolbox) an arbitrary
+/// non-empty dir wins (the index is a `HashMap`, so iteration order isn't stable) — `build`'s
+/// duplicate check still guards a true conflict.
 ///
 /// # Arguments
 ///
@@ -556,7 +559,7 @@ fn dirs_by_name(
 ) -> HashMap<(String, String), String> {
     let mut dirs = HashMap::new();
     for ((group, name, _version), (_json, dir)) in index {
-        // skip empty dirs (older toolboxes predating the field); keep the first real dir for a tool
+        // skip empty dirs (older toolboxes predating the field); keep one real dir per tool
         if !dir.is_empty() {
             dirs.entry((group.clone(), name.clone()))
                 .or_insert_with(|| dir.clone());
@@ -682,6 +685,145 @@ fn plan_placement(
         Placement::Update(target_rel)
     } else {
         Placement::SkipDiffers
+    }
+}
+
+/// The decided action for one resource in a write loop, with all messages pre-rendered
+///
+/// This is the pure decision shared by the image and pipeline write loops: it resolves placement
+/// ([`plan_placement`]), folds in build's `(name, version)` identity (the group-mismatch re-group /
+/// skip), and renders any warnings — so the loop only has to emit messages and do I/O.
+#[derive(Debug, PartialEq, Eq)]
+enum WriteAction {
+    /// Skip this resource, emitting this warning (a duplicate/move/differ that can't be written)
+    Skip(String),
+    /// Write this resource
+    Write {
+        /// The tool directory (relative to the toolbox root) to write into
+        target_rel: String,
+        /// Whether to (re)generate `manifest.toml` — `true` only for a genuinely new tool
+        full_write: bool,
+        /// The group this tool is being re-grouped from, when a group-mismatched `(name, version)` is
+        /// updated in place under `--overwrite`; drives the "Re-grouping" notice
+        regrouped_from: Option<String>,
+        /// Whether the incoming config is byte-identical to the existing one (a no-op write)
+        unchanged: bool,
+        /// An optional informational warning to emit before writing (a softer cross-group signal)
+        soft_warn: Option<String>,
+    },
+}
+
+/// Decide how to write one resource against the existing toolbox, rendering messages but doing no I/O
+///
+/// Mirrors `build`'s identity rule: a tool is `(name, version)` toolbox-wide, independent of group. So
+/// a placement of `New` whose `(name, version)` already lives in the toolbox under a different
+/// group/dir would duplicate at build time — with `--overwrite` it is re-grouped in place, otherwise
+/// skipped. Pure and deterministic so it can be unit-tested without a client or filesystem.
+///
+/// # Arguments
+///
+/// * `kind` - "image" or "pipeline", for the rendered messages
+/// * `group` / `name` / `version` - The incoming resource's identity (group already overridden)
+/// * `current_json` - The incoming config's canonical JSON (for the unchanged comparison)
+/// * `explicit_dest` - The resolved per-resource `=dir`, if any
+/// * `existing_dir_by_name` - The dir this `(group, name)` already occupies in the toolbox, if any
+/// * `existing_exact_json` - The canonical config of the exact `(group, name, version)` in the toolbox
+/// * `existing_loc` - Where `(name, version)` lives toolbox-wide as `(group, dir)`, if anywhere
+/// * `other_groups` - The groups this `name` already appears under in the toolbox
+/// * `default_rel` - The configured/default layout directory for this resource
+/// * `overwrite` - Whether `--overwrite` is set
+#[allow(clippy::too_many_arguments)]
+fn decide_write(
+    kind: &str,
+    group: &str,
+    name: &str,
+    version: &str,
+    current_json: &str,
+    explicit_dest: Option<&str>,
+    existing_dir_by_name: Option<&str>,
+    existing_exact_json: Option<&str>,
+    existing_loc: Option<&(String, String)>,
+    other_groups: Option<&std::collections::BTreeSet<String>>,
+    default_rel: &str,
+    overwrite: bool,
+) -> WriteAction {
+    let placement = plan_placement(
+        explicit_dest,
+        existing_dir_by_name,
+        existing_exact_json,
+        current_json,
+        default_rel,
+        overwrite,
+    );
+    // build-identity collision: a New write whose (name, version) already lives elsewhere (a different
+    // group/dir than we're writing under) would be a build-breaking duplicate. With --overwrite,
+    // re-group it in place; without, skip rather than corrupt the toolbox.
+    if let Placement::New(_) = &placement
+        && let Some((existing_group, existing_dir)) = existing_loc
+        && !existing_dir.is_empty()
+    {
+        if overwrite {
+            return WriteAction::Write {
+                target_rel: existing_dir.clone(),
+                full_write: false,
+                regrouped_from: Some(existing_group.clone()),
+                unchanged: false,
+                soft_warn: None,
+            };
+        }
+        return WriteAction::Skip(format!(
+            "{kind} '{name}:{version}' already exists in the toolbox at '{existing_dir}' under group \
+             '{existing_group}'; not writing a duplicate under group '{group}' (it would fail build) \
+             — re-run with --overwrite to re-group it in place"
+        ));
+    }
+    match placement {
+        // a genuinely new tool: full write, but flag the softer cross-group rename signal (same name
+        // under a different group at a different version — allowed, but likely an unbridged rename)
+        Placement::New(target_rel) => {
+            let soft_warn = other_groups
+                .filter(|groups| groups.iter().any(|other| other != group))
+                .map(|groups| {
+                    format!(
+                        "{kind} '{name}' is being written under group '{group}', but the toolbox \
+                         already has a {kind} named '{name}' under group(s) {}; this adds a separate \
+                         copy — pass --group-override <toolbox-group> to reconcile against the existing \
+                         one",
+                        groups.iter().cloned().collect::<Vec<_>>().join(", ")
+                    )
+                });
+            WriteAction::Write {
+                target_rel,
+                full_write: true,
+                regrouped_from: None,
+                unchanged: false,
+                soft_warn,
+            }
+        }
+        Placement::Unchanged(target_rel) => WriteAction::Write {
+            target_rel,
+            full_write: false,
+            regrouped_from: None,
+            unchanged: true,
+            soft_warn: None,
+        },
+        Placement::Update(target_rel) => WriteAction::Write {
+            target_rel,
+            full_write: false,
+            regrouped_from: None,
+            unchanged: false,
+            soft_warn: None,
+        },
+        Placement::SkipMove(existing) => WriteAction::Skip(format!(
+            "{kind} '{name}:{version}' already exists in the toolbox at '{existing}'; not writing a \
+             second copy at '{}' (it would fail build) — omit =dir to update it in place, or remove \
+             the old copy first",
+            explicit_dest.unwrap_or_default()
+        )),
+        Placement::SkipDiffers => WriteAction::Skip(format!(
+            "{kind} '{name}:{version}' already exists in the toolbox and differs; not updated — pass \
+             --overwrite to update it"
+        )),
     }
 }
 
@@ -927,6 +1069,23 @@ fn build_manifest(
 
 // ─── File Writing ────────────────────────────────────────────────────────────
 
+/// How [`write_image_entry`] writes one image's files
+#[derive(Clone, Copy)]
+struct ImageWriteOptions {
+    /// Mark the manifest `build = true` (a Dockerfile sits in the image's explicit `=dir`); otherwise
+    /// the default reference-only manifest is written, pinned to the captured url via `exported_image_path`
+    build: bool,
+    /// (Re)generate `manifest.toml` — `true` for a full write (a new tool); `false` for an in-place
+    /// update, which preserves the existing manifest's toolbox-authored build settings and only writes
+    /// the manifest when it is missing (so the tool stays buildable)
+    write_manifest: bool,
+    /// Write the config's `image` url empty and omit `exported_image_path`, so a rebuild derives each
+    /// image path from `config.toml` (a registry-agnostic release) instead of a pinned url
+    strip_registry: bool,
+    /// Open the config in an editor for review before writing
+    review: bool,
+}
+
 /// Write a resolved image entry to the toolbox directory, resolving on-disk
 /// conflicts; returns [`WriteOutcome::Quit`] if the user asked to stop
 ///
@@ -935,18 +1094,9 @@ fn build_manifest(
 /// * `image_dir` - The tool directory to write this image's files into (resolved by the caller)
 /// * `config` - The resolved image request (its `name` is the on-disk file stem)
 /// * `version` - The toolbox version label to record
-/// * `build` - Whether the manifest should mark this image `build = true` (a Dockerfile was found
-///   in its explicit destination dir); `false` writes the default reference-only manifest pinned
-///   to the captured registry url via `exported_image_path`
-/// * `write_manifest` - Whether to (re)generate `manifest.toml`. `true` for a full write (a new tool);
-///   `false` for an in-place update, which preserves the existing manifest's toolbox-authored build
-///   settings and only writes the manifest when it is missing (so the tool stays buildable)
-/// * `strip_registry` - Write the config's `image` url empty and omit the manifest's
-///   `exported_image_path`, so a rebuild derives each image path from `config.toml` (a registry-agnostic
-///   release) instead of a pinned url
+/// * `opts` - How to write this image (build flag, manifest (re)generation, registry stripping, review)
 /// * `network_policies` - The policy definitions this image references
-/// * `review` - Open the config in an editor for review before writing
-/// * `editor` - The editor command used when `review` is set
+/// * `editor` - The editor command used when `opts.review` is set
 /// * `resolver` - The on-disk conflict resolver
 /// * `progress` - The progress bar
 #[allow(clippy::too_many_arguments)]
@@ -954,11 +1104,8 @@ async fn write_image_entry(
     image_dir: &Path,
     config: &ImageRequest,
     version: &str,
-    build: bool,
-    write_manifest: bool,
-    strip_registry: bool,
+    opts: ImageWriteOptions,
     network_policies: &[NetworkPolicyRequest],
-    review: bool,
     editor: &str,
     resolver: &mut DiskConflictResolver,
     progress: &Bar,
@@ -968,7 +1115,7 @@ async fn write_image_entry(
     // --strip-registry publishes a registry-agnostic toolbox: clear the container url in the written
     // config (an empty `image`, the same form `init` scaffolds) so a rebuild derives the path from the
     // toolbox's own config.toml rather than a pinned url. The exported_image_path is dropped below too.
-    let stripped = strip_registry.then(|| {
+    let stripped = opts.strip_registry.then(|| {
         let mut cleared = config.clone();
         cleared.image = Some(String::new());
         cleared
@@ -981,7 +1128,7 @@ async fn write_image_entry(
         crate::utils::curated_json(config, crate::handlers::imports::merge::IMAGE_FIELD_ORDER)
             .map_err(|e| Error::new(format!("Failed to serialize image '{name}': {e}")))?;
     // let the user hand-edit the config first when --review is set; otherwise write it verbatim
-    let final_json = if review {
+    let final_json = if opts.review {
         // suspend the spinner while the editor owns the terminal
         progress
             .suspend_async(review_config_in_editor::<ImageRequest>(
@@ -1035,7 +1182,7 @@ async fn write_image_entry(
     // tool stays buildable). An update with the manifest present skips this entirely, preserving the
     // toolbox-authored build/build_path/[base_image]/image_from that a regeneration would reset.
     let manifest_path = image_dir.join("manifest.toml");
-    if write_manifest || !manifest_path.exists() {
+    if opts.write_manifest || !manifest_path.exists() {
         // when build is set (a Dockerfile sits in this image's explicit dest dir), write a build = true
         // manifest with no exported_image_path so the rebuild builds from that context. --strip-registry
         // likewise omits exported_image_path so a rebuild derives the path from config.toml. otherwise
@@ -1047,9 +1194,9 @@ async fn write_image_entry(
             name,
             name,
             version,
-            !build,
+            !opts.build,
             &policy_files,
-            if build || strip_registry {
+            if opts.build || opts.strip_registry {
                 None
             } else {
                 config.image.as_deref()
@@ -1063,17 +1210,17 @@ async fn write_image_entry(
             return Ok(WriteOutcome::Quit);
         }
     }
-    // mirror a non-empty description into description.md so the toolbox repo carries the tool
-    // docs as markdown (toolbox build reads it back and treats it as the source of truth); an
-    // empty/absent description writes no file so build leaves the inline value untouched
-    if let Some(description) = config
-        .description
-        .as_deref()
-        .filter(|description| !description.is_empty())
-        && resolver
-            .write_text(&image_dir.join("description.md"), description, progress)
-            .await?
-            == WriteOutcome::Quit
+    // always write description.md so every tool carries a docs file; a None/empty description is
+    // written as an empty file (never the literal "null"), which build treats as absent — leaving the
+    // inline config value (also empty) untouched. The markdown is the toolbox's source of truth.
+    if resolver
+        .write_text(
+            &image_dir.join("description.md"),
+            config.description.as_deref().unwrap_or_default(),
+            progress,
+        )
+        .await?
+        == WriteOutcome::Quit
     {
         return Ok(WriteOutcome::Quit);
     }
@@ -1109,6 +1256,8 @@ async fn write_pipeline_entry(
     // curated (prioritized) field order so the written <name>.json matches what `init` scaffolds —
     // a consistent, edit-friendly layout across every spot that writes a pipeline config. The order
     // is still deterministic (curated keys first, remaining keys sorted), so it stays diff-stable.
+    // The config's `description` field is serialized verbatim (kept as `null` when unset, like the
+    // Thorium struct) — the markdown source of truth is the description.md file written below.
     let config_json = crate::utils::curated_json(
         config,
         crate::handlers::imports::merge::PIPELINE_FIELD_ORDER,
@@ -1149,13 +1298,13 @@ async fn write_pipeline_entry(
     {
         return Ok(WriteOutcome::Quit);
     }
-    // mirror a non-empty description to description.md (build treats it as the source of truth);
-    // an empty description writes no file so the inline config value stands
-    if !description.is_empty()
-        && resolver
-            .write_text(&pipeline_dir.join("description.md"), description, progress)
-            .await?
-            == WriteOutcome::Quit
+    // always write description.md so every pipeline carries a docs file; a None/empty description is
+    // an empty file (never the literal "null"), which build treats as absent — leaving the inline
+    // config value untouched. The markdown is the toolbox's source of truth.
+    if resolver
+        .write_text(&pipeline_dir.join("description.md"), description, progress)
+        .await?
+        == WriteOutcome::Quit
     {
         return Ok(WriteOutcome::Quit);
     }
@@ -1374,9 +1523,8 @@ pub async fn export(
             let Some(config) = &entry.config else {
                 continue;
             };
-            // reconcile against the existing toolbox: explicit =dest > the dir this tool already
-            // occupies > the configured/default layout, plus the conflict outcome (new / unchanged /
-            // update-with-overwrite / skip)
+            // decide where and how to write this image against the existing toolbox (placement,
+            // group-mismatch re-group/skip, and any cross-group warning) — see decide_write
             let key = (config.group.clone(), config.name.clone(), version.clone());
             let name_key = (config.group.clone(), config.name.clone());
             let current_json = crate::utils::canonical_json(config)?;
@@ -1386,89 +1534,44 @@ pub async fn export(
                 config.name
             );
             let explicit_dest = dest_overrides.get(config.name.as_str()).map(String::as_str);
-            let placement = plan_placement(
+            let action = decide_write(
+                "image",
+                &config.group,
+                &config.name,
+                version,
+                &current_json,
                 explicit_dest,
                 existing_image_dirs.get(&name_key).map(String::as_str),
                 existing_images.get(&key).map(|(json, _dir)| json.as_str()),
-                &current_json,
+                existing_image_locs.get(&(config.name.clone(), version.clone())),
+                existing_image_groups.get(&config.name),
                 &default_rel,
                 cmd.overwrite,
             );
-            // a New write whose (name, version) already lives elsewhere in the toolbox would be a
-            // build-breaking duplicate (build identifies an image by name+version, ignoring group).
-            // This is the group-mismatch case: the toolbox holds the tool under a different group than
-            // we're writing under (the `-g` group, or `--group-override` if set). With --overwrite,
-            // re-group it in place — reuse its directory and let the refreshed config carry the new
-            // group; without --overwrite, skip rather than corrupt the toolbox with a duplicate.
-            let mut placement = placement;
-            let mut regrouped_from: Option<String> = None;
-            if let Placement::New(_) = &placement
-                && let Some((existing_group, existing_dir)) =
-                    existing_image_locs.get(&(config.name.clone(), version.clone()))
-                && !existing_dir.is_empty()
-            {
-                if cmd.overwrite {
-                    regrouped_from = Some(existing_group.clone());
-                    placement = Placement::Update(existing_dir.clone());
-                } else {
-                    progress.warning(format!(
-                        "image '{}:{version}' already exists in the toolbox at '{existing_dir}' under \
-                         group '{existing_group}'; not writing a duplicate under group '{}' (it would \
-                         fail build) — re-run with --overwrite to re-group it in place",
-                        config.name, config.group
-                    ));
-                    continue;
-                }
-            }
-            // a New tool whose NAME (but not this exact version) exists under a different group is a
-            // softer signal of the same rename; warn but allow it (build keeps distinct versions)
-            if let Placement::New(_) = placement
-                && let Some(groups) = existing_image_groups.get(&config.name)
-                && groups.iter().any(|other| other != &config.group)
-            {
-                progress.warning(format!(
-                    "image '{}' is being written under group '{}', but the toolbox already has an \
-                     image named '{}' under group(s) {}; this adds a separate copy — pass \
-                     --group-override <toolbox-group> to reconcile against the existing one",
-                    config.name,
-                    config.group,
-                    config.name,
-                    groups.iter().cloned().collect::<Vec<_>>().join(", ")
-                ));
-            }
             // a skip outcome warns and moves on to the next resource (the rest still export)
-            let target_rel = match &placement {
-                Placement::New(dir) | Placement::Unchanged(dir) | Placement::Update(dir) => {
-                    dir.clone()
-                }
-                Placement::SkipMove(existing) => {
-                    progress.warning(format!(
-                        "image '{}:{version}' already exists in the toolbox at '{existing}'; not \
-                         writing a second copy at '{}' (it would fail build) — omit =dest to update \
-                         it in place, or remove the old copy first",
-                        config.name,
-                        explicit_dest.unwrap_or_default()
-                    ));
+            let (target_rel, full_write, regrouped_from, unchanged) = match action {
+                WriteAction::Skip(msg) => {
+                    progress.warning(msg);
                     continue;
                 }
-                Placement::SkipDiffers => {
-                    progress.warning(format!(
-                        "image '{}:{version}' already exists in the toolbox and differs; not updated \
-                         — pass --overwrite to update it",
-                        config.name
-                    ));
-                    continue;
+                WriteAction::Write {
+                    target_rel,
+                    full_write,
+                    regrouped_from,
+                    unchanged,
+                    soft_warn,
+                } => {
+                    if let Some(warn) = soft_warn {
+                        progress.warning(warn);
+                    }
+                    (target_rel, full_write, regrouped_from, unchanged)
                 }
             };
             let image_dir = output.join(&target_rel);
-            // a full write (a brand-new tool) regenerates the manifest; an in-place update preserves
-            // the existing manifest.toml (its toolbox-authored build/build_path/[base_image]/image_from)
-            // and only rewrites the Thorium-owned config/description/policy files
-            let write_manifest = matches!(placement, Placement::New(_));
-            // when a NEW image is pointed at an explicit `=dest` that already holds a Dockerfile, the
+            // when a NEW image is pointed at an explicit `=dir` that already holds a Dockerfile, the
             // user is folding this config into an existing build context, so mark its manifest
             // build = true. Only the explicit-dest fresh-write case is auto-detected.
-            let build = write_manifest
+            let build = full_write
                 && dest_overrides.contains_key(config.name.as_str())
                 && image_dir.join("Dockerfile").exists();
             if build {
@@ -1478,43 +1581,38 @@ pub async fn export(
                 ));
             }
             // an unchanged image skips the redundant container re-bundle when its tarball is already
-            // saved; an update refreshes the config in place (manifest kept)
+            // saved; a re-group/update refreshes the config in place (manifest preserved)
             let mut skip_bundle = false;
-            match &placement {
-                Placement::Unchanged(_) => {
-                    skip_bundle = !cmd.with_images
-                        || image_dir.join(format!("{}.tar.gz", config.name)).exists();
-                    progress.info_anonymous(format!(
-                        "Unchanged: image '{}:{version}' already current in the toolbox",
-                        config.name
-                    ));
-                }
-                Placement::Update(_) => {
-                    if let Some(from) = &regrouped_from {
-                        progress.info_anonymous(format!(
-                            "Re-grouping image '{}:{version}' from '{from}' to '{}' in place at \
-                             '{target_rel}'",
-                            config.name, config.group
-                        ));
-                    } else {
-                        progress.info_anonymous(format!(
-                            "Updating image '{}:{version}' in place at '{target_rel}' (config only; \
-                             manifest build settings preserved)",
-                            config.name
-                        ));
-                    }
-                }
-                _ => {}
+            if unchanged {
+                skip_bundle =
+                    !cmd.with_images || image_dir.join(format!("{}.tar.gz", config.name)).exists();
+                progress.info_anonymous(format!(
+                    "Unchanged: image '{}:{version}' already current in the toolbox",
+                    config.name
+                ));
+            } else if let Some(from) = &regrouped_from {
+                progress.info_anonymous(format!(
+                    "Re-grouping image '{}:{version}' from '{from}' to '{}' in place at '{target_rel}'",
+                    config.name, config.group
+                ));
+            } else if !full_write {
+                progress.info_anonymous(format!(
+                    "Updating image '{}:{version}' in place at '{target_rel}' (config only; manifest \
+                     build settings preserved)",
+                    config.name
+                ));
             }
             let outcome = write_image_entry(
                 &image_dir,
                 config,
                 version,
-                build,
-                write_manifest,
-                cmd.strip_registry,
+                ImageWriteOptions {
+                    build,
+                    write_manifest: full_write,
+                    strip_registry: cmd.strip_registry,
+                    review,
+                },
                 &entry.network_policies,
-                review,
                 editor,
                 &mut resolver,
                 &progress,
@@ -1541,10 +1639,9 @@ pub async fn export(
                 let Some(config) = &entry.config else {
                     continue;
                 };
-                // reconcile against the existing toolbox with the same precedence and conflict
-                // outcomes as images (explicit =dest > the pipeline's existing dir > default layout).
-                // A pipeline manifest carries no toolbox-authored build settings, so an update always
-                // does a full rewrite (write_pipeline_entry always regenerates it).
+                // decide placement + reconciliation the same way images do (a pipeline manifest carries
+                // no toolbox-authored build settings, so write_pipeline_entry always regenerates it —
+                // the `full_write` flag only drives the "Updating in place" notice here)
                 let key = (config.group.clone(), config.name.clone(), version.clone());
                 let name_key = (config.group.clone(), config.name.clone());
                 let current_json = crate::utils::canonical_json(config)?;
@@ -1557,97 +1654,56 @@ pub async fn export(
                     config.name
                 );
                 let explicit_dest = dest_overrides.get(config.name.as_str()).map(String::as_str);
-                let placement = plan_placement(
+                let action = decide_write(
+                    "pipeline",
+                    &config.group,
+                    &config.name,
+                    version,
+                    &current_json,
                     explicit_dest,
                     existing_pipeline_dirs.get(&name_key).map(String::as_str),
                     existing_pipelines
                         .get(&key)
                         .map(|(json, _dir)| json.as_str()),
-                    &current_json,
+                    existing_pipeline_locs.get(&(config.name.clone(), version.clone())),
+                    existing_pipeline_groups.get(&config.name),
                     &default_rel,
                     cmd.overwrite,
                 );
-                // build-breaking duplicate guard, same as images: a New write whose (name, version)
-                // already lives elsewhere would fail build. With --overwrite, re-group it in place;
-                // without, skip rather than corrupt the toolbox with a duplicate.
-                let mut placement = placement;
-                let mut regrouped_from: Option<String> = None;
-                if let Placement::New(_) = &placement
-                    && let Some((existing_group, existing_dir)) =
-                        existing_pipeline_locs.get(&(config.name.clone(), version.clone()))
-                    && !existing_dir.is_empty()
-                {
-                    if cmd.overwrite {
-                        regrouped_from = Some(existing_group.clone());
-                        placement = Placement::Update(existing_dir.clone());
-                    } else {
-                        progress.warning(format!(
-                            "pipeline '{}:{version}' already exists in the toolbox at '{existing_dir}' \
-                             under group '{existing_group}'; not writing a duplicate under group '{}' \
-                             (it would fail build) — re-run with --overwrite to re-group it in place",
-                            config.name, config.group
-                        ));
+                let (target_rel, full_write, regrouped_from, unchanged) = match action {
+                    WriteAction::Skip(msg) => {
+                        progress.warning(msg);
                         continue;
                     }
-                }
-                // softer rename signal: same name under a different group but a different version
-                if let Placement::New(_) = placement
-                    && let Some(groups) = existing_pipeline_groups.get(&config.name)
-                    && groups.iter().any(|other| other != &config.group)
-                {
-                    progress.warning(format!(
-                        "pipeline '{}' is being written under group '{}', but the toolbox already has \
-                         a pipeline named '{}' under group(s) {}; this adds a separate copy — pass \
-                         --group-override <toolbox-group> to reconcile against the existing one",
-                        config.name,
-                        config.group,
-                        config.name,
-                        groups.iter().cloned().collect::<Vec<_>>().join(", ")
-                    ));
-                }
-                let target_rel = match &placement {
-                    Placement::New(dir) | Placement::Unchanged(dir) | Placement::Update(dir) => {
-                        dir.clone()
-                    }
-                    Placement::SkipMove(existing) => {
-                        progress.warning(format!(
-                            "pipeline '{}:{version}' already exists in the toolbox at '{existing}'; \
-                             not writing a second copy at '{}' (it would fail build) — omit =dest to \
-                             update it in place, or remove the old copy first",
-                            config.name,
-                            explicit_dest.unwrap_or_default()
-                        ));
-                        continue;
-                    }
-                    Placement::SkipDiffers => {
-                        progress.warning(format!(
-                            "pipeline '{}:{version}' already exists in the toolbox and differs; not \
-                             updated — pass --overwrite to update it",
-                            config.name
-                        ));
-                        continue;
+                    WriteAction::Write {
+                        target_rel,
+                        full_write,
+                        regrouped_from,
+                        unchanged,
+                        soft_warn,
+                    } => {
+                        if let Some(warn) = soft_warn {
+                            progress.warning(warn);
+                        }
+                        (target_rel, full_write, regrouped_from, unchanged)
                     }
                 };
-                match &placement {
-                    Placement::Unchanged(_) => progress.info_anonymous(format!(
+                if unchanged {
+                    progress.info_anonymous(format!(
                         "Unchanged: pipeline '{}:{version}' already current in the toolbox",
                         config.name
-                    )),
-                    Placement::Update(_) => {
-                        if let Some(from) = &regrouped_from {
-                            progress.info_anonymous(format!(
-                                "Re-grouping pipeline '{}:{version}' from '{from}' to '{}' in place at \
-                                 '{target_rel}'",
-                                config.name, config.group
-                            ));
-                        } else {
-                            progress.info_anonymous(format!(
-                                "Updating pipeline '{}:{version}' in place at '{target_rel}'",
-                                config.name
-                            ));
-                        }
-                    }
-                    _ => {}
+                    ));
+                } else if let Some(from) = &regrouped_from {
+                    progress.info_anonymous(format!(
+                        "Re-grouping pipeline '{}:{version}' from '{from}' to '{}' in place at \
+                         '{target_rel}'",
+                        config.name, config.group
+                    ));
+                } else if !full_write {
+                    progress.info_anonymous(format!(
+                        "Updating pipeline '{}:{version}' in place at '{target_rel}'",
+                        config.name
+                    ));
                 }
                 let pipeline_dir = output.join(&target_rel);
                 // the resolved image map carries the (possibly renamed) names paired
@@ -1865,10 +1921,11 @@ async fn bundle_image(
 #[cfg(test)]
 mod tests {
     use super::{
-        ExportToolbox, Placement, dirs_by_name, existing_resource_ids, groups_by_name,
-        locs_by_name_version, manifest, plan_placement, resolve_dest_within, resolve_output,
+        ExportToolbox, Placement, WriteAction, decide_write, dirs_by_name, existing_resource_ids,
+        groups_by_name, locs_by_name_version, manifest, plan_placement, resolve_dest_within,
+        resolve_output,
     };
-    use std::collections::HashMap;
+    use std::collections::{BTreeSet, HashMap};
     use std::path::{Path, PathBuf};
     use thorium::models::{ImageRequest, PipelineRequest};
 
@@ -2112,6 +2169,152 @@ mod tests {
                 false
             ),
             Placement::Unchanged("custom/a".into())
+        );
+    }
+
+    /// A genuinely new tool is a full write at the resolved dir; a same-name/different-group tool at a
+    /// different version is still a full write but carries the soft cross-group warning
+    #[test]
+    fn decide_write_new_and_soft_warn() {
+        assert_eq!(
+            decide_write(
+                "image", "g", "a", "1.0", "{}", None, None, None, None, None, "images/a", false,
+            ),
+            WriteAction::Write {
+                target_rel: "images/a".into(),
+                full_write: true,
+                regrouped_from: None,
+                unchanged: false,
+                soft_warn: None,
+            }
+        );
+        // exists under another group but at a different version → allowed, with a soft warning
+        let other: BTreeSet<String> = ["toolbox-grp".to_string()].into_iter().collect();
+        let WriteAction::Write {
+            full_write,
+            soft_warn,
+            ..
+        } = decide_write(
+            "image",
+            "static-ouo",
+            "a",
+            "2.0",
+            "{}",
+            None,
+            None,
+            None,
+            None,
+            Some(&other),
+            "images/a",
+            false,
+        )
+        else {
+            panic!("expected a Write");
+        };
+        assert!(full_write);
+        assert!(soft_warn.is_some());
+    }
+
+    /// A group-mismatched `(name, version)` already in the toolbox: re-grouped in place with
+    /// `--overwrite`, skipped with a warning without it
+    #[test]
+    fn decide_write_regroups_or_skips_on_collision() {
+        let loc = ("toolbox-grp".to_string(), "tools/a".to_string());
+        // --overwrite → re-group in place at the existing dir (not a full write; manifest preserved)
+        assert_eq!(
+            decide_write(
+                "image",
+                "static-ouo",
+                "a",
+                "1.0",
+                "{}",
+                None,
+                None,
+                None,
+                Some(&loc),
+                None,
+                "images/a",
+                true,
+            ),
+            WriteAction::Write {
+                target_rel: "tools/a".into(),
+                full_write: false,
+                regrouped_from: Some("toolbox-grp".into()),
+                unchanged: false,
+                soft_warn: None,
+            }
+        );
+        // no --overwrite → skip (would be a build-breaking duplicate)
+        assert!(matches!(
+            decide_write(
+                "image",
+                "static-ouo",
+                "a",
+                "1.0",
+                "{}",
+                None,
+                None,
+                None,
+                Some(&loc),
+                None,
+                "images/a",
+                false,
+            ),
+            WriteAction::Skip(_)
+        ));
+    }
+
+    /// An exact match drives Unchanged (identical) or Update (differs, with --overwrite), each at the
+    /// tool's existing directory and never a full manifest rewrite
+    #[test]
+    fn decide_write_unchanged_and_update() {
+        // byte-identical at the same (group,name) dir → Unchanged
+        assert_eq!(
+            decide_write(
+                "image",
+                "g",
+                "a",
+                "1.0",
+                "{}",
+                None,
+                Some("images/a"),
+                Some("{}"),
+                None,
+                None,
+                "images/a",
+                false,
+            ),
+            WriteAction::Write {
+                target_rel: "images/a".into(),
+                full_write: false,
+                regrouped_from: None,
+                unchanged: true,
+                soft_warn: None,
+            }
+        );
+        // differs + --overwrite → Update in place
+        assert_eq!(
+            decide_write(
+                "image",
+                "g",
+                "a",
+                "1.0",
+                "{\"new\":1}",
+                None,
+                Some("images/a"),
+                Some("{\"old\":1}"),
+                None,
+                None,
+                "images/a",
+                true,
+            ),
+            WriteAction::Write {
+                target_rel: "images/a".into(),
+                full_write: false,
+                regrouped_from: None,
+                unchanged: false,
+                soft_warn: None,
+            }
         );
     }
 

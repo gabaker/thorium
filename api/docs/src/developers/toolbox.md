@@ -82,9 +82,11 @@ override is visible. If `description.md` is absent (or present but empty), the i
 (`config_from` pointing at a URL) can't be edited during build, so a `description.md` beside it
 is only warned about, never injected.
 
-`toolbox export` writes a `description.md` from each exported resource's description, and
-`toolbox init` scaffolds a stub. Descriptions surface in the Thorium UI and `thorctl images
-get`, so they're how users — and AI agents — decide which tool to run.
+`toolbox export` always writes a `description.md` for each exported resource — its content is the
+resource's description, or an **empty file** when the description is unset/empty (never the literal
+text `null`, which would otherwise become the description on re-import). `toolbox init` scaffolds a
+stub. Descriptions surface in the Thorium UI and `thorctl images get`, so they're how users — and AI
+agents — decide which tool to run.
 
 #### Toolbox config (`config.toml`)
 

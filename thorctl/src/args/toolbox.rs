@@ -553,33 +553,33 @@ pub struct ExportToolbox {
     /// duplicated.
     #[clap(short = 'g', long = "group", value_name = "GROUP")]
     pub group: Option<String>,
-    /// Export specific pipelines. Format: `group/name[=path]` (or `name[=path]` with --group),
+    /// Export specific pipelines. Format: `group/name[=dir]` (or `name[=dir]` with --group),
     /// comma-separated for multiple.
     ///
-    /// Images referenced by exported pipelines are auto-included. The optional `[=path]` suffix
-    /// writes that pipeline's files to `path`, e.g. `static/av=pipelines/av`; without it the
-    /// configured/default layout is used. `path` may be relative (interpreted against the toolbox
-    /// root) or absolute, but must resolve to a directory inside the toolbox. `[=path]` is placement
+    /// Images referenced by exported pipelines are auto-included. The optional `[=dir]` suffix
+    /// writes that pipeline's files to `dir`, e.g. `static/av=pipelines/av`; without it the
+    /// configured/default layout is used. `dir` may be relative (interpreted against the toolbox
+    /// root) or absolute, but must resolve to a directory inside the toolbox. `[=dir]` is placement
     /// only — it never changes which pipeline (or its images) is selected.
     #[clap(
         short = 'p',
         long = "pipelines",
-        value_name = "GROUP/NAME[=PATH]",
+        value_name = "GROUP/NAME[=DIR]",
         value_delimiter = ','
     )]
     pub pipelines: Vec<String>,
-    /// Export specific standalone images. Format: `group/name[=path]` (or `name[=path]` with
+    /// Export specific standalone images. Format: `group/name[=dir]` (or `name[=dir]` with
     /// --group), comma-separated for multiple.
     ///
-    /// The optional `[=path]` suffix writes that image's files to `path`, e.g.
+    /// The optional `[=dir]` suffix writes that image's files to `dir`, e.g.
     /// `static/clamav=tools/clamav` to fold a config into an existing build-context dir; naming an
-    /// auto-pulled dependency image this way also redirects it. `path` may be relative (interpreted
+    /// auto-pulled dependency image this way also redirects it. `dir` may be relative (interpreted
     /// against the toolbox root) or absolute, but must resolve to a directory inside the toolbox.
-    /// `[=path]` is placement only.
+    /// `[=dir]` is placement only.
     #[clap(
         short = 'i',
         long = "images",
-        value_name = "GROUP/NAME[=PATH]",
+        value_name = "GROUP/NAME[=DIR]",
         value_delimiter = ','
     )]
     pub images: Vec<String>,
@@ -680,9 +680,10 @@ pub struct ResourceSpec {
 impl ResourceSpec {
     /// Parse `group/name`, `name`, or either with an optional `=dest` placement suffix
     ///
-    /// `static/clamav=tools/clamav` selects `static/clamav` and writes its files into
-    /// `tools/clamav`; the `=dest` is placement only and is validated as a relative subpath of the
-    /// toolbox root (no absolute path, no `..`).
+    /// `static/clamav=tools/clamav` selects `static/clamav` and writes its files into `tools/clamav`;
+    /// the `=dest` is placement only. Only emptiness is checked here — the dest may be absolute or
+    /// relative (and may contain `..`); `export` resolves it against the toolbox root and enforces the
+    /// must-stay-inside-the-toolbox rule (see `resolve_dest_within`).
     ///
     /// # Arguments
     ///
