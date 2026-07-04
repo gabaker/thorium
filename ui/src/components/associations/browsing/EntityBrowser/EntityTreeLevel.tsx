@@ -31,7 +31,7 @@ interface EntityTreeLevelProps {
  * grouped by kind under {@link LayerHeader}s (only when a header adds value), and paginated per level.
  */
 const EntityTreeLevel: React.FC<EntityTreeLevelProps> = ({ parentId, path, depth, rowKeyPrefix, explicit }) => {
-  const { graph } = useGraphData();
+  const { graph, growable } = useGraphData();
   const browser = useEntityBrowser();
   const [limit, setLimit] = useState(PAGE_SIZE);
 
@@ -53,6 +53,9 @@ const EntityTreeLevel: React.FC<EntityTreeLevelProps> = ({ parentId, path, depth
       );
     }
     if (!explicit) return null;
+    // a still-growable parent isn't fully explored — don't claim "no further associations" (its grow is
+    // pending or available); the empty note is only accurate once the node is fully grown.
+    if (growable.has(parentId)) return null;
     return (
       <Level $depth={depth}>
         <EmptyNote>No further associations.</EmptyNote>

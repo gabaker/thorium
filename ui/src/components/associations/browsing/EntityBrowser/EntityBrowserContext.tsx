@@ -81,7 +81,7 @@ export const EntityBrowserProvider: React.FC<EntityBrowserProviderProps> = ({
   defaultDepth = 0,
   children,
 }) => {
-  const { graph, graphId, graphVersion, growToDepth } = useGraphData();
+  const { graph, graphId, graphVersion, growToDepth, growable } = useGraphData();
 
   const [clauses, setClauses] = useState<Clause[]>([]);
   const [flaggedOnly, setFlaggedOnly] = useState(false);
@@ -91,6 +91,9 @@ export const EntityBrowserProvider: React.FC<EntityBrowserProviderProps> = ({
   const grownNodesRef = useRef<Set<string>>(new Set());
   // largest depth we've already grown to, so raising the depth clause grows additively and only once
   const maxRequestedDepthRef = useRef(0);
+  // FIX (cross-tree race): the grown depth is per-tree; track which tree it applies to so a swap to a new
+  // tree id (StrictMode/remount) resets the guard and the new tree gets grown instead of being skipped.
+  const grownForGraphIdRef = useRef<string>('');
 
   const setChildrenExpanded = useCallback((rowKey: string, expanded: boolean) => {
     setExpandedChildren((prev) => {
@@ -135,9 +138,13 @@ export const EntityBrowserProvider: React.FC<EntityBrowserProviderProps> = ({
     (rowKey: string, nodeId: string) => {
       if (collapsedChildren.has(rowKey)) return false;
       if (expandedChildren.has(rowKey)) return true;
+      // a still-growable node stays collapsed under auto-expand — its children aren't fully loaded yet, so
+      // showing it "expanded" alongside the grow affordance would be contradictory; the user grows it by
+      // explicitly expanding (which lands in `expandedChildren` above).
+      if (growable.has(nodeId)) return false;
       return autoExpandDepth > 0 && (distances.get(nodeId) ?? Infinity) < autoExpandDepth;
     },
-    [collapsedChildren, expandedChildren, distances, autoExpandDepth],
+    [collapsedChildren, expandedChildren, growable, distances, autoExpandDepth],
   );
   const isChildrenExplicit = useCallback((rowKey: string) => expandedChildren.has(rowKey), [expandedChildren]);
   const text = useMemo(() => getSearchTextFromClauses(clauses), [clauses]);
@@ -185,6 +192,14 @@ export const EntityBrowserProvider: React.FC<EntityBrowserProviderProps> = ({
   const growTarget = Math.max(maxDepth ?? 0, defaultDepth);
   useEffect(() => {
     if (!graphId) return;
+    // FIX (cross-tree race): reset the per-tree depth guard when the shared graph swaps to a new tree, so the
+    // final tree is grown to the requested depth instead of being skipped by a guard set on an abandoned tree.
+    if (grownForGraphIdRef.current !== graphId) {
+      // DEBUG (remove after diagnosing entities-tab depth 400s)
+      console.warn('[eb-debug] graphId changed — resetting depth grow guard', { from: grownForGraphIdRef.current, to: graphId });
+      grownForGraphIdRef.current = graphId;
+      maxRequestedDepthRef.current = 0;
+    }
     if (growTarget > 1 && growTarget > maxRequestedDepthRef.current) {
       // DEBUG (remove after diagnosing entities-tab depth 400s): the entities tab's auto grow-to-depth
       // trigger (fires on mount/remount and when the depth clause increases). The graph never auto-grows.

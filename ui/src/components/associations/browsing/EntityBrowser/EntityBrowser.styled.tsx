@@ -96,6 +96,8 @@ export const GroupCount = styled.span`
 export const RowContainer = styled.div`
   display: flex;
   flex-direction: column;
+  /* same small gap between a node's info box and its nested children level as between sibling entities */
+  gap: 2px;
 `;
 
 /** A single entity/file/repo "info box": header + metadata preview grouped in one bordered card. */
