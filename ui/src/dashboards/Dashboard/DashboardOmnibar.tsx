@@ -4,15 +4,27 @@ import { FaChevronDown, FaChevronUp, FaEyeSlash, FaXmark } from 'react-icons/fa6
 // spec: ./SPEC.md
 
 // project imports
-import { FiltersSection, FiltersToggleLabel, HiddenChip, OmnibarStrip, OmnibarStripSlot } from './styles';
+import { groupHiddenByType } from './hiddenGroups';
+import {
+  ClearHiddenButton,
+  FiltersSection,
+  FiltersToggleLabel,
+  HiddenChip,
+  HiddenTypeGroup,
+  HiddenTypeLabel,
+  OmnibarStrip,
+  OmnibarStripSlot,
+} from './styles';
 import TagsTile from './TagsTile';
+import { nodeTypeOf } from '@components/associations/browsing/EntityBrowser/browserHelpers';
 import { useEntityBrowser } from '@components/associations/browsing/EntityBrowser/EntityBrowserContext';
 import FlaggedOnlyToggle from '@components/associations/browsing/EntityBrowser/FlaggedOnlyToggle';
-import HiddenNodesControl from '@components/associations/browsing/EntityBrowser/HiddenNodesControl';
 import { buildBrowserOmnibarOptions } from '@components/associations/browsing/EntityBrowser/omnibarOptions';
+import { useGraphData } from '@components/associations/data/GraphDataContext';
 import Collapsible, { TogglePosition } from '@components/shared/info/Collapsible';
 import Omnibar from '@components/shared/inputs/omnibar/Omnibar';
 import type { Clause } from '@components/shared/inputs/omnibar/ClauseTypes';
+import { entityLabel } from '@models/entities';
 
 /// The collapsed height (px) of the expandable filters section: a scrollable, bottom-faded window onto
 /// the tags tile, tall enough to show a couple of tag-key tiles before the "filters" toggle expands it.
@@ -39,9 +51,9 @@ export interface DashboardOmnibarProps {
 /**
  * The dashboard's always-shown filter strip, sitting between the stats panel and the content tiles.
  *
- * Renders an {@link Omnibar} bound to the shared clause state plus one removable chip per hidden node (a
- * click unhides it), the standalone {@link HiddenNodesControl} ("Hidden (n)" dropdown with Clear all), and
- * the {@link FlaggedOnlyToggle}. The omnibar's option lexicon (text/tag/group/Show/Hide/Exclude/Include/depth)
+ * Renders an {@link Omnibar} bound to the shared clause state, the hidden nodes as removable chips
+ * **grouped by resource type** (each type headered, a chip-click unhides that node) with a single "Clear
+ * all", and the {@link FlaggedOnlyToggle}. The omnibar's option lexicon (text/tag/group/Show/Hide/Exclude/Include/depth)
  * is built from the graph-derived `presentKinds`/`tagOptions`/`groupOptions` read from the surrounding
  * {@link EntityBrowserProvider}, so it offers exactly the browser's own vocabulary. The two toggle controls
  * also read that context, so this strip must be rendered inside the provider. Below the controls sits an
@@ -56,30 +68,44 @@ export interface DashboardOmnibarProps {
  * @returns The omnibar strip.
  */
 const DashboardOmnibar: React.FC<DashboardOmnibarProps> = ({ clauses, setClauses }) => {
-  const { presentKinds, tagOptions, groupOptions, hiddenNodes, unhideNode, labelForNode } = useEntityBrowser();
+  const { presentKinds, tagOptions, groupOptions, hiddenNodes, unhideNode, unhideAll, labelForNode } = useEntityBrowser();
+  const { graph } = useGraphData();
   const dropdownOptions = useMemo(
     () => buildBrowserOmnibarOptions(presentKinds, tagOptions, groupOptions),
     [presentKinds, tagOptions, groupOptions],
   );
-  // hidden ids are URL-backed now, so surface each as a removable chip (a click unhides it) alongside the
-  // "Hidden (n)" dropdown, making the hidden set both visible and directly undoable from the strip
-  const hiddenIds = Array.from(hiddenNodes);
+  // hidden ids are URL-backed, so surface them in the strip grouped by resource type: one removable chip
+  // per hidden node (a click unhides it) under its type header, plus a single "Clear all" — a unified,
+  // discoverable place to see and undo every hidden thing
+  const hiddenGroups = useMemo(
+    () => groupHiddenByType(Array.from(hiddenNodes), (id) => nodeTypeOf(id, graph), entityLabel),
+    [hiddenNodes, graph],
+  );
   return (
     <OmnibarStrip>
       <OmnibarStripSlot>
         <Omnibar clauses={clauses} setClauses={setClauses} dropdownOptions={dropdownOptions} placeholder="Filter entities…" />
       </OmnibarStripSlot>
-      {hiddenIds.map((id) => {
-        const label = labelForNode(id);
-        return (
-          <HiddenChip key={id} type="button" aria-label={`Unhide ${label}`} onClick={() => unhideNode(id)}>
-            <FaEyeSlash size={12} aria-hidden />
-            <span title={label}>{label}</span>
-            <FaXmark size={12} aria-hidden />
-          </HiddenChip>
-        );
-      })}
-      <HiddenNodesControl />
+      {hiddenGroups.map((group) => (
+        <HiddenTypeGroup key={group.type}>
+          <HiddenTypeLabel>{group.label}</HiddenTypeLabel>
+          {group.ids.map((id) => {
+            const label = labelForNode(id);
+            return (
+              <HiddenChip key={id} type="button" aria-label={`Unhide ${label}`} onClick={() => unhideNode(id)}>
+                <FaEyeSlash size={12} aria-hidden />
+                <span title={label}>{label}</span>
+                <FaXmark size={12} aria-hidden />
+              </HiddenChip>
+            );
+          })}
+        </HiddenTypeGroup>
+      ))}
+      {hiddenGroups.length > 0 && (
+        <ClearHiddenButton type="button" onClick={unhideAll}>
+          Clear all
+        </ClearHiddenButton>
+      )}
       <FlaggedOnlyToggle />
       <FiltersSection>
         <Collapsible

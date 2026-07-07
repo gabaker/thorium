@@ -37,7 +37,16 @@ import { OverlayTipRight } from '@components/shared/overlay/tips';
 import EntitySummary, { SummaryVariant } from '@components/shared/info/EntitySummary';
 import { SummaryPopover } from '@components/shared/info/SummaryPopover';
 import { treeNodeToInfo } from '@components/shared/info/info';
-import { GraphWindow, GraphDiv, LoadingOverlay, TreeOverlayToggle, TreeOverlayPanel, TreeOverlayHeader, MinimizeButton } from './Shared';
+import {
+  GraphDiv,
+  GraphOverlayMessage,
+  GraphWindow,
+  LoadingOverlay,
+  MinimizeButton,
+  TreeOverlayHeader,
+  TreeOverlayPanel,
+  TreeOverlayToggle,
+} from './Shared';
 import RenderErrorAlert from '@components/shared/alerts/RenderErrorAlert';
 
 // spec: ./AssociationGraph.spec.md
@@ -77,6 +86,7 @@ const AssociationGraph3DInner: React.FC<{ bordered?: boolean }> = ({ bordered })
     graphId,
     graphVersion,
     loading,
+    error,
     growing,
     initialDepth,
     grow,
@@ -1084,6 +1094,18 @@ const AssociationGraph3DInner: React.FC<{ bordered?: boolean }> = ({ bordered })
       {loading && (
         <LoadingOverlay>
           <Spinner animation="border" variant="secondary" />
+        </LoadingOverlay>
+      )}
+      {/* surface load failures and empty results so the canvas is never a silent blank. graphId is empty
+          until the initial tree loads, so gating the empty message on it avoids a pre-load flash. */}
+      {!loading && error && (
+        <LoadingOverlay>
+          <GraphOverlayMessage>Failed to load graph</GraphOverlayMessage>
+        </LoadingOverlay>
+      )}
+      {!loading && !error && graphId !== '' && nodeCount === 0 && (
+        <LoadingOverlay>
+          <GraphOverlayMessage>No graph data</GraphOverlayMessage>
         </LoadingOverlay>
       )}
       {treeOverlayOpen ? (

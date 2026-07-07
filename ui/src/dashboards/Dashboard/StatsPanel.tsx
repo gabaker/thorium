@@ -154,7 +154,7 @@ const StatsPanel: React.FC<StatsPanelProps> = ({ clauses, setClauses, onBarClick
             </ChartBlock>
             <ChartBlock>
               <ChartHeader>
-                <ChartTitle>Tag values</ChartTitle>
+                <ChartTitle>Tags</ChartTitle>
                 <KeyPicker aria-label="Tag key to chart" value={tagKey} onChange={(event) => setTagKey(event.target.value)}>
                   {TAG_KEY_OPTIONS.map((key) => (
                     <option key={key} value={key}>

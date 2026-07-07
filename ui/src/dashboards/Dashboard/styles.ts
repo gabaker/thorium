@@ -53,7 +53,7 @@ export const StatsRow = styled.div`
 /// stack gap so the floating controls sit closer to the stats above and the omnibar below.
 export const ControlsRow = styled.div`
   min-width: 0;
-  margin: -${spacers.two} 0;
+  margin: -${spacers.three} 0;
 `;
 
 /// The full-width omnibar-strip row wrapper (grid row 3).
@@ -130,6 +130,36 @@ export const HiddenChip = styled.button`
   &:hover {
     border-color: var(--thorium-highlight-panel-border);
     color: var(--thorium-text);
+  }
+`;
+
+/// A labelled cluster of hidden-node chips that share one resource type, shown inline in the omnibar strip.
+export const HiddenTypeGroup = styled.div`
+  display: inline-flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: ${spacers.two};
+`;
+
+/// The resource-type header preceding a hidden group's chips (e.g. "Files", "Devices").
+export const HiddenTypeLabel = styled.span`
+  color: var(--thorium-secondary-text);
+  font-size: 0.75rem;
+  font-weight: 600;
+`;
+
+/// The "Clear all" action beside the hidden groups that unhides every hidden node at once.
+export const ClearHiddenButton = styled.button`
+  padding: ${spacers.one} ${spacers.three};
+  background: transparent;
+  border: none;
+  color: var(--thorium-link-text);
+  font-size: 0.78rem;
+  font-weight: 600;
+  cursor: pointer;
+
+  &:hover {
+    color: var(--thorium-highlight-text);
   }
 `;
 
@@ -561,11 +591,15 @@ export const FileLinks = styled.div`
   gap: ${spacers.one} ${spacers.three};
 `;
 
-/// The footer row hosting the "Load more" action for the analysis fan-out.
+/**
+ * The footer row for the analysis fan-out: a three-cell grid so the "Load more" action is centered in
+ * the row while the "Showing N of M files" count sits left-justified on the same line (the empty third
+ * cell balances the centered middle cell).
+ */
 export const AnalysisFooter = styled.div`
-  display: flex;
+  display: grid;
+  grid-template-columns: 1fr auto 1fr;
   align-items: center;
-  gap: ${spacers.three};
   margin-top: ${spacers.three};
   color: var(--thorium-secondary-text);
   font-size: 0.8rem;

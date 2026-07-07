@@ -215,12 +215,13 @@ const AnalysisStatusPanel: React.FC = () => {
               )}
               {hasMore && loadedCount > 0 && !loading && (
                 <AnalysisFooter>
-                  <Button variant={ButtonVariant.Secondary} size={ButtonSize.Small} onClick={loadMore}>
-                    Load more
-                  </Button>
                   <span>
                     Showing {loadedCount} of {totalFiles} files
                   </span>
+                  <Button variant={ButtonVariant.Secondary} size={ButtonSize.Small} onClick={loadMore}>
+                    Load more
+                  </Button>
+                  <span aria-hidden />
                 </AnalysisFooter>
               )}
             </>

@@ -140,13 +140,11 @@ const VisxBarChart: React.FC<VisxBarChartProps> = ({ bars, onBarClick, ariaLabel
 
   const interactive = typeof onBarClick === 'function';
 
-  if (bars.length === 0) {
-    return <EmptyChart>No data</EmptyChart>;
-  }
-
   return (
     <ChartContainer ref={containerRef}>
-      {width > 0 ? (
+      {bars.length === 0 ? (
+        <EmptyChart>No data</EmptyChart>
+      ) : width > 0 ? (
         <svg width={width} height={height} role="group" aria-label={ariaLabel}>
           <Group left={MARGIN.left} top={MARGIN.top}>
             {bars.map((bar) => {
@@ -202,7 +200,11 @@ const VisxBarChart: React.FC<VisxBarChartProps> = ({ bars, onBarClick, ariaLabel
             />
           </Group>
         </svg>
-      ) : null}
+      ) : (
+        // width not yet measured: reserve height (via EmptyChart's min-height) so the container never
+        // collapses to a zero-size blank; the ResizeObserver fills in the real width on the next frame
+        <EmptyChart aria-hidden />
+      )}
     </ChartContainer>
   );
 };

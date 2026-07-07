@@ -359,11 +359,12 @@ export const BalancedColumns: React.FC<BalancedColumnsProps> = ({
     measure();
   }, [columnCount, anchorCount, items.length, measure]);
 
-  // unmeasured anchors default to their own index column and unmeasured items to the last column
-  // (matching the pre-measure static layout: left slot in column 0, right slot and items in
-  // column 1); measured indices are clamped in case the count shrank before the next measure
+  // unmeasured anchors default to their own index column; unmeasured items round-robin across columns
+  // (i % columnCount) so tiles appended before the next measure (e.g. new tag keys arriving as the graph
+  // grows) spread evenly instead of all stacking in the last column; measured indices are clamped in case
+  // the count shrank before the next measure
   const anchorCols = resolvedAnchors.map((_, i) => Math.min(assignment?.anchorCols[i] ?? i, columnCount - 1));
-  const itemCols = items.map((_, i) => Math.min(assignment?.itemCols[i] ?? columnCount - 1, columnCount - 1));
+  const itemCols = items.map((_, i) => Math.min(assignment?.itemCols[i] ?? i % columnCount, columnCount - 1));
 
   // bucket the anchor/item indices per column in a single O(n) pass so rendering each column maps
   // over its own bucket instead of scanning every tile once per column (O(columns * n))

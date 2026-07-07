@@ -11,6 +11,10 @@ export const GraphWindow = styled.div<{ $bordered?: boolean }>`
     border: 1px solid var(--thorium-panel-border);
     border-radius: 4px;
   `}
+  /* default viewport-relative height for the standalone graph page and entity/file/repo detail views,
+     which render the graph directly with no sizing parent. In the dashboard the tile stretches this to
+     flex: 1 (flex-basis 0 overrides this height) so the canvas fills the square tile instead. */
+  height: 90vh;
   overflow: hidden;
 
   /* the window is focusable so the keyboard shortcuts stay scoped to the graph; show a
@@ -24,8 +28,12 @@ export const GraphWindow = styled.div<{ $bordered?: boolean }>`
 export const GraphDiv = styled.div`
   z-index: 200;
   overflow: hidden;
-  min-height: 90vh;
-  max-height: 90vh;
+  /* fill the GraphWindow so the ForceGraph3D canvas matches its container's real height (the tile in the
+     dashboard, or GraphWindow's 90vh default elsewhere). min-height: 0 lets it shrink inside a flex tile
+     shorter than 90vh instead of overflowing and being clipped from the bottom. */
+  width: 100%;
+  height: 100%;
+  min-height: 0;
 `;
 
 export const TreeOverlayPanel = styled.div`
@@ -72,6 +80,12 @@ export const LoadingOverlay = styled.div`
   align-items: center;
   justify-content: center;
   pointer-events: none;
+`;
+
+/// Muted, centered message shown over the graph canvas for empty ("No graph data") or error states.
+export const GraphOverlayMessage = styled.div`
+  color: var(--thorium-secondary-text);
+  font-size: 0.9rem;
 `;
 
 export const PreviewContainer = styled.div`
