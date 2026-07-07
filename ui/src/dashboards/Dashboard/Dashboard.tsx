@@ -20,7 +20,7 @@ import {
   ContentTile,
   ControlsRow,
   DashboardLayout,
-  HideableTile,
+  GraphPane,
   OmnibarRow,
   PaneScroll,
   StatsRow,
@@ -318,17 +318,16 @@ const DashboardBody: React.FC<DashboardBodyProps> = ({
   const expandedPane = rawPanel as PaneFocus | '';
   // the content arrangement: narrow → tabs; ultra-wide with a focused pane → expanded; else the split view
   const mode = !isUltraWide ? ContentMode.Tabs : expandedPane ? ContentMode.Expanded : ContentMode.Split;
-  // which panes are shown: both in split, only the focused one when expanded, only the active tab when narrow.
-  // The graph's `active` (WebGL gate) tracks its visibility so a hidden graph pays no render cost.
-  const browserVisible =
-    mode === ContentMode.Split ||
-    (mode === ContentMode.Expanded && expandedPane === PaneFocus.Browser) ||
-    (mode === ContentMode.Tabs && activeTab === ContentTab.Entities);
-  const graphVisible =
-    mode === ContentMode.Split ||
-    (mode === ContentMode.Expanded && expandedPane === PaneFocus.Graph) ||
-    (mode === ContentMode.Tabs && activeTab === ContentTab.Graph);
-  // focus a pane (or restore the split view when it's already focused); the other pane stays mounted
+  // pane visibility: BOTH are shown in split AND expanded (expanded just stacks them into one column with the
+  // focused pane on top); in the narrow tabs layout only the active tab shows. The graph's `active` (WebGL gate)
+  // tracks its visibility, so it stays alive when stacked below rather than being torn down.
+  const browserVisible = mode !== ContentMode.Tabs || activeTab === ContentTab.Entities;
+  const graphVisible = mode !== ContentMode.Tabs || activeTab === ContentTab.Graph;
+  // in the single-column expanded stack, the focused pane sits on top via grid `order` (no re-parenting)
+  const graphFocused = mode === ContentMode.Expanded && expandedPane === PaneFocus.Graph;
+  const browserOrder = graphFocused ? 1 : 0;
+  const graphOrder = graphFocused ? 0 : 1;
+  // focus a pane (or restore the split view when it's already focused); the other pane stacks below, still shown
   const toggleBrowserExpand = useCallback(
     () => setPanel(expandedPane === PaneFocus.Browser ? '' : PaneFocus.Browser),
     [expandedPane, setPanel],
@@ -371,17 +370,17 @@ const DashboardBody: React.FC<DashboardBodyProps> = ({
         />
       )}
       <ContentGrid $columns={mode === ContentMode.Split ? 2 : 1}>
-        <ContentTile $hidden={!browserVisible}>
+        <ContentTile $hidden={!browserVisible} $order={browserOrder}>
           {/* the pane header (with the ⤢ focus toggle) shows only in the two-column ultra-wide layout; in the
               narrow tabs layout the tab bar already labels the pane, so no header is rendered */}
           {isUltraWide && (
             <TileHeader>
               <TileHeaderRow>
                 <span>Entities</span>
-                <OverlayTipBottom tip={browserExpanded ? 'Restore the split view' : 'Expand the entities panel to fill the dashboard'}>
+                <OverlayTipBottom tip={browserExpanded ? 'Restore the side-by-side view' : 'Expand entities (stack the graph below)'}>
                   <IconButton
                     onClick={toggleBrowserExpand}
-                    aria-label={browserExpanded ? 'Restore the split view' : 'Expand the entities panel to fill the dashboard'}
+                    aria-label={browserExpanded ? 'Restore the side-by-side view' : 'Expand entities and stack the graph below'}
                   >
                     {browserExpanded ? <FaCompress size={15} /> : <FaExpand size={15} />}
                   </IconButton>
@@ -393,14 +392,15 @@ const DashboardBody: React.FC<DashboardBodyProps> = ({
             <BrowserTile />
           </PaneScroll>
         </ContentTile>
-        <HideableTile $hidden={!graphVisible}>
+        <GraphPane $hidden={!graphVisible} $order={graphOrder}>
           <DashboardGraphTile
             active={graphVisible}
             canExpand={isUltraWide}
             expanded={expandedPane === PaneFocus.Graph}
             onToggleExpand={toggleGraphExpand}
+            fill={mode === ContentMode.Expanded}
           />
-        </HideableTile>
+        </GraphPane>
       </ContentGrid>
       {/* AnalysisStatusPanel renders its own <AnalysisRow> root, so it is placed bare here, full-width below
           the content grid in every arrangement. */}

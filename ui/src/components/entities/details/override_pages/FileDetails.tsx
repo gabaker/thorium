@@ -382,7 +382,7 @@ const FileInfo = ({ details, setDetails, groupDetails, setDeletionStatus, onNavi
         </Col>
       </Row>
       <FileActionsToolbar sha256={details.sha256!} onNavigateTab={onNavigateTab} />
-      <Row className="my-4">
+      <Row className="mt-2 mb-4">
         <Col xs="auto" className="mt-3">
           <p>Select submission:</p>
         </Col>
@@ -400,7 +400,7 @@ const FileInfo = ({ details, setDetails, groupDetails, setDeletionStatus, onNavi
             {subs && subs.map((sub, idx) => <option key={idx}>{sub.id}</option>)}
           </Form.Control>
         </Col>
-        <Col xs="auto">
+        <Col xs="auto" className="d-flex align-items-center justify-content-center">
           <OverlayTipTop
             tip={`Delete this submission. Only system admins,
                 group owners/managers, and the submitter can delete a submission.`}

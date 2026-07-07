@@ -36,6 +36,11 @@ export interface DashboardGraphTileProps {
   expanded?: boolean;
   /** Called when the focus toggle is clicked (focus this pane / restore the split view). */
   onToggleExpand?: () => void;
+  /**
+   * Whether the tile is in the single-column stacked (expanded) layout: it then renders at a viewport-bounded
+   * height instead of a column-width square (which would be far too tall at full page width).
+   */
+  fill?: boolean;
 }
 
 /**
@@ -52,16 +57,26 @@ export interface DashboardGraphTileProps {
  * @param canExpand - Whether to show the focus (expand-to-fill) toggle.
  * @param expanded - Whether this pane is currently focused (toggle shows the collapse icon).
  * @param onToggleExpand - Called when the focus toggle is clicked.
+ * @param fill - Whether to render at a viewport-bounded height for the single-column stacked (expanded) layout.
  * @returns The graph tile.
  */
-const DashboardGraphTile: React.FC<DashboardGraphTileProps> = ({ active, canExpand = false, expanded = false, onToggleExpand }) => (
-  <GraphContentTile>
+const DashboardGraphTile: React.FC<DashboardGraphTileProps> = ({
+  active,
+  canExpand = false,
+  expanded = false,
+  onToggleExpand,
+  fill = false,
+}) => (
+  <GraphContentTile $fill={fill}>
     <TileHeader>
       <TileHeaderRow>
         <span>Association Graph</span>
         {canExpand && (
-          <OverlayTipBottom tip={expanded ? 'Restore the split view' : 'Expand the graph to fill the dashboard'}>
-            <IconButton onClick={onToggleExpand} aria-label={expanded ? 'Restore the split view' : 'Expand the graph to fill the dashboard'}>
+          <OverlayTipBottom tip={expanded ? 'Restore the side-by-side view' : 'Expand graph (stack entities below)'}>
+            <IconButton
+              onClick={onToggleExpand}
+              aria-label={expanded ? 'Restore the side-by-side view' : 'Expand graph and stack entities below'}
+            >
               {expanded ? <FaCompress size={15} /> : <FaExpand size={15} />}
             </IconButton>
           </OverlayTipBottom>

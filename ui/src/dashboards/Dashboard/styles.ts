@@ -309,10 +309,13 @@ export const PaneScroll = styled.div`
 
 /**
  * A content-tile wrapper (browser or graph). `$hidden` toggles visibility with `display: none` so a
- * tile stays mounted (and its state/canvas preserved) while its tab is inactive.
+ * tile stays mounted (and its state/canvas preserved) while its tab is inactive. `$order` sets its grid
+ * `order` so the focused pane can sit on top when the region stacks into one column (expanded mode) without
+ * re-parenting the tile (which would remount it).
  */
-export const ContentTile = styled.div<{ $hidden?: boolean }>`
+export const ContentTile = styled.div<{ $hidden?: boolean; $order?: number }>`
   display: ${({ $hidden }) => ($hidden ? 'none' : 'flex')};
+  order: ${({ $order }) => $order ?? 0};
   flex-direction: column;
   min-width: 0;
   min-height: 0;
@@ -323,22 +326,20 @@ export const ContentTile = styled.div<{ $hidden?: boolean }>`
 `;
 
 /**
- * The graph tile renders as a square: {@link ContentTile} already spans its column's width (a
- * full-width `BalancedColumns` slot in the ultra-wide layout, and `display: contents` on
- * {@link HideableTile} in the tabbed layout, so the width comes from the column in both
- * arrangements), and `aspect-ratio: 1 / 1` derives
- * the height from that width. A small `min-height` is kept only as a floor for very narrow viewports so
- * the 3D canvas always has some room; the aspect ratio otherwise drives the height.
+ * The graph tile. By default it renders as a **square** (`aspect-ratio: 1 / 1`) deriving its height from the
+ * width of its {@link GraphPane} column — the side-by-side (split) and tabbed layouts. When **`$fill`** is set
+ * (the expanded, single-column stack) the square would be as tall as the full page width, so it instead takes a
+ * viewport-bounded height (`70vh`) as a large landscape graph. A `min-height` floor keeps the canvas usable on
+ * narrow viewports.
  *
- * The graph body (`AssociationGraph`'s own `GraphWindow` root) is stretched to `flex: 1` so it fills the
- * square beneath {@link TileHeader}; the tile's `overflow: hidden` clips the graph's internally
- * fixed-height canvas to the square.
+ * The graph body (`AssociationGraph`'s own `GraphWindow` root) is stretched to `flex: 1` so it fills the tile
+ * beneath {@link TileHeader}; the tile's `overflow: hidden` clips the graph's internally fixed-height canvas.
  */
-export const GraphContentTile = styled(ContentTile)`
-  aspect-ratio: 1 / 1;
+export const GraphContentTile = styled(ContentTile)<{ $fill?: boolean }>`
+  ${({ $fill }) => ($fill ? 'height: 70vh;' : 'aspect-ratio: 1 / 1;')}
   min-height: 320px;
 
-  /* stretch the lazily-loaded graph root (and its Suspense fallback) to fill the square under the header */
+  /* stretch the lazily-loaded graph root (and its Suspense fallback) to fill the tile under the header */
   & > div:last-child {
     flex: 1;
     min-height: 0;
@@ -346,13 +347,16 @@ export const GraphContentTile = styled(ContentTile)`
 `;
 
 /**
- * A display-toggling wrapper for a tile that renders its own container (e.g. {@link DashboardGraphTile}).
- * Lets the page keep the tile mounted while its tab is inactive without the tile needing a hidden prop:
- * `$hidden` collapses it with `display: none`, and `display: contents` when shown so the wrapped tile's
- * own layout/height (the graph's min-height) is preserved.
+ * The graph pane's grid-item wrapper. A real grid item (not `display: contents`) so it can carry a grid
+ * `order` — letting the graph sit above or below the browser when the region stacks into one column
+ * (expanded mode) without re-parenting the graph tile (which would remount its WebGL scene). `$hidden`
+ * collapses it with `display: none` (kept mounted) for the narrow tabbed layout.
  */
-export const HideableTile = styled.div<{ $hidden?: boolean }>`
-  display: ${({ $hidden }) => ($hidden ? 'none' : 'contents')};
+export const GraphPane = styled.div<{ $hidden?: boolean; $order?: number }>`
+  min-width: 0;
+  min-height: 0;
+  order: ${({ $order }) => $order ?? 0};
+  ${({ $hidden }) => ($hidden ? 'display: none;' : '')}
 `;
 
 /// Header strip shown at the top of a stats/content tile.
