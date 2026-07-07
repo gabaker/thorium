@@ -69,17 +69,38 @@ export enum TogglePosition {
 
 /** Props for {@link Collapsible}. */
 export interface CollapsibleProps {
-  /** The content to clip; may be any node (markdown, a tags tile, arbitrary JSX). */
-  children: React.ReactNode;
-  /** Collapsed height cap in px; taller content is clipped behind the expand toggle. */
+  /**
+   * The content to clip. Either a node (default measure-and-clip mode) or a function of the collapsed
+   * state — pair the function form with {@link CollapsibleProps.hasMore} to render a truncated set while
+   * collapsed and the full set when expanded (the caller owns the truncation, so nothing is clipped).
+   */
+  children: React.ReactNode | ((collapsed: boolean) => React.ReactNode);
+  /** Collapsed height cap in px; taller content is clipped behind the expand toggle (measure mode only). */
   maxPx: number;
+  /**
+   * When provided, the toggle is driven by this "there is more to show" signal instead of a measured
+   * overflow, and the content renders at its natural height (no max-height clip or fade). Use with a
+   * function `children` that returns a truncated set while collapsed and the full set when expanded — the
+   * caller owns the truncation. Leave undefined for the default measure-and-clip behavior other callers use.
+   */
+  hasMore?: boolean;
   /**
    * Render the toggle label for the given collapsed state. Defaults to `Show more`/`Show less`. Callers
    * override to match their context (e.g. `⌄ filters` / `⌃ filters`).
    */
   renderToggleLabel?: (collapsed: boolean) => React.ReactNode;
-  /** Whether to start collapsed. Defaults to `true`. */
+  /** Whether to start collapsed. Defaults to `true`. Ignored when {@link CollapsibleProps.collapsed} is set. */
   defaultCollapsed?: boolean;
+  /**
+   * Controlled collapsed state. When provided, the component uses this instead of its own internal
+   * state and the toggle calls {@link CollapsibleProps.onToggleCollapsed} with the requested next
+   * value — letting a parent own the expanded/collapsed state (e.g. to preserve it across remounts,
+   * as the dashboard tags tile does when the balanced-column layout re-parents a tile). When omitted,
+   * the component manages its own state seeded by {@link CollapsibleProps.defaultCollapsed}.
+   */
+  collapsed?: boolean;
+  /** Called with the requested next collapsed state when the toggle is pressed in controlled mode. */
+  onToggleCollapsed?: (next: boolean) => void;
   /**
    * Where the toggle sits relative to the content. `Bottom` (default) keeps the show-more/less pattern;
    * `Top` renders a horizontally-centered toggle above the content; `Adaptive` puts it at the bottom while
@@ -111,10 +132,19 @@ function defaultToggleLabel(collapsed: boolean): React.ReactNode {
  * overflowing the bottom edge fades (static, anchored to the box); `scrollWhenCollapsed` additionally makes
  * the collapsed cap a scroll area (fade kept). Callers control the toggle label via `renderToggleLabel`.
  *
- * @param children - The content to clip.
- * @param maxPx - Collapsed height cap in px.
+ * Controlled ("has more") mode: when `hasMore` is provided the component skips the measure/clip/fade and
+ * drives the toggle from that flag, rendering the content at its natural height. Pair it with a function
+ * `children` that returns a truncated set while collapsed and the full set when expanded — this lets a
+ * caller mount only a preview of a large list (e.g. the tags tile's top-N values) and mount the rest on
+ * expand, instead of mounting everything and merely CSS-clipping it.
+ *
+ * @param children - The content to clip, or a `(collapsed) => node` function (controlled truncation).
+ * @param maxPx - Collapsed height cap in px (measure mode only).
+ * @param hasMore - When set, drives the toggle from this flag instead of a measured overflow (controlled mode).
  * @param renderToggleLabel - Optional toggle-label renderer (defaults to `Show more`/`Show less`).
- * @param defaultCollapsed - Whether to start collapsed (defaults to `true`).
+ * @param defaultCollapsed - Whether to start collapsed (defaults to `true`; ignored when `collapsed` is set).
+ * @param collapsed - Controlled collapsed state; when set the parent owns it via `onToggleCollapsed`.
+ * @param onToggleCollapsed - Called with the requested next collapsed state in controlled mode.
  * @param togglePosition - Where the toggle sits relative to the content (defaults to `Bottom`).
  * @param scrollWhenCollapsed - When true, the collapsed cap scrolls while keeping the static bottom fade.
  * @param className - Optional class name applied to the clip wrapper.
@@ -123,21 +153,33 @@ function defaultToggleLabel(collapsed: boolean): React.ReactNode {
 const Collapsible: React.FC<CollapsibleProps> = ({
   children,
   maxPx,
+  hasMore,
   renderToggleLabel = defaultToggleLabel,
   defaultCollapsed = true,
+  collapsed: controlledCollapsed,
+  onToggleCollapsed,
   togglePosition = TogglePosition.Bottom,
   scrollWhenCollapsed = false,
   className,
 }) => {
-  const [collapsed, setCollapsed] = useState(defaultCollapsed);
+  // controlled "has more" mode: the caller truncates the content itself (via function children) and tells
+  // us whether more exists, so we skip the measure/clip/fade and drive the toggle from that flag instead
+  const controlled = hasMore !== undefined;
+  // controlled-collapse mode: the parent owns the collapsed state (so it survives remounts). When the
+  // `collapsed` prop is absent we fall back to internal state seeded by `defaultCollapsed`
+  const collapseControlled = controlledCollapsed !== undefined;
+  const [internalCollapsed, setInternalCollapsed] = useState(defaultCollapsed);
+  const collapsed = collapseControlled ? controlledCollapsed : internalCollapsed;
   const [overflowing, setOverflowing] = useState(false);
   // the inner, uncapped content wrapper: its full height drives the overflow measure (the Clip itself is
   // capped, so we measure the content, not the clip)
   const contentRef = useRef<HTMLDivElement>(null);
 
   // re-measure whenever the content's size changes (not just on mount) so async-loaded content — e.g. tags
-  // that populate after the graph loads, or a grid that reflows on resize — reliably reveals the toggle
+  // that populate after the graph loads, or a grid that reflows on resize — reliably reveals the toggle.
+  // Skipped in controlled mode, where `hasMore` drives the toggle and content shows at its natural height.
   useLayoutEffect(() => {
+    if (controlled) return;
     const el = contentRef.current;
     if (!el) return;
     const measure = () => setOverflowing(el.scrollHeight > maxPx + 1);
@@ -146,13 +188,26 @@ const Collapsible: React.FC<CollapsibleProps> = ({
     const observer = new ResizeObserver(measure);
     observer.observe(el);
     return () => observer.disconnect();
-  }, [maxPx]);
+  }, [maxPx, controlled]);
 
-  const toggle = overflowing && (
-    <ToggleButton type="button" onClick={() => setCollapsed((c) => !c)}>
+  const showToggle = controlled ? hasMore : overflowing;
+  // route the toggle to the parent's setter when collapse is controlled, else to internal state
+  const toggleCollapsed = () => {
+    const next = !collapsed;
+    if (collapseControlled) {
+      onToggleCollapsed?.(next);
+    } else {
+      setInternalCollapsed(next);
+    }
+  };
+  const toggle = showToggle && (
+    <ToggleButton type="button" onClick={toggleCollapsed}>
       {renderToggleLabel(collapsed)}
     </ToggleButton>
   );
+
+  // resolve function children against the current collapsed state (controlled truncation)
+  const content = typeof children === 'function' ? children(collapsed) : children;
 
   // resolve Adaptive to a concrete side per collapsed state: bottom while collapsed, top once expanded
   const effectivePosition =
@@ -171,8 +226,14 @@ const Collapsible: React.FC<CollapsibleProps> = ({
   return (
     <>
       {effectivePosition === TogglePosition.Top && toggle && <TopToggleRow>{toggle}</TopToggleRow>}
-      <Clip className={className} $collapsed={collapsed} $maxPx={maxPx} $fade={collapsed && overflowing} $scroll={scrollWhenCollapsed}>
-        <div ref={contentRef}>{children}</div>
+      <Clip
+        className={className}
+        $collapsed={controlled ? false : collapsed}
+        $maxPx={maxPx}
+        $fade={!controlled && collapsed && overflowing}
+        $scroll={scrollWhenCollapsed}
+      >
+        <div ref={contentRef}>{content}</div>
       </Clip>
       {bottomToggle}
     </>

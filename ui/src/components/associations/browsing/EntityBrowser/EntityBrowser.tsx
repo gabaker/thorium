@@ -1,12 +1,13 @@
 // spec: ./EntityBrowser.spec.md
-import React, { ReactNode, useMemo, useState } from 'react';
+import React, { Fragment, ReactNode, useMemo, useState } from 'react';
+import { FaHouse } from 'react-icons/fa6';
 
 // project imports
 import BrowserToolbar from './BrowserToolbar';
 import EntityRow from './EntityRow';
 import EntityTreeLevel, { PAGE_SIZE } from './EntityTreeLevel';
 import { EntityBrowserProvider, useEntityBrowser } from './EntityBrowserContext';
-import { BrowserRoot, ShowMoreButton, ShowMoreRow } from './EntityBrowser.styled';
+import { BrowserRoot, Crumb, CrumbSep, CurrentCrumb, FocusBar, ShowMoreButton, ShowMoreRow } from './EntityBrowser.styled';
 import { EntityBrowserProps } from './types';
 import { useGraphData } from '../../data/GraphDataContext';
 import AlertBanner, { Severity } from '@components/shared/alerts/AlertBanner';
@@ -16,6 +17,39 @@ import LoadingSpinner from '@components/shared/fallback/LoadingSpinner';
 // when a fresh `new Set()` would otherwise be passed on every parent render. Consumers only read it (EntityRow
 // copies it before adding its own id), so a single shared instance is safe.
 const EMPTY_PATH: Set<string> = new Set();
+
+/**
+ * The focus breadcrumb shown above the tree while it is re-rooted (focused) at a node: a clickable trail from
+ * **All** (clears the focus, restoring the natural roots) down through the ancestors to the current focus root
+ * (the bold, non-interactive last crumb). Clicking an ancestor pops the focus up to it. Renders nothing when
+ * the tree is not focused.
+ *
+ * @returns The focus breadcrumb bar, or `null` when not focused.
+ */
+const FocusBreadcrumb: React.FC = () => {
+  const { focusRoot, focusAncestors, setFocusRoot } = useEntityBrowser();
+  if (!focusRoot || focusAncestors.length === 0) return null;
+  const lastIndex = focusAncestors.length - 1;
+  return (
+    <FocusBar aria-label="Focused subtree">
+      <Crumb type="button" onClick={() => setFocusRoot(null)} aria-label="Show all — clear the focus">
+        <FaHouse size={11} aria-hidden /> All
+      </Crumb>
+      {focusAncestors.map((crumb, i) => (
+        <Fragment key={crumb.id}>
+          <CrumbSep aria-hidden>›</CrumbSep>
+          {i === lastIndex ? (
+            <CurrentCrumb title={crumb.label}>{crumb.label}</CurrentCrumb>
+          ) : (
+            <Crumb type="button" onClick={() => setFocusRoot(crumb.id)} title={crumb.label}>
+              {crumb.label}
+            </Crumb>
+          )}
+        </Fragment>
+      ))}
+    </FocusBar>
+  );
+};
 
 /** Props for {@link EntityBrowserBody}. */
 interface EntityBrowserBodyProps {
@@ -74,6 +108,7 @@ export const EntityBrowserBody: React.FC<EntityBrowserBodyProps> = ({ showRootNo
   return (
     <BrowserRoot data-testid="entity-browser">
       {toolbar}
+      <FocusBreadcrumb />
       {shownRoots.length === 0 ? (
         <AlertBanner severity={Severity.Info}>No matching items.</AlertBanner>
       ) : showRootNodes ? (

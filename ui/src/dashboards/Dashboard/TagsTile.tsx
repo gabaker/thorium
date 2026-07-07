@@ -1,4 +1,4 @@
-import React, { useMemo } from 'react';
+import React, { useCallback, useMemo, useRef, useState } from 'react';
 import { FaChevronDown, FaChevronUp } from 'react-icons/fa6';
 
 // spec: ./SPEC.md
@@ -11,7 +11,7 @@ import { toggleTagValue } from './tagFilter';
 import { useEntityBrowser } from '@components/associations/browsing/EntityBrowser/EntityBrowserContext';
 import { useGraphData } from '@components/associations/data/GraphDataContext';
 import Collapsible, { TogglePosition } from '@components/shared/info/Collapsible';
-import { BalancedColumns } from '@components/shared/layout/BalancedColumns';
+import { BalancedColumns, BalanceStrategy } from '@components/shared/layout/BalancedColumns';
 import { OverlayTipTop } from '@components/shared/overlay/tips';
 import { ClauseCondition, ClauseIsMulti, type Clause } from '@components/shared/inputs/omnibar/ClauseTypes';
 import { getHiddenTagsFromClauses } from '@components/shared/inputs/omnibar/utils';
@@ -33,12 +33,26 @@ export interface TagsTileProps {
 const DEFAULT_HIDDEN_KEYS = ['Results', 'Parent', 'submitter'];
 
 /// The minimum width (px) of a per-key tag tile; `BalancedColumns` derives the column count from this so
-/// wide screens pack more (narrower) columns while each tile stays only as tall as its content.
+/// wide screens pack more (narrower) columns while each tile stays only as tall as its content. Tiles are
+/// balanced tallest-first (`LongestFirst`) on their collapsed heights and the layout re-balances only on a
+/// data change (`layoutKey`), so expanding one tile lengthens its own column in place instead of
+/// reshuffling every tile.
 const TAG_TILE_MIN_WIDTH = 200;
 
-/// The collapsed height cap (px) of a tag tile's value chips — about 3–4 chip rows. Taller tiles clip the
-/// extra chips behind the shared bottom fade and reveal a caret to expand; short tiles show no caret.
+/// A stable empty value list shared as the fallback for a key with no counted values, so the memoized
+/// {@link TagKeyTile} isn't handed a fresh `[]` (which would defeat its shallow-prop memoization).
+const EMPTY_TAG_VALUES: TagValueCount[] = [];
+
+/// The `maxPx` passed to the value `Collapsible`. The tile runs the `Collapsible` in controlled top-N mode
+/// (truncation is by count, see {@link TAG_TILE_COLLAPSED_COUNT}), so this cap is unused for the tiles; it
+/// is retained only as the component's required argument.
 const TAG_TILE_VALUES_MAX_PX = 120;
+
+/// The number of value chips mounted per tag tile while collapsed. The remaining values are not mounted
+/// until the tile is expanded (via the caret), keeping the DOM small for high-cardinality keys on large
+/// dashboards. Values are count-sorted with active (already-filtered) ones first, so the preview keeps the
+/// most relevant values visible.
+const TAG_TILE_COLLAPSED_COUNT = 12;
 
 /// Render the caret-only toggle for a tag tile's value collapse: a down chevron while collapsed (expand)
 /// and an up chevron while expanded (collapse). The visible glyph is icon-only, so the accessible name is
@@ -76,6 +90,84 @@ function activeTagValues(clauses: Clause[]): Map<string, Set<string>> {
   return active;
 }
 
+/// Props for {@link TagKeyTile}.
+interface TagKeyTileProps {
+  /// The tag key this tile represents.
+  tagKey: string;
+  /// The key's value+count list (descending count), as returned by `collectTagCounts`.
+  values: TagValueCount[];
+  /// The set of this key's active (already-filtered) values, or `undefined` when none are filtered.
+  activeForKey?: Set<string>;
+  /// Whether this tile's value list is collapsed (controlled by the parent so it survives remounts).
+  collapsed: boolean;
+  /// Toggle the tile's collapsed state; called with the tag key and the requested next collapsed value.
+  onToggle: (tagKey: string, nextCollapsed: boolean) => void;
+  /// Toggle a value into/out of the key's filter; called with the tag key and the clicked value.
+  onChipClick: (tagKey: string, value: string) => void;
+}
+
+/**
+ * A single tag-key tile: the key label plus its value chips, wrapped in a controlled top-N
+ * {@link Collapsible}. Memoized so unrelated dashboard re-renders (e.g. a graph tick that leaves this
+ * key's counts and active values untouched) don't rebuild its chip subtree — only a change to this
+ * key's `values`, `activeForKey`, or `collapsed` re-renders it. The collapsed state is owned by the
+ * parent (via {@link TagKeyTileProps.onToggle}) so it is preserved even if `BalancedColumns` re-parents
+ * the tile into a different column.
+ *
+ * @param tagKey - The tag key this tile represents.
+ * @param values - The key's value+count list (descending count).
+ * @param activeForKey - The key's active (already-filtered) values, if any.
+ * @param collapsed - Whether the value list is collapsed.
+ * @param onToggle - Toggles the collapsed state (key, next collapsed).
+ * @param onChipClick - Toggles a value filter (key, value).
+ * @returns The tag-key tile.
+ */
+const TagKeyTile: React.FC<TagKeyTileProps> = React.memo(({ tagKey, values, activeForKey, collapsed, onToggle, onChipClick }) => {
+  // order active (already-filtered) values first — each partition keeping its descending-count order — so
+  // applied filters stay visible in the collapsed preview under the fade. Active-ness depends on the
+  // clause-derived `activeForKey`, so it's partitioned here rather than baked into `collectTagCounts`
+  const ordered = useMemo(() => {
+    const active: TagValueCount[] = [];
+    const inactive: TagValueCount[] = [];
+    for (const entry of values) {
+      (activeForKey?.has(entry.value) ? active : inactive).push(entry);
+    }
+    return [...active, ...inactive];
+  }, [values, activeForKey]);
+  return (
+    <TagGroup>
+      <TagGroupKey>{tagKey}</TagGroupKey>
+      <Collapsible
+        maxPx={TAG_TILE_VALUES_MAX_PX}
+        hasMore={ordered.length > TAG_TILE_COLLAPSED_COUNT}
+        collapsed={collapsed}
+        onToggleCollapsed={(next) => onToggle(tagKey, next)}
+        renderToggleLabel={tagValuesToggleLabel}
+        togglePosition={TogglePosition.Adaptive}
+      >
+        {(isCollapsed) => (
+          <TagGroupValues>
+            {(isCollapsed ? ordered.slice(0, TAG_TILE_COLLAPSED_COUNT) : ordered).map(({ value, count }) => {
+              const isActive = activeForKey?.has(value) ?? false;
+              // tell the user a click filters the dashboard by this tag (and that an active chip removes it)
+              const tip = isActive ? `Remove the ${tagKey}: ${value} filter` : `Filter the dashboard to items tagged ${tagKey}: ${value}`;
+              return (
+                <OverlayTipTop key={value} tip={tip}>
+                  <TagChip type="button" $active={isActive} aria-pressed={isActive} onClick={() => onChipClick(tagKey, value)}>
+                    {value}
+                    <TagChipCount>({count})</TagChipCount>
+                  </TagChip>
+                </OverlayTipTop>
+              );
+            })}
+          </TagGroupValues>
+        )}
+      </Collapsible>
+    </TagGroup>
+  );
+});
+TagKeyTile.displayName = 'TagKeyTile';
+
 /**
  * The dashboard's tags tile: every tag present in the current (visible) node set, grouped by key, each
  * value a clickable chip showing its count.
@@ -87,8 +179,10 @@ function activeTagValues(clauses: Clause[]): Map<string, Set<string>> {
  * dropped unconditionally. Clicking a chip toggles its value into the key's single is-one-of filter via
  * {@link toggleTagValue}; already-filtered values render active and sort **first** within their tile so they
  * stay visible when the tile is collapsed. Each tile's value chips are wrapped in a shared {@link Collapsible}
- * (default collapsed): a tile taller than {@link TAG_TILE_VALUES_MAX_PX} clips its extra chips behind the
- * static bottom fade and reveals a caret-only toggle to expand; short tiles show no caret. The tally is
+ * run in controlled top-N mode (default collapsed): only the first {@link TAG_TILE_COLLAPSED_COUNT} values
+ * are mounted while collapsed and the rest are mounted on expand — so a high-cardinality key never mounts
+ * thousands of chips just to clip them. A key with more values than the cap shows a caret-only toggle to
+ * expand (revealing all values inline, since the tile does not scroll); a key with fewer shows no caret. The tally is
  * memoized on `[graphVersion, visibleSet, hiddenKeys]` so it recomputes only when the graph, the visible set,
  * or the hidden-key exclusion set change; the active-value lookup is precomputed once per clause change.
  *
@@ -119,6 +213,44 @@ const TagsTile: React.FC<TagsTileProps> = ({ clauses, setClauses }) => {
   // active (already-filtered) values per key, computed once per clause change for O(1) chip lookups
   const activeValues = useMemo(() => activeTagValues(clauses), [clauses]);
 
+  // which keys are expanded, lifted here (keyed by tag key) so a tile's expanded state survives a
+  // `BalancedColumns` re-parent (a column move remounts the tile, which would otherwise reset a
+  // collapse state living inside the tile). Absent from the layout key below, so expanding is not a
+  // rebalance trigger.
+  const [expandedKeys, setExpandedKeys] = useState<Set<string>>(() => new Set());
+  const handleToggle = useCallback((key: string, nextCollapsed: boolean) => {
+    setExpandedKeys((prev) => {
+      const next = new Set(prev);
+      // `nextCollapsed` is the requested state: collapsing drops the key, expanding adds it
+      if (nextCollapsed) {
+        next.delete(key);
+      } else {
+        next.add(key);
+      }
+      return next;
+    });
+  }, []);
+  const handleChipClick = useCallback(
+    (key: string, value: string) => {
+      setClauses(toggleTagValue(clauses, key, value));
+    },
+    [clauses, setClauses],
+  );
+
+  // a monotonic key that changes only when the data driving tile *heights* changes — the counted values
+  // (`tagCounts`) or the active-value ordering (`activeValues`). Both are already memoized on their exact
+  // inputs, so a ref-identity change is the precise "data changed" signal. Comparing identities during
+  // render (rather than a size/hash heuristic) avoids missing a same-count filter change. Expanding a tile
+  // is deliberately NOT reflected here, so `BalancedColumns` holds its column assignment steady on expand.
+  const layoutVersionRef = useRef(0);
+  const prevLayoutInputsRef = useRef<{ counts: unknown; active: unknown } | null>(null);
+  const prevLayoutInputs = prevLayoutInputsRef.current;
+  if (prevLayoutInputs === null || prevLayoutInputs.counts !== tagCounts || prevLayoutInputs.active !== activeValues) {
+    layoutVersionRef.current += 1;
+    prevLayoutInputsRef.current = { counts: tagCounts, active: activeValues };
+  }
+  const layoutKey = layoutVersionRef.current;
+
   const keys = Array.from(tagCounts.keys()).sort((a, b) => a.localeCompare(b));
 
   if (keys.length === 0) {
@@ -129,46 +261,19 @@ const TagsTile: React.FC<TagsTileProps> = ({ clauses, setClauses }) => {
     <BalancedColumns
       columnWidth={TAG_TILE_MIN_WIDTH}
       gap={spacers.two}
-      items={keys.map((key) => {
-        // order active (already-filtered) values first — each partition keeping its descending-count order —
-        // so applied filters stay visible in the collapsed preview under the fade. Active-ness depends on
-        // `clauses`, so it's partitioned here in the render rather than baked into `collectTagCounts`.
-        const values = tagCounts.get(key) ?? [];
-        const activeForKey = activeValues.get(key);
-        const active: TagValueCount[] = [];
-        const inactive: TagValueCount[] = [];
-        for (const entry of values) {
-          (activeForKey?.has(entry.value) ? active : inactive).push(entry);
-        }
-        const ordered = [...active, ...inactive];
-        return (
-          <TagGroup key={key}>
-            <TagGroupKey>{key}</TagGroupKey>
-            <Collapsible maxPx={TAG_TILE_VALUES_MAX_PX} renderToggleLabel={tagValuesToggleLabel} togglePosition={TogglePosition.Adaptive}>
-              <TagGroupValues>
-                {ordered.map(({ value, count }) => {
-                  const isActive = activeForKey?.has(value) ?? false;
-                  // tell the user a click filters the dashboard by this tag (and that an active chip removes it)
-                  const tip = isActive ? `Remove the ${key}: ${value} filter` : `Filter the dashboard to items tagged ${key}: ${value}`;
-                  return (
-                    <OverlayTipTop key={value} tip={tip}>
-                      <TagChip
-                        type="button"
-                        $active={isActive}
-                        aria-pressed={isActive}
-                        onClick={() => setClauses(toggleTagValue(clauses, key, value))}
-                      >
-                        {value}
-                        <TagChipCount>({count})</TagChipCount>
-                      </TagChip>
-                    </OverlayTipTop>
-                  );
-                })}
-              </TagGroupValues>
-            </Collapsible>
-          </TagGroup>
-        );
-      })}
+      balanceStrategy={BalanceStrategy.LongestFirst}
+      layoutKey={layoutKey}
+      items={keys.map((key) => (
+        <TagKeyTile
+          key={key}
+          tagKey={key}
+          values={tagCounts.get(key) ?? EMPTY_TAG_VALUES}
+          activeForKey={activeValues.get(key)}
+          collapsed={!expandedKeys.has(key)}
+          onToggle={handleToggle}
+          onChipClick={handleChipClick}
+        />
+      ))}
     />
   );
 };

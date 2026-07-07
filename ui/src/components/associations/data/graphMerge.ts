@@ -58,20 +58,22 @@ export function mergeGrowthInto(initial: Graph, grown: Graph, grownNodeIds: stri
 }
 
 /**
- * Compute the shortest hop distance from the graph's seed nodes to every reachable node.
+ * Compute the shortest hop distance from a set of seed nodes to every reachable node.
  *
- * Runs a BFS from `graph.initial` (each seeded at distance 0) over an undirected adjacency built
- * from `graph.branches`, so distance ignores edge direction. `growToDepth` uses the result to pick
- * which growable frontier nodes still need to be grown to reach a target depth.
+ * Runs a BFS from the seeds (each at distance 0) over an undirected adjacency built from
+ * `graph.branches`, so distance ignores edge direction. `growToDepth` uses the `graph.initial`-seeded
+ * result to pick which growable frontier nodes still need growing; the entity browser also seeds it from
+ * a single **focus root** so auto-expand depth is measured relative to a re-rooted subtree.
  *
  * @param graph - The graph to traverse.
+ * @param seeds - The nodes to measure distance from (each at distance 0). Defaults to `graph.initial`.
  * @returns A map of node id to its shortest distance from any seed; unreachable nodes are absent.
  */
-export function computeDistances(graph: Graph): Map<string, number> {
+export function computeDistances(graph: Graph, seeds?: Array<string | number>): Map<string, number> {
   const distances = new Map<string, number>();
   const queue: [string, number][] = [];
-  // seed distances with 0
-  for (const id of graph.initial) {
+  // seed distances with 0 (from the given seeds, or the graph's own initial seeds by default)
+  for (const id of seeds ?? graph.initial) {
     const nodeId = id.toString();
     if (!distances.has(nodeId)) {
       distances.set(nodeId, 0);

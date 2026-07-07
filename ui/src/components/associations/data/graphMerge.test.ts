@@ -122,4 +122,20 @@ describe('computeDistances', () => {
     const distances = computeDistances(graphWith({}));
     expect(distances.size).toBe(0);
   });
+
+  it('measures from an explicit seed set instead of graph.initial', () => {
+    // initial is 'a', but seeding from 'b' re-bases distances on the focus root (0 at 'b')
+    const graph = graphWith({
+      initial: ['a'],
+      branches: {
+        a: [branch('b', 'h1')],
+        b: [branch('c', 'h2')],
+      },
+    });
+    const distances = computeDistances(graph, ['b']);
+    expect(distances.get('b')).toBe(0);
+    expect(distances.get('c')).toBe(1);
+    // 'a' is one undirected hop back up from the seed 'b'
+    expect(distances.get('a')).toBe(1);
+  });
 });

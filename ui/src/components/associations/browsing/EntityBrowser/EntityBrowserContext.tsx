@@ -15,6 +15,7 @@ import {
   collectTagOptions,
   computeFlaggedNodes,
   filterTree,
+  focusBreadcrumb,
   getDepthFromClauses,
   getEntityLayerConfigFromClauses,
   nodeTypeOf,
@@ -34,6 +35,16 @@ interface EntityBrowserContextValue {
   // graph-derived (recomputed on graphVersion)
   index: TreeIndex;
   roots: RootDescriptor[];
+  /**
+   * The node the tree is currently re-rooted (focused) at, or `null` for the natural roots. When set, {@link
+   * roots} is that single node and the view is measured relative to it (indent resets, auto-expand is
+   * focus-relative, and the depth bound is lifted so the whole loaded subtree is browsable).
+   */
+  focusRoot: string | null;
+  /** Re-root the tree at `id` (or `null` to restore the natural roots). */
+  setFocusRoot: (id: string | null) => void;
+  /** The focus breadcrumb top→down (incl. the focus root as the last entry); empty when not focused. */
+  focusAncestors: RootDescriptor[];
   multiParent: Set<string>;
   presentKinds: NodeType[];
   tagOptions: TagOptions;
@@ -102,6 +113,13 @@ interface EntityBrowserProviderProps {
   flaggedOnly?: boolean;
   /** Setter for controlled {@link flaggedOnly}. Required for the toggle to be controlled. */
   setFlaggedOnly?: (b: boolean) => void;
+  /**
+   * Optional controlled focus root (re-rooted subtree). When provided (with {@link onFocusRootChange}), the
+   * caller owns it (e.g. the dashboard keeps it in the URL); when omitted it falls back to internal `useState`.
+   */
+  focusRoot?: string | null;
+  /** Change handler for controlled {@link focusRoot}. Required for the focus root to be controlled. */
+  onFocusRootChange?: (id: string | null) => void;
   children: React.ReactNode;
 }
 
@@ -123,6 +141,8 @@ export const EntityBrowserProvider: React.FC<EntityBrowserProviderProps> = ({
   onHiddenNodesChange,
   flaggedOnly: controlledFlaggedOnly,
   setFlaggedOnly: controlledSetFlaggedOnly,
+  focusRoot: controlledFocusRoot,
+  onFocusRootChange,
   children,
 }) => {
   const { graph, graphId, graphVersion, growToDepth, growable } = useGraphData();
@@ -171,6 +191,17 @@ export const EntityBrowserProvider: React.FC<EntityBrowserProviderProps> = ({
   const unhideAll = useCallback(() => {
     applyHiddenNodes(() => new Set());
   }, [applyHiddenNodes]);
+  // focus root follows the same controlled-or-uncontrolled pattern: re-root the tree at a node (indent resets,
+  // view measured relative to it) or clear it to restore the natural roots
+  const [internalFocusRoot, setInternalFocusRoot] = useState<string | null>(null);
+  const focusRoot = controlledFocusRoot !== undefined ? controlledFocusRoot : internalFocusRoot;
+  const setFocusRoot = useCallback(
+    (id: string | null) => {
+      if (onFocusRootChange) onFocusRootChange(id);
+      else setInternalFocusRoot(id);
+    },
+    [onFocusRootChange],
+  );
   // explicit user expands / collapses layered over the depth-driven auto-expand default
   const [expandedChildren, setExpandedChildren] = useState<Set<string>>(new Set());
   const [collapsedChildren, setCollapsedChildren] = useState<Set<string>>(new Set());
@@ -207,10 +238,29 @@ export const EntityBrowserProvider: React.FC<EntityBrowserProviderProps> = ({
     }
   }, [rootSpec]);
   // resolveRoots depends only on the spec's structural content (captured by rootSpecKey), the graph, and the
-  // index; keying on rootSpecKey instead of the spec object avoids recomputes from inline-literal identity
-  const roots = useMemo(() => resolveRoots(graph, rootSpec, index), [graphVersion, rootSpecKey, index]);
+  // index; keying on rootSpecKey instead of the spec object avoids recomputes from inline-literal identity.
+  // When a focus root is active (and loaded), the tree is re-rooted at that single node instead.
+  const roots = useMemo(() => {
+    if (focusRoot && focusRoot in graph.data_map) {
+      const node = graph.data_map[focusRoot];
+      return [{ id: focusRoot, label: (node ? getNodeName(node, 80) : '') || focusRoot }];
+    }
+    return resolveRoots(graph, rootSpec, index);
+  }, [graphVersion, rootSpecKey, index, focusRoot]);
+  // the breadcrumb trail back up from a focus root (top→down, incl. the focus root); empty when not focused
+  const focusAncestors = useMemo(
+    () => (focusRoot && focusRoot in graph.data_map ? focusBreadcrumb(graph, index, focusRoot) : []),
+    [graphVersion, index, focusRoot],
+  );
   const multiParent = useMemo(() => findMultiParentNodeIds(graph, index), [graphVersion, index]);
   const distances = useMemo(() => computeDistances(graph), [graphVersion]);
+  // when focused, measure auto-expand depth relative to the focus root so a re-rooted subtree expands its own
+  // first levels (distances from the far-away original seeds would otherwise leave it collapsed)
+  const focusDistances = useMemo(
+    () => (focusRoot && focusRoot in graph.data_map ? computeDistances(graph, [focusRoot]) : null),
+    [graphVersion, focusRoot],
+  );
+  const effectiveDistances = focusDistances ?? distances;
   const flaggedNodes = useMemo(() => computeFlaggedNodes(graph, index), [graphVersion, index]);
   const tagOptions = useMemo(() => collectTagOptions(graph), [graphVersion]);
   const groupOptions = useMemo(() => collectGroupOptions(graph), [graphVersion]);
@@ -227,8 +277,14 @@ export const EntityBrowserProvider: React.FC<EntityBrowserProviderProps> = ({
   // 0 => no explicit depth clause => no depth bound (show everything pulled)
   const depthClause = useMemo(() => getDepthFromClauses(clauses, 0), [clauses]);
   const maxDepth = depthClause > 0 ? depthClause : null;
-  // rows within this many hops of the seeds auto-expand (so the loaded nesting shows). The explicit depth
-  // clause takes precedence; otherwise the component's `defaultDepth` (0 = nothing auto-expands).
+  // focus is only "applied" once its node is actually loaded — a stale URL focus for an absent node falls back
+  // to the natural roots (see `roots`), so it must NOT also lift the depth bound / re-base distances
+  const focusApplied = focusDistances !== null;
+  // while focused the depth bound is lifted so the whole loaded subtree under the focus root is browsable
+  // (the bound is distance-from-original-seeds, which would otherwise prune the re-rooted subtree)
+  const effectiveMaxDepth = focusApplied ? null : maxDepth;
+  // rows within this many hops of the seeds (or the focus root, when focused) auto-expand so the loaded
+  // nesting shows. The explicit depth clause takes precedence; otherwise the component's `defaultDepth`.
   const autoExpandDepth = maxDepth ?? defaultDepth;
   const isChildrenExpanded = useCallback(
     (rowKey: string, nodeId: string, viaReversed = false, reverseDepth = 0) => {
@@ -241,9 +297,9 @@ export const EntityBrowserProvider: React.FC<EntityBrowserProviderProps> = ({
       // row's arrival context so a reverse-reached node isn't judged by its (suppressed) forward children.
       if (growable.has(nodeId) && !hasContextualDisplayChildren(index, nodeId, DOWN_DEFAULT_CFG, viaReversed, reverseDepth))
         return false;
-      return autoExpandDepth > 0 && (distances.get(nodeId) ?? Infinity) < autoExpandDepth;
+      return autoExpandDepth > 0 && (effectiveDistances.get(nodeId) ?? Infinity) < autoExpandDepth;
     },
-    [collapsedChildren, expandedChildren, growable, distances, autoExpandDepth, index],
+    [collapsedChildren, expandedChildren, growable, effectiveDistances, autoExpandDepth, index],
   );
   const isChildrenExplicit = useCallback((rowKey: string) => expandedChildren.has(rowKey), [expandedChildren]);
   // resolve a display label for a (possibly hidden) node id so the hidden-nodes control can list what's hidden
@@ -264,15 +320,15 @@ export const EntityBrowserProvider: React.FC<EntityBrowserProviderProps> = ({
       includeSet: layerConfig.includeSet,
       defaultPolicies,
       fallback: fallbackPolicy,
-      maxDepth,
-      distances,
+      maxDepth: effectiveMaxDepth,
+      distances: effectiveDistances,
       hiddenNodes,
       // the entity browser surfaces relationship (non-structural) associations against their stored direction
       // so e.g. a WindowsProcess shows its Flags and each Flag its SigmaRule; containment stays directional
       orientation: TreeOrientation.Down,
       bidirectional: defaultBidirectional,
     }),
-    [layerConfig, defaultPolicies, fallbackPolicy, maxDepth, distances, hiddenNodes],
+    [layerConfig, defaultPolicies, fallbackPolicy, effectiveMaxDepth, effectiveDistances, hiddenNodes],
   );
 
   const criteria = useMemo<FilterCriteria>(
@@ -311,6 +367,9 @@ export const EntityBrowserProvider: React.FC<EntityBrowserProviderProps> = ({
     () => ({
       index,
       roots,
+      focusRoot,
+      setFocusRoot,
+      focusAncestors,
       multiParent,
       presentKinds,
       tagOptions,
@@ -334,6 +393,9 @@ export const EntityBrowserProvider: React.FC<EntityBrowserProviderProps> = ({
     [
       index,
       roots,
+      focusRoot,
+      setFocusRoot,
+      focusAncestors,
       multiParent,
       presentKinds,
       tagOptions,

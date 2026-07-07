@@ -8,7 +8,9 @@ import {
   effectiveChildren,
   filterTree,
   findFileNodeHash,
+  focusBreadcrumb,
   getDepthFromClauses,
+  getDisplayTags,
   getEntityLayerConfigFromClauses,
   groupByKind,
   nodeGroups,
@@ -699,5 +701,83 @@ describe('resolveRoots — hidden roots (dropped by the body consumer)', () => {
     // the consumer drops hidden roots with a plain filter
     const hiddenNodes = new Set([FILE_HASH]);
     expect(roots.filter((r) => !hiddenNodes.has(r.id))).toEqual([]);
+  });
+});
+
+describe('getDisplayTags', () => {
+  it('flattens key/value pairs and drops suppressed keys', () => {
+    const node = entityNode('e1', 'thing', Entities.Flag, {
+      FileType: { PE32: [] },
+      submitter: { alice: [] },
+      Parent: { 'abc…': [] },
+      FolderAllSha256: { deadbeef: [] },
+    });
+    const { shown, overflow } = getDisplayTags(node);
+    // only FileType survives; submitter/Parent/FolderAllSha256 are suppressed
+    expect(shown).toEqual([{ key: 'FileType', value: 'PE32' }]);
+    expect(overflow).toBe(0);
+  });
+
+  it('orders pairs by key then value regardless of insertion order', () => {
+    const node = entityNode('e1', 'thing', Entities.Flag, {
+      Zeta: { b: [], a: [] },
+      Alpha: { two: [] },
+    });
+    const { shown } = getDisplayTags(node);
+    expect(shown).toEqual([
+      { key: 'Alpha', value: 'two' },
+      { key: 'Zeta', value: 'a' },
+      { key: 'Zeta', value: 'b' },
+    ]);
+  });
+
+  it('caps at the limit and reports the overflow count + labels', () => {
+    const node = entityNode('e1', 'thing', Entities.Flag, {
+      K: { v1: [], v2: [], v3: [], v4: [] },
+    });
+    const { shown, overflow, overflowLabels } = getDisplayTags(node, 2);
+    expect(shown).toEqual([
+      { key: 'K', value: 'v1' },
+      { key: 'K', value: 'v2' },
+    ]);
+    expect(overflow).toBe(2);
+    expect(overflowLabels).toEqual(['K: v3', 'K: v4']);
+  });
+
+  it('returns an empty set for a node with no (non-suppressed) tags', () => {
+    const node = entityNode('e1', 'thing', Entities.Flag, { Results: { r: [] } });
+    expect(getDisplayTags(node)).toEqual({ shown: [], overflow: 0, overflowLabels: [] });
+  });
+});
+
+describe('focusBreadcrumb', () => {
+  // root --(To)--> mid --(To)--> leaf : parentsOf(leaf)=[mid], parentsOf(mid)=[root]
+  function chainGraph(): Graph {
+    return mkGraph({
+      dataMap: {
+        root: entityNode('idr', 'Root', Entities.Device),
+        mid: entityNode('idm', 'Mid', Entities.Folder),
+        leaf: entityNode('idl', 'Leaf', Entities.Flag),
+      },
+      branches: {
+        root: [assocBranch('mid', AssociationKind.ChildProcess, Direction.To)],
+        mid: [assocBranch('leaf', AssociationKind.ChildProcess, Direction.To)],
+      },
+      initial: ['root'],
+    });
+  }
+
+  it('returns the ancestor chain top→down including the focus root, with labels', () => {
+    const graph = chainGraph();
+    const idx = buildTreeIndex(graph);
+    const crumbs = focusBreadcrumb(graph, idx, 'leaf');
+    expect(crumbs.map((c) => c.id)).toEqual(['root', 'mid', 'leaf']);
+    expect(crumbs.map((c) => c.label)).toEqual(['Root', 'Mid', 'Leaf']);
+  });
+
+  it('returns just the focus root when it has no parent', () => {
+    const graph = chainGraph();
+    const idx = buildTreeIndex(graph);
+    expect(focusBreadcrumb(graph, idx, 'root').map((c) => c.id)).toEqual(['root']);
   });
 });

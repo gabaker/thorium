@@ -80,6 +80,73 @@ export function getNodeTags(node: TreeNode): Tags {
   return {};
 }
 
+/**
+ * Tag keys never rendered as header chips: internal plumbing (`Results`/`Parent`/`submitter`) and
+ * unbounded-cardinality folder hashes (a distinct hash per folder), which would flood a row with noise. The
+ * danger classification is already surfaced by the row's danger dot, so danger tags still render as chips
+ * (they carry descriptive value, e.g. `TLP: RED`) — only the keys here are suppressed. Kept as a `Set` for
+ * O(1) membership while flattening a node's tags.
+ */
+export const HEADER_HIDDEN_TAG_KEYS = new Set<string>([
+  'Results',
+  'Parent',
+  'submitter',
+  'FolderAllSha256',
+  'FolderDataSha256',
+  'FolderNamesSha256',
+]);
+
+/** The default maximum number of tag chips rendered inline in a row header before the rest collapse to `+N`. */
+export const HEADER_TAG_LIMIT = 6;
+
+/** A single flattened tag key/value pair for header display. */
+export interface DisplayTag {
+  /** The tag key (e.g. `FileType`). */
+  key: string;
+  /** One value under that key (e.g. `PE32`). */
+  value: string;
+}
+
+/** The capped set of a node's display tags: the shown chips plus how many (and which) overflowed the cap. */
+export interface DisplayTags {
+  /** The tag chips to render, deterministically ordered and capped at the limit. */
+  shown: DisplayTag[];
+  /** How many tag pairs were dropped past the cap (0 when everything fit). */
+  overflow: number;
+  /** The `key: value` labels of the overflowed pairs, for the `+N` chip's tooltip. */
+  overflowLabels: string[];
+}
+
+/**
+ * Flatten a node's tags into a capped, deterministically-ordered list of `key/value` pairs for the row
+ * header, excluding the {@link HEADER_HIDDEN_TAG_KEYS} noise/plumbing keys.
+ *
+ * Pairs are ordered by key then value (case-insensitive) so the same node always shows the same chips in the
+ * same order regardless of object key iteration order; only the first `limit` are returned, with the
+ * remainder reported as an overflow count + labels so the caller can render a single `+N` chip. Cheap enough
+ * to call per rendered row (only paginated rows mount) — it is O(tags) over one node's own tags.
+ *
+ * @param node - The tree node whose tags to flatten.
+ * @param limit - The maximum number of chips to return (defaults to {@link HEADER_TAG_LIMIT}).
+ * @returns The shown chips plus the overflow count and labels.
+ */
+export function getDisplayTags(node: TreeNode, limit: number = HEADER_TAG_LIMIT): DisplayTags {
+  const tags = getNodeTags(node);
+  const pairs: DisplayTag[] = [];
+  // flatten key -> {value: groups} into key/value pairs, dropping the suppressed keys entirely
+  for (const [key, values] of Object.entries(tags)) {
+    if (HEADER_HIDDEN_TAG_KEYS.has(key)) continue;
+    for (const value of Object.keys(values ?? {})) {
+      pairs.push({ key, value });
+    }
+  }
+  // stable order (key, then value) so a node's chips don't reshuffle across renders/object iteration order
+  pairs.sort((a, b) => a.key.localeCompare(b.key) || a.value.localeCompare(b.value));
+  const shown = pairs.slice(0, limit);
+  const rest = pairs.slice(limit);
+  return { shown, overflow: rest.length, overflowLabels: rest.map((t) => `${t.key}: ${t.value}`) };
+}
+
 /** The groups a node belongs to (Entity `.groups`; Sample/Repo from their submissions). */
 export function nodeGroups(node: TreeNode): string[] {
   if (node[TreeNodeKey.Entity]) return node[TreeNodeKey.Entity].groups ?? [];
@@ -140,6 +207,32 @@ export function resolveRoots(graph: Graph, spec: RootSpec, index?: TreeIndex): R
       return roots.map((id) => ({ id, label: labelFor(graph, id) }));
     }
   }
+}
+
+/**
+ * Build the focus breadcrumb: the first-parent ancestor chain from the topmost ancestor **down to and
+ * including** `focusRoot`, so a re-rooted (focused) tree can show a clickable trail back up to the natural
+ * roots. Ascends via {@link firstParent} (the same first-parent rule {@link resolveRoots} uses for `initial`),
+ * guarding cycles, then reverses to top→down order. The last entry is `focusRoot` itself (the current head).
+ *
+ * @param graph - The shared graph (for labels).
+ * @param index - The tree index (for `parentsOf`).
+ * @param focusRoot - The node the tree is currently re-rooted at.
+ * @returns The ancestor chain top→down, each with a display label; `[focusRoot]` when it has no parent.
+ */
+export function focusBreadcrumb(graph: Graph, index: TreeIndex, focusRoot: string): RootDescriptor[] {
+  const chain: string[] = [];
+  const visited = new Set<string>();
+  let current: string | null = focusRoot;
+  // ascend first-parents until we run out or hit a cycle
+  while (current && !visited.has(current)) {
+    visited.add(current);
+    chain.push(current);
+    current = firstParent(index, current);
+  }
+  // chain is [focus, parent, …, top]; present it top→down so the trail reads left-to-right into the subtree
+  chain.reverse();
+  return chain.map((id) => ({ id, label: labelFor(graph, id) }));
 }
 
 /** Whether a node is within the config's depth bound (null bound = unbounded). Shared by effectiveChildren/filterTree. */

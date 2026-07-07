@@ -25,6 +25,10 @@ export const BrowserRoot = styled.div`
   gap: 10px;
   /* small end gap so the last tree item doesn't butt against the container edge */
   padding-bottom: 10px;
+  /* establish a size container so nested Level indentation adapts to the tile's OWN width (narrow dashboard
+     column vs. full-width tab vs. expanded) rather than the viewport — see the container queries on Level */
+  container-type: inline-size;
+  container-name: entitybrowser;
 `;
 
 // --- toolbar ---
@@ -150,10 +154,9 @@ export const HiddenMenuHeader = styled.div`
   font-weight: 700;
 `;
 
-/** Right-aligned slot that anchors the hover/focus-revealed hide affordance at the header's trailing edge. */
+/** Slot that holds the hover/focus-revealed hide affordance inside the header's trailing rail. */
 export const HideSlot = styled.span`
   flex: 0 0 auto;
-  margin-left: auto;
   display: inline-flex;
 `;
 
@@ -185,7 +188,147 @@ export const HideButton = styled.button`
   }
 `;
 
+/** Hover/focus-revealed "focus this subtree" (re-root) affordance in a row header. Mirrors {@link HideButton}. */
+export const FocusButton = styled.button`
+  flex: 0 0 auto;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 22px;
+  height: 22px;
+  background: transparent;
+  border: none;
+  border-radius: 6px;
+  color: var(--thorium-secondary-text);
+  cursor: pointer;
+  /* revealed only on row hover / keyboard focus-within (see RowHeader) */
+  opacity: 0;
+  transition: opacity 0.12s ease;
+
+  &:hover {
+    background: var(--thorium-highlight-panel-bg);
+    color: var(--thorium-text);
+  }
+  &:focus-visible {
+    opacity: 1;
+    outline: 2px solid var(--thorium-highlight-text);
+    outline-offset: -2px;
+  }
+`;
+
+/**
+ * The always-visible depth/focus pill shown once a row's nesting passes {@link INDENT_CAP} (where indentation
+ * freezes and no longer conveys depth). It reports the depth **and** acts as the re-root trigger — clicking it
+ * focuses the tree on that subtree — so the automatic indent cap and the user's focus action are one affordance.
+ */
+export const DepthPill = styled.button`
+  flex: 0 0 auto;
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  font-size: 0.68rem;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+  padding: 0 6px;
+  height: 1.1rem;
+  border-radius: 8px;
+  background: var(--thorium-secondary-panel-bg);
+  border: 1px solid var(--thorium-panel-border);
+  color: var(--thorium-secondary-text);
+  cursor: pointer;
+
+  &:hover {
+    border-color: var(--thorium-highlight-panel-border);
+    color: var(--thorium-text);
+  }
+  &:focus-visible {
+    outline: 2px solid var(--thorium-highlight-text);
+    outline-offset: -2px;
+  }
+`;
+
+/**
+ * The focus breadcrumb bar shown above the tree while re-rooted: a clickable trail from "All" (clears the
+ * focus) down through the ancestors to the current focus root, so the user can pop back out one level at a
+ * time. Wraps on narrow tiles.
+ */
+export const FocusBar = styled.div`
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px;
+  padding: 6px 10px;
+  font-size: 0.8rem;
+  background: var(--thorium-secondary-panel-bg);
+  border: 1px solid var(--thorium-panel-border);
+  border-radius: 8px;
+`;
+
+/** A clickable crumb in the {@link FocusBar} (re-roots at that ancestor, or clears focus for the "All" crumb). */
+export const Crumb = styled.button`
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  max-width: 14rem;
+  padding: 1px 6px;
+  background: transparent;
+  border: none;
+  border-radius: 6px;
+  color: var(--thorium-link-text);
+  font: inherit;
+  cursor: pointer;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+
+  &:hover {
+    background: var(--thorium-highlight-panel-bg);
+    color: var(--thorium-highlight-text);
+  }
+  &:focus-visible {
+    outline: 2px solid var(--thorium-highlight-text);
+    outline-offset: -2px;
+  }
+`;
+
+/** The current (last) crumb in the {@link FocusBar}: the focus root itself, shown bold and non-interactive. */
+export const CurrentCrumb = styled.span`
+  max-width: 18rem;
+  padding: 1px 6px;
+  font-weight: 700;
+  color: var(--thorium-text);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+`;
+
+/** The `›` separator between focus crumbs. */
+export const CrumbSep = styled.span`
+  color: var(--thorium-secondary-text);
+`;
+
 // --- tree levels / rows ---
+
+/**
+ * The nesting depth past which per-level indentation is **frozen**: levels deeper than this add only a
+ * hairline {@link FROZEN_INDENT} step (keeping the guide-rule visible) instead of a full indent step, so an
+ * arbitrarily deep tree can never march its rows off the right edge. Exported so the row can surface the
+ * depth/focus affordance (re-root) at exactly the depth where indentation stops conveying nesting.
+ */
+export const INDENT_CAP = 6;
+
+/** The minimal per-level indent applied past {@link INDENT_CAP} — just enough to keep nested guide-rules apart. */
+const FROZEN_INDENT = '4px';
+
+/**
+ * The per-level indent for a level at `$depth`: nothing at the root, one adaptive `--indent-step` for the
+ * first {@link INDENT_CAP} levels, then a frozen hairline step. The step itself is set by the container
+ * queries below off the browser tile's own width, so a narrow column compresses the indent automatically.
+ */
+function levelIndent($depth: number): string {
+  if ($depth <= 0) return '0';
+  return $depth <= INDENT_CAP ? 'var(--indent-step)' : FROZEN_INDENT;
+}
 
 /** A nested level; the left guide-rule keeps deep DAGs readable. */
 export const Level = styled.div<{ $depth: number }>`
@@ -193,9 +336,21 @@ export const Level = styled.div<{ $depth: number }>`
   flex-direction: column;
   /* very small margin between listed entities to keep the tree compact */
   gap: 2px;
-  /* taper the indent step past depth 4 so deeply nested rows keep usable header width */
-  margin-left: ${({ $depth }) => ($depth > 0 ? ($depth > 4 ? 6 : 10) : 0)}px;
-  padding-left: ${({ $depth }) => ($depth > 0 ? ($depth > 4 ? 6 : 10) : 0)}px;
+  /* per-level indent step, adapted to the browser tile's own width (container queries below) and frozen past
+     INDENT_CAP so deep rows keep usable header width; the guide-rule is retained at every non-root level */
+  --indent-step: 10px;
+  @container entitybrowser (max-width: 480px) {
+    & {
+      --indent-step: 6px;
+    }
+  }
+  @container entitybrowser (min-width: 900px) {
+    & {
+      --indent-step: 14px;
+    }
+  }
+  margin-left: ${({ $depth }) => levelIndent($depth)};
+  padding-left: ${({ $depth }) => levelIndent($depth)};
   border-left: ${({ $depth }) => ($depth > 0 ? '1px solid var(--thorium-panel-border)' : 'none')};
 `;
 
@@ -232,9 +387,14 @@ export const InfoBox = styled.div`
   overflow: hidden;
 `;
 
+/**
+ * The row header row: a fixed {@link Chevron} rail, a growing {@link HeaderLead} (identity + badges that
+ * wrap as a unit), and a fixed {@link HeaderTrail} (spinner + hide). `align-items: flex-start` keeps the
+ * chevron and trailing rail aligned to the FIRST line even when the lead wraps its badges onto later lines.
+ */
 export const RowHeader = styled.div`
   display: flex;
-  align-items: center;
+  align-items: flex-start;
   gap: 8px;
   padding: 6px 10px;
   cursor: pointer;
@@ -247,16 +407,21 @@ export const RowHeader = styled.div`
     outline: 2px solid var(--thorium-highlight-text);
     outline-offset: -2px;
   }
-  /* reveal the hide affordance when the row is hovered or anything inside it has keyboard focus */
-  &:hover ${HideButton}, &:focus-within ${HideButton} {
+  /* reveal the hide + focus affordances when the row is hovered or anything inside it has keyboard focus */
+  &:hover ${HideButton}, &:focus-within ${HideButton}, &:hover ${FocusButton}, &:focus-within ${FocusButton} {
     opacity: 1;
   }
 `;
 
+/** The shared height of the header's first line, so the chevron / trailing rail center-align to the name row. */
+const HEADER_LINE = '1.4rem';
+
 export const Chevron = styled.span<{ $expanded: boolean; $hidden?: boolean }>`
   display: inline-flex;
   align-items: center;
+  justify-content: center;
   width: 12px;
+  height: ${HEADER_LINE};
   flex: 0 0 auto;
   color: var(--thorium-secondary-text);
   visibility: ${({ $hidden }) => ($hidden ? 'hidden' : 'visible')};
@@ -264,11 +429,50 @@ export const Chevron = styled.span<{ $expanded: boolean; $hidden?: boolean }>`
   transition: transform 0.15s ease;
 `;
 
-/* Shared name styling: the name is the header's growing element with a legible floor,
-   so it ellipsizes instead of losing the flex shrink fight against the badges. */
+/**
+ * The header's growing region: the identity (icon + name) followed by the structural badges and tag chips.
+ * A wrapping flex row so, as the row narrows, the whole badge/tag cluster **floats onto the next line under
+ * the name** rather than crushing the name — the name keeps the first line, badges/tags flow after it. The
+ * row/column gaps are tight (2px vertical, 6px horizontal) so wrapped lines stay compact.
+ */
+export const HeaderLead = styled.div`
+  flex: 1 1 auto;
+  min-width: 0;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 2px 6px;
+`;
+
+/**
+ * The identity cluster (type icon + name) kept together as one wrap-unit so the icon never detaches from the
+ * name. `flex: 0 1 auto` lets it take only the width its (ellipsized) name needs — no longer *growing* to eat
+ * the row and stranding the badges far to the right (the previous behavior); `min-width: 0` lets the name
+ * ellipsize under pressure.
+ */
+export const HeaderIdentity = styled.span`
+  flex: 0 1 auto;
+  min-width: 0;
+  min-height: ${HEADER_LINE};
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+`;
+
+/** The header's fixed trailing rail (grow spinner + hide affordance), aligned to the first line. */
+export const HeaderTrail = styled.span`
+  flex: 0 0 auto;
+  min-height: ${HEADER_LINE};
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+`;
+
+/* Shared name styling: the name takes only the width it needs (no flex-grow), ellipsizing under pressure with
+   a small floor so badges/tags sit right after it and wrap beneath it rather than the name eating the row. */
 const identifierBase = css`
-  flex: 1 1 8rem;
-  min-width: 8rem;
+  flex: 0 1 auto;
+  min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -297,6 +501,68 @@ export const BadgeGroup = styled.span`
   flex-wrap: wrap;
   gap: ${BUTTON_BAR_GAP};
   min-width: 0;
+`;
+
+/**
+ * Groups the header's descriptive tag chips. Sits after {@link BadgeGroup} in {@link HeaderLead} and wraps
+ * with it, so tags flow right after the structural badges and drop to the next line together under pressure.
+ */
+export const TagBadgeGroup = styled.span`
+  display: inline-flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: ${BUTTON_BAR_GAP};
+  min-width: 0;
+`;
+
+/**
+ * A single descriptive tag chip (`key: value`) in the row header. Deliberately lighter than the structural
+ * {@link BaseBadge} (dashed, transparent) so tags read as metadata rather than competing with the kind /
+ * relationship badges. Capped in width and ellipsized so one long value can't stretch the header.
+ */
+export const TagBadge = styled.span`
+  flex: 0 1 auto;
+  min-width: 0;
+  max-width: 16rem;
+  display: inline-flex;
+  align-items: baseline;
+  gap: 3px;
+  font-size: 0.7rem;
+  font-weight: 500;
+  padding: 1px 6px;
+  border-radius: 10px;
+  border: 1px dashed var(--thorium-panel-border);
+  color: var(--thorium-secondary-text);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+`;
+
+/** The key portion of a {@link TagBadge}, de-emphasized so the value stands out. */
+export const TagBadgeKey = styled.span`
+  flex: 0 0 auto;
+  opacity: 0.75;
+`;
+
+/** The value portion of a {@link TagBadge}; ellipsizes when the value is long. */
+export const TagBadgeValue = styled.span`
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--thorium-text);
+`;
+
+/** The `+N` chip shown when a node has more tags than the header cap; its title lists the overflowed tags. */
+export const TagOverflowBadge = styled.span`
+  flex: 0 0 auto;
+  font-size: 0.7rem;
+  font-weight: 600;
+  padding: 1px 6px;
+  border-radius: 10px;
+  background: var(--thorium-secondary-panel-bg);
+  color: var(--thorium-secondary-text);
+  cursor: default;
 `;
 
 const BaseBadge = styled.span`

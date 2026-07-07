@@ -1,9 +1,9 @@
 // spec: ./EntityBrowser.spec.md
 import React, { useMemo, useState } from 'react';
-import { FaChevronRight, FaEyeSlash, FaSeedling } from 'react-icons/fa6';
+import { FaBullseye, FaChevronRight, FaEyeSlash, FaSeedling } from 'react-icons/fa6';
 
 // project imports
-import { effectiveChildren, getNodeTags, hasDangerTags, nodeTypeOf } from './browserHelpers';
+import { effectiveChildren, getDisplayTags, getNodeTags, hasDangerTags, nodeTypeOf } from './browserHelpers';
 import EntityTreeLevel from './EntityTreeLevel';
 import MetadataBox from './MetadataBox';
 import { useEntityBrowser } from './EntityBrowserContext';
@@ -11,10 +11,16 @@ import {
   BadgeGroup,
   Chevron,
   DangerDot,
+  DepthPill,
   DuplicateBadge,
+  FocusButton,
   GrowBadge,
+  HeaderIdentity,
+  HeaderLead,
+  HeaderTrail,
   HideButton,
   HideSlot,
+  INDENT_CAP,
   IdentifierLink,
   IdentifierText,
   InfoBox,
@@ -23,6 +29,11 @@ import {
   RowContainer,
   RowHeader,
   RowSpinner,
+  TagBadge,
+  TagBadgeGroup,
+  TagBadgeKey,
+  TagBadgeValue,
+  TagOverflowBadge,
   ViaBadge,
 } from './EntityBrowser.styled';
 import { hasContextualDisplayChildren, toDisplayCfg, TreeEdge } from '../treeHelpers';
@@ -63,6 +74,8 @@ const EntityRow: React.FC<EntityRowProps> = ({ nodeId, rowKey, path, depth, edge
 
   const node = graph.data_map[nodeId];
   const info = useMemo(() => (node ? treeNodeToInfo(node) : null), [node]);
+  // descriptive tag chips for the header (capped, noise keys dropped); recomputed only when the node changes
+  const displayTags = useMemo(() => (node ? getDisplayTags(node) : { shown: [], overflow: 0, overflowLabels: [] }), [node]);
   const nodeType = nodeTypeOf(nodeId, graph);
   const childrenExpanded = browser.isChildrenExpanded(rowKey, nodeId, viaReversed, reverseDepth);
   const isDuplicate = browser.multiParent.has(nodeId);
@@ -107,6 +120,11 @@ const EntityRow: React.FC<EntityRowProps> = ({ nodeId, rowKey, path, depth, edge
     e.stopPropagation();
     browser.hideNode(nodeId);
   };
+  // re-root the tree at this node (focus its subtree); stop propagation so the header's toggle doesn't also fire
+  const onFocus = (e: React.MouseEvent) => {
+    e.stopPropagation();
+    browser.setFocusRoot(nodeId);
+  };
 
   const onKeyDown = (e: React.KeyboardEvent) => {
     if (e.key === 'Enter' || e.key === ' ') {
@@ -133,41 +151,77 @@ const EntityRow: React.FC<EntityRowProps> = ({ nodeId, rowKey, path, depth, edge
           <Chevron $expanded={childrenExpanded} $hidden={!canExpand}>
             <FaChevronRight size={10} />
           </Chevron>
-          <EntityTypeIcon kind={nodeType as Entities} size={14} />
-          {info?.titleHref ? (
-            <IdentifierLink href={info.titleHref} target="_blank" rel="noreferrer" onClick={(e) => e.stopPropagation()}>
-              {title}
-            </IdentifierLink>
-          ) : (
-            <IdentifierText>{title}</IdentifierText>
-          )}
-          <BadgeGroup>
-            <KindBadge>{entityLabel(nodeType)}</KindBadge>
-            {edge && (
-              <RelationshipBadge title={edge.containerLabel ? `${edge.label} ${edge.containerLabel}` : edge.label}>
-                {edge.label}
-                {edge.containerLabel ? ` ${edge.containerLabel}` : ''}
-              </RelationshipBadge>
+          <HeaderLead>
+            <HeaderIdentity>
+              <EntityTypeIcon kind={nodeType as Entities} size={14} />
+              {info?.titleHref ? (
+                <IdentifierLink href={info.titleHref} target="_blank" rel="noreferrer" onClick={(e) => e.stopPropagation()}>
+                  {title}
+                </IdentifierLink>
+              ) : (
+                <IdentifierText>{title}</IdentifierText>
+              )}
+            </HeaderIdentity>
+            <BadgeGroup>
+              <KindBadge>{entityLabel(nodeType)}</KindBadge>
+              {edge && (
+                <RelationshipBadge title={edge.containerLabel ? `${edge.label} ${edge.containerLabel}` : edge.label}>
+                  {edge.label}
+                  {edge.containerLabel ? ` ${edge.containerLabel}` : ''}
+                </RelationshipBadge>
+              )}
+              {breadcrumb && breadcrumb.length > 0 && (
+                <ViaBadge title={`Reached through: ${breadcrumb.join(' › ')}`}>via {breadcrumb.join(' › ')}</ViaBadge>
+              )}
+              {isDanger && <DangerDot title="Carries danger-classified tags" />}
+              {isDuplicate && <DuplicateBadge title="Appears under multiple parents in this tree">Duplicate</DuplicateBadge>}
+              {isGrowable && (
+                <GrowBadge title="More associations can be loaded — expand to grow">
+                  <FaSeedling size={10} /> grow
+                </GrowBadge>
+              )}
+            </BadgeGroup>
+            {displayTags.shown.length > 0 && (
+              <TagBadgeGroup>
+                {displayTags.shown.map((tag) => (
+                  <TagBadge key={`${tag.key}:${tag.value}`} title={`${tag.key}: ${tag.value}`}>
+                    <TagBadgeKey>{tag.key}</TagBadgeKey>
+                    <TagBadgeValue>{tag.value}</TagBadgeValue>
+                  </TagBadge>
+                ))}
+                {displayTags.overflow > 0 && (
+                  <TagOverflowBadge title={displayTags.overflowLabels.join('\n')}>+{displayTags.overflow}</TagOverflowBadge>
+                )}
+              </TagBadgeGroup>
             )}
-            {breadcrumb && breadcrumb.length > 0 && (
-              <ViaBadge title={`Reached through: ${breadcrumb.join(' › ')}`}>via {breadcrumb.join(' › ')}</ViaBadge>
-            )}
-            {isDanger && <DangerDot title="Carries danger-classified tags" />}
-            {isDuplicate && <DuplicateBadge title="Appears under multiple parents in this tree">Duplicate</DuplicateBadge>}
-            {isGrowable && (
-              <GrowBadge title="More associations can be loaded — expand to grow">
-                <FaSeedling size={10} /> grow
-              </GrowBadge>
-            )}
-          </BadgeGroup>
-          {growing && <RowSpinner aria-label="loading" />}
-          <HideSlot>
-            <OverlayTipTop tip="Hide this item and everything under it">
-              <HideButton type="button" aria-label={`Hide ${title} and everything under it`} onClick={onHide}>
-                <FaEyeSlash size={13} />
-              </HideButton>
-            </OverlayTipTop>
-          </HideSlot>
+          </HeaderLead>
+          <HeaderTrail>
+            {growing && <RowSpinner aria-label="loading" />}
+            {/* focus (re-root) affordance: hover-revealed on shallow rows; once nesting passes the indent cap
+                it promotes to an always-visible depth pill (the pill doubles as the focus trigger). Only shown
+                when the row actually has a subtree to focus into. */}
+            {canExpand &&
+              (depth > INDENT_CAP ? (
+                <OverlayTipTop tip="Focus on this subtree (reset the nesting here)">
+                  <DepthPill type="button" aria-label={`Focus on ${title} — nested ${depth} levels deep`} onClick={onFocus}>
+                    <FaBullseye size={10} aria-hidden /> {depth}
+                  </DepthPill>
+                </OverlayTipTop>
+              ) : (
+                <OverlayTipTop tip="Focus on this subtree">
+                  <FocusButton type="button" aria-label={`Focus on ${title} — show only this subtree`} onClick={onFocus}>
+                    <FaBullseye size={13} />
+                  </FocusButton>
+                </OverlayTipTop>
+              ))}
+            <HideSlot>
+              <OverlayTipTop tip="Hide this item and everything under it">
+                <HideButton type="button" aria-label={`Hide ${title} and everything under it`} onClick={onHide}>
+                  <FaEyeSlash size={13} />
+                </HideButton>
+              </OverlayTipTop>
+            </HideSlot>
+          </HeaderTrail>
         </RowHeader>
         {info && <MetadataBox model={info} />}
       </InfoBox>

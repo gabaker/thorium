@@ -1,4 +1,5 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { FaCompress, FaExpand } from 'react-icons/fa';
 import { Link, useLocation, useNavigate, useSearchParams } from 'react-router-dom';
 
 // spec: ./SPEC.md
@@ -15,14 +16,16 @@ import { makeDepthClause, withDepthClause } from './depthClause';
 import { decodeSeedParams } from './seedParams';
 import StatsPanel from './StatsPanel';
 import {
-  ContentRow,
+  ContentGrid,
   ContentTile,
   ControlsRow,
   DashboardLayout,
   HideableTile,
   OmnibarRow,
+  PaneScroll,
   StatsRow,
-  TabbedContent,
+  TileHeader,
+  TileHeaderRow,
   ULTRA_WIDE_BREAKPOINT,
 } from './styles';
 import { resetFilterClauses, toggleTagValue } from './tagFilter';
@@ -32,15 +35,15 @@ import { MAX_DEPTH } from '@components/associations/browsing/EntityBrowser/omnib
 import { GraphDataProvider, useGraphData } from '@components/associations/data/GraphDataContext';
 import Page from '@components/pages/Page';
 import AlertBanner, { Severity } from '@components/shared/alerts/AlertBanner';
+import { IconButton } from '@components/shared/buttons';
 import { Clause, ClauseIsMulti } from '@components/shared/inputs/omnibar/ClauseTypes';
 import { useOmnibarUrlState } from '@components/shared/inputs/omnibar/useOmnibarUrlState';
-import { BalancedColumns } from '@components/shared/layout/BalancedColumns';
+import { OverlayTipBottom } from '@components/shared/overlay/tips';
 import { Tabs } from '@components/shared/tabs';
-import { boolCodec, setCodec } from '@utilities/url/codecs';
+import { boolCodec, setCodec, stringCodec } from '@utilities/url/codecs';
 import { useUrlState } from '@utilities/url/useUrlState';
 import { useMediaQuery } from '@utilities/useMediaQuery';
 import type { Seed } from '@models/trees';
-import { spacers } from '@styles';
 
 /// The seed keys the dashboard owns; the decoded seed is memoized on just these so unrelated URL changes
 /// (omnibar clause params, tab hash) never trigger a graph refetch.
@@ -55,6 +58,13 @@ const FLAGGED_CODEC = boolCodec('flagged');
 /// stable reference rather than a fresh Set each render.
 const EMPTY_HIDDEN: Set<string> = new Set();
 
+/// The codec binding the focused (expanded-to-fill) pane to `panel=browser|graph`; absent means the split
+/// view. Module-level so its identity is stable across renders (the {@link useUrlState} memo contract).
+const PANEL_CODEC = stringCodec('panel');
+/// The codec binding the re-rooted (focused) subtree to `focus=<nodeId>`; absent means the natural roots.
+/// Disjoint from the seed keys, so changing focus never refetches the graph or remounts the content.
+const FOCUS_CODEC = stringCodec('focus');
+
 /**
  * The content tabs shown below the ultra-wide breakpoint. Persisted in the URL hash so a shared link
  * restores the view; the raw enum value is the hash (e.g. `#graph`).
@@ -64,6 +74,27 @@ enum ContentTab {
   Entities = 'entities',
   /// The association graph tile.
   Graph = 'graph',
+}
+
+/// Which content pane is focused (expanded to fill the region) via the ⤢ toggle; drives the `panel` URL key.
+enum PaneFocus {
+  /// The entity browser pane fills the region (the graph pane is hidden but kept mounted).
+  Browser = 'browser',
+  /// The association graph pane fills the region (the browser pane is hidden but kept mounted).
+  Graph = 'graph',
+}
+
+/**
+ * The arrangement of the content region, derived from the viewport and the focused pane. All three are one
+ * stable element tree differing only by CSS/props, so switching never re-parents (remounts) the heavy tiles.
+ */
+enum ContentMode {
+  /// Ultra-wide, no pane focused: browser and graph side by side (two columns).
+  Split = 'split',
+  /// Ultra-wide, a pane focused: that pane fills the single column, the other is hidden (still mounted).
+  Expanded = 'expanded',
+  /// Narrow: a tab bar toggles which single-column pane is shown (the other hidden, still mounted).
+  Tabs = 'tabs',
 }
 
 /**
@@ -134,6 +165,9 @@ export const DashboardContent: React.FC<DashboardContentProps> = ({ seed, depthA
   // as controlled state, so hiding a node / flagging survives refresh and is shareable via the dashboard link
   const [hiddenNodes, setHiddenNodes] = useUrlState(HIDDEN_CODEC, EMPTY_HIDDEN);
   const [flaggedOnly, setFlaggedOnly] = useUrlState(FLAGGED_CODEC, false);
+  // the re-rooted (focused) subtree, URL-backed so a focused view is shareable and survives refresh; fed to
+  // the provider as controlled state ('' ⇒ no focus / natural roots)
+  const [focusRoot, setFocusRoot] = useUrlState(FOCUS_CODEC, '');
 
   // one-shot: if the URL carried no depth clause, seed one for the mount depth so the omnibar always
   // shows the current crawl depth. Guarded by a ref so it runs once and never fights later user edits.
@@ -193,6 +227,8 @@ export const DashboardContent: React.FC<DashboardContentProps> = ({ seed, depthA
             onHiddenNodesChange={setHiddenNodes}
             flaggedOnly={flaggedOnly}
             setFlaggedOnly={setFlaggedOnly}
+            focusRoot={focusRoot || null}
+            onFocusRootChange={(id) => setFocusRoot(id ?? '')}
           >
             <DashboardBody
               seed={seed}
@@ -275,6 +311,31 @@ const DashboardBody: React.FC<DashboardBodyProps> = ({
     void reload().finally(() => setRefreshing(false));
   }, [reload, refreshReactions]);
 
+  // the focused (expanded-to-fill) pane, URL-backed so a focused view is shareable/survives refresh. Only
+  // meaningful in the ultra-wide two-column layout; the narrow (tabs) layout ignores it. Persisted as a plain
+  // string; narrowed to the `PaneFocus` enum (or '') so comparisons stay enum-typed.
+  const [rawPanel, setPanel] = useUrlState(PANEL_CODEC, '');
+  const expandedPane = rawPanel as PaneFocus | '';
+  // the content arrangement: narrow → tabs; ultra-wide with a focused pane → expanded; else the split view
+  const mode = !isUltraWide ? ContentMode.Tabs : expandedPane ? ContentMode.Expanded : ContentMode.Split;
+  // which panes are shown: both in split, only the focused one when expanded, only the active tab when narrow.
+  // The graph's `active` (WebGL gate) tracks its visibility so a hidden graph pays no render cost.
+  const browserVisible =
+    mode === ContentMode.Split ||
+    (mode === ContentMode.Expanded && expandedPane === PaneFocus.Browser) ||
+    (mode === ContentMode.Tabs && activeTab === ContentTab.Entities);
+  const graphVisible =
+    mode === ContentMode.Split ||
+    (mode === ContentMode.Expanded && expandedPane === PaneFocus.Graph) ||
+    (mode === ContentMode.Tabs && activeTab === ContentTab.Graph);
+  // focus a pane (or restore the split view when it's already focused); the other pane stays mounted
+  const toggleBrowserExpand = useCallback(
+    () => setPanel(expandedPane === PaneFocus.Browser ? '' : PaneFocus.Browser),
+    [expandedPane, setPanel],
+  );
+  const toggleGraphExpand = useCallback(() => setPanel(expandedPane === PaneFocus.Graph ? '' : PaneFocus.Graph), [expandedPane, setPanel]);
+  const browserExpanded = expandedPane === PaneFocus.Browser;
+
   return (
     <DashboardLayout>
       <StatsRow>
@@ -294,50 +355,56 @@ const DashboardBody: React.FC<DashboardBodyProps> = ({
       <OmnibarRow>
         <DashboardOmnibar clauses={clauses} setClauses={setClauses} />
       </OmnibarRow>
-      {isUltraWide ? (
-        // wide: balanced two-column layout. The browser tile anchors the left column and the square
-        // graph tile the right; the remaining tiles (Analysis Status, plus any future data-view tiles)
-        // flow into whichever column is currently shorter so a short entities list never strands the
-        // reactions tile low under the graph. Both anchor tiles stay mounted so lazy/inView state is
-        // preserved.
-        <BalancedColumns
-          gap={spacers.four}
-          left={
-            <ContentTile>
-              <BrowserTile />
-            </ContentTile>
-          }
-          right={<DashboardGraphTile active />}
-          items={[<AnalysisStatusPanel key="reactions" />]}
+      {/* one stable content tree for every arrangement: the browser and graph panes are always the same
+          elements in the same order, so switching split ⇄ expanded ⇄ tabs is pure CSS (grid columns +
+          display:none) and never re-parents (remounts) the browser's state or the graph's WebGL canvas.
+          The tab bar shows only in the narrow layout; the ⤢ focus toggles show only ultra-wide. */}
+      {mode === ContentMode.Tabs && (
+        <Tabs<ContentTab>
+          aria-label="Dashboard content"
+          active={activeTab}
+          onChange={setActiveTab}
+          tabs={[
+            { key: ContentTab.Entities, label: 'Entities' },
+            { key: ContentTab.Graph, label: 'Graph' },
+          ]}
         />
-      ) : (
-        // narrow: tabs (both panels mounted, toggled with display:none) with the Analysis Status
-        // panel full-width below the tabs.
-        <>
-          <ContentRow>
-            <TabbedContent>
-              <Tabs<ContentTab>
-                aria-label="Dashboard content"
-                active={activeTab}
-                onChange={setActiveTab}
-                tabs={[
-                  { key: ContentTab.Entities, label: 'Entities' },
-                  { key: ContentTab.Graph, label: 'Graph' },
-                ]}
-              />
-              <ContentTile $hidden={activeTab !== ContentTab.Entities}>
-                <BrowserTile />
-              </ContentTile>
-              <HideableTile $hidden={activeTab !== ContentTab.Graph}>
-                <DashboardGraphTile active={activeTab === ContentTab.Graph} />
-              </HideableTile>
-            </TabbedContent>
-          </ContentRow>
-          {/* AnalysisStatusPanel renders its own <AnalysisRow> root, so it is placed bare here (no
-              second wrapper) — matching the ultra-wide path, which also renders it bare. */}
-          <AnalysisStatusPanel />
-        </>
       )}
+      <ContentGrid $columns={mode === ContentMode.Split ? 2 : 1}>
+        <ContentTile $hidden={!browserVisible}>
+          {/* the pane header (with the ⤢ focus toggle) shows only in the two-column ultra-wide layout; in the
+              narrow tabs layout the tab bar already labels the pane, so no header is rendered */}
+          {isUltraWide && (
+            <TileHeader>
+              <TileHeaderRow>
+                <span>Entities</span>
+                <OverlayTipBottom tip={browserExpanded ? 'Restore the split view' : 'Expand the entities panel to fill the dashboard'}>
+                  <IconButton
+                    onClick={toggleBrowserExpand}
+                    aria-label={browserExpanded ? 'Restore the split view' : 'Expand the entities panel to fill the dashboard'}
+                  >
+                    {browserExpanded ? <FaCompress size={15} /> : <FaExpand size={15} />}
+                  </IconButton>
+                </OverlayTipBottom>
+              </TileHeaderRow>
+            </TileHeader>
+          )}
+          <PaneScroll>
+            <BrowserTile />
+          </PaneScroll>
+        </ContentTile>
+        <HideableTile $hidden={!graphVisible}>
+          <DashboardGraphTile
+            active={graphVisible}
+            canExpand={isUltraWide}
+            expanded={expandedPane === PaneFocus.Graph}
+            onToggleExpand={toggleGraphExpand}
+          />
+        </HideableTile>
+      </ContentGrid>
+      {/* AnalysisStatusPanel renders its own <AnalysisRow> root, so it is placed bare here, full-width below
+          the content grid in every arrangement. */}
+      <AnalysisStatusPanel />
     </DashboardLayout>
   );
 };

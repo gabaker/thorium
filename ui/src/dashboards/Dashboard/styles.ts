@@ -276,16 +276,35 @@ export const EmptyTags = styled.div`
 `;
 
 /**
- * The narrow layout's content region: a single-column grid hosting the tabbed tiles (the ultra-wide
- * layout uses `BalancedColumns` instead). `minmax(0, 1fr)` lets the column shrink so the 3D graph
- * canvas and the browser table never force the grid to overflow.
+ * The dashboard's content region: a stable N-column grid hosting the browser pane and the graph pane as
+ * **fixed sibling grid items in a constant source order**, so switching arrangement never re-parents them
+ * (preserving the browser's scroll/expansion state and the graph's WebGL canvas). Every arrangement is
+ * expressed purely as CSS/props over this one tree:
+ *
+ * - **split** (ultra-wide, no pane focused): `$columns=2` — browser left, graph right.
+ * - **expanded** (a pane focused via the ⤢ toggle): `$columns=1` — the focused pane fills, the other is
+ *   `display:none` (still mounted, its `active` gated off so the graph pays no WebGL cost).
+ * - **tabs** (narrow): `$columns=1` — only the active-tab pane is shown; the other is `display:none`.
+ *
+ * `minmax(0, 1fr)` tracks let a column shrink so the 3D canvas / browser table never force an overflow.
  */
-export const ContentRow = styled.div`
+export const ContentGrid = styled.div<{ $columns: number }>`
   display: grid;
-  grid-template-columns: minmax(0, 1fr);
+  grid-template-columns: repeat(${({ $columns }) => $columns}, minmax(0, 1fr));
   align-items: start;
   gap: ${spacers.four};
   min-height: 0;
+`;
+
+/**
+ * Horizontal-scroll safety valve wrapping the browser tree inside its pane: for a pathologically wide/deep
+ * subtree that even the frozen indent can't keep within the pane, this scrolls sideways rather than crushing
+ * rows. No vertical scrollbar appears because the pane isn't height-capped (the page grows), so the
+ * `overflow-y` that `overflow-x` forces to `auto` never has capped content to scroll.
+ */
+export const PaneScroll = styled.div`
+  min-width: 0;
+  overflow-x: auto;
 `;
 
 /**
@@ -324,18 +343,6 @@ export const GraphContentTile = styled(ContentTile)`
     flex: 1;
     min-height: 0;
   }
-`;
-
-/**
- * The tabbed content wrapper used below the ultra-wide breakpoint: a tab bar over both panels, which stay
- * mounted and toggle via {@link ContentTile}/{@link HideableTile}'s `$hidden` so switching tabs preserves
- * each tile's state (browser scroll/expansion, graph camera).
- */
-export const TabbedContent = styled.div`
-  display: flex;
-  flex-direction: column;
-  gap: ${spacers.three};
-  min-height: 0;
 `;
 
 /**

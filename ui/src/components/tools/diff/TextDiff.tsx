@@ -63,6 +63,11 @@ const TextDiff: React.FC<TextDiffProps> = ({ oldValue, newValue, method = DiffMe
   // both use light backgrounds, so only the remaining themes count as dark
   const theme = typeof document !== 'undefined' ? document.getElementById('root')?.getAttribute('theme') : null;
   const useDarkTheme = theme !== 'Light' && theme !== 'Crab';
+  // react-diff-viewer-continued handles the YAML method structurally only at the line level; for
+  // sub-line word highlighting it calls jsdiff's `diffYaml`, which does not exist and throws
+  // `compareFunc is not a function` on any modified (not purely added/removed) line. Disabling word
+  // diff for YAML keeps the structural line diff and avoids the crash.
+  const disableWordDiff = method === DiffMethod.YAML;
   return (
     <DiffWrapper>
       <ReactDiffViewer
@@ -70,6 +75,7 @@ const TextDiff: React.FC<TextDiffProps> = ({ oldValue, newValue, method = DiffMe
         newValue={newValue}
         splitView={splitView}
         compareMethod={method}
+        disableWordDiff={disableWordDiff}
         useDarkTheme={useDarkTheme}
         styles={DIFF_STYLES}
         leftTitle={oldTitle}

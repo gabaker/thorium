@@ -3,11 +3,14 @@ import { describe, expect, it } from 'vitest';
 // project imports
 import {
   ASSIGNMENT_HYSTERESIS_PX,
+  BalanceStrategy,
   ColumnSide,
   assignColumns,
   assignColumnsN,
+  assignmentsEqual,
   computeColumnCount,
   maxColumnHeight,
+  roundRobinAssignment,
   shouldReplaceAssignment,
 } from './BalancedColumns';
 
@@ -102,6 +105,61 @@ describe('assignColumnsN', () => {
   it('balances items by running height with ties to the lowest index', () => {
     // heights [10,0]: -> col 1 (r=5), -> col 1 (r=25), -> col 0 (l=15), -> col 0 (l=25)
     expect(assignColumnsN(2, [10, 0], [5, 20, 5, 10])).toEqual({ anchorCols: [0, 1], itemCols: [1, 1, 0, 0] });
+  });
+
+  it('defaults to InOrder when no strategy is given', () => {
+    // the default arg must reproduce the explicit InOrder result exactly (no behavior change)
+    const heights = [10, 30, 20];
+    expect(assignColumnsN(2, [], heights)).toEqual(assignColumnsN(2, [], heights, BalanceStrategy.InOrder));
+  });
+
+  it('LongestFirst places tallest-first but returns index-aligned itemCols', () => {
+    // heights [10,30,20] placed as 30(i1)->col0, 20(i2)->col1, 10(i0)->col1; itemCols stay index-aligned
+    expect(assignColumnsN(2, [], [10, 30, 20], BalanceStrategy.LongestFirst)).toEqual({ anchorCols: [], itemCols: [1, 0, 1] });
+  });
+
+  it('LongestFirst balances a skewed set better than InOrder', () => {
+    // one tall item among small ones: InOrder strands it atop a filled column, LongestFirst isolates it
+    const items = [10, 10, 10, 10, 60];
+    const inOrder = assignColumnsN(2, [], items, BalanceStrategy.InOrder);
+    const longest = assignColumnsN(2, [], items, BalanceStrategy.LongestFirst);
+    expect(maxColumnHeight(longest, 2, [], items)).toBeLessThan(maxColumnHeight(inOrder, 2, [], items));
+  });
+
+  it('LongestFirst breaks height ties by original index', () => {
+    // all equal heights fall back to index order, matching InOrder's lowest-index-tie round-robin
+    expect(assignColumnsN(3, [], [10, 10, 10], BalanceStrategy.LongestFirst)).toEqual({ anchorCols: [], itemCols: [0, 1, 2] });
+  });
+});
+
+describe('roundRobinAssignment', () => {
+  it('seeds anchors in their own column and cycles items across columns', () => {
+    expect(roundRobinAssignment(3, 2, 5)).toEqual({ anchorCols: [0, 1], itemCols: [0, 1, 2, 0, 1] });
+  });
+
+  it('clamps a degenerate column count to a single column', () => {
+    expect(roundRobinAssignment(0, 1, 3)).toEqual({ anchorCols: [0], itemCols: [0, 0, 0] });
+  });
+
+  it('clamps overflow anchors to the last column', () => {
+    // anchors beyond the column count pin to the final column (min(i, count-1))
+    expect(roundRobinAssignment(2, 4, 0)).toEqual({ anchorCols: [0, 1, 1, 1], itemCols: [] });
+  });
+});
+
+describe('assignmentsEqual', () => {
+  it('is true for identical placements and false for differing ones', () => {
+    expect(assignmentsEqual({ anchorCols: [0, 1], itemCols: [0] }, { anchorCols: [0, 1], itemCols: [0] })).toBe(true);
+    expect(assignmentsEqual({ anchorCols: [0, 1], itemCols: [0] }, { anchorCols: [0, 1], itemCols: [1] })).toBe(false);
+  });
+
+  it('is false for differing shapes', () => {
+    expect(assignmentsEqual({ anchorCols: [0], itemCols: [0] }, { anchorCols: [0], itemCols: [0, 1] })).toBe(false);
+  });
+
+  it('compares nulls by reference', () => {
+    expect(assignmentsEqual(null, null)).toBe(true);
+    expect(assignmentsEqual(null, { anchorCols: [], itemCols: [] })).toBe(false);
   });
 });
 
