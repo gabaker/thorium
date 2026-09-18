@@ -37,7 +37,6 @@ When running `minithor` commands, the following files are looked for in your cur
 
 | File | Used by | Required? |
 |------|---------|-----------|
-| `.certs/*.crt` | `minikube install` | No — optional TLS proxy certs to trust in minikube |
 | `thorium-cluster.yml` | `deploy` | No — cluster config (a built-in default is used if absent) |
 | `.dockerconfigjson` | `deploy` | No — private registry credentials for pulling images |
 | `banner.txt` | `deploy` | No — login banner (a default is generated if absent) |
@@ -49,14 +48,17 @@ All paths can be overridden with CLI flags — run `minithor <command> --help` f
 Install and start minikube and any necessary plugins.
 
 ```bash
-minithor minikube install [--cpus <n>] [--memory <n>] [--certs-dir <path>]
+minithor minikube install [--cpus <n>] [--memory <n>] [--certs <path>] [--force-node-config]
 ```
 
 | Flag | Description |
 |------|-------------|
 | `--cpus <n>` | Number of CPUs to allocate to minikube (default: 8) |
 | `--memory <n>` | Memory in GiB to allocate to minikube (default: 16) |
-| `--certs-dir <path>` | Directory containing `.crt` files to trust (default: `$PWD/.certs/`) |
+| `--certs <path>` | A `.crt` file, or a directory of `*.crt` files, to install into the minikube node's trust store. Required behind a TLS-intercepting proxy so the node trusts it for image pulls. No default — cert install only runs when this flag is given. |
+| `--force-node-config` | Overwrite the node's CA and containerd proxy drop-in even if they already exist. By default existing files are left in place so a manual fix on the node isn't clobbered. |
+
+Detects the best available driver (podman > docker > kvm2), downloads minikube for your OS/architecture, configures resource limits, and starts the cluster with Calico CNI, CSI, and Ingress addons. When the host has an HTTP proxy configured (see below), the node's container runtime is also configured to pull images through it.
 
 ### Create registry auth file (optional)
 
@@ -71,15 +73,24 @@ If omitted, the operator will pull images without authentication (works for publ
 
 ### Proxy configuration (optional)
 
-If your organization maintains a proxy for all traffic going to the internet, export proxy settings before running the deploy command:
+If your organization maintains a proxy for all traffic going to the internet, export proxy settings before running the `minikube install` command:
 
 ```bash
 export HTTP_PROXY=<HTTP_PROXY_URL:PORT>
 export HTTPS_PROXY=<HTTPS_PROXY_URL:PORT>
-export NO_PROXY=localhost,127.0.0.1,10.0.0.0/8,192.168.0.0/16
 ```
 
 Or use the provided proxy file: `source proxy`
+
+`HTTP_PROXY`/`HTTPS_PROXY` are taken from your environment as-is. You do **not** need to set `NO_PROXY` for the cluster to work — minithor automatically computes the full bypass list (the node subnet, service and pod CIDRs, control-plane host, loopback, and the cluster-internal registry/DNS suffixes) and unions it with any `NO_PROXY`/`no_proxy` you already have set. This computed value is used consistently across `install`, `start`, and `expose`.
+
+When a proxy is configured, `minithor minikube install` (and subsequent `minithor start`) configures the minikube node's container runtime to pull external images through it, since minikube's own proxy propagation into the node is unreliable. If your proxy performs TLS interception, pass its CA to `minikube install` with `--certs <path>` so the node trusts it for image pulls:
+
+```bash
+minithor minikube install --certs /path/to/proxy-ca.crt
+```
+
+On an unproxied host, all of this proxy/cert plumbing is a no-op.
 
 ### Deploy
 

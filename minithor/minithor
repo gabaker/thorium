@@ -13,11 +13,62 @@ CONTAINER_CMD=""
 # In-cluster container registry, referenced by its Kubernetes service DNS name.
 REGISTRY_HOST="registry.thorium.svc.cluster.local"
 REGISTRY_PORT=5000
-# Cluster-internal names that must never traverse an HTTP proxy and that the
-# minikube node must reach directly (CoreDNS is pod-facing only, so the node's
-# container runtime can't resolve/route these through a proxy). Suffix entries
-# (leading dot) match subdomains in Go's httpproxy matcher used by the runtime.
-CLUSTER_NO_PROXY="${REGISTRY_HOST},.svc.cluster.local,svc.cluster.local,cluster.local"
+# The critical hosts and CIDR ranges that must never traverse an HTTP proxy so
+# the minikube node and host can reach them directly: the node subnet (docker
+# driver), the service and pod CIDRs, the control-plane host, loopback, and the
+# cluster-internal registry/DNS suffixes (CoreDNS is pod-facing only, so the
+# node's container runtime can't route these through a proxy). Leading-dot
+# entries match subdomains in Go's httpproxy matcher used by the runtime. This
+# is unioned with the host's own NO_PROXY by compute_no_proxy().
+MINIKUBE_NO_PROXY="control-plane.minikube.internal,192.168.49.0/24,10.96.0.0/12,10.244.0.0/16,localhost,127.0.0.1,${REGISTRY_HOST},.svc,.svc.cluster.local,cluster.local"
+
+# Union the host's existing NO_PROXY/no_proxy with MINIKUBE_NO_PROXY, emitting
+# each entry exactly once (order preserved). This is the single source of truth
+# for the NO_PROXY handed to minikube and baked into the node, so install,
+# start, and expose stay consistent. HTTP_PROXY/HTTPS_PROXY are always taken
+# as-is from the host environment and never constructed here.
+compute_no_proxy() {
+    printf '%s,%s,%s' "${NO_PROXY:-}" "${no_proxy:-}" "$MINIKUBE_NO_PROXY" \
+        | tr ',' '\n' \
+        | awk 'NF && !seen[$0]++' \
+        | paste -sd,
+}
+
+# Persist the computed NO_PROXY into a shell rc file so ad-hoc kubectl/curl
+# use in interactive shells (outside minithor, which fixes this up itself on
+# every cluster-touching command via ensure_minikube_running/minikube_start)
+# also bypasses the proxy for the minikube node. Manages its own marked block
+# so re-running install on an existing rc file only replaces that block and
+# never touches any other proxy settings the user has in the file.
+persist_no_proxy_rc() {
+    local rc_file="$1"
+    local no_proxy_value="$2"
+    local marker_start="# >>> minithor NO_PROXY (managed, do not edit) >>>"
+    local marker_end="# <<< minithor NO_PROXY (managed, do not edit) <<<"
+
+    touch "$rc_file"
+    if grep -qF "$marker_start" "$rc_file" 2>/dev/null; then
+        # Delete the managed block along with the single blank separator line
+        # this function prepends, so repeated installs don't accumulate blank
+        # lines at the removal site.
+        awk -v s="$marker_start" -v e="$marker_end" '
+            $0 == s { if (buffered_blank) buffered_blank=0; in_block=1; next }
+            in_block { if ($0 == e) in_block=0; next }
+            $0 == "" { if (buffered_blank) print ""; buffered_blank=1; next }
+            { if (buffered_blank) { print ""; buffered_blank=0 }; print }
+            END { if (buffered_blank) print "" }
+        ' "$rc_file" > "${rc_file}.tmp" && mv "${rc_file}.tmp" "$rc_file"
+    fi
+
+    {
+        echo ""
+        echo "$marker_start"
+        echo "# Required for minikube (192.168.49.0/24 etc.) to bypass the proxy."
+        echo "export NO_PROXY=\"$no_proxy_value\""
+        echo "export no_proxy=\"\$NO_PROXY\""
+        echo "$marker_end"
+    } >> "$rc_file"
+}
 
 kctl() { minikube kubectl -- "$@"; }
 
@@ -333,12 +384,14 @@ minikube_start() {
     # when the node is created since it bakes into the runtime's daemon config.
     local insecure_registry="${REGISTRY_HOST}:${REGISTRY_PORT}"
 
-    # Ensure the cluster-internal names bypass any configured HTTP proxy. minikube
-    # propagates these env vars into the node runtime's proxy config at create time;
-    # without the cluster domain here, registry pulls get routed through the proxy
-    # and fail with "denied: Access denied". Merge (don't clobber) any user value.
-    export NO_PROXY="${NO_PROXY:+$NO_PROXY,}${CLUSTER_NO_PROXY}"
-    export no_proxy="${no_proxy:+$no_proxy,}${CLUSTER_NO_PROXY}"
+    # Hand minikube a clean, deduped NO_PROXY (host entries + critical cluster
+    # hosts/CIDRs). HTTP_PROXY/HTTPS_PROXY are inherited from the host env as-is.
+    # Note: minikube's own propagation of these into the node runtime is
+    # unreliable (it can bake empty values), so setup_node_pull_env() re-asserts
+    # the proxy directly on the node after start — this just keeps what minikube
+    # sees consistent.
+    export NO_PROXY="$(compute_no_proxy)"
+    export no_proxy="$NO_PROXY"
 
     if [ "$DRIVER" = "docker" ]; then
         env -u DOCKER_HOST minikube start --cni calico --driver="$DRIVER" --insecure-registry="$insecure_registry"
@@ -359,6 +412,13 @@ fix_container_config() {
 }
 
 ensure_minikube_running() {
+    # Every subcommand that reaches the cluster calls this first, so fixing up
+    # NO_PROXY here (rather than in each cmd_* function) guarantees local
+    # kubectl/port-forward traffic to the node bypasses any configured HTTP
+    # proxy, regardless of what the invoking shell happened to have set.
+    export NO_PROXY="$(compute_no_proxy)"
+    export no_proxy="$NO_PROXY"
+
     local status_output
     status_output="$(minikube status 2>/dev/null)" || true
     local host_status
@@ -475,6 +535,100 @@ ensure_registry_node_dns() {
         || echo "    WARNING: failed to set registry hosts entry on the minikube node"
 }
 
+# Make the minikube node able to pull images through the host's HTTP proxy and,
+# behind a TLS-intercepting proxy, trust its CA. This is required because
+# minikube's own proxy propagation into the node runtime is unreliable (it can
+# bake empty HTTP_PROXY/HTTPS_PROXY), so the container runtime otherwise dials
+# external registries (quay.io, ghcr.io, ...) directly and times out.
+#
+#   setup_node_pull_env [certs_path] [force]
+#
+# certs_path (optional): a .crt file, or a directory of *.crt files, to install
+# into the node's trust store. Gated — cert injection only happens when given.
+# force (optional, "true"/"false", default false): when true, overwrite the CA
+# and the containerd proxy drop-in on the node even if they already exist. By
+# default an existing file is left in place so a manual fix isn't clobbered.
+# Proxy config is driven entirely by the host's HTTP_PROXY/HTTPS_PROXY and is a
+# no-op on unproxied hosts. Certs are copied with `minikube cp` (piping through
+# `minikube ssh` stdin hangs). Driver-agnostic: everything goes through
+# `minikube cp` / `minikube ssh`, so it works for docker, podman, and kvm2.
+setup_node_pull_env() {
+    local certs_path="${1:-}"
+    local force="${2:-false}"
+    local changed=false
+
+    # --- Certs (gated on a caller-supplied path) ---
+    if [ -n "$certs_path" ]; then
+        local certs=()
+        if [ -f "$certs_path" ]; then
+            certs=("$certs_path")
+        elif [ -d "$certs_path" ]; then
+            local f
+            for f in "$certs_path"/*.crt; do
+                [ -e "$f" ] && certs+=("$f")
+            done
+        else
+            echo "  WARNING: --certs path '$certs_path' is not a file or directory, skipping cert install" >&2
+        fi
+        if [ "${#certs[@]}" -eq 0 ]; then
+            echo "  No .crt files found at '$certs_path', skipping cert install"
+        else
+            local cert base
+            for cert in "${certs[@]}"; do
+                base="$(basename "$cert")"
+                # Existence gate: leave an already-installed CA alone so a
+                # manual fix on the node isn't clobbered (unless --force-node-config).
+                if [ "$force" != true ] \
+                    && minikube ssh -- "test -f /usr/local/share/ca-certificates/$base" >/dev/null 2>&1; then
+                    echo "  CA '$base' already present on the minikube node, leaving it in place (use --force-node-config to overwrite)"
+                    continue
+                fi
+                echo "  Installing CA '$base' into the minikube node trust store"
+                if minikube cp "$cert" "/tmp/$base" >/dev/null 2>&1 \
+                    && minikube ssh -- "sudo cp /tmp/$base /usr/local/share/ca-certificates/$base" >/dev/null 2>&1; then
+                    changed=true
+                else
+                    echo "    WARNING: failed to copy '$base' to the minikube node" >&2
+                fi
+            done
+            if [ "$changed" = true ]; then
+                minikube ssh -- "sudo update-ca-certificates" >/dev/null 2>&1 \
+                    || echo "    WARNING: update-ca-certificates failed on the minikube node" >&2
+            fi
+        fi
+    fi
+
+    # --- Proxy (driven by the host env; no-op when unset) ---
+    if [ -n "${HTTP_PROXY:-}${HTTPS_PROXY:-}${http_proxy:-}${https_proxy:-}" ]; then
+        local http_p="${HTTP_PROXY:-${http_proxy:-}}"
+        local https_p="${HTTPS_PROXY:-${https_proxy:-${HTTP_PROXY:-${http_proxy:-}}}}"
+        local no_p
+        no_p="$(compute_no_proxy)"
+        # Existence gate: if the drop-in is already on the node, leave it alone so
+        # a manual fix to minikube's proxy propagation isn't clobbered (unless
+        # --force-node-config).
+        if [ "$force" != true ] \
+            && minikube ssh -- "test -f /etc/systemd/system/containerd.service.d/http-proxy.conf" >/dev/null 2>&1; then
+            echo "  Containerd proxy drop-in already present on the minikube node, leaving it in place (use --force-node-config to overwrite)"
+        elif minikube ssh -- "sudo mkdir -p /etc/systemd/system/containerd.service.d && \
+            printf '[Service]\nEnvironment=\"HTTP_PROXY=%s\"\nEnvironment=\"HTTPS_PROXY=%s\"\nEnvironment=\"NO_PROXY=%s\"\n' \
+                '$http_p' '$https_p' '$no_p' \
+                | sudo tee /etc/systemd/system/containerd.service.d/http-proxy.conf >/dev/null" >/dev/null 2>&1; then
+            echo "  Configured the minikube node's container runtime to use the host HTTP proxy"
+            changed=true
+        else
+            echo "    WARNING: failed to write containerd proxy drop-in on the minikube node" >&2
+        fi
+    fi
+
+    # --- Apply (reload + restart containerd only if something changed) ---
+    if [ "$changed" = true ]; then
+        echo "  Reloading and restarting containerd on the minikube node"
+        minikube ssh -- "sudo systemctl daemon-reload && sudo systemctl restart containerd" >/dev/null 2>&1 \
+            || echo "    WARNING: failed to restart containerd on the minikube node" >&2
+    fi
+}
+
 helm_uninstall() {
     local release=$1 namespace=$2
     if helm status "$release" -n "$namespace" &>/dev/null; then
@@ -575,13 +729,19 @@ Usage: minithor minikube install [options]
 Options:
   --cpus <n>           Number of CPUs to allocate to minikube (default: 8)
   --memory <n>         Memory in GiB to allocate to minikube (default: 16)
-  --certs-dir <path>   Directory containing .crt files to trust
-                       (default: \$PWD/.certs/)
+  --certs <path>       A .crt file, or a directory of *.crt files, to install
+                       into the minikube node's trust store. Required behind a
+                       TLS-intercepting proxy so the node trusts it for image
+                       pulls. No default — cert install only runs when given.
+  --force-node-config  Overwrite the node's CA and containerd proxy drop-in even
+                       if they already exist. By default existing files are left
+                       in place so a manual fix on the node isn't clobbered.
   -h, --help           Show this help message
 
 Detects the best available driver (podman > docker > kvm2), downloads
 minikube for your OS/architecture, configures resource limits, and starts
-the cluster with Calico CNI, CSI, and Ingress addons.
+the cluster with Calico CNI, CSI, and Ingress addons. When the host has an
+HTTP proxy configured, the node's container runtime is configured to use it.
 EOF
 }
 
@@ -727,7 +887,8 @@ EOF
 ########################################
 
 cmd_minikube_install() {
-    local certs_dir="$PWD/.certs"
+    local certs_path=""
+    local force_node_config=false
     local install_cpus=8
     local install_memory_gib=16
 
@@ -748,12 +909,15 @@ cmd_minikube_install() {
                 fi
                 install_memory_gib="$1"
                 ;;
-            --certs-dir)
+            --certs)
                 shift
                 if [ $# -eq 0 ]; then
-                    echo "ERROR: --certs-dir requires an argument" >&2; exit 1
+                    echo "ERROR: --certs requires an argument" >&2; exit 1
                 fi
-                certs_dir="$1"
+                certs_path="$1"
+                ;;
+            --force-node-config)
+                force_node_config=true
                 ;;
             *) echo "Unknown option: $1"; usage_minikube_install; exit 1 ;;
         esac
@@ -762,13 +926,6 @@ cmd_minikube_install() {
 
     select_driver
     echo "Selected driver: $DRIVER"
-
-    # Inject org certs into podman VM on macOS
-    if [ "$DRIVER" = "podman" ] && [ "$OS" = "Darwin" ]; then
-        podman machine ssh "sudo mkdir -p /etc/pki/ca-trust/source/anchors/"
-        cat "$certs_dir"/*.crt | podman machine ssh "sudo tee /etc/pki/ca-trust/source/anchors/thorium-org-cert.crt > /dev/null"
-        podman machine ssh "sudo update-ca-trust"
-    fi
 
     # Download and install minikube
     local tmp_dir
@@ -817,27 +974,24 @@ cmd_minikube_install() {
         echo 'alias kubectl="minikube kubectl --"' >> ~/.zshrc
     fi
 
-    local proxy_bypass="localhost,127.0.0.1,10.0.0.0/8,192.168.0.0/16,${CLUSTER_NO_PROXY}"
-    # Merge (don't clobber) any NO_PROXY the user already has in their environment,
-    # so minikube bakes env-provided bypass entries into the node alongside ours.
-    export NO_PROXY="${NO_PROXY:+$NO_PROXY,}$proxy_bypass"
-    export no_proxy="${no_proxy:+$no_proxy,}$proxy_bypass"
-
-    for rc in ~/.bashrc ~/.zshrc; do
-        if ! grep -q 'NO_PROXY=.*192\.168\.0\.0' "$rc" 2>/dev/null; then
-            cat >> "$rc" <<RCEOF
-
-export NO_PROXY="$proxy_bypass"
-export no_proxy="$proxy_bypass"
-RCEOF
-        fi
-    done
-
-    mkdir -p ~/.minikube/certs/
-    cp "$certs_dir"/*.crt ~/.minikube/certs/ 2>/dev/null || true
+    # Persist NO_PROXY so interactive shells opened after this install (not
+    # just minithor's own subcommands, which fix this up on every invocation
+    # via ensure_minikube_running/minikube_start) can reach the minikube node
+    # through the proxy-aware kubectl alias above.
+    local persisted_no_proxy
+    persisted_no_proxy="$(compute_no_proxy)"
+    persist_no_proxy_rc ~/.bashrc "$persisted_no_proxy"
+    persist_no_proxy_rc ~/.zshrc "$persisted_no_proxy"
 
     minikube_start
     fix_container_config
+
+    # Configure the node's container runtime to pull through the host proxy and,
+    # if --certs was given, trust the (TLS-intercepting) proxy CA. This is what
+    # lets external image pulls (quay.io/calico, ghcr.io/..., docker.io/...)
+    # succeed on a proxied host; a no-op when the host has no proxy configured.
+    setup_node_pull_env "$certs_path" "$force_node_config"
+
     kctl config view --minify
 
     minikube addons enable csi-hostpath-driver
@@ -946,6 +1100,10 @@ cmd_start() {
 
     minikube_start
     fix_container_config
+
+    # Re-assert the node's proxy drop-in (the docker driver's node restart can
+    # drop it). Certs persist on the node filesystem, so no path is needed here.
+    setup_node_pull_env ""
 
     log "Tuning minikube node kernel parameters"
     tune_kernel_params minikube
@@ -1379,7 +1537,8 @@ EOF
 
     log "Deploying Scylla Operator"
     helm upgrade --install scylla-operator scylla/scylla-operator \
-        --namespace scylla-operator --create-namespace
+        --namespace scylla-operator --create-namespace \
+        --version 1.21.1
     wait_for_resource crd scyllaclusters.scylla.scylladb.com "" "$deploy_timeout"
     kctl wait --for condition=established \
         crd/scyllaclusters.scylla.scylladb.com --timeout="${deploy_timeout}s"
@@ -1514,7 +1673,7 @@ spec:
     spec:
       containers:
         - name: minio
-          image: minio/minio:latest
+          image: quay.io/minio/minio:latest
           resources:
             requests:
               cpu: 256m
@@ -1833,7 +1992,7 @@ spec:
       restartPolicy: Never
       containers:
       - name: mc
-        image: minio/mc:latest
+        image: quay.io/minio/mc:latest
         command:
         - /bin/sh
         - -c
@@ -2243,7 +2402,7 @@ DEFEOF
     log "Importing toolbox"
     curl -o "$toolbox_path" https://raw.githubusercontent.com/cisagov/thorium/refs/heads/main/tools/toolbox.json
     echo "Toolbox downloaded to $toolbox_path"
-    "$THORCTL_BIN" toolbox import "$toolbox_path" -y
+    "$THORCTL_BIN" toolbox import "$toolbox_path" --overwrite
 
     ########################################
     # Optional: Container Registry
@@ -2564,16 +2723,6 @@ cmd_expose() {
         shift
     done
 
-    # Ensure minikube IP bypasses any configured HTTP proxy
-    if [ -n "${HTTP_PROXY:-}${HTTPS_PROXY:-}${http_proxy:-}${https_proxy:-}" ]; then
-        local minikube_ip
-        minikube_ip=$(minikube ip 2>/dev/null || true)
-        if [ -n "$minikube_ip" ]; then
-            export NO_PROXY="${NO_PROXY:+$NO_PROXY,}$minikube_ip"
-            export no_proxy="${no_proxy:+$no_proxy,}$minikube_ip"
-        fi
-    fi
-
     ensure_minikube_running
     mkdir -p "$EXPOSE_LOG_DIR"
 
@@ -2603,6 +2752,9 @@ cmd_expose() {
     if [ "$NO_API" = false ]; then
         start_forward thorium-api thorium thorium-api "$API_PORT:80"
         start_forward registry thorium registry 5000
+        if kctl get svc registry -n thorium &>/dev/null; then
+            start_forward registry thorium registry 5000
+        fi
     fi
 
     # forward the backing services for --dev or when only the infrastructure is wanted
