@@ -24,6 +24,7 @@ async fn main() {
         SubCommands::Clusters(clusters) => handlers::clusters::handle(&args, clusters).await,
         SubCommands::Groups(groups) => handlers::groups::handle(&args, groups).await,
         SubCommands::Files(files) => handlers::files::handle(&args, files).await,
+        SubCommands::Grep(grep) => handlers::grep::handle(&args, grep).await,
         SubCommands::Images(images) => handlers::images::handle(&args, images).await,
         SubCommands::Pipelines(pipelines) => handlers::pipelines::handle(&args, pipelines).await,
         SubCommands::Reactions(reactions) => handlers::reactions::handle(&args, reactions).await,

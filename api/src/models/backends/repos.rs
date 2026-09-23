@@ -1130,6 +1130,7 @@ impl ApiCursor<Commitish> {
         Ok(ApiCursor {
             cursor: self.cursor,
             data,
+            metadata: None,
         })
     }
 }
@@ -1510,6 +1511,7 @@ impl ApiCursor<RepoListLine> {
         Ok(ApiCursor {
             cursor: self.cursor,
             data,
+            metadata: None,
         })
     }
 }

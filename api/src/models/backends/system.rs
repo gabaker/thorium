@@ -634,6 +634,7 @@ impl Node {
             let cursor = ApiCursor {
                 cursor: None,
                 data: nodes,
+                metadata: None,
             };
             Ok(cursor)
         }

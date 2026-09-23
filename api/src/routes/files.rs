@@ -12,15 +12,17 @@ use uuid::Uuid;
 
 use super::OpenApiSecurity;
 use crate::models::AuthedUser;
-use crate::models::backends::{CommentSupport, TagSupport};
+use crate::models::backends::{self, CommentSupport, TagSupport};
 use crate::models::{
     ApiCursor, Association, AssociationListParams, AssociationTargetColumn, CarvedOrigin, Comment,
     CommentResponse, DeleteCommentParams, DeleteSampleParams, EntityKinds, EntityRequest,
-    FileListParams, ImageVersion, Origin, OriginRequest, Output, OutputDisplayType,
-    OutputFormBuilder, OutputHandler, OutputKind, OutputMap, OutputResponse, PcapNetworkProtocol,
+    FileListParams, GrepDocumentMatches, GrepMatch, GrepMatches, GrepQueryParams, GrepRequest,
+    GrepSource, GrepStats,
+    ImageVersion, Origin, OriginRequest, Output, OutputDisplayType, OutputFormBuilder,
+    OutputHandler, OutputKind, OutputMap, OutputResponse, PcapNetworkProtocol,
     ResultFileDownloadParams, ResultGetParams, Sample, SampleCheck, SampleCheckResponse,
     SampleListLine, SampleSubmissionResponse, SubmissionChunk, SubmissionUpdate, TagCounts,
-    TagDeleteRequest, TagRequest, ZipDownloadParams,
+    TagDeleteRequest, TagRequest, TruncationReason, ZipDownloadParams,
 };
 use crate::utils::{ApiError, AppState};
 
@@ -777,11 +779,93 @@ async fn download_result_entities(
     Ok(body)
 }
 
+/// Search a page of samples with grep
+///
+/// This searches every sample this user can see, so it returns a cursor that can be
+/// continued if more samples still need to be searched.
+///
+/// # Arguments
+///
+/// * `user` - The user that is grepping these samples
+/// * `params` - The query params for this grep search
+/// * `state` - Shared Thorium objects
+/// * `request` - The grep request body containing the regex pattern
+#[utoipa::path(
+    post,
+    path = "/api/files/grep/",
+    params(
+        ("params" = GrepQueryParams, description = "The query params for this grep search"),
+    ),
+    request_body = GrepRequest,
+    responses(
+        (status = 200, description = "A page of grep matches", body = ApiCursor<GrepMatches>),
+        (status = 400, description = "This grep pattern is not a valid regex"),
+        (status = 401, description = "This user is not authorized to access this route"),
+    ),
+    security(
+        ("basic" = []),
+    )
+)]
+#[instrument(name = "routes::files::grep", skip_all, err(Debug))]
+async fn grep(
+    user: AuthedUser,
+    params: GrepQueryParams,
+    State(state): State<AppState>,
+    Json(request): Json<GrepRequest>,
+) -> Result<Json<ApiCursor<GrepMatches>>, ApiError> {
+    // combine our query params and pattern into the full grep params
+    let params = params.into_params(request);
+    // grep a page of samples
+    let matches = backends::grep::grep_many::<Sample>(&user, params, &state.shared).await?;
+    Ok(Json(matches))
+}
+
+/// Search a single sample with grep
+///
+/// # Arguments
+///
+/// * `user` - The user that is grepping this sample
+/// * `sha256` - The sha256 of the sample to grep
+/// * `params` - The query params for this grep search
+/// * `state` - Shared Thorium objects
+/// * `request` - The grep request body containing the regex pattern
+#[utoipa::path(
+    post,
+    path = "/api/files/grep/:sha256",
+    params(
+        ("sha256" = String, Path, description = "The sha256 of the sample to grep"),
+        ("params" = GrepQueryParams, description = "The query params for this grep search"),
+    ),
+    request_body = GrepRequest,
+    responses(
+        (status = 200, description = "The grep matches for this sample", body = GrepMatches),
+        (status = 400, description = "This grep pattern is not a valid regex"),
+        (status = 401, description = "This user is not authorized to access this route"),
+    ),
+    security(
+        ("basic" = []),
+    )
+)]
+#[instrument(name = "routes::files::grep_sample", skip_all, err(Debug))]
+async fn grep_sample(
+    user: AuthedUser,
+    Path(sha256): Path<String>,
+    params: GrepQueryParams,
+    State(state): State<AppState>,
+    Json(request): Json<GrepRequest>,
+) -> Result<Json<GrepMatches>, ApiError> {
+    // combine our query params and pattern into the full grep params
+    let params = params.into_params(request);
+    // grep this single sample
+    let matches = backends::grep::grep_one::<Sample>(&user, &sha256, params, &state.shared).await?;
+    Ok(Json(matches))
+}
+
 /// The struct containing our openapi docs
 #[derive(OpenApi)]
 #[openapi(
-    paths(list, upload, list_details, get_sample, delete_sample, exists, download, download_as_zip, download_result_file, download_result_entities, update, tag, delete_tags, create_comment, delete_comment, download_attachment, get_results, upload_results),
-    components(schemas(ApiCursor<Sample>, ApiCursor<SampleListLine>, CarvedOrigin, Comment, CommentResponse, DeleteCommentParams, DeleteSampleParams,FileListParams, ImageVersion, Origin, OriginRequest, Output, OutputDisplayType, OutputHandler, OutputMap, OutputResponse, PcapNetworkProtocol, ResultGetParams, Sample, SampleCheck, SampleCheckResponse, SampleListLine, SampleSubmissionResponse, SubmissionChunk, SubmissionUpdate, TagDeleteRequest<Sample>, TagRequest<Sample>, ZipDownloadParams, TagCounts, EntityKinds, EntityRequest)),
+    paths(list, upload, list_details, get_sample, delete_sample, exists, download, download_as_zip, download_result_file, download_result_entities, update, tag, delete_tags, create_comment, delete_comment, download_attachment, get_results, upload_results, grep, grep_sample),
+    components(schemas(ApiCursor<Sample>, ApiCursor<SampleListLine>, ApiCursor<GrepMatches>, CarvedOrigin, Comment, CommentResponse, DeleteCommentParams, DeleteSampleParams,FileListParams, GrepDocumentMatches, GrepMatch, GrepMatches, GrepQueryParams, GrepRequest, GrepSource, GrepStats, ImageVersion, Origin, OriginRequest, Output, OutputDisplayType, OutputHandler, OutputMap, OutputResponse, PcapNetworkProtocol, ResultGetParams, Sample, SampleCheck, SampleCheckResponse, SampleListLine, SampleSubmissionResponse, SubmissionChunk, SubmissionUpdate, TagDeleteRequest<Sample>, TagRequest<Sample>, TruncationReason, ZipDownloadParams, TagCounts, EntityKinds, EntityRequest)),
     modifiers(&OpenApiSecurity),
 )]
 pub struct FileApiDocs;
@@ -806,6 +890,8 @@ pub fn mount(router: Router<AppState>) -> Router<AppState> {
         .route("/files/sample/{sha256}", get(get_sample))
         .route("/files/sample/{sha256}/{submission}", delete(delete_sample))
         .route("/files/exists", post(exists))
+        .route("/files/grep/", post(grep))
+        .route("/files/grep/{sha256}", post(grep_sample))
         .route("/files/sample/{sha256}/download", get(download))
         .route("/files/sample/{sha256}/download/zip", get(download_as_zip))
         .route("/files/sample/{sha256}", patch(update))

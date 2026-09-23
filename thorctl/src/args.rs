@@ -12,6 +12,7 @@ use self::{
     clusters::{Clusters, Login},
     config::Config,
     files::Files,
+    grep::Grep,
     groups::Groups,
     images::Images,
     network_policies::NetworkPolicies,
@@ -33,6 +34,7 @@ pub mod cart;
 pub mod clusters;
 pub mod config;
 pub mod files;
+pub mod grep;
 pub mod groups;
 mod helpers;
 pub mod images;
@@ -87,7 +89,7 @@ pub struct Args {
     /// Don't check for updates from the API
     #[clap(long)]
     pub skip_update: bool,
-    /// The command string to follow (files, images, pipelines, reactions, trees, install, admins, agents, cart, uncart, update, config)
+    /// The command string to follow (files, grep, images, pipelines, reactions, trees, install, admins, agents, cart, uncart, update, config)
     #[clap(subcommand)]
     pub cmd: SubCommands,
     /// The number of parallel async actions to process at once
@@ -118,6 +120,39 @@ pub enum SubCommands {
     /// Perform file related tasks
     #[clap(version, author, subcommand, alias = "file")]
     Files(Files),
+    /// Grep files, repos, or entities in Thorium
+    #[clap(version, author)]
+    #[command(
+        about = "Grep files, repos, or entities in Thorium",
+        long_about = r#"
+Grep files, repos, or entities in Thorium
+
+Grep searches run a regex over data Elasticsearch cannot see (like result files)
+straight out of Thorium's datastores. Searches walk a whole corpus by default or
+only specific items when targets are given.
+
+Examples:
+  # Grep the file corpus for a pattern
+  thorctl grep 'corn[0-9]+'
+
+  # Grep the repo corpus instead, scoped to one group
+  thorctl grep 'corn[0-9]+' --repos -g plants
+
+  # Grep specific items (SHA256s, entity UUIDs, and repo URLs can be mixed)
+  thorctl grep -i 'germinated' 7b2f09d1e5a64c2b9f3a8d7e6c5b4a3928170605f4e3d2c1b0a998877665c4e9
+  thorctl grep 'xor' github.com/corn/stalker
+
+  # Only search inline results and tags from one tool
+  thorctl grep 'key=' --sources results,tags --tools CornHarvester
+
+  # Pipe machine readable output
+  thorctl grep 'corn[0-9]+' --format json | jq -r '.key'
+
+  # Resume an earlier search with the cursor printed when it stopped early
+  thorctl grep 'corn[0-9]+' --cursor 6ba7b810-9dad-11d1-80b4-00c04fd430c8
+"#
+    )]
+    Grep(Grep),
     /// Perform image related tasks
     #[clap(version, author, subcommand, alias = "image")]
     Images(Images),

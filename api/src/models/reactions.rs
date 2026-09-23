@@ -8,6 +8,8 @@ use uuid::Uuid;
 
 // only support tokio for file reads in tokio mode
 #[cfg(feature = "tokio-models")]
+use std::path::Path;
+#[cfg(feature = "tokio-models")]
 use tokio::{fs::File, io::AsyncReadExt};
 
 // import python bindings if needed
@@ -445,7 +447,7 @@ impl ReactionRequest {
     /// ```
     /// use thorium::models::ReactionRequest;
     ///
-    /// # async fn exec() -> Result<(), std::io::ApiError> {
+    /// # async fn exec() -> Result<(), std::io::Error> {
     /// // create a reaction with that depends on a file by path
     /// let request = ReactionRequest::new("Combine", "fill_gas")
     ///     .file("reactions.rs");
@@ -457,15 +459,15 @@ impl ReactionRequest {
     /// # });
     /// ```
     #[cfg(feature = "tokio-models")]
-    pub async fn file<T: AsRef<Path> + Into<Box<dyn std::error::ApiError + Send + Sync>>>(
+    pub async fn file<T: AsRef<Path> + Into<Box<dyn std::error::Error + Send + Sync>>>(
         mut self,
         path: T,
-    ) -> Result<Self, std::io::ApiError> {
+    ) -> Result<Self, std::io::Error> {
         // try to get the name of this file
         let name = match path.as_ref().file_name() {
             Some(name) => name,
             // if we can't get a file name then assume this is a directory and error
-            None => return Err(std::io::ApiError::new(ApiErrorKind::IsADirectory, path)),
+            None => return Err(std::io::Error::new(std::io::ErrorKind::IsADirectory, path)),
         };
         // cast our name to a string lossily
         let clean = name.to_string_lossy().into_owned();

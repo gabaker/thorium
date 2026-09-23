@@ -6,6 +6,7 @@ pub mod entities;
 mod errors;
 pub mod events;
 pub mod files;
+pub mod grep;
 pub mod groups;
 mod helpers;
 pub mod images;
@@ -28,7 +29,8 @@ pub mod trees;
 pub mod users;
 
 pub use cursors::{
-    CursorCore, ElasticCursor, ExistsCursor, GroupedScyllaCursor, GroupedScyllaCursorRetain,
+    CursorCore, ElasticCursor, ExistsCursor, GrepCursor, GrepCursorRetain, GroupedScyllaCursor,
+    GroupedScyllaCursorRetain,
     GroupedScyllaCursorSupport, RedisCursor, RedisCursorName, RedisCursorRetain,
     RedisCursorSupport, RedisGroupCursor, ScyllaCursor, ScyllaCursorRetain, ScyllaCursorSupport,
     ScyllaTagCountCursor, SimpleCursorExt, SimpleScyllaCursor, TagCountCursorSupport,

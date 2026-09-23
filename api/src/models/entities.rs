@@ -1465,7 +1465,7 @@ impl EntityListParams {
             None => match Utc.timestamp_opt(shared.config.thorium.entities.earliest, 0) {
                 chrono::LocalResult::Single(default_end) => Ok(default_end),
                 _ => crate::internal_err!(format!(
-                    "default earliest repos timestamp is invalid or ambigous - {}",
+                    "default earliest entities timestamp is invalid or ambigous - {}",
                     shared.config.thorium.entities.earliest
                 )),
             },

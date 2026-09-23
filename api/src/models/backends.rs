@@ -32,6 +32,7 @@ mod backends_reexport {
     pub mod users;
     pub mod version;
     pub mod volumes;
+    pub mod grep;
 
     pub use comments::CommentSupport;
 }
@@ -45,6 +46,7 @@ pub use backends_reexport::*;
 mod backends_reexport_client {
     mod support;
 
+    pub use support::GrepSupport;
     pub use support::NotificationSupport;
     pub use support::OutputSupport;
     pub use support::TagSupport;

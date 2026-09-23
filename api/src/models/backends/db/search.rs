@@ -29,6 +29,7 @@ pub async fn search(
         return Ok(ApiCursor {
             cursor: None,
             data: Vec::default(),
+            metadata: None,
         });
     }
     // get our cursor or build a new one scoped to the creating user
@@ -41,12 +42,17 @@ pub async fn search(
     // determine if this cursor has been exhausted or not
     if data.len() < cursor.limit as usize {
         // this cursor is exhausted so omit the cursor ID
-        Ok(ApiCursor { cursor: None, data })
+        Ok(ApiCursor {
+            cursor: None,
+            data,
+            metadata: None,
+        })
     } else {
         // this cursor is exhausted so omit the cursor ID
         Ok(ApiCursor {
             cursor: Some(cursor.id),
             data,
+            metadata: None,
         })
     }
 }

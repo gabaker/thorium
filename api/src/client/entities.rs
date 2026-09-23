@@ -5,14 +5,22 @@ use tracing::instrument;
 use uuid::Uuid;
 
 use super::Error;
-use crate::models::{Cursor, Entity, EntityListOpts, EntityRequest, EntityResponse, EntityUpdate};
+use super::traits::{GenericClient, GrepClient, GrepClientHelper};
+use crate::models::{
+    Cursor, Entity, EntityListOpts, EntityRequest, EntityResponse, EntityUpdate, GrepMatches,
+    GrepOpts, GrepPage,
+};
 use crate::{
     add_date, add_query, add_query_bool, add_query_list, add_query_list_clone, send, send_build,
 };
 
-// import our static runtime if we need a blocking client
-#[cfg(feature = "sync")]
-use super::RUNTIME;
+// sync client imports
+cfg_if::cfg_if! {
+    if #[cfg(feature = "sync")] {
+        use super::RUNTIME;
+        use super::traits::GrepClientBlocking;
+    }
+}
 
 /// A handler for the entities routes in Thorium
 #[cfg_attr(feature = "sync", thorium_derive::blocking_struct)]
@@ -371,5 +379,108 @@ impl Entities {
             &self.client,
         )
         .await
+    }
+}
+
+impl GenericClient for Entities {
+    /// Provide the base url to the entities route in the API
+    fn base_url(&self) -> String {
+        format!("{}/api/entities", self.host)
+    }
+
+    /// Provide the configured client from `self`
+    fn client(&self) -> &reqwest::Client {
+        &self.client
+    }
+
+    /// Provide the configured auth token from `self`
+    fn token(&self) -> &str {
+        &self.token
+    }
+}
+
+impl GrepClientHelper for Entities {}
+
+#[cfg_attr(feature = "sync", thorium_derive::blocking_trait)]
+impl GrepClient for Entities {
+    /// Greps a page of entities in Thorium
+    ///
+    /// This searches every entity you can see, so if there are more entities left to search
+    /// then the returned cursor id should be passed back in with
+    /// [`GrepOpts::cursor`](crate::models::GrepOpts::cursor) to continue the search.
+    ///
+    /// # Arguments
+    ///
+    /// * `opts` - The options to use when grepping entities
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use thorium::Thorium;
+    /// use thorium::client::GrepClient;
+    /// use thorium::models::{GrepOpts, GrepSource};
+    /// # use thorium::Error;
+    ///
+    /// # async fn exec() -> Result<(), Error> {
+    /// // create Thorium client
+    /// let thorium = Thorium::build("http://127.0.0.1").token("<token>").build().await?;
+    /// // grep the first page of entities for a pattern in their metadata
+    /// let opts = GrepOpts::new("corn[0-9]+").source(GrepSource::Metadata).limit(10);
+    /// let page = thorium.entities.grep(opts).await?;
+    /// // if we got a cursor back then there are more entities left to search
+    /// if let Some(cursor) = page.cursor {
+    ///     let opts = GrepOpts::new("corn[0-9]+").source(GrepSource::Metadata).cursor(cursor);
+    ///     thorium.entities.grep(opts).await?;
+    /// }
+    /// # // allow test code to be compiled but don't unwrap as no API instance would be up
+    /// # Ok(())
+    /// # }
+    /// # tokio_test::block_on(async {
+    /// #    exec().await
+    /// # });
+    /// ```
+    #[cfg_attr(
+        feature = "trace",
+        instrument(name = "GrepClient<Entities>::grep", skip_all, err(Debug))
+    )]
+    async fn grep(&self, opts: GrepOpts) -> Result<GrepPage, Error> {
+        self.grep_generic(opts).await
+    }
+
+    /// Greps a single entity in Thorium
+    ///
+    /// # Arguments
+    ///
+    /// * `id` - The id of the entity to grep
+    /// * `opts` - The options to use when grepping this entity
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use thorium::Thorium;
+    /// use thorium::client::GrepClient;
+    /// use thorium::models::GrepOpts;
+    /// use uuid::Uuid;
+    /// # use thorium::Error;
+    ///
+    /// # async fn exec() -> Result<(), Error> {
+    /// // create Thorium client
+    /// let thorium = Thorium::build("http://127.0.0.1").token("<token>").build().await?;
+    /// // grep a single entity for a pattern
+    /// let id = Uuid::new_v4();
+    /// thorium.entities.grep_key(id.to_string(), GrepOpts::new("corn[0-9]+")).await?;
+    /// # // allow test code to be compiled but don't unwrap as no API instance would be up
+    /// # Ok(())
+    /// # }
+    /// # tokio_test::block_on(async {
+    /// #    exec().await
+    /// # });
+    /// ```
+    #[cfg_attr(
+        feature = "trace",
+        instrument(name = "GrepClient<Entities>::grep_key", skip_all, err(Debug))
+    )]
+    async fn grep_key<K: AsRef<str>>(&self, id: K, opts: GrepOpts) -> Result<GrepMatches, Error> {
+        self.grep_key_generic(id, opts).await
     }
 }

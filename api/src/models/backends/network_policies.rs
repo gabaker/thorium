@@ -1027,6 +1027,7 @@ impl ApiCursor<NetworkPolicyListLine> {
         Ok(ApiCursor {
             cursor: self.cursor,
             data,
+            metadata: None,
         })
     }
 }

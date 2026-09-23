@@ -28,15 +28,18 @@ use utoipa::OpenApi;
 
 use super::OpenApiSecurity;
 use crate::models::AuthedUser;
-use crate::models::backends::TagSupport;
+use crate::models::backends::{self, TagSupport};
 use crate::models::{
-    ApiCursor, Association, AssociationListParams, AssociationTargetColumn, Branch, BranchDetails,
-    BranchRequest, Commit, CommitDetails, CommitRequest, Commitish, CommitishDetails,
-    CommitishKinds, CommitishListParams, CommitishMapRequest, CommitishRequest, GitTag,
-    GitTagDetails, GitTagRequest, Output, OutputFormBuilder, OutputKind, OutputMap, OutputResponse,
-    Repo, RepoCheckout, RepoCreateResponse, RepoDataUploadResponse, RepoDownloadOpts, RepoListLine,
-    RepoListParams, RepoRequest, RepoScheme, RepoSubmissionChunk, ResultFileDownloadParams,
-    ResultGetParams, TagDeleteRequest, TagRequest,
+    ApiCursor,
+    Association, AssociationListParams, AssociationTargetColumn,
+    Branch, BranchDetails, BranchRequest, Commit, CommitDetails, CommitRequest,
+    Commitish, CommitishDetails, CommitishKinds, CommitishListParams, CommitishMapRequest,
+    CommitishRequest, GitTag, GitTagDetails, GitTagRequest, GrepDocumentMatches, GrepMatch,
+    GrepMatches, GrepQueryParams, GrepRequest, GrepSource, GrepStats, Output, OutputFormBuilder,
+    OutputKind, OutputMap,
+    OutputResponse, Repo, RepoCheckout, RepoCreateResponse, RepoDataUploadResponse,
+    RepoDownloadOpts, RepoListLine, RepoListParams, RepoRequest, RepoScheme, RepoSubmissionChunk,
+    ResultFileDownloadParams, ResultGetParams, TagDeleteRequest, TagRequest, TruncationReason,
 };
 use crate::utils::{ApiError, AppState, bounder};
 
@@ -633,13 +636,96 @@ async fn download_result_file(
     Err(ApiError::new(StatusCode::NOT_FOUND, None))
 }
 
+/// Search a page of repos with grep
+///
+/// This searches every repo this user can see, so it returns a cursor that can be
+/// continued if more repos still need to be searched.
+///
+/// # Arguments
+///
+/// * `user` - The user that is grepping these repos
+/// * `params` - The query params for this grep search
+/// * `state` - Shared Thorium objects
+/// * `request` - The grep request body containing the regex pattern
+#[utoipa::path(
+    post,
+    path = "/api/repos/grep/",
+    params(
+        ("params" = GrepQueryParams, description = "The query params for this grep search"),
+    ),
+    request_body = GrepRequest,
+    responses(
+        (status = 200, description = "A page of grep matches", body = ApiCursor<GrepMatches>),
+        (status = 400, description = "This grep pattern is not a valid regex"),
+        (status = 401, description = "This user is not authorized to access this route"),
+    ),
+    security(
+        ("basic" = []),
+    )
+)]
+#[instrument(name = "routes::repos::grep", skip_all, err(Debug))]
+async fn grep(
+    user: AuthedUser,
+    params: GrepQueryParams,
+    State(state): State<AppState>,
+    Json(request): Json<GrepRequest>,
+) -> Result<Json<ApiCursor<GrepMatches>>, ApiError> {
+    // combine our query params and pattern into the full grep params
+    let params = params.into_params(request);
+    // grep a page of repos
+    let matches = backends::grep::grep_many::<Repo>(&user, params, &state.shared).await?;
+    Ok(Json(matches))
+}
+
+/// Search a single repo with grep
+///
+/// # Arguments
+///
+/// * `user` - The user that is grepping this repo
+/// * `repo_path` - The url of the repo to grep
+/// * `params` - The query params for this grep search
+/// * `state` - Shared Thorium objects
+/// * `request` - The grep request body containing the regex pattern
+// TODO_UTOIPA: WIDLCARD
+// #[utoipa::path(
+//     post,
+//     path = "/api/repos/grep/*repo_path",
+//     params(
+//         ("repo_path" = String, Path, description = "The url of the repo to grep"),
+//         ("params" = GrepQueryParams, description = "The query params for this grep search"),
+//     ),
+//     request_body = GrepRequest,
+//     responses(
+//         (status = 200, description = "The grep matches for this repo", body = GrepMatches),
+//         (status = 400, description = "This grep pattern is not a valid regex"),
+//         (status = 401, description = "This user is not authorized to access this route"),
+//     ),
+//     security(
+//         ("basic" = []),
+//     )
+// )]
+#[instrument(name = "routes::repos::grep_repo", skip_all, err(Debug))]
+async fn grep_repo(
+    user: AuthedUser,
+    Path(repo_path): Path<String>,
+    params: GrepQueryParams,
+    State(state): State<AppState>,
+    Json(request): Json<GrepRequest>,
+) -> Result<Json<GrepMatches>, ApiError> {
+    // combine our query params and pattern into the full grep params
+    let params = params.into_params(request);
+    // grep this single repo
+    let matches = backends::grep::grep_one::<Repo>(&user, &repo_path, params, &state.shared).await?;
+    Ok(Json(matches))
+}
+
 /// The struct containing our openapi docs
 #[derive(OpenApi)]
 #[openapi(
     // TODO_UTOIPA: WILDCARD add these back in once all the wildcard issues are resolved
-    // paths(list, create, list_details, get_repo, upload, commitshes, update_commitishes, commitsh_details, download, tag, delete_tags, get_results, upload_results, download_result_file, bundle_results),
-    paths(list, create, list_details),
-    components(schemas(ApiCursor<Repo>, ApiCursor<RepoListLine>, Branch, BranchDetails, BranchRequest, Commit, CommitDetails, Commitish, CommitishDetails, CommitishKinds, CommitishMapRequest, CommitishRequest, CommitRequest, GitTag, GitTagDetails, GitTagRequest, OutputMap, OutputResponse, Repo, RepoCheckout, RepoCreateResponse, RepoDownloadOpts, RepoListParams, RepoDataUploadResponse, RepoRequest, RepoScheme, RepoSubmissionChunk, ResultGetParams, TagDeleteRequest<Repo>, TagRequest<Repo>)),
+    // paths(list, create, list_details, get_repo, upload, commitshes, update_commitishes, commitsh_details, download, tag, delete_tags, get_results, upload_results, download_result_file, bundle_results, grep_repo),
+    paths(list, create, list_details, grep),
+    components(schemas(ApiCursor<Repo>, ApiCursor<RepoListLine>, ApiCursor<GrepMatches>, Branch, BranchDetails, BranchRequest, Commit, CommitDetails, Commitish, CommitishDetails, CommitishKinds, CommitishMapRequest, CommitishRequest, CommitRequest, GitTag, GitTagDetails, GitTagRequest, GrepDocumentMatches, GrepMatch, GrepMatches, GrepQueryParams, GrepRequest, GrepSource, GrepStats, OutputMap, OutputResponse, Repo, RepoCheckout, RepoCreateResponse, RepoDownloadOpts, RepoListParams, RepoDataUploadResponse, RepoRequest, RepoScheme, RepoSubmissionChunk, ResultGetParams, TagDeleteRequest<Repo>, TagRequest<Repo>, TruncationReason)),
     modifiers(&OpenApiSecurity),
 )]
 pub struct RepoApiDocs;
@@ -659,6 +745,8 @@ pub fn mount(router: Router<AppState>) -> Router<AppState> {
     router
         .route("/repos/", get(list).post(create))
         .route("/repos/details/", get(list_details))
+        .route("/repos/grep/", post(grep))
+        .route("/repos/grep/{*repo_path}", post(grep_repo))
         .route("/repos/data/{*repo_path}", get(get_repo).post(upload))
         .route(
             "/repos/commitishes/{data}/{*repo_path}",

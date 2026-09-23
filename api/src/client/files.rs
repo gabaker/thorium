@@ -13,14 +13,17 @@ use uuid::Uuid;
 use tracing::instrument;
 
 use super::Error;
-use super::traits::{GenericClient, ResultsClient, ResultsClientHelper, TransferProgress};
+use super::traits::{
+    GenericClient, GrepClient, GrepClientHelper, ResultsClient, ResultsClientHelper,
+    TransferProgress,
+};
 use crate::models::{
     Attachment, CartedFile, CommentRequest, CommentResponse, CountCursor, Cursor,
     DeleteCommentParams, DownloadedFile, EntityKinds, EntityRequest, FileDeleteOpts,
-    FileDownloadOpts, FileListOpts, OutputMap, OutputRequest, OutputResponse, ResultGetParams,
-    Sample, SampleCheck, SampleCheckResponse, SampleListLine, SampleRequest,
-    SampleSubmissionResponse, SubmissionUpdate, TagCounts, TagDeleteRequest, TagRequest,
-    UncartedFile,
+    FileDownloadOpts, FileListOpts, GrepMatches, GrepOpts, GrepPage, OutputMap, OutputRequest,
+    OutputResponse, ResultGetParams, Sample, SampleCheck, SampleCheckResponse, SampleListLine,
+    SampleRequest, SampleSubmissionResponse, SubmissionUpdate, TagCounts, TagDeleteRequest,
+    TagRequest, UncartedFile,
 };
 use crate::{
     add_date, add_query, add_query_bool, add_query_list, add_query_list_clone, send, send_build,
@@ -31,7 +34,7 @@ use crate::{
 cfg_if::cfg_if! {
     if #[cfg(feature = "sync")] {
         use super::RUNTIME;
-        use super::traits::ResultsClientBlocking;
+        use super::traits::{GrepClientBlocking, ResultsClientBlocking};
         use crate::models::{CursorBlocking, CountCursorBlocking};
     }
 }
@@ -1120,5 +1123,94 @@ impl ResultsClient for Files {
     {
         self.download_result_entities_generic(sha256, tool, result_id, entity_kind)
             .await
+    }
+}
+
+impl GrepClientHelper for Files {}
+
+#[cfg_attr(feature = "sync", thorium_derive::blocking_trait)]
+impl GrepClient for Files {
+    /// Greps a page of samples in Thorium
+    ///
+    /// This searches every sample you can see, so if there are more samples left to search
+    /// then the returned cursor id should be passed back in with
+    /// [`GrepOpts::cursor`](crate::models::GrepOpts::cursor) to continue the search.
+    ///
+    /// # Arguments
+    ///
+    /// * `opts` - The options to use when grepping samples
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use thorium::Thorium;
+    /// use thorium::client::GrepClient;
+    /// use thorium::models::{GrepOpts, GrepSource};
+    /// # use thorium::Error;
+    ///
+    /// # async fn exec() -> Result<(), Error> {
+    /// // create Thorium client
+    /// let thorium = Thorium::build("http://127.0.0.1").token("<token>").build().await?;
+    /// // grep the first page of samples for a pattern in their results
+    /// let opts = GrepOpts::new("corn[0-9]+").source(GrepSource::Results).limit(10);
+    /// let page = thorium.files.grep(opts).await?;
+    /// // if we got a cursor back then there are more samples left to search
+    /// if let Some(cursor) = page.cursor {
+    ///     let opts = GrepOpts::new("corn[0-9]+").source(GrepSource::Results).cursor(cursor);
+    ///     thorium.files.grep(opts).await?;
+    /// }
+    /// # // allow test code to be compiled but don't unwrap as no API instance would be up
+    /// # Ok(())
+    /// # }
+    /// # tokio_test::block_on(async {
+    /// #    exec().await
+    /// # });
+    /// ```
+    #[cfg_attr(
+        feature = "trace",
+        instrument(name = "GrepClient<Files>::grep", skip_all, err(Debug))
+    )]
+    async fn grep(&self, opts: GrepOpts) -> Result<GrepPage, Error> {
+        self.grep_generic(opts).await
+    }
+
+    /// Greps a single sample in Thorium
+    ///
+    /// # Arguments
+    ///
+    /// * `sha256` - The sha256 of the sample to grep
+    /// * `opts` - The options to use when grepping this sample
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use thorium::Thorium;
+    /// use thorium::client::GrepClient;
+    /// use thorium::models::GrepOpts;
+    /// # use thorium::Error;
+    ///
+    /// # async fn exec() -> Result<(), Error> {
+    /// // create Thorium client
+    /// let thorium = Thorium::build("http://127.0.0.1").token("<token>").build().await?;
+    /// // grep a single sample for a pattern
+    /// let sha256 = "63b0490d4736e740f26ea9483d55c254abe032845b70ba84ea463ca6582d106f";
+    /// thorium.files.grep_key(sha256, GrepOpts::new("corn[0-9]+")).await?;
+    /// # // allow test code to be compiled but don't unwrap as no API instance would be up
+    /// # Ok(())
+    /// # }
+    /// # tokio_test::block_on(async {
+    /// #    exec().await
+    /// # });
+    /// ```
+    #[cfg_attr(
+        feature = "trace",
+        instrument(name = "GrepClient<Files>::grep_key", skip_all, err(Debug))
+    )]
+    async fn grep_key<K: AsRef<str>>(
+        &self,
+        sha256: K,
+        opts: GrepOpts,
+    ) -> Result<GrepMatches, Error> {
+        self.grep_key_generic(sha256, opts).await
     }
 }
