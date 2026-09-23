@@ -11,10 +11,10 @@ use uuid::Uuid;
 
 use super::shared::graphics;
 use crate::models::AuthedUser;
-use crate::models::backends::{GraphicSupport, TagSupport};
+use crate::models::backends::{self, GraphicSupport, TagSupport};
 use crate::models::{
-    ApiCursor, Association, AssociationListParams, AssociationTargetColumn, Entity, EntityListLine,
-    EntityListParams, EntityResponse, TagDeleteRequest, TagRequest,
+    ApiCursor, Association, AssociationListParams, AssociationTargetColumn, Entity, EntityListLine, EntityListParams, EntityResponse, GrepMatches, GrepQueryParams, GrepRequest,
+    TagDeleteRequest, TagRequest,
 };
 use crate::not_found;
 use crate::utils::{ApiError, AppState};
@@ -388,6 +388,56 @@ async fn list_associations(
     Ok(Json(cursor))
 }
 
+/// Search a page of entities with grep
+///
+/// This searches every entity this user can see, so it returns a cursor that can be
+/// continued if more entities still need to be searched.
+///
+/// # Arguments
+///
+/// * `user` - The user that is grepping these entities
+/// * `params` - The query params for this grep search
+/// * `state` - Shared Thorium objects
+/// * `request` - The grep request body containing the regex pattern
+#[instrument(name = "routes::entities::grep", skip_all, err(Debug))]
+async fn grep(
+    user: AuthedUser,
+    params: GrepQueryParams,
+    State(state): State<AppState>,
+    Json(request): Json<GrepRequest>,
+) -> Result<Json<ApiCursor<GrepMatches>>, ApiError> {
+    // combine our query params and pattern into the full grep params
+    let params = params.into_params(request);
+    // grep a page of entities
+    let matches = backends::grep::grep_many::<Entity>(&user, params, &state.shared).await?;
+    Ok(Json(matches))
+}
+
+/// Search a single entity with grep
+///
+/// # Arguments
+///
+/// * `user` - The user that is grepping this entity
+/// * `id` - The id of the entity to grep
+/// * `params` - The query params for this grep search
+/// * `state` - Shared Thorium objects
+/// * `request` - The grep request body containing the regex pattern
+#[instrument(name = "routes::entities::grep_entity", skip_all, err(Debug))]
+async fn grep_entity(
+    user: AuthedUser,
+    Path(id): Path<Uuid>,
+    params: GrepQueryParams,
+    State(state): State<AppState>,
+    Json(request): Json<GrepRequest>,
+) -> Result<Json<GrepMatches>, ApiError> {
+    // combine our query params and pattern into the full grep params
+    let params = params.into_params(request);
+    // grep this single entity
+    let matches =
+        backends::grep::grep_one::<Entity>(&user, &id.to_string(), params, &state.shared).await?;
+    Ok(Json(matches))
+}
+
 /// Add the entities routes to our router
 ///
 /// # Arguments
@@ -396,6 +446,8 @@ async fn list_associations(
 pub fn mount(router: Router<AppState>) -> Router<AppState> {
     router
         .route("/entities/", post(create))
+        .route("/entities/grep/", post(grep))
+        .route("/entities/grep/{id}", post(grep_entity))
         .route("/entities/", axum::routing::get(list))
         .route("/entities/details/", axum::routing::get(list_details))
         .route(

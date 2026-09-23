@@ -18,8 +18,7 @@ api = [
   "scylla", "ldap3", "itertools", "sha-1", "sha2", "md-5", "data-encoding", "anyhow", "elasticsearch", "zip", "async-trait",
   "axum", "http", "tower", "axum-macros", "tower-http", "tokio-stream", "generic-array", "futures-util", "tokio-util", "serde_qs",
   "aws-sdk-s3", "aws-types", "aws-smithy-http", "aws-credential-types", "scylla-utils", "http-body", "axum-extra", "once_cell", "utoipa",
-  "utoipa-swagger-ui", "lettre", "headers", "percent-encoding", "dashmap", "scc", "mime", "rmcp", "openidconnect", "humantime",
-  "constant_time_eq"
+  "utoipa-swagger-ui", "lettre", "headers", "percent-encoding", "dashmap", "scc", "mime", "rmcp", "openidconnect", "humantime", "grep", "constant_time_eq"
   ]
 
 # include scylla utility functions
@@ -165,6 +164,7 @@ bytesize = { version = "2.1.0", features = ["serde"] }
 sigma-rust = { workspace = true }
 openidconnect = { version = "4", features = ["reqwest"], optional = true }
 humantime = { version = "2.3", optional = true }
+grep = { version = "0.4", optional = true }
 
 # rkyv dependencies
 rkyv = { version = "=0.7.43", features = ["arbitrary_enum_discriminant", "uuid", "validation"], optional = true }
@@ -172,7 +172,7 @@ bytecheck = { version = "=0.6.11", optional = true }
 
 # client dependencies
 reqwest = { workspace = true, optional = true }
-tokio-util = { version = "0.7", default-features = false, features = ["codec", "io", "compat", "time"], optional = true }
+tokio-util = { version = "0.7", default-features = false, features = ["codec", "io", "io-util", "compat", "time"], optional = true }
 git2 = { version = "0.20", optional = true }
 gix = { version = "0.72", optional = true }
 gix-date = { version = "0.10", optional = true }
@@ -221,6 +221,10 @@ rand = { version = "0.9.1", features = ["alloc", "small_rng"] }
 # udeps might think this is unused but its used by our doc tests
 tokio-test = "0.4"
 serial_test = "3"
+
+[[test]]
+name = "grep"
+path = "tests/grep.rs"
 
 # Per-entity-kind integration tests. These live in the tests/entities/ subdirectory
 # which cargo does not auto-discover, so each kind is registered as its own binary.

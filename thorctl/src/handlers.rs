@@ -8,6 +8,7 @@ mod controllers;
 pub(crate) mod edit;
 pub(crate) mod exports;
 pub mod files;
+pub mod grep;
 pub mod groups;
 pub mod images;
 pub(crate) mod imports;

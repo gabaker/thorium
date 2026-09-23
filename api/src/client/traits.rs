@@ -1,14 +1,19 @@
 //! Traits defining shared behavior between elements of the Thorium client
 use reqwest::Client;
 
+mod grep;
 mod notifications;
 mod progress;
 mod results;
 
+pub use grep::GrepClient;
+pub(super) use grep::GrepClientHelper;
 pub(super) use notifications::NotificationsClient;
 pub use results::ResultsClient;
 pub(super) use results::ResultsClientHelper;
 
+#[cfg(feature = "sync")]
+pub use grep::GrepClientBlocking;
 #[cfg(feature = "sync")]
 pub use results::ResultsClientBlocking;
 

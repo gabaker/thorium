@@ -1,0 +1,8 @@
+{"version":3,"term":{"cols":120,"rows":28},"timestamp":1793125812,"idle_time_limit":2.0,"command":"bash /tmp/grep-demo/clips/pipe.sh","env":{"SHELL":"/bin/bash"}}
+[0.003, "o", "\u001b[1;32m$\u001b[0m thorctl grep 'corn[0-9]+' -g demo-plants --format json | jq -r .key"]
+[0.000, "o", "\r\n"]
+[1.064, "o", "c9d7404d4d03ae3bcea555e8d0f7e95d748943bdabcebb4d2a299d8e36fde17e\r\n"]
+[0.000, "o", "046d0504818962ee1bdc51793deb026d8c993b581caf9b79d88fdf714bfb78e6\r\n"]
+[2.005, "o", "\r\n\u001b[1;32m$\u001b[0m thorctl grep 'corn[0-9]+' -g demo-plants | cut -d: -f1-3\r\n"]
+[1.074, "o", "c9d7404d4d03ae3bcea555e8d0f7e95d748943bdabcebb4d2a299d8e36fde17e:results:CornCounter\r\nc9d7404d4d03ae3bcea555e8d0f7e95d748943bdabcebb4d2a299d8e36fde17e:results:CornCounter\r\nc9d7404d4d03ae3bcea555e8d0f7e95d748943bdabcebb4d2a299d8e36fde17e:tags:plant\r\n046d0504818962ee1bdc51793deb026d8c993b581caf9b79d88fdf714bfb78e6:results:CornHarvester\r\n046d0504818962ee1bdc51793deb026d8c993b581caf9b79d88fdf714bfb78e6:results:CornHarvester\r\n046d0504818962ee1bdc51793deb026d8c993b581caf9b79d88fdf714bfb78e6:result_files:CornHarvester\r\n046d0504818962ee1bdc51793deb026d8c993b581caf9b79d88fdf714bfb78e6:result_files:CornHarvester\r\n046d0504818962ee1bdc51793deb026d8c993b581caf9b79d88fdf714bfb78e6:tags:plant\r\n"]
+[3.005, "x", "0"]

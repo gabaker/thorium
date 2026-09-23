@@ -19,7 +19,8 @@ use crate::models::{
 };
 use crate::utils::{helpers, ApiError, Shared};
 use crate::{
-    bad, internal_err, log_scylla_err, not_found, same_vec, serialize, serialize_opt, unauthorized,
+    bad, deserialize, internal_err, log_scylla_err, not_found, same_vec, serialize, serialize_opt,
+    unauthorized,
 };
 
 /// Check if a user already has a matching repo submission
@@ -1178,5 +1179,35 @@ pub async fn list(
     cursor.next(shared).await?;
     // save this cursor
     cursor.save(shared).await?;
+    Ok(cursor)
+}
+
+/// List repos for a grep search without saving the list cursor
+///
+/// Grep cursors embed the retained state of their inner list cursor, so the cursor
+/// built here is handed back unsaved for its owner to persist atomically.
+///
+/// # Arguments
+///
+/// * `user` - The user that is listing repos
+/// * `params` - The query params to use when listing repos
+/// * `retain` - The serialized retained state of the list cursor to resume
+/// * `shared` - Shared Thorium objects
+#[instrument(name = "db::repos::list_greppable", skip(user, retain, shared), err(Debug))]
+pub async fn list_greppable(
+    user: &User,
+    params: RepoListParams,
+    retain: Option<String>,
+    shared: &Shared,
+) -> Result<ScyllaCursor<RepoListLine>, ApiError> {
+    // resume our cursor from its retained state or build a new one from our params
+    let mut cursor = match retain {
+        Some(retain) => {
+            ScyllaCursor::from_retain(deserialize!(&retain), &user.username, params.limit, true, shared)?
+        }
+        None => ScyllaCursor::from_params(params, &user.username, true, shared).await?,
+    };
+    // get the next page of data for this cursor
+    cursor.next(shared).await?;
     Ok(cursor)
 }

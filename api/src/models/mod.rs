@@ -11,6 +11,7 @@ mod errors;
 pub mod events;
 pub mod files;
 pub mod git;
+pub mod grep;
 pub mod groups;
 pub mod helpers;
 pub mod images;
@@ -167,6 +168,7 @@ cfg_if::cfg_if! {
         pub use git::UntarredRepo;
         pub use cursors::{Cursor, DateOpts, CountCursor, CountCursorSupport};
         pub use files::UncartedFile;
+        pub use grep::{GrepOpts, GrepPage};
     }
 }
 
@@ -180,7 +182,7 @@ cfg_if::cfg_if! {
 // api feature exports
 cfg_if::cfg_if! {
     if #[cfg(feature = "api")] {
-        pub use cursors::ApiCursor;
+        pub use cursors::{ApiCursor, CursorMetadataSupport, NoCursorMetadata};
         pub use reactions::{RawGenericJobArgs, RawReactionRequest};
         pub use files::{SampleForm, OriginForm, CommentForm};
         pub use entities::{EntityForm, EntityMetadataUpdateForm, EntityUpdateForm,EntityMetadataForm};
@@ -200,6 +202,10 @@ cfg_if::cfg_if! {
             Notification, NotificationLevel, NotificationParams, NotificationRequest, NotificationType,
         };
         pub use results::{OutputRequest, OutputKind, OutputMap};
+        pub use grep::{
+            GrepDocumentMatches, GrepMatch, GrepMatches, GrepParams, GrepQueryParams, GrepRequest,
+            GrepSource, GrepStats, TruncationReason,
+        };
     }
 }
 

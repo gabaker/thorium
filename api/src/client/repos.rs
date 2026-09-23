@@ -14,20 +14,28 @@ use uuid::Uuid;
 use tracing::instrument;
 
 use super::Error;
-use super::traits::{GenericClient, ResultsClient, ResultsClientHelper, TransferProgress};
+use super::traits::{
+    GenericClient, GrepClient, GrepClientHelper, ResultsClient, ResultsClientHelper,
+    TransferProgress,
+};
 use crate::models::{
     Attachment, CommitListOpts, Commitish, CommitishDetails, CommitishMapRequest, Cursor,
-    EntityKinds, EntityRequest, OutputMap, OutputRequest, OutputResponse, Repo, RepoCreateResponse,
-    RepoDataUploadResponse, RepoDownloadOpts, RepoListLine, RepoListOpts, RepoRequest,
-    ResultGetParams, TagDeleteRequest, TagRequest, TarredRepo, UntarredRepo,
+    EntityKinds, EntityRequest, GrepMatches, GrepOpts, GrepPage, OutputMap, OutputRequest,
+    OutputResponse, Repo, RepoCreateResponse, RepoDataUploadResponse, RepoDownloadOpts,
+    RepoListLine, RepoListOpts, RepoRequest, ResultGetParams, TagDeleteRequest, TagRequest,
+    TarredRepo, UntarredRepo,
 };
 use crate::{
     add_date, add_query, add_query_bool, add_query_list, add_query_list_clone, send, send_build,
 };
 
-// import our static runtime if we need a blocking client
-#[cfg(feature = "sync")]
-use super::RUNTIME;
+// sync client imports
+cfg_if::cfg_if! {
+    if #[cfg(feature = "sync")] {
+        use super::RUNTIME;
+        use super::traits::GrepClientBlocking;
+    }
+}
 
 /// repos handler for the Thorium client
 #[cfg_attr(feature = "sync", thorium_derive::blocking_struct)]
@@ -869,5 +877,92 @@ impl ResultsClient for Repos {
         // download this results entity file
         self.download_result_entities_generic(repo_trimmed, tool, result_id, entity_kind)
             .await
+    }
+}
+
+impl GrepClientHelper for Repos {}
+
+#[cfg_attr(feature = "sync", thorium_derive::blocking_trait)]
+impl GrepClient for Repos {
+    /// Greps a page of repos in Thorium
+    ///
+    /// This searches every repo you can see, so if there are more repos left to search then
+    /// the returned cursor id should be passed back in with
+    /// [`GrepOpts::cursor`](crate::models::GrepOpts::cursor) to continue the search.
+    ///
+    /// # Arguments
+    ///
+    /// * `opts` - The options to use when grepping repos
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use thorium::Thorium;
+    /// use thorium::client::GrepClient;
+    /// use thorium::models::{GrepOpts, GrepSource};
+    /// # use thorium::Error;
+    ///
+    /// # async fn exec() -> Result<(), Error> {
+    /// // create Thorium client
+    /// let thorium = Thorium::build("http://127.0.0.1").token("<token>").build().await?;
+    /// // grep the first page of repos for a pattern in their results
+    /// let opts = GrepOpts::new("corn[0-9]+").source(GrepSource::Results).limit(10);
+    /// let page = thorium.repos.grep(opts).await?;
+    /// // if we got a cursor back then there are more repos left to search
+    /// if let Some(cursor) = page.cursor {
+    ///     let opts = GrepOpts::new("corn[0-9]+").source(GrepSource::Results).cursor(cursor);
+    ///     thorium.repos.grep(opts).await?;
+    /// }
+    /// # // allow test code to be compiled but don't unwrap as no API instance would be up
+    /// # Ok(())
+    /// # }
+    /// # tokio_test::block_on(async {
+    /// #    exec().await
+    /// # });
+    /// ```
+    #[cfg_attr(
+        feature = "trace",
+        instrument(name = "GrepClient<Repos>::grep", skip_all, err(Debug))
+    )]
+    async fn grep(&self, opts: GrepOpts) -> Result<GrepPage, Error> {
+        self.grep_generic(opts).await
+    }
+
+    /// Greps a single repo in Thorium
+    ///
+    /// # Arguments
+    ///
+    /// * `repo` - The URL of the repo to grep
+    /// * `opts` - The options to use when grepping this repo
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use thorium::Thorium;
+    /// use thorium::client::GrepClient;
+    /// use thorium::models::GrepOpts;
+    /// # use thorium::Error;
+    ///
+    /// # async fn exec() -> Result<(), Error> {
+    /// // create Thorium client
+    /// let thorium = Thorium::build("http://127.0.0.1").token("<token>").build().await?;
+    /// // grep a single repo for a pattern
+    /// let repo = "github.com/rust-lang/rust";
+    /// thorium.repos.grep_key(repo, GrepOpts::new("corn[0-9]+")).await?;
+    /// # // allow test code to be compiled but don't unwrap as no API instance would be up
+    /// # Ok(())
+    /// # }
+    /// # tokio_test::block_on(async {
+    /// #    exec().await
+    /// # });
+    /// ```
+    #[cfg_attr(
+        feature = "trace",
+        instrument(name = "GrepClient<Repos>::grep_key", skip_all, err(Debug))
+    )]
+    async fn grep_key<K: AsRef<str>>(&self, repo: K, opts: GrepOpts) -> Result<GrepMatches, Error> {
+        // trim any ending '/' from the repo URL
+        let repo_trimmed = repo.as_ref().trim_end_matches('/');
+        self.grep_key_generic(repo_trimmed, opts).await
     }
 }

@@ -11,25 +11,78 @@ cfg_if::cfg_if! {
         use serde::{Deserialize, Serialize};
         use uuid::Uuid;
 
+        use crate::models::{
+            Association, Commitish, CommitishDetails, ElasticDoc, Entity, EntityListLine,
+            GrepMatches, GrepStats, NetworkPolicy, NetworkPolicyListLine, Node, NodeListLine,
+            Repo, RepoListLine, Sample, SampleListLine,
+        };
+
+        /// Attaches optional page level metadata to the data an [`ApiCursor`] returns
+        pub trait CursorMetadataSupport {
+            /// The metadata one page of this data type can carry
+            type Metadata: std::fmt::Debug + Serialize;
+        }
+
+        /// The empty metadata for cursor data types that never carry any
+        ///
+        /// This is never actually serialized since cursors over these data types
+        /// always leave their metadata unset.
+        #[derive(Debug, Clone, Copy, Serialize)]
+        pub struct NoCursorMetadata;
+
+        /// Stamp the empty metadata impl for cursor data types that never carry any
+        macro_rules! no_cursor_metadata {
+            ($($data:ty),+ $(,)?) => {
+                $(
+                    impl CursorMetadataSupport for $data {
+                        /// This data type never carries any page metadata
+                        type Metadata = NoCursorMetadata;
+                    }
+                )+
+            };
+        }
+
+        // every cursor data type except grep matches never carries page metadata
+        no_cursor_metadata!(
+            Association, Commitish, CommitishDetails, ElasticDoc, Entity, EntityListLine,
+            NetworkPolicy, NetworkPolicyListLine, Node, NodeListLine, Repo, RepoListLine,
+            Sample, SampleListLine, String,
+        );
+
+        impl CursorMetadataSupport for GrepMatches {
+            /// Grep pages carry their counts of found, truncated, and errored documents
+            type Metadata = GrepStats;
+        }
+
         /// A cursor for data in Thorium used by the API
         #[derive(Debug, Serialize)]
         #[cfg_attr(feature = "api", derive(utoipa::ToSchema))]
         pub struct ApiCursor<T>
         where
             for<'de> T: Deserialize<'de>,
-            T: Serialize
+            T: Serialize,
+            T: CursorMetadataSupport,
         {
             /// The ID for this cursor if more data can be pulled
             #[serde(skip_serializing_if = "Option::is_none")]
             pub cursor: Option<Uuid>,
             /// A single page worth of data
             pub data: Vec<T>,
+            /// Any page level metadata for this data type
+            ///
+            /// Grep is the only data type that sets this today; its page wide counts
+            /// of found, truncated, and errored documents ride here as
+            /// [`GrepStats`](crate::models::GrepStats).
+            #[serde(skip_serializing_if = "Option::is_none")]
+            #[schema(value_type = Option<Object>)]
+            pub metadata: Option<T::Metadata>,
         }
 
         impl<T> ApiCursor<T>
         where
             for<'de> T: Deserialize<'de>,
             T: Serialize,
+            T: CursorMetadataSupport,
         {
             /// Create an empty api cursor
             ///
@@ -38,9 +91,44 @@ cfg_if::cfg_if! {
             /// * `hint` - The hint for how much space to allocate
             #[must_use]
             pub fn empty(hint: usize) -> Self {
-                ApiCursor { cursor: None, data: Vec::with_capacity(hint) }
+                ApiCursor { cursor: None, data: Vec::with_capacity(hint), metadata: None }
             }
         }
+    }
+}
+
+#[cfg(all(test, feature = "api"))]
+mod tests {
+    use super::*;
+
+    use crate::models::GrepMatches;
+
+    /// Make sure cursor metadata is only serialized when it is set
+    #[test]
+    fn api_cursor_metadata_is_skipped_when_unset() {
+        // build a cursor page without any metadata
+        let cursor: ApiCursor<GrepMatches> = ApiCursor::empty(0);
+        // serialize this page to json
+        let raw = serde_json::to_value(&cursor).unwrap();
+        // make sure the unset metadata and cursor id were skipped entirely
+        assert!(raw.get("metadata").is_none());
+        assert!(raw.get("cursor").is_none());
+        // build a cursor page that carries metadata
+        let cursor = ApiCursor::<GrepMatches> {
+            cursor: None,
+            data: Vec::default(),
+            metadata: Some(GrepStats {
+                found: 1,
+                truncated: 2,
+                errors: 3,
+            }),
+        };
+        // serialize this page to json
+        let raw = serde_json::to_value(&cursor).unwrap();
+        // make sure the set metadata was serialized with its counts
+        assert_eq!(raw["metadata"]["found"], 1);
+        assert_eq!(raw["metadata"]["truncated"], 2);
+        assert_eq!(raw["metadata"]["errors"], 3);
     }
 }
 

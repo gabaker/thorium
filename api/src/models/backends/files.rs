@@ -153,6 +153,7 @@ impl CommentForm {
         if let Some(name) = field.name() {
             match name {
                 "comment" => self.comment = field.text().await?,
+                "groups" => self.groups.push(field.text().await?),
                 // this is an attachment  so return it so we can stream it to s3
                 "files" => return Ok(Some(field)),
                 _ => return bad!(format!("{} is not a valid form name", name)),
@@ -1708,6 +1709,7 @@ impl ApiCursor<SampleListLine> {
         Ok(ApiCursor {
             cursor: self.cursor,
             data,
+            metadata: None,
         })
     }
 }

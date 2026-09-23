@@ -1772,6 +1772,27 @@ impl Origin {
         }
     }
 
+    /// Get a copy of this origin with its dangling flag reset to its stored value
+    ///
+    /// The dangling flag is recomputed with a live existence check every time a
+    /// submission is read, so it is derived state rather than stored data. Grep
+    /// documents must be byte stable across reads for cursor resumes to skip
+    /// already returned matches correctly, so greps serialize this stable copy.
+    #[must_use]
+    pub fn as_stored(&self) -> Self {
+        // copy this origin so we can clear its read time state
+        let mut stored = self.clone();
+        // clear the dangling flag on any variant that has one
+        match &mut stored {
+            Origin::Unpacked { dangling, .. }
+            | Origin::Transformed { dangling, .. }
+            | Origin::MemoryDump { dangling, .. }
+            | Origin::Carved { dangling, .. } => *dangling = false,
+            _ => (),
+        }
+        stored
+    }
+
     /// Check if this origin is indirect
     ///
     /// Some origins can be indirect as they can be represented in a tree

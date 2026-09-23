@@ -2,6 +2,7 @@
 use bb8_redis::redis::cmd;
 use chrono::prelude::*;
 use elasticsearch::SearchParts;
+use ::grep::regex::RegexMatcher;
 use futures::stream::{self, StreamExt, TryStreamExt};
 use futures_util::Future;
 use scylla::client::pager::QueryPager;
@@ -16,13 +17,22 @@ use std::cmp::{Ord, Ordering};
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
 use std::fmt::Debug;
 use std::hash::Hash;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering as AtomicOrdering};
+use std::time::{Duration, Instant};
 use tracing::{Level, event, instrument};
 use uuid::Uuid;
 
+use axum::http::StatusCode;
+
 use super::elastic::{self, ElasticResponse};
 use super::keys::{cursors, tags};
-use crate::models::{ApiCursor, ElasticDoc, TagCounts, TagKeyCounts, TagListRow, TagMap, User};
-use crate::models::{ElasticSearchParams, TagType};
+use crate::models::backends::GrepSupport;
+use crate::models::backends::grep::{self, GrepResume};
+use crate::models::{
+    ApiCursor, CursorMetadataSupport, ElasticDoc, TagCounts, TagKeyCounts, TagListRow, TagMap, User,
+};
+use crate::models::{ElasticSearchParams, GrepMatches, GrepParams, GrepSource, GrepStats, TagType};
 use crate::utils::{ApiError, Shared, helpers};
 use crate::{
     bad, conn, deserialize, internal_err, internal_err_unwrapped, log_scylla_err, not_found, query,
@@ -41,6 +51,8 @@ pub enum CursorKind {
     TagsCount,
     /// A cursor based on data in Elastic
     Elastic,
+    /// A cursor for a grep based search
+    Grep,
     /// A Tree of data in Thorium
     Tree,
     /// A cursor based on data in redis
@@ -57,6 +69,7 @@ impl CursorKind {
             CursorKind::GroupedScylla => "GroupedScylla",
             CursorKind::TagsCount => "TagsCount",
             CursorKind::Elastic => "Elastic",
+            CursorKind::Grep => "Grep",
             CursorKind::Tree => "Tree",
             CursorKind::Redis => "Redis",
         }
@@ -932,6 +945,51 @@ where
         Ok(cursor)
     }
 
+    /// Get the partition chunk size for a cursors retained data
+    ///
+    /// # Arguments
+    ///
+    /// * `retain` - The retained data to get the chunk size for
+    /// * `shared` - Shared Thorium objects
+    fn retained_chunk(retain: &ScyllaCursorRetain<D>, shared: &Shared) -> u16 {
+        // tag based cursors have a different chunk size
+        if let Some(tag_retain) = &retain.tags_retain {
+            // get the type of tag this cursor is for
+            let tag_type = &tag_retain.tag_type;
+            // get the right chunk size based on the type of tags this is
+            shared.config.thorium.tags.map_type(tag_type).partition_size
+        } else {
+            // this is not a tag based query so use our types partitions size
+            D::partition_size(shared)
+        }
+    }
+
+    /// Rebuild a cursor from retained data without touching redis
+    ///
+    /// This is for cursors that embed another cursors retained state, like grep
+    /// cursors, so the embedded cursor can be rebuilt and persisted as part of its
+    /// owner instead of under its own redis key.
+    ///
+    /// # Arguments
+    ///
+    /// * `retain` - The retained data to rebuild this cursor from
+    /// * `username` - The username of the user this cursor is scoped to
+    /// * `limit` - The max number of items to return at once
+    /// * `dedupe` - Whether to dedupe items or not
+    /// * `shared` - Shared Thorium objects
+    pub fn from_retain(
+        retain: ScyllaCursorRetain<D>,
+        username: &str,
+        limit: usize,
+        dedupe: bool,
+        shared: &Shared,
+    ) -> Result<ScyllaCursor<D>, ApiError> {
+        // get the partition chunk size for this cursors data
+        let chunk = Self::retained_chunk(&retain, shared);
+        // rebuild our cursor with an id that is inert since it is never saved
+        Self::rebuild(Uuid::new_v4(), username, retain, chunk, limit, dedupe)
+    }
+
     /// Gets a cursors data from Redis
     ///
     /// # Arguments
@@ -958,17 +1016,8 @@ where
             Some(data) => {
                 // try to deseruialize this cursors retained data
                 let retain: ScyllaCursorRetain<D> = deserialize!(&data);
-                // tag based cursors have a different chunk size
-                let chunk = if let Some(tag_retain) = &retain.tags_retain {
-                    // get the type of tag this cursor is for
-                    let tag_type = &tag_retain.tag_type;
-                    // get the right chunk size based on the type of tags this is
-                    shared.config.thorium.tags.map_type(tag_type).partition_size
-                } else {
-                    // this is not a tag based query so use our types partitions size
-                    D::partition_size(shared)
-                };
-
+                // get the partition chunk size for this cursors data
+                let chunk = Self::retained_chunk(&retain, shared);
                 // rebuild our cursor scoped to the creating user
                 Self::rebuild(
                     cursor_id,
@@ -1740,6 +1789,7 @@ where
     for<'de> D: Deserialize<'de> + Debug + std::marker::Send,
     D: Serialize,
     D: ScyllaCursorSupport,
+    D: CursorMetadataSupport,
     D: Debug,
 {
     /// convert this scylla cursor to a user facing cursor
@@ -1754,6 +1804,7 @@ where
         ApiCursor {
             cursor: id,
             data: scylla_cursor.data,
+            metadata: None,
         }
     }
 }
@@ -2024,6 +2075,7 @@ where
     for<'de> D: Deserialize<'de>,
     D: Serialize,
     D: SimpleCursorExt,
+    D: CursorMetadataSupport,
 {
     /// convert this simple scylla cursor to a user facing cursor
     fn from(scylla_cursor: SimpleScyllaCursor<D>) -> Self {
@@ -2037,6 +2089,7 @@ where
         ApiCursor {
             cursor: id,
             data: scylla_cursor.data,
+            metadata: None,
         }
     }
 }
@@ -2685,6 +2738,7 @@ where
     for<'de> D: Deserialize<'de> + Debug,
     D: Serialize,
     D: GroupedScyllaCursorSupport,
+    D: CursorMetadataSupport,
     D: Debug,
 {
     /// convert this scylla cursor to a user facing cursor
@@ -2699,6 +2753,7 @@ where
         ApiCursor {
             cursor: id,
             data: scylla_cursor.data,
+            metadata: None,
         }
     }
 }
@@ -3425,6 +3480,617 @@ impl ElasticCursor {
     }
 }
 
+/// The data to retain throughout a grep cursors life
+///
+/// This holds everything needed to continue a grep search, including the id of the inner
+/// list cursor we are paging items with and any keys we listed but have not searched yet.
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct GrepCursorRetain {
+    /// The regex pattern this cursor is searching for
+    pub pattern: String,
+    /// Whether this search should ignore case or not
+    pub case_insensitive: bool,
+    /// Whether this pattern can match across multiple lines
+    pub multi_line: bool,
+    /// The sources of data this cursor is searching
+    pub sources: Vec<GrepSource>,
+    /// The tools this cursor is restricting result searches too
+    pub tools: Vec<String>,
+    /// The groups this cursor is searching in
+    pub groups: Vec<String>,
+    /// The groups the user explicitly requested, before defaulting to all the
+    /// groups they can see; used when getting an items results so the default
+    /// group intersection semantics are preserved
+    #[serde(default)]
+    pub requested_groups: Vec<String>,
+    /// The timestamp to start searching from for this cursor
+    pub start: DateTime<Utc>,
+    /// The timestamp to stop searching at for this cursor
+    pub end: DateTime<Utc>,
+    /// The serialized retained state of the inner list cursor we page items with
+    ///
+    /// The inner cursors state is embedded here instead of under its own redis key
+    /// so one save atomically persists this cursor and the inner one together; a
+    /// request dropped mid page can then never lose or split their state, and the
+    /// inner state always lives exactly as long as this cursor does.
+    pub inner: Option<String>,
+    /// Whether the inner list cursor has been exhausted or not
+    pub inner_exhausted: bool,
+    /// The keys we have listed but not searched yet
+    pub pending: VecDeque<String>,
+    /// The within item progress to resume if the match budget died mid item
+    ///
+    /// None means the previous page ended cleanly on an item boundary. Defaulted
+    /// so cursors saved before this field existed still deserialize.
+    #[serde(default)]
+    pub resume: Option<GrepResume>,
+}
+
+impl GrepCursorRetain {
+    /// Rebuild the grep params for a single page of this cursor
+    ///
+    /// The rebuilt params use the groups the user explicitly requested rather than
+    /// the expanded list we page items with so that getting an items results keeps
+    /// its default group intersection semantics.
+    ///
+    /// These params only ever feed single item scans, so the page oriented fields
+    /// (`cursor`, `limit`, and the scan budgets) are inert placeholders; this cursor
+    /// enforces the real page limit and budgets itself between items.
+    ///
+    /// # Arguments
+    ///
+    /// * `max_matches` - The max number of matches this query can still return
+    /// * `with_truncated` - Whether hit-less truncated or errored documents are kept
+    #[must_use]
+    pub fn params(&self, max_matches: usize, with_truncated: bool) -> GrepParams {
+        GrepParams {
+            pattern: self.pattern.clone(),
+            case_insensitive: self.case_insensitive,
+            multi_line: self.multi_line,
+            groups: self.requested_groups.clone(),
+            start: self.start,
+            end: Some(self.end),
+            cursor: None,
+            // single item scans never read the page limit; use the clamp floor so
+            // these params stay valid even if they are ever clamped or paged with
+            limit: 1,
+            sources: self.sources.clone(),
+            tools: self.tools.clone(),
+            max_matches: Some(max_matches),
+            scan_time: None,
+            scan_idle: None,
+            with_truncated,
+        }
+    }
+}
+
+/// Build the retained state for a mid page checkpoint of a grep cursor
+///
+/// A checkpoint restores everything the current page has consumed but not yet
+/// returned to the user, so retrying the cursor after a mid page error searches
+/// every unreturned item again instead of losing them.
+///
+/// # Arguments
+///
+/// * `retain` - The current retained state for this cursor
+/// * `consumed` - The keys this page already searched
+/// * `page_resume` - The resume state this page started with
+fn grep_checkpoint_retain(
+    retain: &GrepCursorRetain,
+    consumed: &[String],
+    page_resume: &Option<GrepResume>,
+) -> GrepCursorRetain {
+    // start from the current retained state
+    let mut checkpoint = retain.clone();
+    // restore the keys this page searched to the front in their original order
+    for key in consumed.iter().rev() {
+        checkpoint.pending.push_front(key.clone());
+    }
+    // restore the resume state this page started with
+    checkpoint.resume = page_resume.clone();
+    checkpoint
+}
+
+/// Get the clamped per page time budgets for a grep request
+///
+/// # Arguments
+///
+/// * `params` - The grep params to get the time budgets from
+fn grep_scan_budgets(params: &GrepParams) -> Result<(Duration, Duration), ApiError> {
+    // get the max wall clock time one page can scan for
+    let scan_time = match params.scan_time {
+        Some(scan_time) => Duration::from_millis(scan_time),
+        None => return internal_err!("grep params were not clamped".to_owned()),
+    };
+    // get the max time one page keeps scanning after its last new match
+    let scan_idle = match params.scan_idle {
+        Some(scan_idle) => Duration::from_millis(scan_idle),
+        None => return internal_err!("grep params were not clamped".to_owned()),
+    };
+    Ok((scan_time, scan_idle))
+}
+
+/// A cursor for a grep based search over many items
+#[derive(Debug)]
+pub struct GrepCursor {
+    /// The id for this cursor
+    pub id: Uuid,
+    /// The username of the user this cursor is scoped to
+    pub username: String,
+    /// The info to retain throughout this cursors lifetime
+    pub retain: GrepCursorRetain,
+    /// The max number of items with matches to return in one page
+    pub limit: usize,
+    /// The max wall clock time one page can scan for
+    pub scan_time: Duration,
+    /// The max time one page keeps scanning after its last new match
+    pub scan_idle: Duration,
+    /// The query wide budget of matches still left
+    pub remaining: Arc<AtomicUsize>,
+    /// Whether hit-less truncated or errored documents are kept in responses
+    pub with_truncated: bool,
+    /// The matches this cursor has found
+    pub data: Vec<GrepMatches>,
+    /// The counts of documents this page scanned
+    pub stats: GrepStats,
+    /// Whether this is a new cursor or it already existed and is being continued
+    pub new: bool,
+}
+
+impl GrepCursor {
+    /// Create or get a grep cursor based on grep params
+    ///
+    /// # Arguments
+    ///
+    /// * `user` - The user this cursor is scoped to
+    /// * `params` - The grep params to use
+    /// * `requested_groups` - The groups the user explicitly requested before any defaults were applied
+    /// * `earliest` - The earliest timestamp an item of the searched type can exist at
+    /// * `shared` - Shared Thorium objects
+    #[instrument(name = "GrepCursor::from_params", skip(user, shared), err(Debug))]
+    pub async fn from_params(
+        user: &User,
+        mut params: GrepParams,
+        requested_groups: Vec<String>,
+        earliest: i64,
+        shared: &Shared,
+    ) -> Result<Self, ApiError> {
+        // if a cursor was specified then get an existing cursor
+        if let Some(id) = params.cursor.take() {
+            // get an existing cursor whose retained data already has the
+            // requested groups from when the cursor was created
+            GrepCursor::get(id, &user.username, params, shared).await
+        } else {
+            // we don't have an existing cursor so make a new one
+            GrepCursor::new(user, params, requested_groups, earliest)
+        }
+    }
+
+    /// Create a new grep cursor
+    ///
+    /// # Arguments
+    ///
+    /// * `user` - The user this cursor is scoped to
+    /// * `params` - The grep params to use
+    /// * `requested_groups` - The groups the user explicitly requested before any defaults were applied
+    /// * `earliest` - The earliest timestamp an item of the searched type can exist at
+    #[instrument(name = "GrepCursor::new", skip(user), err(Debug))]
+    fn new(
+        user: &User,
+        params: GrepParams,
+        requested_groups: Vec<String>,
+        earliest: i64,
+    ) -> Result<Self, ApiError> {
+        // get the end timestamp for this cursor or a sane default
+        let end = params.end(earliest)?;
+        // get the budget of matches this query can return
+        let max_matches = match params.max_matches {
+            Some(max_matches) => max_matches,
+            None => return internal_err!("grep params were not clamped".to_owned()),
+        };
+        // get the time budgets for this page
+        let (scan_time, scan_idle) = grep_scan_budgets(&params)?;
+        // build the initial retained data for this cursor
+        let retain = GrepCursorRetain {
+            pattern: params.pattern,
+            case_insensitive: params.case_insensitive,
+            multi_line: params.multi_line,
+            sources: params.sources,
+            tools: params.tools,
+            groups: params.groups,
+            requested_groups,
+            start: params.start,
+            end,
+            inner: None,
+            inner_exhausted: false,
+            pending: VecDeque::default(),
+            resume: None,
+        };
+        // build a new grep cursor
+        let cursor = GrepCursor {
+            id: Uuid::new_v4(),
+            username: user.username.clone(),
+            retain,
+            limit: params.limit,
+            scan_time,
+            scan_idle,
+            remaining: Arc::new(AtomicUsize::new(max_matches)),
+            with_truncated: params.with_truncated,
+            data: Vec::default(),
+            stats: GrepStats::default(),
+            new: true,
+        };
+        Ok(cursor)
+    }
+
+    /// Get an existing grep cursors data
+    ///
+    /// # Arguments
+    ///
+    /// * `id` - The id of the cursor to get
+    /// * `username` - The username of the user this cursor is scoped to
+    /// * `params` - The grep params to use
+    /// * `shared` - Shared Thorium objects
+    #[instrument(name = "GrepCursor::get", skip(shared), err(Debug))]
+    pub async fn get(
+        id: Uuid,
+        username: &str,
+        params: GrepParams,
+        shared: &Shared,
+    ) -> Result<Self, ApiError> {
+        // build the key to our cursor data in redis scoped to the creating user
+        let key = cursors::data(CursorKind::Grep, username, &id, shared);
+        // get our cursor from redis
+        let data: Option<String> = query!(cmd("get").arg(key), shared).await?;
+        // get the budget of matches this query can return
+        let max_matches = match params.max_matches {
+            Some(max_matches) => max_matches,
+            None => return internal_err!("grep params were not clamped".to_owned()),
+        };
+        // get the time budgets for this page
+        let (scan_time, scan_idle) = grep_scan_budgets(&params)?;
+        // check if we got any cursor data
+        match data {
+            Some(data) => {
+                // try to deserialize our cursor data
+                let retain = deserialize!(&data);
+                // build our cursor
+                let cursor = GrepCursor {
+                    id,
+                    username: username.to_owned(),
+                    retain,
+                    limit: params.limit,
+                    scan_time,
+                    scan_idle,
+                    remaining: Arc::new(AtomicUsize::new(max_matches)),
+                    with_truncated: params.with_truncated,
+                    data: Vec::default(),
+                    stats: GrepStats::default(),
+                    new: false,
+                };
+                Ok(cursor)
+            }
+            None => not_found!(format!("cursor {} was not found, perhaps it expired?", id)),
+        }
+    }
+
+    /// Check if this cursor has been exhausted
+    ///
+    /// A grep cursor is only exhausted once the inner list cursor is exhausted, every
+    /// key it handed us has been searched, and no item is waiting to be resumed.
+    #[must_use]
+    pub fn exhausted(&self) -> bool {
+        self.retain.inner_exhausted
+            && self.retain.pending.is_empty()
+            && self.retain.resume.is_none()
+    }
+
+    /// Grep the next page of items for this cursor
+    ///
+    /// A page keeps scanning items until it has `limit` items to return, its scan
+    /// time budget is spent, its match budget is exhausted, or the corpus runs out.
+    /// Once at least one document with actual matches has been found a page also
+    /// stops after `scan_idle` passes without finding another, so partially full
+    /// pages still return promptly; items with only truncated or errored documents
+    /// never arm or reset that cutoff. Both time budgets are checked between items,
+    /// so a single slow item can overshoot them by its own scan time.
+    ///
+    /// Any keys that were listed but not searched are left in `pending` so that
+    /// continuing this cursor resumes at the exact item we stopped at. If the match
+    /// budget died inside an item then its within item progress is saved in `resume`
+    /// and that item is finished first on the next page, skipping the matches it
+    /// already returned so no match is ever duplicated or lost.
+    ///
+    /// # Arguments
+    ///
+    /// * `user` - The user that is grepping these items
+    /// * `matcher` - The compiled matcher to search documents with
+    /// * `shared` - Shared Thorium objects
+    #[instrument(name = "GrepCursor::next", skip_all, err(Debug))]
+    pub async fn next<T: GrepSupport>(
+        &mut self,
+        user: &User,
+        matcher: &RegexMatcher,
+        shared: &Shared,
+    ) -> Result<(), ApiError> {
+        // if we have no groups then short circuit and do nothing
+        if self.retain.groups.is_empty() {
+            // log that this user has no groups
+            event!(Level::WARN, msg = "User has no groups");
+            return Ok(());
+        }
+        // how many items we have searched in this page
+        let mut searched = 0;
+        // how many pages of keys we have listed in this page
+        let mut listed = 0;
+        // the keys this page has already searched, so a mid page checkpoint can
+        // restore them; nothing searched this page has been returned to the user yet
+        let mut consumed: Vec<String> = Vec::new();
+        // the resume state this page started with, so a checkpoint can restore it
+        let page_resume = self.retain.resume.clone();
+        // the wall clock this pages time budgets are measured against
+        let started = Instant::now();
+        // when this page last found an item with new matches
+        let mut last_found = started;
+        // why this page stopped scanning, assuming we run out of items unless a
+        // budget breaks out of the loop first
+        let mut reason = "exhausted";
+        // keep searching items until we fill a page of matches, spend our time or
+        // match budgets, or run out of items
+        loop {
+            // if we have a full page of items with matches then stop scanning
+            if self.data.len() >= self.limit {
+                reason = "page_full";
+                break;
+            }
+            // only check our time budgets after some progress has been made so even
+            // a tiny budget always advances this cursor instead of stalling it
+            if searched > 0 || listed > 0 {
+                // if our scan time budget is spent then stop scanning
+                if started.elapsed() >= self.scan_time {
+                    reason = "scan_time";
+                    break;
+                }
+                // if we have found matches but haven't found more recently then stop
+                // scanning so a partially full page still returns promptly
+                //
+                // only documents with actual matches arm this cutoff, so a stream of
+                // hit-less truncated or errored documents can never end a scan early
+                if self.stats.found > 0 && last_found.elapsed() >= self.scan_idle {
+                    reason = "scan_idle";
+                    break;
+                }
+            }
+            // finish any item whose match budget died mid search on an earlier page first
+            if let Some(resume) = self.retain.resume.take() {
+                // keep this items key since the resume state is moved into the search
+                let key = resume.key.clone();
+                // rebuild the params for this item with the budget we have left
+                let params = self
+                    .retain
+                    .params(self.remaining.load(AtomicOrdering::Relaxed), self.with_truncated);
+                // grep the rest of this items documents, skipping already returned matches
+                let scan = match grep::grep_item::<T>(
+                    user,
+                    &key,
+                    &params,
+                    matcher,
+                    self.remaining.clone(),
+                    Some(resume),
+                    shared,
+                )
+                .await
+                {
+                    Ok(scan) => scan,
+                    // this item was deleted between pages so there is nothing left to resume
+                    Err(error) if error.status() == StatusCode::NOT_FOUND => {
+                        // log that we dropped the resume state for a deleted item
+                        event!(
+                            Level::WARN,
+                            msg = "Dropped resume state for a missing item",
+                            key = key.as_str()
+                        );
+                        // a deleted item still counts as progress so our time budgets
+                        // bound how many keys one request can walk
+                        searched += 1;
+                        continue;
+                    }
+                    // any other error fails this page before its state is saved
+                    Err(error) => return Err(error),
+                };
+                // count this item as searched even if it had no new matches
+                searched += 1;
+                // fold this items document counts into this pages stats
+                self.stats.merge(&scan.stats);
+                // only keep items that still have documents to return
+                if !scan.matches.is_empty() {
+                    self.data.push(scan.matches);
+                }
+                // only an item that found actual matches resets our idle cutoff so
+                // truncated or errored documents never keep a scan looking alive
+                if scan.stats.found > 0 {
+                    last_found = Instant::now();
+                }
+                // if the budget died inside this item again then save its new state and stop
+                if let Some(resume) = scan.resume {
+                    self.retain.resume = Some(resume);
+                    reason = "match_budget";
+                    break;
+                }
+                continue;
+            }
+            // if we have no keys left to search then list the next page of them
+            if self.retain.pending.is_empty() {
+                // if our inner cursor is exhausted then we have nothing left to search
+                if self.retain.inner_exhausted {
+                    break;
+                }
+                // list the next page of keys to grep
+                let keys = T::list_greppable(user, self, shared).await?;
+                // if our inner cursor handed back no cursor id then its exhausted
+                self.retain.inner_exhausted = self.retain.inner.is_none();
+                // count this listing as progress so our time budgets are now live
+                listed += 1;
+                // an empty listing can still advance the inner cursor (deduped or
+                // sparse buckets), so keep listing until it is exhausted or a time
+                // budget breaks instead of handing back a needlessly empty page
+                if keys.is_empty() {
+                    continue;
+                }
+                // queue these keys to be searched
+                self.retain.pending.extend(keys);
+                // checkpoint this cursor so a mid page error cannot lose these keys
+                //
+                // the advanced inner cursor state is embedded in this cursor, so this
+                // one save atomically persists the listed keys and the position they
+                // came from. The checkpoint restores everything this page has consumed
+                // but not returned yet, so a retry after an error searches every
+                // unreturned item again.
+                self.save_checkpoint(&consumed, &page_resume, shared)
+                    .await?;
+            }
+            // if our match budget is exhausted then stop before searching another item
+            if self.remaining.load(AtomicOrdering::Relaxed) == 0 {
+                reason = "match_budget";
+                break;
+            }
+            // pop the next key to search
+            let Some(key) = self.retain.pending.pop_front() else {
+                break;
+            };
+            // rebuild the params for this item
+            let params = self
+                .retain
+                .params(self.remaining.load(AtomicOrdering::Relaxed), self.with_truncated);
+            // grep this single item
+            let scan = match grep::grep_item::<T>(
+                user,
+                &key,
+                &params,
+                matcher,
+                self.remaining.clone(),
+                None,
+                shared,
+            )
+            .await
+            {
+                Ok(scan) => scan,
+                // this item was deleted after it was listed so just skip it
+                Err(error) if error.status() == StatusCode::NOT_FOUND => {
+                    // log that we skipped a deleted item
+                    event!(
+                        Level::WARN,
+                        msg = "Skipped a missing item",
+                        key = key.as_str()
+                    );
+                    // a deleted item still counts as progress so our time budgets
+                    // bound how many keys one request can walk
+                    searched += 1;
+                    continue;
+                }
+                // any other error fails this page; the last saved state or checkpoint
+                // still has this key pending so a retry searches it again
+                Err(error) => return Err(error),
+            };
+            // remember this key so a mid page checkpoint can restore it
+            consumed.push(key);
+            // count this item as searched even if it had no matches
+            searched += 1;
+            // fold this items document counts into this pages stats
+            self.stats.merge(&scan.stats);
+            // only keep items that still have documents to return
+            if !scan.matches.is_empty() {
+                self.data.push(scan.matches);
+            }
+            // only an item that found actual matches resets our idle cutoff so
+            // truncated or errored documents never keep a scan looking alive
+            if scan.stats.found > 0 {
+                last_found = Instant::now();
+            }
+            // if the budget died inside this item then save where to resume so no
+            // matches are ever lost
+            if let Some(resume) = scan.resume {
+                self.retain.resume = Some(resume);
+                reason = "match_budget";
+                break;
+            }
+        }
+        // note how this page went so long scans are observable
+        event!(
+            Level::INFO,
+            msg = "Finished grep page",
+            reason,
+            searched,
+            listed,
+            matched = self.data.len(),
+            found = self.stats.found,
+            truncated = self.stats.truncated,
+            errors = self.stats.errors,
+            elapsed_ms = started.elapsed().as_millis() as u64,
+        );
+        Ok(())
+    }
+
+    /// Save a mid page checkpoint of this cursor to redis
+    ///
+    /// Listing items advances the inner list cursor whose state is embedded in this
+    /// cursor, so this one save atomically persists the freshly listed keys and the
+    /// position they came from. A checkpoint restores everything this page has
+    /// consumed but not yet returned, so a retry after a mid page error searches
+    /// every unreturned item again instead of silently losing them.
+    ///
+    /// # Arguments
+    ///
+    /// * `consumed` - The keys this page already searched
+    /// * `page_resume` - The resume state this page started with
+    /// * `shared` - Shared Thorium objects
+    #[instrument(name = "GrepCursor::save_checkpoint", skip_all, err(Debug))]
+    async fn save_checkpoint(
+        &self,
+        consumed: &[String],
+        page_resume: &Option<GrepResume>,
+        shared: &Shared,
+    ) -> Result<(), ApiError> {
+        // build the retained state this checkpoint should restore on a retry
+        let checkpoint = grep_checkpoint_retain(&self.retain, consumed, page_resume);
+        // serialize our checkpoint
+        let data = serialize!(&checkpoint);
+        // build the key to save this checkpoint too scoped to the creating user
+        let key = cursors::data(CursorKind::Grep, &self.username, &self.id, shared);
+        // hold onto checkpoints for the same window as a saved cursor
+        let ttl = if self.new { 28_800 } else { 604_800 };
+        // save this checkpoint to redis
+        let _: () = query!(cmd("set").arg(key).arg(data).arg("EX").arg(ttl), shared).await?;
+        Ok(())
+    }
+
+    /// Save this grep cursor to redis
+    ///
+    /// # Arguments
+    ///
+    /// * `shared` - Shared Thorium objects
+    #[instrument(name = "GrepCursor::save", skip_all, err(Debug))]
+    pub async fn save(&self, shared: &Shared) -> Result<(), ApiError> {
+        // serialize our retained info
+        let data = serialize!(&self.retain);
+        // build the key to save this cursor data too scoped to the creating user
+        let key = cursors::data(CursorKind::Grep, &self.username, &self.id, shared);
+        // we only need to save this cursor if it still has items left to search
+        if self.exhausted() {
+            // delete any existing cursor data, including any mid page checkpoints a
+            // new cursor may have written while listing items
+            let _: () = query!(cmd("del").arg(key), shared).await?;
+        } else {
+            // if this is a new cursor only hold onto it for 8 hours
+            // if its an existing cursor that is being paged then hold onto it for 7 days
+            let ttl = if self.new { 28_800 } else { 604_800 };
+            // save this cursors data to redis
+            let _: () = query!(cmd("set").arg(key).arg(data).arg("EX").arg(ttl), shared).await?;
+        }
+        Ok(())
+    }
+}
+
 /// The core logic all cursors must implement
 pub trait RedisCursorSupport: Debug + Serialize + for<'a> Deserialize<'a> {
     /// The params to use when listing data in redis
@@ -3699,7 +4365,10 @@ impl<D: RedisCursorSupport> RedisCursor<D> {
     /// # Arguments
     ///
     /// * `shared` - Shared Thorium objects
-    pub async fn consume(&mut self, shared: &Shared) -> Result<ApiCursor<D::Names>, ApiError> {
+    pub async fn consume(&mut self, shared: &Shared) -> Result<ApiCursor<D::Names>, ApiError>
+    where
+        D::Names: CursorMetadataSupport,
+    {
         // get the correct size to preallocate for our api cursor data
         let size = std::cmp::min(self.limit, self.retain.remaining.len());
         // preallocate the vec of data to return
@@ -3782,7 +4451,11 @@ impl<D: RedisCursorSupport> RedisCursor<D> {
             Some(self.id)
         };
         // build our cursor object
-        Ok(ApiCursor { cursor: id, data })
+        Ok(ApiCursor {
+            cursor: id,
+            data,
+            metadata: None,
+        })
     }
 
     /// Saves this cursor to Redis
@@ -3817,14 +4490,15 @@ impl<D: RedisCursorSupport> RedisCursor<D> {
 #[cfg(test)]
 mod tests {
     use super::{
-        ExistsCursor, GroupedScyllaCursor, GroupedScyllaCursorRetain, ScyllaCursor,
-        ScyllaCursorRetain, build_group_filter, build_query_string_clause,
-        scylla_cursor_save_expire, simple_scylla_delete_kind, simple_scylla_save_kind,
+        ExistsCursor, GrepCursorRetain, GrepResume, GroupedScyllaCursor,
+        GroupedScyllaCursorRetain, ScyllaCursor, ScyllaCursorRetain, build_group_filter,
+        build_query_string_clause, grep_checkpoint_retain, scylla_cursor_save_expire,
+        simple_scylla_delete_kind, simple_scylla_save_kind,
     };
     use crate::models::{NetworkPolicyListLine, NetworkPolicyListRow, SampleListLine};
     use crate::utils::helpers;
     use chrono::prelude::*;
-    use std::collections::{HashMap, HashSet};
+    use std::collections::{HashMap, HashSet, VecDeque};
     use uuid::Uuid;
 
     /// `SimpleScyllaCursor::save` builds the exhausted-cursor `DEL` key with the same
@@ -4256,5 +4930,112 @@ mod tests {
             cursor.retain.ties,
             vec![("c".to_owned(), vec!["g2".to_owned()])]
         );
+    }
+
+    /// Grep cursors saved before resume state existed must still deserialize.
+    #[test]
+    fn grep_cursor_retain_defaults_resume_for_old_cursors() {
+        // build the JSON an older cursor would have saved before resume existed
+        let old = serde_json::json!({
+            "pattern": "corn",
+            "case_insensitive": false,
+            "multi_line": false,
+            "sources": ["Results"],
+            "tools": [],
+            "groups": ["corn-group"],
+            "requested_groups": [],
+            "start": "2026-01-01T00:00:00Z",
+            "end": "2025-01-01T00:00:00Z",
+            "inner": null,
+            "inner_exhausted": false,
+            "pending": ["corn-key"],
+        });
+        // an old cursor should still deserialize with no resume state
+        let retain: GrepCursorRetain = serde_json::from_value(old).unwrap();
+        assert!(retain.resume.is_none());
+        // and its other retained info should survive untouched
+        assert_eq!(retain.pattern, "corn");
+        assert_eq!(retain.pending, VecDeque::from(["corn-key".to_owned()]));
+    }
+
+    /// Mid page checkpoints restore consumed keys and the page start resume state.
+    #[test]
+    fn grep_checkpoint_restores_consumed_state() {
+        // build the retained state partway through a page
+        let retain = GrepCursorRetain {
+            pattern: "corn".to_owned(),
+            case_insensitive: false,
+            multi_line: false,
+            sources: Vec::default(),
+            tools: Vec::default(),
+            groups: vec!["corn-group".to_owned()],
+            requested_groups: Vec::default(),
+            start: Utc::now(),
+            end: Utc::now(),
+            inner: None,
+            inner_exhausted: false,
+            pending: VecDeque::from(["k3".to_owned(), "k4".to_owned()]),
+            resume: None,
+        };
+        // this page already searched two keys and finished the resume item
+        let consumed = vec!["k1".to_owned(), "k2".to_owned()];
+        let page_resume = Some(GrepResume {
+            key: "k0".to_owned(),
+            docs: Vec::default(),
+        });
+        // build a checkpoint of this page
+        let checkpoint = grep_checkpoint_retain(&retain, &consumed, &page_resume);
+        // consumed keys should be restored to the front in their original order
+        assert_eq!(
+            checkpoint.pending,
+            VecDeque::from([
+                "k1".to_owned(),
+                "k2".to_owned(),
+                "k3".to_owned(),
+                "k4".to_owned()
+            ])
+        );
+        // the resume state this page started with should be restored
+        assert_eq!(
+            checkpoint.resume.as_ref().map(|resume| resume.key.as_str()),
+            Some("k0")
+        );
+    }
+
+    /// Grep cursors embed their inner list cursors retained state as a blob.
+    #[test]
+    fn grep_retain_round_trips_inner_blob() {
+        // serialize an inner list cursors retained state into a blob, including
+        // the dedupe set that keeps later pages from repeating items
+        let mut inner = sample_retain();
+        inner.dedupe_set.insert("corn-sha".to_owned());
+        let blob = serde_json::to_string(&inner).unwrap();
+        // embed that blob in a grep cursors retained state
+        let retain = GrepCursorRetain {
+            pattern: "corn".to_owned(),
+            case_insensitive: false,
+            multi_line: false,
+            sources: Vec::default(),
+            tools: Vec::default(),
+            groups: vec!["corn-group".to_owned()],
+            requested_groups: Vec::default(),
+            start: Utc::now(),
+            end: Utc::now(),
+            inner: Some(blob),
+            inner_exhausted: false,
+            pending: VecDeque::default(),
+            resume: None,
+        };
+        // round trip the grep cursors retained state like saving to redis does
+        let saved = serde_json::to_string(&retain).unwrap();
+        let restored: GrepCursorRetain = serde_json::from_str(&saved).unwrap();
+        // the embedded inner state should restore into the same list cursor state
+        let blob = restored.inner.unwrap();
+        let rebuilt: ScyllaCursorRetain<SampleListLine> = serde_json::from_str(&blob).unwrap();
+        assert_eq!(rebuilt.start, inner.start);
+        assert_eq!(rebuilt.end, inner.end);
+        assert_eq!(rebuilt.group_by, inner.group_by);
+        // the dedupe set must survive so items are never repeated across pages
+        assert!(rebuilt.dedupe_set.contains("corn-sha"));
     }
 }

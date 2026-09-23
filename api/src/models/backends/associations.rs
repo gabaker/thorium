@@ -575,7 +575,11 @@ impl TryFrom<ScyllaCursor<ListableAssociation>> for ApiCursor<Association> {
             .map(Association::try_from)
             .collect::<Result<Vec<Association>, ApiError>>()?;
         // build our api cursor with our converted data
-        Ok(ApiCursor { cursor: id, data })
+        Ok(ApiCursor {
+            cursor: id,
+            data,
+            metadata: None,
+        })
     }
 }
 

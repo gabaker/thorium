@@ -2062,6 +2062,7 @@ impl ApiCursor<EntityListLine> {
         Ok(ApiCursor {
             cursor: self.cursor,
             data: populated,
+            metadata: None,
         })
     }
 }

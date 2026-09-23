@@ -54,6 +54,7 @@ pub use search::events::tags::TagSearchEvents;
 pub use search::events::{SearchEvents, SearchEventsClient};
 pub use streams::Streams;
 pub use system::System;
+pub use traits::GrepClient;
 pub use traits::ResultsClient;
 pub use trees::Trees;
 pub use updates::Updates;
@@ -82,6 +83,7 @@ cfg_if::cfg_if! {
         pub use associations::AssociationsBlocking;
 
         // expose blocking traits
+        pub use traits::GrepClientBlocking;
         pub use traits::ResultsClientBlocking;
 
         // get needed imports

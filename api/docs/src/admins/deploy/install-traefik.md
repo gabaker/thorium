@@ -20,6 +20,9 @@ helm show values traefik/traefik > traefik-values.yml
 ### 3) Modify the default helm values fpr Traefik
 
 Update read and write response timeouts for http and https requests going through the traefik ingress proxy.
+This matters beyond large uploads: stock Traefik defaults `readTimeout` to 60 seconds, and long polling
+routes like grep searches scan for up to 50 seconds per page by default, so a proxy that keeps the stock
+timeouts can clip otherwise healthy requests.
 
 ```yaml
 ports:

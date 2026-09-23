@@ -18,7 +18,8 @@ use crate::models::{
     DecompiledFunction, Dependencies, DependencyPassStrategy, DeviceEntityRequest, Entity,
     EntityMetadata, EntityMetadataRequest, EntityMetadataUpdate, EntityRequest,
     EphemeralDependencySettings, FileSystemEntity,
-    FileSystemFolderEntity, FilesHandler, Flag, GenericJobArgs, GroupRequest, GroupUsersRequest,
+    FileSystemFolderEntity, FilesHandler, Flag, GenericJobArgs, GroupRequest, GroupUpdate,
+    GroupUsersRequest, GroupUsersUpdate,
     ImageLifetime, ImageRequest, ImageScaler, ImageVersion, IncidentRequest, IpBlock, IpBlockRaw,
     Ipv4Block,
     Ipv6Block, KwargDependency, NetworkPolicyCustomK8sRule, NetworkPolicyCustomLabel,
@@ -169,6 +170,28 @@ pub async fn client(client: &Thorium) -> Result<Thorium, Error> {
         .basic_auth(username, password)
         .build()
         .await
+}
+
+/// Create a new user that is a member of the given groups and build a client for them
+///
+/// # Arguments
+///
+/// * `admin` - An admin client to create the user and update the groups with
+/// * `groups` - The groups to add the new user to
+#[allow(dead_code)]
+pub async fn client_in_groups(admin: &Thorium, groups: &[String]) -> Result<Thorium, Error> {
+    // create a new user and build a client for them
+    let new_client = client(admin).await?;
+    // get the username of our new user
+    let username = new_client.users.info().await?.username;
+    // add our new user to each group
+    for group in groups {
+        // build an update adding our new user as a direct member
+        let update =
+            GroupUpdate::default().users(GroupUsersUpdate::default().direct_add(&username));
+        admin.groups.update(group, &update).await?;
+    }
+    Ok(new_client)
 }
 
 /// Generate a random image request

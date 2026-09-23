@@ -1872,6 +1872,136 @@ impl Default for Results {
     }
 }
 
+/// Helps serde default the max number of matches a single grep query can return to 1000
+fn default_grep_max_matches() -> usize {
+    1000
+}
+
+/// Helps serde default the max number of bytes we will search in a single document to 64 MiB
+fn default_grep_max_document_size() -> ByteSize {
+    ByteSize::mib(64)
+}
+
+/// Helps serde default the max number of bytes a single line can be to 1 MiB
+fn default_grep_max_line_size() -> ByteSize {
+    ByteSize::mib(1)
+}
+
+/// Helps serde default the number of documents to search at once to 10
+fn default_grep_concurrency() -> usize {
+    10
+}
+
+/// Helps serde default the max size a compiled regex can be to 10 MiB
+fn default_grep_regex_size_limit() -> ByteSize {
+    ByteSize::mib(10)
+}
+
+/// Helps serde default the max size a regex's DFA cache can be to 10 MiB
+fn default_grep_dfa_size_limit() -> ByteSize {
+    ByteSize::mib(10)
+}
+
+/// Helps serde default the max number of bytes in a match snippet to 512
+fn default_grep_max_snippet_size() -> usize {
+    512
+}
+
+/// Helps serde default the max number of items to grep in a single page to 100
+fn default_grep_max_items() -> usize {
+    100
+}
+
+/// Helps serde default the max number of milliseconds a grep page can scan for to 50 seconds
+fn default_grep_max_scan_time() -> u64 {
+    50_000
+}
+
+/// Helps serde default the max number of milliseconds a grep page keeps scanning after its last new match to 3 seconds
+fn default_grep_max_scan_idle() -> u64 {
+    3_000
+}
+
+/// The settings for grep based searches
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, JsonSchema)]
+pub struct Grep {
+    /// The max number of matches a single grep query can return
+    ///
+    /// Once this many matches have been found the search is halted early, even
+    /// if more documents are still queued.
+    #[serde(default = "default_grep_max_matches")]
+    pub max_matches: usize,
+    /// The max number of bytes we will search in a single document; accepts M, MB,
+    /// MiB, or equivalents for KB and GB
+    ///
+    /// Documents larger then this are streamed up to this limit and then abandoned,
+    /// which is reported back to the user as a truncated document. The entire document
+    /// is never resident in memory at once.
+    #[serde(default = "default_grep_max_document_size")]
+    #[schemars(example = "64 MiB")]
+    #[schemars(schema_with = "bytesize_schema_gen")]
+    pub max_document_size: ByteSize,
+    /// The max number of bytes a single line in a document can be; accepts M, MB,
+    /// MiB, or equivalents for KB and GB
+    ///
+    /// This bounds how large the searchers roll buffer can grow while searching a
+    /// stream of data.
+    #[serde(default = "default_grep_max_line_size")]
+    #[schemars(example = "1 MiB")]
+    #[schemars(schema_with = "bytesize_schema_gen")]
+    pub max_line_size: ByteSize,
+    /// The number of documents to search at once
+    #[serde(default = "default_grep_concurrency")]
+    pub concurrency: usize,
+    /// The max size a compiled regex can be; accepts M, MB, MiB, or equivalents for KB and GB
+    #[serde(default = "default_grep_regex_size_limit")]
+    #[schemars(example = "10 MiB")]
+    #[schemars(schema_with = "bytesize_schema_gen")]
+    pub regex_size_limit: ByteSize,
+    /// The max size a regexes DFA cache can be; accepts M, MB, MiB, or equivalents for KB and GB
+    #[serde(default = "default_grep_dfa_size_limit")]
+    #[schemars(example = "10 MiB")]
+    #[schemars(schema_with = "bytesize_schema_gen")]
+    pub dfa_size_limit: ByteSize,
+    /// The max number of bytes to return in a single matches snippet
+    #[serde(default = "default_grep_max_snippet_size")]
+    pub max_snippet_size: usize,
+    /// The max number of items (samples/repos/entities) to grep in a single page
+    #[serde(default = "default_grep_max_items")]
+    pub max_items: usize,
+    /// The max number of milliseconds a single corpus grep page can scan for
+    ///
+    /// A corpus grep page keeps scanning items until it fills a page of matches, this
+    /// much time passes, or the corpus is exhausted. This is in milliseconds rather
+    /// then the seconds used elsewhere so tests can set sub second budgets.
+    #[serde(default = "default_grep_max_scan_time")]
+    pub max_scan_time: u64,
+    /// The max number of milliseconds a corpus grep page keeps scanning after its last new match
+    ///
+    /// This only applies once a page has found at least one item with matches, so a
+    /// page that has found nothing keeps scanning until its scan time is spent.
+    #[serde(default = "default_grep_max_scan_idle")]
+    pub max_scan_idle: u64,
+}
+
+impl Default for Grep {
+    /// Create a default grep config
+    fn default() -> Self {
+        Grep {
+            max_matches: default_grep_max_matches(),
+            max_document_size: default_grep_max_document_size(),
+            max_line_size: default_grep_max_line_size(),
+            concurrency: default_grep_concurrency(),
+            regex_size_limit: default_grep_regex_size_limit(),
+            dfa_size_limit: default_grep_dfa_size_limit(),
+            max_snippet_size: default_grep_max_snippet_size(),
+            max_items: default_grep_max_items(),
+            max_scan_time: default_grep_max_scan_time(),
+            max_scan_idle: default_grep_max_scan_idle(),
+        }
+    }
+}
+
 /// Helps serde default the ephemeral files bucket to thorium-ephemeral-files
 fn default_ephemeral_bucket() -> String {
     "thorium-ephemeral-files".to_owned()
@@ -1956,7 +2086,7 @@ fn default_repos_bucket() -> String {
     "thorium-repos-files".to_owned()
 }
 
-/// Helps serde default the repos earliest to 01/01/2010
+/// Helps serde default the repos earliest to 01/01/2000
 fn default_repos_earliest() -> i64 {
     946_684_801
 }
@@ -2412,6 +2542,9 @@ pub struct Thorium {
     /// The settings for results
     #[serde(default)]
     pub results: Results,
+    /// The settings for grep based searches
+    #[serde(default)]
+    pub grep: Grep,
     /// The settings for ephemeral files
     #[serde(default)]
     pub ephemeral: Ephemeral,

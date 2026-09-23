@@ -16,7 +16,7 @@ use crate::models::{
     KeySupport, TagDeleteRequest, TagRequest, User,
 };
 use crate::utils::{ApiError, Shared, helpers};
-use crate::{bad, not_found, serialize};
+use crate::{deserialize, not_found, serialize};
 
 /// Create a `Entity` in Scylla
 ///
@@ -131,9 +131,10 @@ pub async fn create(
 /// * `shared` - Shared Thorium objects
 #[instrument(name = "db::entities::get", skip(shared), err(Debug))]
 pub async fn get(groups: &[String], id: Uuid, shared: &Shared) -> Result<Entity, ApiError> {
-    // make sure we don't have empty groups
+    // a user with no groups cannot see any entity, so report it as missing just
+    // like an entity that doesn't exist in any of their groups
     if groups.is_empty() {
-        return bad!("Groups cannot be empty when getting an entity".to_string());
+        return not_found!(format!("Entity {id} not found"));
     }
     let mut entity: Option<Entity> = None;
     // break our groups into chunks of 100
@@ -198,6 +199,41 @@ pub async fn list(
     }
     // save this cursor
     cursor.save(shared).await?;
+    Ok(cursor)
+}
+
+/// List entities for a grep search without saving the list cursor
+///
+/// Grep cursors embed the retained state of their inner list cursor, so the cursor
+/// built here is handed back unsaved for its owner to persist atomically.
+///
+/// # Arguments
+///
+/// * `user` - The user that is listing entities
+/// * `params` - The query params to use when listing entities
+/// * `retain` - The serialized retained state of the list cursor to resume
+/// * `shared` - Shared Thorium objects
+#[instrument(name = "db::entities::list_greppable", skip(user, retain, shared), err(Debug))]
+pub async fn list_greppable(
+    user: &User,
+    params: EntityListParams,
+    retain: Option<String>,
+    shared: &Shared,
+) -> Result<ScyllaCursor<EntityListLine>, ApiError> {
+    // resume our cursor from its retained state or build a new one from our params
+    let mut cursor = match retain {
+        Some(retain) => {
+            ScyllaCursor::from_retain(deserialize!(&retain), &user.username, params.limit, true, shared)?
+        }
+        None => ScyllaCursor::from_params(params, &user.username, true, shared).await?,
+    };
+    // get the next page of data for this cursor
+    cursor.next(shared).await?;
+    // if we are searching on tags, we need to supplement the data
+    // with names+kinds because tag rows don't have them
+    if cursor.retain.tags_retain.is_some() {
+        supplement_tag_lines(&mut cursor.data, shared).await?;
+    }
     Ok(cursor)
 }
 
