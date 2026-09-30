@@ -42,7 +42,7 @@ pub fn calculate_image_args_update(
             repo: set_modified_opt!(old_args.repo, new_args.repo),
             clear_commit: set_clear!(old_args.commit, new_args.commit),
             commit: set_modified_opt!(old_args.commit, new_args.commit),
-            // needs template
+            // the output strategies are always set, so send the new one whenever it differs
             output: set_modified!(old_args.output, new_args.output),
             output_files: set_modified!(old_args.output_files, new_args.output_files),
         })
@@ -144,7 +144,7 @@ fn calculate_results_dependencies_update(
         // add images that are in the new but not in the old
         add_images,
         location: set_modified!(old.location, new.location),
-        // needs template
+        // the results kwarg is always set, so send the new one whenever it differs
         kwarg: set_modified!(old.kwarg, new.kwarg),
         strategy: set_modified!(old.strategy, new.strategy),
         remove_names,
@@ -201,7 +201,7 @@ fn calculate_tags_dependencies_update(
 /// * `old` - The old dependencies settings
 /// * `new` - The new dependencies settings
 #[allow(clippy::needless_pass_by_value)]
-fn calculate_childen_dependencies_update(
+fn calculate_children_dependencies_update(
     mut old: ChildrenDependencySettings,
     mut new: ChildrenDependencySettings,
 ) -> ChildrenDependencySettingsUpdate {
@@ -285,7 +285,7 @@ pub fn calculate_dependencies_update(old: Dependencies, new: Dependencies) -> De
     let results = calculate_results_dependencies_update(old.results, new.results);
     let repos = calculate_repo_dependencies_update(old.repos, new.repos);
     let tags = calculate_tags_dependencies_update(old.tags, new.tags);
-    let children = calculate_childen_dependencies_update(old.children, new.children);
+    let children = calculate_children_dependencies_update(old.children, new.children);
     let filesystems = calculate_filesystem_dependencies_update(old.filesystems, new.filesystems);
     let cache = calculate_cache_dependencies_update(old.cache, new.cache);
     // build our dependencies update
@@ -517,21 +517,25 @@ pub fn calculate_child_filters_update(
 
 /// Calculate a kvm update by diffing old and new kvm settings
 ///
+/// The update API has no way to clear KVM settings, so removing them (`Some` to
+/// `None`) yields a no-op; the import and edit paths keep the existing settings
+/// in that case (see `MergeableImage::retain_unsettable`) so it never reads as a
+/// change.
+///
 /// # Arguments
 ///
 /// * `old_kvm` - The old kvm settings
 /// * `new_kvm` - The new kvm settings
 pub fn calculate_kvm_update(old_kvm: Option<Kvm>, new_kvm: Option<Kvm>) -> KvmUpdate {
     match (old_kvm, new_kvm) {
-        // none in both cases, so return a noop
-        (None, None) => KvmUpdate::default(),
+        // no new settings: either there were none before, or they were removed and
+        // the update API has no way to clear them, so return a noop
+        (_, None) => KvmUpdate::default(),
         // we added kvm settings, so set the update to whatever the new one is
         (None, Some(new_kvm)) => KvmUpdate {
             xml: Some(new_kvm.xml),
             qcow2: Some(new_kvm.qcow2),
         },
-        // set from Some to None, but there's no way to clear Kvm settings currently
-        (Some(_), None) => KvmUpdate::default(),
         (Some(old_kvm), Some(new_kvm)) => {
             if old_kvm == new_kvm {
                 KvmUpdate::default()

@@ -115,8 +115,9 @@ pub use oauth::{
     OAuthUserCreate, OAuthUsernameCheck,
 };
 pub use pipelines::{
-    Pipeline, PipelineBan, PipelineBanKind, PipelineBanUpdate, PipelineDetailsList, PipelineList,
-    PipelineListParams, PipelineRequest, PipelineStats, PipelineUpdate, StageStats,
+    DEFAULT_PIPELINE_SLA, Pipeline, PipelineBan, PipelineBanKind, PipelineBanUpdate,
+    PipelineDetailsList, PipelineList, PipelineListParams, PipelineRequest, PipelineStats,
+    PipelineUpdate, StageStats,
 };
 pub use reactions::{
     BulkReactionResponse, HandleReactionResponse, Reaction, ReactionArgs, ReactionCache,

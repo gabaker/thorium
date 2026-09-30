@@ -22,6 +22,7 @@ use super::{Controller, update};
 use crate::args::files::{
     CountFiles, DeleteFiles, DescribeFiles, DownloadFiles, Files, GetFiles, UploadFiles,
 };
+use crate::args::pipelines::PipelineTarget;
 use crate::args::{Args, DescribeCommand, SearchParameterized};
 use crate::utils;
 
@@ -215,29 +216,35 @@ pub async fn build_reaction_reqs(
 ) -> Result<Vec<ReactionRequest>, Error> {
     // create list of base reaction requests
     let reaction_reqs = match &cmd.pipelines {
-            Some(pipelines) =>
-                stream::iter(pipelines
-                    .iter())
-                    .map(|pipeline| async move {
-                        // attempt to parse the pipeline name/group
-                        let parse_err = || Error::new(format!(
-                            "Error parsing pipeline '{pipeline}'; pipeline should be formatted '<PIPELINE>:<GROUP>'",
-                        ));
-                        let mut split = pipeline.split(':');
-                        let name = split.next().ok_or_else(parse_err)?;
-                        let group = split.next().ok_or_else(parse_err)?;
-                        if split.next().is_some() {
-                            return Err(parse_err());
-                        }
-                        thorium.pipelines.get(group, name).await.map_err(|err|
-                            Error::new(format!("Invalid pipeline '{pipeline}': {err}")))?;
-                        // create a base reaction request
-                        Ok(ReactionRequest::new(group, name))
-                    })
-                    .buffer_unordered(25)
-                    .collect::<Vec<Result<ReactionRequest, Error>>>().await,
-            None => Vec::default(),
-        };
+        Some(pipelines) => {
+            stream::iter(pipelines.iter())
+                .map(|pipeline| async move {
+                    // parse the pipeline's group and name with the shared target parser
+                    let target = PipelineTarget::parse(pipeline)?;
+                    // uploads don't search for a pipeline's group, so one must be given
+                    let Some(group) = target.group else {
+                        return Err(Error::new(format!(
+                            "Pipeline '{pipeline}' has no group; specify it as \
+                                 <GROUP>/<PIPELINE> (or <PIPELINE>:<GROUP>)",
+                        )));
+                    };
+                    // make sure the pipeline exists before uploading anything
+                    thorium
+                        .pipelines
+                        .get(&group, &target.pipeline)
+                        .await
+                        .map_err(|err| {
+                            Error::new(format!("Invalid pipeline '{pipeline}': {err}"))
+                        })?;
+                    // create a base reaction request
+                    Ok(ReactionRequest::new(group, target.pipeline))
+                })
+                .buffer_unordered(25)
+                .collect::<Vec<Result<ReactionRequest, Error>>>()
+                .await
+        }
+        None => Vec::default(),
+    };
     // recollect the possible Vec<Result> to a Result<Vec> or just convert the default Vec to a Result
     reaction_reqs.into_iter().collect()
 }

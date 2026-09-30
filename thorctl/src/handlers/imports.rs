@@ -18,7 +18,7 @@ use std::collections::HashSet;
 use thorium::models::GroupRequest;
 use thorium::{CtlConf, Error, Thorium};
 
-use super::progress::Bar;
+use super::progress::{Bar, BarKind};
 
 pub(crate) mod categorize;
 pub(crate) mod create;
@@ -39,15 +39,14 @@ use rollback::Journal;
 
 /// Whether an existing image would actually be updated by its incoming request
 ///
-/// Uses the same normalized comparison as the apply phase
-/// ([`ImageKind::calculate_update`]) so the confirmation screen never labels a
-/// difference that normalizes away (a trimmed description, a defaulted field) as a
-/// conflict the apply phase would then treat as a no-op.
+/// Uses the same update calculation as the apply phase
+/// ([`ImageKind::calculate_update`]), so the confirmation screen labels a resource
+/// "changed" exactly when the apply phase would send an update for it.
 ///
 /// # Arguments
 ///
 /// * `img` - The categorized image to test for an effective change
-fn image_would_change(img: &categorize::CategorizedImage) -> bool {
+pub fn image_would_change(img: &categorize::CategorizedImage) -> bool {
     img.existing.as_ref().is_some_and(|existing| {
         ImageKind::calculate_update(existing.clone(), img.request.clone()).is_some()
     })
@@ -55,8 +54,8 @@ fn image_would_change(img: &categorize::CategorizedImage) -> bool {
 
 /// Whether an existing pipeline would actually be updated by its incoming request
 ///
-/// The pipeline counterpart of [`image_would_change`], using
-/// [`PipelineKind::calculate_update`] for the same normalized comparison.
+/// The pipeline counterpart of [`image_would_change`], using the same update
+/// calculation as the apply phase ([`PipelineKind::calculate_update`]).
 ///
 /// # Arguments
 ///
@@ -119,6 +118,28 @@ impl ConflictMode {
     }
 }
 
+/// The shared settings an apply pass needs, identical for images and pipelines
+#[derive(Debug, Clone, Copy)]
+pub struct ApplyCtx<'a> {
+    /// How existing resources are handled
+    pub mode: ConflictMode,
+    /// The editor override for interactive merges
+    pub editor: Option<&'a str>,
+    /// Whether the session can prompt (interactive mode with a terminal)
+    pub can_prompt: bool,
+    /// Max concurrent API actions in the apply phase (the global `--workers`)
+    pub workers: usize,
+}
+
+/// Whether both stdin and stderr are terminals
+///
+/// Prompts read from stdin and dialoguer draws on stderr, so both must be a TTY
+/// before any prompt or interactive editor flow is started.
+pub fn is_interactive_terminal() -> bool {
+    use std::io::IsTerminal;
+    std::io::stdin().is_terminal() && std::io::stderr().is_terminal()
+}
+
 /// The categorized resources an import run will act on, used to show the user
 /// an accurate summary before anything is applied
 pub struct ImportPlan<'a> {
@@ -163,23 +184,96 @@ impl<'a> ImportPlan<'a> {
 
     /// Whether any existing resource would actually be updated by its request
     ///
-    /// New resources, resources that normalize to no change, and missing groups
-    /// are not conflicts. Uses the same normalized comparison as the apply phase
-    /// (see [`image_would_change`]/[`pipeline_would_change`]) to decide whether to
-    /// prompt before importing: a clean import (only creates, or no effective
-    /// changes) proceeds without confirmation.
+    /// New resources, existing resources the apply phase would not update, and
+    /// missing groups are not conflicts. Uses the same update calculation as the
+    /// apply phase (see [`image_would_change`]/[`pipeline_would_change`]).
     pub fn has_conflicts(&self) -> bool {
         self.existing_images.iter().any(|i| image_would_change(i))
-            || self.existing_pipelines.iter().any(|p| pipeline_would_change(p))
+            || self
+                .existing_pipelines
+                .iter()
+                .any(|p| pipeline_would_change(p))
     }
 }
 
-/// The label describing what will happen to existing resources in this mode
-fn existing_label(kind: &str, mode: ConflictMode) -> String {
-    match mode {
-        ConflictMode::Force => format!("Existing {kind} (will be force-updated):"),
-        ConflictMode::SkipConflicts => format!("Existing {kind} (changed will be skipped):"),
-        ConflictMode::Interactive => format!("Existing {kind} (will prompt for action):"),
+/// How the confirmation screen should describe existing resources
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PlanLabels {
+    /// Existing resources go through the normal conflict handling for this mode
+    Conflicts(ConflictMode),
+    /// `--migrate-registry`: existing images only get their url migrated and
+    /// existing pipelines are left untouched
+    MigrateRegistry,
+}
+
+/// The heading describing what will happen to existing resources of one kind
+///
+/// # Arguments
+///
+/// * `kind` - The plural resource kind being described (e.g. "Images")
+/// * `labels` - How existing resources will be handled
+fn existing_label(kind: &str, labels: PlanLabels) -> String {
+    match labels {
+        PlanLabels::Conflicts(ConflictMode::Force) => {
+            format!("Existing {kind} (will be force-updated):")
+        }
+        PlanLabels::Conflicts(ConflictMode::SkipConflicts) => {
+            format!("Existing {kind} (changed will be skipped):")
+        }
+        PlanLabels::Conflicts(ConflictMode::Interactive) => {
+            format!("Existing {kind} (will prompt for action):")
+        }
+        PlanLabels::MigrateRegistry if kind == "Pipelines" => {
+            format!("Existing {kind} (left unchanged by --migrate-registry):")
+        }
+        PlanLabels::MigrateRegistry => format!("Existing {kind} (only the image url is migrated):"),
+    }
+}
+
+/// Whether an existing image's stored url differs from its incoming request's url
+///
+/// This is the only change `--migrate-registry` applies to existing images.
+///
+/// # Arguments
+///
+/// * `img` - The categorized image to test
+pub fn image_url_would_change(img: &categorize::CategorizedImage) -> bool {
+    img.existing
+        .as_ref()
+        .is_some_and(|existing| img.request.image.is_some() && existing.image != img.request.image)
+}
+
+/// Render the changed/unchanged status tag for a resource on the confirmation screen
+///
+/// # Arguments
+///
+/// * `changed` - Whether the resource would be updated
+fn status_tag(changed: bool) -> colored::ColoredString {
+    if changed {
+        "changed".bright_yellow()
+    } else {
+        "unchanged".bright_blue()
+    }
+}
+
+/// Look up the current user's name for the confirmation prompt
+///
+/// The username is only shown in the prompt, so a lookup failure must not abort
+/// the import; it falls back to a placeholder with a warning instead.
+///
+/// # Arguments
+///
+/// * `thorium` - The Thorium client
+/// * `progress` - The progress bar to warn through
+pub async fn current_username(thorium: &Thorium, progress: &Bar) -> String {
+    match thorium.users.info().await {
+        Ok(user) => user.username,
+        Err(err) => {
+            progress.warning(format!(
+                "Could not look up the current user ({err}); continuing"
+            ));
+            "<current user>".to_string()
+        }
     }
 }
 
@@ -198,58 +292,64 @@ pub fn confirm_import(
     username: &str,
     mode: ConflictMode,
 ) -> Result<bool, Error> {
+    confirm_plan(conf, plan, username, PlanLabels::Conflicts(mode))
+}
+
+/// Confirm an import with the user, labelling existing resources per `labels`
+///
+/// # Arguments
+///
+/// * `conf` - The Thorctl config (used to display the API URL)
+/// * `plan` - The categorized resources this import will create or touch
+/// * `username` - The current user's name, shown in the confirmation prompt
+/// * `labels` - How existing resources will be handled, to label them accurately
+pub fn confirm_plan(
+    conf: &CtlConf,
+    plan: &ImportPlan,
+    username: &str,
+    labels: PlanLabels,
+) -> Result<bool, Error> {
+    // list the images that will be created
     if !plan.new_images.is_empty() {
         println!("{}", "New Images:".bright_green());
         for img in &plan.new_images {
-            println!(
-                "  {}:{} (group: {})",
-                img.name, img.version, img.request.group
-            );
+            println!("  {}", img.label());
         }
     }
+    // list the existing images, tagged with whether they would actually change
     if !plan.existing_images.is_empty() {
-        println!("{}", existing_label("Images", mode).bright_yellow());
+        println!("{}", existing_label("Images", labels).bright_yellow());
         for img in &plan.existing_images {
-            // label using the same normalized check the apply phase uses so a
-            // difference that normalizes away doesn't show as "changed"
-            let changed = image_would_change(img);
-            let status = if changed {
-                "changed".bright_yellow()
-            } else {
-                "unchanged".bright_blue()
+            // migrate only ever touches the url; otherwise use the apply phase's check
+            let changed = match labels {
+                PlanLabels::MigrateRegistry => image_url_would_change(img),
+                PlanLabels::Conflicts(_) => image_would_change(img),
             };
-            println!(
-                "  {}:{} (group: {}) [{}]",
-                img.name, img.version, img.request.group, status
-            );
+            println!("  {} [{}]", img.label(), status_tag(changed));
         }
     }
+    // list the pipelines that will be created
     if !plan.new_pipelines.is_empty() {
         println!("{}", "New Pipelines:".bright_green());
         for pipe in &plan.new_pipelines {
-            println!(
-                "  {}:{} (group: {})",
-                pipe.name, pipe.version, pipe.request.group
-            );
+            println!("  {}", pipe.label());
         }
     }
+    // list the existing pipelines; under migrate they are never touched, so no tag
     if !plan.existing_pipelines.is_empty() {
-        println!("{}", existing_label("Pipelines", mode).bright_yellow());
+        println!("{}", existing_label("Pipelines", labels).bright_yellow());
         for pipe in &plan.existing_pipelines {
-            // label using the same normalized check the apply phase uses so a
-            // difference that normalizes away doesn't show as "changed"
-            let changed = pipeline_would_change(pipe);
-            let status = if changed {
-                "changed".bright_yellow()
-            } else {
-                "unchanged".bright_blue()
-            };
-            println!(
-                "  {}:{} (group: {}) [{}]",
-                pipe.name, pipe.version, pipe.request.group, status
-            );
+            match labels {
+                PlanLabels::MigrateRegistry => println!("  {}", pipe.label()),
+                PlanLabels::Conflicts(_) => println!(
+                    "  {} [{}]",
+                    pipe.label(),
+                    status_tag(pipeline_would_change(pipe))
+                ),
+            }
         }
     }
+    // list the groups that will be created first
     if !plan.missing_groups.is_empty() {
         println!("{}", "New Groups:".bright_green());
         for group in &plan.missing_groups {
@@ -257,6 +357,7 @@ pub fn confirm_import(
         }
     }
     println!();
+    // ask the user to confirm the whole plan
     let response = dialoguer::Confirm::new()
         .with_prompt(format!(
             "Import the above items to Thorium instance at '{}' as user '{}'?",
@@ -267,6 +368,74 @@ pub fn confirm_import(
     Ok(response)
 }
 
+/// Finish an import: pick the final banner and report collected failures
+///
+/// The banner reflects both how the apply phase ended and whether any resource
+/// failed, so it never reads "Import complete!" after a Quit or a failure. Any
+/// failures, or a user Quit, are returned as one error so the command exits
+/// non-zero after keeping the resources that succeeded.
+///
+/// # Arguments
+///
+/// * `progress` - The progress bar to finish
+/// * `outcome` - How the apply phase ended
+/// * `failures` - The labels of resources that failed to import
+pub fn finish_import(
+    progress: &Bar,
+    outcome: ImportOutcome,
+    failures: &[String],
+) -> Result<(), Error> {
+    // pick the banner from the outcome and whether anything failed
+    match outcome {
+        ImportOutcome::Completed if failures.is_empty() => {
+            progress.refresh("Import complete!", BarKind::Timer);
+        }
+        ImportOutcome::Completed => {
+            progress.refresh("Import finished with errors", BarKind::Timer);
+        }
+        ImportOutcome::Quit => progress.refresh("Import stopped early", BarKind::Timer),
+    }
+    progress.finish();
+    // surface a Quit or any failed resources as an error so we exit non-zero
+    match import_error_message(outcome, failures) {
+        Some(msg) => Err(Error::new(msg)),
+        None => Ok(()),
+    }
+}
+
+/// Build the error message for an import that stopped early or had failures
+///
+/// Returns `None` when the import completed with no failures.
+///
+/// # Arguments
+///
+/// * `outcome` - How the apply phase ended
+/// * `failures` - The labels of resources that failed to import
+fn import_error_message(outcome: ImportOutcome, failures: &[String]) -> Option<String> {
+    // describe the resources that failed, if any
+    let failed = (!failures.is_empty()).then(|| {
+        format!(
+            "{} resource(s) failed to import: {}",
+            failures.len(),
+            failures.join(", ")
+        )
+    });
+    match (outcome, failed) {
+        // a clean completion is a success
+        (ImportOutcome::Completed, None) => None,
+        // a completed import with failures reports just the failures
+        (ImportOutcome::Completed, Some(failed)) => Some(failed),
+        // a Quit with no failures still leaves the import incomplete
+        (ImportOutcome::Quit, None) => {
+            Some("Import stopped early: the remaining resources were not imported".to_string())
+        }
+        // a Quit after failures reports both
+        (ImportOutcome::Quit, Some(failed)) => Some(format!(
+            "Import stopped early: the remaining resources were not imported and {failed}"
+        )),
+    }
+}
+
 /// Settle a finished (or stopped) import's journal, offering rollback
 ///
 /// On a clean completion this is a no-op. When the apply phase stopped early —
@@ -274,9 +443,9 @@ pub fn confirm_import(
 /// far are either rolled back or reported, depending on whether we can prompt:
 ///
 /// - interactive sessions are asked whether to roll back
-/// - non-interactive sessions roll back automatically only with
-///   `--rollback-on-failure`; otherwise the applied changes are listed so the
-///   partial import is auditable
+/// - non-interactive sessions (and interactive ones whose prompt fails) roll
+///   back automatically only with `--rollback-on-failure`; otherwise the applied
+///   changes are listed so the partial import is auditable
 ///
 /// The original error (if any) is always propagated after the journal is
 /// settled so exit codes still reflect the failure. A rollback that itself
@@ -307,35 +476,53 @@ pub async fn settle_journal(
     if journal.is_empty() {
         return result;
     }
-    if can_prompt {
-        // ask the user whether the partial import should be undone
-        let wants_rollback = progress.suspend(|| rollback::confirm_rollback(&journal))?;
-        if wants_rollback {
+    // ask the user whether the partial import should be undone; a failed prompt
+    // (e.g. the terminal went away) falls back to the non-interactive handling below
+    // and never replaces the original result
+    let wants_rollback = if can_prompt {
+        match progress.suspend(|| rollback::confirm_rollback(&journal)) {
+            Ok(choice) => Some(choice),
+            Err(err) => {
+                progress.warning(format!("Could not ask about rollback: {err}"));
+                None
+            }
+        }
+    } else {
+        None
+    };
+    match wants_rollback {
+        // the user chose to roll back
+        Some(true) => {
             // a rollback failure must not mask the original error: surface it as a
             // warning and still fall through to return `result` below
             if let Err(err) = journal.rollback(thorium, progress).await {
                 progress.warning(format!("Rollback failed: {err}"));
             }
         }
-    } else if rollback_on_failure {
-        progress.warning(format!(
-            "Import stopped early; rolling back {} applied changes (--rollback-on-failure)",
-            journal.len()
-        ));
-        // surface a rollback failure as a warning rather than replacing the
-        // original error that triggered the rollback
-        if let Err(err) = journal.rollback(thorium, progress).await {
-            progress.warning(format!("Rollback failed: {err}"));
+        // the user chose to keep the applied changes
+        Some(false) => {}
+        // nobody could answer, but --rollback-on-failure asks for an automatic undo
+        None if rollback_on_failure => {
+            progress.warning(format!(
+                "Import stopped early; rolling back {} applied changes (--rollback-on-failure)",
+                journal.len()
+            ));
+            // surface a rollback failure as a warning rather than replacing the
+            // original error that triggered the rollback
+            if let Err(err) = journal.rollback(thorium, progress).await {
+                progress.warning(format!("Rollback failed: {err}"));
+            }
         }
-    } else {
-        // we can't prompt and weren't told to auto-rollback: leave the changes
-        // but make the partial state visible
-        progress.warning(format!(
-            "Import stopped early with {} changes already applied (pass --rollback-on-failure to auto-undo):",
-            journal.len()
-        ));
-        for line in journal.describe() {
-            progress.warning(format!("  applied: {line}"));
+        // nobody could answer and no auto-rollback: leave the changes but make the
+        // partial state visible
+        None => {
+            progress.warning(format!(
+                "Import stopped early with {} changes already applied (pass --rollback-on-failure to auto-undo):",
+                journal.len()
+            ));
+            for line in journal.describe() {
+                progress.warning(format!("  applied: {line}"));
+            }
         }
     }
     result
@@ -343,8 +530,9 @@ pub async fn settle_journal(
 
 /// List the resource names with configs in an export directory's subdirectory
 ///
-/// Scans `<export_dir>/<subdir>/*.json` and returns the file stems, sorted for
-/// stable ordering. Used by the `--all` import flags.
+/// Scans `<export_dir>/<subdir>/*.json` files and returns their stems, sorted so
+/// the confirmation listing and prompts follow a stable order. Used when an
+/// import is given no explicit names.
 ///
 /// # Arguments
 ///
@@ -365,8 +553,15 @@ pub async fn list_export_configs(
         .map_err(|err| Error::new(format!("Failed to read '{}': {err}", dir.display())))?
     {
         let path = entry.path();
+        // skip directories and other non-file entries, even ones named `*.json`
+        let is_file = entry
+            .file_type()
+            .await
+            .map_err(|err| Error::new(format!("Failed to read '{}': {err}", path.display())))?
+            .is_file();
         // only json files are resource configs; tarballs etc live alongside them
-        if path.extension().is_some_and(|ext| ext == "json")
+        if is_file
+            && path.extension().is_some_and(|ext| ext == "json")
             && let Some(stem) = path.file_stem().and_then(|stem| stem.to_str())
         {
             names.push(stem.to_string());
@@ -378,7 +573,7 @@ pub async fn list_export_configs(
             dir.display()
         )));
     }
-    // sort so --all runs are deterministic
+    // sort so imports of a whole directory run in a stable order
     names.sort_unstable();
     Ok(names)
 }
@@ -393,10 +588,7 @@ pub async fn list_export_configs(
 ///
 /// * `existing` - The categorized resources that already exist in Thorium
 /// * `progress` - The progress bar to log warnings through
-pub fn warn_skipped<K: kind::ImportKind>(
-    existing: &[&categorize::Categorized<K>],
-    progress: &Bar,
-) {
+pub fn warn_skipped<K: kind::ImportKind>(existing: &[&categorize::Categorized<K>], progress: &Bar) {
     for item in existing {
         // only changed resources warrant a warning
         let Some(current) = item.existing.as_ref() else {
@@ -404,10 +596,9 @@ pub fn warn_skipped<K: kind::ImportKind>(
         };
         if let Some(update) = K::calculate_update(current.clone(), item.request.clone()) {
             progress.warning(format!(
-                "Skipping {} '{}:{}' (differs: {}); re-run with --overwrite or resolve interactively",
+                "Skipping {} '{}' (differs: {}); re-run with --overwrite or resolve interactively",
                 K::NOUN,
-                K::group(&item.request),
-                K::name(&item.request),
+                item.label(),
                 summary::render_changed_fields(&update),
             ));
         }
@@ -448,7 +639,8 @@ pub async fn apply_existing<K: kind::ImportKind>(
         ConflictMode::Force => {
             // apply every incoming change without the editor, collecting any per-resource
             // failures so one bad update doesn't abort the rest
-            let failures = create::force_update::<K>(thorium, existing, workers, progress, journal).await;
+            let failures =
+                create::force_update::<K>(thorium, existing, workers, progress, journal).await;
             Ok(ApplyOutcome {
                 outcome: ImportOutcome::Completed,
                 failures,
@@ -509,7 +701,36 @@ pub fn dedup_names(names: Vec<String>, progress: &Bar) -> Vec<String> {
     unique
 }
 
-/// Get the list of groups missing in Thorium that an import expects
+/// List every group the current user can see in Thorium
+///
+/// Admins see every group; other users only see the groups they are members of.
+///
+/// # Arguments
+///
+/// * `thorium` - The Thorium client
+pub async fn list_visible_groups(thorium: &Thorium) -> Result<HashSet<String>, Error> {
+    let mut thorium_groups = HashSet::new();
+    // use a very large limit to make sure we get all groups
+    let mut cursor = thorium.groups.list().limit(crate::utils::LIST_ALL_LIMIT);
+    loop {
+        // fetch the next page of group names
+        cursor
+            .next()
+            .await
+            .map_err(|err| Error::new(format!("Failed to list groups: {err}")))?;
+        thorium_groups.extend(cursor.names.drain(..));
+        // stop once every page has been read
+        if cursor.exhausted {
+            break;
+        }
+    }
+    Ok(thorium_groups)
+}
+
+/// Get the sorted list of groups missing in Thorium that an import expects
+///
+/// For non-admins a group they aren't a member of is also reported as missing,
+/// since they can't see it.
 ///
 /// # Arguments
 ///
@@ -520,23 +741,14 @@ pub async fn get_missing_groups(
     mut wanted_groups: HashSet<String>,
 ) -> Result<Vec<String>, Error> {
     // get all existing groups already in Thorium
-    let mut thorium_groups = HashSet::new();
-    // use a very large limit to make sure we get all groups
-    let mut cursor = thorium.groups.list().limit(crate::utils::LIST_ALL_LIMIT);
-    loop {
-        cursor
-            .next()
-            .await
-            .map_err(|err| Error::new(format!("Error listing groups: {err}")))?;
-        thorium_groups.extend(cursor.names.drain(..));
-        if cursor.exhausted {
-            break;
-        }
-    }
+    let thorium_groups = list_visible_groups(thorium).await?;
     // calculate which groups are missing
-    Ok(wanted_groups
+    let mut missing: Vec<String> = wanted_groups
         .extract_if(|wanted| !thorium_groups.contains(wanted))
-        .collect())
+        .collect();
+    // sort so the confirmation listing and creation order are stable
+    missing.sort_unstable();
+    Ok(missing)
 }
 
 /// Create all of the given groups in Thorium and increment the progress bar
@@ -562,13 +774,44 @@ where
     stream::iter(groups)
         .map(Ok::<_, Error>)
         .try_for_each_concurrent(workers.max(1), |missing_group| async {
+            // create the group, naming it in any failure
             let group_request = GroupRequest::new(missing_group);
-            thorium.groups.create(&group_request).await?;
+            thorium.groups.create(&group_request).await.map_err(|err| {
+                Error::new(format!(
+                    "Failed to create group '{}': {err}",
+                    group_request.name
+                ))
+            })?;
+            // record the creation so it can be rolled back
             journal.created_group(&group_request.name);
             progress.inc(1);
             Ok(())
         })
-        .await
-        .map_err(|err| Error::new(format!("Error creating missing groups: {err}")))?;
+        .await?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{ImportOutcome, import_error_message};
+
+    /// A clean completion is not an error, while failures and a Quit both are
+    #[test]
+    fn import_error_message_covers_outcomes() {
+        // a clean completion succeeds
+        assert_eq!(import_error_message(ImportOutcome::Completed, &[]), None);
+        // failures on completion list the failed resources
+        let failures = vec!["image a".to_string(), "image b".to_string()];
+        assert_eq!(
+            import_error_message(ImportOutcome::Completed, &failures).as_deref(),
+            Some("2 resource(s) failed to import: image a, image b")
+        );
+        // a Quit with no failures is still an error
+        let quit = import_error_message(ImportOutcome::Quit, &[]).unwrap();
+        assert!(quit.starts_with("Import stopped early: "));
+        // a Quit after failures reports both
+        let both = import_error_message(ImportOutcome::Quit, &failures).unwrap();
+        assert!(both.starts_with("Import stopped early: "));
+        assert!(both.ends_with("2 resource(s) failed to import: image a, image b"));
+    }
 }

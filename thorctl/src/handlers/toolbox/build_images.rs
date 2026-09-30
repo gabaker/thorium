@@ -14,8 +14,9 @@ use thorium::Error;
 use crate::args::toolbox::BuildImagesToolbox;
 use crate::handlers::container;
 use crate::handlers::progress;
+use crate::utils;
 
-use super::build::{BaseImage, DEFAULT_BASE_IMAGE_ARG};
+use super::build::{BaseImage, DEFAULT_BASE_IMAGE_ARG, default_true};
 
 /// The slice of a toolbox.json image entry that drives a build
 ///
@@ -58,7 +59,10 @@ enum BaseResolution {
 ///
 /// * `cli` - The `--base-image ARG=IMAGE` override, if given
 /// * `entry` - This image's resolved `base_image` from `toolbox.json`, if any
-fn resolve_base_build_arg(cli: Option<&(String, String)>, entry: Option<&BaseImage>) -> BaseResolution {
+fn resolve_base_build_arg(
+    cli: Option<&(String, String)>,
+    entry: Option<&BaseImage>,
+) -> BaseResolution {
     // a substitution is "requested" if the operator passed --base-image or the entry carries its
     // own resolved image; this distinguishes a genuine opt-out (Withheld) from "nothing to do"
     let requested = cli.is_some() || entry.and_then(|base| base.image.as_ref()).is_some();
@@ -119,11 +123,6 @@ fn resolve_build_args(
     args
 }
 
-/// The default for manifest booleans that should be on unless explicitly disabled
-fn default_true() -> bool {
-    true
-}
-
 /// Append a tag suffix to the version of an image tag, e.g. `reg/x:1.0` + `-mybranch`
 /// -> `reg/x:1.0-mybranch`
 ///
@@ -131,7 +130,9 @@ fn default_true() -> bool {
 /// the reference has a `:version` after its final path segment (so a registry port like
 /// `host:5000/img` isn't treated as a version, and a tag with no version is left untouched). A
 /// digest-pinned reference (`…@sha256:…`) has no mutable version and is returned unchanged. An
-/// absent or empty suffix is a no-op.
+/// absent or empty suffix is a no-op, and so is a version that already ends with the suffix (a
+/// `toolbox.json` built with `toolbox build --tag-suffix` already carries it), so passing the same
+/// suffix to both commands doesn't double it.
 ///
 /// # Arguments
 ///
@@ -151,6 +152,11 @@ fn apply_tag_suffix(tag: &str, suffix: Option<&str>) -> String {
     // only the final path segment can hold a version, so scan for the version ':' starting after the
     // last '/'; this keeps a registry port like `host:5000/img` from being mistaken for a version
     let leaf_start = tag.rfind('/').map_or(0, |slash| slash + 1);
+    // a version already carrying the suffix was suffixed at `toolbox build` time; appending again
+    // would push a tag the embedded configs don't reference
+    if tag.ends_with(suffix) {
+        return tag.to_string();
+    }
     // the version is always the tail of the reference, so when the leaf has a ':' the suffix can be
     // appended to the whole string and still land on the version; a leaf with no ':' has no version
     // to suffix and is returned untouched rather than mangling the bare name
@@ -279,7 +285,7 @@ pub async fn build_images(cmd: &BuildImagesToolbox) -> Result<(), Error> {
     let mut failures: Vec<String> = Vec::new();
     for (name, version, entry) in targets {
         // human-readable identity for log lines and the failure list
-        let label = format!("{name}:{version}");
+        let label = utils::entry_id(None, &name, &version);
         // entries can opt out of building (prebuilt images in a registry)
         if !entry.build_image {
             println!("{} {label} (build disabled)", "Skipping".bright_yellow());
@@ -301,31 +307,32 @@ pub async fn build_images(cmd: &BuildImagesToolbox) -> Result<(), Error> {
         // resolve the base-image substitution into one decision that drives both the notice and
         // the build-arg, so they can't disagree (CLI escape hatch over the entry's resolved
         // base_image, gated by allow_override)
-        let base_override = match resolve_base_build_arg(cmd.base_image.as_ref(), entry.base_image.as_ref()) {
-            BaseResolution::Apply(arg, image) => {
-                // name where the override came from for "why this base?" debugging; the CLI flag
-                // always wins in resolve_base_build_arg, so its presence alone identifies the source
-                let source = if cmd.base_image.is_some() {
-                    "--base-image"
-                } else {
-                    "toolbox.json"
-                };
-                println!(
-                    "{} base image '{image}' (build-arg {arg}, from {source}) for {label}",
-                    "Overriding".bright_cyan()
-                );
-                Some((arg, image))
-            }
-            BaseResolution::Withheld => {
-                println!(
-                    "{} base image override for {label} (allow_override = false)",
-                    "Skipping".bright_yellow()
-                );
-                None
-            }
-            // either no substitution applies, or it was withheld above; either way pass no override
-            BaseResolution::NotApplicable => None,
-        };
+        let base_override =
+            match resolve_base_build_arg(cmd.base_image.as_ref(), entry.base_image.as_ref()) {
+                BaseResolution::Apply(arg, image) => {
+                    // name where the override came from for "why this base?" debugging; the CLI flag
+                    // always wins in resolve_base_build_arg, so its presence alone identifies the source
+                    let source = if cmd.base_image.is_some() {
+                        "--base-image"
+                    } else {
+                        "toolbox.json"
+                    };
+                    println!(
+                        "{} base image '{image}' (build-arg {arg}, from {source}) for {label}",
+                        "Overriding".bright_cyan()
+                    );
+                    Some((arg, image))
+                }
+                BaseResolution::Withheld => {
+                    println!(
+                        "{} base image override for {label} (allow_override = false)",
+                        "Skipping".bright_yellow()
+                    );
+                    None
+                }
+                // either no substitution applies, or it was withheld above; either way pass no override
+                BaseResolution::NotApplicable => None,
+            };
         // merge this image's effective build args: the generic --build-arg set with the resolved
         // base override layered on top (the override replaces a generic arg sharing its key)
         let build_args = resolve_build_args(&cmd.build_args, base_override.as_ref());
@@ -359,37 +366,39 @@ pub async fn build_images(cmd: &BuildImagesToolbox) -> Result<(), Error> {
             // default best-effort behavior: log this failure and keep going so one broken image
             // doesn't block the rest; the run still exits non-zero via the failures list below
             Err(err) => {
-                eprintln!("{} {label}: {err}", "Failed".bright_red());
+                eprintln!("{} to build/push '{label}': {err}", "Failed".bright_red());
                 failures.push(label);
             }
         }
     }
-    // a run where nothing built and nothing failed (everything skipped) shouldn't look like a
-    // successful build
-    if built == 0 && failures.is_empty() {
-        println!(
-            "{} no images were built (all entries were skipped)",
-            "Done!".bright_yellow()
-        );
-    } else {
-        println!(
-            "\n{} {built} image{} built{}",
-            "Done!".bright_green(),
-            if built == 1 { "" } else { "s" },
-            if cmd.push { " and pushed" } else { "" },
-        );
-    }
+    // the built count and push note shared by every summary line
+    let built_summary = format!(
+        "{built} image{} built{}",
+        if built == 1 { "" } else { "s" },
+        if cmd.push { " and pushed" } else { "" },
+    );
     // if any image failed under best-effort mode, list every failure and return an error so the
     // overall command exits non-zero rather than reporting a misleading success
     if !failures.is_empty() {
         eprintln!(
-            "{} {} image{} failed: {}",
-            "Errors:".bright_red(),
+            "\n{} {built_summary}, {} failed: {}",
+            "Image build finished with errors:".bright_red(),
             failures.len(),
-            if failures.len() == 1 { "" } else { "s" },
             failures.join(", "),
         );
         return Err(Error::new(format!("{} image(s) failed", failures.len())));
+    }
+    // a run where nothing built (everything skipped) shouldn't look like a successful build
+    if built == 0 {
+        println!(
+            "\n{} no images were built (all entries were skipped)",
+            "Image build complete!".bright_yellow()
+        );
+    } else {
+        println!(
+            "\n{} {built_summary}",
+            "Image build complete!".bright_green()
+        );
     }
     Ok(())
 }
@@ -438,6 +447,7 @@ async fn build_one(
     Ok(())
 }
 
+/// Unit tests for the pure build-images helpers (build-arg resolution and tag suffixing)
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -449,7 +459,11 @@ mod tests {
 
     /// A resolved `BaseImage` entry from an image, an optional arg, and an allow_override flag,
     /// for terse test fixtures
-    fn entry(image: Option<&str>, image_arg: Option<&str>, allow_override: Option<bool>) -> BaseImage {
+    fn entry(
+        image: Option<&str>,
+        image_arg: Option<&str>,
+        allow_override: Option<bool>,
+    ) -> BaseImage {
         BaseImage {
             image: image.map(str::to_string),
             image_arg: image_arg.map(str::to_string),
@@ -473,7 +487,10 @@ mod tests {
         let generic = vec![arg("VERSION", "1")];
         let base = arg("IMAGE", "ubuntu:22.04");
         let resolved = resolve_build_args(&generic, Some(&base));
-        assert_eq!(resolved, vec![arg("VERSION", "1"), arg("IMAGE", "ubuntu:22.04")]);
+        assert_eq!(
+            resolved,
+            vec![arg("VERSION", "1"), arg("IMAGE", "ubuntu:22.04")]
+        );
     }
 
     /// The `(arg, image)` of an `Apply` outcome, or `None` for `Withheld`/`NotApplicable`
@@ -549,9 +566,23 @@ mod tests {
     /// A non-empty suffix lands on the version; absent/empty leaves the tag unchanged
     #[test]
     fn apply_tag_suffix_appends_to_version() {
-        assert_eq!(apply_tag_suffix("reg/x:1.0", Some("-mybranch")), "reg/x:1.0-mybranch");
+        assert_eq!(
+            apply_tag_suffix("reg/x:1.0", Some("-mybranch")),
+            "reg/x:1.0-mybranch"
+        );
         assert_eq!(apply_tag_suffix("reg/x:1.0", None), "reg/x:1.0");
         assert_eq!(apply_tag_suffix("reg/x:1.0", Some("")), "reg/x:1.0");
+    }
+
+    /// A tag whose version already carries the suffix (baked in by `toolbox build --tag-suffix`)
+    /// is not suffixed a second time
+    #[test]
+    fn apply_tag_suffix_is_idempotent() {
+        // the suffix is applied once
+        let once = apply_tag_suffix("reg/x:latest", Some("-br"));
+        assert_eq!(once, "reg/x:latest-br");
+        // applying it again leaves the tag unchanged
+        assert_eq!(apply_tag_suffix(&once, Some("-br")), "reg/x:latest-br");
     }
 
     /// A digest-pinned reference and a tag with no version are left unchanged; a registry port is
@@ -567,7 +598,10 @@ mod tests {
         assert_eq!(apply_tag_suffix("reg/x", Some("-br")), "reg/x");
         // a registry port is not a version, but the real version still gets the suffix
         assert_eq!(apply_tag_suffix("host:5000/x", Some("-br")), "host:5000/x");
-        assert_eq!(apply_tag_suffix("host:5000/x:1.0", Some("-br")), "host:5000/x:1.0-br");
+        assert_eq!(
+            apply_tag_suffix("host:5000/x:1.0", Some("-br")),
+            "host:5000/x:1.0-br"
+        );
     }
 
     /// On a key collision the override replaces the generic arg rather than producing a

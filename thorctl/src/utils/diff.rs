@@ -1,6 +1,8 @@
 //! Shared code for calculating diffs for updating models in Thorium
 //!
-//! Used in the `edit` and `toolbox update` commands
+//! Used by the `images`/`pipelines edit` commands and every import flow (`images
+//! import`, `pipelines import`, `toolbox import`) through
+//! `handlers::imports::update`
 
 pub mod images;
 

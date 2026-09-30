@@ -7,8 +7,10 @@ Thorium can then handle executing your image within an analysis pipeline. Your t
 communicate with the Thorium API. Because of this functionality, any command line (CLI) tool that can run in a
 container or on bare metal can be added as a new image without any customization.
 
-You may add a new image using the Web UI as shown in the following video. Adding images is not currently supported
-via Thorctl.
+You may add a new image using the Web UI as shown in the following video. Thorctl can also create images from
+configuration files: `thorctl images import` creates them from an export directory (see
+[Importing, Exporting, and Editing Images and Pipelines](./import_export.md)), and `thorctl toolbox import` creates
+them from a [toolbox](./toolbox.md), which you can scaffold with `thorctl toolbox init`.
 
 <video autoplay loop controls>
   <source src="../static_resources/images/create-image.mp4", type="video/mp4">

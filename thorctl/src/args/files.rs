@@ -140,9 +140,9 @@ pub struct UploadFiles {
     #[clap(long)]
     pub dry_run: bool,
     /// Any pipelines to immediately spawn for the files that are uploaded;
-    /// pipelines are specified by their name + group, separated with ":"
-    /// (i.e. <PIPELINE1>:<GROUP1>,<PIPELINE2>:<GROUP2>)
-    #[clap(short, long, value_delimiter = ',')]
+    /// pipelines are specified by their group + name, separated with "/"
+    /// (i.e. <GROUP1>/<PIPELINE1>,<GROUP2>/<PIPELINE2>; <PIPELINE>:<GROUP> is also accepted)
+    #[clap(short, long, value_delimiter = ',', value_name = "GROUP/PIPELINE")]
     pub pipelines: Option<Vec<String>>,
     /// Any regular expressions to use to determine which files to upload
     ///

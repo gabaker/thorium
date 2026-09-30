@@ -2,13 +2,13 @@
 //!
 //! Short-flag policy (applies to every toolbox subcommand, and mirrors the wider `thorctl` CLI):
 //! - Short flags are reserved for non-destructive selection/IO inputs and standard run toggles, used
-//!   consistently across commands: `-g` group, `-i` images/import, `-p` pipelines, `-o` output,
-//!   `-c` config, `-L` list, `-n` non-interactive, `-e` exit-on-error.
-//! - Destructive, "force", and scope/reconciliation flags are intentionally **long-only** (no short),
-//!   so a stray short can't trigger a less-reversible action: `--skip-confirm`, `--force`, `--forced`,
+//!   consistently across commands: `-g` group, `-i` images, `-p` pipelines, `-o` output,
+//!   `-c` config, `-n` non-interactive, `-e` exit-on-error.
+//! - Destructive and scope/reconciliation flags are intentionally **long-only** (no short), so a
+//!   stray short can't trigger a less-reversible action: `--skip-confirm`, `--dry-run`,
 //!   `--overwrite`, `--overwrite-config`, `--skip-conflicts`, `--group-override`,
 //!   `--update-network-policy`, `--exit-code`, `--strip-registry`, `--with-images`, `--review`,
-//!   `--rollback-on-failure`.
+//!   `--rollback-on-failure`, `--push`.
 //! - Known pre-existing cross-command exceptions (left as-is to avoid breaking users): `-g` vs `-G`
 //!   are both used for groups elsewhere in `thorctl`, and `-c` means `--config` here but a boolean
 //!   toggle in some other commands. Don't extend these; new flags should follow the rules above.
@@ -23,22 +23,24 @@ pub enum Toolbox {
     /// Import a toolbox into Thorium
     ///
     /// A Thorium toolbox is an external collection of tools and pipelines pre-configured
-    /// and ready to run in Thorium. If images or pipelines already exist in Thorium,
-    /// an interactive editor will open to review and resolve differences. Use --overwrite
-    /// to automatically apply all incoming changes without the editor.
+    /// and ready to run in Thorium. If images or pipelines already exist in Thorium and
+    /// differ, you are prompted per resource to Edit (open the merge editor), Skip, Apply,
+    /// or Quit; this needs a terminal. Use --overwrite to apply all incoming changes
+    /// without prompting, or --skip-conflicts to leave differing resources untouched.
     #[clap(version, author)]
     Import(ImportToolbox),
     /// Build a toolbox manifest from image and pipeline manifests
     ///
-    /// Walks the current directory for image and pipeline manifest.toml files,
-    /// reads their associated JSON configs, and produces a toolbox.json file
-    /// suitable for import into Thorium.
+    /// Walks the directory containing --config (or --path, if given) for image
+    /// and pipeline manifest.toml files, reads their associated JSON configs, and
+    /// produces a toolbox.json file suitable for import into Thorium.
     #[clap(version, author)]
     Build(BuildToolbox),
     /// Initialize toolbox, image, or pipeline scaffolding
     ///
     /// Generate default manifest.toml and JSON config files. Existing files
-    /// are never overwritten.
+    /// are skipped unless --overwrite (per-tool files) or --overwrite-config
+    /// (config.toml, `init toolbox` only) is given.
     #[clap(version, author, subcommand)]
     Init(Init),
     /// Export Thorium images and pipelines into a toolbox directory structure
@@ -51,17 +53,20 @@ pub enum Toolbox {
     /// Remove a previously imported toolbox from Thorium
     ///
     /// Deletes the pipelines and images named by a toolbox manifest from the
-    /// target instance. Pipelines are deleted before the images they
-    /// reference; resources that don't exist are reported and skipped.
-    /// Groups are never deleted.
+    /// target instance. The manifest is validated and its collisions resolved
+    /// the same way a non-interactive import does, so only resources an import
+    /// would have created are targeted. Pipelines are deleted before the images
+    /// they reference; resources that don't exist are reported and skipped, and
+    /// images still used by pipelines outside the toolbox are left in place.
+    /// Groups and network policies are never deleted.
     #[clap(version, author)]
     Remove(RemoveToolbox),
     /// Diff an on-disk toolbox against what a Thorium instance has imported
     ///
     /// Shows what an import of this toolbox would change, rendered like git
-    /// diff: resources only in the toolbox appear as new files, resources
-    /// only in the instance's groups as deletions, and changed resources as
-    /// unified hunks.
+    /// diff: changed resources appear as unified hunks, resources only in the
+    /// toolbox or only in the instance's groups as one-line `only in ...`
+    /// entries, and a summary line counts each kind.
     #[clap(version, author)]
     Diff(DiffToolbox),
     /// Build (and optionally push) the container images in a toolbox
@@ -101,7 +106,7 @@ fn parse_build_arg(raw: &str) -> Result<(String, String), String> {
 #[derive(Parser, Debug)]
 #[allow(clippy::struct_excessive_bools)]
 pub struct BuildImagesToolbox {
-    /// The path to the toolbox.json holding the build entries (default: ./toolbox.json)
+    /// The path to the toolbox.json holding the build entries
     #[clap(value_name = "TOOLBOX.JSON", default_value = "toolbox.json")]
     pub manifest: PathBuf,
     /// Only build these images, comma-separated. Format: `name[,name,...]`
@@ -137,6 +142,10 @@ pub struct BuildImagesToolbox {
     /// Lets a CI/CD feature-branch run build/push differentiated images (e.g.
     /// `:1.0-mybranch`) from an unmodified toolbox.json so they don't collide with the
     /// mainline `:1.0`. Pass the separator you want (e.g. `-mybranch`).
+    ///
+    /// This is the alternative to `toolbox build --tag-suffix`, which bakes the suffix into
+    /// toolbox.json instead; use one or the other. A tag that already ends with the suffix is
+    /// not suffixed again.
     // allow_hyphen_values so a leading-dash suffix like `-mybranch` is taken as the
     // value rather than parsed as another flag
     #[clap(long, value_name = "SUFFIX", allow_hyphen_values = true)]
@@ -166,7 +175,7 @@ pub struct BuildImagesToolbox {
 /// Diff an on-disk toolbox against a running Thorium instance
 #[derive(Parser, Debug)]
 pub struct DiffToolbox {
-    /// A toolbox.json (path or URL) or a toolbox repo directory. Format: `path | url | dir`
+    /// A toolbox.json (path or http(s) URL) or a toolbox repo directory. Format: `path | url | dir`
     ///
     /// Directories are built in-memory from their manifests, so the diff
     /// reflects the current on-disk configs without regenerating toolbox.json.
@@ -177,15 +186,31 @@ pub struct DiffToolbox {
     /// Use this when the toolbox was imported with --group-override.
     #[clap(long, value_name = "GROUP")]
     pub group_override: Option<String>,
-    /// Exit with code 1 when any difference exists (git diff semantics)
+    /// Exit with code 1 when an import would change something (git diff --exit-code semantics)
+    ///
+    /// Counts changed images/pipelines, images/pipelines only in the toolbox, and differing
+    /// network policies. Resources only in the instance never count, since an import doesn't
+    /// delete them. Errors also exit with code 1, so exit code 1 alone doesn't distinguish
+    /// drift from a failed diff.
     #[clap(long)]
     pub exit_code: bool,
+    /// Target registry base path for images bundled in the toolbox
+    ///
+    /// Only used when the toolbox bundles container images (exported with
+    /// `--with-images`). Each bundled image's url is compared as
+    /// `<image-path-prefix>/<group>/<name>:<tag>`, the url an import with the same
+    /// prefix would store. If omitted for a bundled toolbox, the prefix recorded in
+    /// the manifest is used; with neither, urls are compared as-is. Never prompts.
+    #[clap(long, value_name = "REGISTRY/BASE")]
+    pub image_path_prefix: Option<String>,
 }
 
 /// Remove a toolbox's pipelines and images from Thorium
 #[derive(Parser, Debug)]
 pub struct RemoveToolbox {
-    /// The toolbox manifest to use: a local file path or a URL. Format: `path | url`
+    /// The toolbox manifest to use: a local toolbox.json path or an http(s) URL. Format: `path | url`
+    ///
+    /// A toolbox repo directory is not accepted; run `toolbox build` and pass its toolbox.json.
     #[clap(value_name = "PATH | URL")]
     pub manifest: ManifestLocation,
     /// Remove from this group instead of the groups recorded in the manifest
@@ -194,8 +219,15 @@ pub struct RemoveToolbox {
     #[clap(long, value_name = "GROUP")]
     pub group_override: Option<String>,
     /// Skip the confirmation dialog
-    #[clap(long)]
+    ///
+    /// The resources being removed are still listed before anything is deleted.
+    #[clap(long, conflicts_with = "dry_run")]
     pub skip_confirm: bool,
+    /// List what would be removed without deleting anything
+    ///
+    /// Needs no terminal, so it can preview a removal in CI.
+    #[clap(long)]
+    pub dry_run: bool,
 }
 
 /// Subcommands for `thorctl toolbox init`
@@ -226,21 +258,33 @@ impl std::str::FromStr for ManifestLocation {
 
     /// Parse a string into a [`ManifestLocation`]
     ///
-    /// A URL is preferred over a path so a remote `toolbox.json` can be fetched; only
-    /// inputs that fail URL parsing are treated as local files.
+    /// Only `http://` and `https://` URLs are fetched remotely, since those are the
+    /// only schemes the downloader supports. A `file://` URL is converted to its local
+    /// path, and everything else — including Windows drive paths like `C:\tb\toolbox.json`,
+    /// which parse as URLs with a single-letter scheme — is treated as a local path.
     ///
     /// # Arguments
     ///
     /// * `s` - The raw manifest location string (a URL or a filesystem path)
     fn from_str(s: &str) -> Result<Self, Self::Err> {
-        // prefer a URL interpretation so remote manifests are fetched rather than
-        // mistaken for a relative path
-        if let Ok(url) = Url::parse(s) {
-            return Ok(Self::Url(url));
+        match Url::parse(s) {
+            // remote manifests are only fetched over http(s)
+            Ok(url) if matches!(url.scheme(), "http" | "https") => Ok(Self::Url(url)),
+            // a file url names a local file, so read it from disk
+            Ok(url) if url.scheme() == "file" => url
+                .to_file_path()
+                .map(Self::Path)
+                .map_err(|()| format!("'{s}' is not a valid local file URL")),
+            // any other explicit `scheme://` can't be downloaded, so reject it clearly
+            // instead of reporting a missing local file
+            Ok(url) if url.scheme().len() > 1 && s.contains("://") => Err(format!(
+                "unsupported URL scheme '{}' in '{s}'; use an http(s) URL or a local path",
+                url.scheme()
+            )),
+            // anything else (a relative path, or a drive path parsed as a one-letter
+            // scheme) is a local filesystem path
+            _ => Ok(Self::Path(PathBuf::from(s))),
         }
-        // anything that isn't a valid URL is taken as a local filesystem path; this
-        // parse is infallible so the location always resolves to one of the two variants
-        Ok(Self::Path(PathBuf::from(s)))
     }
 }
 
@@ -248,7 +292,9 @@ impl std::str::FromStr for ManifestLocation {
 #[derive(Parser, Debug)]
 #[allow(clippy::struct_excessive_bools)]
 pub struct ImportToolbox {
-    /// The toolbox manifest to use: a local file path or a URL. Format: `path | url`
+    /// The toolbox manifest to use: a local toolbox.json path or an http(s) URL. Format: `path | url`
+    ///
+    /// A toolbox repo directory is not accepted; run `toolbox build` and pass its toolbox.json.
     #[clap(value_name = "PATH | URL")]
     pub manifest: ManifestLocation,
     /// Force the tools and pipelines to be imported to a specific group
@@ -279,10 +325,12 @@ pub struct ImportToolbox {
     /// Target registry base path for images bundled in the toolbox
     ///
     /// Only used when the toolbox bundles container images (exported with
-    /// `--with-images`). Each bundled image is loaded, retagged, and pushed to
-    /// `<image-path-prefix>/<group>/<name>:<tag>`, and its Thorium config is
-    /// rewritten to point there. If omitted for a bundled toolbox, the prefix
-    /// recorded in the manifest is used, otherwise you are prompted for one.
+    /// `--with-images`). Each bundled K8s image's Thorium config is rewritten to
+    /// point at `<image-path-prefix>/<group>/<name>:<tag>`, and its container is
+    /// loaded, retagged, and pushed there when that image is created or updated.
+    /// If omitted for a bundled toolbox, the prefix recorded in the manifest is
+    /// used; with neither, an interactive run prompts for one and a
+    /// non-interactive run (--overwrite, --skip-conflicts, or no terminal) fails.
     #[clap(long, value_name = "REGISTRY/BASE")]
     pub image_path_prefix: Option<String>,
     /// Update existing Thorium network policies to match the toolbox
@@ -305,7 +353,7 @@ pub struct ImportToolbox {
 /// Build a toolbox manifest from image and pipeline manifests
 #[derive(Parser, Debug, Clone)]
 pub struct BuildToolbox {
-    /// Path to the toolbox TOML config file (default: config.toml in the current directory)
+    /// Path to the toolbox TOML config file
     #[clap(
         short = 'c',
         long = "config",
@@ -341,6 +389,10 @@ pub struct BuildToolbox {
     /// mainline `:1.0`. Only affects derived `<registry>/...:<version>` tags; images
     /// pinned to an explicit url are left untouched. Pass the separator you want
     /// (e.g. `-mybranch`).
+    ///
+    /// This is the alternative to `toolbox build-images --tag-suffix`, which suffixes tags at
+    /// build time without touching toolbox.json; use one or the other (build-images won't
+    /// re-apply a suffix a tag already carries).
     // allow_hyphen_values so a leading-dash suffix like `-mybranch` is taken as the
     // value rather than parsed as another flag
     #[clap(long, value_name = "SUFFIX", allow_hyphen_values = true)]
@@ -352,6 +404,8 @@ pub struct BuildToolbox {
 pub struct InitToolbox {
     /// Image build directories, comma-separated. Format: `path[,path,...]` (each gets a
     /// manifest.toml + JSON config)
+    ///
+    /// Relative paths are resolved under --toolbox-dir.
     #[clap(
         short = 'i',
         long = "images",
@@ -364,7 +418,9 @@ pub struct InitToolbox {
     ///
     /// Use the optional `[:image,...]` colon suffix to bind specific images, e.g.
     /// `-p ./pipelines/capa:capa,yara`. Without it, all --images are bound. Repeat -p for
-    /// multiple pipelines.
+    /// multiple pipelines. A suffix containing a path separator, or a Windows drive
+    /// prefix like `C:`, is part of the path rather than an image list. Relative paths
+    /// are resolved under --toolbox-dir.
     #[clap(
         short = 'p',
         long = "pipeline",
@@ -376,16 +432,15 @@ pub struct InitToolbox {
     #[clap(short = 'g', long = "group", value_name = "GROUP")]
     pub group: Option<String>,
     /// Path to the toolbox root directory where config.toml will be created
-    /// (default: current directory)
     #[clap(long, value_name = "DIR", default_value = ".")]
     pub toolbox_dir: PathBuf,
     /// Seed the new config.toml from an existing one (name, registry, registries,
-    /// image_path_prefix, export paths, bundled_images) instead of --name/--registry
+    /// `image_path_prefix`, export paths, `bundled_images`, `[base_image]`) instead of --name/--registry
     ///
     /// Mutually exclusive with --name, --registry, --image-path, and --pipeline-path.
     #[clap(short = 'c', long = "config", value_name = "CONFIG.TOML", conflicts_with_all = ["name", "registry", "image_path", "pipeline_path"], verbatim_doc_comment)]
     pub config: Option<PathBuf>,
-    /// Toolbox name for config.toml (default: "My Toolbox")
+    /// Toolbox name for config.toml
     #[clap(long, value_name = "NAME", default_value = "My Toolbox")]
     pub name: String,
     /// Container registry for config.toml, e.g. ghcr.io/org/repo
@@ -409,6 +464,9 @@ pub struct InitToolbox {
     #[clap(long, value_name = "EDITOR")]
     pub editor: Option<String>,
     /// Skip interactive prompts and use defaults for all fields
+    ///
+    /// Interactive mode needs a terminal on stdin and stderr; without one, pass -n together
+    /// with --group.
     #[clap(short = 'n', long)]
     pub non_interactive: bool,
     /// Overwrite existing per-tool files instead of skipping them
@@ -439,41 +497,50 @@ impl PipelineSpec {
     ///
     /// `"./pipelines/capa:capa,yara"` → path `./pipelines/capa`, images `["capa", "yara"]`
     /// `"./pipelines/capa"` → path `./pipelines/capa`, images `None` (all images)
+    /// `"C:\tb\capa"` → path `C:\tb\capa`, images `None` (a drive prefix is not a binding)
+    ///
+    /// The last `:` only separates an image list when what follows it contains no path
+    /// separator and the colon isn't a Windows drive prefix (a single ASCII letter at the
+    /// start of the string).
     ///
     /// # Arguments
     ///
     /// * `s` - The pipeline argument string to parse
     pub fn parse(s: &str) -> Self {
+        // the whole string is the path whenever there is no usable image binding
+        let unbound = || Self {
+            path: PathBuf::from(s),
+            images: None,
+        };
         // split on the LAST colon so a path that itself contains a colon keeps everything
         // up to the final one as the directory and only the trailing segment is the image list
-        if let Some((path, images_str)) = s.rsplit_once(':') {
-            // split the post-colon segment into individual image names, trimming
-            // whitespace and dropping empties so `capa, yara,` yields just `["capa","yara"]`
-            let images: Vec<String> = images_str
-                .split(',')
-                .map(|s| s.trim().to_string())
-                .filter(|s| !s.is_empty())
-                .collect();
-            // a colon with no real image names (e.g. a trailing `:` or `: `) is treated as
-            // "no binding": fall back to the FULL original string as the path so the colon
-            // isn't silently stripped off a directory that legitimately contained one
-            if images.is_empty() {
-                Self {
-                    path: PathBuf::from(s),
-                    images: None,
-                }
-            } else {
-                Self {
-                    path: PathBuf::from(path),
-                    images: Some(images),
-                }
-            }
-        } else {
-            // no colon at all means bind every image, so record the whole string as the path
-            Self {
-                path: PathBuf::from(s),
-                images: None,
-            }
+        let Some((path, images_str)) = s.rsplit_once(':') else {
+            // no colon at all means bind every image
+            return unbound();
+        };
+        // a single letter before the colon is a Windows drive prefix (`C:`), not a path
+        let is_drive_prefix = path.len() == 1 && path.chars().all(|c| c.is_ascii_alphabetic());
+        // image names never contain path separators, so such a suffix is part of the path
+        let has_separator = images_str.contains(['/', '\\']);
+        if is_drive_prefix || has_separator {
+            return unbound();
+        }
+        // split the post-colon segment into individual image names, trimming
+        // whitespace and dropping empties so `capa, yara,` yields just `["capa","yara"]`
+        let images: Vec<String> = images_str
+            .split(',')
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+            .collect();
+        // a colon with no real image names (e.g. a trailing `:` or `: `) is treated as
+        // "no binding": keep the FULL original string as the path so the colon isn't
+        // silently stripped off a directory that legitimately contained one
+        if images.is_empty() {
+            return unbound();
+        }
+        Self {
+            path: PathBuf::from(path),
+            images: Some(images),
         }
     }
 }
@@ -505,6 +572,9 @@ pub struct InitImage {
     #[clap(long, value_name = "EDITOR")]
     pub editor: Option<String>,
     /// Skip interactive prompts and use defaults for all fields
+    ///
+    /// Interactive mode needs a terminal on stdin and stderr; without one, pass -n together
+    /// with --group.
     #[clap(short = 'n', long)]
     pub non_interactive: bool,
     /// Overwrite existing files instead of skipping them
@@ -518,8 +588,10 @@ pub struct InitPipeline {
     /// Path to the pipeline directory (the scaffolded files land here)
     #[clap(value_name = "PATH")]
     pub path: PathBuf,
-    /// Image names this pipeline runs, comma-separated. Format: `image[,image,...]` (prompted
-    /// interactively if omitted)
+    /// Image names this pipeline runs, comma-separated. Format: `image[,image,...]`
+    ///
+    /// Required with --non-interactive. Otherwise, when omitted, the editor opens with an
+    /// empty order to fill in.
     #[clap(
         short = 'i',
         long = "images",
@@ -530,8 +602,8 @@ pub struct InitPipeline {
     /// Group name to use in the generated pipeline config (prompted interactively if omitted)
     #[clap(short = 'g', long = "group", value_name = "GROUP")]
     pub group: Option<String>,
-    /// Pipeline order as JSON: a list of parallel stages, e.g. `[["img1","img2"],["img3"]]`
-    /// (defaults to all images in a single parallel stage)
+    /// Pipeline order as JSON: a list of parallel stages, e.g. `[["img1","img2"],["img3"]]`,
+    /// or a flat list like `["img1","img2"]` (defaults to all images in a single parallel stage)
     #[clap(long, value_name = "JSON")]
     pub order: Option<String>,
     /// Resolve the pipeline's images against an existing toolbox's config.toml (the "look here"
@@ -546,6 +618,9 @@ pub struct InitPipeline {
     #[clap(long, value_name = "EDITOR")]
     pub editor: Option<String>,
     /// Skip interactive prompts and use defaults for all fields
+    ///
+    /// Interactive mode needs a terminal on stdin and stderr; without one, pass -n together
+    /// with --group and --images.
     #[clap(short = 'n', long)]
     pub non_interactive: bool,
     /// Overwrite existing files instead of skipping them
@@ -611,23 +686,31 @@ pub struct ExportToolbox {
     /// output directory.
     #[clap(short = 'o', long = "output", value_name = "DIR")]
     pub output: Option<PathBuf>,
-    /// Seed the toolbox-wide settings (name, registry, registries, image_path_prefix,
-    /// bundled_images) from *another* toolbox's config.toml instead of --name/--registry
+    /// Seed the toolbox-wide settings (name, registry, registries, `image_path_prefix`,
+    /// `export_image_path`, `export_pipeline_path`, `[base_image]`) from *another* toolbox's
+    /// config.toml instead of --name/--registry
     ///
     /// This is for starting a new toolbox from an existing one's settings. Appending into a
     /// toolbox that already has a config.toml does NOT need this: an existing
-    /// <output>/config.toml is auto-detected, reused, and preserved (settings-source priority is
-    /// --config > existing <output>/config.toml > --name/--registry). Mutually exclusive with
-    /// --name and --registry.
+    /// <output>/config.toml is auto-detected, reused, and preserved, and while it is kept it takes
+    /// precedence over --config (which is then ignored with a warning). Settings-source priority
+    /// is: kept <output>/config.toml > --config > --name/--registry. With --overwrite-config, an
+    /// explicit --name/--registry is applied. Mutually exclusive with --name and --registry. Bundling is
+    /// never inherited; it always follows --with-images.
     ///
     /// Giving --config also anchors --output to the config's directory unless --output is set, so
     /// `export -c mytb/config.toml ...` exports into `mytb/`. To seed settings from one toolbox into
-    /// a different directory, pass --output explicitly.
+    /// a different directory, pass --output explicitly. If the --config file doesn't exist, a
+    /// warning is printed and a new toolbox is created there with the default name and no
+    /// registry (--name/--registry can't be combined with --config).
     #[clap(short = 'c', long = "config", value_name = "CONFIG.TOML", conflicts_with_all = ["name", "registry"])]
     pub config: Option<PathBuf>,
-    /// Toolbox name for config.toml (default: "My Toolbox")
-    #[clap(long, value_name = "NAME", default_value = "My Toolbox")]
-    pub name: String,
+    /// Toolbox name for config.toml (default: "My Toolbox" for a new toolbox)
+    ///
+    /// Ignored with a warning while an existing config.toml is kept; applied over it with
+    /// --overwrite-config.
+    #[clap(long, value_name = "NAME")]
+    pub name: Option<String>,
     /// Container registry for config.toml, e.g. ghcr.io/org/repo
     ///
     /// Optional: when omitted, the exported toolbox declares no central registry and
@@ -638,15 +721,17 @@ pub struct ExportToolbox {
     /// untouched with a warning (use --overwrite to overwrite instead)
     #[clap(long)]
     pub skip_conflicts: bool,
-    /// Open each config in an editor to review/tweak it before writing
+    /// Open each config in an editor to review/tweak it before writing (requires a terminal)
     #[clap(long)]
     pub review: bool,
     /// Update a matched in-toolbox resource that differs (otherwise it is skipped with a warning)
     ///
     /// When a tool with the same group/name already exists and its config differs, this updates it in
-    /// place. For an image, only the Thorium config (JSON), description, and policy files are
-    /// rewritten — its manifest.toml build settings (build/build_path/[base_image]/image_from) are
-    /// preserved; a pipeline's manifest is regenerated. It does NOT touch config.toml — use
+    /// place; unchanged tools are not rewritten. For an image, the Thorium config (JSON),
+    /// description, and policy files are rewritten, and in its manifest.toml only `version`,
+    /// `exported_image_path`, and `network_policies_from` are refreshed — build settings
+    /// (`build`/`build_path`/`[base_image]`/`image_from`) are kept. For a pipeline, only the
+    /// `[images]` tables of its manifest.toml are updated. It does NOT touch config.toml — use
     /// --overwrite-config for that.
     #[clap(long, conflicts_with = "skip_conflicts")]
     pub overwrite: bool,
@@ -659,10 +744,13 @@ pub struct ExportToolbox {
     pub overwrite_config: bool,
     /// Bundle each image's container image file into the toolbox for offline transfer
     ///
-    /// Downloads (docker pull) and saves (docker save) each image into its tool directory as
-    /// `<dir>/<name>.tar.gz` (the configured export layout, default `images/<name>`). The resulting
-    /// toolbox can be moved to an offline environment and imported with `--image-path-prefix` to
-    /// push the images into a local registry. Requires docker.
+    /// Pulls and saves each image's container with the configured container runtime (docker or
+    /// podman, see --container-runtime) into its tool directory as `<dir>/<name>.tar.gz` (the
+    /// configured export layout, default `images/<name>`). Only K8s images run from a container, so
+    /// images with other scalers are exported without a tarball; a K8s image with no container url
+    /// fails the export. The resulting toolbox can be moved to an offline environment and imported
+    /// with `--image-path-prefix` to push the images into a local registry. Requires a container
+    /// runtime.
     #[clap(long)]
     pub with_images: bool,
     /// Write each image's container url as empty so the release carries no hard-coded registry path
@@ -671,8 +759,9 @@ pub struct ExportToolbox {
     /// `exported_image_path`, so a rebuild derives each image's path from the toolbox's own
     /// `config.toml` registry/`image_path_prefix` instead of a pinned url. Use it to publish a
     /// registry-agnostic toolbox a consumer points at their own registry. Pipelines carry no url, so
-    /// this only affects images. **Conflicts with `--with-images`** (a bundled import needs the url to
-    /// tag and push the saved tarball).
+    /// this only affects images. Requires a registry in the effective config (--registry, --config,
+    /// or the existing config.toml). **Conflicts with `--with-images`** (a bundled import needs the
+    /// url to tag and push the saved tarball).
     #[clap(long, conflicts_with = "with_images")]
     pub strip_registry: bool,
 }
@@ -696,7 +785,8 @@ impl ResourceSpec {
     /// `static/clamav=tools/clamav` selects `static/clamav` and writes its files into `tools/clamav`;
     /// the `=dest` is placement only. Only emptiness is checked here — the dest may be absolute or
     /// relative (and may contain `..`); `export` resolves it against the toolbox root and enforces the
-    /// must-stay-inside-the-toolbox rule (see `resolve_dest_within`).
+    /// must-stay-inside-the-toolbox rule (see `resolve_dest_within`). An empty group or name (such as
+    /// `/clamav`, `static/`, or the empty element a trailing comma produces) is rejected.
     ///
     /// # Arguments
     ///
@@ -719,28 +809,33 @@ impl ResourceSpec {
         };
         // split the reference on the FIRST slash so an explicit `group/name` always wins; everything
         // after the first slash is the name (resource names may themselves contain slashes)
-        if let Some((group, name)) = reference.split_once('/') {
-            Ok(Self {
-                group: group.to_string(),
-                name: name.to_string(),
-                dest,
-            })
+        let (group, name) = if let Some((group, name)) = reference.split_once('/') {
+            (group.to_string(), name.to_string())
         } else {
             // with no `group/` prefix the reference is bare, so it can only be resolved when
             // a default group was supplied (from `--group`); otherwise the group is ambiguous
             match default_group {
-                Some(g) => Ok(Self {
-                    group: g.to_string(),
-                    name: reference.to_string(),
-                    dest,
-                }),
+                Some(group) => (group.to_string(), reference.to_string()),
                 // reject rather than guess a group so a bare name can't silently land in the
                 // wrong place when the caller never set one
-                None => Err(format!(
-                    "'{reference}' must be in group/name format when --group is not set"
-                )),
+                None => {
+                    return Err(format!(
+                        "'{reference}' must be in group/name format when --group is not set"
+                    ));
+                }
             }
+        };
+        // an empty group or name can't identify a resource; the usual cause is a stray
+        // slash or a trailing comma in a comma-separated list
+        if group.trim().is_empty() {
+            return Err(format!("'{s}' has an empty group"));
         }
+        if name.trim().is_empty() {
+            return Err(format!(
+                "'{s}' has an empty name (check for a stray '/' or trailing comma)"
+            ));
+        }
+        Ok(Self { group, name, dest })
     }
 }
 
@@ -831,5 +926,108 @@ mod tests {
             Some("../rel")
         );
         assert!(ResourceSpec::parse("static/clamav=", None).is_err());
+    }
+
+    /// An empty group or name is rejected, including the empty element of a trailing comma
+    #[test]
+    fn resource_spec_rejects_empty_parts() {
+        // a leading slash leaves the group empty
+        assert!(ResourceSpec::parse("/clamav", None).is_err());
+        // a trailing slash leaves the name empty
+        assert!(ResourceSpec::parse("static/", None).is_err());
+        // a trailing comma yields an empty element, which is an empty name with --group
+        assert!(ResourceSpec::parse("", Some("static")).is_err());
+        // whitespace-only parts are just as empty
+        assert!(ResourceSpec::parse(" /clamav", None).is_err());
+        assert!(ResourceSpec::parse("static/ =dir", None).is_err());
+    }
+
+    /// Only http(s) URLs are remote; drive paths and relative paths are local files
+    #[test]
+    fn manifest_location_only_http_is_url() {
+        use std::str::FromStr;
+        // http and https are fetched remotely
+        assert!(matches!(
+            ManifestLocation::from_str("https://example.com/toolbox.json"),
+            Ok(ManifestLocation::Url(_))
+        ));
+        assert!(matches!(
+            ManifestLocation::from_str("http://example.com/toolbox.json"),
+            Ok(ManifestLocation::Url(_))
+        ));
+        // Windows drive paths (either slash style) parse as a one-letter scheme but are paths
+        for raw in ["C:\\foo\\toolbox.json", "C:/foo", "c:\\toolbox.json"] {
+            match ManifestLocation::from_str(raw) {
+                Ok(ManifestLocation::Path(path)) => assert_eq!(path, PathBuf::from(raw)),
+                other => panic!("expected a path for {raw}, got {other:?}"),
+            }
+        }
+        // relative and absolute unix paths stay paths
+        assert!(matches!(
+            ManifestLocation::from_str("./toolbox.json"),
+            Ok(ManifestLocation::Path(_))
+        ));
+        assert!(matches!(
+            ManifestLocation::from_str("/tmp/toolbox.json"),
+            Ok(ManifestLocation::Path(_))
+        ));
+        // a file url becomes its local path (a drive-less file url is only valid on unix)
+        if cfg!(unix) {
+            match ManifestLocation::from_str("file:///tmp/toolbox.json") {
+                Ok(ManifestLocation::Path(path)) => {
+                    assert_eq!(path, PathBuf::from("/tmp/toolbox.json"));
+                }
+                other => panic!("expected a path for a file url, got {other:?}"),
+            }
+        }
+        // other explicit schemes can't be downloaded and are rejected
+        assert!(ManifestLocation::from_str("ftp://example.com/toolbox.json").is_err());
+    }
+
+    /// A trailing image list is split off, and a missing one binds every image
+    #[test]
+    fn pipeline_spec_parses_image_binding() {
+        let spec = PipelineSpec::parse("./pipelines/capa:capa, yara,");
+        assert_eq!(spec.path, PathBuf::from("./pipelines/capa"));
+        assert_eq!(
+            spec.images,
+            Some(vec!["capa".to_string(), "yara".to_string()])
+        );
+        // no colon binds everything
+        let spec = PipelineSpec::parse("./pipelines/capa");
+        assert_eq!(spec.path, PathBuf::from("./pipelines/capa"));
+        assert!(spec.images.is_none());
+        // a trailing colon with no names keeps the whole string as the path
+        let spec = PipelineSpec::parse("./pipelines/capa:");
+        assert_eq!(spec.path, PathBuf::from("./pipelines/capa:"));
+        assert!(spec.images.is_none());
+    }
+
+    /// Windows drive prefixes and colon-containing directories are never split as bindings
+    #[test]
+    fn pipeline_spec_handles_drive_letters() {
+        // a drive path with no binding keeps the whole path
+        let spec = PipelineSpec::parse("C:\\tb\\pipelines\\capa");
+        assert_eq!(spec.path, PathBuf::from("C:\\tb\\pipelines\\capa"));
+        assert!(spec.images.is_none());
+        // forward slashes after the drive are handled the same way
+        let spec = PipelineSpec::parse("C:/tb/pipelines/capa");
+        assert_eq!(spec.path, PathBuf::from("C:/tb/pipelines/capa"));
+        assert!(spec.images.is_none());
+        // a drive path with a binding splits only at the last colon
+        let spec = PipelineSpec::parse("C:\\tb\\capa:capa,yara");
+        assert_eq!(spec.path, PathBuf::from("C:\\tb\\capa"));
+        assert_eq!(
+            spec.images,
+            Some(vec!["capa".to_string(), "yara".to_string()])
+        );
+        // a bare drive-relative path is a path, not a binding of image `capa` to dir `C`
+        let spec = PipelineSpec::parse("C:capa");
+        assert_eq!(spec.path, PathBuf::from("C:capa"));
+        assert!(spec.images.is_none());
+        // a directory whose name contains a colon keeps its full path
+        let spec = PipelineSpec::parse("./a:b/capa");
+        assert_eq!(spec.path, PathBuf::from("./a:b/capa"));
+        assert!(spec.images.is_none());
     }
 }

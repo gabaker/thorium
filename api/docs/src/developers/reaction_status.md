@@ -29,10 +29,10 @@ are also provided a link to the reaction status page when you initial submit a r
 </video>
 
 If you are using Thorctl to generate your analysis reactions, you can also watch the status of reactions
-you create on the command line using `--watch` or `-w`.
+you create on the command line using `--watch` or `-W`.
 
 ```bash
-$ thorctl reactions create --group demo --pipeline testpipeline -f
+$ thorctl reactions create -p demo/testpipeline --watch 85622c435c5d605bc0a226fa05f94db7e030403bbad56e6b6933c6b0eda06ab5
 CODE | PIPELINE                  | SAMPLES                                                          | ID                                   | MESSAGE                         
 -----+---------------------------+------------------------------------------------------------------+--------------------------------------+----------------------------------
 200  | testpipeline              | 85622c435c5d605bc0a226fa05f94db7e030403bbad56e6b6933c6b0eda06ab5 | a0498ac4-42db-4fe0-884a-e28876ec3496 | -                               
