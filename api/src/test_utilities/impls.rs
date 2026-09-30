@@ -63,6 +63,10 @@ impl PartialEq<Image> for ImageRequest {
         same!(image.output_collection, self.output_collection);
         same!(image.child_filters, self.child_filters);
         same!(image.network_policies, self.network_policies);
+        same!(image.args, self.args);
+        same!(image.modifiers, self.modifiers);
+        same!(image.clean_up, self.clean_up);
+        same!(image.kvm, self.kvm);
         true
     }
 }
@@ -78,7 +82,7 @@ impl PartialEq<Pipeline> for PipelineRequest {
         same!(pipe.name, self.name);
         same!(pipe.group, self.group);
         same!(self.compare_order(&pipe.order), true);
-        same!(&pipe.sla, self.sla.as_ref().unwrap_or(&604_800));
+        same!(&pipe.sla, self.sla.as_ref().unwrap_or(&crate::models::DEFAULT_PIPELINE_SLA));
         same!(&pipe.triggers, &self.triggers);
         same!(&pipe.description, &self.description);
         true

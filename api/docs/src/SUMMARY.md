@@ -22,6 +22,8 @@
         - [Adding Images](./developers/add_images.md)
         - [Configuring Images](./developers/configuring_images.md)
         - [More on Children (Samples)](./developers/children.md)
+        - [Importing, Exporting, and Editing Images and Pipelines](./developers/import_export.md)
+        - [Upgrading: Changes to Tool Commands](./developers/tool_cli_changes.md)
     - [Building Pipelines](./developers/build_pipelines.md)
     - [Toolboxes](./developers/toolbox.md)
     - [Reaction Status](./developers/reaction_status.md)

@@ -5,6 +5,9 @@ use std::collections::{HashMap, HashSet};
 use thorium::Error;
 use thorium::models::{ImageRequest, NetworkPolicyRequest, PipelineRequest};
 
+use super::prompt;
+use crate::utils;
+
 /// A toolbox manifest – a description of pipelines and images that
 /// can be imported into Thorium
 #[derive(Debug, Serialize, Deserialize)]
@@ -24,8 +27,9 @@ pub struct ToolboxManifest {
     pub images: HashMap<String, ImageManifest>,
     /// Whether this toolbox bundles container image tarballs alongside its configs
     ///
-    /// When true, an import must load each `images/<name>/<name>.tar.gz`, push it to a
-    /// target registry, and rewrite the image's url before creating it in Thorium.
+    /// When true, an import must load each image's `<name>.tar.gz` tarball (found in the
+    /// image version's `dir`, or `images/<name>/` when `dir` is empty), push it to a target
+    /// registry, and rewrite the image's url before creating it in Thorium.
     #[serde(default)]
     pub bundled_images: bool,
     /// The default registry base path that bundled images are pushed under on import
@@ -36,14 +40,40 @@ pub struct ToolboxManifest {
     pub image_path_prefix: Option<String>,
 }
 
+/// The display label of a pipeline version (`group/name@version`, or `name@version`
+/// when the version has no resolved config to take a group from)
+///
+/// # Arguments
+///
+/// * `pipeline` - The pipeline's manifest key
+/// * `version_name` - The pipeline's version
+/// * `version` - The pipeline version, whose config supplies the group when resolved
+fn pipeline_label(pipeline: &str, version_name: &str, version: &PipelineVersion) -> String {
+    utils::entry_id(
+        version.config.as_ref().map(|config| config.group.as_str()),
+        pipeline,
+        version_name,
+    )
+}
+
 /// A report of the image and pipeline versions dropped during lenient
 /// validation, so the caller can warn the user about what was skipped
 #[derive(Debug, Default)]
 pub struct DroppedItems {
-    /// `("name:version", reason)` for each removed image version
+    /// `(label, reason)` for each removed image version, labelled `group/name@version` (or `name@version` without a group)
     pub images: Vec<(String, String)>,
-    /// `("name:version", reasons)` for each removed pipeline version
+    /// `(label, reasons)` for each removed pipeline version, labelled `group/name@version` (or `name@version` without a group)
     pub pipelines: Vec<(String, Vec<String>)>,
+}
+
+impl DroppedItems {
+    /// Sort the dropped images and pipelines by label so the warnings built from
+    /// this report come out in the same order on every run
+    fn sort(&mut self) {
+        // the removals are gathered from HashMap iteration, so order them by label
+        self.images.sort();
+        self.pipelines.sort();
+    }
 }
 
 impl ToolboxManifest {
@@ -68,6 +98,8 @@ impl ToolboxManifest {
         self.drop_unconfigured_images(&mut dropped);
         // drop pipelines whose config/order/image references are unusable
         self.drop_structurally_invalid_pipelines(&mut dropped);
+        // order the report so the resulting warnings are reproducible across runs
+        dropped.sort();
         dropped
     }
 
@@ -81,6 +113,8 @@ impl ToolboxManifest {
         let mut dropped = DroppedItems::default();
         // drop pipelines whose order names an image not present in the pipeline's group
         self.drop_incoherent_pipelines(&mut dropped);
+        // order the report so the resulting warnings are reproducible across runs
+        dropped.sort();
         dropped
     }
 
@@ -97,7 +131,7 @@ impl ToolboxManifest {
             manifest.versions.retain(|version, v| {
                 if v.config.is_none() {
                     dropped.images.push((
-                        format!("{name}:{version}"),
+                        utils::entry_id(None, name, version),
                         format!("config not resolved (config_from: {:?})", v.config_from),
                     ));
                     false
@@ -147,8 +181,8 @@ impl ToolboxManifest {
                 }
             }
         }
-        // gather the reasons each pipeline version is invalid into a side map keyed
-        // "pipeline:version", since we only hold a shared borrow of self while iterating
+        // gather the reasons each pipeline version is invalid into a side map keyed by
+        // the version's display label, since we only hold a shared borrow of self while iterating
         // and can't mutate the pipelines until the scan finishes
         let mut invalid: HashMap<String, Vec<String>> = HashMap::new();
         for (pipeline, pipeline_manifest) in &self.pipelines {
@@ -162,8 +196,8 @@ impl ToolboxManifest {
                     {
                         if ref_names.contains(image_name.as_str()) {
                             reasons.push(format!(
-                                "requires image '{image_name}:{}' not in manifest",
-                                image_version.version
+                                "requires image '{}' not in manifest",
+                                utils::entry_id(None, image_name, &image_version.version)
                             ));
                         } else {
                             reasons.push(format!("requires image '{image_name}' not in manifest"));
@@ -195,7 +229,7 @@ impl ToolboxManifest {
                 }
                 // a version with any accumulated reason is marked invalid for removal
                 if !reasons.is_empty() {
-                    invalid.insert(format!("{pipeline}:{version_name}"), reasons);
+                    invalid.insert(pipeline_label(pipeline, version_name, version), reasons);
                 }
             }
         }
@@ -245,7 +279,7 @@ impl ToolboxManifest {
                 }
                 if !missing.is_empty() {
                     invalid.insert(
-                        format!("{pipeline}:{version_name}"),
+                        pipeline_label(pipeline, version_name, version),
                         vec![format!(
                             "order references image(s) not in group '{}': {missing:?}",
                             config.group
@@ -258,13 +292,13 @@ impl ToolboxManifest {
         Self::remove_invalid_pipeline_versions(&mut self.pipelines, &invalid, dropped);
     }
 
-    /// Remove the pipeline versions named in `invalid` (keyed "pipeline:version"),
+    /// Remove the pipeline versions named in `invalid` (keyed per [`pipeline_label`]),
     /// dropping any pipeline left with no versions, and record them in `dropped`
     ///
     /// # Arguments
     ///
     /// * `pipelines` - The manifest's pipelines to remove the invalid versions from
-    /// * `invalid` - Map of "pipeline:version" labels to the reasons each is invalid
+    /// * `invalid` - Map of pipeline version labels to the reasons each is invalid
     /// * `dropped` - The report to record each removed pipeline version in
     fn remove_invalid_pipeline_versions(
         pipelines: &mut HashMap<String, PipelineManifest>,
@@ -277,9 +311,9 @@ impl ToolboxManifest {
         }
         // drop each flagged version, then drop any pipeline left with no versions
         pipelines.retain(|pipeline, pipeline_manifest| {
-            pipeline_manifest
-                .versions
-                .retain(|version, _| !invalid.contains_key(&format!("{pipeline}:{version}")));
+            pipeline_manifest.versions.retain(|version_name, version| {
+                !invalid.contains_key(&pipeline_label(pipeline, version_name, version))
+            });
             !pipeline_manifest.versions.is_empty()
         });
         // record every removal (with its reasons) so the caller can warn the user
@@ -316,6 +350,9 @@ impl ToolboxManifest {
     /// setting the group for each item in the manifest, returning the updated
     /// manifest
     ///
+    /// Each image version's bundled network policies are scoped to the same group
+    /// so they stay usable by the images that reference them.
+    ///
     /// # Arguments
     ///
     /// * `group` - The group to force items to be imported to
@@ -338,6 +375,13 @@ impl ToolboxManifest {
             )
             // set each group reference to the given group
             .for_each(|group_ref| group_ref.clone_from(&group));
+        // scope every bundled network policy to the target group as well, since the
+        // policies' original groups may not exist in the target instance
+        self.images
+            .values_mut()
+            .flat_map(|image_manifest| image_manifest.versions.values_mut())
+            .flat_map(|v| v.network_policies.iter_mut())
+            .for_each(|policy| policy.groups = vec![group.clone()]);
         self
     }
 
@@ -409,8 +453,9 @@ impl ToolboxManifest {
                 };
                 // a serialization failure must not be coerced to a shared `Null`,
                 // or two distinct configs would compare "identical" and be wrongly
-                // auto-deduped — surface it instead
-                let json = serde_json::to_value(config).map_err(|err| {
+                // auto-deduped — surface it instead. set-valued fields are sorted so
+                // equal configs compare equal regardless of hash iteration order
+                let json = canonical_image_value(config).map_err(|err| {
                     Error::new(format!(
                         "Failed to serialize image '{}' for collision check: {err}",
                         config.name
@@ -517,8 +562,12 @@ impl ToolboxManifest {
         collisions
     }
 
-    /// Suggest a unique new name for a colliding image member: `<name>-<version>`,
-    /// with a numeric suffix appended if that is already taken in the group
+    /// Suggest a unique, valid new name for a colliding image member
+    ///
+    /// Based on `<name>-<version>`, sanitized to the Thorium name rule (lowercase
+    /// letters, digits, and '-', at most [`prompt::RESOURCE_NAME_MAX`] characters),
+    /// with a numeric suffix appended if that name is already taken (see
+    /// [`Self::image_rename_conflict`]).
     ///
     /// # Arguments
     ///
@@ -529,15 +578,20 @@ impl ToolboxManifest {
         collision: &Collision,
         member: &CollisionMember,
     ) -> String {
-        // base the suggestion on "<name>-<version>" then ensure it's free in the group
-        self.unique_image_name(
-            &collision.group,
-            &format!("{}-{}", collision.name, member.version),
-        )
+        // base the suggestion on a sanitized "<name>-<version>"
+        let base = suggestion_base(&collision.name, &member.version);
+        // suffix it until it neither collides in the group nor overwrites a manifest entry
+        unique_name(&base, |candidate| {
+            self.image_rename_conflict(&collision.group, member, candidate)
+                .is_some()
+        })
     }
 
-    /// Suggest a unique new name for a colliding pipeline member: `<name>-<version>`,
-    /// with a numeric suffix appended if that is already taken in the group
+    /// Suggest a unique, valid new name for a colliding pipeline member
+    ///
+    /// Based on `<name>-<version>`, sanitized to the Thorium name rule, with a
+    /// numeric suffix appended if that name is already taken (see
+    /// [`Self::pipeline_rename_conflict`]).
     ///
     /// # Arguments
     ///
@@ -548,11 +602,13 @@ impl ToolboxManifest {
         collision: &Collision,
         member: &CollisionMember,
     ) -> String {
-        // base the suggestion on "<name>-<version>" then ensure it's free in the group
-        self.unique_pipeline_name(
-            &collision.group,
-            &format!("{}-{}", collision.name, member.version),
-        )
+        // base the suggestion on a sanitized "<name>-<version>"
+        let base = suggestion_base(&collision.name, &member.version);
+        // suffix it until it neither collides in the group nor overwrites a manifest entry
+        unique_name(&base, |candidate| {
+            self.pipeline_rename_conflict(&collision.group, member, candidate)
+                .is_some()
+        })
     }
 
     /// Every image config's `(group, name)` identity across all versions
@@ -577,86 +633,85 @@ impl ToolboxManifest {
             .map(|config| (config.group.as_str(), config.name.as_str()))
     }
 
-    /// A name `taken` reports as free, appending `-2`, `-3`, … to `base` until one
-    /// is found
+    /// Why renaming an image member to `candidate` is not allowed, or `None` when it is
     ///
-    /// `taken` is the caller's freshness test (it decides what "already used"
-    /// means); the `(2..)` range is unbounded, so a free name is always found.
+    /// A rename is rejected when another image in the group already uses the name
+    /// (it would create a fresh collision) or when another top-level manifest entry
+    /// is already keyed by the name (the moved version would be filed into, and could
+    /// overwrite, that entry). The member's own manifest key is allowed.
     ///
     /// # Arguments
     ///
-    /// * `base` - The preferred name to return unchanged when it is free
-    /// * `taken` - Predicate reporting whether a candidate name is already used
-    fn unique_name(base: &str, mut taken: impl FnMut(&str) -> bool) -> String {
-        // prefer the unsuffixed name when it is already free
-        if !taken(base) {
-            return base.to_string();
+    /// * `group` - The group the renamed image is imported into
+    /// * `member` - The colliding member being renamed
+    /// * `candidate` - The proposed new name
+    pub fn image_rename_conflict(
+        &self,
+        group: &str,
+        member: &CollisionMember,
+        candidate: &str,
+    ) -> Option<String> {
+        // a name already used by an image in the group would collide again on import
+        if self
+            .image_identities()
+            .any(|(g, n)| g == group && n == candidate)
+        {
+            return Some(format!(
+                "'{candidate}' is already used by another image in this group"
+            ));
         }
-        // otherwise try "base-2", "base-3", … the unbounded range guarantees a hit so the
-        // expect can never fire, but find returns Option and must be unwrapped
-        (2..)
-            .map(|n| format!("{base}-{n}"))
-            .find(|candidate| !taken(candidate))
-            .expect("unbounded range always yields a free name")
+        // a name already used as another entry's manifest key would merge into that entry
+        if candidate != member.manifest_key && self.images.contains_key(candidate) {
+            return Some(format!(
+                "'{candidate}' is already used by another image entry in the toolbox manifest"
+            ));
+        }
+        None
     }
 
-    /// A name not already used by any image in `group`
+    /// Why renaming a pipeline member to `candidate` is not allowed, or `None` when it is
+    ///
+    /// See [`Self::image_rename_conflict`]; the same group-name and manifest-key
+    /// rules apply to pipelines.
     ///
     /// # Arguments
     ///
-    /// * `group` - The group to check existing image names against
-    /// * `base` - The preferred name, suffixed until it is free in the group
-    fn unique_image_name(&self, group: &str, base: &str) -> String {
-        // "taken" means some image already owns this name in the same group; cross-group
-        // names never conflict because Thorium identity is (group, name)
-        Self::unique_name(base, |candidate| {
-            self.image_identities()
-                .any(|(g, n)| g == group && n == candidate)
-        })
-    }
-
-    /// A name not already used by any pipeline in `group`
-    ///
-    /// # Arguments
-    ///
-    /// * `group` - The group to check existing pipeline names against
-    /// * `base` - The preferred name, suffixed until it is free in the group
-    fn unique_pipeline_name(&self, group: &str, base: &str) -> String {
-        // "taken" means some pipeline already owns this name in the same group; cross-group
-        // names never conflict because Thorium identity is (group, name)
-        Self::unique_name(base, |candidate| {
-            self.pipeline_identities()
-                .any(|(g, n)| g == group && n == candidate)
-        })
+    /// * `group` - The group the renamed pipeline is imported into
+    /// * `member` - The colliding member being renamed
+    /// * `candidate` - The proposed new name
+    pub fn pipeline_rename_conflict(
+        &self,
+        group: &str,
+        member: &CollisionMember,
+        candidate: &str,
+    ) -> Option<String> {
+        // a name already used by a pipeline in the group would collide again on import
+        if self
+            .pipeline_identities()
+            .any(|(g, n)| g == group && n == candidate)
+        {
+            return Some(format!(
+                "'{candidate}' is already used by another pipeline in this group"
+            ));
+        }
+        // a name already used as another entry's manifest key would merge into that entry
+        if candidate != member.manifest_key && self.pipelines.contains_key(candidate) {
+            return Some(format!(
+                "'{candidate}' is already used by another pipeline entry in the toolbox manifest"
+            ));
+        }
+        None
     }
 
     /// The set of image names currently used in `group`
     ///
-    /// Used to validate a user-supplied rename so it can't introduce a fresh
-    /// collision with another image in the same group.
-    ///
     /// # Arguments
     ///
     /// * `group` - The group whose image names to collect
+    #[cfg(test)]
     pub fn image_names_in_group(&self, group: &str) -> HashSet<String> {
         // keep only the names whose identity is in the requested group
         self.image_identities()
-            .filter(|(g, _)| *g == group)
-            .map(|(_, n)| n.to_string())
-            .collect()
-    }
-
-    /// The set of pipeline names currently used in `group`
-    ///
-    /// Used to validate a user-supplied rename so it can't introduce a fresh
-    /// collision with another pipeline in the same group.
-    ///
-    /// # Arguments
-    ///
-    /// * `group` - The group whose pipeline names to collect
-    pub fn pipeline_names_in_group(&self, group: &str) -> HashSet<String> {
-        // keep only the names whose identity is in the requested group
-        self.pipeline_identities()
             .filter(|(g, _)| *g == group)
             .map(|(_, n)| n.to_string())
             .collect()
@@ -761,7 +816,7 @@ impl ToolboxManifest {
                     .as_ref()
                     .is_some_and(|config| config.group == group);
                 if in_same_group && pipeline_references_image(version, name) {
-                    dropped_pipelines.push(format!("{pipeline_key}:{version_name}"));
+                    dropped_pipelines.push(pipeline_label(pipeline_key, version_name, version));
                     false
                 } else {
                     true
@@ -794,13 +849,17 @@ impl ToolboxManifest {
         });
     }
 
-    /// Rename one colliding image member to `new_name` and repoint every pipeline
-    /// that wanted *that* member's variant
+    /// Rename one colliding image member to `new_name` and repoint everything in
+    /// the group that wanted *that* member's variant
     ///
     /// The version is split into its own top-level entry under `new_name` (with
-    /// `config.name` updated). Pipelines are disambiguated by pinned image version
-    /// when the colliding members have distinct versions, otherwise by their
-    /// original (pre-override) group.
+    /// `config.name` updated). A dependent pipeline is matched to a variant by its
+    /// version pin (under the image's config name or the member's manifest key),
+    /// narrowed by its original (pre-override) group when the pin alone is not
+    /// decisive. Other images' result/children dependencies on the name are matched
+    /// by their original group. A dependent that can't be matched to exactly one
+    /// variant is left on the variant that keeps the original name, and a warning
+    /// describing it is returned.
     ///
     /// # Arguments
     ///
@@ -814,9 +873,17 @@ impl ToolboxManifest {
         member: &CollisionMember,
         new_name: &str,
         sources: &SourceGroups,
-    ) {
-        // the identity name every dependent pipeline currently points at
-        let old_name = collision.name.clone();
+    ) -> Result<Vec<String>, Error> {
+        // refuse a name that would collide again or overwrite another manifest entry,
+        // before anything is moved
+        if let Some(reason) = self.image_rename_conflict(&collision.group, member, new_name) {
+            return Err(Error::new(format!(
+                "Failed to rename image '{}' to '{new_name}': {reason}",
+                utils::resource_id(&collision.group, &collision.name)
+            )));
+        }
+        // the identity name every dependent currently points at
+        let old_name = collision.name.as_str();
         // pull just the colliding version out of its current entry and re-file it under
         // new_name, so the other versions of that entry keep the original name
         if let Some(manifest) = self.images.get_mut(&member.manifest_key)
@@ -830,7 +897,9 @@ impl ToolboxManifest {
             if manifest.versions.is_empty() {
                 self.images.remove(&member.manifest_key);
             }
-            // file the moved version under the new top-level key, creating it if needed
+            // file the moved version under the new top-level key; the conflict check above
+            // guarantees this key is either unused or the member's own entry, which no
+            // longer holds this version, so nothing is overwritten
             self.images
                 .entry(new_name.to_string())
                 .or_insert_with(|| ImageManifest {
@@ -839,41 +908,98 @@ impl ToolboxManifest {
                 .versions
                 .insert(member.version.clone(), version);
         }
-        // do the colliding members carry distinct version labels? if so, a pipeline's
-        // pinned image version tells us which variant it wanted; if not, fall back to
-        // matching the pipeline's original group to the member's source group
-        // HashSet::insert returns false on a repeat, so `all` is true exactly when every
-        // member carries a distinct version label; that decides the disambiguation strategy
-        let mut seen = HashSet::new();
-        let versions_distinct = collision.members.iter().all(|m| seen.insert(&m.version));
-        // repoint only the dependents that wanted *this* renamed variant; the others keep
-        // pointing at old_name (which now belongs to a different surviving member)
-        for (pipeline_key, manifest) in self.pipelines.iter_mut() {
-            for (version_name, version) in manifest.versions.iter_mut() {
-                // skip pipelines that never referenced the colliding image at all
-                if !pipeline_references_image(version, &old_name) {
+        // dependents that couldn't be matched to exactly one variant, reported to the caller
+        let mut warnings = Vec::new();
+        // repoint only the same-group pipelines that wanted *this* renamed variant; the
+        // others keep pointing at old_name (which now belongs to a different member)
+        for (pipeline_key, manifest) in &mut self.pipelines {
+            for (version_name, version) in &mut manifest.versions {
+                // image references resolve within the pipeline's own group, so a pipeline in
+                // another group never referenced this image
+                let in_group = version
+                    .config
+                    .as_ref()
+                    .is_some_and(|config| config.group == collision.group);
+                // skip pipelines outside the group or that never referenced the identity
+                if !in_group || !pipeline_references_collision(version, collision) {
                     continue;
                 }
-                // distinct versions: the pipeline's pinned image version identifies the
-                // variant. same version: fall back to matching the pipeline's pre-override
-                // source group to the renamed member's source group
-                let wants = if versions_distinct {
-                    version
-                        .images
-                        .get(&old_name)
-                        .is_some_and(|pi| pi.version == member.version)
-                } else {
-                    sources
-                        .pipelines
-                        .get(&(pipeline_key.clone(), version_name.clone()))
-                        == Some(&member.source_group)
-                };
-                // rewrite both the images map and the order so the pipeline tracks the move
-                if wants {
-                    rewrite_pipeline_image_ref(version, &old_name, new_name);
+                // match the pipeline to the variant it wanted by pin, then by source group
+                let source = sources
+                    .pipelines
+                    .get(&(pipeline_key.clone(), version_name.clone()));
+                match wanted_pipeline_member(version, collision, source) {
+                    // rewrite both the images map and the order so the pipeline tracks the move
+                    Some(wanted) if wanted == member => {
+                        rewrite_pipeline_image_ref(version, old_name, member, new_name);
+                    }
+                    // the pipeline wanted another variant, so it stays on its current name
+                    Some(_) => {}
+                    // no pin or source group tells the variants apart; it stays on the
+                    // variant keeping the original name, which the user is told about
+                    None => warnings.push(format!(
+                        "Pipeline '{}' does not identify which variant of image '{}' it uses; \
+                         it keeps using the one that retains the name '{old_name}'",
+                        utils::entry_id(Some(&collision.group), pipeline_key, version_name),
+                        utils::resource_id(&collision.group, old_name)
+                    )),
                 }
             }
         }
+        // repoint other images whose result/children dependencies named this variant
+        for (image_key, manifest) in &mut self.images {
+            for (version_name, version) in &mut manifest.versions {
+                // only same-group images can depend on this image by name
+                let Some(config) = version.config.as_mut() else {
+                    continue;
+                };
+                // the colliding variants themselves are not dependents of their own name
+                if config.group != collision.group
+                    || config.name == old_name
+                    || config.name == new_name
+                {
+                    continue;
+                }
+                // skip images that don't depend on the colliding name at all
+                let deps = &mut config.dependencies;
+                if !deps.results.images.iter().any(|name| name == old_name)
+                    && !deps.children.images.iter().any(|name| name == old_name)
+                {
+                    continue;
+                }
+                // images carry no version pins, so match them by their source group only
+                let source = sources
+                    .images
+                    .get(&(image_key.clone(), version_name.clone()));
+                match member_by_source_group(&collision.members, source) {
+                    // swap the old name for the new one in both dependency lists
+                    Some(wanted) if wanted == member => {
+                        for name in deps
+                            .results
+                            .images
+                            .iter_mut()
+                            .chain(deps.children.images.iter_mut())
+                        {
+                            if name == old_name {
+                                *name = new_name.to_string();
+                            }
+                        }
+                    }
+                    // the image depended on another variant, so it stays as-is
+                    Some(_) => {}
+                    // ambiguous: leave it on the variant keeping the name and tell the user
+                    None => warnings.push(format!(
+                        "Image '{}' depends on image '{}' but does not identify which variant; \
+                         it keeps depending on the one that retains the name '{old_name}'",
+                        utils::entry_id(Some(&collision.group), image_key, version_name),
+                        utils::resource_id(&collision.group, old_name)
+                    )),
+                }
+            }
+        }
+        // order the warnings so the caller's output is reproducible across runs
+        warnings.sort();
+        Ok(warnings)
     }
 
     /// Rename one colliding pipeline member to `new_name` (pipelines aren't
@@ -881,9 +1007,23 @@ impl ToolboxManifest {
     ///
     /// # Arguments
     ///
+    /// * `collision` - The collision being resolved (supplies the group and original name)
     /// * `member` - The colliding pipeline member to rename
     /// * `new_name` - The new name to give the member
-    pub fn rename_pipeline_member(&mut self, member: &CollisionMember, new_name: &str) {
+    pub fn rename_pipeline_member(
+        &mut self,
+        collision: &Collision,
+        member: &CollisionMember,
+        new_name: &str,
+    ) -> Result<(), Error> {
+        // refuse a name that would collide again or overwrite another manifest entry,
+        // before anything is moved
+        if let Some(reason) = self.pipeline_rename_conflict(&collision.group, member, new_name) {
+            return Err(Error::new(format!(
+                "Failed to rename pipeline '{}' to '{new_name}': {reason}",
+                utils::resource_id(&collision.group, &collision.name)
+            )));
+        }
         // pull just the colliding version out of its current entry and re-file it under
         // new_name, leaving the entry's other versions under the original name
         if let Some(manifest) = self.pipelines.get_mut(&member.manifest_key)
@@ -897,7 +1037,9 @@ impl ToolboxManifest {
             if manifest.versions.is_empty() {
                 self.pipelines.remove(&member.manifest_key);
             }
-            // file the moved version under the new top-level key, creating it if needed
+            // file the moved version under the new top-level key; the conflict check above
+            // guarantees this key is either unused or the member's own entry, which no
+            // longer holds this version, so nothing is overwritten
             self.pipelines
                 .entry(new_name.to_string())
                 .or_insert_with(|| PipelineManifest {
@@ -906,6 +1048,7 @@ impl ToolboxManifest {
                 .versions
                 .insert(member.version.clone(), version);
         }
+        Ok(())
     }
 }
 
@@ -934,7 +1077,7 @@ pub struct Collision {
 }
 
 /// One member of a [`Collision`]
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CollisionMember {
     /// The top-level manifest key this version lives under
     pub manifest_key: String,
@@ -965,18 +1108,131 @@ fn pipeline_references_image(version: &PipelineVersion, name: &str) -> bool {
         .is_some_and(|order| order.iter().flatten().any(|image| *image == name))
 }
 
-/// Rewrite a pipeline version's references to `old_name` to point at `new_name`,
-/// in both the `images` map and the image order
+/// Whether a pipeline version references a collision's identity, either by the
+/// shared config name (in its `images` map or order) or by any member's manifest key
+/// in its `images` map
+///
+/// # Arguments
+///
+/// * `version` - The pipeline version to inspect
+/// * `collision` - The collision whose identity to look for
+fn pipeline_references_collision(version: &PipelineVersion, collision: &Collision) -> bool {
+    // a reference by the shared config name covers both the images map and the order
+    if pipeline_references_image(version, &collision.name) {
+        return true;
+    }
+    // the images map may also key an image by its manifest key (tool name)
+    collision
+        .members
+        .iter()
+        .any(|member| version.images.contains_key(&member.manifest_key))
+}
+
+/// The collision member a dependent pipeline wanted, or `None` when it can't be
+/// told apart from the other members
+///
+/// Members whose version is pinned in the pipeline's `images` map (under the shared
+/// config name or the member's own manifest key) are the candidates; with no such pin
+/// every member is. More than one candidate is narrowed by the pipeline's original
+/// (pre-override) group.
+///
+/// # Arguments
+///
+/// * `version` - The dependent pipeline version
+/// * `collision` - The collision whose members are matched against
+/// * `source_group` - The pipeline's pre-override group, if it was captured
+fn wanted_pipeline_member<'a>(
+    version: &PipelineVersion,
+    collision: &'a Collision,
+    source_group: Option<&String>,
+) -> Option<&'a CollisionMember> {
+    // collect the members this pipeline pins by version under either reference form
+    let pinned: Vec<&CollisionMember> = collision
+        .members
+        .iter()
+        .filter(|member| {
+            [collision.name.as_str(), member.manifest_key.as_str()]
+                .iter()
+                .any(|reference| {
+                    version
+                        .images
+                        .get(*reference)
+                        .is_some_and(|pin| pin.version == member.version)
+                })
+        })
+        .collect();
+    // without any matching pin every member remains a candidate
+    let candidates: Vec<&CollisionMember> = if pinned.is_empty() {
+        collision.members.iter().collect()
+    } else {
+        pinned
+    };
+    // a single candidate is decisive on its own
+    if let [only] = candidates.as_slice() {
+        return Some(*only);
+    }
+    // otherwise narrow by the pipeline's original group
+    member_by_source_group(candidates, source_group)
+}
+
+/// The single member whose source group matches `source_group`, or `None` when no
+/// member or more than one member matches
+///
+/// # Arguments
+///
+/// * `members` - The candidate members
+/// * `source_group` - The dependent's pre-override group, if it was captured
+fn member_by_source_group<'a, I>(
+    members: I,
+    source_group: Option<&String>,
+) -> Option<&'a CollisionMember>
+where
+    I: IntoIterator<Item = &'a CollisionMember>,
+{
+    // an uncaptured source group can't disambiguate anything
+    let source_group = source_group?;
+    // keep only the members that came from the dependent's original group
+    let mut matching = members
+        .into_iter()
+        .filter(|member| &member.source_group == source_group);
+    // exactly one match identifies the member; zero or several is ambiguous
+    match (matching.next(), matching.next()) {
+        (Some(member), None) => Some(member),
+        _ => None,
+    }
+}
+
+/// Rewrite a pipeline version's references to a renamed member so they point at
+/// `new_name`, in both the `images` map and the image order
+///
+/// The `images` map pin is moved from the shared config name, or from the member's
+/// manifest key when it pins the member's version, to `new_name`.
 ///
 /// # Arguments
 ///
 /// * `version` - The pipeline version to rewrite in place
-/// * `old_name` - The image name currently referenced
-/// * `new_name` - The image name to replace it with
-fn rewrite_pipeline_image_ref(version: &mut PipelineVersion, old_name: &str, new_name: &str) {
-    // move the images-map pin (if any) from the old key to the new one, preserving its
-    // pinned version; the map may legitimately lack the key if only the order names it
+/// * `old_name` - The shared config name currently referenced
+/// * `member` - The member that was renamed
+/// * `new_name` - The image name to replace the references with
+fn rewrite_pipeline_image_ref(
+    version: &mut PipelineVersion,
+    old_name: &str,
+    member: &CollisionMember,
+    new_name: &str,
+) {
+    // move the images-map pin (if any) keyed by the config name to the new key, preserving
+    // its pinned version; the map may legitimately lack the key if only the order names it
     if let Some(pipeline_image) = version.images.remove(old_name) {
+        version.images.insert(new_name.to_string(), pipeline_image);
+    }
+    // a pin keyed by the member's manifest key moves too, but only when it pins this
+    // member's version (another version under that key is a different image)
+    if version
+        .images
+        .get(&member.manifest_key)
+        .is_some_and(|pin| pin.version == member.version)
+        && let Some(pipeline_image) = version.images.remove(&member.manifest_key)
+    {
         version.images.insert(new_name.to_string(), pipeline_image);
     }
     if let Some(config) = &mut version.config {
@@ -1012,6 +1268,123 @@ fn rewrite_pipeline_image_ref(version: &mut PipelineVersion, old_name: &str, new
     }
 }
 
+/// Truncate a name to at most `max` characters, dropping any trailing '-' the cut
+/// leaves behind
+///
+/// # Arguments
+///
+/// * `name` - The name to truncate (expected to be ASCII)
+/// * `max` - The maximum length to keep
+fn truncate_name(name: &str, max: usize) -> String {
+    // take at most `max` characters, then trim a dangling separator
+    name.chars()
+        .take(max)
+        .collect::<String>()
+        .trim_end_matches('-')
+        .to_string()
+}
+
+/// Map an arbitrary string onto the Thorium resource name rule: lowercase ASCII
+/// letters, digits, and single '-' separators, with no leading or trailing '-',
+/// truncated to [`prompt::RESOURCE_NAME_MAX`]
+///
+/// # Arguments
+///
+/// * `raw` - The string to sanitize
+fn sanitize_name(raw: &str) -> String {
+    // lowercase the input and turn every character outside [a-z0-9] into a separator
+    let mapped: String = raw
+        .to_ascii_lowercase()
+        .chars()
+        .map(|c| {
+            if c.is_ascii_lowercase() || c.is_ascii_digit() {
+                c
+            } else {
+                '-'
+            }
+        })
+        .collect();
+    // collapse separator runs and drop leading/trailing separators
+    let collapsed = mapped
+        .split('-')
+        .filter(|part| !part.is_empty())
+        .collect::<Vec<_>>()
+        .join("-");
+    // fit the result within the API's name length cap
+    truncate_name(&collapsed, prompt::RESOURCE_NAME_MAX)
+}
+
+/// The sanitized `<name>-<version>` base a rename suggestion starts from, falling
+/// back to the sanitized name (or `renamed`) when nothing valid is left
+///
+/// # Arguments
+///
+/// * `name` - The colliding resource's name
+/// * `version` - The member's version label
+fn suggestion_base(name: &str, version: &str) -> String {
+    // prefer "<name>-<version>" mapped onto the name rule
+    let base = sanitize_name(&format!("{name}-{version}"));
+    if !base.is_empty() {
+        return base;
+    }
+    // fall back to the bare name, and finally a fixed placeholder
+    let base = sanitize_name(name);
+    if base.is_empty() {
+        "renamed".to_string()
+    } else {
+        base
+    }
+}
+
+/// A valid name `taken` reports as free, appending `-2`, `-3`, … to `base` until one
+/// is found
+///
+/// `taken` is the caller's freshness test (it decides what "already used" means).
+/// `base` is truncated as needed so every candidate, suffix included, stays within
+/// [`prompt::RESOURCE_NAME_MAX`]; the `(2..)` range is unbounded, so a free name is
+/// always found.
+///
+/// # Arguments
+///
+/// * `base` - The preferred (already sanitized) name to return unchanged when it is free
+/// * `taken` - Predicate reporting whether a candidate name is already used
+fn unique_name(base: &str, mut taken: impl FnMut(&str) -> bool) -> String {
+    // prefer the unsuffixed name when it is already free
+    let first = truncate_name(base, prompt::RESOURCE_NAME_MAX);
+    if !taken(&first) {
+        return first;
+    }
+    // otherwise try "base-2", "base-3", … until one is free, shortening the base so the
+    // suffix still fits; `taken` can only reject finitely many names, so this terminates
+    let mut n: u64 = 2;
+    loop {
+        // build the next suffixed candidate within the length cap
+        let suffix = format!("-{n}");
+        let stem = truncate_name(base, prompt::RESOURCE_NAME_MAX.saturating_sub(suffix.len()));
+        let candidate = format!("{stem}{suffix}");
+        // return the first candidate nothing else uses
+        if !taken(&candidate) {
+            return candidate;
+        }
+        n += 1;
+    }
+}
+
+/// Serialize an image config to JSON with object keys and set-valued arrays in a
+/// canonical order, so two equal configs always produce equal values
+///
+/// # Arguments
+///
+/// * `config` - The image config to serialize
+pub(crate) fn canonical_image_value(
+    config: &ImageRequest,
+) -> Result<serde_json::Value, serde_json::Error> {
+    // serde_json objects are sorted maps, so only the set-valued arrays need sorting
+    let mut value = serde_json::to_value(config)?;
+    crate::utils::sort_set_fields(&mut value, crate::utils::IMAGE_SET_FIELDS);
+    Ok(value)
+}
+
 /// A pipeline entry in a toolbox manifest: its versions keyed by version label
 #[derive(Debug, Serialize, Deserialize)]
 pub struct PipelineManifest {
@@ -1030,13 +1403,15 @@ pub struct PipelineVersion {
     pub dir: String,
     /// A description of the pipeline for the purpose of the toolbox, not for
     /// Thorium itself
+    #[serde(default)]
     pub description: String,
     /// A map of image names to their info for the pipeline
+    #[serde(default)]
     pub images: HashMap<String, PipelineImage>,
     /// URL to fetch the pipeline config from (alternative to inline config)
     #[serde(skip_serializing_if = "Option::is_none")]
     pub config_from: Option<String>,
-    /// The pipeline's Thorium configuration (inline or resolved from config_from)
+    /// The pipeline's Thorium configuration (inline or resolved from `config_from`)
     #[serde(default)]
     pub config: Option<PipelineRequest>,
 }
@@ -1066,11 +1441,12 @@ pub struct ImageVersion {
     #[serde(default)]
     pub dir: String,
     /// The image's build path relative to the toolbox manifest's location
+    #[serde(default)]
     pub build_path: String,
     /// URL to fetch the image config from (alternative to inline config)
     #[serde(skip_serializing_if = "Option::is_none")]
     pub config_from: Option<String>,
-    /// The image's Thorium configuration (inline or resolved from config_from)
+    /// The image's Thorium configuration (inline or resolved from `config_from`)
     #[serde(default)]
     pub config: Option<ImageRequest>,
     /// URLs to fetch network policy definitions from (resolved into
@@ -1297,7 +1673,7 @@ mod tests {
         let dropped = m.validate_structural();
         assert!(!m.pipelines.contains_key("p"));
         assert_eq!(dropped.pipelines.len(), 1);
-        assert_eq!(dropped.pipelines[0].0, "p:latest");
+        assert_eq!(dropped.pipelines[0].0, "g/p@latest");
         assert!(dropped.pipelines[0].1.iter().any(|r| r.contains("missing")));
     }
 
@@ -1380,7 +1756,7 @@ mod tests {
         let dropped = m.validate_structural();
         assert!(m.images.is_empty());
         assert_eq!(dropped.images.len(), 1);
-        assert_eq!(dropped.images[0].0, "a:latest");
+        assert_eq!(dropped.images[0].0, "a@latest");
         assert!(!m.pipelines.contains_key("p"));
     }
 
@@ -1431,7 +1807,8 @@ mod tests {
             .find(|mem| mem.version == "latest")
             .unwrap()
             .clone();
-        m.rename_image_member(&collision, &latest, "exiftool-latest", &sources);
+        m.rename_image_member(&collision, &latest, "exiftool-latest", &sources)
+            .unwrap();
         // both images now coexist
         assert!(m.images.contains_key("exiftool")); // the 1.2 variant kept the name
         assert!(m.images.contains_key("exiftool-latest"));
@@ -1496,7 +1873,8 @@ mod tests {
             .unwrap()
             .clone();
         let new_name = m.suggested_image_rename(&collision, &uur);
-        m.rename_image_member(&collision, &uur, &new_name, &sources);
+        m.rename_image_member(&collision, &uur, &new_name, &sources)
+            .unwrap();
         // the static pipeline keeps 'exiftool'; the uur pipeline is repointed
         assert_eq!(order_of(&m, "p-static"), vec![vec!["exiftool".to_string()]]);
         assert_eq!(order_of(&m, "p-uur"), vec![vec![new_name.clone()]]);
@@ -1589,7 +1967,7 @@ mod tests {
         // both colliding image entries are gone...
         assert!(!m.image_names_in_group("g").contains("x"));
         // ...the pipeline that used it is dropped, the one that didn't is kept
-        assert_eq!(dropped, vec!["dep:latest".to_string()]);
+        assert_eq!(dropped, vec!["g/dep@latest".to_string()]);
         assert!(!m.pipelines.contains_key("dep"));
         assert!(m.pipelines.contains_key("free"));
     }
@@ -1658,9 +2036,310 @@ mod tests {
         let m1 = collision.members[1].clone();
         let n1 = m.suggested_image_rename(&collision, &m1);
         assert_eq!(n1, "x-latest");
-        m.rename_image_member(&collision, &m1, &n1, &sources);
+        m.rename_image_member(&collision, &m1, &n1, &sources)
+            .unwrap();
         let m2 = collision.members[2].clone();
         let n2 = m.suggested_image_rename(&collision, &m2);
         assert_eq!(n2, "x-latest-2");
+    }
+
+    /// Two image entries whose network-policy sets hold the same elements are an
+    /// identical duplicate regardless of each set's iteration order
+    #[test]
+    fn identical_check_ignores_set_order() {
+        // build two configs with the same policies inserted in opposite orders, repeated
+        // across many sets so differing hash orders are all but certain to appear
+        let names: Vec<String> = (0..16).map(|n| format!("p{n}")).collect();
+        let mut a = image_version("g", "x", "url");
+        let mut b = image_version("g", "x", "url");
+        a.config.as_mut().unwrap().network_policies = names.iter().cloned().collect();
+        b.config.as_mut().unwrap().network_policies = names.iter().rev().cloned().collect();
+        let m = manifest(
+            vec![
+                (
+                    "a",
+                    ImageManifest {
+                        versions: HashMap::from([("latest".to_string(), a)]),
+                    },
+                ),
+                (
+                    "b",
+                    ImageManifest {
+                        versions: HashMap::from([("latest".to_string(), b)]),
+                    },
+                ),
+            ],
+            vec![],
+        );
+        let sources = m.capture_source_groups();
+        let collisions = m.detect_image_collisions(&sources).unwrap();
+        assert_eq!(collisions.len(), 1);
+        assert!(collisions[0].identical);
+    }
+
+    /// The suggested rename is sanitized to a valid name even when the version label
+    /// has dots, uppercase letters, or would push the name past the length cap
+    #[test]
+    fn suggested_rename_is_a_valid_name() {
+        let m = manifest(
+            vec![(
+                "detect-it-easy",
+                versioned_image("g", "detect-it-easy", &["3.09", "V3.10-RC.Long-Label"]),
+            )],
+            vec![],
+        );
+        let sources = m.capture_source_groups();
+        let collision = m.detect_image_collisions(&sources).unwrap().remove(0);
+        for member in &collision.members {
+            let name = m.suggested_image_rename(&collision, member);
+            assert!(
+                prompt::validate_name(&name, prompt::RESOURCE_NAME_MAX).is_ok(),
+                "'{name}' should be a valid name"
+            );
+        }
+        let old = collision
+            .members
+            .iter()
+            .find(|mem| mem.version == "3.09")
+            .unwrap();
+        assert_eq!(
+            m.suggested_image_rename(&collision, old),
+            "detect-it-easy-3-09"
+        );
+    }
+
+    /// A numeric suffix still fits within the name length cap
+    #[test]
+    fn unique_name_suffix_respects_length_cap() {
+        let base = "a".repeat(prompt::RESOURCE_NAME_MAX);
+        let name = unique_name(&base, |candidate| candidate == base);
+        assert_eq!(name.len(), prompt::RESOURCE_NAME_MAX);
+        assert!(name.ends_with("-2"));
+    }
+
+    /// A rename onto another entry's manifest key (whose config name differs) is
+    /// rejected instead of overwriting that entry's version, and the suggestion skips it
+    #[test]
+    fn rename_rejects_existing_manifest_key() {
+        let m = manifest(
+            vec![
+                (
+                    "clamav",
+                    ImageManifest {
+                        versions: HashMap::from([(
+                            "1".to_string(),
+                            image_version("a", "clamav", "url-a"),
+                        )]),
+                    },
+                ),
+                (
+                    "clamav-1",
+                    ImageManifest {
+                        versions: HashMap::from([(
+                            "1".to_string(),
+                            image_version("b", "clamav", "url-b"),
+                        )]),
+                    },
+                ),
+            ],
+            vec![],
+        );
+        let sources = m.capture_source_groups();
+        let mut m = m.override_group("shared");
+        let collision = m.detect_image_collisions(&sources).unwrap().remove(0);
+        // keep 'clamav-1' and rename the 'clamav' entry
+        let member = collision
+            .members
+            .iter()
+            .find(|mem| mem.manifest_key == "clamav")
+            .unwrap()
+            .clone();
+        // the suggestion avoids the existing 'clamav-1' key
+        assert_eq!(m.suggested_image_rename(&collision, &member), "clamav-1-2");
+        // an explicit rename onto that key is refused and changes nothing
+        assert!(
+            m.rename_image_member(&collision, &member, "clamav-1", &sources)
+                .is_err()
+        );
+        assert_eq!(m.images.len(), 2);
+        assert_eq!(
+            m.images["clamav-1"].versions["1"]
+                .config
+                .as_ref()
+                .unwrap()
+                .image
+                .as_deref(),
+            Some("url-b")
+        );
+    }
+
+    /// A pipeline that pins the image by its manifest key follows the renamed variant
+    #[test]
+    fn rename_repoints_pipeline_pinned_by_manifest_key() {
+        let m = manifest(
+            vec![
+                (
+                    "sqlitediff",
+                    ImageManifest {
+                        versions: HashMap::from([(
+                            "1.0".to_string(),
+                            image_version("a", "sqldiff", "url-1"),
+                        )]),
+                    },
+                ),
+                (
+                    "sqldiff",
+                    ImageManifest {
+                        versions: HashMap::from([(
+                            "2.0".to_string(),
+                            image_version("b", "sqldiff", "url-2"),
+                        )]),
+                    },
+                ),
+            ],
+            vec![(
+                "pa",
+                pipeline_pinned("a", "pa", json!(["sqldiff"]), &[("sqlitediff", "1.0")]),
+            )],
+        );
+        let sources = m.capture_source_groups();
+        let mut m = m.override_group("shared");
+        let collision = m.detect_image_collisions(&sources).unwrap().remove(0);
+        let old = collision
+            .members
+            .iter()
+            .find(|mem| mem.version == "1.0")
+            .unwrap()
+            .clone();
+        let warnings = m
+            .rename_image_member(&collision, &old, "sqldiff-v1", &sources)
+            .unwrap();
+        assert_eq!(warnings, Vec::<String>::new());
+        assert_eq!(order_of(&m, "pa"), vec![vec!["sqldiff-v1".to_string()]]);
+        assert!(
+            m.pipelines["pa"].versions["latest"]
+                .images
+                .contains_key("sqldiff-v1")
+        );
+    }
+
+    /// When neither pin nor source group tells the variants apart, dependents stay on
+    /// the variant keeping the name and a warning is returned
+    #[test]
+    fn ambiguous_rename_leaves_dependents_and_warns() {
+        let m = manifest(
+            vec![
+                (
+                    "scan-a",
+                    ImageManifest {
+                        versions: HashMap::from([(
+                            "1".to_string(),
+                            image_version("g", "scan", "url-a"),
+                        )]),
+                    },
+                ),
+                (
+                    "scan-b",
+                    ImageManifest {
+                        versions: HashMap::from([(
+                            "1".to_string(),
+                            image_version("g", "scan", "url-b"),
+                        )]),
+                    },
+                ),
+            ],
+            vec![(
+                "p1",
+                pipeline_pinned("g", "p1", json!(["scan"]), &[("scan", "1")]),
+            )],
+        );
+        let sources = m.capture_source_groups();
+        let mut m = m;
+        let collision = m.detect_image_collisions(&sources).unwrap().remove(0);
+        let b = collision
+            .members
+            .iter()
+            .find(|mem| mem.manifest_key == "scan-b")
+            .unwrap()
+            .clone();
+        let warnings = m
+            .rename_image_member(&collision, &b, "scan-b2", &sources)
+            .unwrap();
+        assert_eq!(warnings.len(), 1);
+        assert_eq!(order_of(&m, "p1"), vec![vec!["scan".to_string()]]);
+    }
+
+    /// Renaming a variant repoints another image's result dependency matched by
+    /// source group
+    #[test]
+    fn rename_repoints_image_dependencies() {
+        let mut dependent = image_version("dynamic", "y", "url-y");
+        dependent
+            .config
+            .as_mut()
+            .unwrap()
+            .dependencies
+            .results
+            .images = vec!["x".to_string()];
+        let m = manifest(
+            vec![
+                ("x", image("static", "x")),
+                (
+                    "x-dyn",
+                    ImageManifest {
+                        versions: HashMap::from([(
+                            "latest".to_string(),
+                            image_version("dynamic", "x", "url-dyn"),
+                        )]),
+                    },
+                ),
+                (
+                    "y",
+                    ImageManifest {
+                        versions: HashMap::from([("latest".to_string(), dependent)]),
+                    },
+                ),
+            ],
+            vec![],
+        );
+        let sources = m.capture_source_groups();
+        let mut m = m.override_group("static");
+        let collision = m.detect_image_collisions(&sources).unwrap().remove(0);
+        let dynamic = collision
+            .members
+            .iter()
+            .find(|mem| mem.source_group == "dynamic")
+            .unwrap()
+            .clone();
+        m.rename_image_member(&collision, &dynamic, "x-dynamic", &sources)
+            .unwrap();
+        let deps = &m.images["y"].versions["latest"]
+            .config
+            .as_ref()
+            .unwrap()
+            .dependencies;
+        assert_eq!(deps.results.images, vec!["x-dynamic".to_string()]);
+    }
+
+    /// Dropped-item reports come back sorted by label
+    #[test]
+    fn dropped_items_are_sorted() {
+        let mut m = manifest(
+            vec![],
+            (0..8)
+                .map(|n| {
+                    (
+                        ["p0", "p1", "p2", "p3", "p4", "p5", "p6", "p7"][n],
+                        pipeline("g", "p", json!(["missing"]), &["missing"]),
+                    )
+                })
+                .collect(),
+        );
+        let dropped = m.validate_structural();
+        let labels: Vec<&String> = dropped.pipelines.iter().map(|(label, _)| label).collect();
+        let mut sorted = labels.clone();
+        sorted.sort();
+        assert_eq!(labels.len(), 8);
+        assert_eq!(labels, sorted);
     }
 }

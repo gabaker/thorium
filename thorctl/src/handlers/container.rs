@@ -174,43 +174,75 @@ pub async fn save(url: &str, dest: &Path, bar: &Bar) -> Result<(), Error> {
         .map_err(|err| Error::new(format!("Image save task panicked: {err}")))?
 }
 
+/// Build the temporary path a tarball is streamed into before being renamed over `dest`
+///
+/// The temporary file sits next to `dest` so the final rename stays on one filesystem
+/// (and is therefore atomic).
+///
+/// # Arguments
+///
+/// * `dest` - The final `.tar.gz` path
+fn partial_path(dest: &Path) -> std::path::PathBuf {
+    // append a suffix to the full file name so `<name>.tar.gz` becomes `<name>.tar.gz.partial`
+    let mut name = dest.file_name().unwrap_or_default().to_os_string();
+    name.push(".partial");
+    dest.with_file_name(name)
+}
+
 /// Synchronously run `<runtime> save <url>` and gzip its tar output into `dest`
 ///
 /// Streams the subprocess's stdout straight through the gzip encoder with
-/// [`std::io::copy`] so memory stays bounded regardless of image size. Always reaps
-/// the subprocess; on any failure it is killed and the partial archive removed so it
-/// can't be mistaken for a complete, importable tarball. Intended to be called from a
-/// blocking context (see [`save`]).
+/// [`std::io::copy`] so memory stays bounded regardless of image size. The runtime's stderr
+/// is captured (drained on a separate thread so it can't fill its pipe and stall the save)
+/// rather than inherited, so its progress output can't clobber thorctl's progress bars; it
+/// is included in the error when the save fails. The archive is
+/// written to a temporary file next to `dest` and only renamed over `dest` once it is
+/// complete, so a failed save never truncates or deletes a previously exported tarball.
+/// Always reaps the subprocess; on any failure it is killed and the partial archive is
+/// removed so it can't be mistaken for a complete, importable tarball. Intended to be
+/// called from a blocking context (see [`save`]).
 ///
 /// # Arguments
 ///
 /// * `url` - The image url to save (must already be present locally)
 /// * `dest` - The `.tar.gz` path to write
 fn save_blocking(url: &str, dest: &Path) -> Result<(), Error> {
-    // spawn the save with a piped stdout so we can compress it as it streams; stderr is
-    // left inherited so the runtime's own progress/errors reach the terminal
+    // stream into a sibling temp file so an existing good archive survives a failed save
+    let partial = partial_path(dest);
+    // spawn the save with a piped stdout so we can compress it as it streams, and a piped
+    // stderr so the runtime's own output (e.g. podman's "Copying blob" lines) can't draw over
+    // our progress bars
     let mut child = std::process::Command::new(runtime().binary())
         .args(["save", url])
         .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
         .spawn()
         .map_err(|e| Error::new(format!("Failed to run {} save: {e}", runtime())))?;
+    // drain stderr on its own thread while stdout streams, keeping it for the error message
+    let stderr_reader = child.stderr.take().map(|mut stderr| {
+        std::thread::spawn(move || {
+            let mut captured = Vec::new();
+            let _ = std::io::Read::read_to_end(&mut stderr, &mut captured);
+            captured
+        })
+    });
     // take ownership of the piped stdout handle so we can stream it; absent only if the
     // pipe wasn't set up, which shouldn't happen given the Stdio::piped above
     let mut stdout = child
         .stdout
         .take()
         .ok_or_else(|| Error::new(format!("{} save did not produce stdout", runtime())))?;
-    // stream-compress the tar into the destination; std::io::copy bounds memory by
+    // stream-compress the tar into the temp file; std::io::copy bounds memory by
     // copying in fixed-size chunks rather than buffering the whole image
     let stream = (|| -> Result<(), Error> {
-        let gz_file = std::fs::File::create(dest)
-            .map_err(|e| Error::new(format!("Failed to create '{}': {e}", dest.display())))?;
+        let gz_file = std::fs::File::create(&partial)
+            .map_err(|e| Error::new(format!("Failed to create '{}': {e}", partial.display())))?;
         let mut encoder = GzEncoder::new(gz_file, Compression::default());
         std::io::copy(&mut stdout, &mut encoder)
-            .map_err(|e| Error::new(format!("Failed to write '{}': {e}", dest.display())))?;
+            .map_err(|e| Error::new(format!("Failed to write '{}': {e}", partial.display())))?;
         encoder
             .finish()
-            .map_err(|e| Error::new(format!("Failed to finish '{}': {e}", dest.display())))?;
+            .map_err(|e| Error::new(format!("Failed to finish '{}': {e}", partial.display())))?;
         Ok(())
     })();
     // if our compress/write failed, kill the subprocess so one still writing to the pipe
@@ -222,19 +254,53 @@ fn save_blocking(url: &str, dest: &Path) -> Result<(), Error> {
     // own streaming error is the root cause and wins, otherwise a non-zero exit fails
     let status = child
         .wait()
-        .map_err(|e| Error::new(format!("{} save failed: {e}", runtime())))?;
-    let result = stream.and_then(|()| {
-        if status.success() {
-            Ok(())
-        } else {
-            Err(Error::new(format!("{} save failed for '{url}'", runtime())))
-        }
-    });
-    // don't leave a truncated/garbage archive behind on failure; it would look importable
+        .map_err(|e| Error::new(format!("{} save failed: {e}", runtime())));
+    // collect the runtime's stderr now that it has exited and closed the pipe
+    let stderr = stderr_reader
+        .and_then(|reader| reader.join().ok())
+        .map_or_else(String::new, |captured| {
+            String::from_utf8_lossy(&captured).trim().to_string()
+        });
+    let result = stream
+        .and(status)
+        .and_then(|status| {
+            if status.success() {
+                Ok(())
+            } else {
+                Err(Error::new(save_failure(url, &stderr)))
+            }
+        })
+        // move the complete archive into place, replacing any earlier export
+        .and_then(|()| {
+            std::fs::rename(&partial, dest).map_err(|e| {
+                Error::new(format!(
+                    "Failed to move '{}' to '{}': {e}",
+                    partial.display(),
+                    dest.display()
+                ))
+            })
+        });
+    // don't leave a truncated/garbage temp archive behind on failure
     if result.is_err() {
-        let _ = std::fs::remove_file(dest);
+        let _ = std::fs::remove_file(&partial);
     }
     result
+}
+
+/// Build the error message for a failed `<runtime> save`, including its captured stderr
+///
+/// # Arguments
+///
+/// * `url` - The image url that failed to save
+/// * `stderr` - The runtime's trimmed stderr output (may be empty)
+fn save_failure(url: &str, stderr: &str) -> String {
+    // name the runtime and image, and append the runtime's own explanation when it gave one
+    let ctx = format!("{} save failed for '{url}'", runtime());
+    if stderr.is_empty() {
+        ctx
+    } else {
+        format!("{ctx}: {stderr}")
+    }
 }
 
 /// Load an image from a tarball into the local cache (`<runtime> load -i <tar>`)
@@ -421,7 +487,11 @@ pub async fn tag_streamed(src: &str, dst: &str) -> Result<(), Error> {
     // build `<runtime> tag <src> <dst>` to alias an extra reference onto a local image
     let cmd = command(["tag", src, dst]);
     // stream it so it shares the same live-output framing as the surrounding build/push
-    run_streamed(cmd, format!("{} tag failed ('{src}' -> '{dst}')", runtime())).await
+    run_streamed(
+        cmd,
+        format!("{} tag failed ('{src}' -> '{dst}')", runtime()),
+    )
+    .await
 }
 
 /// Push an image, streaming the runtime's output to the terminal
@@ -439,6 +509,26 @@ pub async fn push_streamed(url: &str) -> Result<(), Error> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    /// A failed save names the image and appends the runtime's captured stderr when present
+    #[test]
+    fn save_failure_includes_stderr() {
+        // the runtime isn't initialized in tests, so it falls back to docker
+        assert_eq!(
+            save_failure("reg/img:1", "no such image"),
+            "docker save failed for 'reg/img:1': no such image"
+        );
+        assert_eq!(
+            save_failure("reg/img:1", ""),
+            "docker save failed for 'reg/img:1'"
+        );
+    }
+    /// The temporary tarball path sits next to the destination with a `.partial` suffix
+    #[test]
+    fn partial_path_is_sibling() {
+        // the temp file must share the destination's directory so the rename is atomic
+        let partial = partial_path(Path::new("exports/images/foo.tar.gz"));
+        assert_eq!(partial, Path::new("exports/images/foo.tar.gz.partial"));
+    }
     /// Each runtime maps to its expected CLI binary name
     #[test]
     fn binary_names_match_runtime() {
@@ -461,7 +551,9 @@ mod tests {
     #[test]
     fn resolve_falls_back_to_config() {
         // with no flag, the config value should beat the detection fallback
-        let chosen = resolve(None, Some(ContainerRuntime::Podman), || ContainerRuntime::Docker);
+        let chosen = resolve(None, Some(ContainerRuntime::Podman), || {
+            ContainerRuntime::Docker
+        });
         assert_eq!(chosen, ContainerRuntime::Podman);
     }
     /// The detection fallback is used when neither flag nor config is set
@@ -505,7 +597,10 @@ mod tests {
     #[test]
     fn build_args_no_cache_only() {
         // only no_cache is set, so --no-cache appears but --pull must not
-        let opts = BuildOptions { no_cache: true, pull: false };
+        let opts = BuildOptions {
+            no_cache: true,
+            pull: false,
+        };
         let args = build_command_args("reg/x:1", Path::new("ctx"), &[], opts);
         assert!(args.contains(&"--no-cache".to_string()));
         assert!(!args.contains(&"--pull".to_string()));
@@ -515,7 +610,10 @@ mod tests {
     #[test]
     fn build_args_pull_only() {
         // only pull is set, so --pull appears but --no-cache must not
-        let opts = BuildOptions { no_cache: false, pull: true };
+        let opts = BuildOptions {
+            no_cache: false,
+            pull: true,
+        };
         let args = build_command_args("reg/x:1", Path::new("ctx"), &[], opts);
         assert!(args.contains(&"--pull".to_string()));
         assert!(!args.contains(&"--no-cache".to_string()));
@@ -525,7 +623,10 @@ mod tests {
     #[test]
     fn build_args_both_flags() {
         // both options set, so both flags must be present
-        let opts = BuildOptions { no_cache: true, pull: true };
+        let opts = BuildOptions {
+            no_cache: true,
+            pull: true,
+        };
         let args = build_command_args("reg/x:1", Path::new("ctx"), &[], opts);
         assert!(args.contains(&"--no-cache".to_string()));
         assert!(args.contains(&"--pull".to_string()));
@@ -536,8 +637,12 @@ mod tests {
     fn build_args_render_build_args_then_context() {
         // two build args exercise both the rendering and the ordering guarantee
         let build_args = vec![arg("IMAGE", "ubuntu:22.04"), arg("VERSION", "1")];
-        let args =
-            build_command_args("reg/x:1", Path::new("ctx"), &build_args, BuildOptions::default());
+        let args = build_command_args(
+            "reg/x:1",
+            Path::new("ctx"),
+            &build_args,
+            BuildOptions::default(),
+        );
         // join into one string so the `--build-arg key=value` pairing can be asserted
         let joined = args.join(" ");
         assert!(joined.contains("--build-arg IMAGE=ubuntu:22.04"));

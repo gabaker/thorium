@@ -12,6 +12,7 @@ use walkdir::WalkDir;
 
 use crate::args::toolbox::BuildToolbox;
 use crate::handlers::progress;
+use crate::utils;
 
 // ─── TOML Input Models ─────────────────────────────────────────────────────
 
@@ -96,8 +97,9 @@ pub(crate) const DEFAULT_BASE_IMAGE_ARG: &str = "IMAGE";
 
 /// Read and parse a toolbox `config.toml`
 ///
-/// Shared by `toolbox build` (the walk root's config) and `toolbox export`
-/// (`--config`, which reuses an existing toolbox's settings).
+/// Shared by `toolbox build` (the walk root's config), `toolbox export` (`--config`, which
+/// reuses an existing toolbox's settings), and `toolbox init` (`--config` templates and `-c`
+/// resolution sources).
 ///
 /// # Arguments
 ///
@@ -212,13 +214,13 @@ struct PipelineImageToml {
 }
 
 /// The default image/pipeline version when a manifest omits one
-fn default_version() -> String {
+pub(super) fn default_version() -> String {
     "latest".to_string()
 }
 
 /// The serde default for [`ManifestToml::build`]: an image is built unless its manifest
 /// explicitly sets `build = false`
-fn default_true() -> bool {
+pub(super) fn default_true() -> bool {
     true
 }
 
@@ -452,6 +454,18 @@ fn set_config_image(config: &mut Option<serde_json::Value>, name: &str, url: &st
     }
 }
 
+/// Whether images run by a scaler need a container image pulled from a registry
+///
+/// Only K8s images pull a container from a registry; `BareMetal`, `Windows`, `Kvm`,
+/// and `External` images run without one.
+///
+/// # Arguments
+///
+/// * `scaler` - The scaler the image runs under
+pub(super) fn scaler_requires_container_image(scaler: ImageScaler) -> bool {
+    matches!(scaler, ImageScaler::K8s)
+}
+
 /// Whether a loaded image config needs a container image pulled from a registry
 ///
 /// Only K8s images pull a container from a registry; `BareMetal`, `Windows`, `Kvm`,
@@ -468,7 +482,9 @@ fn config_requires_container_image(config: Option<&serde_json::Value>) -> bool {
     match config {
         Some(value) => match value.get("scaler").and_then(serde_json::Value::as_str) {
             // a named scaler requires a container image only when it is K8s
-            Some(scaler) => matches!(ImageScaler::from_str(scaler), Ok(ImageScaler::K8s)),
+            Some(scaler) => {
+                ImageScaler::from_str(scaler).is_ok_and(scaler_requires_container_image)
+            }
             // an absent scaler defaults to K8s, which does require one
             None => true,
         },
@@ -584,25 +600,42 @@ fn load_network_policies(
 /// when present beside the manifest it wins over any inline description, with
 /// a warning when it overrides a differing non-empty value. Configs fetched
 /// from URLs at import time can't be injected into, so that combination only
-/// warns.
+/// warns. A description.md that exists but can't be read (permissions, non-UTF-8 text) is
+/// warned about rather than silently treated as absent.
+///
+/// Returns the non-empty description.md contents when one was found, so callers can mirror it
+/// elsewhere in the entry.
 ///
 /// # Arguments
 ///
 /// * `root` - The tool directory that may hold a description.md
 /// * `name` - The tool name, used for warnings
 /// * `config` - The loaded config to inject into, if any
-fn apply_description_md(root: &Path, name: &str, config: &mut Option<serde_json::Value>) {
+fn apply_description_md(
+    root: &Path,
+    name: &str,
+    config: &mut Option<serde_json::Value>,
+) -> Option<String> {
     let desc_path = root.join("description.md");
-    let Ok(description) = std::fs::read_to_string(&desc_path) else {
+    // only a missing file means "no description.md"; any other read failure is surfaced
+    let description = match std::fs::read_to_string(&desc_path) {
+        Ok(description) => description,
         // no description.md is the common case; nothing to do
-        return;
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return None,
+        Err(err) => {
+            progress::warn(format!(
+                "{name}: failed to read '{}' ({err}); its description is not applied",
+                desc_path.display()
+            ));
+            return None;
+        }
     };
     // trim trailing whitespace (editors leave a final newline) so the embedded description is
     // byte-stable across runs and matches what export writes back out
     let description = description.trim_end().to_string();
     // an empty (or whitespace-only) file is treated as absent, leaving any inline description intact
     if description.is_empty() {
-        return;
+        return None;
     }
     match config {
         Some(serde_json::Value::Object(map)) => {
@@ -612,13 +645,13 @@ fn apply_description_md(root: &Path, name: &str, config: &mut Option<serde_json:
                 && !inline.is_empty()
                 && inline != description
             {
-                eprintln!(
-                    "Warning: {name}: description.md overrides the differing inline description in its config"
-                );
+                progress::warn(format!(
+                    "{name}: description.md overrides the differing inline description in its config"
+                ));
             }
             map.insert(
                 "description".to_string(),
-                serde_json::Value::String(description),
+                serde_json::Value::String(description.clone()),
             );
         }
         Some(_) => {
@@ -633,6 +666,7 @@ fn apply_description_md(root: &Path, name: &str, config: &mut Option<serde_json:
             ));
         }
     }
+    Some(description)
 }
 
 /// Express a build context relative to `output_dir` (the directory holding the
@@ -751,7 +785,6 @@ fn build_image_version(
     // merge this image's base-image config over the toolbox-wide default (per-tool wins); the result
     // is written onto the entry for build-images, except for image_from images (cleared below)
     let base_image = merge_base_image(global_base_image, manifest.base_image.as_ref());
-
     // an empty version would produce a broken registry tag like "registry/path:"
     // (see the tag assembly below), so reject it rather than emit junk
     if version.is_empty() {
@@ -765,15 +798,16 @@ fn build_image_version(
     if let Some(own) = manifest.base_image.as_ref() {
         if manifest.image_from.is_some() {
             // an image_from image is never built, so its [base_image] has no effect
-            eprintln!(
-                "Warning: {name}: [base_image] is ignored on an image_from image (it is never built)"
-            );
+            progress::warn(format!(
+                "{name}: [base_image] is ignored on an image_from image (it is never built)"
+            ));
         } else {
             // this manifest both sets an override image and disables overriding
             if own.image.is_some() && own.allow_override == Some(false) {
-                eprintln!(
-                    "Warning: {name}: [base_image].image is set but allow_override = false, so the base image substitution will be skipped"
-                );
+                progress::warn(format!(
+                    "{name}: [base_image].image is set but allow_override = false, so the base \
+                     image substitution will be skipped"
+                ));
             }
             // this manifest names a build-arg but supplies no image, and none is inherited either
             if own.image.is_none()
@@ -783,13 +817,13 @@ fn build_image_version(
                     .and_then(|base| base.image.as_ref())
                     .is_none()
             {
-                eprintln!(
-                    "Warning: {name}: [base_image].image_arg is set without an image, so it has no effect"
-                );
+                progress::warn(format!(
+                    "{name}: [base_image].image_arg is set without an image, so it has no effect"
+                ));
             }
         }
     }
-
+    // the build context, relative to the manifest (defaults to the manifest's own directory)
     let build_path_str = manifest.build_path.as_deref().unwrap_or("./");
     // "./" / "." mean the manifest's own directory; anything else is joined onto it
     // with Path::join (portable, unlike a manual "/" concat)
@@ -805,14 +839,12 @@ fn build_image_version(
     // the toolbox.json's directory; import resolves a bundled image's tarball from here. It is
     // independent of build_path (the build context) though they coincide for build_path = "./".
     let dir = build_path_relative_to_output(root, output_dir);
-
     // resolve config_from: an inline value (local path or absent->empty object) or a deferred URL
     let loaded = load_json_config(root, manifest.config_from.as_deref())?;
     let mut config = loaded.value;
     // bundle any network policy definitions the image references (local files inline, URLs deferred)
     let (network_policies_from, network_policies) =
         load_network_policies(root, manifest.network_policies_from.as_ref())?;
-
     // an image that reuses another's container image is never built and derives no tag
     // of its own: the container url is filled in after the walk (see resolve_image_from
     // in build_output) once every image's url is known. build_path/build/[base_image]/
@@ -837,7 +869,6 @@ fn build_image_version(
             base_image: None,
         });
     }
-
     // an image whose manifest provides no Thorium config (no config_from, or an empty
     // `{}` config) is "build-only": it is built and kept in toolbox.json, but carries no
     // embedded config so `toolbox import` skips it. Don't synthesize a config just to
@@ -860,11 +891,11 @@ fn build_image_version(
         // a build-enabled image that derives no tag builds nothing — import skips it (no
         // config) and build-images skips it (no tags) — so surface the silent no-op
         if manifest.build && image_tags.is_empty() {
-            eprintln!(
-                "Warning: {name}: build is enabled but no image tag could be derived; add a \
+            progress::warn(format!(
+                "{name}: build is enabled but no image tag could be derived; add a \
                  'registry' to config.toml (the tool name is the tag leaf; pass --use-image-path \
                  with an 'image_name' for a repo-style path). build-images will skip it."
-            );
+            ));
         }
         return Ok(BuildImageVersion {
             dir,
@@ -878,10 +909,8 @@ fn build_image_version(
             base_image,
         });
     }
-
     // description.md beside the manifest becomes the image's description
     apply_description_md(root, name, &mut config);
-
     // An image we don't build locally keeps the real registry path it already lives
     // at — the url an export recorded, or one already in its config — so an exported
     // toolbox round-trips instead of pointing at a `registry + image_name`-derived
@@ -897,11 +926,19 @@ fn build_image_version(
             .map(str::to_string)
             .or_else(|| config.as_ref().and_then(config_image_url))
     };
-
+    // tag the image with its pinned url, or derive tags from the registries
     let image_tags = if let Some(url) = pinned {
         // use the real path verbatim for both the tag and the embedded config
         set_config_image(&mut config, name, &url);
         vec![url]
+    } else if !manifest.build
+        && config.is_some()
+        && !config_requires_container_image(config.as_ref())
+    {
+        // an unbuilt image whose local config runs without a container (BareMetal, Windows, Kvm,
+        // External) has nothing to tag; deriving a registry url would invent an image it never
+        // uses. A URL-resolved config can't be introspected, so it still derives tags below
+        Vec::new()
     } else {
         // derive <registry>/[prefix/]<image_name>:<version> for each registry
         let tags = derive_image_tags(
@@ -921,9 +958,10 @@ fn build_image_version(
                 if let Some(existing) = config.as_ref().and_then(config_image_url)
                     && &existing != first
                 {
-                    eprintln!(
-                        "Warning: {name}: build derived image tag '{first}' overrides the config's image '{existing}' (set build = false to keep the config's url)"
-                    );
+                    progress::warn(format!(
+                        "{name}: build derived image tag '{first}' overrides the config's image \
+                         '{existing}' (set build = false to keep the config's url)"
+                    ));
                 }
                 set_config_image(&mut config, name, first);
                 tags
@@ -935,9 +973,11 @@ fn build_image_version(
                 // image normally has its tag derived, so note the fallback per-image.
                 Some(existing) => {
                     if manifest.build {
-                        eprintln!(
-                            "Warning: {name}: could not derive a registry tag (no registry, or --use-image-path with no image_name); falling back to the image '{existing}' set in its config"
-                        );
+                        progress::warn(format!(
+                            "{name}: could not derive a registry tag (no registry, or \
+                             --use-image-path with no image_name); falling back to the image \
+                             '{existing}' set in its config"
+                        ));
                     }
                     vec![existing]
                 }
@@ -947,11 +987,9 @@ fn build_image_version(
             },
         }
     };
-
     // normalize the finished config to its canonical form so build matches export
     // (resource units in particular); stub/URL configs pass through untouched
     let config = canonicalize_config::<ImageRequest>(config);
-
     Ok(BuildImageVersion {
         dir,
         build_path: image_build_path,
@@ -967,10 +1005,14 @@ fn build_image_version(
 
 /// Assembles one pipeline's `toolbox.json` entry from its manifest and on-disk config
 ///
+/// Warns when the manifest's `[images.*]` table doesn't match the images named in the embedded
+/// config's `order`, since the two drift apart easily when only one is edited.
+///
 /// # Arguments
 ///
 /// * `manifest` - The pipeline's parsed `manifest.toml`
 /// * `root` - The manifest's directory
+/// * `output_dir` - The directory the `toolbox.json` is written to
 fn build_pipeline_version(
     manifest: &ManifestToml,
     root: &Path,
@@ -979,15 +1021,10 @@ fn build_pipeline_version(
     // the tool directory (where this manifest.toml lives), relative to the toolbox.json's directory —
     // recorded so export can find a pipeline's existing home and update it in place
     let dir = build_path_relative_to_output(root, output_dir);
-    // a pipeline's manifest description seeds the entry; a sibling description.md overrides it below
-    // (the manifest value lives on the entry, the override lands in the embedded config)
-    let description = manifest.description.clone().unwrap_or_default();
     // project the manifest's image->version map onto the output shape; an absent images table
-    // yields an empty map rather than failing, leaving structural validation to catch it on import
-    let images: HashMap<String, PipelineImageOutput> = manifest
-        .images
-        .as_ref()
-        .map(|imgs| {
+    // yields an empty map (flagged below when the config's order runs images)
+    let images: HashMap<String, PipelineImageOutput> =
+        manifest.images.as_ref().map_or_default(|imgs| {
             imgs.iter()
                 .map(|(k, v)| {
                     (
@@ -998,17 +1035,22 @@ fn build_pipeline_version(
                     )
                 })
                 .collect()
-        })
-        .unwrap_or_default();
+        });
     // resolve config_from the same way images do (inline value or deferred URL)
     let loaded = load_json_config(root, manifest.config_from.as_deref())?;
     let mut config = loaded.value;
-    // description.md beside the manifest becomes the pipeline's description
-    apply_description_md(root, &manifest.name, &mut config);
+    // description.md beside the manifest becomes the pipeline's description, both in the embedded
+    // config and on the entry itself so the two agree; without one, the manifest's value is used
+    let description = apply_description_md(root, &manifest.name, &mut config)
+        .or_else(|| manifest.description.clone())
+        .unwrap_or_default();
+    // flag a manifest image map that disagrees with the images the config's order actually runs
+    if let Some(config) = config.as_ref() {
+        warn_pipeline_image_drift(&manifest.name, config, &images);
+    }
     // normalize the finished config to its canonical form so build matches export;
     // stub/URL configs pass through untouched
     let config = canonicalize_config::<PipelineRequest>(config);
-
     Ok(BuildPipelineVersion {
         dir,
         description,
@@ -1016,6 +1058,85 @@ fn build_pipeline_version(
         config_from: loaded.url,
         config,
     })
+}
+
+/// Collect the image names a pipeline config's `order` runs, in both the staged
+/// (`[["a"], ["b"]]`) and the flat (`["a", "b"]`) form
+///
+/// # Arguments
+///
+/// * `config` - The pipeline config whose `order` is scanned
+fn pipeline_order_images(config: &serde_json::Value) -> HashSet<String> {
+    let mut images = HashSet::new();
+    // a missing or non-array order runs no images
+    if let Some(order) = config.get("order").and_then(serde_json::Value::as_array) {
+        for entry in order {
+            match entry {
+                // a flat entry is itself an image name
+                serde_json::Value::String(name) => {
+                    images.insert(name.clone());
+                }
+                // a staged entry is an array of image names; non-strings are ignored
+                serde_json::Value::Array(stage) => {
+                    images.extend(
+                        stage
+                            .iter()
+                            .filter_map(|image| image.as_str().map(String::from)),
+                    );
+                }
+                // anything else is malformed and left to import-time validation
+                _ => {}
+            }
+        }
+    }
+    images
+}
+
+/// Warn when a pipeline manifest's `[images.*]` table differs from the images its config's
+/// `order` runs
+///
+/// # Arguments
+///
+/// * `name` - The pipeline name, for the warning
+/// * `config` - The pipeline's embedded config
+/// * `images` - The manifest's image map
+fn warn_pipeline_image_drift(
+    name: &str,
+    config: &serde_json::Value,
+    images: &HashMap<String, PipelineImageOutput>,
+) {
+    // a config with no order at all (e.g. an empty stub) has nothing to compare against
+    if config.get("order").is_none() {
+        return;
+    }
+    let ordered = pipeline_order_images(config);
+    // images the order runs that the manifest doesn't declare (so no version is recorded)
+    let mut undeclared: Vec<&str> = ordered
+        .iter()
+        .filter(|image| !images.contains_key(*image))
+        .map(String::as_str)
+        .collect();
+    // images the manifest declares that the order never runs
+    let mut unused: Vec<&str> = images
+        .keys()
+        .filter(|image| !ordered.contains(*image))
+        .map(String::as_str)
+        .collect();
+    // sort so the warnings are deterministic
+    undeclared.sort_unstable();
+    unused.sort_unstable();
+    if !undeclared.is_empty() {
+        progress::warn(format!(
+            "{name}: order runs image(s) missing from manifest.toml's [images] table: {}",
+            undeclared.join(", ")
+        ));
+    }
+    if !unused.is_empty() {
+        progress::warn(format!(
+            "{name}: manifest.toml's [images] table lists image(s) the order never runs: {}",
+            unused.join(", ")
+        ));
+    }
 }
 
 /// Build a toolbox manifest from a directory of image and pipeline manifests
@@ -1038,13 +1159,15 @@ pub fn build(cmd: &BuildToolbox) -> Result<(), Error> {
         crawl.display(),
         output_path.display()
     );
-    let output = build_output(cmd)?;
+    // walk the manifests and assemble the output
+    let output = build_output(cmd, &crawl, &output_path)?;
     // serialize through the canonical (sorted-key) form: `BuildOutput`'s image and
     // pipeline maps are `HashMap`s, so a direct `to_string_pretty` would emit keys in
     // random order and churn `toolbox.json` between otherwise-identical runs. Routing
     // through serde_json::Value (a sorted BTreeMap) makes the file byte-deterministic
     // so it can be committed and diffed.
     let json = crate::utils::canonical_json(&output)?;
+    // write the manifest beside the config (or at --output)
     std::fs::write(&output_path, json)
         .map_err(|e| Error::new(format!("Failed to write '{}': {e}", output_path.display())))?;
     println!("Wrote toolbox manifest to '{}'", output_path.display());
@@ -1061,6 +1184,7 @@ pub fn build(cmd: &BuildToolbox) -> Result<(), Error> {
 ///
 /// * `config` - The path to the toolbox's `config.toml`
 pub(super) fn config_base_dir(config: &Path) -> PathBuf {
+    // an empty parent (a bare file name) means the cwd
     config
         .parent()
         .filter(|parent| !parent.as_os_str().is_empty())
@@ -1073,6 +1197,7 @@ pub(super) fn config_base_dir(config: &Path) -> PathBuf {
 ///
 /// * `cmd` - The build command arguments
 fn resolved_crawl(cmd: &BuildToolbox) -> PathBuf {
+    // an explicit --path wins; otherwise crawl the toolbox root
     cmd.path
         .clone()
         .unwrap_or_else(|| config_base_dir(&cmd.config))
@@ -1085,6 +1210,7 @@ fn resolved_crawl(cmd: &BuildToolbox) -> PathBuf {
 ///
 /// * `cmd` - The build command arguments
 fn resolved_output(cmd: &BuildToolbox) -> PathBuf {
+    // an explicit --output wins; otherwise write beside the config
     cmd.output
         .clone()
         .unwrap_or_else(|| config_base_dir(&cmd.config).join("toolbox.json"))
@@ -1100,7 +1226,7 @@ fn resolved_output(cmd: &BuildToolbox) -> PathBuf {
 /// * `cmd` - The build inputs (config path and walk root)
 pub(super) fn build_in_memory(cmd: &BuildToolbox) -> Result<serde_json::Value, Error> {
     // run the same walk/assembly as `build`, just keeping the result in memory
-    let output = build_output(cmd)?;
+    let output = build_output(cmd, &resolved_crawl(cmd), &resolved_output(cmd))?;
     // hand back a `Value` (not the canonical sorted-key string) since diff compares structures, not
     // bytes, and doesn't need the deterministic on-disk form
     serde_json::to_value(&output)
@@ -1139,7 +1265,8 @@ fn resolve_image_from_url(
         // re-visiting a node means the chain loops back on itself
         if !visited.insert((name.clone(), version.clone())) {
             return Err(format!(
-                "image_from chain cycles back to '{name}:{version}'"
+                "image_from chain cycles back to '{}'",
+                utils::entry_id(None, &name, &version)
             ));
         }
         // if this node also reuses another image, keep following the chain
@@ -1153,13 +1280,23 @@ fn resolve_image_from_url(
         let entry = images
             .get(&name)
             .and_then(|versions| versions.get(&version))
-            .ok_or_else(|| format!("image '{name}:{version}' not found in toolbox"))?;
+            .ok_or_else(|| {
+                format!(
+                    "image '{}' not found in toolbox",
+                    utils::entry_id(None, &name, &version)
+                )
+            })?;
         return entry
             .config
             .as_ref()
             .and_then(config_image_url)
             .or_else(|| entry.image_tags.first().cloned())
-            .ok_or_else(|| format!("image '{name}:{version}' has no container image to reuse"));
+            .ok_or_else(|| {
+                format!(
+                    "image '{}' has no container image to reuse",
+                    utils::entry_id(None, &name, &version)
+                )
+            });
     }
 }
 
@@ -1168,9 +1305,15 @@ fn resolve_image_from_url(
 /// # Arguments
 ///
 /// * `cmd` - The build command arguments
-fn build_output(cmd: &BuildToolbox) -> Result<BuildOutput, Error> {
+/// * `crawl` - The resolved directory to crawl for manifests
+/// * `output_path` - The resolved `toolbox.json` path build paths are recorded relative to
+fn build_output(
+    cmd: &BuildToolbox,
+    crawl: &Path,
+    output_path: &Path,
+) -> Result<BuildOutput, Error> {
+    // load the toolbox-wide settings from config.toml
     let config = load_config(&cmd.config)?;
-
     // assemble the registries to derive image tags for: the primary registry plus any
     // extras, dropping blanks and dupes so an unset/empty registry contributes nothing
     // (an empty list means tags come from each image's own config instead)
@@ -1180,17 +1323,13 @@ fn build_output(cmd: &BuildToolbox) -> Result<BuildOutput, Error> {
             registries.push(registry.clone());
         }
     }
-
-    // resolve the crawl root and output path (both default to the config's directory)
-    let crawl = resolved_crawl(cmd);
-    let output_path = resolved_output(cmd);
     // build_path values are recorded relative to the toolbox.json's directory; an
     // output with no parent (e.g. bare "toolbox.json") anchors to the cwd
     let output_dir = output_path
         .parent()
         .filter(|parent| !parent.as_os_str().is_empty())
         .unwrap_or_else(|| Path::new("."));
-
+    // the assembled entries, keyed name -> version
     let mut images: HashMap<String, HashMap<String, BuildImageVersion>> = HashMap::new();
     let mut pipelines: HashMap<String, HashMap<String, BuildPipelineVersion>> = HashMap::new();
     // each `image_from` image's `(name, version)` mapped to the `(name, version)` of the
@@ -1202,8 +1341,8 @@ fn build_output(cmd: &BuildToolbox) -> Result<BuildOutput, Error> {
     // make toolbox.json non-deterministic
     let mut image_locations: HashMap<(String, String), String> = HashMap::new();
     let mut pipeline_locations: HashMap<(String, String), String> = HashMap::new();
-
-    for entry in WalkDir::new(&crawl) {
+    // walk every file under the crawl root, turning each manifest.toml into an entry
+    for entry in WalkDir::new(crawl) {
         // a path we can't read (permissions, broken symlink) shouldn't vanish
         // silently from the output — surface it and keep walking the rest
         let entry = match entry {
@@ -1221,14 +1360,13 @@ fn build_output(cmd: &BuildToolbox) -> Result<BuildOutput, Error> {
         if path.file_name() != Some(OsStr::new("manifest.toml")) {
             continue;
         }
-        // a tool's directory (the manifest's parent) anchors all of its relative paths; skip a
-        // manifest with no usable parent (e.g. one walked at the bare root) since there'd be nothing
-        // to resolve its config/policies/build context against
+        // a tool's directory (the manifest's parent) anchors all of its relative paths; a manifest
+        // at a relative crawl root has an empty parent, which is the cwd
         let root = match path.parent() {
-            Some(r) if r != Path::new("") && r != Path::new(".") => r,
-            _ => continue,
+            Some(parent) if parent.as_os_str().is_empty() => Path::new("."),
+            Some(parent) => parent,
+            None => continue,
         };
-
         // unlike an unreadable directory entry above (skippable filesystem noise), a
         // manifest.toml that exists but won't read or parse is a real authoring bug — fail
         // the build loudly rather than silently dropping the tool
@@ -1236,7 +1374,6 @@ fn build_output(cmd: &BuildToolbox) -> Result<BuildOutput, Error> {
             .map_err(|e| Error::new(format!("Failed to read '{}': {e}", path.display())))?;
         let manifest: ManifestToml = toml::from_str(&manifest_str)
             .map_err(|e| Error::new(format!("Failed to parse '{}': {e}", path.display())))?;
-
         // name+version is the identity that must be unique within each kind (images, pipelines) and
         // the lookup key for image_from resolution and duplicate detection below
         let key = (manifest.name.clone(), manifest.version.clone());
@@ -1246,10 +1383,9 @@ fn build_output(cmd: &BuildToolbox) -> Result<BuildOutput, Error> {
                 // walk order; fail and name both directories so the author can disambiguate
                 if let Some(prev) = image_locations.get(&key) {
                     return Err(Error::new(format!(
-                        "duplicate image manifest '{}:{}' in '{prev}' and '{}'; each image's \
+                        "duplicate image manifest '{}' in '{prev}' and '{}'; each image's \
                          name+version must be unique across the toolbox",
-                        key.0,
-                        key.1,
+                        utils::entry_id(None, &key.0, &key.1),
                         root.display()
                     )));
                 }
@@ -1281,10 +1417,9 @@ fn build_output(cmd: &BuildToolbox) -> Result<BuildOutput, Error> {
                 // same determinism guard for pipelines
                 if let Some(prev) = pipeline_locations.get(&key) {
                     return Err(Error::new(format!(
-                        "duplicate pipeline manifest '{}:{}' in '{prev}' and '{}'; each pipeline's \
+                        "duplicate pipeline manifest '{}' in '{prev}' and '{}'; each pipeline's \
                          name+version must be unique across the toolbox",
-                        key.0,
-                        key.1,
+                        utils::entry_id(None, &key.0, &key.1),
                         root.display()
                     )));
                 }
@@ -1298,7 +1433,6 @@ fn build_output(cmd: &BuildToolbox) -> Result<BuildOutput, Error> {
             }
         }
     }
-
     // resolve every image_from reference to a concrete container url now that the whole
     // tree has been walked and each non-reusing image carries its url. Collect all
     // failures so the build reports every bad reference in one pass.
@@ -1320,13 +1454,17 @@ fn build_output(cmd: &BuildToolbox) -> Result<BuildOutput, Error> {
                         entry.image_tags = vec![url];
                     } else {
                         from_errors.push(format!(
-                            "{name}:{version} -> config is resolved from a URL; image_from needs a \
-                             local config to embed the reused image url"
+                            "{} -> config is resolved from a URL; image_from needs a local config \
+                             to embed the reused image url",
+                            utils::entry_id(None, &name, &version)
                         ));
                     }
                 }
             }
-            Err(reason) => from_errors.push(format!("{name}:{version} -> {reason}")),
+            Err(reason) => from_errors.push(format!(
+                "{} -> {reason}",
+                utils::entry_id(None, &name, &version)
+            )),
         }
     }
     if !from_errors.is_empty() {
@@ -1336,7 +1474,6 @@ fn build_output(cmd: &BuildToolbox) -> Result<BuildOutput, Error> {
             from_errors.join("\n  ")
         )));
     }
-
     // fail the build if any K8s image couldn't be given a container tag, listing them all
     // so the user can fix every one in a single pass. Run after image_from resolution so
     // reused images are checked with their now-filled tag.
@@ -1345,7 +1482,7 @@ fn build_output(cmd: &BuildToolbox) -> Result<BuildOutput, Error> {
         for (version, entry) in versions {
             if entry.image_tags.is_empty() && config_requires_container_image(entry.config.as_ref())
             {
-                untagged_k8s.push(format!("{name}:{version}"));
+                untagged_k8s.push(utils::entry_id(None, name, version));
             }
         }
     }
@@ -1358,7 +1495,6 @@ fn build_output(cmd: &BuildToolbox) -> Result<BuildOutput, Error> {
             untagged_k8s.join(", ")
         )));
     }
-
     // assemble the final output; the top-level base_image is the raw global config for reference,
     // while each image entry already carries its own resolved (merged) value
     Ok(BuildOutput {
@@ -1375,6 +1511,8 @@ fn build_output(cmd: &BuildToolbox) -> Result<BuildOutput, Error> {
     })
 }
 
+/// Unit tests for the pure build helpers (config canonicalization, path anchoring, tag
+/// derivation, `image_from` resolution, and base-image merging)
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1547,6 +1685,20 @@ mod tests {
         }
         // a config resolved from a URL at import time can't be introspected here
         assert!(!config_requires_container_image(None));
+    }
+
+    /// Only the K8s scaler needs a container image
+    #[test]
+    fn scaler_requires_container_image_only_k8s() {
+        assert!(scaler_requires_container_image(ImageScaler::K8s));
+        for scaler in [
+            ImageScaler::BareMetal,
+            ImageScaler::Windows,
+            ImageScaler::Kvm,
+            ImageScaler::External,
+        ] {
+            assert!(!scaler_requires_container_image(scaler));
+        }
     }
 
     /// `set_config_image` writes the url into an object config and no-ops on a None config
@@ -1760,5 +1912,38 @@ mod tests {
         assert!(merged.image_arg.is_none());
         assert_eq!(merged.token.as_deref(), Some("TOK"));
         assert_eq!(merged.user.as_deref(), Some("USR"));
+    }
+
+    /// The images a pipeline order runs are collected from both the staged and the flat form
+    #[test]
+    fn pipeline_order_images_reads_both_forms() {
+        // the staged form: an array of stages
+        let staged = serde_json::json!({ "order": [["a", "b"], ["c"]] });
+        let expected: HashSet<String> = ["a", "b", "c"].iter().map(ToString::to_string).collect();
+        assert_eq!(pipeline_order_images(&staged), expected);
+        // the flat form: a single implicit stage
+        let flat = serde_json::json!({ "order": ["a", "b", "c"] });
+        assert_eq!(pipeline_order_images(&flat), expected);
+        // a missing order runs nothing
+        assert!(pipeline_order_images(&serde_json::json!({})).is_empty());
+    }
+
+    /// A missing description.md is absent; a present one is injected and returned
+    #[test]
+    fn apply_description_md_missing_and_present() {
+        // an isolated scratch directory for this test
+        let dir = std::env::temp_dir().join(format!("thorctl-desc-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        // no description.md: nothing is applied and the config is untouched
+        let mut config = Some(serde_json::json!({ "description": "inline" }));
+        assert_eq!(apply_description_md(&dir, "tool", &mut config), None);
+        assert_eq!(config, Some(serde_json::json!({ "description": "inline" })));
+        // a description.md overrides the inline description and is returned (trailing space trimmed)
+        std::fs::write(dir.join("description.md"), "# tool\n\nfrom file\n").unwrap();
+        let applied = apply_description_md(&dir, "tool", &mut config);
+        assert_eq!(applied.as_deref(), Some("# tool\n\nfrom file"));
+        assert_eq!(config.unwrap()["description"], "# tool\n\nfrom file");
+        // clean up the scratch directory
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 }

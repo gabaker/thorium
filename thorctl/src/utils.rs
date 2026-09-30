@@ -21,20 +21,76 @@ use crate::{Args, CtlConf};
 /// unbounded-cursor API.
 pub const LIST_ALL_LIMIT: u64 = 1_000_000;
 
+/// The object-key paths of the set-valued (`HashSet`) arrays in a serialized image
+/// config or editor view
+///
+/// These serialize in hash-iteration order, which differs between two equal sets, so
+/// every canonical and curated serializer below sorts them. The paths only exist on
+/// images, so other values (pipelines, network policies) pass through untouched.
+pub const IMAGE_SET_FIELDS: &[&[&str]] = &[
+    &["network_policies"],
+    &["child_filters", "mime"],
+    &["child_filters", "file_name"],
+    &["child_filters", "file_extension"],
+];
+
+/// Sort the arrays found at the given object-key paths so set-valued fields serialize
+/// in a stable order
+///
+/// Only the listed paths are sorted: other arrays (a pipeline's `order`, an image's
+/// `args`) are order-significant and must be left alone.
+///
+/// # Arguments
+///
+/// * `value` - The serialized value to normalize in place
+/// * `paths` - The object-key paths of the set-valued arrays to sort
+pub fn sort_set_fields(value: &mut serde_json::Value, paths: &[&[&str]]) {
+    for path in paths {
+        // walk down to the node at this path; a missing key leaves nothing to sort
+        let node = path
+            .iter()
+            .try_fold(&mut *value, |node, key| node.get_mut(*key));
+        // sort the array by each element's JSON text, which is total and stable
+        if let Some(serde_json::Value::Array(items)) = node {
+            items.sort_by_cached_key(ToString::to_string);
+        }
+    }
+}
+
+/// Convert a value to a `serde_json::Value` with its image set-valued arrays sorted
+///
+/// Objects in a `serde_json::Value` are sorted maps, so the result is fully
+/// order-stable: two equal configs always produce equal values.
+///
+/// # Arguments
+///
+/// * `value` - The value to convert
+/// * `format` - The output format named in the error message on failure
+fn to_stable_value<T: Serialize>(value: &T, format: &str) -> Result<serde_json::Value, Error> {
+    // serialize into a sorted-map value
+    let mut json = serde_json::to_value(value)
+        .map_err(|err| Error::new(format!("Failed to serialize to {format}: {err}")))?;
+    // sort the set-valued arrays that serialize in hash order
+    sort_set_fields(&mut json, IMAGE_SET_FIELDS);
+    Ok(json)
+}
+
 /// Serialize a value to pretty JSON with object keys sorted
 ///
 /// `HashMap`/`HashSet` fields (e.g. an image's `env`, a pipeline's `triggers`)
 /// serialize in a random, per-run order, which makes otherwise-identical configs
 /// byte-differ between runs. Routing through `serde_json::Value` (a sorted
 /// `BTreeMap`) yields a canonical, order-stable form so equality and diff
-/// comparisons treat reordered maps as identical.
+/// comparisons treat reordered maps as identical. Image set-valued arrays are
+/// sorted too (see [`IMAGE_SET_FIELDS`]).
 ///
 /// # Arguments
 ///
 /// * `value` - The value to serialize
 pub fn canonical_json<T: Serialize>(value: &T) -> Result<String, Error> {
-    let sorted = serde_json::to_value(value)
-        .map_err(|err| Error::new(format!("Failed to serialize to JSON: {err}")))?;
+    // convert to an order-stable value
+    let sorted = to_stable_value(value, "JSON")?;
+    // render it as pretty JSON
     serde_json::to_string_pretty(&sorted)
         .map_err(|err| Error::new(format!("Failed to serialize to JSON: {err}")))
 }
@@ -48,8 +104,9 @@ pub fn canonical_json<T: Serialize>(value: &T) -> Result<String, Error> {
 ///
 /// * `value` - The value to serialize
 pub fn canonical_yaml<T: Serialize>(value: &T) -> Result<String, Error> {
-    let sorted = serde_json::to_value(value)
-        .map_err(|err| Error::new(format!("Failed to serialize to YAML: {err}")))?;
+    // convert to an order-stable value
+    let sorted = to_stable_value(value, "YAML")?;
+    // render it as YAML
     serde_norway::to_string(&sorted)
         .map_err(|err| Error::new(format!("Failed to serialize to YAML: {err}")))
 }
@@ -61,19 +118,21 @@ pub fn canonical_yaml<T: Serialize>(value: &T) -> Result<String, Error> {
 /// lands at the end). Each ordered name matches either the plain key or its
 /// static-marked `*key*` form, so this works for both the `Mergeable*` editor view
 /// (which marks uneditable fields like `*name*`) and the raw config JSON. Nested
-/// maps stay sorted (canonical), keeping editor/merge output deterministic.
+/// maps stay sorted (canonical) and image set-valued arrays are sorted, keeping
+/// editor/merge output deterministic.
 ///
 /// # Arguments
 ///
 /// * `value` - The value to serialize
 /// * `order` - The curated top-level key order (plain names; `*name*` also matches)
 pub fn curated_yaml<T: Serialize>(value: &T, order: &[&str]) -> Result<String, Error> {
-    let json = serde_json::to_value(value)
-        .map_err(|err| Error::new(format!("Failed to serialize to YAML: {err}")))?;
+    // convert to an order-stable value
+    let json = to_stable_value(value, "YAML")?;
     // only objects have a key order to curate; anything else falls back to canonical
     let serde_json::Value::Object(map) = json else {
         return canonical_yaml(value);
     };
+    // insert the entries in curated order; a YAML mapping keeps insertion order
     let mut out = serde_norway::Mapping::new();
     for (key, v) in curated_entries(map, order) {
         let yaml_value = serde_norway::to_value(&v)
@@ -87,9 +146,10 @@ pub fn curated_yaml<T: Serialize>(value: &T, order: &[&str]) -> Result<String, E
 /// Serialize a value to pretty JSON with a curated top-level key order
 ///
 /// The JSON twin of [`curated_yaml`]: top-level keys in the curated order, then any
-/// remaining keys sorted at the end (never dropped); nested objects stay sorted. Used
-/// to write scaffolded `<name>.json` configs in an edit-friendly order rather than
-/// alphabetical.
+/// remaining keys sorted at the end (never dropped); nested objects stay sorted and
+/// image set-valued arrays are sorted. Used to write every exported and scaffolded
+/// `<name>.json` config (`images export`, `pipelines export`, `toolbox export`,
+/// `toolbox init`) so the same resource always serializes to the same text.
 ///
 /// # Arguments
 ///
@@ -97,13 +157,14 @@ pub fn curated_yaml<T: Serialize>(value: &T, order: &[&str]) -> Result<String, E
 /// * `order` - The curated top-level key order (plain names; `*name*` also matches)
 pub fn curated_json<T: Serialize>(value: &T, order: &[&str]) -> Result<String, Error> {
     use serde::ser::{SerializeMap, Serializer};
-    let json = serde_json::to_value(value)
-        .map_err(|err| Error::new(format!("Failed to serialize to JSON: {err}")))?;
+    // convert to an order-stable value
+    let json = to_stable_value(value, "JSON")?;
     // only objects have a key order to curate; anything else serializes as-is
     let serde_json::Value::Object(map) = json else {
-        return serde_json::to_string_pretty(value)
+        return serde_json::to_string_pretty(&json)
             .map_err(|err| Error::new(format!("Failed to serialize to JSON: {err}")));
     };
+    // put the top-level keys in curated order
     let entries = curated_entries(map, order);
     // drive the serializer's map directly so the (insertion) order we feed is the
     // emitted order — `serde_json::Value`'s own `BTreeMap` would re-sort it
@@ -160,6 +221,83 @@ pub mod pipelines;
 pub mod reactions;
 pub mod render;
 pub mod repos;
+
+/// Render a Thorium resource's identity for display as `group/name`
+///
+/// A Thorium image or pipeline is identified by its group and name; every
+/// human-facing message names one the same way so output stays greppable.
+///
+/// # Arguments
+///
+/// * `group` - The group the resource belongs to
+/// * `name` - The name of the resource
+#[must_use]
+pub fn resource_id(group: &str, name: &str) -> String {
+    format!("{group}/{name}")
+}
+
+/// Render a toolbox manifest entry's identity for display
+///
+/// A manifest entry is identified by its name and version, with the group coming
+/// from config; it renders as `group/name@version` when the group is known and
+/// `name@version` otherwise.
+///
+/// # Arguments
+///
+/// * `group` - The group the entry lands in, if known at the call site
+/// * `name` - The name of the entry
+/// * `version` - The entry's manifest version
+#[must_use]
+pub fn entry_id(group: Option<&str>, name: &str, version: &str) -> String {
+    // lead with the group only when this site knows it
+    match group {
+        Some(group) => format!("{group}/{name}@{version}"),
+        None => format!("{name}@{version}"),
+    }
+}
+
+/// An empty group list, for network policy labels qualified by id alone
+pub const NO_GROUPS: &[&str] = &[];
+
+/// Render the parenthetical that follows a network policy's name in messages
+///
+/// Network policies are identified by name, qualified by the group(s) they are in
+/// and their id where those apply: `name (group: g, id: <id>)`, `name (id: <id>)`
+/// or `name (groups: a, b)`. Parts that don't apply are omitted, and nothing is
+/// rendered when neither applies. The returned text starts with a space so it can
+/// be appended directly after the (possibly quoted) name.
+///
+/// # Arguments
+///
+/// * `groups` - The groups to qualify the policy with (empty to omit)
+/// * `id` - The policy's id, if it applies at this site
+#[must_use]
+pub fn policy_suffix<G: AsRef<str>>(groups: &[G], id: Option<&uuid::Uuid>) -> String {
+    // collect whichever qualifiers apply, in a fixed order
+    let mut parts = Vec::with_capacity(2);
+    match groups {
+        [] => (),
+        [group] => parts.push(format!("group: {}", group.as_ref())),
+        groups => parts.push(format!(
+            "groups: {}",
+            groups
+                .iter()
+                .map(AsRef::as_ref)
+                .collect::<Vec<_>>()
+                .join(", ")
+        )),
+    }
+    // the id always follows the groups
+    if let Some(id) = id {
+        parts.push(format!("id: {id}"));
+    }
+    // render nothing when there is nothing to qualify the name with
+    if parts.is_empty() {
+        String::new()
+    } else {
+        format!(" ({})", parts.join(", "))
+    }
+}
 
 /// Get a Thorium client or setup keys
 ///
@@ -400,9 +538,13 @@ pub fn warn_insecure(
 ///
 /// # Arguments
 ///
-/// * `skip_flag` - The flag that bypasses the prompt (e.g. "--skip-confirm (-y)")
+/// * `skip_flag` - The flag that bypasses the prompt (e.g. "--skip-confirm")
 pub fn require_confirm_terminal(skip_flag: &str) -> Result<(), Error> {
-    if std::io::IsTerminal::is_terminal(&std::io::stdin()) {
+    // dialoguer reads the answer from stdin and draws the prompt on stderr, so both
+    // must be terminals for the prompt to work
+    if std::io::IsTerminal::is_terminal(&std::io::stdin())
+        && std::io::IsTerminal::is_terminal(&std::io::stderr())
+    {
         Ok(())
     } else {
         Err(Error::new(format!(
@@ -538,6 +680,39 @@ mod tests {
     use regex::RegexSet;
 
     use super::filter_str;
+
+    /// `policy_suffix` renders only the qualifiers that apply
+    #[test]
+    fn policy_suffix_renders_applicable_parts() {
+        let id = uuid::Uuid::nil();
+        let none: [&str; 0] = [];
+        assert_eq!(
+            super::policy_suffix(&["g"], Some(&id)),
+            format!(" (group: g, id: {id})")
+        );
+        assert_eq!(
+            super::policy_suffix(&none, Some(&id)),
+            format!(" (id: {id})")
+        );
+        assert_eq!(super::policy_suffix(&["a", "b"], None), " (groups: a, b)");
+        assert_eq!(super::policy_suffix(&none, None), "");
+    }
+
+    /// `resource_id` renders `group/name`
+    #[test]
+    fn resource_id_renders_group_slash_name() {
+        assert_eq!(super::resource_id("static", "clamav"), "static/clamav");
+    }
+
+    /// `entry_id` includes the group only when it is known
+    #[test]
+    fn entry_id_renders_with_and_without_group() {
+        assert_eq!(
+            super::entry_id(Some("static"), "clamav", "1.2"),
+            "static/clamav@1.2"
+        );
+        assert_eq!(super::entry_id(None, "clamav", "1.2"), "clamav@1.2");
+    }
 
     /// curated_yaml emits curated keys first (matching `key` or `*key*`), then every
     /// remaining key sorted at the end (never dropped), with nested maps sorted

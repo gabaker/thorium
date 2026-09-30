@@ -1,17 +1,26 @@
-//! Merge-conflict resolution for toolbox imports
+//! Merge-conflict resolution and the normalized change model for imports
 //!
-//! When a toolbox import encounters images or pipelines that already exist,
-//! this module handles the interactive merge workflow: prompting the user for
-//! an action, generating YAML with conflict markers, opening the editor,
-//! and calculating the appropriate update to apply.
+//! Every import flow (`images import`, `pipelines import`, `toolbox import`) and
+//! `images`/`pipelines edit` compare resources through the [`MergeableImage`] and
+//! [`MergeablePipeline`] views defined here. The same views drive the confirmation
+//! screen, the per-resource merge prompt, the editor, `--overwrite`,
+//! `--skip-conflicts`, rollback, and `toolbox diff` (see
+//! [`super::update::calculate_image_update`]), so all of them agree on whether a
+//! resource changed.
+//!
+//! When an import encounters images or pipelines that already exist, this module
+//! also drives the interactive merge workflow: prompting the user for an action,
+//! generating YAML with conflict markers, opening the editor, and applying the
+//! resulting update.
 
 use colored::Colorize;
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 use thorium::models::{
-    ChildFilters, Cleanup, Dependencies, Image, ImageArgs, ImageBan, ImageLifetime, ImageRequest,
-    ImageScaler, ImageUpdate, ImageVersion, Kvm, OutputCollection, OutputDisplayType, Pipeline,
-    PipelineRequest, PipelineUpdate, ResourcesRequest, SecurityContext, SpawnLimits, Volume,
+    ChildFilters, Cleanup, Dependencies, EventTrigger, Image, ImageArgs, ImageBan, ImageLifetime,
+    ImageRequest, ImageScaler, ImageUpdate, ImageVersion, Kvm, OutputCollection, OutputDisplayType,
+    Pipeline, PipelineRequest, PipelineUpdate, Resources, ResourcesRequest, SecurityContext,
+    SpawnLimits, Volume,
 };
 use thorium::{CtlConf, Error, Thorium};
 use uuid::Uuid;
@@ -23,45 +32,58 @@ use super::kind::ImportKind;
 use super::rollback::Journal;
 use super::update;
 use crate::handlers::progress::Bar;
+use crate::utils;
 
 // ─── Curated Editor Key Order ────────────────────────────────────────────────
 
-/// Curated top-level key order for the image editor view, mirroring the UI image
-/// form (`ui/src/pages/images/ImageCreate.jsx` + `components/pages/images/Fields.jsx`).
+/// Curated top-level key order for image configs and the image editor view
 ///
-/// Non-editable fields (`name`/`group`/`creator`/`bans`, and `runtime`) lead/sit with
-/// the static-marked fields; commonly edited basics follow the form order; sub-sections
-/// follow `ImageCreate.jsx`. Covers every `MergeableImage` field and every
-/// `build_image_config` key. Keys not listed still appear (sorted) at the end — see
-/// [`crate::utils::curated_yaml`]. Plain names; the helper also matches the `*name*`
-/// static-marked forms.
+/// This one list orders every image config thorctl writes or shows — `images export`,
+/// `toolbox export`, `toolbox init`, `images edit`, the import merge editor, and
+/// `toolbox diff` — so the same image always reads the same way. It mirrors the UI's
+/// image edit views: the basic fields follow the form in
+/// `ui/src/components/pages/images/Fields.tsx`, and the sections follow the edit mode of
+/// `ui/src/components/pages/images/ImageInfo.tsx`. `clean_up` has no UI section, so it
+/// sits beside `kvm`.
+///
+/// Covers every `MergeableImage` field and every `build_image_config` key. Keys not
+/// listed still appear (sorted) at the end — see [`crate::utils::curated_yaml`]. Plain
+/// names; the helper also matches the `*name*` static-marked forms.
+#[rustfmt::skip]
 pub const IMAGE_FIELD_ORDER: &[&str] = &[
-    // non-editable: identity + server/managed (shown for context, marked *...*, ignored on save)
+    // identity and server-managed fields (marked *...* in the editor and ignored on save)
     "name", "group", "creator", "bans",
-    // commonly edited basics (form order; runtime — non-editable — kept in its UI display slot)
+    // basic fields, in UI form order (runtime is read-only but keeps its UI slot)
     "description", "version", "scaler", "image", "timeout", "lifetime", "runtime",
     "display_type", "spawn_limit", "collect_logs", "generator",
-    // sub-sections (ImageCreate.jsx order; child_filters with output_collection;
-    // clean_up/kvm/modifiers just before security_context)
-    "resources", "args", "output_collection", "child_filters", "dependencies", "env", "volumes",
-    "network_policies", "clean_up", "kvm", "modifiers", "security_context",
+    // sections, in UI edit-mode order
+    "resources", "args", "output_collection", "dependencies", "env", "volumes",
+    "network_policies", "child_filters", "modifiers", "clean_up", "kvm", "security_context",
 ];
 
-/// Curated top-level key order for the pipeline editor view. `name`/`group` only
-/// appear in the init config shape (not the edit view); harmless when absent.
+/// Curated top-level key order for pipeline configs and the pipeline editor view
+///
+/// Shared by `pipelines export`, `toolbox export`, `toolbox init`, `pipelines edit`, the
+/// import merge editor, and `toolbox diff`. It mirrors the UI's pipeline create/edit
+/// form: the fields in `ui/src/components/pages/pipelines/Fields.tsx` (name, group,
+/// description, SLA), then the order, then the triggers. `name`/`group` are absent from
+/// the edit view, where they are simply skipped.
 pub const PIPELINE_FIELD_ORDER: &[&str] =
-    &["name", "group", "order", "description", "sla", "triggers"];
+    &["name", "group", "description", "sla", "order", "triggers"];
 
 // ─── Mergeable Structs ───────────────────────────────────────────────────────
+
+/// The top-level keys of a [`MergeableImage`] that are identity or server-managed
+/// fields: shown in the editor for context but never compared or applied
+const NON_EDITABLE_IMAGE_KEYS: &[&str] = &["*group*", "*name*", "*creator*", "*runtime*", "*bans*"];
 
 /// Normalize a description into its canonical comparison form
 ///
 /// `toolbox build` injects the description from `description.md`, trimming trailing
 /// whitespace (build.rs `apply_description_md`), while the live image/pipeline in
-/// Thorium keeps whatever was stored (often with a trailing newline). Without this
-/// a freshly exported toolbox would diff dirty on the description alone. Trimming
-/// both sides — and collapsing an empty result to `None` — makes the comparison
-/// insensitive to that round-trip.
+/// Thorium keeps whatever was stored (often with a trailing newline). Trimming
+/// trailing whitespace on every side — and collapsing an empty result to `None` —
+/// makes the comparison and the generated update insensitive to that round-trip.
 ///
 /// # Arguments
 ///
@@ -74,12 +96,20 @@ fn normalize_description(description: Option<String>) -> Option<String> {
 
 /// An image converted to a common format for editing, merging, and diffing.
 ///
-/// Used by both standalone `images edit` and `toolbox import` merge workflows.
+/// Used by standalone `images edit`, every image import flow, and `toolbox diff`.
 /// Identity fields (group, name, creator) and server-managed fields (runtime,
 /// bans) are `Option` — populated when editing an existing image via
-/// `From<Image>`, left as `None` when converting from an `ImageRequest`
-/// (toolbox merge). Fields set to `None` are omitted from serialized YAML.
-#[derive(Debug, Serialize, Deserialize)]
+/// `From<Image>`, left as `None` when converting from an `ImageRequest`. Fields
+/// set to `None` are omitted from serialized YAML. Unknown keys are rejected so a
+/// typo in the editor is reported instead of silently ignored.
+///
+/// Both `From` conversions [`normalize`](Self::normalize) the view, so set-like
+/// lists are sorted and descriptions are trimmed before anything is compared.
+/// Views are compared and rendered through [`canonical_value`](Self::canonical_value),
+/// which sorts map keys and `HashSet`-backed arrays, so comparisons are insensitive
+/// to set/map order and sensitive to the order of real lists.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct MergeableImage {
     /// The group the image belongs to (identity, non-editable; `None` from a request)
     #[serde(rename = "*group*", skip_serializing_if = "Option::is_none", default)]
@@ -94,7 +124,7 @@ pub struct MergeableImage {
     pub version: Option<ImageVersion>,
     /// The scaler that schedules this image
     pub scaler: ImageScaler,
-    /// The container image URL, or `None` when not set
+    /// The container image URL (trimmed), or `None` when not set
     pub image: Option<String>,
     /// How long the image lives before it is reaped, or `None` for no limit
     pub lifetime: Option<ImageLifetime>,
@@ -109,11 +139,11 @@ pub struct MergeableImage {
     /// The image's average runtime (server-managed, non-editable; `None` from a request)
     #[serde(rename = "*runtime*", skip_serializing_if = "Option::is_none", default)]
     pub runtime: Option<f64>,
-    /// The volumes mounted into each job
+    /// The volumes mounted into each job, sorted by name
     pub volumes: Vec<Volume>,
     /// The command-line argument layout passed to the tool
     pub args: ImageArgs,
-    /// Free-form scaler modifiers, or `None` when not set
+    /// Free-form scaler modifiers, or `None` when not set (an empty string is `None`)
     pub modifiers: Option<String>,
     /// The image's description (normalized via [`normalize_description`])
     pub description: Option<String>,
@@ -142,6 +172,111 @@ pub struct MergeableImage {
     pub network_policies: HashSet<String>,
 }
 
+impl MergeableImage {
+    /// Put the view into its canonical comparison form
+    ///
+    /// Lists that the update API treats as sets (volumes matched by name, dependency
+    /// image/name lists, output file names and groups) are sorted, since their order
+    /// can't be changed by an update and carries no meaning. Descriptions are trimmed
+    /// (see [`normalize_description`]), and the container image and modifiers are
+    /// trimmed/collapsed the way the API stores them, so an empty value is `None`.
+    pub(crate) fn normalize(&mut self) {
+        // volumes are diffed by name, so their list order carries no meaning
+        self.volumes
+            .sort_by(|left, right| left.name.cmp(&right.name));
+        // dependency lists are diffed as add/remove sets
+        self.dependencies.ephemeral.names.sort_unstable();
+        self.dependencies.results.images.sort_unstable();
+        self.dependencies.results.names.sort_unstable();
+        self.dependencies.children.images.sort_unstable();
+        self.dependencies.filesystems.images.sort_unstable();
+        // output file names are diffed as a set and groups are a set of group names
+        self.output_collection.files.names.sort_unstable();
+        self.output_collection.groups.sort_unstable();
+        // trim descriptions so a description.md round-trip doesn't read as drift
+        self.description = normalize_description(self.description.take());
+        // the API trims the container image and treats an empty one as unset
+        self.image = self
+            .image
+            .take()
+            .map(|image| image.trim().to_string())
+            .filter(|image| !image.is_empty());
+        // the API stores an empty modifiers string as unset
+        self.modifiers = self
+            .modifiers
+            .take()
+            .filter(|modifiers| !modifiers.is_empty());
+    }
+
+    /// Keep the current value for fields the image update API can't clear or set
+    ///
+    /// An `ImageUpdate` has no way to clear a timeout or KVM settings, or to change
+    /// an output file handler's `entities` path. Leaving those differences in place
+    /// would report a change that applying the update can never converge, so an
+    /// omitted timeout/KVM config and any `entities` value are taken from `current`.
+    ///
+    /// # Arguments
+    ///
+    /// * `current` - The view of the image as it exists in Thorium
+    pub(crate) fn retain_unsettable(&mut self, current: &MergeableImage) {
+        // a timeout can be changed but never cleared
+        if self.timeout.is_none() {
+            self.timeout = current.timeout;
+        }
+        // KVM settings can be changed but never cleared
+        if self.kvm.is_none() {
+            self.kvm.clone_from(&current.kvm);
+        }
+        // the files handler's entities path has no update field at all
+        self.output_collection
+            .files
+            .entities
+            .clone_from(&current.output_collection.files.entities);
+    }
+
+    /// Clear the identity and server-managed fields, leaving only editable ones
+    pub(crate) fn strip_non_editable(&mut self) {
+        self.group = None;
+        self.name = None;
+        self.creator = None;
+        self.runtime = None;
+        self.bans = None;
+    }
+
+    /// Serialize the view with object keys and set-valued arrays in canonical order
+    ///
+    /// Used for both comparing and rendering views, so two views with the same sets
+    /// always compare equal and render identically run-to-run.
+    pub(crate) fn canonical_value(&self) -> serde_json::Value {
+        // serializing plain data into a JSON value can't fail; Null only compares
+        // equal to another Null, which can't hide a real difference in practice
+        let mut value = serde_json::to_value(self).unwrap_or_default();
+        // objects are sorted maps already; sort the HashSet-backed arrays too
+        crate::utils::sort_set_fields(&mut value, crate::utils::IMAGE_SET_FIELDS);
+        value
+    }
+
+    /// Serialize only the editable fields, for comparing two views
+    pub(crate) fn editable_value(&self) -> serde_json::Value {
+        // start from the canonical form so set order never reads as a change
+        let mut value = self.canonical_value();
+        // drop identity/server-managed fields; imports and edits never change them
+        if let Some(map) = value.as_object_mut() {
+            map.retain(|key, _| !NON_EDITABLE_IMAGE_KEYS.contains(&key.as_str()));
+        }
+        value
+    }
+
+    /// Whether two views have the same editable content
+    ///
+    /// # Arguments
+    ///
+    /// * `other` - The view to compare against
+    pub(crate) fn same_editable(&self, other: &MergeableImage) -> bool {
+        self.editable_value() == other.editable_value()
+    }
+}
+
 impl From<Image> for MergeableImage {
     /// Build a mergeable image from an existing Thorium image, populating the
     /// identity and server-managed fields the request form lacks
@@ -150,7 +285,7 @@ impl From<Image> for MergeableImage {
     ///
     /// * `image` - The existing Thorium image to convert
     fn from(image: Image) -> Self {
-        Self {
+        let mut view = Self {
             // identity + server-managed fields are present on a live image; carry them
             // so the editor view shows them (marked static) and mirroring has values
             group: Some(image.group),
@@ -170,10 +305,9 @@ impl From<Image> for MergeableImage {
             volumes: image.volumes,
             args: image.args,
             modifiers: image.modifiers,
-            // normalize so a description.md round-trip doesn't read as drift
-            description: normalize_description(image.description),
+            description: image.description,
             // a live image always has a concrete security context; wrap it to match
-            // the request-sourced side, which defaults an omitted context
+            // the request-sourced side
             security_context: Some(image.security_context),
             collect_logs: image.collect_logs,
             generator: image.generator,
@@ -185,19 +319,26 @@ impl From<Image> for MergeableImage {
             kvm: image.kvm,
             bans: Some(image.bans),
             network_policies: image.network_policies,
-        }
+        };
+        // sort set-like lists and trim text fields into the comparison form
+        view.normalize();
+        view
     }
 }
 
 impl From<ImageRequest> for MergeableImage {
-    /// Build a mergeable image from an incoming manifest request, leaving identity
-    /// and server-managed fields unset since a request never carries them
+    /// Build a mergeable image from a request exactly as the server would create it
+    ///
+    /// Identity and server-managed fields are left unset since a request never
+    /// carries them. An omitted security context becomes the server default. To
+    /// compare a request against an existing image, use [`incoming_image_view`],
+    /// which resolves omitted fields against that image instead.
     ///
     /// # Arguments
     ///
-    /// * `req` - The incoming image request from the manifest
+    /// * `req` - The incoming image request
     fn from(req: ImageRequest) -> Self {
-        Self {
+        let mut view = Self {
             // a request never carries identity/server-managed fields; leave them unset
             // so they're omitted from the serialized editor view
             group: None,
@@ -208,7 +349,8 @@ impl From<ImageRequest> for MergeableImage {
             image: req.image,
             lifetime: req.lifetime,
             timeout: req.timeout,
-            resources: req.resources,
+            // round-trip through the stored form so equivalent spellings compare equal
+            resources: ResourcesRequest::from(Resources::from(req.resources)),
             spawn_limit: req.spawn_limit,
             env: req.env,
             // server-managed, never present on a request
@@ -216,12 +358,8 @@ impl From<ImageRequest> for MergeableImage {
             volumes: req.volumes,
             args: req.args,
             modifiers: req.modifiers,
-            // normalize so a description.md round-trip doesn't read as drift
-            description: normalize_description(req.description),
-            // a request that omits the security context (None) is equivalent to the
-            // server default, which is what `From<Image>` always carries. Default it
-            // here so an omitted context doesn't read as drift against an existing
-            // image (the update calc already treats default-vs-default as no change).
+            description: req.description,
+            // the server creates an image without a security context with the default
             security_context: Some(req.security_context.unwrap_or_default()),
             collect_logs: req.collect_logs,
             generator: req.generator,
@@ -234,23 +372,91 @@ impl From<ImageRequest> for MergeableImage {
             // server-managed, never present on a request
             bans: None,
             network_policies: req.network_policies,
-        }
+        };
+        // sort set-like lists and trim text fields into the comparison form
+        view.normalize();
+        view
     }
+}
+
+/// Build the incoming view of an image request compared against an existing image
+///
+/// This defines what an omitted field in an import request means for an image that
+/// already exists. Fields with no server-side default mean exactly what they say
+/// (an omitted description, version, lifetime, clean-up, ... clears it). Fields the
+/// server fills in on create, or that the update API can't clear, keep the existing
+/// image's value instead:
+///
+/// - `security_context`: the server applies its default on create, and only admins
+///   may set one, so an omitted context never resets a custom one
+/// - `network_policies`: on create the server applies the group's default network
+///   policies to a K8s image whose list is empty, so an empty list keeps whatever
+///   policies the image has rather than reading as a change or removing them
+/// - `timeout`, `kvm`, and the output files handler's `entities` path: the update
+///   API can't clear/set them (see [`MergeableImage::retain_unsettable`])
+///
+/// Identity and server-managed fields are mirrored from the existing image so the
+/// merge editor shows them as shared context rather than conflicts.
+///
+/// # Arguments
+///
+/// * `existing` - The image as it exists in Thorium
+/// * `req` - The incoming image request
+pub(crate) fn incoming_image_view(existing: &Image, mut req: ImageRequest) -> MergeableImage {
+    // an omitted security context keeps the existing one
+    if req.security_context.is_none() {
+        req.security_context = Some(existing.security_context.clone());
+    }
+    // an empty policy list keeps the existing (often server-defaulted) policies
+    if req.network_policies.is_empty() {
+        req.network_policies.clone_from(&existing.network_policies);
+    }
+    // build both views in their normalized comparison form
+    let current = MergeableImage::from(existing.clone());
+    let mut incoming = MergeableImage::from(req);
+    // keep the values the update API can't clear or set
+    incoming.retain_unsettable(&current);
+    // show identity/server-managed fields as shared context in the editor
+    mirror_non_editable_fields(&mut incoming, &current);
+    incoming
 }
 
 /// A pipeline converted to a common format for merge comparison and YAML editing.
 /// Only contains editable fields — group, name, creator, and bans are excluded.
-#[derive(Debug, Serialize, Deserialize)]
+///
+/// Triggers are typed, so an invalid trigger typed in the editor is a parse error
+/// that re-opens the editor instead of failing the import after the editor closes.
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct MergeablePipeline {
     /// The stage ordering, as groups of image names that run together in sequence
     pub order: Vec<Vec<String>>,
     /// The pipeline's SLA in seconds
     pub sla: u64,
-    /// The pipeline's triggers keyed by name, kept as raw JSON for the editor view
-    pub triggers: HashMap<String, serde_json::Value>,
+    /// The pipeline's triggers keyed by name
+    #[serde(default)]
+    pub triggers: HashMap<String, EventTrigger>,
     /// The pipeline's description (normalized via [`normalize_description`])
     pub description: Option<String>,
+}
+
+impl MergeablePipeline {
+    /// Put the view into its canonical comparison form by trimming the description
+    pub(crate) fn normalize(&mut self) {
+        self.description = normalize_description(self.description.take());
+    }
+
+    /// Whether two views have the same content
+    ///
+    /// # Arguments
+    ///
+    /// * `other` - The view to compare against
+    pub(crate) fn same_content(&self, other: &MergeablePipeline) -> bool {
+        // serializing plain data into a JSON value can't fail; triggers are a map, so
+        // this comparison is insensitive to trigger order
+        serde_json::to_value(self).unwrap_or_default()
+            == serde_json::to_value(other).unwrap_or_default()
+    }
 }
 
 impl From<Pipeline> for MergeablePipeline {
@@ -260,31 +466,30 @@ impl From<Pipeline> for MergeablePipeline {
     ///
     /// * `pipeline` - The existing Thorium pipeline to convert
     fn from(pipeline: Pipeline) -> Self {
-        Self {
+        let mut view = Self {
             order: pipeline.order,
             sla: pipeline.sla,
-            // EventTrigger -> Value is infallible in practice; a Null fallback would
-            // only affect this comparison view. The authoritative validation is the
-            // write-back parse in `calculate_pipeline_update_from_mergeable`, which
-            // errors on a bad trigger rather than dropping it.
-            triggers: pipeline
-                .triggers
-                .into_iter()
-                .map(|(k, v)| (k, serde_json::to_value(v).unwrap_or_default()))
-                .collect(),
-            // normalize so a description.md round-trip doesn't read as drift
-            description: normalize_description(pipeline.description),
-        }
+            triggers: pipeline.triggers,
+            description: pipeline.description,
+        };
+        // trim the description into the comparison form
+        view.normalize();
+        view
     }
 }
 
 impl From<PipelineRequest> for MergeablePipeline {
-    /// Build a mergeable pipeline from an incoming manifest request, applying the
-    /// API's default SLA when the request omits one
+    /// Build a mergeable pipeline from a request, applying a one-week SLA when the
+    /// request omits one
+    ///
+    /// An order that isn't a valid list of stages becomes an empty order here; the
+    /// update calculation sends such an order to the server unchanged so it can
+    /// report why it's invalid. To compare a request against an existing pipeline,
+    /// use [`incoming_pipeline_view`], which keeps the existing SLA instead.
     ///
     /// # Arguments
     ///
-    /// * `req` - The incoming pipeline request from the manifest
+    /// * `req` - The incoming pipeline request
     fn from(req: PipelineRequest) -> Self {
         // deserialize the order from the flexible Value format to Vec<Vec<String>>
         let order: Vec<Vec<String>> = req
@@ -293,22 +498,38 @@ impl From<PipelineRequest> for MergeablePipeline {
             .into_iter()
             .map(|inner| inner.into_iter().map(String::from).collect())
             .collect();
-        Self {
+        let mut view = Self {
             order,
-            // a request without an explicit SLA falls back to one week (604,800s),
-            // matching the API's default so the diff doesn't show phantom drift
-            sla: req.sla.unwrap_or(604_800),
-            // convert each trigger to raw JSON for the editor view; the authoritative
-            // validation is the write-back parse in calculate_pipeline_update_from_mergeable
-            triggers: req
-                .triggers
-                .into_iter()
-                .map(|(k, v)| (k, serde_json::to_value(v).unwrap_or_default()))
-                .collect(),
-            // normalize so a description.md round-trip doesn't read as drift
-            description: normalize_description(req.description),
-        }
+            // a request without an explicit SLA gets the server default of one week
+            sla: req.sla.unwrap_or(thorium::models::DEFAULT_PIPELINE_SLA),
+            triggers: req.triggers,
+            description: req.description,
+        };
+        // trim the description into the comparison form
+        view.normalize();
+        view
     }
+}
+
+/// Build the incoming view of a pipeline request compared against an existing pipeline
+///
+/// An omitted `sla` keeps the existing pipeline's SLA rather than resetting it to a
+/// default, matching how [`incoming_image_view`] treats fields the server fills in
+/// on create. Every other field means exactly what the request says.
+///
+/// # Arguments
+///
+/// * `existing` - The pipeline as it exists in Thorium
+/// * `req` - The incoming pipeline request
+pub(crate) fn incoming_pipeline_view(
+    existing: &Pipeline,
+    mut req: PipelineRequest,
+) -> MergeablePipeline {
+    // an omitted SLA keeps the existing one
+    if req.sla.is_none() {
+        req.sla = Some(existing.sla);
+    }
+    MergeablePipeline::from(req)
 }
 
 // ─── Per-Resource Prompt ─────────────────────────────────────────────────────
@@ -320,7 +541,7 @@ pub enum MergeAction {
     Edit,
     /// Keep the existing configuration unchanged
     Skip,
-    /// Accept all incoming changes from the manifest
+    /// Accept all incoming changes
     Apply,
     /// Stop processing remaining resources
     Quit,
@@ -335,15 +556,14 @@ pub enum MergeAction {
 /// * `name` - The name of the resource
 fn prompt_merge_action(resource_type: &str, group: &str, name: &str) -> Result<MergeAction, Error> {
     println!(
-        "\n{} '{}:{}' has changes:",
+        "\n{} '{}' has changes:",
         resource_type.bright_yellow(),
-        group.bright_blue(),
-        name.bright_blue(),
+        utils::resource_id(group, name).bright_blue(),
     );
     let items = &[
         "Edit   - Open editor to review and resolve conflicts",
         "Skip   - Keep the existing configuration unchanged",
-        "Apply  - Accept all incoming changes from the manifest",
+        "Apply  - Accept all incoming changes",
         "Quit   - Stop processing remaining resources",
     ];
     let selection = dialoguer::Select::new()
@@ -353,7 +573,6 @@ fn prompt_merge_action(resource_type: &str, group: &str, name: &str) -> Result<M
         .map_err(|err| Error::new(format!("Failed to read user input: {err}")))?;
     Ok(match selection {
         0 => MergeAction::Edit,
-        1 => MergeAction::Skip,
         2 => MergeAction::Apply,
         3 => MergeAction::Quit,
         _ => MergeAction::Skip,
@@ -362,13 +581,18 @@ fn prompt_merge_action(resource_type: &str, group: &str, name: &str) -> Result<M
 
 /// Copy identity and server-managed fields from `current` onto `incoming`
 ///
-/// A toolbox manifest never carries an image's identity fields (group, name,
+/// An import request never carries an image's identity fields (group, name,
 /// creator) or its server-managed fields (runtime, bans), and this merge can't
-/// edit them — so the incoming (manifest) side always omits them. Left alone, the
-/// line-based conflict diff would flag every such field as a conflict (a value on
-/// the current side, nothing on the incoming side). Mirroring them makes both
-/// sides match so they render as shared context instead. `calculate_image_update*`
-/// ignores these fields when computing what to apply, so this is display-only.
+/// edit them — so the incoming side always omits them. Left alone, the line-based
+/// conflict diff would flag every such field as a conflict (a value on the current
+/// side, nothing on the incoming side). Mirroring them makes both sides match so
+/// they render as shared context instead. Change detection and
+/// `calculate_image_update*` ignore these fields, so this is display-only.
+///
+/// # Arguments
+///
+/// * `incoming` - The incoming view to copy the fields onto
+/// * `current` - The current view to copy the fields from
 fn mirror_non_editable_fields(incoming: &mut MergeableImage, current: &MergeableImage) {
     incoming.group.clone_from(&current.group);
     incoming.name.clone_from(&current.name);
@@ -379,14 +603,43 @@ fn mirror_non_editable_fields(incoming: &mut MergeableImage, current: &Mergeable
 
 // ─── Single-Resource Interactive Merge ───────────────────────────────────────
 
+/// The conflict-marker label for the Thorium side of a merge
+const CURRENT_LABEL: &str = "Current (Thorium)";
+/// The conflict-marker label for the imported side of a merge
+const INCOMING_LABEL: &str = "Incoming (Import)";
+
+/// The result of resolving a merge conflict in the editor
+#[derive(Debug, PartialEq, Eq)]
+pub enum MergeEdit<U> {
+    /// The resolved state differs from the current resource and this update applies it
+    Update(U),
+    /// The resolved state matches the current resource, so there is nothing to apply
+    NoChanges,
+    /// The user cancelled the edit
+    Cancelled,
+}
+
+impl<U> MergeEdit<U> {
+    /// Wrap a calculated update, where `None` means the resolved state changed nothing
+    ///
+    /// # Arguments
+    ///
+    /// * `update` - The update calculated from the resolved state, if any
+    fn from_update(update: Option<U>) -> Self {
+        match update {
+            Some(update) => MergeEdit::Update(update),
+            None => MergeEdit::NoChanges,
+        }
+    }
+}
+
 /// Resolve an image merge conflict via the editor and return the resulting
-/// image update, or None if the user's edits result in no changes or they
-/// cancelled
+/// image update, or whether the user's edits changed nothing or they cancelled
 ///
 /// # Arguments
 ///
 /// * `image` - The current image in Thorium
-/// * `req` - The incoming image request from the manifest
+/// * `req` - The incoming image request
 /// * `conf` - The Thorctl config
 /// * `editor_override` - Optional editor override from the CLI
 pub(crate) async fn merge_image_interactive(
@@ -394,46 +647,44 @@ pub(crate) async fn merge_image_interactive(
     req: &ImageRequest,
     conf: &CtlConf,
     editor_override: Option<&str>,
-) -> Result<Option<ImageUpdate>, Error> {
+) -> Result<MergeEdit<ImageUpdate>, Error> {
+    // build both sides in the same normalized form change detection uses, with
+    // omitted incoming fields resolved against the current image
     let current = MergeableImage::from(image.clone());
-    let mut incoming = MergeableImage::from(req.clone());
-    // a manifest never carries identity/server-managed fields and this merge
-    // can't edit them, so mirror them from the current image to avoid spurious
-    // conflicts (see [`mirror_non_editable_fields`])
-    mirror_non_editable_fields(&mut incoming, &current);
-    // serialize both to canonical (sorted-key) YAML so reordered maps (env,
-    // triggers, …) don't surface as spurious conflicts
-    let current_yaml = crate::utils::curated_yaml(&current, IMAGE_FIELD_ORDER)
+    let incoming = incoming_image_view(image, req.clone());
+    // serialize both in the curated editor key order (see IMAGE_FIELD_ORDER); nested
+    // maps are key-sorted and set-like lists sorted, so reordering never conflicts
+    let current_yaml = crate::utils::curated_yaml(&current.canonical_value(), IMAGE_FIELD_ORDER)
         .map_err(|err| Error::new(format!("Failed to serialize current image to YAML: {err}")))?;
-    let incoming_yaml = crate::utils::curated_yaml(&incoming, IMAGE_FIELD_ORDER)
+    let incoming_yaml = crate::utils::curated_yaml(&incoming.canonical_value(), IMAGE_FIELD_ORDER)
         .map_err(|err| Error::new(format!("Failed to serialize incoming image to YAML: {err}")))?;
     // generate the conflict YAML
     let conflict_yaml = editor::generate_conflict_view(
         &current_yaml,
         &incoming_yaml,
-        "Current (Thorium)",
-        "Incoming (Manifest)",
+        CURRENT_LABEL,
+        INCOMING_LABEL,
     );
-    // open the editor
-    let editor_cmd = editor_override.unwrap_or(&conf.default_editor);
+    // open the editor; parse errors re-open it via the editor loop's Edit/Cancel prompt
+    let editor_cmd = editor::resolve_editor(editor_override, conf);
     let label = format!("{}-{}", image.group, image.name);
     let resolved: MergeableImage =
         match editor::editor_loop(&conflict_yaml, &label, editor_cmd).await? {
             Some(resolved) => resolved,
-            None => return Ok(None),
+            None => return Ok(MergeEdit::Cancelled),
         };
     // calculate update from the current image to the resolved state
     update::calculate_image_update_from_mergeable(image.clone(), resolved)
+        .map(MergeEdit::from_update)
 }
 
 /// Resolve a pipeline merge conflict via the editor and return the resulting
-/// pipeline update, or None if the user's edits result in no changes or they
-/// cancelled
+/// pipeline update, or whether the user's edits changed nothing or they cancelled
 ///
 /// # Arguments
 ///
 /// * `pipeline` - The current pipeline in Thorium
-/// * `req` - The incoming pipeline request from the manifest
+/// * `req` - The incoming pipeline request
 /// * `conf` - The Thorctl config
 /// * `editor_override` - Optional editor override from the CLI
 pub(crate) async fn merge_pipeline_interactive(
@@ -441,16 +692,19 @@ pub(crate) async fn merge_pipeline_interactive(
     req: &PipelineRequest,
     conf: &CtlConf,
     editor_override: Option<&str>,
-) -> Result<Option<PipelineUpdate>, Error> {
+) -> Result<MergeEdit<PipelineUpdate>, Error> {
+    // build both sides in the same normalized form change detection uses, with an
+    // omitted incoming SLA resolved against the current pipeline
     let current = MergeablePipeline::from(pipeline.clone());
-    let incoming = MergeablePipeline::from(req.clone());
-    // serialize both to canonical (sorted-key) YAML so reordered maps (triggers)
-    // don't surface as spurious conflicts
-    let current_yaml = crate::utils::curated_yaml(&current, PIPELINE_FIELD_ORDER).map_err(|err| {
-        Error::new(format!(
-            "Failed to serialize current pipeline to YAML: {err}"
-        ))
-    })?;
+    let incoming = incoming_pipeline_view(pipeline, req.clone());
+    // serialize both in the curated editor key order (see PIPELINE_FIELD_ORDER);
+    // nested maps (triggers) are key-sorted so reordering never conflicts
+    let current_yaml =
+        crate::utils::curated_yaml(&current, PIPELINE_FIELD_ORDER).map_err(|err| {
+            Error::new(format!(
+                "Failed to serialize current pipeline to YAML: {err}"
+            ))
+        })?;
     let incoming_yaml =
         crate::utils::curated_yaml(&incoming, PIPELINE_FIELD_ORDER).map_err(|err| {
             Error::new(format!(
@@ -461,19 +715,21 @@ pub(crate) async fn merge_pipeline_interactive(
     let conflict_yaml = editor::generate_conflict_view(
         &current_yaml,
         &incoming_yaml,
-        "Current (Thorium)",
-        "Incoming (Manifest)",
+        CURRENT_LABEL,
+        INCOMING_LABEL,
     );
-    // open the editor
-    let editor_cmd = editor_override.unwrap_or(&conf.default_editor);
+    // open the editor; triggers are typed, so an invalid trigger is a parse error
+    // that re-opens the editor via the editor loop's Edit/Cancel prompt
+    let editor_cmd = editor::resolve_editor(editor_override, conf);
     let label = format!("{}-{}", pipeline.group, pipeline.name);
     let resolved: MergeablePipeline =
         match editor::editor_loop(&conflict_yaml, &label, editor_cmd).await? {
             Some(resolved) => resolved,
-            None => return Ok(None),
+            None => return Ok(MergeEdit::Cancelled),
         };
     // calculate update from the current pipeline to the resolved state
     update::calculate_pipeline_update_from_mergeable(pipeline.clone(), resolved)
+        .map(MergeEdit::from_update)
 }
 
 // ─── Batch Interactive Merge ─────────────────────────────────────────────────
@@ -481,12 +737,19 @@ pub(crate) async fn merge_pipeline_interactive(
 /// Interactively handle existing resources that have changes, prompting the user
 /// for each one to Edit (merge editor), Skip, Apply (accept incoming), or Quit
 ///
+/// Only resources whose computed update is non-empty ([`ImportKind::calculate_update`],
+/// the same predicate as the confirmation screen and `--overwrite`) are prompted
+/// for. If an edit or apply fails (an editor error, or the server rejecting the
+/// update), the error is shown and the same resource is prompted for again so the
+/// user can retry, skip it, or quit. A cancelled edit also prompts for the same
+/// resource again.
+///
 /// # Arguments
 ///
 /// * `thorium` - The Thorium client used to apply updates
-/// * `existing` - Resources from the manifest that already exist in Thorium
+/// * `existing` - Imported resources that already exist in Thorium
 /// * `conf` - The Thorctl config (used for the default editor)
-/// * `editor_override` - Optional editor command that overrides `conf.default_editor`
+/// * `editor_override` - Optional editor command that overrides the configured editor
 /// * `progress` - The progress bar (suspended during interactive prompts)
 /// * `journal` - The journal to snapshot pre-update state in for rollback
 pub async fn interactive_merge<K: ImportKind>(
@@ -497,64 +760,102 @@ pub async fn interactive_merge<K: ImportKind>(
     progress: &Bar,
     journal: &Journal,
 ) -> Result<ImportOutcome, Error> {
-    // filter to only resources with actual changes
-    let changed: Vec<_> = existing
+    // keep only resources with an effective change, computing each update once so
+    // Apply reuses it
+    let changed: Vec<(&Categorized<K>, &K::Existing, K::Update)> = existing
         .into_iter()
-        .filter(|item| {
-            item.existing
-                .as_ref()
-                .is_some_and(|current| K::changed(current, &item.request))
+        .filter_map(|item| {
+            // resources that don't exist yet are handled by the create pass
+            let current = item.existing.as_ref()?;
+            // an empty update means nothing would change, so there's nothing to prompt
+            let update = K::calculate_update(current.clone(), item.request.clone())?;
+            Some((item, current, update))
         })
         .collect();
-    if changed.is_empty() {
-        return Ok(ImportOutcome::Completed);
-    }
-    for item in changed {
-        // the filter above guarantees Some, but bind defensively rather than unwrap
-        let Some(current) = item.existing.as_ref() else {
-            continue;
-        };
+    for (item, current, incoming_update) in changed {
+        // resolve the resource's identity for the prompt and messages
         let group = K::group(&item.request);
         let name = K::name(&item.request);
-        // suspend the progress bar for interactive prompts
-        let action = progress.suspend(|| prompt_merge_action(K::TITLE, group, name))?;
-        match action {
-            MergeAction::Edit => {
-                // open the editor to resolve this resource's conflicts
-                let update = progress
-                    .suspend_async(K::merge_interactive(
-                        current,
-                        &item.request,
-                        conf,
-                        editor_override,
-                    ))
-                    .await?;
-                if let Some(update) = update {
-                    apply_merge_update::<K>(thorium, item, current, &update, journal).await?;
-                } else {
-                    println!(
-                        "{} No changes detected for {} '{group}:{name}'",
-                        "Skipped:".bright_blue(),
+        // re-prompt for this resource until an action completes
+        loop {
+            // suspend the progress bar for interactive prompts
+            let action = progress.suspend(|| prompt_merge_action(K::TITLE, group, name))?;
+            // run the chosen action, yielding the error of a failed edit/apply
+            let result = match action {
+                MergeAction::Edit => {
+                    // open the editor to resolve this resource's conflicts
+                    let edited = progress
+                        .suspend_async(K::merge_interactive(
+                            current,
+                            &item.request,
+                            conf,
+                            editor_override,
+                        ))
+                        .await;
+                    match edited {
+                        Ok(MergeEdit::Update(update)) => {
+                            apply_merge_update::<K>(
+                                thorium, item, current, &update, progress, journal,
+                            )
+                            .await
+                        }
+                        Ok(MergeEdit::Cancelled) => {
+                            // a cancelled edit changes nothing, so prompt for this resource again
+                            progress.suspend(|| {
+                                println!(
+                                    "Edit cancelled for {} '{}'",
+                                    K::NOUN,
+                                    utils::resource_id(group, name),
+                                );
+                            });
+                            continue;
+                        }
+                        Ok(MergeEdit::NoChanges) => {
+                            progress.suspend(|| {
+                                println!(
+                                    "{} No changes detected for {} '{}'",
+                                    "Skipped:".bright_blue(),
+                                    K::NOUN,
+                                    utils::resource_id(group, name),
+                                );
+                            });
+                            Ok(())
+                        }
+                        Err(err) => Err(Error::new(format!(
+                            "Failed to edit {} '{}': {err}",
+                            K::NOUN,
+                            item.label()
+                        ))),
+                    }
+                }
+                MergeAction::Skip => {
+                    progress.info_anonymous(format!(
+                        "Skipping {} '{}'",
                         K::NOUN,
-                    );
+                        item.label().bright_yellow()
+                    ));
+                    Ok(())
                 }
-            }
-            MergeAction::Skip => {
-                progress.info_anonymous(format!(
-                    "Skipping {} '{}:{}'",
-                    K::NOUN,
-                    item.name.bright_yellow(),
-                    item.version.bright_yellow()
-                ));
-            }
-            MergeAction::Apply => {
-                if let Some(update) = K::calculate_update(current.clone(), item.request.clone()) {
-                    apply_merge_update::<K>(thorium, item, current, &update, journal).await?;
+                MergeAction::Apply => {
+                    apply_merge_update::<K>(
+                        thorium,
+                        item,
+                        current,
+                        &incoming_update,
+                        progress,
+                        journal,
+                    )
+                    .await
                 }
-            }
-            MergeAction::Quit => {
-                println!("Stopping further resource processing.");
-                return Ok(ImportOutcome::Quit);
+                MergeAction::Quit => {
+                    progress.suspend(|| println!("Stopping further resource processing."));
+                    return Ok(ImportOutcome::Quit);
+                }
+            };
+            // a failed edit/apply is shown and this resource is prompted for again
+            match result {
+                Ok(()) => break,
+                Err(err) => progress.error(format!("{err}")),
             }
         }
     }
@@ -570,34 +871,40 @@ pub async fn interactive_merge<K: ImportKind>(
 /// * `item` - The categorized resource being updated (source of group/name)
 /// * `current` - The pre-update resource state to snapshot for rollback
 /// * `update` - The resolved update payload to apply
+/// * `progress` - The progress bar to print the success line through
 /// * `journal` - The journal to record the pre-update snapshot in
 async fn apply_merge_update<K: ImportKind>(
     thorium: &Thorium,
     item: &Categorized<K>,
     current: &K::Existing,
     update: &K::Update,
+    progress: &Bar,
     journal: &Journal,
 ) -> Result<(), Error> {
     // resolve the resource's group and name for the update call and messages
     let group = K::group(&item.request);
     let name = K::name(&item.request);
-    K::update(thorium, group, name, update).await.map_err(|err| {
-        Error::new(format!(
-            "Error updating {} '{}:{}': {}",
-            K::NOUN,
-            item.name,
-            item.version,
-            err
-        ))
-    })?;
+    K::update(thorium, group, name, update)
+        .await
+        .map_err(|err| {
+            Error::new(format!(
+                "Failed to update {} '{}': {}",
+                K::NOUN,
+                item.label(),
+                err
+            ))
+        })?;
     // snapshot the pre-update state so the update can be reverted
     K::record_updated(journal, current.clone());
-    println!(
-        "{} {} {}",
-        K::TITLE.bright_green(),
-        format!("'{group}:{name}'").yellow(),
-        "updated successfully!".bright_green()
-    );
+    // print the success line without colliding with the progress bar
+    progress.suspend(|| {
+        println!(
+            "{} {} {}",
+            K::TITLE.bright_green(),
+            format!("'{}'", utils::resource_id(group, name)).yellow(),
+            "updated successfully!".bright_green()
+        );
+    });
     Ok(())
 }
 
@@ -607,6 +914,13 @@ mod tests {
     use crate::handlers::imports::editor::generate_conflict_view;
     use std::collections::HashMap;
     use thorium::models::ImageRequest;
+
+    /// A calculated update becomes `Update` and no update becomes `NoChanges`
+    #[test]
+    fn merge_edit_from_update() {
+        assert_eq!(MergeEdit::from_update(Some(1)), MergeEdit::Update(1));
+        assert_eq!(MergeEdit::<i32>::from_update(None), MergeEdit::NoChanges);
+    }
 
     /// Build a MergeableImage with the non-editable fields populated
     fn populated_mergeable_image() -> MergeableImage {
@@ -625,7 +939,10 @@ mod tests {
     fn non_editable_image_fields_are_static_marked() {
         let yaml = serde_norway::to_string(&populated_mergeable_image()).unwrap();
         for marked in ["*group*", "*name*", "*creator*", "*runtime*", "*bans*"] {
-            assert!(yaml.contains(marked), "expected static marker {marked} in:\n{yaml}");
+            assert!(
+                yaml.contains(marked),
+                "expected static marker {marked} in:\n{yaml}"
+            );
         }
     }
 
@@ -685,7 +1002,10 @@ mod tests {
             "Current (Thorium)",
             "Incoming (Manifest)",
         );
-        assert!(before.contains("<<<<<<<"), "expected a conflict before mirroring");
+        assert!(
+            before.contains("<<<<<<<"),
+            "expected a conflict before mirroring"
+        );
 
         // after mirroring, the two sides match and there is no conflict
         mirror_non_editable_fields(&mut incoming, &current);
@@ -732,5 +1052,31 @@ mod tests {
         let pipeline_yaml = crate::utils::canonical_yaml(&pipeline).unwrap();
         serde_norway::from_str::<MergeablePipeline>(&pipeline_yaml)
             .expect("canonical pipeline YAML must deserialize");
+    }
+
+    /// A typo'd key in the image editor is rejected rather than silently ignored
+    #[test]
+    fn mergeable_image_rejects_unknown_keys() {
+        let image = MergeableImage::from(ImageRequest::new("static", "exiftool"));
+        let mut value = serde_json::to_value(&image).unwrap();
+        value["timout"] = serde_json::json!(900);
+        assert!(serde_json::from_value::<MergeableImage>(value).is_err());
+    }
+
+    /// Set-valued fields render in sorted order so views are stable run-to-run
+    #[test]
+    fn set_fields_serialize_sorted() {
+        let mut req = ImageRequest::new("static", "exiftool");
+        req.network_policies = ["c", "a", "b"].iter().map(|p| (*p).to_string()).collect();
+        req.child_filters.mime = ["z", "x", "y"].iter().map(|p| (*p).to_string()).collect();
+        let value = MergeableImage::from(req).canonical_value();
+        assert_eq!(
+            value["network_policies"],
+            serde_json::json!(["a", "b", "c"])
+        );
+        assert_eq!(
+            value["child_filters"]["mime"],
+            serde_json::json!(["x", "y", "z"])
+        );
     }
 }

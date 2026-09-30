@@ -11,7 +11,9 @@ use serde::de::DeserializeOwned;
 use thorium::models::{Image, ImageUpdate, Pipeline, PipelineUpdate};
 use thorium::{CtlConf, Error, Thorium};
 
-use crate::handlers::imports::editor::{editor_loop, resolve_editor};
+use crate::handlers::imports::editor::{
+    editor_loop_with_text, prompt_reedit, resolve_editor, save_recovery_file,
+};
 use crate::handlers::imports::merge::{
     IMAGE_FIELD_ORDER, MergeableImage, MergeablePipeline, PIPELINE_FIELD_ORDER,
 };
@@ -32,6 +34,12 @@ pub trait EditableEntity {
     const FIELD_ORDER: &'static [&'static str];
 
     /// Resolve the entity's group, finding it when one isn't supplied
+    ///
+    /// # Arguments
+    ///
+    /// * `thorium` - The Thorium client
+    /// * `name` - The name of the entity
+    /// * `group` - The group the entity is in, if known
     async fn resolve_group(
         thorium: &Thorium,
         name: &str,
@@ -39,12 +47,30 @@ pub trait EditableEntity {
     ) -> Result<String, Error>;
 
     /// Fetch the current entity from Thorium
+    ///
+    /// # Arguments
+    ///
+    /// * `thorium` - The Thorium client
+    /// * `group` - The group the entity is in
+    /// * `name` - The name of the entity
     async fn fetch(thorium: &Thorium, group: &str, name: &str) -> Result<Self::Data, Error>;
 
     /// Compute the update from the current entity and the editor-resolved view
+    ///
+    /// # Arguments
+    ///
+    /// * `data` - The current entity
+    /// * `view` - The view the user saved
     fn calculate_update(data: Self::Data, view: Self::View) -> Result<Option<Self::Update>, Error>;
 
     /// Apply the update in Thorium
+    ///
+    /// # Arguments
+    ///
+    /// * `thorium` - The Thorium client
+    /// * `group` - The group the entity is in
+    /// * `name` - The name of the entity
+    /// * `update` - The update to apply
     async fn send_update(
         thorium: &Thorium,
         group: &str,
@@ -53,8 +79,41 @@ pub trait EditableEntity {
     ) -> Result<(), Error>;
 }
 
+/// List the non-editable (`*field*`) keys whose values differ between two views
+///
+/// Non-editable fields are shown for context only and ignored on save, so a
+/// change to one is reported rather than silently dropped.
+///
+/// # Arguments
+///
+/// * `original` - The view as fetched from Thorium
+/// * `edited` - The view the user saved
+fn changed_static_fields<V: Serialize>(original: &V, edited: &V) -> Vec<String> {
+    // compare the two views as JSON objects
+    let (Ok(serde_json::Value::Object(original)), Ok(serde_json::Value::Object(edited))) =
+        (serde_json::to_value(original), serde_json::to_value(edited))
+    else {
+        return Vec::new();
+    };
+    // keep the static-marked keys whose values differ (including removed ones)
+    let mut changed: Vec<String> = original
+        .keys()
+        .chain(edited.keys())
+        .filter(|key| key.len() > 2 && key.starts_with('*') && key.ends_with('*'))
+        .filter(|key| original.get(*key) != edited.get(*key))
+        .cloned()
+        .collect();
+    changed.sort_unstable();
+    changed.dedup();
+    changed
+}
+
 /// Edit an entity: resolve its group, fetch it, open its editing view in the
 /// user's editor, then compute and apply any update.
+///
+/// If the server rejects the update, the user can reopen the editor with their
+/// own edits; if they decline, the edits are saved to a file whose path is
+/// included in the returned error so nothing is lost.
 ///
 /// # Arguments
 ///
@@ -70,33 +129,78 @@ pub async fn edit_entity<E: EditableEntity>(
     group: Option<&str>,
     editor_override: Option<&str>,
 ) -> Result<(), Error> {
+    // editing needs a terminal for the editor and the error prompts
+    if !crate::handlers::imports::is_interactive_terminal() {
+        return Err(Error::new(format!(
+            "Editing {} '{name}' requires an interactive terminal",
+            E::KIND.to_lowercase()
+        )));
+    }
+    // find and fetch the entity
     let group = E::resolve_group(thorium, name, group).await?;
     let data = E::fetch(thorium, &group, name).await?;
+    // render the editable view
     let view = E::View::from(data.clone());
-    let yaml = utils::curated_yaml(&view, E::FIELD_ORDER)
+    let mut yaml = utils::curated_yaml(&view, E::FIELD_ORDER)
         .map_err(|err| Error::new(format!("Failed to serialize {} to YAML: {err}", E::KIND)))?;
     let editor = resolve_editor(editor_override, conf);
     let label = format!("{group}-{name}");
-    let resolved: E::View = match editor_loop(&yaml, &label, editor).await? {
-        Some(resolved) => resolved,
-        None => {
+    // name the resource the same way in every message below
+    let id = utils::resource_id(&group, name);
+    loop {
+        // let the user edit the view, keeping their exact text for a retry
+        let Some((resolved, text)) =
+            editor_loop_with_text::<E::View>(&yaml, &label, editor).await?
+        else {
             println!("Cancelled.");
             return Ok(());
-        }
-    };
-    match E::calculate_update(data, resolved)? {
-        Some(update) => {
-            E::send_update(thorium, &group, name, &update).await?;
-            println!(
-                "{} {} {}",
-                E::KIND.bright_green(),
-                format!("'{group}:{name}'").yellow(),
-                "updated successfully!".bright_green()
+        };
+        // non-editable fields are ignored on save, so say so if they were changed
+        let ignored = changed_static_fields(&view, &resolved);
+        if !ignored.is_empty() {
+            eprintln!(
+                "{} Ignoring edits to non-editable field(s): {}",
+                "Warning:".bright_yellow(),
+                ignored.join(", ")
             );
         }
-        None => println!("No changes detected! Exiting..."),
+        // compute the update; nothing to send means nothing changed
+        let Some(update) = E::calculate_update(data.clone(), resolved)? else {
+            println!("No changes detected! Exiting...");
+            return Ok(());
+        };
+        // send the update, offering to re-edit if the server rejects it
+        match E::send_update(thorium, &group, name, &update).await {
+            Ok(()) => {
+                println!(
+                    "{} {} {}",
+                    E::KIND.bright_green(),
+                    format!("'{id}'").yellow(),
+                    "updated successfully!".bright_green()
+                );
+                return Ok(());
+            }
+            Err(err) => {
+                eprintln!(
+                    "{} Failed to update {} '{id}': {err}",
+                    "Error:".bright_red().bold(),
+                    E::KIND.to_lowercase()
+                );
+                // reopen the editor with the user's own text to fix the problem
+                if prompt_reedit()? {
+                    yaml = text;
+                    continue;
+                }
+                // keep the edits recoverable before giving up
+                let saved = save_recovery_file(&text, &label, "yml")?;
+                return Err(Error::new(format!(
+                    "Failed to update {} '{id}': {err} (your edits were saved to '{}')",
+                    E::KIND.to_lowercase(),
+                    saved.display()
+                )));
+            }
+        }
     }
-    Ok(())
 }
 
 /// [`EditableEntity`] for Thorium images
@@ -161,7 +265,7 @@ impl EditableEntity for PipelineEditable {
     ) -> Result<String, Error> {
         match group {
             Some(group) => Ok(group.to_string()),
-            None => utils::pipelines::find_pipeline_group(thorium, &name.to_string()).await,
+            None => utils::pipelines::find_pipeline_group(thorium, name).await,
         }
     }
 

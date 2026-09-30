@@ -11,9 +11,13 @@ of features including:
 - starting Git repo builds
 - downloading results
 - listing files
+- editing, importing, and exporting images and pipelines
+- building, importing, and exporting toolboxes
 
 An example of some of these can be found in the [Users](./../users/users.md)
-section of these docs.
+section of these docs. The image, pipeline, and toolbox commands are covered in
+[Importing, Exporting, and Editing Images and Pipelines](../developers/import_export.md) and
+[Toolboxes](../developers/toolbox.md).
 
 To install Thorctl, follow the instructions for your specific operating system in the sections below.
 
@@ -82,14 +86,24 @@ file, use `thorctl config`. For example, you can disable the automatic check for
 by running:
 
 ```
-thorctl config --skip-updates=true
+thorctl config --skip-update=true
 ```
 
 You can specify a config file to modify using the `--config` flag as described above:
 
 ```
-thorctl --config <PATH-TO-CONFIG-FILE> config --skip-updates=true
+thorctl --config <PATH-TO-CONFIG-FILE> config --skip-update=true
 ```
+
+To skip the update check for a single command instead, pass the global `--skip-update` flag before the subcommand
+(for example `thorctl --skip-update images get`). When Thorctl is older than the server it asks whether to update
+only if it's running in a terminal; in scripts and CI jobs it just prints an out-of-date notice on stderr and carries on.
+
+Commands that open a text editor (such as `thorctl images edit`) use the editor set with
+`thorctl config --default-editor <EDITOR>`, falling back to `$VISUAL`, `$EDITOR`, and finally `vi`
+(see [Choosing an editor](../developers/import_export.md#choosing-an-editor)). Commands that pull, push, or build container
+images use docker or podman; set `container_runtime: docker` or `container_runtime: podman` in the config file, or pass the
+global `--container-runtime` flag, to choose one explicitly.
 
 #### Proxy Settings
 
@@ -128,22 +142,56 @@ The command line args passed to Thorctl
 Usage: thorctl [OPTIONS] <COMMAND>
 
 Commands:
-  clusters   Manage Thorium clusters
-  login      Login to a Thorium cluster
-  files      Perform file related tasks
-  reactions  Perform reactions related tasks
-  results    Perform results related tasks
-  repos      Perform repositories related tasks
-  help       Print this message or the help of the given subcommand(s)
+  clusters          Manage Thorium clusters
+  login             Login to Thorium interactively
+  groups            Perform group related tasks
+  files             Perform file related tasks
+  images            Perform image related tasks
+  pipelines         Perform pipeline related tasks
+  reactions         Perform reaction related tasks
+  results           Perform result related tasks
+  tokens            Perform scoped token related tasks
+  activate          Activate a scoped token making Thorctl authenticate with it
+  deactivate        Deactivate the currently activated scoped token
+  tags              Perform tag related tasks
+  repos             Perform repository related tasks
+  trees             Perform tree related tasks
+  network-policies  Perform network policy related tasks [alias: netpols]
+  ai                Use AI to perform tasks in Thorium
+  cart              Cart files locally
+  uncart            Uncart files locally
+  run               Create and run a reaction, monitor its progress, and download its results
+  update            Update Thorctl if necessary
+  config            Modify the Thorctl config file indicated by `--config`
+  toolbox           Perform toolbox related tasks
+  help              Print this message or the help of the given subcommand(s)
 
 Options:
-      --admin <ADMIN>      The path to load the core Thorium config file from for admin actions [default: ~/.thorium/thorium.yml]
-      --config <CONFIG>    path to authentication key files for regular actions [default: ~/.thorium/config.yml]
-  -k, --keys <KEYS>        The path to the single user auth keys to use in place of the Thorctl config
-  -w, --workers <WORKERS>  The number of parallel async actions to process at once [default: 10]
-  -h, --help               Print help
-  -V, --version            Print version
+      --admin <ADMIN>
+          The path to load the core Thorium config file from for admin actions [default:
+          ~/.thorium/thorium.yml]
+      --config <CONFIG>
+          The path to authentication key files for regular actions [default:
+          ~/.thorium/config.yml]
+      --keys <KEYS>
+          The path to a keys file to used to authenticate with the Thorium API
+      --skip-update
+          Don't check for updates from the API
+  -w, --workers <WORKERS>
+          The number of parallel async actions to process at once [default: 10]
+  -q, --quiet
+          Disable progress tracking and only print errors to stderr
+      --container-runtime <CONTAINER_RUNTIME>
+          Container CLI to use for image pull/save/load/tag/push/build [possible values: docker,
+          podman]
+  -h, --help
+          Print help (see more with '--help')
+  -V, --version
+          Print version
 ```
+
+These global options go **before** the subcommand, for example `thorctl --workers 20 files upload …` or
+`thorctl --container-runtime podman images import …`.
 
 Each subcommand of Thorctl (eg `files`) has its own help menu to inform users on the available options for that
 subcommand.
@@ -152,19 +200,33 @@ subcommand.
 $ thorctl files upload --help
 Upload some files and/or directories to Thorium
 
-Usage: thorctl files upload [OPTIONS] --file-groups <GROUPS> [TARGETS]...
+Usage: thorctl files upload [OPTIONS] --groups <FILE_GROUPS> <TARGETS|--from-file <FROM_FILE>>
 
 Arguments:
-  [TARGETS]...  The files and or folders to upload
+  [TARGETS]...  The files and/or folders to upload
 
 Options:
-  -g, --groups <GROUPS>            The groups to upload these files to
-  -p, --pipelines <PIPELINES>      The pipelines to spawn for all files that are uploaded
-  -t, --tags <TAGS>                The tags to add to any files uploaded where key/value is separated by a deliminator
-      --deliminator <DELIMINATOR>  The deliminator character to use when splitting tags into key/values [default: =]
-  -f, --filter <FILTER>            Any regular expressions to use to determine which files to upload
-  -s, --skip <SKIP>                Any regular expressions to use to determine which files to skip
-      --folder-tags <FOLDER_TAGS>  The tags keys to use for each folder name starting at the root of the specified targets
-  -h, --help                       Print help
-  -V, --version                    Print version
-  ```
+      --from-file <FROM_FILE>       An optional file containing a list of paths to files/directories
+                                    to upload, delimited by newline
+  -g, --groups <FILE_GROUPS>        The groups to upload these files to
+  -T, --file-tags <FILE_TAGS>       The tags to add to any files uploaded where key/value is
+                                    separated by a delimiter
+      --delimiter <DELIMITER>       The delimiter character to use when splitting tags into
+                                    key/values
+                                       (i.e. <TAG>=<VALUE1>=<VALUE2>=<VALUE3>) [default: =]
+      --dry-run                     Display files that will be uploaded without uploading them
+  -p, --pipelines <GROUP/PIPELINE>  Any pipelines to immediately spawn for the files that are
+                                    uploaded; pipelines are specified by their group + name,
+                                    separated with "/" (i.e.
+                                    <GROUP1>/<PIPELINE1>,<GROUP2>/<PIPELINE2>; <PIPELINE>:<GROUP> is
+                                    also accepted)
+  -f, --filter <FILTER>             Any regular expressions to use to determine which files to
+                                    upload
+  -s, --skip <SKIP>                 Any regular expressions to use to determine which files to skip
+      --include-hidden              Include hidden directories/files
+      --folder-tags <FOLDER_TAGS>   A list of keys to assign to directory names to upload as tags
+                                    (e.g. --folder-tags "a/b" on "foo/bar/baz.txt" would have tags
+                                    "a=foo", "b=bar")
+  -h, --help                        Print help (see more with '--help')
+  -V, --version                     Print version
+```

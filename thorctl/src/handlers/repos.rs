@@ -360,8 +360,7 @@ async fn update(
                 // log this error and then stop listing data
                 controller
                     .multi
-                    .error(&format!("Error listing repos: {error:?}"))
-                    .unwrap_or_else(|_| panic!("Failed to log error: {error:#?}"));
+                    .error(&format!("Error listing repos: {error:?}"));
             }
         }
     }

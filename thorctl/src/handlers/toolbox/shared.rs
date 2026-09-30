@@ -11,6 +11,7 @@ use url::Url;
 use crate::args::toolbox::ManifestLocation;
 use crate::handlers::progress::{Bar, BarKind};
 use crate::handlers::toolbox::manifest::{DroppedItems, ToolboxManifest};
+use crate::utils;
 
 /// Warn through the progress bar about every image/pipeline version a validation
 /// pass dropped, so skipped resources are visible before anything is applied
@@ -44,30 +45,37 @@ pub fn warn_dropped(dropped: &DroppedItems, progress: &Bar) {
     }
 }
 
-/// Get a [`ToolboxManifest`] from a [`ManifestLocation`]
+/// Get a [`ToolboxManifest`] from a [`ManifestLocation`], with a progress bar named `name`
+///
+/// The bar's name prefixes its warnings and errors (`Warning: <name> - ...`), so it
+/// should identify the running command (e.g. "toolbox import").
 ///
 /// # Arguments
 ///
 /// * `location` - The location the manifest is found at
+/// * `name` - The name of the returned progress bar
 ///
 /// # Returns
 ///
 /// Returns the [`ToolboxManifest`] along with a [`Bar`] used to track download/reading progress
-pub async fn get_manifest(location: &ManifestLocation) -> Result<(ToolboxManifest, Bar), Error> {
+pub async fn get_manifest_named(
+    location: &ManifestLocation,
+    name: &str,
+) -> Result<(ToolboxManifest, Bar), Error> {
     // branch on whether the manifest lives at a URL or a local path; the two sources
     // need different fetch logic and a differently-worded progress message
     match location {
         ManifestLocation::Url(manifest_url) => {
             // start the bar unbounded since the content length isn't known until the
             // response headers arrive inside the URL fetch
-            let progress = Bar::new("", "Downloading manifest...", BarKind::UnboundIO);
+            let progress = Bar::new(name, "Downloading manifest...", BarKind::UnboundIO);
             let manifest = get_manifest_from_url(manifest_url, &progress).await?;
             Ok((manifest, progress))
         }
         ManifestLocation::Path(manifest_path) => {
             // start the bar unbounded; the file size isn't known until the path fetch
             // stats the file, at which point it switches the bar to a bounded mode
-            let progress = Bar::new("", "Reading manifest file...", BarKind::UnboundIO);
+            let progress = Bar::new(name, "Reading manifest file...", BarKind::UnboundIO);
             let manifest = get_manifest_from_path(manifest_path, &progress).await?;
             Ok((manifest, progress))
         }
@@ -85,7 +93,7 @@ async fn get_manifest_from_url(url: &Url, progress: &Bar) -> Result<ToolboxManif
     // any status code is known
     let resp = reqwest::get(url.clone())
         .await
-        .map_err(|err| Error::new(format!("Error downloading toolbox manifest: {err}")))?;
+        .map_err(|err| Error::new(format!("Failed to download toolbox manifest: {err}")))?;
     // turn a non-2xx status (404, 500, ...) into an error so we don't try to parse an
     // error page body as a manifest
     match resp.error_for_status() {
@@ -111,7 +119,7 @@ async fn get_manifest_from_url(url: &Url, progress: &Bar) -> Result<ToolboxManif
             while let Some(bytes) = manifest_bytes_stream.next().await {
                 let bytes = bytes.map_err(|err| {
                     Error::new(format!(
-                        "Error downloading toolbox manifest response body: {err}"
+                        "Failed to download toolbox manifest response body: {err}"
                     ))
                 })?;
                 progress.inc(bytes.len() as u64);
@@ -119,10 +127,10 @@ async fn get_manifest_from_url(url: &Url, progress: &Bar) -> Result<ToolboxManif
             }
             // parse the fully buffered body into the manifest model
             serde_json::from_slice(&manifest_bytes)
-                .map_err(|err| Error::new(format!("Malformed toolbox manifest: {err}")))
+                .map_err(|err| Error::new(format!("Failed to parse toolbox manifest: {err}")))
         }
         Err(err) => Err(Error::new(format!(
-            "Error downloading toolbox manifest: {err}"
+            "Failed to download toolbox manifest: {err}"
         ))),
     }
 }
@@ -134,10 +142,24 @@ async fn get_manifest_from_url(url: &Url, progress: &Bar) -> Result<ToolboxManif
 /// * `path` - The manifest file path
 /// * `progress` - The progress bar
 async fn get_manifest_from_path(path: &Path, progress: &Bar) -> Result<ToolboxManifest, Error> {
+    // a directory (e.g. a toolbox repo checkout) isn't a manifest; point the user at the
+    // toolbox.json inside it, or at `toolbox build` to generate one, instead of a raw IO error
+    if path.is_dir() {
+        let candidate = path.join("toolbox.json");
+        let hint = if candidate.is_file() {
+            format!("pass the manifest file instead: '{}'", candidate.display())
+        } else {
+            "run `thorctl toolbox build` to generate a toolbox.json and pass that file".to_string()
+        };
+        return Err(Error::new(format!(
+            "Failed to read toolbox manifest '{}': it is a directory; {hint}",
+            path.display()
+        )));
+    }
     // open the file up front so a missing/unreadable path fails before the bar advances
     let mut manifest_file = tokio::fs::File::open(path).await.map_err(|err| {
         Error::new(format!(
-            "Error opening manifest file '{}': {}",
+            "Failed to open manifest file '{}': {}",
             path.display(),
             err
         ))
@@ -162,7 +184,7 @@ async fn get_manifest_from_path(path: &Path, progress: &Bar) -> Result<ToolboxMa
             .await
             .map_err(|err| {
                 Error::new(format!(
-                    "Error reading manifest file '{}': {}",
+                    "Failed to read manifest file '{}': {}",
                     path.display(),
                     err
                 ))
@@ -174,7 +196,7 @@ async fn get_manifest_from_path(path: &Path, progress: &Bar) -> Result<ToolboxMa
     }
     // parse the fully buffered file into the manifest model
     serde_json::from_slice(&manifest_bytes)
-        .map_err(|err| Error::new(format!("Malformed toolbox manifest: {err}")))
+        .map_err(|err| Error::new(format!("Failed to parse toolbox manifest: {err}")))
 }
 
 /// Fetch a JSON config from a URL and deserialize it
@@ -209,6 +231,10 @@ async fn fetch_json_config<T: serde::de::DeserializeOwned>(url: &str) -> Result<
 /// into the version's `network_policies`. Versions with neither an inline config nor a
 /// `config_from` are left with `config` as `None` — they are not resolved here and are
 /// dropped later by structural validation.
+///
+/// Every URL is attempted even after a failure, and all failures are then reported
+/// together in one error naming each resource and URL. Callers run this before making
+/// any change to Thorium, so a failed fetch aborts the command with nothing applied.
 ///
 /// # Arguments
 ///
@@ -249,40 +275,67 @@ pub async fn resolve_manifest_configs(
     }
     // now that the exact total is known, switch the bar to bounded so it shows real progress
     progress.refresh("Fetching remote configs", BarKind::Bound(url_count));
+    // every fetch failure, labelled with the resource it belongs to, reported together below
+    let mut failures: Vec<String> = Vec::new();
     // resolve each image version's URL-sourced config and network policies in place
-    for image_manifest in manifest.images.values_mut() {
-        for version in image_manifest.versions.values_mut() {
+    for (image_name, image_manifest) in &mut manifest.images {
+        for (version_name, version) in &mut image_manifest.versions {
             // fetch the config only when it's URL-sourced and not already inline, matching
             // the counting pass; embed the result so downstream validation sees a config
             if let Some(url) = &version.config_from
                 && version.config.is_none()
             {
-                let config: ImageRequest = fetch_json_config(url).await?;
-                version.config = Some(config);
+                match fetch_json_config::<ImageRequest>(url).await {
+                    Ok(config) => version.config = Some(config),
+                    Err(err) => failures.push(format!(
+                        "image '{}' config_from: {err}",
+                        utils::entry_id(None, image_name, version_name)
+                    )),
+                }
                 progress.inc(1);
             }
             // drain each policy URL into the resolved `network_policies` list; draining
             // (rather than iterating) moves the urls out so they aren't re-fetched and the
             // resolved manifest no longer carries unresolved `network_policies_from` urls
             for url in version.network_policies_from.drain(..) {
-                let policy: NetworkPolicyRequest = fetch_json_config(&url).await?;
-                version.network_policies.push(policy);
+                match fetch_json_config::<NetworkPolicyRequest>(&url).await {
+                    Ok(policy) => version.network_policies.push(policy),
+                    Err(err) => failures.push(format!(
+                        "image '{}' network_policies_from: {err}",
+                        utils::entry_id(None, image_name, version_name)
+                    )),
+                }
                 progress.inc(1);
             }
         }
     }
     // resolve each pipeline version's URL-sourced config in place (pipelines carry no policies)
-    for pipeline_manifest in manifest.pipelines.values_mut() {
-        for version in pipeline_manifest.versions.values_mut() {
+    for (pipeline_name, pipeline_manifest) in &mut manifest.pipelines {
+        for (version_name, version) in &mut pipeline_manifest.versions {
             // fetch the config only when it's URL-sourced and not already inline
             if let Some(url) = &version.config_from
                 && version.config.is_none()
             {
-                let config: PipelineRequest = fetch_json_config(url).await?;
-                version.config = Some(config);
+                match fetch_json_config::<PipelineRequest>(url).await {
+                    Ok(config) => version.config = Some(config),
+                    Err(err) => failures.push(format!(
+                        "pipeline '{}' config_from: {err}",
+                        utils::entry_id(None, pipeline_name, version_name)
+                    )),
+                }
                 progress.inc(1);
             }
         }
+    }
+    // abort with every failed fetch listed, in a stable order, so all unreachable urls
+    // can be fixed at once instead of one per run
+    if !failures.is_empty() {
+        failures.sort();
+        return Err(Error::new(format!(
+            "Failed to fetch {} remote config(s); nothing was changed:\n  - {}",
+            failures.len(),
+            failures.join("\n  - ")
+        )));
     }
     Ok(())
 }

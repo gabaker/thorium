@@ -11,6 +11,7 @@ use thorium::models::{
 };
 use thorium::{CtlConf, Error, Thorium};
 
+use super::merge::MergeEdit;
 use super::rollback::Journal;
 use super::{merge, update};
 
@@ -56,17 +57,31 @@ pub trait ImportKind {
 
     /// Compute the update needed to bring `existing` in line with `req`, or
     /// `None` when nothing changed
+    ///
+    /// This is the single change predicate for every import path (confirmation,
+    /// interactive merge, `--overwrite`, `--skip-conflicts`, `toolbox diff`); see
+    /// [`update::calculate_image_update`] for the normalization it applies.
     fn calculate_update(existing: Self::Existing, req: Self::Request) -> Option<Self::Update>;
     /// Resolve a merge conflict interactively via the editor, returning the
-    /// resulting update (or `None` if the edit was a no-op or was cancelled)
+    /// resulting update, or whether the edit was a no-op or was cancelled
     async fn merge_interactive(
         existing: &Self::Existing,
         req: &Self::Request,
         conf: &CtlConf,
         editor_override: Option<&str>,
-    ) -> Result<Option<Self::Update>, Error>;
-    /// Whether the incoming request differs from the existing resource
-    fn changed(existing: &Self::Existing, req: &Self::Request) -> bool;
+    ) -> Result<MergeEdit<Self::Update>, Error>;
+    /// Whether the incoming request would change the existing resource
+    ///
+    /// Delegates to [`ImportKind::calculate_update`] so it can never disagree with
+    /// the update that would actually be applied.
+    ///
+    /// # Arguments
+    ///
+    /// * `existing` - The resource as it exists in Thorium
+    /// * `req` - The incoming request
+    fn changed(existing: &Self::Existing, req: &Self::Request) -> bool {
+        Self::calculate_update(existing.clone(), req.clone()).is_some()
+    }
 
     /// Record a creation in the rollback journal
     fn record_created(journal: &Journal, group: &str, name: &str);
@@ -125,12 +140,8 @@ impl ImportKind for ImageKind {
         req: &ImageRequest,
         conf: &CtlConf,
         editor_override: Option<&str>,
-    ) -> Result<Option<ImageUpdate>, Error> {
+    ) -> Result<MergeEdit<ImageUpdate>, Error> {
         merge::merge_image_interactive(existing, req, conf, editor_override).await
-    }
-    /// Whether the incoming image request differs from the existing image
-    fn changed(existing: &Image, req: &ImageRequest) -> bool {
-        existing != req
     }
     /// Record an image creation in the rollback journal
     fn record_created(journal: &Journal, group: &str, name: &str) {
@@ -176,7 +187,11 @@ impl ImportKind for PipelineKind {
         name: &str,
         update: &PipelineUpdate,
     ) -> Result<(), Error> {
-        thorium.pipelines.update(group, name, update).await.map(|_| ())
+        thorium
+            .pipelines
+            .update(group, name, update)
+            .await
+            .map(|_| ())
     }
     /// Compute the update needed to bring an existing pipeline in line with a request
     fn calculate_update(existing: Pipeline, req: PipelineRequest) -> Option<PipelineUpdate> {
@@ -188,12 +203,8 @@ impl ImportKind for PipelineKind {
         req: &PipelineRequest,
         conf: &CtlConf,
         editor_override: Option<&str>,
-    ) -> Result<Option<PipelineUpdate>, Error> {
+    ) -> Result<MergeEdit<PipelineUpdate>, Error> {
         merge::merge_pipeline_interactive(existing, req, conf, editor_override).await
-    }
-    /// Whether the incoming pipeline request differs from the existing pipeline
-    fn changed(existing: &Pipeline, req: &PipelineRequest) -> bool {
-        existing != req
     }
     /// Record a pipeline creation in the rollback journal
     fn record_created(journal: &Journal, group: &str, name: &str) {

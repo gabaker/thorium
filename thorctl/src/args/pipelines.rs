@@ -52,7 +52,7 @@ pub enum Pipelines {
 #[derive(Parser, Debug)]
 pub struct GetPipelines {
     /// Any groups to filter by when searching for pipelines
-    ///     Note: If no groups are given, the search will include all groups the user is apart of
+    ///     Note: If no groups are given, the search will include all groups the user is a part of
     #[clap(short, long, value_delimiter = ',', verbatim_doc_comment)]
     pub groups: Vec<String>,
     /// The max number of pipelines to list per group
@@ -67,21 +67,22 @@ pub struct GetPipelines {
     #[clap(short, long, default_value = "50")]
     pub page_size: usize,
     /// Print the pipelines in alphabetical order rather than by group, then creation date
-    #[clap(short, long)]
+    ///     Note: Sorting can require many system resources for large amounts of pipelines
+    #[clap(short, long, verbatim_doc_comment)]
     pub alpha: bool,
 }
 
 /// A command to describe specific pipelines in full
 #[derive(Parser, Debug)]
 pub struct DescribePipelines {
-    /// Any specific pipelines to describe, optionally with a specific group delimited
-    /// with a colon in case other groups have a pipeline with the same name
-    /// (e.g. '<PIPELINE>:<OPTIONAL-GROUP>')
+    /// Any specific pipelines to describe, optionally qualified with their group in case
+    /// other groups have a pipeline with the same name (e.g. '<GROUP>/<PIPELINE>';
+    /// '<PIPELINE>:<GROUP>' is also accepted)
+    #[clap(value_name = "[GROUP/]PIPELINE")]
     pub pipelines: Vec<String>,
     /// The path to a file containing a list of pipelines to describe separated by newlines;
-    /// optionally, each pipeline can have a specific group delimited with a colon in case
-    /// other groups have a pipeline with the same name
-    /// (e.g. '<PIPELINE>:<OPTIONAL-GROUP>')
+    /// each pipeline can be qualified with its group in case other groups have a pipeline
+    /// with the same name (e.g. '<GROUP>/<PIPELINE>'; '<PIPELINE>:<GROUP>' is also accepted)
     #[clap(short = 'L', long = "list")]
     pub list: Option<PathBuf>,
     /// The path to the file to write output to; if not provided, details will be output to stdout
@@ -148,23 +149,15 @@ pub struct PipelineTarget {
 }
 
 impl PipelineTarget {
-    pub fn parse(raw: &str, delimiter: char) -> Result<Self, thorium::Error> {
-        let mut split = raw.split(delimiter);
-        let pipeline = split.next();
-        let group = split.next();
-        match (pipeline, split.next()) {
-            // no pipeline was given or there was more than one delimiter, so return an error
-            (None, _) | (_, Some(_)) => Err(thorium::Error::new(
-                    format!("Unable to parse '{raw}' to pipeline target! \
-                    The target should be formatted as the pipeline's name and optionally
-                    the pipeline's group delimited with a single colon (<PIPELINE>:<OPTIONAL-GROUP>)",
-            ))),
-            (Some(pipeline), None) =>
-                Ok(PipelineTarget {
-                    pipeline: pipeline.to_owned(),
-                    group: group.map(ToOwned::to_owned),
-                })
-        }
+    /// Parse a `<GROUP>/<PIPELINE>`, `<PIPELINE>:<GROUP>`, or bare `<PIPELINE>` target
+    ///
+    /// # Arguments
+    ///
+    /// * `raw` - The raw target to parse
+    pub fn parse(raw: &str) -> Result<Self, thorium::Error> {
+        // split the target with the parser shared with image targets
+        let (pipeline, group) = super::images::parse_name_group(raw, "pipeline")?;
+        Ok(PipelineTarget { pipeline, group })
     }
 }
 
@@ -217,7 +210,7 @@ impl DescribeSealed for DescribePipelines {
     }
 
     fn parse_target<'a>(&self, raw: &'a str) -> Result<Self::Target<'a>, thorium::Error> {
-        PipelineTarget::parse(raw, ':')
+        PipelineTarget::parse(raw)
     }
 
     async fn retrieve_data(
@@ -292,7 +285,7 @@ pub enum PipelineBans {
     /// Add a ban to a pipeline, preventing it from being run
     #[clap(version, author)]
     Create(CreatePipelineBan),
-    /// Remove a ban from an pipeline
+    /// Remove a ban from a pipeline
     #[clap(version, author)]
     Delete(DeletePipelineBan),
 }
@@ -392,10 +385,11 @@ pub struct ExportPipelines {
     /// The group to export pipelines from
     #[clap(short, long, value_name = "GROUP", required = true)]
     pub group: String,
-    /// The directory to export pipelines to (default: exports)
+    /// The directory to export pipelines to
     #[clap(short, long, value_name = "DIR", default_value = "exports")]
     pub output: PathBuf,
-    /// Export pipeline/image configs only with no docker images
+    /// Only export pipeline/image configs, without container image tarballs (tarballs
+    /// are only saved for K8s images, the only ones import loads them for)
     #[clap(long)]
     pub config_only: bool,
     /// Overwrite existing on-disk configs that differ without prompting
@@ -405,9 +399,12 @@ pub struct ExportPipelines {
     /// untouched with a warning (use --overwrite to overwrite instead)
     #[clap(long)]
     pub skip_conflicts: bool,
-    /// Open each config in an editor to review/tweak it before writing
+    /// Open each config in an editor to review/tweak it before writing (requires a terminal)
     #[clap(long)]
     pub review: bool,
+    /// Override the default editor for reviews and on-disk merge conflicts
+    #[clap(long, value_name = "EDITOR")]
+    pub editor: Option<String>,
 }
 
 /// A command to import pipelines
@@ -423,16 +420,23 @@ pub struct ImportPipelines {
     /// The directory to import pipelines from
     #[clap(short, long, value_name = "DIR", required = true)]
     pub import: PathBuf,
-    /// The registry to upload these pipelines' images to
+    /// The registry to retag and push container images to; only applies to images whose
+    /// container is actually pushed (K8s images with a tarball in the export, without
+    /// --skip-push)
     #[clap(short, long, value_name = "REGISTRY")]
     pub registry: Option<String>,
-    /// The registry url to override the domain stored in Thorium with
+    /// The registry url to override the domain stored in Thorium with; applies to every
+    /// image, whether or not its container is pushed
     #[clap(long, value_name = "URL")]
     pub registry_override: Option<String>,
-    /// Skip pushing images to docker
+    /// Skip loading, retagging, and pushing container image tarballs (docker/podman);
+    /// the configs are still imported and --registry has no effect
     #[clap(long)]
     pub skip_push: bool,
-    /// Just update the registry
+    /// Only migrate image urls: existing images get a url-only update (rewritten by
+    /// --registry/--registry-override, skipped if the url already matches), missing
+    /// images and pipelines are created, existing pipelines are left untouched,
+    /// and failures are collected and reported at the end
     #[clap(long, conflicts_with_all = ["overwrite", "skip_conflicts"])]
     pub migrate_registry: bool,
     /// Overwrite existing pipelines/images without opening the editor

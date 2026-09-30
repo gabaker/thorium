@@ -1,7 +1,6 @@
 //! Handle the different ai commands for Thorctl
 
 use futures::stream::{self, StreamExt};
-use indicatif::ProgressStyle;
 use owo_colors::OwoColorize;
 use rmcp::model::{
     CallToolRequestParam, CallToolResult, ClientCapabilities, ClientInfo, Implementation,

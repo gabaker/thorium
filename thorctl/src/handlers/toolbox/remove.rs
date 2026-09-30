@@ -1,127 +1,392 @@
 //! Remove a previously imported toolbox's resources from Thorium
 //!
-//! The manifest is the source of truth for what to remove: every pipeline and
-//! image it names is deleted from the target instance if present. Pipelines
-//! are deleted before the images they reference so the API never sees an
-//! image deletion that would orphan a pipeline. Groups are never deleted.
+//! The manifest is the source of truth for what to remove. It is prepared exactly like a
+//! non-interactive import (structural validation, group override, group coherence, and
+//! collision resolution), so only resources an import would have created are targeted;
+//! every surviving pipeline and image is deleted from the target instance if present.
+//! Pipelines are deleted before the images they reference, and images still used by
+//! pipelines outside the toolbox are left in place (and reported) before anything is
+//! deleted. Groups and network policies are never deleted.
 
 use colored::Colorize;
 use http::StatusCode;
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::io::IsTerminal;
 use thorium::{CtlConf, Error, Thorium};
 
-use super::shared;
-use crate::args::toolbox::RemoveToolbox;
+use super::manifest::ToolboxManifest;
+use super::{collisions, shared};
+use crate::args::toolbox::{ManifestLocation, RemoveToolbox};
 use crate::handlers::imports::categorize::{self, CategorizedImage, CategorizedPipeline};
+use crate::handlers::imports::kind::{ImageKind, ImportKind, PipelineKind};
 use crate::handlers::progress::{Bar, BarKind};
+use crate::utils;
 
 /// A resource's `(group, name)` identity in Thorium
 type Identity = (String, String);
 
-/// Collapse categorized entries into the unique `(group, name)` identities that
-/// exist and should be deleted, and flag the identities the manifest defines more
-/// than once
+/// An existing resource this removal will try to delete
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct Target {
+    /// The group the resource lives in
+    group: String,
+    /// The resource's name
+    name: String,
+    /// Whether the live resource differs from the toolbox's definition (it was changed
+    /// after import, or it wasn't created by the toolbox at all)
+    modified: bool,
+}
+
+/// Collapse categorized entries into the unique existing targets and the unique
+/// identities that don't exist in the instance
 ///
-/// Deleting the same identity twice would error on the second call, so existing
-/// targets are de-duplicated (first-seen order). A duplicated identity also means
-/// an import could have resolved the collision by renaming the extras to names
-/// this manifest doesn't carry — so those copies can't be targeted for removal
-/// and the caller should warn about them.
+/// Deleting the same identity twice would error on the second call, so targets are
+/// de-duplicated. Both lists are sorted so the listing and the delete order are the
+/// same on every run.
 ///
 /// # Arguments
 ///
-/// * `entries` - `(group, name, exists)` for every flattened manifest entry
-fn dedup_targets<'a, I>(entries: I) -> (Vec<Identity>, HashSet<Identity>)
+/// * `entries` - `(group, name, changed)` for every flattened manifest entry, where
+///   `changed` is `None` when the resource doesn't exist and otherwise whether the
+///   live resource differs from the entry
+fn collect_targets<'a, I>(entries: I) -> (Vec<Target>, Vec<Identity>)
 where
-    I: IntoIterator<Item = (&'a str, &'a str, bool)>,
+    I: IntoIterator<Item = (&'a str, &'a str, Option<bool>)>,
 {
-    // count every occurrence of each identity (existing or not) so any identity
-    // the manifest names more than once can be flagged as a collision later
-    let mut counts: HashMap<Identity, usize> = HashMap::new();
-    // the ordered, de-duplicated identities we will actually try to delete
-    let mut targets: Vec<Identity> = Vec::new();
-    // identities already pushed to `targets`, so each is deleted at most once
-    let mut seen: HashSet<Identity> = HashSet::new();
-    for (group, name, exists) in entries {
-        // an identity is the owned (group, name) pair; clone because it feeds
-        // both the count map and the target/seen sets below
+    // existing identities mapped to whether any entry for them differs from the live copy
+    let mut existing: BTreeMap<Identity, bool> = BTreeMap::new();
+    // identities the instance doesn't have
+    let mut missing: BTreeSet<Identity> = BTreeSet::new();
+    for (group, name, changed) in entries {
+        // the owned identity is the key for both collections
         let key = (group.to_string(), name.to_string());
-        // tally this occurrence regardless of existence; the count drives the
-        // duplicate warning even for identities that aren't delete targets
-        *counts.entry(key.clone()).or_default() += 1;
-        // only target identities that exist in the instance, and only the first
-        // time each is seen, so a re-listed identity isn't deleted twice (the
-        // second delete would 404/error) — first-seen order keeps output stable
-        if exists && seen.insert(key.clone()) {
-            targets.push(key);
+        match changed {
+            // an existing identity is a target once, flagged if any entry differs
+            Some(changed) => *existing.entry(key).or_default() |= changed,
+            // an absent identity is only reported
+            None => {
+                missing.insert(key);
+            }
         }
     }
-    // an identity counted more than once was defined multiple times in the
-    // manifest; a prior import may have renamed the extras to names we can't
-    // derive here, so the caller warns those renamed copies may remain
-    let duplicates = counts
+    // turn the existing identities into sorted targets
+    let targets = existing
         .into_iter()
-        .filter(|(_, count)| *count > 1)
-        .map(|(key, _)| key)
+        .map(|((group, name), modified)| Target {
+            group,
+            name,
+            modified,
+        })
         .collect();
-    (targets, duplicates)
+    (targets, missing.into_iter().collect())
 }
 
-/// Confirm the removal with the user, listing what exists and what doesn't
+/// The pipelines outside this removal that still use an image
+///
+/// The API refuses to delete an image while any pipeline uses it, so an image whose
+/// users aren't all being deleted here can't be removed.
+///
+/// # Arguments
+///
+/// * `used_by` - The names of the pipelines that use the image (in the image's group)
+/// * `group` - The image's group
+/// * `pipeline_targets` - The pipelines this removal deletes
+fn blocking_pipelines(used_by: &[String], group: &str, pipeline_targets: &[Target]) -> Vec<String> {
+    // keep every user that isn't one of the pipelines being deleted from the same group
+    let mut blocking: Vec<String> = used_by
+        .iter()
+        .filter(|user| {
+            !pipeline_targets
+                .iter()
+                .any(|pipe| pipe.group == group && &pipe.name == *user)
+        })
+        .cloned()
+        .collect();
+    // sort for deterministic output
+    blocking.sort_unstable();
+    blocking
+}
+
+/// The `(kind, group, name)` identities of every configured image and pipeline in a manifest
+///
+/// # Arguments
+///
+/// * `manifest` - The manifest to collect identities from
+fn identities(manifest: &ToolboxManifest) -> BTreeSet<(&'static str, String, String)> {
+    // every configured image version contributes its identity
+    let images = manifest
+        .images
+        .values()
+        .flat_map(|image| image.versions.values())
+        .filter_map(|version| version.config.as_ref())
+        .map(|config| ("Image", config.group.clone(), config.name.clone()));
+    // every configured pipeline version contributes its identity
+    let pipelines = manifest
+        .pipelines
+        .values()
+        .flat_map(|pipeline| pipeline.versions.values())
+        .filter_map(|version| version.config.as_ref())
+        .map(|config| ("Pipeline", config.group.clone(), config.name.clone()));
+    images.chain(pipelines).collect()
+}
+
+/// Print a per-resource result, even when the progress bar is hidden
+///
+/// A hidden bar (no TTY, CI, piped output) drops its printed lines, which would leave a
+/// non-interactive removal with no record of what it deleted, so this falls back to stdout.
+///
+/// # Arguments
+///
+/// * `progress` - The progress bar to print through when it is visible
+/// * `msg` - The message to print
+fn report(progress: &Bar, msg: &str) {
+    // a visible bar prints above itself so the line isn't overwritten
+    if progress.is_visible() {
+        progress.info_anonymous(msg);
+    } else {
+        // otherwise print directly so the line is never lost
+        println!("{msg}");
+    }
+}
+
+/// Finish the progress bar with a final banner, even when the bar is hidden
+///
+/// # Arguments
+///
+/// * `progress` - The progress bar to finish
+/// * `msg` - The final banner
+fn finish(progress: &Bar, msg: &'static str) {
+    // a visible bar shows the banner as its final message
+    if progress.is_visible() {
+        progress.refresh(msg, BarKind::Timer);
+        progress.finish();
+    } else {
+        // otherwise print the banner directly
+        println!("{msg}");
+    }
+}
+
+/// Format a target for the listing, noting when it differs from the toolbox
+///
+/// # Arguments
+///
+/// * `target` - The target to format
+fn describe_target(target: &Target) -> String {
+    if target.modified {
+        format!(
+            "  {} {}",
+            utils::resource_id(&target.group, &target.name),
+            "(differs from the toolbox definition)".bright_yellow()
+        )
+    } else {
+        format!("  {}", utils::resource_id(&target.group, &target.name))
+    }
+}
+
+/// What a removal will delete, leave in place, and skip
+struct RemovalPlan {
+    /// The pipelines to delete
+    pipelines: Vec<Target>,
+    /// The images to delete
+    images: Vec<Target>,
+    /// Images that can't be deleted and the outside pipelines still using them
+    blocked: Vec<(Target, Vec<String>)>,
+    /// Pipelines the manifest names that don't exist in the instance
+    missing_pipelines: Vec<Identity>,
+    /// Images the manifest names that don't exist in the instance
+    missing_images: Vec<Identity>,
+}
+
+impl RemovalPlan {
+    /// Whether the plan deletes nothing at all
+    fn deletes_nothing(&self) -> bool {
+        self.pipelines.is_empty() && self.images.is_empty()
+    }
+
+    /// Print what the removal will delete, leave in place, and skip
+    fn print(&self) {
+        // pipelines first because removal deletes them first; headers are skipped for
+        // empty sections so the listing isn't cluttered
+        if !self.pipelines.is_empty() {
+            println!("{}", "Pipelines to delete:".bright_red());
+            for pipe in &self.pipelines {
+                println!("{}", describe_target(pipe));
+            }
+        }
+        // then images, which are deleted after the pipelines that may reference them
+        if !self.images.is_empty() {
+            println!("{}", "Images to delete:".bright_red());
+            for img in &self.images {
+                println!("{}", describe_target(img));
+            }
+        }
+        // images the API would refuse to delete are listed so the user knows up front
+        if !self.blocked.is_empty() {
+            println!(
+                "{}",
+                "Images left in place (still used by pipelines outside this toolbox):"
+                    .bright_yellow()
+            );
+            for (img, users) in &self.blocked {
+                println!(
+                    "  {} (used by: [{}])",
+                    utils::resource_id(&img.group, &img.name),
+                    users.join(", ")
+                );
+            }
+        }
+        // everything the manifest names but the instance doesn't have is a no-op
+        if !self.missing_pipelines.is_empty() || !self.missing_images.is_empty() {
+            println!("{}", "Not found (skipped):".bright_blue());
+            for (group, name) in &self.missing_pipelines {
+                println!("  pipeline {}", utils::resource_id(group, name));
+            }
+            for (group, name) in &self.missing_images {
+                println!("  image {}", utils::resource_id(group, name));
+            }
+        }
+        // removal never touches groups or policies, so say so where the user decides
+        println!("Groups and network policies are never removed.");
+    }
+}
+
+/// Load and prepare the manifest exactly like a non-interactive import would
+///
+/// Network policy URLs are not fetched because removal never touches policies, so a
+/// dead policy URL can't block a removal. Collisions are resolved non-interactively
+/// (skip + warn); an identity that is dropped here isn't removed, and a warning says so,
+/// because a prior interactive import may have kept or renamed it.
+///
+/// # Arguments
+///
+/// * `cmd` - The toolbox remove command that was run
+async fn prepare_manifest(cmd: &RemoveToolbox) -> Result<(ToolboxManifest, Bar), Error> {
+    // a toolbox directory must be built first; say so instead of failing to read it
+    if let ManifestLocation::Path(path) = &cmd.manifest
+        && path.is_dir()
+    {
+        return Err(Error::new(format!(
+            "'{}' is a directory; pass its toolbox.json (run `thorctl toolbox build` to \
+             generate one)",
+            path.display()
+        )));
+    }
+    // load the manifest the same way import does (path or URL)
+    let (mut manifest, progress) =
+        shared::get_manifest_named(&cmd.manifest, "toolbox remove").await?;
+    // removal never touches policies, so don't fetch their URLs
+    manifest
+        .images
+        .values_mut()
+        .flat_map(|image| image.versions.values_mut())
+        .for_each(|version| version.network_policies_from.clear());
+    // resolve URL-backed configs, which are needed to learn each resource's group and name
+    shared::resolve_manifest_configs(&mut manifest, &progress)
+        .await
+        .map_err(|err| {
+            Error::new(format!(
+                "Failed to resolve the toolbox's remote configs, which are needed to identify \
+                 what to remove: {err}"
+            ))
+        })?;
+    // drop intrinsically-invalid versions, which an import would never have created
+    shared::warn_dropped(&manifest.validate_structural(), &progress);
+    // snapshot the pre-override groups so collision resolution matches import's
+    let sources = manifest.capture_source_groups();
+    // apply the same group override an import would have used
+    if let Some(group_override) = &cmd.group_override {
+        manifest = manifest.override_group(group_override);
+    }
+    // drop pipelines whose images aren't in their final group, as import does
+    shared::warn_dropped(&manifest.validate_group_coherence(), &progress);
+    // remember what survived so far to report what collision resolution drops
+    let before = identities(&manifest);
+    // resolve collisions non-interactively, like a non-interactive import
+    collisions::resolve_collisions(&mut manifest, &sources, false, &progress)?;
+    // report every identity collision resolution dropped, since it may still exist
+    for (kind, group, name) in before.difference(&identities(&manifest)) {
+        progress.warning(format!(
+            "{kind} '{}' was not removed because its toolbox definition collides \
+             (or depends on a colliding image); a prior interactive import may have kept or \
+             renamed it, so check for it and remove it manually if needed",
+            utils::resource_id(group, name)
+        ));
+    }
+    // re-check coherence after resolution, as import does
+    shared::warn_dropped(&manifest.validate_group_coherence(), &progress);
+    Ok((manifest, progress))
+}
+
+/// Build the removal plan from the categorized pipelines and images
+///
+/// # Arguments
+///
+/// * `pipelines` - The categorized pipelines the manifest names
+/// * `images` - The categorized images the manifest names
+fn build_plan(pipelines: &[CategorizedPipeline], images: &[CategorizedImage]) -> RemovalPlan {
+    // collapse pipelines into unique targets, flagging those that differ from the toolbox
+    let (pipeline_targets, missing_pipelines) = collect_targets(pipelines.iter().map(|pipe| {
+        (
+            pipe.request.group.as_str(),
+            pipe.request.name.as_str(),
+            pipe.existing
+                .as_ref()
+                .map(|existing| PipelineKind::changed(existing, &pipe.request)),
+        )
+    }));
+    // collapse images the same way
+    let (image_targets, missing_images) = collect_targets(images.iter().map(|img| {
+        (
+            img.request.group.as_str(),
+            img.request.name.as_str(),
+            img.existing
+                .as_ref()
+                .map(|existing| ImageKind::changed(existing, &img.request)),
+        )
+    }));
+    // index which pipelines use each existing image
+    let used_by: HashMap<Identity, &[String]> = images
+        .iter()
+        .filter_map(|img| {
+            img.existing.as_ref().map(|existing| {
+                (
+                    (existing.group.clone(), existing.name.clone()),
+                    existing.used_by.as_slice(),
+                )
+            })
+        })
+        .collect();
+    // split the images into deletable ones and those still used outside this removal
+    let mut deletable = Vec::new();
+    let mut blocked = Vec::new();
+    for target in image_targets {
+        // find the pipelines outside this removal that still use the image
+        let users = used_by
+            .get(&(target.group.clone(), target.name.clone()))
+            .map_or_else(Vec::new, |used_by| {
+                blocking_pipelines(used_by, &target.group, &pipeline_targets)
+            });
+        if users.is_empty() {
+            deletable.push(target);
+        } else {
+            blocked.push((target, users));
+        }
+    }
+    RemovalPlan {
+        pipelines: pipeline_targets,
+        images: deletable,
+        blocked,
+        missing_pipelines,
+        missing_images,
+    }
+}
+
+/// Confirm the removal with the user
 ///
 /// # Arguments
 ///
 /// * `conf` - The Thorctl config (used to display the API URL)
-/// * `pipelines` - The categorized pipelines named by the manifest
-/// * `images` - The categorized images named by the manifest
-fn confirm_remove(
-    conf: &CtlConf,
-    pipelines: &[CategorizedPipeline],
-    images: &[CategorizedImage],
-) -> Result<bool, Error> {
-    // a resource exists in the instance when categorization found a match; only
-    // these are real delete targets, so they are what we list and confirm
-    let found_pipelines: Vec<_> = pipelines
-        .iter()
-        .filter(|pipe| pipe.existing.is_some())
-        .collect();
-    let found_images: Vec<_> = images.iter().filter(|img| img.existing.is_some()).collect();
-    // surface pipelines first because removal deletes them first; skip the header
-    // entirely when none exist so the prompt isn't cluttered with empty sections
-    if !found_pipelines.is_empty() {
-        println!("{}", "Pipelines to delete:".bright_red());
-        for pipe in &found_pipelines {
-            println!("  {}:{}", pipe.request.group, pipe.request.name);
-        }
-    }
-    // then images, which are deleted after the pipelines that may reference them
-    if !found_images.is_empty() {
-        println!("{}", "Images to delete:".bright_red());
-        for img in &found_images {
-            println!("  {}:{}", img.request.group, img.request.name);
-        }
-    }
-    // collect everything the manifest names but the instance doesn't have, so the
-    // user sees these are intentionally skipped (not silently dropped) — a missing
-    // resource is a no-op, never a failure
-    let missing: Vec<String> = pipelines
-        .iter()
-        .filter(|pipe| pipe.existing.is_none())
-        .map(|pipe| format!("pipeline {}:{}", pipe.request.group, pipe.request.name))
-        .chain(
-            images
-                .iter()
-                .filter(|img| img.existing.is_none())
-                .map(|img| format!("image {}:{}", img.request.group, img.request.name)),
-        )
-        .collect();
-    // only show the skipped section when there is something skipped
-    if !missing.is_empty() {
-        println!("{}", "Not found (skipped):".bright_blue());
-        for line in missing {
-            println!("  {line}");
-        }
-    }
+fn confirm_remove(conf: &CtlConf) -> Result<bool, Error> {
     // blank line separates the listing from the prompt for readability
     println!();
     // default to No so a stray Enter never deletes anything; the prompt names the
@@ -136,6 +401,68 @@ fn confirm_remove(
     Ok(response)
 }
 
+/// Delete every pipeline and then every image in a removal plan
+///
+/// One failure never aborts the rest: each failure is warned about and its label is
+/// returned so the caller can report everything at the end.
+///
+/// # Arguments
+///
+/// * `thorium` - The Thorium client
+/// * `plan` - The removal plan to carry out
+/// * `progress` - The progress bar to report through
+async fn delete_targets(thorium: &Thorium, plan: &RemovalPlan, progress: &Bar) -> Vec<String> {
+    // labels of the resources whose deletion failed
+    let mut failures: Vec<String> = Vec::new();
+    // delete pipelines first so no image deletion can orphan one
+    progress.refresh(
+        "Deleting pipelines",
+        BarKind::Bound(plan.pipelines.len() as u64),
+    );
+    for Target { group, name, .. } in &plan.pipelines {
+        // name the pipeline the same way in every message below
+        let id = utils::resource_id(group, name);
+        // a missing resource is treated as already-removed, not a failure, so a
+        // re-run never aborts the rest of the removal
+        match thorium.pipelines.delete(group, name).await {
+            Ok(_) => report(progress, &format!("Deleted pipeline '{id}'")),
+            Err(err) if err.status() == Some(StatusCode::NOT_FOUND) => {
+                report(progress, &format!("Pipeline '{id}' already removed"));
+            }
+            // log the failure and keep going so the remaining resources still get deleted
+            Err(err) => {
+                progress.warning(format!("Failed to delete pipeline '{id}': {err}"));
+                failures.push(format!("pipeline {id}"));
+            }
+        }
+        // advance the bar whether the delete succeeded, 404'd, or failed, since
+        // every outcome is one fully-handled target
+        progress.inc(1);
+    }
+    // images are deleted only after all pipelines; size the bar to the deletable images
+    progress.refresh("Deleting images", BarKind::Bound(plan.images.len() as u64));
+    for Target { group, name, .. } in &plan.images {
+        // name the image the same way in every message below
+        let id = utils::resource_id(group, name);
+        // as with pipelines, a 404 means the image is already gone and counts as success
+        match thorium.images.delete(group, name).await {
+            Ok(_) => report(progress, &format!("Deleted image '{id}'")),
+            Err(err) if err.status() == Some(StatusCode::NOT_FOUND) => {
+                report(progress, &format!("Image '{id}' already removed"));
+            }
+            // log the failure and keep going; a pipeline that still references this image
+            // (e.g. its own delete failed above) is the likely cause and is reported too
+            Err(err) => {
+                progress.warning(format!("Failed to delete image '{id}': {err}"));
+                failures.push(format!("image {id}"));
+            }
+        }
+        // advance the bar for every handled image target, regardless of outcome
+        progress.inc(1);
+    }
+    failures
+}
+
 /// Remove a toolbox's pipelines and images from Thorium
 ///
 /// # Arguments
@@ -144,19 +471,9 @@ fn confirm_remove(
 /// * `conf` - The Thorctl config
 /// * `cmd` - The toolbox remove command that was run
 pub async fn remove(thorium: Thorium, conf: CtlConf, cmd: &RemoveToolbox) -> Result<(), Error> {
-    // the manifest is the source of truth for what to remove; load it the same
-    // way import does (path or URL) so removal targets exactly what was imported
-    let location = &cmd.manifest;
-    let (mut manifest, progress) = shared::get_manifest(location).await?;
-    // resolve any URL-backed configs/policies so flattening sees concrete entries
-    shared::resolve_manifest_configs(&mut manifest, &progress).await?;
-    // apply the same group override an import would have used, so the (group, name)
-    // identities we compute match the ones actually created in the instance
-    if let Some(group_override) = &cmd.group_override {
-        manifest = manifest.override_group(group_override);
-    }
-    // categorize against the instance so each entry carries whether it exists;
-    // this is what lets us delete only what is present and skip the rest
+    // load the manifest and prepare it the way a non-interactive import would
+    let (manifest, progress) = prepare_manifest(cmd).await?;
+    // categorize against the instance so each entry carries its live resource, if any
     let images = categorize::categorize_images(
         &thorium,
         super::import::flatten_manifest_images(&manifest),
@@ -169,170 +486,142 @@ pub async fn remove(thorium: Thorium, conf: CtlConf, cmd: &RemoveToolbox) -> Res
         &progress,
     )
     .await?;
-    // collapse duplicate (group, name) targets so we never delete the same
-    // resource twice (the second call would error), and flag identities the
-    // toolbox defines more than once
-    let (pipeline_targets, pipeline_dups) = dedup_targets(
-        pipelines.iter().map(|pipe| {
-            (
-                pipe.request.group.as_str(),
-                pipe.request.name.as_str(),
-                pipe.existing.is_some(),
-            )
-        }),
-    );
-    // same de-duplication for images, computed separately so image and pipeline
-    // duplicate warnings can be labeled distinctly
-    let (image_targets, image_dups) = dedup_targets(images.iter().map(|img| {
-        (
-            img.request.group.as_str(),
-            img.request.name.as_str(),
-            img.existing.is_some(),
-        )
-    }));
-    // a duplicated identity means an import may have renamed the extras to names
-    // we can't derive from this manifest, so those copies may still remain
-    warn_duplicates("Pipeline", pipeline_dups, &progress);
-    warn_duplicates("Image", image_dups, &progress);
-    // nothing from this toolbox is present, so there is nothing to delete or
-    // confirm; finish the progress bar and return success rather than prompting
-    if pipeline_targets.is_empty() && image_targets.is_empty() {
-        progress.finish();
+    // decide what to delete, what to leave in place, and what's already absent
+    let plan = build_plan(&pipelines, &images);
+    // images the API would refuse to delete, labeled for the final error
+    let blocked: Vec<String> = plan
+        .blocked
+        .iter()
+        .map(|(img, _)| format!("image {}", utils::resource_id(&img.group, &img.name)))
+        .collect();
+    // nothing deletable and nothing blocked means this toolbox is already gone
+    if plan.deletes_nothing() && blocked.is_empty() {
+        progress.finish_and_clear();
         println!("Nothing to remove: no resources from this toolbox exist in the instance");
         return Ok(());
     }
+    // always list the plan before acting, so non-interactive runs leave a record too
+    progress.suspend(|| plan.print());
+    // a dry run stops after the listing
+    if cmd.dry_run {
+        progress.finish_and_clear();
+        println!("Dry run: nothing was deleted");
+        return Ok(());
+    }
     // deleting is irreversible, so confirm exactly what will be removed
-    if !cmd.skip_confirm {
-        // fail clearly (not with a raw dialoguer error) when we can't prompt
-        crate::utils::require_confirm_terminal("--skip-confirm (-y)")?;
-        let confirmed = progress.suspend(|| confirm_remove(&conf, &pipelines, &images))?;
+    if !cmd.skip_confirm && !plan.deletes_nothing() {
+        // dialoguer reads stdin and draws on stderr, so both must be terminals to prompt
+        if !(std::io::stdin().is_terminal() && std::io::stderr().is_terminal()) {
+            progress.finish_and_clear();
+            return Err(Error::new(
+                "No terminal available to confirm this removal; pass --skip-confirm to \
+                 proceed non-interactively, or --dry-run to preview it",
+            ));
+        }
+        // ask the user to confirm the listed removal
+        let confirmed = progress.suspend(|| confirm_remove(&conf))?;
+        // a declined prompt deletes nothing, and says so
         if !confirmed {
+            progress.finish_and_clear();
+            println!("Removal cancelled; nothing was deleted");
             return Ok(());
         }
     }
-    // labels of resources whose deletion failed; collected so one failure doesn't abort
-    // the rest — we make as much progress as possible and report everything at the end
-    let mut failures: Vec<String> = Vec::new();
-    // delete pipelines first so no image deletion can orphan one
-    progress.refresh(
-        "Deleting pipelines",
-        BarKind::Bound(pipeline_targets.len() as u64),
-    );
-    for (group, name) in &pipeline_targets {
-        // a missing resource is treated as already-removed, not a failure, so a
-        // collision or a re-run never aborts the rest of the removal
-        match thorium.pipelines.delete(group, name).await {
-            Ok(_) => progress.info_anonymous(format!("Deleted pipeline '{group}:{name}'")),
-            Err(err) if err.status() == Some(StatusCode::NOT_FOUND) => {
-                progress.info_anonymous(format!("Pipeline '{group}:{name}' already removed"));
-            }
-            // log the failure and keep going so the remaining resources still get deleted
-            Err(err) => {
-                progress.warning(format!("Failed to delete pipeline '{group}:{name}': {err}"));
-                failures.push(format!("pipeline {group}:{name}"));
-            }
+    // delete everything in the plan, collecting the labels of anything that failed
+    let failures = delete_targets(&thorium, &plan, &progress).await;
+    // anything that failed or was left in place means the toolbox wasn't fully removed,
+    // so report it all once and exit non-zero
+    if !failures.is_empty() || !blocked.is_empty() {
+        finish(&progress, "Removal finished with errors");
+        // describe each kind of problem separately
+        let mut problems = Vec::new();
+        if !failures.is_empty() {
+            problems.push(format!(
+                "failed to delete {} resource(s): {}",
+                failures.len(),
+                failures.join(", ")
+            ));
         }
-        // advance the bar whether the delete succeeded, 404'd, or failed, since
-        // every outcome is one fully-handled target
-        progress.inc(1);
-    }
-    // images are deleted only after all pipelines, so by now nothing this run
-    // tracked still references them; size the bar to the image target count
-    progress.refresh(
-        "Deleting images",
-        BarKind::Bound(image_targets.len() as u64),
-    );
-    for (group, name) in &image_targets {
-        // as with pipelines, a 404 means the image is already gone and counts as
-        // success; only other errors are treated as failures
-        match thorium.images.delete(group, name).await {
-            Ok(_) => progress.info_anonymous(format!("Deleted image '{group}:{name}'")),
-            Err(err) if err.status() == Some(StatusCode::NOT_FOUND) => {
-                progress.info_anonymous(format!("Image '{group}:{name}' already removed"));
-            }
-            // log the failure and keep going; a pipeline that still references this image
-            // (e.g. its own delete failed above) is the likely cause and is reported too
-            Err(err) => {
-                progress.warning(format!("Failed to delete image '{group}:{name}': {err}"));
-                failures.push(format!("image {group}:{name}"));
-            }
+        if !blocked.is_empty() {
+            problems.push(format!(
+                "left {} image(s) in place because pipelines outside this toolbox still use \
+                 them: {}",
+                blocked.len(),
+                blocked.join(", ")
+            ));
         }
-        // advance the bar for every handled image target, regardless of outcome
-        progress.inc(1);
-    }
-    // every target was attempted; if any failed, surface them all and exit non-zero so a
-    // partial removal isn't silently reported as a success
-    if !failures.is_empty() {
-        progress.refresh("Removal finished with errors", BarKind::Timer);
-        progress.finish();
         return Err(Error::new(format!(
-            "Failed to delete {} resource(s): {}",
-            failures.len(),
-            failures.join(", ")
+            "Toolbox was not fully removed: {}",
+            problems.join("; ")
         )));
     }
     // every target deleted (or already absent) with no failures, so report success
-    progress.refresh("Removal complete!", BarKind::Timer);
-    progress.finish();
+    finish(&progress, "Removal complete!");
     Ok(())
-}
-
-/// Warn that duplicated `(group, name)` identities may have left renamed copies
-/// behind that this removal can't target
-///
-/// # Arguments
-///
-/// * `kind` - "Image" or "Pipeline", used to start the message
-/// * `duplicates` - The duplicated identities
-/// * `progress` - The progress bar to warn through
-fn warn_duplicates(kind: &str, duplicates: HashSet<Identity>, progress: &Bar) {
-    // the set has no order; collect and sort so warnings are deterministic across
-    // runs (stable output for logs and tests)
-    let mut duplicates: Vec<Identity> = duplicates.into_iter().collect();
-    duplicates.sort();
-    // emit one warning per duplicated identity; the renamed copies a prior import
-    // may have created can't be derived here, so we can only warn, not delete them
-    for (group, name) in duplicates {
-        progress.warning(format!(
-            "{kind} '{}:{}' is defined more than once in the toolbox; if a prior import \
-             renamed the duplicates, those renamed copies were not removed",
-            group.bright_yellow(),
-            name.bright_yellow(),
-        ));
-    }
 }
 
 /// Unit tests for the removal helpers that have no instance dependency
 #[cfg(test)]
 mod tests {
     use super::*;
-    /// Existing identities are de-duplicated (kept once, in order) and repeated
-    /// identities are flagged; non-existent entries are never delete targets
+
+    /// Build a target for the assertions below
+    ///
+    /// # Arguments
+    ///
+    /// * `group` - The target's group
+    /// * `name` - The target's name
+    /// * `modified` - Whether the target differs from the toolbox
+    fn target(group: &str, name: &str, modified: bool) -> Target {
+        Target {
+            group: group.to_string(),
+            name: name.to_string(),
+            modified,
+        }
+    }
+
+    /// Existing identities are de-duplicated and sorted, a differing entry flags its
+    /// target, and absent identities are only reported as missing
     #[test]
-    fn dedups_existing_and_flags_duplicates() {
-        // mix of a repeated existing identity, a unique existing identity, and a
-        // non-existent one to exercise every branch of dedup_targets at once
+    fn collects_sorted_unique_targets() {
         let entries = vec![
-            ("static", "exiftool", true),
-            // same identity again, so it must be counted as a duplicate
-            ("static", "exiftool", true),
-            ("static", "yara", true),
-            // not present in the instance, so never a target or a duplicate
-            ("static", "ghost", false),
+            ("static", "yara", Some(false)),
+            // the same identity twice (two versions); one differs, so the target is flagged
+            ("static", "exiftool", Some(false)),
+            ("static", "exiftool", Some(true)),
+            // not present in the instance, listed twice but reported once
+            ("static", "ghost", None),
+            ("static", "ghost", None),
         ];
-        let (targets, duplicates) = dedup_targets(entries);
-        // the repeated identity collapses to one target and order is preserved
+        let (targets, missing) = collect_targets(entries);
+        // targets are unique and sorted by (group, name)
         assert_eq!(
             targets,
             vec![
-                ("static".to_string(), "exiftool".to_string()),
-                ("static".to_string(), "yara".to_string()),
+                target("static", "exiftool", true),
+                target("static", "yara", false)
             ]
         );
-        // the twice-listed identity is flagged; the once-listed one is not
-        assert!(duplicates.contains(&("static".to_string(), "exiftool".to_string())));
-        assert!(!duplicates.contains(&("static".to_string(), "yara".to_string())));
-        // a non-existent identity is neither a delete target nor a duplicate
-        assert!(!targets.contains(&("static".to_string(), "ghost".to_string())));
+        // the absent identity is reported once and never targeted
+        assert_eq!(missing, vec![("static".to_string(), "ghost".to_string())]);
+    }
+
+    /// Pipelines being deleted in the same group don't block an image; others do
+    #[test]
+    fn blocking_pipelines_excludes_targets() {
+        let used_by = vec![
+            "scan".to_string(),
+            "custom".to_string(),
+            "other".to_string(),
+        ];
+        // `scan` is deleted in the image's group, `other` only in a different group
+        let pipeline_targets = vec![target("g", "scan", false), target("h", "other", false)];
+        let blocking = blocking_pipelines(&used_by, "g", &pipeline_targets);
+        assert_eq!(blocking, vec!["custom".to_string(), "other".to_string()]);
+        // an image whose users are all being deleted isn't blocked
+        assert_eq!(
+            blocking_pipelines(&["scan".to_string()], "g", &pipeline_targets),
+            Vec::<String>::new()
+        );
     }
 }

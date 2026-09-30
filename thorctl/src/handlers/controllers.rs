@@ -1,7 +1,7 @@
 //! The controller for workers in Thorctl
 use crate::args::Args;
 
-use super::progress::{BarKind, MultiBar};
+use super::progress::{Bar, BarKind, MultiBar};
 use super::{JobMsg, MonitorHandler, MonitorMsg, Worker, WorkerWrapper};
 use futures::StreamExt;
 use futures::stream::FuturesUnordered;
@@ -22,6 +22,8 @@ pub struct Controller<W: Worker> {
     pub monitor: JoinHandle<()>,
     /// The progress bar to log updates on
     pub multi: MultiBar,
+    /// Handles to every worker's progress bar, cleared once the workers exit
+    worker_bars: Vec<Bar>,
     /// The futures for our workers
     active: FuturesUnordered<JoinHandle<()>>,
 }
@@ -60,6 +62,7 @@ impl<W: Worker> Controller<W> {
             monitor_rx,
             monitor,
             multi,
+            worker_bars: Vec::with_capacity(workers),
             active: FuturesUnordered::default(),
         };
         // spawn our workers
@@ -98,6 +101,8 @@ impl<W: Worker> Controller<W> {
             let msg = format!("Spawning 🦀: {i}");
             // setup this workers progress bar
             let bar = self.multi.add(&msg, BarKind::Timer);
+            // keep a handle so an idle worker's bar can be cleared once the workers exit
+            self.worker_bars.push(bar.clone());
             // build our inner worker
             let inner = W::init(thorium, conf, bar, args, cmd, &self.monitor_tx).await;
             // build our outer worker
@@ -116,8 +121,7 @@ impl<W: Worker> Controller<W> {
     /// * `msg` - The error message to log
     pub fn error(&mut self, msg: &str) {
         self.multi
-            .error(&format!("{}: {}", "Error".bright_red(), msg))
-            .unwrap_or_else(|_| panic!("Failed to log error: {msg}"));
+            .error(&format!("{}: {}", "Error".bright_red(), msg));
     }
 
     /// Print an info message
@@ -128,8 +132,7 @@ impl<W: Worker> Controller<W> {
     #[allow(dead_code)]
     pub fn info(&self, msg: &str) {
         self.multi
-            .error(&format!("{}: {}", "Info".bright_blue(), msg))
-            .unwrap_or_else(|_| panic!("Failed to log info: {msg}"));
+            .error(&format!("{}: {}", "Info".bright_blue(), msg));
     }
 
     /// Add a job to our queue
@@ -155,6 +158,11 @@ impl<W: Worker> Controller<W> {
             if let Err(error) = ret {
                 self.error(&error.to_string());
             }
+        }
+        // clear the bars of workers that never finished them (e.g. never got a job) so no
+        // stale spinner is left behind
+        for bar in &self.worker_bars {
+            bar.clear_if_unfinished();
         }
         // tell our monitor to complete
         self.monitor_tx.send(MonitorMsg::Finished).await?;
