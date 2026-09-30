@@ -247,9 +247,9 @@ impl DownloadWorker {
         // build the opts for downloading this repo
         let mut opts = RepoDownloadOpts::default();
         // if we have a bar then add it to our download opts
-        if let Some(bar) = &self.bar.bar {
+        if let Some(bar) = self.bar.progress_bar() {
             // add our progress bar to this download
-            opts.progress = Some(bar.clone());
+            opts.progress = Some(bar);
         }
         // if a commitish is set then set that
         if let Some(commitish) = job.commitish.take() {

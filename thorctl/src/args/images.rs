@@ -53,13 +53,13 @@ pub enum Images {
 #[derive(Parser, Debug)]
 pub struct GetImages {
     /// Any groups to filter by when searching for images
-    ///     Note: If no groups are given, the search will include all groups the user is apart of
+    ///     Note: If no groups are given, the search will include all groups the user is a part of
     #[clap(short, long, value_delimiter = ',', verbatim_doc_comment)]
     pub groups: Vec<String>,
     /// Filter by a specific scaler
     #[clap(short, long, ignore_case = true)]
     pub scaler: Option<ImageScaler>,
-    /// The max number of images to list
+    /// The max number of images to list per group
     #[clap(short, long, default_value = "50")]
     pub limit: usize,
     /// Refrain from setting a limit when retrieving images
@@ -79,14 +79,14 @@ pub struct GetImages {
 /// A command to describe images in full
 #[derive(Parser, Debug)]
 pub struct DescribeImages {
-    /// Any specific images to describe, optionally with a specific group delimited
-    /// with a colon in case other groups have an image with the same name
-    /// (e.g. '<IMAGE>:<OPTIONAL-GROUP>')
+    /// Any specific images to describe, optionally qualified with their group in case
+    /// other groups have an image with the same name (e.g. '<GROUP>/<IMAGE>';
+    /// '<IMAGE>:<GROUP>' is also accepted)
+    #[clap(value_name = "[GROUP/]IMAGE")]
     pub images: Vec<String>,
     /// The path to a file containing a list of images to describe separated by newlines;
-    /// optionally, each image can have a specific group delimited with a colon in case
-    /// other groups have an image with the same name
-    /// (e.g. '<IMAGE>:<OPTIONAL-GROUP>')
+    /// each image can be qualified with its group in case other groups have an image
+    /// with the same name (e.g. '<GROUP>/<IMAGE>'; '<IMAGE>:<GROUP>' is also accepted)
     #[clap(short = 'L', long = "list")]
     pub list: Option<PathBuf>,
     /// The path to the file to write output to; if not provided, details will be output to stdout
@@ -152,6 +152,52 @@ pub struct ImageTarget {
     group: Option<String>,
 }
 
+/// Split a resource target into its name and optional group
+///
+/// Accepts `<GROUP>/<NAME>` (preferred), the older `<NAME>:<GROUP>`, or a bare
+/// `<NAME>`; a `/` can't appear in the older form, so the two never overlap.
+/// Shared by the image and pipeline target parsers. Empty names or groups, extra
+/// separators, and targets mixing `/` and `:` are rejected with a one-line error.
+///
+/// # Arguments
+///
+/// * `raw` - The raw target to parse
+/// * `kind` - The kind of resource being targeted (e.g. `image`), used in the error
+pub(crate) fn parse_name_group(
+    raw: &str,
+    kind: &str,
+) -> Result<(String, Option<String>), thorium::Error> {
+    // describe every accepted form in one line so any rejection is self-explanatory
+    let upper = kind.to_uppercase();
+    let invalid = |reason: &str| {
+        thorium::Error::new(format!(
+            "Unable to parse '{raw}' as a {kind} target: {reason}; expected <GROUP>/<{upper}>, \
+             <{upper}>:<GROUP>, or <{upper}>"
+        ))
+    };
+    // mixing both separators is ambiguous about which part is the group
+    if raw.contains('/') && raw.contains(':') {
+        return Err(invalid("it mixes '/' and ':'"));
+    }
+    // pick the form by its separator: `group/name` or `name:group`
+    let (name, group) = if let Some((group, name)) = raw.split_once('/') {
+        (name, Some(group))
+    } else if let Some((name, group)) = raw.split_once(':') {
+        (name, Some(group))
+    } else {
+        (raw, None)
+    };
+    // an empty part or a second separator can't be resolved
+    if name.is_empty() || group.is_some_and(str::is_empty) {
+        return Err(invalid("the name and group must not be empty"));
+    }
+    // a leftover separator in either part means the target had more than one
+    if name.contains(['/', ':']) || group.is_some_and(|group| group.contains(['/', ':'])) {
+        return Err(invalid("it has more than one separator"));
+    }
+    Ok((name.to_owned(), group.map(ToOwned::to_owned)))
+}
+
 impl DescribeSealed for DescribeImages {
     type Data = thorium::models::Image;
 
@@ -201,26 +247,8 @@ impl DescribeSealed for DescribeImages {
     }
 
     fn parse_target<'a>(&self, raw: &'a str) -> Result<Self::Target<'a>, thorium::Error> {
-        let mut split = raw.split(':');
-        let Some(image) = split.next() else {
-            return Err(thorium::Error::new(format!(
-                "Unable to parse '{raw}' to image target! \
-                    The target should be formatted as the image's name and optionally
-                    the image's group delimited with a single colon (<IMAGE>:<OPTIONAL-GROUP>)",
-            )));
-        };
-        let group = split.next();
-        if split.next().is_some() {
-            return Err(thorium::Error::new(format!(
-                "Unable to parse '{raw}' to image target! \
-                The target should be formatted as the image's name and optionally
-                the image's group delimited with a single colon (<IMAGE>:<OPTIONAL-GROUP>)",
-            )));
-        }
-        Ok(ImageTarget {
-            image: image.to_owned(),
-            group: group.map(ToOwned::to_owned),
-        })
+        let (image, group) = parse_name_group(raw, "image")?;
+        Ok(ImageTarget { image, group })
     }
 
     async fn retrieve_data(
@@ -398,16 +426,22 @@ pub struct ImportImages {
     /// The directory to import images from
     #[clap(short, long, value_name = "DIR", required = true)]
     pub import: PathBuf,
-    /// The registry to upload these images to
+    /// The registry to retag and push container images to; only applies to images whose
+    /// container is actually pushed (K8s images with a tarball in the export, without
+    /// --skip-push)
     #[clap(short, long, value_name = "REGISTRY")]
     pub registry: Option<String>,
-    /// The registry url to override the domain stored in Thorium with
+    /// The registry url to override the domain stored in Thorium with; applies to every
+    /// image, whether or not its container is pushed
     #[clap(long, value_name = "URL")]
     pub registry_override: Option<String>,
-    /// Skip pushing images to docker
+    /// Skip loading, retagging, and pushing container image tarballs (docker/podman);
+    /// the configs are still imported and --registry has no effect
     #[clap(long)]
     pub skip_push: bool,
-    /// Just update the registry
+    /// Only migrate image urls: existing images get a url-only update (rewritten by
+    /// --registry/--registry-override, skipped if the url already matches), missing
+    /// images are created, and failures are collected and reported at the end
     #[clap(long, conflicts_with_all = ["overwrite", "skip_conflicts"])]
     pub migrate_registry: bool,
     /// Overwrite existing images without opening the editor
@@ -441,10 +475,11 @@ pub struct ExportImages {
     /// The group to export images from
     #[clap(short, long, value_name = "GROUP", required = true)]
     pub group: String,
-    /// The directory to export images to (default: exports)
+    /// The directory to export images to
     #[clap(short, long, value_name = "DIR", default_value = "exports")]
     pub output: PathBuf,
-    /// Only export image configs with no docker images
+    /// Only export image configs, without container image tarballs (tarballs are
+    /// only saved for K8s images, the only ones import loads them for)
     #[clap(long)]
     pub config_only: bool,
     /// Overwrite existing on-disk configs that differ without prompting
@@ -454,7 +489,73 @@ pub struct ExportImages {
     /// untouched with a warning (use --overwrite to overwrite instead)
     #[clap(long)]
     pub skip_conflicts: bool,
-    /// Open each config in an editor to review/tweak it before writing
+    /// Open each config in an editor to review/tweak it before writing (requires a terminal)
     #[clap(long)]
     pub review: bool,
+    /// Override the default editor for reviews and on-disk merge conflicts
+    #[clap(long, value_name = "EDITOR")]
+    pub editor: Option<String>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::parse_name_group;
+
+    /// A bare name parses with no group
+    #[test]
+    fn parses_name_only() {
+        let (name, group) = parse_name_group("foo", "image").unwrap();
+        assert_eq!(name, "foo");
+        assert_eq!(group, None);
+    }
+
+    /// The older `name:group` form parses into both parts
+    #[test]
+    fn parses_name_colon_group() {
+        let (name, group) = parse_name_group("foo:grp", "image").unwrap();
+        assert_eq!(name, "foo");
+        assert_eq!(group.as_deref(), Some("grp"));
+    }
+
+    /// The preferred `group/name` form parses into both parts
+    #[test]
+    fn parses_group_slash_name() {
+        let (name, group) = parse_name_group("grp/foo", "image").unwrap();
+        assert_eq!(name, "foo");
+        assert_eq!(group.as_deref(), Some("grp"));
+    }
+
+    /// Empty parts, extra separators, and mixed separators are rejected with a
+    /// one-line message naming every accepted form
+    #[test]
+    fn rejects_malformed_targets() {
+        for raw in [
+            "",
+            ":grp",
+            "foo:",
+            "a:b:c",
+            "/foo",
+            "grp/",
+            "a/b/c",
+            "grp/foo:x",
+            "foo:grp/x",
+        ] {
+            let err = parse_name_group(raw, "pipeline").unwrap_err().to_string();
+            assert!(
+                !err.contains('\n'),
+                "message for '{raw}' spans lines: {err}"
+            );
+            assert!(err.contains("<GROUP>/<PIPELINE>"), "{err}");
+            assert!(err.contains("<PIPELINE>:<GROUP>"), "{err}");
+        }
+    }
+
+    /// Mixing separators names the ambiguity
+    #[test]
+    fn rejects_mixed_separators() {
+        let err = parse_name_group("grp/foo:x", "image")
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("mixes '/' and ':'"), "{err}");
+    }
 }

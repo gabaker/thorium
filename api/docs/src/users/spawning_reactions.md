@@ -23,24 +23,34 @@ Thorctl allows you to spawn reactions for a single file or many files at once. U
 on a specific file using the file's SHA256 hash:
 
 ```bash
-thorctl reactions create --group <PIPELINE_GROUP> --pipeline <PIPELINE> <SHA256>
+thorctl reactions create --pipelines <PIPELINE_GROUP>/<PIPELINE> <SHA256>
 ```
+
+The pipeline is given with `-p`/`--pipelines` as `<GROUP>/<PIPELINE>`. The group can be left off (`-p <PIPELINE>`) when no
+other group you belong to has a pipeline with the same name, and the older `<PIPELINE>:<GROUP>` form is also accepted. To run
+several pipelines, separate them with commas (`-p demo/test-pipeline,demo/other-pipeline`).
 
 If you want to run a pipeline on files that have a specific tag or tags, add the `-t/--tags` flag and specify a tag in the format
 `KEY=VALUE` as shown below:
 ```bash
-thorctl reactions create --limit <LIMIT> --group <PIPELINE_GROUP> --pipeline <PIPELINE> --tags Datatset=Examples
+thorctl reactions create --limit <LIMIT> -p <PIPELINE_GROUP>/<PIPELINE> --tags Dataset=Examples
 ```
 
 To specify multiple tags, enter a `-t/--tags` flag for each tag:
 ```bash
-thorctl reactions create --limit <LIMIT> --group <PIPELINE_GROUP> --pipeline <PIPELINE> --tags Tag1=Hello --tags Tag2=Goodbye
+thorctl reactions create --limit <LIMIT> -p <PIPELINE_GROUP>/<PIPELINE> --tags Tag1=Hello --tags Tag2=Goodbye
+```
+
+To limit the tag search to files in specific groups, add `-g/--groups` (this filters the files; it doesn't select the
+pipeline's group):
+```bash
+thorctl reactions create --limit <LIMIT> -p <PIPELINE_GROUP>/<PIPELINE> --groups <FILE_GROUP> --tags Dataset=Examples
 ```
 
 You can also watch the status of reactions using `--watch` or `-W`.
 
 ```bash
-$ thorctl reactions create --group demo --pipeline test-pipeline --watch
+$ thorctl reactions create -p demo/test-pipeline --watch 85622c435c5d605bc0a226fa05f94db7e030403bbad56e6b6933c6b0eda06ab5
 CODE | PIPELINE                  | SAMPLES                                                          | ID                                   | MESSAGE                         
 -----+---------------------------+------------------------------------------------------------------+--------------------------------------+----------------------------------
 200  | test-pipeline              | 85622c435c5d605bc0a226fa05f94db7e030403bbad56e6b6933c6b0eda06ab5 | a0498ac4-42db-4fe0-884a-e28876ec3496 | -

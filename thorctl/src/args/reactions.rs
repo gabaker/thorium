@@ -433,9 +433,10 @@ pub const BUNDLE_DELIMITER: char = ',';
 #[derive(Parser, Debug)]
 #[allow(clippy::struct_excessive_bools)]
 pub struct CreateReactions {
-    /// The pipelines to run, optionally specified with a group delimited with
-    /// ':' if more than one pipeline exists with the same name (i.e. <PIPELINE>:<GROUP>)
-    #[clap(short, long, value_delimiter = ',', required = true, value_parser = NonEmptyStringValueParser::new())]
+    /// The pipelines to run, optionally qualified with their group if more than one
+    /// pipeline exists with the same name (i.e. <GROUP>/<PIPELINE>; <PIPELINE>:<GROUP>
+    /// is also accepted)
+    #[clap(short, long, value_delimiter = ',', required = true, value_name = "[GROUP/]PIPELINE", value_parser = NonEmptyStringValueParser::new())]
     pub pipelines: Vec<String>,
     /// Any tags to set for the created reactions
     #[clap(short = 'T', long)]
@@ -614,7 +615,7 @@ impl CreateReactions {
     pub fn parse_pipelines(&self) -> Result<Vec<PipelineTarget>, Error> {
         self.pipelines
             .iter()
-            .map(|raw| PipelineTarget::parse(raw, ':'))
+            .map(|raw| PipelineTarget::parse(raw))
             .collect::<Vec<Result<_, _>>>()
             .into_iter()
             .collect()

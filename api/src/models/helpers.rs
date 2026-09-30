@@ -38,7 +38,8 @@ macro_rules! matches_opt {
 #[macro_export]
 macro_rules! matches_set {
     ($left:expr, $right:expr) => {
-        if !$left.len() == $right.len() && !$left.is_superset(&$right) {
+        // equal sets have the same size and one contains every element of the other
+        if $left.len() != $right.len() || !$left.is_superset(&$right) {
             return false;
         }
     };
@@ -64,7 +65,6 @@ pub fn matches_vecs_helper<T: PartialEq>(a: &[T], b: &[T]) -> bool {
 macro_rules! matches_vec {
     ($left:expr, $right:expr) => {
         if !$crate::models::helpers::matches_vecs_helper(&$left, &$right) {
-            println!("FAILED CHECK -> {:#?} == {:#?}", $left, $right);
             return false;
         }
     };
@@ -385,4 +385,80 @@ macro_rules! tag_list_clone {
             entry.insert(value.clone());
         }
     };
+}
+
+/// Unit tests for the comparison helper macros
+#[cfg(test)]
+mod tests {
+    use std::collections::HashSet;
+
+    use crate::models::{GroupUsers, GroupUsersRequest};
+
+    /// Build a set of owned strings from string slices
+    ///
+    /// # Arguments
+    ///
+    /// * `items` - The strings to put in the set
+    fn set(items: &[&str]) -> HashSet<String> {
+        items.iter().map(|item| (*item).to_string()).collect()
+    }
+
+    /// Return whether two sets match according to `matches_set!`
+    ///
+    /// # Arguments
+    ///
+    /// * `left` - The first set to compare
+    /// * `right` - The second set to compare
+    fn sets_match(left: &HashSet<String>, right: &HashSet<String>) -> bool {
+        matches_set!(left, right);
+        true
+    }
+
+    /// Identical sets match, including two empty sets
+    #[test]
+    fn matches_set_equal() {
+        assert!(sets_match(&set(&["a", "b"]), &set(&["b", "a"])));
+        assert!(sets_match(&set(&[]), &set(&[])));
+    }
+
+    /// A set missing an element, or holding an extra one, does not match
+    #[test]
+    fn matches_set_subset_and_superset() {
+        assert!(!sets_match(&set(&["a"]), &set(&["a", "b"])));
+        assert!(!sets_match(&set(&["a", "b"]), &set(&["a"])));
+        assert!(!sets_match(&set(&[]), &set(&["a"])));
+    }
+
+    /// Sets of the same size with different elements do not match
+    #[test]
+    fn matches_set_same_size_different_elements() {
+        assert!(!sets_match(&set(&["a", "b"]), &set(&["a", "c"])));
+    }
+
+    /// Group roles compare their direct users and metagroups as sets
+    #[test]
+    fn group_users_compare_as_sets() {
+        // build a role holding two direct users and one metagroup
+        let users = GroupUsers {
+            combined: set(&["alice", "bob", "carol"]),
+            direct: set(&["alice", "bob"]),
+            metagroups: set(&["team"]),
+        };
+        // the same members in any order match
+        let request = GroupUsersRequest::default()
+            .direct("bob")
+            .direct("alice")
+            .metagroup("team");
+        assert!(users == request);
+        // a missing direct user does not match
+        let missing = GroupUsersRequest::default().direct("alice").metagroup("team");
+        assert!(users != missing);
+        // an extra metagroup does not match
+        let extra = GroupUsersRequest::default()
+            .direct("alice")
+            .direct("bob")
+            .metagroup("team")
+            .metagroup("other");
+        assert!(users != extra);
+    }
 }

@@ -152,18 +152,18 @@ You can also run pipelines on the file later from the file's page in the Web UI 
 ---
 It is best to use Thorctl when you have a large number of files that you want to upload. Thorctl will eagerly upload
 multiple files in parallel by default, and specifying a directory to upload will recursively upload every file within
-the directory tree. To upload a file or a folder of files, you can use the following command (using `--file-groups`/`-G`
-go specify the groups to upload to):
+the directory tree. To upload a file or a folder of files, you can use the following command (using `--groups`/`-g`
+to specify the groups to upload to):
 
 ```bash
-thorctl files upload --file-groups <group> <files/or/folders>
+thorctl files upload --groups <group> <files/or/folders>
 ```
 
 If you have multiple files or folders to upload (e.g. `./hello.txt`, `/bin/ls`, and `~/Documents`), you can upload them all
 in one command like so:
 
 ```bash
-thorctl files upload -G example-group ./hello.txt /bin/ls ~/Documents
+thorctl files upload -g example-group ./hello.txt /bin/ls ~/Documents
 ```
 
 ### Uploading to Multiple Groups
@@ -171,13 +171,13 @@ thorctl files upload -G example-group ./hello.txt /bin/ls ~/Documents
 You can upload to more than one group by placing commas between each group:
 
 ```bash
-thorctl files upload -G <group1>,<group2>,<group3> <file/or/folder>
+thorctl files upload -g <group1>,<group2>,<group3> <file/or/folder>
 ```
 
-Or by adding multiple `-G` or `--file-groups` flags:
+Or by adding multiple `-g` or `--groups` flags:
 
 ```bash
-thorctl files upload -G <group1> -G <group2> -G <group3> <file/or/folder>
+thorctl files upload -g <group1> -g <group2> -g <group3> <file/or/folder>
 ```
 
 ### Uploading with Tags
@@ -185,11 +185,25 @@ thorctl files upload -G <group1> -G <group2> -G <group3> <file/or/folder>
 You can also upload a file with specific tags with the `--file-tags` or `-T` flag:
 
 ```bash
-thorctl files upload --file-groups <group> --file-tags Dataset=Examples --file-tags Corn=good <file/or/folder>
+thorctl files upload --groups <group> --file-tags Dataset=Examples --file-tags Corn=good <file/or/folder>
 ```
 
-Because tags can contain any symbol (including commas), you must specify each tag with its own `-file-tags` or `-T` flag rather
+Because tags can contain any symbol (including commas), you must specify each tag with its own `--file-tags` or `-T` flag rather
 than delimiting them with commas.
+
+### Running Pipelines on Upload
+
+To run one or more pipelines on every uploaded file as soon as it's uploaded, pass `-p`/`--pipelines`. Each pipeline
+must include its group, written `<GROUP>/<PIPELINE>` (the older `<PIPELINE>:<GROUP>` form also works). Separate multiple
+pipelines with commas:
+
+```bash
+thorctl files upload --groups <group> --pipelines <pipeline-group>/<pipeline> <file/or/folder>
+thorctl files upload -g example-group -p static/scan,static/triage ./my-folder
+```
+
+Every pipeline is checked before anything is uploaded; a pipeline given without a group, or one that doesn't exist, stops
+the upload with an error.
 
 ### Filtering Which Files to Upload
 
@@ -198,19 +212,19 @@ inclusively or exclusively filter with regular expressions using the `--filter` 
 For example, to upload only files with the `.exe` extension within a folder, you could run the following command:
 
 ```bash
-thorctl files upload --file-groups example-group --filter .*\.exe ./my-folder
+thorctl files upload --groups example-group --filter .*\.exe ./my-folder
 ```
 
 Or to upload everything within a folder except for files starting with `temp-`, you could run this command:
 
 ```bash
-thorctl files upload --file-groups example-group --skip temp-.* ./my-folder
+thorctl files upload --groups example-group --skip temp-.* ./my-folder
 ```
 
 Supply multiple filters by specifying filter flags multiple times:
 
 ```bash
-thorctl files upload --file-groups example-group --filter .*\.exe --filter .*evil.* --skip temp-.* ./my-folder
+thorctl files upload --groups example-group --filter .*\.exe --filter .*evil.* --skip temp-.* ./my-folder
 ```
 
 The filter and skip regular expressions must adhere to the format used by the Rust
@@ -223,7 +237,7 @@ regular expressions can be found here: [https://rustexp.lpil.uk](https://rustexp
 Additionally, if you want to include hidden sub-directories/files in a target directory, use the `--include-hidden` flag:
 
 ```bash
-thorctl files upload -G example-group ./files --include-hidden
+thorctl files upload -g example-group ./files --include-hidden
 ```
 
 ### Folder Tags
@@ -247,7 +261,7 @@ The `foo` directory contains five total files spread across three subdirectories
 corresponds to a directory from top to bottom (including the root `foo` directory). So for example, if you run:
 
 ```bash
-thorctl files upload -G example-group foo --folder-tags alpha/beta/gamma
+thorctl files upload -g example-group foo --folder-tags alpha/beta/gamma
 ```
 
 The key `alpha` would correspond to the `foo` directory, `beta` to `bar`, and `gamma` to `baz` and `qux`. So all
@@ -285,5 +299,5 @@ a maximum of 10 files can be uploaded concurrently. You can adjust the number of
 using the `--workers/-w` flag:
 
 ```bash
-thorctl --workers 20 files upload --file-groups <group> <files/or/directories>
+thorctl --workers 20 files upload --groups <group> <files/or/directories>
 ```

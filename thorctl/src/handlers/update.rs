@@ -1,5 +1,7 @@
 //! Handle updating thorctl
 
+use std::io::IsTerminal;
+
 use crate::Args;
 use thorium::models::Component;
 use thorium::{Error, Thorium};
@@ -28,12 +30,20 @@ pub async fn check(thorium: &Thorium) -> Result<bool, Error> {
 
 /// Check if an update is needed and then ask for permission to update
 ///
+/// The prompt is only offered when stdin and stderr are both terminals; otherwise an
+/// out-of-date client is only reported (by [`check`]) so scripted/CI runs are never
+/// blocked on a prompt they can't answer.
+///
 /// # Arguments
 ///
 /// * `thorium` - A client for the Thorium API
 pub async fn ask_update(thorium: &Thorium) -> Result<(), Error> {
-    // check if thorctl needs to be updated
-    if check(thorium).await? {
+    // check if thorctl needs to be updated; this prints the out of date notice
+    let outdated = check(thorium).await?;
+    // dialoguer draws its prompt on stderr and reads stdin, so both must be terminals
+    let interactive = std::io::stdin().is_terminal() && std::io::stderr().is_terminal();
+    // only prompt when an update is available and we can ask the user about it
+    if outdated && interactive {
         // ask the user for permission to update Thorctl
         let response = dialoguer::Confirm::new()
             .with_prompt("Update now?:")

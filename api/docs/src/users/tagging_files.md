@@ -27,18 +27,18 @@ Values for a tag cannot be blank/empty strings.
 ## Tagging on Upload (Thorctl)
 ---
 
-When using Thorctl to upload one or more file(s), you can apply key/value tag pairs with the `-t key=value` or
-`--tags key=value` flag.
+When using Thorctl to upload one or more file(s), you can apply key/value tag pairs with the `-T key=value` or
+`--file-tags key=value` flag.
 
 ```bash
-$ thorctl files upload --file-groups demo --tags TagKey=sometagvalue /path/to/upload
+$ thorctl files upload --groups demo --file-tags TagKey=sometagvalue /path/to/upload
 ```
 
-If you want to specify multiple tags to apply to each file you upload, supply the `-t` or `--tags` flag multiple
+If you want to specify multiple tags to apply to each file you upload, supply the `-T` or `--file-tags` flag multiple
 times:
 
 ```bash
-$ thorctl files upload --file-groups demo --tags Key1=value1 --tags Key2=value2 /path/to/upload
+$ thorctl files upload --groups demo --file-tags Key1=value1 --file-tags Key2=value2 /path/to/upload
 ```
 
 

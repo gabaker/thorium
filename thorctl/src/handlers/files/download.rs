@@ -336,9 +336,9 @@ impl FilesDownloadWorker {
         // set the file download opts to use
         let mut opts = FileDownloadOpts::default().uncart_by_value(self.cmd.uncarted);
         // if we have a bar then add it to our download opts
-        if let Some(bar) = &self.bar.bar {
+        if let Some(bar) = self.bar.progress_bar() {
             // add our progress bar to this download
-            opts.progress = Some(bar.clone());
+            opts.progress = Some(bar);
         }
         // download this file and uncart it
         self.thorium

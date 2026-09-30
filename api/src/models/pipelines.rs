@@ -12,6 +12,9 @@ use crate::{
     matches_update_opt, same,
 };
 
+/// The SLA in seconds (one week) given to a pipeline created without one
+pub const DEFAULT_PIPELINE_SLA: u64 = 7 * 24 * 60 * 60;
+
 /// A request for a pipeline in Thorium
 ///
 /// This is almost exactly the same as Pipeline but with a jsonvalue for order
@@ -122,50 +125,32 @@ impl PipelineRequest {
 
     /// Compare the order from a [`PipelineRequest`] and a [`Pipeline`]
     ///
-    /// Returns true if the order is the same
+    /// Returns true if the order is the same: the same number of stages, and each
+    /// stage lists the same images in the same order. A bare string stage is
+    /// treated as a single-image stage. An order that is not a valid array of
+    /// strings/string arrays never matches.
+    ///
+    /// # Arguments
+    ///
+    /// * `order` - The stage order of an existing [`Pipeline`] to compare against
     #[must_use]
     pub fn compare_order(&self, order: &[Vec<String>]) -> bool {
-        // make sure order is an array
-        if !self.order.is_array() {
+        // normalize the flexible request order into stages of image names
+        let Ok(stages) = self.deserialize_image_order() else {
+            return false;
+        };
+        // a differing stage count means stages were added or removed
+        if stages.len() != order.len() {
             return false;
         }
-
-        // convert pipeline request order and iteratively check
-        let stages = self.order.as_array().unwrap();
-        for (i, stage) in stages.iter().enumerate() {
-            // normalize stage to a Vec<Value>
-            let wrapped = match stage.is_array() {
-                true => stage.as_array().unwrap().to_owned(),
-                false => match stage.is_string() {
-                    true => vec![stage.to_owned()],
-                    false => return false,
-                },
-            };
-            // normalize all Values to strings
-            let mut normalized = Vec::with_capacity(wrapped.len());
-            for image in wrapped {
-                match image.is_string() {
-                    true => normalized.push(image.as_str().unwrap().to_owned()),
-                    false => return false,
-                }
-            }
-
-            // make sure the two vectors are the same length
-            if normalized.len() != order[i].len() {
-                return false;
-            }
-
-            // make sure the values in the vector are the same
-            let same = normalized
-                .iter()
-                .zip(&order[i])
-                .all(|(norm, ord)| norm == ord);
-            if !same {
-                return false;
-            }
-        }
-
-        true
+        // every stage must list the same images in the same order
+        stages.iter().zip(order).all(|(stage, existing)| {
+            stage.len() == existing.len()
+                && stage
+                    .iter()
+                    .zip(existing)
+                    .all(|(image, existing_image)| *image == existing_image.as_str())
+        })
     }
 
     /// Attempt to deserialize the raw image order defined in the pipeline request
@@ -612,7 +597,7 @@ impl PartialEq<PipelineRequest> for Pipeline {
         same!(self.name, request.name);
         same!(self.group, request.group);
         same!(request.compare_order(&self.order), true);
-        same!(&self.sla, request.sla.as_ref().unwrap_or(&604_800));
+        same!(&self.sla, request.sla.as_ref().unwrap_or(&DEFAULT_PIPELINE_SLA));
         same!(&self.triggers, &request.triggers);
         same!(&self.description, &request.description);
         true
@@ -758,4 +743,57 @@ pub struct PipelineListParams {
     /// The max amount of pipelines to return in on request
     #[serde(default = "default_list_limit")]
     pub limit: usize,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::PipelineRequest;
+
+    /// Build an existing-pipeline style order from string slices
+    ///
+    /// # Arguments
+    ///
+    /// * `stages` - The stages of image names to convert
+    fn order(stages: &[&[&str]]) -> Vec<Vec<String>> {
+        stages
+            .iter()
+            .map(|stage| stage.iter().map(|image| (*image).to_string()).collect())
+            .collect()
+    }
+
+    /// An identical order (including bare string stages) compares equal
+    #[test]
+    fn compare_order_equal() {
+        let req = PipelineRequest::new("g", "p", serde_json::json!(["a", ["b", "c"]]));
+        assert!(req.compare_order(&order(&[&["a"], &["b", "c"]])));
+    }
+
+    /// A request with more stages than the pipeline differs instead of panicking
+    #[test]
+    fn compare_order_longer_request() {
+        let req = PipelineRequest::new("g", "p", serde_json::json!([["a"], ["b"]]));
+        assert!(!req.compare_order(&order(&[&["a"]])));
+    }
+
+    /// A request that is a strict prefix of the pipeline's stages differs
+    #[test]
+    fn compare_order_shorter_request() {
+        let req = PipelineRequest::new("g", "p", serde_json::json!([["a"]]));
+        assert!(!req.compare_order(&order(&[&["a"], &["b"]])));
+    }
+
+    /// Differing images within a stage, or an invalid order, differ
+    #[test]
+    fn compare_order_mismatch_and_invalid() {
+        let req = PipelineRequest::new("g", "p", serde_json::json!([["a", "c"]]));
+        assert!(!req.compare_order(&order(&[&["a", "b"]])));
+        let invalid = PipelineRequest::new("g", "p", serde_json::json!({"a": 1}));
+        assert!(!invalid.compare_order(&order(&[&["a"]])));
+    }
+
+    /// The default SLA is exactly one week in seconds
+    #[test]
+    fn default_sla_is_one_week() {
+        assert_eq!(super::DEFAULT_PIPELINE_SLA, 604_800);
+    }
 }

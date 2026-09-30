@@ -50,12 +50,12 @@ To remove a notification, you'll need to know its ID. You can view notifications
 `--ids/-i` flag with `notifications get`:
 
 ```Bash
-thorctl <ENTITY-TYPE> notifications get -ids <group> <ENTITY-NAME>
+thorctl <ENTITY-TYPE> notifications get --ids <group> <ENTITY-NAME>
 ```
 
 This will print the notification ID's along with their contents. Take note of a notification's ID,
 then provide it to `notifications delete` to delete it:
 
 ```Bash
-thorctl <ENTITY-TYPE> notifications delete <ID>
+thorctl <ENTITY-TYPE> notifications delete <group> <ENTITY-NAME> <ID>
 ```

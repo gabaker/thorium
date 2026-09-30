@@ -6478,6 +6478,8 @@ impl PartialEq<ImageRequest> for Image {
         same!(self.spawn_limit, request.spawn_limit);
         same!(self.env, request.env);
         matches_vec!(&self.volumes, &request.volumes);
+        same!(self.args, request.args);
+        same!(self.modifiers, request.modifiers);
         same!(self.description, request.description);
         matches_update!(self.security_context, request.security_context);
         same!(self.collect_logs, request.collect_logs);
@@ -6486,6 +6488,8 @@ impl PartialEq<ImageRequest> for Image {
         same!(self.display_type, request.display_type);
         same!(self.output_collection, request.output_collection);
         same!(self.child_filters, request.child_filters);
+        same!(self.clean_up, request.clean_up);
+        same!(self.kvm, request.kvm);
         same!(self.network_policies, request.network_policies);
         true
     }

@@ -61,8 +61,13 @@ human-readable summary that lists any bans. To get the full raw data, including 
 records, pass `--format json`. For images, you would run:
 
 ```Bash
-thorctl images describe <IMAGE> --format json
+thorctl images describe <GROUP>/<IMAGE> --format json
 ```
+
+The group can be left off (`thorctl images describe <IMAGE>`) when no other group you belong to has an
+image with the same name; the older `<IMAGE>:<GROUP>` form also works. Pipelines work the same way with
+`thorctl pipelines describe <GROUP>/<PIPELINE>`. In our example above, that would be
+`thorctl images describe corn/sow --format json`.
 
 This will output the image's data in JSON format, including the image's bans:
 

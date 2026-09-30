@@ -6,18 +6,142 @@
 use colored::Colorize;
 use serde::de::DeserializeOwned;
 use similar::{ChangeTag, TextDiff};
+use std::path::{Path, PathBuf};
+use std::sync::OnceLock;
 use thorium::{CtlConf, Error};
 use uuid::Uuid;
 
-/// Resolve the editor command to use: an explicit `--editor` override if one was
-/// given, otherwise the configured `default_editor`.
+/// The editor named by `$VISUAL` or `$EDITOR`, read once per process
+///
+/// Returns `None` when neither is set to a non-empty value.
+fn env_editor() -> Option<&'static str> {
+    static ENV_EDITOR: OnceLock<Option<String>> = OnceLock::new();
+    ENV_EDITOR
+        .get_or_init(|| {
+            ["VISUAL", "EDITOR"]
+                .into_iter()
+                .filter_map(|var| std::env::var(var).ok())
+                .map(|value| value.trim().to_string())
+                .find(|value| !value.is_empty())
+        })
+        .as_deref()
+}
+
+/// Resolve the editor command to use
+///
+/// Order of precedence: an explicit `--editor` override, then a configured
+/// `default_editor` that differs from the built-in default, then `$VISUAL`, then
+/// `$EDITOR`, and finally the built-in default (`vi`). A config that was never
+/// changed carries the built-in default, so it defers to the environment.
 ///
 /// # Arguments
 ///
 /// * `editor_override` - An optional editor command from a `--editor` flag
 /// * `conf` - The Thorctl config, whose `default_editor` is the fallback
 pub(crate) fn resolve_editor<'a>(editor_override: Option<&'a str>, conf: &'a CtlConf) -> &'a str {
-    editor_override.unwrap_or(&conf.default_editor)
+    // an explicit override always wins
+    if let Some(editor) = editor_override {
+        return editor;
+    }
+    // a customized config value wins over the environment
+    if conf.default_editor != thorium::client::conf::default_default_editor() {
+        return &conf.default_editor;
+    }
+    // otherwise honor $VISUAL/$EDITOR before falling back to the built-in default
+    env_editor().unwrap_or(&conf.default_editor)
+}
+
+/// Split an editor command into its program and arguments
+///
+/// Follows simple shell-words rules so settings like `code --wait` or
+/// `"/opt/My Editor/bin/edit" -w` work: whitespace separates words, single
+/// quotes are literal, and double quotes group words. Outside single quotes a
+/// backslash escapes the next character, except on Windows where backslashes are
+/// path separators and are kept literally. A command that names an existing file
+/// as a whole (a path with unquoted spaces) is used as-is.
+///
+/// # Arguments
+///
+/// * `command` - The editor command to split
+fn split_command(command: &str) -> Result<Vec<String>, Error> {
+    // a whole-string path to an existing program is never split
+    if Path::new(command).is_file() {
+        return Ok(vec![command.to_string()]);
+    }
+    let backslash_escapes = !cfg!(windows);
+    let mut words = Vec::new();
+    let mut current = String::new();
+    let mut in_word = false;
+    let mut chars = command.chars();
+    while let Some(c) = chars.next() {
+        match c {
+            // whitespace ends the current word
+            c if c.is_whitespace() => {
+                if in_word {
+                    words.push(std::mem::take(&mut current));
+                    in_word = false;
+                }
+            }
+            // single quotes are literal until the closing quote
+            '\'' => {
+                in_word = true;
+                loop {
+                    match chars.next() {
+                        Some('\'') => break,
+                        Some(inner) => current.push(inner),
+                        None => {
+                            return Err(Error::new(format!(
+                                "Unterminated single quote in editor command '{command}'"
+                            )));
+                        }
+                    }
+                }
+            }
+            // double quotes group words, allowing escaped quotes and backslashes
+            '"' => {
+                in_word = true;
+                loop {
+                    match chars.next() {
+                        Some('"') => break,
+                        Some('\\') if backslash_escapes => match chars.next() {
+                            Some(escaped @ ('"' | '\\')) => current.push(escaped),
+                            Some(other) => {
+                                current.push('\\');
+                                current.push(other);
+                            }
+                            None => break,
+                        },
+                        Some(inner) => current.push(inner),
+                        None => {
+                            return Err(Error::new(format!(
+                                "Unterminated double quote in editor command '{command}'"
+                            )));
+                        }
+                    }
+                }
+            }
+            // a backslash escapes the next character
+            '\\' if backslash_escapes => {
+                in_word = true;
+                if let Some(escaped) = chars.next() {
+                    current.push(escaped);
+                }
+            }
+            // any other character extends the current word
+            other => {
+                in_word = true;
+                current.push(other);
+            }
+        }
+    }
+    // keep the final word
+    if in_word {
+        words.push(current);
+    }
+    if words.is_empty() {
+        return Err(Error::new("The editor command is empty"));
+    }
+    Ok(words)
 }
 
 // ─── Merge Conflict Generation ───────────────────────────────────────────────
@@ -46,7 +170,6 @@ pub fn generate_conflict_view(
     // buffer for collecting consecutive changed lines
     let mut current_lines: Vec<&str> = Vec::new();
     let mut incoming_lines: Vec<&str> = Vec::new();
-
     for change in diff.iter_all_changes() {
         match change.tag() {
             ChangeTag::Equal => {
@@ -124,17 +247,24 @@ fn flush_conflict(
 /// Check if the content contains any unresolved merge conflict markers.
 /// Returns the 1-based line number of the first conflict marker found, if any.
 ///
+/// Markers are only recognized at the start of a line, exactly as
+/// [`generate_conflict_view`] writes them. A `<<<<<<<` or `>>>>>>>` line is always
+/// a leftover marker, but a `=======` line only counts inside an open
+/// `<<<<<<<` block, so content that legitimately contains a line of seven `=`
+/// (e.g. a Markdown heading underline) is not flagged.
+///
 /// # Arguments
 ///
 /// * `content` - The file content to scan for conflict markers
 fn find_conflict_markers(content: &str) -> Option<usize> {
     for (line_num, line) in content.lines().enumerate() {
-        let trimmed = line.trim();
-        if trimmed.starts_with("<<<<<<<") || trimmed == "=======" || trimmed.starts_with(">>>>>>>")
-        {
+        // an open or close marker starting a line is always a leftover marker
+        if line.starts_with("<<<<<<<") || line.starts_with(">>>>>>>") {
             return Some(line_num + 1);
         }
     }
+    // a separator is only a marker between an open and a close marker, and any open
+    // marker was already reported above, so a lone separator is content
     None
 }
 
@@ -172,6 +302,7 @@ fn prompt_error_action() -> Result<ErrorAction, Error> {
         "Edit   - Reopen editor to fix the issue",
         "Cancel - Abandon changes for this resource",
     ];
+    // ask which action to take
     let selection = dialoguer::Select::new()
         .items(items)
         .default(0)
@@ -183,6 +314,14 @@ fn prompt_error_action() -> Result<ErrorAction, Error> {
     })
 }
 
+/// Ask whether to reopen the editor after an error, returning `true` to reopen
+///
+/// Used by callers that hit an error after the editor loop returned (e.g. the
+/// server rejecting an update) so the user's edits aren't lost.
+pub(crate) fn prompt_reedit() -> Result<bool, Error> {
+    Ok(matches!(prompt_error_action()?, ErrorAction::Edit))
+}
+
 /// Action the user wants to take after a validation error
 enum ErrorAction {
     /// Reopen the editor to fix the issue
@@ -191,37 +330,170 @@ enum ErrorAction {
     Cancel,
 }
 
-/// An RAII guard that removes a temporary file when it is dropped
+/// Make a label safe to use as part of a file name
+///
+/// # Arguments
+///
+/// * `label` - The label to sanitize
+fn file_safe(label: &str) -> String {
+    label
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.') {
+                c
+            } else {
+                '_'
+            }
+        })
+        .collect()
+}
+
+/// Create a new file readable and writable only by the current user
+///
+/// Fails if the file already exists, so a pre-placed file or symlink can't be
+/// used to redirect the write.
+///
+/// # Arguments
+///
+/// * `path` - The path of the file to create
+/// * `content` - The content to write to the file
+fn create_private_file(path: &Path, content: &str) -> Result<(), Error> {
+    use std::io::Write;
+    // open exclusively, restricting permissions on unix
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    std::os::unix::fs::OpenOptionsExt::mode(&mut options, 0o600);
+    // write the content
+    options
+        .open(path)
+        .and_then(|mut file| file.write_all(content.as_bytes()))
+        .map_err(|err| {
+            Error::new(format!(
+                "Failed to write temporary file '{}': {err}",
+                path.display()
+            ))
+        })
+}
+
+/// Create a new directory accessible only by the current user
+///
+/// # Arguments
+///
+/// * `path` - The directory to create (must not exist yet)
+fn create_private_dir(path: &Path) -> Result<(), Error> {
+    // create exclusively, restricting permissions on unix
+    let mut builder = std::fs::DirBuilder::new();
+    #[cfg(unix)]
+    std::os::unix::fs::DirBuilderExt::mode(&mut builder, 0o700);
+    builder.create(path).map_err(|err| {
+        Error::new(format!(
+            "Failed to create temporary directory '{}': {err}",
+            path.display()
+        ))
+    })
+}
+
+/// An RAII guard over a private temporary edit file
+///
+/// Each guard owns a fresh directory in the system temp dir, created with
+/// user-only permissions, holding one user-only file. Nothing is shared between
+/// users or runs, so a second user on the same host is never blocked by
+/// another's directory and edited content (which may include secrets such as
+/// env values) is not readable by others.
 ///
 /// The editor loop has many exit points (editor launch failure, read failure,
 /// parse error, user cancel via an error prompt, and success). Owning the temp
-/// path in a guard guarantees the file is cleaned up on every path, including the
-/// ones that propagate an error with `?`, so no stray edit files are left behind.
+/// path in a guard guarantees it is cleaned up on every path, including the ones
+/// that propagate an error with `?`, so no stray edit files are left behind.
 struct TempFile {
-    /// The path to the temporary file to remove on drop
-    path: std::path::PathBuf,
+    /// The private directory holding the file, removed on drop
+    dir: PathBuf,
+    /// The path to the temporary file
+    path: PathBuf,
 }
 
 impl TempFile {
-    /// Wraps a temp path in a guard that removes it on drop
+    /// Create a private temporary file holding `content`
     ///
     /// # Arguments
     ///
-    /// * `path` - The temporary file path to own and clean up
-    fn new(path: std::path::PathBuf) -> Self {
-        TempFile { path }
+    /// * `label` - A label used in the file name (e.g. "image-group-name")
+    /// * `ext` - The file extension (without a dot) so the editor highlights the format
+    /// * `content` - The initial file content
+    fn create(label: &str, ext: &str, content: &str) -> Result<Self, Error> {
+        // make a fresh private directory for this edit session
+        let dir = std::env::temp_dir().join(format!("thorium-edit-{}", Uuid::new_v4()));
+        create_private_dir(&dir)?;
+        // build the guard first so the directory is removed even if the write fails
+        let temp = TempFile {
+            path: dir.join(format!("{}.{ext}", file_safe(label))),
+            dir,
+        };
+        create_private_file(&temp.path, content)?;
+        Ok(temp)
     }
+
     /// Returns the path of the guarded temporary file
-    fn path(&self) -> &std::path::Path {
+    fn path(&self) -> &Path {
         &self.path
     }
 }
 
 impl Drop for TempFile {
-    /// Removes the temporary file, ignoring errors since cleanup is best-effort
+    /// Removes the temporary directory and file, ignoring errors since cleanup is
+    /// best-effort
     fn drop(&mut self) {
-        let _ = std::fs::remove_file(&self.path);
+        let _ = std::fs::remove_dir_all(&self.dir);
     }
+}
+
+/// Save edited content to a new user-only file so it survives a failed update
+///
+/// Returns the path the content was written to.
+///
+/// # Arguments
+///
+/// * `content` - The edited content to save
+/// * `label` - A label used in the file name
+/// * `ext` - The file extension (without a dot)
+pub(crate) fn save_recovery_file(content: &str, label: &str, ext: &str) -> Result<PathBuf, Error> {
+    let path = std::env::temp_dir().join(format!(
+        "thorium-edit-{}-{}.{ext}",
+        file_safe(label),
+        Uuid::new_v4()
+    ));
+    create_private_file(&path, content)?;
+    Ok(path)
+}
+
+/// Run the editor command on a file and wait for it to exit
+///
+/// # Arguments
+///
+/// * `editor` - The editor command (split into program and arguments)
+/// * `path` - The file to open
+async fn run_editor(editor: &str, path: &Path) -> Result<(), Error> {
+    // split the command so editors that need flags (e.g. `code --wait`) work
+    let words = split_command(editor)?;
+    let (program, args) = words
+        .split_first()
+        .ok_or_else(|| Error::new("The editor command is empty"))?;
+    // launch the editor and wait for it
+    let status = tokio::process::Command::new(program)
+        .args(args)
+        .arg(path)
+        .status()
+        .await
+        .map_err(|err| Error::new(format!("Unable to open editor '{editor}': {err}")))?;
+    // a failing editor aborts the edit
+    if !status.success() {
+        return Err(match status.code() {
+            Some(code) => Error::new(format!("Editor '{editor}' exited with error code: {code}")),
+            None => Error::new(format!("Editor '{editor}' exited with error!")),
+        });
+    }
+    Ok(())
 }
 
 /// The core editor loop: write `content` to a temp file, open the user's editor, and
@@ -229,8 +501,9 @@ impl Drop for TempFile {
 /// error it prints a helpful message (with line/column when the error carries a
 /// location) and prompts the user to reopen the editor or cancel.
 ///
-/// `parse` returns any [`EditorParseError`] on failure so the loop can surface its
-/// location. [`editor_loop`] and [`editor_loop_validated`] are thin wrappers over this.
+/// `parse` receives the saved text and returns any [`EditorParseError`] on failure so
+/// the loop can surface its location. [`editor_loop`] and the other entry points are
+/// thin wrappers over this.
 ///
 /// # Arguments
 ///
@@ -251,49 +524,16 @@ async fn editor_loop_core<R, E: EditorParseError>(
     ext: &str,
     parse: impl Fn(&str) -> Result<R, E>,
 ) -> Result<Option<R>, Error> {
-    // create a temp directory
-    let temp_dir = std::env::temp_dir().join("thorium");
-    tokio::fs::create_dir_all(&temp_dir).await.map_err(|err| {
-        Error::new(format!(
-            "Failed to create temporary directory '{}': {}",
-            temp_dir.to_string_lossy(),
-            err
-        ))
-    })?;
-    // own the temp path in a guard so every exit below (including `?` from the
-    // error prompts) removes the file rather than leaking it
-    let temp = TempFile::new(temp_dir.join(format!("merge-{}-{}.{ext}", label, Uuid::new_v4())));
-    // write initial content
-    write_temp_file(temp.path(), content).await?;
+    // own the temp file in a guard so every exit below (including `?` from the
+    // error prompts) removes it rather than leaking it
+    let temp = TempFile::create(label, ext, content)?;
     loop {
-        // open the editor
-        let status = match tokio::process::Command::new(editor)
-            .arg(temp.path())
-            .status()
-            .await
-        {
-            Ok(status) => status,
-            Err(err) => {
-                return Err(Error::new(format!(
-                    "Unable to open editor '{editor}': {err}"
-                )));
-            }
-        };
-        if !status.success() {
-            return Err(match status.code() {
-                Some(code) => {
-                    Error::new(format!("Editor '{editor}' exited with error code: {code}"))
-                }
-                None => Error::new(format!("Editor '{editor}' exited with error!")),
-            });
-        }
+        // open the editor and wait for the user to finish
+        run_editor(editor, temp.path()).await?;
         // read back the file
-        let resolved = match tokio::fs::read_to_string(temp.path()).await {
-            Ok(content) => content,
-            Err(err) => {
-                return Err(Error::new(format!("Failed to read temporary file: {err}")));
-            }
-        };
+        let resolved = tokio::fs::read_to_string(temp.path())
+            .await
+            .map_err(|err| Error::new(format!("Failed to read temporary file: {err}")))?;
         // check for unresolved conflict markers
         if let Some(line) = find_conflict_markers(&resolved) {
             eprintln!(
@@ -328,15 +568,37 @@ async fn editor_loop_core<R, E: EditorParseError>(
                 } else {
                     eprintln!("{} Parse error: {}", "Error:".bright_red().bold(), err);
                 }
-                match prompt_error_action()? {
-                    ErrorAction::Edit => continue,
-                    ErrorAction::Cancel => {
-                        return Ok(None);
-                    }
+                // reopen the editor on the next loop iteration, or give up
+                if let ErrorAction::Cancel = prompt_error_action()? {
+                    return Ok(None);
                 }
             }
         }
     }
+}
+
+/// Like [`editor_loop`], but also returns the exact text the user saved
+///
+/// Lets a caller reopen the editor with the user's own text (comments and all)
+/// if something fails after the edit, e.g. the server rejecting the update.
+///
+/// # Arguments
+///
+/// * `content` - The initial file content
+/// * `label` - A label used when naming the temp file
+/// * `editor` - The editor command to open
+pub(crate) async fn editor_loop_with_text<T>(
+    content: &str,
+    label: &str,
+    editor: &str,
+) -> Result<Option<(T, String)>, Error>
+where
+    T: DeserializeOwned,
+{
+    editor_loop_core(content, label, editor, "yml", |resolved| {
+        serde_norway::from_str::<T>(resolved).map(|parsed| (parsed, resolved.to_string()))
+    })
+    .await
 }
 
 /// Open a file in the user's editor with a validation loop, deserializing the result
@@ -422,22 +684,6 @@ pub(crate) async fn merge_in_editor<E: EditorParseError>(
     .await
 }
 
-/// Write content to a temp file, creating or overwriting it
-///
-/// # Arguments
-///
-/// * `path` - The path of the temporary file to write
-/// * `content` - The content to write to the file
-async fn write_temp_file(path: &std::path::Path, content: &str) -> Result<(), Error> {
-    tokio::fs::write(path, content).await.map_err(|err| {
-        Error::new(format!(
-            "Failed to write temporary file '{}': {}",
-            path.to_string_lossy(),
-            err
-        ))
-    })
-}
-
 /// Open a config in the user's editor for review, validating it against the typed
 /// request `T`, and return the (possibly edited) config as curated, pretty JSON.
 ///
@@ -463,14 +709,83 @@ pub(crate) async fn review_config_in_editor<T>(
 where
     T: DeserializeOwned,
 {
+    // parse the config and render it as curated YAML for editing
     let value: serde_json::Value = serde_json::from_str(json_config)
         .map_err(|e| Error::new(format!("Failed to parse config for editor review: {e}")))?;
     let yaml = crate::utils::curated_yaml(&value, order)
         .map_err(|e| Error::new(format!("Failed to convert config to YAML: {e}")))?;
+    // let the user review it, keeping the default on cancel
     match editor_loop_validated::<T>(&yaml, label, editor).await? {
         // write the edited document in curated order
         Some(resolved) => crate::utils::curated_json(&resolved, order),
         // cancelled: write the unchanged default, still in curated order
         None => crate::utils::curated_json(&value, order),
+    }
+}
+
+/// Unit tests for editor command splitting and conflict marker detection
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Plain commands and commands with flags split on whitespace
+    #[test]
+    fn splits_flags() {
+        assert_eq!(split_command("vi").unwrap(), vec!["vi"]);
+        assert_eq!(
+            split_command("code --wait").unwrap(),
+            vec!["code", "--wait"]
+        );
+        assert_eq!(
+            split_command("  emacsclient   -t ").unwrap(),
+            vec!["emacsclient", "-t"]
+        );
+    }
+
+    /// Quotes group words containing spaces
+    #[test]
+    fn splits_quotes() {
+        assert_eq!(
+            split_command("\"/opt/My Editor/edit\" -w").unwrap(),
+            vec!["/opt/My Editor/edit", "-w"]
+        );
+        assert_eq!(
+            split_command("'my editor' --flag='a b'").unwrap(),
+            vec!["my editor", "--flag=a b"]
+        );
+    }
+
+    /// Unterminated quotes and empty commands are errors
+    #[test]
+    fn rejects_bad_commands() {
+        assert!(split_command("\"code --wait").is_err());
+        assert!(split_command("'code").is_err());
+        assert!(split_command("   ").is_err());
+    }
+
+    /// Generated conflict markers are detected
+    #[test]
+    fn finds_generated_markers() {
+        let view = generate_conflict_view("a: 1\n", "a: 2\n", "Current", "Incoming");
+        assert_eq!(find_conflict_markers(&view), Some(1));
+    }
+
+    /// A lone line of seven '=' is content, not a marker, even at column 0
+    #[test]
+    fn ignores_lone_separator() {
+        assert_eq!(
+            find_conflict_markers("description: |\n  Usage\n  =======\n"),
+            None
+        );
+        assert_eq!(find_conflict_markers("Usage\n=======\ntext\n"), None);
+    }
+
+    /// Indented marker-like lines are content
+    #[test]
+    fn ignores_indented_markers() {
+        assert_eq!(
+            find_conflict_markers("text: |\n  <<<<<<< not a marker\n"),
+            None
+        );
     }
 }

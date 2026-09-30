@@ -7,25 +7,33 @@
 //! resources created.
 //!
 //! Undo strategy per action:
-//! - created resources/groups are deleted
-//! - updated resources are reverted by diffing the live state back to the
-//!   original snapshot taken before the update (this also correctly reverts
-//!   partial edits made through the merge editor)
+//! - created resources/groups/network policies are deleted
+//! - updated network policies are restored to their pre-update snapshot
+//! - updated images and pipelines are reverted by diffing the live state back to
+//!   the snapshot taken before the update, through the same normalized views the
+//!   merge editor uses (so partial editor merges revert too). Every editable field
+//!   is restored, including network policies and security contexts, with these
+//!   exceptions:
+//!   - what the image update API can't clear or set: a timeout or KVM settings
+//!     added to an image that had none stay in place, as does an output files
+//!     handler `entities` path
+//!   - description differences in trailing whitespace alone are not reverted
+//!   - bans are never touched by imports, so they are not reverted
 //!
 //! Registry writes (docker pushes) are intentionally NOT journaled — deleting
 //! tags from arbitrary registries is registry-specific and often unauthorized.
 
 use colored::Colorize;
 use std::sync::Mutex;
-use thorium::models::{
-    Image, ImageRequest, NetworkPolicy, NetworkPolicyRequest, NetworkPolicyUpdate, Pipeline,
-    PipelineRequest,
-};
+use thorium::models::{Image, NetworkPolicy, NetworkPolicyRequest, NetworkPolicyUpdate, Pipeline};
 use thorium::{Error, Thorium};
+use uuid::Uuid;
 
+use super::merge::{MergeableImage, MergeablePipeline};
 use super::update;
 use crate::handlers::progress::{Bar, BarKind};
 use crate::handlers::toolbox::policies;
+use crate::utils;
 
 /// A single applied change and how to undo it
 enum AppliedAction {
@@ -36,7 +44,15 @@ enum AppliedAction {
     /// A pipeline was created; undo by deleting it
     CreatedPipeline { group: String, name: String },
     /// A network policy was created; undo by deleting it
-    CreatedNetworkPolicy { name: String },
+    ///
+    /// The id (when it could be resolved) targets this exact policy, since policies
+    /// in different groups may share a name.
+    CreatedNetworkPolicy {
+        /// The name of the created policy
+        name: String,
+        /// The created policy's id, if it could be resolved
+        id: Option<Uuid>,
+    },
     /// A network policy was updated; undo by reverting to the pre-update snapshot
     UpdatedNetworkPolicy { original: Box<NetworkPolicy> },
     /// An image was updated; undo by reverting to the pre-update snapshot
@@ -50,17 +66,37 @@ impl AppliedAction {
     fn describe(&self) -> String {
         match self {
             Self::CreatedGroup { name } => format!("created group '{name}'"),
-            Self::CreatedImage { group, name } => format!("created image '{group}:{name}'"),
-            Self::CreatedPipeline { group, name } => format!("created pipeline '{group}:{name}'"),
-            Self::CreatedNetworkPolicy { name } => format!("created network policy '{name}'"),
+            Self::CreatedImage { group, name } => {
+                format!("created image '{}'", utils::resource_id(group, name))
+            }
+            Self::CreatedPipeline { group, name } => {
+                format!("created pipeline '{}'", utils::resource_id(group, name))
+            }
+            Self::CreatedNetworkPolicy { name, id } => {
+                // a policy is qualified by its id alone here; its groups aren't journaled
+                format!(
+                    "created network policy '{name}'{}",
+                    utils::policy_suffix(utils::NO_GROUPS, id.as_ref())
+                )
+            }
             Self::UpdatedNetworkPolicy { original } => {
-                format!("updated network policy '{}' (id {})", original.name, original.id)
+                format!(
+                    "updated network policy '{}'{}",
+                    original.name,
+                    utils::policy_suffix(utils::NO_GROUPS, Some(&original.id))
+                )
             }
             Self::UpdatedImage { original } => {
-                format!("updated image '{}:{}'", original.group, original.name)
+                format!(
+                    "updated image '{}'",
+                    utils::resource_id(&original.group, &original.name)
+                )
             }
             Self::UpdatedPipeline { original } => {
-                format!("updated pipeline '{}:{}'", original.group, original.name)
+                format!(
+                    "updated pipeline '{}'",
+                    utils::resource_id(&original.group, &original.name)
+                )
             }
         }
     }
@@ -86,7 +122,10 @@ impl Journal {
     fn push(&self, action: AppliedAction) {
         // a poisoned mutex means another import task panicked; the journal is
         // best-effort book-keeping, so keep recording with whatever we have
-        let mut actions = self.actions.lock().unwrap_or_else(|err| err.into_inner());
+        let mut actions = self
+            .actions
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         actions.push(action);
     }
 
@@ -99,7 +138,7 @@ impl Journal {
     pub fn len(&self) -> usize {
         self.actions
             .lock()
-            .unwrap_or_else(|err| err.into_inner())
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
             .len()
     }
 
@@ -107,7 +146,7 @@ impl Journal {
     pub fn describe(&self) -> Vec<String> {
         self.actions
             .lock()
-            .unwrap_or_else(|err| err.into_inner())
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
             .iter()
             .map(AppliedAction::describe)
             .collect()
@@ -135,8 +174,16 @@ impl Journal {
     }
 
     /// Record a created network policy
-    pub fn created_network_policy<T: Into<String>>(&self, name: T) {
-        self.push(AppliedAction::CreatedNetworkPolicy { name: name.into() });
+    ///
+    /// # Arguments
+    ///
+    /// * `name` - The name of the created policy
+    /// * `id` - The created policy's id, if it could be resolved
+    pub fn created_network_policy<T: Into<String>>(&self, name: T, id: Option<Uuid>) {
+        self.push(AppliedAction::CreatedNetworkPolicy {
+            name: name.into(),
+            id,
+        });
     }
 
     /// Record an updated network policy, snapshotting its pre-update state
@@ -177,7 +224,7 @@ impl Journal {
         let actions = self
             .actions
             .into_inner()
-            .unwrap_or_else(|err| err.into_inner());
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         progress.refresh("Rolling back", BarKind::Bound(actions.len() as u64));
         // collect per-action failures instead of stopping at the first one: rollback
         // is best-effort restoration, so a single un-undoable action must not strand
@@ -198,8 +245,10 @@ impl Journal {
                     AppliedAction::CreatedPipeline { group, name } => {
                         thorium.pipelines.delete(&group, &name).await?;
                     }
-                    AppliedAction::CreatedNetworkPolicy { name } => {
-                        thorium.network_policies.delete(&name, None).await?;
+                    AppliedAction::CreatedNetworkPolicy { name, id } => {
+                        // target the exact policy by id when known, since names can
+                        // repeat across groups
+                        thorium.network_policies.delete(&name, id).await?;
                     }
                     AppliedAction::UpdatedNetworkPolicy { original } => {
                         // unbox the owned snapshot, keeping the identity needed to target
@@ -211,30 +260,37 @@ impl Journal {
                         // groups, unlike the additive-only import path)
                         let live = thorium.network_policies.get(&name, Some(id)).await?;
                         let revert = network_policy_restore(&original, &live);
-                        thorium.network_policies.update(&name, Some(id), &revert).await?;
+                        thorium
+                            .network_policies
+                            .update(&name, Some(id), &revert)
+                            .await?;
                     }
                     AppliedAction::UpdatedImage { original } => {
                         // unbox the owned snapshot; clone only the identity we need after
-                        // it is moved into the request below, not the whole Image
+                        // it is moved into the view below, not the whole Image
                         let original = *original;
                         let (group, name) = (original.group.clone(), original.name.clone());
-                        // diff the live state back to the snapshot so even partial
-                        // editor merges revert cleanly
+                        // diff the live state back to the snapshot's full view (not the
+                        // request form, whose omitted fields keep live values) so even
+                        // partial editor merges revert
                         let live = thorium.images.get(&group, &name).await?;
+                        let target = MergeableImage::from(original);
                         if let Some(revert) =
-                            update::calculate_image_update(live, ImageRequest::from(original))
+                            update::calculate_image_update_from_mergeable(live, target)?
                         {
                             thorium.images.update(&group, &name, &revert).await?;
                         }
                     }
                     AppliedAction::UpdatedPipeline { original } => {
                         // unbox the owned snapshot; clone only the identity we need after
-                        // it is moved into the request below, not the whole Pipeline
+                        // it is moved into the view below, not the whole Pipeline
                         let original = *original;
                         let (group, name) = (original.group.clone(), original.name.clone());
+                        // diff the live state back to the snapshot's full view
                         let live = thorium.pipelines.get(&group, &name).await?;
+                        let target = MergeablePipeline::from(original);
                         if let Some(revert) =
-                            update::calculate_pipeline_update(live, PipelineRequest::from(original))
+                            update::calculate_pipeline_update_from_mergeable(live, target)?
                         {
                             thorium.pipelines.update(&group, &name, &revert).await?;
                         }
@@ -354,8 +410,8 @@ mod tests {
             described,
             vec![
                 "created group 'grp'".to_string(),
-                "created image 'grp:img'".to_string(),
-                "created pipeline 'grp:pipe'".to_string(),
+                "created image 'grp/img'".to_string(),
+                "created pipeline 'grp/pipe'".to_string(),
             ]
         );
     }

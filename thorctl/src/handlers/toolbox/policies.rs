@@ -14,9 +14,10 @@
 //! coverage is only ever added, never removed).
 
 use colored::Colorize;
+use http::StatusCode;
 use std::collections::HashMap;
 use thorium::models::{
-    NetworkPolicy, NetworkPolicyListOpts, NetworkPolicyRequest, NetworkPolicyRule,
+    IpBlockRaw, NetworkPolicy, NetworkPolicyListOpts, NetworkPolicyRequest, NetworkPolicyRule,
     NetworkPolicyRuleRaw, NetworkPolicyUpdate,
 };
 use thorium::{Error, Thorium};
@@ -25,6 +26,7 @@ use uuid::Uuid;
 use super::manifest::ToolboxManifest;
 use crate::handlers::imports::rollback::Journal;
 use crate::handlers::progress::{Bar, BarKind};
+use crate::utils;
 
 /// The bundled policies categorized against the target instance
 pub struct PolicyPlan {
@@ -69,7 +71,7 @@ pub struct PolicyUpdatePlan {
     pub name: String,
     /// The id of the existing policy this update targets
     pub id: Uuid,
-    /// A representative group the targeted policy lives in, for display
+    /// A toolbox target group the targeted policy lives in, for display
     pub group: String,
     /// The rule/flag fields being overwritten (empty for a groups-only add)
     pub drift: Vec<String>,
@@ -80,16 +82,62 @@ pub struct PolicyUpdatePlan {
     pub chosen: NetworkPolicyRequest,
 }
 
+/// Render one raw IP block in the canonical form Thorium stores it in
+///
+/// Thorium parses each CIDR on create and renders it back with its network length
+/// always included (`10.0.0.1` is stored as `10.0.0.1/32`, and IPv6 text is
+/// compressed/lowercased), so a hand-written block must be canonicalized the same
+/// way before comparing, or it would never match the stored policy. A block that
+/// fails to parse is returned unchanged so the server still reports the real error.
+///
+/// # Arguments
+///
+/// * `block` - The raw IP block to canonicalize
+fn normalize_ip_block(block: &IpBlockRaw) -> IpBlockRaw {
+    // parse the block exactly like the server does, which yields a single stored block
+    let parsed = NetworkPolicyRule::default().raw_cidr(block.cidr.clone(), block.except.clone());
+    // render the stored block back to its raw string form, or keep the input if unparsable
+    match parsed {
+        Ok(rule) => rule
+            .allowed_ips
+            .first()
+            .map_or_else(|| block.clone(), IpBlockRaw::from),
+        Err(_) => block.clone(),
+    }
+}
+
+/// Canonicalize every IP block in one direction's rules
+///
+/// # Arguments
+///
+/// * `rules` - The ingress or egress rules to canonicalize in place
+fn normalize_rules(rules: Option<&mut Vec<NetworkPolicyRuleRaw>>) {
+    // a direction with no rules has nothing to canonicalize
+    let Some(rules) = rules else {
+        return;
+    };
+    // rewrite each rule's IP blocks into Thorium's stored form
+    for rule in rules {
+        rule.allowed_ips = rule.allowed_ips.iter().map(normalize_ip_block).collect();
+    }
+}
+
 /// Normalize a policy request so semantically equal policies compare equal
 ///
-/// Group order carries no meaning, so it is sorted; rule order is preserved
-/// since rules are applied as written.
+/// Group order carries no meaning, so groups are sorted and de-duplicated; rule
+/// order is preserved since rules are applied as written. CIDRs are rendered in
+/// the canonical form Thorium stores them in (see [`normalize_ip_block`]).
 ///
 /// # Arguments
 ///
 /// * `policy` - The policy request to normalize
 fn normalize(mut policy: NetworkPolicyRequest) -> NetworkPolicyRequest {
+    // sort and de-duplicate the groups since their order and repetition carry no meaning
     policy.groups.sort_unstable();
+    policy.groups.dedup();
+    // canonicalize the CIDRs in both directions so they match the stored form
+    normalize_rules(policy.ingress.as_mut());
+    normalize_rules(policy.egress.as_mut());
     policy
 }
 
@@ -103,6 +151,7 @@ fn normalize(mut policy: NetworkPolicyRequest) -> NetworkPolicyRequest {
 /// * `ours` - The bundled policy from the toolbox
 /// * `theirs` - The policy to compare against
 fn requests_equal(ours: &NetworkPolicyRequest, theirs: &NetworkPolicyRequest) -> bool {
+    // compare the serialized forms, since the request type has no PartialEq
     match (serde_json::to_value(ours), serde_json::to_value(theirs)) {
         (Ok(ours), Ok(theirs)) => ours == theirs,
         // treat serialization failures as different so they surface as warnings
@@ -125,8 +174,9 @@ fn diff_fields(ours: &NetworkPolicyRequest, theirs: &NetworkPolicyRequest) -> Ve
 ///
 /// Used when comparing a bundled policy against an existing instance policy to ignore
 /// group membership: the toolbox targets specific groups while the instance policy may
-/// legitimately span more, and policies are never updated anyway — so only rule/flag
-/// drift should surface.
+/// legitimately span more. Group coverage is compared separately (gaps become
+/// `missing_groups`, or `add_groups` under `--update-network-policy`), so only rule/flag
+/// drift is reported here.
 ///
 /// # Arguments
 ///
@@ -153,11 +203,13 @@ fn diff_fields_excluding(
         ours.remove(*field);
         theirs.remove(*field);
     }
+    // keep every top-level field whose value differs (or is absent) on the other side
     let mut fields: Vec<String> = ours
         .iter()
         .filter(|(key, value)| theirs.get(key.as_str()) != Some(*value))
         .map(|(key, _)| key.clone())
         .collect();
+    // sort so the reported field list is deterministic
     fields.sort_unstable();
     fields
 }
@@ -167,7 +219,8 @@ fn diff_fields_excluding(
 /// Identical duplicates (after normalization) collapse into one entry. The same name
 /// bundled with differing definitions can't be reconciled, but it must not fail the
 /// whole import: the first definition (in sorted order) is kept, the rest are ignored,
-/// and a warning is emitted per conflicting name.
+/// and a warning is emitted per conflicting name. A policy that targets no groups
+/// can't be created or used by any image, so it is dropped with a warning.
 ///
 /// # Arguments
 ///
@@ -206,6 +259,7 @@ fn dedupe_policies(
     // track each kept policy alongside the image key it was first seen in so a genuine
     // conflict can name both sides
     let mut by_name: HashMap<String, (NetworkPolicyRequest, String)> = HashMap::new();
+    // the warnings to surface for skipped or conflicting policies
     let mut warnings = Vec::new();
     // visit images in sorted key order so "first definition wins" is deterministic
     let mut images: Vec<_> = manifest.images.iter().collect();
@@ -216,11 +270,24 @@ fn dedupe_policies(
         versions.sort_by(|a, b| a.0.cmp(b.0));
         for (_version, version) in versions {
             for policy in &version.network_policies {
+                // normalize first so equivalent definitions compare equal
                 let mut policy = normalize(policy.clone());
                 // policies are group-scoped, so the override applies to them
                 // exactly like it does to images and pipelines
                 if let Some(group) = group_override {
                     policy.groups = vec![group.to_string()];
+                }
+                // blank group names are never valid, so ignore them
+                policy.groups.retain(|group| !group.trim().is_empty());
+                // a policy with no target groups can't be created, so skip it up front
+                // rather than letting the create fail midway through the apply
+                if policy.groups.is_empty() {
+                    warnings.push(format!(
+                        "Skipping network policy '{}' bundled by image '{image_key}': it targets \
+                         no groups",
+                        policy.name
+                    ));
+                    continue;
                 }
                 match by_name.get_mut(&policy.name) {
                     // first sighting of this policy name
@@ -279,6 +346,23 @@ fn unique_groups(policies: &[NetworkPolicyRequest]) -> Vec<String> {
     groups
 }
 
+/// Whether a listing error means the caller simply can't see the group's policies
+///
+/// Non-admins get a 401/403 when listing a group they aren't a member of, and a group
+/// that doesn't exist yet (it will be created by the import) returns 401/404. Neither
+/// can hold a policy the caller could match against, so both are treated as "no
+/// existing policies" instead of failing the whole import or diff.
+///
+/// # Arguments
+///
+/// * `err` - The error returned by the listing call
+fn is_invisible_group(err: &Error) -> bool {
+    matches!(
+        err.status(),
+        Some(StatusCode::UNAUTHORIZED | StatusCode::FORBIDDEN | StatusCode::NOT_FOUND)
+    )
+}
+
 /// Fetch the network policies that already exist in the given groups, indexed by
 /// `(group, name)`
 ///
@@ -286,6 +370,10 @@ fn unique_groups(policies: &[NetworkPolicyRequest]) -> Vec<String> {
 /// within a single group a name maps to at most one policy, so this avoids the global
 /// get-by-name that 400s when several distinct policies share a name across groups.
 /// Mirrors how `network-policies describe --group` lists by group.
+///
+/// Each group is listed separately so a group the caller can't see (not a member, or
+/// not created yet) contributes no existing policies rather than failing the lookup for
+/// every other group (see [`is_invisible_group`]).
 ///
 /// # Arguments
 ///
@@ -295,39 +383,40 @@ pub(super) async fn fetch_existing_in_groups(
     thorium: &Thorium,
     groups: &[String],
 ) -> Result<HashMap<(String, String), NetworkPolicy>, Error> {
+    // the existing policies found so far, keyed by (group, name)
     let mut existing = HashMap::new();
-    // nothing to look up when no groups are targeted
-    if groups.is_empty() {
-        return Ok(existing);
-    }
-    // list (with full details) only the policies in the groups we care about
-    let opts = NetworkPolicyListOpts::default().groups(groups.to_vec());
-    let mut cursor = thorium
-        .network_policies
-        .list_details(&opts)
-        .await
-        .map_err(|err| {
-            Error::new(format!(
-                "Error listing network policies for groups {groups:?}: {err}"
-            ))
-        })?;
-    loop {
-        for policy in cursor.data.drain(..) {
-            // index the policy under each queried group it belongs to; a name is unique
-            // within a group, so (group, name) identifies exactly one policy
-            for group in &policy.groups {
-                if groups.iter().any(|wanted| wanted == group) {
-                    existing.insert((group.clone(), policy.name.clone()), policy.clone());
+    for group in groups {
+        // list (with full details) only the policies in this one group
+        let opts = NetworkPolicyListOpts::default().groups(vec![group.clone()]);
+        let mut cursor = match thorium.network_policies.list_details(&opts).await {
+            Ok(cursor) => cursor,
+            // a group we can't see holds no policies we could match, so skip it
+            Err(err) if is_invisible_group(&err) => continue,
+            Err(err) => {
+                return Err(Error::new(format!(
+                    "Failed to list network policies for group '{group}': {err}"
+                )));
+            }
+        };
+        loop {
+            // index each policy under the queried group; a name is unique within a group,
+            // so (group, name) identifies exactly one policy
+            for policy in cursor.data.drain(..) {
+                if policy.groups.iter().any(|member| member == group) {
+                    existing.insert((group.clone(), policy.name.clone()), policy);
                 }
             }
+            // stop once every page of this group has been read
+            if cursor.exhausted() {
+                break;
+            }
+            // fetch the next page of this group's policies
+            cursor.refill().await.map_err(|err| {
+                Error::new(format!(
+                    "Failed to list network policies for group '{group}': {err}"
+                ))
+            })?;
         }
-        if cursor.exhausted() {
-            break;
-        }
-        cursor
-            .refill()
-            .await
-            .map_err(|err| Error::new(format!("Error listing network policies: {err}")))?;
     }
     Ok(existing)
 }
@@ -335,8 +424,7 @@ pub(super) async fn fetch_existing_in_groups(
 /// The outcome of categorizing one bundled policy against the existing instance state
 ///
 /// `Mismatched` can't derive `PartialEq`/`Eq` because it carries
-/// [`NetworkPolicy`] (no `Eq`) and the bundled request, so tests match on it
-/// rather than comparing it.
+/// [`NetworkPolicy`] (no `Eq`), so tests match on it rather than comparing it.
 #[derive(Debug)]
 enum PolicyClassification {
     /// The policy exists in no target group and will be created
@@ -376,6 +464,7 @@ fn classify_policy(
     let mut present = Vec::new();
     let mut missing = Vec::new();
     for group in &policy.groups {
+        // file each target group by whether the policy name already exists there
         if existing.contains_key(&(group.clone(), policy.name.clone())) {
             present.push(group.clone());
         } else {
@@ -391,6 +480,7 @@ fn classify_policy(
     let mut overlapped: Vec<NetworkPolicy> = Vec::new();
     let mut drift: Vec<String> = Vec::new();
     for group in &present {
+        // look up the existing policy that holds this name in this group
         if let Some(existing_policy) = existing.get(&(group.clone(), policy.name.clone())) {
             // record each distinct existing policy once, since the same name across groups
             // can resolve to several independent policies
@@ -399,15 +489,20 @@ fn classify_policy(
             }
             // surface the first rule/flag drift we find (group membership ignored)
             if drift.is_empty() {
-                let diff =
-                    diff_fields_excluding(policy, &NetworkPolicyRequest::from(existing_policy), &["groups"]);
+                // compare against the stored form so both sides share one representation
+                let diff = diff_fields_excluding(
+                    policy,
+                    &NetworkPolicyRequest::from(existing_policy),
+                    &["groups"],
+                );
+                // keep this policy's drift only when it actually differs
                 if !diff.is_empty() {
                     drift = diff;
                 }
             }
         }
     }
-    // partial coverage: targets multiple groups but only exists in some of them
+    // sort the uncovered target groups (partial coverage) for deterministic output
     missing.sort_unstable();
     // matches everywhere it exists and covers every target group → nothing to do
     if drift.is_empty() && missing.is_empty() {
@@ -441,15 +536,18 @@ pub async fn categorize_policies(
     update: bool,
     progress: &Bar,
 ) -> Result<PolicyPlan, Error> {
+    // start with an empty plan that each classified policy is filed into
     let mut plan = PolicyPlan {
         new: Vec::new(),
         mismatched: Vec::new(),
         updates: Vec::new(),
         unchanged: 0,
     };
+    // nothing bundled means nothing to check
     if policies.is_empty() {
         return Ok(plan);
     }
+    // bound the bar by the number of bundled policies being checked
     progress.refresh(
         "Checking network policies",
         BarKind::Bound(policies.len() as u64),
@@ -461,6 +559,7 @@ pub async fn categorize_policies(
     let existing: HashMap<(String, String), NetworkPolicy> =
         fetch_existing_in_groups(thorium, &groups).await?;
     for policy in policies {
+        // file each policy by how it compares to the instance
         match classify_policy(&policy, &existing) {
             PolicyClassification::New => plan.new.push(policy),
             PolicyClassification::Unchanged => plan.unchanged += 1,
@@ -486,6 +585,7 @@ pub async fn categorize_policies(
                 }
             }
         }
+        // count this policy as checked
         progress.inc(1);
     }
     Ok(plan)
@@ -507,12 +607,16 @@ fn build_updates(mismatch: &PolicyMismatch) -> Vec<PolicyUpdatePlan> {
     // coverage gaps) is deterministic
     let mut existing = mismatch.existing.clone();
     existing.sort_by_key(|policy| policy.id);
+    // the per-policy update plans produced for this mismatch
     let mut plans = Vec::new();
     for (idx, policy) in existing.iter().enumerate() {
         // recompute drift against this specific policy: distinct policies sharing a name
         // can differ from the toolbox in different ways
-        let drift =
-            diff_fields_excluding(&mismatch.chosen, &NetworkPolicyRequest::from(policy), &["groups"]);
+        let drift = diff_fields_excluding(
+            &mismatch.chosen,
+            &NetworkPolicyRequest::from(policy),
+            &["groups"],
+        );
         // only the truly-missing groups (no existing policy anywhere) need adding, and
         // they go to the first policy; groups already covered by a sibling policy are
         // left alone so we never create a duplicate name within a group
@@ -525,10 +629,20 @@ fn build_updates(mismatch: &PolicyMismatch) -> Vec<PolicyUpdatePlan> {
         if drift.is_empty() && add_groups.is_empty() {
             continue;
         }
+        // display a group the toolbox targets that this policy is actually in, so the
+        // label points at the overlap rather than an unrelated group of the policy
+        let group = mismatch
+            .chosen
+            .groups
+            .iter()
+            .find(|target| policy.groups.contains(target))
+            .or_else(|| policy.groups.first())
+            .cloned()
+            .unwrap_or_default();
         plans.push(PolicyUpdatePlan {
             name: mismatch.name.clone(),
             id: policy.id,
-            group: policy.groups.first().cloned().unwrap_or_default(),
+            group,
             drift,
             add_groups,
             chosen: mismatch.chosen.clone(),
@@ -555,6 +669,7 @@ fn build_delta(
     add_groups: &[String],
     existing: &NetworkPolicy,
 ) -> NetworkPolicyUpdate {
+    // start from a groups-only delta; rule/flag fields are filled in only when they drifted
     let mut update = NetworkPolicyUpdate {
         add_groups: add_groups.to_vec(),
         ..NetworkPolicyUpdate::default()
@@ -578,10 +693,11 @@ fn build_delta(
         update.remove_egress = remove;
         update.add_egress = add;
     }
-    // flags only when they differ
+    // set the forced flag only when it differs
     if drift.iter().any(|field| field == "forced_policy") {
         update.forced_policy = Some(chosen.forced_policy);
     }
+    // set the default flag only when it differs
     if drift.iter().any(|field| field == "default_policy") {
         update.default_policy = Some(chosen.default_policy);
     }
@@ -613,9 +729,9 @@ pub(crate) fn rule_direction_delta(
         Some(rules) if rules.is_empty() => (false, true, Vec::new(), Vec::new()),
         // explicit rules → drop the existing rules by id and add the target rules
         Some(rules) => {
-            let remove = existing
-                .map(|rules| rules.iter().map(|rule| rule.id).collect())
-                .unwrap_or_default();
+            // every existing rule is replaced, so collect all of their ids for removal
+            let remove =
+                existing.map_or_else(Vec::new, |rules| rules.iter().map(|rule| rule.id).collect());
             (false, false, remove, rules.clone())
         }
     }
@@ -627,12 +743,18 @@ pub(crate) fn rule_direction_delta(
 ///
 /// * `plan` - The categorized policy plan
 pub fn print_plan(plan: &PolicyPlan) {
+    // list the policies that will be created, with the groups they will be created in
     if !plan.new.is_empty() {
         println!("{}", "New Network Policies:".bright_green());
         for policy in &plan.new {
-            println!("  {} (groups: {})", policy.name, policy.groups.join(", "));
+            println!(
+                "  {}{}",
+                policy.name,
+                utils::policy_suffix(&policy.groups, None)
+            );
         }
     }
+    // list the existing policies that differ but are left alone without the update flag
     if !plan.mismatched.is_empty() {
         println!(
             "{}",
@@ -651,12 +773,14 @@ pub fn print_plan(plan: &PolicyPlan) {
             }
             if !mismatch.missing_groups.is_empty() {
                 println!(
-                    "  {} (missing from group(s): {:?})",
-                    mismatch.name, mismatch.missing_groups
+                    "  {} (missing from group(s): [{}])",
+                    mismatch.name,
+                    mismatch.missing_groups.join(", ")
                 );
             }
         }
     }
+    // list the existing policies that will be updated toward the toolbox's definition
     if !plan.updates.is_empty() {
         println!("{}", "Network Policies to update:".bright_yellow());
         for update in &plan.updates {
@@ -664,18 +788,17 @@ pub fn print_plan(plan: &PolicyPlan) {
             // bundled name can map to several distinct existing policies
             if !update.drift.is_empty() {
                 println!(
-                    "  {} (group: {}, id: {}) — overwrite (differs: [{}])",
+                    "  {}{} — overwrite (differs: [{}])",
                     update.name,
-                    update.group,
-                    update.id,
+                    utils::policy_suffix(&[&update.group], Some(&update.id)),
                     update.drift.join(", ")
                 );
             }
             if !update.add_groups.is_empty() {
                 println!(
-                    "  {} (id: {}) — add group(s): {}",
+                    "  {}{} — add group(s): [{}]",
                     update.name,
-                    update.id,
+                    utils::policy_suffix(&[&update.group], Some(&update.id)),
                     update.add_groups.join(", ")
                 );
             }
@@ -705,10 +828,11 @@ pub fn warn_mismatched(plan: &PolicyPlan, progress: &Bar) {
         // coverage gap: the policy exists but not in every target group
         if !mismatch.missing_groups.is_empty() {
             progress.warning(format!(
-                "Network policy '{}' exists in Thorium but not in group(s) {:?}; not creating \
+                "Network policy '{}' exists in Thorium but not in group(s) [{}]; not creating \
                  it there — re-run with --update-network-policy to add those group(s) to the \
                  existing policy",
-                mismatch.name, mismatch.missing_groups
+                mismatch.name,
+                mismatch.missing_groups.join(", ")
             ));
         }
     }
@@ -733,9 +857,11 @@ pub async fn update_policies(
     progress: &Bar,
     journal: &Journal,
 ) -> Result<(), Error> {
+    // nothing planned means nothing to update
     if updates.is_empty() {
         return Ok(());
     }
+    // bound the bar by the number of planned updates
     progress.refresh(
         "Updating network policies",
         BarKind::Bound(updates.len() as u64),
@@ -748,8 +874,9 @@ pub async fn update_policies(
             .await
             .map_err(|err| {
                 Error::new(format!(
-                    "Error fetching network policy '{}' (id {}) before update: {err}",
-                    plan.name, plan.id
+                    "Failed to fetch network policy '{}'{} before update: {err}",
+                    plan.name,
+                    utils::policy_suffix(utils::NO_GROUPS, Some(&plan.id))
                 ))
             })?;
         // record the pre-update snapshot before the patch so rollback can restore it
@@ -759,20 +886,18 @@ pub async fn update_policies(
         // log the action being taken, splitting overwrite from a groups-only add
         if !plan.drift.is_empty() {
             progress.info_anonymous(format!(
-                "Updating network policy '{}' (group '{}', id {}) in Thorium to match the \
-                 toolbox (differs: [{}])",
+                "Updating network policy '{}'{} in Thorium to match the toolbox (differs: [{}])",
                 plan.name,
-                plan.group,
-                plan.id,
+                utils::policy_suffix(&[&plan.group], Some(&plan.id)),
                 plan.drift.join(", ")
             ));
         }
         if !plan.add_groups.is_empty() {
             progress.info_anonymous(format!(
-                "Adding group(s) [{}] to existing network policy '{}' (id {})",
+                "Adding group(s) [{}] to existing network policy '{}'{}",
                 plan.add_groups.join(", "),
                 plan.name,
-                plan.id
+                utils::policy_suffix(&[&plan.group], Some(&plan.id))
             ));
         }
         // apply the patch targeting this exact policy by id
@@ -782,13 +907,39 @@ pub async fn update_policies(
             .await
             .map_err(|err| {
                 Error::new(format!(
-                    "Error updating network policy '{}' (id {}): {err}",
-                    plan.name, plan.id
+                    "Failed to update network policy '{}'{}: {err}",
+                    plan.name,
+                    utils::policy_suffix(utils::NO_GROUPS, Some(&plan.id))
                 ))
             })?;
+        // count this update as applied
         progress.inc(1);
     }
     Ok(())
+}
+
+/// Look up the id Thorium assigned to a policy this import just created
+///
+/// The create route returns no body, and the same name may already exist in other
+/// groups, so the new policy is found by listing its own target groups (where the name
+/// is unique). Returns `None` when the lookup fails or finds nothing; the caller still
+/// has the name to fall back on.
+///
+/// # Arguments
+///
+/// * `thorium` - The Thorium client
+/// * `policy` - The policy request that was just created
+async fn created_policy_id(thorium: &Thorium, policy: &NetworkPolicyRequest) -> Option<Uuid> {
+    // list the policy's target groups, where its name is unique
+    let existing = fetch_existing_in_groups(thorium, &policy.groups)
+        .await
+        .ok()?;
+    // take the id from the first target group that holds the new policy
+    policy
+        .groups
+        .iter()
+        .find_map(|group| existing.get(&(group.clone(), policy.name.clone())))
+        .map(|created| created.id)
 }
 
 /// Create the missing network policies in the target instance
@@ -805,28 +956,45 @@ pub async fn create_policies(
     progress: &Bar,
     journal: &Journal,
 ) -> Result<(), Error> {
+    // nothing missing means nothing to create
     if policies.is_empty() {
         return Ok(());
     }
+    // bound the bar by the number of policies being created
     progress.refresh(
         "Creating network policies",
         BarKind::Bound(policies.len() as u64),
     );
     for policy in policies {
         // create the policy in the instance; the request already carries its target groups
-        thorium
-            .network_policies
-            .create(policy.clone())
-            .await
-            .map_err(|err| {
-                Error::new(format!(
-                    "Error creating network policy '{}': {err}",
-                    policy.name
-                ))
-            })?;
+        if let Err(err) = thorium.network_policies.create(policy.clone()).await {
+            // only admins may create network policies, so name that requirement when refused
+            let hint = if matches!(
+                err.status(),
+                Some(StatusCode::UNAUTHORIZED | StatusCode::FORBIDDEN)
+            ) {
+                " (creating network policies requires a Thorium admin)"
+            } else {
+                ""
+            };
+            return Err(Error::new(format!(
+                "Failed to create network policy '{}'{hint}: {err}",
+                policy.name
+            )));
+        }
+        // resolve the new policy's id so it can be told apart from same-named policies in
+        // other groups
+        let id = created_policy_id(thorium, policy).await;
         // journal the creation only after it succeeds so rollback never tries to delete a
         // policy that was never actually created
-        journal.created_network_policy(&policy.name);
+        journal.created_network_policy(&policy.name, id);
+        // report the creation, including the id when it could be resolved
+        progress.info_anonymous(format!(
+            "Created network policy '{}'{}",
+            policy.name,
+            utils::policy_suffix(&policy.groups, id.as_ref())
+        ));
+        // count this policy as created
         progress.inc(1);
     }
     Ok(())
@@ -841,6 +1009,12 @@ mod tests {
 
     /// A minimal policy with the given name, groups, and `default_policy` flag (the flag
     /// is just a cheap way to make two policies differ)
+    ///
+    /// # Arguments
+    ///
+    /// * `name` - The policy name
+    /// * `groups` - The groups the policy targets
+    /// * `default_policy` - Whether the policy is a default policy
     fn policy(name: &str, groups: &[&str], default_policy: bool) -> NetworkPolicyRequest {
         NetworkPolicyRequest {
             name: name.to_string(),
@@ -854,6 +1028,10 @@ mod tests {
 
     /// Build a manifest where each `(image_key, policies)` entry is one image with a
     /// single `latest` version bundling those policies
+    ///
+    /// # Arguments
+    ///
+    /// * `images` - The `(image_key, policies)` entries to build images from
     fn manifest(images: Vec<(&str, Vec<NetworkPolicyRequest>)>) -> ToolboxManifest {
         let images = images
             .into_iter()
@@ -908,7 +1086,10 @@ mod tests {
         ]);
         let (policies, warnings) = dedupe_policies(&m, None);
         assert_eq!(policies.len(), 1);
-        assert!(!policies[0].default_policy, "the 'a' definition should be kept");
+        assert!(
+            !policies[0].default_policy,
+            "the 'a' definition should be kept"
+        );
         assert_eq!(warnings.len(), 1);
         // the warning names both images involved and the kept side
         assert!(warnings[0].contains("defined differently by two images"));
@@ -950,6 +1131,13 @@ mod tests {
     }
 
     /// Build a stored `NetworkPolicy` for the existing-index and delta tests
+    ///
+    /// # Arguments
+    ///
+    /// * `name` - The policy name
+    /// * `groups` - The groups the policy is in
+    /// * `default_policy` - Whether the policy is a default policy
+    /// * `id` - The policy's id
     fn existing_policy(
         name: &str,
         groups: &[&str],
@@ -971,6 +1159,10 @@ mod tests {
     }
 
     /// Build an existing-policy index keyed by `(group, name)` from `(group, policy)` pairs
+    ///
+    /// # Arguments
+    ///
+    /// * `entries` - The `(group, policy)` pairs to index
     fn index(entries: Vec<(&str, NetworkPolicy)>) -> HashMap<(String, String), NetworkPolicy> {
         entries
             .into_iter()
@@ -1229,7 +1421,12 @@ mod tests {
         let updates = build_updates(&mismatch);
         assert_eq!(updates.len(), 1);
         assert_eq!(updates[0].id, Uuid::from_u128(2));
-        assert!(updates[0].drift.iter().any(|field| field == "default_policy"));
+        assert!(
+            updates[0]
+                .drift
+                .iter()
+                .any(|field| field == "default_policy")
+        );
     }
 
     /// A coverage gap is folded into the first existing policy as an additive group add
@@ -1247,5 +1444,113 @@ mod tests {
         assert_eq!(updates.len(), 1);
         assert_eq!(updates[0].add_groups, vec!["b".to_string()]);
         assert!(updates[0].drift.is_empty());
+    }
+
+    /// Build a policy whose egress allows the given `(cidr, except)` blocks
+    ///
+    /// # Arguments
+    ///
+    /// * `blocks` - The raw `(cidr, except)` pairs to allow
+    fn egress_policy(blocks: &[(&str, Option<Vec<&str>>)]) -> NetworkPolicyRequest {
+        // start from a minimal policy in group `a`
+        let mut request = policy("p", &["a"], false);
+        // turn each pair into a raw IP block in a single egress rule
+        let allowed_ips = blocks
+            .iter()
+            .map(|(cidr, except)| IpBlockRaw {
+                cidr: (*cidr).to_string(),
+                except: except
+                    .as_ref()
+                    .map(|except| except.iter().map(|cidr| (*cidr).to_string()).collect()),
+            })
+            .collect();
+        request.egress = Some(vec![NetworkPolicyRuleRaw {
+            allowed_ips,
+            ..NetworkPolicyRuleRaw::default()
+        }]);
+        request
+    }
+
+    /// Host addresses gain their full prefix length and IPv6 text is canonicalized,
+    /// matching the form Thorium stores
+    #[test]
+    fn normalize_canonicalizes_cidrs() {
+        let normalized = normalize(egress_policy(&[
+            ("10.0.0.1", None),
+            ("10.0.0.0/8", Some(vec!["10.1.0.0/16", "10.2.3.4"])),
+            ("2001:DB8:0:0:0:0:0:1", None),
+            ("not-a-cidr", None),
+        ]));
+        let blocks = &normalized.egress.as_ref().expect("egress kept")[0].allowed_ips;
+        // a bare IPv4 host becomes a /32
+        assert_eq!(blocks[0].cidr, "10.0.0.1/32");
+        // an already-full network is unchanged, and its except hosts gain /32
+        assert_eq!(blocks[1].cidr, "10.0.0.0/8");
+        assert_eq!(
+            blocks[1].except,
+            Some(vec!["10.1.0.0/16".to_string(), "10.2.3.4/32".to_string()])
+        );
+        // an uncompressed uppercase IPv6 host is compressed, lowercased, and becomes a /128
+        assert_eq!(blocks[2].cidr, "2001:db8::1/128");
+        // an unparsable block is left for the server to reject
+        assert_eq!(blocks[3].cidr, "not-a-cidr");
+    }
+
+    /// A hand-written host CIDR matches the stored `/32` form, so it reports no drift
+    #[test]
+    fn classify_unchanged_for_equivalent_cidrs() {
+        // the stored policy carries the full-length form Thorium renders
+        let mut stored = existing_policy("p", &["a"], false, Uuid::from_u128(1));
+        stored.egress = Some(vec![
+            NetworkPolicyRule::default()
+                .raw_cidr("8.8.8.8/32".to_string(), None)
+                .expect("valid cidr"),
+        ]);
+        let existing = index(vec![("a", stored)]);
+        // the bundled policy is written with a bare host address
+        let bundled = normalize(egress_policy(&[("8.8.8.8", None)]));
+        assert!(matches!(
+            classify_policy(&bundled, &existing),
+            PolicyClassification::Unchanged
+        ));
+    }
+
+    /// A bundled policy with no target groups is dropped with a warning instead of being
+    /// sent to create
+    #[test]
+    fn dedupe_drops_policy_without_groups() {
+        let m = manifest(vec![("a", vec![policy("p", &[], false)])]);
+        let (policies, warnings) = dedupe_policies(&m, None);
+        assert!(policies.is_empty());
+        assert_eq!(warnings.len(), 1);
+        assert!(warnings[0].contains("targets no groups"));
+        // an override supplies a group, so the same policy is kept
+        let (policies, warnings) = dedupe_policies(&m, Some("g"));
+        assert_eq!(policies.len(), 1);
+        assert_eq!(warnings, Vec::<String>::new());
+    }
+
+    /// Repeated groups within one policy collapse to a single entry
+    #[test]
+    fn normalize_dedups_groups() {
+        let normalized = normalize(policy("p", &["b", "a", "b"], false));
+        assert_eq!(normalized.groups, vec!["a".to_string(), "b".to_string()]);
+    }
+
+    /// The update label names a toolbox target group the policy is in, not an unrelated one
+    #[test]
+    fn build_updates_labels_target_group() {
+        // the existing policy spans `z` (unrelated) and `b` (targeted by the toolbox)
+        let existing = existing_policy("p", &["z", "b"], true, Uuid::from_u128(1));
+        let mismatch = PolicyMismatch {
+            name: "p".to_string(),
+            drift: vec!["default_policy".to_string()],
+            missing_groups: Vec::new(),
+            chosen: policy("p", &["b"], false),
+            existing: vec![existing],
+        };
+        let updates = build_updates(&mismatch);
+        assert_eq!(updates.len(), 1);
+        assert_eq!(updates[0].group, "b");
     }
 }

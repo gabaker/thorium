@@ -12,8 +12,10 @@ You can create a ban with Thorctl by using the entity's respective subcommand an
 `bans create` function.
 
 ```Bash
-thorctl <images/pipelines> bans create <group> <image/pipeline> --msg <MESSAGE>
+thorctl <images/pipelines> bans create <group> <image/pipeline> <MESSAGE>
 ```
+
+For example, `thorctl images bans create corn sow "This image is under review"`.
 
 This will create a `Generic`-type ban containing the given message. This also generates an `Error`
 level notification associated with the entity that users can view to see the reason for the ban.
@@ -26,10 +28,11 @@ need the ban's ID if you want to remove a ban. You can view an entity's bans and
 with other metadata by using the Thorctl `describe` command:
 
 ```Bash
-thorctl <ENTITY-TYPE> describe <ENTITY-NAME>
+thorctl <images/pipelines> describe <group>/<image/pipeline> --format json
 ```
 
-This will output the entity's data in JSON format, including its bans:
+This will output the entity's data in JSON format, including its bans (without `--format json`,
+`describe` prints a human-readable summary instead):
 
 ```JSON
 {
@@ -51,7 +54,7 @@ This will output the entity's data in JSON format, including its bans:
 Take note of the ban's ID and provide it to the `bans delete` command to remove it:
 
 ```Bash
-thorctl <ENTITY-TYPE> bans delete <BAN-ID>
+thorctl <images/pipelines> bans delete <group> <image/pipeline> <BAN-ID>
 ```
 
 > Note that removing automatically generated bans is not generally advised, as Thorium will

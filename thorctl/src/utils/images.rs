@@ -12,6 +12,9 @@ use thorium::{
 
 use super::render::{field, header, label, render_markdown};
 
+/// The maximum number of groups searched concurrently when looking up a resource's group
+const GROUP_SEARCH_CONCURRENCY: usize = 10;
+
 /// Write a single line to the output, mapping any IO error
 ///
 /// # Arguments
@@ -48,7 +51,10 @@ pub fn print_image_details(image: &Image, out: &mut dyn Write, ansi: bool) -> Re
     if let Some(timeout) = image.timeout {
         write_line(out, &field("Timeout", &format!("{timeout}s"), ansi))?;
     }
-    write_line(out, &field("Avg runtime", &format!("{}s", image.runtime), ansi))?;
+    write_line(
+        out,
+        &field("Avg runtime", &format!("{}s", image.runtime), ansi),
+    )?;
     let resources = format!(
         "{} mCPU, {} MiB memory, {} MiB storage",
         image.resources.cpu, image.resources.memory, image.resources.ephemeral_storage
@@ -79,11 +85,23 @@ pub fn print_image_details(image: &Image, out: &mut dyn Write, ansi: bool) -> Re
                 ),
             };
             let line = format!("  - {message}");
-            write_line(out, &if ansi { line.bright_red().to_string() } else { line })?;
+            write_line(
+                out,
+                &if ansi {
+                    line.bright_red().to_string()
+                } else {
+                    line
+                },
+            )?;
         }
     }
     if !image.network_policies.is_empty() {
-        let policies = image.network_policies.iter().cloned().collect::<Vec<_>>().join(", ");
+        let policies = image
+            .network_policies
+            .iter()
+            .cloned()
+            .collect::<Vec<_>>()
+            .join(", ");
         write_line(out, &field("Network policies", &policies, ansi))?;
     }
     // finally render the full description markdown
@@ -105,7 +123,11 @@ pub async fn list_all_images(thorium: &Thorium, group: &str) -> Result<Vec<Image
     let mut images = Vec::new();
     // a single group can't realistically exceed this limit; the cursor still
     // pages underneath it
-    let mut cursor = thorium.images.list(group).limit(super::LIST_ALL_LIMIT).details();
+    let mut cursor = thorium
+        .images
+        .list(group)
+        .limit(super::LIST_ALL_LIMIT)
+        .details();
     loop {
         cursor
             .next()
@@ -163,13 +185,15 @@ pub async fn find_image_group(thorium: &Thorium, image_name: &str) -> Result<Str
     // wrap in an Arc<Mutex<>> to add to the list concurrently
     let matching_groups = Arc::new(Mutex::new(matching_groups));
     // create image cursors for each group
-    stream::iter(
-        groups
-            .into_iter()
-            .map(|group| Ok((thorium.images.list(&group).limit(super::LIST_ALL_LIMIT), group))),
-    )
+    stream::iter(groups.into_iter().map(|group| {
+        Ok((
+            thorium.images.list(&group).limit(super::LIST_ALL_LIMIT),
+            group,
+        ))
+    }))
     // concurrently search for the image in each group and add matching groups to the list
-    .try_for_each_concurrent(None, |(cursor, group)| {
+    // bounded so a user in many groups doesn't open a request per group all at once
+    .try_for_each_concurrent(Some(GROUP_SEARCH_CONCURRENCY), |(cursor, group)| {
         search_image_cursor(cursor, group, image_name, matching_groups.clone())
     })
     .await?;
@@ -180,9 +204,16 @@ pub async fn find_image_group(thorium: &Thorium, image_name: &str) -> Result<Str
         .map_err(|_| Error::new("Poison mutex error retrieving image"))?;
     // ensure that only a single matching group was found
     match matching_groups.len() {
-        len if len < 1 => Err(Error::new("Image not found")),
+        0 => Err(Error::new(format!(
+            "Image '{image_name}' not found in any of your groups"
+        ))),
         len if len > 1 => Err(Error::new(format!(
-            "Images with the given name exist in more than one group: {matching_groups:?}. Please specify a group"
+            "Image '{image_name}' exists in multiple groups ({}); specify a group",
+            matching_groups
+                .iter()
+                .map(|group| super::resource_id(group, image_name))
+                .collect::<Vec<_>>()
+                .join(", ")
         ))),
         _ => matching_groups
             .into_iter()

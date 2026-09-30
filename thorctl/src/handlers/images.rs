@@ -14,29 +14,33 @@ mod notifications;
 
 cfg_if::cfg_if! {
     if #[cfg(any(target_os = "linux", target_os = "macos"))] {
-        use std::io::IsTerminal;
+        use std::path::Path;
+        use std::sync::{Arc, Mutex};
 
         use futures::stream::{self, StreamExt};
         use thorium::CtlConf;
-        use thorium::models::ImageRequest;
+        use thorium::models::{ImageRequest, ImageScaler};
 
         use crate::args::images::{ExportImages, ImportImages};
-        use crate::handlers::imports;
-        use crate::handlers::exports::{DiskConflictResolver, WriteOutcome};
+        use crate::handlers::imports::{self, editor::resolve_editor, merge::IMAGE_FIELD_ORDER};
+        use crate::handlers::exports::{
+            self, ConfigExport, DiskConflictResolver, ExportReport, WriteOutcome,
+        };
         use crate::handlers::progress::{Bar, BarKind};
         use super::Controller;
 
         mod export;
         pub(crate) mod import;
 
-        use export::ImageExportWorker;
+        use export::{ImageExportWorker, TarballExport};
     }
 }
 
+/// Prints the rows of the `images get` table
 struct GetImagesLine;
 
 impl GetImagesLine {
-    /// Print this log lines header
+    /// Print the table header
     pub fn header() {
         println!(
             "{:<30} | {:<20} | {:<10} | {:<50}",
@@ -137,13 +141,16 @@ async fn describe(thorium: Thorium, cmd: &DescribeImages) -> Result<(), Error> {
 /// * `cmd` - The delete images command to execute
 async fn delete(thorium: Thorium, cmd: &crate::args::images::DeleteImages) -> Result<(), Error> {
     use colored::Colorize;
+    use itertools::Itertools;
+    // repeated names would only fail as not-found on their second delete
+    let names: Vec<&String> = cmd.images.iter().unique().collect();
     // deleting is irreversible, so confirm exactly what will be removed
     if !cmd.skip_confirm {
         // fail clearly (not with a raw dialoguer error) when we can't prompt
-        utils::require_confirm_terminal("--skip-confirm (-y)")?;
+        utils::require_confirm_terminal("--skip-confirm")?;
         println!("{}", "Images to delete:".bright_red());
-        for image in &cmd.images {
-            println!("  {}:{}", cmd.group, image);
+        for name in &names {
+            println!("  {}", utils::resource_id(&cmd.group, name));
         }
         let confirmed = dialoguer::Confirm::new()
             .with_prompt("Delete the images listed above?")
@@ -153,25 +160,36 @@ async fn delete(thorium: Thorium, cmd: &crate::args::images::DeleteImages) -> Re
             return Ok(());
         }
     }
-    for image in &cmd.images {
-        match thorium.images.delete(&cmd.group, image).await {
-            Ok(_) => println!("Deleted image '{}:{}'", cmd.group, image),
+    // delete each image, continuing past failures so one bad image doesn't strand the rest
+    let mut failed: Vec<String> = Vec::new();
+    for name in names {
+        match thorium.images.delete(&cmd.group, name).await {
+            Ok(_) => println!("Deleted image '{}'", utils::resource_id(&cmd.group, name)),
             // a missing image isn't fatal to the rest of the batch
             Err(err) if err.status() == Some(http::StatusCode::NOT_FOUND) => {
                 eprintln!(
-                    "{}: image '{}:{}' not found; skipping",
+                    "{}: image '{}' not found; skipping",
                     "Warning".bright_yellow(),
-                    cmd.group,
-                    image
+                    utils::resource_id(&cmd.group, name)
                 );
             }
             Err(err) => {
-                return Err(Error::new(format!(
-                    "Failed to delete image '{}:{}': {err}",
-                    cmd.group, image
-                )));
+                eprintln!(
+                    "{}: Failed to delete image '{}': {err}",
+                    "Error".bright_red(),
+                    utils::resource_id(&cmd.group, name)
+                );
+                failed.push(format!("'{}'", utils::resource_id(&cmd.group, name)));
             }
         }
+    }
+    // exit non-zero if anything failed to delete
+    if !failed.is_empty() {
+        return Err(Error::new(format!(
+            "Failed to delete {} image(s): {}",
+            failed.len(),
+            failed.join(", ")
+        )));
     }
     Ok(())
 }
@@ -185,13 +203,14 @@ async fn delete(thorium: Thorium, cmd: &crate::args::images::DeleteImages) -> Re
 /// * `conf` - The Thorctl config
 /// * `workers` - The maximum number of concurrent workers to use
 #[cfg(any(target_os = "linux", target_os = "macos"))]
-pub async fn import(
+async fn import(
     thorium: &Thorium,
     cmd: &ImportImages,
     conf: &CtlConf,
     workers: usize,
 ) -> Result<(), Error> {
-    let progress = Bar::new("", "Importing images", BarKind::Timer);
+    let progress = Bar::new("images import", "Importing images", BarKind::Timer);
+    // build the shared import options from the command
     let opts = import::ImageImportOpts::from_cmd(cmd, workers);
     // no explicit list imports every config in the export directory
     let names = if cmd.images.is_empty() {
@@ -202,7 +221,7 @@ pub async fn import(
     // load the requests and check what already exists before changing anything
     let images = import::categorize_from_disk(thorium, &opts, &names, &progress).await?;
     // no pipelines for a standalone image import; the shared driver handles the rest
-    imports::disk::run_disk_import(
+    Box::pin(imports::disk::run_disk_import(
         thorium,
         conf,
         &progress,
@@ -210,11 +229,154 @@ pub async fn import(
         images,
         Vec::new(),
         cmd.rollback_on_failure,
-    )
+    ))
     .await
 }
 
+/// The options for exporting image configs and their container tarballs
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+pub(crate) struct ImageExportOpts<'a> {
+    /// The group to export images from
+    pub group: &'a str,
+    /// The root export directory (configs and tarballs go in its `images` subdirectory)
+    pub output: &'a Path,
+    /// Only export configs, without container tarballs
+    pub config_only: bool,
+    /// Open each config in an editor for review before writing
+    pub review: bool,
+    /// The editor used for reviews
+    pub editor: &'a str,
+}
+
+/// Export image configs and their container tarballs into an export directory
+///
+/// Configs are written sequentially through the shared `resolver` so on-disk
+/// conflicts can be prompted for and "all" choices carry across the whole export.
+/// Tarballs are only saved for K8s images (the only scaler import loads them for)
+/// and run afterwards in a worker pool for every config that ended up on disk, even
+/// when the user quit partway, so no exported config is left without its tarball.
+/// Failures are recorded in the returned report instead of aborting the export.
+///
+/// # Arguments
+///
+/// * `thorium` - The Thorium client
+/// * `opts` - The image export options
+/// * `names` - The (de-duplicated) names of the images to export
+/// * `resolver` - The on-disk conflict resolver shared across the whole export
+/// * `progress` - The progress bar to log through (cleared before tarballs export)
+/// * `args` - The shared Thorctl args (for the worker count)
+/// * `conf` - The Thorctl config
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+pub(crate) async fn export_images_with(
+    thorium: &Thorium,
+    opts: &ImageExportOpts<'_>,
+    names: Vec<String>,
+    resolver: &mut DiskConflictResolver,
+    progress: &Bar,
+    args: &Args,
+    conf: &CtlConf,
+) -> ExportReport {
+    // collect failures and a Quit across the config and tarball passes
+    let mut report = ExportReport::default();
+    // configs and tarballs both live in the export's images directory
+    let images_dir = opts.output.join("images");
+    // fetch the images concurrently (bounded by --workers, never zero); `buffered` keeps
+    // the input order so prompts and errors come out in a stable order
+    let fetch_workers = std::cmp::min(args.workers, names.len()).max(1);
+    let fetched: Vec<(String, Result<Image, Error>)> = stream::iter(names)
+        .map(|name| async move {
+            let result = thorium.images.get(opts.group, &name).await;
+            (name, result)
+        })
+        .buffered(fetch_workers)
+        .collect()
+        .await;
+    // write each config sequentially so conflicts can be resolved interactively
+    let cfg = ConfigExport {
+        kind: "image",
+        dir: images_dir.clone(),
+        order: IMAGE_FIELD_ORDER,
+        review: opts.review,
+        editor: opts.editor,
+    };
+    let exported = exports::export_configs::<Image, ImageRequest>(
+        &cfg,
+        fetched,
+        |request: &ImageRequest| request.name.as_str(),
+        resolver,
+        progress,
+        &mut report,
+    )
+    .await;
+    // queue a tarball for every K8s image config now on disk that has a container url.
+    // A config left as-is (identical or a skipped conflict) only re-exports a missing
+    // tarball, so a large archive that's already present isn't re-pulled and re-saved
+    let mut docker_jobs: Vec<(String, String)> = Vec::new();
+    if !opts.config_only {
+        for config in exported {
+            // import only loads tarballs for K8s images, so other scalers stay config-only
+            if config.request.scaler != ImageScaler::K8s {
+                continue;
+            }
+            if let Some(url) = config.request.image {
+                let tarball = images_dir.join(format!("{}.tar.gz", config.name));
+                if config.outcome == WriteOutcome::Written || !tarball.exists() {
+                    docker_jobs.push((config.name, url));
+                }
+            }
+        }
+    }
+    // export the queued tarballs in parallel, collecting per-image failures
+    if !docker_jobs.is_empty() {
+        // clear the config bar so it doesn't fight with the worker bars
+        progress.finish_and_clear();
+        let failures = Arc::new(Mutex::new(Vec::new()));
+        let tarballs = TarballExport {
+            images_dir,
+            failures: failures.clone(),
+        };
+        // never spawn more workers than jobs, and never zero (no one would take the jobs)
+        let workers = std::cmp::min(args.workers, docker_jobs.len()).max(1);
+        let mut controller = Controller::<ImageExportWorker>::spawn(
+            "Exporting Images",
+            thorium,
+            workers,
+            conf,
+            args,
+            &tarballs,
+        )
+        .await;
+        for (name, url) in docker_jobs {
+            // a job that can't be queued never runs, so count it as failed
+            if let Err(error) = controller.add_job((name.clone(), url)).await {
+                controller.error(&format!(
+                    "Failed to queue tarball export for image '{name}': {error}"
+                ));
+                report.fail("image tarball", name);
+            }
+        }
+        // wait for the workers; a controller error means results may be incomplete
+        if let Err(error) = controller.finish().await {
+            progress.error(format!("Failed to finish exporting tarballs: {error}"));
+            report.fail("image tarball", "(worker pool)");
+        }
+        // fold the workers' failures into the report
+        let failed = std::mem::take(
+            &mut *failures
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner),
+        );
+        for name in failed {
+            report.fail("image tarball", name);
+        }
+    }
+    report
+}
+
 /// Export images from Thorium
+///
+/// A Quit at a conflict prompt stops writing further configs, still exports the
+/// tarballs of configs already written, and exits non-zero ("Export stopped early").
 ///
 /// # Arguments
 ///
@@ -223,134 +385,60 @@ pub async fn import(
 /// * `args` - The shared Thorctl args (for the worker count)
 /// * `conf` - The Thorctl config
 #[cfg(any(target_os = "linux", target_os = "macos"))]
-pub async fn export(
+async fn export(
     thorium: &Thorium,
     cmd: &ExportImages,
     args: &Args,
     conf: &CtlConf,
 ) -> Result<(), Error> {
+    // fail before doing any work if --review can't open an editor
+    exports::require_review_terminal(cmd.review)?;
     // no explicit list exports every image in the group
-    let names: Vec<String> = if cmd.images.is_empty() {
-        crate::utils::images::list_all_images(thorium, &cmd.group)
+    let listed = if cmd.images.is_empty() {
+        let names: Vec<String> = utils::images::list_all_images(thorium, &cmd.group)
             .await?
             .into_iter()
             .map(|image| image.name)
-            .collect()
+            .collect();
+        // an empty group has nothing to export; say so rather than silently succeeding
+        if names.is_empty() {
+            return Err(Error::new(format!(
+                "No images found in group '{}'",
+                cmd.group
+            )));
+        }
+        Some(names)
     } else {
-        cmd.images.clone()
+        None
     };
-    // pre-flight: write each config sequentially so on-disk conflicts can be
-    // resolved interactively without the worker pool prompting concurrently
-    let can_prompt = !cmd.skip_conflicts && std::io::stdin().is_terminal();
-    let editor = crate::handlers::imports::editor::resolve_editor(None, conf).to_string();
-    let mut resolver = DiskConflictResolver::new(cmd.overwrite, can_prompt, editor);
-    let progress = Bar::new("images export", "Exporting configs", BarKind::Timer);
-    let images_dir = cmd.output.join("images");
-    // fetch the images concurrently (bounded by --workers); the writes below stay
-    // sequential so the conflict resolver can prompt without racing
-    let fetch_workers = std::cmp::min(args.workers, names.len()).max(1);
-    let fetched: Vec<(String, Result<Image, Error>)> = stream::iter(names)
-        .map(|name| async move {
-            let result = thorium.images.get(&cmd.group, &name).await;
-            (name, result)
-        })
-        .buffer_unordered(fetch_workers)
-        .collect()
-        .await;
-    // images whose container tarball still needs exporting after their config lands,
-    // paired with the container url so the worker pool doesn't have to re-fetch them
-    let mut docker_jobs: Vec<(String, String)> = Vec::new();
-    // names we couldn't fetch; collected so the export exits non-zero instead of
-    // silently reporting success after skipping resources
-    let mut failed: Vec<String> = Vec::new();
-    for (name, result) in fetched {
-        let image = match result {
-            Ok(image) => image,
-            Err(err) => {
-                progress.error(format!("Failed to get image '{name}': {err}"));
-                failed.push(name);
-                continue;
-            }
-        };
-        let request = ImageRequest::from(image.clone());
-        // curated (prioritized) field order so an exported image config matches the layout `init`
-        // and toolbox export produce — one consistent, edit-friendly format everywhere (still
-        // deterministic: curated keys first, remaining keys sorted)
-        let config_json = crate::utils::curated_json(
-            &request,
-            crate::handlers::imports::merge::IMAGE_FIELD_ORDER,
-        )
-        .map_err(|e| Error::new(format!("Failed to serialize image '{name}': {e}")))?;
-        // optionally open the config in an editor for review before writing
-        let config_json = if cmd.review {
-            progress
-                .suspend_async(crate::handlers::imports::editor::review_config_in_editor::<
-                    thorium::models::ImageRequest,
-                >(
-                    &config_json,
-                    &format!("export-image-{name}"),
-                    &conf.default_editor,
-                    crate::handlers::imports::merge::IMAGE_FIELD_ORDER,
-                ))
-                .await?
-        } else {
-            config_json
-        };
-        let outcome = resolver
-            .write_yaml::<ImageRequest>(
-                &images_dir.join(format!("{name}.json")),
-                &config_json,
-                &progress,
-            )
-            .await?;
-        if outcome == WriteOutcome::Quit {
-            progress.refresh("Export stopped early", BarKind::Timer);
-            progress.finish();
-            return Ok(());
-        }
-        // queue the container tarball export for images that have a url. When the
-        // config write was skipped (identical on disk or a skipped conflict) avoid
-        // redundantly re-pulling/saving a large tarball that's already present, but
-        // still export one that's missing so a skipped config can't leave a resource
-        // without its image.
-        if !cmd.config_only
-            && let Some(url) = &image.image
-        {
-            let tarball = images_dir.join(format!("{name}.tar.gz"));
-            if outcome == WriteOutcome::Written || !tarball.exists() {
-                docker_jobs.push((name.clone(), url.clone()));
-            }
-        }
-    }
+    // --quiet gets an inert bar that still prints warnings and errors
+    let progress = Bar::new_or_quiet(
+        "images export",
+        "Exporting image configs",
+        BarKind::Timer,
+        args.quiet,
+    );
+    // explicit names are de-duplicated so one image is never exported twice at once
+    let names = listed.unwrap_or_else(|| imports::dedup_names(cmd.images.clone(), &progress));
+    // build a resolver that prompts only when interactive and on a terminal
+    let can_prompt = !cmd.skip_conflicts && imports::is_interactive_terminal();
+    let editor = resolve_editor(cmd.editor.as_deref(), conf);
+    let mut resolver = DiskConflictResolver::new(cmd.overwrite, can_prompt, editor.to_string())
+        .explicit_skip(cmd.skip_conflicts);
+    // export the configs and tarballs
+    let opts = ImageExportOpts {
+        group: &cmd.group,
+        output: &cmd.output,
+        config_only: cmd.config_only,
+        review: cmd.review,
+        editor,
+    };
+    let report =
+        export_images_with(thorium, &opts, names, &mut resolver, &progress, args, conf).await;
+    // print the final banner and exit non-zero on any failure or a Quit
+    progress.refresh(report.banner(), BarKind::Timer);
     progress.finish();
-    // export container tarballs in parallel for the approved images
-    if !docker_jobs.is_empty() {
-        let workers = std::cmp::min(args.workers, docker_jobs.len());
-        let mut controller = Controller::<ImageExportWorker>::spawn(
-            "Exporting Images",
-            thorium,
-            workers,
-            conf,
-            args,
-            cmd,
-        )
-        .await;
-        for job in docker_jobs {
-            if let Err(error) = controller.add_job(job).await {
-                controller.error(&error.to_string());
-            }
-        }
-        controller.finish().await?;
-    }
-    // surface skipped images as a non-zero exit so a partial export isn't read as success
-    if !failed.is_empty() {
-        return Err(Error::new(format!(
-            "Failed to export {} image(s): {}",
-            failed.len(),
-            failed.join(", ")
-        )));
-    }
-    Ok(())
+    report.into_result()
 }
 
 /// Handle all images commands
@@ -358,7 +446,7 @@ pub async fn export(
 /// # Arguments
 ///
 /// * `args` - The arguments passed to Thorctl
-/// * `cmd` - The reactions command to execute
+/// * `cmd` - The images command to execute
 pub async fn handle(args: &Args, cmd: &Images) -> Result<(), Error> {
     // load our config and instance our client
     let (conf, thorium) = utils::get_client(args).await?;
@@ -370,7 +458,7 @@ pub async fn handle(args: &Args, cmd: &Images) -> Result<(), Error> {
     if !args.skip_update && !conf.skip_update.unwrap_or_default() {
         super::update::ask_update(&thorium).await?;
     }
-    // call the right reactions handler
+    // call the right images handler
     match cmd {
         Images::Get(cmd) => get(thorium, cmd).await,
         Images::Describe(cmd) => describe(thorium, cmd).await,
