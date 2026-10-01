@@ -1,0 +1,14 @@
+{{- if .Values.control_plane.podDisruptionBudget -}}
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  namespace: {{ include "quickwit.namespace" $ }}
+  name: {{ include "quickwit.fullname" . }}-control-plane
+  labels:
+    {{- include "quickwit.labels" . | nindent 4 }}
+spec:
+  selector:
+    matchLabels:
+      {{- include "quickwit.control_plane.selectorLabels" . | nindent 6 }}
+  {{- toYaml .Values.control_plane.podDisruptionBudget | nindent 2 }}
+{{- end -}}

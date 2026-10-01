@@ -1,5 +1,6 @@
 use k8s_openapi::api::core::v1::Service;
 use kube::{
+    Api,
     api::{DeleteParams, Patch, PatchParams, PostParams},
     runtime::reflector::Lookup,
 };
@@ -96,7 +97,7 @@ async fn update(meta: &ClusterMeta, name: &str, service: &Service) -> Result<(),
 /// This creates an API service so network traffic can be routed to the API
 /// from internal or external locations (using an ingress proxy like Traefik).
 ///
-///  Arguments
+/// # Arguments
 ///
 /// * `meta` - Thorium cluster client and metadata
 /// * `service` - The service to update
@@ -147,7 +148,7 @@ pub async fn create_or_update(meta: &ClusterMeta, service: &Service) -> Result<(
 /// This creates an API service so network traffic can be routed to the API
 /// from internal or external locations (using an ingress proxy like Traefik).
 ///
-///  Arguments
+/// # Arguments
 ///
 /// * `meta` - Thorium cluster client and metadata
 pub async fn create_or_update_all(meta: &ClusterMeta) -> Result<(), Error> {
@@ -161,36 +162,34 @@ pub async fn create_or_update_all(meta: &ClusterMeta) -> Result<(), Error> {
     create_or_update(meta, &mcp_service).await
 }
 
-/// Cleanup Thorium API service
+/// Cleanup the Thorium API and MCP services
 ///
-/// This deletes a Thorium API service from kubernetes based on the default
-/// service name thorium-api.
+/// This deletes the `thorium-api` and `thorium-mcp` services the operator creates.
 ///
-///  Arguments
+/// # Arguments
 ///
-/// * `meta` - Thorium cluster client and metadata
-pub async fn delete(meta: &ClusterMeta) -> Result<(), Error> {
+/// * `service_api` - The Service API for the `ThoriumCluster`'s namespace
+pub async fn delete(service_api: &Api<Service>) -> Result<(), Error> {
     let params: DeleteParams = DeleteParams::default();
-    // delete the Thorium service
-    let service_name = "thorium-api".to_string();
-    match meta.service_api.delete(&service_name, &params).await {
-        Ok(_) => println!("Deleted {} service", &service_name),
-        Err(kube::Error::Api(error)) => {
-            // service was not found, continue on
-            if error.code == 404 {
-                println!("Service {} does not exist, skipping deletion", service_name);
-                return Ok(());
+    // delete each service we create
+    for service_name in ["thorium-api", "thorium-mcp"] {
+        match service_api.delete(service_name, &params).await {
+            Ok(_) => println!("Deleted {service_name} service"),
+            // a missing service is already in the state we want
+            Err(kube::Error::Api(error)) if error.code == 404 => {
+                println!("Service {service_name} does not exist, skipping deletion");
             }
-            return Err(Error::new(format!(
-                "Could not delete {} service: {}",
-                service_name, error.message
-            )));
-        }
-        Err(error) => {
-            return Err(Error::new(format!(
-                "Could not delete {} service: {}",
-                service_name, error
-            )));
+            Err(kube::Error::Api(error)) => {
+                return Err(Error::new(format!(
+                    "Could not delete {service_name} service: {}",
+                    error.message
+                )));
+            }
+            Err(error) => {
+                return Err(Error::new(format!(
+                    "Could not delete {service_name} service: {error}"
+                )));
+            }
         }
     }
     Ok(())
