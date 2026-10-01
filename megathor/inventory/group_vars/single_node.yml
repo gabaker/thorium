@@ -1,3 +1,15 @@
+# S3 backend: SeaweedFS runs as one process on one PVC, while Rook needs >= 3 raw
+# disks; to use Rook on a single node instead, swap these two toggles
+seaweedfs_enabled: true
+rook_enabled: false
+
+# SeaweedFS
+seaweedfs_volume_size: "32Gi"
+seaweedfs_cpu_requests: "256m"
+seaweedfs_memory_requests: "512Mi"
+seaweedfs_cpu_limits: "1"
+seaweedfs_memory_limits: "2Gi"
+
 # Rook Operator
 rook_provisioner_replicas: 1
 
@@ -20,12 +32,12 @@ elastic_search_node_count: 1
 elastic_search_volume_size: "32Gi"
 elastic_search_cpu_requests: "1"
 elastic_search_cpu_limits: "1"
-elastic_search_memory_requests: "2G" 
+elastic_search_memory_requests: "2G"
 elastic_search_memory_limits: "2G"
-kibana_cpu_requests: "1" 
+kibana_cpu_requests: "1"
 kibana_cpu_limits: "1"
 kibana_memory_requests: "1G"
-kibana_memory_limits: "1G" 
+kibana_memory_limits: "1G"
 
 # Redis
 redis_volume_size: "8Gi"
@@ -33,14 +45,6 @@ redis_cpu_requests: "512m"
 redis_memory_requests: "512Mi"
 redis_cpu_limits: "1"
 redis_memory_limits: "1Gi"
-
-# Minio
-minio_replicas: 1
-minio_cpu_requests: "256m"
-minio_memory_requests: "512Mi"
-minio_cpu_limits: "1"
-minio_memory_limits: "1Gi"
-minio_volume_size: "32Gi"
 
 # Jaeger
 jaeger_replicas: 1
@@ -71,6 +75,8 @@ scylla_operator_replicas: 1
 # Scylla Cluster
 scylla_members: 1
 scylla_replication_factor: 1
+# a single node rarely meets production mode's XFS and host tuning requirements
+scylla_developer_mode: true
 scylla_storage_size: "32Gi"
 scylla_cpu_requests: "1"
 scylla_memory_requests: "2Gi"
@@ -86,4 +92,3 @@ thorium_nodes:
   - <thorium node 1>
   - <thorium node 2>
   - <thorium node 3>
-

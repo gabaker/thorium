@@ -1,6 +1,8 @@
 offline: true
 use_proxy: false
-# replace this IP:PORT with the IP/Hostname:port of your private registry
+# replace this IP:PORT with the IP/Hostname:port of your private registry; every
+# image must be mirrored there under its upstream path (see scripts/offline-images.txt
+# and scripts/mirror-images.bash)
 offline_registry: "10.0.0.1:5000"
 
 k8s_registry: "{{ offline_registry }}"
@@ -13,12 +15,12 @@ elastic_container_registry: "{{ offline_registry }}"
 # Redis
 redis_container_registry: "{{ offline_registry }}"
 # redis_image: "redis"
-# redis_version: "7"
+# redis_version: "7.4.11"
 
-# Minio
-minio_registry: "{{ offline_registry }}"
-# minio_image: "minio/minio"
-# minio_version: "latest"
+# SeaweedFS
+seaweedfs_container_registry: "{{ offline_registry }}"
+# seaweedfs_image: "chrislusf/seaweedfs"
+# seaweedfs_version: "4.48"
 
 # Rook Operator
 rook_container_registry: "{{ offline_registry }}"
@@ -33,11 +35,11 @@ ceph_container_registry: "{{ offline_registry }}"
 # Jaeger
 jaeger_container_registry: "{{ offline_registry }}"
 # jaeger_image: "jaegertracing/jaeger-query"
-# jaeger_version: "latest"
+# jaeger_version: "1.76.0"
 
 # Kubegres
 kubegres_container_registry: "{{ offline_registry }}"
-# kubegres_image: "reactivetechio/kubegres:1.19"
+# kubegres_image: "reactivetechio/kubegres"
 # kubegres_version: "1.19"
 
 # Quickwit
@@ -60,11 +62,14 @@ cert_manager_webhook_image: "{{ cert_manager_container_registry }}/jetstack/cert
 cert_manager_acme_solver_image: "{{ cert_manager_container_registry }}/jetstack/cert-manager-acmesolver:{{ cert_manager_version }}"
 # cert_manager_version: "v1.18.2"
 
-# Scylla Operator
+# Scylla Operator and Cluster
 scylla_container_registry: "{{ offline_registry }}"
 # scylla_base_image: "scylladb"
+# scylla_image: "scylladb/scylla"
 # scylla_agent_image: "scylladb/scylla-manager-agent"
-# scylla_helm_chart_version: "v1.16.3"
+# offline-stage.yml pulls files/scylla-operator-<scylla_helm_chart_version>.tgz (the chart
+# versions carry a "v" prefix, e.g. scylla-operator-v1.21.1.tgz)
+# scylla_helm_chart_version: "v1.21.1"
 
 # Thorium Operator
 thorium_container_registry: "{{ offline_registry }}"

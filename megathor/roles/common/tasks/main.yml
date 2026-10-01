@@ -1,19 +1,47 @@
 ---
+# Rook always deploys a Ceph object store, so rook and seaweedfs are each a
+# complete S3 backend and the s3_* settings can only point at one of them
+- name: Ensure at most one S3 backend is enabled
+  ansible.builtin.assert:
+    that:
+      - not (rook_enabled | default(false) | bool and seaweedfs_enabled | default(false) | bool)
+    fail_msg: >-
+      Only one of rook_enabled ({{ rook_enabled | default(false) }}) and
+      seaweedfs_enabled ({{ seaweedfs_enabled | default(false) }}) may be true
+
+- name: Ensure an external S3 endpoint is set when no S3 backend is deployed
+  ansible.builtin.assert:
+    that:
+      - s3_endpoint | length > 0
+    fail_msg: >-
+      Neither rook_enabled nor seaweedfs_enabled is true, so set s3_endpoint (and s3_region,
+      s3_access_key, s3_secret_key) to an external S3 service
+  when: not (rook_enabled | default(false) | bool or seaweedfs_enabled | default(false) | bool)
+
+- name: Ensure the instance name is a valid namespace prefix
+  ansible.builtin.assert:
+    that:
+      - thorium_instance is match('^[a-z0-9]([-a-z0-9]{0,30}[a-z0-9])?$')
+    fail_msg: "thorium_instance ({{ thorium_instance }}) must be a lowercase DNS label of at most 32 characters"
+  when: thorium_instance | length > 0
+
+# The example inventories ship "<...>" placeholders that must be replaced
+- name: Ensure the Thorium node list has been filled in
+  ansible.builtin.assert:
+    that:
+      - thorium_nodes | length > 0
+      - thorium_nodes | select('search', '<') | list | length == 0
+    fail_msg: "Set thorium_nodes to the names of the Kubernetes nodes Thorium may schedule jobs on"
+  when: thorium_enabled | default(true) | bool
+
+- name: Ensure the Traefik external IPs have been filled in
+  ansible.builtin.assert:
+    that:
+      - traefik_external_ips | select('search', '<') | list | length == 0
+    fail_msg: "Set traefik_external_ips to the addresses Traefik should be reachable on"
+  when: traefik_enabled | default(true) | bool
+
 - name: Create artifacts directory
   file:
     path: ./artifacts
     state: directory
-
-# Install Python dependencies
-#- name: Install Python pip
-#  package:
-#    name: python3-pip
-#    state: present
-#
-#- name: Install Ansible pip dependencies
-#  pip:
-#    name: "{{ item }}"
-#    state: present
-#  loop:
-#    - kubernetes
-#    - boto3

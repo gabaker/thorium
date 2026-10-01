@@ -1,0 +1,43 @@
+# Creates Thorium's Scylla role and keyspace. Runs inside the first Scylla pod
+# with this script on stdin, so credentials go into temporary cqlshrc files and
+# never appear on a command line; any failure fails the task.
+set -euo pipefail
+HOST='scylla-us-east-1-us-east-1a-0.{{ scylla_namespace }}.svc.cluster.local'
+RC_DIR=$(mktemp -d)
+trap 'rm -rf "$RC_DIR"' EXIT
+printf '[authentication]\nusername = %s\npassword = %s\n' {{ scylla_username | quote }} {{ scylla_password | quote }} > "$RC_DIR/thorium"
+printf '[authentication]\nusername = cassandra\npassword = cassandra\n' > "$RC_DIR/cassandra"
+
+# Find working credentials: Thorium's (a rerun) or the default cassandra login
+# (first run). CQL can lag behind pod readiness, so retry before giving up.
+AUTH=""
+for attempt in $(seq 1 30); do
+    for candidate in thorium cassandra; do
+        if cqlsh "$HOST" --cqlshrc="$RC_DIR/$candidate" -e "DESCRIBE CLUSTER" >/dev/null 2>&1; then
+            AUTH=$candidate
+            break 2
+        fi
+    done
+    echo "Waiting for Scylla to accept logins (attempt $attempt/30)..."
+    sleep 5
+done
+if [ -z "$AUTH" ]; then
+    echo "ERROR: neither the saved {{ scylla_username }} credentials nor the default cassandra login work" >&2
+    exit 1
+fi
+cql() { cqlsh "$HOST" --cqlshrc="$RC_DIR/$AUTH" -e "$1"; }
+
+cql "CREATE ROLE IF NOT EXISTS admin WITH SUPERUSER = true"
+cql "CREATE ROLE IF NOT EXISTS {{ scylla_username }} WITH PASSWORD = '{{ scylla_password }}' AND LOGIN = true AND SUPERUSER = true"
+# keep an existing role's password in step with the saved credential
+cql "ALTER ROLE {{ scylla_username }} WITH PASSWORD = '{{ scylla_password }}'"
+cql "CREATE KEYSPACE IF NOT EXISTS thorium WITH REPLICATION = {'class': 'SimpleStrategy', 'replication_factor': {{ scylla_replication_factor }}}"
+# grants may already be in place (or implied by superuser), so their errors are ignored
+cql "GRANT admin TO {{ scylla_username }}" 2>/dev/null || true
+cql "GRANT ALL ON KEYSPACE thorium TO {{ scylla_username }}" 2>/dev/null || true
+cql "GRANT CREATE ON ALL KEYSPACES TO {{ scylla_username }}" 2>/dev/null || true
+
+# Drop the default cassandra role on first run only
+if [ "$AUTH" = "cassandra" ]; then
+    cqlsh "$HOST" --cqlshrc="$RC_DIR/thorium" -e "DROP ROLE IF EXISTS cassandra"
+fi

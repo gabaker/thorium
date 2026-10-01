@@ -1,3 +1,5 @@
 ansible
 kubernetes
 boto3
+# json_query filter used by the rook role
+jmespath

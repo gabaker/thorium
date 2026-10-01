@@ -51,10 +51,12 @@ rules:
   verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
 ---
 
+# Each deployment binds its own "thorium" service account, which the operator
+# (when deployed here) and this deployment's scaler run as
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRoleBinding
 metadata:
-  name: thorium-operator-binding
+  name: "thorium-operator-binding{{ '-' ~ thorium_instance if thorium_instance else '' }}"
 subjects:
 - kind: ServiceAccount
   name: thorium 

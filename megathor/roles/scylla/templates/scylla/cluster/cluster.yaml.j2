@@ -9,10 +9,12 @@ metadata:
   name: scylla
   namespace: "{{ scylla_namespace }}"
 spec:
+  repository: "{{ scylla_container_registry }}/{{ scylla_image }}"
   agentRepository: "{{ scylla_container_registry }}/{{ scylla_agent_image}}"
   version: "{{ scylla_version }}"
   agentVersion: "{{ scylla_agent_version }}"
-  developerMode: "{{ scylla_developer_mode }}"
+  # the CRD requires a boolean, not a string
+  developerMode: {{ scylla_developer_mode | bool | lower }}
   datacenter:
     name: us-east-1
     racks:

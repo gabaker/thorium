@@ -1,5 +1,7 @@
 
 # Cert Manager
+# Deploy the cluster-wide cert-manager (needed by the Scylla operator webhook);
+# disable when another deployment in this cluster already provides it
 cert_manager_enabled: true
 cert_manager_version: "v1.18.2"
 cert_manager_container_registry: "quay.io"
@@ -12,25 +14,35 @@ cert_manager_acme_solver_image: "{{ cert_manager_container_registry }}/jetstack/
 scylla_enabled: true
 
 # Scylla Operator
+# Deploy the cluster-wide Scylla operator; disable when another deployment in
+# this cluster already provides it
+scylla_operator_enabled: true
 scylla_operator_replicas: 1
 scylla_container_registry: "docker.io"
 scylla_base_image: "scylladb"
 scylla_agent_image: "scylladb/scylla-manager-agent"
-scylla_helm_chart_version: "v1.16.3"
+scylla_image: "scylladb/scylla"
+# Pinned: newer operators use curl in probes/hooks, which the scylla-manager-agent image
+# (scylla_agent_version) lacks; bump only together with a compatible agent. The chart repo
+# publishes versions with a "v" prefix, which the offline tarball name also carries, and
+# operator values are read from templates/scylla/operator/<version>/operator.yaml.j2
+scylla_helm_chart_version: "v1.21.1"
 scylla_operator_namespace: "scylla-operator"
 
 # Scylla Cluster
 scylla_members: 3
 scylla_replication_factor: 3
-scylla_namespace: "scylla"
+scylla_namespace: "{{ namespace_prefix }}scylla"
 scylla_version: "6.2.3"
 scylla_agent_version: "3.4.2"
-scylla_developer_mode: "false"
+# Production mode refuses to start without XFS and tuned hosts; enable developer
+# mode for single-node or test clusters
+scylla_developer_mode: false
 scylla_storage_size: "32Gi"
 scylla_cpu_requests: "0"
 scylla_memory_requests: "0"
 scylla_cpu_limits: "4"
 scylla_memory_limits: "16Gi"
 scylla_nodes:
-  - "scylla-client.scylla.svc.cluster.local" 
+  - "scylla-client.{{ scylla_namespace }}.svc.cluster.local"
 scylla_username: "thorium"

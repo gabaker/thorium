@@ -1,1 +1,9 @@
 k8s_registry: "registry.k8s.io"
+# An optional name for this Thorium deployment. When set, every per-deployment
+# namespace is prefixed with "<thorium_instance>-" (e.g. "test-thorium",
+# "test-redis") so several deployments can share one Kubernetes cluster. The
+# cluster-wide operators (cert-manager, ECK, Scylla, Kubegres, Traefik, and the
+# Thorium operator) are shared by every deployment in a cluster, so each is only
+# deployed by one of them (see the *_operator_enabled toggles).
+thorium_instance: ""
+namespace_prefix: "{{ thorium_instance ~ '-' if thorium_instance else '' }}"

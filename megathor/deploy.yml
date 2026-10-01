@@ -9,10 +9,10 @@
     - role: rook
       when: rook_enabled | bool
     - role: secrets
-    # minio must be deployed after secrets get read/setup
-    - role: minio
-      when: minio_enabled | bool
-    # bucket creation must happen after minio or rook are deployed
+    # seaweedfs must be deployed after secrets get read/setup
+    - role: seaweedfs
+      when: seaweedfs_enabled | bool
+    # bucket creation must happen after the S3 backend is deployed
     - role: s3
     # Databases/Tracing
     - role: elastic
@@ -21,8 +21,10 @@
       when: redis_enabled | bool
     - role: jaeger
       when: jaeger_enabled | bool
+    # the Kubegres operator is cluster-wide; kubegres_enabled alone still decides
+    # whether Quickwit's Postgres is run through Kubegres
     - role: kubegres
-      when: kubegres_enabled | bool
+      when: kubegres_operator_enabled | bool
     - role: quickwit
       when: quickwit_enabled | bool
     - role: scylla
