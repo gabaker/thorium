@@ -8,7 +8,9 @@ use crate::k8s::clusters::ClusterMeta;
 /// Add worker nodes to Thorium
 ///
 /// Each Thorium worker must be added Thorium via the API with an empty resource spec before
-/// the scaler can schedule pods on them.
+/// the scaler can schedule pods on them. The workers of each cluster are the nodes listed in the
+/// config or, when none are listed, every node of that cluster. A cluster with an `api_url` that
+/// lists no nodes adds none, since the operator can only list the nodes of its own cluster.
 ///
 /// # Arguments
 ///
@@ -18,9 +20,11 @@ pub async fn add_nodes_to_thorium(meta: &ClusterMeta, thorium: &Thorium) -> Resu
     // use default resources for initial node registration
     let resources = Resources::default();
     // add each cluster's nodes to Thorium
-    let clusters = meta.cluster.spec.config.thorium.scaler.k8s.clusters.clone();
-    for (name, k8s_cluster) in clusters.iter() {
-        for node in k8s_cluster.nodes.iter() {
+    let clusters = meta.conf.thorium.scaler.k8s.clusters.clone();
+    for (name, k8s_cluster) in &clusters {
+        // get the node names in our conf, or every node when none are listed
+        let nodes = crate::k8s::nodes::resolve_nodes(meta, k8s_cluster).await?;
+        for node in &nodes {
             // build node registration object
             let node_reg = NodeRegistration {
                 cluster: if k8s_cluster.alias.is_some() {
@@ -29,7 +33,7 @@ pub async fn add_nodes_to_thorium(meta: &ClusterMeta, thorium: &Thorium) -> Resu
                     name.clone()
                 },
                 name: node.clone(),
-                resources: resources,
+                resources,
             };
             // register node config w/ Thorium API
             let reg_result = thorium.system.register_node(&node_reg).await?;

@@ -287,18 +287,6 @@ Thorium provides no automatic migration of that state. To carry it over, rename 
 yourself or restore a `thoradm backup` taken before the upgrade; neither is a procedure Thorium
 provides or has tested.
 
-On every reconcile the operator sends CreateBucket for each Thorium bucket (`files`, `repos`,
-`attachments`, `results`, `ephemeral`, `graphics`, and `reaction_cache`, including the ones the
-example leaves at their default names) and treats a bucket Thorium's S3 identity already owns as
-created. It sends a location constraint only when `thorium.s3.region` names a region other than
-`us-east-1`; with no region, an empty one, or `us-east-1` it sends no bucket configuration, so the
-store creates the bucket in its default location. A refused CreateBucket fails the reconcile, and
-the operator logs `Failed to create bucket <bucket> at <endpoint> (thorium.s3.region: <region>):
-...` and retries. If the store refuses the request, or Thorium's S3 identity may not create
-buckets, pre-create every bucket and set `thorium.s3.skip_bucket_auto_create: true`: the operator
-then sends no CreateBucket and doesn't check that the buckets exist, so a missing bucket shows up
-only when Thorium first uses it.
-
 Thorium deployments that consist of multiple K8s clusters (managed by a single scaler pod) will
 require a dedicated `kubeconfig` secret rather than the use of a service account that is default
 for single cluster instances. This secret file must be built manually from the `kubeconfig` files

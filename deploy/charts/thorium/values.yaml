@@ -1,0 +1,93 @@
+# Thorium umbrella chart. Install it into the "thorium" namespace, or into "<prefix>-thorium"
+# (e.g. "dev-thorium") to give every Thorium namespace the namespace prefix "<prefix>-" (a
+# lowercase DNS label of at most 32 characters). The infra-operators chart must already be
+# installed.
+#
+# Each top-level key below configures one subchart; see charts/<name>/values.yaml for every
+# setting. Defaults are sized for a single-node development cluster; see values-production.yaml
+# for a multi-node starting point.
+
+# Settings shared by every subchart
+global:
+  # The cluster DNS domain used to build in-cluster service hostnames
+  clusterDomain: cluster.local
+  # The cluster's service and pod CIDRs (e.g. [10.96.0.0/12, 10.244.0.0/16]), which the chart
+  # can't detect. When operator.operator.proxy sets a proxy they are added to its noProxy along
+  # with localhost and the cluster domain, so in-cluster traffic addressed by IP (a Service's
+  # ClusterIP, a pod IP) bypasses the proxy instead of being sent through it
+  clusterCIDRs: []
+  # Pull every image from this registry instead of its upstream one (e.g. "10.0.0.1:5000" for an
+  # offline mirror). The upstream registry host is dropped and the path kept:
+  # docker.io/library/redis:7.4.11 -> <registry>/redis:7.4.11,
+  # docker.elastic.co/elasticsearch/elasticsearch:8.19.2 -> <registry>/elasticsearch/elasticsearch:8.19.2
+  imageRegistry: ""
+  # The backing services this chart deploys and manages. Each toggle is shared by every
+  # subchart: infra deploys the service, secrets renders its credentials, and the operator
+  # picks matching bootstrap defaults. Set one to false to point Thorium at an external
+  # service instead (see deploy/README.md, "External services").
+  managed:
+    # deploy ScyllaDB through the Scylla operator; the Thorium operator creates Thorium's
+    # Scylla role with the default cassandra superuser (cluster.bootstrap.scylla)
+    scylla: true
+    # deploy Elasticsearch/Kibana through ECK; Thorium's Elastic user and role come from ECK's
+    # file realm, so the operator needs no Elastic superuser
+    elastic: true
+    # deploy Redis; when false set operator.backends.redis.host and secrets.credentials.redisPassword
+    redis: true
+    # deploy SeaweedFS as the S3 store and create the quickwit bucket in it; when false set
+    # operator.backends.s3.endpoint, secrets.credentials.s3AccessKey/s3SecretKey, and (with
+    # Quickwit) secrets.quickwitS3Endpoint. The operator creates Thorium's buckets either way
+    s3: true
+    # deploy Postgres (Kubegres) for the Quickwit metastore and create its database; when false
+    # set secrets.quickwitMetastoreUri (with Quickwit) to a database the site created
+    postgres: true
+  # Thorium's Elastic index names, used for the ThoriumCluster config and for the Elastic role
+  # that grants Thorium every thorium* index plus any name here outside that pattern
+  elasticIndices:
+    sampleResults: thorium_sample_results
+    repoResults: thorium_repo_results
+    sampleTags: thorium_sample_tags
+    repoTags: thorium_repo_tags
+
+# Namespaces and generate-once credentials (charts/secrets). Set renderOnly: true only for
+# helm template/lint output that is never applied (see deploy/README.md, "Credentials that must
+# not change or be lost")
+secrets:
+  credentials:
+    adminUsername: admin
+
+# Backing services: Redis, SeaweedFS, Scylla, Elasticsearch/Kibana, Quickwit's Postgres,
+# Jaeger, and an optional registry (charts/infra)
+infra: {}
+
+# Trace storage, installed into <prefix>-quickwit (charts/quickwit, vendored upstream chart)
+quickwit:
+  enabled: true
+  # name Quickwit's services quickwit-<component> whatever the release is called, since Thorium's
+  # tracing endpoint and Jaeger address quickwit-indexer and quickwit-searcher
+  fullnameOverride: quickwit
+  image:
+    repository: docker.io/quickwit/quickwit
+    pullPolicy: IfNotPresent
+  # the metastore URI, S3 endpoint, and S3 credentials come from the quickwit-credentials secret
+  # (rendered by the secrets subchart) and are expanded from ${VAR} references at startup
+  environmentFrom:
+    - secretRef:
+        name: quickwit-credentials
+  config:
+    default_index_root_uri: s3://quickwit/quickwit-indexes
+    metastore_uri: ${QW_METASTORE_URI}
+    storage:
+      s3:
+        region: us-east-1
+        endpoint: ${QW_S3_ENDPOINT}
+        force_path_style_access: true
+        access_key_id: ${AWS_ACCESS_KEY_ID}
+        secret_access_key: ${AWS_SECRET_ACCESS_KEY}
+  metastore:
+    replicaCount: 1
+  searcher:
+    replicaCount: 1
+
+# The Thorium operator and the ThoriumCluster it reconciles (charts/operator)
+operator: {}

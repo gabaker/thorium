@@ -20,8 +20,7 @@ pub trait SearchStore: Clone + Sync + Send + 'static + Sized {
     /// # Arguments
     ///
     /// * `conf` - A Thorium config
-    /// * `index` - The index to send docs too
-    fn new(conf: &Conf) -> Result<Self, Error>;
+    async fn new(conf: &Conf) -> Result<Self, Error>;
 
     /// Initiate the search store in case it hasn't been already
     ///

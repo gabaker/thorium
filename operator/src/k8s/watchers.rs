@@ -1,6 +1,7 @@
 //! The watchers the operator uses to monitor its K8s clusters
 
-use kube::Client;
+use k8s_openapi::NamespaceResourceScope;
+use kube::{Api, Client, Resource};
 use std::sync::Arc;
 use tokio::task::JoinSet;
 
@@ -13,6 +14,25 @@ mod thorium_cr;
 
 /// How long in seconds to wait after encountering an error during reconcillation
 const RECONCILE_ERROR_REQUEUE_SECS: u64 = 60u64;
+
+/// Build an api for a namespaced resource limited to the namespace the operator watches
+///
+/// # Arguments
+///
+/// * `client` - The kube client to build the api with
+/// * `namespace` - The namespace to watch (all namespaces if unset)
+pub fn scoped_api<K>(client: &Client, namespace: Option<&str>) -> Api<K>
+where
+    K: Resource<Scope = NamespaceResourceScope>,
+    <K as Resource>::DynamicType: Default,
+{
+    match namespace {
+        // only watch this namespace
+        Some(namespace) => Api::namespaced(client.clone(), namespace),
+        // watch every namespace
+        None => Api::all(client.clone()),
+    }
+}
 
 /// Start the watchers for this cluster
 ///
@@ -39,5 +59,9 @@ pub fn start(
     // create a node watcher
     watchers.spawn(nodes::start(name, client.clone(), shared.clone()));
     // create an mcp pod watcher
-    watchers.spawn(mcp::start(client.clone(), shared.clone()));
+    watchers.spawn(mcp::start(
+        client.clone(),
+        args.namespace.clone(),
+        shared.clone(),
+    ));
 }

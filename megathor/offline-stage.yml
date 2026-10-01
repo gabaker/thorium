@@ -22,25 +22,32 @@
       args:
         chdir: "{{ playbook_dir }}"
 
-    - name: Add Helm Quickwit repo
-      kubernetes.core.helm_repository:
-        name: "quickwit"
-        repo_url: "https://helm.quickwit.io" 
-
-    - name: Pull the Quickwit Helm chart
-      command: helm pull quickwit/quickwit --version {{ quickwit_helm_chart_version }} --destination ./files/
+    # The thorium and infra-operators charts carry every subchart, so each is one file. Set
+    # thorium_stage_charts_from to a deploy/charts directory to package unpublished charts.
+    - name: Pull the Thorium Helm charts
+      command: "helm pull {{ thorium_chart_repo }}/{{ item }} --version {{ thorium_chart_version }} --destination ./files/"
       args:
         chdir: "{{ playbook_dir }}"
+      loop: [thorium, infra-operators]
+      when: thorium_stage_charts_from is not defined
 
-    - name: Add Helm Scylla repo
-      kubernetes.core.helm_repository:
-        name: "scylla"
-        repo_url: "https://scylla-operator-charts.storage.googleapis.com/stable" 
-
-    - name: Pull the Scylla Operator Helm chart
-      command: helm pull scylla/scylla-operator --version {{ scylla_helm_chart_version }} --destination ./files/
+    - name: Package the Thorium Helm charts from source
+      command: "helm package {{ thorium_stage_charts_from }}/{{ item }} --destination ./files/"
       args:
         chdir: "{{ playbook_dir }}"
+      loop: [thorium, infra-operators]
+      when: thorium_stage_charts_from is defined
+
+    # The images the charts deploy, as "<source> <path>" lines for scripts/mirror-images.bash
+    - name: List the images the Thorium charts deploy
+      shell: >-
+        {{ playbook_dir }}/../deploy/charts/scripts/list-images.sh {{ thorium_values_files | default([]) | map('quote') | join(' ') }}
+        > ./files/thorium-images.txt
+      args:
+        chdir: "{{ playbook_dir }}"
+      environment:
+        THORIUM_CHART: "{{ playbook_dir }}/files/thorium-{{ thorium_chart_version }}.tgz"
+        INFRA_OPERATORS_CHART: "{{ playbook_dir }}/files/infra-operators-{{ thorium_chart_version }}.tgz"
 
     - name: Add Helm Rook repo
       kubernetes.core.helm_repository:

@@ -1,0 +1,70 @@
+# A starting point for a multi-node production deployment; layer it over the chart defaults and
+# adjust sizes, node names, and hosts for your cluster:
+#
+#   helm upgrade --install thorium <chart> -n thorium --create-namespace \
+#     -f values-production.yaml -f site.yaml
+
+infra:
+  # e.g. ceph-block with Rook, or your cluster's replicated storage class
+  storageClass: ""
+  redis:
+    storage: 64Gi
+    resources:
+      limits: { cpu: "2", memory: 8Gi }
+  scylla:
+    developerMode: false
+    members: 3
+    storage: 500Gi
+    resources:
+      requests: { cpu: "4", memory: 16Gi }
+      limits: { cpu: "4", memory: 16Gi }
+  elastic:
+    count: 3
+    javaOpts: -Xms8g -Xmx8g
+    storage: 500Gi
+    resources:
+      requests: { cpu: "2", memory: 16Gi }
+      limits: { cpu: "4", memory: 16Gi }
+  postgres:
+    replicas: 3
+    storage: 64Gi
+
+# SeaweedFS runs as a single process; use a replicated S3 store (e.g. Rook/Ceph RGW) instead, and
+# create the quickwit bucket in it
+global:
+  managed:
+    s3: false
+
+secrets:
+  # the S3 store Quickwit keeps traces in (your S3 endpoint)
+  quickwitS3Endpoint: http://rook-ceph-rgw-thorium-s3.rook-ceph.svc.cluster.local
+  # supply the S3 credentials your store issued; others are generated once if left empty
+  credentials:
+    s3AccessKey: ""
+    s3SecretKey: ""
+
+quickwit:
+  metastore:
+    replicaCount: 2
+  searcher:
+    replicaCount: 2
+
+operator:
+  backends:
+    scylla:
+      replication: 3
+    s3:
+      endpoint: http://rook-ceph-rgw-thorium-s3.rook-ceph.svc.cluster.local
+  cluster:
+    components:
+      api:
+        replicas: 3
+    scaler:
+      # the nodes Thorium may run jobs on (an empty list means every node)
+      nodes: []
+  ingress:
+    type: traefik
+    host: thorium.example.com
+    tls:
+      # an existing kubernetes.io/tls secret in the thorium namespace
+      secretName: thorium-tls

@@ -19,15 +19,47 @@ pub struct ThoriumInfo {
     pub meta: Arc<ClusterMeta>,
 }
 
+impl ThoriumInfo {
+    /// Check whether this cluster's `ThoriumCluster` still exists and isn't being deleted
+    ///
+    /// The shared info is a snapshot from the last apply, so watchers check the live
+    /// resource before acting on a cluster that may be mid-deletion.
+    pub async fn is_live(&self) -> Result<bool, Error> {
+        // get the current state of this cluster
+        let api: Api<ThoriumCluster> =
+            Api::namespaced(self.meta.client.clone(), &self.meta.namespace);
+        let cluster = api.get_opt(&self.meta.name).await?;
+        // a missing or deleting cluster should be left alone
+        Ok(cluster.is_some_and(|cluster| cluster.metadata.deletion_timestamp.is_none()))
+    }
+}
+
 /// The controller the Thorium k8s operator
 #[derive(Default)]
 pub struct SharedInfo {
-    /// The info for different clusters in thorium
+    /// The info for different clusters in thorium keyed by `namespace/name`
     pub info: papaya::HashMap<String, ThoriumInfo>,
 }
 
 impl SharedInfo {
+    /// Build the key a `ThoriumCluster` is stored under
+    ///
+    /// # Arguments
+    ///
+    /// * `namespace` - The namespace of the `ThoriumCluster`
+    /// * `name` - The name of the `ThoriumCluster`
+    pub fn key(namespace: &str, name: &str) -> String {
+        format!("{namespace}/{name}")
+    }
+
     /// Get the Thorium info for a specific node
+    ///
+    /// Clusters without a k8s scaler are skipped since they never schedule on nodes.
+    ///
+    /// # Arguments
+    ///
+    /// * `k8s_cluster` - The name of the k8s cluster this node is in
+    /// * `node` - The name of the node
     pub fn get_for_node(
         &self,
         k8s_cluster: &str,
@@ -37,10 +69,18 @@ impl SharedInfo {
         let mut has_config = false;
         // track clusters with this name but an empty node list
         let mut possible_cluster = None;
+        // whether any cluster runs a k8s scaler at all
+        let mut any_scaler = false;
         // iterate over our clusters
         for (_, info) in &self.info.pin() {
+            // clusters without a k8s scaler don't use nodes
+            if info.meta.cluster.spec.components.scaler.is_none() {
+                continue;
+            }
+            // at least one cluster schedules on nodes
+            any_scaler = true;
             // get a ref to our k8s clusters
-            let k8s_config = &info.meta.cluster.spec.config.thorium.scaler.k8s;
+            let k8s_config = &info.meta.conf.thorium.scaler.k8s;
             // get the k8s cluster this node comes from
             if let Some(cluster) = k8s_config.clusters.get(k8s_cluster) {
                 // if this cluster contains this node explicitly then return its config
@@ -67,8 +107,9 @@ impl SharedInfo {
             Some(info) => Ok(Some(info)),
             None => {
                 // if this cluster has specified nodes and this node is one of them
-                // then its been deliberately ignored and we should not return any cluster info
-                if has_config {
+                // then its been deliberately ignored and we should not return any cluster info;
+                // without any k8s scaler no cluster wants this node either
+                if has_config || !any_scaler {
                     Ok(None)
                 } else {
                     // this cluster has no config set so return an error
@@ -112,7 +153,7 @@ async fn get_k8s_clients() -> Result<Vec<(String, Client)>, Error> {
 
 /// Initialize the controller and shared state (given the crd is installed)
 ///
-/// Arguments
+/// # Arguments
 ///
 /// * `args` - Arguments passed to the thorium-operator operate sub command
 pub async fn run(args: OperateCluster) {
@@ -140,7 +181,8 @@ pub async fn run(args: OperateCluster) {
             .await
             .expect("failed to create ThoriumCluster CRD");
         // list ThoriumCluster resources
-        let clusters_api: Api<ThoriumCluster> = Api::<ThoriumCluster>::all(client.clone());
+        let clusters_api: Api<ThoriumCluster> =
+            watchers::scoped_api(&client, args.namespace.as_deref());
         if let Err(error) = clusters_api.list(&ListParams::default().limit(1)).await {
             println!("Failed to list ThoriumCluster API: {error}");
             std::process::exit(1);

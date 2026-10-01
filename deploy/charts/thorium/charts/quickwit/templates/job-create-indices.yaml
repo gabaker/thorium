@@ -1,0 +1,111 @@
+{{- if .Values.bootstrap.enabled -}}
+{{- range .Values.seed.indexes }}
+---
+apiVersion: batch/v1
+kind: Job
+metadata:
+  namespace: {{ include "quickwit.namespace" $ }}
+  name: {{ printf "%s-index-%s" (include "quickwit.fullname" $ | trunc 47) .index_id | trunc 63 |  trimSuffix "-" }}
+  labels:
+    {{- include "quickwit.labels" $ | nindent 4 }}
+  annotations:
+    "helm.sh/hook": post-install,post-upgrade
+    "helm.sh/hook-delete-policy": before-hook-creation,hook-succeeded
+    "helm.sh/hook-weight": "1"
+    {{- with $.Values.annotations }}
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
+spec:
+  template:
+    metadata:
+      name: "{{ $.Release.Name }}"
+      {{- with $.Values.podAnnotations }}
+      annotations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      labels:
+        app.kubernetes.io/managed-by: {{ $.Release.Service | quote }}
+        app.kubernetes.io/instance: {{ $.Release.Name | quote }}
+        helm.sh/chart: "{{ $.Chart.Name }}-{{ $.Chart.Version }}"
+    spec:
+      {{- with $.Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      serviceAccountName: {{ include "quickwit.serviceAccountName" $ }}
+      securityContext:
+        {{- toYaml $.Values.podSecurityContext | nindent 8 }}
+      restartPolicy: Never
+      {{- with $.Values.bootstrap.indexes.initContainers }}
+      initContainers:
+        {{- toYaml . | nindent 8 }}
+      {{ end }}
+      containers:
+      - name: {{ $.Chart.Name }}
+        securityContext:
+          {{- toYaml $.Values.securityContext | nindent 10 }}
+        image: {{ include "quickwit.image" $ | quote }}
+        imagePullPolicy: {{ $.Values.image.pullPolicy }}
+        {{- if $.Values.bootstrap.indexes.command }}
+        command: {{- toYaml $.Values.bootstrap.indexes.command | nindent 8 }}
+        {{- else }}
+        command: ["/bin/bash","-c","quickwit index describe --index {{ .index_id }} --endpoint ${QW_CLUSTER_ENDPOINT} || quickwit index create --index-config {{ .index_id }}.yaml --endpoint ${QW_CLUSTER_ENDPOINT}"]
+        {{- end }}
+        env:
+          {{- include "quickwit.environment" $ | nindent 10 }}
+          {{- with (include "quickwit.extraEnv" $.Values.bootstrap.extraEnv) }}
+          {{- . | nindent 10 }}
+          {{- end }}
+        {{- if or ($.Values.environmentFrom) ($.Values.bootstrap.extraEnvFrom) }}
+        envFrom:
+        {{- with $.Values.environmentFrom }}
+          {{- toYaml . | nindent 12 }}
+        {{- end }}
+        {{- with $.Values.bootstrap.extraEnvFrom }}
+          {{- toYaml . | nindent 12 }}
+        {{- end }}
+        {{- end }}
+        volumeMounts:
+          - name: config
+            mountPath: /quickwit/node.yaml
+            subPath: node.yaml
+          - name: index
+            mountPath: /quickwit/{{ .index_id }}.yaml
+            subPath: {{ .index_id }}.yaml
+          {{- with concat ($.Values.volumeMounts | default list) ($.Values.bootstrap.indexes.extraVolumeMounts | default list) }}
+            {{- toYaml . | nindent 10 }}
+          {{- end }}
+        resources:
+          {{- toYaml $.Values.bootstrap.resources | nindent 10 }}
+      volumes:
+        - name: config
+          configMap:
+            name: {{ template "quickwit.fullname" $ }}
+            items:
+              - key: node.yaml
+                path: node.yaml
+        - name: index
+          configMap:
+            name: {{ template "quickwit.fullname" $ }}-bootstrap
+            items:
+              - key: {{ .index_id }}.yaml
+                path: {{ .index_id }}.yaml
+         {{- with concat ($.Values.volumes | default list) ($.Values.bootstrap.indexes.extraVolumes | default list) }}
+           {{- toYaml . | nindent 8 }}
+         {{- end }}
+      {{- with $.Values.bootstrap.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with merge (dict) ($.Values.bootstrap.affinity | default dict) ($.Values.affinity | default dict) }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- $tolerations := concat ($.Values.tolerations | default list) ($.Values.bootstrap.tolerations | default list) | compact | uniq }}
+      tolerations:
+        {{- toYaml $tolerations | nindent 8 }}
+      {{- if $.Values.bootstrap.runtimeClassName }}
+      runtimeClassName: {{ $.Values.bootstrap.runtimeClassName | quote }}
+      {{- end }}
+{{- end }}
+{{- end }}

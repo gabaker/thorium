@@ -1,0 +1,31 @@
+# Cluster-wide operators for Thorium's backing services. Install once per cluster, before any
+# thorium chart, e.g. `helm install infra-operators <chart> -n infra-operators --create-namespace`.
+# Every operator runs in the release namespace. Disable any operator the cluster already runs.
+#
+# For an offline mirror registry set global.imageRegistry (used by Kubegres) and point each
+# operator's image at the mirror, e.g.:
+#   scylla-operator.image.repository: <registry>/scylladb
+#   eck-operator.image.repository: <registry>/eck/eck-operator
+
+global:
+  imageRegistry: ""
+
+# Scylla operator (manages Thorium's ScyllaCluster); its webhook certificate is generated
+# by the chart, so cert-manager is not needed
+scylla-operator:
+  enabled: true
+  image:
+    repository: docker.io/scylladb
+  webhook:
+    createSelfSignedCertificate: true
+
+# Elastic Cloud on Kubernetes operator (manages Thorium's Elasticsearch and Kibana)
+eck-operator:
+  enabled: true
+  image:
+    repository: docker.elastic.co/eck/eck-operator
+
+# Kubegres operator (manages Thorium's Quickwit metastore Postgres)
+kubegres:
+  enabled: true
+  image: docker.io/reactivetechio/kubegres:1.19

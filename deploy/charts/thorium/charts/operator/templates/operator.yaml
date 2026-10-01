@@ -1,0 +1,117 @@
+{{- $ns := include "thorium.namespace" . }}
+{{- if .Values.imagePullSecret.create }}
+---
+# Pulls the Thorium image for the operator, the chart's jobs, and (through the ThoriumCluster's
+# image_pull_secrets) every Thorium component; registry-token is the operator's own secret
+apiVersion: v1
+kind: Secret
+metadata:
+  name: {{ include "operator.pullSecretName" . }}
+  namespace: {{ $ns }}
+  labels:
+    {{- include "operator.labels" . | nindent 4 }}
+type: kubernetes.io/dockerconfigjson
+data:
+  .dockerconfigjson: {{ required "imagePullSecret.dockerconfigjson is required when imagePullSecret.create is true" .Values.imagePullSecret.dockerconfigjson | b64enc | quote }}
+{{- end }}
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: banner
+  namespace: {{ $ns }}
+  labels:
+    {{- include "operator.labels" . | nindent 4 }}
+data:
+  banner.txt: {{ .Values.banner | quote }}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: operator
+  namespace: {{ $ns }}
+  labels:
+    app: operator
+    {{- include "operator.labels" . | nindent 4 }}
+spec:
+  replicas: 1
+  # the operator has no leader election, so the old pod must stop before its replacement starts
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app: operator
+  template:
+    metadata:
+      labels:
+        app: operator
+    spec:
+      serviceAccountName: thorium-operator
+      automountServiceAccountToken: true
+      imagePullSecrets:
+        {{- include "operator.imagePullSecrets" . | nindent 8 }}
+      {{- with .Values.operator.podSecurityContext }}
+      securityContext:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      containers:
+        - name: operator
+          image: {{ printf "%s:%s" (include "thorium.image" (dict "root" $ "image" .Values.image.repository)) (include "operator.tag" .) }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          {{- with .Values.operator.securityContext }}
+          securityContext:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          {{- if .Values.operator.watchOwnNamespaceOnly }}
+          # appended to the image entrypoint (`thorium-operator operate`)
+          args: ["--namespace", {{ $ns | quote }}]
+          {{- end }}
+          env:
+            {{- with .Values.operator.proxy }}
+            {{- $noProxy := compact (splitList "," (.noProxy | default "" | nospace)) }}
+            {{- if or .httpProxy .httpsProxy }}
+            {{- /* with a proxy set, in-cluster services (the Thorium API and its backends) are still
+                   reached directly: by name through the cluster domain, and by IP through the
+                   service and pod CIDRs in global.clusterCIDRs, which the chart can't detect */}}
+            {{- $domain := ($.Values.global).clusterDomain | default "cluster.local" }}
+            {{- $cidrs := ($.Values.global).clusterCIDRs | default list }}
+            {{- if not (kindIs "slice" $cidrs) }}
+            {{- fail "global.clusterCIDRs must be a list of CIDRs, e.g. [10.96.0.0/12, 10.244.0.0/16]" }}
+            {{- end }}
+            {{- $defaults := concat (list "localhost" "127.0.0.1" ".svc" (printf ".svc.%s" $domain) $domain) (compact (toStrings $cidrs)) }}
+            {{- $noProxy = concat $defaults $noProxy | uniq }}
+            {{- end }}
+            {{- $noProxy = join "," $noProxy }}
+            - { name: http_proxy, value: {{ .httpProxy | quote }} }
+            - { name: HTTP_PROXY, value: {{ .httpProxy | quote }} }
+            - { name: https_proxy, value: {{ .httpsProxy | quote }} }
+            - { name: HTTPS_PROXY, value: {{ .httpsProxy | quote }} }
+            - { name: no_proxy, value: {{ $noProxy | quote }} }
+            - { name: NO_PROXY, value: {{ $noProxy | quote }} }
+            {{- end }}
+          resources:
+            {{- toYaml .Values.operator.resources | nindent 12 }}
+          {{- if include "operator.elasticCaSecret" . }}
+          # the operator validates an external Elastic against the same path as the components
+          volumeMounts:
+            - name: elastic-ca
+              mountPath: /etc/thorium/elastic-ca
+              readOnly: true
+          {{- end }}
+      {{- with include "operator.elasticCaSecret" . }}
+      volumes:
+        - name: elastic-ca
+          secret:
+            secretName: {{ . }}
+            items:
+              - key: {{ $.Values.backends.elastic.caSecret.key | default "ca.crt" }}
+                path: ca.crt
+      {{- end }}
+      {{- with .Values.operator.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.operator.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}

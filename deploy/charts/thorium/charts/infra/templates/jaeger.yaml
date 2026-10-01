@@ -1,0 +1,50 @@
+{{- if .Values.jaeger.enabled }}
+{{- $ns := include "thorium.ns" (dict "root" $ "name" "jaeger") }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: jaeger
+  namespace: {{ $ns }}
+  labels:
+    {{- include "infra.labels" . | nindent 4 }}
+spec:
+  type: ClusterIP
+  selector:
+    app: jaeger
+  ports:
+    - name: jaeger
+      port: 16686
+      targetPort: 16686
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: jaeger
+  namespace: {{ $ns }}
+  labels:
+    app: jaeger
+    {{- include "infra.labels" . | nindent 4 }}
+spec:
+  serviceName: jaeger
+  replicas: 1
+  selector:
+    matchLabels:
+      app: jaeger
+  template:
+    metadata:
+      labels:
+        app: jaeger
+    spec:
+      containers:
+        - name: jaeger
+          image: {{ include "thorium.image" (dict "root" $ "image" .Values.jaeger.image) }}
+          imagePullPolicy: IfNotPresent
+          env:
+            - name: SPAN_STORAGE_TYPE
+              value: grpc
+            - name: GRPC_STORAGE_SERVER
+              value: {{ printf "%s:7281" (include "thorium.host" (dict "root" $ "service" "quickwit-searcher" "ns" "quickwit")) | quote }}
+          resources:
+            {{- toYaml .Values.jaeger.resources | nindent 12 }}
+{{- end }}

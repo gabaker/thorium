@@ -8,37 +8,69 @@ storage_class: local-path
 vault_password_file: "artifacts/vault_pass"
 # vault_path: "artifacts/secrets.yml"
 
-# Prefix every per-deployment namespace with "<namespace_prefix>-" (see "Namespace
-# Prefix" in the README)
+# The Thorium Helm charts (thorium and infra-operators). Online deployments install the
+# published charts; offline deployments install the copies offline-stage.yml saves to files/.
+# thorium_chart / infra_operators_chart override either with a chart directory, packaged .tgz,
+# or oci:// reference (e.g. to test unpublished charts from ../deploy/charts).
+thorium_chart_repo: "oci://ghcr.io/cisagov/thorium/charts"
+thorium_chart_version: "1.8.1"
+# thorium_chart: ""
+# infra_operators_chart: ""
+# Extra values files for the thorium chart, applied after the values megathor generates
+# (see deploy/charts/thorium/values.yaml for every setting)
+# thorium_values_files: []
+
+# Prefix Thorium's namespaces ("<namespace_prefix>-thorium", ...); a lowercase DNS
+# label of at most 32 characters (see "Namespace Prefix" in the README)
 # namespace_prefix: ""
 
-# Cluster-wide operators; disable any that the cluster already provides
-# cert_manager_enabled: true
-# elastic_operator_enabled: true
+# The cluster-wide operators (infra-operators chart); disable any the cluster already runs
 # scylla_operator_enabled: true
+# elastic_operator_enabled: true
 # kubegres_operator_enabled: true
-# traefik_enabled: true
-# thorium_operator_enabled: true
+# scylla_operator_replicas: 1
 
-# Elastic
-elastic_enabled: true
-# elastic_namespace: "elastic-system" # "<namespace_prefix>-elastic" when namespace_prefix is set
-# elastic_username: "thorium"
-
-# Redis
+# Backing services deployed by the thorium chart (sizes and the thorium_external_* settings an
+# external service needs: roles/thorium/defaults/main.yml)
 redis_enabled: true
-# redis_namespace: "redis"
-# redis_port: 6379
+elastic_enabled: true
+# kibana_enabled: true
+scylla_enabled: true
+# scylla_members: 3
+# scylla_replication_factor: 3
+# scylla_developer_mode: false
+jaeger_enabled: true
+quickwit_enabled: true
+quickwit_bucket: "quickwit"
+# An external Postgres for the Quickwit metastore instead of the chart's (create the database first)
+# quickwit_metastore_uri: "postgres://user:password@host:5432/quickwit-metastore"
+# An external Redis instead of the chart's (redis_password must be the password it requires)
+# redis_enabled: false
+# thorium_external_redis_host: "redis.example.com"
+# redis_password: ""
+# An external Scylla / Elasticsearch instead of the chart's. Without
+# thorium_scylla_admin_secret / thorium_elastic_admin_secret (roles/thorium/defaults) the
+# operator doesn't create Thorium's role or user, so give the ones you created; the run fails
+# without them. Keep the passwords in an ansible-vault encrypted file, e.g.
+# `ansible-vault encrypt_string --name thorium_external_scylla_password '<password>'`
+# scylla_enabled: false
+# thorium_external_scylla_nodes: ["scylla-1.example.com:9042"]
+# thorium_external_scylla_username: "thorium"
+# thorium_external_scylla_password: ""
+# elastic_enabled: false
+# thorium_external_elastic_node: "https://elastic.example.com:9200"
+# thorium_external_elastic_username: "thorium"
+# thorium_external_elastic_password: ""
+
+# The cluster's service and pod CIDRs, passed to the chart's global.clusterCIDRs so in-cluster
+# traffic addressed by IP bypasses an operator proxy (megathor can't detect them)
+# thorium_cluster_cidrs: ["10.96.0.0/12", "10.244.0.0/16"]
 
 # S3 backend: enable at most one of rook_enabled or seaweedfs_enabled.
 # - rook: replicated Ceph object store (and ceph-block storage class) for multi-node clusters
 # - seaweedfs: single-instance SeaweedFS (`weed mini`) on one PVC; the single_node default
 # Disable both to use an external S3 service and set the s3_* overrides below.
-
-# SeaweedFS
 seaweedfs_enabled: false
-# seaweedfs_namespace: "seaweedfs"
-# seaweedfs_version: "4.48"
 # seaweedfs_volume_size: "128Gi"
 
 # Rook Operator
@@ -61,19 +93,6 @@ ceph_health_check_retries: 1
 # s3_secret_key: ""
 s3_validate_certs: true
 
-# Jaeger
-jaeger_enabled: true
-# jaeger_namespace: "jaeger"
-
-# Kubegres
-kubegres_enabled: true
-
-# Quickwit
-quickwit_enabled: true
-quickwit_helm_chart_version: "0.8.17"
-# quickwit_namespace: "quickwit"
-quickwit_bucket: "quickwit"
-
 # Traefik
 traefik_enabled: true
 traefik_helm_chart_version: "37.1.0"
@@ -81,28 +100,12 @@ traefik_helm_chart_version: "37.1.0"
 traefik_external_ips:
   - "0.0.0.0"
 
-# Cert Manager
-cert_manager_enabled: true
-
-# Scylla:
-scylla_enabled: true
-
-# Scylla Operator
-# Pinned: newer operators use curl in probes/hooks, which the scylla-manager-agent
-# image (scylla_agent_version) lacks; bump only together with a compatible agent
-scylla_helm_chart_version: "v1.21.1"
-# scylla_operator_namespace: "scylla-operator"
-
-# Scylla Cluster
-# scylla_username: "thorium"
-# scylla_namespace: "scylla"
-# scylla_developer_mode: false
-
-# Thorium Operator
+# Thorium
 thorium_enabled: true
-# thorium_deployment_name: "dev"
-# thorium_namespace: "thorium"
-# thorium_version: "latest"
+# thorium_deployment_name: "thorium"
+# thorium_version: "" # defaults to the chart's appVersion
+# thorium_image_pull_policy: "Always" # IfNotPresent to run from images cached on the nodes
+# thorium_admin_username: "admin"
 # The Kubernetes nodes Thorium may schedule jobs on
 thorium_nodes: []
 # Pull secret value is just a stub placeholder base64(thorium:corn)
@@ -115,4 +118,4 @@ thorium_nodes: []
 #
 # thorium_ingress_enabled: true
 # thorium_ingress_hostname: "*" # or put thorium.<SLD>.<TLD>
-# thorium_tls_cert_secret_name: "api-certs
+# thorium_tls_cert_secret_name: "api-certs"

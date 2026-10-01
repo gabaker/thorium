@@ -1,0 +1,13 @@
+# Files that never belong in a packaged chart
+.git/
+.gitignore
+.DS_Store
+*.swp
+*.bak
+*.tmp
+*.orig
+*~
+.vscode/
+.idea/
+.claude/
+.mcp.json

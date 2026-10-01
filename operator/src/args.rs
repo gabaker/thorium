@@ -15,6 +15,8 @@ pub struct Args {
 pub enum SubCommands {
     /// Operate a Thorium k8s cluster
     Operate(OperateCluster),
+    /// Print the `ThoriumCluster` CRD as YAML
+    Crd,
 }
 
 /// Operate a thorium cluster arguments
@@ -23,4 +25,7 @@ pub struct OperateCluster {
     /// Thorium URL when not running local to k8s
     #[clap(short, long)]
     pub url: Option<String>,
+    /// Only watch `ThoriumCluster` resources in this namespace (all namespaces if unset)
+    #[clap(long, env = "THORIUM_OPERATOR_NAMESPACE")]
+    pub namespace: Option<String>,
 }

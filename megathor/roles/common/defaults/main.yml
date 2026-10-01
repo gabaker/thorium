@@ -1,7 +1,20 @@
 k8s_registry: "registry.k8s.io"
-# An optional prefix for this deployment's namespaces. When set, every
-# per-deployment namespace is prefixed with "<namespace_prefix>-" (e.g.
-# "prod-thorium", "prod-redis")
+# An optional prefix for Thorium's namespaces: a lowercase DNS label of at most
+# 32 characters. When set, every Thorium namespace is prefixed with
+# "<namespace_prefix>-" (e.g. "test-thorium", "test-redis").
 namespace_prefix: ""
 # The prefix with its "-" separator, or empty when no prefix is set
 namespace_prefix_dashed: "{{ namespace_prefix ~ '-' if namespace_prefix else '' }}"
+
+# The Thorium Helm charts. Online deployments install the published charts at
+# thorium_chart_version; offline deployments install the packaged charts that
+# offline-stage.yml saved to files/. Set thorium_chart or infra_operators_chart
+# to a chart directory, a packaged .tgz, or an oci:// reference to override.
+thorium_chart_repo: "oci://ghcr.io/cisagov/thorium/charts"
+thorium_chart_version: "1.8.1"
+
+# The S3 backend served by the thorium chart's SeaweedFS (single node only)
+seaweedfs_enabled: false
+seaweedfs_s3_endpoint: "http://seaweedfs.{{ namespace_prefix_dashed }}seaweedfs.svc.cluster.local:8333"
+# The bucket Quickwit stores traces in
+quickwit_bucket: "quickwit"
