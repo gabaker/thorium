@@ -1,0 +1,130 @@
+# Storage class for every PVC; empty uses the cluster default
+storageClass: ""
+
+# Redis: Thorium's cache and job queues (password from the redis-auth secret); deployed when
+# global.managed.redis is true
+redis:
+  image: docker.io/redis:7.4.11
+  storage: 16Gi
+  resources:
+    requests: { cpu: "0", memory: "0" }
+    limits: { cpu: 500m, memory: 512Mi }
+
+# SeaweedFS: single-process S3 store (`weed mini`) on one PVC for single-node deployments;
+# deployed when global.managed.s3 is true
+seaweedfs:
+  # pinned because `weed mini` defaults may change between SeaweedFS releases
+  image: docker.io/chrislusf/seaweedfs:4.48
+  storage: 8Gi
+  # buckets created for services other than Thorium (the operator creates Thorium's own); an
+  # external S3 store needs these created by the site
+  buckets:
+    - quickwit
+  resources:
+    requests: { cpu: 256m, memory: 512Mi }
+    limits: { cpu: "1", memory: 1Gi }
+
+# ScyllaDB cluster managed by the Scylla operator (the operator must already be installed);
+# deployed when global.managed.scylla is true
+scylla:
+  # image repositories (moved to global.imageRegistry when one is set)
+  repository: docker.io/scylladb/scylla
+  agentRepository: docker.io/scylladb/scylla-manager-agent
+  version: 6.2.3
+  agentVersion: 3.4.2
+  developerMode: true
+  datacenter: us-east-1
+  rack: us-east-1a
+  members: 1
+  storage: 32Gi
+  resources:
+    requests: { cpu: "0", memory: "0" }
+    limits: { cpu: "2", memory: 4Gi }
+  # the scylla.yaml handed to every Scylla node (developer_mode is appended from developerMode)
+  config: |
+    num_tokens: 256
+    commitlog_sync: periodic
+    commitlog_sync_period_in_ms: 10000
+    commitlog_segment_size_in_mb: 32
+    seed_provider:
+        - class_name: org.apache.cassandra.locator.SimpleSeedProvider
+          parameters:
+              - seeds: "127.0.0.1"
+    listen_address: 0.0.0.0
+    broadcast_address: 10.233.13.110
+    native_transport_port: 9042
+    native_shard_aware_transport_port: 19042
+    read_request_timeout_in_ms: 5000
+    write_request_timeout_in_ms: 2000
+    cas_contention_timeout_in_ms: 1000
+    endpoint_snitch: SimpleSnitch
+    rpc_address: localhost
+    rpc_port: 9160
+    api_port: 10000
+    api_address: 127.0.0.1
+    batch_size_warn_threshold_in_kb: 128
+    batch_size_fail_threshold_in_kb: 1024
+    authenticator: PasswordAuthenticator
+    authorizer: CassandraAuthorizer
+    partitioner: org.apache.cassandra.dht.Murmur3Partitioner
+    commitlog_total_space_in_mb: -1
+    murmur3_partitioner_ignore_msb_bits: 12
+    force_schema_commit_log: true
+
+# Elasticsearch (and optionally Kibana) managed by ECK (the ECK operator must already be
+# installed); deployed when global.managed.elastic is true
+elastic:
+  # full images; empty uses ECK's defaults (docker.elastic.co, or global.imageRegistry when set)
+  image: ""
+  kibanaImage: ""
+  version: 8.19.2
+  count: 1
+  # extra elasticsearch.yml settings for every node (merged over the chart's)
+  config: {}
+  # the JVM heap; empty lets Elasticsearch size it from the memory limit
+  javaOpts: -Xms1g -Xmx1g
+  storage: 32Gi
+  resources:
+    requests: { cpu: "0", memory: "0" }
+    limits: { cpu: "1", memory: 2Gi }
+  kibana:
+    enabled: true
+    resources:
+      requests: { cpu: "0", memory: "0" }
+      limits: { cpu: "1", memory: 1Gi }
+
+# Postgres for the Quickwit metastore in the quickwit namespace, managed by Kubegres (Kubegres
+# must already be installed); deployed along with the metastore database when
+# global.managed.postgres is true
+postgres:
+  image: docker.io/postgres:17
+  replicas: 1
+  storage: 32Gi
+  database: quickwit-metastore
+  resources:
+    requests: { cpu: "0", memory: "0" }
+    limits: { cpu: "1", memory: 2Gi }
+
+# Jaeger query UI reading traces from Quickwit
+jaeger:
+  enabled: true
+  image: docker.io/jaegertracing/jaeger-query:1.76.0
+  resources:
+    requests: { cpu: "0", memory: "0" }
+    limits: { cpu: "1", memory: 1Gi }
+
+# An optional container registry for Thorium tool images, deployed in the thorium namespace
+registry:
+  enabled: false
+  image: docker.io/registry:2
+  storage: 64Gi
+  # an existing secret with an `htpasswd` key enables basic auth
+  htpasswdSecret: ""
+  resources:
+    requests: { cpu: "0", memory: "0" }
+    limits: { cpu: "1", memory: 1Gi }
+
+# Settings for the setup jobs (bucket and metastore database creation)
+jobs:
+  # how many times each job retries before failing the release
+  backoffLimit: 30

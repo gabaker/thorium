@@ -1,19 +1,33 @@
 thorium_enabled: true
-# Deploy the Thorium operator. It manages every ThoriumCluster in the cluster, so
-# only one deployment per Kubernetes cluster should run it; disable it for
-# additional deployments sharing a cluster.
-thorium_operator_enabled: true
-thorium_deployment_name: "dev"
+# The ThoriumCluster's name and the namespace this deployment runs in (the thorium chart's
+# release namespace; every other namespace gets the same prefix)
+thorium_deployment_name: "thorium"
 thorium_namespace: "{{ namespace_prefix_dashed }}thorium"
+# The chart to install; empty uses the published chart online or files/ offline
+thorium_chart: ""
+# Extra values files for the thorium chart, applied after the values megathor generates
+thorium_values_files: []
+# How long to wait for the operator to report the ThoriumCluster ready
+thorium_ready_timeout: 1800
+
+# The Thorium image; an empty version uses the chart's appVersion
 thorium_container_registry: "ghcr.io"
 thorium_image: "cisagov/thorium/infrastructure/thorium"
-thorium_version: "latest"
+thorium_version: ""
+# The pull policy for the operator and every Thorium component. Always picks up a new image
+# pushed under the same tag; IfNotPresent runs from images already cached on the nodes when the
+# registry is unreachable
+thorium_image_pull_policy: "Always"
 thorium_operator_memory_limits: "512Mi"
 thorium_operator_cpu_limits: "512m"
 thorium_operator_memory_requests: "256Mi"
 thorium_operator_cpu_requests: "256m"
-# The Kubernetes nodes Thorium may schedule jobs on
+# The Kubernetes nodes Thorium may schedule jobs on (an empty list means every node)
 thorium_nodes: []
+# Run the Thorium k8s scaler (it creates job namespaces named after Thorium groups)
+thorium_scaler_enabled: true
+# The initial Thorium admin user; its password is generated once and kept in the vault
+thorium_admin_username: "admin"
 # Pull secret value is just a stub placeholder base64(thorium:corn)
 thorium_image_pull_secret: {}
 # thorium_image_pull_secret:
@@ -22,8 +36,102 @@ thorium_image_pull_secret: {}
 #      auth: "dGhvcml1bTpjb3JuCg=="
 thorium_ui_banner: |
   Welcome to Thorium. <Please place you banner here>
-# Create Traefik IngressRoutes for the API; needs Traefik's CRDs in the cluster
+# Route the API through Traefik (needs Traefik's CRDs in the cluster)
 thorium_ingress_enabled: true
-# Deployments sharing one Traefik must each set a distinct hostname
-# thorium_ingress_hostname: "localhost"
-# thorium_tls_cert_secret_name: "api-certs
+# The hostname Traefik routes to the API; unset (or "*") routes every host to Thorium, so set
+# one when Traefik also serves other sites
+# thorium_ingress_hostname: "thorium.example.com"
+# thorium_tls_cert_secret_name: "api-certs"
+
+# Backing services deployed by the thorium chart (global.managed.<service>); each one turned off
+# needs its external settings below
+redis_enabled: true
+redis_volume_size: "16Gi"
+redis_cpu_requests: "512m"
+redis_memory_requests: "512Mi"
+redis_cpu_limits: "2"
+redis_memory_limits: "4Gi"
+
+seaweedfs_volume_size: "128Gi"
+seaweedfs_cpu_requests: "500m"
+seaweedfs_memory_requests: "1Gi"
+seaweedfs_cpu_limits: "2"
+seaweedfs_memory_limits: "4Gi"
+
+scylla_enabled: true
+scylla_members: 3
+scylla_replication_factor: 3
+scylla_developer_mode: false
+scylla_storage_size: "32Gi"
+scylla_cpu_requests: "0"
+scylla_memory_requests: "0"
+scylla_cpu_limits: "4"
+scylla_memory_limits: "16Gi"
+scylla_username: "thorium"
+
+elastic_enabled: true
+elastic_username: "thorium"
+elastic_search_node_count: 1
+elastic_search_volume_size: "32Gi"
+elastic_search_cpu_requests: "1"
+elastic_search_cpu_limits: "2"
+elastic_search_memory_requests: "4G"
+elastic_search_memory_limits: "4G"
+kibana_enabled: true
+kibana_cpu_requests: "1"
+kibana_cpu_limits: "1"
+kibana_memory_requests: "1G"
+kibana_memory_limits: "1G"
+
+jaeger_enabled: true
+jaeger_cpu_requests: "512m"
+jaeger_memory_requests: "512Mi"
+jaeger_cpu_limits: "1"
+jaeger_memory_limits: "1G"
+
+quickwit_enabled: true
+quickwit_metastore_replica_count: 1
+quickwit_searcher_replica_count: 1
+quickwit_postgres_replicas: 1
+quickwit_postgress_storage_size: "32G"
+quickwit_postgres_memory_requests: "1Gi"
+quickwit_postgres_cpu_requests: "1"
+quickwit_postgres_memory_limits: "2Gi"
+quickwit_postgres_cpu_limits: "2"
+
+# External services, for backends the chart doesn't deploy (see deploy/README.md, "External
+# services"). Each is required when its toggle above is false: redis_enabled -> the Redis host
+# (and redis_password set to the password it requires), scylla_enabled -> the Scylla nodes,
+# elastic_enabled -> the Elasticsearch node. S3 without seaweedfs_enabled uses s3_endpoint,
+# s3_access_key, and s3_secret_key (roles/s3), and Quickwit's Postgres uses quickwit_metastore_uri
+thorium_external_redis_host: ""
+thorium_external_redis_port: 6379
+thorium_external_scylla_nodes: []
+# e.g. https://elastic.example.com:9200
+thorium_external_elastic_node: ""
+# A Quickwit metastore URI for an external Postgres
+# (postgres://user:password@host:5432/quickwit-metastore); setting it skips the chart's Postgres
+# (global.managed.postgres), and the database must already exist
+quickwit_metastore_uri: ""
+# Secrets in the thorium namespace holding superuser credentials (`username` and `password`
+# keys) the operator creates Thorium's own Scylla role or Elastic role and user with. Setting the
+# Scylla one turns the operator's Scylla bootstrap on; the Elastic one is only used when
+# elastic_enabled is false
+thorium_scylla_admin_secret: ""
+thorium_elastic_admin_secret: ""
+# Thorium's own credentials for an external Scylla (scylla_enabled false) or Elasticsearch
+# (elastic_enabled false) whose role or user the site created, i.e. without
+# thorium_scylla_admin_secret / thorium_elastic_admin_secret. The thorium chart refuses to
+# install without them in that case, since a generated password would never match. Keep the
+# passwords out of plain inventory files: put them in an ansible-vault encrypted vars file
+# (e.g. group_vars/all/vault.yml) or pass them with --extra-vars @vault.yml
+thorium_external_scylla_username: "thorium"
+thorium_external_scylla_password: ""
+thorium_external_elastic_username: "thorium"
+thorium_external_elastic_password: ""
+# The cluster's service and pod CIDRs (e.g. ["10.96.0.0/12", "10.244.0.0/16"]), rendered into
+# the chart's global.clusterCIDRs. megathor deploys onto an existing cluster and can't detect
+# them, so this defaults to empty; set it whenever the operator goes through a proxy so
+# in-cluster traffic addressed by IP bypasses the proxy (kubeadm defaults to 10.96.0.0/12 for
+# services; the pod CIDR depends on the CNI, e.g. 10.244.0.0/16 for flannel)
+thorium_cluster_cidrs: []

@@ -51,6 +51,49 @@ impl ElasticIndex {
         }
     }
 
+    /// Build the body that creates this index in Elastic with its mappings and settings
+    ///
+    /// # Arguments
+    ///
+    /// * `elastic_conf` - The elastic config
+    #[must_use]
+    pub fn create_body(&self, elastic_conf: &crate::conf::Elastic) -> serde_json::Value {
+        // get the field that identifies the item each document describes
+        let id_field = match self {
+            ElasticIndex::SampleResults | ElasticIndex::SampleTags => "sha256",
+            ElasticIndex::RepoResults | ElasticIndex::RepoTags => "url",
+        };
+        // start with the fields every index shares
+        let mut properties = serde_json::json!({
+            "group": { "type": "keyword" },
+            "streamed": { "type": "date" },
+        });
+        // add the field identifying the item each document describes
+        properties[id_field] = serde_json::json!({ "type": "keyword" });
+        // get the text fields specific to this kind of index
+        let text_fields: &[&str] = match self {
+            ElasticIndex::SampleResults | ElasticIndex::RepoResults => {
+                &["results", "files", "children"]
+            }
+            ElasticIndex::SampleTags | ElasticIndex::RepoTags => &["tags"],
+        };
+        // add each text field to our mappings
+        for field in text_fields {
+            properties[*field] = serde_json::json!({ "type": "text" });
+        }
+        // build the full body with our highlighting limits
+        serde_json::json!({
+            "mappings": { "properties": properties },
+            "settings": {
+                "index": {
+                    "highlight": {
+                        "max_analyzed_offset": elastic_conf.max_analyzed_offset
+                    }
+                }
+            }
+        })
+    }
+
     /// Get the earliest date for documents in the given index
     ///
     /// # Arguments
@@ -196,4 +239,96 @@ pub struct ElasticDoc {
     pub highlight: Option<serde_json::Value>,
     /// The sort values for this document
     pub sort: Vec<i64>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::ElasticIndex;
+    use serde_json::json;
+
+    /// Build an Elastic config with a non-default max analyzed offset
+    fn elastic_conf() -> crate::conf::Elastic {
+        // build a minimal config and let serde default everything else
+        serde_json::from_value(json!({
+            "node": "https://elastic:9200",
+            "username": "thorium",
+            "password": "password",
+            "max_analyzed_offset": 1234,
+        }))
+        .expect("minimal elastic config parses")
+    }
+
+    /// Build the expected body for creating a results index
+    ///
+    /// # Arguments
+    ///
+    /// * `id_field` - The keyword field identifying the item each document describes
+    fn results_body(id_field: &str) -> serde_json::Value {
+        // build our expected mappings
+        let mut properties = json!({
+            "group": { "type": "keyword" },
+            "streamed": { "type": "date" },
+            "results": { "type": "text" },
+            "files": { "type": "text" },
+            "children": { "type": "text" },
+        });
+        properties[id_field] = json!({ "type": "keyword" });
+        // wrap the mappings with our highlighting settings
+        json!({
+            "mappings": { "properties": properties },
+            "settings": { "index": { "highlight": { "max_analyzed_offset": 1234 } } }
+        })
+    }
+
+    /// Build the expected body for creating a tags index
+    ///
+    /// # Arguments
+    ///
+    /// * `id_field` - The keyword field identifying the item each document describes
+    fn tags_body(id_field: &str) -> serde_json::Value {
+        // build our expected mappings
+        let mut properties = json!({
+            "group": { "type": "keyword" },
+            "streamed": { "type": "date" },
+            "tags": { "type": "text" },
+        });
+        properties[id_field] = json!({ "type": "keyword" });
+        // wrap the mappings with our highlighting settings
+        json!({
+            "mappings": { "properties": properties },
+            "settings": { "index": { "highlight": { "max_analyzed_offset": 1234 } } }
+        })
+    }
+
+    /// The sample results index keys on sha256 and maps results, files, and children as text
+    #[test]
+    fn sample_results_body() {
+        // build the body and compare it to the full expected body
+        let body = ElasticIndex::SampleResults.create_body(&elastic_conf());
+        assert_eq!(body, results_body("sha256"));
+    }
+
+    /// The repo results index keys on url and maps results, files, and children as text
+    #[test]
+    fn repo_results_body() {
+        // build the body and compare it to the full expected body
+        let body = ElasticIndex::RepoResults.create_body(&elastic_conf());
+        assert_eq!(body, results_body("url"));
+    }
+
+    /// The sample tags index keys on sha256 and maps only tags as text
+    #[test]
+    fn sample_tags_body() {
+        // build the body and compare it to the full expected body
+        let body = ElasticIndex::SampleTags.create_body(&elastic_conf());
+        assert_eq!(body, tags_body("sha256"));
+    }
+
+    /// The repo tags index keys on url and maps only tags as text
+    #[test]
+    fn repo_tags_body() {
+        // build the body and compare it to the full expected body
+        let body = ElasticIndex::RepoTags.create_body(&elastic_conf());
+        assert_eq!(body, tags_body("url"));
+    }
 }

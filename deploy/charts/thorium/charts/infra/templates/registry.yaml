@@ -1,0 +1,91 @@
+{{- if .Values.registry.enabled }}
+{{- $ns := include "thorium.ns" (dict "root" $ "name" "thorium") }}
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: registry-persistent-storage-claim
+  namespace: {{ $ns }}
+  labels:
+    {{- include "infra.labels" . | nindent 4 }}
+  annotations:
+    helm.sh/resource-policy: keep
+spec:
+  {{- include "infra.storageClass" . | nindent 2 }}
+  resources:
+    requests:
+      storage: {{ .Values.registry.storage }}
+  accessModes:
+    - ReadWriteOnce
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: docker-registry
+  namespace: {{ $ns }}
+  labels:
+    {{- include "infra.labels" . | nindent 4 }}
+spec:
+  selector:
+    app: docker-registry
+  ports:
+    - name: http
+      port: 5000
+      targetPort: 5000
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: docker-registry
+  namespace: {{ $ns }}
+  labels:
+    app: docker-registry
+    {{- include "infra.labels" . | nindent 4 }}
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app: docker-registry
+  template:
+    metadata:
+      labels:
+        app: docker-registry
+    spec:
+      containers:
+        - name: registry
+          image: {{ include "thorium.image" (dict "root" $ "image" .Values.registry.image) }}
+          imagePullPolicy: IfNotPresent
+          {{- if .Values.registry.htpasswdSecret }}
+          env:
+            - name: REGISTRY_AUTH
+              value: htpasswd
+            - name: REGISTRY_AUTH_HTPASSWD_REALM
+              value: Thorium
+            - name: REGISTRY_AUTH_HTPASSWD_PATH
+              value: /auth/htpasswd
+          {{- end }}
+          ports:
+            - containerPort: 5000
+              name: http
+          resources:
+            {{- toYaml .Values.registry.resources | nindent 12 }}
+          volumeMounts:
+            - mountPath: /var/lib/registry
+              name: registry-data
+            {{- if .Values.registry.htpasswdSecret }}
+            - mountPath: /auth
+              name: htpasswd
+              readOnly: true
+            {{- end }}
+      volumes:
+        - name: registry-data
+          persistentVolumeClaim:
+            claimName: registry-persistent-storage-claim
+        {{- if .Values.registry.htpasswdSecret }}
+        - name: htpasswd
+          secret:
+            secretName: {{ .Values.registry.htpasswdSecret }}
+        {{- end }}
+{{- end }}

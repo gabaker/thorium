@@ -1,0 +1,35 @@
+---
+
+- name: Choose the infra-operators chart
+  ansible.builtin.set_fact:
+    infra_operators_chart_ref: >-
+      {{ infra_operators_chart if infra_operators_chart | length > 0
+         else (playbook_dir ~ '/files/infra-operators-' ~ thorium_chart_version ~ '.tgz') if offline | bool
+         else thorium_chart_repo ~ '/infra-operators' }}
+
+- name: Install the infra-operators chart
+  kubernetes.core.helm:
+    name: infra-operators
+    chart_ref: "{{ infra_operators_chart_ref }}"
+    # only oci:// references are versioned; local charts carry their own version
+    chart_version: "{{ thorium_chart_version if infra_operators_chart_ref is match('oci://') else omit }}"
+    release_namespace: "{{ infra_operators_namespace }}"
+    create_namespace: true
+    wait: true
+    wait_timeout: "{{ service_wait_timeout }}s"
+    values_files: "{{ infra_operators_values_files }}"
+    values:
+      global:
+        imageRegistry: "{{ offline_registry if offline | bool else '' }}"
+      scylla-operator:
+        enabled: "{{ scylla_operator_enabled | bool }}"
+        replicas: "{{ scylla_operator_replicas | int }}"
+        webhookServerReplicas: "{{ scylla_operator_replicas | int }}"
+        image:
+          repository: "{{ offline_registry ~ '/scylladb' if offline | bool else 'docker.io/scylladb' }}"
+      eck-operator:
+        enabled: "{{ elastic_operator_enabled | bool }}"
+        image:
+          repository: "{{ offline_registry ~ '/eck/eck-operator' if offline | bool else 'docker.elastic.co/eck/eck-operator' }}"
+      kubegres:
+        enabled: "{{ kubegres_operator_enabled | bool }}"
