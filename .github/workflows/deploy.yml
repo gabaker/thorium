@@ -12,12 +12,12 @@ on:
 # jobs start with no token permissions and are granted only what they use
 permissions: {}
 
-# superseded runs on feature branches and pull requests are cancelled. Running
-# jobs on main and on release tags are never cancelled, so a publish is never
-# interrupted, but a queued run is still replaced when a newer run queues behind it
+# superseded runs are cancelled, except on the default branch and release tags so their publish
+# is never interrupted. Fork feature branches also publish and can be cancelled mid-publish; the
+# next run republishes. A queued run is still replaced when a newer run queues behind it
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: ${{ github.ref != 'refs/heads/main' && !startsWith(github.ref, 'refs/tags/') }}
+  cancel-in-progress: ${{ github.ref != format('refs/heads/{0}', github.event.repository.default_branch) && !startsWith(github.ref, 'refs/tags/') }}
 
 jobs:
   build-mdbook-docs:
@@ -311,81 +311,14 @@ jobs:
           mv windows/reactor/thorium-reactor.exe target/x86_64-pc-windows-gnu/release/
           mv macos/x86_64/* target/x86_64-apple-darwin/release/.
           mv macos/aarch64/* target/aarch64-apple-darwin/release/.
-      # The image is built on every push and pull request but only published:
-      # - from every branch on forks, tagged with the branch name
-      # - from the default branch only on the core repo
-      # - from release tags, tagged with the version
-      # `latest` points at the highest release tag on the default branch. It is set by a release
-      # tag's run when the tag is already on the default branch, and re-pointed by every
-      # default-branch run so a release merged after its tag was pushed is still promoted.
-      # The ref name and repository come from the runner's default GITHUB_* env vars rather than
-      # template expansion so branch/tag names are never interpolated into the script
+      # .github/scripts/release_refs.py picks the image tag, whether to publish it, and which release
+      # `latest` points at; see its docstring for the rules
       - name: Choose Image Tags
         id: image
         env:
           IS_FORK: ${{ github.event.repository.fork }}
           DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
-        run: |
-          # a failing git command in a pipeline fails the step instead of leaving latest stale
-          set -o pipefail
-          IMAGE_PATH=$(echo "ghcr.io/${GITHUB_REPOSITORY}/infrastructure/thorium" | tr '[:upper:]' '[:lower:]')
-          RELEASE_RE='^[0-9]+\.[0-9]+\.[0-9]+$'
-          # print the highest X.Y.Z release tag reachable from a ref, or nothing if there is none
-          highest_release() {
-            git tag --merged "$1" | { grep -E "$RELEASE_RE" || true; } | sort --version-sort | tail -n1
-          }
-          PUBLISH=false
-          LATEST_SOURCE=""
-          if [[ "$GITHUB_EVENT_NAME" == "pull_request" ]]; then
-            # the ref name is <number>/merge; pull request images stay local to the runner
-            TAG="pr-${GITHUB_REF_NAME%%/*}"
-          elif [[ "$GITHUB_REF_TYPE" == "tag" ]]; then
-            # the tag filter allows any suffix, so only accept X.Y.Z with an optional SemVer
-            # prerelease, which is also a valid image tag of at most 128 characters
-            if ! [[ "$GITHUB_REF_NAME" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$ ]] || [[ ${#GITHUB_REF_NAME} -gt 128 ]]; then
-              echo "::error::Release tags must be X.Y.Z, optionally followed by a prerelease such as -rc.1"
-              exit 1
-            fi
-            TAG="$GITHUB_REF_NAME"
-            PUBLISH=true
-            HIGHEST_RELEASE=$(highest_release "origin/${DEFAULT_BRANCH}")
-            if [[ "$GITHUB_REF_NAME" == "$HIGHEST_RELEASE" ]]; then
-              LATEST_SOURCE="${IMAGE_PATH}:${TAG}"
-            fi
-          else
-            # replace characters docker does not allow in tags and strip leading '.' and '-'
-            TAG="${GITHUB_REF_NAME//[^a-zA-Z0-9._-]/-}"
-            TAG=$(sed -E 's/^[.-]+//' <<< "$TAG")
-            # keep branches from overwriting `latest` or release tags
-            if [[ "$TAG" == "latest" || "$TAG" =~ ^[0-9]+\.[0-9]+\.[0-9]+ ]]; then
-              TAG="branch-${TAG}"
-            fi
-            # names that sanitizing changed, or that are empty or exceed docker's 128 character
-            # limit, get a hash of the branch name so they stay valid and distinct, so feat/x and
-            # feat-x do not share a tag
-            if [[ -z "$TAG" || ${#TAG} -gt 128 || "$TAG" != "$GITHUB_REF_NAME" ]]; then
-              HASH=$(printf '%s' "$GITHUB_REF_NAME" | sha256sum | cut -c1-8)
-              TAG="${TAG:+${TAG:0:119}-}${HASH}"
-            fi
-            if [[ "$IS_FORK" == "true" || "$GITHUB_REF_NAME" == "$DEFAULT_BRANCH" ]]; then
-              PUBLISH=true
-            fi
-            # checkout fetches the current default branch, so a re-run of an older commit still
-            # finds the newest release
-            if [[ "$GITHUB_REF_NAME" == "$DEFAULT_BRANCH" ]]; then
-              LATEST_RELEASE=$(highest_release "origin/${DEFAULT_BRANCH}")
-              if [[ -n "$LATEST_RELEASE" ]]; then
-                LATEST_SOURCE="${IMAGE_PATH}:${LATEST_RELEASE}"
-              fi
-            fi
-          fi
-          echo "image=${IMAGE_PATH}:${TAG} publish=${PUBLISH} latest-source=${LATEST_SOURCE}"
-          {
-            echo "image=${IMAGE_PATH}:${TAG}"
-            echo "latest-image=${IMAGE_PATH}:latest"
-            echo "latest-source=${LATEST_SOURCE}"
-            echo "publish=${PUBLISH}"
-          } >> "$GITHUB_OUTPUT"
+        run: python3 .github/scripts/release_refs.py image
       - name: Build Thorium Container Image
         env:
           IMAGE: ${{ steps.image.outputs.image }}

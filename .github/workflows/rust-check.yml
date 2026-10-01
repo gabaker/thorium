@@ -1,4 +1,5 @@
-# Runs Thorium's Rust static checks: cargo check, clippy, and rustfmt
+# Runs Thorium's Rust static checks: cargo check, clippy, and rustfmt, plus a check that every copy
+# of Thorium's version matches the Cargo workspace version (.github/scripts/versions.py)
 #
 # - Failures are reported here, as failed (red) jobs on the commit and pull
 #   request. This workflow has no `needs` or `workflow_run` link to deploy.yml
@@ -8,6 +9,8 @@
 # - Every diagnostic is written to the job log, inline annotations, the job
 #   summary, and a `<check>-report` artifact by .github/scripts/lint_report.py,
 #   so reviewers can read the results without digging through build output.
+#   The version check is small enough to print its mismatches and annotations
+#   itself, and needs no toolchain or cache.
 # - Integration tests are not run here; they need ScyllaDB, Redis,
 #   Elasticsearch, and S3.
 # - The nightly toolchain is installed with the runner's preinstalled rustup,
@@ -285,3 +288,20 @@ jobs:
             echo "cargo fmt --check failed (exit code ${RUSTFMT_EXIT}); see the job summary"
             exit 1
           fi
+
+  versions:
+    name: Version consistency
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      contents: read # check out the repository
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      # every copy of the version (Cargo, the web UI, the charts, deployment defaults, and docs)
+      # must match the workspace version; `python3 .github/scripts/versions.py bump` fixes them
+      - name: Check versions
+        run: python3 .github/scripts/versions.py check

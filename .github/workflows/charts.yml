@@ -1,0 +1,185 @@
+# Lints, packages, and publishes the thorium and infra-operators Helm charts
+#
+# - Charts are linted, rendered, and packaged on every push and pull request, and published by
+#   the same rules as the Thorium image (see .github/scripts/release_refs.py): from every branch on
+#   forks, from the default branch on the core repo, and from release tags (X.Y.Z, equal to the
+#   chart version or a prerelease of it), never from pull requests. Charts are pushed to
+#   oci://ghcr.io/<owner>/<repo>/charts.
+# - The packaged thorium chart deploys the image deploy.yml publishes for the same ref, from the
+#   same repository: ghcr.io/<owner>/<repo>/infrastructure/thorium:<branch or release tag>; the
+#   chart's default pull policy, Always, picks up each push to a branch tag. This workflow does not wait for
+#   that image, so a chart can be published before its image, or without one if the image build
+#   fails. deploy/charts/scripts/package.sh does the packaging, and can be run by hand the same way.
+# - Jobs start with no token permissions. The packaged charts are handed to a separate
+#   publish job, which holds the only `packages: write` token and runs no chart code.
+# - Actions are pinned by full commit SHA, checkout does not persist credentials, and
+#   context values reach scripts through env vars rather than template expansion.
+# - setup-helm is given an empty token, since it needs none but defaults to the job's.
+name: Helm Charts
+
+on:
+  push:
+    branches: ['**']
+    tags:
+      - '[0-9]+.[0-9]+.[0-9]+*'
+  pull_request:
+  workflow_dispatch:
+
+# jobs start with no token permissions and are granted only what they use
+permissions: {}
+
+# superseded runs are cancelled, except on the default branch and release tags so their publish
+# is never interrupted. Fork feature branches also publish and can be cancelled mid-publish; the
+# next run republishes. A queued run is still replaced when a newer run queues behind it
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.ref != format('refs/heads/{0}', github.event.repository.default_branch) && !startsWith(github.ref, 'refs/tags/') }}
+
+env:
+  HELM_VERSION: v3.22.0
+  CHARTS: deploy/charts
+
+jobs:
+  lint:
+    name: Lint Helm Charts
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: azure/setup-helm@9bc31f4ebc9c6b171d7bfbaa5d006ae7abdb4310 # v5.0.1
+        with:
+          version: ${{ env.HELM_VERSION }}
+          token: ""
+      # helm lint can't read the generated credentials back from a cluster, so the thorium chart
+      # is linted with secrets.renderOnly for its templates to render at all
+      - name: Lint
+        run: |
+          helm lint --strict "$CHARTS/infra-operators"
+          helm lint --strict -n thorium --set secrets.renderOnly=true "$CHARTS/thorium"
+      # secrets.renderOnly stands in placeholder credentials, since helm template can't read the
+      # generated ones back from a cluster and the chart refuses to regenerate them otherwise
+      - name: Render the default, namespace-prefixed, and production deployments
+        run: |
+          helm template infra-operators "$CHARTS/infra-operators" -n infra-operators > /dev/null
+          helm template thorium "$CHARTS/thorium" -n thorium --set secrets.renderOnly=true > /dev/null
+          helm template thorium "$CHARTS/thorium" -n dev-thorium --set secrets.renderOnly=true > /dev/null
+          helm template thorium "$CHARTS/thorium" -n thorium -f "$CHARTS/thorium/values-production.yaml" \
+            --set secrets.renderOnly=true > /dev/null
+      - name: Check the chart refuses to regenerate credentials without renderOnly
+        run: |
+          if stderr=$(helm template thorium "$CHARTS/thorium" -n thorium 2>&1 > /dev/null); then
+            echo "helm template rendered generated credentials without secrets.renderOnly"
+            exit 1
+          fi
+          if ! grep -q "so these credentials would be regenerated" <<< "$stderr"; then
+            echo "helm template failed for another reason than the credentials guard:"
+            echo "$stderr"
+            exit 1
+          fi
+      # PyYAML comes from the distro's signed packages when the runner image lacks it
+      - name: Install PyYAML
+        run: python3 -c 'import yaml' 2>/dev/null || { sudo apt-get update && sudo apt-get install -y python3-yaml; }
+      - name: Check the namespace blacklist covers every prefixed namespace
+        run: |
+          helm template thorium "$CHARTS/thorium" -n dev-thorium --set secrets.renderOnly=true \
+            --set 'operator.cluster.namespaceBlacklist={extra}' \
+            --show-only charts/operator/templates/thoriumcluster.yaml \
+            | python3 -c '
+          import sys, yaml
+          cluster = next(d for d in yaml.safe_load_all(sys.stdin) if d and d.get("kind") == "ThoriumCluster")
+          found = set(cluster["spec"]["config"]["thorium"]["namespace_blacklist"])
+          prefixed = {f"dev-{ns}" for ns in ("thorium", "redis", "scylla", "elastic", "seaweedfs", "quickwit", "jaeger")}
+          fixed = {"infra-operators", "kube-system", "kube-public", "kube-node-lease", "default", "thorium", "scylla", "scylla-operator", "cert-manager", "redis", "elastic-system", "jaeger", "quickwit", "extra"}
+          missing = sorted((prefixed | fixed) - found)
+          if missing:
+              sys.exit(f"thorium.namespace_blacklist is missing {missing}")
+          '
+      - name: Check every image follows global.imageRegistry
+        run: |
+          stray=$(helm template thorium "$CHARTS/thorium" -n thorium --set secrets.renderOnly=true \
+            --set global.imageRegistry=mirror.invalid \
+            | grep -E '^\s*(- )?(image|repository|agentRepository|registry):' \
+            | grep -v 'mirror.invalid' || true)
+          if [ -n "$stray" ]; then
+            echo "Images not using global.imageRegistry:"
+            echo "$stray"
+            exit 1
+          fi
+      - name: List images
+        run: |
+          "$CHARTS/scripts/list-images.sh"
+
+  package:
+    name: Package Helm Charts
+    needs: lint
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    outputs:
+      publish: ${{ steps.version.outputs.publish }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: azure/setup-helm@9bc31f4ebc9c6b171d7bfbaa5d006ae7abdb4310 # v5.0.1
+        with:
+          version: ${{ env.HELM_VERSION }}
+          token: ""
+      # .github/scripts/release_refs.py picks the chart version, whether to publish, and the image the
+      # thorium chart deploys; see its docstring for the rules
+      - name: Choose the chart version
+        id: version
+        env:
+          IS_FORK: ${{ github.event.repository.fork }}
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+        run: python3 .github/scripts/release_refs.py chart "$CHARTS/thorium/Chart.yaml" "$CHARTS/infra-operators/Chart.yaml"
+      # deploy/charts/scripts/package.sh points the thorium chart at this ref's image and checks the
+      # rendered result before packaging
+      - name: Package
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+          IMAGE_REPOSITORY: ${{ steps.version.outputs.image-repository }}
+          IMAGE_TAG: ${{ steps.version.outputs.image-tag }}
+        run: |
+          "$CHARTS/scripts/package.sh" -d dist --version "$VERSION" --image-repository "$IMAGE_REPOSITORY" \
+            --image-tag "$IMAGE_TAG"
+      - name: Upload packaged charts
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: helm-charts
+          path: dist/*.tgz
+          retention-days: 7
+
+  publish:
+    name: Publish Helm Charts
+    needs: package
+    if: needs.package.outputs.publish == 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      packages: write # push charts to ghcr.io
+    steps:
+      - uses: azure/setup-helm@9bc31f4ebc9c6b171d7bfbaa5d006ae7abdb4310 # v5.0.1
+        with:
+          version: ${{ env.HELM_VERSION }}
+          token: ""
+      - name: Download packaged charts
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: helm-charts
+          path: ${{ runner.temp }}/charts
+      - name: Log in to the container registry
+        env:
+          GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: echo "$GHCR_TOKEN" | helm registry login ghcr.io -u "$GITHUB_ACTOR" --password-stdin
+      - name: Push
+        run: |
+          repo="${GITHUB_REPOSITORY,,}"
+          for chart in "${RUNNER_TEMP}"/charts/*.tgz; do
+            helm push "$chart" "oci://ghcr.io/${repo}/charts"
+          done

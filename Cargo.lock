@@ -1234,15 +1234,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "bytestring"
-version = "1.5.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "86566c496f2f47d9b8147a4c8b02ffdb69c919fe0c2b2e7195d22cbba0e635c9"
-dependencies = [
- "bytes",
-]
-
-[[package]]
 name = "bzip2"
 version = "0.6.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -8811,23 +8802,27 @@ dependencies = [
  "aws-sdk-s3",
  "aws-types",
  "base64 0.22.1",
- "bytestring",
  "chrono",
  "clap",
+ "elasticsearch",
  "futures 0.3.34",
  "generic-array",
+ "json-patch",
  "k8s-openapi",
  "kube",
  "kube-derive",
  "openssl",
  "papaya",
  "rand 0.9.5",
+ "redis 0.32.7",
  "reqwest",
  "rustls 0.23.45",
  "schemars 1.2.2",
+ "scylla",
  "serde",
  "serde_json",
  "serde_norway",
+ "sha2 0.10.9",
  "thorium-api",
  "tokio",
  "tokio-stream",

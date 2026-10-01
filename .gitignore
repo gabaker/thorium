@@ -1,6 +1,8 @@
 book
 keys.yml
 *.txt
+# Helm prints a chart's templates/NOTES.txt after install
+!deploy/charts/**/NOTES.txt
 target
 *.bak
 binaries
@@ -18,4 +20,5 @@ built
 
 # python
 **/.venv
+__pycache__/
 python/thorpy/main.py

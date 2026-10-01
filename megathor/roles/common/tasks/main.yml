@@ -25,6 +25,37 @@
     fail_msg: "namespace_prefix ({{ namespace_prefix }}) must be a lowercase DNS label of at most 32 characters (the \"-\" separator is added automatically)"
   when: namespace_prefix | length > 0
 
+# An external Scylla or Elasticsearch the operator doesn't bootstrap already holds Thorium's
+# role or user, so a generated password would never match it
+- name: Ensure Thorium's external Scylla credentials are set
+  ansible.builtin.assert:
+    that:
+      - thorium_external_scylla_username | default('thorium') | length > 0
+      - thorium_external_scylla_password | default('') | length > 0
+    fail_msg: >-
+      scylla_enabled is false and thorium_scylla_admin_secret is unset, so set
+      thorium_external_scylla_username and thorium_external_scylla_password to the Scylla role
+      you created for Thorium (keep the password in an ansible-vault encrypted vars file)
+  when:
+    - thorium_enabled | default(true) | bool
+    - not (scylla_enabled | default(true) | bool)
+    - thorium_scylla_admin_secret | default('') | length == 0
+
+- name: Ensure Thorium's external Elastic credentials are set
+  ansible.builtin.assert:
+    that:
+      - thorium_external_elastic_username | default('thorium') | length > 0
+      - thorium_external_elastic_password | default('') | length > 0
+    fail_msg: >-
+      elastic_enabled is false and thorium_elastic_admin_secret is unset, so set
+      thorium_external_elastic_username and thorium_external_elastic_password to the
+      Elasticsearch user you created for Thorium (keep the password in an ansible-vault
+      encrypted vars file)
+  when:
+    - thorium_enabled | default(true) | bool
+    - not (elastic_enabled | default(true) | bool)
+    - thorium_elastic_admin_secret | default('') | length == 0
+
 # The example inventories ship "<...>" placeholders that must be replaced
 - name: Ensure the Thorium node list has been filled in
   ansible.builtin.assert:

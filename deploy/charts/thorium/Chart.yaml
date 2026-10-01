@@ -1,0 +1,18 @@
+apiVersion: v2
+name: thorium
+description: Thorium and the backing services it needs (install into <prefix>thorium; needs the infra-operators chart)
+type: application
+version: 1.8.1
+appVersion: "1.8.1"
+home: https://github.com/cisagov/thorium
+# The subcharts are vendored in charts/; each top-level values key configures one of them
+dependencies:
+  - name: secrets
+    version: 1.8.1
+  - name: infra
+    version: 1.8.1
+  - name: quickwit
+    version: 0.8.17
+    condition: quickwit.enabled
+  - name: operator
+    version: 1.8.1

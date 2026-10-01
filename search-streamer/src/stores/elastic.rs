@@ -2,14 +2,13 @@
 
 use bytesize::ByteSize;
 use elasticsearch::auth::Credentials;
-use elasticsearch::cert::CertificateValidation;
 use elasticsearch::http::request::JsonBody;
 use elasticsearch::http::transport::{SingleNodeConnectionPool, TransportBuilder};
 use elasticsearch::indices::{IndicesCreateParts, IndicesDeleteParts, IndicesExistsParts};
 use elasticsearch::{BulkParts, Elasticsearch};
 use itertools::Itertools;
 use serde::{Deserialize, Serialize};
-use serde_json::{json, Value};
+use serde_json::Value;
 use std::time::Duration;
 use thorium::models::ElasticIndex;
 use thorium::{Conf, Error};
@@ -31,11 +30,13 @@ pub struct Elastic {
 impl Elastic {
     /// Create a new Elastic streamer
     ///
+    /// Elastic's certificate is validated exactly like the Thorium API and operator do, from
+    /// the config's `insecure_certificates` and `cert_validation` settings.
+    ///
     /// # Arguments
     ///
     /// * `conf` - A Thorium config
-    /// * `index` - The index to send docs too
-    pub fn new(conf: &Conf) -> Result<Self, Error> {
+    pub async fn new(conf: &Conf) -> Result<Self, Error> {
         // Until https://github.com/elastic/elasticsearch-rs/pull/189 is merged
         // we can only support a single node connection pool
         // try to cast our node to a url
@@ -45,10 +46,12 @@ impl Elastic {
         // get our username and password
         let username = conf.elastic.username.clone();
         let password = conf.elastic.password.clone();
+        // get the cert validation the API uses
+        let validation = conf.elastic.try_cert_validation().await?;
         // build our transport object for elastic
         let transport = TransportBuilder::new(pool)
             .auth(Credentials::Basic(username, password))
-            .cert_validation(CertificateValidation::None)
+            .cert_validation(validation)
             .timeout(std::time::Duration::from_secs(60))
             .build()?;
         // build our elastic client
@@ -59,81 +62,6 @@ impl Elastic {
             elastic_conf: conf.elastic.clone(),
             max_request_size: conf.thorium.search_streamer.max_request_size.into(),
         })
-    }
-
-    /// Return the index create body for the given elastic index in a JSON Value
-    ///
-    /// # Arguments
-    ///
-    /// * `index` - The elastic index to get mappings for
-    ///
-    /// # Panics
-    ///
-    /// Panics if the body is not a JSON object, as values are inserted into
-    /// the body object after it's initially created
-    fn index_create_body(&self, index: &ElasticIndex) -> Value {
-        // first set the mappings based on the elastic index
-        let mut body = match index {
-            ElasticIndex::SampleResults => serde_json::json!({
-                "mappings": {
-                    "properties": {
-                        "group": { "type": "keyword" },
-                        "sha256": { "type": "keyword" },
-                        "streamed": { "type": "date" },
-                        "results": { "type": "text" },
-                        "files": { "type": "text" },
-                        "children": { "type": "text" }
-                    }
-                }
-            }),
-            ElasticIndex::SampleTags => serde_json::json!({
-                "mappings": {
-                    "properties": {
-                        "group": { "type": "keyword" },
-                        "sha256": { "type": "keyword" },
-                        "streamed": { "type": "date" },
-                        "tags": { "type": "text" }
-                    }
-                }
-            }),
-            ElasticIndex::RepoResults => serde_json::json!({
-                "mappings": {
-                    "properties": {
-                        "group": { "type": "keyword" },
-                        "url": { "type": "keyword" },
-                        "streamed": { "type": "date" },
-                        "results": { "type": "text" },
-                        "files": { "type": "text" },
-                        "children": { "type": "text" }
-                    }
-                }
-            }),
-            ElasticIndex::RepoTags => serde_json::json!({
-                "mappings": {
-                    "properties": {
-                        "group": { "type": "keyword" },
-                        "url": { "type": "keyword" },
-                        "streamed": { "type": "date" },
-                        "tags": { "type": "text" }
-                    }
-                }
-            }),
-        };
-        // insert the rest of the body
-        let body_mut = body
-            .as_object_mut()
-            .expect("Elastic index create body is not a valid JSON object!");
-        body_mut.insert(
-            "settings".to_string(),
-            json!({
-                "index": {
-                    "highlight": {
-                        "max_analyzed_offset": self.elastic_conf.max_analyzed_offset
-                    }
-                }
-            }),
-        );
-        body
     }
 }
 
@@ -150,9 +78,8 @@ impl SearchStore for Elastic {
     /// # Arguments
     ///
     /// * `conf` - A Thorium config
-    /// * `index` - The index to send docs too
-    fn new(conf: &Conf) -> Result<Self, Error> {
-        Elastic::new(conf)
+    async fn new(conf: &Conf) -> Result<Self, Error> {
+        Elastic::new(conf).await
     }
 
     /// Initiate the search store in case it hasn't been already
@@ -232,7 +159,7 @@ impl SearchStore for Elastic {
             };
             if create {
                 // generate the body based on the type of index we're creating
-                let body = self.index_create_body(index);
+                let body = index.create_body(&self.elastic_conf);
                 // create the index in elastic
                 let response = self
                     .elastic

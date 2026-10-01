@@ -1,90 +1,50 @@
 ---
 
-- name: Create namespace
-  kubernetes.core.k8s:
-    name: "{{ thorium_namespace }}"
-    state: present
-    kind: Namespace
+- name: Choose the thorium chart
+  ansible.builtin.set_fact:
+    thorium_chart_ref: >-
+      {{ thorium_chart if thorium_chart | length > 0
+         else (playbook_dir ~ '/files/thorium-' ~ thorium_chart_version ~ '.tgz') if offline | bool
+         else thorium_chart_repo ~ '/thorium' }}
 
-- name: Create registry-token for service account
-  kubernetes.core.k8s:
-    state: present
-    definition:
-      apiVersion: v1
-      kind: Secret
-      metadata:
-        name: registry-token
-        namespace: "{{ thorium_namespace }}"
-      type: kubernetes.io/dockerconfigjson
-      data:
-        .dockerconfigjson: "{{ thorium_image_pull_secret | to_json | ansible.builtin.b64encode }}"
-
-- name: Create UI Banner 
-  kubernetes.core.k8s:
-    name: banner
-    state: present
-    namespace: "{{ thorium_namespace }}"
-    definition:
-      apiVersion: v1
-      kind: ConfigMap
-      metadata:
-        name: banner
-      data:
-        banner.txt: "{{ thorium_ui_banner }}"
-
-- name: Create Service Account and rbac
-  kubernetes.core.k8s:
-    namespace: "{{ thorium_namespace }}"
-    state: present
-    apply: true
-    definition: "{{ lookup('template', 'rbac.yaml.j2') }}"
-
-- name: Deploy the Thorium operator
-  when: thorium_operator_enabled | bool
+# The generated values hold every backend credential, so they only exist on disk while helm runs
+- name: Install the thorium chart
   block:
-    - name: Create operator deployment
-      kubernetes.core.k8s:
-        namespace: "{{ thorium_namespace }}"
-        state: present
-        apply: true
-        definition: "{{ lookup('template', 'operator.yaml.j2') }}"
+    - name: Write the thorium chart values
+      ansible.builtin.template:
+        src: values.yaml.j2
+        dest: ./artifacts/thorium-values.yaml
+        mode: "0600"
+      no_log: true
 
-    - name: Wait for Operator to be available
-      kubernetes.core.k8s:
-        api_version: apps/v1
-        kind: Deployment
-        name: operator
-        namespace: "{{ thorium_namespace }}"
-        wait: true
-        wait_condition:
-          type: Available
-          status: "True"
-        wait_timeout: 300
-        wait_sleep: 5
+    - name: Install the thorium chart
+      kubernetes.core.helm:
+        name: thorium
+        chart_ref: "{{ thorium_chart_ref }}"
+        # only oci:// references are versioned; local charts carry their own version
+        chart_version: "{{ thorium_chart_version if thorium_chart_ref is match('oci://') else omit }}"
+        release_namespace: "{{ thorium_namespace }}"
+        create_namespace: true
+        values_files: "{{ ['./artifacts/thorium-values.yaml'] + thorium_values_files }}"
+  always:
+    - name: Remove the thorium chart values
+      ansible.builtin.file:
+        path: ./artifacts/thorium-values.yaml
+        state: absent
 
-# A deployment sharing another deployment's operator needs the operator to have
-# registered the ThoriumCluster CRD before the ThoriumCluster can be created
-- name: Wait for the ThoriumCluster CRD to be established
-  shell: kubectl wait --for condition=established --timeout=30s crd/thoriumclusters.sandia.gov
-  register: thorium_crd_wait
-  until: thorium_crd_wait.rc == 0
-  retries: "{{ (service_wait_timeout | int / 30) | int }}"
-  delay: 1
-  changed_when: false
-
-- name: Create Traefik ingress and TLS configurations
-  kubernetes.core.k8s:
+- name: Wait for the operator to report the ThoriumCluster ready
+  kubernetes.core.k8s_info:
+    api_version: sandia.gov/v1
+    kind: ThoriumCluster
+    name: "{{ thorium_deployment_name }}"
     namespace: "{{ thorium_namespace }}"
-    state: present
-    apply: true
-    definition: "{{ lookup('template', 'traefik.yaml.j2') }}"
-  when: thorium_ingress_enabled | bool
+  register: thorium_cluster
+  until: (thorium_cluster.resources | first | default({})).status.phase | default('') == 'Ready'
+  retries: "{{ (thorium_ready_timeout | int / 10) | int }}"
+  delay: 10
 
-- name: Create ThoriumCluster
-  kubernetes.core.k8s:
-    namespace: "{{ thorium_namespace }}"
-    state: present
-    apply: true
-    definition: "{{ lookup('template', 'thorium-cluster.yaml.j2') }}"
-  # the resource embeds every backend credential
-  no_log: true
+- name: Show how to get the admin credentials
+  ansible.builtin.debug:
+    msg: >-
+      Thorium is ready. Admin user {{ thorium_admin_username }}; its password is in the vault
+      (thorium_admin_password) and in the thorium-admin secret in {{ thorium_namespace }}.

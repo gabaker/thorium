@@ -38,6 +38,8 @@
         - [Tracing/Logging](./architecture/tracing.md)
         - [Event Handler](./architecture/event-handler.md)
     - [Deploy](./admins/deploy/deploy.md)
+        - [Helm Charts](./admins/deploy/deploy-helm.md)
+        - [Development Deployments (minithor)](./admins/deploy/minithor.md)
         - [Traefik](./admins/deploy/install-traefik.md)
         - [Rook](./admins/deploy/install-rook.md)
         - [Redis](./admins/deploy/install-redis.md)

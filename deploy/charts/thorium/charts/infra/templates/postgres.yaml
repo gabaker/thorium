@@ -1,0 +1,81 @@
+{{- if include "infra.managed" (dict "root" $ "service" "postgres") }}
+{{- $ns := include "thorium.ns" (dict "root" $ "name" "quickwit") }}
+{{- $host := include "thorium.host" (dict "root" $ "service" "postgres" "ns" "quickwit") }}
+---
+apiVersion: kubegres.reactive-tech.io/v1
+kind: Kubegres
+metadata:
+  name: postgres
+  namespace: {{ $ns }}
+  labels:
+    {{- include "infra.labels" . | nindent 4 }}
+spec:
+  replicas: {{ .Values.postgres.replicas }}
+  image: {{ include "thorium.image" (dict "root" $ "image" .Values.postgres.image) }}
+  database:
+    {{- if .Values.storageClass }}
+    storageClassName: {{ .Values.storageClass | quote }}
+    {{- end }}
+    size: {{ .Values.postgres.storage }}
+  resources:
+    {{- toYaml .Values.postgres.resources | nindent 4 }}
+  env:
+    - name: POSTGRES_PASSWORD
+      valueFrom:
+        secretKeyRef:
+          name: postgres-cluster-auth
+          key: superUserPassword
+    - name: POSTGRES_REPLICATION_PASSWORD
+      valueFrom:
+        secretKeyRef:
+          name: postgres-cluster-auth
+          key: replicationUserPassword
+---
+# Creates the Quickwit metastore database once Postgres accepts the saved password
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: quickwit-create-metastore-db
+  namespace: {{ $ns }}
+  labels:
+    {{- include "infra.labels" . | nindent 4 }}
+  annotations:
+    helm.sh/hook: post-install,post-upgrade
+    helm.sh/hook-delete-policy: before-hook-creation
+spec:
+  backoffLimit: {{ .Values.jobs.backoffLimit }}
+  template:
+    spec:
+      restartPolicy: Never
+      containers:
+        - name: createdb
+          image: {{ include "thorium.image" (dict "root" $ "image" .Values.postgres.image) }}
+          imagePullPolicy: IfNotPresent
+          env:
+            - name: PGHOST
+              value: {{ $host | quote }}
+            - name: PGUSER
+              value: postgres
+            - name: PGPASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: postgres-cluster-auth
+                  key: superUserPassword
+            - name: DATABASE
+              value: {{ .Values.postgres.database | quote }}
+          command:
+            - /bin/sh
+            - -c
+            - |
+              set -e
+              for attempt in $(seq 1 60); do
+                psql -c "SELECT 1" >/dev/null 2>&1 && break
+                echo "Waiting for Postgres to accept connections ($attempt/60)..."
+                sleep 5
+              done
+              if psql -tAc "SELECT 1 FROM pg_database WHERE datname='$DATABASE'" | grep -q 1; then
+                echo "Database $DATABASE already exists"
+              else
+                createdb "$DATABASE"
+              fi
+{{- end }}
