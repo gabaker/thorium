@@ -319,7 +319,7 @@ For full thoradm documentation, see the User Docs at `{THORIUM_URL}/api/docs/use
 `minithor` stands up a **single-node Thorium stack on Minikube** — a self-contained local instance
 for developing features against, and for building/testing/curating tools. It is not highly available
 and is for development/testing only (or small offline fly-away kits), not production. A deploy brings
-up all backing services (Redis, Elasticsearch, ScyllaDB, MinIO/S3, Postgres, Quickwit, Jaeger), the
+up all backing services (Redis, Elasticsearch, ScyllaDB, SeaweedFS/S3, Postgres, Quickwit, Jaeger), the
 Thorium operator and `ThoriumCluster`, a default admin user, a `static` group, an `allow-all` network
 policy, and (optionally) an in-cluster container registry; it also installs `thorctl` and imports the
 default toolbox. Backing-service passwords are randomly generated per deploy.
@@ -357,7 +357,7 @@ Once exposed, `THORIUM_URL=http://localhost:8080` (Step 1). Log in via the UI or
 The instance serves its own docs at the same paths under `{THORIUM_URL}/api/docs/...` (Step 2) —
 the user docs, Swagger UI, and rustdoc are all reachable locally at `http://localhost:8080/api/docs/...`,
 so every doc link in this guide resolves against the running minithor instance, not just a remote one.
-`minithor expose --dev` also forwards the backing-service ports (Elastic, Kibana, Redis, MinIO,
+`minithor expose --dev` also forwards the backing-service ports (Elastic, Kibana, Redis, SeaweedFS,
 Scylla), and `minithor get-config` writes the cluster config (DB credentials) to `~/thorium.yml` —
 needed by `thoradm` (Step 6).
 
@@ -367,7 +367,7 @@ needed by `thoradm` (Step 6).
 | `minithor deploy` | Deploy all Thorium services and backing infrastructure (add `--registry` for an in-cluster registry) |
 | `minithor expose` | Port-forward the Thorium API to localhost:8080 (and the registry to localhost:5000 when one was deployed) |
 | `minithor expose --port <port>` | Port-forward the API to a custom local port |
-| `minithor expose --dev` | Also forward database ports (Elastic, Kibana, Redis, MinIO, Scylla). See "Testing locally" below — Scylla requires special handling |
+| `minithor expose --dev` | Also forward database ports (Elastic, Kibana, Redis, SeaweedFS, Scylla). See "Testing locally" below — Scylla requires special handling |
 | `minithor expose --status` | Show which port-forwards are running |
 | `minithor expose --stop` | Stop all port-forwards **and remove any loopback aliases** created for Scylla |
 | `minithor start` | Start a previously stopped cluster |
@@ -375,6 +375,7 @@ needed by `thoradm` (Step 6).
 | `minithor get-config` | Extract the raw in-cluster config to ~/thorium.yml |
 | `minithor get-config --local` | Extract the config **rewritten for local host access** via the exposed ports, to ~/thorium.local.yml (see "Testing locally") |
 | `minithor cleanup --confirm` | Remove all Thorium resources for a fresh deploy (also stops port-forwards and removes loopback aliases) |
+| `minithor --instance <name> <command>` | Run `deploy`/`expose`/`get-config`/`cleanup` against a named instance whose namespaces are prefixed `<name>-`, so several Thorium instances can share the cluster for deployment testing only — not supported by the scaler (they share the operators; use `expose --port-offset <n>` to expose more than one) |
 | `minithor minikube delete --confirm` | Fully remove minikube (also stops port-forwards and removes loopback aliases) |
 
 ### Testing Locally: Connecting a Local Build to the Cluster Databases
@@ -397,7 +398,7 @@ when one was deployed):
 | Elasticsearch | `https://localhost:9200` | self-signed cert — clients must skip cert validation (see below) |
 | Kibana | `https://localhost:5601` | |
 | Redis | `localhost:6379` | |
-| MinIO (S3) | `http://localhost:9000` | |
+| SeaweedFS (S3) | `http://localhost:8333` | |
 | Scylla (CQL) | `<advertised-cluster-ip>:9042` | **not** `localhost` — see "How Scylla is exposed" |
 
 **2. Generate a host-ready config:**
@@ -407,7 +408,7 @@ minithor get-config --local      # writes ~/thorium.local.yml
 ```
 
 `--local` rewrites the in-cluster config so a host process can connect through the exposed
-ports. It changes: Elastic/Redis/MinIO hosts → `localhost`; Elastic `insecure_certificates`
+ports. It changes: Elastic/Redis/SeaweedFS hosts → `localhost`; Elastic `insecure_certificates`
 → `true` (the cluster cert's SAN does not cover `localhost`); `scylla.nodes` → each node's
 advertised cluster IP (matching the forward, see below); `thorium.port` → `8888` (binding
 `80` needs root); and `thorium.tracing.external` → `null` (the in-cluster collector is not
@@ -433,7 +434,7 @@ until they all succeed.
 
 ### How Scylla is exposed (and why it's special)
 
-Redis, Elasticsearch, and MinIO are single-endpoint services, so a normal
+Redis, Elasticsearch, and SeaweedFS are single-endpoint services, so a normal
 `localhost:<port>` port-forward works. **Scylla is different**: the CQL driver connects to
 the seed node, then reads the cluster topology and *re-dials each node at the address it
 advertises* (`broadcast_rpc_address`). With the scylla-operator each node advertises its

@@ -56,7 +56,7 @@ minithor minikube install [--cpus <n>] [--memory <n>] [--certs <path>] [--force-
 | `--cpus <n>` | Number of CPUs to allocate to minikube (default: 8) |
 | `--memory <n>` | Memory in GiB to allocate to minikube (default: 16) |
 | `--certs <path>` | A `.crt` file, or a directory of `*.crt` files, to install into the minikube node's trust store. Required behind a TLS-intercepting proxy so the node trusts it for image pulls. No default — cert install only runs when this flag is given. |
-| `--force-node-config` | Overwrite the node's CA and containerd proxy drop-in even if they already exist. By default existing files are left in place so a manual fix on the node isn't clobbered. |
+| `--force-node-config` | Overwrite the node's CA and container-runtime (dockerd or containerd) proxy drop-in even if they already exist. By default existing files are left in place so a manual fix on the node isn't clobbered. |
 
 Detects the best available driver (podman > docker > kvm2), downloads minikube for your OS/architecture, configures resource limits, and starts the cluster with Calico CNI, CSI, and Ingress addons. When the host has an HTTP proxy configured (see below), the node's container runtime is also configured to pull images through it.
 
@@ -94,7 +94,7 @@ On an unproxied host, all of this proxy/cert plumbing is a no-op.
 
 ### Deploy
 
-The `deploy` command handles the full deployment in a single step: all backing services (Redis, Elasticsearch, ScyllaDB, MinIO, Postgres, Quickwit, Jaeger), the Thorium operator, the ThoriumCluster resource, and a default test user.
+The `deploy` command handles the full deployment in a single step: all backing services (Redis, Elasticsearch, ScyllaDB, SeaweedFS, Postgres, Quickwit, Jaeger), the Thorium operator, the ThoriumCluster resource, and a default test user.
 
 ```bash
 minithor deploy [options]
@@ -109,16 +109,19 @@ minithor deploy [options]
 | `--toolbox <path>` | Download location for `toolbox.json` (default: `$PWD/toolbox.json`) |
 | `--user <name>` | Username for the initial admin user (default: `test`) |
 | `--password <pass>` | Password for the initial admin user (default: `INSECURE_DEV_PASSWORD`) |
-| `--rand-password` | Generate a random password for the admin user |
+| `--rand-password` | Generate a random password for the admin user (saved and reused on redeploy) |
 | `--registry` | Deploy a container registry (registry:2) in the thorium namespace with persistent storage |
 | `--registry-user <name>` | Enable registry basic auth for this user (implies `--registry`, password is auto-generated and printed to stdout) |
+| `--timeout <seconds>` | Timeout for each service rollout/wait (default: 600) |
+| `--version <tag>` | Thorium image tag for the operator and ThoriumCluster (default: `latest`) |
+| `--instance <name>` | Deploy a named instance alongside others, for deployment testing only (see [Multiple Instances](#multiple-instances)) |
 
 This will:
 
 1. Wait for the minikube cluster to be healthy
 2. Install Helm and add required chart repos
-3. Deploy Redis, Elasticsearch (ECK), cert-manager, ScyllaDB, MinIO, Jaeger, Kubegres, and Quickwit
-4. Configure databases (Scylla roles/keyspace, Elasticsearch index/user, MinIO buckets)
+3. Deploy Redis, Elasticsearch (ECK), cert-manager, ScyllaDB, SeaweedFS, Jaeger, Kubegres, and Quickwit
+4. Configure databases (Scylla roles/keyspace, Elasticsearch index/user, the Quickwit bucket in SeaweedFS; the Thorium operator creates Thorium's own buckets)
 5. Deploy the Thorium operator and create the ThoriumCluster CRD
 6. Wait for all Thorium components (API, scaler, event-handler, search-streamer) to be running
 7. Create an admin user (default: `test` / `INSECURE_DEV_PASSWORD`, customizable via `--user` / `--password` / `--rand-password`)
@@ -126,7 +129,7 @@ This will:
 9. Create a `static` group and an `allow-all` network policy
 10. Optionally deploy a container registry with persistent storage (if `--registry` or `--registry-user` is specified)
 
-All backing-service passwords (Redis, Scylla, Elasticsearch, MinIO, Postgres, and the Thorium API secret key) are randomly generated per deploy using a cryptographically secure RNG. These passwords are not displayed during deployment but can be retrieved afterward with `minithor get-config`.
+All backing-service passwords (Redis, Scylla, Elasticsearch, SeaweedFS S3, Postgres, and the Thorium API secret key) are randomly generated on the first deploy using a cryptographically secure RNG and saved in the `minithor-credentials` secret (namespace `minithor`). Re-running `deploy` reuses them, so it is safe to run again after a timeout or to pick up script changes; each run also re-applies the saved password to Scylla's `thorium` role and checks that Postgres still accepts the saved password. A cluster deployed before credentials were saved has its existing passwords read back from the running deployment on the next deploy. `minithor cleanup --confirm` deletes the saved credentials along with the data, so the following deploy starts fresh. The passwords are not displayed during deployment but can be retrieved afterward with `minithor get-config`.
 
 To customize the ThoriumCluster configuration, provide your own config file:
 
@@ -134,22 +137,28 @@ To customize the ThoriumCluster configuration, provide your own config file:
 minithor deploy --config path/to/thorium-cluster.yml
 ```
 
+Write backend credentials in the file as placeholders (`${THORIUM_SECRET}`, `${S3_AK}`, `${S3_SK}`, `${REDIS_PASS}`, `${SCYLLA_PASS}`, `${ES_PASS}`), and the namespace and service hosts as `${THORIUM_NAMESPACE}`, `${REDIS_HOST}`, `${SCYLLA_HOST}`, `${ELASTIC_HOST}`, `${S3_HOST}`, and `${QUICKWIT_INDEXER_HOST}`; deploy substitutes the real values before applying it, so one file works for any instance. See `thorium-cluster.yml.example`.
+
+Operator and chart versions (ECK, cert-manager, the Scylla operator, the Quickwit chart) and the Redis and Jaeger images are pinned to megathor's defaults, so what is tested here matches what megathor deploys. If a shared operator is already installed at a different chart version (for example by an older minithor), deploy leaves it unchanged and prints a warning; `minithor cleanup --confirm` followed by a fresh deploy moves to the pinned versions.
+
 ### Access Thorium
 
 Port-forward the Thorium API to localhost:
 
 ```bash
-minithor expose [--dev] [--port <port>] [--stop] [--status]
+minithor expose [--dev] [--no-api] [--port <port>] [--port-offset <n>] [--stop] [--status]
 ```
 
 | Flag             | Description                                                     |
 |------------------|-----------------------------------------------------------------|
-| `--dev`          | Also forward database ports (Elastic, Kibana, Redis, MinIO, Scylla) |
-| `--port <port>`  | Local port for the Thorium API (default: 8080)                  |
-| `--stop`         | Stop all running port-forwards                                  |
+| `--dev`          | Also forward database ports (Elastic, Kibana, Redis, SeaweedFS, Scylla) |
+| `--no-api`       | Forward only the backing services (skip API/registry); implies the database ports |
+| `--port <port>`  | Local port for the Thorium API (default: 8080 + offset)         |
+| `--port-offset <n>` | Add `<n>` to every local port so several instances can be exposed at once |
+| `--stop`         | Stop all of your port-forwards (every instance) and remove the Scylla loopback aliases |
 | `--status`       | Show which port-forwards are running                            |
 
-The registry service (port 5000) is also forwarded by default when a registry has been deployed. Port-forward logs are written to `/tmp/minithor-expose-logs/`.
+The registry service (port 5000) is also forwarded when a registry has been deployed. `expose` exits non-zero if any forward fails to start. If a local port is already held by something other than one of your own stale port-forwards (a local Redis, another user's forward, ...), that forward is reported as failed and the other process is left alone. Port-forward logs and loopback alias state are kept per user in `~/.cache/minithor/` (or `$XDG_CACHE_HOME/minithor/`).
 
 Then open http://localhost:8080 in your browser and log in with the credentials shown at the end of the deploy output (default: `test` / `INSECURE_DEV_PASSWORD`).
 
@@ -158,9 +167,28 @@ Then open http://localhost:8080 in your browser and log in with the credentials 
 Extract the running Thorium config from the cluster:
 
 ```bash
-minithor get-config
-# Writes thorium.yml to ~/thorium.yml
+minithor get-config            # writes the raw in-cluster config to ~/thorium.yml
+minithor get-config --local    # writes a config for host access via 'expose --dev' to ~/thorium.local.yml
 ```
+
+Both files contain every backend credential and are written readable only by you.
+
+### Multiple Instances
+
+`--instance <name>` (or `MINITHOR_INSTANCE=<name>`) selects a named Thorium instance for `deploy`, `expose`, `get-config`, and `cleanup`. A named instance puts each component in its own `<name>-` prefixed namespace (`<name>-thorium`, `<name>-redis`, `<name>-scylla`, `<name>-elastic`, `<name>-quickwit`, `<name>-seaweedfs`, `<name>-jaeger`, `<name>-minithor`), so several instances can run side by side.
+
+> **Deployment testing only.** Running more than one Thorium instance in a single Kubernetes cluster is a developer feature for testing deployment tooling. It is not a supported production configuration: the scaler does not support sharing a cluster with another Thorium instance (each instance's scaler schedules into the same group-named job namespaces).
+
+
+```bash
+minithor deploy                                  # default instance
+minithor --instance b deploy                     # a second instance
+minithor --instance b expose --dev --port-offset 100   # API on :8180, Elastic on :9300, ...
+minithor --instance b get-config --local --port-offset 100   # ~/thorium-b.local.yml
+minithor --instance b cleanup --confirm          # removes only instance b
+```
+
+All instances share the cluster-wide operators (ECK, the Scylla operator, cert-manager, Kubegres) and a single Thorium operator, which manages every ThoriumCluster; the first instance deployed runs it and later instances reuse it. `cleanup` removes the shared operators and CRDs only with the last instance, and refuses to remove the instance running the Thorium operator while others remain unless `--force` is given. Each instance's scaler creates job namespaces named after Thorium groups (such as `static`), so instances using the same group names schedule into the same namespaces; keep instances apart when testing scheduling. The in-cluster registry (`--registry`) is only available to the default instance, and a named instance's ingress host is `<name>.localhost`.
 
 ### Stop
 
@@ -188,7 +216,7 @@ Remove all deployed Thorium resources and backing services for a fresh deploy. T
 minithor cleanup --confirm
 ```
 
-This removes all namespaces, Helm releases, CRDs, and cluster-level RBAC created by the deploy step. Individual step failures are logged but do not abort the cleanup. The minikube cluster itself is preserved.
+This removes all namespaces, Helm releases, CRDs, cluster-level RBAC, and the saved credentials created by the deploy step. Individual step failures are logged but do not abort the cleanup. `--timeout <seconds>` sets the timeout for each delete/wait (default: 300). The minikube cluster itself is preserved.
 
 ### Delete Minikube
 

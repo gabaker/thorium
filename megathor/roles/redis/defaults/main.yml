@@ -1,7 +1,12 @@
 redis_enabled: true
-redis_namespace: "redis"
+redis_namespace: "{{ namespace_prefix_dashed }}redis"
 redis_container_registry: "docker.io"
 redis_image: "redis"
-redis_version: "7"
-redis_host: "redis.redis.svc.cluster.local"
+redis_version: "7.4.11"
+redis_host: "redis.{{ redis_namespace }}.svc.cluster.local"
 redis_port: 6379
+redis_volume_size: "16Gi"
+redis_cpu_requests: "512m"
+redis_memory_requests: "512Mi"
+redis_cpu_limits: "2"
+redis_memory_limits: "4Gi"

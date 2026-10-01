@@ -1,1 +1,7 @@
 k8s_registry: "registry.k8s.io"
+# An optional prefix for this deployment's namespaces. When set, every
+# per-deployment namespace is prefixed with "<namespace_prefix>-" (e.g.
+# "prod-thorium", "prod-redis")
+namespace_prefix: ""
+# The prefix with its "-" separator, or empty when no prefix is set
+namespace_prefix_dashed: "{{ namespace_prefix ~ '-' if namespace_prefix else '' }}"

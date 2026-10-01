@@ -14,6 +14,10 @@ spec:
     metadata:
       labels:
           app: redis
+      annotations:
+        # roll the pod when the config (including the password) changes since
+        # redis only reads it at startup
+        checksum/config: "{{ lookup('template', 'redis.conf.j2') | hash('sha256') }}"
     spec:
       containers:
         - name: redis
