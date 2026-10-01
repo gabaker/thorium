@@ -488,7 +488,7 @@ commitlog_total_space_in_mb: -1
 # false: strict environment checks are in place; do not start if they are not met.
 # true: relaxed environment checks; performance and reliability may degraade.
 #
-developer_mode: true
+developer_mode: {{ scylla_developer_mode | bool | lower }}
 
 
 # Idle-time background processing

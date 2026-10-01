@@ -39,25 +39,38 @@
     apply: true
     definition: "{{ lookup('template', 'rbac.yaml.j2') }}"
 
-- name: Create operator deployment
-  kubernetes.core.k8s:
-    namespace: "{{ thorium_namespace }}"
-    state: present
-    apply: true
-    definition: "{{ lookup('template', 'operator.yaml.j2') }}"
+- name: Deploy the Thorium operator
+  when: thorium_operator_enabled | bool
+  block:
+    - name: Create operator deployment
+      kubernetes.core.k8s:
+        namespace: "{{ thorium_namespace }}"
+        state: present
+        apply: true
+        definition: "{{ lookup('template', 'operator.yaml.j2') }}"
 
-- name: Wait for Operator to be available
-  kubernetes.core.k8s:
-    api_version: apps/v1
-    kind: Deployment
-    name: operator
-    namespace: "{{ thorium_namespace }}"
-    wait: true
-    wait_condition:
-      type: Available
-      status: "True"
-    wait_timeout: 300
-    wait_sleep: 5
+    - name: Wait for Operator to be available
+      kubernetes.core.k8s:
+        api_version: apps/v1
+        kind: Deployment
+        name: operator
+        namespace: "{{ thorium_namespace }}"
+        wait: true
+        wait_condition:
+          type: Available
+          status: "True"
+        wait_timeout: 300
+        wait_sleep: 5
+
+# A deployment sharing another deployment's operator needs the operator to have
+# registered the ThoriumCluster CRD before the ThoriumCluster can be created
+- name: Wait for the ThoriumCluster CRD to be established
+  shell: kubectl wait --for condition=established --timeout=30s crd/thoriumclusters.sandia.gov
+  register: thorium_crd_wait
+  until: thorium_crd_wait.rc == 0
+  retries: "{{ (service_wait_timeout | int / 30) | int }}"
+  delay: 1
+  changed_when: false
 
 - name: Create Traefik ingress and TLS configurations
   kubernetes.core.k8s:
@@ -65,6 +78,7 @@
     state: present
     apply: true
     definition: "{{ lookup('template', 'traefik.yaml.j2') }}"
+  when: thorium_ingress_enabled | bool
 
 - name: Create ThoriumCluster
   kubernetes.core.k8s:
@@ -72,3 +86,5 @@
     state: present
     apply: true
     definition: "{{ lookup('template', 'thorium-cluster.yaml.j2') }}"
+  # the resource embeds every backend credential
+  no_log: true

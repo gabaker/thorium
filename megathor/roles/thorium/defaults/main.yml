@@ -1,6 +1,10 @@
 thorium_enabled: true
+# Deploy the Thorium operator. It manages every ThoriumCluster in the cluster, so
+# only one deployment per Kubernetes cluster should run it; disable it for
+# additional deployments sharing a cluster.
+thorium_operator_enabled: true
 thorium_deployment_name: "dev"
-thorium_namespace: "thorium"
+thorium_namespace: "{{ namespace_prefix_dashed }}thorium"
 thorium_container_registry: "ghcr.io"
 thorium_image: "cisagov/thorium/infrastructure/thorium"
 thorium_version: "latest"
@@ -8,6 +12,8 @@ thorium_operator_memory_limits: "512Mi"
 thorium_operator_cpu_limits: "512m"
 thorium_operator_memory_requests: "256Mi"
 thorium_operator_cpu_requests: "256m"
+# The Kubernetes nodes Thorium may schedule jobs on
+thorium_nodes: []
 # Pull secret value is just a stub placeholder base64(thorium:corn)
 thorium_image_pull_secret: {}
 # thorium_image_pull_secret:
@@ -16,5 +22,8 @@ thorium_image_pull_secret: {}
 #      auth: "dGhvcml1bTpjb3JuCg=="
 thorium_ui_banner: |
   Welcome to Thorium. <Please place you banner here>
+# Create Traefik IngressRoutes for the API; needs Traefik's CRDs in the cluster
+thorium_ingress_enabled: true
+# Deployments sharing one Traefik must each set a distinct hostname
 # thorium_ingress_hostname: "localhost"
 # thorium_tls_cert_secret_name: "api-certs

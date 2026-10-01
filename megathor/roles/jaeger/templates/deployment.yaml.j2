@@ -24,7 +24,7 @@ spec:
             - name: SPAN_STORAGE_TYPE
               value: "grpc"
             - name: GRPC_STORAGE_SERVER
-              value: "quickwit-searcher.quickwit.svc.cluster.local.:7281"
+              value: "quickwit-searcher.{{ quickwit_namespace }}.svc.cluster.local.:7281"
           resources:
             requests:
               cpu: "{{ jaeger_cpu_requests }}"

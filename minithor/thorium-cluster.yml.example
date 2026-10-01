@@ -1,11 +1,21 @@
+# Example ThoriumCluster for `minithor deploy --config <file>`.
+#
+# Backend credentials, service hosts, and the namespace are written as ${NAME}
+# placeholders; deploy replaces them with the values it configured the backing
+# services with (credentials are saved in the minithor-credentials secret), so
+# this file never needs real secrets and works for any --instance.
+# Supported placeholders: ${THORIUM_SECRET}, ${S3_AK}, ${S3_SK}, ${REDIS_PASS},
+# ${SCYLLA_PASS}, ${ES_PASS}, ${THORIUM_NAMESPACE}, ${REDIS_HOST},
+# ${SCYLLA_HOST}, ${ELASTIC_HOST}, ${S3_HOST}, ${QUICKWIT_INDEXER_HOST}.
+# Any other text is applied as written.
 apiVersion: sandia.gov/v1
 kind: ThoriumCluster
 metadata:
   name: dev
-  namespace: thorium
+  namespace: "${THORIUM_NAMESPACE}"
 spec:
-  registry: "ghcr.io/gabaker/thorium/infrastructure/thorium"
-  version: "FixMinithorDeploy" 
+  registry: "ghcr.io/cisagov/thorium/infrastructure/thorium"
+  version: "latest"
   # registry_auth:
   #   "registry.domain:port": "dGhvcml1bTpjb3JuCg==" # "thorium:corn"
   image_pull_policy: Always
@@ -36,13 +46,13 @@ spec:
       resources:
         cpu: 0
         memory: 0
-  config: 
+  config:
     thorium:
-      secret_key: "INSECURE_DEV_PASSWORD"
+      secret_key: "${THORIUM_SECRET}"
       tracing:
         external:
           Grpc:
-            endpoint: "http://quickwit-indexer.quickwit.svc.cluster.local:7281"
+            endpoint: "http://${QUICKWIT_INDEXER_HOST}:7281"
             level: "Info"
         local:
           level: "Info"
@@ -64,9 +74,9 @@ spec:
       ephemeral:
         bucket: "thorium-ephemeral"
       s3:
-        access_key: "INSECURE_DEV_MINIO_ACCESS_KEY"
-        secret_token: "INSECURE_DEV_MINIO_SECRET_KEY"
-        endpoint: "http://minio.minio.svc.cluster.local:9000"
+        access_key: "${S3_AK}"
+        secret_token: "${S3_SK}"
+        endpoint: "http://${S3_HOST}:8333"
         region: "us-east-1"
         use_path_style: true
       auth:
@@ -80,20 +90,20 @@ spec:
               nodes:
                 - "minikube"
     redis:
-      host: "redis.redis.svc.cluster.local"
+      host: "${REDIS_HOST}"
       port: 6379
-      password: "INSECURE_DEV_PASSWORD"
+      password: "${REDIS_PASS}"
     scylla:
       nodes:
-        - "scylla-client.scylla.svc.cluster.local"
+        - "${SCYLLA_HOST}"
       replication: 1
       auth:
         username: "thorium"
-        password: "INSECURE_DEV_PASSWORD"
+        password: "${SCYLLA_PASS}"
     elastic:
-      node: "https://elastic-es-http.elastic-system.svc.cluster.local:9200"
+      node: "https://${ELASTIC_HOST}:9200"
       username: "thorium"
-      password: "INSECURE_DEV_PASSWORD"
+      password: "${ES_PASS}"
       results:
         repos: thorium_repo_results
         samples: thorium_sample_results

@@ -1,7 +1,7 @@
 # quickwit
 quickwit_enabled: true
-quickwit_helm_chart_version: "0.7.18"
-quickwit_namespace: "quickwit"
+quickwit_helm_chart_version: "0.8.17"
+quickwit_namespace: "{{ namespace_prefix_dashed }}quickwit"
 quickwit_container_registry: "docker.io"
 quickwit_image: "quickwit/quickwit"
 quickwit_bucket: "quickwit"
@@ -9,8 +9,8 @@ quickwit_postgres_replicas: 1
 quickwit_postgres_container_registry: "docker.io"
 quickwit_postgres_image: "postgres"
 quickwit_postgres_version: "17"
-quickwit_postgres_host: "postgres.quickwit.svc.cluster.local.:5432"
-quickwit_host: "http://quickwit-indexer.quickwit.svc.cluster.local:7281"
+quickwit_postgres_host: "postgres.{{ quickwit_namespace }}.svc.cluster.local.:5432"
+quickwit_host: "http://quickwit-indexer.{{ quickwit_namespace }}.svc.cluster.local:7281"
 quickwit_metastore_replica_count: 1
 quickwit_searcher_replica_count: 1
 quickwit_postgress_storage_size: "32G"

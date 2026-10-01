@@ -4,7 +4,10 @@ metadata:
   name: elastic
   namespace: {{ elastic_namespace }}
 spec:
-  version: {{ elastic_search_version }} 
+  version: {{ elastic_search_version }}
+  # set explicitly so an ECK operator shared with another deployment (whose
+  # container-registry setting may differ) still pulls from our registry
+  image: "{{ elastic_container_registry }}/elasticsearch/elasticsearch:{{ elastic_search_version }}"
   volumeClaimDeletePolicy: DeleteOnScaledownOnly
   nodeSets:
   - name: default

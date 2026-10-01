@@ -8,21 +8,38 @@ storage_class: local-path
 vault_password_file: "artifacts/vault_pass"
 # vault_path: "artifacts/secrets.yml"
 
+# Prefix every per-deployment namespace with "<namespace_prefix>-" (see "Namespace
+# Prefix" in the README)
+# namespace_prefix: ""
+
+# Cluster-wide operators; disable any that the cluster already provides
+# cert_manager_enabled: true
+# elastic_operator_enabled: true
+# scylla_operator_enabled: true
+# kubegres_operator_enabled: true
+# traefik_enabled: true
+# thorium_operator_enabled: true
+
 # Elastic
 elastic_enabled: true
-# elastic_namespace: "elastic-system"
-# elastic_url: "https://elastic-es-http.elastic-system.svc.cluster.local:9200"
+# elastic_namespace: "elastic-system" # "<namespace_prefix>-elastic" when namespace_prefix is set
 # elastic_username: "thorium"
 
 # Redis
 redis_enabled: true
 # redis_namespace: "redis"
-# redis_host: "redis.redis.svc.cluster.local"
 # redis_port: 6379
 
-# Minio
-minio_enabled: false
-# minio_namespace: "minio"
+# S3 backend: enable at most one of rook_enabled or seaweedfs_enabled.
+# - rook: replicated Ceph object store (and ceph-block storage class) for multi-node clusters
+# - seaweedfs: single-instance SeaweedFS (`weed mini`) on one PVC; the single_node default
+# Disable both to use an external S3 service and set the s3_* overrides below.
+
+# SeaweedFS
+seaweedfs_enabled: false
+# seaweedfs_namespace: "seaweedfs"
+# seaweedfs_version: "4.48"
+# seaweedfs_volume_size: "128Gi"
 
 # Rook Operator
 rook_enabled: true
@@ -34,10 +51,14 @@ ceph_ignore_health_errors: true
 ceph_health_check_retries: 1
 
 # S3
-s3_endpoint: "http://minio.minio.svc.cluster.local"
-# s3_endpoint: "http://rook-ceph-rgw-thorium-s3.rook-ceph.svc.cluster.local"
-s3_region: "default" # default or thorium-s3 when using rook
-s3_flavor: "minio" # leave s3 as minio for rook/ceph
+# s3_endpoint, s3_region, s3_flavor, s3_thorium_region, and s3_use_path_style are derived
+# from the enabled S3 backend (see roles/s3/defaults/main.yml); set them only for external S3
+# s3_endpoint: "https://s3.example.com" # required when no S3 backend is enabled
+# s3_region: "us-east-1"
+# s3_flavor: "" # Quickwit flavor ("minio" covers rook/ceph)
+# s3_use_path_style: false
+# s3_access_key: ""
+# s3_secret_key: ""
 s3_validate_certs: true
 
 # Jaeger
@@ -49,16 +70,16 @@ kubegres_enabled: true
 
 # Quickwit
 quickwit_enabled: true
-quickwit_helm_chart_version: "0.7.18"
+quickwit_helm_chart_version: "0.8.17"
 # quickwit_namespace: "quickwit"
-# quickwit_postgres_host: "postgres.quickwit.svc.cluster.local.:5432"
-# quickwit_host: "http://quickwit-indexer.quickwit.svc.cluster.local:7281"
 quickwit_bucket: "quickwit"
 
 # Traefik
 traefik_enabled: true
 traefik_helm_chart_version: "37.1.0"
 # traefik_namespace: "traefik"
+traefik_external_ips:
+  - "0.0.0.0"
 
 # Cert Manager
 cert_manager_enabled: true
@@ -67,27 +88,31 @@ cert_manager_enabled: true
 scylla_enabled: true
 
 # Scylla Operator
-scylla_helm_chart_version: "v1.16.3"
+# Pinned: newer operators use curl in probes/hooks, which the scylla-manager-agent
+# image (scylla_agent_version) lacks; bump only together with a compatible agent
+scylla_helm_chart_version: "v1.21.1"
 # scylla_operator_namespace: "scylla-operator"
 
 # Scylla Cluster
 # scylla_username: "thorium"
 # scylla_namespace: "scylla"
-# scylla_nodes:
-#   - "scylla-client.scylla.svc.cluster.local" 
+# scylla_developer_mode: false
 
 # Thorium Operator
 thorium_enabled: true
 # thorium_deployment_name: "dev"
 # thorium_namespace: "thorium"
 # thorium_version: "latest"
+# The Kubernetes nodes Thorium may schedule jobs on
+thorium_nodes: []
 # Pull secret value is just a stub placeholder base64(thorium:corn)
 # thorium_image_pull_secret:
-#   auths: 
+#   auths:
 #     "registry.domain:port":
 #       "auth: "dGhvcml1bTpjb3JuCg=="
 # thorium_ui_banner: |
 #   Welcome to Thorium. <Please place you banner here>
 #
+# thorium_ingress_enabled: true
 # thorium_ingress_hostname: "*" # or put thorium.<SLD>.<TLD>
 # thorium_tls_cert_secret_name: "api-certs

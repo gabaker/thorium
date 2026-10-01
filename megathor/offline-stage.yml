@@ -9,7 +9,7 @@
       ignore_errors: yes
 
     - name: Install Helm if not present
-      command: curl https://raw.githubusercontent.com/helm/helm/master/scripts/get-helm-3 | bash
+      shell: curl -fsSL https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-3 | bash
       when: helm_version.rc != 0
 
     - name: Add Helm Traefik repo

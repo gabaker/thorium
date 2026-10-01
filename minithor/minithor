@@ -1,5 +1,9 @@
 #!/usr/bin/env bash
-set -euo pipefail
+# Single-quoted `sh -c` scripts are expanded inside pods (so secrets arrive over
+# stdin instead of host command lines), not by this shell
+# shellcheck disable=SC2016
+# -E makes ERR traps fire inside functions (kctl and every helper is one)
+set -Eeuo pipefail
 
 ########################################
 # Shared utilities
@@ -31,7 +35,7 @@ compute_no_proxy() {
     printf '%s,%s,%s' "${NO_PROXY:-}" "${no_proxy:-}" "$MINIKUBE_NO_PROXY" \
         | tr ',' '\n' \
         | awk 'NF && !seen[$0]++' \
-        | paste -sd,
+        | paste -sd, -
 }
 
 # Persist the computed NO_PROXY into a shell rc file so ad-hoc kubectl/curl
@@ -57,7 +61,11 @@ persist_no_proxy_rc() {
             $0 == "" { if (buffered_blank) print ""; buffered_blank=1; next }
             { if (buffered_blank) { print ""; buffered_blank=0 }; print }
             END { if (buffered_blank) print "" }
-        ' "$rc_file" > "${rc_file}.tmp" && mv "${rc_file}.tmp" "$rc_file"
+        ' "$rc_file" > "${rc_file}.tmp"
+        # Write back through the existing file rather than mv so a symlinked rc
+        # file (e.g. managed by a dotfile manager) stays a symlink
+        cat "${rc_file}.tmp" > "$rc_file"
+        rm -f "${rc_file}.tmp"
     fi
 
     {
@@ -82,89 +90,184 @@ log() { echo -e "\n====== $1 ======\n"; }
 # together.
 ########################################
 
-# Where expose writes its logs and tracks the loopback aliases it created
-EXPOSE_LOG_DIR="/tmp/minithor-expose-logs"
-LOOPBACK_STATE_FILE="${EXPOSE_LOG_DIR}/loopback-aliases"
-CURRENT_USER="$(id -un)"
+# Where expose writes its logs and tracks the loopback aliases it created. This
+# is per-user and private: the alias list is later fed to `sudo ip addr del`, so
+# it must not live in a shared location another user could write to.
+MINITHOR_STATE_DIR="${XDG_CACHE_HOME:-$HOME/.cache}/minithor"
+EXPOSE_LOG_DIR="${MINITHOR_STATE_DIR}/expose-logs"
+LOOPBACK_STATE_FILE="${MINITHOR_STATE_DIR}/loopback-aliases"
+CURRENT_UID="$(id -u)"
 
-# Scylla connection details (the operator runs Thorium's Scylla in this ns)
-SCYLLA_NAMESPACE="scylla"
+# Create the private state directories used by expose
+ensure_state_dir() {
+    mkdir -p "$EXPOSE_LOG_DIR"
+    chmod 700 "$MINITHOR_STATE_DIR" "$EXPOSE_LOG_DIR"
+}
+
 SCYLLA_CQL_PORT=9042
-
-# In-cluster service DNS names baked into the thorium secret. Used by
-# `get-config --local` to rewrite the config for host access via exposed ports.
-ELASTIC_CLUSTER_HOST="elastic-es-http.elastic-system.svc.cluster.local"
-REDIS_CLUSTER_HOST="redis.redis.svc.cluster.local"
-MINIO_CLUSTER_HOST="minio.minio.svc.cluster.local"
-SCYLLA_CLUSTER_HOST="scylla-client.scylla.svc.cluster.local"
 # Local API listen port written into a `--local` config (80 needs root)
 LOCAL_API_PORT=8888
 
-# List the minikube kubectl port-forward processes we manage. The `[p]ort`
-# trick keeps grep from matching itself; `.*svc/` tolerates an interspersed
-# `--address` flag (used for the Scylla forwards). `ps -A -o user,pid,args` is
-# portable across GNU (Linux) and BSD (macOS) ps — unlike `ps -eo user:20,...`,
-# whose `-e`/`:width` syntax means different things on macOS.
+# Component versions, pinned to match megathor's defaults so what is tested
+# here is what megathor deploys
+ECK_CHART_VERSION="2.16.0"
+CERT_MANAGER_CHART_VERSION="v1.18.2"
+# Pinned: newer operators use curl in probes/hooks, which the pinned
+# scylla-manager-agent image lacks
+SCYLLA_OPERATOR_CHART_VERSION="1.21.1"
+QUICKWIT_CHART_VERSION="0.8.17"
+REDIS_IMAGE="docker.io/redis:7.4.11"
+JAEGER_IMAGE="docker.io/jaegertracing/jaeger-query:1.76.0"
+# Pinned because `weed mini` defaults may change between SeaweedFS releases
+SEAWEEDFS_IMAGE="docker.io/chrislusf/seaweedfs:4.48"
+THORIUM_REGISTRY="ghcr.io/cisagov/thorium/infrastructure/thorium"
+
+# The cluster-wide operators every instance shares
+ELASTIC_OPERATOR_NAMESPACE="elastic-system"
+SCYLLA_OPERATOR_NAMESPACE="scylla-operator"
+# The optional in-cluster registry only exists for the default instance, since
+# the node's container runtime trusts REGISTRY_HOST from cluster creation
+REGISTRY_NAMESPACE="thorium"
+
+# Select which Thorium instance the namespace and service DNS variables below
+# describe. The default instance (no name) uses the plain namespaces (thorium,
+# redis, ...); a named instance prefixes each with "<name>-" so several Thorium
+# deployments can share the cluster for deployment testing only, since the scaler
+# does not support sharing a cluster with another instance. The cluster-wide
+# operators (ECK, Scylla, cert-manager, Kubegres, and the Thorium operator) are
+# shared by all instances.
+#
+#   set_instance [name]
+set_instance() {
+    INSTANCE="${1:-}"
+    if [ -n "$INSTANCE" ] && ! [[ "$INSTANCE" =~ ^[a-z0-9]([-a-z0-9]{0,30}[a-z0-9])?$ ]]; then
+        echo "ERROR: --instance must be a lowercase DNS label of at most 32 characters" >&2
+        exit 1
+    fi
+    local prefix="${INSTANCE:+$INSTANCE-}"
+    THORIUM_NAMESPACE="${prefix}thorium"
+    REDIS_NAMESPACE="${prefix}redis"
+    SCYLLA_NAMESPACE="${prefix}scylla"
+    QUICKWIT_NAMESPACE="${prefix}quickwit"
+    SEAWEEDFS_NAMESPACE="${prefix}seaweedfs"
+    JAEGER_NAMESPACE="${prefix}jaeger"
+    # where deploy keeps the credentials it generated (see load_credentials)
+    CREDENTIALS_NAMESPACE="${prefix}minithor"
+    # the default instance keeps Elasticsearch alongside the ECK operator
+    if [ -n "$INSTANCE" ]; then
+        ELASTIC_NAMESPACE="${prefix}elastic"
+    else
+        ELASTIC_NAMESPACE="$ELASTIC_OPERATOR_NAMESPACE"
+    fi
+    # In-cluster service DNS names baked into the thorium secret. Also used by
+    # `get-config --local` to rewrite the config for host access via exposed ports.
+    ELASTIC_CLUSTER_HOST="elastic-es-http.${ELASTIC_NAMESPACE}.svc.cluster.local"
+    REDIS_CLUSTER_HOST="redis.${REDIS_NAMESPACE}.svc.cluster.local"
+    SEAWEEDFS_CLUSTER_HOST="seaweedfs.${SEAWEEDFS_NAMESPACE}.svc.cluster.local"
+    SCYLLA_CLUSTER_HOST="scylla-client.${SCYLLA_NAMESPACE}.svc.cluster.local"
+    POSTGRES_CLUSTER_HOST="postgres.${QUICKWIT_NAMESPACE}.svc.cluster.local"
+    QUICKWIT_INDEXER_HOST="quickwit-indexer.${QUICKWIT_NAMESPACE}.svc.cluster.local"
+    QUICKWIT_SEARCHER_HOST="quickwit-searcher.${QUICKWIT_NAMESPACE}.svc.cluster.local"
+    # each instance binds its own "thorium" service account (used by its scaler)
+    THORIUM_BINDING="thorium-operator-binding${INSTANCE:+-$INSTANCE}"
+    # nginx routes on host, so each instance's ingress needs its own
+    INGRESS_HOST="${INSTANCE:+$INSTANCE.}localhost"
+    # get-config writes ~/thorium.yml for the default instance, ~/thorium-<name>.yml otherwise
+    CONFIG_NAME="thorium${INSTANCE:+-$INSTANCE}"
+}
+set_instance "${MINITHOR_INSTANCE:-}"
+
+# List the minikube kubectl port-forward processes on this host as
+# "<uid> <pid> <args...>". The `[p]ort` trick keeps grep from matching itself;
+# `.*svc/` tolerates an interspersed `--address` flag (used for the Scylla
+# forwards). The uid is used for ownership because procps truncates long user
+# names. `-ww` stops BSD/macOS ps from truncating args to the terminal width.
 find_forwards() {
-    ps -A -o user,pid,args 2>/dev/null \
+    ps -A -ww -o uid= -o pid= -o args= 2>/dev/null \
         | grep 'minikube kubectl.*[p]ort-forward.*svc/' \
         || true
 }
 
+# List only the port-forwards owned by the invoking user
+find_own_forwards() { find_forwards | awk -v u="$CURRENT_UID" '$1 == u'; }
+
 parse_service() { echo "$1" | sed -n 's/.*svc\/\([^ ]*\).*/\1/p'; }
 parse_ports()   { echo "$1" | awk '{print $NF}'; }
 
-kill_process() {
-    local pid=$1 owner=$2
-    if [ "$owner" = "$CURRENT_USER" ]; then
-        pkill -P "$pid" 2>/dev/null || true
-        kill "$pid" 2>/dev/null || true
-    else
-        echo "  Port-forward owned by $owner, using sudo to stop"
-        sudo pkill -P "$pid" 2>/dev/null || true
-        sudo kill "$pid" 2>/dev/null || true
-    fi
+# Print a user name for a uid, falling back to the raw uid
+uid_name() { id -nu "$1" 2>/dev/null || echo "uid $1"; }
+
+# Stop a process started by this user along with its children (the minikube
+# wrapper spawns the real kubectl as a child)
+kill_own_process() {
+    local pid=$1
+    pkill -P "$pid" 2>/dev/null || true
+    kill "$pid" 2>/dev/null || true
 }
 
-is_forward_alive() { find_forwards | grep -q "svc/$1"; }
+# Is a port-forward to this service already running? Services are matched with
+# their namespace since every instance uses the same service names.
+#
+#   is_forward_alive <service> <namespace>
+is_forward_alive() { find_forwards | grep -qE "svc/$1 -n $2( |$)"; }
 
-stop_forward() {
-    local service=$1 line owner pid
-    while IFS= read -r line; do
-        [ -n "$line" ] || continue
-        owner=$(echo "$line" | awk '{print $1}')
-        pid=$(echo "$line" | awk '{print $2}')
-        kill_process "$pid" "$owner"
-        echo "Stopped $service (PID $pid, owner $owner)"
-    done < <(find_forwards | grep "svc/$service")
-}
+parse_namespace() { echo "$1" | sed -n 's/.* -n \([^ ]*\).*/\1/p'; }
 
 stop_all_forwards() {
-    local found=false line owner pid service
+    local found=false line uid pid service others
     while IFS= read -r line; do
         [ -n "$line" ] || continue
         found=true
-        owner=$(echo "$line" | awk '{print $1}')
-        pid=$(echo "$line" | awk '{print $2}')
+        read -r uid pid _ <<< "$line"
         service=$(parse_service "$line")
-        kill_process "$pid" "$owner"
-        echo "Stopped $service (PID $pid, owner $owner)"
-    done < <(find_forwards)
+        kill_own_process "$pid"
+        echo "Stopped $service (PID $pid)"
+    done < <(find_own_forwards)
     if [ "$found" = false ]; then
         echo "No port-forwards running"
     fi
+    # Other users' forwards are theirs to manage; only report them
+    others=$(find_forwards | awk -v u="$CURRENT_UID" '$1 != u' | wc -l | tr -d ' ')
+    if [ "$others" -gt 0 ]; then
+        echo "Left $others port-forward(s) owned by other users running"
+    fi
+}
+
+# Stop this user's port-forwards into the selected instance's namespaces and
+# remove the Scylla loopback aliases they used, leaving other instances' alone
+stop_instance_forwards() {
+    local line pid ns service
+    local namespaces=" $THORIUM_NAMESPACE $ELASTIC_NAMESPACE $REDIS_NAMESPACE $SEAWEEDFS_NAMESPACE $SCYLLA_NAMESPACE "
+    while IFS= read -r line; do
+        [ -n "$line" ] || continue
+        ns=$(parse_namespace "$line")
+        [[ "$namespaces" == *" $ns "* ]] || continue
+        read -r _ pid _ <<< "$line"
+        service=$(parse_service "$line")
+        kill_own_process "$pid"
+        echo "Stopped $service ($ns, PID $pid)"
+    done < <(find_own_forwards)
+    # the instance's Scylla nodes advertise the addresses its aliases were made for
+    local svc ip
+    while read -r svc ip; do
+        [ -n "$ip" ] || continue
+        loopback_alias_del "$ip"
+        if [ -f "$LOOPBACK_STATE_FILE" ]; then
+            grep -vxF "$ip" "$LOOPBACK_STATE_FILE" > "${LOOPBACK_STATE_FILE}.tmp" || true
+            mv "${LOOPBACK_STATE_FILE}.tmp" "$LOOPBACK_STATE_FILE"
+        fi
+    done <<< "$(discover_scylla_nodes)"
 }
 
 show_status() {
-    local found=false line owner pid service ports
+    local found=false line uid pid service ports
     while IFS= read -r line; do
         [ -n "$line" ] || continue
         found=true
-        owner=$(echo "$line" | awk '{print $1}')
-        pid=$(echo "$line" | awk '{print $2}')
+        read -r uid pid _ <<< "$line"
         service=$(parse_service "$line")
         ports=$(parse_ports "$line")
-        echo "  $service: running as $owner (PID $pid) -> $ports"
+        echo "  $service ($(parse_namespace "$line")): running as $(uid_name "$uid") (PID $pid) -> $ports"
     done < <(find_forwards)
     if [ "$found" = false ]; then
         echo "  No port-forwards running"
@@ -185,13 +288,12 @@ start_forward() {
     shift 3
     local ports=("$@")
 
-    if is_forward_alive "$service"; then
-        local existing owner pid
-        existing=$(find_forwards | grep "svc/$service" | head -1)
-        owner=$(echo "$existing" | awk '{print $1}')
-        pid=$(echo "$existing" | awk '{print $2}')
-        echo "  $name: already running as $owner (PID $pid), skipping"
-        return
+    if is_forward_alive "$service" "$namespace"; then
+        local existing uid pid
+        existing=$(find_forwards | grep -E "svc/$service -n $namespace( |$)" | head -1)
+        read -r uid pid _ <<< "$existing"
+        echo "  $name: already running as $(uid_name "$uid") (PID $pid), skipping"
+        return 0
     fi
 
     if ! kctl get svc "$service" -n "$namespace" &>/dev/null; then
@@ -199,27 +301,36 @@ start_forward() {
         return 1
     fi
 
-    # Kill any stale process holding the local port. When bound to a specific
-    # address, scope the check to that address so sibling forwards on the same
-    # port (e.g. multiple Scylla nodes on :9042) aren't killed.
+    # Find any process holding the local port. When bound to a specific address,
+    # scope the check to that address so sibling forwards on the same port (e.g.
+    # multiple Scylla nodes on :9042) aren't matched.
     local local_port="${ports[0]%%:*}"
-    local stale_pid stale_owner
+    local holder_pid=""
     if command -v ss &>/dev/null; then
         if [ -n "$bind_addr" ]; then
-            stale_pid=$(ss -tlnp "src ${bind_addr}:${local_port}" 2>/dev/null | sed -n 's/.*pid=\([0-9]*\).*/\1/p' | head -1 || true)
+            holder_pid=$(ss -tlnp "src ${bind_addr}:${local_port}" 2>/dev/null | sed -n 's/.*pid=\([0-9]*\).*/\1/p' | head -1 || true)
         else
-            stale_pid=$(ss -tlnp "sport = :$local_port" 2>/dev/null | sed -n 's/.*pid=\([0-9]*\).*/\1/p' | head -1 || true)
+            holder_pid=$(ss -tlnp "sport = :$local_port" 2>/dev/null | sed -n 's/.*pid=\([0-9]*\).*/\1/p' | head -1 || true)
         fi
     elif [ -n "$bind_addr" ]; then
-        stale_pid=$(lsof -nP -ti "TCP@${bind_addr}:${local_port}" -sTCP:LISTEN 2>/dev/null | head -1 || true)
+        holder_pid=$(lsof -nP -ti "TCP@${bind_addr}:${local_port}" -sTCP:LISTEN 2>/dev/null | head -1 || true)
     else
-        stale_pid=$(lsof -nP -ti "TCP:$local_port" -sTCP:LISTEN 2>/dev/null | head -1 || true)
+        holder_pid=$(lsof -nP -ti "TCP:$local_port" -sTCP:LISTEN 2>/dev/null | head -1 || true)
     fi
-    if [ -n "$stale_pid" ]; then
-        stale_owner=$(ps -o user= -p "$stale_pid" 2>/dev/null | awk '{print $1}' || true)
-        echo "  $name: killing stale process on port ${bind_addr:+$bind_addr:}$local_port (PID $stale_pid, owner ${stale_owner:-unknown})"
-        kill_process "$stale_pid" "${stale_owner:-$CURRENT_USER}"
-        sleep 1
+    if [ -n "$holder_pid" ]; then
+        # Only a stale port-forward of our own is safe to replace; anything else
+        # (a local Redis, another user's forward, ...) is left alone
+        local holder_uid holder_args
+        holder_uid=$(ps -o uid= -p "$holder_pid" 2>/dev/null | tr -d ' ' || true)
+        holder_args=$(ps -ww -o args= -p "$holder_pid" 2>/dev/null || true)
+        if [ "$holder_uid" = "$CURRENT_UID" ] && [[ "$holder_args" == *port-forward* ]]; then
+            echo "  $name: replacing stale port-forward on port ${bind_addr:+$bind_addr:}$local_port (PID $holder_pid)"
+            kill_own_process "$holder_pid"
+            sleep 1
+        else
+            echo "  $name: FAILED (port ${bind_addr:+$bind_addr:}$local_port is in use by PID $holder_pid, owner $(uid_name "${holder_uid:-?}"))"
+            return 1
+        fi
     fi
 
     local addr_flag=()
@@ -230,7 +341,7 @@ start_forward() {
     local pid=$!
 
     sleep 1
-    if is_forward_alive "$service"; then
+    if is_forward_alive "$service" "$namespace"; then
         echo "  $name: forwarding ${bind_addr:+$bind_addr }${ports[*]} (PID $pid)"
     else
         echo "  $name: FAILED to start (port-forward exited immediately)"
@@ -255,7 +366,7 @@ loopback_alias_present() {
 # in the state file so teardown knows to remove it. Idempotent.
 loopback_alias_add() {
     local ip=$1
-    mkdir -p "$EXPOSE_LOG_DIR"
+    ensure_state_dir
     if ! { [ -f "$LOOPBACK_STATE_FILE" ] && grep -qxF "$ip" "$LOOPBACK_STATE_FILE"; }; then
         echo "$ip" >> "$LOOPBACK_STATE_FILE"
     fi
@@ -311,6 +422,12 @@ discover_scylla_nodes() {
     done
 }
 
+# Start a port-forward without aborting the caller on failure, counting the
+# failure in EXPOSE_FAILURES so expose can report it and exit non-zero at the end
+run_forward() {
+    start_forward "$@" || EXPOSE_FAILURES=$((EXPOSE_FAILURES + 1))
+}
+
 # Set up dev port-forwards for Scylla. A plain localhost forward does NOT work:
 # the driver connects to the seed, learns each node's advertised
 # broadcast_rpc_address (the per-pod ClusterIP) and re-dials *that* address,
@@ -329,15 +446,152 @@ forward_scylla_dev() {
         [ -n "$svc" ] || continue
         if ! loopback_alias_add "$ip"; then
             echo "  scylla[$svc]: FAILED to add loopback alias $ip"
+            EXPOSE_FAILURES=$((EXPOSE_FAILURES + 1))
             continue
         fi
-        start_forward --address "$ip" "scylla-$svc" "$SCYLLA_NAMESPACE" "$svc" \
+        run_forward --address "$ip" "${INSTANCE:+$INSTANCE-}scylla-$svc" "$SCYLLA_NAMESPACE" "$svc" \
             "$SCYLLA_CQL_PORT:$SCYLLA_CQL_PORT"
     done <<< "$nodes"
 }
 
 generate_password() {
     openssl rand -base64 32 | tr -d '/+=' | head -c 32
+}
+
+# Where deploy keeps the backend credentials it generated, so re-running deploy
+# reuses them instead of rotating passwords the stateful services already hold.
+# `cleanup` deletes this namespace along with the data, so a fresh deploy
+# starts with fresh credentials.
+CREDENTIALS_SECRET="minithor-credentials"
+
+# Print a short, stable hash of a string (used as a pod annotation so a changed
+# credential rolls the pods that read it)
+config_hash() {
+    if command -v sha256sum >/dev/null 2>&1; then
+        printf '%s' "$1" | sha256sum | cut -c1-16
+    else
+        printf '%s' "$1" | shasum -a 256 | cut -c1-16
+    fi
+}
+
+# Escape a string for embedding inside a JSON string literal
+json_escape() { printf '%s' "$1" | sed 's/\\/\\\\/g; s/"/\\"/g'; }
+
+# Print one decoded key of a secret, or nothing if the secret or key is missing
+#
+#   read_secret_key <namespace> <secret> <key>
+read_secret_key() {
+    kctl get secret "$2" -n "$1" \
+        -o go-template="{{with index .data \"$3\"}}{{. | base64decode}}{{end}}" 2>/dev/null || true
+}
+
+# Print a credential from a deployment made before credentials were saved, read
+# back from the resources that hold it, or nothing when there is none
+legacy_credential() {
+    local jsonpath=""
+    case "$1" in
+        redis-password)     jsonpath='{.items[0].spec.config.redis.password}' ;;
+        scylla-password)    jsonpath='{.items[0].spec.config.scylla.auth.password}' ;;
+        elastic-password)   jsonpath='{.items[0].spec.config.elastic.password}' ;;
+        s3-access-key)      jsonpath='{.items[0].spec.config.thorium.s3.access_key}' ;;
+        s3-secret-key)      jsonpath='{.items[0].spec.config.thorium.s3.secret_token}' ;;
+        thorium-secret-key) jsonpath='{.items[0].spec.config.thorium.secret_key}' ;;
+        postgres-password)
+            read_secret_key "$QUICKWIT_NAMESPACE" postgres-cluster-auth superUserPassword
+            return 0
+            ;;
+    esac
+    [ -n "$jsonpath" ] || return 0
+    kctl get thoriumclusters -n "$THORIUM_NAMESPACE" -o jsonpath="$jsonpath" 2>/dev/null || true
+}
+
+# Load every backend credential into the caller's variables: the saved value if
+# there is one, else the value an existing deployment already uses, else a new
+# random one. Values are embedded unquoted in YAML, SQL, and sed expressions, so
+# anything outside a conservative character set is rejected.
+load_credentials() {
+    local pair key var value
+    for pair in redis-password:REDIS_PASS postgres-password:PG_PASS \
+        scylla-password:SCYLLA_PASS elastic-password:ES_PASS \
+        s3-access-key:S3_AK s3-secret-key:S3_SK thorium-secret-key:THORIUM_SECRET; do
+        key="${pair%%:*}"
+        var="${pair#*:}"
+        value=$(read_secret_key "$CREDENTIALS_NAMESPACE" "$CREDENTIALS_SECRET" "$key")
+        if [ -z "$value" ]; then
+            value=$(legacy_credential "$key")
+            if [ -n "$value" ]; then
+                echo "  $key: reusing the value from the existing deployment"
+            fi
+        fi
+        if [ -z "$value" ]; then
+            value=$(generate_password)
+        fi
+        if ! [[ "$value" =~ ^[A-Za-z0-9._~-]+$ ]]; then
+            echo "ERROR: stored $key contains unsupported characters; run 'minithor cleanup --confirm' for fresh credentials" >&2
+            return 1
+        fi
+        printf -v "$var" '%s' "$value"
+    done
+}
+
+# Persist the credentials in the caller's variables (plus the admin user when a
+# random admin password is in use) to the credentials secret. The manifest is
+# piped over stdin so no secret appears on a command line.
+#
+#   save_credentials [admin_user admin_password]
+save_credentials() {
+    local admin_user="${1:-}" admin_pass="${2:-}"
+    local admin_lines=""
+    if [ -n "$admin_user" ]; then
+        admin_lines="  admin-user: \"$(json_escape "$admin_user")\"
+  admin-password: \"$(json_escape "$admin_pass")\""
+    fi
+    kctl apply -f - >/dev/null <<EOF
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: $CREDENTIALS_NAMESPACE
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: $CREDENTIALS_SECRET
+  namespace: $CREDENTIALS_NAMESPACE
+type: Opaque
+stringData:
+  redis-password: "$REDIS_PASS"
+  postgres-password: "$PG_PASS"
+  scylla-password: "$SCYLLA_PASS"
+  elastic-password: "$ES_PASS"
+  s3-access-key: "$S3_AK"
+  s3-secret-key: "$S3_SK"
+  thorium-secret-key: "$THORIUM_SECRET"
+${admin_lines}
+EOF
+}
+
+# Substitute the \${NAME} credential, namespace, and service host placeholders
+# in a user-supplied cluster config with this deploy's values, so one file works
+# for any instance. Only these names are replaced, so any other \$ in the file
+# is left as written.
+#
+#   render_cluster_config <source> <destination>
+render_cluster_config() {
+    sed \
+        -e "s|\\\${REDIS_PASS}|$REDIS_PASS|g" \
+        -e "s|\\\${SCYLLA_PASS}|$SCYLLA_PASS|g" \
+        -e "s|\\\${ES_PASS}|$ES_PASS|g" \
+        -e "s|\\\${S3_AK}|$S3_AK|g" \
+        -e "s|\\\${S3_SK}|$S3_SK|g" \
+        -e "s|\\\${THORIUM_SECRET}|$THORIUM_SECRET|g" \
+        -e "s|\\\${THORIUM_NAMESPACE}|$THORIUM_NAMESPACE|g" \
+        -e "s|\\\${REDIS_HOST}|$REDIS_CLUSTER_HOST|g" \
+        -e "s|\\\${SCYLLA_HOST}|$SCYLLA_CLUSTER_HOST|g" \
+        -e "s|\\\${ELASTIC_HOST}|$ELASTIC_CLUSTER_HOST|g" \
+        -e "s|\\\${S3_HOST}|$SEAWEEDFS_CLUSTER_HOST|g" \
+        -e "s|\\\${QUICKWIT_INDEXER_HOST}|$QUICKWIT_INDEXER_HOST|g" \
+        "$1" > "$2"
 }
 
 has_podman() {
@@ -376,6 +630,20 @@ select_driver() {
     fi
 }
 
+# Set DRIVER/CONTAINER_CMD from the existing minikube profile, which is the
+# driver the cluster was actually created with. Returns 1 when no profile exists.
+detect_profile_driver() {
+    local profile_driver
+    profile_driver=$(minikube profile list -o json 2>/dev/null \
+        | grep -o '"Driver": *"[^"]*"' | head -1 | sed 's/.*"\([^"]*\)"$/\1/') || true
+    [ -n "$profile_driver" ] || return 1
+    DRIVER="$profile_driver"
+    case "$DRIVER" in
+        docker|podman) CONTAINER_CMD="$DRIVER" ;;
+        *) CONTAINER_CMD="" ;;
+    esac
+}
+
 minikube_start() {
     # Trust the in-cluster registry as insecure (HTTP) at cluster-creation time.
     # The node's container runtime defaults to HTTPS for every registry; without
@@ -390,7 +658,8 @@ minikube_start() {
     # unreliable (it can bake empty values), so setup_node_pull_env() re-asserts
     # the proxy directly on the node after start — this just keeps what minikube
     # sees consistent.
-    export NO_PROXY="$(compute_no_proxy)"
+    NO_PROXY="$(compute_no_proxy)"
+    export NO_PROXY
     export no_proxy="$NO_PROXY"
 
     if [ "$DRIVER" = "docker" ]; then
@@ -416,7 +685,8 @@ ensure_minikube_running() {
     # NO_PROXY here (rather than in each cmd_* function) guarantees local
     # kubectl/port-forward traffic to the node bypasses any configured HTTP
     # proxy, regardless of what the invoking shell happened to have set.
-    export NO_PROXY="$(compute_no_proxy)"
+    NO_PROXY="$(compute_no_proxy)"
+    export NO_PROXY
     export no_proxy="$NO_PROXY"
 
     local status_output
@@ -433,6 +703,11 @@ ensure_minikube_running() {
     if [[ "$kube_status" != "Configured" ]]; then
         echo "Kubeconfig is stale, updating context..." >&2
         minikube update-context >/dev/null 2>&1
+        # update-context points container drivers at the node's internal IP,
+        # which isn't reachable from macOS hosts, so re-apply the published port
+        if detect_profile_driver; then
+            fix_container_config >/dev/null
+        fi
     fi
 }
 
@@ -459,6 +734,54 @@ wait_for_resource() {
     done
 }
 
+# Wait until at least one pod matching a selector exists and all matching pods
+# are Ready. A bare `kubectl wait -l` fails immediately with "no matching
+# resources" when the controller hasn't created the pods yet.
+#
+#   wait_for_pods_ready <namespace> <selector> [timeout]
+wait_for_pods_ready() {
+    local namespace=$1 selector=$2 timeout=${3:-300}
+    local elapsed=0
+    echo "Waiting for pods ($selector) in $namespace to be Ready (timeout: ${timeout}s)..."
+    until [ -n "$(kctl get pods -n "$namespace" -l "$selector" -o name 2>/dev/null)" ]; do
+        sleep 5
+        elapsed=$((elapsed + 5))
+        if [ "$elapsed" -ge "$timeout" ]; then
+            echo "ERROR: Timed out waiting for pods ($selector) in $namespace to be created" >&2
+            return 1
+        fi
+    done
+    kctl wait --for=condition=Ready pod -l "$selector" -n "$namespace" --timeout="$((timeout - elapsed))s"
+}
+
+# Wait for a Job to succeed, failing fast (with its logs) once the Job is marked
+# Failed instead of waiting out the whole timeout
+#
+#   wait_for_job <namespace> <job> [timeout]
+wait_for_job() {
+    local namespace=$1 job=$2 timeout=${3:-300}
+    local elapsed=0 succeeded failed
+    while :; do
+        succeeded=$(kctl get job "$job" -n "$namespace" -o jsonpath='{.status.succeeded}' 2>/dev/null || true)
+        if [ "${succeeded:-0}" -ge 1 ]; then
+            return 0
+        fi
+        failed=$(kctl get job "$job" -n "$namespace" \
+            -o jsonpath='{.status.conditions[?(@.type=="Failed")].status}' 2>/dev/null || true)
+        if [ "$failed" = "True" ] || [ "$elapsed" -ge "$timeout" ]; then
+            if [ "$failed" = "True" ]; then
+                echo "ERROR: job/$job in $namespace failed; last logs:" >&2
+            else
+                echo "ERROR: Timed out after ${timeout}s waiting for job/$job in $namespace; last logs:" >&2
+            fi
+            kctl logs -n "$namespace" "job/$job" --tail=50 >&2 || true
+            return 1
+        fi
+        sleep 5
+        elapsed=$((elapsed + 5))
+    done
+}
+
 wait_for_port_forward() {
     local port=$1 max_attempts=${2:-20}
     for attempt in $(seq 1 "$max_attempts"); do
@@ -479,12 +802,16 @@ run_step() {
 
 tune_kernel_params() {
     local target="${1:-host}"
+    # fs.aio-max-nr is kernel-wide and each Scylla node reserves a large share,
+    # so a second instance's Scylla fails to start at the 65536 default
     local params=(
+        "fs.aio-max-nr=2097152"
         "fs.inotify.max_user_instances=1024"
         "fs.file-max=2097152"
         "fs.nr_open=1048576"
         "vm.max_map_count=262144"
     )
+    local persisted=()
     for param in "${params[@]}"; do
         local key="${param%%=*}"
         local desired="${param#*=}"
@@ -500,7 +827,10 @@ tune_kernel_params() {
         fi
         if [ "$current" -ge "$desired" ] 2>/dev/null; then
             echo "  $key = $current (already >= $desired)"
+            # persist the higher current value so a reboot never lowers it
+            persisted+=("$key=$current")
         else
+            persisted+=("$param")
             echo "  $key: $current -> $desired"
             if [ "$target" = "minikube" ]; then
                 minikube ssh -- sudo /sbin/sysctl -w "$param" >/dev/null 2>&1 || echo "    WARNING: failed to set $key on minikube node"
@@ -509,10 +839,10 @@ tune_kernel_params() {
             fi
         fi
     done
-    if [ "$target" = "host" ] && [ "$OS" = "Linux" ]; then
+    if [ "$target" = "host" ] && [ "$OS" = "Linux" ] && [ "${#persisted[@]}" -gt 0 ]; then
         local conf="/etc/sysctl.d/99-minithor.conf"
         echo "  Persisting to $conf"
-        printf '%s\n' "${params[@]}" | sudo tee "$conf" >/dev/null 2>&1 || echo "    WARNING: failed to write $conf"
+        printf '%s\n' "${persisted[@]}" | sudo tee "$conf" >/dev/null 2>&1 || echo "    WARNING: failed to write $conf"
     fi
 }
 
@@ -524,7 +854,7 @@ tune_kernel_params() {
 # re-asserted on every `minithor start`.
 ensure_registry_node_dns() {
     local ip
-    ip="$(kctl get svc registry -n thorium -o jsonpath='{.spec.clusterIP}' 2>/dev/null)" || return 0
+    ip="$(kctl get svc registry -n "$REGISTRY_NAMESPACE" -o jsonpath='{.spec.clusterIP}' 2>/dev/null)" || return 0
     [ -n "$ip" ] || return 0
     echo "  Mapping ${REGISTRY_HOST} -> ${ip} on the minikube node"
     # /etc/hosts is a bind-mount in the node; rewrite in place (rename-based edits
@@ -546,16 +876,31 @@ ensure_registry_node_dns() {
 # certs_path (optional): a .crt file, or a directory of *.crt files, to install
 # into the node's trust store. Gated — cert injection only happens when given.
 # force (optional, "true"/"false", default false): when true, overwrite the CA
-# and the containerd proxy drop-in on the node even if they already exist. By
+# and the runtime proxy drop-in on the node even if they already exist. By
 # default an existing file is left in place so a manual fix isn't clobbered.
 # Proxy config is driven entirely by the host's HTTP_PROXY/HTTPS_PROXY and is a
-# no-op on unproxied hosts. Certs are copied with `minikube cp` (piping through
-# `minikube ssh` stdin hangs). Driver-agnostic: everything goes through
-# `minikube cp` / `minikube ssh`, so it works for docker, podman, and kvm2.
+# no-op on unproxied hosts. The drop-in targets whichever runtime pulls images on
+# the node: dockerd for the docker/kvm2 drivers' default runtime, containerd for
+# podman (started with --container-runtime=containerd). Files are copied with
+# `minikube cp` (piping through `minikube ssh` stdin hangs), which also keeps
+# proxy URLs (which may embed credentials) off command lines and out of shell
+# quoting. Driver-agnostic: everything goes through `minikube cp` / `minikube
+# ssh`, so it works for docker, podman, and kvm2.
 setup_node_pull_env() {
     local certs_path="${1:-}"
     local force="${2:-false}"
     local changed=false
+
+    # The node reports its runtime as e.g. "docker://28.1.1" or "containerd://1.7"
+    local runtime_service
+    runtime_service=$(kctl get node minikube -o jsonpath='{.status.nodeInfo.containerRuntimeVersion}' 2>/dev/null | cut -d: -f1) || true
+    case "$runtime_service" in
+        docker|containerd) ;;
+        *)
+            echo "  WARNING: could not detect the node's container runtime, assuming containerd" >&2
+            runtime_service=containerd
+            ;;
+    esac
 
     # --- Certs (gated on a caller-supplied path) ---
     if [ -n "$certs_path" ]; then
@@ -604,29 +949,63 @@ setup_node_pull_env() {
         local https_p="${HTTPS_PROXY:-${https_proxy:-${HTTP_PROXY:-${http_proxy:-}}}}"
         local no_p
         no_p="$(compute_no_proxy)"
+        local dropin_dir="/etc/systemd/system/${runtime_service}.service.d"
+        local dropin="${dropin_dir}/http-proxy.conf"
         # Existence gate: if the drop-in is already on the node, leave it alone so
         # a manual fix to minikube's proxy propagation isn't clobbered (unless
         # --force-node-config).
         if [ "$force" != true ] \
-            && minikube ssh -- "test -f /etc/systemd/system/containerd.service.d/http-proxy.conf" >/dev/null 2>&1; then
-            echo "  Containerd proxy drop-in already present on the minikube node, leaving it in place (use --force-node-config to overwrite)"
-        elif minikube ssh -- "sudo mkdir -p /etc/systemd/system/containerd.service.d && \
-            printf '[Service]\nEnvironment=\"HTTP_PROXY=%s\"\nEnvironment=\"HTTPS_PROXY=%s\"\nEnvironment=\"NO_PROXY=%s\"\n' \
-                '$http_p' '$https_p' '$no_p' \
-                | sudo tee /etc/systemd/system/containerd.service.d/http-proxy.conf >/dev/null" >/dev/null 2>&1; then
-            echo "  Configured the minikube node's container runtime to use the host HTTP proxy"
-            changed=true
+            && minikube ssh -- "test -f $dropin" >/dev/null 2>&1; then
+            echo "  ${runtime_service} proxy drop-in already present on the minikube node, leaving it in place (use --force-node-config to overwrite)"
         else
-            echo "    WARNING: failed to write containerd proxy drop-in on the minikube node" >&2
+            # systemd expands % specifiers in Environment=, so URL-encoded
+            # characters in the proxy URLs must be written as %%
+            local dropin_tmp
+            dropin_tmp=$(umask 077; mktemp)
+            printf '[Service]\nEnvironment="HTTP_PROXY=%s"\nEnvironment="HTTPS_PROXY=%s"\nEnvironment="NO_PROXY=%s"\n' \
+                "${http_p//\%/%%}" "${https_p//\%/%%}" "${no_p//\%/%%}" > "$dropin_tmp"
+            if minikube cp "$dropin_tmp" /tmp/minithor-http-proxy.conf >/dev/null 2>&1 \
+                && minikube ssh -- "sudo mkdir -p $dropin_dir && \
+                    sudo install -m 600 /tmp/minithor-http-proxy.conf $dropin && \
+                    rm -f /tmp/minithor-http-proxy.conf" >/dev/null 2>&1; then
+                echo "  Configured the minikube node's ${runtime_service} to use the host HTTP proxy"
+                changed=true
+            else
+                echo "    WARNING: failed to write the ${runtime_service} proxy drop-in on the minikube node" >&2
+            fi
+            rm -f "$dropin_tmp"
         fi
     fi
 
-    # --- Apply (reload + restart containerd only if something changed) ---
+    # --- Apply (reload + restart the runtime only if something changed) ---
     if [ "$changed" = true ]; then
-        echo "  Reloading and restarting containerd on the minikube node"
-        minikube ssh -- "sudo systemctl daemon-reload && sudo systemctl restart containerd" >/dev/null 2>&1 \
-            || echo "    WARNING: failed to restart containerd on the minikube node" >&2
+        echo "  Reloading and restarting ${runtime_service} on the minikube node"
+        minikube ssh -- "sudo systemctl daemon-reload && sudo systemctl restart ${runtime_service}" >/dev/null 2>&1 \
+            || echo "    WARNING: failed to restart ${runtime_service} on the minikube node" >&2
     fi
+}
+
+# Install a Helm chart at a pinned version, or leave an existing release alone
+# when it runs a different chart version. The charts installed this way are
+# shared cluster-wide operators whose downgrade Helm can't do safely (their CRDs
+# aren't downgraded), so a mismatched release is reported instead of changed;
+# `minithor cleanup --confirm` then a fresh deploy moves to the pinned version.
+#
+#   helm_install_pinned <release> <chart> <version> <namespace> [extra helm args...]
+helm_install_pinned() {
+    local release=$1 chart=$2 version=$3 namespace=$4
+    shift 4
+    local installed
+    installed=$(helm list -n "$namespace" --filter "^${release}\$" -o json 2>/dev/null \
+        | grep -o '"chart":"[^"]*"' | head -1 | sed 's/"chart":"\(.*\)"/\1/') || true
+    # chart names look like "eck-operator-2.16.0" or "scylla-operator-v1.21.1"
+    if [ -n "$installed" ] && [ "${installed##*-}" != "$version" ] && [ "${installed##*-}" != "v$version" ]; then
+        echo "WARNING: $release is already installed as $installed (pinned: $version); leaving it unchanged." >&2
+        echo "  Run 'minithor cleanup --confirm' and deploy again to switch to the pinned version." >&2
+        return 0
+    fi
+    helm upgrade --install "$release" "$chart" --version "$version" \
+        --namespace "$namespace" --create-namespace "$@"
 }
 
 helm_uninstall() {
@@ -651,8 +1030,11 @@ clear_finalizers_and_delete() {
 force_delete_ns() {
     local ns=$1
     echo "Force-clearing finalizers on stuck namespace '$ns'..."
+    # kubectl pretty-prints JSON across lines, so flatten it before blanking every
+    # finalizers array with a single-line pattern
     kctl get ns "$ns" -o json \
-        | sed 's/"finalizers":[^]]*]/"finalizers":[]/' \
+        | tr -d '\n' \
+        | sed 's/"finalizers": *\[[^]]*\]/"finalizers": []/g' \
         | kctl replace --raw "/api/v1/namespaces/$ns/finalize" -f -
 }
 
@@ -700,7 +1082,15 @@ Commands:
   cleanup          Remove all Thorium resources for a fresh deploy (requires --confirm)
 
 Global options:
-  -h, --help       Show this help message
+  --instance <name>  Operate on a named Thorium instance whose namespaces are
+                     prefixed with "<name>-" (default: the unprefixed instance;
+                     also settable with MINITHOR_INSTANCE). For deployment
+                     testing only, several instances can run in one cluster
+                     (not supported by the scaler); they share the cluster-wide
+                     operators (ECK, Scylla, cert-manager, Kubegres, Thorium)
+                     and each instance's scaler uses the same group namespaces.
+                     Applies to deploy, expose, get-config, and cleanup.
+  -h, --help         Show this help message
 
 Run 'minithor <command> --help' for command-specific options.
 EOF
@@ -733,7 +1123,7 @@ Options:
                        into the minikube node's trust store. Required behind a
                        TLS-intercepting proxy so the node trusts it for image
                        pulls. No default — cert install only runs when given.
-  --force-node-config  Overwrite the node's CA and containerd proxy drop-in even
+  --force-node-config  Overwrite the node's CA and runtime proxy drop-in even
                        if they already exist. By default existing files are left
                        in place so a manual fix on the node isn't clobbered.
   -h, --help           Show this help message
@@ -799,13 +1189,22 @@ Options:
                           password is auto-generated and printed to stdout)
   --timeout <seconds>     Timeout in seconds for each service rollout/wait
                           (default: 600)
+  --version <tag>         Thorium image tag for the operator and ThoriumCluster
+                          (default: latest)
+  --instance <name>       Deploy a named instance alongside others (see
+                          'minithor --help'); --registry is only supported for
+                          the default instance
   -h, --help              Show this help message
 
 Deploys the full stack: Redis, Elasticsearch (ECK), cert-manager,
-ScyllaDB, MinIO, Jaeger, Kubegres, Quickwit, and the Thorium operator.
+ScyllaDB, SeaweedFS, Jaeger, Kubegres, Quickwit, and the Thorium operator.
 Optionally deploys a container registry (registry:2) with persistent storage.
 Configures databases, creates a test user, installs thorctl, and imports
-the default toolbox. Service passwords are randomly generated per deploy.
+the default toolbox. Service passwords are generated on the first deploy and
+saved in the minithor-credentials secret so redeploys reuse them. Operator and
+chart versions are pinned to megathor's; an operator already installed at a
+different version is left unchanged (with a warning). The Thorium operator is
+shared by every instance, so a named instance reuses an existing one.
 EOF
 }
 
@@ -819,14 +1218,18 @@ Options:
   --local          Rewrite the config to connect to the databases through the
                    local ports created by 'minithor expose --dev', and write it
                    to ~/thorium.local.yml (the raw ~/thorium.yml is left alone).
+  --port-offset <n> With --local, the offset given to 'expose --port-offset'
   -h, --help       Show this help message
+
+A named instance (--instance <name>) writes ~/thorium-<name>.yml and
+~/thorium-<name>.local.yml instead.
 
 Reads the 'thorium' secret in the thorium namespace. By default writes the raw
 in-cluster config to thorium.yml in your home directory (~/).
 
 With --local it translates the config for running a local build of the API/tools
 against the cluster's databases via exposed ports:
-  * elastic / redis / minio hosts  -> localhost
+  * elastic/redis/seaweedfs hosts  -> localhost
   * elastic insecure_certificates  -> true (localhost won't match the cluster cert)
   * scylla.nodes                   -> each node's advertised cluster IP (matches
                                       the loopback-aliased forward expose creates)
@@ -843,13 +1246,22 @@ minithor expose — port-forward services to localhost
 Usage: minithor expose [options]
 
 Options:
-  --dev            Also forward database ports (Elastic, Kibana, Redis, MinIO, Scylla)
+  --dev            Also forward database ports (Elastic, Kibana, Redis, SeaweedFS, Scylla)
   --no-api         Forward only the backing services (skip api/registry) so a
                    locally-run API can use them; implies the database ports
-  --port <port>    Local port for the Thorium API (default: 8080)
-  --stop           Stop all running port-forwards
+  --port <port>    Local port for the Thorium API (default: 8080 + offset)
+  --port-offset <n> Add <n> to every local port (API, Elastic, Kibana, Redis,
+                   SeaweedFS) so several instances can be exposed at once
+  --stop           Stop all of your port-forwards (every instance) and remove
+                   loopback aliases
   --status         Show which port-forwards are running
   -h, --help       Show this help message
+
+Forwards the Thorium API, plus the container registry on port 5000 when one
+was deployed with 'minithor deploy --registry'. Exits non-zero if any forward
+fails to start; a port held by something other than your own stale forward is
+reported and skipped rather than killed. Logs and loopback alias state live in
+${MINITHOR_STATE_DIR}.
 EOF
 }
 
@@ -874,11 +1286,14 @@ Options:
   --confirm            Required. Confirms you want to remove all resources.
   --timeout <seconds>  Timeout in seconds for each delete/wait operation
                        (default: 300)
+  --force              Remove the instance even when it hosts the Thorium
+                       operator other instances depend on
   -h, --help           Show this help message
 
-Removes all Thorium services, backing infrastructure, Helm releases,
-namespaces, and CRDs. The minikube cluster itself is preserved — use
-'minithor minikube delete --confirm' to fully remove minikube.
+Removes the instance's Thorium services, backing infrastructure, Helm
+releases, namespaces, and saved credentials. The shared operators and CRDs are
+removed too once no other instance remains. The minikube cluster itself is
+preserved — use 'minithor minikube delete --confirm' to fully remove minikube.
 EOF
 }
 
@@ -930,6 +1345,8 @@ cmd_minikube_install() {
     # Download and install minikube
     local tmp_dir
     tmp_dir=$(mktemp -d)
+    # expanded now on purpose: the trap must remove this call's directory
+    # shellcheck disable=SC2064
     trap "rm -rf '$tmp_dir'" RETURN
 
     case "$OS" in
@@ -1021,7 +1438,8 @@ cmd_minikube_delete() {
         return 1
     fi
 
-    select_driver
+    # a broken install (e.g. docker daemon down) must still be deletable
+    select_driver || true
 
     if [ -n "$DRIVER" ]; then
         echo "Detected available driver: $DRIVER"
@@ -1119,6 +1537,8 @@ cmd_start() {
         | grep -E 'CrashLoopBackOff|Error|ImagePullBackOff|ErrImagePull|InvalidImageName' \
         | awk '{print $2 " -n " $1}' \
         | while read -r line; do
+            # $line is "<pod> -n <namespace>" and must split into arguments
+            # shellcheck disable=SC2086
             kctl delete pod $line --ignore-not-found 2>/dev/null || true
         done
 }
@@ -1150,9 +1570,11 @@ cmd_deploy() {
     local toolbox_path="$PWD/toolbox.json"
     local deploy_user="test"
     local deploy_pass="INSECURE_DEV_PASSWORD"
+    local rand_password=false
     local deploy_registry=false
     local registry_user=""
     local deploy_timeout=600
+    local thorium_version="latest"
 
     while [ $# -gt 0 ]; do
         case "$1" in
@@ -1193,7 +1615,7 @@ cmd_deploy() {
                 deploy_pass="$1"
                 ;;
             --rand-password)
-                deploy_pass=$(generate_password)
+                rand_password=true
                 ;;
             --registry)
                 deploy_registry=true
@@ -1211,19 +1633,24 @@ cmd_deploy() {
                 fi
                 deploy_timeout="$1"
                 ;;
+            --version)
+                shift
+                if [ $# -eq 0 ]; then echo "ERROR: --version requires an argument" >&2; exit 1; fi
+                thorium_version="$1"
+                ;;
             *) echo "Unknown option: $1"; usage_deploy; exit 1 ;;
         esac
         shift
     done
 
-    local REDIS_PASS PG_PASS SCYLLA_PASS ES_PASS MINIO_AK MINIO_SK THORIUM_SECRET
-    REDIS_PASS=$(generate_password)
-    PG_PASS=$(generate_password)
-    SCYLLA_PASS=$(generate_password)
-    ES_PASS=$(generate_password)
-    MINIO_AK=$(generate_password)
-    MINIO_SK=$(generate_password)
-    THORIUM_SECRET=$(generate_password)
+    # the registry's hostname is trusted by the node's container runtime from
+    # cluster creation, so only the default instance can run it
+    if [ "$deploy_registry" = true ] && [ -n "$INSTANCE" ]; then
+        echo "ERROR: --registry is only supported for the default instance" >&2
+        exit 1
+    fi
+
+    local REDIS_PASS="" PG_PASS="" SCYLLA_PASS="" ES_PASS="" S3_AK="" S3_SK="" THORIUM_SECRET=""
 
     CURRENT_SECTION="startup"
     trap 'echo "FATAL: Failed in \"$CURRENT_SECTION\" at line $LINENO (command: $BASH_COMMAND)" >&2' ERR
@@ -1259,6 +1686,30 @@ cmd_deploy() {
         fi
         sleep "$retry_delay"
     done
+
+    ########################################
+    # Credentials
+    ########################################
+    CURRENT_SECTION="Credentials"
+    log "Loading service credentials"
+    load_credentials
+    # A random admin password is saved alongside the service credentials so a
+    # redeploy logs in as the already-created user instead of generating a new
+    # password that no longer matches it
+    local saved_admin_user=""
+    if [ "$rand_password" = true ]; then
+        local stored_admin_user stored_admin_pass
+        stored_admin_user=$(read_secret_key "$CREDENTIALS_NAMESPACE" "$CREDENTIALS_SECRET" admin-user)
+        stored_admin_pass=$(read_secret_key "$CREDENTIALS_NAMESPACE" "$CREDENTIALS_SECRET" admin-password)
+        if [ "$stored_admin_user" = "$deploy_user" ] && [ -n "$stored_admin_pass" ]; then
+            deploy_pass="$stored_admin_pass"
+        else
+            deploy_pass=$(generate_password)
+        fi
+        saved_admin_user="$deploy_user"
+    fi
+    save_credentials "$saved_admin_user" "$deploy_pass"
+    echo "Credentials saved in secret $CREDENTIALS_SECRET (namespace $CREDENTIALS_NAMESPACE)"
 
     ########################################
     # Kernel parameter tuning
@@ -1307,13 +1758,13 @@ cmd_deploy() {
 apiVersion: v1
 kind: Namespace
 metadata:
-  name: redis
+  name: $REDIS_NAMESPACE
 ---
 apiVersion: v1
 kind: Secret
 metadata:
   name: redis-conf
-  namespace: redis
+  namespace: $REDIS_NAMESPACE
 type: Opaque
 stringData:
   redis.conf: |
@@ -1373,7 +1824,7 @@ apiVersion: v1
 kind: PersistentVolumeClaim
 metadata:
   name: redis-persistent-storage-claim
-  namespace: redis
+  namespace: $REDIS_NAMESPACE
 spec:
   storageClassName: csi-hostpath-sc
   resources:
@@ -1386,7 +1837,7 @@ apiVersion: v1
 kind: Service
 metadata:
   name: redis
-  namespace: redis
+  namespace: $REDIS_NAMESPACE
 spec:
   type: ClusterIP
   selector:
@@ -1400,7 +1851,7 @@ apiVersion: apps/v1
 kind: StatefulSet
 metadata:
   name: redis
-  namespace: redis
+  namespace: $REDIS_NAMESPACE
   labels:
     app: redis
 spec:
@@ -1413,10 +1864,13 @@ spec:
     metadata:
       labels:
         app: redis
+      annotations:
+        # rolls the pod when the password changes (redis only reads it at start)
+        minithor/config-hash: "$(config_hash "$REDIS_PASS")"
     spec:
       containers:
         - name: redis
-          image: docker.io/redis:7
+          image: $REDIS_IMAGE
           imagePullPolicy: Always
           command: ["redis-server", "/var/lib/redis/redis.conf"]
           resources:
@@ -1446,9 +1900,9 @@ EOF
     CURRENT_SECTION="Elasticsearch"
 
     log "Deploying ECK Operator"
-    helm upgrade --install elastic-operator elastic/eck-operator \
-        --namespace elastic-system --create-namespace
-    wait_for_rollout statefulset/elastic-operator elastic-system "$deploy_timeout"
+    helm_install_pinned elastic-operator elastic/eck-operator "$ECK_CHART_VERSION" \
+        "$ELASTIC_OPERATOR_NAMESPACE"
+    wait_for_rollout statefulset/elastic-operator "$ELASTIC_OPERATOR_NAMESPACE" "$deploy_timeout"
     wait_for_resource crd elasticsearches.elasticsearch.k8s.elastic.co "" "$deploy_timeout"
     wait_for_resource crd kibanas.kibana.k8s.elastic.co "" "$deploy_timeout"
     kctl wait --for condition=established \
@@ -1456,13 +1910,18 @@ EOF
         crd/kibanas.kibana.k8s.elastic.co --timeout="${deploy_timeout}s"
 
     log "Deploying Elasticsearch and Kibana"
-    kctl apply -f - <<'EOF'
+    kctl apply -f - <<EOF
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: $ELASTIC_NAMESPACE
 ---
 apiVersion: elasticsearch.k8s.elastic.co/v1
 kind: Elasticsearch
 metadata:
   name: elastic
-  namespace: elastic-system
+  namespace: $ELASTIC_NAMESPACE
 spec:
   version: 8.19.2
   volumeClaimDeletePolicy: DeleteOnScaledownOnly
@@ -1501,7 +1960,7 @@ apiVersion: kibana.k8s.elastic.co/v1
 kind: Kibana
 metadata:
   name: elastic
-  namespace: elastic-system
+  namespace: $ELASTIC_NAMESPACE
 spec:
   version: 8.19.2
   count: 1
@@ -1526,38 +1985,74 @@ EOF
     CURRENT_SECTION="Scylla"
 
     log "Deploying cert-manager"
-    helm upgrade --install cert-manager jetstack/cert-manager \
-        --namespace cert-manager --create-namespace \
-        --set crds.enabled=true
+    helm_install_pinned cert-manager jetstack/cert-manager "$CERT_MANAGER_CHART_VERSION" \
+        cert-manager --set crds.enabled=true
     wait_for_resource crd certificates.cert-manager.io "" "$deploy_timeout"
     wait_for_resource crd issuers.cert-manager.io "" "$deploy_timeout"
     kctl wait --for condition=established \
         crd/certificates.cert-manager.io crd/issuers.cert-manager.io --timeout="${deploy_timeout}s"
     kctl -n cert-manager rollout status deployment.apps/cert-manager-webhook -w --timeout="${deploy_timeout}s"
+    # A rolled-out webhook still rejects requests until the cainjector has
+    # written its CA bundle, so retry a dry-run Issuer until it is admitted
+    local webhook_ready=false
+    for attempt in $(seq 1 30); do
+        if kctl apply --dry-run=server -f - >/dev/null 2>&1 <<'EOF'
+apiVersion: cert-manager.io/v1
+kind: Issuer
+metadata:
+  name: cert-manager-readiness-check
+  namespace: cert-manager
+spec:
+  selfSigned: {}
+EOF
+        then
+            webhook_ready=true
+            break
+        fi
+        echo "Waiting for the cert-manager webhook to accept requests (attempt $attempt/30)..."
+        sleep 10
+    done
+    if [ "$webhook_ready" = false ]; then
+        echo "ERROR: the cert-manager webhook did not start accepting requests" >&2
+        exit 1
+    fi
 
     log "Deploying Scylla Operator"
-    helm upgrade --install scylla-operator scylla/scylla-operator \
-        --namespace scylla-operator --create-namespace \
-        --version 1.21.1
+    helm_install_pinned scylla-operator scylla/scylla-operator "$SCYLLA_OPERATOR_CHART_VERSION" \
+        "$SCYLLA_OPERATOR_NAMESPACE"
     wait_for_resource crd scyllaclusters.scylla.scylladb.com "" "$deploy_timeout"
     kctl wait --for condition=established \
         crd/scyllaclusters.scylla.scylladb.com --timeout="${deploy_timeout}s"
-    kctl -n scylla-operator rollout status deployment.apps/scylla-operator -w --timeout="${deploy_timeout}s"
-    kctl -n scylla-operator rollout status deployment.apps/webhook-server -w --timeout="${deploy_timeout}s"
+    kctl -n "$SCYLLA_OPERATOR_NAMESPACE" rollout status deployment.apps/scylla-operator -w --timeout="${deploy_timeout}s"
+    kctl -n "$SCYLLA_OPERATOR_NAMESPACE" rollout status deployment.apps/webhook-server -w --timeout="${deploy_timeout}s"
     sleep 10
 
     log "Deploying Scylla Cluster"
-    kctl apply -f - <<'EOF'
+    kctl apply -f - <<EOF
 ---
 apiVersion: v1
 kind: Namespace
 metadata:
-  name: scylla
+  name: $SCYLLA_NAMESPACE
 EOF
-    kctl create secret generic scylla-auth-token -n scylla \
-        --from-literal=auth-token.yaml='auth_token: dummy-minithor-token' \
-        --dry-run=client -o yaml | kctl apply -f -
-    kctl apply -f - <<'EOF'
+    # The racks reference the scylla-agent-config agent config, so the operator
+    # mounts the agent auth token from this secret rather than generating one,
+    # and the Scylla pod can't start without it. It's only created when missing
+    # so a redeploy keeps the token the running agent already uses; the manifest
+    # is piped so the token stays off the command line.
+    if ! kctl get secret scylla-auth-token -n "$SCYLLA_NAMESPACE" &>/dev/null; then
+        kctl apply -f - <<EOF
+apiVersion: v1
+kind: Secret
+metadata:
+  name: scylla-auth-token
+  namespace: $SCYLLA_NAMESPACE
+type: Opaque
+stringData:
+  auth-token.yaml: "auth_token: $(generate_password)"
+EOF
+    fi
+    kctl apply -f - <<EOF
 ---
 apiVersion: scylla.scylladb.com/v1
 kind: ScyllaCluster
@@ -1565,7 +2060,7 @@ metadata:
   labels:
     controller-tools.k8s.io: "1.0"
   name: scylla
-  namespace: scylla
+  namespace: $SCYLLA_NAMESPACE
 spec:
   version: 6.2.3
   agentVersion: 3.4.2
@@ -1595,16 +2090,15 @@ spec:
           - mountPath: /tmp/coredumps
             name: coredumpfs
 EOF
-    wait_for_resource statefulset scylla-us-east-1-us-east-1a scylla "$deploy_timeout"
-    kctl wait --for=condition=Ready pod -l scylla/cluster=scylla \
-        -n scylla --timeout="${deploy_timeout}s"
+    wait_for_resource statefulset scylla-us-east-1-us-east-1a "$SCYLLA_NAMESPACE" "$deploy_timeout"
+    wait_for_pods_ready "$SCYLLA_NAMESPACE" scylla/cluster=scylla "$deploy_timeout"
 
-    kctl apply -f - <<'EOF'
+    kctl apply -f - <<EOF
 apiVersion: v1
 kind: ConfigMap
 metadata:
   name: scylla-config
-  namespace: scylla
+  namespace: $SCYLLA_NAMESPACE
 data:
   scylla.yaml: |
     num_tokens: 256
@@ -1637,43 +2131,82 @@ data:
     murmur3_partitioner_ignore_msb_bits: 12
     force_schema_commit_log: true
 EOF
-    kctl rollout restart -n scylla statefulset.apps/scylla-us-east-1-us-east-1a
-    kctl wait --for=condition=Ready pod -l scylla/cluster=scylla \
-        -n scylla --timeout="${deploy_timeout}s"
+    kctl rollout restart -n "$SCYLLA_NAMESPACE" statefulset.apps/scylla-us-east-1-us-east-1a
+    # wait on the rollout itself; a pod wait would return on the old Ready pod
+    wait_for_rollout statefulset/scylla-us-east-1-us-east-1a "$SCYLLA_NAMESPACE" "$deploy_timeout"
 
     ########################################
-    # MinIO
+    # SeaweedFS (S3)
     ########################################
-    CURRENT_SECTION="MinIO"
-    log "Deploying MinIO"
+    CURRENT_SECTION="SeaweedFS"
+    log "Deploying SeaweedFS"
+    # `weed mini` runs master, volume, filer, and S3 in a single process; the
+    # admin UI, WebDAV, Iceberg, and Lance endpoints are disabled since only
+    # S3 is needed. S3 identities come from the s3.json secret so additional
+    # users can be declared there. The master/filer ports have no auth (the
+    # filer serves every object), so a NetworkPolicy limits other pods to the S3
+    # port; only pods labelled app=seaweedfs-admin (the bucket creation job) may
+    # reach master/filer with `weed shell`. Port-forwards enter through the pod's
+    # own network namespace and are unaffected.
     kctl apply -f - <<EOF
 ---
 apiVersion: v1
 kind: Namespace
 metadata:
-  name: minio
+  name: $SEAWEEDFS_NAMESPACE
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: seaweedfs-s3-config
+  namespace: $SEAWEEDFS_NAMESPACE
+type: Opaque
+stringData:
+  s3.json: |
+    {
+      "identities": [
+        {
+          "name": "thorium",
+          "credentials": [
+            {"accessKey": "$S3_AK", "secretKey": "$S3_SK"}
+          ],
+          "actions": ["Admin", "Read", "Write", "List", "Tagging"]
+        }
+      ]
+    }
 ---
 apiVersion: apps/v1
 kind: StatefulSet
 metadata:
-  name: minio
-  namespace: minio
+  name: seaweedfs
+  namespace: $SEAWEEDFS_NAMESPACE
   labels:
-    app: minio
+    app: seaweedfs
 spec:
-  serviceName: minio
+  serviceName: seaweedfs
   replicas: 1
   selector:
     matchLabels:
-      app: minio
+      app: seaweedfs
   template:
     metadata:
       labels:
-        app: minio
+        app: seaweedfs
+      annotations:
+        # rolls the pod when the S3 keys change (s3.json is only read at start)
+        minithor/config-hash: "$(config_hash "$S3_AK:$S3_SK")"
     spec:
       containers:
-        - name: minio
-          image: quay.io/minio/minio:latest
+        - name: seaweedfs
+          image: $SEAWEEDFS_IMAGE
+          args:
+            - mini
+            - -dir=/data
+            - -s3.config=/etc/seaweedfs/s3.json
+            - -admin.ui=false
+            - -webdav=false
+            - -s3.port.iceberg=0
+            - -s3.port.lance=0
           resources:
             requests:
               cpu: 256m
@@ -1681,22 +2214,28 @@ spec:
             limits:
               cpu: 1
               memory: 1Gi
-          command:
-            - /bin/bash
-            - -c
-          args:
-            - minio server /data
+          ports:
+            - containerPort: 8333
+              name: s3
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: 8333
+            periodSeconds: 5
+            failureThreshold: 3
           volumeMounts:
             - mountPath: /data
-              name: minio-data
-          env:
-            - name: MINIO_ACCESS_KEY
-              value: "$MINIO_AK"
-            - name: MINIO_SECRET_KEY
-              value: "$MINIO_SK"
+              name: seaweedfs-data
+            - mountPath: /etc/seaweedfs
+              name: s3-config
+              readOnly: true
+      volumes:
+        - name: s3-config
+          secret:
+            secretName: seaweedfs-s3-config
   volumeClaimTemplates:
     - metadata:
-        name: minio-data
+        name: seaweedfs-data
       spec:
         storageClassName: csi-hostpath-sc
         accessModes:
@@ -1708,17 +2247,58 @@ spec:
 apiVersion: v1
 kind: Service
 metadata:
-  name: minio
-  namespace: minio
+  name: seaweedfs
+  namespace: $SEAWEEDFS_NAMESPACE
 spec:
   selector:
-    app: minio
+    app: seaweedfs
   ports:
-  - port: 9000
-    targetPort: 9000
-    name: minio-web
+  - port: 8333
+    targetPort: 8333
+    name: s3
+    protocol: TCP
+  - port: 9333
+    targetPort: 9333
+    name: master
+    protocol: TCP
+  - port: 19333
+    targetPort: 19333
+    name: master-grpc
+    protocol: TCP
+  - port: 8888
+    targetPort: 8888
+    name: filer
+    protocol: TCP
+  - port: 18888
+    targetPort: 18888
+    name: filer-grpc
     protocol: TCP
   type: ClusterIP
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: seaweedfs-ingress
+  namespace: $SEAWEEDFS_NAMESPACE
+spec:
+  podSelector:
+    matchLabels:
+      app: seaweedfs
+  policyTypes:
+    - Ingress
+  ingress:
+    # S3 is authenticated by s3.json and open to the cluster
+    - ports:
+        - port: 8333
+          protocol: TCP
+    # master/filer admin ports only for the bucket job and the pod itself
+    - from:
+        - podSelector:
+            matchLabels:
+              app: seaweedfs-admin
+        - podSelector:
+            matchLabels:
+              app: seaweedfs
 EOF
 
     ########################################
@@ -1726,18 +2306,18 @@ EOF
     ########################################
     CURRENT_SECTION="Jaeger"
     log "Deploying Jaeger"
-    kctl apply -f - <<'EOF'
+    kctl apply -f - <<EOF
 ---
 apiVersion: v1
 kind: Namespace
 metadata:
-  name: jaeger
+  name: $JAEGER_NAMESPACE
 ---
 apiVersion: v1
 kind: Service
 metadata:
   name: jaeger
-  namespace: jaeger
+  namespace: $JAEGER_NAMESPACE
 spec:
   type: ClusterIP
   selector:
@@ -1751,7 +2331,7 @@ apiVersion: apps/v1
 kind: StatefulSet
 metadata:
   name: jaeger
-  namespace: jaeger
+  namespace: $JAEGER_NAMESPACE
   labels:
     app: jaeger
 spec:
@@ -1767,13 +2347,13 @@ spec:
     spec:
       containers:
         - name: jaeger
-          image: jaegertracing/jaeger-query:latest
+          image: $JAEGER_IMAGE
           imagePullPolicy: Always
           env:
             - name: SPAN_STORAGE_TYPE
               value: "grpc"
             - name: GRPC_STORAGE_SERVER
-              value: "quickwit-searcher.quickwit.svc.cluster.local:7281"
+              value: "${QUICKWIT_SEARCHER_HOST}:7281"
           resources:
             requests:
               cpu: 0
@@ -1800,13 +2380,13 @@ EOF
 apiVersion: v1
 kind: Namespace
 metadata:
-  name: quickwit
+  name: $QUICKWIT_NAMESPACE
 ---
 apiVersion: v1
 kind: Secret
 metadata:
   name: postgres-cluster-auth
-  namespace: quickwit
+  namespace: $QUICKWIT_NAMESPACE
 type: Opaque
 stringData:
   superUserPassword: $PG_PASS
@@ -1816,7 +2396,7 @@ apiVersion: kubegres.reactive-tech.io/v1
 kind: Kubegres
 metadata:
   name: postgres
-  namespace: quickwit
+  namespace: $QUICKWIT_NAMESPACE
 spec:
   replicas: 1
   image: docker.io/postgres:17
@@ -1842,15 +2422,21 @@ spec:
           name: postgres-cluster-auth
           key: replicationUserPassword
 EOF
-    wait_for_resource statefulset postgres-1 quickwit "$deploy_timeout"
-    kctl wait --for=condition=Ready pod -l app=postgres \
-        -n quickwit --timeout="${deploy_timeout}s"
+    wait_for_resource statefulset postgres-1 "$QUICKWIT_NAMESPACE" "$deploy_timeout"
+    wait_for_pods_ready "$QUICKWIT_NAMESPACE" app=postgres "$deploy_timeout"
 
     log "Creating Quickwit metastore database"
+    # Kubegres requires password auth even on the local socket, so the saved
+    # password is sent over stdin into PGPASSWORD inside the pod (never on a host
+    # command line). POSTGRES_PASSWORD only applies when the data directory is
+    # first created, so this also confirms the saved credential still matches.
+    pg_exec() {
+        kctl -n "$QUICKWIT_NAMESPACE" exec -i pod/postgres-1-0 -- \
+            sh -c 'IFS= read -r pw; export PGPASSWORD="$pw"; '"$1" <<< "$PG_PASS"
+    }
     local pg_ready=false
     for attempt in $(seq 1 30); do
-        if kctl -n quickwit exec pod/postgres-1-0 -- \
-            /bin/bash -c "PGPASSWORD=$PG_PASS psql -U postgres -c 'SELECT 1'" &>/dev/null; then
+        if pg_exec 'psql -U postgres -c "SELECT 1"' &>/dev/null; then
             pg_ready=true
             break
         fi
@@ -1858,11 +2444,12 @@ EOF
         sleep 5
     done
     if [ "$pg_ready" = false ]; then
-        echo "ERROR: Postgres not accepting connections after 150s" >&2
+        echo "ERROR: Postgres not accepting logins with the saved password after 150s" >&2
+        echo "  If Postgres is running, its password no longer matches the minithor-credentials secret;" >&2
+        echo "  run 'minithor cleanup --confirm' and deploy again." >&2
         exit 1
     fi
-    kctl -n quickwit exec pod/postgres-1-0 -- \
-        /bin/bash -c "PGPASSWORD=$PG_PASS psql -U postgres -c \"SELECT 1 FROM pg_database WHERE datname='quickwit-metastore'\" | grep -q 1 || PGPASSWORD=$PG_PASS createdb -U postgres quickwit-metastore"
+    pg_exec 'psql -U postgres -tAc "SELECT 1 FROM pg_database WHERE datname='"'quickwit-metastore'"'" | grep -q 1 || createdb -U postgres quickwit-metastore'
 
     log "Deploying Quickwit"
     QUICKWIT_VALUES=$(mktemp)
@@ -1873,15 +2460,14 @@ image:
 
 config:
   default_index_root_uri: s3://quickwit/quickwit-indexes
-  metastore_uri: postgres://postgres:$PG_PASS@postgres.quickwit.svc.cluster.local:5432/quickwit-metastore
+  metastore_uri: postgres://postgres:$PG_PASS@${POSTGRES_CLUSTER_HOST}:5432/quickwit-metastore
   storage:
     s3:
-      flavor: minio
-      region: default
-      endpoint: http://minio.minio.svc.cluster.local:9000
+      region: us-east-1
+      endpoint: http://${SEAWEEDFS_CLUSTER_HOST}:8333
       force_path_style_access: true
-      access_key_id: "$MINIO_AK"
-      secret_access_key: "$MINIO_SK"
+      access_key_id: "$S3_AK"
+      secret_access_key: "$S3_SK"
 
 metastore:
   replicaCount: 1
@@ -1889,7 +2475,8 @@ metastore:
 searcher:
   replicaCount: 1
 EOF
-    helm upgrade --install quickwit quickwit/quickwit -n quickwit -f "$QUICKWIT_VALUES"
+    helm upgrade --install quickwit quickwit/quickwit --version "$QUICKWIT_CHART_VERSION" \
+        -n "$QUICKWIT_NAMESPACE" -f "$QUICKWIT_VALUES"
     rm -f "$QUICKWIT_VALUES"
 
     ########################################
@@ -1897,17 +2484,14 @@ EOF
     ########################################
     CURRENT_SECTION="Wait for all rollouts"
     log "Waiting for all services"
-    kctl wait --for=condition=Ready pod -l scylla/cluster=scylla \
-        -n scylla --timeout="${deploy_timeout}s"
-    wait_for_rollout statefulset/minio minio "$deploy_timeout"
-    wait_for_rollout statefulset/redis redis "$deploy_timeout"
-    kctl wait --for=condition=Ready pod -l app=postgres \
-        -n quickwit --timeout="${deploy_timeout}s"
-    wait_for_rollout statefulset/quickwit-searcher quickwit "$deploy_timeout"
-    wait_for_rollout statefulset/quickwit-indexer quickwit "$deploy_timeout"
-    wait_for_resource statefulset elastic-es-default elastic-system "$deploy_timeout"
-    kctl wait --for=condition=Ready pod -l elasticsearch.k8s.elastic.co/cluster-name=elastic \
-        -n elastic-system --timeout="${deploy_timeout}s"
+    wait_for_pods_ready "$SCYLLA_NAMESPACE" scylla/cluster=scylla "$deploy_timeout"
+    wait_for_rollout statefulset/seaweedfs "$SEAWEEDFS_NAMESPACE" "$deploy_timeout"
+    wait_for_rollout statefulset/redis "$REDIS_NAMESPACE" "$deploy_timeout"
+    wait_for_pods_ready "$QUICKWIT_NAMESPACE" app=postgres "$deploy_timeout"
+    wait_for_rollout statefulset/quickwit-searcher "$QUICKWIT_NAMESPACE" "$deploy_timeout"
+    wait_for_rollout statefulset/quickwit-indexer "$QUICKWIT_NAMESPACE" "$deploy_timeout"
+    wait_for_resource statefulset elastic-es-default "$ELASTIC_NAMESPACE" "$deploy_timeout"
+    wait_for_pods_ready "$ELASTIC_NAMESPACE" elasticsearch.k8s.elastic.co/cluster-name=elastic "$deploy_timeout"
 
     ########################################
     # Post-deploy configuration
@@ -1916,36 +2500,57 @@ EOF
 
     ### Scylla DB init
     log "Configuring Scylla"
-    kctl -n scylla exec -i --tty=false pod/scylla-us-east-1-us-east-1a-0 -c scylla -- /bin/bash <<EOF
-HOST='scylla-us-east-1-us-east-1a-0.scylla.svc.cluster.local'
+    # Runs inside the Scylla pod. Credentials go into temporary cqlshrc files so
+    # they never appear on a cqlsh command line, and any failure aborts the exec
+    # (and so the deploy) instead of being silently ignored.
+    kctl -n "$SCYLLA_NAMESPACE" exec -i --tty=false pod/scylla-us-east-1-us-east-1a-0 -c scylla -- /bin/bash <<EOF
+set -euo pipefail
+HOST='scylla-us-east-1-us-east-1a-0.${SCYLLA_NAMESPACE}.svc.cluster.local'
+RC_DIR=\$(mktemp -d)
+trap 'rm -rf "\$RC_DIR"' EXIT
+printf '[authentication]\nusername = thorium\npassword = %s\n' '$SCYLLA_PASS' > "\$RC_DIR/thorium"
+printf '[authentication]\nusername = cassandra\npassword = cassandra\n' > "\$RC_DIR/cassandra"
 
-# Determine which credentials work: cassandra (first run) or thorium (redeploy)
-if cqlsh "\$HOST" -u cassandra -p cassandra -e "DESCRIBE CLUSTER" &>/dev/null; then
-    AUTH_USER=cassandra
-    AUTH_PASS=cassandra
-else
-    AUTH_USER=thorium
-    AUTH_PASS=\$SCYLLA_PASS
+# Find working credentials: thorium (redeploy) or the default cassandra (first
+# run). CQL can lag behind pod readiness, so retry before giving up.
+AUTH=""
+for attempt in \$(seq 1 30); do
+    for candidate in thorium cassandra; do
+        if cqlsh "\$HOST" --cqlshrc="\$RC_DIR/\$candidate" -e "DESCRIBE CLUSTER" >/dev/null 2>&1; then
+            AUTH=\$candidate
+            break 2
+        fi
+    done
+    echo "Waiting for Scylla to accept logins (attempt \$attempt/30)..."
+    sleep 5
+done
+if [ -z "\$AUTH" ]; then
+    echo "ERROR: neither the saved thorium credentials nor the default cassandra login work" >&2
+    exit 1
 fi
+cql() { cqlsh "\$HOST" --cqlshrc="\$RC_DIR/\$AUTH" -e "\$1"; }
 
-cqlsh "\$HOST" -u "\$AUTH_USER" -p "\$AUTH_PASS" -e "CREATE ROLE IF NOT EXISTS admin WITH SUPERUSER = true"
-cqlsh "\$HOST" -u "\$AUTH_USER" -p "\$AUTH_PASS" -e "CREATE ROLE IF NOT EXISTS thorium WITH PASSWORD = '$SCYLLA_PASS' AND LOGIN = true AND SUPERUSER = true"
-cqlsh "\$HOST" -u "\$AUTH_USER" -p "\$AUTH_PASS" -e "GRANT admin TO thorium" 2>/dev/null || true
-cqlsh "\$HOST" -u "\$AUTH_USER" -p "\$AUTH_PASS" -e "CREATE KEYSPACE IF NOT EXISTS thorium WITH REPLICATION = {'class': 'SimpleStrategy', 'replication_factor': 1}"
-cqlsh "\$HOST" -u "\$AUTH_USER" -p "\$AUTH_PASS" -e "GRANT ALL ON KEYSPACE thorium TO thorium" 2>/dev/null || true
-cqlsh "\$HOST" -u "\$AUTH_USER" -p "\$AUTH_PASS" -e "GRANT CREATE ON ALL KEYSPACES TO thorium" 2>/dev/null || true
+cql "CREATE ROLE IF NOT EXISTS admin WITH SUPERUSER = true"
+cql "CREATE ROLE IF NOT EXISTS thorium WITH PASSWORD = '$SCYLLA_PASS' AND LOGIN = true AND SUPERUSER = true"
+# keep an existing role's password in step with the saved credential
+cql "ALTER ROLE thorium WITH PASSWORD = '$SCYLLA_PASS'"
+cql "CREATE KEYSPACE IF NOT EXISTS thorium WITH REPLICATION = {'class': 'SimpleStrategy', 'replication_factor': 1}"
+# grants may already be in place (or implied by superuser), so their errors are ignored
+cql "GRANT admin TO thorium" 2>/dev/null || true
+cql "GRANT ALL ON KEYSPACE thorium TO thorium" 2>/dev/null || true
+cql "GRANT CREATE ON ALL KEYSPACES TO thorium" 2>/dev/null || true
 
-# Drop default cassandra role on first run only
-if [ "\$AUTH_USER" = "cassandra" ]; then
-    cqlsh "\$HOST" -u thorium -p $SCYLLA_PASS -e "DROP ROLE IF EXISTS cassandra"
+# Drop the default cassandra role on first run only
+if [ "\$AUTH" = "cassandra" ]; then
+    cqlsh "\$HOST" --cqlshrc="\$RC_DIR/thorium" -e "DROP ROLE IF EXISTS cassandra"
 fi
 EOF
 
     ### Elastic index/role/user
     log "Configuring Elasticsearch"
-    wait_for_resource secret elastic-es-elastic-user elastic-system "$deploy_timeout"
-    ESPASS=$(kctl get secret -n elastic-system elastic-es-elastic-user -o go-template='{{index .data "elastic" | base64decode}}')
-    kctl -n elastic-system exec -i --tty=false pod/elastic-es-default-0 -- /bin/bash <<ESEOF
+    wait_for_resource secret elastic-es-elastic-user "$ELASTIC_NAMESPACE" "$deploy_timeout"
+    ESPASS=$(kctl get secret -n "$ELASTIC_NAMESPACE" elastic-es-elastic-user -o go-template='{{index .data "elastic" | base64decode}}')
+    kctl -n "$ELASTIC_NAMESPACE" exec -i --tty=false pod/elastic-es-default-0 -- /bin/bash <<ESEOF
 # Create index (ignore 400 = already exists)
 HTTP_CODE=\$(curl -s -o /dev/null -w '%{http_code}' -k -X PUT -u elastic:$ESPASS "https://localhost:9200/thorium")
 if [ "\$HTTP_CODE" = "200" ]; then
@@ -1976,31 +2581,47 @@ curl -k -X POST -u elastic:$ESPASS "https://localhost:9200/_security/user/thoriu
 '
 ESEOF
 
-    ### MinIO quickwit bucket
+    ### SeaweedFS quickwit bucket
+    # Thorium's own buckets are created by the operator; only Quickwit's is made
+    # here. `s3.bucket.create` fails if the bucket exists, so check the listing
+    # first to keep redeploys idempotent, then confirm the bucket is present.
+    # The app=seaweedfs-admin label is what the NetworkPolicy lets through to
+    # the master/filer ports.
     log "Creating Quickwit S3 bucket"
-    kctl delete job create-quickwit-bucket -n minio --ignore-not-found
+    kctl delete job create-quickwit-bucket -n "$SEAWEEDFS_NAMESPACE" --ignore-not-found
     kctl apply -f - <<EOF
 apiVersion: batch/v1
 kind: Job
 metadata:
   name: create-quickwit-bucket
-  namespace: minio
+  namespace: $SEAWEEDFS_NAMESPACE
 spec:
   backoffLimit: 4
   template:
+    metadata:
+      labels:
+        app: seaweedfs-admin
     spec:
       restartPolicy: Never
       containers:
-      - name: mc
-        image: quay.io/minio/mc:latest
+      - name: weed-shell
+        image: $SEAWEEDFS_IMAGE
         command:
         - /bin/sh
         - -c
         - |
-          mc alias set myminio http://minio.minio.svc.cluster.local:9000 $MINIO_AK $MINIO_SK
-          mc mb --ignore-existing myminio/quickwit
+          set -e
+          shell() { echo "\$1" | weed shell -master=${SEAWEEDFS_CLUSTER_HOST}:9333 -filer=${SEAWEEDFS_CLUSTER_HOST}:8888; }
+          # match the exact bucket name (the first field of each listing line)
+          has_bucket() { shell "s3.bucket.list" | awk '\$1 == "quickwit" { found = 1 } END { exit !found }'; }
+          if has_bucket; then
+            echo "Bucket quickwit already exists"
+          else
+            shell "s3.bucket.create -name quickwit"
+          fi
+          has_bucket
 EOF
-    kctl wait --for=condition=complete job/create-quickwit-bucket -n minio --timeout="${deploy_timeout}s"
+    wait_for_job "$SEAWEEDFS_NAMESPACE" create-quickwit-bucket "$deploy_timeout"
 
     ########################################
     # Thorium
@@ -2008,7 +2629,7 @@ EOF
     CURRENT_SECTION="Thorium deployment"
 
     log "Deploying Thorium"
-    kctl create ns thorium --dry-run=client -o yaml | kctl apply -f -
+    kctl create ns "$THORIUM_NAMESPACE" --dry-run=client -o yaml | kctl apply -f -
 
     local banner_file="$banner_path"
     local banner_tmp=""
@@ -2017,16 +2638,18 @@ EOF
         echo "Welcome to Thorium. <Please place your banner here>" > "$banner_tmp"
         banner_file="$banner_tmp"
     fi
-    kctl create cm banner --from-file="banner.txt=$banner_file" -n thorium \
+    kctl create cm banner --from-file="banner.txt=$banner_file" -n "$THORIUM_NAMESPACE" \
         --dry-run=client -o yaml | kctl apply -f -
     [ -n "$banner_tmp" ] && rm -f "$banner_tmp"
-    kctl apply -f - <<'EOF'
+    # each instance has its own "thorium" service account, which its scaler (and
+    # the operator, when deployed here) runs as; the ClusterRole is shared
+    kctl apply -f - <<EOF
 ---
 apiVersion: v1
 kind: ServiceAccount
 metadata:
   name: thorium
-  namespace: thorium
+  namespace: $THORIUM_NAMESPACE
 imagePullSecrets:
   - name: registry-token
 automountServiceAccountToken: true
@@ -2035,7 +2658,7 @@ apiVersion: v1
 kind: Secret
 metadata:
   name: thorium-account-token
-  namespace: thorium
+  namespace: $THORIUM_NAMESPACE
   annotations:
     kubernetes.io/service-account.name: thorium
 type: kubernetes.io/service-account-token
@@ -2067,67 +2690,45 @@ rules:
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRoleBinding
 metadata:
-  name: thorium-operator-binding
+  name: $THORIUM_BINDING
 subjects:
 - kind: ServiceAccount
   name: thorium
-  namespace: thorium
+  namespace: $THORIUM_NAMESPACE
 roleRef:
   kind: ClusterRole
   name: thorium-operator
   apiGroup: "rbac.authorization.k8s.io"
 EOF
 
+    local pull_secrets=""
     if [ -f "$docker_config" ]; then
-        kctl create secret docker-registry registry-token -n thorium \
+        kctl create secret docker-registry registry-token -n "$THORIUM_NAMESPACE" \
             --from-file=".dockerconfigjson=$docker_config" \
             --dry-run=client -o yaml | kctl apply -f -
-        kctl apply -f - <<'EOF'
-apiVersion: apps/v1
-kind: Deployment
-metadata:
-  name: operator
-  namespace: thorium
-  labels:
-    app: operator
-spec:
-  replicas: 1
-  selector:
-    matchLabels:
-      app: operator
-  template:
-    metadata:
-      labels:
-        app: operator
-    spec:
-      serviceAccountName: thorium
-      automountServiceAccountToken: true
-      containers:
-        - name: operator
-          image: ghcr.io/cisagov/thorium/infrastructure/thorium:latest
-          imagePullPolicy: Always
-          resources:
-            requests:
-              memory: 0
-              cpu: 0
-            limits:
-              memory: 1Gi
-              cpu: 256m
-          env:
-            - name: "http_proxy"
-            - name: "https_proxy"
-            - name: "HTTP_PROXY"
-            - name: "HTTPS_PROXY"
+        pull_secrets='
       imagePullSecrets:
-      - name: registry-token
-EOF
+      - name: registry-token'
+    fi
+
+    # The operator manages every ThoriumCluster in the cluster, so instances
+    # share one: reuse an operator another instance already runs (identified by
+    # its app=operator label and "thorium" service account) instead of starting
+    # a second one that would fight it
+    local operator_ns
+    operator_ns=$(kctl get deploy -A -l app=operator \
+        -o jsonpath='{range .items[*]}{.metadata.namespace}{" "}{.spec.template.spec.serviceAccountName}{"\n"}{end}' 2>/dev/null \
+        | awk -v ns="$THORIUM_NAMESPACE" '$2 == "thorium" && $1 != ns { print $1; exit }') || true
+    if [ -n "$operator_ns" ]; then
+        echo "Using the Thorium operator already running in namespace $operator_ns"
     else
-        kctl apply -f - <<'EOF'
+        operator_ns="$THORIUM_NAMESPACE"
+        kctl apply -f - <<EOF
 apiVersion: apps/v1
 kind: Deployment
 metadata:
   name: operator
-  namespace: thorium
+  namespace: $THORIUM_NAMESPACE
   labels:
     app: operator
 spec:
@@ -2144,7 +2745,7 @@ spec:
       automountServiceAccountToken: true
       containers:
         - name: operator
-          image: ghcr.io/cisagov/thorium/infrastructure/thorium:latest
+          image: ${THORIUM_REGISTRY}:${thorium_version}
           imagePullPolicy: Always
           resources:
             requests:
@@ -2157,16 +2758,16 @@ spec:
             - name: "http_proxy"
             - name: "https_proxy"
             - name: "HTTP_PROXY"
-            - name: "HTTPS_PROXY"
+            - name: "HTTPS_PROXY"${pull_secrets}
 EOF
     fi
 
-    kctl apply -f - <<'EOF'
+    kctl apply -f - <<EOF
 apiVersion: networking.k8s.io/v1
 kind: Ingress
 metadata:
   name: thorium-default-ingress
-  namespace: thorium
+  namespace: $THORIUM_NAMESPACE
   annotations:
     kubernetes.io/ingress.class: nginx
     nginx.ingress.kubernetes.io/ssl-redirect: "false"
@@ -2174,7 +2775,7 @@ metadata:
 spec:
   ingressClassName: nginx
   rules:
-    - host: localhost
+    - host: $INGRESS_HOST
       http:
         paths:
           - path: "/"
@@ -2186,7 +2787,7 @@ spec:
                   number: 80
 EOF
 
-    wait_for_rollout deployment.apps/operator thorium "$deploy_timeout"
+    wait_for_rollout deployment.apps/operator "$operator_ns" "$deploy_timeout"
 
     log "Waiting for operator to register ThoriumCluster CRD"
     wait_for_resource crd thoriumclusters.sandia.gov "" "$deploy_timeout"
@@ -2199,7 +2800,13 @@ EOF
     CURRENT_SECTION="ThoriumCluster CRD"
     log "Creating ThoriumCluster resource"
     if [ -f "$cluster_config" ]; then
-        kctl apply -f "$cluster_config" -n thorium
+        # fill the credential placeholders (see thorium-cluster.yml.example) with
+        # the credentials the backends were configured with
+        local rendered_config
+        rendered_config=$(mktemp)
+        render_cluster_config "$cluster_config" "$rendered_config"
+        kctl apply -f "$rendered_config" -n "$THORIUM_NAMESPACE"
+        rm -f "$rendered_config"
     else
         echo "No cluster config found at $cluster_config, using built-in default" >&2
         local default_config
@@ -2209,10 +2816,10 @@ apiVersion: sandia.gov/v1
 kind: ThoriumCluster
 metadata:
   name: dev
-  namespace: thorium
+  namespace: $THORIUM_NAMESPACE
 spec:
-  registry: "ghcr.io/cisagov/thorium/infrastructure/thorium"
-  version: "latest"
+  registry: "$THORIUM_REGISTRY"
+  version: "$thorium_version"
   image_pull_policy: Always
   components:
     api:
@@ -2246,7 +2853,7 @@ spec:
       tracing:
         external:
           Grpc:
-            endpoint: "http://quickwit-indexer.quickwit.svc.cluster.local:7281"
+            endpoint: "http://${QUICKWIT_INDEXER_HOST}:7281"
             level: "Info"
         local:
           level: "Info"
@@ -2268,9 +2875,9 @@ spec:
       ephemeral:
         bucket: "thorium-ephemeral"
       s3:
-        access_key: "$MINIO_AK"
-        secret_token: "$MINIO_SK"
-        endpoint: "http://minio.minio.svc.cluster.local:9000"
+        access_key: "$S3_AK"
+        secret_token: "$S3_SK"
+        endpoint: "http://${SEAWEEDFS_CLUSTER_HOST}:8333"
         region: "us-east-1"
         use_path_style: true
       auth:
@@ -2284,18 +2891,18 @@ spec:
               nodes:
                 - "minikube"
     redis:
-      host: "redis.redis.svc.cluster.local"
+      host: "${REDIS_CLUSTER_HOST}"
       port: 6379
       password: "$REDIS_PASS"
     scylla:
       nodes:
-        - "scylla-client.scylla.svc.cluster.local"
+        - "${SCYLLA_CLUSTER_HOST}"
       replication: 1
       auth:
         username: "thorium"
         password: "$SCYLLA_PASS"
     elastic:
-      node: "https://elastic-es-http.elastic-system.svc.cluster.local:9200"
+      node: "https://${ELASTIC_CLUSTER_HOST}:9200"
       username: "thorium"
       password: "$ES_PASS"
       results:
@@ -2305,7 +2912,7 @@ spec:
         repos: thorium_repo_tags
         samples: thorium_sample_tags
 DEFEOF
-        kctl apply -f "$default_config" -n thorium
+        kctl apply -f "$default_config" -n "$THORIUM_NAMESPACE"
         rm -f "$default_config"
     fi
 
@@ -2317,20 +2924,20 @@ DEFEOF
     log "Waiting for Thorium components to start"
 
     echo "Waiting for API deployment..."
-    wait_for_resource deployment api thorium "$deploy_timeout"
-    wait_for_rollout deployment.apps/api thorium "$deploy_timeout"
+    wait_for_resource deployment api "$THORIUM_NAMESPACE" "$deploy_timeout"
+    wait_for_rollout deployment.apps/api "$THORIUM_NAMESPACE" "$deploy_timeout"
 
     echo "Waiting for scaler deployment..."
-    wait_for_resource deployment scaler thorium "$deploy_timeout"
-    wait_for_rollout deployment.apps/scaler thorium "$deploy_timeout"
+    wait_for_resource deployment scaler "$THORIUM_NAMESPACE" "$deploy_timeout"
+    wait_for_rollout deployment.apps/scaler "$THORIUM_NAMESPACE" "$deploy_timeout"
 
     echo "Waiting for event-handler deployment..."
-    wait_for_resource deployment event-handler thorium "$deploy_timeout"
-    wait_for_rollout deployment.apps/event-handler thorium "$deploy_timeout"
+    wait_for_resource deployment event-handler "$THORIUM_NAMESPACE" "$deploy_timeout"
+    wait_for_rollout deployment.apps/event-handler "$THORIUM_NAMESPACE" "$deploy_timeout"
 
     echo "Waiting for search-streamer deployment..."
-    wait_for_resource deployment search-streamer thorium "$deploy_timeout"
-    wait_for_rollout deployment.apps/search-streamer thorium "$deploy_timeout"
+    wait_for_resource deployment search-streamer "$THORIUM_NAMESPACE" "$deploy_timeout"
+    wait_for_rollout deployment.apps/search-streamer "$THORIUM_NAMESPACE" "$deploy_timeout"
 
     log "All Thorium components are running"
 
@@ -2339,22 +2946,25 @@ DEFEOF
     ########################################
     CURRENT_SECTION="Create test user"
     log "Creating test admin user"
-    API_POD=$(kctl get pod -n thorium -l app=api -o jsonpath='{.items[0].metadata.name}')
-    CREATE_RESP=$(kctl -n thorium exec -i "pod/$API_POD" -- \
-        curl -s -w '\n%{http_code}' -X POST http://localhost/api/users/ \
-        -H 'Content-Type: application/json' \
-        -H "secret-key: $THORIUM_SECRET" \
-        -d "{\"username\":\"$deploy_user\",\"password\":\"$deploy_pass\",\"email\":\"${deploy_user}@localhost\",\"role\":\"Admin\",\"local\":true,\"skip_verification\":true}")
-    HTTP_CODE=$(echo "$CREATE_RESP" | tail -1)
-    BODY=$(echo "$CREATE_RESP" | sed '$d')
-    if [ "$HTTP_CODE" = "200" ]; then
+    local api_pod create_resp http_code body user_json
+    api_pod=$(kctl get pod -n "$THORIUM_NAMESPACE" -l app=api -o jsonpath='{.items[0].metadata.name}')
+    user_json=$(printf '{"username":"%s","password":"%s","email":"%s@localhost","role":"Admin","local":true,"skip_verification":true}' \
+        "$(json_escape "$deploy_user")" "$(json_escape "$deploy_pass")" "$(json_escape "$deploy_user")")
+    # The secret key (first line) and JSON body (the rest) go over stdin so
+    # neither lands on a host command line
+    create_resp=$(printf '%s\n%s\n' "$THORIUM_SECRET" "$user_json" \
+        | kctl -n "$THORIUM_NAMESPACE" exec -i "pod/$api_pod" -- sh -c \
+            'IFS= read -r key; curl -s -w "\n%{http_code}" -X POST http://localhost/api/users/ -H "Content-Type: application/json" -H "secret-key: $key" -d @-')
+    http_code=$(echo "$create_resp" | tail -1)
+    body=$(echo "$create_resp" | sed '$d')
+    if [ "$http_code" = "200" ]; then
         echo "Admin user created successfully"
         echo "  Username: $deploy_user"
         echo "  Password: $deploy_pass"
-    elif echo "$BODY" | grep -q "already exists"; then
+    elif echo "$body" | grep -q "already exists"; then
         echo "Test admin user already exists, skipping"
     else
-        echo "WARNING: Failed to create test user (HTTP $HTTP_CODE): $BODY"
+        echo "WARNING: Failed to create test user (HTTP $http_code): $body"
     fi
 
     ########################################
@@ -2364,15 +2974,29 @@ DEFEOF
 
     log "Installing thorctl"
 
-    pkill -f 'port-forward svc/thorium-api' 2>/dev/null || true
-
-    PF_PORT=8080
-    kctl -n thorium port-forward svc/thorium-api "$PF_PORT":80 &
+    # A private forward on a port kubectl picks, so it never collides with (or
+    # tears down) a forward started by `minithor expose`
+    # PF_PID/PF_LOG are globals because the EXIT trap runs after this function
+    local pf_port=""
+    PF_LOG=$(mktemp)
+    kctl -n "$THORIUM_NAMESPACE" port-forward svc/thorium-api :80 >"$PF_LOG" 2>&1 &
     PF_PID=$!
-    trap 'kill $PF_PID 2>/dev/null; kill -9 $PF_PID 2>/dev/null; pkill -9 -f "port-forward svc/thorium-api" 2>/dev/null || true' EXIT
-    wait_for_port_forward "$PF_PORT" 20
+    trap 'pkill -P "$PF_PID" 2>/dev/null; kill "$PF_PID" 2>/dev/null; rm -f "$PF_LOG"; true' EXIT
+    for attempt in $(seq 1 20); do
+        pf_port=$(sed -n 's/^Forwarding from 127\.0\.0\.1:\([0-9]*\) .*/\1/p' "$PF_LOG" | head -1)
+        [ -n "$pf_port" ] && break
+        if ! kill -0 "$PF_PID" 2>/dev/null; then
+            break
+        fi
+        sleep 1
+    done
+    if [ -z "$pf_port" ]; then
+        echo "ERROR: port-forward to thorium-api failed: $(cat "$PF_LOG")" >&2
+        exit 1
+    fi
+    wait_for_port_forward "$pf_port" 20
 
-    THORCTL_URL="http://localhost:$PF_PORT"
+    THORCTL_URL="http://localhost:$pf_port"
 
     local thorctl_os thorctl_hw
     thorctl_os=$(uname -s | awk '{print tolower($0)}')
@@ -2387,17 +3011,21 @@ DEFEOF
     "$THORCTL_BIN" login "$THORCTL_URL" --user "$deploy_user" --password "$deploy_pass"
 
     log "Creating 'static' group and 'allow-all' network policy"
-    BASIC_AUTH=$(echo -n "$deploy_user:$deploy_pass" | base64)
-    kctl -n thorium exec -i "pod/$API_POD" -- \
-        curl -sf -X POST http://localhost/api/groups/ \
-        -H "Authorization: Basic $BASIC_AUTH" \
-        -H 'Content-Type: application/json' \
-        -d '{"name":"static"}' || true
-    kctl -n thorium exec -i "pod/$API_POD" -- \
-        curl -sf -X POST http://localhost/api/network-policies \
-        -H "Authorization: Basic $BASIC_AUTH" \
-        -H 'Content-Type: application/json' \
-        -d '{"name":"allow-all","groups":["static"],"ingress":[],"egress":null,"forced_policy":false,"default_policy":false}' || true
+    # GNU base64 wraps long output, which would split the header value
+    local basic_auth
+    basic_auth=$(printf '%s' "$deploy_user:$deploy_pass" | base64 | tr -d '\n')
+    # POST a JSON body as the admin user; the auth header (first stdin line) and
+    # body (the rest) go over stdin so neither lands on a host command line.
+    # Failures are tolerated because both objects may already exist.
+    api_post_as_admin() {
+        printf '%s\n%s\n' "$basic_auth" "$2" \
+            | kctl -n "$THORIUM_NAMESPACE" exec -i "pod/$api_pod" -- sh -c \
+                'IFS= read -r auth; curl -sf -X POST "http://localhost$1" -H "Authorization: Basic $auth" -H "Content-Type: application/json" -d @-' \
+                sh "$1" || true
+    }
+    api_post_as_admin /api/groups/ '{"name":"static"}'
+    api_post_as_admin /api/network-policies '{"name":"allow-all","groups":["static"],"ingress":[],"egress":null,"forced_policy":false,"default_policy":false}'
+    echo
 
     log "Importing toolbox"
     curl -o "$toolbox_path" https://raw.githubusercontent.com/cisagov/thorium/refs/heads/main/tools/toolbox.json
@@ -2421,17 +3049,31 @@ DEFEOF
             REGISTRY_PASS=$(generate_password)
             echo "Configuring registry basic auth for user '$registry_user'..."
 
+            # The credentials go to htpasswd over stdin so they aren't recorded in
+            # the pod spec, and the secret manifest is piped for the same reason
             local htpasswd_entry
-            htpasswd_entry=$(kctl run htpasswd-gen --rm -i --restart=Never \
-                --image=docker.io/httpd:2-alpine \
-                -- htpasswd -Bbn "$registry_user" "$REGISTRY_PASS" 2>/dev/null \
-                | grep -v '^pod ' | tr -d '\r')
+            htpasswd_entry=$(printf '%s\n%s\n' "$registry_user" "$REGISTRY_PASS" \
+                | kctl run htpasswd-gen --rm -i --restart=Never -n thorium \
+                    --image=docker.io/httpd:2-alpine \
+                    -- sh -c 'IFS= read -r u; IFS= read -r p; htpasswd -Bbn "$u" "$p"' 2>/dev/null \
+                | grep -v '^pod ' | tr -d '\r' | sed '/^$/d')
+            if [ -z "$htpasswd_entry" ]; then
+                echo "ERROR: failed to generate the registry htpasswd entry" >&2
+                exit 1
+            fi
 
-            kctl create secret generic registry-auth -n thorium \
-                --from-literal=htpasswd="$htpasswd_entry" \
-                --from-literal=username="$registry_user" \
-                --from-literal=password="$REGISTRY_PASS" \
-                --dry-run=client -o yaml | kctl apply -f -
+            kctl apply -f - <<SECEOF
+apiVersion: v1
+kind: Secret
+metadata:
+  name: registry-auth
+  namespace: thorium
+type: Opaque
+stringData:
+  htpasswd: "$htpasswd_entry"
+  username: "$(json_escape "$registry_user")"
+  password: "$REGISTRY_PASS"
+SECEOF
 
             reg_auth_config='
     auth:
@@ -2605,10 +3247,10 @@ REGEOF
     log "Deployment complete!"
     echo ""
     echo "Access Thorium:"
-    echo "  1. Run 'minithor expose' in a separate terminal"
-    echo "  2. Open http://localhost:8080 in your browser"
+    echo "  1. Run 'minithor${INSTANCE:+ --instance $INSTANCE} expose' in a separate terminal"
+    echo "  2. Open http://localhost:8080 in your browser (with --port-offset <n>, 8080 + <n>)"
     echo "  3. Login with username '$deploy_user' and password '$deploy_pass'"
-    echo "  4. Service passwords were randomly generated — run 'minithor get-config' to view"
+    echo "  4. Service passwords were randomly generated — run 'minithor${INSTANCE:+ --instance $INSTANCE} get-config' to view"
 }
 
 ########################################
@@ -2617,16 +3259,21 @@ REGEOF
 
 # Rewrite an extracted thorium.yml so a host process can reach the cluster's
 # databases through the ports created by `minithor expose --dev`.
+#
+#   translate_config_local <file> [port_offset]
 translate_config_local() {
-    local file=$1
+    local file=$1 offset=${2:-0}
 
     # Swap in-cluster service DNS names for localhost and relax the elastic cert
     # check (the cluster cert's SAN doesn't cover localhost). Use temp-file + mv
     # rather than `sed -i` so this works with both GNU and BSD/macOS sed.
+    # The local ports follow `expose --port-offset`; redis's port is the only
+    # "port: 6379" line in the config.
     sed \
-        -e "s#${ELASTIC_CLUSTER_HOST}#localhost#g" \
+        -e "s#${ELASTIC_CLUSTER_HOST}:9200#localhost:$((9200 + offset))#g" \
         -e "s#${REDIS_CLUSTER_HOST}#localhost#g" \
-        -e "s#${MINIO_CLUSTER_HOST}#localhost#g" \
+        -e "s#^\\( *port: \\)6379\$#\\1$((6379 + offset))#" \
+        -e "s#${SEAWEEDFS_CLUSTER_HOST}:8333#localhost:$((8333 + offset))#g" \
         -e 's/^\( *insecure_certificates: \)false/\1true/' \
         -e "s/^\(  port: \)80\$/\1${LOCAL_API_PORT}/" \
         "$file" > "${file}.tmp" && mv "${file}.tmp" "$file"
@@ -2643,8 +3290,8 @@ translate_config_local() {
     # $(...) strips the trailing newline from scylla_lines, so re-add one with \n
     # (for multi-node repl the inner newlines are preserved and only the final
     # one was stripped, so printing one back yields exactly the right output).
-    awk -v repl="$scylla_lines" '
-        /^  - scylla-client\.scylla\.svc\.cluster\.local$/ { printf "%s\n", repl; next }
+    awk -v repl="$scylla_lines" -v host="  - $SCYLLA_CLUSTER_HOST" '
+        $0 == host { printf "%s\n", repl; next }
         { print }
     ' "$file" > "${file}.tmp" && mv "${file}.tmp" "$file"
 
@@ -2659,31 +3306,54 @@ translate_config_local() {
 }
 
 cmd_get_config() {
-    local local_mode=false
-    for arg in "$@"; do
-        case "$arg" in
+    local local_mode=false port_offset=0
+    while [ $# -gt 0 ]; do
+        case "$1" in
             -h|--help) usage_get_config; return 0 ;;
             --local)   local_mode=true ;;
-            *) echo "Unknown option: $arg"; usage_get_config; exit 1 ;;
+            --port-offset)
+                shift
+                if [ $# -eq 0 ] || ! [[ "$1" =~ ^[0-9]+$ ]]; then
+                    echo "ERROR: --port-offset requires a numeric argument" >&2; exit 1
+                fi
+                port_offset="$1"
+                ;;
+            *) echo "Unknown option: $1"; usage_get_config; exit 1 ;;
         esac
+        shift
     done
 
     ensure_minikube_running
+    # every file written here holds backend credentials, so keep them owner-only
+    umask 077
 
-    local output="${HOME}/thorium.yml"
-    [ "$local_mode" = true ] && output="${HOME}/thorium.local.yml"
+    local output="${HOME}/${CONFIG_NAME}.yml"
+    [ "$local_mode" = true ] && output="${HOME}/${CONFIG_NAME}.local.yml"
 
     echo "Extracting Thorium config from cluster secret..."
-    kctl get secret thorium -n thorium \
+    # The config holds every backend credential: build it in a private temp file
+    # next to the destination and only replace the destination once it succeeds
+    local tmp_output
+    tmp_output=$(mktemp "${output}.XXXXXX")
+    if ! kctl get secret thorium -n "$THORIUM_NAMESPACE" \
         -o go-template='{{index .data "thorium.yml" | base64decode}}' \
-        > "$output"
+        > "$tmp_output"; then
+        rm -f "$tmp_output"
+        echo "ERROR: failed to read the thorium secret; is Thorium deployed?" >&2
+        return 1
+    fi
 
     if [ "$local_mode" = true ]; then
         echo "Translating config for local access via exposed ports..."
-        if ! translate_config_local "$output"; then
+        if ! translate_config_local "$tmp_output" "$port_offset"; then
+            rm -f "$tmp_output"
             echo "ERROR: failed to translate config for local use" >&2
             return 1
         fi
+    fi
+    mv "$tmp_output" "$output"
+
+    if [ "$local_mode" = true ]; then
         echo "Local config written to $output"
         echo "Run 'minithor expose --dev' (if you haven't) then start the API with:"
         echo "  thorium-api --config $output     (listens on port ${LOCAL_API_PORT})"
@@ -2701,7 +3371,8 @@ cmd_expose() {
     local STOP_MODE=false
     local STATUS_MODE=false
     local NO_API=false
-    local API_PORT=8080
+    local API_PORT=""
+    local port_offset=0
 
     while [ $# -gt 0 ]; do
         case "$1" in
@@ -2717,6 +3388,14 @@ cmd_expose() {
                 fi
                 API_PORT="$1"
                 ;;
+            --port-offset)
+                shift
+                if [ $# -eq 0 ] || ! [[ "$1" =~ ^[0-9]+$ ]]; then
+                    echo "ERROR: --port-offset requires a numeric argument" >&2
+                    exit 1
+                fi
+                port_offset="$1"
+                ;;
             -h|--help) usage_expose; return 0 ;;
             *) echo "Unknown option: $1"; usage_expose; exit 1 ;;
         esac
@@ -2724,7 +3403,7 @@ cmd_expose() {
     done
 
     ensure_minikube_running
-    mkdir -p "$EXPOSE_LOG_DIR"
+    ensure_state_dir
 
     ########################################
     # Main expose logic
@@ -2747,22 +3426,32 @@ cmd_expose() {
     fi
 
     echo "Starting port-forwards..."
+    EXPOSE_FAILURES=0
+    # every local port is shifted by --port-offset so several instances can be
+    # exposed at once (Scylla binds to each node's own advertised IP instead)
+    local es_port=$((9200 + port_offset)) kb_port=$((5601 + port_offset))
+    local redis_port=$((6379 + port_offset)) s3_port=$((8333 + port_offset))
+    API_PORT="${API_PORT:-$((8080 + port_offset))}"
+    local has_registry=false
+    if kctl get svc registry -n "$THORIUM_NAMESPACE" &>/dev/null; then
+        has_registry=true
+    fi
 
     # --no-api forwards only the backing services so a locally-run API can use them
     if [ "$NO_API" = false ]; then
-        start_forward thorium-api thorium thorium-api "$API_PORT:80"
-        start_forward registry thorium registry 5000
-        if kctl get svc registry -n thorium &>/dev/null; then
-            start_forward registry thorium registry 5000
+        run_forward "${INSTANCE:+$INSTANCE-}thorium-api" "$THORIUM_NAMESPACE" thorium-api "$API_PORT:80"
+        # the registry is optional (deploy --registry), so only forward it when deployed
+        if [ "$has_registry" = true ]; then
+            run_forward registry "$THORIUM_NAMESPACE" registry 5000
         fi
     fi
 
     # forward the backing services for --dev or when only the infrastructure is wanted
     if [ "$DEV_MODE" = true ] || [ "$NO_API" = true ]; then
-        start_forward elastic elastic-system elastic-es-http 9200
-        start_forward kibana elastic-system elastic-kb-http 5601
-        start_forward redis redis redis 6379
-        start_forward minio minio minio 9000
+        run_forward "${INSTANCE:+$INSTANCE-}elastic" "$ELASTIC_NAMESPACE" elastic-es-http "$es_port:9200"
+        run_forward "${INSTANCE:+$INSTANCE-}kibana" "$ELASTIC_NAMESPACE" elastic-kb-http "$kb_port:5601"
+        run_forward "${INSTANCE:+$INSTANCE-}redis" "$REDIS_NAMESPACE" redis "$redis_port:6379"
+        run_forward "${INSTANCE:+$INSTANCE-}seaweedfs" "$SEAWEEDFS_NAMESPACE" seaweedfs "$s3_port:8333"
         # Scylla needs per-node loopback-aliased forwards (see forward_scylla_dev)
         forward_scylla_dev
     fi
@@ -2773,13 +3462,15 @@ cmd_expose() {
     echo ""
     if [ "$NO_API" = false ]; then
         echo "Thorium API available at http://localhost:$API_PORT"
-        echo "Registry at http://localhost:5000"
+        if [ "$has_registry" = true ]; then
+            echo "Registry at http://localhost:5000"
+        fi
     fi
     if [ "$DEV_MODE" = true ] || [ "$NO_API" = true ]; then
-        echo "Elasticsearch at https://localhost:9200"
-        echo "Kibana at https://localhost:5601"
-        echo "Redis at localhost:6379"
-        echo "MinIO at http://localhost:9000"
+        echo "Elasticsearch at https://localhost:$es_port"
+        echo "Kibana at https://localhost:$kb_port"
+        echo "Redis at localhost:$redis_port"
+        echo "SeaweedFS S3 at http://localhost:$s3_port"
         local scy_svc scy_ip
         while read -r scy_svc scy_ip; do
             [ -n "$scy_svc" ] || continue
@@ -2791,6 +3482,10 @@ cmd_expose() {
     echo ""
     echo "Logs: $EXPOSE_LOG_DIR/"
     echo "Run 'minithor expose --status' to check, 'minithor expose --stop' to stop all"
+    if [ "$EXPOSE_FAILURES" -gt 0 ]; then
+        echo "WARNING: $EXPOSE_FAILURES port-forward(s) failed to start (see above)" >&2
+        return 1
+    fi
 }
 
 ########################################
@@ -2798,7 +3493,7 @@ cmd_expose() {
 ########################################
 
 cmd_cleanup() {
-    local confirm=false
+    local confirm=false force=false
     local cleanup_timeout=300
     FAILURES=0
 
@@ -2806,6 +3501,7 @@ cmd_cleanup() {
         case "$1" in
             -h|--help) usage_cleanup; return 0 ;;
             --confirm) confirm=true ;;
+            --force) force=true ;;
             --timeout)
                 shift
                 if [ $# -eq 0 ] || ! [[ "$1" =~ ^[0-9]+$ ]]; then
@@ -2830,117 +3526,167 @@ cmd_cleanup() {
 
     ensure_minikube_running
 
+    # Other instances still in the cluster keep the shared operators and CRDs
+    # alive; only the last instance's cleanup removes them
+    local other_instances remove_shared=true
+    other_instances=$(kctl get thoriumclusters -A \
+        -o jsonpath='{range .items[*]}{.metadata.namespace}{"\n"}{end}' 2>/dev/null \
+        | grep -vx "$THORIUM_NAMESPACE" | sort -u | tr '\n' ' ') || true
+    if [ -n "$other_instances" ]; then
+        remove_shared=false
+        echo "Other Thorium instances remain (namespaces: $other_instances); keeping the shared operators and CRDs"
+        # the Thorium operator serves every instance, so removing the namespace
+        # it runs in would leave the others unmanaged
+        if kctl get deploy operator -n "$THORIUM_NAMESPACE" &>/dev/null && [ "$force" = false ]; then
+            echo "ERROR: the shared Thorium operator runs in $THORIUM_NAMESPACE and the other instances depend on it." >&2
+            echo "  Clean up the other instances first, or pass --force to remove it anyway." >&2
+            return 1
+        fi
+    fi
+
     ########################################
     # Dev port-forwards + loopback aliases
     ########################################
     CURRENT_SECTION="Stopping dev port-forwards"
     log "Stopping dev port-forwards and loopback aliases"
-    run_step stop_all_forwards
-    run_step remove_all_loopback_aliases
+    run_step stop_instance_forwards
 
     ########################################
-    # Container Registry (in thorium ns)
+    # Container Registry (default instance only)
     ########################################
-    CURRENT_SECTION="Removing Container Registry"
-    log "Removing Container Registry"
-    run_step kctl delete statefulset registry -n thorium --ignore-not-found --timeout="${cleanup_timeout}s"
-    run_step kctl delete svc registry -n thorium --ignore-not-found --timeout="${cleanup_timeout}s"
-    run_step kctl delete secret registry-auth -n thorium --ignore-not-found --timeout="${cleanup_timeout}s"
-    run_step kctl delete configmap registry-config -n thorium --ignore-not-found --timeout="${cleanup_timeout}s"
-    run_step kctl delete pvc registry-data-registry-0 -n thorium --ignore-not-found --timeout="${cleanup_timeout}s"
+    if [ "$THORIUM_NAMESPACE" = "$REGISTRY_NAMESPACE" ]; then
+        CURRENT_SECTION="Removing Container Registry"
+        log "Removing Container Registry"
+        run_step kctl delete statefulset registry -n "$REGISTRY_NAMESPACE" --ignore-not-found --timeout="${cleanup_timeout}s"
+        run_step kctl delete svc registry -n "$REGISTRY_NAMESPACE" --ignore-not-found --timeout="${cleanup_timeout}s"
+        run_step kctl delete secret registry-auth -n "$REGISTRY_NAMESPACE" --ignore-not-found --timeout="${cleanup_timeout}s"
+        run_step kctl delete configmap registry-config -n "$REGISTRY_NAMESPACE" --ignore-not-found --timeout="${cleanup_timeout}s"
+        run_step kctl delete pvc registry-data-registry-0 -n "$REGISTRY_NAMESPACE" --ignore-not-found --timeout="${cleanup_timeout}s"
+    fi
 
     ########################################
     # Thorium
     ########################################
     CURRENT_SECTION="Removing Thorium"
     log "Removing Thorium"
-    run_step kctl delete deployment operator -n thorium --ignore-not-found --timeout="${cleanup_timeout}s"
-    clear_finalizers_and_delete thoriumclusters.sandia.gov thoriumclusters.sandia.gov thorium
-    run_step kctl delete ns thorium --ignore-not-found --timeout="${cleanup_timeout}s"
-    run_step kctl delete clusterrole thorium-operator --ignore-not-found --timeout="${cleanup_timeout}s"
-    run_step kctl delete clusterrolebinding thorium-operator-binding --ignore-not-found --timeout="${cleanup_timeout}s"
+    run_step kctl delete deployment operator -n "$THORIUM_NAMESPACE" --ignore-not-found --timeout="${cleanup_timeout}s"
+    clear_finalizers_and_delete thoriumclusters.sandia.gov thoriumclusters.sandia.gov "$THORIUM_NAMESPACE"
+    run_step kctl delete ns "$THORIUM_NAMESPACE" --ignore-not-found --timeout="${cleanup_timeout}s"
+    run_step kctl delete clusterrolebinding "$THORIUM_BINDING" --ignore-not-found --timeout="${cleanup_timeout}s"
+    if [ "$remove_shared" = true ]; then
+        run_step kctl delete clusterrole thorium-operator --ignore-not-found --timeout="${cleanup_timeout}s"
+    fi
 
     ########################################
     # Quickwit
     ########################################
     CURRENT_SECTION="Removing Quickwit"
     log "Removing Quickwit"
-    helm_uninstall quickwit quickwit
+    helm_uninstall quickwit "$QUICKWIT_NAMESPACE"
 
     ########################################
     # Kubegres + Postgres
     ########################################
     CURRENT_SECTION="Removing Kubegres + Postgres"
     log "Removing Kubegres + Postgres"
-    run_step kctl delete deployment kubegres-controller-manager -n kubegres-system --ignore-not-found --timeout="${cleanup_timeout}s"
-    clear_finalizers_and_delete kubegres.kubegres.reactive-tech.io kubegres.kubegres.reactive-tech.io quickwit
-    run_step kctl delete statefulsets,deployments,services,pods --all -n quickwit --force --grace-period=0 --ignore-not-found --timeout="${cleanup_timeout}s"
-    run_step kctl delete ns quickwit --ignore-not-found --timeout="${cleanup_timeout}s"
-    run_step kctl delete ns kubegres-system --ignore-not-found --timeout="${cleanup_timeout}s"
-    run_step kctl delete clusterrole kubegres-kubegres-editor-role kubegres-kubegres-viewer-role kubegres-manager-role kubegres-metrics-auth-role kubegres-metrics-reader --ignore-not-found --timeout="${cleanup_timeout}s"
-    run_step kctl delete clusterrolebinding kubegres-manager-rolebinding kubegres-metrics-auth-rolebinding --ignore-not-found --timeout="${cleanup_timeout}s"
+    clear_finalizers_and_delete kubegres.kubegres.reactive-tech.io kubegres.kubegres.reactive-tech.io "$QUICKWIT_NAMESPACE"
+    run_step kctl delete statefulsets,deployments,services,pods --all -n "$QUICKWIT_NAMESPACE" --force --grace-period=0 --ignore-not-found --timeout="${cleanup_timeout}s"
+    run_step kctl delete ns "$QUICKWIT_NAMESPACE" --ignore-not-found --timeout="${cleanup_timeout}s"
+    if [ "$remove_shared" = true ]; then
+        run_step kctl delete deployment kubegres-controller-manager -n kubegres-system --ignore-not-found --timeout="${cleanup_timeout}s"
+        run_step kctl delete ns kubegres-system --ignore-not-found --timeout="${cleanup_timeout}s"
+        run_step kctl delete clusterrole kubegres-kubegres-editor-role kubegres-kubegres-viewer-role kubegres-manager-role kubegres-metrics-auth-role kubegres-metrics-reader --ignore-not-found --timeout="${cleanup_timeout}s"
+        run_step kctl delete clusterrolebinding kubegres-manager-rolebinding kubegres-metrics-auth-rolebinding --ignore-not-found --timeout="${cleanup_timeout}s"
+    fi
 
     ########################################
     # Jaeger
     ########################################
     CURRENT_SECTION="Removing Jaeger"
     log "Removing Jaeger"
-    run_step kctl delete ns jaeger --ignore-not-found --timeout="${cleanup_timeout}s"
+    run_step kctl delete ns "$JAEGER_NAMESPACE" --ignore-not-found --timeout="${cleanup_timeout}s"
 
     ########################################
-    # MinIO
+    # SeaweedFS
     ########################################
-    CURRENT_SECTION="Removing MinIO"
-    log "Removing MinIO"
-    run_step kctl delete ns minio --ignore-not-found --timeout="${cleanup_timeout}s"
+    CURRENT_SECTION="Removing SeaweedFS"
+    log "Removing SeaweedFS"
+    run_step kctl delete ns "$SEAWEEDFS_NAMESPACE" --ignore-not-found --timeout="${cleanup_timeout}s"
+    # also remove a legacy minio namespace if one is present
+    if [ -z "$INSTANCE" ]; then
+        run_step kctl delete ns minio --ignore-not-found --timeout="${cleanup_timeout}s"
+    fi
 
     ########################################
     # Scylla
     ########################################
     CURRENT_SECTION="Removing Scylla"
     log "Removing Scylla"
-    run_step kctl delete deployment scylla-operator -n scylla-operator --ignore-not-found --timeout="${cleanup_timeout}s"
-    run_step kctl delete deployment webhook-server -n scylla-operator --ignore-not-found --timeout="${cleanup_timeout}s"
-    clear_finalizers_and_delete scyllaclusters.scylla.scylladb.com scyllaclusters.scylla.scylladb.com scylla
-    run_step kctl delete statefulsets,deployments,services,pods --all -n scylla --force --grace-period=0 --ignore-not-found --timeout="${cleanup_timeout}s"
-    run_step kctl delete ns scylla --ignore-not-found --timeout="${cleanup_timeout}s"
-    helm_uninstall scylla-operator scylla-operator
-    run_step kctl delete ns scylla-operator --ignore-not-found --timeout="${cleanup_timeout}s"
+    clear_finalizers_and_delete scyllaclusters.scylla.scylladb.com scyllaclusters.scylla.scylladb.com "$SCYLLA_NAMESPACE"
+    run_step kctl delete statefulsets,deployments,services,pods --all -n "$SCYLLA_NAMESPACE" --force --grace-period=0 --ignore-not-found --timeout="${cleanup_timeout}s"
+    run_step kctl delete ns "$SCYLLA_NAMESPACE" --ignore-not-found --timeout="${cleanup_timeout}s"
+    if [ "$remove_shared" = true ]; then
+        run_step kctl delete deployment scylla-operator -n "$SCYLLA_OPERATOR_NAMESPACE" --ignore-not-found --timeout="${cleanup_timeout}s"
+        run_step kctl delete deployment webhook-server -n "$SCYLLA_OPERATOR_NAMESPACE" --ignore-not-found --timeout="${cleanup_timeout}s"
+        helm_uninstall scylla-operator "$SCYLLA_OPERATOR_NAMESPACE"
+        run_step kctl delete ns "$SCYLLA_OPERATOR_NAMESPACE" --ignore-not-found --timeout="${cleanup_timeout}s"
+    fi
 
     ########################################
     # cert-manager
     ########################################
-    CURRENT_SECTION="Removing cert-manager"
-    log "Removing cert-manager"
-    helm_uninstall cert-manager cert-manager
-    run_step kctl delete ns cert-manager --ignore-not-found --timeout="${cleanup_timeout}s"
+    if [ "$remove_shared" = true ]; then
+        CURRENT_SECTION="Removing cert-manager"
+        log "Removing cert-manager"
+        helm_uninstall cert-manager cert-manager
+        run_step kctl delete ns cert-manager --ignore-not-found --timeout="${cleanup_timeout}s"
+    fi
 
     ########################################
     # Elasticsearch
     ########################################
     CURRENT_SECTION="Removing Elasticsearch"
     log "Removing Elasticsearch"
-    helm_uninstall elastic-operator elastic-system
-    clear_finalizers_and_delete elasticsearches.elasticsearch.k8s.elastic.co elasticsearches.elasticsearch.k8s.elastic.co elastic-system
-    clear_finalizers_and_delete kibanas.kibana.k8s.elastic.co kibanas.kibana.k8s.elastic.co elastic-system
-    run_step kctl delete statefulsets,deployments,services,pods --all -n elastic-system --force --grace-period=0 --ignore-not-found --timeout="${cleanup_timeout}s"
-    run_step kctl delete ns elastic-system --ignore-not-found --timeout="${cleanup_timeout}s"
+    if [ "$remove_shared" = true ]; then
+        helm_uninstall elastic-operator "$ELASTIC_OPERATOR_NAMESPACE"
+    fi
+    clear_finalizers_and_delete elasticsearches.elasticsearch.k8s.elastic.co elasticsearches.elasticsearch.k8s.elastic.co "$ELASTIC_NAMESPACE"
+    clear_finalizers_and_delete kibanas.kibana.k8s.elastic.co kibanas.kibana.k8s.elastic.co "$ELASTIC_NAMESPACE"
+    if [ "$ELASTIC_NAMESPACE" != "$ELASTIC_OPERATOR_NAMESPACE" ] || [ "$remove_shared" = true ]; then
+        run_step kctl delete statefulsets,deployments,services,pods --all -n "$ELASTIC_NAMESPACE" --force --grace-period=0 --ignore-not-found --timeout="${cleanup_timeout}s"
+        run_step kctl delete ns "$ELASTIC_NAMESPACE" --ignore-not-found --timeout="${cleanup_timeout}s"
+    else
+        # the default instance shares elastic-system with the ECK operator the
+        # other instances still use, so only its data is removed
+        run_step kctl delete pvc -l elasticsearch.k8s.elastic.co/cluster-name=elastic -n "$ELASTIC_NAMESPACE" --ignore-not-found --timeout="${cleanup_timeout}s"
+    fi
 
     ########################################
     # Redis
     ########################################
     CURRENT_SECTION="Removing Redis"
     log "Removing Redis"
-    run_step kctl delete ns redis --ignore-not-found --timeout="${cleanup_timeout}s"
+    run_step kctl delete ns "$REDIS_NAMESPACE" --ignore-not-found --timeout="${cleanup_timeout}s"
+
+    ########################################
+    # Saved credentials
+    ########################################
+    CURRENT_SECTION="Removing saved credentials"
+    log "Removing saved credentials"
+    run_step kctl delete ns "$CREDENTIALS_NAMESPACE" --ignore-not-found --timeout="${cleanup_timeout}s"
 
     ########################################
     # Leftover CRDs
     ########################################
-    CURRENT_SECTION="Cleaning up CRDs"
-    log "Cleaning up leftover CRDs"
-    CRDS=$(kctl get crds -o name 2>/dev/null | grep -E 'cert-manager|elastic|scylla|kubegres|sandia' || true)
-    if [ -n "$CRDS" ]; then
-        run_step kctl delete $CRDS --timeout="${cleanup_timeout}s"
+    if [ "$remove_shared" = true ]; then
+        CURRENT_SECTION="Cleaning up CRDs"
+        log "Cleaning up leftover CRDs"
+        CRDS=$(kctl get crds -o name 2>/dev/null | grep -E 'cert-manager|elastic|scylla|kubegres|sandia' || true)
+        if [ -n "$CRDS" ]; then
+            # one CRD name per word
+            # shellcheck disable=SC2086
+            run_step kctl delete $CRDS --timeout="${cleanup_timeout}s"
+        fi
     fi
 
     ########################################
@@ -2966,6 +3712,31 @@ cmd_cleanup() {
 ########################################
 # Dispatch
 ########################################
+
+# --instance may appear anywhere on the command line (before or after the
+# subcommand), so pull it out before dispatching
+args=()
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --instance)
+            if [ $# -lt 2 ]; then
+                echo "ERROR: --instance requires a name" >&2
+                exit 1
+            fi
+            set_instance "$2"
+            shift 2
+            ;;
+        --instance=*)
+            set_instance "${1#--instance=}"
+            shift
+            ;;
+        *)
+            args+=("$1")
+            shift
+            ;;
+    esac
+done
+set -- ${args[@]+"${args[@]}"}
 
 if [ $# -eq 0 ]; then
     usage
