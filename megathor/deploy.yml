@@ -9,28 +9,14 @@
     - role: rook
       when: rook_enabled | bool
     - role: secrets
-    # seaweedfs must be deployed after secrets get read/setup
-    - role: seaweedfs
-      when: seaweedfs_enabled | bool
-    # bucket creation must happen after the S3 backend is deployed
+    # Quickwit's bucket on Rook or an external S3 service (the thorium chart creates it on SeaweedFS)
     - role: s3
-    # Databases/Tracing
-    - role: elastic
-      when: elastic_enabled | bool
-    - role: redis
-      when: redis_enabled | bool
-    - role: jaeger
-      when: jaeger_enabled | bool
-    # the Kubegres operator is cluster-wide; kubegres_enabled alone still decides
-    # whether Quickwit's Postgres is run through Kubegres
-    - role: kubegres
-      when: kubegres_operator_enabled | bool
-    - role: quickwit
-      when: quickwit_enabled | bool
-    - role: scylla
-      when: scylla_enabled | bool
+      when: not (seaweedfs_enabled | bool)
     - role: traefik
       when: traefik_enabled | bool
-    # Thorium Operator/Cluster
+    # the Scylla, ECK, and Kubegres operators, shared by every Thorium deployment in the cluster
+    - role: infra_operators
+      when: infra_operators_enabled | bool
+    # Thorium and its backing services (the thorium Helm chart)
     - role: thorium
       when: thorium_enabled | bool

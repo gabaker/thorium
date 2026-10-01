@@ -20,13 +20,12 @@ serde_norway = { workspace = true }
 tokio = { workspace = true, features = ["full"] }
 tokio-stream = "0.1"
 futures = "0.3"
-clap = { version = "4", features = ["derive"] }
+clap = { version = "4", features = ["derive", "env"] }
 rustls = "0.23.27"
-kube = { workspace = true }
+kube = { workspace = true, features = ["unstable-runtime", "jsonpatch"] }
 kube-derive = { workspace = true }
 k8s-openapi = { workspace = true }
 schemars = { workspace = true }
-bytestring = { version = "1.4" }
 rand = { version = "0.9" }
 base64 = { version = "0.22" }
 chrono = { workspace = true }
@@ -36,3 +35,8 @@ aws-sdk-s3 = { version = "1.90", features = ["rt-tokio", "behavior-version-lates
 aws-credential-types = { version = "1.2" }
 generic-array = { version = "0.14" }
 papaya = "0.2"
+scylla = { version = "1.2" }
+json-patch = "4.2"
+sha2 = "0.10"
+elasticsearch = { version = "9.0.0-alpha.1" }
+redis = { version = "0.32.1", default-features = false, features = ["tokio-comp"] }

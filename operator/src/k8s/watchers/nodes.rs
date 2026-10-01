@@ -1,3 +1,5 @@
+//! Watches nodes and provisions and labels the ones a Thorium cluster schedules on
+
 use futures::StreamExt;
 use k8s_openapi::api::core::v1::Node;
 use kube::runtime::Controller;
@@ -9,15 +11,13 @@ use std::time::Duration;
 use thorium::Error;
 
 use crate::k8s::controller::SharedInfo;
-use crate::k8s::crds::ThoriumCluster;
 
+/// The context for our node watcher
 #[derive(Clone)]
 struct NodeWatchContext {
-    /// kube API client
-    client: Client,
     /// The name of the k8s cluster this node is from
     k8s_name: String,
-    // The shared thorium operator info
+    /// The shared thorium operator info
     shared: Arc<SharedInfo>,
 }
 
@@ -31,12 +31,12 @@ fn node_error_policy(_cluster: Arc<Node>, error: &Error, _state: Arc<NodeWatchCo
     Action::requeue(Duration::from_secs(super::RECONCILE_ERROR_REQUEUE_SECS))
 }
 
-/// Reconcile changes to ThoriumCluster
+/// Provision and label a node for the Thorium cluster that schedules on it
 ///
-/// Arguments
+/// # Arguments
 ///
-/// * `cluster` - Thorium cluster being changed
-/// * `state` - Controller context including client instance and optional URL
+/// * `node` - The node that changed
+/// * `ctx` - The node watcher's context
 async fn reconcile_nodes(node: Arc<Node>, ctx: Arc<NodeWatchContext>) -> Result<Action, Error> {
     // if we don't have any configs then just requeue this node in 30 seconds
     if ctx.shared.info.is_empty() {
@@ -54,6 +54,10 @@ async fn reconcile_nodes(node: Arc<Node>, ctx: Arc<NodeWatchContext>) -> Result<
             // this node has been deliberately excluded from usage in Thorium so ignore it
             None => return Ok(Action::requeue(Duration::from_mins(15))),
         };
+        // leave this node alone while its cluster is being deleted
+        if !info.is_live().await? {
+            return Ok(Action::requeue(Duration::from_secs(60)));
+        }
         // get the current version of the api
         let api_version = info.thorium.updates.get_version().await?;
         // check if this node already has a Thorium enabled label
@@ -88,12 +92,11 @@ async fn reconcile_nodes(node: Arc<Node>, ctx: Arc<NodeWatchContext>) -> Result<
                 }
             }
         }
-        // cleanup this provision pod if it exists
-        crate::k8s::nodes::cleanup_provision_pod_specific(&info.meta, name).await?;
-        // provision this node
-        crate::k8s::nodes::deploy_provision_pod(&info.meta, name).await?;
+        // provision this node with the API's version, replacing any outdated provision pod
+        let version = api_version.thorium.to_string();
+        crate::k8s::nodes::deploy_provision_pod(&info.meta, name, &version).await?;
         // label this node with its new version
-        crate::k8s::nodes::label_node(&info.meta, name, &api_version.thorium.to_string()).await?;
+        crate::k8s::nodes::label_node(&info.meta, name, &version).await?;
         // don't scan this node for 15 minutes
         return Ok(Action::requeue(Duration::from_mins(15)));
     }
@@ -102,20 +105,20 @@ async fn reconcile_nodes(node: Arc<Node>, ctx: Arc<NodeWatchContext>) -> Result<
 }
 
 /// Watch our nodes for any changes
+///
+/// # Arguments
+///
+/// * `k8s_name` - The name of the k8s cluster these nodes are in
+/// * `client` - The kube client to watch with
+/// * `shared` - Data shared across watchers
 pub async fn start(k8s_name: String, client: Client, shared: Arc<SharedInfo>) {
     // build a node api
-    let node_api: Api<Node> = Api::<Node>::all(client.clone());
-    let clusters_api: Api<ThoriumCluster> = Api::<ThoriumCluster>::all(client.clone());
+    let node_api: Api<Node> = Api::<Node>::all(client);
     // setup some state for our watcher
-    let ctx = NodeWatchContext {
-        client: client.clone(),
-        k8s_name,
-        shared: shared.clone(),
-    };
+    let ctx = NodeWatchContext { k8s_name, shared };
     // create a controller to watch for changes in our nodes
     Controller::new(node_api, Config::default().any_semantic())
         .shutdown_on_signal()
-        .owns(clusters_api, Config::default())
         .run(reconcile_nodes, node_error_policy, Arc::new(ctx))
         .filter_map(|x| async move { std::result::Result::ok(x) })
         .for_each(|_| futures::future::ready(()))

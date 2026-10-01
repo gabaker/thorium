@@ -1,0 +1,86 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  namespace: {{ .Release.Namespace }}
+  name: webhook-server
+  labels:
+    app.kubernetes.io/name: webhook-server
+    app.kubernetes.io/instance: webhook-server
+spec:
+  replicas: {{ .Values.webhookServerReplicas }}
+  strategy:
+    type: RollingUpdate
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: webhook-server
+      app.kubernetes.io/instance: webhook-server
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: webhook-server
+        app.kubernetes.io/instance: webhook-server
+    spec:
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      serviceAccountName: "webhook-server"
+      {{- with .Values.securityContext }}
+      securityContext: {{ toYaml . | nindent 8 }}
+      {{- end }}
+      containers:
+      - name: webhook-server
+        image: {{ .Values.image.repository }}/scylla-operator:{{ .Values.image.tag | default .Chart.AppVersion }}
+        imagePullPolicy: IfNotPresent
+        args:
+        - run-webhook-server
+        - --loglevel=2
+        - --tls-cert-file=/tmp/k8s-webhook-server/serving-certs/tls.crt
+        - --tls-private-key-file=/tmp/k8s-webhook-server/serving-certs/tls.key
+        - --port=5000
+        livenessProbe:
+          httpGet:
+            path: /readyz
+            port: 5000
+            scheme: HTTPS
+        readinessProbe:
+          httpGet:
+            path: /readyz
+            port: 5000
+            scheme: HTTPS
+          initialDelaySeconds: 5
+          periodSeconds: 10
+        lifecycle:
+          preStop:
+            exec:
+              command:
+              - /usr/bin/sleep
+              - 15s
+        ports:
+        - containerPort: 5000
+          name: webhook-server
+          protocol: TCP
+        resources:
+          {{- toYaml .Values.webhookServerResources | nindent 10 }}
+        volumeMounts:
+        - mountPath: /tmp/k8s-webhook-server/serving-certs/
+          name: cert
+          readOnly: true
+      terminationGracePeriodSeconds: 75
+      volumes:
+      - name: cert
+        secret:
+          defaultMode: 420
+          secretName: {{ include "scylla-operator.certificateSecretName" . }}
+      {{- with .Values.webhookServerNodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.webhookServerAffinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.webhookServerTolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}

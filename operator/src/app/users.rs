@@ -1,7 +1,7 @@
-use reqwest::{self, StatusCode};
+use reqwest::StatusCode;
 use thorium::{
     Error,
-    client::{self, Users},
+    client::Users,
     models::{AuthResponse, UserCreate, UserRole, UserUpdate},
 };
 
@@ -32,7 +32,8 @@ pub async fn create_or_auth_user(
     admin: bool,
     thorium: Option<&thorium::Thorium>,
 ) -> Result<AuthResponse, Error> {
-    let client = reqwest::Client::new();
+    // build a client with bounded timeouts for basic auth requests
+    let client = super::helpers::reqwest_client()?;
     // build out user request, make user a local auth user with admin role
     let user_req = UserCreate::new(username, password, "thorium")
         // we want users created by the operator to be admin
@@ -41,12 +42,12 @@ pub async fn create_or_auth_user(
         .skip_verification()
         // set local auth to true in case cluster is LDAP enabled
         .local();
-    let settings = client::ClientSettings::default();
+    let settings = super::helpers::client_settings();
     // key is none for non-admin users
     let mut key: Option<String> = None;
     // pass in thorium secret_key if creating an admin account
     if admin {
-        key = Some(meta.cluster.spec.config.thorium.secret_key.clone());
+        key = Some(meta.conf.thorium.secret_key.clone());
     }
     // attempt to create the user account if it doesn't exist
     let result = thorium::client::Users::create(url, user_req, key.as_deref(), &settings).await;
@@ -59,11 +60,14 @@ pub async fn create_or_auth_user(
         Err(error) => {
             match error.status() {
                 Some(StatusCode::CONFLICT) => {
-                    println!("User {} already exists", username);
-                    // force override of old password, used when we don't have a password secret
-                    // to grab the user password from
+                    println!("User {username} already exists");
+                    // authenticate with the password we have, which may already be current
+                    println!("Attempting basic auth with {username}'s password");
+                    let current = Users::auth_basic(url, username, password, &client).await;
                     match thorium {
-                        Some(thorium_api) => {
+                        // force a reset with an admin client when our password doesn't work,
+                        // since we may not know the password of a user created without us
+                        Some(thorium_api) if needs_reset(&current) => {
                             println!("Attempting force reset of password with an admin user token");
                             let update = UserUpdate {
                                 password: Some(password.to_owned()),
@@ -73,17 +77,18 @@ pub async fn create_or_auth_user(
                             };
                             // update the user via the Thorium client
                             thorium_api.users.update(username, update).await?;
-                            println!("Password reset successful for {}", username);
-                            println!("Attempting basic auth with {}'s password", username);
+                            println!("Password reset successful for {username}");
+                            println!("Attempting basic auth with {username}'s password");
                             // attempt basic auth with password and return AuthResponse
                             Users::auth_basic(url, username, password, &client).await
                         }
-                        // user exists and no admin token was provided, lets just auth with user's pass
-                        None => {
-                            println!("Attempting basic auth with {}'s password", username);
-                            // attempt basic auth with password and return AuthResponse
-                            Users::auth_basic(url, username, password, &client).await
+                        // an existing user whose password already works needs no reset
+                        Some(_) => {
+                            println!("{username}'s stored password is current, skipping reset");
+                            current
                         }
+                        // without an admin client we can only use the user's password as is
+                        None => current,
                     }
                 }
                 _ => Err(Error::new(format!(
@@ -93,6 +98,18 @@ pub async fn create_or_auth_user(
             }
         }
     }
+}
+
+/// Check whether an existing user's password must be force reset
+///
+/// A reset is needed unless the password we have authenticates the user as a verified user.
+///
+/// # Arguments
+///
+/// * `current` - The result of authenticating with the password we have
+fn needs_reset(current: &Result<AuthResponse, Error>) -> bool {
+    // only a successful login as a verified user lets us skip the reset
+    !matches!(current, Ok(AuthResponse::Authed { .. }))
 }
 
 /// Create an operator user account
@@ -194,5 +211,27 @@ pub async fn create(
         None => Err(Error::new(format!(
             "Could not generate new or get existing {username} user password"
         ))),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A password reset is skipped only when the stored password authenticates a verified user
+    #[test]
+    fn reset_skipped_for_current_password() {
+        // a working password needs no reset
+        let authed = Ok(AuthResponse::Authed {
+            token: "token".to_owned(),
+            expires: chrono::Utc::now(),
+        });
+        assert!(!needs_reset(&authed));
+        // a rejected password is reset
+        assert!(needs_reset(&Err(Error::new("401 Unauthorized"))));
+        // a user that still has to verify its email is reset too
+        assert!(needs_reset(&Ok(AuthResponse::VerifyEmail(
+            "user@example.com".to_owned()
+        ))));
     }
 }

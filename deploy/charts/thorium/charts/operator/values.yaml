@@ -1,0 +1,228 @@
+# The Thorium image used by the operator and every Thorium component
+image:
+  repository: ghcr.io/cisagov/thorium/infrastructure/thorium
+  # defaults to the chart's appVersion
+  tag: ""
+  # The pull policy for the operator and, through the ThoriumCluster, every Thorium component.
+  # Always checks the registry for a newer image under the same tag whenever a pod starts; use
+  # IfNotPresent where the registry is unreachable but the image is already cached on the nodes
+  pullPolicy: Always
+
+# Registry credentials for pulling the Thorium image. The operator, the chart's jobs, and every
+# Thorium component the operator deploys reference this secret. (The operator renders its own
+# `registry-token` secret from cluster.registryAuth, which is referenced as well.)
+imagePullSecret:
+  # create the `thorium-image-pull` secret from `dockerconfigjson`
+  create: false
+  # the raw contents of a .dockerconfigjson file
+  dockerconfigjson: ""
+  # without create, the name of an existing pull secret in <prefix>-thorium to reference instead
+  name: ""
+
+# The Thorium operator deployment
+operator:
+  # Only reconcile ThoriumClusters in the thorium namespace (<prefix>-thorium). This is a
+  # security scope: the operator's Secret, pod, and deployment permissions are bound in that
+  # namespace rather than granted cluster-wide.
+  watchOwnNamespaceOnly: true
+  resources:
+    requests: { cpu: "0", memory: "0" }
+    limits: { cpu: 256m, memory: 1Gi }
+  # proxy settings passed to the operator (empty values are unset). When a proxy is set, noProxy
+  # is the in-cluster defaults localhost,127.0.0.1,.svc,.svc.<clusterDomain>,<clusterDomain>,
+  # then every CIDR in global.clusterCIDRs, then the entries set here, so the operator reaches
+  # the API and backends directly
+  proxy:
+    httpProxy: ""
+    httpsProxy: ""
+    noProxy: ""
+  # Where the operator and the uninstall hook Job run
+  nodeSelector: {}
+  tolerations: []
+  # The operator container's securityContext. The Thorium image has no USER and so runs as
+  # root; the operator only talks to the network and writes nothing to disk, so it never needs
+  # extra privileges or Linux capabilities. Restricted Pod Security also needs the pod to run
+  # as non-root, e.g. podSecurityContext {runAsNonRoot: true, runAsUser: 65534,
+  # runAsGroup: 65534, seccompProfile: {type: RuntimeDefault}} with readOnlyRootFilesystem: true
+  # added here; set a key to null to drop one of these defaults
+  securityContext:
+    allowPrivilegeEscalation: false
+    capabilities:
+      drop: [ALL]
+  # The operator pod's securityContext. The runtime's default seccomp profile only blocks system
+  # calls the operator never makes; the pod runs as the image's default (root) user unless
+  # runAsNonRoot/runAsUser are added here
+  podSecurityContext:
+    seccompProfile:
+      type: RuntimeDefault
+
+# The login banner shown by the Thorium UI
+banner: "Welcome to Thorium"
+
+# The ThoriumCluster resource
+cluster:
+  name: thorium
+  # the image tag to deploy for Thorium components; defaults to image.tag
+  version: ""
+  # the pull policy for Thorium components; defaults to image.pullPolicy
+  imagePullPolicy: ""
+  # Thorium components; set a component to null to omit it (e.g. `scaler: null` to run Thorium
+  # without the k8s scaler)
+  components:
+    api:
+      replicas: 1
+      resources: { cpu: 0, memory: 0 }
+    scaler:
+      service_account: true
+      resources: { cpu: 0, memory: 0 }
+    search_streamer:
+      resources: { cpu: 0, memory: 0 }
+      cmd: ["/app/thorium-search-streamer"]
+      args: ["--config", "/conf/thorium.yml", "--keys", "/keys/keys.yml"]
+    event_handler:
+      resources: { cpu: 0, memory: 0 }
+  # auth tokens for tool image registries (registry -> base64 user:password)
+  registryAuth: {}
+  # Extra namespaces Thorium must never create for a group, appended to the generated
+  # thorium.namespace_blacklist (every namespace of this deployment with its prefix,
+  # infra-operators, the Kubernetes system namespaces, and Thorium's built-in defaults). Setting
+  # config.thorium.namespace_blacklist instead replaces the whole list.
+  namespaceBlacklist: []
+  # Non-secret thorium.yml settings deep-merged over the defaults this chart generates from
+  # the backends section; secrets come from configSecrets instead
+  config: {}
+  # Secrets holding partial thorium.yml documents merged over config by the operator, in order
+  configSecrets:
+    - name: thorium-config-secrets
+      key: thorium.yml
+  # Privileged setup the operator performs against Thorium's backends. It runs again only when
+  # this section, the Thorium config, or a Secret it names changes. Every Secret named here
+  # must be in the thorium namespace (<prefix>-thorium).
+  bootstrap:
+    # create the initial Thorium admin user from a secret with username/password keys
+    admin:
+      enabled: true
+      secretName: thorium-admin
+    # create Thorium's Scylla role using superuser credentials
+    scylla:
+      # null follows global.managed.scylla (on for the chart's Scylla)
+      enabled: null
+      dropDefaultRole: true
+      # an optional secret with superuser credentials: {name, username, usernameKey, passwordKey};
+      # without one the default cassandra/cassandra superuser is used, which only exists on a
+      # fresh Scylla
+      adminSecret: {}
+    # create Thorium's Elastic role and user in an externally managed Elasticsearch. The chart's
+    # own Elasticsearch gets them from ECK's file realm instead, so this stays off unless
+    # global.managed.elastic is false and adminSecret.name is set.
+    elastic:
+      # null turns this on when global.managed.elastic is false and adminSecret.name is set
+      enabled: null
+      # a secret with Elastic superuser credentials: {name, username, usernameKey, passwordKey}
+      adminSecret:
+        name: ""
+        username: elastic
+        passwordKey: password
+  # The k8s scaler's view of this cluster
+  scaler:
+    # the context name the operator/scaler use for the in-cluster service account
+    context: kubernetes-admin@cluster.local
+    alias: thorium
+    # nodes Thorium may schedule jobs on; empty means every node
+    nodes: []
+
+# Where Thorium's backends live; empty hosts default to the infra subchart's services, and each
+# is required when global.managed turns that service off (redis.host, scylla.nodes,
+# elastic.node, s3.endpoint)
+backends:
+  redis:
+    host: ""
+    port: 6379
+  scylla:
+    nodes: []
+    replication: 1
+  elastic:
+    node: ""
+    # skip TLS verification. The chart's ECK Elasticsearch serves a self-signed certificate
+    # whose CA lives in <prefix>-elastic, and its traffic never leaves the cluster, so it stays
+    # unverified. Set caSecret instead to verify an external Elasticsearch.
+    insecureCertificates: true
+    # a Secret in <prefix>-thorium holding the PEM CA that signed an external Elasticsearch's
+    # certificate (global.managed.elastic must be false). When name is set it is mounted
+    # read-only into the operator and every Thorium component, and Elastic's certificate chain
+    # and hostname are verified against it (insecureCertificates is ignored).
+    caSecret:
+      name: ""
+      key: ca.crt
+  s3:
+    endpoint: ""
+    region: us-east-1
+    usePathStyle: true
+  tracing:
+    # the Quickwit OTLP endpoint; empty defaults to the Quickwit indexer in <prefix>-quickwit
+    endpoint: ""
+
+# Deletes the ThoriumCluster in a pre-delete hook on `helm uninstall` and waits for it to be gone,
+# so the operator (still running during hooks) removes its finalizer, node labels, provision pods,
+# and the resources it created. Helm waits up to its --timeout (5m by default) for the hook, so
+# keep timeoutSeconds below it or pass a larger --timeout.
+uninstallHook:
+  enabled: true
+  timeoutSeconds: 240
+  # The Job only runs curl and jq against the Kubernetes API with its service account token, so
+  # it runs unprivileged and satisfies restricted Pod Security. It uses operator.nodeSelector
+  # and operator.tolerations.
+  resources:
+    requests: { cpu: 10m, memory: 32Mi }
+    limits: { cpu: 100m, memory: 64Mi }
+  podSecurityContext:
+    runAsNonRoot: true
+    runAsUser: 65534
+    runAsGroup: 65534
+    seccompProfile:
+      type: RuntimeDefault
+  securityContext:
+    allowPrivilegeEscalation: false
+    readOnlyRootFilesystem: true
+    capabilities:
+      drop: [ALL]
+
+# Exposing the Thorium API/UI
+ingress:
+  # none, nginx (a networking.k8s.io Ingress), or traefik (IngressRoute + TLS store)
+  type: none
+  className: nginx
+  # the hostname to route; empty routes every host
+  host: ""
+  annotations: {}
+  tls:
+    # an existing kubernetes.io/tls secret in <prefix>-thorium
+    secretName: ""
+    # make secretName Traefik's default certificate (the cluster-wide "default" TLSStore);
+    # Traefik allows only one default certificate per cluster (traefik only)
+    defaultStore: true
+  # also route a hostname to the infra subchart's registry (traefik only)
+  registryHost: ""
+
+# Import a toolbox after Thorium is up. Nothing is imported unless url or json is set.
+toolbox:
+  # an http(s) URL to a toolbox.json reachable from the cluster
+  url: ""
+  # the contents of a toolbox.json (e.g. `--set-file toolbox.json=./toolbox.json`)
+  json: ""
+  # how existing images/pipelines are handled: skip-conflicts or overwrite
+  mode: skip-conflicts
+  # force every tool into this group (created if missing)
+  groupOverride: ""
+  # groups and network policies the toolbox references, created (if missing) before importing;
+  # the defaults match what tools/toolbox.json expects
+  groups:
+    - static
+  networkPolicies:
+    - name: allow-all
+      groups: ["static"]
+      ingress: []
+      egress: null
+      forced_policy: false
+      default_policy: false
+  backoffLimit: 20

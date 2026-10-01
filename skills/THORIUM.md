@@ -369,13 +369,10 @@ minithor deploy
 ```
 
 - Nodes are named `<profile>`, `<profile>-m02`, `<profile>-m03`, ... (`minikube`, `minikube-m02`, ... by default).
-- `deploy` writes every node into the ThoriumCluster's
-  `config.thorium.scaler.k8s.clusters.kubernetes-admin@cluster.local.nodes`. Custom configs passed with
-  `--config` should use `nodes: ${K8S_NODES}`, which expands to a YAML list of all node names. The
-  operator only labels (`thorium=enabled`), provisions, and registers the **listed** nodes, and the scaler
-  only schedules on labeled, registered nodes — so the list must match the real node names exactly, and
-  an empty list means no jobs ever schedule. Keep the `kubernetes-admin@cluster.local` key (the scaler
-  runs with a service account and expects that context name).
+- The thorium chart leaves the ThoriumCluster's scaler node list (`operator.cluster.scaler.nodes`)
+  empty, which the operator treats as every node: it labels (`thorium=enabled`), provisions, and
+  registers each one, and the scaler only schedules on labeled, registered nodes. To restrict jobs to
+  specific nodes, pass a list with `--set`/`--values`; the names must match the real node names exactly.
 - `--cpus`/`--memory` are cluster totals (split evenly, rounded down); `--node-cpus`/`--node-memory`
   set per-node sizes instead. Each node needs more than 2 CPUs and 2 GiB of memory (the scaler
   reserves that much per node), and install refuses a split that leaves less.
@@ -421,7 +418,7 @@ needed by `thoradm` (Step 6).
 | `minithor get-config` | Extract the raw in-cluster config to ~/thorium.yml |
 | `minithor get-config --local` | Extract the config **rewritten for local host access** via the exposed ports, to ~/thorium.local.yml (see "Testing locally") |
 | `minithor cleanup --confirm` | Remove all Thorium resources for a fresh deploy (also stops port-forwards and removes loopback aliases) |
-| `minithor --instance <name> <command>` | Run `deploy`/`expose`/`get-config`/`cleanup` against a named instance whose namespaces are prefixed `<name>-`, so several Thorium instances can share the cluster for deployment testing only — not supported by the scaler (they share the operators; use `expose --port-offset <n>` to expose more than one) |
+| `minithor --namespace-prefix <prefix> <command>` | Run `deploy`/`credentials`/`expose`/`get-config`/`cleanup` against a Thorium deployment whose namespaces are prefixed `<prefix>-` (`<prefix>-thorium`, `<prefix>-redis`, ...); pass the same prefix to every command. A cluster runs one Thorium deployment; use a second `--profile` (and `expose --port-offset <n>`) to run two |
 | `minithor minikube delete --confirm` | Fully remove minikube (also stops port-forwards and removes loopback aliases); with `--profile`, deletes only that profile's cluster |
 | `minithor --profile <name> <command>` | Run any command against a separate minikube profile (cluster) instead of `minikube` |
 

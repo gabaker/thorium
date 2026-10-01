@@ -97,7 +97,7 @@ where
         let mut futures = FuturesUnordered::new();
         // create the search source instance
         let source = D::new(&self.scylla, &self.conf.thorium.namespace).await?;
-        let store = S::new(&self.conf)?;
+        let store = S::new(&self.conf).await?;
         // spawn our workers
         self.spawn_workers(&mut futures, source, &store);
         // try initiating the search store and starting/resuming an init session

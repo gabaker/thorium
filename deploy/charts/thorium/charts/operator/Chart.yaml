@@ -1,0 +1,7 @@
+apiVersion: v2
+name: operator
+description: The Thorium operator, its RBAC and CRD, and the ThoriumCluster describing the deployment
+type: application
+version: 1.8.1
+appVersion: "1.8.1"
+home: https://github.com/cisagov/thorium

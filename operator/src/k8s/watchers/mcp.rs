@@ -8,20 +8,19 @@ use kube::runtime::controller::Action;
 use kube::runtime::reflector::Lookup;
 use kube::runtime::watcher::Config;
 use kube::{Api, Client};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use thorium::Error;
 
-use crate::k8s::controller::SharedInfo;
+use crate::k8s::controller::{SharedInfo, ThoriumInfo};
 
 /// The context for our api pod watcher
-#[derive(Clone)]
 struct ApiWatchContext {
     /// kube API client
     client: Client,
-    /// The currently designated mcp api pod
-    mcp_pod: Option<String>,
-    // The shared thorium operator info
+    /// The currently designated mcp api pod, shared by every reconcile
+    mcp_pod: Mutex<Option<String>>,
+    /// The shared thorium operator info
     shared: Arc<SharedInfo>,
 }
 
@@ -50,13 +49,13 @@ fn pod_is_alive(pod: &Pod) -> bool {
     }
 }
 
-/// Reconcile changes to ThoriumCluster
+/// Make sure exactly one live api pod is labelled to serve MCP queries
 ///
-/// Arguments
+/// # Arguments
 ///
-/// * `cluster` - Thorium cluster being changed
-/// * `state` - Controller context including client instance and optional URL
-async fn reconcile_api_pods(pod: Arc<Pod>, mut ctx: Arc<ApiWatchContext>) -> Result<Action, Error> {
+/// * `pod` - The api pod that changed
+/// * `ctx` - The api pod watcher's context
+async fn reconcile_api_pods(pod: Arc<Pod>, ctx: Arc<ApiWatchContext>) -> Result<Action, Error> {
     // if we don't have any configs then just requeue this node in 30 seconds
     if ctx.shared.info.is_empty() {
         // don't scan this pod for another 30 seconds
@@ -77,14 +76,39 @@ async fn reconcile_api_pods(pod: Arc<Pod>, mut ctx: Arc<ApiWatchContext>) -> Res
             return Ok(Action::requeue(Duration::from_secs(60)));
         }
     };
+    // find the clusters deployed in this pod's namespace
+    let infos = ctx
+        .shared
+        .info
+        .pin()
+        .values()
+        .filter(|info| info.meta.namespace == namespace)
+        .cloned()
+        .collect::<Vec<ThoriumInfo>>();
+    // pods outside of a deployed cluster's namespace are not ours to label
+    if infos.is_empty() {
+        return Ok(Action::requeue(Duration::from_secs(30)));
+    }
+    // leave this namespace alone while its cluster is being deleted
+    for info in &infos {
+        if !info.is_live().await? {
+            return Ok(Action::requeue(Duration::from_secs(60)));
+        }
+    }
+    // get the currently designated mcp pod
+    let current = ctx
+        .mcp_pod
+        .lock()
+        .map_err(|_| Error::new("The designated MCP pod lock is poisoned"))?
+        .clone();
     // get our designated mcp pod info if this our designated mcp pod already
-    let designated_pod = if ctx.mcp_pod.as_ref() == Some(name) {
+    let designated_pod = if current.as_ref() == Some(name) {
         // we already have our designated mcp pods info so just use that
         Some(pod)
     } else {
         // this is not our currently designated mcp pod so check if that pod is alive or dead
         // build a Thorium api pod client
-        let pod_api: Api<Pod> = Api::<Pod>::namespaced(ctx.client.clone(), "thorium");
+        let pod_api: Api<Pod> = Api::<Pod>::namespaced(ctx.client.clone(), &namespace);
         // get our designated mcp pods info
         match pod_api.get_opt(name).await {
             // return our designated mcp pods info
@@ -113,8 +137,11 @@ async fn reconcile_api_pods(pod: Arc<Pod>, mut ctx: Arc<ApiWatchContext>) -> Res
     let pod_api: Api<Pod> = Api::<Pod>::namespaced(ctx.client.clone(), &namespace);
     // scan for a pod to label
     if let Some(new_mcp_pod) = scan(&pod_api).await {
-        // update our designated mcp pod record
-        Arc::make_mut(&mut ctx).mcp_pod = Some(new_mcp_pod);
+        // update our designated mcp pod record for every later reconcile
+        *ctx.mcp_pod
+            .lock()
+            .map_err(|_| Error::new("The designated MCP pod lock is poisoned"))? =
+            Some(new_mcp_pod);
     }
     // no more action is needed for 60 seconds
     Ok(Action::requeue(Duration::from_secs(60)))
@@ -122,7 +149,7 @@ async fn reconcile_api_pods(pod: Arc<Pod>, mut ctx: Arc<ApiWatchContext>) -> Res
 
 /// Label this api pod to be able to serve mcp queries
 ///
-///  Arguments
+/// # Arguments
 ///
 /// * `pod_api` - K8s pod api client
 /// * `pod` - The name of the pod to add the mcp label to
@@ -148,7 +175,7 @@ pub async fn add_label(pod_api: &Api<Pod>, pod: &str) {
 
 /// Remove Thorium worker pod labels
 ///
-///  Arguments
+/// # Arguments
 ///
 /// * `pod_api` - K8s pod api client
 /// * `pod` - The name of the pod to remove the mcp label from
@@ -276,16 +303,22 @@ async fn scan(pod_api: &Api<Pod>) -> Option<String> {
     }
 }
 
-/// Watch our nodes for any changes
-pub async fn start(client: Client, shared: Arc<SharedInfo>) {
-    // build a Thorium api pod client
-    let pod_api: Api<Pod> = Api::<Pod>::all(client.clone());
+/// Watch our api pods for any changes
+///
+/// # Arguments
+///
+/// * `client` - The kube client to watch with
+/// * `namespace` - The namespace to watch api pods in (all namespaces if unset)
+/// * `shared` - Data shared across watchers
+pub async fn start(client: Client, namespace: Option<String>, shared: Arc<SharedInfo>) {
+    // build a Thorium api pod client for the namespaces we watch
+    let pod_api: Api<Pod> = super::scoped_api(&client, namespace.as_deref());
     // Scan and make sure we have an existing mcp pod if possible
     let mcp_pod = scan(&pod_api).await;
     // setup some state for our watcher
     let ctx = ApiWatchContext {
         client: client.clone(),
-        mcp_pod,
+        mcp_pod: Mutex::new(mcp_pod),
         shared: shared.clone(),
     };
     // set our config to only list api pods

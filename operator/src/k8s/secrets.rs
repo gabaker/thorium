@@ -3,16 +3,17 @@ use kube::Api;
 use kube::api::{DeleteParams, ObjectMeta, Patch, PatchParams, PostParams};
 use rand::Rng;
 use rand::distr::Alphanumeric;
+use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
-use thorium::Error;
+use thorium::{Conf, Error};
 
-use super::clusters::ClusterMeta;
+use super::clusters::{ClusterMeta, get_secret_bytes};
 
 /// Create or update a Secret
 ///
 /// This creates or optionally updates a kubernetes secret if it exists.
 ///
-///  Arguments
+/// # Arguments
 ///
 /// * `meta` - Thorium cluster client and metadata
 /// * `secret` - Secret object to update in the kubernetes API
@@ -76,7 +77,7 @@ pub async fn create_or_update(
 
 /// Build a Secret object
 ///
-///  Arguments
+/// # Arguments
 ///
 /// * `secret` - JSON string secret data
 /// * `name` - Name of secret being created
@@ -100,31 +101,104 @@ pub fn build_secret(secret: &str, name: &str, key: &str, namespace: &str) -> Sec
     secret
 }
 
-/// Create the thorium config secret
+/// The Secrets the operator writes or deletes, which config and bootstrap Secrets can't use
 ///
-/// This creates the thorium.yml config secret using the ThoriumCluster CRD.
+/// Any name ending in `-pass` is reserved for user passwords as well. The chart's own pull
+/// secret is listed so the operator never reads a config from it.
+pub const RESERVED_SECRET_NAMES: &[&str] = &[
+    "thorium",
+    "keys",
+    "keys-kaboom",
+    "docker-skopeo",
+    crate::k8s::crds::REGISTRY_TOKEN_SECRET,
+    "thorium-image-pull",
+];
+
+/// Check whether a Secret name is reserved for a Secret the operator or chart owns
 ///
-///  Arguments
+/// # Arguments
+///
+/// * `name` - The name of the Secret to check
+pub fn is_reserved_secret_name(name: &str) -> bool {
+    // user password secrets are named <username>-pass
+    RESERVED_SECRET_NAMES.contains(&name) || name.ends_with("-pass")
+}
+
+/// A rendered thorium.yml and its hash
+pub struct RenderedConfig {
+    /// The thorium.yml document the components mount
+    pub yaml: String,
+    /// The hex encoded sha256 of `yaml`
+    pub hash: String,
+}
+
+/// Render the thorium.yml config for a cluster without writing it anywhere
+///
+/// # Arguments
+///
+/// * `conf` - The merged Thorium config to render
+pub fn render_thorium_config(conf: &Conf) -> Result<RenderedConfig, Error> {
+    // convert the merged config to JSON first so enums serialize as maps; serializing the
+    // typed config directly emits YAML tags (e.g. `!Grpc`) that the config loader rejects
+    let conf_json = serde_json::to_value(conf)?;
+    // render the config as YAML
+    let yaml = serde_norway::to_string(&conf_json)?;
+    // hash the rendered config so components can roll out when it changes
+    let hash = format!("{:x}", Sha256::digest(yaml.as_bytes()));
+    Ok(RenderedConfig { yaml, hash })
+}
+
+/// Write a rendered thorium.yml to the `thorium` Secret the components mount
+///
+/// # Arguments
 ///
 /// * `meta` - Thorium cluster client and metadata
-pub async fn create_thorium_config(meta: &ClusterMeta) -> Result<(), Error> {
-    // Create Thorium config secret from ThoriumCluster resource
-    let secret_yaml = serde_norway::to_string(&serde_json::json!(&meta.cluster.spec.config))?;
+/// * `rendered` - The rendered config to write
+pub async fn write_thorium_config(
+    meta: &ClusterMeta,
+    rendered: &RenderedConfig,
+) -> Result<(), Error> {
     // build thorium config secret template
-    let thorium_secret = build_secret(
-        secret_yaml.as_ref(),
-        "thorium",
-        "thorium.yml",
-        &meta.namespace,
-    );
-    // create thorium config secret in k8s
+    let thorium_secret = build_secret(&rendered.yaml, "thorium", "thorium.yml", &meta.namespace);
+    // create or update the thorium config secret in k8s
     create_or_update(meta, &thorium_secret, true).await?;
     Ok(())
 }
 
+/// Read one key of a user Secret a component mounts so its content can be hashed
+///
+/// A missing Secret or key gives a fixed marker instead of failing, since the component's
+/// pods report the missing mount themselves and the marker still changes the hash once the
+/// Secret appears.
+///
+/// # Arguments
+///
+/// * `meta` - Thorium cluster client and metadata
+/// * `name` - The name of the Secret
+/// * `key` - The key in the Secret the component mounts
+pub async fn mounted_content(meta: &ClusterMeta, name: &str, key: &str) -> Result<Vec<u8>, Error> {
+    // get this Secret if it exists
+    let secret = meta.secret_api.get_opt(name).await.map_err(|error| {
+        Error::new(format!(
+            "Failed to get {name} secret in {}: {error}",
+            meta.namespace
+        ))
+    })?;
+    // take the mounted key out of it or mark it as absent
+    Ok(secret
+        .and_then(|secret| secret.data)
+        .and_then(|mut data| data.remove(key))
+        .map_or_else(
+            || format!("absent:{name}/{key}").into_bytes(),
+            |bytes| bytes.0,
+        ))
+}
+
 /// Create a keys.yml secret for a user
 ///
-///  Arguments
+/// Returns the rendered keys.yml so callers can hash what the components mount.
+///
+/// # Arguments
 ///
 /// * `meta` - Thorium cluster client and metadata
 /// * `username` - Name of user
@@ -135,30 +209,21 @@ pub async fn create_keys(
     username: &str,
     password: &str,
     secret_name: Option<&str>,
-) -> Result<(), Error> {
+) -> Result<String, Error> {
+    // render the keys.yml for this user
     let template = serde_json::json!({
         "api": format!("http://thorium-api.{}.svc.cluster.local", &meta.namespace),
         "username": username,
         "password": password
     })
     .to_string();
-    // build out secret name if provided
-    let mut name = "keys".to_string();
-    if secret_name.is_some() {
-        name = secret_name
-            .expect("expected secret name for key to be some")
-            .to_owned();
-    }
+    // use the default keys secret name unless another was given
+    let name = secret_name.unwrap_or("keys");
     // build a password secret
-    let secret = build_secret(
-        template.as_ref(),
-        name.as_ref(),
-        "keys.yml",
-        &meta.namespace,
-    );
+    let secret = build_secret(template.as_ref(), name, "keys.yml", &meta.namespace);
     // actually create the secret in k8s
     create_or_update(meta, &secret, true).await?;
-    Ok(())
+    Ok(template)
 }
 
 /// Create a user password secret
@@ -169,7 +234,7 @@ pub async fn create_keys(
 /// account password secret is lost, external action will need to be taken to delete
 /// that user account.
 ///
-///  Arguments
+/// # Arguments
 ///
 /// * `username` - Name of the Thorium user
 /// * `meta` - Thorium cluster client and metadata
@@ -201,7 +266,7 @@ pub async fn create_user_secret(
 
 /// Get kubernetes secret by name
 ///
-///  Arguments
+/// # Arguments
 ///
 /// * `secret_api` - API for interacting with kubernetes secrets
 /// * `secret_name` - Name of secret to retrieve
@@ -229,9 +294,32 @@ pub async fn get_secret(
     };
 }
 
+/// Read a single key from a Secret as a utf8 string
+///
+/// A missing Secret or key reports a `NOT_FOUND` status.
+///
+/// # Arguments
+///
+/// * `api` - The Secret API for the Secret's namespace
+/// * `kind` - What the Secret holds (e.g. "bootstrap admin") for errors
+/// * `name` - The name of the Secret
+/// * `key` - The key to read from the Secret
+pub async fn get_secret_key(
+    api: &Api<Secret>,
+    kind: &str,
+    name: &str,
+    key: &str,
+) -> Result<String, Error> {
+    // get the raw bytes of this key
+    let raw = get_secret_bytes(api, kind, name, key).await?;
+    // decode this key as utf8
+    String::from_utf8(raw)
+        .map_err(|_| Error::new(format!("Secret {name} key {key} is not valid utf8")))
+}
+
 /// Retrieve password from a user k8s secret
 ///
-///  Arguments
+/// # Arguments
 ///
 /// * `username` - Name of the Thorium user
 /// * `meta` - Thorium cluster client and metadata
@@ -261,20 +349,9 @@ pub async fn get_user_password(
     }
 }
 
-/// Create or update Thorium secrets
-///
-///  Arguments
-///
-/// * `meta` - Thorium cluster client and metadata
-pub async fn create_or_update_config(meta: &ClusterMeta) -> Result<(), Error> {
-    // create thorium config secret
-    create_thorium_config(meta).await?;
-    Ok(())
-}
-
 /// Create registry tokens secret from ThoriumCluster CRD
 ///
-///  Arguments
+/// # Arguments
 ///
 /// * `meta` - Thorium cluster client and metadata
 pub async fn create_or_update_registry_auth(meta: &ClusterMeta) -> Result<(), Error> {
@@ -306,7 +383,7 @@ pub async fn create_or_update_registry_auth(meta: &ClusterMeta) -> Result<(), Er
     // build a container pull secret
     let mut pull_secret = build_secret(
         template.as_ref(),
-        "registry-token",
+        crate::k8s::crds::REGISTRY_TOKEN_SECRET,
         ".dockerconfigjson",
         &meta.namespace,
     );
@@ -320,10 +397,10 @@ pub async fn create_or_update_registry_auth(meta: &ClusterMeta) -> Result<(), Er
 
 /// Cleanup Thorium secrets
 ///
-///  Arguments
+/// # Arguments
 ///
-/// * `meta` - Thorium cluster client and metadata
-pub async fn delete(meta: &ClusterMeta) -> Result<(), Error> {
+/// * `secret_api` - The Secret API for the `ThoriumCluster`'s namespace
+pub async fn delete(secret_api: &Api<Secret>) -> Result<(), Error> {
     let params: DeleteParams = DeleteParams::default();
     // delete secrets from vector
     // Do not delete the "thorium-operator-pass" unless deleting the thorium-operator user from the Thorium API
@@ -336,7 +413,7 @@ pub async fn delete(meta: &ClusterMeta) -> Result<(), Error> {
         "docker-skopeo".to_string(),
     ];
     for secret_name in secrets_names.iter() {
-        match meta.secret_api.delete(secret_name, &params).await {
+        match secret_api.delete(secret_name, &params).await {
             Ok(_) => {
                 println!("Deleted {} secret", secret_name);
             }
@@ -360,4 +437,52 @@ pub async fn delete(meta: &ClusterMeta) -> Result<(), Error> {
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::k8s::clusters::tests::sample_conf;
+
+    /// Rendering the same config twice gives the same YAML and hash
+    #[test]
+    fn config_hash_is_deterministic() {
+        // render the same config twice from separately parsed copies
+        let first = render_thorium_config(&sample_conf()).expect("config should render");
+        let second = render_thorium_config(&sample_conf()).expect("config should render");
+        // both renders match exactly
+        assert_eq!(first.yaml, second.yaml);
+        assert_eq!(first.hash, second.hash);
+        // the hash is a hex sha256
+        assert_eq!(first.hash.len(), 64);
+        // the rendered config has no YAML tags the config loader would reject
+        assert!(!first.yaml.contains('!'));
+    }
+
+    /// Changing the config changes its hash
+    #[test]
+    fn config_hash_tracks_changes() {
+        // render a config and a copy with a different redis password
+        let base = sample_conf();
+        let mut changed = sample_conf();
+        changed.redis.password = Some("rotated".to_owned());
+        let base = render_thorium_config(&base).expect("config should render");
+        let changed = render_thorium_config(&changed).expect("config should render");
+        // the hashes differ
+        assert_ne!(base.hash, changed.hash);
+    }
+
+    /// Operator-owned and password secret names are reserved
+    #[test]
+    fn reserved_names() {
+        // every listed name is reserved
+        for name in RESERVED_SECRET_NAMES {
+            assert!(is_reserved_secret_name(name), "{name}");
+        }
+        // user password secrets are reserved
+        assert!(is_reserved_secret_name("thorium-operator-pass"));
+        // the chart's config and admin secrets are not
+        assert!(!is_reserved_secret_name("thorium-config-secrets"));
+        assert!(!is_reserved_secret_name("thorium-admin"));
+    }
 }

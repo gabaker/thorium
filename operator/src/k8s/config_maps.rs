@@ -1,4 +1,5 @@
 use k8s_openapi::api::core::v1::ConfigMap;
+use kube::Api;
 use kube::api::{DeleteParams, ObjectMeta, Patch, PatchParams, PostParams};
 use std::collections::BTreeMap;
 use thorium::{Error, conf::Tracing};
@@ -10,7 +11,7 @@ use super::clusters::ClusterMeta;
 /// This creates a kubernetes ConfigMap in the ThoriumCluster namespace using a
 /// preconstructed ConfigMap object.
 ///
-///  Arguments
+/// # Arguments
 ///
 /// * `meta` - Thorium cluster client and metadata
 /// * `cm` - Kubernetes ConfigMap to create or patch
@@ -71,7 +72,7 @@ pub async fn create_or_update(meta: &ClusterMeta, cm: &ConfigMap) -> Result<(), 
 /// The tracing.yml ConfigMap is used by the agents and the Thorium reactor and it's
 /// configuration is embedded in the ThoriumCluster definition (and thorium.yml configuration).
 ///
-///  Arguments
+/// # Arguments
 ///
 /// * `meta` - Thorium cluster client and metadata
 /// * `tracing` - Thorium's tracing configuration settings
@@ -103,13 +104,45 @@ async fn create_tracing_cm(meta: &ClusterMeta, tracing: &Tracing) -> Result<(), 
 /// This creates all CMs for a ThoriumCluster deployment. Right now since most
 /// configurations contain secrets, CMs are limited to the tracing.yml conf.
 ///
-///  Arguments
+/// # Arguments
 ///
 /// * `meta` - Thorium cluster client and metadata
 pub async fn create_or_update_all(meta: &ClusterMeta) -> Result<(), Error> {
     // create tracing config
-    create_tracing_cm(meta, &meta.cluster.spec.config.thorium.tracing).await?;
+    create_tracing_cm(meta, &meta.conf.thorium.tracing).await?;
     Ok(())
+}
+
+/// The chart-created `ConfigMap` holding the login banner the API mounts
+pub const BANNER_CONFIG_MAP: &str = "banner";
+
+/// The key in [`BANNER_CONFIG_MAP`] holding the banner text
+const BANNER_KEY: &str = "banner.txt";
+
+/// Read the login banner the API mounts and only reads at startup
+///
+/// A missing `ConfigMap` or key is an empty banner, since the API mounts it as optional.
+///
+/// # Arguments
+///
+/// * `meta` - Thorium cluster client and metadata
+pub async fn banner(meta: &ClusterMeta) -> Result<String, Error> {
+    // get the banner ConfigMap if it exists
+    let cm = meta
+        .cm_api
+        .get_opt(BANNER_CONFIG_MAP)
+        .await
+        .map_err(|error| {
+            Error::new(format!(
+                "Failed to get {BANNER_CONFIG_MAP} ConfigMap in {}: {error}",
+                meta.namespace
+            ))
+        })?;
+    // take the banner text out of it
+    Ok(cm
+        .and_then(|cm| cm.data)
+        .and_then(|mut data| data.remove(BANNER_KEY))
+        .unwrap_or_default())
 }
 
 /// Cleanup Thorium config maps
@@ -121,12 +154,12 @@ pub async fn create_or_update_all(meta: &ClusterMeta) -> Result<(), Error> {
 ///
 /// # Arguments
 ///
-/// * `meta` - Thorium cluster client and metadata
-pub async fn delete(meta: &ClusterMeta) -> Result<(), Error> {
+/// * `cm_api` - The `ConfigMap` API for the `ThoriumCluster`'s namespace
+pub async fn delete(cm_api: &Api<ConfigMap>) -> Result<(), Error> {
     let params: DeleteParams = DeleteParams::default();
     // delete the Thorium secret
     let tracing_conf_name = "tracing-conf";
-    match meta.cm_api.delete(tracing_conf_name, &params).await {
+    match cm_api.delete(tracing_conf_name, &params).await {
         Ok(_) => {
             println!("Deleted {} ConfigMap", &tracing_conf_name);
         }

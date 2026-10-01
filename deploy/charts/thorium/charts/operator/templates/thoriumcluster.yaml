@@ -1,0 +1,73 @@
+{{- $ns := include "thorium.namespace" . }}
+{{- $c := .Values.cluster }}
+---
+apiVersion: sandia.gov/v1
+kind: ThoriumCluster
+metadata:
+  name: {{ $c.name }}
+  namespace: {{ $ns }}
+  labels:
+    {{- include "operator.labels" . | nindent 4 }}
+spec:
+  registry: {{ include "thorium.image" (dict "root" $ "image" .Values.image.repository) | quote }}
+  version: {{ $c.version | default (include "operator.tag" .) | quote }}
+  image_pull_policy: {{ $c.imagePullPolicy | default .Values.image.pullPolicy }}
+  {{- with $c.registryAuth }}
+  registry_auth:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+  {{- with include "operator.pullSecretName" . }}
+  image_pull_secrets:
+    - {{ . }}
+  {{- end }}
+  components:
+    {{- range $name, $spec := $c.components }}
+    {{- if $spec }}
+    {{ $name }}:
+      {{- toYaml $spec | nindent 6 }}
+    {{- end }}
+    {{- end }}
+  config:
+    {{- include "operator.config" . | nindent 4 }}
+  {{- with $c.configSecrets }}
+  config_secrets:
+    {{- range . }}
+    - name: {{ .name }}
+      key: {{ .key | default "thorium.yml" }}
+    {{- end }}
+  {{- end }}
+  {{- with include "operator.elasticCaSecret" . }}
+  elastic_ca_secret:
+    name: {{ . }}
+    key: {{ $.Values.backends.elastic.caSecret.key | default "ca.crt" }}
+  {{- end }}
+  {{- $b := $c.bootstrap }}
+  {{- /* null bootstrap toggles follow the managed service toggles */}}
+  {{- $scylla := include "thorium.bootstrapScylla" (dict "root" $ "bootstrap" $b) }}
+  {{- $elastic := include "thorium.bootstrapElastic" (dict "root" $ "bootstrap" $b) }}
+  {{- if and $elastic (not $b.elastic.adminSecret.name) }}
+  {{- fail "operator.cluster.bootstrap.elastic.adminSecret.name is required when the Elastic bootstrap is enabled" }}
+  {{- end }}
+  {{- if or $b.admin.enabled $scylla $elastic }}
+  bootstrap:
+    {{- if $b.admin.enabled }}
+    admin:
+      secret:
+        name: {{ $b.admin.secretName }}
+        username_key: username
+        password_key: password
+    {{- end }}
+    {{- if $scylla }}
+    scylla:
+      drop_default_role: {{ $b.scylla.dropDefaultRole }}
+      {{- with $b.scylla.adminSecret }}
+      admin_secret:
+        {{- include "operator.secretCredentials" . | nindent 8 }}
+      {{- end }}
+    {{- end }}
+    {{- if $elastic }}
+    elastic:
+      admin_secret:
+        {{- include "operator.secretCredentials" $b.elastic.adminSecret | nindent 8 }}
+    {{- end }}
+  {{- end }}

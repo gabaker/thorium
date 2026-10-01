@@ -1,0 +1,47 @@
+{{- /*
+Fail early when Quickwit is enabled but a backing service it needs isn't managed by this chart
+and nothing points Quickwit at an external one. The secrets subchart renders Quickwit's
+credentials but can't see quickwit.enabled, so these checks live in the umbrella. The operator
+subchart fails on its own when an external Redis, S3, Scylla, or Elasticsearch endpoint is
+missing.
+*/ -}}
+{{- $secrets := .Values.secrets | default dict -}}
+{{- if .Values.quickwit.enabled -}}
+{{- if not (include "thorium.managed" (dict "root" $ "service" "s3")) -}}
+{{- $_ := required "secrets.quickwitS3Endpoint is required with Quickwit when global.managed.s3 is false (and the quickwit bucket must already exist in that store)" (dig "quickwitS3Endpoint" "" $secrets) -}}
+{{- end -}}
+{{- if not (include "thorium.managed" (dict "root" $ "service" "postgres")) -}}
+{{- $_ := required "secrets.quickwitMetastoreUri is required with Quickwit when global.managed.postgres is false (and the metastore database must already exist)" (dig "quickwitMetastoreUri" "" $secrets) -}}
+{{- end -}}
+{{- end -}}
+{{- /*
+An external Scylla or Elasticsearch that the operator doesn't bootstrap already holds Thorium's
+role or user, so its credentials must be given rather than generated: a generated password
+would never match. The secrets subchart can't see the operator's bootstrap settings, so this
+check lives in the umbrella and uses the same bootstrap helpers as the operator subchart. A
+credential already stored in thorium-credentials (a later upgrade) also satisfies it. Render-only
+tooling (secrets.renderOnly) has no cluster and never installs, so its placeholders satisfy it too;
+a real install or upgrade always enforces it.
+*/ -}}
+{{- $credentials := dig "credentials" dict $secrets -}}
+{{- $renderOnly := dig "renderOnly" false $secrets -}}
+{{- $bootstrap := dig "cluster" "bootstrap" dict (.Values.operator | default dict) -}}
+{{- $stored := dict -}}
+{{- with lookup "v1" "Secret" (include "thorium.namespace" .) "thorium-credentials" -}}
+{{- $stored = .data | default dict -}}
+{{- end -}}
+{{- $externals := list -}}
+{{- if not (or (include "thorium.managed" (dict "root" $ "service" "scylla")) (include "thorium.bootstrapScylla" (dict "root" $ "bootstrap" $bootstrap))) -}}
+{{- $externals = append $externals (dict "keys" (list "scyllaUsername" "scyllaPassword") "message" "external Scylla without bootstrap.scylla needs secrets.credentials.scyllaUsername/scyllaPassword for the role you created") -}}
+{{- end -}}
+{{- if not (or (include "thorium.managed" (dict "root" $ "service" "elastic")) (include "thorium.bootstrapElastic" (dict "root" $ "bootstrap" $bootstrap))) -}}
+{{- $externals = append $externals (dict "keys" (list "elasticUsername" "elasticPassword") "message" "external Elastic without bootstrap.elastic needs secrets.credentials.elasticUsername/elasticPassword for the user you created") -}}
+{{- end -}}
+{{- range $externals -}}
+{{- $message := .message -}}
+{{- range .keys -}}
+{{- if not (or (index $credentials .) (hasKey $stored .) $renderOnly) -}}
+{{- fail (printf "%s (secrets.credentials.%s is not set)" $message .) -}}
+{{- end -}}
+{{- end -}}
+{{- end -}}

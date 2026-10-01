@@ -1,0 +1,151 @@
+{{- if .Values.uninstallHook.enabled }}
+{{- $ns := include "thorium.namespace" . }}
+{{- $name := .Values.cluster.name }}
+{{- /*
+On `helm uninstall`, delete the ThoriumCluster before Helm removes the operator so the operator
+runs its finalizer: it removes node labels and provision pods and the resources it created, then
+releases the ThoriumCluster. The hook's account can only get and delete this one ThoriumCluster.
+*/}}
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: thorium-uninstall
+  namespace: {{ $ns }}
+  labels:
+    {{- include "operator.labels" . | nindent 4 }}
+  annotations:
+    helm.sh/hook: pre-delete
+    helm.sh/hook-weight: "-10"
+    helm.sh/hook-delete-policy: before-hook-creation,hook-succeeded
+imagePullSecrets:
+  {{- include "operator.imagePullSecrets" . | nindent 2 }}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: thorium-uninstall
+  namespace: {{ $ns }}
+  labels:
+    {{- include "operator.labels" . | nindent 4 }}
+  annotations:
+    helm.sh/hook: pre-delete
+    helm.sh/hook-weight: "-10"
+    helm.sh/hook-delete-policy: before-hook-creation,hook-succeeded
+rules:
+  - apiGroups: ["sandia.gov"]
+    resources: ["thoriumclusters"]
+    resourceNames: [{{ $name | quote }}]
+    verbs: ["get", "delete"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: thorium-uninstall
+  namespace: {{ $ns }}
+  labels:
+    {{- include "operator.labels" . | nindent 4 }}
+  annotations:
+    helm.sh/hook: pre-delete
+    helm.sh/hook-weight: "-5"
+    helm.sh/hook-delete-policy: before-hook-creation,hook-succeeded
+subjects:
+  - kind: ServiceAccount
+    name: thorium-uninstall
+    namespace: {{ $ns }}
+roleRef:
+  kind: Role
+  name: thorium-uninstall
+  apiGroup: rbac.authorization.k8s.io
+---
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: thorium-uninstall
+  namespace: {{ $ns }}
+  labels:
+    {{- include "operator.labels" . | nindent 4 }}
+  annotations:
+    helm.sh/hook: pre-delete
+    helm.sh/hook-weight: "0"
+    helm.sh/hook-delete-policy: before-hook-creation,hook-succeeded
+spec:
+  backoffLimit: 0
+  activeDeadlineSeconds: {{ add .Values.uninstallHook.timeoutSeconds 30 }}
+  template:
+    spec:
+      restartPolicy: Never
+      serviceAccountName: thorium-uninstall
+      automountServiceAccountToken: true
+      imagePullSecrets:
+        {{- include "operator.imagePullSecrets" . | nindent 8 }}
+      {{- with .Values.uninstallHook.podSecurityContext }}
+      securityContext:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      containers:
+        - name: delete-thoriumcluster
+          image: {{ printf "%s:%s" (include "thorium.image" (dict "root" $ "image" .Values.image.repository)) (include "operator.tag" .) }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          {{- with .Values.uninstallHook.securityContext }}
+          securityContext:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          {{- with .Values.uninstallHook.resources }}
+          resources:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          # the script only writes its auth header and responses here, so the root filesystem
+          # can stay read-only
+          volumeMounts:
+            - name: tmp
+              mountPath: /tmp
+          env:
+            - name: HOME
+              value: /tmp
+            - name: CLUSTER_URL
+              value: {{ printf "https://kubernetes.default.svc/apis/sandia.gov/v1/namespaces/%s/thoriumclusters/%s" $ns $name | quote }}
+            - name: TIMEOUT
+              value: {{ .Values.uninstallHook.timeoutSeconds | quote }}
+          command:
+            - /bin/sh
+            - -c
+            - |
+              set -eu
+              sa=/var/run/secrets/kubernetes.io/serviceaccount
+              # the token goes to curl from a file so it never appears in the process list
+              printf 'Authorization: Bearer %s\n' "$(cat "$sa/token")" > /tmp/auth
+              api() { curl -sS --noproxy '*' --cacert "$sa/ca.crt" -H @/tmp/auth -o /tmp/body -w '%{http_code}' "$@"; }
+              code=$(api -X DELETE "$CLUSTER_URL")
+              case "$code" in
+                200|202) echo "Deleting the ThoriumCluster; waiting for the operator to clean up" ;;
+                404) echo "The ThoriumCluster is already gone"; exit 0 ;;
+                *) echo "Failed to delete the ThoriumCluster ($code): $(cat /tmp/body)"; exit 1 ;;
+              esac
+              waited=0
+              while [ "$waited" -lt "$TIMEOUT" ]; do
+                code=$(api "$CLUSTER_URL")
+                if [ "$code" = 404 ]; then
+                  echo "The ThoriumCluster has been cleaned up"
+                  exit 0
+                fi
+                sleep 5
+                waited=$((waited + 5))
+              done
+              echo "Timed out after ${TIMEOUT}s waiting for the operator to clean up the ThoriumCluster"
+              echo "Last status: $(jq -c '.status // {}' /tmp/body 2>/dev/null || cat /tmp/body)"
+              exit 1
+      volumes:
+        - name: tmp
+          emptyDir:
+            sizeLimit: 16Mi
+      {{- /* run where the operator runs, e.g. on nodes reserved for infrastructure */}}
+      {{- with .Values.operator.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.operator.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+{{- end }}

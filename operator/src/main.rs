@@ -16,5 +16,7 @@ async fn main() {
     match args.cmd {
         // start backing up data
         args::SubCommands::Operate(operate_args) => controller::run(operate_args).await,
+        // print the ThoriumCluster CRD
+        args::SubCommands::Crd => k8s::crds::print_crd(),
     }
 }

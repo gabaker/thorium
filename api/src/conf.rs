@@ -2,7 +2,7 @@
 use bytesize::ByteSize;
 use cart_rs::CartVersion;
 use schemars::{JsonSchema, Schema, SchemaGenerator, json_schema};
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::net::IpAddr;
 use std::num::NonZeroUsize;
 use std::path::{Path, PathBuf};
@@ -658,8 +658,9 @@ pub struct K8s {
     #[serde(default)]
     pub clusters: BTreeMap<String, K8sCluster>,
     /// The contexts to ignore when parsing our kube config
+    // sorted so a serialized config is identical every time it is rendered
     #[serde(default)]
-    pub ignored_contexts: HashSet<String>,
+    pub ignored_contexts: BTreeSet<String>,
     /// How long at minimum to wait between scale attempts in seconds
     #[serde(default = "default_dwell")]
     pub dwell: u64,
@@ -683,7 +684,7 @@ impl Default for K8s {
         K8s {
             primary_cluster: default_primary_cluster(),
             clusters: BTreeMap::default(),
-            ignored_contexts: HashSet::default(),
+            ignored_contexts: BTreeSet::default(),
             dwell: default_dwell(),
             limbo: default_limbo(),
             fair_share: FairShareWeights::default(),
@@ -2329,7 +2330,7 @@ fn default_namespace() -> String {
 }
 
 /// Provide a default set of namespaces to not allow Thorium to create
-fn default_namespace_blacklist() -> HashSet<String> {
+fn default_namespace_blacklist() -> BTreeSet<String> {
     [
         default_namespace(),
         "scylla".to_string(),
@@ -2432,8 +2433,9 @@ pub struct Thorium {
     #[serde(default)]
     pub assets: Assets,
     /// A list of namespaces/groups that cannot be created by Thorium or its users
+    // sorted so a serialized config is identical every time it is rendered
     #[serde(default = "default_namespace_blacklist")]
-    pub namespace_blacklist: HashSet<String>,
+    pub namespace_blacklist: BTreeSet<String>,
 }
 
 /// Cross origin request settings
@@ -2606,46 +2608,81 @@ pub struct Elastic {
     pub max_analyzed_offset: u32,
 }
 
+/// Read and parse a PEM encoded CA cert for validating Elastic's certificate
+///
+/// # Arguments
+///
+/// * `path` - The path to the PEM encoded CA cert
+#[cfg(any(feature = "api", feature = "client"))]
+async fn read_elastic_ca(path: &Path) -> Result<elasticsearch::cert::Certificate, String> {
+    // read our CA cert from disk
+    let ca_bytes = tokio::fs::read(path)
+        .await
+        .map_err(|error| {
+            format!(
+                "Failed to read elastic validation cert at {}: {error}",
+                path.display()
+            )
+        })?;
+    // build our cert
+    elasticsearch::cert::Certificate::from_pem(&ca_bytes).map_err(|error| {
+        format!(
+            "Failed to parse certificate at {} as a PEM encoded CA cert: {error}",
+            path.display()
+        )
+    })
+}
+
 impl Elastic {
     /// Cast this elastic cert config into a ```CertificateValidation``` object
     ///
-    /// # Error
+    /// # Panics
     ///
     /// will panic if an invalid certificate is supplied
     #[cfg(feature = "api")]
     pub async fn to_cert_validation(&self) -> elasticsearch::cert::CertificateValidation {
+        // build our cert validation and panic on any invalid cert
+        match self.cert_validation_inner().await {
+            Ok(validation) => validation,
+            Err(error) => panic!("{error}"),
+        }
+    }
+
+    /// Cast this elastic cert config into a ```CertificateValidation``` object
+    ///
+    /// This validates certificates exactly like [`Elastic::to_cert_validation`] but returns
+    /// an error instead of panicking on an invalid certificate.
+    #[cfg(feature = "client")]
+    pub async fn try_cert_validation(
+        &self,
+    ) -> Result<elasticsearch::cert::CertificateValidation, crate::Error> {
+        // build our cert validation
+        self.cert_validation_inner().await.map_err(crate::Error::new)
+    }
+
+    /// Build the ```CertificateValidation``` for this elastic cert config
+    #[cfg(any(feature = "api", feature = "client"))]
+    async fn cert_validation_inner(
+        &self,
+    ) -> Result<elasticsearch::cert::CertificateValidation, String> {
         // if insecure certificates is turned on then ignore certificate validation
         if self.insecure_certificates {
-            return elasticsearch::cert::CertificateValidation::None;
+            return Ok(elasticsearch::cert::CertificateValidation::None);
         }
         // handle each specific type of cert validation config
         match &self.cert_validation {
-            None => elasticsearch::cert::CertificateValidation::Default,
+            None => Ok(elasticsearch::cert::CertificateValidation::Default),
             Some(ElasticCertValidation::Full(path)) => {
-                // read our CA cert from disk
-                let ca_bytes = tokio::fs::read(path).await.unwrap_or_else(|_| {
-                    panic!("Failed to read elastic validation cert at {path:?}")
-                });
-                // build our cert
-                let cert =
-                    elasticsearch::cert::Certificate::from_pem(&ca_bytes).unwrap_or_else(|_| {
-                        panic!("Failed to parse certificate at {path:?} as a PEM encoded CA cert")
-                    });
-                // return the right validation behavior
-                elasticsearch::cert::CertificateValidation::Full(cert)
+                // read and parse our CA cert
+                let cert = read_elastic_ca(path).await?;
+                // validate the full chain along with the CN/SAN
+                Ok(elasticsearch::cert::CertificateValidation::Full(cert))
             }
             Some(ElasticCertValidation::CA(path)) => {
-                // read our CA cert from disk
-                let ca_bytes = tokio::fs::read(path).await.unwrap_or_else(|_| {
-                    panic!("Failed to read elastic validation cert at {path:?}")
-                });
-                // build our cert
-                let cert =
-                    elasticsearch::cert::Certificate::from_pem(&ca_bytes).unwrap_or_else(|_| {
-                        panic!("Failed to parse certificate at {path:?} as a PEM encoded CA cert")
-                    });
-                // return the right validation behavior
-                elasticsearch::cert::CertificateValidation::Certificate(cert)
+                // read and parse our CA cert
+                let cert = read_elastic_ca(path).await?;
+                // validate the chain against this CA without CN/SAN checks
+                Ok(elasticsearch::cert::CertificateValidation::Certificate(cert))
             }
         }
     }

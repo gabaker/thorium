@@ -1,0 +1,7 @@
+{{- include "quickwit.metastore.deployment" (dict
+  "root" .
+  "component" "metastore"
+  "selectorLabels" "quickwit.metastore.selectorLabels"
+  "values" .Values.metastore
+  "service" "metastore"
+) }}
