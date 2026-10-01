@@ -314,6 +314,158 @@ fn default_version() -> String {
 
 pub const CRD_NAME: &str = "thoriumclusters.sandia.gov";
 
+/// The label that links a Secret to the `ThoriumCluster` it configures
+///
+/// Changes to Secrets carrying this label trigger a reconcile of the `ThoriumCluster`
+/// named by the label's value in the Secret's namespace.
+pub const CLUSTER_SECRET_LABEL: &str = "thorium.sandia.gov/cluster";
+
+/// Serde helper for the default key of a config secret
+fn default_config_secret_key() -> String {
+    "thorium.yml".to_owned()
+}
+
+/// A reference to a Secret holding a partial thorium.yml config
+#[derive(Serialize, Deserialize, Clone, Debug, JsonSchema)]
+pub struct ConfigSecretRef {
+    /// The name of the Secret in the `ThoriumCluster`'s namespace
+    pub name: String,
+    /// The key in the Secret containing the partial thorium.yml YAML document
+    #[serde(default = "default_config_secret_key")]
+    pub key: String,
+}
+
+/// A username/password pair stored in a Secret
+#[derive(Serialize, Deserialize, Clone, Debug, JsonSchema)]
+pub struct SecretCredentials {
+    /// The name of the Secret containing the credentials
+    pub name: String,
+    /// The namespace of the Secret (defaults to the `ThoriumCluster`'s namespace)
+    pub namespace: Option<String>,
+    /// A literal username to use
+    pub username: Option<String>,
+    /// The key in the Secret containing the username (takes precedence over `username`)
+    pub username_key: Option<String>,
+    /// The key in the Secret containing the password
+    pub password_key: String,
+}
+
+/// The initial Thorium admin user to create
+#[derive(Serialize, Deserialize, Clone, Debug, JsonSchema)]
+pub struct AdminBootstrap {
+    /// The Secret containing the admin's username and password
+    pub secret: SecretCredentials,
+}
+
+/// Settings for creating Thorium's Scylla role
+#[derive(Serialize, Deserialize, Clone, Debug, JsonSchema)]
+pub struct ScyllaBootstrap {
+    /// The Scylla superuser credentials to create the role with (defaults to cassandra/cassandra)
+    pub admin_secret: Option<SecretCredentials>,
+    /// Drop the default cassandra role once Thorium's role exists
+    #[serde(default)]
+    pub drop_default_role: bool,
+}
+
+/// Settings for creating Thorium's Elastic role and user
+#[derive(Serialize, Deserialize, Clone, Debug, JsonSchema)]
+pub struct ElasticBootstrap {
+    /// The Elastic superuser credentials to create the role and user with
+    pub admin_secret: SecretCredentials,
+}
+
+/// Backend setup the operator performs before and after deploying Thorium
+#[derive(Serialize, Deserialize, Clone, Debug, Default, JsonSchema)]
+pub struct ThoriumBootstrap {
+    /// Create an initial Thorium admin user
+    pub admin: Option<AdminBootstrap>,
+    /// Create Thorium's Scylla role
+    pub scylla: Option<ScyllaBootstrap>,
+    /// Create Thorium's Elastic role, user, and indexes
+    pub elastic: Option<ElasticBootstrap>,
+}
+
+/// The observed state of a `ThoriumCluster`
+#[derive(Serialize, Deserialize, Clone, Debug, Default, JsonSchema, PartialEq, Eq)]
+pub struct ThoriumClusterStatus {
+    /// The current phase of this `ThoriumCluster` (Provisioning, Ready, or Error)
+    pub phase: Option<String>,
+    /// Details about the current phase
+    pub message: Option<String>,
+    /// When the phase or message last changed (RFC3339)
+    pub last_transition: Option<String>,
+}
+
+/// Remove `required` constraints from a JSON schema so any field may be omitted
+///
+/// Constraints on the members of `oneOf`/`anyOf`/`allOf` are kept because they are what
+/// distinguish enum variants from one another.
+///
+/// # Arguments
+///
+/// * `value` - The JSON schema to strip
+/// * `union_member` - Whether this schema is a member of a `oneOf`/`anyOf`/`allOf`
+fn strip_required(value: &mut serde_json::Value, union_member: bool) {
+    // only schema objects can contain constraints
+    let Some(object) = value.as_object_mut() else {
+        return;
+    };
+    // drop this schema's required list unless it identifies a union member
+    if !union_member
+        && object
+            .get("required")
+            .is_some_and(serde_json::Value::is_array)
+    {
+        object.remove("required");
+    }
+    // walk the child schemas of this schema
+    for (key, child) in object.iter_mut() {
+        match key.as_str() {
+            // each property is its own schema
+            "properties" => {
+                // strip every property's schema
+                if let Some(properties) = child.as_object_mut() {
+                    for property in properties.values_mut() {
+                        strip_required(property, false);
+                    }
+                }
+            }
+            // array items and map values are schemas
+            "items" | "additionalProperties" => strip_required(child, false),
+            // union members keep their own required lists
+            "oneOf" | "anyOf" | "allOf" => {
+                // strip below each member without touching the member itself
+                if let Some(members) = child.as_array_mut() {
+                    for member in members {
+                        strip_required(member, true);
+                    }
+                }
+            }
+            // any other keyword doesn't contain a schema
+            _ => (),
+        }
+    }
+}
+
+/// Build the schema for a partial Thorium config
+///
+/// This is the [`thorium::Conf`] schema with every field optional so secrets can be
+/// supplied separately through `config_secrets`.
+///
+/// # Arguments
+///
+/// * `generator` - The schema generator building the CRD
+fn partial_conf_schema(generator: &mut schemars::SchemaGenerator) -> schemars::Schema {
+    // generate the full config schema
+    let schema = generator.subschema_for::<thorium::Conf>();
+    // convert the schema to raw JSON so we can edit it
+    let mut raw = schema.to_value();
+    // make every field optional
+    strip_required(&mut raw, false);
+    // convert our edited schema back into a schema
+    schemars::Schema::try_from(raw).expect("partial config schema is not a valid schema")
+}
+
 /// ThoriumCluster CRD definition
 #[derive(CustomResource, Serialize, Deserialize, Clone, Debug, JsonSchema)]
 #[kube(
@@ -321,6 +473,9 @@ pub const CRD_NAME: &str = "thoriumclusters.sandia.gov";
     version = "v1",
     kind = "ThoriumCluster",
     namespaced,
+    status = "ThoriumClusterStatus",
+    printcolumn = r#"{"name":"Phase","type":"string","jsonPath":".status.phase"}"#,
+    printcolumn = r#"{"name":"Message","type":"string","jsonPath":".status.message","priority":1}"#,
     doc = "Custom resource representing a ThoriumCluster"
 )]
 pub struct ThoriumClusterSpec {
@@ -337,7 +492,16 @@ pub struct ThoriumClusterSpec {
     #[serde(default = "default_pull_policy")]
     pub image_pull_policy: String,
     /// Configuration options for Thorium components
-    pub config: thorium::Conf,
+    ///
+    /// Any field may be omitted here and supplied by `config_secrets` instead.
+    #[schemars(schema_with = "partial_conf_schema")]
+    pub config: serde_json::Value,
+    /// Secrets holding partial thorium.yml documents merged over `config` in order
+    #[serde(default)]
+    pub config_secrets: Vec<ConfigSecretRef>,
+    /// Backend setup the operator performs for this cluster
+    #[serde(default)]
+    pub bootstrap: Option<ThoriumBootstrap>,
 }
 
 /// Methods operating on a ThoriumCluster resource
@@ -423,7 +587,9 @@ pub async fn get_stub_resource() -> Result<ThoriumCluster, Error> {
             "search_streamer": {},
         },
         "registry": "url:port/path/to/image",
-        "tag": "tag"
+        "tag": "tag",
+        "config": {},
+        "config_secrets": [{"name": "thorium-config-secrets"}]
     });
     // build ThoriumCluster spec from json
     let thorium_cluster_spec: ThoriumClusterSpec =
@@ -437,6 +603,61 @@ pub async fn get_stub_resource() -> Result<ThoriumCluster, Error> {
             .expect("could not turn ThoriumCluster to YAML string")
     );
     Ok(thorium_cluster)
+}
+
+/// Print the `ThoriumCluster` CRD as YAML
+pub fn print_crd() {
+    // serialize the CRD for this operator version
+    let crd = serde_norway::to_string(&ThoriumCluster::crd())
+        .expect("could not turn ThoriumCluster CRD to YAML string");
+    // print the CRD to stdout
+    print!("{crd}");
+}
+
+/// Set a `ThoriumCluster`'s status if it has changed
+///
+/// Failures are logged rather than returned so a status update never fails a reconcile.
+///
+/// # Arguments
+///
+/// * `client` - The kube client to patch the status with
+/// * `cluster` - The `ThoriumCluster` to update
+/// * `phase` - The new phase for this `ThoriumCluster`
+/// * `message` - Details about the new phase
+pub async fn set_status(
+    client: &Client,
+    cluster: &ThoriumCluster,
+    phase: &str,
+    message: Option<String>,
+) {
+    // get the current status of this cluster
+    let current = cluster.status.clone().unwrap_or_default();
+    // skip the update if nothing changed so we don't trigger needless watch events
+    if current.phase.as_deref() == Some(phase) && current.message == message {
+        return;
+    }
+    // get this cluster's name and namespace
+    let (Some(name), Some(namespace)) = (&cluster.metadata.name, &cluster.metadata.namespace)
+    else {
+        println!("Cannot set the status of a ThoriumCluster without a name and namespace");
+        return;
+    };
+    // build the new status
+    let status = ThoriumClusterStatus {
+        phase: Some(phase.to_owned()),
+        message,
+        last_transition: Some(chrono::Utc::now().to_rfc3339()),
+    };
+    // build the status patch
+    let patch = json!({ "status": status });
+    // patch the status subresource
+    let api: Api<ThoriumCluster> = Api::namespaced(client.clone(), namespace);
+    if let Err(error) = api
+        .patch_status(name, &PatchParams::default(), &Patch::Merge(&patch))
+        .await
+    {
+        println!("Failed to set status of ThoriumCluster {namespace}/{name}: {error}");
+    }
 }
 
 /// Create or update the ThoriumCluster CRD

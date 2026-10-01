@@ -84,7 +84,7 @@ async fn reconcile_api_pods(pod: Arc<Pod>, mut ctx: Arc<ApiWatchContext>) -> Res
     } else {
         // this is not our currently designated mcp pod so check if that pod is alive or dead
         // build a Thorium api pod client
-        let pod_api: Api<Pod> = Api::<Pod>::namespaced(ctx.client.clone(), "thorium");
+        let pod_api: Api<Pod> = Api::<Pod>::namespaced(ctx.client.clone(), &namespace);
         // get our designated mcp pods info
         match pod_api.get_opt(name).await {
             // return our designated mcp pods info
@@ -276,10 +276,16 @@ async fn scan(pod_api: &Api<Pod>) -> Option<String> {
     }
 }
 
-/// Watch our nodes for any changes
-pub async fn start(client: Client, shared: Arc<SharedInfo>) {
-    // build a Thorium api pod client
-    let pod_api: Api<Pod> = Api::<Pod>::all(client.clone());
+/// Watch our api pods for any changes
+///
+/// # Arguments
+///
+/// * `client` - The kube client to watch with
+/// * `namespace` - The namespace to watch api pods in (all namespaces if unset)
+/// * `shared` - Data shared across watchers
+pub async fn start(client: Client, namespace: Option<String>, shared: Arc<SharedInfo>) {
+    // build a Thorium api pod client for the namespaces we watch
+    let pod_api: Api<Pod> = super::scoped_api(&client, namespace.as_deref());
     // Scan and make sure we have an existing mcp pod if possible
     let mcp_pod = scan(&pod_api).await;
     // setup some state for our watcher

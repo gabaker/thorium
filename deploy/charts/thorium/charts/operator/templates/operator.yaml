@@ -1,0 +1,74 @@
+{{- $ns := include "thorium.namespace" . }}
+{{- if .Values.imagePullSecret.create }}
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: registry-token
+  namespace: {{ $ns }}
+  labels:
+    {{- include "operator.labels" . | nindent 4 }}
+type: kubernetes.io/dockerconfigjson
+data:
+  .dockerconfigjson: {{ required "imagePullSecret.dockerconfigjson is required when imagePullSecret.create is true" .Values.imagePullSecret.dockerconfigjson | b64enc | quote }}
+{{- end }}
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: banner
+  namespace: {{ $ns }}
+  labels:
+    {{- include "operator.labels" . | nindent 4 }}
+data:
+  banner.txt: {{ .Values.banner | quote }}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: operator
+  namespace: {{ $ns }}
+  labels:
+    app: operator
+    {{- include "operator.labels" . | nindent 4 }}
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: operator
+  template:
+    metadata:
+      labels:
+        app: operator
+    spec:
+      serviceAccountName: thorium
+      automountServiceAccountToken: true
+      imagePullSecrets:
+        - name: registry-token
+      containers:
+        - name: operator
+          image: {{ printf "%s:%s" (include "thorium.image" (dict "root" $ "image" .Values.image.repository)) (include "operator.tag" .) }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          {{- if .Values.operator.watchOwnNamespaceOnly }}
+          # appended to the image entrypoint (`thorium-operator operate`)
+          args: ["--namespace", {{ $ns | quote }}]
+          {{- end }}
+          env:
+            {{- with .Values.operator.proxy }}
+            - { name: http_proxy, value: {{ .httpProxy | quote }} }
+            - { name: HTTP_PROXY, value: {{ .httpProxy | quote }} }
+            - { name: https_proxy, value: {{ .httpsProxy | quote }} }
+            - { name: HTTPS_PROXY, value: {{ .httpsProxy | quote }} }
+            - { name: no_proxy, value: {{ .noProxy | quote }} }
+            - { name: NO_PROXY, value: {{ .noProxy | quote }} }
+            {{- end }}
+          resources:
+            {{- toYaml .Values.operator.resources | nindent 12 }}
+      {{- with .Values.operator.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.operator.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}

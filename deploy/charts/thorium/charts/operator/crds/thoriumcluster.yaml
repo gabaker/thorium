@@ -1,0 +1,2496 @@
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  name: thoriumclusters.sandia.gov
+spec:
+  group: sandia.gov
+  names:
+    categories: []
+    kind: ThoriumCluster
+    plural: thoriumclusters
+    shortNames: []
+    singular: thoriumcluster
+  scope: Namespaced
+  versions:
+  - additionalPrinterColumns:
+    - jsonPath: .status.phase
+      name: Phase
+      type: string
+    - jsonPath: .status.message
+      name: Message
+      priority: 1
+      type: string
+    name: v1
+    schema:
+      openAPIV3Schema:
+        description: Custom resource representing a ThoriumCluster
+        properties:
+          spec:
+            description: ThoriumCluster CRD definition
+            properties:
+              bootstrap:
+                description: Backend setup the operator performs for this cluster
+                nullable: true
+                properties:
+                  admin:
+                    description: Create an initial Thorium admin user
+                    nullable: true
+                    properties:
+                      secret:
+                        description: The Secret containing the admin's username and password
+                        properties:
+                          name:
+                            description: The name of the Secret containing the credentials
+                            type: string
+                          namespace:
+                            description: The namespace of the Secret (defaults to the `ThoriumCluster`'s namespace)
+                            nullable: true
+                            type: string
+                          password_key:
+                            description: The key in the Secret containing the password
+                            type: string
+                          username:
+                            description: A literal username to use
+                            nullable: true
+                            type: string
+                          username_key:
+                            description: The key in the Secret containing the username (takes precedence over `username`)
+                            nullable: true
+                            type: string
+                        required:
+                        - name
+                        - password_key
+                        type: object
+                    required:
+                    - secret
+                    type: object
+                  elastic:
+                    description: Create Thorium's Elastic role, user, and indexes
+                    nullable: true
+                    properties:
+                      admin_secret:
+                        description: The Elastic superuser credentials to create the role and user with
+                        properties:
+                          name:
+                            description: The name of the Secret containing the credentials
+                            type: string
+                          namespace:
+                            description: The namespace of the Secret (defaults to the `ThoriumCluster`'s namespace)
+                            nullable: true
+                            type: string
+                          password_key:
+                            description: The key in the Secret containing the password
+                            type: string
+                          username:
+                            description: A literal username to use
+                            nullable: true
+                            type: string
+                          username_key:
+                            description: The key in the Secret containing the username (takes precedence over `username`)
+                            nullable: true
+                            type: string
+                        required:
+                        - name
+                        - password_key
+                        type: object
+                    required:
+                    - admin_secret
+                    type: object
+                  scylla:
+                    description: Create Thorium's Scylla role
+                    nullable: true
+                    properties:
+                      admin_secret:
+                        description: The Scylla superuser credentials to create the role with (defaults to cassandra/cassandra)
+                        nullable: true
+                        properties:
+                          name:
+                            description: The name of the Secret containing the credentials
+                            type: string
+                          namespace:
+                            description: The namespace of the Secret (defaults to the `ThoriumCluster`'s namespace)
+                            nullable: true
+                            type: string
+                          password_key:
+                            description: The key in the Secret containing the password
+                            type: string
+                          username:
+                            description: A literal username to use
+                            nullable: true
+                            type: string
+                          username_key:
+                            description: The key in the Secret containing the username (takes precedence over `username`)
+                            nullable: true
+                            type: string
+                        required:
+                        - name
+                        - password_key
+                        type: object
+                      drop_default_role:
+                        default: false
+                        description: Drop the default cassandra role once Thorium's role exists
+                        type: boolean
+                    type: object
+                type: object
+              components:
+                description: List of Thorium components to deploy
+                properties:
+                  api:
+                    description: Thorium API
+                    properties:
+                      args:
+                        default:
+                        - --config
+                        - /conf/thorium.yml
+                        items:
+                          type: string
+                        type: array
+                      cmd:
+                        default:
+                        - /app/thorium-api
+                        description: Commands to run in API container
+                        items:
+                          type: string
+                        type: array
+                      env:
+                        default:
+                        - name: http_proxy
+                          value: ''
+                        - name: https_proxy
+                          value: ''
+                        - name: no_proxy
+                          value: localhost,cluster.local
+                        - name: HTTP_PROXY
+                          value: ''
+                        - name: HTTPS_PROXY
+                          value: ''
+                        - name: NO_PROXY
+                          value: localhost,cluster.local
+                        description: Environment variables to apply to API container
+                        items:
+                          description: A struct representing an environment variable
+                          properties:
+                            name:
+                              type: string
+                            value:
+                              nullable: true
+                              type: string
+                          required:
+                          - name
+                          type: object
+                        type: array
+                      replicas:
+                        default: 3
+                        description: Number of API pods to scale the deployment
+                        format: uint16
+                        maximum: 65535.0
+                        minimum: 0.0
+                        type: integer
+                      resources:
+                        default:
+                          cpu: 2000
+                          memory: 8192
+                        description: The CPU and Memory needed by the API
+                        properties:
+                          cpu:
+                            format: uint64
+                            minimum: 0.0
+                            type: integer
+                          memory:
+                            format: uint64
+                            minimum: 0.0
+                            type: integer
+                        required:
+                        - cpu
+                        - memory
+                        type: object
+                    type: object
+                  baremetal_scaler:
+                    description: The baremetal/kaboom scaler
+                    nullable: true
+                    properties:
+                      args:
+                        default:
+                        - --config
+                        - /conf/thorium.yml
+                        - --auth
+                        - /keys/keys.yml
+                        - --scaler
+                        - bare-metal
+                        items:
+                          type: string
+                        type: array
+                      cmd:
+                        default:
+                        - /app/thorium-scaler
+                        description: Commands to run in scaler container
+                        items:
+                          type: string
+                        type: array
+                      env:
+                        default:
+                        - name: http_proxy
+                          value: ''
+                        - name: https_proxy
+                          value: ''
+                        - name: no_proxy
+                          value: localhost,cluster.local
+                        - name: HTTP_PROXY
+                          value: ''
+                        - name: HTTPS_PROXY
+                          value: ''
+                        - name: NO_PROXY
+                          value: localhost,cluster.local
+                        - name: KUBECONFIG
+                          value: /root/.kube/config
+                        description: Environment variables to apply in container
+                        items:
+                          description: A struct representing an environment variable
+                          properties:
+                            name:
+                              type: string
+                            value:
+                              nullable: true
+                              type: string
+                          required:
+                          - name
+                          type: object
+                        type: array
+                      resources:
+                        default:
+                          cpu: 2000
+                          memory: 4096
+                        description: The CPU and Memory for a scaler container
+                        properties:
+                          cpu:
+                            format: uint64
+                            minimum: 0.0
+                            type: integer
+                          memory:
+                            format: uint64
+                            minimum: 0.0
+                            type: integer
+                        required:
+                        - cpu
+                        - memory
+                        type: object
+                    type: object
+                  event_handler:
+                    description: Event trigger/handler component of Thorium
+                    nullable: true
+                    properties:
+                      args:
+                        default:
+                        - --config
+                        - /conf/thorium.yml
+                        - --auth
+                        - /keys/keys.yml
+                        items:
+                          type: string
+                        type: array
+                      cmd:
+                        default:
+                        - /app/thorium-event-handler
+                        description: Commands to run in event-handler container
+                        items:
+                          type: string
+                        type: array
+                      env:
+                        default:
+                        - name: http_proxy
+                          value: ''
+                        - name: https_proxy
+                          value: ''
+                        - name: no_proxy
+                          value: localhost,cluster.local
+                        - name: HTTP_PROXY
+                          value: ''
+                        - name: HTTPS_PROXY
+                          value: ''
+                        - name: NO_PROXY
+                          value: localhost,cluster.local
+                        description: Environment variables to apply in container
+                        items:
+                          description: A struct representing an environment variable
+                          properties:
+                            name:
+                              type: string
+                            value:
+                              nullable: true
+                              type: string
+                          required:
+                          - name
+                          type: object
+                        type: array
+                      resources:
+                        default:
+                          cpu: 2000
+                          memory: 4096
+                        description: The CPU and Memory needed by the event-handler
+                        properties:
+                          cpu:
+                            format: uint64
+                            minimum: 0.0
+                            type: integer
+                          memory:
+                            format: uint64
+                            minimum: 0.0
+                            type: integer
+                        required:
+                        - cpu
+                        - memory
+                        type: object
+                    type: object
+                  scaler:
+                    description: The kubernetes scaler
+                    nullable: true
+                    properties:
+                      args:
+                        default:
+                        - --config
+                        - /conf/thorium.yml
+                        - --auth
+                        - /keys/keys.yml
+                        items:
+                          type: string
+                        type: array
+                      cmd:
+                        default:
+                        - /app/thorium-scaler
+                        description: Commands to run in scaler container
+                        items:
+                          type: string
+                        type: array
+                      env:
+                        default:
+                        - name: http_proxy
+                          value: ''
+                        - name: https_proxy
+                          value: ''
+                        - name: no_proxy
+                          value: localhost,cluster.local
+                        - name: HTTP_PROXY
+                          value: ''
+                        - name: HTTPS_PROXY
+                          value: ''
+                        - name: NO_PROXY
+                          value: localhost,cluster.local
+                        - name: KUBECONFIG
+                          value: /root/.kube/config
+                        description: Environment variables to apply in container
+                        items:
+                          description: A struct representing an environment variable
+                          properties:
+                            name:
+                              type: string
+                            value:
+                              nullable: true
+                              type: string
+                          required:
+                          - name
+                          type: object
+                        type: array
+                      resources:
+                        default:
+                          cpu: 2000
+                          memory: 4096
+                        description: The CPU and Memory for a scaler container
+                        properties:
+                          cpu:
+                            format: uint64
+                            minimum: 0.0
+                            type: integer
+                          memory:
+                            format: uint64
+                            minimum: 0.0
+                            type: integer
+                        required:
+                        - cpu
+                        - memory
+                        type: object
+                      service_account:
+                        default: false
+                        description: whether to use a service account
+                        type: boolean
+                    type: object
+                  search_streamer:
+                    description: Elastic search streamer
+                    nullable: true
+                    properties:
+                      args:
+                        default:
+                        - --config
+                        - /conf/thorium.yml
+                        - --keys
+                        - /keys/keys.yml
+                        items:
+                          type: string
+                        type: array
+                      cmd:
+                        default:
+                        - /app/thorium-search-streamer
+                        description: Commands to run in search-streamer container
+                        items:
+                          type: string
+                        type: array
+                      env:
+                        default:
+                        - name: http_proxy
+                          value: ''
+                        - name: https_proxy
+                          value: ''
+                        - name: no_proxy
+                          value: localhost,cluster.local
+                        - name: HTTP_PROXY
+                          value: ''
+                        - name: HTTPS_PROXY
+                          value: ''
+                        - name: NO_PROXY
+                          value: localhost,cluster.local
+                        description: Environment variables to apply in container
+                        items:
+                          description: A struct representing an environment variable
+                          properties:
+                            name:
+                              type: string
+                            value:
+                              nullable: true
+                              type: string
+                          required:
+                          - name
+                          type: object
+                        type: array
+                      resources:
+                        default:
+                          cpu: 2000
+                          memory: 4096
+                        description: The CPU and Memory needed by the search-streamer
+                        properties:
+                          cpu:
+                            format: uint64
+                            minimum: 0.0
+                            type: integer
+                          memory:
+                            format: uint64
+                            minimum: 0.0
+                            type: integer
+                        required:
+                        - cpu
+                        - memory
+                        type: object
+                    type: object
+                required:
+                - api
+                type: object
+              config:
+                description: |-
+                  Configuration options for Thorium components
+
+                  Any field may be omitted here and supplied by `config_secrets` instead.
+                properties:
+                  elastic:
+                    description: |-
+                      Elastic settings
+
+                      The cert validation settings are overly complex to support the operator being able
+                      to set this as a valid CRD in K8s.
+                    properties:
+                      cert_validation:
+                        description: |-
+                          The options for Elastic certificate validation
+
+                          Missing vairant comments until https://github.com/kube-rs/kube/issues/1821 is resolved
+                        nullable: true
+                        oneOf:
+                        - required:
+                          - Full
+                        - required:
+                          - CA
+                        properties:
+                          CA:
+                            type: string
+                          Full:
+                            type: string
+                        type: object
+                      insecure_certificates:
+                        default: false
+                        description: Disable certificate validation
+                        type: boolean
+                      max_analyzed_offset:
+                        default: 1000000
+                        description: |-
+                          The max analyzed offset for highlighting configure in the index
+                          and for every query
+
+                          This avoids errors when fields are larger than the configured maximum
+                          and truncates highlighting instead
+                        format: uint32
+                        minimum: 0.0
+                        type: integer
+                      node:
+                        description: The node to connect to
+                        type: string
+                      password:
+                        description: The password to use when authenticating
+                        type: string
+                      results:
+                        default:
+                          repos: thorium_repo_results
+                          samples: thorium_sample_results
+                        description: The options for results in elastic
+                        properties:
+                          repos:
+                            default: thorium_repo_results
+                            description: The name of the repo results index in elastic
+                            type: string
+                          samples:
+                            default: thorium_sample_results
+                            description: The name of the sample results index in elastic
+                            type: string
+                        type: object
+                      tags:
+                        default:
+                          repos: thorium_repo_tags
+                          samples: thorium_sample_tags
+                        description: The options for tags in elastic
+                        properties:
+                          repos:
+                            default: thorium_repo_tags
+                            description: The name of the repo tags index in elastic
+                            type: string
+                          samples:
+                            default: thorium_sample_tags
+                            description: The name of the sample tags index in elastic
+                            type: string
+                        type: object
+                      username:
+                        description: The username to use when authenticating
+                        type: string
+                    type: object
+                  redis:
+                    description: Redis settings
+                    properties:
+                      host:
+                        description: The host redis is reachable at
+                        type: string
+                      password:
+                        description: A password to use if redis has authentication enabled
+                        nullable: true
+                        type: string
+                      pool_size:
+                        description: The number of connections to have in the connection pool
+                        format: uint32
+                        minimum: 0.0
+                        nullable: true
+                        type: integer
+                      port:
+                        description: The port redis is bound to
+                        format: uint16
+                        maximum: 65535.0
+                        minimum: 0.0
+                        type: integer
+                      username:
+                        description: A username to use if redis has authentication enabled
+                        nullable: true
+                        type: string
+                    type: object
+                  scylla:
+                    description: Scylla settings
+                    properties:
+                      auth:
+                        description: The auth creds to use when authenticating to scylla
+                        nullable: true
+                        properties:
+                          password:
+                            description: The password to use when authenticating
+                            type: string
+                          username:
+                            description: The username to use when authenticating
+                            type: string
+                        type: object
+                      nodes:
+                        description: The list of nodes to connect to
+                        items:
+                          type: string
+                        type: array
+                      replication:
+                        description: The replication factor to use
+                        format: uint64
+                        minimum: 0.0
+                        type: integer
+                      setup_time:
+                        default: 120
+                        description: The amount of time to wait for scylla to get setup
+                        format: uint32
+                        minimum: 0.0
+                        type: integer
+                    type: object
+                  scylla_override:
+                    description: Allow scylla nodes to easily be overwritten with a single node for testing
+                    nullable: true
+                    type: string
+                  thorium:
+                    description: Thorium configs
+                    properties:
+                      assets:
+                        default:
+                          binaries: binaries
+                          dev_docs: docs/dev
+                          not_found: docs/user/static_resources/mascot.png
+                          user_docs: docs/user
+                        description: The path to the Thorium docs to serve
+                        properties:
+                          binaries:
+                            default: binaries
+                            description: The path to serve Thorium binaries from
+                            type: string
+                          dev_docs:
+                            default: docs/dev
+                            description: The path to our developer focused docs
+                            type: string
+                          not_found:
+                            default: docs/user/static_resources/mascot.png
+                            description: The path to the 404 page to serve on docs/binary serving 404s
+                            type: string
+                          user_docs:
+                            default: docs/user
+                            description: The path to our user focused docs
+                            type: string
+                        type: object
+                      associations:
+                        default:
+                          earliest: 1748736000
+                          partition_size: 180
+                        description: The settings related to associations
+                        properties:
+                          earliest:
+                            default: 1748736000
+                            description: The earliest we'll see an entity as a Unix timestamp
+                            format: int64
+                            type: integer
+                          partition_size:
+                            default: 180
+                            description: The number of seconds each partition in the database should cover
+                            format: uint16
+                            maximum: 65535.0
+                            minimum: 0.0
+                            type: integer
+                        type: object
+                      attachments:
+                        default:
+                          bucket: thorium-attachment-files
+                        description: The settings for attachments
+                        properties:
+                          bucket:
+                            default: thorium-attachment-files
+                            description: The bucket to write attachment files to
+                            type: string
+                        type: object
+                      auth:
+                        default:
+                          email: null
+                          local_user_ids:
+                            group: 1879048192
+                            user: 1879048192
+                          oauth: null
+                          token_expire: 90
+                        description: The authentication settings to use
+                        properties:
+                          email:
+                            description: The email settings to use
+                            nullable: true
+                            properties:
+                              addr:
+                                description: The email address to send verification emails from
+                                type: string
+                              approved_emails:
+                                description: The email regexes to restrict users too
+                                items:
+                                  type: string
+                                type: array
+                              base_url:
+                                description: The thorium base api url to use for email verification (e.g. https://thorium.sandia.gov/api)
+                                type: string
+                              password:
+                                description: The password for email verification
+                                type: string
+                              rate_limit:
+                                default: 600
+                                description: The time to require between verification emails in seconds
+                                format: uint64
+                                minimum: 0.0
+                                type: integer
+                              smtp_server:
+                                description: The smtp server to use when sending emails
+                                type: string
+                            type: object
+                          ldap:
+                            description: The settings to use for ldap
+                            nullable: true
+                            properties:
+                              bind_filters:
+                                description: The filters to append to uid=<username> when binding in ldap
+                                type: string
+                              credentials:
+                                description: Tt dehe credentials to use when listing group membership info from ldap
+                                nullable: true
+                                properties:
+                                  bind_filters:
+                                    description: The filters to append to uid=<username> when binding in ldap
+                                    type: string
+                                  password:
+                                    description: The password to use when binding
+                                    type: string
+                                  user:
+                                    description: The user to bind as
+                                    type: string
+                                type: object
+                              group_member_field:
+                                description: The field to extract group membership usernames from
+                                nullable: true
+                                type: string
+                              group_members_attr:
+                                description: The attribute to use when getting group membership
+                                type: string
+                              group_unix_id:
+                                description: The info needed to extract a unix group id
+                                properties:
+                                  attr:
+                                    description: The name of the attribute to extract our id from
+                                    oneOf:
+                                    - required:
+                                      - String
+                                    - required:
+                                      - Binary
+                                    properties:
+                                      Binary:
+                                        type: string
+                                      String:
+                                        type: string
+                                    type: object
+                                  cast:
+                                    default:
+                                      Int: 0
+                                    description: The strategy to use when casting/deserializing this id
+                                    oneOf:
+                                    - required:
+                                      - Int
+                                    - required:
+                                      - Base64Sid
+                                    properties:
+                                      Base64Sid:
+                                        format: uint
+                                        minimum: 0.0
+                                        type: integer
+                                      Int:
+                                        format: uint
+                                        minimum: 0.0
+                                        type: integer
+                                    type: object
+                                type: object
+                              host:
+                                description: The hostname ldap can be reached at including ldap:// or ldaps://
+                                type: string
+                              scope:
+                                description: The filters to append to cn=<group> when searching ldap
+                                type: string
+                              search_filter_prepend:
+                                default: ''
+                                description: What to prepend to usernames in search filters
+                                type: string
+                              sync_interval:
+                                default: 600
+                                description: How long to sleep between syncing data in seconds
+                                format: uint64
+                                minimum: 0.0
+                                type: integer
+                              tls_verify:
+                                default: true
+                                description: Verify that the TLS cert is valid or not
+                                type: boolean
+                              user_append:
+                                default: ''
+                                description: What to append to the username to bind too
+                                type: string
+                              user_prepend:
+                                default: uid=
+                                description: What to prepend to the username to bind too
+                                type: string
+                              user_unix_id:
+                                description: The info needed to extract a unix user id
+                                properties:
+                                  attr:
+                                    description: The name of the attribute to extract our id from
+                                    oneOf:
+                                    - required:
+                                      - String
+                                    - required:
+                                      - Binary
+                                    properties:
+                                      Binary:
+                                        type: string
+                                      String:
+                                        type: string
+                                    type: object
+                                  cast:
+                                    default:
+                                      Int: 0
+                                    description: The strategy to use when casting/deserializing this id
+                                    oneOf:
+                                    - required:
+                                      - Int
+                                    - required:
+                                      - Base64Sid
+                                    properties:
+                                      Base64Sid:
+                                        format: uint
+                                        minimum: 0.0
+                                        type: integer
+                                      Int:
+                                        format: uint
+                                        minimum: 0.0
+                                        type: integer
+                                    type: object
+                                type: object
+                            type: object
+                          local_user_ids:
+                            default:
+                              group: 1879048192
+                              user: 1879048192
+                            description: The user/group unix ids to use for local users
+                            properties:
+                              group:
+                                description: The unix group id of this user
+                                format: uint64
+                                minimum: 0.0
+                                type: integer
+                              user:
+                                description: The unix user id of this user
+                                format: uint64
+                                minimum: 0.0
+                                type: integer
+                            type: object
+                          oauth:
+                            description: The settings for oauth based auth
+                            nullable: true
+                            properties:
+                              link_expire:
+                                default: 86400
+                                description: How long any account linking tokens should be valid for in seconds
+                                format: uint64
+                                minimum: 0.0
+                                type: integer
+                              providers:
+                                additionalProperties:
+                                  description: The setttings for a oauth provider
+                                  properties:
+                                    client_id:
+                                      description: The id for Thorium to use to identify itself to this provider
+                                      type: string
+                                    client_secret:
+                                      description: The secret for Thorium to ues to identify itself to this provider
+                                      type: string
+                                    issuer_url:
+                                      description: The url for this provider
+                                      type: string
+                                    scopes:
+                                      description: The scope to set for this provider
+                                      items:
+                                        type: string
+                                      type: array
+                                  type: object
+                                description: The different settings for oauth providers
+                                type: object
+                              redirect_base:
+                                description: The base scheme + domain for to redirect back to
+                                type: string
+                              register_expire:
+                                default: 600
+                                description: How long any registration tokens should be valid for in seconds
+                                format: uint64
+                                minimum: 0.0
+                                type: integer
+                            type: object
+                          token_expire:
+                            default: 90
+                            format: uint32
+                            minimum: 0.0
+                            type: integer
+                        type: object
+                      base_network_policies:
+                        default:
+                        - egress:
+                          - allowed_all: false
+                            allowed_custom:
+                            - namespace_labels:
+                              - key: kubernetes.io/metadata.name
+                                value: thorium
+                              pod_labels:
+                              - key: app
+                                value: api
+                            allowed_groups: []
+                            allowed_internet: false
+                            allowed_ips: []
+                            allowed_local: false
+                            allowed_tools: []
+                            ports: []
+                          - allowed_all: false
+                            allowed_custom:
+                            - namespace_labels:
+                              - key: kubernetes.io/metadata.name
+                                value: kube-system
+                              pod_labels:
+                              - key: k8s-app
+                                value: kube-dns
+                            - namespace_labels:
+                              - key: kubernetes.io/metadata.name
+                                value: kube-system
+                              pod_labels:
+                              - key: k8s-app
+                                value: node-local-dns
+                            allowed_groups: []
+                            allowed_internet: false
+                            allowed_ips:
+                            - cidr: 169.254.0.0/16
+                              except: null
+                            - cidr: fe80::/10
+                              except: null
+                            allowed_local: false
+                            allowed_tools: []
+                            ports:
+                            - port: 53
+                              protocol: UDP
+                          ingress:
+                          - allowed_all: false
+                            allowed_custom:
+                            - namespace_labels:
+                              - key: kubernetes.io/metadata.name
+                                value: thorium
+                              pod_labels:
+                              - key: app
+                                value: api
+                            allowed_groups: []
+                            allowed_internet: false
+                            allowed_ips: []
+                            allowed_local: false
+                            allowed_tools: []
+                            ports: []
+                          name: thorium-default
+                        description: |-
+                          Base network policies that should be applied to *all* tools in Thorium
+
+                          If none are supplied, a default policy will be applied instead (see
+                          [`BaseNetworkPolicy::default`])
+
+                          These policies are not stored in the database, and are simply applied to
+                          every tool in every group by the scaler; [`thorium::models::NetworkPolicy`]s
+                          with the same name as `BaseNetworkPolicy`s are valid, as the two policy types
+                          are named differently in K8's. See [`BaseNetworkPolicy`] for more info
+                        items:
+                          description: |-
+                            A base network policy that should apply to *all* images in ALL of Thorium
+
+                            Because network policies in K8's are *additive*, the base policy should be
+                            fairly restrictive to allow for other network policies to open up access.
+                            Alternatively, to bypass Thorium's network policy functionality altogether
+                            and allow full access for all tools, you can provide a base network policy
+                            with ingress and egress containing a rule with `allowed_all` set to `true`
+                          properties:
+                            egress:
+                              description: |-
+                                The rules for egress from all tools in Thorium
+
+                                If None, all egress traffic is allowed; if empty, no egress traffic is allowed
+                              items:
+                                description: |-
+                                  Specific network policy settings to apply to a tool, whether for
+                                  ingress or egress
+
+                                  Similar to [`NetworkPolicyRule`] except that it uses raw `String`s
+                                  instead of real CIDR's from the [`cidr`] crate for easier serialization and in order
+                                  to implement [`JsonSchema`] required for all fields in [`thorium::Conf`];
+                                  raw CIDR's are parsed when converted to a full-fledged [`NetworkPolicyRule`]
+                                properties:
+                                  allowed_all:
+                                    default: false
+                                    description: |-
+                                      Allow traffic to or from any entity
+
+                                      Overrides all other settings except [`NetworkPolicySettings::ports`]
+                                    type: boolean
+                                  allowed_custom:
+                                    default: []
+                                    description: |-
+                                      A list of custom rules allowing access to peers on K8's,
+                                      matched by namespace and/or pod label(s)
+                                    items:
+                                      description: A custom rule to allow network access to/from namespaces/pods in K8's by namespace/pod label(s)
+                                      properties:
+                                        namespace_labels:
+                                          description: |-
+                                            A list of custom labels to match namespaces on
+
+                                            These labels are matched by *AND* logic, meaning
+                                            namespaces must have all of the given labels to match
+                                          items:
+                                            description: A custom label to use for matching network policies to [`NetworkPolicyCustomK8sRule`]s
+                                            properties:
+                                              key:
+                                                description: The label's key
+                                                type: string
+                                              value:
+                                                description: The label's value
+                                                type: string
+                                            type: object
+                                          nullable: true
+                                          type: array
+                                        pod_labels:
+                                          description: |-
+                                            A list of custom labels to match pods on
+
+                                            These labels are matched by *AND* logic, meaning
+                                            pods must have all of the given labels to match
+                                          items:
+                                            description: A custom label to use for matching network policies to [`NetworkPolicyCustomK8sRule`]s
+                                            properties:
+                                              key:
+                                                description: The label's key
+                                                type: string
+                                              value:
+                                                description: The label's value
+                                                type: string
+                                            type: object
+                                          nullable: true
+                                          type: array
+                                      type: object
+                                    type: array
+                                  allowed_groups:
+                                    default: []
+                                    description: |-
+                                      The list of Thorium groups (namespaces) to allow access to or from
+
+                                      Restrictions on ports from [`NetworkPolicySettings::ports`] still apply
+                                    items:
+                                      type: string
+                                    type: array
+                                  allowed_internet:
+                                    default: false
+                                    description: |-
+                                      Whether or not to allow blanket internet access, allowing traffic to or from
+                                      all public IP addresses. This also allows access to the K8's `CoreDNS` service
+                                      to allow for resolving domain names
+
+                                      Restrictions on ports from [`NetworkPolicySettings::ports`] still apply
+                                    type: boolean
+                                  allowed_ips:
+                                    default: []
+                                    description: |-
+                                      The list of IP's to allow access to or from
+
+                                      Restrictions on ports from [`NetworkPolicySettings::ports`] still apply
+                                    items:
+                                      description: |-
+                                        Similar to [`IpBlock`] except it uses `String`s to
+                                        represent CIDR's rather than actual CIDR structs
+                                      properties:
+                                        cidr:
+                                          description: The IP CIDR to allow
+                                          type: string
+                                        except:
+                                          description: A subset of the [`IpBlockConf::cidr`] to exclude
+                                          items:
+                                            type: string
+                                          nullable: true
+                                          type: array
+                                      type: object
+                                    type: array
+                                  allowed_local:
+                                    default: false
+                                    description: |-
+                                      Whether or not to allow blanket access for local IP addresses, allowing
+                                      traffic to or from all private IP addresses
+
+                                      Restrictions on ports from [`NetworkPolicySettings::ports`] still apply
+                                    type: boolean
+                                  allowed_tools:
+                                    default: []
+                                    description: |-
+                                      The list of Thorium tools within the restricted tool's own group to allow access to or from
+
+                                      Restrictions on ports from [`NetworkPolicySettings::ports`] still apply
+                                    items:
+                                      type: string
+                                    type: array
+                                  ports:
+                                    default: []
+                                    description: |-
+                                      A list of specific ports + protocols to allow
+
+                                      If empty, traffic will be allowed on all ports + protocols
+                                    items:
+                                      description: |-
+                                        A policy detailing one or more ports to allow traffic on and which [`Protocol`]
+                                        to allow on those port(s)
+                                      properties:
+                                        end_port:
+                                          description: |-
+                                            An end port if specifying a range of ports; the end port is the
+                                            last port in the range
+                                          format: uint16
+                                          maximum: 65535.0
+                                          minimum: 0.0
+                                          nullable: true
+                                          type: integer
+                                        port:
+                                          description: |-
+                                            The port to allow, or the first port in a range of ports to
+                                            allow when used in conjunction with [`PortPolicy::end_port`]
+                                          format: uint16
+                                          maximum: 65535.0
+                                          minimum: 0.0
+                                          type: integer
+                                        protocol:
+                                          description: A specific protocol type to allow on a port
+                                          enum:
+                                          - TCP
+                                          - UDP
+                                          - SCTP
+                                          nullable: true
+                                          type: string
+                                      type: object
+                                    type: array
+                                type: object
+                              nullable: true
+                              type: array
+                            ingress:
+                              description: |-
+                                The rules for ingress to all tools in Thorium
+
+                                If None, all ingress traffic is allowed; if empty, no ingress traffic is allowed
+                              items:
+                                description: |-
+                                  Specific network policy settings to apply to a tool, whether for
+                                  ingress or egress
+
+                                  Similar to [`NetworkPolicyRule`] except that it uses raw `String`s
+                                  instead of real CIDR's from the [`cidr`] crate for easier serialization and in order
+                                  to implement [`JsonSchema`] required for all fields in [`thorium::Conf`];
+                                  raw CIDR's are parsed when converted to a full-fledged [`NetworkPolicyRule`]
+                                properties:
+                                  allowed_all:
+                                    default: false
+                                    description: |-
+                                      Allow traffic to or from any entity
+
+                                      Overrides all other settings except [`NetworkPolicySettings::ports`]
+                                    type: boolean
+                                  allowed_custom:
+                                    default: []
+                                    description: |-
+                                      A list of custom rules allowing access to peers on K8's,
+                                      matched by namespace and/or pod label(s)
+                                    items:
+                                      description: A custom rule to allow network access to/from namespaces/pods in K8's by namespace/pod label(s)
+                                      properties:
+                                        namespace_labels:
+                                          description: |-
+                                            A list of custom labels to match namespaces on
+
+                                            These labels are matched by *AND* logic, meaning
+                                            namespaces must have all of the given labels to match
+                                          items:
+                                            description: A custom label to use for matching network policies to [`NetworkPolicyCustomK8sRule`]s
+                                            properties:
+                                              key:
+                                                description: The label's key
+                                                type: string
+                                              value:
+                                                description: The label's value
+                                                type: string
+                                            type: object
+                                          nullable: true
+                                          type: array
+                                        pod_labels:
+                                          description: |-
+                                            A list of custom labels to match pods on
+
+                                            These labels are matched by *AND* logic, meaning
+                                            pods must have all of the given labels to match
+                                          items:
+                                            description: A custom label to use for matching network policies to [`NetworkPolicyCustomK8sRule`]s
+                                            properties:
+                                              key:
+                                                description: The label's key
+                                                type: string
+                                              value:
+                                                description: The label's value
+                                                type: string
+                                            type: object
+                                          nullable: true
+                                          type: array
+                                      type: object
+                                    type: array
+                                  allowed_groups:
+                                    default: []
+                                    description: |-
+                                      The list of Thorium groups (namespaces) to allow access to or from
+
+                                      Restrictions on ports from [`NetworkPolicySettings::ports`] still apply
+                                    items:
+                                      type: string
+                                    type: array
+                                  allowed_internet:
+                                    default: false
+                                    description: |-
+                                      Whether or not to allow blanket internet access, allowing traffic to or from
+                                      all public IP addresses. This also allows access to the K8's `CoreDNS` service
+                                      to allow for resolving domain names
+
+                                      Restrictions on ports from [`NetworkPolicySettings::ports`] still apply
+                                    type: boolean
+                                  allowed_ips:
+                                    default: []
+                                    description: |-
+                                      The list of IP's to allow access to or from
+
+                                      Restrictions on ports from [`NetworkPolicySettings::ports`] still apply
+                                    items:
+                                      description: |-
+                                        Similar to [`IpBlock`] except it uses `String`s to
+                                        represent CIDR's rather than actual CIDR structs
+                                      properties:
+                                        cidr:
+                                          description: The IP CIDR to allow
+                                          type: string
+                                        except:
+                                          description: A subset of the [`IpBlockConf::cidr`] to exclude
+                                          items:
+                                            type: string
+                                          nullable: true
+                                          type: array
+                                      type: object
+                                    type: array
+                                  allowed_local:
+                                    default: false
+                                    description: |-
+                                      Whether or not to allow blanket access for local IP addresses, allowing
+                                      traffic to or from all private IP addresses
+
+                                      Restrictions on ports from [`NetworkPolicySettings::ports`] still apply
+                                    type: boolean
+                                  allowed_tools:
+                                    default: []
+                                    description: |-
+                                      The list of Thorium tools within the restricted tool's own group to allow access to or from
+
+                                      Restrictions on ports from [`NetworkPolicySettings::ports`] still apply
+                                    items:
+                                      type: string
+                                    type: array
+                                  ports:
+                                    default: []
+                                    description: |-
+                                      A list of specific ports + protocols to allow
+
+                                      If empty, traffic will be allowed on all ports + protocols
+                                    items:
+                                      description: |-
+                                        A policy detailing one or more ports to allow traffic on and which [`Protocol`]
+                                        to allow on those port(s)
+                                      properties:
+                                        end_port:
+                                          description: |-
+                                            An end port if specifying a range of ports; the end port is the
+                                            last port in the range
+                                          format: uint16
+                                          maximum: 65535.0
+                                          minimum: 0.0
+                                          nullable: true
+                                          type: integer
+                                        port:
+                                          description: |-
+                                            The port to allow, or the first port in a range of ports to
+                                            allow when used in conjunction with [`PortPolicy::end_port`]
+                                          format: uint16
+                                          maximum: 65535.0
+                                          minimum: 0.0
+                                          type: integer
+                                        protocol:
+                                          description: A specific protocol type to allow on a port
+                                          enum:
+                                          - TCP
+                                          - UDP
+                                          - SCTP
+                                          nullable: true
+                                          type: string
+                                      type: object
+                                    type: array
+                                type: object
+                              nullable: true
+                              type: array
+                            name:
+                              description: |-
+                                The name of the network policy
+
+                                The policy name must be a valid name in K8's unlike regular network policies
+                                (lowercase, alphanumeric except for -'s)
+
+                                This name only needs to be unique among other base network policies, meaning
+                                regular policies can have this same name if desired. This is because regular
+                                policies have UUID's appended to them to prevent name collisions in K8's
+                              type: string
+                          type: object
+                        type: array
+                      cors:
+                        default:
+                          domains: []
+                          insecure: false
+                        description: The settings to use to configure CORS
+                        properties:
+                          domains:
+                            default: []
+                            description: The domains to allow cross origin requests from
+                            items:
+                              type: string
+                            type: array
+                          insecure:
+                            default: false
+                            description: Whether to allow CORS requests from any domain
+                            type: boolean
+                        type: object
+                      entities:
+                        default:
+                          earliest: 1748736000
+                          partition_size: 180
+                        description: The settings related to entities
+                        properties:
+                          earliest:
+                            default: 1748736000
+                            description: The earliest we'll see an entity as a Unix timestamp
+                            format: int64
+                            type: integer
+                          partition_size:
+                            default: 180
+                            description: The number of seconds each partition in the database should cover
+                            format: uint16
+                            maximum: 65535.0
+                            minimum: 0.0
+                            type: integer
+                        type: object
+                      ephemeral:
+                        default:
+                          bucket: thorium-ephemeral-files
+                        description: The settings for ephemeral files
+                        properties:
+                          bucket:
+                            default: thorium-ephemeral-files
+                            description: The bucket to write extras files to
+                            type: string
+                        type: object
+                      events:
+                        default:
+                          max_depth: 5
+                          partition_size: 10
+                          retention: 604800
+                        description: The settings related to events
+                        properties:
+                          max_depth:
+                            default: 5
+                            description: The max depth to trigger new triggers at
+                            format: uint8
+                            maximum: 255.0
+                            minimum: 0.0
+                            type: integer
+                          partition_size:
+                            default: 10
+                            description: The number of seconds each partition in the database should cover
+                            format: uint16
+                            maximum: 65535.0
+                            minimum: 0.0
+                            type: integer
+                          retention:
+                            default: 604800
+                            description: How long to hold onto events for regardless of if they are acted on or not
+                            format: uint64
+                            minimum: 0.0
+                            type: integer
+                        type: object
+                      files:
+                        default:
+                          bucket: thorium-files
+                          cart_version: V1
+                          earliest: 1262332800
+                          partition_size: 180
+                          password: SecretCornIsBest
+                        description: The settings for saving/Carting files
+                        properties:
+                          bucket:
+                            default: thorium-files
+                            description: The bucket to write carted files too
+                            type: string
+                          cart_version:
+                            default: V1
+                            description: |-
+                              The `CaRT` version to write new files with
+
+                              Reads always detect the version from the file itself, so lowering this never makes an
+                              already stored file unreadable. Repos are carted with this too since they share the
+                              files password.
+                            enum:
+                            - V1
+                            - V2
+                            type: string
+                          earliest:
+                            default: 1262332800
+                            description: The earliest date a file will have a submission date for as a unix epoch
+                            format: int64
+                            type: integer
+                          partition_size:
+                            default: 180
+                            description: The number of seconds each partition in the database should cover
+                            format: uint16
+                            maximum: 65535.0
+                            minimum: 0.0
+                            type: integer
+                          password:
+                            default: SecretCornIsBest
+                            description: The password to use when encrypting carted files
+                            type: string
+                        type: object
+                      graphics:
+                        default:
+                          bucket: thorium-graphics
+                        description: The settings related to graphics (image files)
+                        properties:
+                          bucket:
+                            default: thorium-graphics
+                            description: The bucket to write graphics to
+                            type: string
+                        type: object
+                      interface:
+                        default: 0.0.0.0
+                        description: The interface to bind onto
+                        type: string
+                      namespace:
+                        default: thorium
+                        description: The namespace to use in the backend
+                        type: string
+                      namespace_blacklist:
+                        default:
+                        - kube-system
+                        - redis
+                        - thorium
+                        - scylla-operator
+                        - quickwit
+                        - elastic-system
+                        - cert-manager
+                        - jaeger
+                        - scylla
+                        description: A list of namespaces/groups that cannot be created by Thorium or its users
+                        items:
+                          type: string
+                        type: array
+                      port:
+                        default: 80
+                        description: The port to bind to
+                        format: uint16
+                        maximum: 65535.0
+                        minimum: 0.0
+                        type: integer
+                      reaction_cache:
+                        default:
+                          bucket: thorium-reaction-cache-files
+                          cart_version: V1
+                          password: SecretCornIsBest
+                        description: The settings for the reaction cache
+                        properties:
+                          bucket:
+                            default: thorium-reaction-cache-files
+                            description: The bucket to write extras files to
+                            type: string
+                          cart_version:
+                            default: V1
+                            description: |-
+                              The `CaRT` version to write new reaction cache files with
+
+                              Reads always detect the version from the file itself, so lowering this never makes an
+                              already cached object unreadable.
+                            enum:
+                            - V1
+                            - V2
+                            type: string
+                          password:
+                            default: SecretCornIsBest
+                            description: The password to use when encrypting carted files
+                            type: string
+                        type: object
+                      repos:
+                        default:
+                          bucket: thorium-repos-files
+                          earliest: 946684801
+                          partition_size: 180
+                        description: The settings for repos
+                        properties:
+                          bucket:
+                            default: thorium-repos-files
+                            description: The bucket to write zipped repositories to
+                            type: string
+                          earliest:
+                            default: 946684801
+                            description: The earliest date a repo will have a commit for as a unix epoch
+                            format: int64
+                            type: integer
+                          partition_size:
+                            default: 180
+                            description: The number of seconds each partition in the database should cover
+                            format: uint16
+                            maximum: 65535.0
+                            minimum: 0.0
+                            type: integer
+                        type: object
+                      request_size_limits:
+                        default:
+                          data: 1024
+                          form: 1024
+                          json: 1024
+                        description: The request size limits to use in the API
+                        properties:
+                          data:
+                            default: 1024
+                            description: The limit to apply to data/files
+                            format: uint64
+                            minimum: 0.0
+                            type: integer
+                          form:
+                            default: 1024
+                            description: The limit to apply to forms
+                            format: uint64
+                            minimum: 0.0
+                            type: integer
+                          json:
+                            default: 1024
+                            description: The limit to apply to json bodies
+                            format: uint64
+                            minimum: 0.0
+                            type: integer
+                        type: object
+                      results:
+                        default:
+                          bucket: thorium-result-files
+                          earliest: 1609459201
+                          partition_size: 60
+                        description: The settings for results
+                        properties:
+                          bucket:
+                            default: thorium-result-files
+                            description: The bucket to write extras files to
+                            type: string
+                          earliest:
+                            default: 1609459201
+                            description: The earliest date a result will exist at as a unix epoch
+                            format: int64
+                            type: integer
+                          partition_size:
+                            default: 60
+                            description: The number of seconds each partition in the database should cover
+                            format: uint16
+                            maximum: 65535.0
+                            minimum: 0.0
+                            type: integer
+                        type: object
+                      retention:
+                        default:
+                          data: 604800
+                          logs: 604800
+                          notifications: 604800
+                          results: 3
+                        description: how long data of various types should be retained in Thorium
+                        properties:
+                          data:
+                            default: 604800
+                            description: How long general job data should be retained in Thorium
+                            format: uint64
+                            minimum: 0.0
+                            type: integer
+                          logs:
+                            default: 604800
+                            description: How long job logs should be retained for from the moment each row is inserted
+                            format: uint64
+                            minimum: 0.0
+                            type: integer
+                          notifications:
+                            default: 604800
+                            description: |-
+                              How long notifications should be retained for from the moment they are inserted;
+                              notifications at the 'ERROR' level never expire by default
+                            format: uint64
+                            minimum: 0.0
+                            type: integer
+                          results:
+                            default: 3
+                            description: How many results to retain for each group
+                            format: uint
+                            minimum: 0.0
+                            type: integer
+                        type: object
+                      s3:
+                        description: The settings used to write objects to s3
+                        properties:
+                          access_key:
+                            description: The access key S3c should use to authenticate
+                            type: string
+                          attempt_timeout:
+                            default: 300
+                            description: |-
+                              The number of seconds a single s3 API attempt (e.g. one `upload_part`) may take
+                              before it times out and is retried
+
+                              This is intentionally generous so large multipart uploads over a slow-but-healthy
+                              link are not aborted, while still bounding a stalled attempt so it can be retried
+                              instead of hanging or failing the entire upload.
+                            format: uint64
+                            minimum: 0.0
+                            type: integer
+                          connect_timeout:
+                            default: 30
+                            description: The number of seconds to wait when establishing a connection to s3
+                            format: uint64
+                            minimum: 0.0
+                            type: integer
+                          endpoint:
+                            description: The endpoint S3c should talk to
+                            type: string
+                          max_attempts:
+                            default: 5
+                            description: The maximum number of times an s3 API call should be attempted before giving up
+                            format: uint32
+                            minimum: 0.0
+                            type: integer
+                          region:
+                            description: The region our s3 client should use
+                            nullable: true
+                            type: string
+                          secret_token:
+                            description: The secret token S3c should use when authenticating
+                            type: string
+                          skip_bucket_auto_create:
+                            default: false
+                            description: Whether the operator should skip bucket creation or not
+                            type: boolean
+                          use_path_style:
+                            default: false
+                            description: Force path style bucket adressing
+                            type: boolean
+                        type: object
+                      scaler:
+                        default:
+                          agent_auto_bypass_proxy_for_api: true
+                          agent_no_proxy: []
+                          bare_metal:
+                            clusters: {}
+                            dwell: 5
+                            fair_share:
+                              cpu: 2
+                              memory: 1
+                            fair_share_divisor: 1
+                          cache_lifetime: 600
+                          crane:
+                            insecure: false
+                            path: /app/crane
+                          deadline_window: 100000
+                          k8s:
+                            clear_proxy: false
+                            clusters: {}
+                            dwell: 5
+                            fair_share:
+                              cpu: 2
+                              memory: 1
+                            fair_share_divisor: 1
+                            ignored_contexts: []
+                            limbo: 5
+                            primary_cluster: kubernetes-admin@cluster.local
+                          kvm:
+                            clusters: {}
+                            dwell: 5
+                            fair_share:
+                              cpu: 2
+                              memory: 1
+                            fair_share_divisor: 1
+                          tasks:
+                            cache_reload: 600
+                            cleanup: 25
+                            decrease_fair_share: 600
+                            image_runtimes: 300
+                            ldap_sync: 600
+                            resources: 120
+                            zombies: 30
+                          windows:
+                            clusters: []
+                            dwell: 5
+                            fair_share:
+                              cpu: 2
+                              memory: 1
+                            fair_share_divisor: 1
+                        description: The settings for the scaler
+                        properties:
+                          agent_auto_bypass_proxy_for_api:
+                            default: true
+                            description: |-
+                              Whether the scaler makes agents bypass any image/environment proxy when reaching the API
+
+                              When true (the default) the scaler adds the API host to each agent's `NO_PROXY` environment
+                              variable so the agent connects to the API directly even if the image's proxy can't route to
+                              it. Set this to false for the rare topology where the API itself sits behind the proxy and
+                              must be reached through it.
+                            type: boolean
+                          agent_no_proxy:
+                            default: []
+                            description: |-
+                              Extra `NO_PROXY` entries injected into spawned agents so they bypass any image/environment
+                              proxy when reaching these hosts
+
+                              These are raw `NO_PROXY`-syntax entries (bare domains, leading-dot domains like `.local`,
+                              IPs, or CIDRs) added on top of (not replacing) the agent environment's `NO_PROXY`. They do
+                              not affect the Thorium API unless an entry happens to match the API host; use
+                              `agent_auto_bypass_proxy_for_api` to bypass the proxy for the API.
+                            items:
+                              type: string
+                            type: array
+                          bare_metal:
+                            default:
+                              clusters: {}
+                              dwell: 5
+                              fair_share:
+                                cpu: 2
+                                memory: 1
+                              fair_share_divisor: 1
+                            description: Specific settings for the BareMetal scaler
+                            properties:
+                              clusters:
+                                additionalProperties:
+                                  description: The settings for a specific bare metal cluster
+                                  properties:
+                                    agent_path:
+                                      default: thorium-agent
+                                      description: The path the bare metal scaler can find the Thorium agent at
+                                      type: string
+                                    nodes:
+                                      additionalProperties:
+                                        description: A restriction on what images or groups a node can run jobs for
+                                        properties:
+                                          images:
+                                            additionalProperties:
+                                              items:
+                                                type: string
+                                              type: array
+                                            default: {}
+                                            description: The group specific images this node can run jobs for
+                                            type: object
+                                        type: object
+                                      default: {}
+                                      description: The nodes in the cluster to run Thorium jobs on by hostname/ip and any restrictions
+                                      type: object
+                                    spawn_slots:
+                                      default:
+                                        deadlines: 2
+                                        fairshare: 2
+                                      description: The max numbers of pods to spawn per node
+                                      properties:
+                                        deadlines:
+                                          description: The amount of pods to spawn per scale loop for the deadline pool
+                                          format: uint64
+                                          minimum: 0.0
+                                          type: integer
+                                        fairshare:
+                                          description: The amount of pods to spawn per scale loop for the fairshare pool
+                                          format: uint64
+                                          minimum: 0.0
+                                          type: integer
+                                      type: object
+                                    username:
+                                      default: root
+                                      description: The user to login to these nodes as
+                                      type: string
+                                  type: object
+                                description: The bare metal clusters to schedule Thorium jobs on
+                                type: object
+                              dwell:
+                                default: 5
+                                description: How long at minimum to wait between scale attempts in seconds
+                                format: uint64
+                                minimum: 0.0
+                                type: integer
+                              fair_share:
+                                default:
+                                  cpu: 2
+                                  memory: 1
+                                description: The settings to use when calculating fairshare costs
+                                properties:
+                                  cpu:
+                                    default: 2
+                                    description: The multiplier to apply to cpu costs
+                                    format: uint64
+                                    minimum: 0.0
+                                    type: integer
+                                  memory:
+                                    default: 1
+                                    description: The multiplier to apply to memory costs
+                                    format: uint64
+                                    minimum: 0.0
+                                    type: integer
+                                type: object
+                              fair_share_divisor:
+                                default: 1
+                                description: The divisor to use when calculating what % of resources to reduce fair share ranks by
+                                format: uint64
+                                minimum: 0.0
+                                type: integer
+                            type: object
+                          cache_lifetime:
+                            default: 600
+                            description: How long the cache should live for at most before being invalidated in seconds
+                            format: uint64
+                            minimum: 0.0
+                            type: integer
+                          crane:
+                            default:
+                              insecure: false
+                              path: /app/crane
+                            description: The crane specific setttings
+                            properties:
+                              insecure:
+                                default: false
+                                description: Tell crane to skip SSL validation
+                                type: boolean
+                              path:
+                                default: /app/crane
+                                description: The path to find crane at
+                                type: string
+                            type: object
+                          deadline_window:
+                            default: 100000
+                            description: The number of deadlines to pull for one scale loop
+                            format: uint64
+                            minimum: 0.0
+                            type: integer
+                          k8s:
+                            default:
+                              clear_proxy: false
+                              clusters: {}
+                              dwell: 5
+                              fair_share:
+                                cpu: 2
+                                memory: 1
+                              fair_share_divisor: 1
+                              ignored_contexts: []
+                              limbo: 5
+                              primary_cluster: kubernetes-admin@cluster.local
+                            description: Specific settings for the K8s scaler
+                            properties:
+                              clear_proxy:
+                                default: false
+                                description: Clear any proxy settings that kube finds
+                                type: boolean
+                              clusters:
+                                additionalProperties:
+                                  description: The settings for a single k8s cluster
+                                  properties:
+                                    alias:
+                                      description: The name to use for this cluster in Thorium
+                                      nullable: true
+                                      type: string
+                                    api_url:
+                                      description: The url to use for the Thorium api instead of the in cluster service
+                                      nullable: true
+                                      type: string
+                                    burstable:
+                                      default:
+                                        cpu: 0.0
+                                        memory: 0.0
+                                      description: What % of burstable resources to allow nodes in this cluster
+                                      properties:
+                                        cpu:
+                                          default: 0.0
+                                          description: The percent of burstable cores to allow for on this node
+                                          format: double
+                                          type: number
+                                        memory:
+                                          default: 0.0
+                                          description: The percent of burstable memory to allow for on this node
+                                          format: double
+                                          type: number
+                                      type: object
+                                    filters:
+                                      default:
+                                        custom: []
+                                        master: false
+                                      description: Settings for filtering nodes from executing Thorium jobs
+                                      properties:
+                                        custom:
+                                          default: []
+                                          description: Custom labels to require nodes to have
+                                          items:
+                                            type: string
+                                          type: array
+                                        master:
+                                          default: false
+                                          description: Whether to filter out master nodes or not
+                                          type: boolean
+                                      type: object
+                                    groups:
+                                      default: []
+                                      description: Any groups to restrict to being to deploy jobs to this cluster
+                                      items:
+                                        type: string
+                                      type: array
+                                    host_aliases:
+                                      additionalProperties:
+                                        items:
+                                          type: string
+                                        type: array
+                                      default: {}
+                                      description: The host aliases to apply to pods in this cluster
+                                      type: object
+                                    image_restrictions:
+                                      additionalProperties:
+                                        additionalProperties:
+                                          items:
+                                            type: string
+                                          type: array
+                                        type: object
+                                      default: {}
+                                      description: |-
+                                        The restrictions for this cluster
+                                        TODO: move this out of the config and into the api in a cleaner/less painful way
+                                      type: object
+                                    insecure:
+                                      default: false
+                                      description: Whether this cluster uses an invalid certificate or not
+                                      type: boolean
+                                    nodes:
+                                      default: []
+                                      description: The nodes in the cluster to run Thorium jobs on (defaults to all)
+                                      items:
+                                        type: string
+                                      type: array
+                                    restricted:
+                                      default: false
+                                      description: Whether this cluster can run any image or is restricted
+                                      type: boolean
+                                    spawn_slots:
+                                      default:
+                                        deadlines: 2
+                                        fairshare: 2
+                                      description: The max numbers of pods to spawn per node
+                                      properties:
+                                        deadlines:
+                                          description: The amount of pods to spawn per scale loop for the deadline pool
+                                          format: uint64
+                                          minimum: 0.0
+                                          type: integer
+                                        fairshare:
+                                          description: The amount of pods to spawn per scale loop for the fairshare pool
+                                          format: uint64
+                                          minimum: 0.0
+                                          type: integer
+                                      type: object
+                                    tls_server_name:
+                                      description: The tls server name to use for cert validation
+                                      nullable: true
+                                      type: string
+                                  type: object
+                                default: {}
+                                description: The k8s clusters to be used by Thorium by their context name
+                                type: object
+                              dwell:
+                                default: 5
+                                description: How long at minimum to wait between scale attempts in seconds
+                                format: uint64
+                                minimum: 0.0
+                                type: integer
+                              fair_share:
+                                default:
+                                  cpu: 2
+                                  memory: 1
+                                description: The settings to use when calculating fairshare costs
+                                properties:
+                                  cpu:
+                                    default: 2
+                                    description: The multiplier to apply to cpu costs
+                                    format: uint64
+                                    minimum: 0.0
+                                    type: integer
+                                  memory:
+                                    default: 1
+                                    description: The multiplier to apply to memory costs
+                                    format: uint64
+                                    minimum: 0.0
+                                    type: integer
+                                type: object
+                              fair_share_divisor:
+                                default: 1
+                                description: The divisor to use when calculating what % of resources to reduce fair share ranks by
+                                format: uint64
+                                minimum: 0.0
+                                type: integer
+                              ignored_contexts:
+                                default: []
+                                description: The contexts to ignore when parsing our kube config
+                                items:
+                                  type: string
+                                type: array
+                              limbo:
+                                default: 5
+                                description: How long an agent should sit in limbo without a job
+                                format: uint
+                                minimum: 0.0
+                                type: integer
+                              primary_cluster:
+                                default: kubernetes-admin@cluster.local
+                                description: The name of the primary cluster that core components will be deployed too
+                                type: string
+                            type: object
+                          kvm:
+                            default:
+                              clusters: {}
+                              dwell: 5
+                              fair_share:
+                                cpu: 2
+                                memory: 1
+                              fair_share_divisor: 1
+                            description: The kvm specific settings
+                            properties:
+                              clusters:
+                                additionalProperties:
+                                  description: The settings for a specific kvm cluster
+                                  properties:
+                                    agent_path:
+                                      default: thorium-agent
+                                      description: The path the bare metal scaler can find the Thorium agent at
+                                      type: string
+                                    nodes:
+                                      additionalProperties:
+                                        description: A restriction on what images or groups a kvm node can run jobs for
+                                        properties:
+                                          images:
+                                            additionalProperties:
+                                              items:
+                                                type: string
+                                              type: array
+                                            default: {}
+                                            description: The group specific images this node can run jobs for
+                                            type: object
+                                        type: object
+                                      default: {}
+                                      description: The nodes in the cluster to run Thorium jobs on by hostname/ip and any restrictions
+                                      type: object
+                                    spawn_slots:
+                                      default:
+                                        deadlines: 2
+                                        fairshare: 2
+                                      description: The max numbers of pods to spawn per node
+                                      properties:
+                                        deadlines:
+                                          description: The amount of pods to spawn per scale loop for the deadline pool
+                                          format: uint64
+                                          minimum: 0.0
+                                          type: integer
+                                        fairshare:
+                                          description: The amount of pods to spawn per scale loop for the fairshare pool
+                                          format: uint64
+                                          minimum: 0.0
+                                          type: integer
+                                      type: object
+                                  type: object
+                                description: The kvm clusters to schedule Thorium jobs on
+                                type: object
+                              dwell:
+                                default: 5
+                                description: How long at minimum to wait between scale attempts in seconds
+                                format: uint64
+                                minimum: 0.0
+                                type: integer
+                              fair_share:
+                                default:
+                                  cpu: 2
+                                  memory: 1
+                                description: The settings to use when calculating fairshare costs
+                                properties:
+                                  cpu:
+                                    default: 2
+                                    description: The multiplier to apply to cpu costs
+                                    format: uint64
+                                    minimum: 0.0
+                                    type: integer
+                                  memory:
+                                    default: 1
+                                    description: The multiplier to apply to memory costs
+                                    format: uint64
+                                    minimum: 0.0
+                                    type: integer
+                                type: object
+                              fair_share_divisor:
+                                default: 1
+                                description: The divisor to use when calculating what % of resources to reduce fair share ranks by
+                                format: uint64
+                                minimum: 0.0
+                                type: integer
+                            type: object
+                          tasks:
+                            default:
+                              cache_reload: 600
+                              cleanup: 25
+                              decrease_fair_share: 600
+                              image_runtimes: 300
+                              ldap_sync: 600
+                              resources: 120
+                              zombies: 30
+                            description: The global scaler specific tasks
+                            properties:
+                              cache_reload:
+                                default: 600
+                                description: How long to wait between reloading the scaler cache
+                                format: uint32
+                                minimum: 0.0
+                                type: integer
+                              cleanup:
+                                default: 25
+                                description: How long to wait between cleaning up any orphaned resources
+                                format: uint32
+                                minimum: 0.0
+                                type: integer
+                              decrease_fair_share:
+                                default: 600
+                                description: How long to wait between decreasing fair share ranks
+                                format: uint32
+                                minimum: 0.0
+                                type: integer
+                              image_runtimes:
+                                default: 300
+                                description: How long to wait between updating our image runtimes
+                                format: uint32
+                                minimum: 0.0
+                                type: integer
+                              ldap_sync:
+                                default: 600
+                                description: How long to wait between syncing ldap info
+                                format: uint32
+                                minimum: 0.0
+                                type: integer
+                              resources:
+                                default: 120
+                                description: How long to wait between updating our resources count
+                                format: uint32
+                                minimum: 0.0
+                                type: integer
+                              zombies:
+                                default: 30
+                                description: How long to wait between checking for zombie jobs
+                                format: uint32
+                                minimum: 0.0
+                                type: integer
+                            type: object
+                          windows:
+                            default:
+                              clusters: []
+                              dwell: 5
+                              fair_share:
+                                cpu: 2
+                                memory: 1
+                              fair_share_divisor: 1
+                            description: The windows specific settings
+                            properties:
+                              clusters:
+                                description: The windows clusters to schedule Thorium jobs on
+                                items:
+                                  type: string
+                                type: array
+                              dwell:
+                                default: 5
+                                description: How long at minimum to wait between scale attempts in seconds
+                                format: uint64
+                                minimum: 0.0
+                                type: integer
+                              fair_share:
+                                default:
+                                  cpu: 2
+                                  memory: 1
+                                description: The settings to use when calculating fairshare costs
+                                properties:
+                                  cpu:
+                                    default: 2
+                                    description: The multiplier to apply to cpu costs
+                                    format: uint64
+                                    minimum: 0.0
+                                    type: integer
+                                  memory:
+                                    default: 1
+                                    description: The multiplier to apply to memory costs
+                                    format: uint64
+                                    minimum: 0.0
+                                    type: integer
+                                type: object
+                              fair_share_divisor:
+                                default: 1
+                                description: The divisor to use when calculating what % of resources to reduce fair share ranks by
+                                format: uint64
+                                minimum: 0.0
+                                type: integer
+                            type: object
+                        type: object
+                      search_streamer:
+                        default:
+                          init:
+                            chunks_per_worker: 10000
+                          max_document_size: 100.0 MiB
+                          max_request_size: 100.0 MiB
+                          workers: 5
+                        description: The settings for the search-streamer
+                        properties:
+                          init:
+                            default:
+                              chunks_per_worker: 10000
+                            description: The settings for the search-streamer init phase
+                            properties:
+                              chunks_per_worker:
+                                default: 10000
+                                description: |-
+                                  The number of chunks per worker to split the Scylla into when
+                                  running the init phase
+
+                                  In general, the more data is in Scylla, the greater the number of chunks
+                                  it should be split up into. Having more chunks means if the search-streamer
+                                  is interrupted while initiating indexes, it can resume the process at a more
+                                  specific point and repeat less work; however for very small databases,
+                                  having too many chunks will lead to many very sparse or empty chunks and
+                                  impact performance.
+                                format: uint
+                                minimum: 1.0
+                                type: integer
+                            type: object
+                          max_document_size:
+                            default: 100.0 MiB
+                            description: |-
+                              The maximum size an individual document/value can be for indexing
+                              in the search store; accepts M, MB, MiB, or equivalents for KB and GB
+
+                              In Elastic, this is equivalent to `http.max_content_len`
+                              (see <https://www.elastic.co/docs/reference/elasticsearch/configuration-reference/networking-settings>).
+                            example: 100 MiB
+                            type: string
+                          max_request_size:
+                            default: 100.0 MiB
+                            description: |-
+                              The maximum size a single create request to the search store;
+                              accepts M, MB, MiB, or equivalents for KB and GB
+                            example: 100 MiB
+                            type: string
+                          workers:
+                            default: 5
+                            description: |-
+                              The number of workers each streamer in the search-streamer has
+
+                              The more workers, the more data can potentially be held in memory
+                              and sent to Elasticsearch at once. Decrease the number of workers
+                              if the search-streamer runs out of memory or Elasticsearch complains.
+                            format: uint
+                            minimum: 1.0
+                            type: integer
+                        type: object
+                      secret_key:
+                        description: |-
+                          The secret key used for generating secrets
+                          and for bootstrapping with the operator
+                          make sure this is a longer string and its protected
+                        type: string
+                      tags:
+                        default:
+                          entities:
+                            earliest: 1748736000
+                            partition_size: 600
+                          files:
+                            earliest: 1609459201
+                            partition_size: 180
+                          repos:
+                            earliest: 1609459201
+                            partition_size: 180
+                        description: The settings for tags
+                        properties:
+                          entities:
+                            default:
+                              earliest: 1748736000
+                              partition_size: 600
+                            description: The settings for entity tags
+                            properties:
+                              earliest:
+                                default: 1609459201
+                                description: The earliest date a tag will exist as a unix epoch
+                                format: int64
+                                type: integer
+                              partition_size:
+                                default: 180
+                                description: The number of seconds each partition in the database should cover
+                                format: uint16
+                                maximum: 65535.0
+                                minimum: 0.0
+                                type: integer
+                            type: object
+                          files:
+                            default:
+                              earliest: 1609459201
+                              partition_size: 180
+                            description: The settings for file tags
+                            properties:
+                              earliest:
+                                default: 1609459201
+                                description: The earliest date a tag will exist as a unix epoch
+                                format: int64
+                                type: integer
+                              partition_size:
+                                default: 180
+                                description: The number of seconds each partition in the database should cover
+                                format: uint16
+                                maximum: 65535.0
+                                minimum: 0.0
+                                type: integer
+                            type: object
+                          repos:
+                            default:
+                              earliest: 1609459201
+                              partition_size: 180
+                            description: The settings for repo tags
+                            properties:
+                              earliest:
+                                default: 1609459201
+                                description: The earliest date a tag will exist as a unix epoch
+                                format: int64
+                                type: integer
+                              partition_size:
+                                default: 180
+                                description: The number of seconds each partition in the database should cover
+                                format: uint16
+                                maximum: 65535.0
+                                minimum: 0.0
+                                type: integer
+                            type: object
+                        type: object
+                      tracing:
+                        default:
+                          local:
+                            level: Info
+                        description: The tracing settings to use
+                        properties:
+                          external:
+                            description: |-
+                              The different settings for external tracing services
+
+                              Missing real variant comments until https://github.com/kube-rs/kube/issues/1821 is resolved
+                            nullable: true
+                            oneOf:
+                            - required:
+                              - Grpc
+                            properties:
+                              Grpc:
+                                properties:
+                                  endpoint:
+                                    type: string
+                                  level:
+                                    description: |-
+                                      The log level to set
+
+                                      Missing real variant comments until https://github.com/kube-rs/kube/issues/1821 is resolved
+                                    enum:
+                                    - Off
+                                    - Error
+                                    - Warn
+                                    - Setup
+                                    - Info
+                                    - Debug
+                                    - Trace
+                                    type: string
+                                type: object
+                            type: object
+                          local:
+                            default:
+                              level: Info
+                            description: The settings for sending traces to stdout/stderr
+                            properties:
+                              level:
+                                description: The log level to use for stdout/stderr
+                                enum:
+                                - Off
+                                - Error
+                                - Warn
+                                - Setup
+                                - Info
+                                - Debug
+                                - Trace
+                                type: string
+                            type: object
+                        type: object
+                    type: object
+                type: object
+              config_secrets:
+                default: []
+                description: Secrets holding partial thorium.yml documents merged over `config` in order
+                items:
+                  description: A reference to a Secret holding a partial thorium.yml config
+                  properties:
+                    key:
+                      default: thorium.yml
+                      description: The key in the Secret containing the partial thorium.yml YAML document
+                      type: string
+                    name:
+                      description: The name of the Secret in the `ThoriumCluster`'s namespace
+                      type: string
+                  required:
+                  - name
+                  type: object
+                type: array
+              image_pull_policy:
+                default: Always
+                description: K8s image pull policies for Thorium components
+                type: string
+              registry:
+                description: URL to base container image for Thorium
+                type: string
+              registry_auth:
+                additionalProperties:
+                  type: string
+                description: Auth tokens for Thorium's container registries
+                nullable: true
+                type: object
+              version:
+                default: latest
+                description: Version or tag of image, overrides version
+                type: string
+            required:
+            - components
+            - config
+            - registry
+            type: object
+          status:
+            description: The observed state of a `ThoriumCluster`
+            nullable: true
+            properties:
+              last_transition:
+                description: When the phase or message last changed (RFC3339)
+                nullable: true
+                type: string
+              message:
+                description: Details about the current phase
+                nullable: true
+                type: string
+              phase:
+                description: The current phase of this `ThoriumCluster` (Provisioning, Ready, or Error)
+                nullable: true
+                type: string
+            type: object
+        required:
+        - spec
+        title: ThoriumCluster
+        type: object
+    served: true
+    storage: true
+    subresources:
+      status: {}

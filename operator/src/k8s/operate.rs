@@ -30,7 +30,7 @@ pub async fn apply(
         &meta.name, &meta.namespace
     );
     // get our k8s config
-    let k8s_config = &meta.cluster.spec.config.thorium.scaler.k8s;
+    let k8s_config = &meta.conf.thorium.scaler.k8s;
     // get the name of our primary cluster
     let primary = &k8s_config.primary_cluster;
     // get our host aliases
@@ -39,6 +39,16 @@ pub async fn apply(
     let host_aliases = unconverted_aliases
         .map(|map| map.iter().map(K8sHostAliases::from).collect())
         .unwrap_or_default();
+    // mark this cluster as provisioning unless it is already ready
+    if meta
+        .cluster
+        .status
+        .as_ref()
+        .and_then(|status| status.phase.as_deref())
+        != Some("Ready")
+    {
+        k8s::crds::set_status(&meta.client, &meta.cluster, "Provisioning", None).await;
+    }
     // create ThoriumCluster namespace if none
     k8s::namespaces::try_create(&meta.namespace).await?;
     // create or update ConfigMaps
@@ -49,6 +59,10 @@ pub async fn apply(
     k8s::secrets::create_or_update_registry_auth(meta).await?;
     // create required s3 buckets if not exists
     app::helpers::create_all_buckets(meta).await?;
+    // create Thorium's Scylla role if requested
+    app::bootstrap::scylla(meta).await?;
+    // create Thorium's Elastic role, user, and indexes if requested
+    app::bootstrap::elastic(meta).await?;
     // create or update API service
     k8s::services::create_or_update_all(meta).await?;
     // create or update api deployment from CR
@@ -62,11 +76,16 @@ pub async fn apply(
     if result.is_err() {
         println!("{}", result.expect_err("expected error but found ()"));
         println!("Error: Timed out waiting for API pod to be reachable, exiting cluster provision");
+        // record that we are still waiting on the API
+        let message = "Timed out waiting for the API to be reachable".to_owned();
+        k8s::crds::set_status(&meta.client, &meta.cluster, "Provisioning", Some(message)).await;
         // exit cluster provision operation early here and requeue
         return Ok(Action::requeue(Duration::from_secs(60)));
     }
     // create operator user and retrieve token
     let operator_token = app::users::create_operator(meta, &host).await?;
+    // create the initial admin user if requested
+    app::bootstrap::admin(meta, &host).await?;
     // build out operator thorium client
     let operator = Thorium::build(host.clone())
         .token(&operator_token)
@@ -119,6 +138,8 @@ pub async fn apply(
     shared.info.pin().insert(name, thorium_info);
     // log completed ThoriumCluster instance
     println!("Completed creation of {} ThoriumCluster", &meta.name);
+    // mark this cluster as ready
+    k8s::crds::set_status(&meta.client, &meta.cluster, "Ready", None).await;
     // If no events were received, check back every 5 min
     Ok(Action::requeue(Duration::from_secs(APPLY_REQUEUE_SECS)))
 }

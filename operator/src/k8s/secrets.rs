@@ -1,6 +1,6 @@
 use k8s_openapi::{ByteString, api::core::v1::Secret};
-use kube::Api;
 use kube::api::{DeleteParams, ObjectMeta, Patch, PatchParams, PostParams};
+use kube::{Api, Client};
 use rand::Rng;
 use rand::distr::Alphanumeric;
 use std::collections::BTreeMap;
@@ -108,8 +108,11 @@ pub fn build_secret(secret: &str, name: &str, key: &str, namespace: &str) -> Sec
 ///
 /// * `meta` - Thorium cluster client and metadata
 pub async fn create_thorium_config(meta: &ClusterMeta) -> Result<(), Error> {
-    // Create Thorium config secret from ThoriumCluster resource
-    let secret_yaml = serde_norway::to_string(&serde_json::json!(&meta.cluster.spec.config))?;
+    // convert the merged config to JSON first so enums serialize as maps; serializing the
+    // typed config directly emits YAML tags (e.g. `!Grpc`) that the config loader rejects
+    let conf_json = serde_json::to_value(&meta.conf)?;
+    // Create Thorium config secret from the merged ThoriumCluster config
+    let secret_yaml = serde_norway::to_string(&conf_json)?;
     // build thorium config secret template
     let thorium_secret = build_secret(
         secret_yaml.as_ref(),
@@ -227,6 +230,40 @@ pub async fn get_secret(
             secret_name, error
         ))),
     };
+}
+
+/// Read a single key from a Secret in any namespace
+///
+///  Arguments
+///
+/// * `client` - The kube client to read the Secret with
+/// * `namespace` - The namespace of the Secret
+/// * `name` - The name of the Secret
+/// * `key` - The key to read from the Secret
+pub async fn get_secret_key(
+    client: &Client,
+    namespace: &str,
+    name: &str,
+    key: &str,
+) -> Result<String, Error> {
+    // build a secret api for this namespace
+    let secret_api: Api<Secret> = Api::namespaced(client.clone(), namespace);
+    // get the secret
+    let secret = get_secret(&secret_api, &name.to_owned())
+        .await?
+        .ok_or_else(|| Error::new(format!("Secret {namespace}/{name} does not exist")))?;
+    // get the requested key from this secret
+    let ByteString(raw) = secret
+        .data
+        .as_ref()
+        .and_then(|data| data.get(key))
+        .ok_or_else(|| Error::new(format!("Secret {namespace}/{name} has no key {key}")))?;
+    // decode this key as utf8
+    String::from_utf8(raw.clone()).map_err(|_| {
+        Error::new(format!(
+            "Secret {namespace}/{name} key {key} is not valid utf8"
+        ))
+    })
 }
 
 /// Retrieve password from a user k8s secret

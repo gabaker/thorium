@@ -1,47 +1,45 @@
 
 # Overview
 
-Minithor utilizes Minikube to provide a local Kubernetes instance with minimal custom configuration required. Such an instance is useful for development and testing of Thorium as well as small stand alone analyst fly-away kits where external network access may not be available. Minithor deployments are not highly available distributed systems like our production instances and provides minimal redundancy. The Thorium deployment produced by following these instructions should be considered Beta. We will work to improve its stability over time. While a Minithor deployment is accessible only from your localhost, all backing-service passwords are randomly generated per deploy. The default admin user password can be randomized with `--rand-password`.
+Minithor utilizes Minikube to provide a local Kubernetes instance with minimal custom configuration required, and deploys Thorium onto it with the Thorium Helm charts (`deploy/charts`). Such an instance is useful for development and testing of Thorium and its tools. Minithor deployments are not highly available distributed systems like our production instances and provides minimal redundancy. The Thorium deployment produced by following these instructions should be considered Beta. We will work to improve its stability over time. While a Minithor deployment is accessible only from your localhost, all backing-service passwords are randomly generated on the first deploy and kept afterward. The default admin user password can be randomized with `--rand-password`.
 
 ### Requirements
 
-To deploy Minithor, you will need a container runtime such as that provided by the docker engine or podman. KVM/libvirt (`kvm2` driver) is also supported on Linux. Minithor automatically selects the best available driver in order of preference: podman > docker > kvm2. Minithor also requires a relatively beefy machine, with 16+ GiB of memory, 8+ CPUs, and 100GiB of local storage.
+To deploy Minithor, you will need a container runtime such as that provided by the docker engine or podman. KVM/libvirt (`kvm2` driver) is also supported on Linux. Minithor automatically selects the best available driver in order of preference: podman > docker > kvm2. Minithor also requires a relatively beefy machine, with 16+ GiB of memory, 8+ CPUs, and 100GiB of local storage. `curl` and `tar` are needed; Helm 3.8+ is used from your PATH or downloaded (pinned and checksum-verified) into `~/.cache/minithor/bin/`.
+
+Minithor is a single script: run it from a checkout, or download just the file:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/cisagov/thorium/main/minithor/minithor -o minithor
+chmod +x minithor
+```
 
 ## Usage
 
-All lifecycle operations are available through the `minithor` CLI. The script reads input files from your current working directory by default and can be installed globally (e.g. `/usr/local/bin/minithor`).
+All lifecycle operations are available through the `minithor` CLI.
 
 ```
-minithor — manage a local Thorium instance on Minikube
+minithor — manage local Thorium instances on Minikube with the Thorium Helm charts
 
-Usage: minithor <command> [options]
+Usage: minithor [global options] <command> [options]
 
 Commands:
   minikube         Manage the minikube cluster (install, delete)
   start            Start a previously stopped minikube cluster
-  deploy           Deploy all Thorium services and backing infrastructure
+  deploy           Deploy a Thorium instance (and the cluster-wide operators if missing)
+  credentials      Print the instance's admin (and optionally every backend) credential
   get-config       Extract the running Thorium config to ~/thorium.yml
   expose           Port-forward Thorium (and optionally backing services) to localhost
   stop             Stop the minikube cluster (preserves state)
-  cleanup          Remove all Thorium resources for a fresh deploy (requires --confirm)
+  cleanup          Remove an instance and its data (requires --confirm)
 
-Global options:
-  -h, --help       Show this help message
-
-Run 'minithor <command> --help' for command-specific options.
+Global options (may appear anywhere on the command line):
+  --instance <name>  Operate on a named Thorium instance (see Multiple Instances)
+  --profile <name>   The minikube profile to use (default: minikube; also MINITHOR_PROFILE)
+  -h, --help         Show this help message
 ```
 
-### Working directory layout
-
-When running `minithor` commands, the following files are looked for in your current working directory:
-
-| File | Used by | Required? |
-|------|---------|-----------|
-| `thorium-cluster.yml` | `deploy` | No — cluster config (a built-in default is used if absent) |
-| `.dockerconfigjson` | `deploy` | No — private registry credentials for pulling images |
-| `banner.txt` | `deploy` | No — login banner (a default is generated if absent) |
-
-All paths can be overridden with CLI flags — run `minithor <command> --help` for details.
+Every command only touches the selected minikube profile's cluster (`--profile`), so other clusters in your kubeconfig are never used by accident.
 
 ### Install Minikube
 
@@ -60,16 +58,16 @@ minithor minikube install [--cpus <n>] [--memory <n>] [--certs <path>] [--force-
 
 Detects the best available driver (podman > docker > kvm2), downloads minikube for your OS/architecture, configures resource limits, and starts the cluster with Calico CNI, CSI, and Ingress addons. When the host has an HTTP proxy configured (see below), the node's container runtime is also configured to pull images through it.
 
-### Create registry auth file (optional)
+### Private Thorium image (optional)
 
-If the Thorium container image is hosted in a private registry, create a `.dockerconfigjson` file in your working directory containing the registry credentials. The deploy command will detect this file and create a Kubernetes image pull secret automatically.
+If the Thorium container image is hosted in a private registry, pass its credentials to deploy and they are stored as the image pull secret:
 
 ```bash
 docker login registry.domain:port
-cp ~/.docker/config.json .dockerconfigjson
+minithor deploy --docker-config ~/.docker/config.json
 ```
 
-If omitted, the operator will pull images without authentication (works for public registries like `ghcr.io`).
+Without it, images are pulled without authentication (works for public registries like `ghcr.io`).
 
 ### Proxy configuration (optional)
 
@@ -94,7 +92,7 @@ On an unproxied host, all of this proxy/cert plumbing is a no-op.
 
 ### Deploy
 
-The `deploy` command handles the full deployment in a single step: all backing services (Redis, Elasticsearch, ScyllaDB, SeaweedFS, Postgres, Quickwit, Jaeger), the Thorium operator, the ThoriumCluster resource, and a default test user.
+The `deploy` command installs the `infra-operators` chart (the Scylla, ECK, and Kubegres operators, once per cluster; operators that already run elsewhere are skipped) and the `thorium` chart, waits for Thorium to be ready, installs `thorctl`, and imports the default toolbox.
 
 ```bash
 minithor deploy [options]
@@ -102,44 +100,42 @@ minithor deploy [options]
 
 | Flag | Description |
 |------|-------------|
-| `--config <path>` | Path to `thorium-cluster.yml` (default: `$PWD/thorium-cluster.yml`; a built-in default is used if absent) |
-| `--docker-config <path>` | Path to `.dockerconfigjson` (default: `$PWD/.dockerconfigjson`) |
-| `--banner <path>` | Path to `banner.txt` (default: `$PWD/banner.txt`, generates default if absent) |
-| `--bin <path>` | Directory for downloaded binaries like thorctl (default: `/usr/local/bin`) |
-| `--toolbox <path>` | Download location for `toolbox.json` (default: `$PWD/toolbox.json`) |
+| `--chart <path\|oci-ref>` | The thorium chart: a local chart directory, a packaged `.tgz`, or an `oci://` reference (default: `oci://ghcr.io/cisagov/thorium/charts/thorium` at the pinned version) |
+| `--operators-chart <path\|oci-ref>` | The infra-operators chart (default: next to a local `--chart`, or the matching `oci://` reference) |
+| `--chart-version <version>` | Chart version for `oci://` charts |
 | `--user <name>` | Username for the initial admin user (default: `test`) |
 | `--password <pass>` | Password for the initial admin user (default: `INSECURE_DEV_PASSWORD`) |
-| `--rand-password` | Generate a random password for the admin user (saved and reused on redeploy) |
-| `--registry` | Deploy a container registry (registry:2) in the thorium namespace with persistent storage |
-| `--registry-user <name>` | Enable registry basic auth for this user (implies `--registry`, password is auto-generated and printed to stdout) |
-| `--timeout <seconds>` | Timeout for each service rollout/wait (default: 600) |
-| `--version <tag>` | Thorium image tag for the operator and ThoriumCluster (default: `latest`) |
-| `--instance <name>` | Deploy a named instance alongside others (see [Multiple Instances](#multiple-instances)) |
+| `--rand-password` | Let the chart generate the admin password (kept on redeploy; see `credentials`) |
+| `--version <tag>` | Thorium image tag (default: the chart's appVersion) |
+| `--registry` | Deploy a container registry in the thorium namespace (default instance only) |
+| `--registry-user <name>` | Enable registry basic auth for this user (implies `--registry`; password via `credentials --all`) |
+| `--toolbox <path\|url>` | Toolbox to import (default: `tools/toolbox.json` on GitHub main), fetched on this host |
+| `--no-toolbox` | Don't import a toolbox |
+| `--banner <file>` | Login banner text |
+| `--docker-config <file>` | `.dockerconfigjson` for pulling the Thorium image |
+| `--bin <dir>` | Where to install thorctl (default: `/usr/local/bin`) |
+| `--no-thorctl` | Don't install thorctl |
+| `--no-kibana` | Skip Kibana |
+| `--no-scaler` | Omit the k8s scaler (when another instance runs one) |
+| `--values <file>` / `--set <key=value>` | Any other thorium chart setting (repeatable; applied last) |
+| `--skip-operators` | Don't install or upgrade the infra-operators chart |
+| `--timeout <seconds>` | Timeout for each install and the readiness wait (default: 1800) |
 
-This will:
+The chart values come from development defaults embedded in the script, then your flags (written to `~/.cache/minithor/values.yaml`), then `--values`/`--set`. Every backing-service credential is generated by the chart on the first deploy and kept in the `thorium-credentials` secret, so re-running `deploy` is safe and upgrades in place.
 
-1. Wait for the minikube cluster to be healthy
-2. Install Helm and add required chart repos
-3. Deploy Redis, Elasticsearch (ECK), cert-manager, ScyllaDB, SeaweedFS, Jaeger, Kubegres, and Quickwit
-4. Configure databases (Scylla roles/keyspace, Elasticsearch index/user, the Quickwit bucket in SeaweedFS; the Thorium operator creates Thorium's own buckets)
-5. Deploy the Thorium operator and create the ThoriumCluster CRD
-6. Wait for all Thorium components (API, scaler, event-handler, search-streamer) to be running
-7. Create an admin user (default: `test` / `INSECURE_DEV_PASSWORD`, customizable via `--user` / `--password` / `--rand-password`)
-8. Install `thorctl` to the bin directory and import the default toolbox
-9. Create a `static` group and an `allow-all` network policy
-10. Optionally deploy a container registry with persistent storage (if `--registry` or `--registry-user` is specified)
+#### Testing unpublished charts
 
-All backing-service passwords (Redis, Scylla, Elasticsearch, SeaweedFS S3, Postgres, and the Thorium API secret key) are randomly generated on the first deploy using a cryptographically secure RNG and saved in the `minithor-credentials` secret (namespace `minithor`). Re-running `deploy` reuses them, so it is safe to run again after a timeout or to pick up script changes; each run also re-applies the saved password to Scylla's `thorium` role and checks that Postgres still accepts the saved password. A cluster deployed before credentials were saved has its existing passwords read back from the running deployment on the next deploy. `minithor cleanup --confirm` deletes the saved credentials along with the data, so the following deploy starts fresh. The passwords are not displayed during deployment but can be retrieved afterward with `minithor get-config`.
-
-To customize the ThoriumCluster configuration, provide your own config file:
+To test chart changes before they are published, point `--chart` at a chart directory or a packaged chart:
 
 ```bash
-minithor deploy --config path/to/thorium-cluster.yml
+minithor deploy --chart deploy/charts/thorium                 # from a checkout
+helm package -d /tmp/charts deploy/charts/infra-operators deploy/charts/thorium
+minithor deploy --chart /tmp/charts/thorium-1.8.1.tgz         # infra-operators-*.tgz is found alongside
 ```
 
-Write backend credentials in the file as placeholders (`${THORIUM_SECRET}`, `${S3_AK}`, `${S3_SK}`, `${REDIS_PASS}`, `${SCYLLA_PASS}`, `${ES_PASS}`), and the namespace and service hosts as `${THORIUM_NAMESPACE}`, `${REDIS_HOST}`, `${SCYLLA_HOST}`, `${ELASTIC_HOST}`, `${S3_HOST}`, and `${QUICKWIT_INDEXER_HOST}`; deploy substitutes the real values before applying it, so one file works for any instance. See `thorium-cluster.yml.example`.
+#### Existing minithor deployments
 
-Operator and chart versions (ECK, cert-manager, the Scylla operator, the Quickwit chart) and the Redis and Jaeger images are pinned to megathor's defaults, so what is tested here matches what megathor deploys. If a shared operator is already installed at a different chart version (for example by an older minithor), deploy leaves it unchanged and prints a warning; `minithor cleanup --confirm` followed by a fresh deploy moves to the pinned versions.
+Instances deployed by earlier versions of minithor (namespaces `elastic-system`, `minithor`, ...) are not upgraded in place; remove them with that version's `cleanup --confirm` (or delete the cluster) and deploy again.
 
 ### Access Thorium
 
@@ -155,7 +151,7 @@ minithor expose [--dev] [--no-api] [--port <port>] [--port-offset <n>] [--stop] 
 | `--no-api`       | Forward only the backing services (skip API/registry); implies the database ports |
 | `--port <port>`  | Local port for the Thorium API (default: 8080 + offset)         |
 | `--port-offset <n>` | Add `<n>` to every local port so several instances can be exposed at once |
-| `--stop`         | Stop all of your port-forwards (every instance) and remove the Scylla loopback aliases |
+| `--stop`         | Stop your port-forwards into this profile (every instance) and remove the Scylla loopback aliases |
 | `--status`       | Show which port-forwards are running                            |
 
 The registry service (port 5000) is also forwarded when a registry has been deployed. `expose` exits non-zero if any forward fails to start. If a local port is already held by something other than one of your own stale port-forwards (a local Redis, another user's forward, ...), that forward is reported as failed and the other process is left alone. Port-forward logs and loopback alias state are kept per user in `~/.cache/minithor/` (or `$XDG_CACHE_HOME/minithor/`).
@@ -175,17 +171,24 @@ Both files contain every backend credential and are written readable only by you
 
 ### Multiple Instances
 
-`--instance <name>` (or `MINITHOR_INSTANCE=<name>`) selects a named Thorium instance for `deploy`, `expose`, `get-config`, and `cleanup`. A named instance puts each component in its own `<name>-` prefixed namespace (`<name>-thorium`, `<name>-redis`, `<name>-scylla`, `<name>-elastic`, `<name>-quickwit`, `<name>-seaweedfs`, `<name>-jaeger`, `<name>-minithor`), so several instances can run side by side for multi-cluster testing:
+`--instance <name>` (or `MINITHOR_INSTANCE=<name>`) selects a named Thorium instance for `deploy`, `credentials`, `expose`, `get-config`, and `cleanup`. The default instance uses the plain namespaces (`thorium`, `redis`, `scylla`, `elastic`, `seaweedfs`, `quickwit`, `jaeger`); a named instance prefixes each with `<name>-`, so several instances can run side by side:
 
 ```bash
 minithor deploy                                  # default instance
-minithor --instance b deploy                     # a second instance
+minithor --instance b deploy --no-scaler         # a second instance
 minithor --instance b expose --dev --port-offset 100   # API on :8180, Elastic on :9300, ...
 minithor --instance b get-config --local --port-offset 100   # ~/thorium-b.local.yml
 minithor --instance b cleanup --confirm          # removes only instance b
 ```
 
-All instances share the cluster-wide operators (ECK, the Scylla operator, cert-manager, Kubegres) and a single Thorium operator, which manages every ThoriumCluster; the first instance deployed runs it and later instances reuse it. `cleanup` removes the shared operators and CRDs only with the last instance, and refuses to remove the instance running the Thorium operator while others remain unless `--force` is given. Each instance's scaler creates job namespaces named after Thorium groups (such as `static`), so instances using the same group names schedule into the same namespaces; keep instances apart when testing scheduling. The in-cluster registry (`--registry`) is only available to the default instance, and a named instance's ingress host is `<name>.localhost`.
+All instances share the cluster-wide operators (the `infra-operators` release); each runs its own Thorium operator that only manages its own namespace. Each instance's scaler creates job namespaces named after Thorium groups (such as `static`), so run the scaler in only one instance (`--no-scaler` elsewhere). The in-cluster registry (`--registry`) is only available to the default instance, and a named instance's ingress host is `<name>.localhost`.
+
+### Credentials
+
+```bash
+minithor credentials         # the admin user
+minithor credentials --all   # every generated credential
+```
 
 ### Stop
 
@@ -207,20 +210,20 @@ minithor start
 
 ### Cleanup
 
-Remove all deployed Thorium resources and backing services for a fresh deploy. The `--confirm` flag is required:
+Remove an instance and its data. The `--confirm` flag is required:
 
 ```bash
-minithor cleanup --confirm
+minithor cleanup --confirm [--operators]
 ```
 
-This removes all namespaces, Helm releases, CRDs, cluster-level RBAC, and the saved credentials created by the deploy step. Individual step failures are logged but do not abort the cleanup. `--timeout <seconds>` sets the timeout for each delete/wait (default: 300). The minikube cluster itself is preserved.
+This deletes the instance's ThoriumCluster (letting its operator clean up), uninstalls its Helm release, and deletes its namespaces, including PVCs and generated credentials. Other instances are left alone. `--operators` also uninstalls the `infra-operators` chart and its CRDs when no other instance remains. `--timeout <seconds>` sets the timeout for each delete/wait (default: 300). The minikube cluster itself is preserved.
 
 ### Delete Minikube
 
-Completely remove minikube, its data, and associated binaries. The `--confirm` flag is required:
+Delete the selected profile's minikube cluster. The `--confirm` flag is required:
 
 ```bash
-minithor minikube delete --confirm
+minithor minikube delete --confirm [--purge]
 ```
 
-This runs `minikube delete --all --purge`, removes `~/.minikube` and `~/.kube`, uninstalls the minikube and kubectl binaries, and prunes unused container images. This is irreversible.
+Only the selected profile is deleted, so other minikube clusters on the host survive. `--purge` also removes `~/.minikube` and `~/.kube`, uninstalls the minikube and kubectl binaries, and prunes unused container images (skipped while other profiles remain). This is irreversible.

@@ -1,0 +1,55 @@
+# Thorium umbrella chart. Install it into the "thorium" namespace, or into "<prefix>thorium"
+# (e.g. "b-thorium") to run a prefixed instance next to others; every namespace the instance
+# uses gets the same prefix. The infra-operators chart must already be installed.
+#
+# Each top-level key below configures one subchart; see charts/<name>/values.yaml for every
+# setting. Defaults are sized for a single-node development cluster; see values-production.yaml
+# for a multi-node starting point.
+
+# Settings shared by every subchart
+global:
+  # The cluster DNS domain used to build in-cluster service hostnames
+  clusterDomain: cluster.local
+  # Pull every image from this registry instead of its upstream one (e.g. "10.0.0.1:5000" for an
+  # offline mirror). The upstream registry host is dropped and the path kept:
+  # docker.io/library/redis:7.4.11 -> <registry>/redis:7.4.11,
+  # docker.elastic.co/elasticsearch/elasticsearch:8.19.2 -> <registry>/elasticsearch/elasticsearch:8.19.2
+  imageRegistry: ""
+
+# Namespaces and generate-once credentials (charts/secrets)
+secrets:
+  credentials:
+    adminUsername: admin
+
+# Backing services: Redis, SeaweedFS, Scylla, Elasticsearch/Kibana, Quickwit's Postgres,
+# Jaeger, and an optional registry (charts/infra)
+infra: {}
+
+# Trace storage, installed into <prefix>quickwit (charts/quickwit, vendored upstream chart)
+quickwit:
+  enabled: true
+  image:
+    repository: docker.io/quickwit/quickwit
+    pullPolicy: IfNotPresent
+  # the metastore URI, S3 endpoint, and S3 credentials come from the quickwit-credentials secret
+  # (rendered by the secrets subchart) and are expanded from ${VAR} references at startup
+  environmentFrom:
+    - secretRef:
+        name: quickwit-credentials
+  config:
+    default_index_root_uri: s3://quickwit/quickwit-indexes
+    metastore_uri: ${QW_METASTORE_URI}
+    storage:
+      s3:
+        region: us-east-1
+        endpoint: ${QW_S3_ENDPOINT}
+        force_path_style_access: true
+        access_key_id: ${AWS_ACCESS_KEY_ID}
+        secret_access_key: ${AWS_SECRET_ACCESS_KEY}
+  metastore:
+    replicaCount: 1
+  searcher:
+    replicaCount: 1
+
+# The Thorium operator and the ThoriumCluster it reconciles (charts/operator)
+operator: {}

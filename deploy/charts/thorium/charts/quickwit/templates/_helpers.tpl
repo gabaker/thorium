@@ -1,0 +1,253 @@
+{{/* Patched by deploy/charts/vendor-charts.sh */}}
+{{/*
+Expand the name of the chart.
+*/}}
+{{- define "quickwit.name" -}}
+{{- default .Chart.Name .Values.nameOverride | trunc 63 | trimSuffix "-" }}
+{{- end }}
+
+{{/*
+Create the Quickwit image reference. An immutable digest takes precedence over
+the configured tag and the chart appVersion.
+*/}}
+{{- define "quickwit.image" -}}
+{{- $ref := "" -}}
+{{- if .Values.image.digest -}}
+{{- $ref = printf "%s@%s" .Values.image.repository .Values.image.digest -}}
+{{- else -}}
+{{- $ref = printf "%s:%s" .Values.image.repository (.Values.image.tag | default .Chart.AppVersion | toString) -}}
+{{- end -}}
+{{- include "thorium.image" (dict "root" . "image" $ref) -}}
+{{- end -}}
+
+{{/*
+Create a default fully qualified app name.
+We truncate at 63 chars because some Kubernetes name fields are limited to this (by the DNS naming spec).
+If release name contains chart name it will be used as a full name.
+*/}}
+{{- define "quickwit.fullname" -}}
+{{- if .Values.fullnameOverride }}
+{{- .Values.fullnameOverride | trunc 63 | trimSuffix "-" }}
+{{- else }}
+{{- $name := default .Chart.Name .Values.nameOverride }}
+{{- if contains $name .Release.Name }}
+{{- .Release.Name | trunc 63 | trimSuffix "-" }}
+{{- else }}
+{{- printf "%s-%s" .Release.Name $name | trunc 63 | trimSuffix "-" }}
+{{- end }}
+{{- end }}
+{{- end }}
+
+{{/*
+Create chart name and version as used by the chart label.
+*/}}
+{{- define "quickwit.chart" -}}
+{{- printf "%s-%s" .Chart.Name .Chart.Version | replace "+" "_" | trunc 63 | trimSuffix "-" }}
+{{- end }}
+
+{{/*
+Custom labels
+*/}}
+{{- define "quickwit.additionalLabels" -}}
+{{- if .Values.additionalLabels }}
+{{ toYaml .Values.additionalLabels }}
+{{- end }}
+{{- end }}
+
+{{/*
+Common labels
+*/}}
+{{- define "quickwit.labels" -}}
+helm.sh/chart: {{ include "quickwit.chart" . }}
+{{ include "quickwit.selectorLabels" . }}
+{{- if .Chart.AppVersion }}
+app.kubernetes.io/version: {{ .Chart.AppVersion | quote }}
+{{- end }}
+app.kubernetes.io/managed-by: {{ .Release.Service }}
+{{- include "quickwit.additionalLabels" . }}
+{{- end }}
+
+{{/*
+Selector labels
+*/}}
+{{- define "quickwit.selectorLabels" -}}
+app.kubernetes.io/name: {{ include "quickwit.name" . }}
+app.kubernetes.io/instance: {{ .Release.Name }}
+{{- end }}
+
+{{/*
+Searcher Selector labels
+*/}}
+{{- define "quickwit.searcher.selectorLabels" -}}
+{{ include "quickwit.selectorLabels" . }}
+app.kubernetes.io/component: searcher
+{{- end }}
+
+{{/*
+Janitor Selector labels
+*/}}
+{{- define "quickwit.janitor.selectorLabels" -}}
+{{ include "quickwit.selectorLabels" . }}
+app.kubernetes.io/component: janitor
+{{- end }}
+
+{{/*
+Metastore Selector labels
+*/}}
+{{- define "quickwit.metastore.selectorLabels" -}}
+{{ include "quickwit.selectorLabels" . }}
+app.kubernetes.io/component: metastore
+{{- end }}
+
+{{/*
+Read-only metastore Selector labels
+*/}}
+{{- define "quickwit.metastore_ro.selectorLabels" -}}
+{{ include "quickwit.selectorLabels" . }}
+app.kubernetes.io/component: metastore-ro
+{{- end }}
+
+{{/*
+Control Plane Selector labels
+*/}}
+{{- define "quickwit.control_plane.selectorLabels" -}}
+{{ include "quickwit.selectorLabels" . }}
+app.kubernetes.io/component: control-plane
+{{- end }}
+
+{{/*
+Indexer Selector labels
+*/}}
+{{- define "quickwit.indexer.selectorLabels" -}}
+{{ include "quickwit.selectorLabels" . }}
+app.kubernetes.io/component: indexer
+{{- end }}
+
+{{/*
+VolumeAttributesClass name for the indexer.
+*/}}
+{{- define "quickwit.indexer.vacName" -}}
+{{- printf "%s-indexer-vac" .Release.Name }}
+{{- end }}
+
+{{/*
+VolumeAttributesClass name for the searcher.
+*/}}
+{{- define "quickwit.searcher.vacName" -}}
+{{- printf "%s-searcher-vac" .Release.Name }}
+{{- end }}
+
+{{/*
+VolumeAttributesClass apiVersion, auto-detected from cluster capabilities.
+*/}}
+{{- define "quickwit.volumeAttributesClass.apiVersion" -}}
+{{- if .Capabilities.APIVersions.Has "storage.k8s.io/v1/VolumeAttributesClass" -}}
+storage.k8s.io/v1
+{{- else if .Capabilities.APIVersions.Has "storage.k8s.io/v1beta1/VolumeAttributesClass" -}}
+storage.k8s.io/v1beta1
+{{- else -}}
+{{- fail "VolumeAttributesClass is not available on this cluster (requires Kubernetes >= 1.31)" }}
+{{- end -}}
+{{- end }}
+
+{{/*
+Compactor Selector labels
+*/}}
+{{- define "quickwit.compactor.selectorLabels" -}}
+{{ include "quickwit.selectorLabels" . }}
+app.kubernetes.io/component: compactor
+{{- end }}
+
+{{/*
+Create the name of the service account to use
+*/}}
+{{- define "quickwit.serviceAccountName" -}}
+{{- if .Values.serviceAccount.create }}
+{{- default (include "quickwit.fullname" .) .Values.serviceAccount.name }}
+{{- else }}
+{{- default "default" .Values.serviceAccount.name }}
+{{- end }}
+{{- end }}
+
+{{/*
+Quickwit ports
+*/}}
+{{- define "quickwit.ports" -}}
+- name: rest
+  containerPort: 7280
+  protocol: TCP
+- name: grpc
+  containerPort: 7281
+  protocol: TCP
+- name: discovery
+  containerPort: 7282
+  protocol: UDP
+{{- end }}
+
+
+{{/*
+Quickwit environment
+*/}}
+{{- define "quickwit.environment" -}}
+- name: NAMESPACE
+  valueFrom:
+    fieldRef:
+      fieldPath: metadata.namespace
+- name: POD_NAME
+  valueFrom:
+    fieldRef:
+      fieldPath: metadata.name
+- name: POD_IP
+  valueFrom:
+    fieldRef:
+      fieldPath: status.podIP
+- name: QW_CONFIG
+  value: {{ .Values.configLocation }}
+{{- if not .Values.config.cluster_id }}
+- name: QW_CLUSTER_ID
+  value: {{ include "quickwit.namespace" . }}-{{ include "quickwit.fullname" . }}
+{{- end }}
+- name: QW_NODE_ID
+  value: "$(POD_NAME)"
+- name: QW_PEER_SEEDS
+  value: {{ include "quickwit.fullname" . }}-headless
+- name: QW_ADVERTISE_ADDRESS
+  value: "$(POD_IP)"
+- name: QW_CLUSTER_ENDPOINT
+  value: http://{{ include "quickwit.fullname" $ }}-metastore.{{ include "quickwit.namespace" $ }}.svc.{{ .Values.clusterDomain }}:7280
+{{- if .Values.enableStandaloneCompactors }}
+- name: QW_ENABLE_STANDALONE_COMPACTORS
+  value: "true"
+{{- end }}
+{{- with (include "quickwit.extraEnv" .Values.environment) }}
+{{ . }}
+{{- end }}
+{{- end }}
+
+{{/*
+Render extra environment variables supporting both map and list formats.
+Map format (legacy): { KEY: VALUE }
+List format (recommended): [{ name: KEY, value: VALUE, valueFrom: ... }]
+*/}}
+{{- define "quickwit.extraEnv" -}}
+{{- if kindIs "map" . -}}
+{{- $envList := list -}}
+{{- range $key, $value := . -}}
+{{- $envList = append $envList (dict "name" $key "value" ($value | toString)) -}}
+{{- end -}}
+{{- if $envList -}}
+{{- toYaml $envList -}}
+{{- end -}}
+{{- else -}}
+{{- with . -}}
+{{- toYaml . -}}
+{{- end -}}
+{{- end -}}
+{{- end }}
+
+{{/*
+The namespace Quickwit runs in: <prefix>quickwit, next to the instance's other services.
+*/}}
+{{- define "quickwit.namespace" -}}
+{{- include "thorium.ns" (dict "root" . "name" "quickwit") -}}
+{{- end -}}

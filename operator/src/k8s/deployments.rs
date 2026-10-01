@@ -571,7 +571,7 @@ async fn search_streamer_template(
 #[allow(dead_code)]
 pub async fn get_templates(meta: &ClusterMeta) -> Result<Vec<Deployment>, Error> {
     // get our k8s config
-    let k8s_config = &meta.cluster.spec.config.thorium.scaler.k8s;
+    let k8s_config = &meta.conf.thorium.scaler.k8s;
     // get the name of our primary cluster
     let primary = &k8s_config.primary_cluster;
     // get our host aliases

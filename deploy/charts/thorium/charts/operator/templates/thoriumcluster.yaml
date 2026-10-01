@@ -1,0 +1,78 @@
+{{- $ns := include "thorium.namespace" . }}
+{{- $c := .Values.cluster }}
+---
+apiVersion: sandia.gov/v1
+kind: ThoriumCluster
+metadata:
+  name: {{ $c.name }}
+  namespace: {{ $ns }}
+  labels:
+    {{- include "operator.labels" . | nindent 4 }}
+spec:
+  registry: {{ include "thorium.image" (dict "root" $ "image" .Values.image.repository) | quote }}
+  version: {{ $c.version | default (include "operator.tag" .) | quote }}
+  image_pull_policy: {{ $c.imagePullPolicy }}
+  {{- with $c.registryAuth }}
+  registry_auth:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+  components:
+    {{- range $name, $spec := $c.components }}
+    {{- if $spec }}
+    {{ $name }}:
+      {{- toYaml $spec | nindent 6 }}
+    {{- end }}
+    {{- end }}
+  config:
+    {{- include "operator.config" . | nindent 4 }}
+  {{- with $c.configSecrets }}
+  config_secrets:
+    {{- range . }}
+    - name: {{ .name }}
+      key: {{ .key | default "thorium.yml" }}
+    {{- end }}
+  {{- end }}
+  {{- $b := $c.bootstrap }}
+  {{- if or $b.admin.enabled $b.scylla.enabled $b.elastic.enabled }}
+  bootstrap:
+    {{- if $b.admin.enabled }}
+    admin:
+      secret:
+        name: {{ $b.admin.secretName }}
+        username_key: username
+        password_key: password
+    {{- end }}
+    {{- if $b.scylla.enabled }}
+    scylla:
+      drop_default_role: {{ $b.scylla.dropDefaultRole }}
+      {{- with $b.scylla.adminSecret }}
+      admin_secret:
+        name: {{ .name }}
+        {{- with .namespace }}
+        namespace: {{ . }}
+        {{- end }}
+        {{- with .username }}
+        username: {{ . }}
+        {{- end }}
+        {{- with .usernameKey }}
+        username_key: {{ . }}
+        {{- end }}
+        password_key: {{ .passwordKey | default "password" }}
+      {{- end }}
+    {{- end }}
+    {{- if $b.elastic.enabled }}
+    {{- with $b.elastic.adminSecret }}
+    elastic:
+      admin_secret:
+        name: {{ .name }}
+        namespace: {{ .namespace | default (printf "%selastic" (include "thorium.prefix" $)) }}
+        {{- with .username }}
+        username: {{ . }}
+        {{- end }}
+        {{- with .usernameKey }}
+        username_key: {{ . }}
+        {{- end }}
+        password_key: {{ .passwordKey | default "password" }}
+    {{- end }}
+    {{- end }}
+  {{- end }}

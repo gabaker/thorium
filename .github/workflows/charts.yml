@@ -1,0 +1,110 @@
+name: Helm Charts
+
+# Lints the thorium and infra-operators charts on pull requests and publishes them to
+# oci://ghcr.io/<owner>/<repo>/charts: pushes to main publish a prerelease
+# (<chart version>-main.<run number>.g<short sha>) and release tags (X.Y.Z, matching the
+# chart version) publish the release version.
+on:
+  pull_request:
+    paths:
+      - 'deploy/charts/**'
+      - '.github/workflows/charts.yml'
+  push:
+    branches:
+      - main
+      - HelmThoriumCharts
+    paths:
+      - 'deploy/charts/**'
+      - '.github/workflows/charts.yml'
+    tags:
+      - '[0-9]+.[0-9]+.[0-9]+*'
+  workflow_dispatch:
+
+concurrency:
+  group: helm-charts-${{ github.ref }}
+
+env:
+  HELM_VERSION: v3.22.0
+  CHARTS: deploy/charts
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v7
+      - uses: azure/setup-helm@v5
+        with:
+          version: ${{ env.HELM_VERSION }}
+      - name: Lint
+        run: helm lint --strict "$CHARTS/infra-operators" "$CHARTS/thorium"
+      - name: Render the default, prefixed, and production instances
+        run: |
+          helm template infra-operators "$CHARTS/infra-operators" -n infra-operators > /dev/null
+          helm template thorium "$CHARTS/thorium" -n thorium > /dev/null
+          helm template thorium "$CHARTS/thorium" -n b-thorium > /dev/null
+          helm template thorium "$CHARTS/thorium" -n thorium -f "$CHARTS/thorium/values-production.yaml" > /dev/null
+      - name: Check every image follows global.imageRegistry
+        run: |
+          stray=$(helm template thorium "$CHARTS/thorium" -n thorium --set global.imageRegistry=mirror.invalid \
+            | grep -E '^\s*(- )?(image|repository|agentRepository|registry):' \
+            | grep -v 'mirror.invalid' || true)
+          if [ -n "$stray" ]; then
+            echo "Images not using global.imageRegistry:"
+            echo "$stray"
+            exit 1
+          fi
+      - uses: actions/setup-python@v7
+        with:
+          python-version: '3.x'
+      - name: List images
+        run: |
+          python -m pip install --quiet pyyaml
+          "$CHARTS/list-images.sh"
+
+  publish:
+    needs: lint
+    if: github.event_name != 'pull_request' && github.repository == 'cisagov/thorium'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v7
+      - uses: azure/setup-helm@v5
+        with:
+          version: ${{ env.HELM_VERSION }}
+      - name: Choose the chart version
+        id: version
+        run: |
+          chart_version=$(sed -n 's/^version: *//p' "$CHARTS/thorium/Chart.yaml")
+          operators_version=$(sed -n 's/^version: *//p' "$CHARTS/infra-operators/Chart.yaml")
+          if [ "$chart_version" != "$operators_version" ]; then
+            echo "thorium ($chart_version) and infra-operators ($operators_version) chart versions differ" >&2
+            exit 1
+          fi
+          if [[ "$GITHUB_REF" == refs/tags/* ]]; then
+            version="${GITHUB_REF_NAME#v}"
+            if [[ "$version" != "$chart_version" && "$version" != "$chart_version"-* ]]; then
+              echo "tag $GITHUB_REF_NAME does not match the chart version $chart_version" >&2
+              exit 1
+            fi
+          else
+            # the g prefix keeps an all-digit short sha with a leading zero a valid SemVer identifier
+            version="${chart_version}-${GITHUB_REF_NAME//[^a-zA-Z0-9]/-}.${GITHUB_RUN_NUMBER}.g${GITHUB_SHA::7}"
+          fi
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+      - name: Package
+        run: |
+          mkdir -p dist
+          helm package "$CHARTS/infra-operators" --version "${{ steps.version.outputs.version }}" -d dist
+          helm package "$CHARTS/thorium" --version "${{ steps.version.outputs.version }}" -d dist
+      - name: Log in to the container registry
+        run: echo "${{ secrets.GITHUB_TOKEN }}" | helm registry login ghcr.io -u "${{ github.actor }}" --password-stdin
+      - name: Push
+        run: |
+          repo="${GITHUB_REPOSITORY,,}"
+          for chart in dist/*.tgz; do
+            helm push "$chart" "oci://ghcr.io/${repo}/charts"
+          done

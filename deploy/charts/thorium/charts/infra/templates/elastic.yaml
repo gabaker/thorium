@@ -1,0 +1,67 @@
+{{- if .Values.elastic.enabled }}
+{{- $ns := include "thorium.ns" (dict "root" $ "name" "elastic") }}
+---
+apiVersion: elasticsearch.k8s.elastic.co/v1
+kind: Elasticsearch
+metadata:
+  name: elastic
+  namespace: {{ $ns }}
+  labels:
+    {{- include "infra.labels" . | nindent 4 }}
+spec:
+  version: {{ .Values.elastic.version }}
+  {{- with .Values.elastic.image | default (and $.Values.global.imageRegistry (printf "docker.elastic.co/elasticsearch/elasticsearch:%s" $.Values.elastic.version)) }}
+  image: {{ include "thorium.image" (dict "root" $ "image" .) | quote }}
+  {{- end }}
+  volumeClaimDeletePolicy: DeleteOnScaledownOnly
+  nodeSets:
+    - name: default
+      count: {{ .Values.elastic.count }}
+      podTemplate:
+        spec:
+          containers:
+            - name: elasticsearch
+              {{- with .Values.elastic.javaOpts }}
+              env:
+                - name: ES_JAVA_OPTS
+                  value: {{ . | quote }}
+              {{- end }}
+              resources:
+                {{- toYaml .Values.elastic.resources | nindent 16 }}
+      volumeClaimTemplates:
+        - metadata:
+            name: elasticsearch-data
+          spec:
+            {{- include "infra.storageClass" . | nindent 12 }}
+            accessModes:
+              - ReadWriteOnce
+            resources:
+              requests:
+                storage: {{ .Values.elastic.storage }}
+      config:
+        {{- toYaml (mustMergeOverwrite (dict "node.store.allow_mmap" true "http.max_content_length" "1024mb") (deepCopy .Values.elastic.config)) | nindent 8 }}
+{{- if .Values.elastic.kibana.enabled }}
+---
+apiVersion: kibana.k8s.elastic.co/v1
+kind: Kibana
+metadata:
+  name: elastic
+  namespace: {{ $ns }}
+  labels:
+    {{- include "infra.labels" . | nindent 4 }}
+spec:
+  version: {{ .Values.elastic.version }}
+  {{- with .Values.elastic.kibanaImage | default (and $.Values.global.imageRegistry (printf "docker.elastic.co/kibana/kibana:%s" $.Values.elastic.version)) }}
+  image: {{ include "thorium.image" (dict "root" $ "image" .) | quote }}
+  {{- end }}
+  count: 1
+  elasticsearchRef:
+    name: elastic
+  podTemplate:
+    spec:
+      containers:
+        - name: kibana
+          resources:
+            {{- toYaml .Values.elastic.kibana.resources | nindent 12 }}
+{{- end }}
+{{- end }}

@@ -1,0 +1,14 @@
+# Install the infra-operators chart: the Scylla, ECK, and Kubegres operators every Thorium
+# deployment's backing services need. They are cluster-wide, so only one deployment per
+# cluster installs them; disable this for additional deployments sharing a cluster.
+infra_operators_enabled: true
+infra_operators_namespace: "infra-operators"
+# Install each operator; disable any the cluster already runs
+scylla_operator_enabled: true
+elastic_operator_enabled: true
+kubegres_operator_enabled: true
+scylla_operator_replicas: 1
+# The chart to install; empty uses the published chart online or files/ offline
+infra_operators_chart: ""
+# Extra values files for the infra-operators chart
+infra_operators_values_files: []

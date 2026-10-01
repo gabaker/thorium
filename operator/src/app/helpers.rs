@@ -106,8 +106,8 @@ pub async fn create_bucket(config: &S3, client: &Client, bucket_name: &str) -> R
 /// * `meta` - Thorium cluster client and metadata
 pub async fn create_all_buckets(meta: &ClusterMeta) -> Result<(), Error> {
     // get s3 portion of config
-    let s3 = &meta.cluster.spec.config.thorium.s3;
-    let config = &meta.cluster.spec.config.thorium;
+    let s3 = &meta.conf.thorium.s3;
+    let config = &meta.conf.thorium;
     // get our s3 credentials
     let creds = Credentials::new(&s3.access_key, &s3.secret_token, None, None, "Thorium");
     // build our s3 config

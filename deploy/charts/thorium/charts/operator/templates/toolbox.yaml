@@ -1,0 +1,90 @@
+{{- $t := .Values.toolbox }}
+{{- if or $t.url $t.json }}
+{{- $ns := include "thorium.namespace" . }}
+{{- $source := ternary "/toolbox/toolbox.json" $t.url (empty $t.url) }}
+{{- $hash := sha256sum (printf "%s%s%s%s%s%s" $t.url $t.json $t.mode $t.groupOverride (toJson $t.groups) (toJson $t.networkPolicies)) | trunc 10 }}
+{{- if $t.json }}
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: toolbox-{{ $hash }}
+  namespace: {{ $ns }}
+  labels:
+    {{- include "operator.labels" . | nindent 4 }}
+data:
+  toolbox.json: {{ $t.json | quote }}
+{{- end }}
+---
+# Imports the toolbox once the API is healthy; the name tracks the toolbox source so a new
+# toolbox runs a new import instead of mutating a finished Job
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: toolbox-import-{{ $hash }}
+  namespace: {{ $ns }}
+  labels:
+    {{- include "operator.labels" . | nindent 4 }}
+spec:
+  backoffLimit: {{ $t.backoffLimit }}
+  template:
+    spec:
+      restartPolicy: Never
+      imagePullSecrets:
+        - name: registry-token
+      containers:
+        - name: import
+          image: {{ printf "%s:%s" (include "thorium.image" (dict "root" $ "image" .Values.image.repository)) (include "operator.tag" .) }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          env:
+            - name: HOME
+              value: /tmp
+            - name: THORIUM_URL
+              value: {{ printf "http://thorium-api.%s.svc.%s" $ns (.Values.global.clusterDomain | default "cluster.local") | quote }}
+            - name: TOOLBOX
+              value: {{ $source | quote }}
+            - name: THORIUM_USER
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.cluster.bootstrap.admin.secretName }}
+                  key: username
+            - name: THORIUM_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.cluster.bootstrap.admin.secretName }}
+                  key: password
+          command:
+            - /bin/sh
+            - -c
+            - |
+              set -e
+              thorctl=/app/binaries/linux/x86-64/thorctl
+              for attempt in $(seq 1 90); do
+                curl -sf "$THORIUM_URL/api/health" >/dev/null && break
+                echo "Waiting for the Thorium API ($attempt/90)..."
+                sleep 10
+              done
+              $thorctl login "$THORIUM_URL" --user "$THORIUM_USER" --password "$THORIUM_PASSWORD"
+              # create the groups and network policies the toolbox references; existing ones are left as is
+              # credentials go to curl on stdin so they never appear in the process list
+              post() { printf 'user = "%s:%s"\n' "$THORIUM_USER" "$THORIUM_PASSWORD" | curl -K - -s -o /dev/null -w "$1 -> %{http_code}\n" -H "Content-Type: application/json" -X POST "$THORIUM_URL$1" -d "$2"; }
+              {{- range $t.groups }}
+              post /api/groups/ {{ dict "name" . | toJson | squote }}
+              {{- end }}
+              {{- range $t.networkPolicies }}
+              post /api/network-policies {{ toJson . | squote }}
+              {{- end }}
+              $thorctl toolbox import "$TOOLBOX" --{{ $t.mode }}{{ with $t.groupOverride }} --group-override {{ . | quote }}{{ end }}
+          {{- if $t.json }}
+          volumeMounts:
+            - name: toolbox
+              mountPath: /toolbox
+              readOnly: true
+          {{- end }}
+      {{- if $t.json }}
+      volumes:
+        - name: toolbox
+          configMap:
+            name: toolbox-{{ $hash }}
+      {{- end }}
+{{- end }}

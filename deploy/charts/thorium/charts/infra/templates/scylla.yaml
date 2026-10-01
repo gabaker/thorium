@@ -1,0 +1,63 @@
+{{- if .Values.scylla.enabled }}
+{{- $ns := include "thorium.ns" (dict "root" $ "name" "scylla") }}
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: scylla-config
+  namespace: {{ $ns }}
+  labels:
+    {{- include "infra.labels" . | nindent 4 }}
+data:
+  scylla.yaml: |
+    {{- .Values.scylla.config | trim | nindent 4 }}
+    developer_mode: {{ .Values.scylla.developerMode }}
+---
+# Scylla Manager is not deployed, so the agent only needs a placeholder token
+apiVersion: v1
+kind: Secret
+metadata:
+  name: scylla-auth-token
+  namespace: {{ $ns }}
+  labels:
+    {{- include "infra.labels" . | nindent 4 }}
+type: Opaque
+stringData:
+  auth-token.yaml: "auth_token: unused-placeholder-token"
+---
+apiVersion: scylla.scylladb.com/v1
+kind: ScyllaCluster
+metadata:
+  name: scylla
+  namespace: {{ $ns }}
+  labels:
+    controller-tools.k8s.io: "1.0"
+    {{- include "infra.labels" . | nindent 4 }}
+spec:
+  repository: {{ include "thorium.image" (dict "root" $ "image" .Values.scylla.repository) | quote }}
+  agentRepository: {{ include "thorium.image" (dict "root" $ "image" .Values.scylla.agentRepository) | quote }}
+  version: {{ .Values.scylla.version }}
+  agentVersion: {{ .Values.scylla.agentVersion }}
+  developerMode: {{ .Values.scylla.developerMode }}
+  datacenter:
+    name: {{ .Values.scylla.datacenter }}
+    racks:
+      - name: {{ .Values.scylla.rack }}
+        scyllaConfig: scylla-config
+        scyllaAgentConfig: scylla-agent-config
+        members: {{ .Values.scylla.members }}
+        storage:
+          capacity: {{ .Values.scylla.storage }}
+          {{- if .Values.storageClass }}
+          storageClassName: {{ .Values.storageClass | quote }}
+          {{- end }}
+        resources:
+          {{- toYaml .Values.scylla.resources | nindent 10 }}
+        volumes:
+          - name: coredumpfs
+            hostPath:
+              path: /tmp/coredumps
+        volumeMounts:
+          - mountPath: /tmp/coredumps
+            name: coredumpfs
+{{- end }}

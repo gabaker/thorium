@@ -1,0 +1,967 @@
+# Default values for quickwit.
+# This is a YAML-formatted file.
+# Declare variables to be passed into your templates.
+
+image:
+  repository: quickwit/quickwit
+  pullPolicy: IfNotPresent
+  # Overrides the image tag whose default is the chart appVersion.
+  # tag: v0.8.2
+  # Overrides the image tag with an immutable image digest.
+  digest: ""
+
+imagePullSecrets: []
+nameOverride: ""
+fullnameOverride: ""
+
+# Set the Kuberentes cluster domain if not default. It's used to build URLs for the services.
+clusterDomain: cluster.local
+
+# -- Additional labels to add to all resources
+additionalLabels: {}
+  # app: quickwit
+
+serviceAccount:
+  # Specifies whether a service account should be created
+  create: true
+  # Annotations to add to the service account
+  annotations: {}
+  # The name of the service account to use.
+  # If not set and create is true, a name is generated using the fullname template
+  name: ""
+
+annotations: {}
+
+podAnnotations: {}
+
+podSecurityContext:
+  fsGroup: 1005
+
+securityContext:
+  runAsNonRoot: true
+  runAsUser: 1005
+
+# Additional global env
+# Legacy map format (e.g. environment: { KEY: VALUE }) is also supported for backward compatibility.
+environment: []
+  # - name: KEY
+  #   value: VALUE
+  # - name: SECRET_KEY
+  #   valueFrom:
+  #     secretKeyRef:
+  #       name: my-secret
+  #       key: secret-key
+environmentFrom: []
+  # - secretRef:
+  #     name: quickwit
+  # - configMapRef:
+  #     name: quickwit
+
+configMaps: []
+  # - name: configmap1
+  #   mountPath: /quickwit/configmaps/
+
+# -- Global tolerations applied to all deployments.
+tolerations: []
+
+# -- Global affinity settings applied to all deployments.
+affinity: {}
+
+# -- Global volumes added to all Pods. Merged with per-component `extraVolumes`.
+volumes: []
+
+# -- Global volume mounts added to all Quickwit containers. Merged with per-component `extraVolumeMounts`.
+volumeMounts: []
+
+# -- Configure [topology spread constraints](https://kubernetes.io/docs/concepts/scheduling-eviction/topology-spread-constraints/).
+topologySpreadConstraints: []
+
+searcher:
+  enabled: true
+
+  # When autoscaling is enabled, replicaCount is ignored.
+  replicaCount: 3
+
+  # Enable and configure autoscaling using Horizontal Pod Autoscaler (HPA)
+  autoscaling:
+    enabled: false
+    annotations: {}
+    minReplicas: 3
+    maxReplicas: 10
+    metrics:
+      # Search is a "latency game", so we aim for low CPU utilization
+      - type: Resource
+        resource:
+          name: cpu
+          target:
+            type: Utilization
+            averageUtilization: 50
+    behavior:
+      scaleUp:
+        stabilizationWindowSeconds: 60
+
+  # Extra env for searcher
+  # Legacy map format (e.g. extraEnv: { KEY: VALUE }) is also supported for backward compatibility.
+  extraEnv: []
+    # - name: KEY
+    #   value: VALUE
+  extraEnvFrom: []
+    # - secretRef:
+    #     name: quickwit-searcher
+    # - configMapRef:
+    #     name: quickwit-searcher
+
+  # extraVolumes -- Additional volumes to use with Pods.
+  extraVolumes: []
+
+  # extraVolumeMounts -- Additional volumes to mount into Quickwit containers.
+  extraVolumeMounts: []
+
+  resources: {}
+    # limits:
+    #   cpu: 100m
+    #   memory: 128Mi
+    # requests:
+    #   cpu: 100m
+    #   memory: 128Mi
+
+  ## Pod distruption budget
+  podDisruptionBudget: {}
+    # maxUnavailable: 1
+    # minAvailable: 2
+
+  persistentVolume:
+    enabled: false
+    annotations: {}
+    # storage: "1Gi"
+    # storageClass: ""
+    # -- Name of an externally managed VolumeAttributesClass to use for the persistent volume.
+    volumeAttributesClassName: ""
+
+  volumeAttributesClass:
+    enabled: false
+    # driverName is mandatory when volumeAttributesClass is enabled.
+    # driverName: ebs.csi.aws.com
+    # parameters:
+    #   iops: "3000"
+    #   throughput: "125"
+
+  updateStrategy: {}
+    # type: RollingUpdate
+
+  startupProbe:
+    httpGet:
+      path: /health/readyz
+      port: rest
+    failureThreshold: 12
+    periodSeconds: 5
+
+  livenessProbe:
+    httpGet:
+      path: /health/livez
+      port: rest
+    timeoutSeconds: 5
+
+  # StatefulSet allows you to relax its ordering guarantees
+  #   - OrderedReady
+  #   - Parallel
+  podManagementPolicy: OrderedReady
+
+  lifecycleHooks: {}
+    # preStop:
+    #   exec:
+    #     command:
+    #       - /bin/sh
+    #       - -c
+    #       - sleep 30
+
+  # Override args for starting container
+  args: []
+
+  # initContainers -- Init containers to be added to the pods
+  initContainers: []
+
+  annotations: {}
+
+  podAnnotations: {}
+
+  serviceAnnotations: {}
+
+  # serviceType: ClusterIP
+  # restNodePort:
+  # grpcNodePort:
+
+  nodeSelector: {}
+
+  tolerations: []
+
+  affinity: {}
+
+  runtimeClassName: ""
+
+  topologySpreadConstraints: []
+
+indexer:
+  enabled: true
+
+  # When autoscaling is enabled, replicaCount is ignored.
+  replicaCount: 1
+
+  # Enable and configure autoscaling using Horizontal Pod Autoscaler (HPA)
+  autoscaling:
+    enabled: false
+    annotations: {}
+    minReplicas: 1
+    maxReplicas: 10
+    metrics:
+      # Indexing is a "throughput game", so we aim for high CPU utilization
+      - type: Resource
+        resource:
+          name: cpu
+          target:
+            type: Utilization
+            averageUtilization: 70
+
+  # Extra env for indexer
+  # Legacy map format (e.g. extraEnv: { KEY: VALUE }) is also supported for backward compatibility.
+  extraEnv: []
+    # - name: KEY
+    #   value: VALUE
+  extraEnvFrom: []
+    # - secretRef:
+    #     name: quickwit-indexer
+    # - configMapRef:
+    #     name: quickwit-indexer
+
+  # extraVolumes -- Additional volumes to use with Pods.
+  extraVolumes: []
+
+  # extraVolumeMounts -- Additional volumes to mount into Quickwit containers.
+  extraVolumeMounts: []
+
+  resources: {}
+    # limits:
+    #   cpu: 100m
+    #   memory: 128Mi
+    # requests:
+    #   cpu: 100m
+    #   memory: 128Mi
+
+  ## Pod distruption budget
+  podDisruptionBudget: {}
+    # maxUnavailable: 1
+    # minAvailable: 2
+
+  updateStrategy: {}
+    # type: RollingUpdate
+
+  startupProbe:
+    httpGet:
+      path: /health/readyz
+      port: rest
+    failureThreshold: 12
+    periodSeconds: 5
+
+  livenessProbe:
+    httpGet:
+      path: /health/livez
+      port: rest
+    timeoutSeconds: 5
+
+  # StatefulSet allows you to relax its ordering guarantees
+  #   - OrderedReady
+  #   - Parallel
+  podManagementPolicy: OrderedReady
+
+  # Override args for starting container
+  args: []
+
+  # initContainers -- Init containers to be added to the pods
+  initContainers: []
+
+  annotations: {}
+
+  podAnnotations: {}
+
+  serviceAnnotations: {}
+
+  # serviceType: ClusterIP
+  # restNodePort:
+  # grpcNodePort:
+
+  nodeSelector: {}
+
+  tolerations: []
+
+  affinity: {}
+
+  lifecycleHooks: {}
+    # preStop:
+    #   exec:
+    #     command:
+    #       - /bin/sh
+    #       - -c
+    #       - sleep 30
+
+  # Long grace period is recommended to wait for all index commit_timeout_secs and splits to be published.
+  # With Quickwit edge or the upcoming 0.10 release, the ingester decommission timeout
+  # is set to 90% of this value.
+  # See https://quickwit.io/docs/configuration/index-config#indexing-settings
+  terminationGracePeriodSeconds: 120
+
+  runtimeClassName: ""
+
+  persistentVolume:
+    enabled: false
+    annotations: {}
+    # storage: "1Gi"
+    # storageClass: ""
+    # -- Name of an externally managed VolumeAttributesClass to use for the persistent volume.
+    volumeAttributesClassName: ""
+
+  volumeAttributesClass:
+    enabled: false
+    # driverName is mandatory when volumeAttributesClass is enabled.
+    # driverName: ebs.csi.aws.com
+    # parameters:
+    #   iops: "3000"
+    #   throughput: "125"
+
+  topologySpreadConstraints: []
+
+metastore:
+  replicaCount: 1
+
+  # Extra env for metastore
+  # Legacy map format (e.g. extraEnv: { KEY: VALUE }) is also supported for backward compatibility.
+  extraEnv: []
+    # - name: KEY
+    #   value: VALUE
+  # This is the recommended way to inject `QW_METASTORE_URI` when using the postgres metastore (see https://quickwit.io/docs/configuration/metastore-config)
+  extraEnvFrom: []
+    # - secretRef:
+    #     name: quickwit-metastore
+    # - configMapRef:
+    #     name: quickwit-metastore
+
+  # extraVolumes -- Additional volumes to use with Pods.
+  extraVolumes: []
+
+  # extraVolumeMounts -- Additional volumes to mount into Quickwit containers.
+  extraVolumeMounts: []
+
+  resources: {}
+    # limits:
+    #   cpu: 100m
+    #   memory: 128Mi
+    # requests:
+    #   cpu: 100m
+    #   memory: 128Mi
+
+  ## Pod distruption budget
+  podDisruptionBudget: {}
+    # maxUnavailable: 1
+    # minAvailable: 2
+
+  strategy: {}
+    # type: RollingUpdate
+
+  startupProbe:
+    httpGet:
+      path: /health/readyz
+      port: rest
+    failureThreshold: 12
+    periodSeconds: 5
+
+  livenessProbe:
+    httpGet:
+      path: /health/livez
+      port: rest
+    timeoutSeconds: 5
+
+  # Override args for starting container
+  args: []
+
+  # initContainers -- Init containers to be added to the pods
+  initContainers: []
+
+  annotations: {}
+
+  podAnnotations: {}
+
+  serviceAnnotations: {}
+
+  # serviceType: ClusterIP
+  # restNodePort:
+  # grpcNodePort:
+
+  nodeSelector: {}
+
+  tolerations: []
+
+  affinity: {}
+
+  runtimeClassName: ""
+
+  topologySpreadConstraints: []
+
+# Read-only metastore backed by a PostgreSQL read replica. When enabled, searchers are
+# automatically configured to route read-only metastore requests to this component.
+metastore_ro:
+  enabled: false
+  replicaCount: 1
+
+  # Extra env for the read-only metastore.
+  # QW_METASTORE_READ_REPLICA_URI must be provided, usually through extraEnvFrom.
+  # Legacy map format (e.g. extraEnv: { KEY: VALUE }) is also supported for backward compatibility.
+  extraEnv: []
+    # - name: QW_METASTORE_READ_REPLICA_URI
+    #   value: postgres://username:password@read-replica-host:5432/metastore
+  extraEnvFrom: []
+    # - secretRef:
+    #     name: quickwit-metastore-read-replica
+    # - configMapRef:
+    #     name: quickwit-metastore-read-replica
+
+  # extraVolumes -- Additional volumes to use with Pods.
+  extraVolumes: []
+
+  # extraVolumeMounts -- Additional volumes to mount into Quickwit containers.
+  extraVolumeMounts: []
+
+  resources: {}
+    # limits:
+    #   cpu: 100m
+    #   memory: 128Mi
+    # requests:
+    #   cpu: 100m
+    #   memory: 128Mi
+
+  ## Pod disruption budget
+  podDisruptionBudget: {}
+    # maxUnavailable: 1
+    # minAvailable: 2
+
+  strategy: {}
+    # type: RollingUpdate
+
+  startupProbe:
+    httpGet:
+      path: /health/readyz
+      port: rest
+    failureThreshold: 12
+    periodSeconds: 5
+
+  livenessProbe:
+    httpGet:
+      path: /health/livez
+      port: rest
+    timeoutSeconds: 5
+
+  # Override args for starting the container.
+  args: []
+
+  # initContainers -- Init containers to be added to the pods.
+  initContainers: []
+
+  annotations: {}
+
+  podAnnotations: {}
+
+  serviceAnnotations: {}
+
+  # serviceType: ClusterIP
+  # restNodePort:
+  # grpcNodePort:
+
+  nodeSelector: {}
+
+  tolerations: []
+
+  affinity: {}
+
+  runtimeClassName: ""
+
+  topologySpreadConstraints: []
+
+control_plane:
+  enabled: true
+
+  # Extra env for control plane
+  # Legacy map format (e.g. extraEnv: { KEY: VALUE }) is also supported for backward compatibility.
+  extraEnv: []
+    # - name: KEY
+    #   value: VALUE
+  extraEnvFrom: []
+    # - secretRef:
+    #     name: quickwit-control-plane
+    # - configMapRef:
+    #     name: quickwit-control-plane
+
+  # extraVolumes -- Additional volumes to use with Pods.
+  extraVolumes: []
+
+  # extraVolumeMounts -- Additional volumes to mount into Quickwit containers.
+  extraVolumeMounts: []
+
+  resources: {}
+    # limits:
+    #   cpu: 100m
+    #   memory: 128Mi
+    # requests:
+    #   cpu: 100m
+    #   memory: 128Mi
+
+  ## Pod distruption budget
+  podDisruptionBudget: {}
+    # maxUnavailable: 1
+    # minAvailable: 2
+
+  startupProbe:
+    httpGet:
+      path: /health/readyz
+      port: rest
+    failureThreshold: 12
+    periodSeconds: 5
+
+  livenessProbe:
+    httpGet:
+      path: /health/livez
+      port: rest
+    timeoutSeconds: 5
+
+  # Override args for starting container
+  args: []
+
+  # initContainers -- Init containers to be added to the pods
+  initContainers: []
+
+  annotations: {}
+
+  podAnnotations: {}
+
+  serviceAnnotations: {}
+
+  # serviceType: ClusterIP
+  # restNodePort:
+  # grpcNodePort:
+
+  nodeSelector: {}
+
+  tolerations: []
+
+  affinity: {}
+
+  runtimeClassName: ""
+
+  topologySpreadConstraints: []
+
+janitor:
+  # Enable Janitor service
+  enabled: true
+
+  # Extra env for janitor
+  # Legacy map format (e.g. extraEnv: { KEY: VALUE }) is also supported for backward compatibility.
+  extraEnv: []
+    # - name: KEY
+    #   value: VALUE
+  extraEnvFrom: []
+    # - secretRef:
+    #     name: quickwit-janitor
+    # - configMapRef:
+    #     name: quickwit-janitor
+
+  # extraVolumes -- Additional volumes to use with Pods.
+  extraVolumes: []
+
+  # extraVolumeMounts -- Additional volumes to mount into Quickwit containers.
+  extraVolumeMounts: []
+
+  resources: {}
+    # limits:
+    #   cpu: 100m
+    #   memory: 128Mi
+    # requests:
+    #   cpu: 100m
+    #   memory: 128Mi
+
+  startupProbe:
+    httpGet:
+      path: /health/readyz
+      port: rest
+    failureThreshold: 12
+    periodSeconds: 5
+
+  livenessProbe:
+    httpGet:
+      path: /health/livez
+      port: rest
+    timeoutSeconds: 5
+
+  # Override args for starting container
+  args: []
+
+  # initContainers -- Init containers to be added to the pods
+  initContainers: []
+
+  annotations: {}
+
+  podAnnotations: {}
+
+  serviceAnnotations: {}
+
+  # serviceType: ClusterIP
+  # restNodePort:
+  # grpcNodePort:
+
+  nodeSelector: {}
+
+  tolerations: []
+
+  affinity: {}
+
+  runtimeClassName: ""
+
+  topologySpreadConstraints: []
+
+# -- Enable the standalone compactor topology.
+#
+# This is a CLUSTER-WIDE switch, not a per-pod one. When `true`:
+#   * `QW_ENABLE_STANDALONE_COMPACTORS=true` is injected into every Quickwit pod
+#     (indexers stop merging locally, the janitor starts the compaction planner).
+#   * the dedicated compactor Deployment / Service / PDB below are rendered.
+# When `false` (default), none of the compactor resources are created and merges
+# happen on the indexers exactly as before. Because the same value drives both
+# the env var and whether the workload is rendered, the compactor pods exist if
+# and only if this flag is true.
+enableStandaloneCompactors: false
+
+# Dedicated compactor workers. Only deployed when `enableStandaloneCompactors` is
+# true (there is intentionally no separate `compactor.enabled` toggle).
+compactor:
+  # When autoscaling is enabled, replicaCount is ignored.
+  replicaCount: 1
+
+  # Enable and configure autoscaling using Horizontal Pod Autoscaler (HPA).
+  # Only takes effect when `enableStandaloneCompactors` is also true.
+  autoscaling:
+    enabled: false
+    annotations: {}
+    minReplicas: 1
+    maxReplicas: 10
+    metrics:
+      # Compaction is a "throughput game", so we aim for high CPU utilization
+      - type: Resource
+        resource:
+          name: cpu
+          target:
+            type: Utilization
+            averageUtilization: 80
+    behavior:
+      scaleUp:
+        stabilizationWindowSeconds: 60
+
+  # Extra env for compactor
+  # Legacy map format (e.g. extraEnv: { KEY: VALUE }) is also supported for backward compatibility.
+  extraEnv: []
+    # - name: KEY
+    #   value: VALUE
+  extraEnvFrom: []
+    # - secretRef:
+    #     name: quickwit-compactor
+    # - configMapRef:
+    #     name: quickwit-compactor
+
+  # extraVolumes -- Additional volumes to use with Pods.
+  extraVolumes: []
+
+  # extraVolumeMounts -- Additional volumes to mount into Quickwit containers.
+  extraVolumeMounts: []
+
+  resources: {}
+    # limits:
+    #   cpu: 100m
+    #   memory: 128Mi
+    # requests:
+    #   cpu: 100m
+    #   memory: 128Mi
+
+  ## Pod distruption budget
+  podDisruptionBudget: {}
+    # maxUnavailable: 1
+    # minAvailable: 2
+
+  strategy: {}
+    # type: RollingUpdate
+
+  startupProbe:
+    httpGet:
+      path: /health/readyz
+      port: rest
+    failureThreshold: 12
+    periodSeconds: 5
+
+  livenessProbe:
+    httpGet:
+      path: /health/livez
+      port: rest
+    timeoutSeconds: 5
+
+  # Override args for starting container
+  args: []
+
+  # initContainers -- Init containers to be added to the pods
+  initContainers: []
+
+  annotations: {}
+
+  podAnnotations: {}
+
+  serviceAnnotations: {}
+
+  # serviceType: ClusterIP
+  # restNodePort:
+  # grpcNodePort:
+
+  nodeSelector: {}
+
+  tolerations: []
+
+  affinity: {}
+
+  lifecycleHooks: {}
+    # preStop:
+    #   exec:
+    #     command:
+    #       - /bin/sh
+    #       - -c
+    #       - sleep 30
+
+  # Grace period to let in-flight merges finish publishing on shutdown. Unfinished
+  # merges are simply rescheduled by the planner after a heartbeat timeout, so this
+  # does not need to be as long as the indexer's. With Quickwit edge or the upcoming
+  # 0.10 release, the compactor decommission timeout is set to 90% of this value.
+  terminationGracePeriodSeconds: 60
+
+  runtimeClassName: ""
+
+  topologySpreadConstraints: []
+
+# Deploy jobs to bootstrap creation of indexes and sources for quickwit clusters
+bootstrap:
+  # Enable bootstrap jobs
+  enabled: false
+
+  # Extra env for bootstrap jobs
+  # Legacy map format (e.g. extraEnv: { KEY: VALUE }) is also supported for backward compatibility.
+  extraEnv: []
+    # - name: KEY
+    #   value: VALUE
+  extraEnvFrom: []
+    # - secretRef:
+    #     name: quickwit-bootstrap
+    # - configMapRef:
+    #     name: quickwit-bootstrap
+
+  resources: {}
+    # limits:
+    #   cpu: 100m
+    #   memory: 128Mi
+    # requests:
+    #   cpu: 100m
+    #   memory: 128Mi
+
+  nodeSelector: {}
+
+  tolerations: []
+
+  affinity: {}
+
+  runtimeClassName: ""
+
+  sources:
+    # Override command for starting container
+    command: []
+
+    # initContainers -- Init containers to be executed before the source creation.
+    initContainers: []
+
+    # extraVolumes -- Additional volumes to use with bootstrap Pods.
+    extraVolumes: []
+
+    # extraVolumeMounts -- Additional volumes to mount into bootstrap containers (not the init containers).
+    extraVolumeMounts: []
+
+  indexes:
+    # Override command for starting container
+    command: []
+
+    # initContainers -- Init containers to be executed before the index creation.
+    initContainers: []
+
+    # extraVolumes -- Additional volumes to use with bootstrap Pods.
+    extraVolumes: []
+
+    # extraVolumeMounts -- Additional volumes to mount into bootstrap containers (not the init containers).
+    extraVolumeMounts: []
+
+# Node configuration
+# Warning: This config is writed directly into a configMap
+# to avoid passing sensitive value you can pass environment variables.
+# https://quickwit.io/docs/configuration/node-config#using-environment-variables-in-the-configuration
+configLocation: /quickwit/node.yaml
+
+config:
+  version: 0.8
+  # Override the cluster ID generated by the chart here.
+  # cluster_id: my-cluster
+  listen_address: 0.0.0.0
+  gossip_listen_port: 7282
+  data_dir: /quickwit/qwdata
+  default_index_root_uri: s3://quickwit/indexes
+
+  # storage:
+    # s3:
+      # endpoint: "http://custom-s3-endpoint"
+      # region: eu-east-1
+      # We recommend using IAM roles and permissions to access Amazon S3 resources,
+      # but you can specify a pair of access and secret keys if necessary.
+      # access_key_id: <my access key>
+      # secret_access_key: ${AWS_ACCESS_KEY_ID}
+    # azure:
+      # account: "<my account name>"
+      # access_key: ${QW_AZURE_STORAGE_ACCESS_KEY}
+
+  # Indexer settings
+  # indexer:
+  #   split_store_max_num_bytes: 200G
+  #   split_store_max_num_splits: 10000
+  # Ingest API settings
+  # ingest_api:
+  #   max_queue_memory_usage: 2GiB
+  #   max_queue_disk_usage: 4GiB
+  # Searcher settings
+  # searcher:
+  #   fast_field_cache_capacity: 10G
+  #   split_footer_cache_capacity: 1G
+  #   max_num_concurrent_split_streams: 100
+  # Metastore settings
+  # metastore:
+  #   postgres:
+  #     max_num_connections: 50
+
+# Seed configuration
+seed:
+  indexes: []
+    # - version: 0.8
+    #   index_id: my-index
+    #   doc_mapping:
+    #     field_mappings:
+    #       - name: timestamp
+    #         type: datetime
+    #         fast: true
+    #         input_formats:
+    #           - unix_timestamp
+    #         output_format: unix_timestamp_secs
+    #       - name: body
+    #         type: text
+    #     timestamp_field: timestamp
+    #   search_settings:
+    #     default_search_fields: [body]
+    #   indexing_settings:
+    #     merge_policy:
+    #       type: limit_merge
+    #       max_merge_ops: 3
+    #       merge_factor: 10
+    #       max_merge_factor: 12
+
+  sources: []
+    # - index: my-index
+    #   source:
+    #     version: 0.8
+    #     source_id: my-source
+    #     source_type: kafka
+    #     num_pipelines: 1
+    #     params:
+    #       topic: quickwit-topic
+    #       client_params:
+    #         bootstrap.servers: kafka-server-endpoint1:9092,kafka-server-endpoint2:9092
+
+# Prometheus metrics
+serviceMonitor:
+  enabled: false
+  # -- Additional labels to add to monitoring resources
+  additionalLabels: {}
+  interval: 60s
+  scrapeTimeout: 10s
+  metricRelabelings: []
+  #  - action: replace
+  #    regex: quickwit-(.*)
+  #    replacement: $1
+  #    sourceLabels: [cluster]
+  #    targetLabel: qw_cluster
+  #  - action: labeldrop
+  #    regex: (endpoint|cluster)
+  relabelings: []
+  #  - sourceLabels: [__meta_kubernetes_pod_node_name]
+  #    targetLabel: instance
+
+# Prometheus Operator alertmanager alerts
+prometheusRule:
+  enabled: false
+  # -- Additional labels to add to PrometheusRule resources
+  additionalLabels: {}
+  rules: []
+  #  - alert: Example
+  #    expr: metric == 1
+  #    for: 1m
+  #    labels:
+  #      severity: warning
+
+service:
+  # Service type configuration default for all Quickwit services
+  type: ClusterIP
+
+  # -- Set the ip family policy to configure dual-stack see [Configure dual-stack](https://kubernetes.io/docs/concepts/services-networking/dual-stack/#services)
+  ipFamilyPolicy: ""
+  # -- Sets the families that should be supported and the order in which they should be applied to ClusterIP as well. Can be IPv4 and/or IPv6.
+  ipFamilies: []
+
+  annotations: {}
+
+ingress:
+  enabled: false
+  className: nginx
+  annotations:
+    nginx.ingress.kubernetes.io/proxy-body-size: 10m
+    nginx.ingress.kubernetes.io/use-regex: "true"
+  hosts:
+    - host: "*"
+      paths:
+        # Ingest and ES bulk endpoints to quickwit-indexer
+        - path: /api/v1/.*/ingest
+          pathType: ImplementationSpecific
+          service: indexer
+          port: rest
+        - path: /api/v1/_elastic/bulk
+          pathType: ImplementationSpecific
+          service: indexer
+          port: rest
+        - path: /api/v1/_elastic/.*/_bulk
+          pathType: ImplementationSpecific
+          service: indexer
+          port: rest
+        # Indexes API endpoints to quickwit-metastore
+        - path: /api/v1/indexes
+          pathType: Prefix
+          service: metastore
+          port: rest
+        # Everything else to quickwit-searcher
+        - path: /
+          pathType: ImplementationSpecific
+          service: searcher
+          port: rest
+  tls: []
+  #  - secretName: chart-example-tls
+  #    hosts:
+  #      - chart-example.local

@@ -1,0 +1,66 @@
+{{- $ns := include "thorium.namespace" . }}
+---
+# Used by the operator and by the Thorium components it deploys (the scaler schedules jobs with it)
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: thorium
+  namespace: {{ $ns }}
+  labels:
+    {{- include "operator.labels" . | nindent 4 }}
+imagePullSecrets:
+  - name: registry-token
+automountServiceAccountToken: true
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: thorium-account-token
+  namespace: {{ $ns }}
+  labels:
+    {{- include "operator.labels" . | nindent 4 }}
+  annotations:
+    kubernetes.io/service-account.name: thorium
+type: kubernetes.io/service-account-token
+---
+# Cluster-scoped names carry the namespace so several deployments can share a cluster
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: {{ $ns }}-operator
+  labels:
+    {{- include "operator.labels" . | nindent 4 }}
+rules:
+  - apiGroups: ["apiextensions.k8s.io"]
+    resources: ["customresourcedefinitions"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  - apiGroups: ["sandia.gov"]
+    resources: ["*"]
+    verbs: ["*"]
+  - apiGroups: ["apps"]
+    resources: ["deployments"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  - apiGroups: ["networking.k8s.io"]
+    resources: ["networkpolicies"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  - apiGroups: ["events.k8s.io"]
+    resources: ["events"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  - apiGroups: [""]
+    resources: ["pods", "services", "secrets", "configmaps", "nodes", "namespaces", "events"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: {{ $ns }}-operator
+  labels:
+    {{- include "operator.labels" . | nindent 4 }}
+subjects:
+  - kind: ServiceAccount
+    name: thorium
+    namespace: {{ $ns }}
+roleRef:
+  kind: ClusterRole
+  name: {{ $ns }}-operator
+  apiGroup: rbac.authorization.k8s.io

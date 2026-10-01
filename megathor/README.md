@@ -1,7 +1,7 @@
 
 # Overview
 
-This folder contains a set of Ansible playbooks for deploying Thorium on top of locally hosted baremetal servers or VMs. This assumes you have no access to external storage interfaces or other cloud native storage/dbs. That said you can repurpose the `deploy.yml` playbook and inventory group variables (`inventory/group_vars`) for hosted environments by disabling roles that are made redundant by other services within your environment. You may have to conduct some steps manually, such as creating Elastic indexes when running this in hosted environments.
+This folder contains a set of Ansible playbooks for deploying Thorium on top of locally hosted baremetal servers or VMs. This assumes you have no access to external storage interfaces or other cloud native storage/dbs. The playbook prepares the cluster (Rook/Ceph storage, Traefik ingress) and then installs Thorium and its backing services with the Thorium Helm charts (`deploy/charts`): the `infra-operators` chart (Scylla, ECK, and Kubegres operators) and the `thorium` chart (Redis, Scylla, Elasticsearch, SeaweedFS, Quickwit, Jaeger, and Thorium itself), generating the chart values from the inventory group variables (`inventory/group_vars`). You can repurpose it for hosted environments by disabling components your environment already provides.
 
 ### Prerequisites
 
@@ -45,15 +45,15 @@ vm.max_map_count=262144
 ansible-playbook -i inventory/local.ini offline-stage.yml -v
 ```
 
-For offline deploments, stage any nessesary files into the `./files` directory. These files will get moved up along with the full playbook.
+For offline deploments, stage any nessesary files into the `./files` directory. These files will get moved up along with the full playbook. `offline-stage.yml` saves the Traefik and Rook charts and the packaged `thorium` and `infra-operators` charts (`files/thorium-<version>.tgz`, `files/infra-operators-<version>.tgz`), and writes `files/thorium-images.txt`, the images those charts deploy. To stage charts that are not published yet, pass `-e thorium_stage_charts_from=$PWD/../deploy/charts`.
 
-Every container image must also be mirrored into your private registry under its upstream path (for example `<offline_registry>/scylladb/scylla:6.2.3`). `scripts/offline-images.txt` lists the images a default deployment pulls, and `scripts/mirror-images.bash <offline_registry>` pulls, retags, and pushes them from a machine with internet access. Then set `offline_registry` in `inventory/group_vars/offline.yml` and add the host to the `[offline]` group in the inventory.
+Every container image must also be mirrored into your private registry under its upstream path without the registry host (for example `<offline_registry>/scylladb/scylla:6.2.3`). `scripts/mirror-images.bash <offline_registry> files/thorium-images.txt` pulls, retags, and pushes the charts' images from a machine with internet access; `scripts/offline-images.txt` lists the remaining (Traefik, Rook) images. Then set `offline_registry` in `inventory/group_vars/offline.yml` and add the host to the `[offline]` group in the inventory. Offline deployments install the staged charts with every image pointed at `offline_registry`.
 
 ### Usage
 
 Update the `group_vars` located in `inventories/group_vars` to match the requirements of your environment; at minimum set `thorium_nodes` (and `traefik_external_ips` when Traefik is enabled), since the playbook refuses to run with the example `<...>` placeholders. This playbook generates all secret key/passwords unless specified in the inventory variables. An ansible vault is generated containing those secret values to ensure that susequent runs of the playbook do not regenerate/override those values. Create the vault password file (`artifacts/vault_pass` by default) before the first run. If the vault exists but can't be decrypted (for example the vault password was not passed), the playbook stops rather than generating new secrets, since the running databases keep the passwords they were created with.
 
-Any machine with `kubectl`, `helm`, and a valid kube config for the cluster can run the playbook: the Elastic, Postgres, and Scylla setup steps run inside their pods, so cluster DNS names don't need to resolve on the controller. (Rook deployments and external S3 still create the Quickwit bucket from the controller, which needs to reach `s3_endpoint`.) Deploy thorium and database dependencies on top of k8s:
+Any machine with `kubectl`, `helm` (3.8+), and a valid kube config for the cluster can run the playbook; database setup is done in-cluster by the Thorium operator, so cluster DNS names don't need to resolve on the controller. (Rook deployments and external S3 still create the Quickwit bucket from the controller, which needs to reach `s3_endpoint`.) Online deployments install the published charts (`thorium_chart_repo`, `thorium_chart_version`); set `thorium_chart`/`infra_operators_chart` to a chart directory or packaged `.tgz` to test unpublished charts, and `thorium_values_files` to layer your own chart values over the generated ones. The initial Thorium admin user (`thorium_admin_username`, default `admin`) gets a generated password saved in the vault as `thorium_admin_password`. Deploy thorium and database dependencies on top of k8s:
 
 ```bash
 ansible-playbook -i inventories/local.ini deploy.yml --ask-vault-pass -v
@@ -74,7 +74,7 @@ Thorium and Quickwit need an S3-compatible object store. Enable at most one of t
 | `rook_enabled` | Rook/Ceph object store (RGW), replicated across nodes; also provides the `ceph-block` storage class | `all.yml` |
 | `seaweedfs_enabled` | Single-instance SeaweedFS (`weed mini`) on one PVC of `seaweedfs_storage_class` (defaults to `storage_class`) | `single_node.yml` |
 
-SeaweedFS runs as a single replica, so it suits single-node or small deployments; use Rook for replicated storage across nodes. Its image is pinned (`seaweedfs_version`) because `weed mini` defaults can change between releases. SeaweedFS S3 identities are stored in the `seaweedfs-s3-config` secret and use the generated `s3_access_key`/`s3_secret_key`, and the Quickwit bucket is created by an in-cluster `weed shell` job (Thorium's own buckets are created by the Thorium operator). SeaweedFS's master and filer ports have no authentication, so the `seaweedfs-ingress` NetworkPolicy only lets other pods reach the S3 port; this needs a CNI that enforces NetworkPolicy (e.g. Calico or Cilium).
+SeaweedFS (deployed by the thorium chart) runs as a single replica, so it suits single-node or small deployments; use Rook for replicated storage across nodes. Its image is pinned in the chart because `weed mini` defaults can change between releases. SeaweedFS S3 identities are stored in the `seaweedfs-s3-config` secret and use the generated `s3_access_key`/`s3_secret_key`, and the Quickwit bucket is created by an in-cluster `weed shell` job (Thorium's own buckets are created by the Thorium operator). SeaweedFS's master and filer ports have no authentication, so the `seaweedfs-ingress` NetworkPolicy only lets other pods reach the S3 port; this needs a CNI that enforces NetworkPolicy (e.g. Calico or Cilium).
 
 Both backends are reached through a single in-cluster service name, so Thorium uses path-style bucket addressing. With Rook the region is `thorium-s3`, the name Rook gives the Ceph zonegroup, which RGW requires as the bucket location constraint.
 
@@ -82,16 +82,9 @@ To use an external S3 service, disable both toggles and set `s3_endpoint` (requi
 
 The MinIO backend has been removed: the MinIO community edition no longer publishes container images. A deployment that used `minio_enabled` needs its objects migrated to SeaweedFS, Rook, or an external S3 service.
 
-### Scylla Operator Version
+### Operators
 
-The Scylla operator chart is pinned (`scylla_helm_chart_version`) because newer operators use `curl` in probes/hooks, which the pinned `scylla-manager-agent` image lacks. Operator values are read from `roles/scylla/templates/scylla/operator/<version>/operator.yaml.j2`, so a new version needs a matching values template. Helm does not upgrade CRDs of an already installed chart, so when upgrading an existing deployment apply the new chart's CRDs first:
-
-```bash
-helm pull scylla/scylla-operator --version v1.21.1 --untar --untardir /tmp/scylla-operator
-kubectl apply --server-side --force-conflicts -f /tmp/scylla-operator/scylla-operator/crds/
-```
-
-Scylla Operator documents upgrades as one minor version at a time, so an existing deployment on an older version may need to step through the intermediate chart versions.
+The Scylla, ECK, and Kubegres operators are installed by the `infra-operators` chart into the `infra-operators` namespace (`infra_operators_namespace`). The Scylla operator's webhook certificate is generated by the chart, so cert-manager is not needed. Disable any operator the cluster already runs with `scylla_operator_enabled`, `elastic_operator_enabled`, or `kubegres_operator_enabled`, or skip the chart entirely with `infra_operators_enabled: false`.
 
 ### Scylla Developer Mode
 
@@ -99,48 +92,30 @@ Scylla Operator documents upgrades as one minor version at a time, so an existin
 
 ### Multiple Deployments in One Cluster
 
-Setting `thorium_instance` prefixes every per-deployment namespace with `<thorium_instance>-` (`test-thorium`, `test-redis`, `test-scylla`, `test-elastic`, `test-quickwit`, `test-seaweedfs`, `test-jaeger`), so several Thorium deployments can share one Kubernetes cluster for testing. The cluster-role binding for the deployment's `thorium` service account is suffixed the same way.
+Setting `thorium_instance` prefixes every per-deployment namespace with `<thorium_instance>-` (`test-thorium`, `test-redis`, `test-scylla`, `test-elastic`, `test-quickwit`, `test-seaweedfs`, `test-jaeger`), so several Thorium deployments can share one Kubernetes cluster for testing. Each deployment runs its own Thorium operator, which only manages its own namespace.
 
-The operators are cluster-wide, so exactly one deployment in the cluster should deploy each of them; set these to `false` in every other deployment's inventory: `cert_manager_enabled`, `elastic_operator_enabled`, `scylla_operator_enabled`, `kubegres_operator_enabled`, `traefik_enabled`, and `thorium_operator_enabled`. The Thorium operator manages every ThoriumCluster in the cluster, so a second copy would fight the first. Deployments sharing a Traefik must each set a distinct `thorium_ingress_hostname`. Each deployment's scaler creates job namespaces named after Thorium groups, so deployments that use the same group names will schedule into the same namespaces; use separate deployments for isolated testing only.
+The `infra-operators` chart and Traefik are cluster-wide, so exactly one deployment in the cluster should deploy them; set `infra_operators_enabled: false` and `traefik_enabled: false` in every other deployment's inventory. Deployments sharing a Traefik must each set a distinct `thorium_ingress_hostname`, and only the one running Traefik provides Traefik's default TLS certificate. Each deployment's scaler creates job namespaces named after Thorium groups, so run the scaler in only one deployment (`thorium_scaler_enabled: false` elsewhere).
 
 ### Cleanup
 
-This section documents commands for cleaning up k8s resources that are deployed by these ansible roles. Cleanup can be helpful for testing the playbooks without redploying your k8s environment. Delete resources in the following order while confirming all the resources from one section have been deleted before moving to the next section.
+These commands remove what the playbook deploys, which helps when testing the playbooks without redeploying your k8s environment. For a named instance, prefix each Thorium namespace with `<thorium_instance>-`.
 
-Cleanup Thorium and DBs/elastic
-
-```
-# for a named instance, prefix each namespace below with "<thorium_instance>-"
-kubectl delete ThoriumCluster dev -n thorium
-helm uninstall -n traefik traefik
-helm uninstall -n quickwit quickwit
-kubectl delete statefulset -n redis redis
-kubectl delete kibana -n elastic-system elastic
-kubectl delete elasticsearch -n elastic-system elastic
-kubectl delete Kubegres -n quickwit postgres
-kubectl delete scyllacluster -n scylla scylla
-kubectl delete statefulset.apps/jaeger -n jaeger
-kubectl delete statefulset.apps/seaweedfs -n seaweedfs # when seaweedfs_enabled
-```
-
-Remove operators and cert-manager
+Remove Thorium and its backing services (delete the ThoriumCluster first so the Thorium operator can clean up):
 
 ```bash
-helm uninstall -n scylla-operator scylla
-kubectl delete deployment -n thorium operator
-kubectl delete deployment -n kubegres-system kubegres-controller-manager
-kubectl delete deployment.apps/cert-manager -n cert-manager
-kubectl delete deployment.apps/cert-manager-cainjector -n cert-manager
-kubectl delete deployment.apps/cert-manager-webhook -n cert-manager
-kubectl delete statefulset.apps/elastic-operator -n elastic-system
+kubectl delete thoriumcluster thorium -n thorium
+helm uninstall thorium -n thorium
 ```
 
-Delete PVCs that remain after stateful resources have been deleted. Note: multiple PVCs may exist for multi-node k8s clusters that have deployed scaled up DBs.
+The namespaces (`thorium`, `redis`, `scylla`, `elastic`, `seaweedfs`, `quickwit`, `jaeger`), their PVCs, and the `thorium-credentials` secret are kept on uninstall; delete the namespaces to remove the data:
 
 ```bash
-# kubectl delete pvc -n redis redis-persistent-storage-claim
-# kubectl delete pvc -n scylla data-scylla-us-east-1-us-east-1a-0
-# kubectl delete pvc -n elastic-system elasticsearch-data-elastic-es-default-0
-# kubectl delete pvc -n quickwit postgres-db-postgres-1-0
-# kubectl delete pvc -n seaweedfs seaweedfs-data-seaweedfs-0
+kubectl delete namespace thorium redis scylla elastic seaweedfs quickwit jaeger
+```
+
+Remove the operators and Traefik once no Thorium deployment remains (Helm leaves the Scylla and Kubegres CRDs installed):
+
+```bash
+helm uninstall infra-operators -n infra-operators
+helm uninstall traefik -n traefik
 ```

@@ -1,0 +1,80 @@
+{{/* Patched by deploy/charts/vendor-charts.sh */}}
+{{- /*
+The webhook serving certificate, generated once by the chart and kept on upgrades (read back from
+the secret), so the webhook works without cert-manager. The secret and the webhook configuration
+share this template so both use the same CA.
+*/ -}}
+{{- $secretName := include "scylla-operator.certificateSecretName" . -}}
+{{- $existing := lookup "v1" "Secret" .Release.Namespace $secretName -}}
+{{- $caBundle := "" -}}
+{{- if .Values.webhook.createSelfSignedCertificate }}
+{{- $crt := "" -}}
+{{- $key := "" -}}
+{{- if and $existing (index ($existing.data | default dict) "ca.crt") }}
+{{- $caBundle = index $existing.data "ca.crt" -}}
+{{- $crt = index $existing.data "tls.crt" -}}
+{{- $key = index $existing.data "tls.key" -}}
+{{- else }}
+{{- $service := include "scylla-operator.webhookServiceName" . -}}
+{{- $ca := genCA "scylla-operator-webhook-ca" 3650 -}}
+{{- $dns := list (printf "%s.%s.svc" $service .Release.Namespace) (printf "%s.%s.svc.cluster.local" $service .Release.Namespace) -}}
+{{- $signed := genSignedCert (printf "%s.%s.svc" $service .Release.Namespace) nil $dns 3650 $ca -}}
+{{- $caBundle = $ca.Cert | b64enc -}}
+{{- $crt = $signed.Cert | b64enc -}}
+{{- $key = $signed.Key | b64enc -}}
+{{- end }}
+apiVersion: v1
+kind: Secret
+metadata:
+  name: {{ $secretName }}
+  namespace: {{ .Release.Namespace }}
+type: kubernetes.io/tls
+data:
+  ca.crt: {{ $caBundle }}
+  tls.crt: {{ $crt }}
+  tls.key: {{ $key }}
+---
+{{- else if $existing }}
+{{- $caBundle = index ($existing.data | default dict) "ca.crt" | default "" -}}
+{{- end }}
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingWebhookConfiguration
+metadata:
+  name: scylla-operator
+webhooks:
+- name: webhook.scylla.scylladb.com
+  clientConfig:
+    service:
+      name: {{ include "scylla-operator.webhookServiceName" . }}
+      namespace: {{ .Release.Namespace }}
+      path: /validate
+    caBundle: {{ $caBundle }}
+  admissionReviewVersions:
+  - v1
+  sideEffects: None
+  failurePolicy: Fail
+  rules:
+  - apiGroups:
+    - scylla.scylladb.com
+    apiVersions:
+    - v1
+    operations:
+    - CREATE
+    - UPDATE
+    resources:
+    - scyllaclusters
+  - apiGroups:
+    - scylla.scylladb.com
+    apiVersions:
+    - v1alpha1
+    operations:
+    - CREATE
+    - UPDATE
+    resources:
+    - nodeconfigs
+    - scyllaoperatorconfigs
+    - scylladbdatacenters
+    - scylladbclusters
+    - scylladbmanagerclusterregistrations
+    - scylladbmanagertasks
+    - scylladbmonitorings

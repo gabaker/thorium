@@ -108,7 +108,7 @@ async fn create_tracing_cm(meta: &ClusterMeta, tracing: &Tracing) -> Result<(), 
 /// * `meta` - Thorium cluster client and metadata
 pub async fn create_or_update_all(meta: &ClusterMeta) -> Result<(), Error> {
     // create tracing config
-    create_tracing_cm(meta, &meta.cluster.spec.config.thorium.tracing).await?;
+    create_tracing_cm(meta, &meta.conf.thorium.tracing).await?;
     Ok(())
 }
 

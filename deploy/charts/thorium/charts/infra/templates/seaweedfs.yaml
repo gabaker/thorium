@@ -1,0 +1,158 @@
+{{- if .Values.seaweedfs.enabled }}
+{{- $ns := include "thorium.ns" (dict "root" $ "name" "seaweedfs") }}
+{{- $host := include "thorium.host" (dict "root" $ "service" "seaweedfs" "ns" "seaweedfs") }}
+---
+# `weed mini` runs master, volume, filer, and S3 in one process; the admin UI, WebDAV,
+# Iceberg, and Lance endpoints are disabled since only S3 is needed. S3 identities come
+# from the seaweedfs-s3-config secret rendered by the secrets subchart.
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: seaweedfs
+  namespace: {{ $ns }}
+  labels:
+    app: seaweedfs
+    {{- include "infra.labels" . | nindent 4 }}
+spec:
+  serviceName: seaweedfs
+  replicas: 1
+  selector:
+    matchLabels:
+      app: seaweedfs
+  template:
+    metadata:
+      labels:
+        app: seaweedfs
+    spec:
+      containers:
+        - name: seaweedfs
+          image: {{ include "thorium.image" (dict "root" $ "image" .Values.seaweedfs.image) }}
+          imagePullPolicy: IfNotPresent
+          args:
+            - mini
+            - -dir=/data
+            - -s3.config=/etc/seaweedfs/s3.json
+            - -admin.ui=false
+            - -webdav=false
+            - -s3.port.iceberg=0
+            - -s3.port.lance=0
+          resources:
+            {{- toYaml .Values.seaweedfs.resources | nindent 12 }}
+          ports:
+            - containerPort: 8333
+              name: s3
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: 8333
+            periodSeconds: 5
+            failureThreshold: 3
+          volumeMounts:
+            - mountPath: /data
+              name: seaweedfs-data
+            - mountPath: /etc/seaweedfs
+              name: s3-config
+              readOnly: true
+      volumes:
+        - name: s3-config
+          secret:
+            secretName: seaweedfs-s3-config
+  volumeClaimTemplates:
+    - metadata:
+        name: seaweedfs-data
+      spec:
+        {{- include "infra.storageClass" . | nindent 8 }}
+        accessModes:
+          - ReadWriteOnce
+        resources:
+          requests:
+            storage: {{ .Values.seaweedfs.storage }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: seaweedfs
+  namespace: {{ $ns }}
+  labels:
+    {{- include "infra.labels" . | nindent 4 }}
+spec:
+  type: ClusterIP
+  selector:
+    app: seaweedfs
+  ports:
+    - { port: 8333, targetPort: 8333, name: s3, protocol: TCP }
+    - { port: 9333, targetPort: 9333, name: master, protocol: TCP }
+    - { port: 19333, targetPort: 19333, name: master-grpc, protocol: TCP }
+    - { port: 8888, targetPort: 8888, name: filer, protocol: TCP }
+    - { port: 18888, targetPort: 18888, name: filer-grpc, protocol: TCP }
+---
+# The master/filer ports have no auth (the filer serves every object), so other pods may
+# only reach the S3 port; pods labelled app=seaweedfs-admin (the bucket job) may use
+# `weed shell` against master/filer
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: seaweedfs-ingress
+  namespace: {{ $ns }}
+  labels:
+    {{- include "infra.labels" . | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels:
+      app: seaweedfs
+  policyTypes:
+    - Ingress
+  ingress:
+    - ports:
+        - port: 8333
+          protocol: TCP
+    - from:
+        - podSelector:
+            matchLabels:
+              app: seaweedfs-admin
+        - podSelector:
+            matchLabels:
+              app: seaweedfs
+{{- if .Values.seaweedfs.buckets }}
+---
+# Creates the non-Thorium buckets once SeaweedFS is reachable; `s3.bucket.create` fails if
+# the bucket exists, so the listing is checked first to stay idempotent
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: seaweedfs-create-buckets
+  namespace: {{ $ns }}
+  labels:
+    {{- include "infra.labels" . | nindent 4 }}
+  annotations:
+    helm.sh/hook: post-install,post-upgrade
+    helm.sh/hook-delete-policy: before-hook-creation
+spec:
+  backoffLimit: {{ .Values.jobs.backoffLimit }}
+  template:
+    metadata:
+      labels:
+        app: seaweedfs-admin
+    spec:
+      restartPolicy: Never
+      containers:
+        - name: weed-shell
+          image: {{ include "thorium.image" (dict "root" $ "image" .Values.seaweedfs.image) }}
+          imagePullPolicy: IfNotPresent
+          command:
+            - /bin/sh
+            - -c
+            - |
+              set -e
+              shell() { echo "$1" | weed shell -master={{ $host }}:9333 -filer={{ $host }}:8888; }
+              has_bucket() { shell "s3.bucket.list" | awk -v b="$1" '$1 == b { found = 1 } END { exit !found }'; }
+              for bucket in {{ join " " .Values.seaweedfs.buckets }}; do
+                if has_bucket "$bucket"; then
+                  echo "Bucket $bucket already exists"
+                else
+                  shell "s3.bucket.create -name $bucket"
+                fi
+                has_bucket "$bucket"
+              done
+{{- end }}
+{{- end }}

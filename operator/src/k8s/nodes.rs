@@ -1,10 +1,40 @@
 use k8s_openapi::api::core::v1::Pod;
 use kube::api::{DeleteParams, ListParams, Patch, PatchParams, PostParams};
+use thorium::conf::K8sCluster;
 use thorium::{Error, Thorium};
 
 use super::clusters::ClusterMeta;
 
+/// Resolve the nodes Thorium uses in a k8s cluster
+///
+/// An empty node list in the config means every node visible to the operator.
+///
+/// # Arguments
+///
+/// * `meta` - Thorium cluster client and metadata
+/// * `k8s_cluster` - The k8s cluster config to resolve nodes for
+pub async fn resolve_nodes(
+    meta: &ClusterMeta,
+    k8s_cluster: &K8sCluster,
+) -> Result<Vec<String>, Error> {
+    // use the configured node names when any are listed
+    if !k8s_cluster.nodes.is_empty() {
+        return Ok(k8s_cluster.nodes.clone());
+    }
+    // list every node in this cluster
+    let nodes = meta.node_api.list(&ListParams::default()).await?;
+    // keep just the node names
+    Ok(nodes
+        .items
+        .into_iter()
+        .filter_map(|node| node.metadata.name)
+        .collect())
+}
+
 const TRACING_MOUNT_PATH: &str = "/tmp/tracing.yml";
+
+/// How long in seconds to wait for a deleted provision pod to disappear
+const POD_DELETE_TIMEOUT_SECS: u64 = 120;
 
 pub async fn label_node(meta: &ClusterMeta, node: &str, version: &str) -> Result<(), Error> {
     println!("labeling {node} with thorium_version={version}");
@@ -46,7 +76,7 @@ pub async fn label_all_nodes(meta: &ClusterMeta, thorium: &Thorium) -> Result<()
     // get the version of Thorium that is being deployed for this node
     let version = thorium.updates.get_version().await?.thorium.to_string();
     // label each node
-    let clusters = meta.cluster.spec.config.thorium.scaler.k8s.clusters.clone();
+    let clusters = meta.conf.thorium.scaler.k8s.clusters.clone();
     for k8s_cluster in clusters.values() {
         for node in &k8s_cluster.nodes {
             // label this node
@@ -64,7 +94,7 @@ pub async fn label_all_nodes(meta: &ClusterMeta, thorium: &Thorium) -> Result<()
 pub async fn delete_node_labels(meta: &ClusterMeta) -> Result<(), Error> {
     let params = PatchParams::default();
     // label each node
-    let clusters = meta.cluster.spec.config.thorium.scaler.k8s.clusters.clone();
+    let clusters = meta.conf.thorium.scaler.k8s.clusters.clone();
     for (_name, k8s_cluster) in clusters.iter() {
         for node in k8s_cluster.nodes.iter() {
             // build a label json template
@@ -110,6 +140,27 @@ pub async fn delete_node_labels(meta: &ClusterMeta) -> Result<(), Error> {
     Ok(())
 }
 
+/// Wait for a deleted pod to disappear from the k8s API
+///
+/// # Arguments
+///
+/// * `meta` - Thorium cluster client and metadata for a specific cluster
+/// * `name` - The name of the pod being deleted
+async fn wait_for_pod_deletion(meta: &ClusterMeta, name: &str) -> Result<(), Error> {
+    // poll once a second until the pod is gone or we give up
+    for _ in 0..POD_DELETE_TIMEOUT_SECS {
+        // check whether the pod still exists
+        if meta.pod_api.get_opt(name).await?.is_none() {
+            return Ok(());
+        }
+        // give the pod time to terminate before checking again
+        tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+    }
+    Err(Error::new(format!(
+        "Timed out waiting for pod {name} to be deleted"
+    )))
+}
+
 /// Cleanup a specific nodes provision pod if it exists
 ///
 /// # Arguments
@@ -124,7 +175,8 @@ pub async fn cleanup_provision_pod_specific(meta: &ClusterMeta, node: &str) -> R
     match meta.pod_api.delete(&name, &params).await {
         Ok(_) => {
             println!("Cleaning up {} pod", &name);
-            Ok(())
+            // wait for the pod to be gone so a replacement with the same name can be created
+            wait_for_pod_deletion(meta, &name).await
         }
         Err(kube::Error::Api(error)) => {
             // don't panic if pods don't exist, thats the desired state
@@ -156,7 +208,7 @@ pub async fn cleanup_provision_pod_specific(meta: &ClusterMeta, node: &str) -> R
 /// * `meta` - Thorium cluster client and metadata
 pub async fn cleanup_provision_pods(meta: &ClusterMeta) -> Result<(), Error> {
     // get a reference to our k8s cluster configs
-    let clusters = meta.cluster.spec.config.thorium.scaler.k8s.clusters.clone();
+    let clusters = meta.conf.thorium.scaler.k8s.clusters.clone();
     // iterate over and clean up the provision nodes in all clusters
     for k8s_cluster in clusters.values() {
         for node in &k8s_cluster.nodes {
@@ -292,7 +344,7 @@ pub async fn deploy_provision_pods(meta: &ClusterMeta) -> Result<(), Error> {
     // cleanup existing provision pods
     cleanup_provision_pods(meta).await?;
     // apply a provision pod to each k8s node for each k8s cluster if any were set
-    let clusters = meta.cluster.spec.config.thorium.scaler.k8s.clusters.clone();
+    let clusters = meta.conf.thorium.scaler.k8s.clusters.clone();
     for (name, k8s_cluster) in &clusters {
         // skip any clusters with an api url as the operator doesn't yet support multiple k8s clusters
         if k8s_cluster.api_url.is_some() {
@@ -300,22 +352,12 @@ pub async fn deploy_provision_pods(meta: &ClusterMeta) -> Result<(), Error> {
             // skip to the next cluster
             continue;
         }
-        // get an interator over the node names in our conf or from the k8s api
-        let nodes = if k8s_cluster.nodes.is_empty() {
-            // list all nodes in this cluster
-            let nodes = meta.node_api.list(&ListParams::default()).await?;
-            // build a list of nodes to deploy too
-            nodes
-                .items
-                .into_iter()
-                .filter_map(|node| node.metadata.name)
-                .collect::<Vec<String>>()
-        } else {
-            // use the names of nodes in our config
-            k8s_cluster.nodes.clone()
-        };
+        // get the node names in our conf or from the k8s api
+        let nodes = resolve_nodes(meta, k8s_cluster).await?;
         // deploy provision pods to nodes in this cluster
         for node in &nodes {
+            // remove any earlier provision pod, including ones on nodes discovered from the k8s api
+            cleanup_provision_pod_specific(meta, node).await?;
             // provision this node
             deploy_provision_pod(meta, node).await?;
         }

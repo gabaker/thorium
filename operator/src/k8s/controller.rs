@@ -40,7 +40,7 @@ impl SharedInfo {
         // iterate over our clusters
         for (_, info) in &self.info.pin() {
             // get a ref to our k8s clusters
-            let k8s_config = &info.meta.cluster.spec.config.thorium.scaler.k8s;
+            let k8s_config = &info.meta.conf.thorium.scaler.k8s;
             // get the k8s cluster this node comes from
             if let Some(cluster) = k8s_config.clusters.get(k8s_cluster) {
                 // if this cluster contains this node explicitly then return its config
@@ -140,7 +140,8 @@ pub async fn run(args: OperateCluster) {
             .await
             .expect("failed to create ThoriumCluster CRD");
         // list ThoriumCluster resources
-        let clusters_api: Api<ThoriumCluster> = Api::<ThoriumCluster>::all(client.clone());
+        let clusters_api: Api<ThoriumCluster> =
+            watchers::scoped_api(&client, args.namespace.as_deref());
         if let Err(error) = clusters_api.list(&ListParams::default().limit(1)).await {
             println!("Failed to list ThoriumCluster API: {error}");
             std::process::exit(1);

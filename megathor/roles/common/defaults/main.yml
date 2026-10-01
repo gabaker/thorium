@@ -2,8 +2,21 @@ k8s_registry: "registry.k8s.io"
 # An optional name for this Thorium deployment. When set, every per-deployment
 # namespace is prefixed with "<thorium_instance>-" (e.g. "test-thorium",
 # "test-redis") so several deployments can share one Kubernetes cluster. The
-# cluster-wide operators (cert-manager, ECK, Scylla, Kubegres, Traefik, and the
-# Thorium operator) are shared by every deployment in a cluster, so each is only
-# deployed by one of them (see the *_operator_enabled toggles).
+# cluster-wide operators (the infra-operators chart and Traefik) are shared by
+# every deployment in a cluster, so each is only deployed by one of them (see
+# infra_operators_enabled and traefik_enabled).
 thorium_instance: ""
 namespace_prefix: "{{ thorium_instance ~ '-' if thorium_instance else '' }}"
+
+# The Thorium Helm charts. Online deployments install the published charts at
+# thorium_chart_version; offline deployments install the packaged charts that
+# offline-stage.yml saved to files/. Set thorium_chart or infra_operators_chart
+# to a chart directory, a packaged .tgz, or an oci:// reference to override.
+thorium_chart_repo: "oci://ghcr.io/cisagov/thorium/charts"
+thorium_chart_version: "1.8.1"
+
+# The S3 backend served by the thorium chart's SeaweedFS (single node only)
+seaweedfs_enabled: false
+seaweedfs_s3_endpoint: "http://seaweedfs.{{ namespace_prefix }}seaweedfs.svc.cluster.local:8333"
+# The bucket Quickwit stores traces in
+quickwit_bucket: "quickwit"

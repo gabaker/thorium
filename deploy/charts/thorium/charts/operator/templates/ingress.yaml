@@ -1,0 +1,115 @@
+{{- $ns := include "thorium.namespace" . }}
+{{- $i := .Values.ingress }}
+{{- if eq $i.type "nginx" }}
+---
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: thorium
+  namespace: {{ $ns }}
+  labels:
+    {{- include "operator.labels" . | nindent 4 }}
+  annotations:
+    nginx.ingress.kubernetes.io/proxy-body-size: "0"
+    {{- if not $i.tls.secretName }}
+    nginx.ingress.kubernetes.io/ssl-redirect: "false"
+    {{- end }}
+    {{- with $i.annotations }}
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
+spec:
+  ingressClassName: {{ $i.className }}
+  {{- if $i.tls.secretName }}
+  tls:
+    - secretName: {{ $i.tls.secretName }}
+      {{- with $i.host }}
+      hosts:
+        - {{ . | quote }}
+      {{- end }}
+  {{- end }}
+  rules:
+    - {{- with $i.host }}
+      host: {{ . | quote }}
+      {{- end }}
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: thorium-api
+                port:
+                  number: 80
+{{- else if eq $i.type "traefik" }}
+---
+apiVersion: traefik.io/v1alpha1
+kind: TLSOption
+metadata:
+  name: tls12
+  namespace: {{ $ns }}
+  labels:
+    {{- include "operator.labels" . | nindent 4 }}
+spec:
+  minVersion: VersionTLS12
+  maxVersion: VersionTLS13
+{{- if and $i.tls.secretName $i.tls.defaultStore }}
+---
+apiVersion: traefik.io/v1alpha1
+kind: TLSStore
+metadata:
+  name: default
+  namespace: {{ $ns }}
+  labels:
+    {{- include "operator.labels" . | nindent 4 }}
+spec:
+  defaultCertificate:
+    secretName: {{ $i.tls.secretName }}
+{{- end }}
+{{- if $i.registryHost }}
+---
+apiVersion: traefik.io/v1alpha1
+kind: Middleware
+metadata:
+  name: docker-registry-middleware
+  namespace: {{ $ns }}
+  labels:
+    {{- include "operator.labels" . | nindent 4 }}
+spec:
+  headers:
+    customRequestHeaders:
+      X-Forwarded-Proto: https
+{{- end }}
+---
+apiVersion: traefik.io/v1alpha1
+kind: IngressRoute
+metadata:
+  name: thorium-ingress
+  namespace: {{ $ns }}
+  labels:
+    {{- include "operator.labels" . | nindent 4 }}
+spec:
+  entryPoints:
+    - websecure
+  routes:
+    # without a host every request reaching the websecure entrypoint goes to Thorium
+    - match: {{ ternary (printf "Host(`%s`)" $i.host) "PathPrefix(`/`)" (not (empty $i.host)) | quote }}
+      kind: Rule
+      services:
+        - name: thorium-api
+          port: 80
+    {{- if $i.registryHost }}
+    - match: {{ printf "Host(`%s`)" $i.registryHost | quote }}
+      kind: Rule
+      services:
+        - name: docker-registry
+          port: 5000
+      middlewares:
+        - name: docker-registry-middleware
+    {{- end }}
+  tls:
+    options:
+      name: tls12
+    {{- with $i.tls.secretName }}
+    secretName: {{ . }}
+    {{- end }}
+{{- end }}

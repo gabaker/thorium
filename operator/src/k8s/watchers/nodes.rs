@@ -102,10 +102,23 @@ async fn reconcile_nodes(node: Arc<Node>, ctx: Arc<NodeWatchContext>) -> Result<
 }
 
 /// Watch our nodes for any changes
-pub async fn start(k8s_name: String, client: Client, shared: Arc<SharedInfo>) {
+///
+/// # Arguments
+///
+/// * `k8s_name` - The name of the k8s cluster these nodes are in
+/// * `client` - The kube client to watch with
+/// * `namespace` - The namespace to watch `ThoriumCluster`s in (all namespaces if unset)
+/// * `shared` - Data shared across watchers
+pub async fn start(
+    k8s_name: String,
+    client: Client,
+    namespace: Option<String>,
+    shared: Arc<SharedInfo>,
+) {
     // build a node api
     let node_api: Api<Node> = Api::<Node>::all(client.clone());
-    let clusters_api: Api<ThoriumCluster> = Api::<ThoriumCluster>::all(client.clone());
+    // build a ThoriumCluster api for the namespaces we watch
+    let clusters_api: Api<ThoriumCluster> = super::scoped_api(&client, namespace.as_deref());
     // setup some state for our watcher
     let ctx = NodeWatchContext {
         client: client.clone(),

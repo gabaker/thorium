@@ -8,6 +8,13 @@
 > cluster that is hosted on servers or VMs. It does not use any specific cloud environment,
 > however nothing precludes deployment of Thorium into the cloud.
 
+## Deploy with Helm (recommended)
+
+The [Thorium Helm charts](./deploy-helm.md) install Thorium and every component below with two
+`helm install` commands, online or offline. Use the manual steps on this page if you need to
+install or manage each component yourself. For a single-node development or test instance, see
+[minithor](./minithor.md).
+
 ## Prerequisites
 
 You will need to deploy a working K8s cluster on baremetal servers, VMs, or within a hosted cloud

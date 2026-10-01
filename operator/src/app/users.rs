@@ -46,7 +46,7 @@ pub async fn create_or_auth_user(
     let mut key: Option<String> = None;
     // pass in thorium secret_key if creating an admin account
     if admin {
-        key = Some(meta.cluster.spec.config.thorium.secret_key.clone());
+        key = Some(meta.conf.thorium.secret_key.clone());
     }
     // attempt to create the user account if it doesn't exist
     let result = thorium::client::Users::create(url, user_req, key.as_deref(), &settings).await;
