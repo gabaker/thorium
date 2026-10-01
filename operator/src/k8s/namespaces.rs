@@ -65,7 +65,7 @@ impl Namespaces {
 
 /// Attempt to create the ThoriumCluster namespace
 ///
-///  Arguments
+/// # Arguments
 ///
 /// * `namespace` - The namespace to create in k8s
 pub async fn try_create(namespace: &str) -> Result<(), Error> {

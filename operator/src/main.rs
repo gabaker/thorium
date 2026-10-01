@@ -8,6 +8,7 @@ mod k8s;
 use clap::Parser;
 use k8s::controller;
 
+/// Run the operator subcommand named on the command line
 #[tokio::main]
 async fn main() {
     // load command line args
@@ -16,5 +17,7 @@ async fn main() {
     match args.cmd {
         // start backing up data
         args::SubCommands::Operate(operate_args) => controller::run(operate_args).await,
+        // print the ThoriumCluster CRD
+        args::SubCommands::Crd => k8s::crds::print_crd(),
     }
 }

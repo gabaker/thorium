@@ -1,0 +1,19 @@
+Thorium is deploying into {{ include "thorium.namespace" . }}.
+{{- $operator := .Values.operator | default dict }}
+{{- $elastic := (($operator.backends | default dict).elastic | default dict) }}
+{{- if and (not (include "thorium.managed" (dict "root" $ "service" "elastic"))) (not (dig "caSecret" "name" "" $elastic)) (dig "insecureCertificates" true $elastic) }}
+
+WARNING: Thorium connects to the external Elasticsearch at {{ $elastic.node | default "<unset>" }}
+without verifying its TLS certificate. Put the CA that signed its certificate in a Secret in
+{{ include "thorium.namespace" . }} and set operator.backends.elastic.caSecret.name (and .key,
+default ca.crt) to verify it.
+{{- end }}
+{{- $proxy := dig "operator" "proxy" dict $operator }}
+{{- if and (or (dig "httpProxy" "" $proxy) (dig "httpsProxy" "" $proxy)) (empty ((.Values.global).clusterCIDRs)) }}
+
+WARNING: operator.operator.proxy sets a proxy but global.clusterCIDRs is empty. In-cluster
+traffic addressed by IP (mainly Kubernetes API calls from proxy-aware components, which reach
+the API server by its Service IP) may be routed through the proxy. Set global.clusterCIDRs to
+the cluster's service and pod CIDRs (e.g. [10.96.0.0/12, 10.244.0.0/16]) so it is added to
+noProxy.
+{{- end }}

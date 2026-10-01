@@ -1,0 +1,123 @@
+{{- $ns := include "thorium.namespace" . }}
+---
+# Used by the Thorium components the operator deploys (the k8s scaler schedules jobs with it); the
+# operator itself runs as thorium-operator
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: thorium
+  namespace: {{ $ns }}
+  labels:
+    {{- include "operator.labels" . | nindent 4 }}
+imagePullSecrets:
+  {{- include "operator.imagePullSecrets" . | nindent 2 }}
+automountServiceAccountToken: true
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: thorium-account-token
+  namespace: {{ $ns }}
+  labels:
+    {{- include "operator.labels" . | nindent 4 }}
+  annotations:
+    kubernetes.io/service-account.name: thorium
+type: kubernetes.io/service-account-token
+---
+# The operator runs as its own account so the Secret access it needs can be limited to this
+# namespace while the components keep the access they need through the thorium account
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: thorium-operator
+  namespace: {{ $ns }}
+  labels:
+    {{- include "operator.labels" . | nindent 4 }}
+imagePullSecrets:
+  {{- include "operator.imagePullSecrets" . | nindent 2 }}
+automountServiceAccountToken: true
+---
+# Cluster-scoped names carry the namespace so they follow the namespace prefix
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: {{ $ns }}-operator
+  labels:
+    {{- include "operator.labels" . | nindent 4 }}
+rules:
+  {{- include "operator.clusterRules" . | nindent 2 }}
+  {{- if not .Values.operator.watchOwnNamespaceOnly }}
+  {{- include "operator.namespacedRules" . | nindent 2 }}
+  {{- end }}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: {{ $ns }}-operator
+  labels:
+    {{- include "operator.labels" . | nindent 4 }}
+subjects:
+  - kind: ServiceAccount
+    name: thorium-operator
+    namespace: {{ $ns }}
+roleRef:
+  kind: ClusterRole
+  name: {{ $ns }}-operator
+  apiGroup: rbac.authorization.k8s.io
+{{- if .Values.operator.watchOwnNamespaceOnly }}
+---
+# The operator only manages Secrets, pods, services, ConfigMaps, and deployments in its own
+# namespace: the config and bootstrap Secrets a ThoriumCluster names, the Secrets it renders for
+# the components, and the components themselves
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: thorium-operator
+  namespace: {{ $ns }}
+  labels:
+    {{- include "operator.labels" . | nindent 4 }}
+rules:
+  {{- include "operator.namespacedRules" . | nindent 2 }}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: thorium-operator
+  namespace: {{ $ns }}
+  labels:
+    {{- include "operator.labels" . | nindent 4 }}
+subjects:
+  - kind: ServiceAccount
+    name: thorium-operator
+    namespace: {{ $ns }}
+roleRef:
+  kind: Role
+  name: thorium-operator
+  apiGroup: rbac.authorization.k8s.io
+{{- end }}
+---
+# The Thorium components; only the k8s scaler calls the k8s API, and it manages namespaces, pods,
+# Secrets, ConfigMaps, and network policies in every group namespace
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: {{ $ns }}-components
+  labels:
+    {{- include "operator.labels" . | nindent 4 }}
+rules:
+  {{- include "operator.componentRules" . | nindent 2 }}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: {{ $ns }}-components
+  labels:
+    {{- include "operator.labels" . | nindent 4 }}
+subjects:
+  - kind: ServiceAccount
+    name: thorium
+    namespace: {{ $ns }}
+roleRef:
+  kind: ClusterRole
+  name: {{ $ns }}-components
+  apiGroup: rbac.authorization.k8s.io

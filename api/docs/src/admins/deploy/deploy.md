@@ -2,11 +2,18 @@
 
 # Deploy Thorium on Kubernetes (K8s)
 
-> This documentation is for Thorium admins looking to deploy a new Thorium instance. This guide is
+> This documentation is for Thorium admins looking to deploy Thorium. This guide is
 > just an example and you will need to modify these steps to make them to work in your
 > environment. The instructions described below setup Thorium and it's dependencies on a blank K8s
 > cluster that is hosted on servers or VMs. It does not use any specific cloud environment,
 > however nothing precludes deployment of Thorium into the cloud.
+
+## Deploy with Helm (recommended)
+
+The [Thorium Helm charts](./deploy-helm.md) install Thorium and every component below with two
+`helm install` commands, online or offline. Use the manual steps on this page if you need to
+install or manage each component yourself. For a development or test deployment, see
+[minithor](./minithor.md).
 
 ## Prerequisites
 

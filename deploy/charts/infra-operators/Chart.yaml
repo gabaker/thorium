@@ -1,0 +1,15 @@
+apiVersion: v2
+name: infra-operators
+description: Cluster-wide operators the thorium chart's backing services need (Scylla, ECK, Kubegres); install once per cluster
+type: application
+version: 1.8.1
+appVersion: "1.8.1"
+home: https://github.com/cisagov/thorium
+# The subcharts are vendored in charts/ by ../scripts/vendor-charts.sh
+dependencies:
+  - name: scylla-operator
+    version: v1.21.1
+    condition: scylla-operator.enabled
+  - name: eck-operator
+    version: 2.16.0
+    condition: eck-operator.enabled

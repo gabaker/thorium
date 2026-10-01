@@ -259,6 +259,15 @@ The confirmation names both, and the summary's `kept` lists what was kept (`user
 user, `table nodes` for the nodes), logged as `restore summary: kept the target's ...`. To restore a
 deployment from its own backup, nothing changes: its operator users and nodes are the backup's.
 
+The bootstrap admin (the user in the `bootstrap.admin.secret` Secret, by default `thorium-admin`)
+isn't one of the operator's users, so a restore of another deployment's backup replaces it like
+every other user: it takes the backup's user of that name, or is gone when the backup has none, and
+the restore's confirmation lists it among the replaced users. The operator creates it again only
+when its bootstrap runs next, which happens when the bootstrap inputs change (the `ThoriumCluster`'s
+`bootstrap` spec, a bootstrap Secret, or the rendered Thorium config). Until then the Secret's
+password doesn't log in, and neither does the toolbox import, which logs in as that user. A backup
+taken afterwards holds that user as an ordinary admin.
+
 ### Merge or Wipe
 
 When the target already holds data, choose what happens to it. `--merge` and `--wipe` exclude each
