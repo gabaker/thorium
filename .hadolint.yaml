@@ -1,0 +1,8 @@
+# hadolint policy for every Dockerfile in this repo
+#
+# CI passes this file explicitly with `-c`, so hadolint never auto-discovers a
+# different config from the working directory or the home directory. Changes to
+# this file change what CI enforces and should be reviewed like workflow changes.
+
+# fail CI only on error-level findings; warnings and info still appear in code scanning
+failure-threshold: error

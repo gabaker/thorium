@@ -1,0 +1,142 @@
+# Lints every Dockerfile in the repo with hadolint and Trivy (open source edition)
+#
+# - Both scanners run from container images pinned by sha256 digest.
+# - Scanner containers run with no network, a read-only root filesystem, no
+#   capabilities, as the runner's unprivileged user, and with the repo mounted
+#   read-only. They receive no tokens and no Docker socket.
+# - Actions are pinned by full commit SHA.
+#
+# To bump a scanner, resolve the new tag's multi-arch index digest from ghcr.io
+# and update both the tag comment and the digest.
+name: Dockerfile Lint
+
+on:
+  push:
+    branches: ['**']
+  pull_request:
+  schedule:
+    # weekly, to surface findings from newly added checks
+    - cron: '41 6 * * 1'
+  workflow_dispatch:
+
+permissions: {}
+
+# superseded runs are cancelled, except on main
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+
+env:
+  # hadolint v2.15.1 (scratch image containing only the static binary)
+  HADOLINT_IMAGE: ghcr.io/hadolint/hadolint@sha256:32dac94127fd60b7b7e3fbfc65e1383b9b5e25c9bfd7b8536de7a539fe68a12d
+  # trivy 0.74.0 (Apache-2.0 open source edition)
+  TRIVY_IMAGE: ghcr.io/aquasecurity/trivy@sha256:62b1e65e8869bc4b4c6aa4fa2b21595256c7c2f6018a9d9ad61caf87187c1969
+
+jobs:
+  hadolint:
+    name: hadolint
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      security-events: write # upload SARIF results to code scanning
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Pull hadolint image
+        run: docker pull "$HADOLINT_IMAGE"
+
+      # Files are listed from git and passed as discrete argv entries, never
+      # through eval, so crafted file names cannot become shell code. The repo
+      # config is passed explicitly and inline ignore pragmas are honored, since
+      # both are visible in review.
+      - name: Run hadolint
+        id: hadolint
+        run: |
+          mapfile -t dockerfiles < <(git ls-files -- '*Dockerfile*')
+          set +e
+          docker run --rm --network none --read-only --cap-drop ALL \
+            --security-opt no-new-privileges --user "$(id -u):$(id -g)" \
+            -v "${GITHUB_WORKSPACE}:/work:ro" -w /work \
+            "$HADOLINT_IMAGE" /bin/hadolint -c /work/.hadolint.yaml \
+            --format sarif -- "${dockerfiles[@]}" > "${RUNNER_TEMP}/hadolint.sarif"
+          echo "exit-code=$?" >> "$GITHUB_OUTPUT"
+
+      # Fork pull requests get a read-only token, so only upload for pushes,
+      # schedules, manual runs, and same-repo pull requests.
+      - name: Upload hadolint SARIF
+        if: ${{ !cancelled() && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) }}
+        uses: github/codeql-action/upload-sarif@2892aa5e19bbd11bc0cff5427e3b750a04d9e3c2 # v4.38.2
+        with:
+          sarif_file: ${{ runner.temp }}/hadolint.sarif
+          category: hadolint
+
+      - name: Fail on error-level findings
+        if: steps.hadolint.outputs.exit-code != '0'
+        env:
+          HADOLINT_EXIT: ${{ steps.hadolint.outputs.exit-code }}
+        run: |
+          echo "hadolint reported error-level findings (exit code ${HADOLINT_EXIT}); see the code scanning results"
+          exit 1
+
+  trivy:
+    name: trivy config
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      security-events: write # upload SARIF results to code scanning
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Pull Trivy image
+        run: docker pull "$TRIVY_IMAGE"
+
+      # Trivy uses the checks bundle embedded in the pinned binary
+      # (--skip-check-update) and runs with no network. Its working directory is
+      # outside the repo, so a trivy.yaml or .trivyignore added by a pull request
+      # is never auto-loaded. Trivy's --severity filter also filters the report,
+      # so it runs twice: once reporting every severity to SARIF, and once
+      # gating only on CRITICAL findings. The repo is mounted at the same path
+      # it has on the runner because Trivy records the scan root in the SARIF
+      # base URI, which code scanning uses to map results to files.
+      - name: Run trivy config
+        id: trivy
+        run: |
+          mkdir -p "${RUNNER_TEMP}/trivy-out"
+          trivy() {
+            docker run --rm --network none --read-only --cap-drop ALL \
+              --security-opt no-new-privileges --user "$(id -u):$(id -g)" \
+              --tmpfs /tmp:rw,size=512m -e HOME=/tmp -w /tmp \
+              -v "${GITHUB_WORKSPACE}:${GITHUB_WORKSPACE}:ro" \
+              -v "${RUNNER_TEMP}/trivy-out:/out" \
+              "$TRIVY_IMAGE" config --skip-check-update --cache-dir /tmp/trivy \
+              --misconfig-scanners dockerfile "$@" "${GITHUB_WORKSPACE}"
+          }
+          trivy --format sarif --output /out/trivy-config.sarif
+          set +e
+          trivy --format table --severity CRITICAL --exit-code 1
+          echo "exit-code=$?" >> "$GITHUB_OUTPUT"
+
+      # Fork pull requests get a read-only token, so only upload for pushes,
+      # schedules, manual runs, and same-repo pull requests.
+      - name: Upload Trivy SARIF
+        if: ${{ !cancelled() && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) }}
+        uses: github/codeql-action/upload-sarif@2892aa5e19bbd11bc0cff5427e3b750a04d9e3c2 # v4.38.2
+        with:
+          sarif_file: ${{ runner.temp }}/trivy-out/trivy-config.sarif
+          category: trivy-config
+
+      - name: Fail on critical findings
+        if: steps.trivy.outputs.exit-code != '0'
+        env:
+          TRIVY_EXIT: ${{ steps.trivy.outputs.exit-code }}
+        run: |
+          echo "trivy reported CRITICAL misconfigurations (exit code ${TRIVY_EXIT}); see the code scanning results"
+          exit 1
