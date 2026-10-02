@@ -4,9 +4,9 @@ FROM $IMAGE
 WORKDIR "/app"
 
 # install sqlite utility
-RUN apt update && \
-    apt install -y sqlite3 jq && \
-    apt clean && \
+RUN apt-get update && \
+    apt-get install -y sqlite3 jq && \
+    apt-get clean && \
     rm -rf /var/lib/apt/lists/*
 
 # set command

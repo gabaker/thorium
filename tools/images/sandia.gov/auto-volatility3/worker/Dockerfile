@@ -11,6 +11,6 @@ RUN chmod -R 777 /usr/lib/python3.*/dist-packages/volatility3 || true
 RUN apt update -y && apt install zip -y
 
 # add our wrapper
-ADD wrapper.sh /app/.
+COPY wrapper.sh /app/.
 
 ENTRYPOINT ["bash", "/app/wrapper.sh"]

@@ -1,11 +1,14 @@
 ARG IMAGE="python:3.11-slim"
 FROM $IMAGE
 
+# fail a RUN step if any command in a pipeline fails
+SHELL ["/bin/bash", "-o", "pipefail", "-c"]
+
 WORKDIR "/app"
 
-RUN apt update && \
-    apt install -y wget && \
-    apt clean && \
+RUN apt-get update && \
+    apt-get install -y wget && \
+    apt-get clean && \
     rm -rf /var/lib/apt/lists/*
 
 RUN EXIFTOOL_VERSION="$(wget -qO- https://exiftool.org/ver.txt)" && \

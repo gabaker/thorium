@@ -1,5 +1,8 @@
 FROM thorium-registry.sandia.gov/base/manylinux_2_28_x86_64:latest
 
+# fail a RUN step if any command in a pipeline fails
+SHELL ["/bin/bash", "-o", "pipefail", "-c"]
+
 # install build dependencies
 RUN yum -y update && \
     yum -y install \
@@ -10,10 +13,18 @@ RUN yum -y update && \
         clang-devel \
         cmake \
         perl-core \
-        libvirt-devel
+        libvirt-devel && \
+    yum clean all && \
+    rm -rf /var/cache/yum
+# the rustup release to install and the sha256 of its x86_64 Linux rustup-init from static.rust-lang.org
+ARG RUSTUP_VERSION=1.29.1
+ARG RUSTUP_INIT_SHA256=dda7234360b7f578ca8b0ddcb80145646fa61a67c1720a5abc7051b35c9fcb71
 # install rust
-RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs > installer && \
-      sh installer --default-toolchain nightly -y
+RUN curl --proto '=https' --tlsv1.2 -sSf -o rustup-init "https://static.rust-lang.org/rustup/archive/${RUSTUP_VERSION}/x86_64-unknown-linux-gnu/rustup-init" && \
+      echo "${RUSTUP_INIT_SHA256}  rustup-init" | sha256sum -c - && \
+      chmod +x rustup-init && \
+      ./rustup-init --default-toolchain nightly -y && \
+      rm rustup-init
 ENV PATH="/root/.cargo/bin:$PATH"
 ENV RUSTFLAGS="-C target-feature=+aes,+sse2"
 # install maturin (PyO3 build system)

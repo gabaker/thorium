@@ -8,7 +8,14 @@ COPY . /tmp/.
 
 # build generator binary
 ENV RUSTFLAGS="-C target-feature=+aes,+sse2"
-RUN git clone https://github.com/cisagov/thorium.git thorium
+# the thorium commit the thorium-api path dependency is built from
+ARG THORIUM_COMMIT="a34b393732be07c3e4f762f002ee4e5da9d48c62"
+
+# fetch the pinned thorium commit and verify it
+RUN git init -q thorium && \
+    git -C thorium fetch -q --depth 1 https://github.com/cisagov/thorium.git "$THORIUM_COMMIT" && \
+    git -C thorium checkout -q --detach FETCH_HEAD && \
+    test "$(git -C thorium rev-parse HEAD)" = "$THORIUM_COMMIT"
 RUN rustup toolchain install nightly --profile minimal
 RUN rustup default nightly
 RUN cargo build --release
@@ -25,7 +32,10 @@ RUN chmod -R 777 /usr/lib/python3.*/dist-packages/volatility3 || true
 # add our tool binary from build image
 COPY --from=builder /tmp/target/release/auto-volatility3 /usr/bin/.
 
-RUN apt update -y && apt install zip -y
+RUN apt-get update && \
+    apt-get install -y zip && \
+    apt-get clean && \
+    rm -rf /var/lib/apt/lists/*
 
 # work out of /app
 WORKDIR /app
