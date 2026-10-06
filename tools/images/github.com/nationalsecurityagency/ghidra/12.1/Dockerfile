@@ -5,13 +5,13 @@ FROM $IMAGE
 SHELL ["/bin/bash", "-o", "pipefail", "-c"]
 
 # Download and install Ghidra
-# renovate: datasource=github-releases depName=NationalSecurityAgency/ghidra extractVersion=^Ghidra_(?<version>.+)_build$ allowedVersions=10.3.x
-ENV GHIDRA_VERSION=10.3.3
-ENV GHIDRA_URL=https://github.com/NationalSecurityAgency/ghidra/releases/download/Ghidra_10.3.3_build/ghidra_10.3.3_PUBLIC_20230829.zip
-ENV GHIDRA_SHA=63833361bea8ef5ada1bc28cd2aa2ae4ab43204d2672b595500372582152eebe
+# renovate: datasource=github-releases depName=NationalSecurityAgency/ghidra extractVersion=^Ghidra_(?<version>.+)_build$ allowedVersions=12.1.x
+ENV GHIDRA_VERSION=12.1.4
+ENV GHIDRA_URL=https://github.com/NationalSecurityAgency/ghidra/releases/download/Ghidra_12.1.4_build/ghidra_12.1.4_PUBLIC_20260921.zip
+ENV GHIDRA_SHA=ddac49f903da9d5bac833e5cc79395098b9c33cfd3279be5f31bd00387d2d4db
 
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends ca-certificates curl unzip openjdk-17-jdk-headless \
+    && apt-get install -y --no-install-recommends ca-certificates curl unzip openjdk-21-jdk-headless \
     && curl -L -o /tmp/ghidra.zip "${GHIDRA_URL}" \
     && echo "${GHIDRA_SHA} /tmp/ghidra.zip" | sha256sum -c - \
     && unzip -q -d /tmp/ /tmp/ghidra.zip \
