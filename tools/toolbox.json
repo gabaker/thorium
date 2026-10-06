@@ -2515,6 +2515,14 @@
         "image_tags": [
           "ghcr.io/cisagov/thorium/tools/ghidra-base:12.0"
         ]
+      },
+      "12.1": {
+        "build_image": true,
+        "build_path": "images/github.com/nationalsecurityagency/ghidra/12.1",
+        "dir": "images/github.com/nationalsecurityagency/ghidra/12.1",
+        "image_tags": [
+          "ghcr.io/cisagov/thorium/tools/ghidra-base:12.1"
+        ]
       }
     },
     "magika": {
