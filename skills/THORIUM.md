@@ -316,16 +316,18 @@ For full thoradm documentation, see the User Docs at `{THORIUM_URL}/api/docs/use
 
 ## Step 7: minithor (Local Development)
 
-`minithor` stands up a **single-node Thorium stack on Minikube** — a self-contained local instance
-for developing features against, and for building/testing/curating tools. It is not highly available
-and is for development/testing only (or small offline fly-away kits), not production. A deploy brings
-up all backing services (Redis, Elasticsearch, ScyllaDB, SeaweedFS/S3, Postgres, Quickwit, Jaeger), the
-Thorium operator and `ThoriumCluster`, a default admin user, a `static` group, an `allow-all` network
-policy, and (optionally) an in-cluster container registry; it also installs `thorctl` and imports the
-default toolbox. Backing-service passwords are randomly generated per deploy.
+`minithor` stands up a **Thorium stack on Minikube** (single-node by default, optionally multi-node)
+— a self-contained local instance for developing features against, and for building/testing/curating
+tools. It is not highly available and is for development/testing only (or small offline fly-away
+kits), not production. A deploy brings up all backing services (Redis, Elasticsearch, ScyllaDB,
+SeaweedFS/S3, Postgres, Quickwit, Jaeger), the Thorium operator and `ThoriumCluster`, a default
+admin user, a `static` group, an `allow-all` network policy, and (optionally) an in-cluster
+container registry; it also installs `thorctl` and imports the default toolbox. Backing-service
+passwords are randomly generated per deploy.
 
 Requirements: a container runtime (podman or docker; `kvm2` also works on Linux) and a beefy host
-(16+ GiB RAM, 8+ CPUs, 100+ GiB disk). It picks the best available driver (podman > docker > kvm2).
+(16+ GiB RAM, 8+ CPUs, 100+ GiB disk; multiply by the node count for multi-node clusters). It picks
+the best available driver (podman > docker > kvm2).
 
 Not all Thorium deployments use minithor. Check if it is available before using any of the commands below:
 
@@ -350,6 +352,49 @@ minithor expose             # port-forward the API to http://localhost:8080
 custom `thorium-cluster.yml`. After `minithor stop` or a reboot, resume with `minithor start` then
 `minithor expose` again.
 
+`minikube install` also accepts `--cpus <n>`/`--memory <GiB>` (cluster totals split evenly across
+the nodes, default 8/16; `--node-cpus`/`--node-memory` size each node directly and conflict with
+them), `--certs <path>` (a proxy CA `.crt` file or directory to trust on every node — required
+behind a TLS-intercepting proxy or nodes fail to pull images with `ImagePullBackOff`), and
+`--force-node-config` (rewrite the nodes' CA/proxy config even if already present).
+
+### Multi-node clusters
+
+To test larger deployments, create the cluster with several nodes; `deploy` then schedules Thorium jobs
+across all of them:
+
+```sh
+minithor minikube install --nodes 3 --cpus 15 --memory 48   # totals: 5 CPUs / 16 GiB per node
+minithor deploy
+```
+
+- Nodes are named `<profile>`, `<profile>-m02`, `<profile>-m03`, ... (`minikube`, `minikube-m02`, ... by default).
+- `deploy` writes every node into the ThoriumCluster's
+  `config.thorium.scaler.k8s.clusters.kubernetes-admin@cluster.local.nodes`. Custom configs passed with
+  `--config` should use `nodes: ${K8S_NODES}`, which expands to a YAML list of all node names. The
+  operator only labels (`thorium=enabled`), provisions, and registers the **listed** nodes, and the scaler
+  only schedules on labeled, registered nodes — so the list must match the real node names exactly, and
+  an empty list means no jobs ever schedule. Keep the `kubernetes-admin@cluster.local` key (the scaler
+  runs with a service account and expects that context name).
+- `--cpus`/`--memory` are cluster totals (split evenly, rounded down); `--node-cpus`/`--node-memory`
+  set per-node sizes instead. Each node needs more than 2 CPUs and 2 GiB of memory (the scaler
+  reserves that much per node), and install refuses a split that leaves less.
+- Per-node setup (kernel params, registry `/etc/hosts` entry, proxy/CA) runs on every node during
+  `install` and `start`.
+- Verify: `minikube kubectl -- get nodes -L thorium` shows `enabled` on every node,
+  `GET /api/system/nodes/details/` lists each node as `Healthy`, and the scaler logs per-node
+  allocatable resources (`minikube kubectl -- logs -n thorium deploy/scaler | grep 'node='`).
+- With the docker driver, nodes report the **host's** CPU/memory to Kubernetes (not the per-node
+  CPU/memory limits), so the scaler over-estimates capacity.
+
+### Separate clusters (profiles)
+
+`minithor --profile <name> <command>` (or `MINIKUBE_PROFILE=<name>`) targets a separate minikube
+profile, so a test cluster (e.g. a multi-node one) can run beside the default `minikube` cluster.
+It applies to every command; `minithor --profile <name> minikube delete --confirm` deletes only that
+profile's cluster. minikube switches the kubectl context to the profile it last started — switch back
+with `kubectl config use-context minikube`.
+
 ### Reach the running instance
 
 Once exposed, `THORIUM_URL=http://localhost:8080` (Step 1). Log in via the UI or
@@ -364,6 +409,7 @@ needed by `thoradm` (Step 6).
 | Command | Description |
 |---------|-------------|
 | `minithor minikube install` | Install minikube and start a Kubernetes cluster |
+| `minithor minikube install --nodes <n>` | Create an `n`-node cluster (`--cpus`/`--memory` are cluster totals split across nodes; `--node-cpus`/`--node-memory` size each node); `deploy` schedules jobs on every node |
 | `minithor deploy` | Deploy all Thorium services and backing infrastructure (add `--registry` for an in-cluster registry) |
 | `minithor expose` | Port-forward the Thorium API to localhost:8080 (and the registry to localhost:5000 when one was deployed) |
 | `minithor expose --port <port>` | Port-forward the API to a custom local port |
@@ -376,7 +422,8 @@ needed by `thoradm` (Step 6).
 | `minithor get-config --local` | Extract the config **rewritten for local host access** via the exposed ports, to ~/thorium.local.yml (see "Testing locally") |
 | `minithor cleanup --confirm` | Remove all Thorium resources for a fresh deploy (also stops port-forwards and removes loopback aliases) |
 | `minithor --instance <name> <command>` | Run `deploy`/`expose`/`get-config`/`cleanup` against a named instance whose namespaces are prefixed `<name>-`, so several Thorium instances can share the cluster for deployment testing only — not supported by the scaler (they share the operators; use `expose --port-offset <n>` to expose more than one) |
-| `minithor minikube delete --confirm` | Fully remove minikube (also stops port-forwards and removes loopback aliases) |
+| `minithor minikube delete --confirm` | Fully remove minikube (also stops port-forwards and removes loopback aliases); with `--profile`, deletes only that profile's cluster |
+| `minithor --profile <name> <command>` | Run any command against a separate minikube profile (cluster) instead of `minikube` |
 
 ### Testing Locally: Connecting a Local Build to the Cluster Databases
 
@@ -450,7 +497,7 @@ To make this work with only a port-forward, `minithor expose --dev`:
 
 The seed connection and the driver's topology re-dial then both land on the forward.
 `get-config --local` writes that same advertised IP into `scylla.nodes`. The created
-aliases are tracked in `/tmp/minithor-expose-logs/loopback-aliases` and are removed
+aliases are tracked in `~/.cache/minithor/loopback-aliases` and are removed
 automatically by `expose --stop`, `cleanup --confirm`, and `minikube delete --confirm`.
 
 > Adding a loopback alias requires `sudo` (you may be prompted). The alias is harmless and
@@ -465,7 +512,7 @@ First confirm what is actually forwarded and which aliases exist:
 minithor expose --status                 # lists running port-forwards
 ip addr show dev lo | grep -w inet       # Linux: shows loopback aliases (e.g. 10.x for Scylla)
 ifconfig lo0 | grep inet                 # macOS equivalent
-cat /tmp/minithor-expose-logs/*.log      # per-forward kubectl logs
+cat ~/.cache/minithor/expose-logs/*.log  # per-forward kubectl logs
 ```
 
 | Symptom | Likely cause / fix |
@@ -475,7 +522,7 @@ cat /tmp/minithor-expose-logs/*.log      # per-forward kubectl logs
 | Elastic errors: TLS/cert hostname mismatch or `invalid peer certificate` | The cluster cert isn't valid for `localhost`. Set `elastic.insecure_certificates: true` (done automatically by `get-config --local`). |
 | Elastic `403 security_exception` for `cluster:monitor/*` | Not a connection problem — the `thorium` user simply lacks that privilege. Auth succeeded; querying a Thorium index works. |
 | API fails to bind / "permission denied" on port 80 | Running as non-root with `thorium.port: 80`. Use a non-privileged port (`get-config --local` sets `8888`). |
-| `expose` reports a forward, but connections are refused | The forward process may have died; check its log under `/tmp/minithor-expose-logs/` and re-run `minithor expose --dev`. Stale forwards on a port are auto-killed on the next `expose`. |
+| `expose` reports a forward, but connections are refused | The forward process may have died; check its log under `~/.cache/minithor/expose-logs/` and re-run `minithor expose --dev`. Stale forwards on a port are auto-killed on the next `expose`. |
 | Stale Scylla loopback alias after a crash | `minithor expose --stop` removes all aliases; or remove manually with `sudo ip addr del <ip>/32 dev lo` (Linux) / `sudo ifconfig lo0 -alias <ip>` (macOS). |
 
 **macOS notes:** the loopback-alias and port-forward approach works on macOS too (it's
