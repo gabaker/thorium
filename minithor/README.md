@@ -26,7 +26,9 @@ Commands:
   cleanup          Remove all Thorium resources for a fresh deploy (requires --confirm)
 
 Global options:
-  -h, --help       Show this help message
+  --instance <name>  Operate on a named Thorium instance (namespaces prefixed with "<name>-")
+  --profile <name>   Operate on a separate minikube cluster (profile) instead of "minikube"
+  -h, --help         Show this help message
 
 Run 'minithor <command> --help' for command-specific options.
 ```
@@ -48,17 +50,32 @@ All paths can be overridden with CLI flags — run `minithor <command> --help` f
 Install and start minikube and any necessary plugins.
 
 ```bash
-minithor minikube install [--cpus <n>] [--memory <n>] [--certs <path>] [--force-node-config]
+minithor minikube install [--nodes <n>] [--cpus <n> | --node-cpus <n>] [--memory <n> | --node-memory <n>] [--certs <path>] [--force-node-config]
 ```
 
 | Flag | Description |
 |------|-------------|
-| `--cpus <n>` | Number of CPUs to allocate to minikube (default: 8) |
-| `--memory <n>` | Memory in GiB to allocate to minikube (default: 16) |
+| `--nodes <n>` | Number of Kubernetes nodes to create (default: 1) |
+| `--cpus <n>` | Total CPUs for the whole cluster, split evenly across the nodes and rounded down (default: 8). Unlike minikube's own `--cpus`, this is a cluster total |
+| `--memory <n>` | Total memory in GiB for the whole cluster, split evenly across the nodes (default: 16) |
+| `--node-cpus <n>` | CPUs for each node instead of splitting `--cpus` (conflicts with `--cpus`) |
+| `--node-memory <n>` | Memory in GiB for each node instead of splitting `--memory` (conflicts with `--memory`) |
 | `--certs <path>` | A `.crt` file, or a directory of `*.crt` files, to install into the minikube node's trust store. Required behind a TLS-intercepting proxy so the node trusts it for image pulls. No default — cert install only runs when this flag is given. |
 | `--force-node-config` | Overwrite the node's CA and container-runtime (dockerd or containerd) proxy drop-in even if they already exist. By default existing files are left in place so a manual fix on the node isn't clobbered. |
 
 Detects the best available driver (podman > docker > kvm2), downloads minikube for your OS/architecture, configures resource limits, and starts the cluster with Calico CNI, CSI, and Ingress addons. When the host has an HTTP proxy configured (see below), the node's container runtime is also configured to pull images through it.
+
+#### Multi-node clusters
+
+`--nodes <n>` creates a cluster with `n` nodes (`minikube`, `minikube-m02`, ...) so larger deployments can be tested. `--cpus` and `--memory` are totals for the whole cluster and are split evenly across the nodes (for example `--nodes 3 --cpus 15 --memory 48` gives each node 5 CPUs and 16 GiB); use `--node-cpus`/`--node-memory` to size each node directly instead. Each node needs more than 2 CPUs and 2 GiB of memory because the Thorium scaler reserves that much on every node, and install refuses a split that leaves less. `minithor deploy` adds every node to the ThoriumCluster's scaler node list, which makes the operator label and register them so jobs are scheduled across all of them. Custom `thorium-cluster.yml` files can use `nodes: ${K8S_NODES}` to get the same list.
+
+To try a multi-node cluster without touching an existing one, use a separate minikube profile:
+
+```bash
+minithor --profile multi minikube install --nodes 3 --cpus 15 --memory 48
+minithor --profile multi deploy
+minithor --profile multi minikube delete --confirm   # deletes only the "multi" cluster
+```
 
 ### Create registry auth file (optional)
 
