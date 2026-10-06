@@ -17,6 +17,22 @@ CONTAINER_CMD=""
 # In-cluster container registry, referenced by its Kubernetes service DNS name.
 REGISTRY_HOST="registry.thorium.svc.cluster.local"
 REGISTRY_PORT=5000
+
+# Select which minikube profile (cluster) every minikube call targets. minikube
+# reads MINIKUBE_PROFILE itself, so exporting it scopes all of its subcommands;
+# the profile name is also the primary node's (and container's) name, with any
+# extra nodes named "<profile>-m02", "<profile>-m03", ...
+#
+#   set_profile [name]
+set_profile() {
+    PROFILE="${1:-minikube}"
+    if ! [[ "$PROFILE" =~ ^[a-z0-9]([-a-z0-9]*[a-z0-9])?$ ]]; then
+        echo "ERROR: --profile must be a lowercase DNS label" >&2
+        exit 1
+    fi
+    export MINIKUBE_PROFILE="$PROFILE"
+}
+set_profile "${MINIKUBE_PROFILE:-}"
 # The critical hosts and CIDR ranges that must never traverse an HTTP proxy so
 # the minikube node and host can reach them directly: the node subnet (docker
 # driver), the service and pod CIDRs, the control-plane host, loopback, and the
@@ -32,7 +48,20 @@ MINIKUBE_NO_PROXY="control-plane.minikube.internal,192.168.49.0/24,10.96.0.0/12,
 # start, and expose stay consistent. HTTP_PROXY/HTTPS_PROXY are always taken
 # as-is from the host environment and never constructed here.
 compute_no_proxy() {
-    printf '%s,%s,%s' "${NO_PROXY:-}" "${no_proxy:-}" "$MINIKUBE_NO_PROXY" \
+    # Every profile but the first gets its own container network, so add the
+    # current profile's node subnet once its network exists (docker/podman only)
+    local profile_subnet=""
+    case "$CONTAINER_CMD" in
+        docker)
+            profile_subnet=$(env -u DOCKER_HOST docker network inspect "$PROFILE" \
+                -f '{{range .IPAM.Config}}{{.Subnet}}{{end}}' 2>/dev/null) || true
+            ;;
+        podman)
+            profile_subnet=$(podman network inspect "$PROFILE" \
+                -f '{{range .Subnets}}{{.Subnet}}{{end}}' 2>/dev/null) || true
+            ;;
+    esac
+    printf '%s,%s,%s,%s' "${NO_PROXY:-}" "${no_proxy:-}" "$MINIKUBE_NO_PROXY" "$profile_subnet" \
         | tr ',' '\n' \
         | awk 'NF && !seen[$0]++' \
         | paste -sd, -
@@ -79,6 +108,19 @@ persist_no_proxy_rc() {
 }
 
 kctl() { minikube kubectl -- "$@"; }
+
+# Print the name of every node in the current minikube profile, one per line
+list_minikube_nodes() { minikube node list 2>/dev/null | awk 'NF {print $1}'; }
+
+# Print the profile's node names as a YAML flow sequence for the ThoriumCluster
+# scaler node list, e.g. ["minikube","minikube-m02"]
+k8s_nodes_yaml() {
+    local nodes
+    nodes=$(kctl get nodes -o jsonpath='{.items[*].metadata.name}')
+    # node names never contain whitespace, so splitting gives one name per item
+    # shellcheck disable=SC2086
+    printf '[%s]' "$(printf '"%s",' $nodes | sed 's/,$//')"
+}
 
 log() { echo -e "\n====== $1 ======\n"; }
 
@@ -571,10 +613,11 @@ ${admin_lines}
 EOF
 }
 
-# Substitute the \${NAME} credential, namespace, and service host placeholders
-# in a user-supplied cluster config with this deploy's values, so one file works
-# for any instance. Only these names are replaced, so any other \$ in the file
-# is left as written.
+# Substitute the \${NAME} credential, namespace, service host, and node list
+# placeholders in a user-supplied cluster config with this deploy's values, so
+# one file works for any instance and node count. \${K8S_NODES} becomes a YAML
+# list of every node in the cluster. Only these names are replaced, so any
+# other \$ in the file is left as written.
 #
 #   render_cluster_config <source> <destination>
 render_cluster_config() {
@@ -591,6 +634,7 @@ render_cluster_config() {
         -e "s|\\\${ELASTIC_HOST}|$ELASTIC_CLUSTER_HOST|g" \
         -e "s|\\\${S3_HOST}|$SEAWEEDFS_CLUSTER_HOST|g" \
         -e "s|\\\${QUICKWIT_INDEXER_HOST}|$QUICKWIT_INDEXER_HOST|g" \
+        -e "s|\\\${K8S_NODES}|$(k8s_nodes_yaml)|g" \
         "$1" > "$2"
 }
 
@@ -644,6 +688,10 @@ detect_profile_driver() {
     esac
 }
 
+#   minikube_start [extra minikube start args...]
+#
+# Extra args (e.g. --nodes/--cpus/--memory) only take effect when the profile is
+# first created; restarting an existing profile brings back all of its nodes.
 minikube_start() {
     # Trust the in-cluster registry as insecure (HTTP) at cluster-creation time.
     # The node's container runtime defaults to HTTPS for every registry; without
@@ -663,18 +711,19 @@ minikube_start() {
     export no_proxy="$NO_PROXY"
 
     if [ "$DRIVER" = "docker" ]; then
-        env -u DOCKER_HOST minikube start --cni calico --driver="$DRIVER" --insecure-registry="$insecure_registry"
+        env -u DOCKER_HOST minikube start --cni calico --driver="$DRIVER" --insecure-registry="$insecure_registry" "$@"
     elif [ "$DRIVER" = "podman" ]; then
-        minikube start --cni calico --container-runtime=containerd --driver="$DRIVER" --insecure-registry="$insecure_registry"
+        minikube start --cni calico --container-runtime=containerd --driver="$DRIVER" --insecure-registry="$insecure_registry" "$@"
     else
-        minikube start --cni calico --driver="$DRIVER" --insecure-registry="$insecure_registry"
+        minikube start --cni calico --driver="$DRIVER" --insecure-registry="$insecure_registry" "$@"
     fi
 }
 
 fix_container_config() {
     if [ -n "$CONTAINER_CMD" ]; then
         local api_port cluster
-        api_port="$($CONTAINER_CMD port minikube 8443/tcp | awk -F: '{print $2}')"
+        # the primary node's container is named after the profile
+        api_port="$($CONTAINER_CMD port "$PROFILE" 8443/tcp | awk -F: '{print $2}')"
         cluster="$(kctl config view --minify -o jsonpath='{.contexts[0].context.cluster}')"
         kctl config set-cluster "$cluster" --server="https://127.0.0.1:${api_port}"
     fi
@@ -692,14 +741,15 @@ ensure_minikube_running() {
     local status_output
     status_output="$(minikube status 2>/dev/null)" || true
     local host_status
-    host_status="$(echo "$status_output" | awk '/^host:/ {print $2}')" || true
+    # multi-node clusters list every node; the first block is the control plane
+    host_status="$(echo "$status_output" | awk '/^host:/ {print $2; exit}')" || true
     if [[ "$host_status" != "Running" ]]; then
         echo "ERROR: minikube is not running. Start it with: minithor start" >&2
         exit 1
     fi
     # Auto-fix stale kubeconfig (e.g. after host reboot changed the container port mapping)
     local kube_status
-    kube_status="$(echo "$status_output" | awk '/^kubeconfig:/ {print $2}')" || true
+    kube_status="$(echo "$status_output" | awk '/^kubeconfig:/ {print $2; exit}')" || true
     if [[ "$kube_status" != "Configured" ]]; then
         echo "Kubeconfig is stale, updating context..." >&2
         minikube update-context >/dev/null 2>&1
@@ -800,8 +850,23 @@ run_step() {
     fi
 }
 
+# Raise the kernel limits Scylla/Elastic need on the host or on minikube nodes
+#
+#   tune_kernel_params [host|minikube|node:<name>]
+#
+# "minikube" tunes every node in the profile; "node:<name>" tunes one node.
 tune_kernel_params() {
     local target="${1:-host}"
+    # tune each node separately since every node has its own kernel settings
+    if [ "$target" = "minikube" ]; then
+        local node
+        for node in $(list_minikube_nodes); do
+            echo "  Node $node:"
+            tune_kernel_params "node:$node"
+        done
+        return 0
+    fi
+    local node_name="${target#node:}"
     # fs.aio-max-nr is kernel-wide and each Scylla node reserves a large share,
     # so a second instance's Scylla fails to start at the 65536 default
     local params=(
@@ -816,8 +881,8 @@ tune_kernel_params() {
         local key="${param%%=*}"
         local desired="${param#*=}"
         local current
-        if [ "$target" = "minikube" ]; then
-            current=$(minikube ssh -- /sbin/sysctl -n "$key" 2>/dev/null | tr -d '\r') || true
+        if [ "$target" != "host" ]; then
+            current=$(minikube ssh -n "$node_name" -- /sbin/sysctl -n "$key" 2>/dev/null | tr -d '\r') || true
         else
             current=$(sysctl -n "$key" 2>/dev/null) || true
         fi
@@ -832,8 +897,8 @@ tune_kernel_params() {
         else
             persisted+=("$param")
             echo "  $key: $current -> $desired"
-            if [ "$target" = "minikube" ]; then
-                minikube ssh -- sudo /sbin/sysctl -w "$param" >/dev/null 2>&1 || echo "    WARNING: failed to set $key on minikube node"
+            if [ "$target" != "host" ]; then
+                minikube ssh -n "$node_name" -- sudo /sbin/sysctl -w "$param" >/dev/null 2>&1 || echo "    WARNING: failed to set $key on node $node_name"
             else
                 sudo sysctl -w "$param" >/dev/null 2>&1 || echo "    WARNING: failed to set $key (may require root)"
             fi
@@ -846,8 +911,8 @@ tune_kernel_params() {
     fi
 }
 
-# Map the in-cluster registry's service DNS name to its ClusterIP in the minikube
-# node's /etc/hosts. The node's container runtime pulls images using the node's
+# Map the in-cluster registry's service DNS name to its ClusterIP in every minikube
+# node's /etc/hosts. Each node's container runtime pulls images using the node's
 # resolver (not CoreDNS), so without this it cannot resolve REGISTRY_HOST and
 # image pulls fail with "no such host". Idempotent; no-op when the registry isn't
 # deployed. The docker driver regenerates /etc/hosts on node restart, so this is
@@ -856,17 +921,20 @@ ensure_registry_node_dns() {
     local ip
     ip="$(kctl get svc registry -n "$REGISTRY_NAMESPACE" -o jsonpath='{.spec.clusterIP}' 2>/dev/null)" || return 0
     [ -n "$ip" ] || return 0
-    echo "  Mapping ${REGISTRY_HOST} -> ${ip} on the minikube node"
-    # /etc/hosts is a bind-mount in the node; rewrite in place (rename-based edits
-    # like `sed -i` fail with "Device or resource busy").
-    minikube ssh -- "sudo cp /etc/hosts /tmp/minithor-hosts && \
-        grep -v ' ${REGISTRY_HOST}\$' /tmp/minithor-hosts | sudo tee /etc/hosts >/dev/null && \
-        echo '${ip} ${REGISTRY_HOST}' | sudo tee -a /etc/hosts >/dev/null" >/dev/null 2>&1 \
-        || echo "    WARNING: failed to set registry hosts entry on the minikube node"
+    local node
+    for node in $(list_minikube_nodes); do
+        echo "  Mapping ${REGISTRY_HOST} -> ${ip} on node $node"
+        # /etc/hosts is a bind-mount in the node; rewrite in place (rename-based edits
+        # like `sed -i` fail with "Device or resource busy").
+        minikube ssh -n "$node" -- "sudo cp /etc/hosts /tmp/minithor-hosts && \
+            grep -v ' ${REGISTRY_HOST}\$' /tmp/minithor-hosts | sudo tee /etc/hosts >/dev/null && \
+            echo '${ip} ${REGISTRY_HOST}' | sudo tee -a /etc/hosts >/dev/null" >/dev/null 2>&1 \
+            || echo "    WARNING: failed to set registry hosts entry on node $node"
+    done
 }
 
-# Make the minikube node able to pull images through the host's HTTP proxy and,
-# behind a TLS-intercepting proxy, trust its CA. This is required because
+# Make every minikube node able to pull images through the host's HTTP proxy
+# and, behind a TLS-intercepting proxy, trust its CA. This is required because
 # minikube's own proxy propagation into the node runtime is unreliable (it can
 # bake empty HTTP_PROXY/HTTPS_PROXY), so the container runtime otherwise dials
 # external registries (quay.io, ghcr.io, ...) directly and times out.
@@ -887,17 +955,28 @@ ensure_registry_node_dns() {
 # quoting. Driver-agnostic: everything goes through `minikube cp` / `minikube
 # ssh`, so it works for docker, podman, and kvm2.
 setup_node_pull_env() {
-    local certs_path="${1:-}"
-    local force="${2:-false}"
+    local node
+    for node in $(list_minikube_nodes); do
+        setup_one_node_pull_env "$node" "$@"
+    done
+}
+
+# Configure a single node's image pulls (see setup_node_pull_env)
+#
+#   setup_one_node_pull_env <node> [certs_path] [force]
+setup_one_node_pull_env() {
+    local node="$1"
+    local certs_path="${2:-}"
+    local force="${3:-false}"
     local changed=false
 
     # The node reports its runtime as e.g. "docker://28.1.1" or "containerd://1.7"
     local runtime_service
-    runtime_service=$(kctl get node minikube -o jsonpath='{.status.nodeInfo.containerRuntimeVersion}' 2>/dev/null | cut -d: -f1) || true
+    runtime_service=$(kctl get node "$node" -o jsonpath='{.status.nodeInfo.containerRuntimeVersion}' 2>/dev/null | cut -d: -f1) || true
     case "$runtime_service" in
         docker|containerd) ;;
         *)
-            echo "  WARNING: could not detect the node's container runtime, assuming containerd" >&2
+            echo "  WARNING: could not detect node $node's container runtime, assuming containerd" >&2
             runtime_service=containerd
             ;;
     esac
@@ -924,21 +1003,21 @@ setup_node_pull_env() {
                 # Existence gate: leave an already-installed CA alone so a
                 # manual fix on the node isn't clobbered (unless --force-node-config).
                 if [ "$force" != true ] \
-                    && minikube ssh -- "test -f /usr/local/share/ca-certificates/$base" >/dev/null 2>&1; then
-                    echo "  CA '$base' already present on the minikube node, leaving it in place (use --force-node-config to overwrite)"
+                    && minikube ssh -n "$node" -- "test -f /usr/local/share/ca-certificates/$base" >/dev/null 2>&1; then
+                    echo "  CA '$base' already present on node $node, leaving it in place (use --force-node-config to overwrite)"
                     continue
                 fi
-                echo "  Installing CA '$base' into the minikube node trust store"
-                if minikube cp "$cert" "/tmp/$base" >/dev/null 2>&1 \
-                    && minikube ssh -- "sudo cp /tmp/$base /usr/local/share/ca-certificates/$base" >/dev/null 2>&1; then
+                echo "  Installing CA '$base' into node $node's trust store"
+                if minikube cp "$cert" "$node:/tmp/$base" >/dev/null 2>&1 \
+                    && minikube ssh -n "$node" -- "sudo cp /tmp/$base /usr/local/share/ca-certificates/$base" >/dev/null 2>&1; then
                     changed=true
                 else
-                    echo "    WARNING: failed to copy '$base' to the minikube node" >&2
+                    echo "    WARNING: failed to copy '$base' to node $node" >&2
                 fi
             done
             if [ "$changed" = true ]; then
-                minikube ssh -- "sudo update-ca-certificates" >/dev/null 2>&1 \
-                    || echo "    WARNING: update-ca-certificates failed on the minikube node" >&2
+                minikube ssh -n "$node" -- "sudo update-ca-certificates" >/dev/null 2>&1 \
+                    || echo "    WARNING: update-ca-certificates failed on node $node" >&2
             fi
         fi
     fi
@@ -955,8 +1034,8 @@ setup_node_pull_env() {
         # a manual fix to minikube's proxy propagation isn't clobbered (unless
         # --force-node-config).
         if [ "$force" != true ] \
-            && minikube ssh -- "test -f $dropin" >/dev/null 2>&1; then
-            echo "  ${runtime_service} proxy drop-in already present on the minikube node, leaving it in place (use --force-node-config to overwrite)"
+            && minikube ssh -n "$node" -- "test -f $dropin" >/dev/null 2>&1; then
+            echo "  ${runtime_service} proxy drop-in already present on node $node, leaving it in place (use --force-node-config to overwrite)"
         else
             # systemd expands % specifiers in Environment=, so URL-encoded
             # characters in the proxy URLs must be written as %%
@@ -964,14 +1043,14 @@ setup_node_pull_env() {
             dropin_tmp=$(umask 077; mktemp)
             printf '[Service]\nEnvironment="HTTP_PROXY=%s"\nEnvironment="HTTPS_PROXY=%s"\nEnvironment="NO_PROXY=%s"\n' \
                 "${http_p//\%/%%}" "${https_p//\%/%%}" "${no_p//\%/%%}" > "$dropin_tmp"
-            if minikube cp "$dropin_tmp" /tmp/minithor-http-proxy.conf >/dev/null 2>&1 \
-                && minikube ssh -- "sudo mkdir -p $dropin_dir && \
+            if minikube cp "$dropin_tmp" "$node:/tmp/minithor-http-proxy.conf" >/dev/null 2>&1 \
+                && minikube ssh -n "$node" -- "sudo mkdir -p $dropin_dir && \
                     sudo install -m 600 /tmp/minithor-http-proxy.conf $dropin && \
-                    rm -f /tmp/minithor-http-proxy.conf" >/dev/null 2>&1; then
-                echo "  Configured the minikube node's ${runtime_service} to use the host HTTP proxy"
+                    sudo rm -f /tmp/minithor-http-proxy.conf" >/dev/null 2>&1; then
+                echo "  Configured node $node's ${runtime_service} to use the host HTTP proxy"
                 changed=true
             else
-                echo "    WARNING: failed to write the ${runtime_service} proxy drop-in on the minikube node" >&2
+                echo "    WARNING: failed to write the ${runtime_service} proxy drop-in on node $node" >&2
             fi
             rm -f "$dropin_tmp"
         fi
@@ -979,9 +1058,9 @@ setup_node_pull_env() {
 
     # --- Apply (reload + restart the runtime only if something changed) ---
     if [ "$changed" = true ]; then
-        echo "  Reloading and restarting ${runtime_service} on the minikube node"
-        minikube ssh -- "sudo systemctl daemon-reload && sudo systemctl restart ${runtime_service}" >/dev/null 2>&1 \
-            || echo "    WARNING: failed to restart ${runtime_service} on the minikube node" >&2
+        echo "  Reloading and restarting ${runtime_service} on node $node"
+        minikube ssh -n "$node" -- "sudo systemctl daemon-reload && sudo systemctl restart ${runtime_service}" >/dev/null 2>&1 \
+            || echo "    WARNING: failed to restart ${runtime_service} on node $node" >&2
     fi
 }
 
@@ -1090,6 +1169,9 @@ Global options:
                      operators (ECK, Scylla, cert-manager, Kubegres, Thorium)
                      and each instance's scaler uses the same group namespaces.
                      Applies to deploy, expose, get-config, and cleanup.
+  --profile <name>   Operate on a separate minikube cluster (profile) instead
+                     of the default "minikube" one (also settable with
+                     MINIKUBE_PROFILE). Applies to every command.
   -h, --help         Show this help message
 
 Run 'minithor <command> --help' for command-specific options.
@@ -1117,8 +1199,18 @@ minithor minikube install — install minikube and start a Kubernetes cluster
 Usage: minithor minikube install [options]
 
 Options:
-  --cpus <n>           Number of CPUs to allocate to minikube (default: 8)
-  --memory <n>         Memory in GiB to allocate to minikube (default: 16)
+  --nodes <n>          Number of Kubernetes nodes to create (default: 1). Every
+                       node is added to the ThoriumCluster by deploy, so jobs
+                       are scheduled across all of them
+  --cpus <n>           Total CPUs for the whole cluster, split evenly across
+                       the nodes and rounded down (default: 8). Unlike
+                       minikube's own --cpus, this is a cluster total
+  --memory <n>         Total memory in GiB for the whole cluster, split evenly
+                       across the nodes (default: 16)
+  --node-cpus <n>      CPUs for each node instead of splitting --cpus
+                       (conflicts with --cpus)
+  --node-memory <n>    Memory in GiB for each node instead of splitting
+                       --memory (conflicts with --memory)
   --certs <path>       A .crt file, or a directory of *.crt files, to install
                        into the minikube node's trust store. Required behind a
                        TLS-intercepting proxy so the node trusts it for image
@@ -1147,7 +1239,8 @@ Options:
 
 Runs 'minikube delete --all --purge', removes ~/.minikube and ~/.kube,
 uninstalls the minikube and kubectl binaries, and prunes unused container
-images. This is irreversible.
+images. This is irreversible. With --profile, only that profile's cluster is
+deleted.
 EOF
 }
 
@@ -1304,25 +1397,46 @@ EOF
 cmd_minikube_install() {
     local certs_path=""
     local force_node_config=false
-    local install_cpus=8
-    local install_memory_gib=16
+    local total_cpus="" total_memory_gib="" node_cpus="" node_memory_gib=""
+    local install_nodes=1
 
     while [ $# -gt 0 ]; do
         case "$1" in
             -h|--help) usage_minikube_install; return 0 ;;
+            --nodes)
+                shift
+                if [ $# -eq 0 ] || ! [[ "$1" =~ ^[1-9][0-9]*$ ]]; then
+                    echo "ERROR: --nodes requires a positive numeric argument" >&2; exit 1
+                fi
+                install_nodes="$1"
+                ;;
             --cpus)
                 shift
                 if [ $# -eq 0 ] || ! [[ "$1" =~ ^[0-9]+$ ]]; then
                     echo "ERROR: --cpus requires a numeric argument" >&2; exit 1
                 fi
-                install_cpus="$1"
+                total_cpus="$1"
                 ;;
             --memory)
                 shift
                 if [ $# -eq 0 ] || ! [[ "$1" =~ ^[0-9]+$ ]]; then
                     echo "ERROR: --memory requires a numeric argument (GiB)" >&2; exit 1
                 fi
-                install_memory_gib="$1"
+                total_memory_gib="$1"
+                ;;
+            --node-cpus)
+                shift
+                if [ $# -eq 0 ] || ! [[ "$1" =~ ^[0-9]+$ ]]; then
+                    echo "ERROR: --node-cpus requires a numeric argument" >&2; exit 1
+                fi
+                node_cpus="$1"
+                ;;
+            --node-memory)
+                shift
+                if [ $# -eq 0 ] || ! [[ "$1" =~ ^[0-9]+$ ]]; then
+                    echo "ERROR: --node-memory requires a numeric argument (GiB)" >&2; exit 1
+                fi
+                node_memory_gib="$1"
                 ;;
             --certs)
                 shift
@@ -1338,6 +1452,38 @@ cmd_minikube_install() {
         esac
         shift
     done
+
+    # A cluster total and a per-node size for the same resource can't both apply
+    if [ -n "$total_cpus" ] && [ -n "$node_cpus" ]; then
+        echo "ERROR: --cpus (cluster total) and --node-cpus (per node) conflict; pass only one" >&2; exit 1
+    fi
+    if [ -n "$total_memory_gib" ] && [ -n "$node_memory_gib" ]; then
+        echo "ERROR: --memory (cluster total) and --node-memory (per node) conflict; pass only one" >&2; exit 1
+    fi
+    # minikube sizes every node the same, so split the cluster totals evenly
+    # (rounding down) unless a per-node size was given; memory is split in MiB
+    # so uneven splits don't lose whole GiBs
+    local install_cpus install_memory_mib
+    if [ -n "$node_cpus" ]; then
+        install_cpus="$node_cpus"
+    else
+        install_cpus=$(( ${total_cpus:-8} / install_nodes ))
+    fi
+    if [ -n "$node_memory_gib" ]; then
+        install_memory_mib=$(( node_memory_gib * 1024 ))
+    else
+        install_memory_mib=$(( ${total_memory_gib:-16} * 1024 / install_nodes ))
+    fi
+    # The scaler reserves 2 CPUs and 2 GiB on every node, so a smaller node
+    # gives Thorium no capacity to run jobs on
+    if [ "$install_cpus" -le 2 ] || [ "$install_memory_mib" -le 2048 ]; then
+        echo "ERROR: each node needs more than 2 CPUs and 2 GiB of memory (the scaler reserves that much per node)," \
+            "but $install_nodes node(s) would get $install_cpus CPUs and ${install_memory_mib} MiB each;" \
+            "raise --cpus/--memory, lower --nodes, or set --node-cpus/--node-memory" >&2
+        exit 1
+    fi
+    echo "Creating $install_nodes node(s) with $install_cpus CPUs and ${install_memory_mib} MiB each" \
+        "($((install_nodes * install_cpus)) CPUs and $((install_nodes * install_memory_mib)) MiB total)"
 
     select_driver
     echo "Selected driver: $DRIVER"
@@ -1377,9 +1523,6 @@ cmd_minikube_install() {
             ;;
     esac
 
-    local install_memory_mib=$((install_memory_gib * 1024))
-    minikube config set cpus "$install_cpus"
-    minikube config set memory "$install_memory_mib"
 
     touch ~/.bashrc
     if ! grep -q 'alias kubectl="minikube kubectl --"' ~/.bashrc 2>/dev/null; then
@@ -1400,14 +1543,20 @@ cmd_minikube_install() {
     persist_no_proxy_rc ~/.bashrc "$persisted_no_proxy"
     persist_no_proxy_rc ~/.zshrc "$persisted_no_proxy"
 
-    minikube_start
+    # the node count and sizes are passed as flags so they apply only to this
+    # profile; minikube saves them with the profile for later restarts
+    minikube_start --nodes="$install_nodes" --cpus="$install_cpus" --memory="$install_memory_mib"
     fix_container_config
 
-    # Configure the node's container runtime to pull through the host proxy and,
+    # Configure each node's container runtime to pull through the host proxy and,
     # if --certs was given, trust the (TLS-intercepting) proxy CA. This is what
     # lets external image pulls (quay.io/calico, ghcr.io/..., docker.io/...)
     # succeed on a proxied host; a no-op when the host has no proxy configured.
     setup_node_pull_env "$certs_path" "$force_node_config"
+
+    # Nodes only turn Ready once the CNI images (pulled through the proxy set
+    # up above) are running, so wait for every node before enabling addons
+    kctl wait --for=condition=Ready node --all --timeout=600s
 
     kctl config view --minify
 
@@ -1436,6 +1585,14 @@ cmd_minikube_delete() {
         echo "" >&2
         usage_minikube_delete >&2
         return 1
+    fi
+
+    # A non-default profile shares minikube with the default cluster, so only
+    # that profile's cluster is removed
+    if [ "$PROFILE" != "minikube" ]; then
+        echo "Deleting minikube profile $PROFILE (other profiles and minikube itself are kept)"
+        minikube delete
+        return 0
     fi
 
     # a broken install (e.g. docker daemon down) must still be deletable
@@ -1523,7 +1680,7 @@ cmd_start() {
     # drop it). Certs persist on the node filesystem, so no path is needed here.
     setup_node_pull_env ""
 
-    log "Tuning minikube node kernel parameters"
+    log "Tuning minikube node kernel parameters on every node"
     tune_kernel_params minikube
 
     sleep 30
@@ -1662,7 +1819,7 @@ cmd_deploy() {
     ########################################
     CURRENT_SECTION="Wait for healthy cluster"
     wait_for_healthy_cluster() {
-        kctl wait --for=condition=Ready node/minikube --timeout=120s &&
+        kctl wait --for=condition=Ready node --all --timeout=120s &&
         kctl wait --for=condition=Ready pod -l k8s-app=calico-node -n kube-system --timeout=120s &&
         kctl wait --for=condition=Ready pod -l k8s-app=calico-kube-controllers -n kube-system --timeout=120s &&
         kctl wait --for=condition=Ready pod -l k8s-app=kube-dns -n kube-system --timeout=120s &&
@@ -1721,7 +1878,7 @@ cmd_deploy() {
         tune_kernel_params host
     fi
 
-    log "Tuning minikube node kernel parameters"
+    log "Tuning minikube node kernel parameters on every node"
     tune_kernel_params minikube
 
     ########################################
@@ -2888,8 +3045,7 @@ spec:
           clusters:
             kubernetes-admin@cluster.local:
               alias: "dev"
-              nodes:
-                - "minikube"
+              nodes: $(k8s_nodes_yaml)
     redis:
       host: "${REDIS_CLUSTER_HOST}"
       port: 6379
@@ -3713,8 +3869,8 @@ cmd_cleanup() {
 # Dispatch
 ########################################
 
-# --instance may appear anywhere on the command line (before or after the
-# subcommand), so pull it out before dispatching
+# --instance and --profile may appear anywhere on the command line (before or
+# after the subcommand), so pull them out before dispatching
 args=()
 while [ $# -gt 0 ]; do
     case "$1" in
@@ -3728,6 +3884,18 @@ while [ $# -gt 0 ]; do
             ;;
         --instance=*)
             set_instance "${1#--instance=}"
+            shift
+            ;;
+        --profile)
+            if [ $# -lt 2 ]; then
+                echo "ERROR: --profile requires a name" >&2
+                exit 1
+            fi
+            set_profile "$2"
+            shift 2
+            ;;
+        --profile=*)
+            set_profile "${1#--profile=}"
             shift
             ;;
         *)

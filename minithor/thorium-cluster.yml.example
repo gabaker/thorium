@@ -6,7 +6,9 @@
 # this file never needs real secrets and works for any --instance.
 # Supported placeholders: ${THORIUM_SECRET}, ${S3_AK}, ${S3_SK}, ${REDIS_PASS},
 # ${SCYLLA_PASS}, ${ES_PASS}, ${THORIUM_NAMESPACE}, ${REDIS_HOST},
-# ${SCYLLA_HOST}, ${ELASTIC_HOST}, ${S3_HOST}, ${QUICKWIT_INDEXER_HOST}.
+# ${SCYLLA_HOST}, ${ELASTIC_HOST}, ${S3_HOST}, ${QUICKWIT_INDEXER_HOST}, and
+# ${K8S_NODES} (a YAML list of every node in the cluster, so jobs are scheduled
+# on all nodes created by `minithor minikube install --nodes <n>`).
 # Any other text is applied as written.
 apiVersion: sandia.gov/v1
 kind: ThoriumCluster
@@ -87,8 +89,7 @@ spec:
           clusters:
             kubernetes-admin@cluster.local:
               alias: "dev"
-              nodes:
-                - "minikube"
+              nodes: ${K8S_NODES}
     redis:
       host: "${REDIS_HOST}"
       port: 6379
