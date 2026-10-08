@@ -1,23 +1,36 @@
 {{/* Patched by deploy/charts/scripts/vendor-charts.sh */}}
 {{- /*
-The webhook serving certificate, generated once by the chart and kept on upgrades (read back from
-the secret), so the webhook works without cert-manager. The secret and the webhook configuration
-share this template so both use the same CA.
+The webhook serving certificate, so the webhook works without cert-manager. The secret and the
+webhook configuration share this template so both use the same CA. The certificate comes from
+webhook.tls when set (a stable certificate for renderers that can't read the cluster, such as
+Argo CD or Flux, which would otherwise generate a new CA on every render), else from the existing
+secret (read back with lookup, so upgrades keep it), else it is generated with SANs for the webhook
+Service under global.clusterDomain. With createSelfSignedCertificate false the secret is managed
+outside the chart and only the CA bundle is read: from webhook.tls.caCrt, else from that secret.
 */ -}}
 {{- $secretName := include "scylla-operator.certificateSecretName" . -}}
 {{- $existing := lookup "v1" "Secret" .Release.Namespace $secretName -}}
+{{- $tls := .Values.webhook.tls | default dict -}}
 {{- $caBundle := "" -}}
+{{- if and (or $tls.crt $tls.key) (not (and $tls.caCrt $tls.crt $tls.key)) }}
+{{- fail "scylla-operator.webhook.tls needs caCrt, crt, and key set together (PEM)" -}}
+{{- end }}
 {{- if .Values.webhook.createSelfSignedCertificate }}
 {{- $crt := "" -}}
 {{- $key := "" -}}
-{{- if and $existing (index ($existing.data | default dict) "ca.crt") }}
+{{- if $tls.crt }}
+{{- $caBundle = $tls.caCrt | b64enc -}}
+{{- $crt = $tls.crt | b64enc -}}
+{{- $key = $tls.key | b64enc -}}
+{{- else if and $existing (index ($existing.data | default dict) "ca.crt") }}
 {{- $caBundle = index $existing.data "ca.crt" -}}
 {{- $crt = index $existing.data "tls.crt" -}}
 {{- $key = index $existing.data "tls.key" -}}
 {{- else }}
 {{- $service := include "scylla-operator.webhookServiceName" . -}}
+{{- $domain := (.Values.global).clusterDomain | default "cluster.local" -}}
 {{- $ca := genCA "scylla-operator-webhook-ca" 3650 -}}
-{{- $dns := list (printf "%s.%s.svc" $service .Release.Namespace) (printf "%s.%s.svc.cluster.local" $service .Release.Namespace) -}}
+{{- $dns := list (printf "%s.%s.svc" $service .Release.Namespace) (printf "%s.%s.svc.%s" $service .Release.Namespace $domain) -}}
 {{- $signed := genSignedCert (printf "%s.%s.svc" $service .Release.Namespace) nil $dns 3650 $ca -}}
 {{- $caBundle = $ca.Cert | b64enc -}}
 {{- $crt = $signed.Cert | b64enc -}}
@@ -34,6 +47,8 @@ data:
   tls.crt: {{ $crt }}
   tls.key: {{ $key }}
 ---
+{{- else if $tls.caCrt }}
+{{- $caBundle = $tls.caCrt | b64enc -}}
 {{- else if $existing }}
 {{- $caBundle = index ($existing.data | default dict) "ca.crt" | default "" -}}
 {{- end }}

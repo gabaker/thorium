@@ -181,4 +181,37 @@ mod tests {
         let response = RedisError::from((ErrorKind::ResponseError, "NOPERM"));
         assert!(!redis_unreachable(&response));
     }
+
+    /// A Redis password alone authenticates as the default user and a username needs one
+    #[tokio::test]
+    async fn redis_info_auth() {
+        // build cluster metadata with the sample Redis password and no username
+        let fake = crate::k8s::clusters::tests::FakeKube::default();
+        let mut meta = crate::k8s::clusters::tests::meta_for(
+            crate::k8s::clusters::tests::namespaced_cluster(
+                crate::k8s::clusters::tests::full_spec(),
+            ),
+            &fake.client(),
+        );
+        let info = redis_info(&meta).expect("info");
+        assert_eq!(info.redis.username.as_deref(), Some("default"));
+        assert_eq!(info.redis.password.as_deref(), Some("redis-pass"));
+        assert_eq!(
+            info.addr,
+            ConnectionAddr::Tcp("redis.redis.svc.cluster.local".to_owned(), 6379)
+        );
+        // a configured username is used as is
+        meta.conf.redis.username = Some("thorium".to_owned());
+        assert_eq!(
+            redis_info(&meta).expect("info").redis.username.as_deref(),
+            Some("thorium")
+        );
+        // without a password no one authenticates
+        meta.conf.redis.username = None;
+        meta.conf.redis.password = None;
+        assert_eq!(redis_info(&meta).expect("info").redis.username, None);
+        // a username without a password is refused like the API refuses it
+        meta.conf.redis.username = Some("thorium".to_owned());
+        assert!(redis_info(&meta).is_err());
+    }
 }

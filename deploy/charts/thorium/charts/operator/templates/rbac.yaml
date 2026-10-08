@@ -9,20 +9,11 @@ metadata:
   namespace: {{ $ns }}
   labels:
     {{- include "operator.labels" . | nindent 4 }}
+{{- with include "operator.imagePullSecrets" . }}
 imagePullSecrets:
-  {{- include "operator.imagePullSecrets" . | nindent 2 }}
+  {{- . | nindent 2 }}
+{{- end }}
 automountServiceAccountToken: true
----
-apiVersion: v1
-kind: Secret
-metadata:
-  name: thorium-account-token
-  namespace: {{ $ns }}
-  labels:
-    {{- include "operator.labels" . | nindent 4 }}
-  annotations:
-    kubernetes.io/service-account.name: thorium
-type: kubernetes.io/service-account-token
 ---
 # The operator runs as its own account so the Secret access it needs can be limited to this
 # namespace while the components keep the access they need through the thorium account
@@ -33,8 +24,10 @@ metadata:
   namespace: {{ $ns }}
   labels:
     {{- include "operator.labels" . | nindent 4 }}
+{{- with include "operator.imagePullSecrets" . }}
 imagePullSecrets:
-  {{- include "operator.imagePullSecrets" . | nindent 2 }}
+  {{- . | nindent 2 }}
+{{- end }}
 automountServiceAccountToken: true
 ---
 # Cluster-scoped names carry the namespace so they follow the namespace prefix
@@ -46,7 +39,7 @@ metadata:
     {{- include "operator.labels" . | nindent 4 }}
 rules:
   {{- include "operator.clusterRules" . | nindent 2 }}
-  {{- if not .Values.operator.watchOwnNamespaceOnly }}
+  {{- if not .Values.controller.watchOwnNamespaceOnly }}
   {{- include "operator.namespacedRules" . | nindent 2 }}
   {{- end }}
 ---
@@ -64,11 +57,12 @@ roleRef:
   kind: ClusterRole
   name: {{ $ns }}-operator
   apiGroup: rbac.authorization.k8s.io
-{{- if .Values.operator.watchOwnNamespaceOnly }}
+{{- if .Values.controller.watchOwnNamespaceOnly }}
 ---
-# The operator only manages Secrets, pods, services, ConfigMaps, and deployments in its own
-# namespace: the config and bootstrap Secrets a ThoriumCluster names, the Secrets it renders for
-# the components, and the components themselves
+# The operator only manages ThoriumClusters, Secrets, pods, services, ConfigMaps, and deployments
+# in its own namespace: the ThoriumCluster it reconciles (and its status), the config and
+# bootstrap Secrets it names, the Secrets it renders for the components, and the components
+# themselves
 apiVersion: rbac.authorization.k8s.io/v1
 kind: Role
 metadata:

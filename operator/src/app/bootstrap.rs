@@ -7,7 +7,10 @@
 //!
 //! The admin Secrets the privileged steps read may be deleted once setup is done: each step
 //! first checks whether its work is already done and only reads its Secret when it isn't.
+//! The one exception is the Scylla admin Secret with `drop_previous_role` set, which is also
+//! read to find the previous role to drop; a deleted Secret then names no role to drop.
 
+use chrono::{DateTime, Utc};
 use elasticsearch::Elasticsearch;
 use elasticsearch::auth::Credentials as ElasticAuth;
 use elasticsearch::http::Url;
@@ -24,6 +27,7 @@ use scylla::errors::{
     ConnectionError, ConnectionPoolError, ConnectionSetupRequestErrorKind, DbError, MetadataError,
     NewSessionError,
 };
+use scylla::value::{CqlValue, Row};
 use sha2::{Digest, Sha256};
 use std::time::Duration;
 use thorium::conf::Elastic;
@@ -33,7 +37,10 @@ use thorium::{Error, client};
 
 use super::helpers::{CheckError, error_chain};
 use crate::k8s::clusters::ClusterMeta;
-use crate::k8s::crds::{SecretCredentials, ThoriumBootstrap, ThoriumCluster};
+use crate::k8s::crds::{
+    ClusterPhase, ScyllaBootstrap, SecretCredentials, ThoriumBootstrap, ThoriumCluster,
+    ThoriumClusterStatus,
+};
 use crate::k8s::secrets;
 
 /// How long to wait when connecting to a backend
@@ -131,6 +138,7 @@ async fn read_credentials(
 /// * `name` - The name of the missing Secret
 /// * `reason` - Why the step needs the Secret
 fn missing_secret(field: &str, name: &str, reason: &str) -> String {
+    // name the field and Secret along with why the step needs it
     format!("{field} {name} is missing and {reason}")
 }
 
@@ -140,6 +148,7 @@ fn missing_secret(field: &str, name: &str, reason: &str) -> String {
 ///
 /// * `name` - The name of the missing Secret
 fn absent_marker(name: &str) -> String {
+    // wrap the name in a form no real resource version takes
     format!("<absent:{name}>")
 }
 
@@ -296,9 +305,19 @@ fn is_scylla_auth_error(error: &NewSessionError) -> bool {
     else {
         return false;
     };
+    // check why the control connection's login failed
+    is_scylla_auth_setup_error(&setup.error)
+}
+
+/// Check whether a failed connection setup request means Scylla rejected the credentials
+///
+/// # Arguments
+///
+/// * `kind` - Why the connection setup request failed
+fn is_scylla_auth_setup_error(kind: &ConnectionSetupRequestErrorKind) -> bool {
     // Scylla answered the login with an authentication error or demanded credentials
     matches!(
-        setup.error,
+        kind,
         ConnectionSetupRequestErrorKind::DbError(DbError::AuthenticationError, _)
             | ConnectionSetupRequestErrorKind::MissingAuthentication
     )
@@ -388,6 +407,7 @@ async fn scylla_execute(
 ///
 /// * `identifier` - The identifier to quote
 fn cql_identifier(identifier: &str) -> String {
+    // wrap the identifier in double quotes, doubling any embedded ones
     format!("\"{}\"", identifier.replace('"', "\"\""))
 }
 
@@ -397,6 +417,7 @@ fn cql_identifier(identifier: &str) -> String {
 ///
 /// * `literal` - The literal to quote
 fn cql_literal(literal: &str) -> String {
+    // wrap the literal in single quotes, doubling any embedded ones
     format!("'{}'", literal.replace('\'', "''"))
 }
 
@@ -446,12 +467,203 @@ async fn scylla_admin_connect(
     Ok((session, "cassandra".to_owned()))
 }
 
+/// Pick the role an admin Secret names that should be dropped now that Thorium uses another
+///
+/// Returns None for Thorium's own role (only its password changed) and for cassandra, which
+/// `drop_default_role` decides on.
+///
+/// # Arguments
+///
+/// * `previous` - The role the admin Secret names
+/// * `current` - The role Thorium uses now
+fn replaced_role<'a>(previous: &'a str, current: &str) -> Option<&'a str> {
+    // keep Thorium's own role and leave cassandra to drop_default_role
+    if previous == current || previous == "cassandra" {
+        return None;
+    }
+    Some(previous)
+}
+
+/// Check whether any role in a `LIST ROLES` result is a superuser
+///
+/// A role is a superuser when it or any role granted to it has `super` set. A result without
+/// a `super` column never counts as a superuser.
+///
+/// # Arguments
+///
+/// * `super_column` - The index of the `super` column, if the result has one
+/// * `rows` - The rows of the result
+fn roles_include_superuser(super_column: Option<usize>, rows: &[Row]) -> bool {
+    // a result without a super column can't show a superuser
+    let Some(column) = super_column else {
+        return false;
+    };
+    // look for any role whose super flag is set
+    rows.iter()
+        .any(|row| matches!(row.columns.get(column), Some(Some(CqlValue::Boolean(true)))))
+}
+
+/// Check that a Scylla role is a superuser, as the session's own role sees it
+///
+/// This lists the role and every role granted to it with `LIST ROLES OF`, which works whether
+/// the cluster keeps its roles in `system_auth` or in `system` (auth-v2), and counts superuser
+/// status inherited through a granted role.
+///
+/// # Arguments
+///
+/// * `session` - A session logged in as the role to check
+/// * `role` - The role to check
+async fn scylla_is_superuser(session: &Session, role: &str) -> Result<bool, Error> {
+    // describe a failure to read this role the same way for each step
+    let failed = |error: &dyn std::fmt::Display| {
+        Error::new(format!("Failed to read Scylla role {role}: {error}"))
+    };
+    // list the role along with every role granted to it
+    let result = session
+        .query_unpaged(format!("LIST ROLES OF {}", cql_identifier(role)), &[])
+        .await
+        .map_err(|error| failed(&error))?
+        .into_rows_result()
+        .map_err(|error| failed(&error))?;
+    // find the column holding each role's superuser flag
+    let super_column = result
+        .column_specs()
+        .get_by_name("super")
+        .map(|(index, _)| index);
+    // read every listed role
+    let rows = result
+        .rows::<Row>()
+        .map_err(|error| failed(&error))?
+        .collect::<Result<Vec<Row>, _>>()
+        .map_err(|error| failed(&error))?;
+    Ok(roles_include_superuser(super_column, &rows))
+}
+
+/// Fail unless Thorium's Scylla role is a superuser before it changes other roles
+///
+/// # Arguments
+///
+/// * `session` - A session logged in as Thorium's role
+/// * `username` - Thorium's role
+/// * `action` - What Thorium's role is about to do, for the error
+async fn ensure_superuser(
+    session: &Session,
+    username: &str,
+    action: &str,
+) -> Result<(), CheckError> {
+    // only a superuser may drop other superuser roles
+    if !scylla_is_superuser(session, username).await? {
+        return Err(Error::new(format!(
+            "Not {action}: Thorium's Scylla role {username} is not a superuser. Make it one \
+             with ALTER ROLE {} WITH SUPERUSER = true as a Scylla superuser",
+            cql_identifier(username)
+        ))
+        .into());
+    }
+    Ok(())
+}
+
+/// Pick the role Thorium used before its Scylla username changed that should be dropped
+///
+/// Returns None without reading the admin Secret unless `drop_previous_role` is set, and None
+/// when the admin Secret is missing or names Thorium's own role or cassandra.
+///
+/// # Arguments
+///
+/// * `meta` - Thorium cluster client and metadata
+/// * `bootstrap` - The Scylla bootstrap settings
+/// * `username` - The role Thorium uses now
+async fn previous_role_to_drop(
+    meta: &ClusterMeta,
+    bootstrap: &ScyllaBootstrap,
+    username: &str,
+) -> Result<Option<String>, CheckError> {
+    // skip this unless dropping the previous role is enabled and an admin Secret names it
+    let Some(admin_secret) = bootstrap
+        .admin_secret
+        .as_ref()
+        .filter(|_| bootstrap.drop_previous_role)
+    else {
+        return Ok(None);
+    };
+    // a missing admin Secret names no role to drop
+    let Some(previous) =
+        read_credentials(meta, "Scylla admin", admin_secret, Some("cassandra")).await?
+    else {
+        return Ok(None);
+    };
+    // only a role other than Thorium's own and cassandra is dropped
+    Ok(replaced_role(&previous.username, username).map(str::to_owned))
+}
+
+/// Drop the role Thorium used before its Scylla username changed (`drop_previous_role`)
+///
+/// The role named by the admin Secret is only dropped once Thorium's new role has logged in
+/// (the session passed here) and is a superuser, so Thorium never loses its way into Scylla.
+///
+/// # Arguments
+///
+/// * `meta` - Thorium cluster client and metadata
+/// * `bootstrap` - The Scylla bootstrap settings
+/// * `username` - The role Thorium uses now
+/// * `session` - A session logged in as Thorium's role
+async fn drop_replaced_role(
+    meta: &ClusterMeta,
+    bootstrap: &ScyllaBootstrap,
+    username: &str,
+    session: &Session,
+) -> Result<(), CheckError> {
+    // find the previous role to drop, if there is one
+    let Some(role) = previous_role_to_drop(meta, bootstrap, username).await? else {
+        return Ok(());
+    };
+    // make sure Thorium's role can still do everything once the previous superuser is gone
+    ensure_superuser(
+        session,
+        username,
+        &format!("dropping the previous Scylla role {role}"),
+    )
+    .await?;
+    // drop the previous role as Thorium's role
+    println!("Dropping the previous Scylla role {role}");
+    scylla_execute(
+        session,
+        format!("DROP ROLE IF EXISTS {}", cql_identifier(&role)),
+        "drop the previous Thorium role",
+    )
+    .await?;
+    Ok(())
+}
+
+/// Build the statement that makes an existing Thorium role match the one the bootstrap creates
+///
+/// The role's password is always set. Login and superuser status are only set when the admin
+/// is another role, since Scylla doesn't let a role change its own superuser status (the admin
+/// Secret holds Thorium's own role when only its password changed).
+///
+/// # Arguments
+///
+/// * `username` - Thorium's role
+/// * `password` - The password Thorium's role should have
+/// * `admin_username` - The superuser running the statement
+fn alter_role_statement(username: &str, password: &str, admin_username: &str) -> String {
+    // quote our role name and password for a statement that can't bind values
+    let role = cql_identifier(username);
+    let password = cql_literal(password);
+    // a role altering itself may only change its password
+    if username == admin_username {
+        return format!("ALTER ROLE {role} WITH PASSWORD = {password}");
+    }
+    format!("ALTER ROLE {role} WITH PASSWORD = {password} AND LOGIN = true AND SUPERUSER = true")
+}
+
 /// Ensure Thorium's Scylla role exists
 ///
 /// This runs before the API is deployed since the API needs this role to create its
-/// keyspace. It does nothing unless `bootstrap.scylla` is set, and the admin Secret is only
-/// read when Thorium's own role can't log in. A Scylla that isn't accepting connections yet
-/// is reported as [`CheckError::Waiting`].
+/// keyspace. It does nothing unless `bootstrap.scylla` is set. The admin Secret is read when
+/// Thorium's own role can't log in, or when `drop_previous_role` is set so the previous role
+/// can be dropped; a deleted Secret then means there is no role to drop. A Scylla that isn't
+/// accepting connections yet is reported as [`CheckError::Waiting`].
 ///
 /// # Arguments
 ///
@@ -482,6 +694,14 @@ pub async fn scylla(meta: &ClusterMeta) -> Result<(), CheckError> {
             println!("Scylla role {} already exists", auth.username);
             // drop the default role if a previous run created our role but didn't finish
             if bootstrap.drop_default_role && auth.username != "cassandra" {
+                // explain a role that can't drop cassandra instead of failing on Unauthorized
+                ensure_superuser(
+                    &session,
+                    &auth.username,
+                    "dropping the default Scylla cassandra role",
+                )
+                .await?;
+                // drop the default role
                 scylla_execute(
                     &session,
                     "DROP ROLE IF EXISTS cassandra".to_owned(),
@@ -489,6 +709,8 @@ pub async fn scylla(meta: &ClusterMeta) -> Result<(), CheckError> {
                 )
                 .await?;
             }
+            // drop the role Thorium used before, which a previous run may not have finished
+            drop_replaced_role(meta, bootstrap, &auth.username, &session).await?;
             return Ok(());
         }
         // a rejected login means Thorium's role still has to be created
@@ -510,18 +732,19 @@ pub async fn scylla(meta: &ClusterMeta) -> Result<(), CheckError> {
         "create Thorium's role",
     )
     .await?;
-    // make sure an existing role's password matches our config
+    // make sure an existing role's password, login, and superuser status match a new one's
     scylla_execute(
         &session,
-        format!("ALTER ROLE {role} WITH PASSWORD = {password}"),
-        "set Thorium's role password",
+        alter_role_statement(&auth.username, &auth.password, &admin_username),
+        "update Thorium's role",
     )
     .await?;
+    // reconnect as Thorium's role, which proves it logs in before any role it replaces is
+    // dropped (a role can't drop itself either)
+    let thorium_session = scylla_connect(nodes, &auth.username, &auth.password).await?;
     // drop the default role if requested and we used it
     if bootstrap.drop_default_role && admin_username == "cassandra" && auth.username != "cassandra"
     {
-        // reconnect as Thorium's role since a role can't drop itself
-        let thorium_session = scylla_connect(nodes, &auth.username, &auth.password).await?;
         // drop the default role
         println!("Dropping the default Scylla cassandra role");
         scylla_execute(
@@ -531,6 +754,8 @@ pub async fn scylla(meta: &ClusterMeta) -> Result<(), CheckError> {
         )
         .await?;
     }
+    // drop the role Thorium used before its username changed
+    drop_replaced_role(meta, bootstrap, &auth.username, &thorium_session).await?;
     Ok(())
 }
 
@@ -702,6 +927,7 @@ fn elastic_index_patterns(conf: &Elastic) -> Vec<String> {
 
 /// The Elastic indexes the Thorium API uses
 fn elastic_indexes() -> [ElasticIndex; 4] {
+    // list the results and tags indexes for samples and repos
     [
         ElasticIndex::SampleResults,
         ElasticIndex::RepoResults,
@@ -716,6 +942,7 @@ fn elastic_indexes() -> [ElasticIndex; 4] {
 ///
 /// * `conf` - The Elastic config for this cluster
 fn elastic_privileges_request(conf: &Elastic) -> serde_json::Value {
+    // ask for every privilege on each index pattern Thorium's role is granted
     serde_json::json!({
         "index": [{"names": elastic_index_patterns(conf), "privileges": ["all"]}]
     })
@@ -772,6 +999,7 @@ async fn elastic_identity_ready(conf: &Elastic) -> Result<bool, CheckError> {
             redact_url(&conf.node)
         )));
     }
+    // check the response, treating an unparseable body as missing privileges
     let body = response.json::<serde_json::Value>().await.ok();
     Ok(elastic_privileges_ok(status, body.as_ref()))
 }
@@ -1081,6 +1309,139 @@ fn access_problems(indexes: &[(&str, IndexState)], body: &serde_json::Value) -> 
     missing
 }
 
+/// Check whether an Elastic node is reached through an in-cluster ECK HTTP service
+///
+/// ECK names the HTTP service of an Elasticsearch `<name>-es-http`, and the chart's own
+/// Elasticsearch is one of these, getting Thorium's user from ECK's file realm.
+///
+/// # Arguments
+///
+/// * `node` - The url of the Elastic node
+fn is_eck_service(node: &str) -> bool {
+    // get the host of this node
+    let Some(host) = Url::parse(node)
+        .ok()
+        .and_then(|url| url.host_str().map(str::to_owned))
+    else {
+        return false;
+    };
+    // the service name is the first label and an in-cluster name is short or under .svc
+    let mut labels = host.split('.');
+    let service = labels.next().unwrap_or_default();
+    let in_cluster = !host.contains('.') || labels.any(|label| label == "svc");
+    service.ends_with("-es-http") && in_cluster
+}
+
+/// How long Elastic may keep rejecting Thorium's credentials before an ECK service fails
+///
+/// ECK's file realm applies the chart's users within a minute or two, so a rejection that
+/// outlasts this is a wrong password rather than one still propagating.
+const ECK_CREDENTIALS_GRACE_SECS: i64 = 300;
+
+/// Check whether a cluster's status shows Elastic has rejected Thorium's credentials long enough
+///
+/// This is true when the cluster already failed on rejected credentials, or when it has
+/// reported the same wait on them (and nothing else) for longer than the grace period. A wait
+/// reported by an upgrade step is embedded in a longer message, so the status only has to
+/// contain the wait.
+///
+/// # Arguments
+///
+/// * `current` - The status last written for this cluster
+/// * `waiting` - The message reported while waiting on the credentials
+/// * `rejected` - Text every failure on these rejected credentials contains
+/// * `now` - The current time
+fn rejected_past_grace(
+    current: &ThoriumClusterStatus,
+    waiting: &str,
+    rejected: &str,
+    now: DateTime<Utc>,
+) -> bool {
+    // get the message this cluster last reported
+    let Some(message) = current.message.as_deref() else {
+        return false;
+    };
+    // a cluster already failed on these credentials keeps failing instead of waiting again
+    if current.phase == Some(ClusterPhase::Error) && message.contains(rejected) {
+        return true;
+    }
+    // otherwise it must have reported this wait since a transition past the grace period
+    if !message.contains(waiting) {
+        return false;
+    }
+    current
+        .last_transition
+        .as_deref()
+        .and_then(|since| DateTime::parse_from_rfc3339(since).ok())
+        .is_some_and(|since| {
+            now.signed_duration_since(since) > chrono::Duration::seconds(ECK_CREDENTIALS_GRACE_SECS)
+        })
+}
+
+/// Classify Elastic rejecting Thorium's own credentials
+///
+/// An Elasticsearch behind an ECK service (like the chart's) gets Thorium's user from ECK's
+/// file realm, which can take a minute to apply, so it is waited on for a few minutes. The
+/// operator can't tell the chart's ECK from another one (like a converted deployment's), so a
+/// rejection that outlasts that grace period fails with how to fix it. Any other Elasticsearch
+/// answering 401 without `bootstrap.elastic` set won't start accepting the credentials on its
+/// own, so that fails right away. Every other status is waited on.
+///
+/// # Arguments
+///
+/// * `conf` - The Elastic config for this cluster
+/// * `status` - The status Elastic answered the authenticate request with
+/// * `bootstrapped` - Whether `bootstrap.elastic` is set so the operator creates the user
+/// * `error` - The error Elastic answered with
+/// * `current` - The status last written for this cluster
+/// * `now` - The current time
+fn rejected_credentials(
+    conf: &Elastic,
+    status: StatusCode,
+    bootstrapped: bool,
+    error: &str,
+    current: &ThoriumClusterStatus,
+    now: DateTime<Utc>,
+) -> CheckError {
+    // every failure on rejected credentials names them the same way
+    let rejected = format!("rejected Thorium's credentials (user {})", conf.username);
+    // an external Elastic without a bootstrap won't create the user by itself
+    let unauthorized = status == StatusCode::UNAUTHORIZED && !bootstrapped;
+    if unauthorized && !is_eck_service(&conf.node) {
+        return CheckError::Failed(Error::new(format!(
+            "Elastic {} {rejected}: {error}. This Elasticsearch isn't one the Thorium chart \
+             manages, so Thorium's user must already exist with the password in the config: \
+             create it with the privileges Thorium needs, or set bootstrap.elastic (Helm \
+             value operator.cluster.bootstrap.elastic) with an Elastic superuser Secret so \
+             the operator creates it",
+            redact_url(&conf.node)
+        )));
+    }
+    // describe the wait for ECK's file realm to apply the user
+    let waiting = format!(
+        "Waiting for Elastic to accept Thorium's credentials (user {}): {error}. The chart's \
+         Elasticsearch gets this user from ECK's file realm, which can take a minute to \
+         apply; an external Elasticsearch needs the user created by the site or by \
+         bootstrap.elastic",
+        conf.username
+    );
+    // an ECK service still rejecting the credentials after the grace period won't accept them
+    if unauthorized && rejected_past_grace(current, &waiting, &rejected, now) {
+        return CheckError::Failed(Error::new(format!(
+            "Elastic {} has {rejected} for over {} minutes: {error}. ECK's file realm applies \
+             the chart's users within a minute or two, so the password in Thorium's config is \
+             likely wrong for this Elasticsearch (such as the ECK of a converted pre-Helm \
+             deployment): set the password Thorium's user has there in Thorium's config, \
+             create the user with that password and the privileges Thorium needs, or set \
+             bootstrap.elastic (Helm value operator.cluster.bootstrap.elastic) with an \
+             Elastic superuser Secret so the operator creates it",
+            redact_url(&conf.node),
+            ECK_CREDENTIALS_GRACE_SECS / 60
+        )));
+    }
+    CheckError::Waiting(waiting)
+}
+
 /// Verify Thorium's own Elastic credentials before any component is deployed
 ///
 /// This authenticates as Thorium's user, checks which configured indexes already exist, and
@@ -1114,15 +1475,23 @@ pub async fn elastic_access(meta: &ClusterMeta) -> Result<Vec<String>, CheckErro
             conf,
             "authenticate Thorium's Elastic user",
         ))?;
-    if !response.status_code().is_success() {
+    // judge any rejection of Thorium's credentials before checking anything else
+    let status = response.status_code();
+    if !status.is_success() {
         let error = elastic_error(response).await;
-        return Err(CheckError::Waiting(format!(
-            "Waiting for Elastic to accept Thorium's credentials (user {}): {error}. The chart's \
-             Elasticsearch gets this user from ECK's file realm, which can take a minute to \
-             apply; an external Elasticsearch needs the user created by the site or by \
-             bootstrap.elastic",
-            conf.username
-        )));
+        // a rejection is judged by the bootstrap and how long this cluster has reported it
+        let bootstrap = meta.cluster.spec.bootstrap.as_ref();
+        let bootstrapped = bootstrap.is_some_and(|bootstrap| bootstrap.elastic.is_some());
+        let current = meta.status.current();
+        let now = Utc::now();
+        return Err(rejected_credentials(
+            conf,
+            status,
+            bootstrapped,
+            &error,
+            &current,
+            now,
+        ));
     }
     // check which indexes exist with Thorium's own credentials
     let mut indexes = Vec::with_capacity(4);
@@ -1151,6 +1520,7 @@ pub async fn elastic_access(meta: &ClusterMeta) -> Result<Vec<String>, CheckErro
                 ),
             ));
         };
+        // track this index's state for the privilege check
         indexes.push((name, state));
     }
     // ask Elastic whether this user holds every privilege Thorium uses on its indexes
@@ -1164,6 +1534,7 @@ pub async fn elastic_access(meta: &ClusterMeta) -> Result<Vec<String>, CheckErro
             conf,
             "check the index privileges of Thorium's Elastic user",
         ))?;
+    // a failed privilege check fails or is waited on by its status
     let status = response.status_code();
     if !status.is_success() {
         let error = elastic_error(response).await;
@@ -1197,6 +1568,82 @@ pub async fn elastic_access(meta: &ClusterMeta) -> Result<Vec<String>, CheckErro
         }
     }
     Ok(notes)
+}
+
+/// List Thorium's existing Elastic indexes that don't map `group` as a keyword
+///
+/// Indexes that don't exist yet are left out since the search streamer creates them with the
+/// right mappings. Reading the mappings needs only Thorium's own credentials.
+///
+/// # Arguments
+///
+/// * `meta` - Thorium cluster client and metadata
+pub async fn indexes_needing_reindex(meta: &ClusterMeta) -> Result<Vec<String>, CheckError> {
+    // get the Elastic config for this cluster
+    let conf = &meta.conf.elastic;
+    // authenticate as Thorium's own user
+    let creds = Credentials {
+        username: conf.username.clone(),
+        password: conf.password.clone(),
+    };
+    let client = elastic_client(conf, &creds).await?;
+    // check each configured index that exists
+    let mut bad = Vec::new();
+    for index in elastic_indexes() {
+        // ask whether this index exists
+        let name = index.full_name(conf);
+        let exists = client
+            .indices()
+            .exists(IndicesExistsParts::Index(&[name]))
+            .send()
+            .await
+            .map_err(elastic_send_error(
+                conf,
+                &format!("check for Elastic index {name}"),
+            ))?;
+        // only check the mappings of indexes that exist
+        let status = exists.status_code();
+        match IndexState::from_status(status) {
+            // missing indexes are created correctly by the search streamer
+            Some(IndexState::Missing) => continue,
+            Some(IndexState::Exists) => (),
+            // anything else means we can't tell
+            _ => {
+                let error = elastic_error(exists).await;
+                return Err(elastic_status_failure(
+                    status,
+                    format!(
+                        "Failed to check for Elastic index {name} as user {}: {error}",
+                        conf.username
+                    ),
+                ));
+            }
+        }
+        // read this index's mappings
+        let response = client
+            .indices()
+            .get_mapping(IndicesGetMappingParts::Index(&[name]))
+            .send()
+            .await
+            .map_err(elastic_send_error(
+                conf,
+                &format!("read the mappings of Elastic index {name}"),
+            ))?;
+        let status = response.status_code();
+        if !status.is_success() {
+            let error = elastic_error(response).await;
+            return Err(elastic_status_failure(
+                status,
+                format!("Failed to read the mappings of Elastic index {name}: {error}"),
+            ));
+        }
+        // keep indexes whose group field isn't a keyword
+        let mapping: serde_json::Value = response.json().await.map_err(Error::from)?;
+        if !group_is_keyword(&mapping) {
+            bad.push(name.to_owned());
+        }
+    }
+    Ok(bad)
 }
 
 /// Get the bootstrap admin's username when it is known without reading its Secret
@@ -1267,6 +1714,7 @@ pub async fn admin(
     else {
         // without the Secret we can only check that the admin was already created
         let username = known_admin_username(&bootstrap.secret);
+        // list every user with the username and role each one has
         let users = operator.users.list_details().await?;
         let roles = users
             .iter()
@@ -1317,7 +1765,13 @@ pub async fn admin(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::k8s::clusters::tests::{cluster_from_spec, sample_conf};
+    use crate::k8s::clusters::tests::{
+        FakeKube, cluster_from_spec, full_spec, kube_status, meta_for, namespaced_cluster,
+        sample_conf,
+    };
+    use base64::Engine;
+    use std::sync::{Arc, Mutex};
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
     /// Scylla connection failures other than a rejected login are waited on
     #[test]
@@ -1435,6 +1889,17 @@ mod tests {
         }
     }
 
+    /// Only a previous role other than Thorium's own and cassandra is dropped
+    #[test]
+    fn replaced_role_skips_own_and_default_roles() {
+        // a changed username drops the previous role
+        assert_eq!(replaced_role("thorium", "thorium2"), Some("thorium"));
+        // a changed password keeps Thorium's own role
+        assert_eq!(replaced_role("thorium", "thorium"), None);
+        // cassandra is left to drop_default_role
+        assert_eq!(replaced_role("cassandra", "thorium"), None);
+    }
+
     /// Moving bytes between bootstrap hash inputs changes the hash
     #[test]
     fn input_hash_parts_dont_collide() {
@@ -1456,6 +1921,7 @@ mod tests {
 
     /// Build a `ThoriumCluster` with a bootstrap spec
     fn bootstrap_cluster() -> ThoriumCluster {
+        // a minimal spec that only bootstraps an admin
         cluster_from_spec(serde_json::json!({
             "components": {"api": {}},
             "registry": "registry/thorium",
@@ -1878,5 +2344,874 @@ mod tests {
         assert!(debug.contains("thorium"));
         assert!(debug.contains("***"));
         assert!(!debug.contains("hunter2"));
+    }
+
+    /// Only in-cluster ECK HTTP services count as the chart's kind of Elasticsearch
+    #[test]
+    fn eck_services_detected() {
+        // the chart's Elasticsearch and other in-cluster ECK services
+        assert!(is_eck_service(
+            "https://elastic-es-http.elastic.svc.cluster.local:9200"
+        ));
+        assert!(is_eck_service(
+            "https://elastic-es-http.dev-elastic.svc:9200"
+        ));
+        assert!(is_eck_service("https://elastic-es-http:9200"));
+        // external Elasticsearches and other services
+        assert!(!is_eck_service("https://elastic.example.com:9200"));
+        assert!(!is_eck_service("https://search-es-http.example.com:9200"));
+        assert!(!is_eck_service(
+            "https://elastic.elastic.svc.cluster.local:9200"
+        ));
+        assert!(!is_eck_service("not a url"));
+    }
+
+    /// Classify Elastic answering 401 to Thorium's credentials for a cluster's status
+    ///
+    /// # Arguments
+    ///
+    /// * `conf` - The Elastic config for this cluster
+    /// * `bootstrapped` - Whether `bootstrap.elastic` is set so the operator creates the user
+    /// * `current` - The status last written for this cluster
+    /// * `now` - The current time
+    fn reject(
+        conf: &Elastic,
+        bootstrapped: bool,
+        current: &ThoriumClusterStatus,
+        now: DateTime<Utc>,
+    ) -> CheckError {
+        rejected_credentials(
+            conf,
+            StatusCode::UNAUTHORIZED,
+            bootstrapped,
+            "denied",
+            current,
+            now,
+        )
+    }
+
+    /// Rejected credentials fail for an external Elastic without a bootstrap and are waited on
+    /// otherwise
+    #[test]
+    fn rejected_credentials_by_backend() {
+        // a cluster that hasn't reported anything yet
+        let fresh = ThoriumClusterStatus::default();
+        let now = Utc::now();
+        // an external Elastic without a bootstrap fails with how to fix it
+        let mut conf = sample_conf().elastic;
+        conf.node = "https://elastic.example.com:9200".to_owned();
+        let failed = reject(&conf, false, &fresh, now);
+        let CheckError::Failed(error) = failed else {
+            panic!("an external Elastic rejecting credentials should fail");
+        };
+        assert!(error.to_string().contains("bootstrap.elastic"));
+        assert!(error.to_string().contains("elastic.example.com"));
+        // with a bootstrap the user is being created, so it is waited on
+        assert!(matches!(
+            reject(&conf, true, &fresh, now),
+            CheckError::Waiting(_)
+        ));
+        // so is an Elastic that isn't ready to answer yet
+        assert!(matches!(
+            rejected_credentials(
+                &conf,
+                StatusCode::SERVICE_UNAVAILABLE,
+                false,
+                "starting",
+                &fresh,
+                now
+            ),
+            CheckError::Waiting(_)
+        ));
+        // the chart's ECK file realm can take a minute to apply
+        let chart = sample_conf().elastic;
+        assert!(matches!(
+            reject(&chart, false, &fresh, now),
+            CheckError::Waiting(_)
+        ));
+    }
+
+    /// An ECK service rejecting Thorium's credentials is waited on for the grace period only
+    #[test]
+    fn rejected_eck_credentials_fail_after_grace() {
+        // the wait an in-cluster ECK service rejecting the credentials reports
+        let chart = sample_conf().elastic;
+        let start = Utc::now();
+        let fresh = ThoriumClusterStatus::default();
+        let CheckError::Waiting(waiting) = reject(&chart, false, &fresh, start) else {
+            panic!("a fresh rejection by an ECK service should be waited on");
+        };
+        // build a status that has reported a message since a given time
+        let reported =
+            |phase: ClusterPhase, message: &str, since: DateTime<Utc>| ThoriumClusterStatus {
+                phase: Some(phase),
+                message: Some(message.to_owned()),
+                last_transition: Some(since.to_rfc3339()),
+                ..ThoriumClusterStatus::default()
+            };
+        let waited = reported(ClusterPhase::Provisioning, &waiting, start);
+        // within the grace period the rejection is still waited on
+        let early = start + chrono::Duration::seconds(ECK_CREDENTIALS_GRACE_SECS - 30);
+        assert!(matches!(
+            reject(&chart, false, &waited, early),
+            CheckError::Waiting(_)
+        ));
+        // past it the rejection fails with how to fix it
+        let late = start + chrono::Duration::seconds(ECK_CREDENTIALS_GRACE_SECS + 30);
+        let CheckError::Failed(error) = reject(&chart, false, &waited, late) else {
+            panic!("a rejection outlasting the grace period should fail");
+        };
+        let failure = error.to_string();
+        assert!(failure.contains("for over 5 minutes"), "{failure}");
+        assert!(failure.contains("bootstrap.elastic"), "{failure}");
+        // an upgrade step embedding the wait in its message is bounded the same way
+        let step = reported(
+            ClusterPhase::Upgrading,
+            &format!("Step elastic-identity is waiting: {waiting}"),
+            start,
+        );
+        assert!(matches!(
+            reject(&chart, false, &step, late),
+            CheckError::Failed(_)
+        ));
+        // a cluster that already failed on these credentials keeps failing instead of waiting
+        let errored = reported(ClusterPhase::Error, &failure, late);
+        assert!(matches!(
+            reject(&chart, false, &errored, late),
+            CheckError::Failed(_)
+        ));
+        // a different long wait doesn't count toward the credentials' grace period
+        let other = reported(ClusterPhase::Provisioning, "Waiting for Redis", start);
+        assert!(matches!(
+            reject(&chart, false, &other, late),
+            CheckError::Waiting(_)
+        ));
+        // a bootstrap creating the user is still waited on however long it takes
+        assert!(matches!(
+            reject(&chart, true, &waited, late),
+            CheckError::Waiting(_)
+        ));
+    }
+
+    /// Answer every Elastic request with a 401
+    ///
+    /// # Arguments
+    ///
+    /// * `_method` - The request method
+    /// * `_path` - The request path
+    fn unauthorized_elastic(_method: &str, _path: &str) -> (u16, String) {
+        // reject the request like Elastic does for unknown credentials
+        (
+            401,
+            r#"{"error":{"type":"security_exception","reason":"unable to authenticate user"}}"#
+                .to_owned(),
+        )
+    }
+
+    /// Answer every Elastic request with a 503
+    ///
+    /// # Arguments
+    ///
+    /// * `_method` - The request method
+    /// * `_path` - The request path
+    fn unavailable_elastic(_method: &str, _path: &str) -> (u16, String) {
+        // answer like an Elastic that isn't ready to serve yet
+        (
+            503,
+            r#"{"error":{"type":"cluster_block_exception","reason":"not ready"}}"#.to_owned(),
+        )
+    }
+
+    /// Put user info with a password into an Elastic node's URL
+    ///
+    /// # Arguments
+    ///
+    /// * `node` - The node to add user info to
+    fn with_user_info(node: &str) -> String {
+        // add a username and password after the scheme
+        node.replacen("http://", "http://svuser:SVopPw42@", 1)
+    }
+
+    /// Check that a message names an Elastic node without the user info configured in it
+    ///
+    /// # Arguments
+    ///
+    /// * `message` - The message to check
+    /// * `node` - The node without its user info
+    fn assert_redacted(message: &str, node: &str) {
+        // neither the password nor the username appear, but the node does
+        assert!(!message.contains("SVopPw42"), "password leaked: {message}");
+        assert!(!message.contains("svuser"), "user leaked: {message}");
+        assert!(message.contains(node), "no node: {message}");
+    }
+
+    /// Messages that quote the Elastic node never carry the user info configured in it
+    #[tokio::test]
+    async fn elastic_messages_redact_node_credentials() {
+        // a node that refuses connections is waited on, named without its user info
+        let fake = crate::k8s::clusters::tests::FakeKube::default();
+        let mut meta = crate::k8s::clusters::tests::meta_for(
+            crate::k8s::clusters::tests::namespaced_cluster(
+                crate::k8s::clusters::tests::full_spec(),
+            ),
+            &fake.client(),
+        );
+        meta.conf.elastic.node = with_user_info("http://127.0.0.1:1");
+        let error = elastic_access(&meta).await.expect_err("unreachable");
+        assert_redacted(&error.to_string(), "http://127.0.0.1:1");
+        // an external Elastic rejecting Thorium's user fails naming the node without it
+        let node = crate::upgrades::tests::fake_elastic(unauthorized_elastic).await;
+        meta.conf.elastic.node = with_user_info(&node);
+        let error = elastic_access(&meta).await.expect_err("rejected");
+        assert_redacted(&error.to_string(), &node);
+        // an Elastic that isn't available yet is waited on naming the node without it
+        let (mut meta, _) = elastic_bootstrap_meta(&fake, unavailable_elastic).await;
+        let node = meta.conf.elastic.node.clone();
+        meta.conf.elastic.node = with_user_info(&node);
+        let error = elastic_identity(&meta).await.expect_err("unavailable");
+        assert_redacted(&error.to_string(), &node);
+    }
+
+    /// The access check fails right away when an external Elastic rejects Thorium's user
+    #[tokio::test]
+    async fn external_elastic_rejection_fails_access_check() {
+        // a cluster pointed at an external Elastic that rejects every request
+        let fake = crate::k8s::clusters::tests::FakeKube::default();
+        let mut meta = crate::k8s::clusters::tests::meta_for(
+            crate::k8s::clusters::tests::namespaced_cluster(
+                crate::k8s::clusters::tests::full_spec(),
+            ),
+            &fake.client(),
+        );
+        meta.conf.elastic.node = crate::upgrades::tests::fake_elastic(unauthorized_elastic).await;
+        // the check fails instead of waiting forever
+        let error = elastic_access(&meta).await.expect_err("rejected");
+        let CheckError::Failed(error) = error else {
+            panic!("an external Elastic rejecting credentials should fail: {error}");
+        };
+        assert!(error.to_string().contains("unable to authenticate user"));
+    }
+
+    /// A Scylla login rejected for its credentials is classified as an authentication failure
+    ///
+    /// The driver's `ConnectionSetupRequestError` can't be built outside the driver, so the
+    /// reason it carries is classified directly.
+    #[test]
+    fn scylla_auth_failures_classified() {
+        // a rejected password is an authentication failure
+        assert!(is_scylla_auth_setup_error(
+            &ConnectionSetupRequestErrorKind::DbError(
+                DbError::AuthenticationError,
+                "bad password".to_owned(),
+            )
+        ));
+        // so is a server demanding credentials from an anonymous session
+        assert!(is_scylla_auth_setup_error(
+            &ConnectionSetupRequestErrorKind::MissingAuthentication
+        ));
+        // any other error answering the login isn't
+        assert!(!is_scylla_auth_setup_error(
+            &ConnectionSetupRequestErrorKind::DbError(DbError::Overloaded, "busy".to_owned())
+        ));
+        assert!(!is_scylla_auth_setup_error(
+            &ConnectionSetupRequestErrorKind::DbError(DbError::Unauthorized, "denied".to_owned())
+        ));
+    }
+
+    /// A role counts as a superuser when it or any role granted to it has `super` set
+    #[test]
+    fn listed_roles_superuser() {
+        // build a LIST ROLES row with a role name and its super flag
+        let row = |name: &str, superuser: Option<bool>| Row {
+            columns: vec![
+                Some(CqlValue::Text(name.to_owned())),
+                superuser.map(CqlValue::Boolean),
+            ],
+        };
+        // a role that is a superuser itself counts
+        assert!(roles_include_superuser(
+            Some(1),
+            &[row("thorium", Some(true))]
+        ));
+        // so does a role granted a superuser role
+        let granted = [row("thorium", Some(false)), row("admins", Some(true))];
+        assert!(roles_include_superuser(Some(1), &granted));
+        // a role without superuser anywhere doesn't
+        let plain = [row("thorium", Some(false)), row("readers", None)];
+        assert!(!roles_include_superuser(Some(1), &plain));
+        // neither does an empty result or one without a super column
+        assert!(!roles_include_superuser(Some(1), &[]));
+        assert!(!roles_include_superuser(
+            None,
+            &[row("thorium", Some(true))]
+        ));
+        // a super column past the end of a row isn't read as set
+        assert!(!roles_include_superuser(
+            Some(5),
+            &[row("thorium", Some(true))]
+        ));
+    }
+
+    /// An existing role is made a superuser that can log in unless it is the admin itself
+    #[test]
+    fn alter_role_matches_created_role() {
+        // another admin makes Thorium's role match the one the bootstrap creates
+        assert_eq!(
+            alter_role_statement("thorium", "pass", "cassandra"),
+            "ALTER ROLE \"thorium\" WITH PASSWORD = 'pass' AND LOGIN = true AND SUPERUSER = true"
+        );
+        // a role updating its own password can't change its own superuser status
+        assert_eq!(
+            alter_role_statement("thorium", "pass", "thorium"),
+            "ALTER ROLE \"thorium\" WITH PASSWORD = 'pass'"
+        );
+        // the role and password are quoted
+        assert_eq!(
+            alter_role_statement("a\"b", "it's", "admin"),
+            "ALTER ROLE \"a\"\"b\" WITH PASSWORD = 'it''s' AND LOGIN = true AND SUPERUSER = true"
+        );
+    }
+
+    /// Build the kube API path of a Secret in the test namespace
+    ///
+    /// # Arguments
+    ///
+    /// * `name` - The name of the Secret
+    fn secret_path(name: &str) -> String {
+        // every test Secret lives in the thorium namespace
+        format!("/api/v1/namespaces/thorium/secrets/{name}")
+    }
+
+    /// Build a Secret the fake kube API answers with
+    ///
+    /// # Arguments
+    ///
+    /// * `name` - The name of the Secret
+    /// * `version` - The Secret's resource version
+    /// * `data` - The keys and plain text values the Secret holds
+    fn secret_body(name: &str, version: &str, data: &[(&str, &str)]) -> serde_json::Value {
+        // base64 encode each value like the kube API does
+        let data = data
+            .iter()
+            .map(|(key, value)| {
+                let encoded = base64::engine::general_purpose::STANDARD.encode(value);
+                ((*key).to_owned(), serde_json::Value::String(encoded))
+            })
+            .collect::<serde_json::Map<String, serde_json::Value>>();
+        serde_json::json!({
+            "apiVersion": "v1",
+            "kind": "Secret",
+            "metadata": {"name": name, "namespace": "thorium", "resourceVersion": version},
+            "data": data
+        })
+    }
+
+    /// Build a fake kube API serving one Secret
+    ///
+    /// # Arguments
+    ///
+    /// * `name` - The name of the Secret
+    /// * `version` - The Secret's resource version
+    /// * `data` - The keys and plain text values the Secret holds
+    fn fake_with_secret(name: &str, version: &str, data: &[(&str, &str)]) -> FakeKube {
+        // answer reads of this Secret
+        FakeKube::default().route(
+            "GET",
+            &secret_path(name),
+            200,
+            secret_body(name, version, data),
+        )
+    }
+
+    /// Build credentials read from a Secret with the given username settings
+    ///
+    /// # Arguments
+    ///
+    /// * `name` - The name of the Secret
+    /// * `username` - A literal username, if set
+    /// * `username_key` - The key holding the username, if set
+    fn creds(name: &str, username: Option<&str>, username_key: Option<&str>) -> SecretCredentials {
+        // the password always comes from the password key
+        SecretCredentials {
+            name: name.to_owned(),
+            username: username.map(str::to_owned),
+            username_key: username_key.map(str::to_owned),
+            password_key: "password".to_owned(),
+        }
+    }
+
+    /// Credentials come from a Secret's key, then a literal, then the default username
+    #[tokio::test]
+    async fn read_credentials_username_precedence() {
+        // a Secret holding a username and password
+        let fake = fake_with_secret(
+            "creds",
+            "1",
+            &[("username", "from-secret"), ("password", "pw")],
+        );
+        let meta = meta_for(namespaced_cluster(full_spec()), &fake.client());
+        // a username key wins over a literal and the default
+        let read = read_credentials(
+            &meta,
+            "test",
+            &creds("creds", Some("literal"), Some("username")),
+            Some("default"),
+        )
+        .await
+        .expect("read")
+        .expect("present");
+        assert_eq!(read.username, "from-secret");
+        assert_eq!(read.password, "pw");
+        // a literal wins over the default
+        let read = read_credentials(
+            &meta,
+            "test",
+            &creds("creds", Some("literal"), None),
+            Some("default"),
+        )
+        .await
+        .expect("read")
+        .expect("present");
+        assert_eq!(read.username, "literal");
+        // the default is used when nothing else names the user
+        let read = read_credentials(&meta, "test", &creds("creds", None, None), Some("default"))
+            .await
+            .expect("read")
+            .expect("present");
+        assert_eq!(read.username, "default");
+        // without any username the credentials can't be used
+        let error = read_credentials(&meta, "test", &creds("creds", None, None), None)
+            .await
+            .expect_err("no username");
+        assert!(
+            error
+                .to_string()
+                .contains("need a username or username_key"),
+            "{error}"
+        );
+    }
+
+    /// A missing Secret reads as no credentials so callers decide whether they need it
+    #[tokio::test]
+    async fn read_credentials_missing_secret() {
+        // a kube API without the Secret
+        let fake = FakeKube::default();
+        let meta = meta_for(namespaced_cluster(full_spec()), &fake.client());
+        // the Secret reads as absent rather than an error
+        let read = read_credentials(&meta, "test", &creds("gone", None, None), Some("default"))
+            .await
+            .expect("read");
+        assert_eq!(read, None);
+    }
+
+    /// Build a cluster that bootstraps Scylla from the previous role's Secret
+    fn previous_role_cluster() -> ThoriumCluster {
+        // add a Scylla bootstrap to the chart shaped spec
+        let mut spec = full_spec();
+        spec["bootstrap"] = serde_json::json!({
+            "scylla": {
+                "admin_secret": {
+                    "name": "thorium-scylla-previous",
+                    "username_key": "username",
+                    "password_key": "password"
+                },
+                "drop_previous_role": true
+            }
+        });
+        namespaced_cluster(spec)
+    }
+
+    /// The input hash follows the previous role Secret's version and marks it when absent
+    #[tokio::test]
+    async fn input_hash_follows_secret_versions() {
+        // hash the inputs with the previous role Secret at version 1
+        let data = [("username", "old-thorium"), ("password", "old-pass")];
+        let first = fake_with_secret("thorium-scylla-previous", "1", &data);
+        let meta = meta_for(previous_role_cluster(), &first.client());
+        let base = input_hash(&meta, "config").await.expect("hash");
+        // the hash covers the Secret's resource version
+        let bootstrap = meta.cluster.spec.bootstrap.as_ref();
+        let expected = [("thorium-scylla-previous", "1".to_owned())];
+        assert_eq!(
+            base,
+            hash_inputs(bootstrap, "config", &expected).expect("hash")
+        );
+        // the same inputs hash the same way
+        assert_eq!(base, input_hash(&meta, "config").await.expect("hash"));
+        // a new version of the Secret reruns the bootstrap
+        let second = fake_with_secret("thorium-scylla-previous", "2", &data);
+        let meta = meta_for(previous_role_cluster(), &second.client());
+        assert_ne!(base, input_hash(&meta, "config").await.expect("hash"));
+        // a deleted Secret is hashed as its absent marker
+        let missing = FakeKube::default();
+        let meta = meta_for(previous_role_cluster(), &missing.client());
+        let absent = [(
+            "thorium-scylla-previous",
+            absent_marker("thorium-scylla-previous"),
+        )];
+        assert_eq!(
+            input_hash(&meta, "config").await.expect("hash"),
+            hash_inputs(bootstrap, "config", &absent).expect("hash")
+        );
+    }
+
+    /// An error reading a bootstrap Secret other than it being missing fails the hash
+    #[tokio::test]
+    async fn input_hash_fails_on_forbidden_secret() {
+        // a kube API that forbids reading the Secret
+        let fake = FakeKube::default().route(
+            "GET",
+            &secret_path("thorium-scylla-previous"),
+            403,
+            kube_status(403, "Forbidden"),
+        );
+        let meta = meta_for(previous_role_cluster(), &fake.client());
+        // the error is returned instead of hashing a marker
+        assert!(input_hash(&meta, "config").await.is_err());
+    }
+
+    /// Build Scylla bootstrap settings that read the previous role's Secret
+    ///
+    /// # Arguments
+    ///
+    /// * `drop_previous_role` - Whether to drop the role the Secret names
+    fn previous_role_bootstrap(drop_previous_role: bool) -> ScyllaBootstrap {
+        // the Secret holds the previous role's username and password
+        ScyllaBootstrap {
+            admin_secret: Some(creds("thorium-scylla-previous", None, Some("username"))),
+            drop_default_role: false,
+            drop_previous_role,
+        }
+    }
+
+    /// Find the previous role to drop when the Secret names a given role
+    ///
+    /// # Arguments
+    ///
+    /// * `previous` - The role the previous role Secret names
+    async fn role_to_drop_for(previous: &str) -> Option<String> {
+        // serve a Secret naming this role
+        let fake = fake_with_secret(
+            "thorium-scylla-previous",
+            "1",
+            &[("username", previous), ("password", "old-pass")],
+        );
+        let meta = meta_for(previous_role_cluster(), &fake.client());
+        // pick the role to drop for Thorium's current role
+        previous_role_to_drop(&meta, &previous_role_bootstrap(true), "thorium")
+            .await
+            .expect("pick the role")
+    }
+
+    /// Only a previous role other than Thorium's own and cassandra is picked to be dropped
+    #[tokio::test]
+    async fn previous_role_to_drop_gating() {
+        // with drop_previous_role off the Secret is never read
+        let fake = fake_with_secret(
+            "thorium-scylla-previous",
+            "1",
+            &[("username", "old-thorium"), ("password", "old-pass")],
+        );
+        let meta = meta_for(previous_role_cluster(), &fake.client());
+        let picked = previous_role_to_drop(&meta, &previous_role_bootstrap(false), "thorium")
+            .await
+            .expect("pick the role");
+        assert_eq!(picked, None);
+        assert!(fake.requests().is_empty(), "{:?}", fake.requests());
+        // a missing Secret names no role to drop
+        let missing = FakeKube::default();
+        let meta = meta_for(previous_role_cluster(), &missing.client());
+        let picked = previous_role_to_drop(&meta, &previous_role_bootstrap(true), "thorium")
+            .await
+            .expect("pick the role");
+        assert_eq!(picked, None);
+        // Thorium's own role (only its password changed) is never dropped
+        assert_eq!(role_to_drop_for("thorium").await, None);
+        // cassandra is left to drop_default_role
+        assert_eq!(role_to_drop_for("cassandra").await, None);
+        // a role Thorium used before its username changed is dropped
+        assert_eq!(
+            role_to_drop_for("old-thorium").await,
+            Some("old-thorium".to_owned())
+        );
+    }
+
+    /// The Scylla step does nothing without `bootstrap.scylla` and needs `scylla.auth` with it
+    #[tokio::test]
+    async fn scylla_bootstrap_requires_auth() {
+        // a cluster without a Scylla bootstrap skips the step without touching anything
+        let fake = FakeKube::default();
+        let meta = meta_for(namespaced_cluster(full_spec()), &fake.client());
+        assert!(scylla(&meta).await.is_ok());
+        assert!(fake.requests().is_empty());
+        // a Scylla bootstrap without credentials in the config fails
+        let mut meta = meta_for(previous_role_cluster(), &fake.client());
+        meta.conf.scylla.auth = None;
+        let error = scylla(&meta).await.expect_err("no scylla.auth");
+        let CheckError::Failed(error) = error else {
+            panic!("a missing scylla.auth should fail: {error}");
+        };
+        assert!(error.to_string().contains("scylla.auth"), "{error}");
+        assert!(fake.requests().is_empty());
+    }
+
+    /// A request the recording Elastic fake received
+    #[derive(Debug, Clone)]
+    struct ElasticRequest {
+        /// The HTTP method of the request
+        method: String,
+        /// The path of the request without its query
+        path: String,
+        /// The request head in lowercase, including its headers
+        head: String,
+        /// The body of the request
+        body: String,
+    }
+
+    /// Serve canned Elastic answers on a local port and record every request with its body
+    ///
+    /// Returns the url to reach the fake at and the requests it has received.
+    ///
+    /// # Arguments
+    ///
+    /// * `answer` - Picks the status and JSON body for a method and path
+    async fn recording_elastic(
+        answer: fn(&str, &str) -> (u16, String),
+    ) -> (String, Arc<Mutex<Vec<ElasticRequest>>>) {
+        // listen on any free local port
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind");
+        let addr = listener.local_addr().expect("local addr");
+        // share the recorded requests with the caller
+        let requests = Arc::new(Mutex::new(Vec::new()));
+        let recorded = requests.clone();
+        // answer each connection with one response
+        tokio::spawn(async move {
+            while let Ok((mut socket, _)) = listener.accept().await {
+                // give each connection its own handle on the recorded requests
+                let recorded = recorded.clone();
+                tokio::spawn(async move {
+                    // read until the end of the request head
+                    let mut raw = Vec::new();
+                    let mut chunk = [0_u8; 4096];
+                    let head_end = loop {
+                        if let Some(end) = raw.windows(4).position(|window| window == b"\r\n\r\n") {
+                            break end + 4;
+                        }
+                        match socket.read(&mut chunk).await {
+                            Ok(0) | Err(_) => return,
+                            Ok(read) => raw.extend_from_slice(&chunk[..read]),
+                        }
+                    };
+                    // get the length of the body from the head
+                    let head = String::from_utf8_lossy(&raw[..head_end]).to_lowercase();
+                    let length = head
+                        .lines()
+                        .find_map(|line| line.strip_prefix("content-length:"))
+                        .and_then(|value| value.trim().parse::<usize>().ok())
+                        .unwrap_or(0);
+                    // read the rest of the body
+                    while raw.len() < head_end + length {
+                        match socket.read(&mut chunk).await {
+                            Ok(0) | Err(_) => return,
+                            Ok(read) => raw.extend_from_slice(&chunk[..read]),
+                        }
+                    }
+                    // get the method and path from the request line
+                    let mut line = head.split_whitespace();
+                    let method = line.next().unwrap_or_default().to_uppercase();
+                    let path = line
+                        .next()
+                        .unwrap_or_default()
+                        .split('?')
+                        .next()
+                        .unwrap_or_default()
+                        .to_owned();
+                    // record this request with its body
+                    let body =
+                        String::from_utf8_lossy(&raw[head_end..head_end + length]).into_owned();
+                    recorded
+                        .lock()
+                        .expect("requests lock")
+                        .push(ElasticRequest {
+                            method: method.clone(),
+                            path: path.clone(),
+                            head: head.clone(),
+                            body,
+                        });
+                    // answer with the canned response
+                    let (status, body) = answer(&method, &path);
+                    let response = format!(
+                        "HTTP/1.1 {status} Fake\r\ncontent-type: application/json\r\n\
+                         content-length: {}\r\nconnection: close\r\n\r\n{body}",
+                        body.len()
+                    );
+                    let _ = socket.write_all(response.as_bytes()).await;
+                });
+            }
+        });
+        (format!("http://{addr}"), requests)
+    }
+
+    /// Answer the has-privileges check with every privilege held
+    ///
+    /// # Arguments
+    ///
+    /// * `_method` - The request method
+    /// * `path` - The request path
+    fn ready_elastic(_method: &str, path: &str) -> (u16, String) {
+        // only the has-privileges check is expected
+        if path.ends_with("/_has_privileges") {
+            return (
+                200,
+                r#"{"username":"thorium","has_all_requested":true}"#.to_owned(),
+            );
+        }
+        (404, "{}".to_owned())
+    }
+
+    /// Answer the has-privileges check with a 401 and accept role and user updates
+    ///
+    /// # Arguments
+    ///
+    /// * `method` - The request method
+    /// * `path` - The request path
+    fn unready_elastic(method: &str, path: &str) -> (u16, String) {
+        // Thorium's user doesn't authenticate yet
+        if path.ends_with("/_has_privileges") {
+            return unauthorized_elastic(method, path);
+        }
+        // the superuser may create the role and user
+        match (method, path) {
+            ("PUT", "/_security/role/thorium") => (200, r#"{"role":{"created":true}}"#.to_owned()),
+            ("PUT", "/_security/user/thorium") => (200, r#"{"created":true}"#.to_owned()),
+            _ => (404, "{}".to_owned()),
+        }
+    }
+
+    /// Answer every request like an Elastic that is still starting
+    ///
+    /// # Arguments
+    ///
+    /// * `_method` - The request method
+    /// * `_path` - The request path
+    fn starting_elastic(_method: &str, _path: &str) -> (u16, String) {
+        // a starting Elastic or a proxy without a backend answers 503
+        (503, "{}".to_owned())
+    }
+
+    /// Build cluster metadata that bootstraps an external Elastic served by a fake
+    ///
+    /// # Arguments
+    ///
+    /// * `fake` - The fake kube API serving the admin Secret, if it exists
+    /// * `answer` - Picks the status and JSON body for each Elastic request
+    async fn elastic_bootstrap_meta(
+        fake: &FakeKube,
+        answer: fn(&str, &str) -> (u16, String),
+    ) -> (ClusterMeta, Arc<Mutex<Vec<ElasticRequest>>>) {
+        // add an Elastic bootstrap to the chart shaped spec
+        let mut spec = full_spec();
+        spec["bootstrap"] = serde_json::json!({
+            "elastic": {"admin_secret": {"name": "elastic-admin", "password_key": "password"}}
+        });
+        let mut meta = meta_for(namespaced_cluster(spec), &fake.client());
+        // point the cluster at the fake Elastic
+        let (node, requests) = recording_elastic(answer).await;
+        meta.conf.elastic.node = node;
+        (meta, requests)
+    }
+
+    /// Thorium's Elastic user already holding its privileges skips the admin Secret entirely
+    #[tokio::test]
+    async fn elastic_identity_ready_skips_admin() {
+        // an Elastic where Thorium's user already has every privilege
+        let fake = FakeKube::default();
+        let (meta, requests) = elastic_bootstrap_meta(&fake, ready_elastic).await;
+        // the step is done without reading the admin Secret
+        assert_eq!(
+            elastic_identity(&meta).await.expect("step"),
+            StepOutcome::Done
+        );
+        assert!(fake.requests().is_empty(), "{:?}", fake.requests());
+        // only the privileges were checked, for every Thorium index
+        let requests = requests.lock().expect("requests lock").clone();
+        assert_eq!(requests.len(), 1, "{requests:?}");
+        assert!(requests[0].path.ends_with("/_has_privileges"));
+        let body: serde_json::Value = serde_json::from_str(&requests[0].body).expect("json");
+        assert_eq!(body, elastic_privileges_request(&meta.conf.elastic));
+    }
+
+    /// A missing admin Secret is reported when Thorium's Elastic user still needs setting up
+    #[tokio::test]
+    async fn elastic_identity_missing_admin_secret() {
+        // an Elastic rejecting Thorium's user and no admin Secret
+        let fake = FakeKube::default();
+        let (meta, requests) = elastic_bootstrap_meta(&fake, unready_elastic).await;
+        // the step reports which Secret is missing
+        let StepOutcome::MissingSecret(message) = elastic_identity(&meta).await.expect("step")
+        else {
+            panic!("a missing admin Secret should be reported");
+        };
+        assert!(
+            message.starts_with("bootstrap.elastic.admin_secret elastic-admin is missing"),
+            "{message}"
+        );
+        // nothing was changed in Elastic
+        let requests = requests.lock().expect("requests lock").clone();
+        assert!(
+            requests.iter().all(|request| request.method != "PUT"),
+            "{requests:?}"
+        );
+    }
+
+    /// The admin creates Thorium's Elastic role and user with the configured password
+    #[tokio::test]
+    async fn elastic_identity_creates_role_and_user() {
+        // an Elastic rejecting Thorium's user with an admin Secret to fix it
+        let fake = fake_with_secret("elastic-admin", "1", &[("password", "admin-pass")]);
+        let (meta, requests) = elastic_bootstrap_meta(&fake, unready_elastic).await;
+        // the step creates the role and user
+        assert_eq!(
+            elastic_identity(&meta).await.expect("step"),
+            StepOutcome::Done
+        );
+        let requests = requests.lock().expect("requests lock").clone();
+        // the role grants every privilege on Thorium's indexes
+        let role = requests
+            .iter()
+            .find(|request| request.method == "PUT" && request.path == "/_security/role/thorium")
+            .expect("role created");
+        let body: serde_json::Value = serde_json::from_str(&role.body).expect("json");
+        assert_eq!(
+            body,
+            serde_json::json!({"indices": [{"names": ["thorium*"], "privileges": ["all"]}]})
+        );
+        // the user gets the configured password and Thorium's role
+        let user = requests
+            .iter()
+            .find(|request| request.method == "PUT" && request.path == "/_security/user/thorium")
+            .expect("user created");
+        let body: serde_json::Value = serde_json::from_str(&user.body).expect("json");
+        assert_eq!(body["password"], "elastic-pass");
+        assert_eq!(body["roles"], serde_json::json!(["thorium"]));
+        // both were sent as the default elastic superuser with the Secret's password
+        let auth = base64::engine::general_purpose::STANDARD.encode("elastic:admin-pass");
+        let header = format!("authorization: basic {}", auth.to_lowercase());
+        assert!(role.head.contains(&header), "{}", role.head);
+        assert!(user.head.contains(&header), "{}", user.head);
+    }
+
+    /// An Elastic that isn't ready to answer the privilege check is waited on
+    #[tokio::test]
+    async fn elastic_identity_waits_on_unavailable_elastic() {
+        // an Elastic that is still starting
+        let fake = FakeKube::default();
+        let (meta, _requests) = elastic_bootstrap_meta(&fake, starting_elastic).await;
+        // the step waits without reading the admin Secret
+        let error = elastic_identity(&meta).await.expect_err("waiting");
+        assert!(matches!(error, CheckError::Waiting(_)), "{error}");
+        assert!(fake.requests().is_empty());
     }
 }

@@ -1,84 +1,86 @@
+# Traefik
 
-## Deploy Traefik 
+Traefik is a reverse proxy and load balancer that routes HTTP and HTTPS traffic to Thorium (and
+to other web services in the cluster, such as a tool image registry). megathor installs it with
+the settings on this page. Install it yourself when your cluster has no ingress controller and
+you want the chart's Traefik ingress (`operator.ingress.type: traefik`); with an nginx ingress
+controller, use `operator.ingress.type: nginx` instead and skip this page.
 
-Traefik is a reverse proxy and load balancer that enables routing of http and https traefik to
-Thorium and any other web services you deploy in K8s (such as a local container registry).
-
-### 1) Install the latest helm repo for Traefik
+## 1) Add the Helm repository
 
 ```bash
 helm repo add traefik https://helm.traefik.io/traefik
 helm repo update
 ```
 
-### 2) Get a default values file for a Traefik release
+## 2) Write the values
 
-```bash
-helm show values traefik/traefik > traefik-values.yml
-```
-
-### 3) Modify the default helm values fpr Traefik
-
-Update read and write response timeouts for http and https requests going through the traefik ingress proxy.
+Save these values as `traefik-values.yaml`. megathor sets the replica count and the external
+IPs and otherwise uses the chart's defaults, including `global.sendAnonymousUsage: false`:
 
 ```yaml
-ports:
-  ...
-  web:
-    ...
-    transport:
-      respondingTimeouts:
-        readTimeout:   0 # @schema type:[string, integer, 0]
-        writeTimeout:  0 # @schema type:[string, integer, 0]
-        idleTimeout:   600 # @schema type:[string, integer, 600]
-  ...
-  ...
-  websecure:
-    ...
-    transport:
-      respondingTimeouts:
-        readTimeout:   0 # @schema type:[string, integer, 0]
-        writeTimeout:  0 # @schema type:[string, integer, 0]
-        idleTimeout:   600 # @schema type:[string, integer, 600]
-```
-
-Update the IP addresses for web traffic that will access your Thorium instances from locations external to K8s.
-
-```yaml
+deployment:
+  replicas: 1
+global:
+  sendAnonymousUsage: false
 service:
-  ...
+  # the addresses clients outside the cluster reach Thorium at
   externalIPs:
     - 1.2.3.4
     - 1.2.3.5
-    - 1.2.3.6
-    - 4.3.2.1
 ```
 
-Explicitly disable anonymous usage reporting for networked Traefik deployments.
+Large file uploads and downloads can run longer than Traefik's default timeouts. To remove the
+read and write timeouts on both entrypoints, also add:
+
 ```yaml
-globalArguments:
-...
-- "--global.sendanonymoususage=false"
+ports:
+  web:
+    transport:
+      respondingTimeouts:
+        readTimeout: 0
+        writeTimeout: 0
+        idleTimeout: 600
+  websecure:
+    transport:
+      respondingTimeouts:
+        readTimeout: 0
+        writeTimeout: 0
+        idleTimeout: 600
 ```
 
-### 4) Create a namespace for Traefik and deploy
+Run `helm show values traefik/traefik --version 37.1.0` for every setting.
+
+## 3) Install Traefik
 
 ```bash
-kubectl create ns traefik
-sleep 5
-helm install -f traefik-values.yml traefik traefik/traefik --namespace=traefik
-```
-
-You can update the values of an existing Traefik helm chart with the following command:
-
-```bash
-helm upgrade -f traefik-values.yml --namespace=traefik traefik traefik/traefik
-```
-
-### 5) Verify the Traefik pod started
-
-```bash
-kubectl get pods -n traefik
+helm install traefik traefik/traefik --version 37.1.0 -n traefik --create-namespace \
+  -f traefik-values.yaml --wait
+kubectl -n traefik get pods
 # NAME                       READY   STATUS    RESTARTS   AGE
-# traefik-HASH               1/1     Running   0          1h
+# traefik-HASH               1/1     Running   0          1m
 ```
+
+Change the values later with
+`helm upgrade traefik traefik/traefik --version 37.1.0 -n traefik -f traefik-values.yaml`.
+
+## Thorium settings
+
+With `operator.ingress.type: traefik`, the `thorium` chart creates, in the thorium namespace:
+
+- an `IngressRoute` named `thorium-ingress` on the `websecure` entrypoint that sends
+  `operator.ingress.host` (every host when empty) to the `thorium-api` Service on port 80, and
+  `operator.ingress.registryHost` to the chart's registry when set;
+- a `TLSOption` named `tls12` (TLS 1.2 and 1.3);
+- with `operator.ingress.tls.secretName` and `operator.ingress.tls.traefikDefaultStore: true`,
+  the cluster's `default` `TLSStore`, which makes that certificate Traefik's default. Traefik
+  allows only one default `TLSStore` per cluster, so set `traefikDefaultStore: false` when
+  something else already defines it.
+
+Create the TLS Secret in the thorium namespace before installing:
+
+```bash
+kubectl -n thorium create secret tls thorium-tls --cert=thorium.crt --key=thorium.key
+```
+
+See [Configure the Helm Charts](./helm-configuration.md) for the other ingress settings.

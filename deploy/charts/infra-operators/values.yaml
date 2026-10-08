@@ -2,30 +2,79 @@
 # thorium chart, e.g. `helm install infra-operators <chart> -n infra-operators --create-namespace`.
 # Every operator runs in the release namespace. Disable any operator the cluster already runs.
 #
-# For an offline mirror registry set global.imageRegistry (used by Kubegres) and point each
-# operator's image at the mirror, e.g.:
-#   scylla-operator.image.repository: <registry>/scylladb
-#   eck-operator.image.repository: <registry>/eck/eck-operator
+# For an offline mirror registry set global.imageRegistry, which moves every operator image to
+# the mirror.
+#
+# Helm installs the CRDs in crds/ (Scylla and Kubegres) only on the first install and never
+# upgrades them, so apply the new CRDs by hand when upgrading to a chart that vendors newer
+# operators. ECK's CRDs are templates and are upgraded with the chart.
 
 global:
+  # Pull every operator image from this registry instead of its upstream one, dropping the
+  # upstream registry host and keeping the path (as in the thorium chart):
+  # docker.io/scylladb/scylla-operator:<tag> -> <registry>/scylladb/scylla-operator:<tag>,
+  # docker.elastic.co/eck/eck-operator:<tag> -> <registry>/eck/eck-operator:<tag>,
+  # docker.io/reactivetechio/kubegres:1.19 -> <registry>/reactivetechio/kubegres:1.19.
+  # The Scylla operator also starts its Scylla pod sidecars from its own image, so they follow,
+  # and the images in scyllaOperatorConfig below are rewritten the same way.
   imageRegistry: ""
+  # The cluster's DNS domain, used in the SANs of the Scylla operator's generated webhook
+  # certificate
+  clusterDomain: cluster.local
+
+# The ScyllaOperatorConfig named "cluster" (the Scylla operator's cluster-wide settings), rendered
+# only when global.imageRegistry is set or create is true; otherwise the operator creates an empty
+# one and uses the images built into it. It names the auxiliary images the operator runs outside
+# Scylla pods: the ScyllaDB utilities image (NodeConfig node tuning) and a Bash tools image
+# (ScyllaDBMonitoring), neither of which the thorium chart uses, so mirror them only if you
+# create those resources. The defaults are the operator's built-in images (which upstream also
+# pins by digest) without the digest, so a mirror can serve them by tag; keep them in step with
+# the scylla-operator version (assets/config/config.yaml in its source).
+# Upgrading a release that didn't render it to one that does fails because the operator already
+# created "cluster"; pass --take-ownership to that helm upgrade to adopt it.
+scyllaOperatorConfig:
+  # render it without global.imageRegistry too, pinning the images below
+  create: false
+  # spec.scyllaUtilsImage; global.imageRegistry applies
+  scyllaDBUtilsImage: docker.io/scylladb/scylla:2026.1.0
+  # spec.unsupportedBashToolsImageOverride; global.imageRegistry applies
+  bashToolsImage: registry.access.redhat.com/ubi9/ubi:9.5-1745854298
 
 # Scylla operator (manages Thorium's ScyllaCluster); its webhook certificate is generated
-# by the chart, so cert-manager is not needed
+# by the chart, so cert-manager is not needed. See charts/scylla-operator/values.yaml for every
+# setting
 scylla-operator:
   enabled: true
+  # the image repository without the image name (the chart appends scylla-operator:<tag>);
+  # global.imageRegistry applies
   image:
     repository: docker.io/scylladb
   webhook:
+    # generate the webhook's serving certificate in the chart (kept across upgrades) instead of
+    # requesting one from cert-manager
     createSelfSignedCertificate: true
+    # A fixed webhook certificate (PEM), for renderers that can't read the cluster (helm
+    # template, Argo CD, Flux), which would otherwise generate a new CA on every render. Set
+    # caCrt, crt, and key together; crt must be valid for <release>-scylla-operator-webhook.<release
+    # namespace>.svc (infra-operators-scylla-operator-webhook.infra-operators.svc by default).
+    # With createSelfSignedCertificate false, set only caCrt (the CA of the secret named by
+    # certificateSecretName, which you create yourself)
+    tls:
+      caCrt: ""
+      crt: ""
+      key: ""
 
-# Elastic Cloud on Kubernetes operator (manages Thorium's Elasticsearch and Kibana)
+# Elastic Cloud on Kubernetes operator (manages Thorium's Elasticsearch and Kibana). See
+# charts/eck-operator/values.yaml for every setting
 eck-operator:
   enabled: true
+  # the full image repository; the tag defaults to the chart's appVersion and
+  # global.imageRegistry applies
   image:
     repository: docker.elastic.co/eck/eck-operator
 
 # Kubegres operator (manages Thorium's Quickwit metastore Postgres)
 kubegres:
   enabled: true
+  # the full controller image; global.imageRegistry applies
   image: docker.io/reactivetechio/kubegres:1.19

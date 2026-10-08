@@ -1,0 +1,79 @@
+#!/usr/bin/env python3
+# Creates an S3 bucket using only the Python standard library, so it runs in the rook-ceph-tools
+# pod (the Ceph image has no S3 client). It is fed on stdin so the keys never appear in a command
+# line, and exits non-zero unless the bucket exists and belongs to these keys afterwards.
+import datetime
+import hashlib
+import hmac
+import sys
+import urllib.error
+import urllib.parse
+import urllib.request
+
+ENDPOINT = {{ s3_endpoint | to_json }}
+REGION = {{ s3_region | to_json }}
+BUCKET = {{ s3_bucket_name | to_json }}
+ACCESS_KEY = {{ s3_access_key | to_json }}
+SECRET_KEY = {{ s3_secret_key | to_json }}
+
+
+def sign(key, message):
+    """HMAC-SHA256 a message with a key"""
+    return hmac.new(key, message.encode(), hashlib.sha256).digest()
+
+
+def main():
+    """Create the bucket with an AWS Signature Version 4 signed request"""
+    url = urllib.parse.urlsplit(ENDPOINT)
+    path = url.path.rstrip("/") + "/" + urllib.parse.quote(BUCKET)
+    # us-east-1 is S3's default location, so only other regions name a location constraint
+    body = b""
+    if REGION and REGION != "us-east-1":
+        body = (
+            '<CreateBucketConfiguration xmlns="http://s3.amazonaws.com/doc/2006-03-01/">'
+            "<LocationConstraint>%s</LocationConstraint></CreateBucketConfiguration>" % REGION
+        ).encode()
+    now = datetime.datetime.now(datetime.timezone.utc)
+    amz_date = now.strftime("%Y%m%dT%H%M%SZ")
+    day = now.strftime("%Y%m%d")
+    payload_hash = hashlib.sha256(body).hexdigest()
+    headers = {"host": url.netloc, "x-amz-content-sha256": payload_hash, "x-amz-date": amz_date}
+    signed_headers = ";".join(sorted(headers))
+    canonical_headers = "".join("%s:%s\n" % (name, headers[name]) for name in sorted(headers))
+    canonical_request = "\n".join(["PUT", path, "", canonical_headers, signed_headers, payload_hash])
+    scope = "%s/%s/s3/aws4_request" % (day, REGION or "us-east-1")
+    string_to_sign = "\n".join(
+        ["AWS4-HMAC-SHA256", amz_date, scope, hashlib.sha256(canonical_request.encode()).hexdigest()]
+    )
+    key = sign(("AWS4" + SECRET_KEY).encode(), day)
+    for part in (REGION or "us-east-1", "s3", "aws4_request"):
+        key = sign(key, part)
+    signature = hmac.new(key, string_to_sign.encode(), hashlib.sha256).hexdigest()
+    headers["authorization"] = "AWS4-HMAC-SHA256 Credential=%s/%s, SignedHeaders=%s, Signature=%s" % (
+        ACCESS_KEY,
+        scope,
+        signed_headers,
+        signature,
+    )
+    request = urllib.request.Request(
+        "%s://%s%s" % (url.scheme, url.netloc, path), data=body, headers=headers, method="PUT"
+    )
+    # the endpoint is an in-cluster service, which a proxy configured in the pod couldn't reach
+    opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+    try:
+        with opener.open(request, timeout=60) as response:
+            print("created bucket %s (HTTP %d)" % (BUCKET, response.status))
+            return 0
+    except urllib.error.HTTPError as error:
+        detail = error.read().decode(errors="replace")
+        # creating a bucket these keys already own is how a rerun finds it
+        if error.code == 409 and "BucketAlreadyOwnedByYou" in detail:
+            print("bucket %s already exists" % BUCKET)
+            return 0
+        print("creating bucket %s failed: HTTP %d %s" % (BUCKET, error.code, detail), file=sys.stderr)
+    except urllib.error.URLError as error:
+        print("creating bucket %s failed: %s" % (BUCKET, error.reason), file=sys.stderr)
+    return 1
+
+
+sys.exit(main())
