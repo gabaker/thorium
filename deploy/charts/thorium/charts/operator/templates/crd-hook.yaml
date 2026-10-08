@@ -1,0 +1,60 @@
+{{- if .Values.crdHook.enabled }}
+{{- $ns := include "thorium.namespace" . }}
+{{- /*
+Before `helm upgrade` changes the ThoriumCluster, apply the new operator's ThoriumCluster CRD.
+Helm never updates the CRD in crds/, and the operator only applies it once its new version starts,
+after Helm has already sent the ThoriumCluster; the API server prunes any field the old CRD lacks
+from it, and Helm's later upgrades never send an unchanged field again. The Job runs the new
+operator image as the operator's own account, which may only change this one CRD. A first install
+gets the CRD from crds/, so this only runs on upgrades.
+*/}}
+---
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: thorium-apply-crd
+  namespace: {{ $ns }}
+  labels:
+    {{- include "operator.labels" . | nindent 4 }}
+  annotations:
+    helm.sh/hook: pre-upgrade
+    helm.sh/hook-weight: "-10"
+    helm.sh/hook-delete-policy: before-hook-creation,hook-succeeded
+spec:
+  backoffLimit: 2
+  activeDeadlineSeconds: {{ .Values.crdHook.timeoutSeconds }}
+  template:
+    spec:
+      restartPolicy: Never
+      serviceAccountName: thorium-operator
+      automountServiceAccountToken: true
+      {{- with include "operator.imagePullSecrets" . }}
+      imagePullSecrets:
+        {{- . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.controller.podSecurityContext }}
+      securityContext:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      containers:
+        - name: apply-crd
+          image: {{ printf "%s:%s" (include "thorium.image" (dict "root" $ "image" .Values.image.repository)) (include "operator.tag" .) }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          {{- with .Values.controller.securityContext }}
+          securityContext:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          {{- with .Values.crdHook.resources }}
+          resources:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          command: ["/app/thorium-operator", "crd", "--apply"]
+      {{- with .Values.controller.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.controller.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+{{- end }}

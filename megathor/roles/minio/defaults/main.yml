@@ -1,5 +1,0 @@
-minio_enabled: true
-minio_namespace: "minio"
-minio_registry: "quay.io"
-minio_image: "minio/minio"
-minio_version: "latest"

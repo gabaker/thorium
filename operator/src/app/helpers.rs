@@ -51,6 +51,7 @@ impl From<Error> for CheckError {
     ///
     /// * `error` - The error the check failed with
     fn from(error: Error) -> Self {
+        // an error that isn't a known wait needs attention
         Self::Failed(error)
     }
 }
@@ -98,6 +99,7 @@ fn s3_unreachable<E, R>(error: &SdkError<E, R>) -> bool {
 fn s3_waiting(endpoint: &str, description: &str, chain: &str) -> CheckError {
     // name the endpoint without any credentials in its URL
     let endpoint = redact_url(endpoint);
+    // an unreachable S3 is waited on with what failed and why
     CheckError::Waiting(format!(
         "Waiting for S3 at {endpoint} to accept connections: failed to {description}: {chain}"
     ))
@@ -138,9 +140,9 @@ pub async fn thorium_client(host: &str, token: &str) -> Result<Thorium, Error> {
 
 /// Build an API url string
 ///
-/// Get the thorium host from operator args or the target ThoriumCluster instance being configured.
-/// The url string will be none outside of a development environment when running in kubernetes
-/// within a pod.
+/// Get the thorium host from operator args or the target `ThoriumCluster` instance being
+/// configured. The url argument is only set outside of k8s (for development), so in a pod the
+/// API's in-cluster service url is used.
 ///
 /// # Arguments
 ///
@@ -150,13 +152,9 @@ pub fn get_thorium_host(meta: &ClusterMeta, url: Option<&String>) -> String {
     match url {
         // grab url if passed to the operator as an arg, mostly for development
         Some(url) => url.to_owned(),
-        // use internal k8s networking by default
-        None => {
-            format!(
-                "http://thorium-api.{}.svc.cluster.local:80",
-                &meta.namespace
-            )
-        }
+        // use internal k8s networking by default, leaving the cluster domain to the pod's DNS
+        // search path so clusters with a domain other than cluster.local work
+        None => format!("http://thorium-api.{}.svc:80", meta.namespace),
     }
 }
 
@@ -182,6 +180,21 @@ pub fn error_chain(error: &dyn std::error::Error) -> String {
         source = cause.source();
     }
     chain
+}
+
+/// Get the location constraint to create a bucket in a region with
+///
+/// AWS rejects a `us-east-1` constraint since that is where buckets go without one, so no
+/// constraint is sent for it or when no region is set.
+///
+/// # Arguments
+///
+/// * `region` - The S3 region from the config, if one is set
+fn location_constraint(region: Option<&str>) -> Option<BucketLocationConstraint> {
+    // only send a constraint for a set region other than us-east-1
+    region
+        .filter(|region| !region.is_empty() && *region != "us-east-1")
+        .map(BucketLocationConstraint::from)
 }
 
 /// How a `HeadBucket` request for a bucket failed
@@ -299,17 +312,10 @@ pub async fn create_bucket(
             }
         },
     }
-    // build out the bucket creation config
-    let mut bucket_config = CreateBucketConfiguration::builder();
-    // if we have a region set then set the location con
-    if let Some(region) = &config.region {
-        // build our constraint
-        let constraint = BucketLocationConstraint::from(region.as_str());
-        // set our constraint
-        bucket_config = bucket_config.location_constraint(constraint);
-    }
-    // build our bucket config
-    let bucket_config = bucket_config.build();
+    // build out the bucket creation config, pinning the bucket to our region when needed
+    let bucket_config = CreateBucketConfiguration::builder()
+        .set_location_constraint(location_constraint(config.region.as_deref()))
+        .build();
     // attempt to create the bucket
     let response = client
         .create_bucket()
@@ -344,11 +350,14 @@ pub async fn create_bucket(
                     println!("Bucket already exists: {bucket_name}");
                     Ok(())
                 }
-                _ => Err(Error::new(format!(
-                    "Failed to create bucket {bucket_name}: {service_err:?}"
+                // any other service error fails bucket creation
+                other => Err(Error::new(format!(
+                    "Failed to create bucket {bucket_name}: {}",
+                    error_chain(other)
                 ))
                 .into()),
             },
+            // any error that isn't a service error fails bucket creation too
             _ => Err(Error::new(format!(
                 "Failed to create bucket {bucket_name}: {}",
                 error_chain(&error)
@@ -703,6 +712,27 @@ mod tests {
         assert!(!message.contains("thorium-files"));
     }
 
+    /// The operator reaches the API through its in-cluster service unless given a url
+    #[tokio::test]
+    async fn thorium_host_default() {
+        // build cluster metadata in the thorium namespace
+        let fake = crate::k8s::clusters::tests::FakeKube::default();
+        let meta = crate::k8s::clusters::tests::meta_for(
+            crate::k8s::clusters::tests::namespaced_cluster(
+                crate::k8s::clusters::tests::full_spec(),
+            ),
+            &fake.client(),
+        );
+        // the in-cluster service is the default
+        assert_eq!(
+            get_thorium_host(&meta, None),
+            "http://thorium-api.thorium.svc:80"
+        );
+        // a url argument wins
+        let url = "http://localhost:8080".to_owned();
+        assert_eq!(get_thorium_host(&meta, Some(&url)), url);
+    }
+
     /// A scripted S3 response: status line, extra headers, and body
     type MockResponse = (
         &'static str,
@@ -1000,5 +1030,23 @@ mod tests {
             .send()
             .await
             .expect("the created bucket exists");
+    }
+
+    /// Buckets in us-east-1 or without a region get no location constraint
+    #[test]
+    fn us_east_1_has_no_location_constraint() {
+        // AWS rejects a us-east-1 constraint and an unset region needs none
+        assert_eq!(location_constraint(Some("us-east-1")), None);
+        assert_eq!(location_constraint(Some("")), None);
+        assert_eq!(location_constraint(None), None);
+        // any other region pins the bucket to it
+        assert_eq!(
+            location_constraint(Some("us-west-2")),
+            Some(BucketLocationConstraint::UsWest2)
+        );
+        assert_eq!(
+            location_constraint(Some("custom-1")),
+            Some(BucketLocationConstraint::from("custom-1"))
+        );
     }
 }

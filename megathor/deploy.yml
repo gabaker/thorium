@@ -11,7 +11,7 @@
     - role: secrets
     # Quickwit's bucket on Rook or an external S3 service (the thorium chart creates it on SeaweedFS)
     - role: s3
-      when: not (seaweedfs_enabled | bool)
+      when: not (seaweedfs_enabled | bool) and quickwit_enabled | bool
     - role: traefik
       when: traefik_enabled | bool
     # the Scylla, ECK, and Kubegres operators, shared by every Thorium deployment in the cluster

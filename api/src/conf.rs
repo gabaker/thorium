@@ -2708,14 +2708,12 @@ pub struct Elastic {
 #[cfg(any(feature = "api", feature = "client"))]
 async fn read_elastic_ca(path: &Path) -> Result<elasticsearch::cert::Certificate, String> {
     // read our CA cert from disk
-    let ca_bytes = tokio::fs::read(path)
-        .await
-        .map_err(|error| {
-            format!(
-                "Failed to read elastic validation cert at {}: {error}",
-                path.display()
-            )
-        })?;
+    let ca_bytes = tokio::fs::read(path).await.map_err(|error| {
+        format!(
+            "Failed to read elastic validation cert at {}: {error}",
+            path.display()
+        )
+    })?;
     // build our cert
     elasticsearch::cert::Certificate::from_pem(&ca_bytes).map_err(|error| {
         format!(
@@ -2742,14 +2740,16 @@ impl Elastic {
 
     /// Cast this elastic cert config into a ```CertificateValidation``` object
     ///
-    /// This validates certificates exactly like [`Elastic::to_cert_validation`] but returns
+    /// This validates certificates exactly like the API's `to_cert_validation` but returns
     /// an error instead of panicking on an invalid certificate.
     #[cfg(feature = "client")]
     pub async fn try_cert_validation(
         &self,
     ) -> Result<elasticsearch::cert::CertificateValidation, crate::Error> {
         // build our cert validation
-        self.cert_validation_inner().await.map_err(crate::Error::new)
+        self.cert_validation_inner()
+            .await
+            .map_err(crate::Error::new)
     }
 
     /// Build the ```CertificateValidation``` for this elastic cert config
@@ -2774,7 +2774,9 @@ impl Elastic {
                 // read and parse our CA cert
                 let cert = read_elastic_ca(path).await?;
                 // validate the chain against this CA without CN/SAN checks
-                Ok(elasticsearch::cert::CertificateValidation::Certificate(cert))
+                Ok(elasticsearch::cert::CertificateValidation::Certificate(
+                    cert,
+                ))
             }
         }
     }
@@ -3053,6 +3055,37 @@ mod tests {
         }
     }
 
+    /// Collect the key paths a config file sets that the parsed config doesn't keep
+    ///
+    /// Serde ignores unknown keys, so a key that was removed or renamed in the schema still
+    /// parses; comparing against the re-serialized config finds it.
+    ///
+    /// # Arguments
+    ///
+    /// * `file` - The config file as JSON
+    /// * `parsed` - The parsed config serialized back to JSON
+    /// * `path` - The key path of `file` within the whole config
+    /// * `unknown` - The key paths found that the parsed config doesn't keep
+    fn unknown_keys(
+        file: &serde_json::Value,
+        parsed: &serde_json::Value,
+        path: &str,
+        unknown: &mut Vec<String>,
+    ) {
+        // only maps have keys to compare
+        let (Some(file), Some(parsed)) = (file.as_object(), parsed.as_object()) else {
+            return;
+        };
+        // check each key the file sets, descending into the ones the config keeps
+        for (key, value) in file {
+            let child = format!("{path}.{key}");
+            match parsed.get(key) {
+                Some(kept) => unknown_keys(value, kept, &child, unknown),
+                None => unknown.push(child),
+            }
+        }
+    }
+
     /// The namespace rule refuses uppercase letters without loading a config, so it holds even
     /// when an environment override replaces the namespace a config file names
     #[test]
@@ -3081,6 +3114,28 @@ mod tests {
         let error = validate_namespace(&too_long).expect_err(&too_long);
         assert!(error.contains("at most 48 characters"), "{error}");
         assert_eq!(parse_namespace(&too_long), Err(error));
+    }
+
+    /// The config template and the integration test config parse and set only keys the
+    /// current schema has
+    #[test]
+    fn shipped_configs_match_schema() {
+        for file in ["thorium-template.yml", "tests/thorium-testing.yml"] {
+            // parse the config the way the API does
+            let path = Path::new(env!("CARGO_MANIFEST_DIR")).join(file);
+            let conf = Conf::new(&path).unwrap_or_else(|error| panic!("{file}: {error}"));
+            // read the raw file to compare its keys against the parsed config
+            let raw = std::fs::read_to_string(&path).expect("config file reads");
+            let raw: serde_json::Value = serde_norway::from_str(&raw).expect("config is YAML");
+            let parsed = serde_json::to_value(&conf).expect("config serializes");
+            // every key the file sets is one the config keeps
+            let mut unknown = Vec::new();
+            unknown_keys(&raw, &parsed, "", &mut unknown);
+            assert!(
+                unknown.is_empty(),
+                "{file} sets keys Conf doesn't have: {unknown:?}"
+            );
+        }
     }
 
     /// Every partition size setting, as its key path in the config
@@ -3211,6 +3266,174 @@ mod tests {
         for prop in found {
             let minimum = prop.get("minimum").and_then(serde_json::Value::as_f64);
             assert_eq!(minimum, Some(1.0), "partition_size schema {prop}");
+        }
+    }
+
+    /// The namespaces the chart's operator helpers add to the blacklist unprefixed include
+    /// every namespace in `default_namespace_blacklist`
+    ///
+    /// The chart renders the full blacklist into the config, replacing the Rust defaults,
+    /// so a default missing from the chart would be dropped from rendered deployments.
+    #[test]
+    fn chart_namespace_blacklist_includes_defaults() {
+        // read the operator chart's helpers
+        let path = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../deploy/charts/thorium/charts/operator/templates/_helpers.tpl");
+        let helpers = std::fs::read_to_string(&path).expect("operator chart helpers read");
+        // get the namespace blacklist helper, which runs until the next definition
+        let start = helpers
+            .find(r#"define "operator.namespaceBlacklist""#)
+            .expect("chart defines the namespace blacklist helper");
+        let body = &helpers[start + 1..];
+        let body = &body[..body.find("define \"").unwrap_or(body.len())];
+        // collect the quoted names from the lines adding literal, unprefixed namespaces
+        let chart: Vec<&str> = body
+            .lines()
+            .filter(|line| line.contains("concat $names (list "))
+            .flat_map(|line| line.split('"').skip(1).step_by(2))
+            .collect();
+        // every Rust default is present in the chart's copy
+        let missing: Vec<String> = super::default_namespace_blacklist()
+            .into_iter()
+            .filter(|name| !chart.contains(&name.as_str()))
+            .collect();
+        assert!(
+            missing.is_empty(),
+            "chart namespace blacklist is missing defaults {missing:?}"
+        );
+    }
+
+    /// Tests for building Elastic certificate validation from the config
+    #[cfg(feature = "client")]
+    mod elastic_cert_validation {
+        use super::super::{Elastic, ElasticCertValidation};
+        use elasticsearch::cert::CertificateValidation;
+        use std::path::{Path, PathBuf};
+
+        /// A self signed PEM encoded CA cert used to validate parsing
+        const TEST_CA: &str = "-----BEGIN CERTIFICATE-----\nMIIBizCCATGgAwIBAgIUX1Zub/ADNCKLq18ZhLmcqkxVLwkwCgYIKoZIzj0EAwIw\nGjEYMBYGA1UEAwwPdGhvcml1bS10ZXN0LWNhMCAXDTI2MTAxNDAzMzM0M1oYDzIx\nMjYwOTIwMDMzMzQzWjAaMRgwFgYDVQQDDA90aG9yaXVtLXRlc3QtY2EwWTATBgcq\nhkjOPQIBBggqhkjOPQMBBwNCAARPABkBrXbDCCBuHQt4MPhgtJ6Vdo+RBwZHp9oE\nQfa112VTKbH53o847fOHWmrUvKDZkXSmRG0wekC4VPsVZDlVo1MwUTAdBgNVHQ4E\nFgQUdxtKuK1IKn10q+UCne5h8MOsC2EwHwYDVR0jBBgwFoAUdxtKuK1IKn10q+UC\nne5h8MOsC2EwDwYDVR0TAQH/BAUwAwEB/zAKBggqhkjOPQQDAgNIADBFAiA81cIq\nIDz3i4VZjSZYsU4lPM4nB4HYkXW2L7paVFxB8wIhAMAaBViNyuT3v7MCr2xwHAGT\n4nRAn2fP56w7PXf44FEW\n-----END CERTIFICATE-----";
+
+        /// Build an Elastic config with the given certificate settings
+        ///
+        /// # Arguments
+        ///
+        /// * `cert_validation` - The certificate validation to configure
+        /// * `insecure_certificates` - Whether to disable certificate validation
+        fn elastic(
+            cert_validation: Option<ElasticCertValidation>,
+            insecure_certificates: bool,
+        ) -> Elastic {
+            // build a minimal config and let serde default everything else
+            let mut conf: Elastic = serde_json::from_value(serde_json::json!({
+                "node": "https://elastic:9200",
+                "username": "thorium",
+                "password": "password",
+            }))
+            .expect("minimal elastic config parses");
+            // apply our certificate settings
+            conf.cert_validation = cert_validation;
+            conf.insecure_certificates = insecure_certificates;
+            conf
+        }
+
+        /// Write a file into a fresh temp directory for this test
+        ///
+        /// # Arguments
+        ///
+        /// * `test` - The name of the test, used to keep each test's files apart
+        /// * `contents` - The contents to write
+        fn write_temp(test: &str, contents: &str) -> PathBuf {
+            // build a directory unique to this test and process
+            let dir =
+                std::env::temp_dir().join(format!("thorium-conf-{test}-{}", std::process::id()));
+            std::fs::create_dir_all(&dir).expect("temp dir creates");
+            // write our file into it
+            let path = dir.join("ca.pem");
+            std::fs::write(&path, contents).expect("temp file writes");
+            path
+        }
+
+        /// Insecure certificates disables validation even when a CA is configured
+        #[tokio::test]
+        async fn insecure_overrides_cert_validation() {
+            // configure a CA that doesn't exist alongside insecure certificates
+            let conf = elastic(
+                Some(ElasticCertValidation::Full(PathBuf::from(
+                    "/missing/ca.pem",
+                ))),
+                true,
+            );
+            // validation is disabled without ever reading the CA
+            let validation = conf
+                .try_cert_validation()
+                .await
+                .expect("insecure validates");
+            assert!(matches!(validation, CertificateValidation::None));
+        }
+
+        /// No configured cert validation uses the default system roots
+        #[tokio::test]
+        async fn unset_uses_default() {
+            // build validation without any cert settings
+            let validation = elastic(None, false)
+                .try_cert_validation()
+                .await
+                .expect("default validates");
+            assert!(matches!(validation, CertificateValidation::Default));
+        }
+
+        /// A `Full` CA validates the chain with CN/SAN checks
+        #[tokio::test]
+        async fn full_uses_full_validation() {
+            // write our CA and configure full validation against it
+            let path = write_temp("full", TEST_CA);
+            let conf = elastic(Some(ElasticCertValidation::Full(path)), false);
+            // the CA builds full validation
+            let validation = conf.try_cert_validation().await.expect("full validates");
+            assert!(matches!(validation, CertificateValidation::Full(_)));
+        }
+
+        /// A `CA` cert validates the chain without CN/SAN checks
+        #[tokio::test]
+        async fn ca_uses_certificate_validation() {
+            // write our CA and configure chain only validation against it
+            let path = write_temp("ca", TEST_CA);
+            let conf = elastic(Some(ElasticCertValidation::CA(path)), false);
+            // the CA builds chain only validation
+            let validation = conf.try_cert_validation().await.expect("ca validates");
+            assert!(matches!(validation, CertificateValidation::Certificate(_)));
+        }
+
+        /// A missing CA file returns an error naming the path instead of panicking
+        #[tokio::test]
+        async fn missing_file_errors() {
+            // configure a CA path that doesn't exist
+            let path = Path::new("/thorium/missing/elastic-ca.pem");
+            let conf = elastic(Some(ElasticCertValidation::Full(path.to_path_buf())), false);
+            // building validation fails and names the path
+            let Err(error) = conf.try_cert_validation().await else {
+                panic!("missing CA errors");
+            };
+            assert!(
+                error.to_string().contains(&path.display().to_string()),
+                "error doesn't name the path: {error}"
+            );
+        }
+
+        /// A CA file that isn't PEM returns an error naming the path instead of panicking
+        #[tokio::test]
+        async fn invalid_pem_errors() {
+            // write a file that isn't a PEM encoded cert
+            let path = write_temp("invalid", "this is not a certificate");
+            let conf = elastic(Some(ElasticCertValidation::CA(path.clone())), false);
+            // building validation fails and names the path
+            let Err(error) = conf.try_cert_validation().await else {
+                panic!("invalid CA errors");
+            };
+            assert!(
+                error.to_string().contains(&path.display().to_string()),
+                "error doesn't name the path: {error}"
+            );
         }
     }
 }

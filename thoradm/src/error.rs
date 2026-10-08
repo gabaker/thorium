@@ -83,6 +83,8 @@ pub enum Error {
     /// Every worker of a step ended early, or some did with orders left; each worker's error is
     /// reported on its own, so this error isn't recorded again
     WorkersEnded(String),
+    /// The requested operation exists but is not implemented yet
+    NotImplemented(String),
 }
 
 impl Error {
@@ -93,6 +95,19 @@ impl Error {
     /// * `msg` - The error message to use
     pub fn new<T: Into<String>>(msg: T) -> Self {
         Error::Generic(msg.into())
+    }
+
+    /// The exit code thoradm returns for this error
+    ///
+    /// Operations that aren't implemented yet exit with 3 so scripts can tell them apart from
+    /// failures; everything else exits with 1.
+    #[must_use]
+    pub fn exit_code(&self) -> u8 {
+        // unimplemented work gets its own code so scripts can fall back to a manual procedure
+        match self {
+            Error::NotImplemented(_) => 3,
+            _ => crate::outcome::RunOutcome::Aborted.code(),
+        }
     }
 
     /// Returns true when S3 answered that the object isn't there: a 404 for a key, not a bucket
@@ -159,6 +174,7 @@ impl std::fmt::Display for Error {
             Error::StripPrefix(err) => write!(f, "StripPrefix Error: {err}"),
             Error::Dialoguer(err) => write!(f, "Dialoguer: {err}"),
             Error::WorkersEnded(msg) => write!(f, "{msg}"),
+            Error::NotImplemented(err) => write!(f, "Not implemented: {err}"),
         }
     }
 }
