@@ -24,6 +24,7 @@ spec:
     metadata:
       annotations:
         checksum/config: {{ include (print $.Template.BasePath "/configmap.yaml") . | sha256sum }}
+        thorium.sandia.gov/credentials-revision: {{ (include "thorium.credentialRevisions" $ | fromYaml).quickwit | quote }}
       {{- with .Values.podAnnotations }}
         {{- toYaml . | nindent 8 }}
       {{- end }}

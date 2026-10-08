@@ -114,12 +114,6 @@ reason = "Tool images wrap third-party tools, and Thorium runs their jobs as the
 
 [[ignore]]
 tool = "trivy-config"
-rule = "DS-0002"
-paths = ["Dockerfile"]
-reason = "Temporary: the Thorium image still runs as root until the operator and Helm charts support running it as an unprivileged user; remove this entry once they do"
-
-[[ignore]]
-tool = "trivy-config"
 rule = "DS-0026"
 reason = "Images run as Kubernetes workloads, which ignore Docker HEALTHCHECK; tool images run as short-lived jobs"
 

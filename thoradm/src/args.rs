@@ -62,6 +62,44 @@ pub enum SubCommands {
     /// Manage Thorium user accounts
     #[clap(subcommand)]
     Users(UsersSubCommands),
+    /// List and run the data migrations behind Thorium's upgrade revisions
+    #[clap(subcommand)]
+    Migrate(MigrateSubCommands),
+}
+
+/// The data migration subcommands
+#[derive(Parser, Debug, Clone)]
+pub enum MigrateSubCommands {
+    /// List every revision and its upgrade steps, with the migrations thoradm runs
+    #[clap(version, author)]
+    List,
+    /// Show the upgrade steps that bring a cluster from one revision to another
+    #[clap(version, author)]
+    Plan(PlanMigrations),
+    /// Run a data migration
+    #[clap(version, author)]
+    Run(MigrationTarget),
+    /// Check whether a data migration still needs to run
+    #[clap(version, author)]
+    Verify(MigrationTarget),
+}
+
+/// Show the upgrade steps between two revisions
+#[derive(Parser, Debug, Clone)]
+pub struct PlanMigrations {
+    /// The revision the cluster is at (e.g. 2026-10-v01)
+    #[clap(long)]
+    pub from: String,
+    /// The revision to upgrade to (defaults to the latest revision)
+    #[clap(long)]
+    pub to: Option<String>,
+}
+
+/// The data migration to run or verify
+#[derive(Parser, Debug, Clone)]
+pub struct MigrationTarget {
+    /// The id of the migration (see `thoradm migrate list`)
+    pub id: String,
 }
 
 /// The user account specific subcommands
@@ -105,7 +143,7 @@ pub enum SettingsSubCommands {
     Get,
     /// Update Thorium system settings
     #[clap(version, author)]
-    Update(UpdateSettings),
+    Update(Box<UpdateSettings>),
     /// Reset Thorium system settings to default
     #[clap(version, author)]
     Reset(ResetSettings),
@@ -213,14 +251,11 @@ pub enum ProvisionSubCommands {
     Node(ProvisionNode),
 }
 
-/// Provision a worker node for Thorium
+/// Provision a worker node for Thorium (a k8s worker node unless `--baremetal` is set)
 #[derive(Parser, Debug, Clone)]
 pub struct ProvisionNode {
-    /// Target a k8s worker node
-    #[clap(long, default_value = "true")]
-    pub k8s: bool,
-    /// Target a k8s worker node
-    #[clap(short, long, default_value = "false")]
+    /// Target a baremetal server instead of a k8s worker node (not supported yet)
+    #[clap(short, long)]
     pub baremetal: bool,
     /// Path to API keys file
     #[clap(short, long)]
@@ -253,14 +288,19 @@ pub enum CensusKinds {
 }
 
 impl std::fmt::Display for CensusKinds {
+    /// Write the name of this census kind
+    ///
+    /// # Arguments
+    ///
+    /// * `f` - The formatter to write to
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            &CensusKinds::All => write!(f, "All"),
-            &CensusKinds::Tags => write!(f, "Tags"),
-            &CensusKinds::TagsCaseInsensitive => write!(f, "TagsCaseInsensitive"),
-            &CensusKinds::Files => write!(f, "Files"),
-            &CensusKinds::Repos => write!(f, "Repos"),
-            &CensusKinds::Commitishes => write!(f, "Commitishes"),
+            CensusKinds::All => write!(f, "All"),
+            CensusKinds::Tags => write!(f, "Tags"),
+            CensusKinds::TagsCaseInsensitive => write!(f, "TagsCaseInsensitive"),
+            CensusKinds::Files => write!(f, "Files"),
+            CensusKinds::Repos => write!(f, "Repos"),
+            CensusKinds::Commitishes => write!(f, "Commitishes"),
         }
     }
 }

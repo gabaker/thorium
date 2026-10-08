@@ -3,7 +3,6 @@ pub mod config_maps;
 pub mod controller;
 pub mod crds;
 pub mod deployments;
-pub mod namespaces;
 pub mod nodes;
 pub mod operate;
 pub mod secrets;

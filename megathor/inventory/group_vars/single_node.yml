@@ -47,7 +47,6 @@ redis_cpu_limits: "1"
 redis_memory_limits: "1Gi"
 
 # Jaeger
-jaeger_replicas: 1
 jaeger_cpu_requests: "512m"
 jaeger_memory_requests: "512Mi"
 jaeger_cpu_limits: "1"
@@ -56,7 +55,7 @@ jaeger_memory_limits: "1G"
 # Quickwit
 quickwit_metastore_replica_count: 1
 quickwit_searcher_replica_count: 1
-quickwit_postgress_storage_size: "16G"
+quickwit_postgres_storage_size: "16G"
 quickwit_postgres_memory_requests: "1Gi"
 quickwit_postgres_cpu_requests: "1"
 quickwit_postgres_memory_limits: "2Gi"
@@ -64,6 +63,12 @@ quickwit_postgres_cpu_limits: "2"
 
 # Traefik
 traefik_replicas: 1
+# a single node rarely has a load balancer controller (MetalLB, a cloud provider) to give a
+# LoadBalancer Service an address, so Traefik gets a NodePort Service; its externalIPs below still
+# serve ports 80 and 443 on those addresses. Use LoadBalancer only with such a controller
+traefik_service_type: "NodePort"
+# replace with the node addresses Traefik should be reachable on (not 0.0.0.0 or 127.0.0.1, which
+# Kubernetes rejects), or [] to reach it only on its node ports
 traefik_external_ips:
  - < IP 1>
  - < IP 2>
@@ -86,7 +91,3 @@ thorium_operator_memory_limits: "512Mi"
 thorium_operator_cpu_limits: "512m"
 thorium_operator_memory_requests: "256Mi"
 thorium_operator_cpu_requests: "256m"
-thorium_nodes:
-  - <thorium node 1>
-  - <thorium node 2>
-  - <thorium node 3>

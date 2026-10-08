@@ -16,6 +16,9 @@ spec:
     - jsonPath: .status.phase
       name: Phase
       type: string
+    - jsonPath: .status.upgrade.current
+      name: Revision
+      type: string
     - jsonPath: .status.message
       name: Message
       priority: 1
@@ -118,6 +121,14 @@ spec:
                         default: false
                         description: Drop the default cassandra role once Thorium's role exists
                         type: boolean
+                      drop_previous_role:
+                        default: false
+                        description: |-
+                          Drop the role in `admin_secret` once Thorium's role logs in as a superuser, when it is a
+                          different role than Thorium's and isn't cassandra (`drop_default_role` covers that one).
+                          For an `admin_secret` holding the role Thorium used before its username changed, never a
+                          site's own superuser
+                        type: boolean
                     type: object
                 type: object
               components:
@@ -130,6 +141,7 @@ spec:
                         default:
                         - --config
                         - /conf/thorium.yml
+                        description: Args to pass to command in API container
                         items:
                           type: string
                         type: array
@@ -159,8 +171,10 @@ spec:
                           description: A struct representing an environment variable
                           properties:
                             name:
+                              description: The name of the environment variable
                               type: string
                             value:
+                              description: The value of the environment variable (empty when unset)
                               nullable: true
                               type: string
                           required:
@@ -180,9 +194,11 @@ spec:
                         description: The CPU and Memory needed by the API
                         properties:
                           cpu:
+                            description: The CPU to request and limit the container to in millicpus (1000 is one core)
                             minimum: 0.0
                             type: integer
                           memory:
+                            description: The memory to request and limit the container to in mebibytes
                             minimum: 0.0
                             type: integer
                         required:
@@ -202,6 +218,7 @@ spec:
                         - /keys/keys.yml
                         - --scaler
                         - bare-metal
+                        description: Args to pass to command in scaler container
                         items:
                           type: string
                         type: array
@@ -226,15 +243,15 @@ spec:
                           value: ''
                         - name: NO_PROXY
                           value: localhost,cluster.local
-                        - name: KUBECONFIG
-                          value: /root/.kube/config
                         description: Environment variables to apply in container
                         items:
                           description: A struct representing an environment variable
                           properties:
                             name:
+                              description: The name of the environment variable
                               type: string
                             value:
+                              description: The value of the environment variable (empty when unset)
                               nullable: true
                               type: string
                           required:
@@ -248,9 +265,11 @@ spec:
                         description: The CPU and Memory for a scaler container
                         properties:
                           cpu:
+                            description: The CPU to request and limit the container to in millicpus (1000 is one core)
                             minimum: 0.0
                             type: integer
                           memory:
+                            description: The memory to request and limit the container to in mebibytes
                             minimum: 0.0
                             type: integer
                         required:
@@ -268,6 +287,7 @@ spec:
                         - /conf/thorium.yml
                         - --auth
                         - /keys/keys.yml
+                        description: Args to pass to command in event-handler container
                         items:
                           type: string
                         type: array
@@ -297,8 +317,10 @@ spec:
                           description: A struct representing an environment variable
                           properties:
                             name:
+                              description: The name of the environment variable
                               type: string
                             value:
+                              description: The value of the environment variable (empty when unset)
                               nullable: true
                               type: string
                           required:
@@ -312,9 +334,11 @@ spec:
                         description: The CPU and Memory needed by the event-handler
                         properties:
                           cpu:
+                            description: The CPU to request and limit the container to in millicpus (1000 is one core)
                             minimum: 0.0
                             type: integer
                           memory:
+                            description: The memory to request and limit the container to in mebibytes
                             minimum: 0.0
                             type: integer
                         required:
@@ -332,6 +356,7 @@ spec:
                         - /conf/thorium.yml
                         - --auth
                         - /keys/keys.yml
+                        description: Args to pass to command in scaler container
                         items:
                           type: string
                         type: array
@@ -356,15 +381,15 @@ spec:
                           value: ''
                         - name: NO_PROXY
                           value: localhost,cluster.local
-                        - name: KUBECONFIG
-                          value: /root/.kube/config
                         description: Environment variables to apply in container
                         items:
                           description: A struct representing an environment variable
                           properties:
                             name:
+                              description: The name of the environment variable
                               type: string
                             value:
+                              description: The value of the environment variable (empty when unset)
                               nullable: true
                               type: string
                           required:
@@ -378,9 +403,11 @@ spec:
                         description: The CPU and Memory for a scaler container
                         properties:
                           cpu:
+                            description: The CPU to request and limit the container to in millicpus (1000 is one core)
                             minimum: 0.0
                             type: integer
                           memory:
+                            description: The memory to request and limit the container to in mebibytes
                             minimum: 0.0
                             type: integer
                         required:
@@ -402,6 +429,7 @@ spec:
                         - /conf/thorium.yml
                         - --keys
                         - /keys/keys.yml
+                        description: Args to pass to command in search-streamer container
                         items:
                           type: string
                         type: array
@@ -431,8 +459,10 @@ spec:
                           description: A struct representing an environment variable
                           properties:
                             name:
+                              description: The name of the environment variable
                               type: string
                             value:
+                              description: The value of the environment variable (empty when unset)
                               nullable: true
                               type: string
                           required:
@@ -446,9 +476,11 @@ spec:
                         description: The CPU and Memory needed by the search-streamer
                         properties:
                           cpu:
+                            description: The CPU to request and limit the container to in millicpus (1000 is one core)
                             minimum: 0.0
                             type: integer
                           memory:
+                            description: The memory to request and limit the container to in mebibytes
                             minimum: 0.0
                             type: integer
                         required:
@@ -2406,6 +2438,40 @@ spec:
                   `docker-skopeo` secret) and every Thorium pod references `registry-token` when set.
                 nullable: true
                 type: object
+              upgrade:
+                default:
+                  approvals: []
+                  auto_target_dev: false
+                  target_revision: null
+                description: How the operator upgrades this cluster between revisions
+                properties:
+                  approvals:
+                    default: []
+                    description: Approvals, with backup confirmations, for steps that change data or need manual work
+                    items:
+                      description: An approval for a step that needs one
+                      properties:
+                        backup:
+                          description: Where the backup taken before this step is (a path, snapshot name, or ticket)
+                          type: string
+                        step:
+                          description: The id of the approved step
+                          type: string
+                      required:
+                      - backup
+                      - step
+                      type: object
+                    type: array
+                  auto_target_dev:
+                    default: false
+                    description: Target the operator's latest revision when no target is set (for dev clusters)
+                    type: boolean
+                  target_revision:
+                    description: The revision (`YYYY-MM-vNN`) to upgrade this cluster to
+                    nullable: true
+                    pattern: ^[0-9]{4}-[0-9]{2}-v[0-9]{2}$
+                    type: string
+                type: object
               version:
                 default: latest
                 description: Version or tag of image, overrides version
@@ -2442,8 +2508,85 @@ spec:
                 - Provisioning
                 - Ready
                 - Error
+                - UpgradeRequired
+                - Upgrading
                 nullable: true
                 type: string
+              upgrade:
+                description: The revision this cluster is at and any upgrade steps left to run
+                nullable: true
+                properties:
+                  current:
+                    description: The revision the cluster is at
+                    nullable: true
+                    type: string
+                  latest:
+                    description: The newest revision the operator knows about
+                    nullable: true
+                    type: string
+                  steps:
+                    default: []
+                    description: The steps left to reach the target (or the latest revision when there is no target)
+                    items:
+                      description: A step planned to bring a cluster to its target revision
+                      properties:
+                        description:
+                          description: What this step does
+                          type: string
+                        kind:
+                          description: What kind of step this is
+                          enum:
+                          - Config
+                          - Infra
+                          - Data
+                          - Manual
+                          type: string
+                        message:
+                          description: Details about the state of this step
+                          nullable: true
+                          type: string
+                        quiesce:
+                          default: []
+                          description: The components scaled to zero while this step runs
+                          items:
+                            description: A Thorium component an upgrade step may scale to zero while it runs
+                            enum:
+                            - Api
+                            - Scaler
+                            - BaremetalScaler
+                            - EventHandler
+                            - SearchStreamer
+                            type: string
+                          type: array
+                        revision:
+                          description: The revision this step belongs to
+                          type: string
+                        state:
+                          description: The state of this step
+                          enum:
+                          - Pending
+                          - Running
+                          - Done
+                          - Skipped
+                          - Blocked
+                          - Failed
+                          type: string
+                        step:
+                          description: The id of this step
+                          type: string
+                      required:
+                      - description
+                      - kind
+                      - revision
+                      - state
+                      - step
+                      type: object
+                    type: array
+                  target:
+                    description: The revision the cluster is upgrading to
+                    nullable: true
+                    type: string
+                type: object
             type: object
         required:
         - spec

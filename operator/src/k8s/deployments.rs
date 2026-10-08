@@ -1,5 +1,5 @@
 use k8s_openapi::api::apps::v1::Deployment;
-use k8s_openapi::api::core::v1::Pod;
+use k8s_openapi::api::core::v1::{Pod, PodStatus};
 use kube::Api;
 use kube::api::{DeleteParams, ListParams, Patch, PatchParams, PostParams};
 use serde_json::Value;
@@ -16,6 +16,13 @@ const CONFIG_HASH_ANNOTATION: &str = "thorium.sandia.gov/config-hash";
 /// thorium.yml (its keys.yml, the login banner, the Elastic CA, and the scaler's kube config)
 const MOUNTS_HASH_ANNOTATION: &str = "thorium.sandia.gov/mounts-hash";
 
+/// The uid and gid of the `thorium` user the Thorium image creates and runs its components as
+pub const THORIUM_UID: i64 = 10001;
+
+/// The home directory of the image's `thorium` user, where the scaler reads its kube config
+/// and registry credentials
+const THORIUM_HOME: &str = "/home/thorium";
+
 /// How often to check on a deployment that is rolling out
 const ROLLOUT_POLL: std::time::Duration = std::time::Duration::from_secs(3);
 
@@ -31,11 +38,14 @@ const FAILING_REASONS: [&str; 5] = [
     "CreateContainerConfigError",
 ];
 
-/// Build JSON template for api deployment
+/// Build the api deployment
 ///
 /// # Arguments
 ///
 /// * `meta` - Thorium cluster client and metadata
+/// * `host_aliases` - The host aliases to add to each pod
+// the deployment is one JSON document that reads best kept whole
+#[allow(clippy::too_many_lines)]
 fn api(
     meta: &ClusterMeta,
     host_aliases: &Vec<K8sHostAliases>,
@@ -57,7 +67,7 @@ fn api(
             }
         },
         "spec": {
-            "replicas": api_spec.replicas.clone(),
+            "replicas": api_spec.replicas,
             "selector": {
                 "matchLabels": {
                     "app": "api",
@@ -71,6 +81,14 @@ fn api(
                     }
                 },
                 "spec": {
+                    // the API never calls the k8s API, so it doesn't get a service account token
+                    "automountServiceAccountToken": false,
+                    // let the non-root API bind its configured port (80 by default), as Docker
+                    // allows in every container; this sysctl is namespaced and safe, so restricted
+                    // Pod Security admits it
+                    "securityContext": {
+                        "sysctls": [{"name": "net.ipv4.ip_unprivileged_port_start", "value": "0"}]
+                    },
                     "containers": [
                         {
                             "name": "api",
@@ -79,8 +97,8 @@ fn api(
                             "args": api_spec.args.clone(),
                             "imagePullPolicy": meta.cluster.spec.image_pull_policy.clone(),
                             "resources": {
-                                "limits": crds::Resources::request_conv(&api_spec.resources).expect("failed to convert resources to valid request format"),
-                                "requests": crds::Resources::request_conv(&api_spec.resources).expect("failed to convert resources to valid request format"),
+                                "limits": crds::Resources::request_conv(&api_spec.resources),
+                                "requests": crds::Resources::request_conv(&api_spec.resources),
                             },
                             "env": api_spec.env.clone(),
                             "livenessProbe": {
@@ -146,400 +164,404 @@ fn api(
     serde_json::from_value(template)
 }
 
-/// Build JSON template for baremetal-scaler deployment
+/// Build JSON template for the k8s scaler deployment
+///
+/// Returns None when the spec has no k8s scaler.
 ///
 /// # Arguments
 ///
 /// * `meta` - Thorium cluster client and metadata
-async fn scaler_template(meta: &ClusterMeta, host_aliases: &Vec<K8sHostAliases>) -> Option<Value> {
-    let scaler_spec = meta.cluster.get_scaler_spec();
-    match scaler_spec {
-        Some(scaler_spec) => {
-            // reference the chart's pull secret and the one rendered from registry_auth
-            let image_pull_secrets = meta.cluster.image_pull_secrets();
-            let mut volumes = serde_json::json!([
-                {
-                    "name": "config",
-                    "secret": {
-                        "secretName": "thorium"
-                    }
-                },
-                {
-                    "name": "keys",
-                    "secret": {
-                        "secretName": "keys"
-                    }
-                }
-            ]);
-            let mut volume_mounts = serde_json::json!([
-                {
-                    "name": "config",
-                    "mountPath": "/conf/thorium.yml",
-                    "subPath": "thorium.yml"
-                },
-                {
-                    "name": "keys",
-                    "mountPath": "/keys/keys.yml",
-                    "subPath": "keys.yml"
-                },
-            ]);
-            // only include skopeo secret when registry auth is configured
-            if !meta.cluster.spec.registry_auth.is_none() {
-                volumes.as_array_mut().unwrap().push(serde_json::json!({
-                    "name": "docker-skopeo",
-                    "secret": {
-                        "secretName": "docker-skopeo"
-                    }
-                }));
-                volume_mounts
-                    .as_array_mut()
-                    .unwrap()
-                    .push(serde_json::json!({
-                        "name": "docker-skopeo",
-                        "mountPath": "/root/.docker"
-                    }));
+/// * `host_aliases` - The host aliases to add to each pod
+// the deployment template is one long JSON document
+#[allow(clippy::too_many_lines)]
+fn scaler_template(meta: &ClusterMeta, host_aliases: &Vec<K8sHostAliases>) -> Option<Value> {
+    // build nothing for a component that isn't in the spec
+    let scaler_spec = meta.cluster.get_scaler_spec()?;
+    // reference the chart's pull secret and the one rendered from registry_auth
+    let image_pull_secrets = meta.cluster.image_pull_secrets();
+    // every scaler mounts the config and its keys
+    let mut volumes = vec![
+        serde_json::json!({"name": "config", "secret": {"secretName": "thorium"}}),
+        serde_json::json!({"name": "keys", "secret": {"secretName": "keys"}}),
+    ];
+    let mut volume_mounts = vec![
+        serde_json::json!({"name": "config", "mountPath": "/conf/thorium.yml", "subPath": "thorium.yml"}),
+        serde_json::json!({"name": "keys", "mountPath": "/keys/keys.yml", "subPath": "keys.yml"}),
+    ];
+    // only include skopeo secret when registry auth is configured
+    if meta.cluster.spec.registry_auth.is_some() {
+        volumes.push(serde_json::json!({
+            "name": "docker-skopeo",
+            "secret": {"secretName": "docker-skopeo"}
+        }));
+        volume_mounts.push(serde_json::json!({
+            "name": "docker-skopeo",
+            "mountPath": format!("{THORIUM_HOME}/.docker")
+        }));
+    }
+    // without a service account the scaler reaches k8s through a user created kube-config secret
+    if !scaler_spec.service_account {
+        volumes.push(serde_json::json!({
+            "name": "kube-config",
+            "secret": {"secretName": crds::KUBE_CONFIG_SECRET}
+        }));
+        volume_mounts.push(serde_json::json!({
+            "name": "kube-config",
+            "mountPath": format!("{THORIUM_HOME}/.kube/config"),
+            "subPath": crds::KUBE_CONFIG_KEY
+        }));
+    }
+    // the scaler reads its registry credentials from $HOME and its kube config from $KUBECONFIG,
+    // both mounted above, so the operator sets these over any value in the spec; a stored spec
+    // can still carry the old CRD default /root/.kube/config, which the non-root scaler can't read
+    let mut env: Vec<crds::EnvVar> = scaler_spec
+        .env
+        .iter()
+        .filter(|var| var.name != "HOME" && var.name != "KUBECONFIG")
+        .cloned()
+        .collect();
+    env.push(crds::EnvVar {
+        name: "HOME".to_owned(),
+        value: Some(THORIUM_HOME.to_owned()),
+    });
+    // without a kube config the scaler falls back to its service account
+    if !scaler_spec.service_account {
+        env.push(crds::EnvVar {
+            name: "KUBECONFIG".to_owned(),
+            value: Some(format!("{THORIUM_HOME}/.kube/config")),
+        });
+    }
+    // build the scaler deployment
+    Some(serde_json::json!({
+        "apiVersion": "apps/v1",
+        "kind": "Deployment",
+        "metadata": {
+            "namespace": meta.cluster.metadata.namespace.clone(),
+            "name": "scaler",
+            "labels": {
+                "app": "scaler",
+                "version": meta.cluster.get_version(),
             }
-            if !scaler_spec.service_account {
-                // if not using service account we must map in a user created kube-config secret
-                volumes.as_array_mut().unwrap().push(serde_json::json!({
-                    "name": "kube-config",
-                    "secret": {
-                        "secretName": "kube-config"
-                    }
-                }));
-                volume_mounts
-                    .as_array_mut()
-                    .unwrap()
-                    .push(serde_json::json!({
-                        "name": "kube-config",
-                        "mountPath": "/root/.kube/config",
-                        "subPath": "config"
-                    }));
-            };
-            Some(serde_json::json!({
-                "apiVersion": "apps/v1",
-                "kind": "Deployment",
+        },
+        "spec": {
+            "replicas": 1,
+            "selector": {
+                "matchLabels": {
+                    "app": "scaler",
+                }
+            },
+            "template": {
                 "metadata": {
-                    "namespace": meta.cluster.metadata.namespace.clone(),
-                    "name": "scaler",
                     "labels": {
                         "app": "scaler",
                         "version": meta.cluster.get_version(),
                     }
                 },
                 "spec": {
-                    "replicas": 1,
-                    "selector": {
-                        "matchLabels": {
-                            "app": "scaler",
-                        }
+                    "serviceAccountName": if scaler_spec.service_account {
+                        Some("thorium")
+                    } else {
+                        None
                     },
-                    "template": {
-                        "metadata": {
-                            "labels": {
-                                "app": "scaler",
-                                "version": meta.cluster.get_version(),
-                            }
-                        },
-                        "spec": {
-                            "serviceAccountName": if scaler_spec.service_account {
-                                Some("thorium")
-                            } else {
-                                None
+                    "automountServiceAccountToken": scaler_spec.service_account,
+                    "containers": [
+                        {
+                            "name": "scaler",
+                            "image": meta.cluster.get_image(),
+                            "imagePullPolicy": meta.cluster.spec.image_pull_policy.clone(),
+                            "command": scaler_spec.cmd.clone(),
+                            "args": scaler_spec.args.clone(),
+                            "resources": {
+                                "limits": crds::Resources::request_conv(&scaler_spec.resources),
+                                "requests": crds::Resources::request_conv(&scaler_spec.resources),
                             },
-                            "automountServiceAccountToken": scaler_spec.service_account.clone(),
-                            "containers": [
-                                {
-                                    "name": "scaler",
-                                    "image": meta.cluster.get_image(),
-                                    "imagePullPolicy": meta.cluster.spec.image_pull_policy.clone(),
-                                    "command": scaler_spec.cmd.clone(),
-                                    "args": scaler_spec.args.clone(),
-                                    "resources": {
-                                        "limits": crds::Resources::request_conv(&scaler_spec.resources).expect("failed to convert resources to valid request format"),
-                                        "requests": crds::Resources::request_conv(&scaler_spec.resources).expect("failed to convert resources to valid request format"),
-                                    },
-                                    "env": scaler_spec.env.clone(),
-                                    "volumeMounts": volume_mounts
-                                }
-                            ],
-                            "hostAliases": host_aliases,
-                            "volumes": volumes,
-                            "imagePullSecrets": image_pull_secrets
+                            "env": env,
+                            "volumeMounts": volume_mounts
                         }
-                    }
+                    ],
+                    "hostAliases": host_aliases,
+                    "volumes": volumes,
+                    "imagePullSecrets": image_pull_secrets
                 }
-            }))
+            }
         }
-        None => None,
-    }
+    }))
 }
 
 /// Build JSON template for baremetal-scaler deployment
 ///
+/// Returns None when the spec has no baremetal scaler.
+///
 /// # Arguments
 ///
 /// * `meta` - Thorium cluster client and metadata
-async fn baremetal_scaler_template(
+/// * `host_aliases` - The host aliases to add to each pod
+fn baremetal_scaler_template(
     meta: &ClusterMeta,
     host_aliases: &Vec<K8sHostAliases>,
 ) -> Option<Value> {
-    let scaler_spec = meta.cluster.get_baremetal_scaler_spec();
+    // build nothing for a component that isn't in the spec
+    let scaler_spec = meta.cluster.get_baremetal_scaler_spec()?;
     // reference the chart's pull secret and the one rendered from registry_auth
     let image_pull_secrets = meta.cluster.image_pull_secrets();
-    match scaler_spec {
-        Some(scaler_spec) => Some(serde_json::json!({
-            "apiVersion": "apps/v1",
-            "kind": "Deployment",
-            "metadata": {
-                "namespace": meta.cluster.metadata.namespace.clone(),
-                "name": "baremetal-scaler",
-                "labels": {
+    // build this component's deployment
+    Some(serde_json::json!({
+        "apiVersion": "apps/v1",
+        "kind": "Deployment",
+        "metadata": {
+            "namespace": meta.cluster.metadata.namespace.clone(),
+            "name": "baremetal-scaler",
+            "labels": {
+                "app": "baremetal-scaler",
+                "version": meta.cluster.get_version(),
+            }
+        },
+        "spec": {
+            "replicas": 1,
+            "selector": {
+                "matchLabels": {
                     "app": "baremetal-scaler",
-                    "version": meta.cluster.get_version(),
                 }
             },
-            "spec": {
-                "replicas": 1,
-                "selector": {
-                    "matchLabels": {
+            "template": {
+                "metadata": {
+                    "labels": {
                         "app": "baremetal-scaler",
+                        "version": meta.cluster.get_version(),
                     }
                 },
-                "template": {
-                    "metadata": {
-                        "labels": {
-                            "app": "baremetal-scaler",
-                            "version": meta.cluster.get_version(),
-                        }
-                    },
-                    "spec": {
-                        "containers": [
-                            {
-                                "name": "baremetal-scaler",
-                                "image": meta.cluster.get_image(),
-                                "imagePullPolicy": meta.cluster.spec.image_pull_policy.clone(),
-                                "command": scaler_spec.cmd.clone(),
-                                "args": scaler_spec.args.clone(),
-                                "resources": {
-                                    "limits": crds::Resources::request_conv(&scaler_spec.resources).expect("failed to convert resources to valid request format"),
-                                    "requests": crds::Resources::request_conv(&scaler_spec.resources).expect("failed to convert resources to valid request format"),
-                                },
-                                "env": scaler_spec.env.clone(),
-                                "volumeMounts": [
-                                    {
-                                        "name": "config",
-                                        "mountPath": "/conf/thorium.yml",
-                                        "subPath": "thorium.yml"
-                                    },
-                                    {
-                                        "name": "keys",
-                                        "mountPath": "/keys/keys.yml",
-                                        "subPath": "keys.yml"
-                                    }
-                                ]
-                            }
-                        ],
-                        "hostAliases": host_aliases,
-                        "volumes": [
-                            {
-                                "name": "config",
-                                "secret": {
-                                    "secretName": "thorium"
-                                }
+                "spec": {
+                    // the bare metal scaler never calls the k8s API, so it doesn't get a service account token
+                    "automountServiceAccountToken": false,
+                    "containers": [
+                        {
+                            "name": "baremetal-scaler",
+                            "image": meta.cluster.get_image(),
+                            "imagePullPolicy": meta.cluster.spec.image_pull_policy.clone(),
+                            "command": scaler_spec.cmd.clone(),
+                            "args": scaler_spec.args.clone(),
+                            "resources": {
+                                "limits": crds::Resources::request_conv(&scaler_spec.resources),
+                                "requests": crds::Resources::request_conv(&scaler_spec.resources),
                             },
-                            {
-                                "name": "keys",
-                                "secret": {
-                                    "secretName": "keys"
+                            "env": scaler_spec.env.clone(),
+                            "volumeMounts": [
+                                {
+                                    "name": "config",
+                                    "mountPath": "/conf/thorium.yml",
+                                    "subPath": "thorium.yml"
+                                },
+                                {
+                                    "name": "keys",
+                                    "mountPath": "/keys/keys.yml",
+                                    "subPath": "keys.yml"
                                 }
+                            ]
+                        }
+                    ],
+                    "hostAliases": host_aliases,
+                    "volumes": [
+                        {
+                            "name": "config",
+                            "secret": {
+                                "secretName": "thorium"
                             }
-                        ],
-                        "imagePullSecrets": image_pull_secrets
-                    }
+                        },
+                        {
+                            "name": "keys",
+                            "secret": {
+                                "secretName": "keys"
+                            }
+                        }
+                    ],
+                    "imagePullSecrets": image_pull_secrets
                 }
             }
-        })),
-        None => None,
-    }
+        }
+    }))
 }
 
 /// Build JSON template for event-handler deployment
 ///
+/// Returns None when the spec has no event handler.
+///
 /// # Arguments
 ///
 /// * `meta` - Thorium cluster client and metadata
-async fn event_handler_template(
-    meta: &ClusterMeta,
-    host_aliases: &Vec<K8sHostAliases>,
-) -> Option<Value> {
-    let handler_spec = meta.cluster.get_event_handler_spec();
+/// * `host_aliases` - The host aliases to add to each pod
+fn event_handler_template(meta: &ClusterMeta, host_aliases: &Vec<K8sHostAliases>) -> Option<Value> {
+    // build nothing for a component that isn't in the spec
+    let handler_spec = meta.cluster.get_event_handler_spec()?;
     // reference the chart's pull secret and the one rendered from registry_auth
     let image_pull_secrets = meta.cluster.image_pull_secrets();
-    match handler_spec {
-        Some(handler_spec) => Some(serde_json::json!({
-            "apiVersion": "apps/v1",
-            "kind": "Deployment",
-            "metadata": {
-                "namespace": meta.cluster.metadata.namespace.clone(),
-                "name": "event-handler",
-                "labels": {
+    // build this component's deployment
+    Some(serde_json::json!({
+        "apiVersion": "apps/v1",
+        "kind": "Deployment",
+        "metadata": {
+            "namespace": meta.cluster.metadata.namespace.clone(),
+            "name": "event-handler",
+            "labels": {
+                "app": "event-handler",
+                "version": meta.cluster.get_version(),
+            }
+        },
+        "spec": {
+            "replicas": 1,
+            "selector": {
+                "matchLabels": {
                     "app": "event-handler",
-                    "version": meta.cluster.get_version(),
                 }
             },
-            "spec": {
-                "replicas": 1,
-                "selector": {
-                    "matchLabels": {
+            "template": {
+                "metadata": {
+                    "labels": {
                         "app": "event-handler",
+                        "version": meta.cluster.get_version(),
                     }
                 },
-                "template": {
-                    "metadata": {
-                        "labels": {
-                            "app": "event-handler",
-                            "version": meta.cluster.get_version(),
-                        }
-                    },
-                    "spec": {
-                        "containers": [
-                            {
-                                "name": "event-handler",
-                                "image": meta.cluster.get_image(),
-                                "imagePullPolicy": meta.cluster.spec.image_pull_policy.clone(),
-                                "command": handler_spec.cmd.clone(),
-                                "args": handler_spec.args.clone(),
-                                "resources": {
-                                    "limits": crds::Resources::request_conv(&handler_spec.resources).expect("failed to convert resources to valid request format"),
-                                    "requests": crds::Resources::request_conv(&handler_spec.resources).expect("failed to convert resources to valid request format"),
-                                },
-                                "env": handler_spec.env.clone(),
-                                "volumeMounts": [
-                                    {
-                                        "name": "config",
-                                        "mountPath": "/conf/thorium.yml",
-                                        "subPath": "thorium.yml",
-                                    },
-                                    {
-                                        "name": "keys",
-                                        "mountPath": "/keys/keys.yml",
-                                        "subPath": "keys.yml"
-                                    }
-                                ]
-                            }
-                        ],
-                        "hostAliases": host_aliases,
-                        "volumes": [
-                            {
-                                "name": "config",
-                                "secret": {
-                                    "secretName": "thorium"
-                                },
+                "spec": {
+                    // the event handler never calls the k8s API, so it doesn't get a service account token
+                    "automountServiceAccountToken": false,
+                    "containers": [
+                        {
+                            "name": "event-handler",
+                            "image": meta.cluster.get_image(),
+                            "imagePullPolicy": meta.cluster.spec.image_pull_policy.clone(),
+                            "command": handler_spec.cmd.clone(),
+                            "args": handler_spec.args.clone(),
+                            "resources": {
+                                "limits": crds::Resources::request_conv(&handler_spec.resources),
+                                "requests": crds::Resources::request_conv(&handler_spec.resources),
                             },
-                            {
-                                "name": "keys",
-                                "secret": {
-                                    "secretName": "keys"
+                            "env": handler_spec.env.clone(),
+                            "volumeMounts": [
+                                {
+                                    "name": "config",
+                                    "mountPath": "/conf/thorium.yml",
+                                    "subPath": "thorium.yml",
+                                },
+                                {
+                                    "name": "keys",
+                                    "mountPath": "/keys/keys.yml",
+                                    "subPath": "keys.yml"
                                 }
+                            ]
+                        }
+                    ],
+                    "hostAliases": host_aliases,
+                    "volumes": [
+                        {
+                            "name": "config",
+                            "secret": {
+                                "secretName": "thorium"
+                            },
+                        },
+                        {
+                            "name": "keys",
+                            "secret": {
+                                "secretName": "keys"
                             }
-                        ],
-                        "imagePullSecrets": image_pull_secrets
-                    }
+                        }
+                    ],
+                    "imagePullSecrets": image_pull_secrets
                 }
             }
-        })),
-        None => None,
-    }
+        }
+    }))
 }
 
 /// Build JSON template for search-streamer deployment
 ///
+/// Returns None when the spec has no search streamer.
+///
 /// # Arguments
 ///
 /// * `meta` - Thorium cluster client and metadata
-async fn search_streamer_template(
+/// * `host_aliases` - The host aliases to add to each pod
+fn search_streamer_template(
     meta: &ClusterMeta,
     host_aliases: &Vec<K8sHostAliases>,
 ) -> Option<Value> {
-    let streamer_spec = meta.cluster.get_search_streamer_spec();
+    // build nothing for a component that isn't in the spec
+    let streamer_spec = meta.cluster.get_search_streamer_spec()?;
     // reference the chart's pull secret and the one rendered from registry_auth
     let image_pull_secrets = meta.cluster.image_pull_secrets();
-    match streamer_spec {
-        Some(streamer_spec) => Some(serde_json::json!({
-            "apiVersion": "apps/v1",
-            "kind": "Deployment",
-            "metadata": {
-                "namespace": meta.cluster.metadata.namespace.clone(),
-                "name": "search-streamer",
-                "labels": {
+    // build this component's deployment
+    Some(serde_json::json!({
+        "apiVersion": "apps/v1",
+        "kind": "Deployment",
+        "metadata": {
+            "namespace": meta.cluster.metadata.namespace.clone(),
+            "name": "search-streamer",
+            "labels": {
+                "app": "search-streamer",
+                "version": meta.cluster.get_version(),
+            }
+        },
+        "spec": {
+            "replicas": 1,
+            "selector": {
+                "matchLabels": {
                     "app": "search-streamer",
-                    "version": meta.cluster.get_version(),
                 }
             },
-            "spec": {
-                "replicas": 1,
-                "selector": {
-                    "matchLabels": {
+            "template": {
+                "metadata": {
+                    "labels": {
                         "app": "search-streamer",
+                        "version": meta.cluster.get_version(),
                     }
                 },
-                "template": {
-                    "metadata": {
-                        "labels": {
-                            "app": "search-streamer",
-                            "version": meta.cluster.get_version(),
-                        }
-                    },
-                    "spec": {
-                        "containers": [
-                            {
-                                "name": "search-streamer",
-                                "image": meta.cluster.get_image(),
-                                "imagePullPolicy": meta.cluster.spec.image_pull_policy.clone(),
-                                "command": streamer_spec.cmd.clone(),
-                                "args": streamer_spec.args.clone(),
-                                "resources": {
-                                    "limits": crds::Resources::request_conv(&streamer_spec.resources).expect("failed to convert resources to valid request format"),
-                                    "requests": crds::Resources::request_conv(&streamer_spec.resources).expect("failed to convert resources to valid request format"),
-                                },
-                                "env": streamer_spec.env.clone(),
-                                "volumeMounts": [
-                                    {
-                                        "name": "config",
-                                        "mountPath": "/conf/thorium.yml",
-                                        "subPath": "thorium.yml"
-                                    },
-                                    {
-                                        "name": "keys",
-                                        "mountPath": "/keys/keys.yml",
-                                        "subPath": "keys.yml"
-                                    }
-                                ]
-                            }
-                        ],
-                        "hostAliases": host_aliases,
-                        "volumes": [
-                            {
-                                "name": "config",
-                                "secret": {
-                                    "secretName": "thorium"
-                                }
+                "spec": {
+                    // the search streamer never calls the k8s API, so it doesn't get a service account token
+                    "automountServiceAccountToken": false,
+                    "containers": [
+                        {
+                            "name": "search-streamer",
+                            "image": meta.cluster.get_image(),
+                            "imagePullPolicy": meta.cluster.spec.image_pull_policy.clone(),
+                            "command": streamer_spec.cmd.clone(),
+                            "args": streamer_spec.args.clone(),
+                            "resources": {
+                                "limits": crds::Resources::request_conv(&streamer_spec.resources),
+                                "requests": crds::Resources::request_conv(&streamer_spec.resources),
                             },
-                            {
-                                "name": "keys",
-                                "secret": {
-                                    "secretName": "keys"
+                            "env": streamer_spec.env.clone(),
+                            "volumeMounts": [
+                                {
+                                    "name": "config",
+                                    "mountPath": "/conf/thorium.yml",
+                                    "subPath": "thorium.yml"
+                                },
+                                {
+                                    "name": "keys",
+                                    "mountPath": "/keys/keys.yml",
+                                    "subPath": "keys.yml"
                                 }
+                            ]
+                        }
+                    ],
+                    "hostAliases": host_aliases,
+                    "volumes": [
+                        {
+                            "name": "config",
+                            "secret": {
+                                "secretName": "thorium"
                             }
-                        ],
-                        "imagePullSecrets": image_pull_secrets
-                    }
+                        },
+                        {
+                            "name": "keys",
+                            "secret": {
+                                "secretName": "keys"
+                            }
+                        }
+                    ],
+                    "imagePullSecrets": image_pull_secrets
                 }
             }
-        })),
-        None => None,
-    }
+        }
+    }))
 }
 
 /// The hashes of the inputs a component's pods are built from
@@ -657,6 +679,43 @@ fn mount_elastic_ca(
     Ok(())
 }
 
+/// Run every pod of a deployment as the image's unprivileged `thorium` user
+///
+/// The pod runs as `THORIUM_UID` under the runtime's default seccomp profile, and each
+/// container drops every Linux capability and can't gain privileges, which satisfies
+/// restricted Pod Security. Settings a template already put in the pod's security context,
+/// such as the API's sysctls, are kept.
+///
+/// # Arguments
+///
+/// * `deployment` - The deployment to restrict
+fn run_as_thorium(deployment: &mut Deployment) -> Result<(), serde_json::Error> {
+    // get this deployment's pod spec
+    let Some(pod) = deployment
+        .spec
+        .as_mut()
+        .and_then(|spec| spec.template.spec.as_mut())
+    else {
+        return Ok(());
+    };
+    // run the whole pod as the thorium user under the default seccomp profile
+    let context = pod.security_context.get_or_insert_with(Default::default);
+    context.run_as_non_root = Some(true);
+    context.run_as_user = Some(THORIUM_UID);
+    context.run_as_group = Some(THORIUM_UID);
+    context.seccomp_profile = Some(serde_json::from_value(
+        serde_json::json!({"type": "RuntimeDefault"}),
+    )?);
+    // no component needs a Linux capability or to gain privileges
+    for container in &mut pod.containers {
+        container.security_context = Some(serde_json::from_value(serde_json::json!({
+            "allowPrivilegeEscalation": false,
+            "capabilities": {"drop": ["ALL"]},
+        }))?);
+    }
+    Ok(())
+}
+
 /// Create or update a k8s deployment within a given namespace
 ///
 /// # Arguments
@@ -673,19 +732,17 @@ pub async fn create_or_update(
     annotate_rollout(&mut deployment, hashes);
     // give every component the CA to validate an external Elastic with
     mount_elastic_ca(&mut deployment, &meta.cluster)?;
+    // run every component unprivileged
+    run_as_thorium(&mut deployment)?;
     // get the name of this deployment to create or patch
     let params = PostParams::default();
-    let name = deployment
-        .metadata
-        .name
-        .clone()
-        .expect("could not get cluster name from metadata");
+    let Some(name) = deployment.metadata.name.clone() else {
+        return Err(Error::new("Cannot create a Deployment without a name"));
+    };
+    // create the deployment, or patch it towards our template if it already exists
     match meta.deploy_api.create(&params, &deployment).await {
         Ok(_) => {
-            println!(
-                "Deployment created {} in namespace {}",
-                &name, &meta.namespace
-            );
+            println!("Deployment created {name} in namespace {}", meta.namespace);
             Ok(())
         }
         Err(kube::Error::Api(error)) => {
@@ -697,27 +754,21 @@ pub async fn create_or_update(
                 let params: PatchParams = PatchParams::default();
                 match meta.deploy_api.patch(&name, &params, &patch).await {
                     Ok(_) => {
-                        println!(
-                            "Patched {} deployment in namespace {}",
-                            &name, &meta.namespace
-                        );
+                        println!("Patched {name} deployment in namespace {}", meta.namespace);
                         Ok(())
                     }
                     Err(error) => Err(Error::new(format!(
-                        "Failed to patch {} deployment: {}",
-                        &name, error
+                        "Failed to patch {name} deployment: {error}"
                     ))),
                 }
             } else {
                 Err(Error::new(format!(
-                    "Failed to create {} deployment: {}",
-                    &name, error
+                    "Failed to create {name} deployment: {error}"
                 )))
             }
         }
         Err(error) => Err(Error::new(format!(
-            "Failed to create {} deployment: {}",
-            &name, error
+            "Failed to create {name} deployment: {error}"
         ))),
     }
 }
@@ -733,32 +784,32 @@ pub async fn delete_one(name: &str, meta: &ClusterMeta) -> Result<(), Error> {
     // delete the deployment by name
     match meta.deploy_api.delete(name, &params).await {
         Ok(_) => println!(
-            "Deleted {} deployment from namespace {}",
-            name, &meta.namespace
+            "Deleted {name} deployment from namespace {}",
+            meta.namespace
         ),
+        // a missing deployment is already in the state we want
+        Err(kube::Error::Api(error)) if error.code == 404 => {
+            println!(
+                "No {name} deployment in namespace {} to delete, skipping cleanup",
+                meta.namespace
+            );
+        }
         Err(kube::Error::Api(error)) => {
-            // don't panic if deployment doesn't exist, thats the desired state
-            if error.code == 404 {
-                println!(
-                    "No {} deployment in namespace {} to delete, skipping cleanup",
-                    &name, &meta.namespace
-                );
-                return Ok(());
-            }
             return Err(Error::new(format!(
-                "Failed things to delete {} deployment in namespace {}: {}",
-                &name, &meta.namespace, error.message
+                "Failed to delete {name} deployment in namespace {}: {}",
+                meta.namespace, error.message
             )));
         }
         Err(error) => {
             return Err(Error::new(format!(
-                "Failed things to delete {} deployment in namespace {}: {}",
-                &name, &meta.namespace, error
+                "Failed to delete {name} deployment in namespace {}: {error}",
+                meta.namespace
             )));
         }
     }
     Ok(())
 }
+
 /// Create or update the API deployment
 ///
 /// # Arguments
@@ -771,14 +822,14 @@ pub async fn deploy_api(
     host_aliases: &Vec<K8sHostAliases>,
     hashes: &RolloutHashes,
 ) -> Result<(), Error> {
-    // build the api deployment ot deploy
+    // build the api deployment to deploy
     let deployment = api(meta, host_aliases)?;
     // create or update this deployment
     create_or_update(deployment, meta, hashes).await?;
     Ok(())
 }
 
-/// Create or update the scaler deployment
+/// Create or update the scaler deployments, deleting any scaler the spec no longer has
 ///
 /// # Arguments
 ///
@@ -793,18 +844,18 @@ pub async fn deploy_scalers(
     hashes: &RolloutHashes,
 ) -> Result<(), Error> {
     // deploy any scaler from template
-    if let Some(deployment) = scaler_template(meta, host_aliases).await {
+    if let Some(deployment) = scaler_template(meta, host_aliases) {
         let deployment: Deployment = serde_json::from_value(deployment)?;
         create_or_update(deployment, meta, scaler_hashes).await?;
-    // component not present in cluster spec during upgrades, cleanup
+    // a component removed from the spec has its deployment deleted
     } else {
         delete_one("scaler", meta).await?;
     }
     // deploy any baremetal scaler from template
-    if let Some(deployment) = baremetal_scaler_template(meta, host_aliases).await {
+    if let Some(deployment) = baremetal_scaler_template(meta, host_aliases) {
         let deployment: Deployment = serde_json::from_value(deployment)?;
         create_or_update(deployment, meta, hashes).await?;
-    // component not present in cluster spec during upgrades, cleanup
+    // a component removed from the spec has its deployment deleted
     } else {
         delete_one("baremetal-scaler", meta).await?;
     }
@@ -824,10 +875,10 @@ pub async fn deploy_event_handler(
     hashes: &RolloutHashes,
 ) -> Result<(), Error> {
     // deploy any event handler from template
-    if let Some(deployment) = event_handler_template(meta, host_aliases).await {
+    if let Some(deployment) = event_handler_template(meta, host_aliases) {
         let deployment: Deployment = serde_json::from_value(deployment)?;
         create_or_update(deployment, meta, hashes).await?;
-    // component not present in cluster spec during upgrades, cleanup
+    // a component removed from the spec has its deployment deleted
     } else {
         delete_one("event-handler", meta).await?;
     }
@@ -847,10 +898,10 @@ pub async fn deploy_search_streamer(
     hashes: &RolloutHashes,
 ) -> Result<(), Error> {
     // deploy any search streamer from template
-    if let Some(deployment) = search_streamer_template(meta, host_aliases).await {
+    if let Some(deployment) = search_streamer_template(meta, host_aliases) {
         let deployment: Deployment = serde_json::from_value(deployment)?;
         create_or_update(deployment, meta, hashes).await?;
-    // component not present in cluster spec during upgrades, cleanup
+    // a component removed from the spec has its deployment deleted
     } else {
         delete_one("search-streamer", meta).await?;
     }
@@ -923,6 +974,13 @@ fn pod_problems(pod: &Pod) -> Vec<String> {
             ));
         }
     }
+    // a pod stranded on a down or unreachable node keeps its last container states
+    if pod_stranded(status) {
+        problems.push(format!(
+            "pod {name} is not ready although its containers are, so its node may be down or \
+             unreachable"
+        ));
+    }
     // describe each container that is waiting or last died
     let containers = status
         .init_container_statuses
@@ -981,6 +1039,51 @@ fn pod_problems(pod: &Pod) -> Vec<String> {
     problems
 }
 
+/// Check whether a pod was marked unready by the node lifecycle controller
+///
+/// A pod whose containers all report ready but that isn't ready itself was marked unready
+/// because its node stopped reporting, so its node is likely down or unreachable.
+///
+/// # Arguments
+///
+/// * `status` - The status of the pod to check
+fn pod_stranded(status: &PodStatus) -> bool {
+    // every container must still report the ready state the kubelet last sent
+    let containers_ready = status
+        .container_statuses
+        .as_ref()
+        .is_some_and(|containers| {
+            !containers.is_empty() && containers.iter().all(|container| container.ready)
+        });
+    // while the pod itself isn't ready
+    let pod_unready = status
+        .conditions
+        .iter()
+        .flatten()
+        .any(|condition| condition.type_ == "Ready" && condition.status != "True");
+    containers_ready && pod_unready
+}
+
+/// Check whether a pod is stuck rather than just starting: it can't be scheduled or is
+/// stranded on a down or unreachable node
+///
+/// # Arguments
+///
+/// * `pod` - The pod to check
+fn pod_stuck(pod: &Pod) -> bool {
+    // a pod without a status hasn't been looked at by the scheduler yet
+    let Some(status) = &pod.status else {
+        return false;
+    };
+    // a pod the scheduler couldn't place
+    let unscheduled = status
+        .conditions
+        .iter()
+        .flatten()
+        .any(|condition| condition.type_ == "PodScheduled" && condition.status == "False");
+    unscheduled || pod_stranded(status)
+}
+
 /// Check whether any of a pod's containers is failing rather than just starting
 ///
 /// A container is failing when it waits for one of the [`FAILING_REASONS`] or last
@@ -1024,6 +1127,8 @@ struct RolloutProblems {
     details: String,
     /// Whether any pod is failing rather than just starting
     failing: bool,
+    /// Whether any pod can't be scheduled or is stranded on a down or unreachable node
+    stuck: bool,
 }
 
 /// Describe why a deployment's pods aren't ready
@@ -1041,6 +1146,7 @@ async fn rollout_problems(meta: &ClusterMeta, name: &str) -> RolloutProblems {
             return RolloutProblems {
                 details: format!("could not list {name} pods: {error}"),
                 failing: false,
+                stuck: false,
             };
         }
     };
@@ -1054,12 +1160,20 @@ async fn rollout_problems(meta: &ClusterMeta, name: &str) -> RolloutProblems {
 ///
 /// * `pods` - The deployment's pods
 fn summarize_pods(pods: &[Pod]) -> RolloutProblems {
-    // check whether any pod is really failing
-    let failing = pods.iter().any(pod_failing);
-    // describe the first few problems we find
-    let problems = pods
+    // a terminating pod is already being replaced and one on a down node keeps the stale
+    // status it last reported, so only pods that aren't being deleted are described
+    let live = pods
         .iter()
-        .flat_map(pod_problems)
+        .filter(|pod| pod.metadata.deletion_timestamp.is_none())
+        .collect::<Vec<&Pod>>();
+    // check whether any pod is really failing
+    let failing = live.iter().any(|pod| pod_failing(pod));
+    // check whether any pod is stuck unscheduled or on a down node
+    let stuck = live.iter().any(|pod| pod_stuck(pod));
+    // describe the first few problems we find
+    let problems = live
+        .iter()
+        .flat_map(|pod| pod_problems(pod))
         .take(MAX_POD_PROBLEMS)
         .collect::<Vec<String>>();
     let details = if problems.is_empty() {
@@ -1067,25 +1181,32 @@ fn summarize_pods(pods: &[Pod]) -> RolloutProblems {
     } else {
         problems.join("; ")
     };
-    RolloutProblems { details, failing }
+    RolloutProblems {
+        details,
+        failing,
+        stuck,
+    }
 }
 
-/// Describe the pending deployments whose pods are failing, if any are
+/// Describe the pending deployments whose pods are failing or stuck, if any are
+///
+/// A stuck pod is one that can't be scheduled or is stranded on a down or unreachable node,
+/// which explains why an already rolled out component became unavailable.
 ///
 /// # Arguments
 ///
 /// * `meta` - Thorium cluster client and metadata
 /// * `pending` - The deployments that haven't finished rolling out
 async fn failing_rollouts(meta: &ClusterMeta, pending: &[String]) -> Option<String> {
-    // describe each pending deployment that has a failing pod
+    // describe each pending deployment that has a failing or stuck pod
     let mut details = Vec::new();
     for name in pending {
         let problems = rollout_problems(meta, name).await;
-        if problems.failing {
+        if problems.failing || problems.stuck {
             details.push(format!("{name}: {}", problems.details));
         }
     }
-    // only report when something is really failing
+    // only report when something is really failing or stuck
     (!details.is_empty()).then(|| details.join(" | "))
 }
 
@@ -1143,17 +1264,18 @@ fn pending_message(waiting: String, failures: Option<String>) -> String {
 ///
 /// # Arguments
 ///
-/// * `cluster` - The `ThoriumCluster` whose status to check
+/// * `status` - The status last written for the `ThoriumCluster`
+/// * `generation` - The `metadata.generation` of the cluster's current spec
 /// * `waiting` - The message naming the pending deployments
-fn status_reports_wait(cluster: &ThoriumCluster, waiting: &str) -> bool {
-    // get the current status if it describes our current spec
-    let Some(status) = cluster
-        .status
-        .as_ref()
-        .filter(|status| status.observed_generation == cluster.metadata.generation)
-    else {
+fn status_reports_wait(
+    status: &crds::ThoriumClusterStatus,
+    generation: Option<i64>,
+    waiting: &str,
+) -> bool {
+    // only a status describing our current spec counts
+    if status.observed_generation != generation {
         return false;
-    };
+    }
     // the message must be this wait, either bare or followed by its pod failures
     status.message.as_deref().is_some_and(|message| {
         message == waiting
@@ -1221,10 +1343,16 @@ pub async fn wait_for_rollouts(
             return Ok(Some(pending_message(waiting, failures)));
         }
         // name the pending deployments in the status unless it already reports this wait
-        if reported.as_ref() != Some(&waiting) && !status_reports_wait(&meta.cluster, &waiting) {
+        if reported.as_ref() != Some(&waiting)
+            && !status_reports_wait(
+                &meta.status.current(),
+                meta.cluster.metadata.generation,
+                &waiting,
+            )
+        {
             crds::set_status(
                 &meta.client,
-                &meta.cluster,
+                &meta.status,
                 crds::ClusterPhase::Provisioning,
                 Some(waiting.clone()),
             )
@@ -1285,21 +1413,19 @@ pub async fn delete(deploy_api: &Api<Deployment>, cluster: &ThoriumCluster) -> R
     for deployment in cluster.list_component_names() {
         match deploy_api.delete(&deployment, &params).await {
             Ok(_) => println!("Deleted {deployment} deployment"),
+            // a missing deployment is already in the state we want
+            Err(kube::Error::Api(error)) if error.code == 404 => {
+                println!("No {deployment} deployment to delete, skipping cleanup");
+            }
             Err(kube::Error::Api(error)) => {
-                // don't panic if pods don't exist, thats the desired state
-                if error.code == 404 {
-                    println!("No {} deployment to delete, skipping cleanup", &deployment);
-                    continue;
-                }
                 return Err(Error::new(format!(
-                    "Failed to delete {} deployment: {}",
-                    &deployment, error.message
+                    "Failed to delete {deployment} deployment: {}",
+                    error.message
                 )));
             }
             Err(error) => {
                 return Err(Error::new(format!(
-                    "Failed to delete {} deployment: {}",
-                    &deployment, error
+                    "Failed to delete {deployment} deployment: {error}"
                 )));
             }
         }
@@ -1310,7 +1436,9 @@ pub async fn delete(deploy_api: &Api<Deployment>, cluster: &ThoriumCluster) -> R
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::k8s::clusters::tests::{FakeKube, full_spec, meta_for, namespaced_cluster};
     use serde::Deserialize;
+    use thorium::models::upgrades::UpgradeComponent;
 
     /// Build a deployment from JSON
     ///
@@ -1710,22 +1838,97 @@ mod tests {
         .expect("pod should deserialize");
         let problems = summarize_pods(&[starting]);
         assert!(!problems.failing);
+        assert!(!problems.stuck);
         assert_eq!(problems.details, "no pod reported an error");
+    }
+
+    /// Pods on a down node are described as possibly unreachable rather than failing, and
+    /// terminating pods stuck on a down node are ignored
+    #[test]
+    fn down_node_pods() {
+        // a running pod the node lifecycle controller marked unready while its containers
+        // still report the last state the kubelet sent
+        let unreachable: Pod = serde_json::from_value(serde_json::json!({
+            "metadata": {"name": "api-1"},
+            "status": {
+                "phase": "Running",
+                "conditions": [{"type": "Ready", "status": "False"}],
+                "containerStatuses": [{
+                    "name": "api",
+                    "ready": true,
+                    "restartCount": 0,
+                    "image": "thorium",
+                    "imageID": "",
+                    "state": {"running": {}}
+                }]
+            }
+        }))
+        .expect("pod should deserialize");
+        let problems = summarize_pods(std::slice::from_ref(&unreachable));
+        assert!(!problems.failing);
+        assert!(problems.stuck);
+        assert!(
+            problems.details.contains("pod api-1 is not ready")
+                && problems.details.contains("node may be down or unreachable"),
+            "{}",
+            problems.details
+        );
+        // a replacement that can't be scheduled because of the down node's taint is described
+        // but isn't failing
+        let pending: Pod = serde_json::from_value(serde_json::json!({
+            "metadata": {"name": "api-2"},
+            "status": {
+                "phase": "Pending",
+                "conditions": [{
+                    "type": "PodScheduled",
+                    "status": "False",
+                    "message": "0/2 nodes are available: 1 node(s) had untolerated taint {node.kubernetes.io/unreachable: }"
+                }]
+            }
+        }))
+        .expect("pod should deserialize");
+        let problems = summarize_pods(std::slice::from_ref(&pending));
+        assert!(!problems.failing);
+        assert!(problems.stuck);
+        assert!(problems.details.contains("node.kubernetes.io/unreachable"));
+        // an evicted pod stuck terminating on the down node with a stale crash isn't counted
+        let mut stuck: Pod = serde_json::from_value(serde_json::json!({
+            "metadata": {"name": "api-0"},
+            "status": {
+                "phase": "Running",
+                "containerStatuses": [{
+                    "name": "api",
+                    "ready": false,
+                    "restartCount": 1,
+                    "image": "thorium",
+                    "imageID": "",
+                    "lastState": {"terminated": {"exitCode": 1, "reason": "Error"}}
+                }]
+            }
+        }))
+        .expect("pod should deserialize");
+        assert!(summarize_pods(std::slice::from_ref(&stuck)).failing);
+        stuck.metadata.deletion_timestamp = Some(
+            k8s_openapi::apimachinery::pkg::apis::meta::v1::Time(chrono::Utc::now()),
+        );
+        let problems = summarize_pods(&[stuck, pending]);
+        assert!(!problems.failing);
+        assert!(!problems.details.contains("api-0"), "{}", problems.details);
+        // a healthy running pod has no problems
+        let mut healthy = unreachable;
+        healthy.status.as_mut().expect("status").conditions = Some(vec![
+            serde_json::from_value(serde_json::json!({"type": "Ready", "status": "True"}))
+                .expect("condition"),
+        ]);
+        assert_eq!(pod_problems(&healthy), Vec::<String>::new());
+        assert!(!summarize_pods(&[healthy]).stuck);
     }
 
     /// A status already reporting the same wait for the current spec is kept so its pod
     /// details aren't replaced by the bare wait on every requeue
     #[test]
     fn status_wait_detection() {
-        // build a cluster at generation 2 reporting a wait with pod details
-        let spec: crds::ThoriumClusterSpec = serde_json::from_value(serde_json::json!({
-            "components": {"api": {}},
-            "registry": "registry/thorium",
-            "config": {}
-        }))
-        .expect("spec should deserialize");
-        let mut cluster = ThoriumCluster::new("thorium", spec);
-        cluster.metadata.generation = Some(2);
+        // build statuses at a generation reporting a wait with or without pod details
         let status = |message: &str, generation: i64| crds::ThoriumClusterStatus {
             phase: Some(crds::ClusterPhase::Provisioning),
             message: Some(message.to_owned()),
@@ -1733,25 +1936,307 @@ mod tests {
             ..Default::default()
         };
         let waiting = "Waiting for event-handler to roll out";
-        cluster.status = Some(status(
+        let current = Some(2);
+        let detailed = status(
             "Waiting for event-handler to roll out: event-handler: pod crashed",
             2,
-        ));
-        assert!(status_reports_wait(&cluster, waiting));
+        );
+        assert!(status_reports_wait(&detailed, current, waiting));
         // the bare wait is reported too
-        cluster.status = Some(status(waiting, 2));
-        assert!(status_reports_wait(&cluster, waiting));
+        assert!(status_reports_wait(&status(waiting, 2), current, waiting));
         // a wait on other deployments isn't this wait
-        cluster.status = Some(status(
-            "Waiting for event-handler, search-streamer to roll out",
-            2,
-        ));
-        assert!(!status_reports_wait(&cluster, waiting));
+        let other = status("Waiting for event-handler, search-streamer to roll out", 2);
+        assert!(!status_reports_wait(&other, current, waiting));
         // a status describing an older spec doesn't count
-        cluster.status = Some(status(waiting, 1));
-        assert!(!status_reports_wait(&cluster, waiting));
-        // a cluster without a status doesn't report anything
-        cluster.status = None;
-        assert!(!status_reports_wait(&cluster, waiting));
+        assert!(!status_reports_wait(&status(waiting, 1), current, waiting));
+        // an empty status doesn't report anything
+        assert!(!status_reports_wait(
+            &crds::ThoriumClusterStatus::default(),
+            current,
+            waiting
+        ));
+    }
+
+    /// Build every component Deployment a cluster spec asks for
+    ///
+    /// # Arguments
+    ///
+    /// * `spec` - The cluster spec
+    fn component_templates(spec: serde_json::Value) -> Vec<Deployment> {
+        // build the templates without contacting the kube API
+        let fake = FakeKube::default();
+        let meta = meta_for(namespaced_cluster(spec), &fake.client());
+        let aliases = Vec::new();
+        let api = api(&meta, &aliases).expect("api deployment");
+        let optional = [
+            scaler_template(&meta, &aliases),
+            baremetal_scaler_template(&meta, &aliases),
+            event_handler_template(&meta, &aliases),
+            search_streamer_template(&meta, &aliases),
+        ];
+        std::iter::once(api)
+            .chain(optional.into_iter().flatten().map(|raw| deployment(&raw)))
+            .collect()
+    }
+
+    /// Get the volume names of a Deployment's pods
+    ///
+    /// # Arguments
+    ///
+    /// * `deployment` - The Deployment to inspect
+    fn volume_names(deployment: &Deployment) -> Vec<String> {
+        deployment
+            .spec
+            .as_ref()
+            .and_then(|spec| spec.template.spec.as_ref())
+            .and_then(|pod| pod.volumes.as_ref())
+            .map_or_else(Vec::new, |volumes| {
+                volumes.iter().map(|volume| volume.name.clone()).collect()
+            })
+    }
+
+    /// Every component Deployment keeps the name and `app` selector legacy clusters were
+    /// deployed with, so converted clusters are patched in place
+    #[tokio::test]
+    async fn component_templates_keep_legacy_selectors() {
+        // build every component of a chart cluster
+        let deployments = component_templates(full_spec());
+        let names = deployments
+            .iter()
+            .map(|deployment| deployment.metadata.name.clone().unwrap_or_default())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            names,
+            [
+                "api",
+                "scaler",
+                "baremetal-scaler",
+                "event-handler",
+                "search-streamer"
+            ]
+        );
+        // the upgrade catalog quiesces components by these names
+        for component in [
+            UpgradeComponent::Api,
+            UpgradeComponent::Scaler,
+            UpgradeComponent::BaremetalScaler,
+            UpgradeComponent::EventHandler,
+            UpgradeComponent::SearchStreamer,
+        ] {
+            assert!(names.contains(&component.deployment_name().to_owned()));
+        }
+        for deployment in &deployments {
+            // the selector is the immutable app label that matches the pod labels
+            let name = deployment.metadata.name.clone().unwrap_or_default();
+            let spec = deployment.spec.as_ref().expect("spec");
+            let selector = spec.selector.match_labels.clone().unwrap_or_default();
+            assert_eq!(
+                selector,
+                std::collections::BTreeMap::from([("app".to_owned(), name.clone())])
+            );
+            let labels = spec
+                .template
+                .metadata
+                .as_ref()
+                .and_then(|meta| meta.labels.clone())
+                .unwrap_or_default();
+            assert_eq!(labels["app"], name);
+            assert_eq!(labels["version"], "1.8.1");
+            // pods run the spec's image with the chart's pull secret and mount thorium.yml
+            let pod = spec.template.spec.as_ref().expect("pod spec");
+            assert_eq!(
+                pod.containers[0].image.as_deref(),
+                Some("registry/thorium:1.8.1"),
+                "{name}"
+            );
+            let pull_secrets = serde_json::to_value(&pod.image_pull_secrets).expect("pull secrets");
+            assert_eq!(
+                pull_secrets,
+                serde_json::json!([{"name": "thorium-image-pull"}]),
+                "{name}"
+            );
+            assert!(
+                volume_names(deployment).contains(&"config".to_owned()),
+                "{name}"
+            );
+            // only a k8s scaler using its service account gets a token, since no other
+            // component calls the k8s API
+            if name != "scaler" {
+                assert_eq!(pod.automount_service_account_token, Some(false), "{name}");
+            }
+        }
+    }
+
+    /// Components left out of the spec get no Deployment
+    #[tokio::test]
+    async fn optional_components_are_skipped() {
+        // build a cluster with only the api
+        let deployments = component_templates(serde_json::json!({
+            "components": {"api": {}},
+            "registry": "registry/thorium",
+            "config": {}
+        }));
+        // only the api is built
+        assert_eq!(deployments.len(), 1);
+        assert_eq!(deployments[0].metadata.name.as_deref(), Some("api"));
+    }
+
+    /// A scaler without a service account mounts the kube config, and registry auth mounts
+    /// the skopeo credentials
+    #[tokio::test]
+    async fn scaler_mounts_follow_spec() {
+        // a scaler using the service account with no registry auth mounts neither
+        let mut spec = full_spec();
+        spec["components"]["scaler"] = serde_json::json!({"service_account": true});
+        let scaler = &component_templates(spec.clone())[1];
+        let volumes = volume_names(scaler);
+        assert!(!volumes.contains(&"kube-config".to_owned()));
+        assert!(!volumes.contains(&"docker-skopeo".to_owned()));
+        let pod = scaler
+            .spec
+            .as_ref()
+            .and_then(|spec| spec.template.spec.clone())
+            .expect("pod");
+        assert_eq!(pod.service_account_name.as_deref(), Some("thorium"));
+        // a scaler without one and with registry auth mounts both
+        spec["components"]["scaler"] = serde_json::json!({"service_account": false});
+        spec["registry_auth"] = serde_json::json!({"registry": "token"});
+        let scaler = &component_templates(spec)[1];
+        let volumes = volume_names(scaler);
+        assert!(volumes.contains(&"kube-config".to_owned()));
+        assert!(volumes.contains(&"docker-skopeo".to_owned()));
+        let pod = scaler
+            .spec
+            .as_ref()
+            .and_then(|spec| spec.template.spec.clone())
+            .expect("pod");
+        assert_eq!(pod.service_account_name, None);
+        assert_eq!(pod.automount_service_account_token, Some(false));
+    }
+
+    /// Every component runs as the image's thorium user with the restricted Pod Security
+    /// settings, and the API keeps its sysctl for binding port 80
+    #[tokio::test]
+    async fn components_run_as_thorium() {
+        for mut deployment in component_templates(full_spec()) {
+            // restrict this component as create_or_update does
+            run_as_thorium(&mut deployment).expect("restrict");
+            let name = deployment.metadata.name.clone().unwrap_or_default();
+            let pod = deployment
+                .spec
+                .and_then(|spec| spec.template.spec)
+                .expect("pod");
+            // the pod runs as the thorium user under the default seccomp profile
+            let context = pod.security_context.expect("pod context");
+            assert_eq!(context.run_as_non_root, Some(true), "{name}");
+            assert_eq!(context.run_as_user, Some(THORIUM_UID), "{name}");
+            assert_eq!(context.run_as_group, Some(THORIUM_UID), "{name}");
+            assert_eq!(
+                context.seccomp_profile.map(|profile| profile.type_),
+                Some("RuntimeDefault".to_owned()),
+                "{name}"
+            );
+            // only the API lowers the unprivileged port range
+            let sysctls = context.sysctls.unwrap_or_default();
+            if name == "api" {
+                assert_eq!(sysctls.len(), 1);
+                assert_eq!(sysctls[0].name, "net.ipv4.ip_unprivileged_port_start");
+                assert_eq!(sysctls[0].value, "0");
+            } else {
+                assert!(sysctls.is_empty(), "{name}");
+            }
+            // every container drops its capabilities and can't gain privileges
+            for container in pod.containers {
+                let context = container.security_context.expect("container context");
+                assert_eq!(context.allow_privilege_escalation, Some(false), "{name}");
+                assert_eq!(
+                    context.capabilities.and_then(|caps| caps.drop),
+                    Some(vec!["ALL".to_owned()]),
+                    "{name}"
+                );
+            }
+        }
+    }
+
+    /// The scaler's HOME and KUBECONFIG point at its mounts whatever its spec's env says, so a
+    /// stored spec still carrying KUBECONFIG=/root/.kube/config works as the thorium user
+    #[tokio::test]
+    async fn scaler_env_points_at_mounts() {
+        // a scaler without a service account whose env names root's kube config
+        let mut spec = full_spec();
+        spec["components"]["scaler"] = serde_json::json!({
+            "service_account": false,
+            "env": [
+                {"name": "https_proxy", "value": "http://proxy:3128"},
+                {"name": "KUBECONFIG", "value": "/root/.kube/config"},
+                {"name": "HOME", "value": "/root"}
+            ]
+        });
+        let env = |deployment: &Deployment| {
+            deployment
+                .spec
+                .as_ref()
+                .and_then(|spec| spec.template.spec.as_ref())
+                .and_then(|pod| pod.containers[0].env.clone())
+                .unwrap_or_default()
+                .into_iter()
+                .map(|var| (var.name, var.value.unwrap_or_default()))
+                .collect::<Vec<_>>()
+        };
+        // other variables are kept and HOME/KUBECONFIG name the thorium user's mounts
+        let scaler = &component_templates(spec.clone())[1];
+        assert_eq!(
+            env(scaler),
+            [
+                ("https_proxy".to_owned(), "http://proxy:3128".to_owned()),
+                ("HOME".to_owned(), "/home/thorium".to_owned()),
+                ("KUBECONFIG".to_owned(), "/home/thorium/.kube/config".to_owned()),
+            ]
+        );
+        // a scaler using its service account gets no KUBECONFIG
+        spec["components"]["scaler"]["service_account"] = serde_json::json!(true);
+        let scaler = &component_templates(spec)[1];
+        assert_eq!(
+            env(scaler),
+            [
+                ("https_proxy".to_owned(), "http://proxy:3128".to_owned()),
+                ("HOME".to_owned(), "/home/thorium".to_owned()),
+            ]
+        );
+    }
+
+    /// Scalers removed from the spec have their Deployments deleted
+    #[tokio::test]
+    async fn removed_scalers_are_deleted() {
+        // a cluster with only the api whose scaler Deployments are already gone
+        let fake = FakeKube::default();
+        let meta = meta_for(
+            namespaced_cluster(serde_json::json!({
+                "components": {"api": {}},
+                "registry": "registry/thorium",
+                "config": {}
+            })),
+            &fake.client(),
+        );
+        let hashes = RolloutHashes {
+            config: String::new(),
+            mounts: String::new(),
+        };
+        deploy_scalers(&meta, &Vec::new(), &hashes, &hashes)
+            .await
+            .expect("deploy scalers");
+        // both scaler Deployments were deleted and nothing was created
+        let paths = fake
+            .writes()
+            .into_iter()
+            .map(|request| format!("{} {}", request.method, request.path))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            paths,
+            [
+                "DELETE /apis/apps/v1/namespaces/thorium/deployments/scaler",
+                "DELETE /apis/apps/v1/namespaces/thorium/deployments/baremetal-scaler"
+            ]
+        );
     }
 }

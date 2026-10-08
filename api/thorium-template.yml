@@ -25,8 +25,6 @@ thorium:
   retention:
     data: 10
     logs: 10
-  web_ui:
-    version: "0.0.0"
 redis:
   host: "<REDIS_IP>"
   port: 6379

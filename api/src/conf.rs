@@ -2616,14 +2616,12 @@ pub struct Elastic {
 #[cfg(any(feature = "api", feature = "client"))]
 async fn read_elastic_ca(path: &Path) -> Result<elasticsearch::cert::Certificate, String> {
     // read our CA cert from disk
-    let ca_bytes = tokio::fs::read(path)
-        .await
-        .map_err(|error| {
-            format!(
-                "Failed to read elastic validation cert at {}: {error}",
-                path.display()
-            )
-        })?;
+    let ca_bytes = tokio::fs::read(path).await.map_err(|error| {
+        format!(
+            "Failed to read elastic validation cert at {}: {error}",
+            path.display()
+        )
+    })?;
     // build our cert
     elasticsearch::cert::Certificate::from_pem(&ca_bytes).map_err(|error| {
         format!(
@@ -2657,7 +2655,9 @@ impl Elastic {
         &self,
     ) -> Result<elasticsearch::cert::CertificateValidation, crate::Error> {
         // build our cert validation
-        self.cert_validation_inner().await.map_err(crate::Error::new)
+        self.cert_validation_inner()
+            .await
+            .map_err(crate::Error::new)
     }
 
     /// Build the ```CertificateValidation``` for this elastic cert config
@@ -2682,7 +2682,9 @@ impl Elastic {
                 // read and parse our CA cert
                 let cert = read_elastic_ca(path).await?;
                 // validate the chain against this CA without CN/SAN checks
-                Ok(elasticsearch::cert::CertificateValidation::Certificate(cert))
+                Ok(elasticsearch::cert::CertificateValidation::Certificate(
+                    cert,
+                ))
             }
         }
     }
@@ -2743,5 +2745,64 @@ impl Conf {
         // update this configs namespace
         self.thorium.namespace = namespace.into();
         self
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::Conf;
+    use std::path::Path;
+
+    /// Collect the key paths a config file sets that the parsed config doesn't keep
+    ///
+    /// Serde ignores unknown keys, so a key that was removed or renamed in the schema still
+    /// parses; comparing against the re-serialized config finds it.
+    ///
+    /// # Arguments
+    ///
+    /// * `file` - The config file as JSON
+    /// * `parsed` - The parsed config serialized back to JSON
+    /// * `path` - The key path of `file` within the whole config
+    /// * `unknown` - The key paths found that the parsed config doesn't keep
+    fn unknown_keys(
+        file: &serde_json::Value,
+        parsed: &serde_json::Value,
+        path: &str,
+        unknown: &mut Vec<String>,
+    ) {
+        // only maps have keys to compare
+        let (Some(file), Some(parsed)) = (file.as_object(), parsed.as_object()) else {
+            return;
+        };
+        // check each key the file sets, descending into the ones the config keeps
+        for (key, value) in file {
+            let child = format!("{path}.{key}");
+            match parsed.get(key) {
+                Some(kept) => unknown_keys(value, kept, &child, unknown),
+                None => unknown.push(child),
+            }
+        }
+    }
+
+    /// The config template and the integration test config parse and set only keys the
+    /// current schema has
+    #[test]
+    fn shipped_configs_match_schema() {
+        for file in ["thorium-template.yml", "tests/thorium-testing.yml"] {
+            // parse the config the way the API does
+            let path = Path::new(env!("CARGO_MANIFEST_DIR")).join(file);
+            let conf = Conf::new(&path).unwrap_or_else(|error| panic!("{file}: {error}"));
+            // read the raw file to compare its keys against the parsed config
+            let raw = std::fs::read_to_string(&path).expect("config file reads");
+            let raw: serde_json::Value = serde_norway::from_str(&raw).expect("config is YAML");
+            let parsed = serde_json::to_value(&conf).expect("config serializes");
+            // every key the file sets is one the config keeps
+            let mut unknown = Vec::new();
+            unknown_keys(&raw, &parsed, "", &mut unknown);
+            assert!(
+                unknown.is_empty(),
+                "{file} sets keys Conf doesn't have: {unknown:?}"
+            );
+        }
     }
 }

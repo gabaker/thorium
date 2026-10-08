@@ -60,7 +60,6 @@ jobs:
         run: |
           cd ui
           npm ci
-          set -e
           npm run validate-style
           npm run build
       - name: Upload UI Bundle Artifact
@@ -76,23 +75,23 @@ jobs:
     permissions:
       contents: read
     env:
-        RUSTFLAGS: "-C target-feature=+aes,+sse2"
+      RUSTFLAGS: "-C target-feature=+aes,+sse2"
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
       - name: Build binaries
         run: |
-          rustup default nightly
           rustup install nightly
+          rustup default nightly
           lscpu
           # build binaries
           cargo build --release --features vendored-openssl
           # build the developer docs
           cargo doc --no-deps
-          # make a glibc dir
+          # make a dir for the glibc binaries
           mkdir glibc
-          # copy artifacts to the a glibc dir
+          # move the binaries into the glibc dir
           mv target/release/thoradm glibc/.
           mv target/release/thorctl glibc/.
           mv target/release/thorium-api glibc/.
@@ -268,18 +267,18 @@ jobs:
       - name: Download Thorium Windows Agent Artifact
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
-           name: x86_64-pc-windows-gnu-agent
-           path: windows/agent
+          name: x86_64-pc-windows-gnu-agent
+          path: windows/agent
       - name: Download Thorium Windows Thorctl Artifact
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
-           name: x86_64-pc-windows-gnu-thorctl
-           path: windows/thorctl
+          name: x86_64-pc-windows-gnu-thorctl
+          path: windows/thorctl
       - name: Download Thorium Windows Reactor Artifact
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
-           name: x86_64-pc-windows-gnu-reactor
-           path: windows/reactor
+          name: x86_64-pc-windows-gnu-reactor
+          path: windows/reactor
       - name: Download Thorium macos x86_64 Binary Artifacts
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:

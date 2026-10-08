@@ -2,8 +2,8 @@ use kube::runtime::controller::Action;
 use kube::{Api, Client};
 use sha2::{Digest, Sha256};
 use std::sync::Arc;
-use thorium::Error;
 use thorium::conf::K8sHostAliases;
+use thorium::{Error, Thorium};
 use tokio::time::Duration;
 
 use crate::app;
@@ -28,6 +28,9 @@ const WAITING_REQUEUE_SECS: u64 = 15u64;
 /// How long in seconds to wait before reconciling a ready cluster that has no new events
 const APPLY_REQUEUE_SECS: u64 = 86400u64;
 
+/// How long in seconds to wait before retrying nodes that failed to provision
+const NODE_FAILURE_REQUEUE_SECS: u64 = 60u64;
+
 /// Hash the documents a component mounts besides thorium.yml
 ///
 /// Each document is prefixed with its length so moving bytes between documents changes the
@@ -40,6 +43,7 @@ fn mounts_hash<T: AsRef<[u8]>>(docs: &[T]) -> String {
     // hash each document after its length
     let mut hasher = Sha256::new();
     for doc in docs {
+        // get the raw bytes of this document
         let doc = doc.as_ref();
         hasher.update((doc.len() as u64).to_le_bytes());
         hasher.update(doc);
@@ -89,11 +93,12 @@ async fn kube_config_content(meta: &ClusterMeta) -> Result<Vec<u8>, Error> {
 /// * `meta` - Thorium cluster metadata being operated upon
 /// * `details` - What the cluster is still waiting on
 async fn still_provisioning(meta: &ClusterMeta, details: String) -> Action {
+    // log what we are waiting on
     println!("{details}");
     // record what we are still waiting on
     k8s::crds::set_status(
         &meta.client,
-        &meta.cluster,
+        &meta.status,
         ClusterPhase::Provisioning,
         Some(details),
     )
@@ -154,9 +159,9 @@ async fn check_backends(
     Ok(BackendChecks { notes, missing })
 }
 
-/// Create a ``ThoriumCluster``
+/// Create or update a `ThoriumCluster`
 ///
-/// This creates a Thorium cluster from scratch using a ``ThoriumCluster`` CRD as defined
+/// This creates or updates a Thorium cluster using a `ThoriumCluster` CRD as defined
 /// in the k8s API. Thorium's S3 buckets are created and every backend is checked with
 /// Thorium's own credentials before thorium.yml is written, so a bad config is reported in
 /// the status instead of being rolled out to the components.
@@ -169,10 +174,18 @@ async fn check_backends(
 /// stop the rollout: the components are still deployed, then the reconcile fails with the
 /// missing Secrets so the cluster is marked as errored and the bootstrap is retried.
 ///
+/// Nodes are provisioned, labelled, and registered only after every component is deployed, so
+/// a node that fails to provision doesn't hold back the components; the cluster is marked as
+/// errored listing the failed nodes and they are retried shortly.
+///
+/// Every component is patched to the same spec on each apply, which changes nothing for a
+/// component that is already deployed, so an apply triggered by a component becoming
+/// unavailable only waits on it and reports it rather than rolling anything out.
+///
 /// # Arguments
 ///
 /// * `meta` - Thorium cluster metadata being operated upon
-/// * `url` - Override url for Kubernetes api service.
+/// * `url` - An override for the url the operator reaches the Thorium API at
 /// * `shared` - Data shared across watchers
 #[allow(clippy::too_many_lines)]
 pub async fn apply(
@@ -180,9 +193,10 @@ pub async fn apply(
     url: Option<String>,
     shared: &Arc<SharedInfo>,
 ) -> Result<Action, Error> {
+    // log which cluster we are applying
     println!(
         "Applying {} ThoriumCluster in {} namespace",
-        &meta.name, &meta.namespace
+        meta.name, meta.namespace
     );
     // get our k8s config
     let k8s_config = &meta.conf.thorium.scaler.k8s;
@@ -195,22 +209,12 @@ pub async fn apply(
         map.iter().map(K8sHostAliases::from).collect()
     });
     // get the status this cluster was last left in
-    let status = meta.cluster.status.as_ref();
+    let status = meta.status.current();
     // mark this cluster as provisioning when it is new or its spec changed, so a retry with
     // the same spec doesn't hide an earlier error
-    if status.and_then(|status| status.phase).is_none()
-        || status.and_then(|status| status.observed_generation) != meta.cluster.metadata.generation
-    {
-        k8s::crds::set_status(
-            &meta.client,
-            &meta.cluster,
-            ClusterPhase::Provisioning,
-            None,
-        )
-        .await;
+    if status.phase.is_none() || status.observed_generation != meta.cluster.metadata.generation {
+        k8s::crds::set_status(&meta.client, &meta.status, ClusterPhase::Provisioning, None).await;
     }
-    // create ThoriumCluster namespace if none
-    k8s::namespaces::try_create(&meta.namespace).await?;
     // create or update ConfigMaps
     k8s::config_maps::create_or_update_all(meta).await?;
     // create or update registry secrets
@@ -270,7 +274,7 @@ pub async fn apply(
         app::users::create(meta, &operator, &host, "thorium").await?;
     // build out thorium user's thorium client
     let thorium = app::helpers::thorium_client(&host, &thorium_token).await?;
-    // create thorium-kaboom user using operator token
+    // create thorium-kaboom user using the thorium user's token
     let (kaboom_password, _) = app::users::create(meta, &thorium, &host, "thorium-kaboom").await?;
     // create keys.yml secret for thorium user
     let keys = k8s::secrets::create_keys(meta, "thorium", &thorium_password, None).await?;
@@ -299,12 +303,6 @@ pub async fn apply(
     };
     // init cluster system settings
     app::configure::init_settings(&thorium).await?;
-    // only a cluster with a k8s scaler schedules on, and so provisions, its nodes
-    let has_scaler = meta.cluster.spec.components.scaler.is_some();
-    if has_scaler {
-        // deploy node provision pods
-        k8s::nodes::deploy_provision_pods(meta, &thorium).await?;
-    }
     // create scaler deployments from CR
     k8s::deployments::deploy_scalers(meta, &host_aliases, &scaler_hashes, &component_hashes)
         .await?;
@@ -312,73 +310,197 @@ pub async fn apply(
     k8s::deployments::deploy_event_handler(meta, &host_aliases, &component_hashes).await?;
     // create search streamer deployment from CR
     k8s::deployments::deploy_search_streamer(meta, &host_aliases, &component_hashes).await?;
-    if has_scaler {
-        // label nodes
-        k8s::nodes::label_all_nodes(meta, &thorium).await?;
-        // add nodes to Thorium for each k8s cluster
-        app::nodes::add_nodes_to_thorium(meta, &thorium).await?;
-    }
-    // deploy version specific upgrades here if needed
-    app::upgrades::handler(meta).await?;
-    // build an info object for our shared map
+    // share this cluster's Thorium client with the node watcher, which provisions ready nodes
+    // that have no thorium label or one for an older version (such as nodes added later)
+    let thorium = Arc::new(thorium);
     let thorium_info = ThoriumInfo {
-        thorium: Arc::new(thorium),
+        thorium: thorium.clone(),
         meta: Arc::new(meta.to_owned()),
     };
-    // add this Thorium meta object to our shared map
-    shared
-        .info
-        .pin()
-        .insert(SharedInfo::key(&meta.namespace, &meta.name), thorium_info);
-    // only report ready once every other component has rolled out too, checking back later
-    // if they don't finish soon
+    // add this cluster to our shared map
+    shared.info.pin().insert(
+        SharedInfo::key(&meta.context, &meta.namespace, &meta.name),
+        thorium_info,
+    );
+    // only a cluster with a k8s scaler schedules on, and so provisions, its nodes; this runs
+    // after every component is deployed so a node that fails to provision never holds back
+    // the rest of the cluster
+    let provisioning = if meta.cluster.spec.components.scaler.is_some() {
+        provision_workers(meta, &thorium).await?
+    } else {
+        None
+    };
+    // wait on the remaining components and report the cluster's phase
+    let outcome = Outcome {
+        notes,
+        missing,
+        provisioning,
+        bootstrap_hash,
+    };
+    finish(meta, outcome, ROLLOUT_WAIT).await
+}
+
+/// Provision, label, and register the nodes a cluster with a k8s scaler schedules on
+///
+/// Returns a description of the nodes that failed to provision, if any did. A failed node
+/// doesn't stop the others from being provisioned, labelled, and registered.
+///
+/// # Arguments
+///
+/// * `meta` - Thorium cluster metadata being operated upon
+/// * `thorium` - The thorium user's Thorium client
+async fn provision_workers(meta: &ClusterMeta, thorium: &Thorium) -> Result<Option<String>, Error> {
+    // get the version the API reports so a new version replaces provision pods and labels
+    let version = thorium.updates.get_version().await?.thorium.to_string();
+    // provision and label every available node
+    let failures = provision_and_label(meta, &version).await?;
+    // add nodes to Thorium for each k8s cluster
+    app::nodes::add_nodes_to_thorium(meta, thorium).await?;
+    Ok(failures)
+}
+
+/// Provision every available node and label the ones that were provisioned
+///
+/// Returns a description of the nodes that failed to provision (or why the nodes couldn't be
+/// listed) instead of failing, so the caller can still finish reconciling the cluster.
+///
+/// # Arguments
+///
+/// * `meta` - Thorium cluster metadata being operated upon
+/// * `version` - The Thorium version the API reports
+async fn provision_and_label(meta: &ClusterMeta, version: &str) -> Result<Option<String>, Error> {
+    // deploy node provision pods, collecting the nodes that fail
+    let failures = match k8s::nodes::provision_nodes(meta, version).await {
+        Ok(failures) => failures,
+        // without the node list nothing can be provisioned or labelled
+        Err(error) => {
+            return Ok(Some(format!(
+                "Failed to provision nodes: {}",
+                k8s::crds::error_message(&error)
+            )));
+        }
+    };
+    // label the nodes that were provisioned
+    k8s::nodes::label_nodes(meta, version, &failures.names()).await?;
+    Ok(failures.message())
+}
+
+/// What an apply found before waiting on the components that report a cluster as ready
+struct Outcome {
+    /// Non-fatal problems to report alongside the ready phase
+    notes: Vec<String>,
+    /// Privileged bootstrap steps that couldn't run because a Secret they need is missing
+    missing: Vec<String>,
+    /// A description of the nodes that failed to provision, if any did
+    provisioning: Option<String>,
+    /// The hash of the bootstrap inputs this apply used
+    bootstrap_hash: String,
+}
+
+/// Wait on every component besides the API and report the cluster's phase
+///
+/// A cluster whose components are all available is `Ready`; one whose components are still
+/// rolling out or have become unavailable (such as when their node goes down) is
+/// `Provisioning` naming them and is checked again soon. Nodes that failed to provision make
+/// the cluster `Error` listing them (along with any pending components, which aren't waited
+/// on then) while its components stay deployed, and they are retried shortly.
+///
+/// # Arguments
+///
+/// * `meta` - Thorium cluster metadata being operated upon
+/// * `outcome` - What the apply found
+/// * `rollout_wait` - How long to wait for the components to roll out
+async fn finish(
+    meta: &ClusterMeta,
+    outcome: Outcome,
+    rollout_wait: Duration,
+) -> Result<Action, Error> {
+    // get every component but the API, which has already rolled out
     let components = meta
         .cluster
         .list_component_names()
         .into_iter()
         .filter(|name| name != "api")
         .collect::<Vec<String>>();
-    if let Some(details) =
-        k8s::deployments::wait_for_rollouts(meta, &components, ROLLOUT_WAIT).await?
-    {
-        return Ok(still_provisioning(meta, details).await);
-    }
+    // nodes that failed to provision are reported right away, so don't wait on the components
+    let rollout_wait = if outcome.provisioning.is_some() {
+        Duration::ZERO
+    } else {
+        rollout_wait
+    };
+    // only report ready once every other component has rolled out too
+    let pending = k8s::deployments::wait_for_rollouts(meta, &components, rollout_wait).await?;
+    // without failed nodes the components alone decide the cluster's phase
+    let Some(failures) = outcome.provisioning else {
+        // check back later on components that don't finish soon
+        if let Some(details) = pending {
+            return Ok(still_provisioning(meta, details).await);
+        }
+        // fail without recording the bootstrap so it is retried once the missing Secrets exist
+        if !outcome.missing.is_empty() {
+            return Err(Error::new(format!(
+                "Components rolled out but the bootstrap is incomplete: {}",
+                outcome.missing.join("; ")
+            )));
+        }
+        // log completed ThoriumCluster instance
+        println!("Completed creation of {} ThoriumCluster", meta.name);
+        // report any non-fatal problems alongside the ready phase
+        let message = (!outcome.notes.is_empty()).then(|| outcome.notes.join("; "));
+        // mark this cluster as ready and record the bootstrap inputs we applied
+        k8s::crds::set_status_with_bootstrap(
+            &meta.client,
+            &meta.status,
+            ClusterPhase::Ready,
+            message,
+            outcome.bootstrap_hash,
+        )
+        .await;
+        // reconcile again in a day if nothing changes before then
+        return Ok(Action::requeue(Duration::from_secs(APPLY_REQUEUE_SECS)));
+    };
+    // list the failed nodes first, then anything else that needs attention
+    let mut problems = vec![failures];
+    problems.extend(pending);
     // fail without recording the bootstrap so it is retried once the missing Secrets exist
-    if !missing.is_empty() {
-        return Err(Error::new(format!(
-            "Components rolled out but the bootstrap is incomplete: {}",
-            missing.join("; ")
-        )));
+    if !outcome.missing.is_empty() {
+        problems.push(format!(
+            "the bootstrap is incomplete: {}",
+            outcome.missing.join("; ")
+        ));
+        return Err(Error::new(problems.join("; ")));
     }
-    // log completed ThoriumCluster instance
-    println!("Completed creation of {} ThoriumCluster", &meta.name);
-    // report any non-fatal problems alongside the ready phase
-    let message = (!notes.is_empty()).then(|| notes.join("; "));
-    // mark this cluster as ready and record the bootstrap inputs we applied
+    // report the non-fatal problems too
+    problems.extend(outcome.notes);
+    let message = problems.join("; ");
+    println!("Error: {message}");
+    // mark this cluster as errored while recording the bootstrap inputs we applied
     k8s::crds::set_status_with_bootstrap(
         &meta.client,
-        &meta.cluster,
-        ClusterPhase::Ready,
-        message,
-        bootstrap_hash,
+        &meta.status,
+        ClusterPhase::Error,
+        Some(message),
+        outcome.bootstrap_hash,
     )
     .await;
-    // reconcile again in a day if nothing changes before then
-    Ok(Action::requeue(Duration::from_secs(APPLY_REQUEUE_SECS)))
+    // retry the failed nodes shortly
+    Ok(Action::requeue(Duration::from_secs(
+        NODE_FAILURE_REQUEUE_SECS,
+    )))
 }
 
-/// Delete a ``ThoriumCluster``
+/// Delete a `ThoriumCluster`
 ///
 /// This deletes an existing Thorium cluster, leaving only certain artifacts behind for future
-/// ``ThoriumCluster`` deployments.
+/// `ThoriumCluster` deployments.
 ///
 /// Notes:
 ///   Not all cluster remnants are removed with this operation. Databases and database content persist
 ///   after k8s Thorium resources are cleaned up. User passwords, cluster and node settings will all
-///   persist after you delete a ``ThoriumCluster`` resource. This also does not remove any on host files
+///   persist after you delete a `ThoriumCluster` resource. This also does not remove any on host files
 ///   such as those dropped into the /opt/thorium directory of each worker node. Since we don't delete
 ///   the thorium-operator user, we also choose not to delete the corresponding thorium-operator-pass
-///   k8s secret. This will allow future reprovisioning of a new ``ThoriumCluster`` using the same DBs without
+///   k8s secret. This will allow future reprovisioning of a new `ThoriumCluster` using the same DBs without
 ///   manual intervention. If you wipe out the DBs after this operation runs, you will need to manually
 ///   delete that secret, otherwise provisioning with that user will fail. Finally, since some resources
 ///   may remain inside this namespace, we do not delete the namespace from k8s.
@@ -388,6 +510,7 @@ pub async fn apply(
 /// * `meta` - Thorium cluster metadata being operated upon
 /// * `shared` - Data shared across watchers
 pub async fn cleanup(meta: &ClusterMeta, shared: &Arc<SharedInfo>) -> Result<Action, Error> {
+    // log which cluster we are deleting
     println!(
         "Deleting {} ThoriumCluster in {} namespace",
         meta.name, meta.namespace
@@ -396,7 +519,7 @@ pub async fn cleanup(meta: &ClusterMeta, shared: &Arc<SharedInfo>) -> Result<Act
     shared
         .info
         .pin()
-        .remove(&SharedInfo::key(&meta.namespace, &meta.name));
+        .remove(&SharedInfo::key(&meta.context, &meta.namespace, &meta.name));
     // only a cluster with a k8s scaler labels nodes, so leave other clusters' labels alone
     if meta.cluster.spec.components.scaler.is_some() {
         // remove kubernetes node labels
@@ -411,14 +534,14 @@ pub async fn cleanup(meta: &ClusterMeta, shared: &Arc<SharedInfo>) -> Result<Act
     Ok(Action::await_change())
 }
 
-/// Delete the resources a ``ThoriumCluster`` created in its own namespace
+/// Delete the resources a `ThoriumCluster` created in its own namespace
 ///
 /// This doesn't need the cluster's Thorium config, so it also runs for a cluster whose
 /// config can no longer be resolved.
 ///
 /// # Arguments
 ///
-/// * `cluster` - The ``ThoriumCluster`` being deleted
+/// * `cluster` - The `ThoriumCluster` being deleted
 /// * `client` - The kube client to delete resources with
 pub async fn cleanup_namespace(cluster: &ThoriumCluster, client: &Client) -> Result<(), Error> {
     // get the name and namespace of this cluster
@@ -440,6 +563,246 @@ pub async fn cleanup_namespace(cluster: &ThoriumCluster, client: &Client) -> Res
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::k8s::clusters::tests::{FakeKube, meta_for, namespaced_cluster};
+
+    /// The path of the test cluster's status subresource
+    const STATUS_PATH: &str =
+        "/apis/sandia.gov/v1/namespaces/thorium/thoriumclusters/thorium/status";
+
+    /// Build a cluster with an API and a k8s scaler whose status is in a phase
+    ///
+    /// # Arguments
+    ///
+    /// * `phase` - The phase the cluster's status reports
+    fn scaling_cluster(phase: ClusterPhase) -> ThoriumCluster {
+        // build a cluster with just an API and a scaler
+        let mut cluster = namespaced_cluster(serde_json::json!({
+            "components": {"api": {}, "scaler": {}},
+            "registry": "registry/thorium",
+            "version": "1.8.1",
+            "config": {},
+            "config_secrets": [{"name": "thorium-config-secrets"}]
+        }));
+        cluster.metadata.generation = Some(1);
+        cluster.status = Some(crate::k8s::crds::ThoriumClusterStatus {
+            phase: Some(phase),
+            observed_generation: Some(1),
+            bootstrap_hash: Some("bootstrap".to_owned()),
+            ..Default::default()
+        });
+        cluster
+    }
+
+    /// Build a fake kube API serving a scaler Deployment with some available replicas, a pod
+    /// stranded on a down node, and the cluster's status subresource
+    ///
+    /// # Arguments
+    ///
+    /// * `cluster` - The cluster whose status is patched
+    /// * `available` - How many of the scaler's single replica are available
+    fn fake_components(cluster: &ThoriumCluster, available: i32) -> FakeKube {
+        // a scaler that rolled out with one replica that is or isn't available
+        let scaler = serde_json::json!({
+            "apiVersion": "apps/v1",
+            "kind": "Deployment",
+            "metadata": {"name": "scaler", "namespace": "thorium", "generation": 1},
+            "spec": {"replicas": 1, "selector": {"matchLabels": {"app": "scaler"}}, "template": {}},
+            "status": {
+                "observedGeneration": 1,
+                "replicas": 1,
+                "updatedReplicas": 1,
+                "availableReplicas": available
+            }
+        });
+        // its pod, which the node lifecycle controller marked unready
+        let pods = serde_json::json!({
+            "apiVersion": "v1",
+            "kind": "PodList",
+            "metadata": {},
+            "items": [{
+                "metadata": {"name": "scaler-1"},
+                "status": {
+                    "phase": "Running",
+                    "conditions": [{"type": "Ready", "status": "False"}],
+                    "containerStatuses": [{
+                        "name": "scaler",
+                        "ready": true,
+                        "restartCount": 0,
+                        "image": "thorium",
+                        "imageID": "",
+                        "state": {"running": {}}
+                    }]
+                }
+            }]
+        });
+        FakeKube::default()
+            .route(
+                "GET",
+                "/apis/apps/v1/namespaces/thorium/deployments/scaler",
+                200,
+                scaler,
+            )
+            .route("GET", "/api/v1/namespaces/thorium/pods", 200, pods)
+            .route(
+                "PATCH",
+                STATUS_PATH,
+                200,
+                serde_json::to_value(cluster).expect("cluster"),
+            )
+    }
+
+    /// Build what an apply found
+    ///
+    /// # Arguments
+    ///
+    /// * `missing` - The bootstrap steps whose Secrets are missing
+    /// * `provisioning` - A description of the nodes that failed to provision
+    fn outcome(missing: &[&str], provisioning: Option<&str>) -> Outcome {
+        Outcome {
+            notes: Vec::new(),
+            missing: missing.iter().map(ToString::to_string).collect(),
+            provisioning: provisioning.map(ToOwned::to_owned),
+            bootstrap_hash: "bootstrap-2".to_owned(),
+        }
+    }
+
+    /// Get the status patches sent through a fake kube API
+    ///
+    /// # Arguments
+    ///
+    /// * `fake` - The fake kube API
+    fn status_writes(fake: &FakeKube) -> Vec<serde_json::Value> {
+        fake.writes()
+            .into_iter()
+            .filter(|request| request.path == STATUS_PATH)
+            .map(|request| request.body["status"].clone())
+            .collect()
+    }
+
+    /// A ready cluster whose component becomes unavailable (here with its node down) moves to
+    /// provisioning naming it and why, and moves back to ready once it recovers
+    #[tokio::test]
+    async fn unavailable_component_leaves_and_regains_ready() {
+        // a ready cluster whose scaler lost its only available replica
+        let cluster = scaling_cluster(ClusterPhase::Ready);
+        let fake = fake_components(&cluster, 0);
+        let meta = meta_for(cluster, &fake.client());
+        // the cluster is checked again soon
+        let action = finish(&meta, outcome(&[], None), Duration::ZERO)
+            .await
+            .expect("finish");
+        assert_eq!(
+            action,
+            Action::requeue(Duration::from_secs(WAITING_REQUEUE_SECS))
+        );
+        // the only write is the provisioning status naming the scaler and its down node
+        assert_eq!(fake.writes().len(), 1, "{:?}", fake.writes());
+        let status = &status_writes(&fake)[0];
+        assert_eq!(status["phase"], "Provisioning");
+        let message = status["message"].as_str().expect("message");
+        assert!(
+            message.starts_with("Waiting for scaler to roll out: scaler: "),
+            "{message}"
+        );
+        assert!(
+            message.contains("node may be down or unreachable"),
+            "{message}"
+        );
+        // once the scaler is available again the cluster is ready
+        let cluster = scaling_cluster(ClusterPhase::Provisioning);
+        let fake = fake_components(&cluster, 1);
+        let meta = meta_for(cluster, &fake.client());
+        let action = finish(&meta, outcome(&[], None), Duration::ZERO)
+            .await
+            .expect("finish");
+        assert_eq!(
+            action,
+            Action::requeue(Duration::from_secs(APPLY_REQUEUE_SECS))
+        );
+        let status = &status_writes(&fake)[0];
+        assert_eq!(status["phase"], "Ready");
+        assert_eq!(status["bootstrap_hash"], "bootstrap-2");
+    }
+
+    /// Nodes that failed to provision mark the cluster as errored listing them and any pending
+    /// component without waiting on it, record the completed bootstrap, and are retried soon
+    #[tokio::test]
+    async fn failed_nodes_report_error() {
+        // a cluster whose components are deployed but whose scaler isn't available yet
+        let cluster = scaling_cluster(ClusterPhase::Ready);
+        let fake = fake_components(&cluster, 0);
+        let meta = meta_for(cluster, &fake.client());
+        let failed = "Failed to provision nodes: node node-a: fake error";
+        // the reconcile succeeds and retries the nodes shortly
+        let action = finish(&meta, outcome(&[], Some(failed)), ROLLOUT_WAIT)
+            .await
+            .expect("finish");
+        assert_eq!(
+            action,
+            Action::requeue(Duration::from_secs(NODE_FAILURE_REQUEUE_SECS))
+        );
+        // a single error status lists the failed node and then the pending scaler
+        let statuses = status_writes(&fake);
+        assert_eq!(statuses.len(), 1, "{statuses:?}");
+        assert_eq!(statuses[0]["phase"], "Error");
+        let message = statuses[0]["message"].as_str().expect("message");
+        assert!(message.starts_with(failed), "{message}");
+        assert!(
+            message.contains("Waiting for scaler to roll out"),
+            "{message}"
+        );
+        assert_eq!(statuses[0]["bootstrap_hash"], "bootstrap-2");
+        // with every component available only the failed nodes are listed
+        let cluster = scaling_cluster(ClusterPhase::Ready);
+        let fake = fake_components(&cluster, 1);
+        let meta = meta_for(cluster, &fake.client());
+        finish(&meta, outcome(&[], Some(failed)), Duration::ZERO)
+            .await
+            .expect("finish");
+        assert_eq!(status_writes(&fake)[0]["message"], failed);
+    }
+
+    /// Nodes that failed to provision alongside missing bootstrap Secrets fail the reconcile
+    /// with both, without recording the bootstrap
+    #[tokio::test]
+    async fn failed_nodes_and_missing_secrets_fail() {
+        // a cluster whose components are all available
+        let cluster = scaling_cluster(ClusterPhase::Ready);
+        let fake = fake_components(&cluster, 1);
+        let meta = meta_for(cluster, &fake.client());
+        // the reconcile fails naming the failed node and the missing Secret
+        let error = finish(
+            &meta,
+            outcome(
+                &["missing admin Secret"],
+                Some("Failed to provision nodes: node node-a"),
+            ),
+            Duration::ZERO,
+        )
+        .await
+        .expect_err("incomplete bootstrap");
+        let message = error.to_string();
+        assert!(message.contains("node node-a"), "{message}");
+        assert!(
+            message.contains("the bootstrap is incomplete: missing admin Secret"),
+            "{message}"
+        );
+        // nothing was written, so the bootstrap isn't recorded
+        assert!(fake.writes().is_empty(), "{:?}", fake.writes());
+        // missing Secrets alone keep their message
+        let error = finish(
+            &meta,
+            outcome(&["missing admin Secret"], None),
+            Duration::ZERO,
+        )
+        .await
+        .expect_err("incomplete bootstrap");
+        assert!(
+            error
+                .to_string()
+                .contains("Components rolled out but the bootstrap is incomplete")
+        );
+    }
 
     /// The mounts hash is stable and changes when any mounted document changes
     #[test]

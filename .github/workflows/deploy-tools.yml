@@ -1,0 +1,154 @@
+# Checks the minithor and megathor deployment tools
+#
+# - The shell scripts are syntax-checked with bash -n and linted with shellcheck (warnings and
+#   above), from the runner image or the distro's signed packages.
+# - megathor's thorium chart values template is rendered with its default variables and each
+#   group_vars variant, and every rendering is linted and rendered against deploy/charts/thorium
+#   (and its infra-operators values template against deploy/charts/infra-operators),
+#   so a template change that breaks the chart (or a chart change that breaks megathor) fails
+#   here rather than in a deployment. secrets.renderOnly stands in placeholder credentials, since
+#   helm can't read generated ones back from a cluster.
+# - Jobs start with no token permissions, actions are pinned by full commit SHA, checkout does not
+#   persist credentials, and setup-helm is given an empty token, since it needs none but defaults
+#   to the job's.
+name: Deployment Tools
+
+on:
+  push:
+    branches: ['**']
+    paths:
+      - 'minithor/**'
+      - 'megathor/**'
+      - 'deploy/charts/**'
+      - '.github/workflows/deploy-tools.yml'
+  pull_request:
+    paths:
+      - 'minithor/**'
+      - 'megathor/**'
+      - 'deploy/charts/**'
+      - '.github/workflows/deploy-tools.yml'
+  workflow_dispatch:
+
+# jobs start with no token permissions and are granted only what they use
+permissions: {}
+
+# superseded runs are cancelled, except on the default branch
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.ref != format('refs/heads/{0}', github.event.repository.default_branch) }}
+
+env:
+  HELM_VERSION: v3.22.0
+  CHARTS: deploy/charts
+
+jobs:
+  shell:
+    name: Lint Shell Scripts
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Check syntax
+        run: |
+          for script in minithor/minithor megathor/scripts/*.bash; do
+            bash -n "$script"
+          done
+      # shellcheck comes from the runner image, or the distro's signed packages when it lacks it
+      - name: Install shellcheck
+        run: command -v shellcheck >/dev/null || { sudo apt-get update && sudo apt-get install -y shellcheck; }
+      - name: Run shellcheck
+        run: shellcheck --severity=warning minithor/minithor megathor/scripts/*.bash
+      - name: Check every command's help
+        run: |
+          for cmd in "" minikube "minikube install" "minikube delete" start deploy credentials \
+            get-config expose stop cleanup; do
+            # word splitting turns each entry into its subcommand and arguments
+            # shellcheck disable=SC2086
+            bash minithor/minithor $cmd --help > /dev/null
+          done
+
+  megathor-values:
+    name: Render megathor Values
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: azure/setup-helm@9bc31f4ebc9c6b171d7bfbaa5d006ae7abdb4310 # v5.0.1
+        with:
+          version: ${{ env.HELM_VERSION }}
+          token: ""
+      # Jinja2 and PyYAML come from the distro's signed packages when the runner image lacks them
+      - name: Install Jinja2 and PyYAML
+        run: |
+          python3 -c 'import jinja2, yaml' 2>/dev/null \
+            || { sudo apt-get update && sudo apt-get install -y python3-jinja2 python3-yaml; }
+      - name: Parse every megathor YAML file
+        run: |
+          find megathor -name '*.yml' -print0 | xargs -0 python3 -c '
+          import sys, yaml
+          for path in sys.argv[1:]:
+              with open(path) as handle:
+                  list(yaml.safe_load_all(handle))
+          '
+      # Each variant renders values.yaml.j2 from every role's defaults and group_vars/all.yml (as
+      # deploy.yml loads them), any extra vars, and placeholder credentials standing in for the
+      # ones the secrets role sets, then lints and renders the thorium chart with the result
+      - name: Render megathor's values and check them against the thorium chart
+        run: |
+          render_dir="${RUNNER_TEMP}/megathor-values"
+          mkdir -p "$render_dir"
+          creds="${render_dir}/credentials.yml"
+          for var in thorium_secret redis_password scylla_password elastic_password s3_access_key \
+            s3_secret_key quickwit_postgres_super_password thorium_admin_password; do
+            echo "${var}: render-only"
+          done > "$creds"
+          defaults=(megathor/roles/*/defaults/main.yml megathor/inventory/group_vars/all.yml)
+          # check <name> <thorium namespace> [vars files and -e key=value...]
+          check() {
+            local name=$1 namespace=$2
+            shift 2
+            local values="${render_dir}/${name}.yaml"
+            echo "::group::${name}"
+            python3 megathor/scripts/render-values.py megathor/roles/thorium/templates/values.yaml.j2 \
+              "${defaults[@]}" "$@" "$creds" > "$values"
+            helm lint --strict -n "$namespace" -f "$values" --set secrets.renderOnly=true "$CHARTS/thorium"
+            helm template thorium "$CHARTS/thorium" -n "$namespace" -f "$values" \
+              --set secrets.renderOnly=true > /dev/null
+            echo "::endgroup::"
+          }
+          check defaults thorium
+          check offline thorium megathor/inventory/group_vars/offline.yml
+          check single-node thorium megathor/inventory/group_vars/single_node.yml
+          check no-quickwit thorium -e quickwit_enabled=false \
+            -e thorium_tracing_endpoint=http://otel.example.com:4317
+          check external thorium -e redis_enabled=false -e thorium_external_redis_host=redis.example.com \
+            -e rook_enabled=false -e seaweedfs_enabled=false -e s3_endpoint=https://s3.example.com \
+            -e s3_region=us-east-1
+          check prefixed dev-thorium -e namespace_prefix=dev -e thorium_version=1.2.3 \
+            -e thorium_container_registry=registry.example.com:5000 -e thorium_scaler_enabled=false
+      - name: Render megathor's infra-operators values and check them against the chart
+        run: |
+          render_dir="${RUNNER_TEMP}/megathor-values"
+          mkdir -p "$render_dir"
+          defaults=(megathor/roles/*/defaults/main.yml megathor/inventory/group_vars/all.yml)
+          for variant in defaults offline; do
+            echo "::group::infra-operators ${variant}"
+            vars=()
+            if [ "$variant" = offline ]; then
+              vars=(megathor/inventory/group_vars/offline.yml)
+            fi
+            values="${render_dir}/infra-operators-${variant}.yaml"
+            python3 megathor/scripts/render-values.py megathor/roles/infra_operators/templates/values.yaml.j2 \
+              "${defaults[@]}" "${vars[@]}" > "$values"
+            helm lint --strict -n infra-operators -f "$values" "$CHARTS/infra-operators"
+            helm template infra-operators "$CHARTS/infra-operators" -n infra-operators -f "$values" > /dev/null
+            echo "::endgroup::"
+          done

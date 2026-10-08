@@ -29,6 +29,8 @@ pub mod streams;
 pub mod system;
 pub mod tags;
 mod trees;
+#[cfg(any(feature = "api", feature = "client"))]
+pub mod upgrades;
 pub mod users;
 mod version;
 mod volumes;
