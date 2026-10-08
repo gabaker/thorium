@@ -1,40 +1,33 @@
 ---
-
-# SeaweedFS buckets are created in-cluster by the seaweedfs role, so the
-# controller-side bucket creation below only runs for rook or an external S3
-# service, and needs the controller to reach s3_endpoint
-- name: Create Quickwit bucket from the controller
-  when: not (seaweedfs_enabled | default(false) | bool)
+# The thorium chart creates the Quickwit bucket in its own SeaweedFS (deploy.yml skips this role
+# then). Rook's object store is only reachable inside the cluster, so its bucket is created from
+# the rook-ceph-tools pod; an external S3 service is reached from the controller.
+- name: Create the Quickwit bucket in Rook's object store
+  when: rook_enabled | bool
   block:
-    - name: Create s3cmd configuration
-      template:
-        src: s3cmd.conf.j2
-        dest: ./artifacts/s3cmd.cfg
-        mode: "0600"
+    # the script carries the S3 keys, so it goes over stdin and stays out of the log
+    - name: Create the Quickwit bucket from the rook-ceph-tools pod
+      ansible.builtin.command:
+        argv: [kubectl, -n, "{{ rook_namespace }}", exec, -i, deploy/rook-ceph-tools, --, python3, "-"]
+        stdin: "{{ lookup('template', 'create-bucket.py.j2', template_vars={'s3_bucket_name': quickwit_bucket}) }}"
+      register: quickwit_bucket_create
+      changed_when: "'created bucket' in quickwit_bucket_create.stdout"
+      failed_when: false
+      no_log: true
 
-    - name: Create S3 buckets with Ansible aws module
-      amazon.aws.s3_bucket:
-        name: "{{ item }}"
-        state: present
-        force: true
-        encryption: none
-        region: "{{ s3_region }}"
-        endpoint_url: "{{ s3_endpoint }}"
-        access_key: "{{ s3_access_key }}"
-        secret_key: "{{ s3_secret_key }}"
-        validate_certs: "{{ s3_validate_certs }}"
-        ceph: "{{ rook_enabled | bool }}"
-      loop:
-        - "{{ quickwit_bucket }}"
-      environment:
-        HTTP_PROXY: ""
-        http_proxy: ""
-        HTTPS_PROXY: ""
-        https_proxy: ""
-      ignore_errors: true
+    - name: Fail when the Quickwit bucket couldn't be created
+      ansible.builtin.fail:
+        msg: "Creating the {{ quickwit_bucket }} bucket failed (rc {{ quickwit_bucket_create.rc }}): {{ quickwit_bucket_create.stderr }}"
+      when: quickwit_bucket_create.rc != 0
 
-    - name: Create S3 Buckets with s3cmd
-      command: "s3cmd mb -c ./artifacts/s3cmd.cfg s3://{{ item }}"
-      ignore_errors: true
-      loop:
-        - "{{ quickwit_bucket }}"
+- name: Create the Quickwit bucket in the external S3 service
+  amazon.aws.s3_bucket:
+    name: "{{ quickwit_bucket }}"
+    state: present
+    encryption: none
+    region: "{{ s3_region }}"
+    endpoint_url: "{{ s3_endpoint }}"
+    access_key: "{{ s3_access_key }}"
+    secret_key: "{{ s3_secret_key }}"
+    validate_certs: "{{ s3_validate_certs }}"
+  when: not (rook_enabled | bool)

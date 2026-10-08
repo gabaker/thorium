@@ -3,33 +3,63 @@
 - name: Choose the infra-operators chart
   ansible.builtin.set_fact:
     infra_operators_chart_ref: >-
-      {{ infra_operators_chart if infra_operators_chart | length > 0
+      {{ infra_operators_chart if infra_operators_chart | default('', true) | length > 0
          else (playbook_dir ~ '/files/infra-operators-' ~ thorium_chart_version ~ '.tgz') if offline | bool
          else thorium_chart_repo ~ '/infra-operators' }}
 
+# The Scylla operator creates its ScyllaOperatorConfig "cluster" when none exists, and the chart
+# renders one when it pulls from a mirror registry (offline), so a release that starts rendering
+# it would fail on the operator's copy; it is labeled as part of the release first so Helm adopts
+# it. The lookup finds nothing on a fresh cluster (before the Scylla CRDs exist)
+- name: Find the Scylla operator's ScyllaOperatorConfig
+  kubernetes.core.k8s_info:
+    api_version: scylla.scylladb.com/v1alpha1
+    kind: ScyllaOperatorConfig
+    name: cluster
+  register: infra_operators_scylla_config
+  when: scylla_operator_enabled | bool
+
+- name: Adopt the Scylla operator's ScyllaOperatorConfig into the infra-operators release
+  kubernetes.core.k8s:
+    state: patched
+    api_version: scylla.scylladb.com/v1alpha1
+    kind: ScyllaOperatorConfig
+    name: cluster
+    definition:
+      metadata:
+        labels:
+          app.kubernetes.io/managed-by: Helm
+        annotations:
+          meta.helm.sh/release-name: infra-operators
+          meta.helm.sh/release-namespace: "{{ infra_operators_namespace }}"
+  when:
+    - scylla_operator_enabled | bool
+    - infra_operators_scylla_config.resources | default([]) | length > 0
+    - (infra_operators_scylla_config.resources[0].metadata.annotations | default({}))['meta.helm.sh/release-name'] | default('') != 'infra-operators'
+
+# The generated values are passed as the first values file, since the helm module applies its
+# values option after every values file and would otherwise override infra_operators_values_files
 - name: Install the infra-operators chart
-  kubernetes.core.helm:
-    name: infra-operators
-    chart_ref: "{{ infra_operators_chart_ref }}"
-    # only oci:// references are versioned; local charts carry their own version
-    chart_version: "{{ thorium_chart_version if infra_operators_chart_ref is match('oci://') else omit }}"
-    release_namespace: "{{ infra_operators_namespace }}"
-    create_namespace: true
-    wait: true
-    wait_timeout: "{{ service_wait_timeout }}s"
-    values_files: "{{ infra_operators_values_files }}"
-    values:
-      global:
-        imageRegistry: "{{ offline_registry if offline | bool else '' }}"
-      scylla-operator:
-        enabled: "{{ scylla_operator_enabled | bool }}"
-        replicas: "{{ scylla_operator_replicas | int }}"
-        webhookServerReplicas: "{{ scylla_operator_replicas | int }}"
-        image:
-          repository: "{{ offline_registry ~ '/scylladb' if offline | bool else 'docker.io/scylladb' }}"
-      eck-operator:
-        enabled: "{{ elastic_operator_enabled | bool }}"
-        image:
-          repository: "{{ offline_registry ~ '/eck/eck-operator' if offline | bool else 'docker.elastic.co/eck/eck-operator' }}"
-      kubegres:
-        enabled: "{{ kubegres_operator_enabled | bool }}"
+  block:
+    - name: Write the infra-operators chart values
+      ansible.builtin.template:
+        src: values.yaml.j2
+        dest: ./artifacts/infra-operators-values.yaml
+        mode: "0600"
+
+    - name: Install the infra-operators chart
+      kubernetes.core.helm:
+        name: infra-operators
+        chart_ref: "{{ infra_operators_chart_ref }}"
+        # only oci:// references are versioned; local charts carry their own version
+        chart_version: "{{ thorium_chart_version if infra_operators_chart_ref is match('oci://') else omit }}"
+        release_namespace: "{{ infra_operators_namespace }}"
+        create_namespace: true
+        wait: true
+        wait_timeout: "{{ service_wait_timeout }}s"
+        values_files: "{{ ['./artifacts/infra-operators-values.yaml'] + infra_operators_values_files }}"
+  always:
+    - name: Remove the infra-operators chart values
+      ansible.builtin.file:
+        path: ./artifacts/infra-operators-values.yaml
+        state: absent

@@ -8834,6 +8834,7 @@ dependencies = [
  "elasticsearch",
  "futures 0.3.34",
  "generic-array",
+ "http 1.5.0",
  "json-patch",
  "k8s-openapi",
  "kube",
@@ -8853,6 +8854,7 @@ dependencies = [
  "thorium-api",
  "tokio",
  "tokio-stream",
+ "tower",
 ]
 
 [[package]]

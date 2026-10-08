@@ -5,7 +5,7 @@ thorium:
   # underscores only, starting with a lowercase letter, at most 48 characters; Thorium refuses
   # to start with any other namespace, so a namespace with uppercase letters must be renamed,
   # and the Redis state under its old prefix isn't found or migrated
-  namespace: "<NAMESPACE>"
+  namespace: "thorium"
   secret_key: "<SECRET_KEY>"
   tracing:
     local:
@@ -29,8 +29,13 @@ thorium:
   retention:
     data: 10
     logs: 10
-  web_ui:
-    version: "0.0.0"
+  # Scaler settings (optional). These are the defaults.
+  # scaler:
+  #   # How many groups to list or images to inspect at once when loading the cache
+  #   cache_concurrency: 10
+  #   k8s:
+  #     # How many namespaces or user secrets to setup at once when syncing to a new cache
+  #     setup_concurrency: 25
   # Authentication settings (optional). Uncomment and fill in to enable OAuth/OIDC login.
   # NOTE: OAuth registration requires email verification (auth.email below) to be configured;
   # without it new-user registration through OAuth is rejected.

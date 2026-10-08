@@ -40,3 +40,8 @@ json-patch = "4.2"
 sha2 = "0.10"
 elasticsearch = { version = "9.0.0-alpha.1" }
 redis = { version = "0.32.1", default-features = false, features = ["tokio-comp"] }
+
+[dev-dependencies]
+# in-process fake of the kube API for tests (both already resolved through kube)
+tower = { version = "0.5", features = ["util"] }
+http = "1"

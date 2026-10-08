@@ -38,7 +38,7 @@ The body you should post should look like this (with all role arrays being optio
 ### LDAP Support
 
 Users and groups in Thorium can also be backed by LDAP. In order for this to work you must
-have configured ldap settings in your [Thorium.yml](../../setup/setup.md). Its also important
+have configured ldap settings in your [Thorium config](../../admins/deploy/concepts.md#configuration-and-credentials). Its also important
 to remember that LDAP metagroups and manual Thorium group permissions cannot be mixed within
 the same role. So if you want to sync the owners role for a group with one or more LDAP
 metagroups you cannot also assign a Thorium user that role directly. You must give them the

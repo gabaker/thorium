@@ -1,0 +1,5 @@
+{{- /* values this subchart doesn't read, each with the value to use instead */ -}}
+{{- include "thorium.movedValues" (dict "values" .Values "prefix" "infra." "moved" (list
+  (list "elastic.kibanaImage" "use infra.elastic.kibana.image")
+  (list "postgres.database" "the metastore database is always quickwit-metastore, the name the Quickwit metastore URI uses")
+)) -}}

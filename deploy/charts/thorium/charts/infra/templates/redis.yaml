@@ -1,9 +1,10 @@
 {{- if include "infra.managed" (dict "root" $ "service" "redis") }}
 {{- $ns := include "thorium.ns" (dict "root" $ "name" "redis") }}
+{{- $conf := include "infra.redisConf" . }}
 {{- $start := .Files.Get "files/redis-start.sh" }}
 ---
-# the Redis conf without the password; requirepass is passed from the redis-auth secret. The start
-# script switches an existing RDB-only data volume to AOF before Redis runs with appendonly yes.
+# the Redis conf without the password, which it includes from the redis-auth secret, and the start
+# script that switches an existing RDB-only data volume to AOF before Redis runs with appendonly yes.
 # The conf's key is redis-aof.conf, not the redis.conf of charts that ran Redis with appendonly no
 # and no start script: a pod of such a chart that restarts against this ConfigMap (an upgrade that
 # applied the ConfigMap but not the StatefulSet) finds no conf and fails to start, rather than
@@ -17,56 +18,7 @@ metadata:
     {{- include "infra.labels" . | nindent 4 }}
 data:
   redis-aof.conf: |
-    bind 0.0.0.0
-    protected-mode yes
-    port 6379
-    tcp-backlog 511
-    timeout 0
-    tcp-keepalive 300
-    daemonize no
-    supervised no
-    pidfile /var/run/redis_6379.pid
-    loglevel notice
-    logfile ""
-    databases 16
-    always-show-logo yes
-    save 900 1
-    save 300 10
-    save 60 10000
-    stop-writes-on-bgsave-error yes
-    rdbcompression yes
-    rdbchecksum yes
-    dbfilename dump2.rdb
-    dir /data
-    appendonly yes
-    appendfilename "appendonly.aof"
-    appendfsync everysec
-    no-appendfsync-on-rewrite no
-    auto-aof-rewrite-percentage 100
-    auto-aof-rewrite-min-size 64mb
-    aof-load-truncated yes
-    aof-use-rdb-preamble yes
-    lua-time-limit 5000
-    slowlog-log-slower-than 10000
-    slowlog-max-len 128
-    latency-monitor-threshold 0
-    notify-keyspace-events ""
-    hash-max-ziplist-entries 512
-    hash-max-ziplist-value 64
-    list-max-ziplist-size -2
-    list-compress-depth 0
-    set-max-intset-entries 512
-    zset-max-ziplist-entries 128
-    zset-max-ziplist-value 64
-    hll-sparse-max-bytes 3000
-    stream-node-max-bytes 4096
-    stream-node-max-entries 100
-    activerehashing yes
-    hz 10
-    dynamic-hz yes
-    aof-rewrite-incremental-fsync yes
-    rdb-save-incremental-fsync yes
-    jemalloc-bg-thread yes
+    {{- $conf | nindent 4 }}
   redis-start.sh: |
     {{- $start | trimSuffix "\n" | nindent 4 }}
 ---
@@ -122,23 +74,29 @@ spec:
       labels:
         app: redis
       annotations:
-        # redis only reads its config at startup, so roll the pod when it changes
-        checksum/config: {{ .Values.redis | toJson | sha256sum }}
+        # Redis only reads its conf (and runs redis-start.sh) at startup, so the pod rolls when
+        # either changes
+        checksum/config: {{ print $conf $start | sha256sum }}
+        # and when redisPassword changes (global.manageSecretUpdates.redis), so it reads the new
+        # auth.conf (see thorium.credentialRevisions)
+        thorium.sandia.gov/credentials-revision: {{ (include "thorium.credentialRevisions" $ | fromYaml).redis | quote }}
     spec:
+      automountServiceAccountToken: false
+      {{- with .Values.redis.podSecurityContext }}
+      securityContext:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
       containers:
         - name: redis
           image: {{ include "thorium.image" (dict "root" $ "image" .Values.redis.image) }}
           imagePullPolicy: IfNotPresent
-          # execs redis-server with redis-aof.conf and the password, first switching an RDB-only
-          # volume to AOF (the ConfigMap's files aren't executable, so sh runs it; it reads
-          # REDIS_PASSWORD for redis-cli)
-          command: ["sh", "/var/lib/redis/redis-start.sh", "/var/lib/redis/redis-aof.conf", "--requirepass", "$(REDIS_PASSWORD)"]
-          env:
-            - name: REDIS_PASSWORD
-              valueFrom:
-                secretKeyRef:
-                  name: redis-auth
-                  key: password
+          # execs redis-server with redis-aof.conf, first switching an RDB-only volume to AOF (the
+          # ConfigMap's files aren't executable, so sh runs it)
+          command: ["sh", "/var/lib/redis/redis-start.sh", "/var/lib/redis/redis-aof.conf"]
+          {{- with .Values.redis.securityContext }}
+          securityContext:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
           ports:
             - containerPort: 6379
               name: redis
@@ -153,10 +111,21 @@ spec:
               name: redis-data
             - mountPath: /var/lib/redis/
               name: redis-conf
+            - mountPath: /etc/redis/auth
+              name: redis-auth
+              readOnly: true
       volumes:
         - name: redis-conf
           configMap:
             name: redis-conf
+        # only auth.conf (requirepass), readable by the pod's group
+        - name: redis-auth
+          secret:
+            secretName: redis-auth
+            defaultMode: 0440
+            items:
+              - key: auth.conf
+                path: auth.conf
         - name: redis-data
           persistentVolumeClaim:
             claimName: redis-persistent-storage-claim

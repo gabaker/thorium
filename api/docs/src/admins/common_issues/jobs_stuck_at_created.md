@@ -45,11 +45,20 @@ kubectl get pods -n <NAMESPACE> | grep "/1" | awk '{print $1}' | kubectl logs -n
 ```
 
 If any of the logs show the agent exiting without claiming a job due to
-version mismatch, run the following command to update the Thorium
-agent on all nodes.
+version mismatch, the node's provision pod hasn't reinstalled the agent yet.
+The Thorium operator replaces the provision pods (and so the agents) once the
+API reports a new version: its node watcher checks each node every 15 minutes,
+and every `ThoriumCluster` reconcile checks too. Node provisioning pauses while
+the `ThoriumCluster` waits in the `UpgradeRequired` phase or runs an upgrade
+(see [Upgrading Thorium](../deploy/upgrades.md)). To reinstall the agent on
+every node now, for example after pushing a new image under the same tag,
+delete the provision pods and restart the operator, which recreates them when
+it reconciles the `ThoriumCluster` on startup (nothing watches the provision
+pods, so without the restart they only come back on the next reconcile):
 
 ```
-kubectl rollout restart deployment operator -n thorium
+kubectl -n thorium delete pod -l app=node-provisioner
+kubectl -n thorium rollout restart deployment/operator
 ```
 
 #### Outdated Agents: Bare Metal

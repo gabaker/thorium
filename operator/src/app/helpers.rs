@@ -51,6 +51,7 @@ impl From<Error> for CheckError {
     ///
     /// * `error` - The error the check failed with
     fn from(error: Error) -> Self {
+        // an error that isn't a known wait needs attention
         Self::Failed(error)
     }
 }
@@ -139,9 +140,9 @@ pub async fn thorium_client(host: &str, token: &str) -> Result<Thorium, Error> {
 
 /// Build an API url string
 ///
-/// Get the thorium host from operator args or the target ThoriumCluster instance being configured.
-/// The url string will be none outside of a development environment when running in kubernetes
-/// within a pod.
+/// Get the thorium host from operator args or the target `ThoriumCluster` instance being
+/// configured. The url argument is only set outside of k8s (for development), so in a pod the
+/// API's in-cluster service url is used.
 ///
 /// # Arguments
 ///
@@ -151,13 +152,9 @@ pub fn get_thorium_host(meta: &ClusterMeta, url: Option<&String>) -> String {
     match url {
         // grab url if passed to the operator as an arg, mostly for development
         Some(url) => url.to_owned(),
-        // use internal k8s networking by default
-        None => {
-            format!(
-                "http://thorium-api.{}.svc.cluster.local:80",
-                &meta.namespace
-            )
-        }
+        // use internal k8s networking by default, leaving the cluster domain to the pod's DNS
+        // search path so clusters with a domain other than cluster.local work
+        None => format!("http://thorium-api.{}.svc:80", meta.namespace),
     }
 }
 
@@ -183,6 +180,21 @@ pub fn error_chain(error: &dyn std::error::Error) -> String {
         source = cause.source();
     }
     chain
+}
+
+/// Get the location constraint to create a bucket in a region with
+///
+/// AWS rejects a `us-east-1` constraint since that is where buckets go without one, so no
+/// constraint is sent for it or when no region is set.
+///
+/// # Arguments
+///
+/// * `region` - The S3 region from the config, if one is set
+fn location_constraint(region: Option<&str>) -> Option<BucketLocationConstraint> {
+    // only send a constraint for a set region other than us-east-1
+    region
+        .filter(|region| !region.is_empty() && *region != "us-east-1")
+        .map(BucketLocationConstraint::from)
 }
 
 /// How a `HeadBucket` request for a bucket failed
@@ -354,10 +366,35 @@ fn redact_check_error(error: CheckError, endpoint: &str) -> CheckError {
     }
 }
 
+/// Describe a bucket that S3 refused to create
+///
+/// # Arguments
+///
+/// * `config` - The Thorium S3 configuration
+/// * `bucket_name` - The bucket that couldn't be created
+/// * `cause` - The error and its causes
+fn create_bucket_error(config: &S3, bucket_name: &str, cause: &str) -> CheckError {
+    // name the endpoint without any credentials in its URL
+    let endpoint = endpoint_name(&config.endpoint);
+    // show the region setting as configured, telling an empty one apart from an unset one
+    let region = config
+        .region
+        .as_deref()
+        .map_or_else(|| "unset".to_owned(), |region| format!("{region:?}"));
+    // name the bucket, where it was created, and how to work around a gateway that refuses it
+    Error::new(format!(
+        "Failed to create bucket {bucket_name} at {endpoint} (thorium.s3.region: {region}): \
+         {cause}. Pre-create the bucket to work around this, since the operator skips \
+         buckets that already exist"
+    ))
+    .into()
+}
+
 /// Create an S3 bucket
 ///
 /// Only a bucket that `HeadBucket` reports missing is created, so pre-created buckets need no
 /// create rights, and any other `HeadBucket` failure is reported with its status code.
+/// A `CreateBucketConfiguration` is only sent when the region needs a location constraint.
 /// Any error is returned without the user info configured in the endpoint.
 ///
 /// # Arguments
@@ -412,24 +449,19 @@ async fn try_create_bucket(
             }
         },
     }
-    // build out the bucket creation config
-    let mut bucket_config = CreateBucketConfiguration::builder();
-    // if we have a region set then set the location con
-    if let Some(region) = &config.region {
-        // build our constraint
-        let constraint = BucketLocationConstraint::from(region.as_str());
-        // set our constraint
-        bucket_config = bucket_config.location_constraint(constraint);
+    // start building the request to create the bucket
+    let mut request = client.create_bucket().bucket(bucket_name);
+    // pin the bucket to our region only when it needs a constraint, since some S3 gateways
+    // such as Ceph RGW reject an empty CreateBucketConfiguration
+    if let Some(constraint) = location_constraint(config.region.as_deref()) {
+        // build the configuration holding our location constraint
+        let bucket_config = CreateBucketConfiguration::builder()
+            .location_constraint(constraint)
+            .build();
+        request = request.create_bucket_configuration(bucket_config);
     }
-    // build our bucket config
-    let bucket_config = bucket_config.build();
     // attempt to create the bucket
-    let response = client
-        .create_bucket()
-        .create_bucket_configuration(bucket_config)
-        .bucket(bucket_name)
-        .send()
-        .await;
+    let response = request.send().await;
     match response {
         // bucket was created
         Ok(_) => {
@@ -457,16 +489,19 @@ async fn try_create_bucket(
                     println!("Bucket already exists: {bucket_name}");
                     Ok(())
                 }
-                _ => Err(Error::new(format!(
-                    "Failed to create bucket {bucket_name}: {service_err:?}"
-                ))
-                .into()),
+                // any other service error fails bucket creation
+                other => Err(create_bucket_error(
+                    config,
+                    bucket_name,
+                    &error_chain(other),
+                )),
             },
-            _ => Err(Error::new(format!(
-                "Failed to create bucket {bucket_name}: {}",
-                error_chain(&error)
-            ))
-            .into()),
+            // any error that isn't a service error fails bucket creation too
+            _ => Err(create_bucket_error(
+                config,
+                bucket_name,
+                &error_chain(&error),
+            )),
         },
     }
 }
@@ -836,6 +871,27 @@ mod tests {
         assert!(!message.contains("thorium-files"));
     }
 
+    /// The operator reaches the API through its in-cluster service unless given a url
+    #[tokio::test]
+    async fn thorium_host_default() {
+        // build cluster metadata in the thorium namespace
+        let fake = crate::k8s::clusters::tests::FakeKube::default();
+        let meta = crate::k8s::clusters::tests::meta_for(
+            crate::k8s::clusters::tests::namespaced_cluster(
+                crate::k8s::clusters::tests::full_spec(),
+            ),
+            &fake.client(),
+        );
+        // the in-cluster service is the default
+        assert_eq!(
+            get_thorium_host(&meta, None),
+            "http://thorium-api.thorium.svc:80"
+        );
+        // a url argument wins
+        let url = "http://localhost:8080".to_owned();
+        assert_eq!(get_thorium_host(&meta, Some(&url)), url);
+    }
+
     /// A scripted S3 response: status line, extra headers, and body
     type MockResponse = (
         &'static str,
@@ -843,9 +899,10 @@ mod tests {
         &'static str,
     );
 
-    /// Serve scripted S3 responses on a local port and record each request's method and path
+    /// Serve scripted S3 responses on a local port and record each request
     ///
-    /// Returns the endpoint to send requests to and the requests seen so far.
+    /// Returns the endpoint to send requests to and the full requests (request line, headers,
+    /// and body) seen so far.
     ///
     /// # Arguments
     ///
@@ -891,10 +948,10 @@ mod tests {
                         }
                     }
                 }
-                // record the method and path
+                // record the whole request
                 let text = String::from_utf8_lossy(&buf).to_string();
                 let line = text.lines().next().unwrap_or_default().to_owned();
-                record.lock().unwrap().push(line.clone());
+                record.lock().unwrap().push(text);
                 // pick the scripted response for this method
                 let (status, headers, body) = if line.starts_with("HEAD") {
                     &head
@@ -1194,5 +1251,115 @@ mod tests {
             .send()
             .await
             .expect("the created bucket exists");
+    }
+
+    /// Buckets in us-east-1 or without a region get no location constraint
+    #[test]
+    fn us_east_1_has_no_location_constraint() {
+        // AWS rejects a us-east-1 constraint and an unset region needs none
+        assert_eq!(location_constraint(Some("us-east-1")), None);
+        assert_eq!(location_constraint(Some("")), None);
+        assert_eq!(location_constraint(None), None);
+        // any other region pins the bucket to it
+        assert_eq!(
+            location_constraint(Some("us-west-2")),
+            Some(BucketLocationConstraint::UsWest2)
+        );
+        assert_eq!(
+            location_constraint(Some("custom-1")),
+            Some(BucketLocationConstraint::from("custom-1"))
+        );
+    }
+
+    /// Get the body of each `CreateBucket` request a mock S3 saw
+    ///
+    /// # Arguments
+    ///
+    /// * `seen` - The full requests the mock S3 recorded
+    fn create_bucket_bodies(seen: &std::sync::Mutex<Vec<String>>) -> Vec<String> {
+        // keep the body after the header block of every PUT
+        seen.lock()
+            .unwrap()
+            .iter()
+            .filter(|request| request.starts_with("PUT"))
+            .map(|request| {
+                request
+                    .split_once("\r\n\r\n")
+                    .map_or_else(String::new, |(_, body)| body.to_owned())
+            })
+            .collect()
+    }
+
+    /// A bucket created without a region, with an empty region, or in us-east-1 is sent with no
+    /// `CreateBucketConfiguration`, and any other region sends its location constraint
+    #[tokio::test]
+    async fn create_bucket_sends_configuration_only_with_a_constraint() {
+        for region in [None, Some(""), Some("us-east-1")] {
+            // serve a missing bucket that is then created
+            let (endpoint, seen) =
+                mock_s3(("404 Not Found", vec![], ""), ("200 OK", vec![], "")).await;
+            let (mut config, client) = test_s3(&endpoint, "key", "secret");
+            config.region = region.map(str::to_owned);
+            create_bucket(&config, &client, "thorium-files")
+                .await
+                .expect("the missing bucket is created");
+            // the create carries no body, which gateways like Ceph RGW reject when empty
+            let bodies = create_bucket_bodies(&seen);
+            assert_eq!(bodies.len(), 1, "region {region:?} sent {bodies:?}");
+            assert!(
+                bodies[0].is_empty(),
+                "region {region:?} sent a body: {}",
+                bodies[0]
+            );
+        }
+        // any other region pins the bucket to it
+        let (endpoint, seen) = mock_s3(("404 Not Found", vec![], ""), ("200 OK", vec![], "")).await;
+        let (mut config, client) = test_s3(&endpoint, "key", "secret");
+        config.region = Some("us-west-2".to_owned());
+        create_bucket(&config, &client, "thorium-files")
+            .await
+            .expect("the missing bucket is created");
+        let bodies = create_bucket_bodies(&seen);
+        assert_eq!(bodies.len(), 1, "sent {bodies:?}");
+        assert!(
+            bodies[0].contains("<CreateBucketConfiguration")
+                && bodies[0].contains("<LocationConstraint>us-west-2</LocationConstraint>"),
+            "no location constraint: {}",
+            bodies[0]
+        );
+    }
+
+    /// A rejected `CreateBucket` names the bucket, the endpoint, and the region setting, and
+    /// suggests pre-creating the bucket
+    #[tokio::test]
+    async fn create_bucket_failure_names_bucket_endpoint_and_region() {
+        // serve a missing bucket whose create is rejected without a message, as Ceph RGW does
+        let (endpoint, _) = mock_s3(
+            ("404 Not Found", vec![], ""),
+            (
+                "400 Bad Request",
+                vec![("Content-Type", "application/xml")],
+                "<?xml version=\"1.0\" encoding=\"UTF-8\"?><Error><Code>InvalidArgument</Code>\
+                 </Error>",
+            ),
+        )
+        .await;
+        let (mut config, client) = test_s3(&endpoint, "key", "secret");
+        config.region = Some(String::new());
+        let message = create_bucket(&config, &client, "thorium-yara-rulesets")
+            .await
+            .expect_err("a rejected create must not pass")
+            .to_string();
+        assert!(
+            message.contains("thorium-yara-rulesets"),
+            "no bucket: {message}"
+        );
+        assert!(message.contains(&endpoint), "no endpoint: {message}");
+        assert!(
+            message.contains("thorium.s3.region"),
+            "no region: {message}"
+        );
+        assert!(message.contains("InvalidArgument"), "no cause: {message}");
+        assert!(message.contains("Pre-create"), "no suggestion: {message}");
     }
 }

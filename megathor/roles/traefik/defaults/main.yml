@@ -4,5 +4,15 @@ traefik_namespace: "traefik"
 traefik_replicas: 1
 traefik_container_registry: "docker.io"
 traefik_image: "traefik"
-traefik_external_ips:
-  - "0.0.0.0" 
+# the type of Traefik's Service: LoadBalancer, NodePort, or ClusterIP. A LoadBalancer Service only
+# gets an address from a load balancer controller (MetalLB, a cloud provider) or from
+# traefik_external_ips; bare-metal clusters without either should use NodePort
+traefik_service_type: "LoadBalancer"
+# the node addresses Traefik's Service is reachable on (its externalIPs); empty leaves them out.
+# Kubernetes rejects unspecified (0.0.0.0, ::), loopback, and link-local addresses
+traefik_external_ips: []
+# whether the Helm install waits for the whole release, Service included. Helm counts a
+# LoadBalancer Service as ready only once it has externalIPs or a load balancer address, so the
+# default skips that wait for a LoadBalancer Service without externalIPs (which only a load
+# balancer controller could make ready); the role then waits for Traefik's Deployment alone
+traefik_wait: "{{ traefik_service_type != 'LoadBalancer' or (traefik_external_ips | length > 0) }}"

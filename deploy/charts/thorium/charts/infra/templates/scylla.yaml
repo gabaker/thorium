@@ -13,18 +13,10 @@ data:
     {{- .Values.scylla.config | trim | nindent 4 }}
     developer_mode: {{ .Values.scylla.developerMode }}
 ---
-# Scylla Manager is not deployed, so the agent only needs a placeholder token
-apiVersion: v1
-kind: Secret
-metadata:
-  name: scylla-auth-token
-  namespace: {{ $ns }}
-  labels:
-    {{- include "infra.labels" . | nindent 4 }}
-type: Opaque
-stringData:
-  auth-token.yaml: "auth_token: unused-placeholder-token"
----
+# The Scylla operator generates and owns the manager agent's auth token Secret
+# (<cluster>-auth-token, here scylla-auth-token). No custom agent config Secret
+# (scyllaAgentConfig) is set, since the operator waits for a named one to exist before it
+# manages that token
 apiVersion: scylla.scylladb.com/v1
 kind: ScyllaCluster
 metadata:
@@ -36,15 +28,14 @@ metadata:
 spec:
   repository: {{ include "thorium.image" (dict "root" $ "image" .Values.scylla.repository) | quote }}
   agentRepository: {{ include "thorium.image" (dict "root" $ "image" .Values.scylla.agentRepository) | quote }}
-  version: {{ .Values.scylla.version }}
-  agentVersion: {{ .Values.scylla.agentVersion }}
+  version: {{ .Values.scylla.version | quote }}
+  agentVersion: {{ .Values.scylla.agentVersion | quote }}
   developerMode: {{ .Values.scylla.developerMode }}
   datacenter:
-    name: {{ .Values.scylla.datacenter }}
+    name: {{ .Values.scylla.datacenter | quote }}
     racks:
-      - name: {{ .Values.scylla.rack }}
+      - name: {{ .Values.scylla.rack | quote }}
         scyllaConfig: scylla-config
-        scyllaAgentConfig: scylla-agent-config
         members: {{ .Values.scylla.members }}
         storage:
           capacity: {{ .Values.scylla.storage }}
@@ -53,11 +44,13 @@ spec:
           {{- end }}
         resources:
           {{- toYaml .Values.scylla.resources | nindent 10 }}
+        {{- if .Values.scylla.coredumps.enabled }}
         volumes:
           - name: coredumpfs
             hostPath:
-              path: /tmp/coredumps
+              path: {{ .Values.scylla.coredumps.path | quote }}
         volumeMounts:
           - mountPath: /tmp/coredumps
             name: coredumpfs
+        {{- end }}
 {{- end }}

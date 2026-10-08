@@ -1,6 +1,160 @@
-{{- if include "infra.managed" (dict "root" $ "service" "postgres") }}
+{{- /*
+The spec of the Job creating the Quickwit metastore database. The Job is named after a hash of
+this rendered spec, since a Job's pod template is immutable: any change to it creates a new Job
+rather than failing to patch the existing one.
+*/ -}}
+{{- define "infra.metastoreDbJobSpec" -}}
+{{- $host := include "thorium.host" (dict "root" $ "service" "postgres" "ns" "quickwit") -}}
+backoffLimit: {{ .Values.jobs.backoffLimit }}
+template:
+  spec:
+    restartPolicy: Never
+    automountServiceAccountToken: false
+    {{- with .Values.jobs.metastorePodSecurityContext }}
+    securityContext:
+      {{- toYaml . | nindent 6 }}
+    {{- end }}
+    containers:
+      - name: createdb
+        image: {{ include "thorium.image" (dict "root" $ "image" .Values.postgres.image) }}
+        imagePullPolicy: IfNotPresent
+        {{- with .Values.jobs.securityContext }}
+        securityContext:
+          {{- toYaml . | nindent 10 }}
+        {{- end }}
+        {{- with .Values.jobs.resources }}
+        resources:
+          {{- toYaml . | nindent 10 }}
+        {{- end }}
+        volumeMounts:
+          - mountPath: /tmp
+            name: tmp
+        env:
+          - name: HOME
+            value: /tmp
+          - name: PGHOST
+            value: {{ $host | quote }}
+          - name: PGUSER
+            value: postgres
+          - name: PGPASSWORD
+            valueFrom:
+              secretKeyRef:
+                name: postgres-cluster-auth
+                key: superUserPassword
+          # the database the Quickwit metastore URI rendered by the secrets subchart names
+          - name: DATABASE
+            value: quickwit-metastore
+        command:
+          - /bin/sh
+          - -c
+          - |
+            set -e
+            for attempt in $(seq 1 60); do
+              psql -c "SELECT 1" >/dev/null 2>&1 && break
+              echo "Waiting for Postgres to accept connections ($attempt/60)..."
+              sleep 5
+            done
+            if psql -tAc "SELECT 1 FROM pg_database WHERE datname='$DATABASE'" | grep -q 1; then
+              echo "Database $DATABASE already exists"
+            else
+              createdb "$DATABASE"
+            fi
+    volumes:
+      - name: tmp
+        emptyDir:
+          sizeLimit: 64Mi
+{{- end -}}
+{{- /*
+The spec of the Job that sets a changed postgresPassword in the chart's Postgres, which Kubegres
+only reads when it initializes the database. It logs in with the current password and, when
+that is rejected, with the previous one (kept by the secrets subchart) to run ALTER USER for the
+superuser and Kubegres's replication user. The Job is named after a hash of this spec, which
+includes the revision postgresPassword last changed at, so it runs again whenever it changes.
+*/ -}}
+{{- define "infra.postgresPasswordJobSpec" -}}
+{{- $host := include "thorium.host" (dict "root" $ "service" "postgres" "ns" "quickwit") -}}
+backoffLimit: {{ .Values.jobs.backoffLimit }}
+template:
+  metadata:
+    annotations:
+      thorium.sandia.gov/credentials-revision: {{ (include "thorium.credentialRevisions" $ | fromYaml).postgres | quote }}
+  spec:
+    restartPolicy: Never
+    automountServiceAccountToken: false
+    {{- with .Values.jobs.metastorePodSecurityContext }}
+    securityContext:
+      {{- toYaml . | nindent 6 }}
+    {{- end }}
+    containers:
+      - name: sync-password
+        image: {{ include "thorium.image" (dict "root" $ "image" .Values.postgres.image) }}
+        imagePullPolicy: IfNotPresent
+        {{- with .Values.jobs.securityContext }}
+        securityContext:
+          {{- toYaml . | nindent 10 }}
+        {{- end }}
+        {{- with .Values.jobs.resources }}
+        resources:
+          {{- toYaml . | nindent 10 }}
+        {{- end }}
+        volumeMounts:
+          - mountPath: /tmp
+            name: tmp
+        env:
+          - name: HOME
+            value: /tmp
+          - name: PGHOST
+            value: {{ $host | quote }}
+          - name: PGUSER
+            value: postgres
+          - name: PASSWORD
+            valueFrom:
+              secretKeyRef:
+                name: postgres-cluster-auth
+                key: superUserPassword
+          - name: PREVIOUS_PASSWORD
+            valueFrom:
+              secretKeyRef:
+                name: postgres-cluster-auth
+                key: previousSuperUserPassword
+        command:
+          - /bin/sh
+          - -c
+          - |
+            set -e
+            for attempt in $(seq 1 60); do
+              if PGPASSWORD="$PASSWORD" psql -c "SELECT 1" >/dev/null 2>&1; then
+                echo "Postgres already accepts the current password"
+                exit 0
+              fi
+              if PGPASSWORD="$PREVIOUS_PASSWORD" psql -c "SELECT 1" >/dev/null 2>&1; then
+                export PGPASSWORD="$PREVIOUS_PASSWORD"
+                echo "Setting the current password on Postgres"
+                replication=$(psql -tAc "SELECT 1 FROM pg_roles WHERE rolname='replication'")
+                # one session, since the previous password stops working once postgres changes
+                {
+                  if [ "$replication" = 1 ]; then
+                    echo "ALTER USER replication WITH PASSWORD :'pw';"
+                  fi
+                  echo "ALTER USER postgres WITH PASSWORD :'pw';"
+                } | psql -v ON_ERROR_STOP=1 -v pw="$PASSWORD"
+                exit 0
+              fi
+              echo "Waiting for Postgres to accept the current or previous password ($attempt/60)..."
+              sleep 5
+            done
+            echo "Postgres accepts neither the current nor the previous postgresPassword" >&2
+            exit 1
+    volumes:
+      - name: tmp
+        emptyDir:
+          sizeLimit: 64Mi
+{{- end -}}
+{{- /* the chart's Postgres only backs the Quickwit metastore */}}
+{{- if and (include "infra.managed" (dict "root" $ "service" "postgres")) (include "thorium.quickwit" $) }}
 {{- $ns := include "thorium.ns" (dict "root" $ "name" "quickwit") }}
 {{- $host := include "thorium.host" (dict "root" $ "service" "postgres" "ns" "quickwit") }}
+{{- $spec := include "infra.metastoreDbJobSpec" . }}
 ---
 apiVersion: kubegres.reactive-tech.io/v1
 kind: Kubegres
@@ -31,51 +185,31 @@ spec:
           name: postgres-cluster-auth
           key: replicationUserPassword
 ---
-# Creates the Quickwit metastore database once Postgres accepts the saved password
+# Creates the Quickwit metastore database once Postgres accepts the saved password. It runs
+# alongside Postgres and Quickwit (which restarts until the database exists), retrying until
+# Postgres is up; it is named after a hash of its spec (see infra.metastoreDbJobSpec)
 apiVersion: batch/v1
 kind: Job
 metadata:
-  name: quickwit-create-metastore-db
+  name: quickwit-create-metastore-db-{{ sha256sum $spec | trunc 10 }}
   namespace: {{ $ns }}
   labels:
     {{- include "infra.labels" . | nindent 4 }}
-  annotations:
-    helm.sh/hook: post-install,post-upgrade
-    helm.sh/hook-delete-policy: before-hook-creation
 spec:
-  backoffLimit: {{ .Values.jobs.backoffLimit }}
-  template:
-    spec:
-      restartPolicy: Never
-      containers:
-        - name: createdb
-          image: {{ include "thorium.image" (dict "root" $ "image" .Values.postgres.image) }}
-          imagePullPolicy: IfNotPresent
-          env:
-            - name: PGHOST
-              value: {{ $host | quote }}
-            - name: PGUSER
-              value: postgres
-            - name: PGPASSWORD
-              valueFrom:
-                secretKeyRef:
-                  name: postgres-cluster-auth
-                  key: superUserPassword
-            - name: DATABASE
-              value: {{ .Values.postgres.database | quote }}
-          command:
-            - /bin/sh
-            - -c
-            - |
-              set -e
-              for attempt in $(seq 1 60); do
-                psql -c "SELECT 1" >/dev/null 2>&1 && break
-                echo "Waiting for Postgres to accept connections ($attempt/60)..."
-                sleep 5
-              done
-              if psql -tAc "SELECT 1 FROM pg_database WHERE datname='$DATABASE'" | grep -q 1; then
-                echo "Database $DATABASE already exists"
-              else
-                createdb "$DATABASE"
-              fi
+  {{- $spec | nindent 2 }}
+{{- if include "thorium.manageSecretUpdates" (dict "root" $ "service" "postgres") }}
+{{- $passwordSpec := include "infra.postgresPasswordJobSpec" . }}
+---
+# Sets a changed postgresPassword in Postgres (see infra.postgresPasswordJobSpec); Quickwit
+# restarts with the new metastore URI and retries until it is accepted
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: quickwit-sync-postgres-password-{{ sha256sum $passwordSpec | trunc 10 }}
+  namespace: {{ $ns }}
+  labels:
+    {{- include "infra.labels" . | nindent 4 }}
+spec:
+  {{- $passwordSpec | nindent 2 }}
+{{- end }}
 {{- end }}

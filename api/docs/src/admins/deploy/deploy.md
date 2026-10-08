@@ -1,62 +1,50 @@
+# Deploying Thorium
 
+Thorium runs on Kubernetes. A deployment consists of the Thorium components (API, scaler, event
+handler, search streamer, and the agents on each worker node), the backing services they store
+data in (ScyllaDB, Redis, Elasticsearch, and an S3-compatible object store, plus optional
+tracing), and the Thorium operator, which deploys and upgrades the components from a
+`ThoriumCluster` resource. [Deployment Concepts](./concepts.md) explains how these fit together.
 
-# Deploy Thorium on Kubernetes (K8s)
+## Choose a path
 
-> This documentation is for Thorium admins looking to deploy Thorium. This guide is
-> just an example and you will need to modify these steps to make them to work in your
-> environment. The instructions described below setup Thorium and it's dependencies on a blank K8s
-> cluster that is hosted on servers or VMs. It does not use any specific cloud environment,
-> however nothing precludes deployment of Thorium into the cloud.
+| Path | Use it for | Page |
+|------|------------|------|
+| Helm charts | Any Kubernetes cluster: on premises, cloud, or GitOps (Argo CD, Flux) | [Install with Helm](./deploy-helm.md) |
+| megathor | Production clusters on bare metal or VMs: prepares Rook/Ceph storage and Traefik, then installs the Helm charts with Ansible | [Production Clusters (megathor)](./megathor.md) |
+| minithor | A laptop or workstation: development, tool development, and testing on Minikube with one or more nodes | [Development Clusters (minithor)](./minithor.md) |
+| The operator without Helm | Sites that can't use Helm, or a pre-Helm deployment that stays outside Helm | [Deploy the Operator Without Helm](./deploy-thorium.md) |
+| Your own backing services | External ScyllaDB, Elasticsearch, Redis, S3, or Postgres with any of the paths above | [Bring Your Own Infrastructure](./infrastructure.md) and [External services](./helm-configuration.md#external-services) |
 
-## Deploy with Helm (recommended)
+megathor and minithor both install the same Helm charts, so everything on the Helm pages also
+applies to them.
 
-The [Thorium Helm charts](./deploy-helm.md) install Thorium and every component below with two
-`helm install` commands, online or offline. Use the manual steps on this page if you need to
-install or manage each component yourself. For a development or test deployment, see
-[minithor](./minithor.md).
+## Already running Thorium?
 
-## Prerequisites
+- **Upgrading** a deployment made with the Helm charts, megathor, or minithor: see
+  [Upgrading Thorium](./upgrades.md).
+- **A deployment made by the minithor or megathor scripts before the Helm charts** (a
+  `ThoriumCluster` usually named `dev` with every credential in its spec) must be converted
+  before a current operator, chart, minithor, or megathor manages it. The operator leaves such a
+  deployment untouched and reports that it "has not been converted". Convert it to Helm with
+  [Converting a Pre-Helm Deployment](./convert-to-helm.md), or keep it outside Helm with
+  [Moving a pre-Helm deployment without Helm](./deploy-thorium.md#moving-a-pre-helm-deployment-without-helm).
 
-You will need to deploy a working K8s cluster on baremetal servers, VMs, or within a hosted cloud
-environment to start this guide. The K8s cluster will need to have a storage provisioner that
-can provide persistent volume claims (PVCs) for the database and tracing services that Thorium
-utilizes. Additionally, admins will need account credentials and permissions to create buckets
-within an S3-compatible object storage interface that is accessible from the K8s cluster.
+## Reading order
 
-## Install Infrastructure Components
+For a new deployment, read the pages in this order:
 
-> For cloud deployments, you may skip the setup steps here for any database or other component that
-> your cloud provider supports natively. Instead, you may choose to follow their guides for setup of
-> the equivalent software stack.
+1. [Deployment Concepts](./concepts.md): components, backing services, the operator, namespaces,
+   credentials, and revisions.
+2. [Planning a Deployment](./planning.md): cluster prerequisites, sizing, storage, ingress, and
+   offline installs.
+3. The install page for your path (see the table above).
+4. [Configure the Helm Charts](./helm-configuration.md): credentials, external services,
+   certificates, ingress, proxies, and pod security.
+5. [Operating a Deployment](./operate.md): status, configuration changes, backups, and
+   uninstalling.
+6. [Upgrading Thorium](./upgrades.md).
+7. [Troubleshooting Deployments](./troubleshooting.md) when something doesn't reach `Ready`.
 
-#### Traefik (ingress proxy)
-
-To deploy Traefik as an ingress proxy, follow these [installation steps](./install-traefik.md).
-
-#### Rook (converged storage)
-
-> This step is only required if your K8s cluster has attached storage that you wish to use to host
-> S3-compatible and block device storage in a hyperconverged manner.
-
-To deploy Rook, follow these [installation steps](./install-rook.md).
-
-#### Redis
-
-To deploy Redis, follow these [installation steps](./install-redis.md).
-
-#### Scylla
-
-To deploy Scylla, follow these [installation steps](./install-scylla.md).
-
-#### Elastic
-
-To deploy Elastic, follow these [installation steps](./install-elastic.md).
-
-#### Tracing (Quickwit and Jaeger)
-
-To deploy Quickwit and Jaeger, follow these [installation steps](./install-tracing.md).
-
-## Deploy Thorium Operator and Cluster
-
-The finals steps involve deploying the Thorium operator, a `ThoriumCluster` custom resource, and
-Traefik `IngressRoutes` as described in the [Deploy Thorium](./deploy-thorium.md) section.
+[ThoriumCluster and Operator Reference](./thoriumcluster.md) and
+[Chart Values Reference](./chart-values.md) list every setting.

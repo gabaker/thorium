@@ -69,6 +69,16 @@ jobs:
           helm template thorium "$CHARTS/thorium" -n dev-thorium --set secrets.renderOnly=true > /dev/null
           helm template thorium "$CHARTS/thorium" -n thorium -f "$CHARTS/thorium/values-production.yaml" \
             --set secrets.renderOnly=true > /dev/null
+      # the example values files in the docs must keep rendering, alone and layered
+      - name: Render the example values files
+        run: |
+          for example in "$CHARTS"/examples/*.yaml "$CHARTS/thorium/values-production.yaml"; do
+            echo "rendering $example"
+            helm template thorium "$CHARTS/thorium" -n thorium --set secrets.renderOnly=true \
+              -f "$example" > /dev/null
+          done
+          helm template thorium "$CHARTS/thorium" -n thorium --set secrets.renderOnly=true \
+            -f "$CHARTS/thorium/values-production.yaml" -f "$CHARTS/examples/site.yaml" > /dev/null
       - name: Check the chart refuses to regenerate credentials without renderOnly
         run: |
           if stderr=$(helm template thorium "$CHARTS/thorium" -n thorium 2>&1 > /dev/null); then
@@ -80,6 +90,32 @@ jobs:
             echo "$stderr"
             exit 1
           fi
+      # the Thorium namespace names the Scylla keyspace and prefixes the Redis keys, so the chart
+      # takes only lowercase letters, digits and underscores, a leading letter, and 48 characters
+      - name: Check the chart refuses a Thorium namespace the operator would refuse
+        run: |
+          longest="n$(head -c 47 /dev/zero | tr '\0' a)"
+          for good in thorium thorium_dev2 "$longest"; do
+            helm template thorium "$CHARTS/thorium" -n thorium --set secrets.renderOnly=true \
+              --set-string operator.cluster.config.thorium.namespace="$good" > /dev/null
+          done
+          for bad in Thorium thorium-dev 1thorium _thorium "" "${longest}a"; do
+            if stderr=$(helm template thorium "$CHARTS/thorium" -n thorium --set secrets.renderOnly=true \
+              --set-string operator.cluster.config.thorium.namespace="$bad" 2>&1 > /dev/null); then
+              echo "helm template accepted the Thorium namespace '$bad'"
+              exit 1
+            fi
+            if ! grep -q "/cluster/config/thorium/namespace" <<< "$stderr"; then
+              echo "helm template refused '$bad' for another reason than the namespace pattern:"
+              echo "$stderr"
+              exit 1
+            fi
+            if helm lint --strict -n thorium --set secrets.renderOnly=true \
+              --set-string operator.cluster.config.thorium.namespace="$bad" "$CHARTS/thorium" > /dev/null 2>&1; then
+              echo "helm lint accepted the Thorium namespace '$bad'"
+              exit 1
+            fi
+          done
       # PyYAML comes from the distro's signed packages when the runner image lacks it
       - name: Install PyYAML
         run: python3 -c 'import yaml' 2>/dev/null || { sudo apt-get update && sudo apt-get install -y python3-yaml; }
@@ -98,6 +134,40 @@ jobs:
           if missing:
               sys.exit(f"thorium.namespace_blacklist is missing {missing}")
           '
+      # A dev cluster is marked by a label a cluster admin puts on the Thorium Namespace, so the
+      # chart must never render that Namespace or let anything it deploys change Namespaces, and
+      # the operator must be able to read it
+      - name: Check the operator only reads Namespaces and the chart never labels one
+        run: |
+          for own in true false; do
+            helm template thorium "$CHARTS/thorium" -n thorium --set secrets.renderOnly=true \
+              --set operator.cluster.upgrade.autoTargetDev=true \
+              --set operator.controller.watchOwnNamespaceOnly=$own \
+              | OWN=$own python3 -c '
+          import os, sys, yaml
+          docs = [d for d in yaml.safe_load_all(sys.stdin) if d]
+          own = os.environ["OWN"] == "true"
+          # the chart never renders the release Namespace, which helm install --create-namespace makes
+          named = [d["metadata"]["name"] for d in docs if d.get("kind") == "Namespace"]
+          if "thorium" in named:
+              sys.exit("the chart renders the release Namespace thorium")
+          # nothing the chart deploys may change a Namespace, so only a cluster admin sets its labels
+          for doc in docs:
+              if doc.get("kind") not in ("ClusterRole", "Role"):
+                  continue
+              for rule in doc.get("rules") or []:
+                  if "namespaces" in rule.get("resources", []) and set(rule.get("verbs", [])) & {"patch", "update", "*"}:
+                      sys.exit(doc["kind"] + " " + doc["metadata"]["name"] + " can change Namespaces: " + str(rule))
+          # the operator reads the Namespace, limited to the release namespace when it watches only it
+          role = next(d for d in docs if d.get("kind") == "ClusterRole" and d["metadata"]["name"] == "thorium-operator")
+          reads = [r for r in role["rules"] if "namespaces" in r.get("resources", []) and "get" in r.get("verbs", [])]
+          if not reads:
+              sys.exit("the operator ClusterRole cannot get Namespaces")
+          if own and any(r.get("resourceNames") != ["thorium"] for r in reads):
+              sys.exit(f"with watchOwnNamespaceOnly the Namespace read must be limited to thorium: {reads}")
+          print("watchOwnNamespaceOnly=" + os.environ["OWN"] + ": ok")
+          '
+          done
       # Thorium namespaces sharing an S3 endpoint must not share buckets, so the default bucket
       # names follow the release namespace, while names set in the config (as convert-to-helm.sh
       # writes them) win
@@ -166,6 +236,15 @@ jobs:
             | grep -v 'mirror.invalid' || true)
           if [ -n "$stray" ]; then
             echo "Images not using global.imageRegistry:"
+            echo "$stray"
+            exit 1
+          fi
+          stray=$(helm template infra-operators "$CHARTS/infra-operators" -n infra-operators \
+            --set global.imageRegistry=mirror.invalid \
+            | grep -E '^\s*(- )?(image|scyllaUtilsImage|unsupportedBashToolsImageOverride):\s*\S' \
+            | grep -v 'mirror.invalid' || true)
+          if [ -n "$stray" ]; then
+            echo "infra-operators images not using global.imageRegistry:"
             echo "$stray"
             exit 1
           fi

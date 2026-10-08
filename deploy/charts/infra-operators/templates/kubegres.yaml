@@ -271,6 +271,7 @@ spec:
     protocol: TCP
     targetPort: 8443
   selector:
+    app.kubernetes.io/name: kubegres
     control-plane: controller-manager
 ---
 apiVersion: apps/v1
@@ -292,6 +293,7 @@ spec:
       annotations:
         kubectl.kubernetes.io/default-container: manager
       labels:
+        app.kubernetes.io/name: kubegres
         control-plane: controller-manager
     spec:
       containers:

@@ -18,8 +18,10 @@ metadata:
     helm.sh/hook: pre-delete
     helm.sh/hook-weight: "-10"
     helm.sh/hook-delete-policy: before-hook-creation,hook-succeeded
+{{- with include "operator.imagePullSecrets" . }}
 imagePullSecrets:
-  {{- include "operator.imagePullSecrets" . | nindent 2 }}
+  {{- . | nindent 2 }}
+{{- end }}
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: Role
@@ -77,8 +79,10 @@ spec:
       restartPolicy: Never
       serviceAccountName: thorium-uninstall
       automountServiceAccountToken: true
+      {{- with include "operator.imagePullSecrets" . }}
       imagePullSecrets:
-        {{- include "operator.imagePullSecrets" . | nindent 8 }}
+        {{- . | nindent 8 }}
+      {{- end }}
       {{- with .Values.uninstallHook.podSecurityContext }}
       securityContext:
         {{- toYaml . | nindent 8 }}
@@ -140,11 +144,11 @@ spec:
           emptyDir:
             sizeLimit: 16Mi
       {{- /* run where the operator runs, e.g. on nodes reserved for infrastructure */}}
-      {{- with .Values.operator.nodeSelector }}
+      {{- with .Values.controller.nodeSelector }}
       nodeSelector:
         {{- toYaml . | nindent 8 }}
       {{- end }}
-      {{- with .Values.operator.tolerations }}
+      {{- with .Values.controller.tolerations }}
       tolerations:
         {{- toYaml . | nindent 8 }}
       {{- end }}

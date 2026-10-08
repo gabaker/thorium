@@ -3,7 +3,7 @@
 use clap::Parser;
 use std::process::ExitCode;
 use thoradm::outcome::RunOutcome;
-use thoradm::{args, backup, census, provision, settings, users};
+use thoradm::{args, backup, census, migrate, provision, settings, users};
 use tracing::error;
 
 /// Runs one thoradm command and exits with its outcome's code
@@ -38,13 +38,17 @@ async fn main() -> ExitCode {
         args::SubCommands::Users(users_cmd) => users::handle(users_cmd, &args)
             .await
             .map(|()| RunOutcome::Complete),
+        args::SubCommands::Migrate(migrate_cmd) => {
+            migrate::handle(migrate_cmd).map(|()| RunOutcome::Complete)
+        }
     };
     // an error that ended the command early is an abort
     match outcome {
         Ok(outcome) => outcome.into(),
         Err(err) => {
             error!("{err}");
-            RunOutcome::Aborted.into()
+            // exit with the code for this kind of error
+            ExitCode::from(err.exit_code())
         }
     }
 }

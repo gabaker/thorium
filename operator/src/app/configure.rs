@@ -10,14 +10,15 @@ use thorium::{Error, Thorium};
 /// * `thorium` - The Thorium client being used for API interactions
 pub async fn init_settings(thorium: &Thorium) -> Result<(), Error> {
     println!("Initializing Thorium system settings");
+    // ask the API to create any default settings that don't exist yet
     let result = thorium.system.init().await?;
-    // return any non-success result codes
-    if result.status() != 204 {
+    // the API answers a successful init with no content
+    if result.status() == 204 {
+        Ok(())
+    } else {
         Err(Error::new(format!(
             "Failed to init system settings: {}",
-            &result.status()
+            result.status()
         )))
-    } else {
-        Ok(())
     }
 }

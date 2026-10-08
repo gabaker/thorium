@@ -12,7 +12,7 @@
 - name: Ensure an external S3 endpoint is set when no S3 backend is deployed
   ansible.builtin.assert:
     that:
-      - s3_endpoint | length > 0
+      - s3_endpoint | default('', true) | length > 0
     fail_msg: >-
       Neither rook_enabled nor seaweedfs_enabled is true, so set s3_endpoint (and s3_region,
       s3_access_key, s3_secret_key) to an external S3 service
@@ -23,7 +23,7 @@
     that:
       - namespace_prefix is match('^[a-z0-9]([-a-z0-9]{0,30}[a-z0-9])?$')
     fail_msg: "namespace_prefix ({{ namespace_prefix }}) must be a lowercase DNS label of at most 32 characters (the \"-\" separator is added automatically)"
-  when: namespace_prefix | length > 0
+  when: namespace_prefix | default('', true) | length > 0
 
 # An external Scylla or Elasticsearch the operator doesn't bootstrap already holds Thorium's
 # role or user, so a generated password would never match it
@@ -31,7 +31,7 @@
   ansible.builtin.assert:
     that:
       - thorium_external_scylla_username | default('thorium') | length > 0
-      - thorium_external_scylla_password | default('') | length > 0
+      - thorium_external_scylla_password | default('', true) | length > 0
     fail_msg: >-
       scylla_enabled is false and thorium_scylla_admin_secret is unset, so set
       thorium_external_scylla_username and thorium_external_scylla_password to the Scylla role
@@ -39,13 +39,13 @@
   when:
     - thorium_enabled | default(true) | bool
     - not (scylla_enabled | default(true) | bool)
-    - thorium_scylla_admin_secret | default('') | length == 0
+    - thorium_scylla_admin_secret | default('', true) | length == 0
 
 - name: Ensure Thorium's external Elastic credentials are set
   ansible.builtin.assert:
     that:
       - thorium_external_elastic_username | default('thorium') | length > 0
-      - thorium_external_elastic_password | default('') | length > 0
+      - thorium_external_elastic_password | default('', true) | length > 0
     fail_msg: >-
       elastic_enabled is false and thorium_elastic_admin_secret is unset, so set
       thorium_external_elastic_username and thorium_external_elastic_password to the
@@ -54,15 +54,61 @@
   when:
     - thorium_enabled | default(true) | bool
     - not (elastic_enabled | default(true) | bool)
-    - thorium_elastic_admin_secret | default('') | length == 0
+    - thorium_elastic_admin_secret | default('', true) | length == 0
 
-# The example inventories ship "<...>" placeholders that must be replaced
-- name: Ensure the Thorium node list has been filled in
+# The thorium chart is installed into thorium_namespace and derives every other namespace from
+# it, so a thorium_namespace that doesn't match namespace_prefix would split the deployment
+# across two prefixes
+- name: Ensure thorium_namespace matches namespace_prefix
   ansible.builtin.assert:
     that:
-      - thorium_nodes | length > 0
+      - thorium_namespace == namespace_prefix_dashed ~ 'thorium'
+    fail_msg: >-
+      thorium_namespace ({{ thorium_namespace }}) must be {{ namespace_prefix_dashed }}thorium;
+      set namespace_prefix to rename Thorium's namespaces instead of thorium_namespace
+  when: thorium_enabled | default(true) | bool
+
+# An external Redis or S3 service already issued its credentials, so megathor can't generate them
+- name: Ensure the external Redis password is set
+  ansible.builtin.assert:
+    that:
+      - redis_password | default('', true) | length > 0
+    fail_msg: >-
+      redis_enabled is false, so set redis_password to the password your Redis requires (keep it
+      in an ansible-vault encrypted vars file)
+  when:
+    - thorium_enabled | default(true) | bool
+    - not (redis_enabled | default(true) | bool)
+
+- name: Ensure the external S3 keys are set
+  ansible.builtin.assert:
+    that:
+      - s3_access_key | default('', true) | length > 0
+      - s3_secret_key | default('', true) | length > 0
+    fail_msg: >-
+      Neither rook_enabled nor seaweedfs_enabled is true, so set s3_access_key and s3_secret_key
+      to your S3 service's keys (keep them in an ansible-vault encrypted vars file)
+  when: not (rook_enabled | default(false) | bool or seaweedfs_enabled | default(false) | bool)
+
+# The chart points Thorium's traces at its Quickwit indexer unless told otherwise
+- name: Warn when traces would go to a Quickwit that isn't deployed
+  ansible.builtin.debug:
+    msg: >-
+      quickwit_enabled is false and thorium_tracing_endpoint is unset, so Thorium sends traces to
+      a Quickwit indexer that doesn't exist; set thorium_tracing_endpoint to another OTLP gRPC
+      collector to keep them
+  when:
+    - thorium_enabled | default(true) | bool
+    - not (quickwit_enabled | default(true) | bool)
+    - thorium_tracing_endpoint | default('', true) | length == 0
+
+# The example inventories ship "<...>" placeholders that must be replaced; an empty list lets
+# Thorium schedule jobs on every node
+- name: Ensure the Thorium node list has no placeholders
+  ansible.builtin.assert:
+    that:
       - thorium_nodes | select('search', '<') | list | length == 0
-    fail_msg: "Set thorium_nodes to the names of the Kubernetes nodes Thorium may schedule jobs on"
+    fail_msg: "Set thorium_nodes to the names of the Kubernetes nodes Thorium may schedule jobs on, or to [] for every node"
   when: thorium_enabled | default(true) | bool
 
 - name: Ensure the Traefik external IPs have been filled in
@@ -70,6 +116,24 @@
     that:
       - traefik_external_ips | select('search', '<') | list | length == 0
     fail_msg: "Set traefik_external_ips to the addresses Traefik should be reachable on"
+  when: traefik_enabled | default(true) | bool
+
+# Kubernetes rejects a Service whose externalIPs hold an unspecified, loopback, or link-local
+# address, which would otherwise only fail once Traefik's chart is installed
+- name: Ensure the Traefik external IPs are addresses Kubernetes accepts
+  ansible.builtin.assert:
+    that:
+      - traefik_external_ips | map('string') | select('match', '^(0\\.0\\.0\\.0|::|::1|127\\..*|169\\.254\\..*|[fF][eE]80:.*)$') | list | length == 0
+    fail_msg: >-
+      traefik_external_ips may not hold unspecified (0.0.0.0, ::), loopback, or link-local addresses;
+      list the node addresses Traefik should be reachable on, or [] to leave them out
+  when: traefik_enabled | default(true) | bool
+
+- name: Ensure the Traefik Service type is one megathor supports
+  ansible.builtin.assert:
+    that:
+      - traefik_service_type | default('LoadBalancer') in ['LoadBalancer', 'NodePort', 'ClusterIP']
+    fail_msg: "Set traefik_service_type to LoadBalancer, NodePort, or ClusterIP"
   when: traefik_enabled | default(true) | bool
 
 - name: Create artifacts directory
