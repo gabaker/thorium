@@ -1,10 +1,21 @@
+{{- /* values this subchart doesn't read, each with the value to use instead */}}
+{{- include "thorium.movedValues" (dict "values" .Values "prefix" "operator." "moved" (list
+  (list "operator" "use operator.controller")
+  (list "imagePullSecret" "use operator.imagePullSecrets (existing secrets) or operator.createImagePullSecret with operator.dockerConfigJson")
+  (list "cluster.bootstrap.admin.secretName" "use operator.cluster.bootstrap.admin.secret.name")
+  (list "cluster.scaler.context" "use operator.cluster.scaler.k8s.context")
+  (list "cluster.scaler.alias" "use operator.cluster.scaler.k8s.alias")
+  (list "cluster.scaler.nodes" "use operator.cluster.scaler.k8s.nodes")
+  (list "backends.tracing.endpoint" "use operator.backends.tracing.grpcEndpoint")
+  (list "ingress.tls.defaultStore" "use operator.ingress.tls.traefikDefaultStore")
+)) }}
 {{- $ns := include "thorium.namespace" . }}
 {{- $c := .Values.cluster }}
 ---
 apiVersion: sandia.gov/v1
 kind: ThoriumCluster
 metadata:
-  name: {{ $c.name }}
+  name: {{ $c.name | quote }}
   namespace: {{ $ns }}
   labels:
     {{- include "operator.labels" . | nindent 4 }}
@@ -16,15 +27,28 @@ spec:
   registry_auth:
     {{- toYaml . | nindent 4 }}
   {{- end }}
-  {{- with include "operator.pullSecretName" . }}
+  {{- with include "operator.pullSecretNames" . | fromYamlArray }}
   image_pull_secrets:
-    - {{ . }}
+    {{- range . }}
+    - {{ . | quote }}
+    {{- end }}
   {{- end }}
   components:
+    {{- /* the ThoriumCluster always deploys the API, so it can't be omitted */}}
+    {{- if not (kindIs "map" (index ($c.components | default dict) "api")) }}
+    {{- fail "operator.cluster.components.api must be a map of settings or {} for the defaults; the API can't be omitted" }}
+    {{- end }}
+    {{- /* null omits a component, while an empty map deploys it with the CRD's defaults */}}
     {{- range $name, $spec := $c.components }}
+    {{- if kindIs "map" $spec }}
     {{- if $spec }}
     {{ $name }}:
       {{- toYaml $spec | nindent 6 }}
+    {{- else }}
+    {{ $name }}: {}
+    {{- end }}
+    {{- else if not (kindIs "invalid" $spec) }}
+    {{- fail (printf "operator.cluster.components.%s must be a map of settings, {} for the defaults, or null to omit it" $name) }}
     {{- end }}
     {{- end }}
   config:
@@ -32,14 +56,28 @@ spec:
   {{- with $c.configSecrets }}
   config_secrets:
     {{- range . }}
-    - name: {{ .name }}
-      key: {{ .key | default "thorium.yml" }}
+    - name: {{ .name | quote }}
+      key: {{ .key | default "thorium.yml" | quote }}
     {{- end }}
   {{- end }}
   {{- with include "operator.elasticCaSecret" . }}
   elastic_ca_secret:
-    name: {{ . }}
-    key: {{ $.Values.backends.elastic.caSecret.key | default "ca.crt" }}
+    name: {{ . | quote }}
+    key: {{ $.Values.backends.elastic.caSecret.key | default "ca.crt" | quote }}
+  {{- end }}
+  {{- with $c.upgrade }}
+  upgrade:
+    {{- with .targetRevision }}
+    target_revision: {{ . | quote }}
+    {{- end }}
+    auto_target_dev: {{ .autoTargetDev | default false }}
+    {{- with .approvals }}
+    approvals:
+      {{- range . }}
+      - step: {{ .step | quote }}
+        backup: {{ .backup | quote }}
+      {{- end }}
+    {{- end }}
   {{- end }}
   {{- $b := $c.bootstrap }}
   {{- /* null bootstrap toggles follow the managed service toggles */}}
@@ -53,9 +91,9 @@ spec:
     {{- if $b.admin.enabled }}
     admin:
       secret:
-        name: {{ $b.admin.secretName }}
-        username_key: username
-        password_key: password
+        name: {{ required "operator.cluster.bootstrap.admin.secret.name is required when the admin bootstrap is enabled" $b.admin.secret.name | quote }}
+        username_key: {{ $b.admin.secret.usernameKey | default "username" | quote }}
+        password_key: {{ $b.admin.secret.passwordKey | default "password" | quote }}
     {{- end }}
     {{- if $scylla }}
     scylla:

@@ -314,6 +314,22 @@ Use `thoradm -h` or `thoradm <subcommand> -h` for detailed help on any command.
 
 For full thoradm documentation, see the User Docs at `{THORIUM_URL}/api/docs/user/admins/thoradm/thoradm.html`.
 
+`thoradm migrate list` and `thoradm migrate plan --from <revision>` print the upgrade revisions
+and the steps between them without needing a cluster config; inside a cluster, run
+`kubectl -n thorium exec deploy/api -- /app/thoradm migrate list`. `thoradm backup` covers Redis,
+Scylla, and S3; Elasticsearch isn't backed up because the search streamer rebuilds it from Scylla.
+
+### Deployment docs
+
+The admin deployment guide is served at `{THORIUM_URL}/api/docs/user/admins/deploy/deploy.html`
+("Deploying Thorium"). Its pages under `{THORIUM_URL}/api/docs/user/admins/deploy/` include
+`deploy-helm.html` (install with Helm), `helm-configuration.html` (chart values, credentials,
+external services), `operate.html` (status, backups, uninstalling), `upgrades.html` (revisions,
+target revisions, approvals), `convert-to-helm.html` (pre-Helm deployments), `deploy-thorium.html`
+(the operator without Helm), `minithor.html`, `megathor.html`, `thoriumcluster.html` (the
+`ThoriumCluster` reference), and `troubleshooting.html`. In a checkout they are
+`api/docs/src/admins/deploy/*.md`.
+
 ## Step 7: minithor (Local Development)
 
 `minithor` stands up a **Thorium stack on Minikube** (single-node by default, optionally multi-node)
@@ -323,11 +339,15 @@ kits), not production. A deploy brings up all backing services (Redis, Elasticse
 SeaweedFS/S3, Postgres, Quickwit, Jaeger), the Thorium operator and `ThoriumCluster`, a default
 admin user, a `static` group, an `allow-all` network policy, and (optionally) an in-cluster
 container registry; it also installs `thorctl` and imports the default toolbox. Backing-service
-passwords are randomly generated per deploy.
+passwords are generated on the first deploy and kept in the `thorium-credentials` Secret, so
+redeploys reuse them. minithor sets the chart's `operator.cluster.upgrade.autoTargetDev`, so a
+redeploy with a newer chart also runs any new upgrade revision (a step that needs an approval makes
+`deploy` fail with the step's message; see "Upgrading Thorium" in the deploy docs below).
 
-Requirements: a container runtime (podman or docker; `kvm2` also works on Linux) and a beefy host
-(16+ GiB RAM, 8+ CPUs, 100+ GiB disk; multiply by the node count for multi-node clusters). It picks
-the best available driver (podman > docker > kvm2).
+Requirements: a container runtime (podman or docker; `kvm2` also works on Linux), `sudo` rights,
+and a beefy host (16+ GiB RAM, 8+ CPUs, 100+ GiB disk by default; `--cpus`/`--memory` are totals
+for the whole cluster, however many nodes it has). It picks the best available driver
+(podman > docker > kvm2).
 
 Not all Thorium deployments use minithor. Check if it is available before using any of the commands below:
 
@@ -348,9 +368,14 @@ minithor expose             # port-forward the API to http://localhost:8080
 ```
 
 `deploy` accepts `--user`/`--password`/`--rand-password` to set the admin credentials,
-`--registry`/`--registry-user <name>` to deploy the container registry, and `--config <path>` for a
-custom `thorium-cluster.yml`. After `minithor stop` or a reboot, resume with `minithor start` then
-`minithor expose` again.
+`--registry`/`--registry-user <name>` to deploy the container registry, and `--values <file>` /
+`--set <key=value>` for any other thorium chart value (`minithor deploy --help` lists every
+option). Only the generated credentials survive a redeploy: each `deploy` renders the chart values
+from its own flags, so repeat the flags you deployed with. `minithor credentials` prints the admin
+login (`--all` adds every backend credential). After `minithor stop` or a reboot, resume with
+`minithor start` then `minithor expose` again. A cluster runs one Thorium deployment, so
+`deploy` refuses a second namespace prefix and a pre-Helm deployment (made by an older minithor or
+megathor), which must be converted first ("Converting a Pre-Helm Deployment" in the deploy docs).
 
 `minikube install` also accepts `--cpus <n>`/`--memory <GiB>` (cluster totals split evenly across
 the nodes, default 8/16; `--node-cpus`/`--node-memory` size each node directly and conflict with
@@ -369,15 +394,16 @@ minithor deploy
 ```
 
 - Nodes are named `<profile>`, `<profile>-m02`, `<profile>-m03`, ... (`minikube`, `minikube-m02`, ... by default).
-- The thorium chart leaves the ThoriumCluster's scaler node list (`operator.cluster.scaler.nodes`)
+- The thorium chart leaves the ThoriumCluster's scaler node list (`operator.cluster.scaler.k8s.nodes`)
   empty, which the operator treats as every node: it labels (`thorium=enabled`), provisions, and
   registers each one, and the scaler only schedules on labeled, registered nodes. To restrict jobs to
   specific nodes, pass a list with `--set`/`--values`; the names must match the real node names exactly.
 - `--cpus`/`--memory` are cluster totals (split evenly, rounded down); `--node-cpus`/`--node-memory`
   set per-node sizes instead. Each node needs more than 2 CPUs and 2 GiB of memory (the scaler
   reserves that much per node), and install refuses a split that leaves less.
-- Per-node setup (kernel params, registry `/etc/hosts` entry, proxy/CA) runs on every node during
-  `install` and `start`.
+- Per-node setup runs on every node: the proxy/CA settings during `install` and `start`, the kernel
+  params during `deploy` and `start`, and the registry `/etc/hosts` entry during `deploy --registry`
+  and `start`.
 - Verify: `minikube kubectl -- get nodes -L thorium` shows `enabled` on every node,
   `GET /api/system/nodes/details/` lists each node as `Healthy`, and the scaler logs per-node
   allocatable resources (`minikube kubectl -- logs -n thorium deploy/scaler | grep 'node='`).
@@ -386,11 +412,13 @@ minithor deploy
 
 ### Separate clusters (profiles)
 
-`minithor --profile <name> <command>` (or `MINIKUBE_PROFILE=<name>`) targets a separate minikube
+`minithor --profile <name> <command>` (or `MINITHOR_PROFILE=<name>`/`MINIKUBE_PROFILE=<name>`) targets a separate minikube
 profile, so a test cluster (e.g. a multi-node one) can run beside the default `minikube` cluster.
 It applies to every command; `minithor --profile <name> minikube delete --confirm` deletes only that
-profile's cluster. minikube switches the kubectl context to the profile it last started — switch back
-with `kubectl config use-context minikube`.
+profile's cluster. minithor always passes the profile's kubectl context, but minikube switches the
+current context to the profile it last started, so for your own kubectl commands switch back with
+`kubectl config use-context minikube`. A second profile writes `~/thorium-<name>.yml` from
+`get-config` and logs thorctl in under `~/.thorium/config-<name>.yml` (use `thorctl --config`).
 
 ### Reach the running instance
 
@@ -410,6 +438,8 @@ needed by `thoradm` (Step 6).
 | `minithor deploy` | Deploy all Thorium services and backing infrastructure (add `--registry` for an in-cluster registry) |
 | `minithor expose` | Port-forward the Thorium API to localhost:8080 (and the registry to localhost:5000 when one was deployed) |
 | `minithor expose --port <port>` | Port-forward the API to a custom local port |
+| `minithor expose --port-offset <n>` | Shift every local port by `n` (to expose a second profile beside the first) |
+| `minithor credentials [--all]` | Print the admin login (and every generated backend credential) |
 | `minithor expose --dev` | Also forward database ports (Elastic, Kibana, Redis, SeaweedFS, Scylla). See "Testing locally" below — Scylla requires special handling |
 | `minithor expose --status` | Show which port-forwards are running |
 | `minithor expose --stop` | Stop all port-forwards **and remove any loopback aliases** created for Scylla |
@@ -417,9 +447,9 @@ needed by `thoradm` (Step 6).
 | `minithor stop` | Stop the cluster (preserves state) |
 | `minithor get-config` | Extract the raw in-cluster config to ~/thorium.yml |
 | `minithor get-config --local` | Extract the config **rewritten for local host access** via the exposed ports, to ~/thorium.local.yml (see "Testing locally") |
-| `minithor cleanup --confirm` | Remove all Thorium resources for a fresh deploy (also stops port-forwards and removes loopback aliases) |
+| `minithor cleanup --confirm` | Remove Thorium, its namespaces and data for a fresh deploy (also stops its port-forwards and removes the Scylla loopback aliases); `--operators` also removes the cluster-wide operators and their CRDs |
 | `minithor --namespace-prefix <prefix> <command>` | Run `deploy`/`credentials`/`expose`/`get-config`/`cleanup` against a Thorium deployment whose namespaces are prefixed `<prefix>-` (`<prefix>-thorium`, `<prefix>-redis`, ...); pass the same prefix to every command. A cluster runs one Thorium deployment; use a second `--profile` (and `expose --port-offset <n>`) to run two |
-| `minithor minikube delete --confirm` | Fully remove minikube (also stops port-forwards and removes loopback aliases); with `--profile`, deletes only that profile's cluster |
+| `minithor minikube delete --confirm` | Delete the selected profile's cluster (also stops port-forwards and removes loopback aliases); `--purge` also removes `~/.minikube`, `~/.kube`, and the binaries once no other profile remains |
 | `minithor --profile <name> <command>` | Run any command against a separate minikube profile (cluster) instead of `minikube` |
 
 ### Testing Locally: Connecting a Local Build to the Cluster Databases
@@ -519,7 +549,7 @@ cat ~/.cache/minithor/expose-logs/*.log  # per-forward kubectl logs
 | Elastic errors: TLS/cert hostname mismatch or `invalid peer certificate` | The cluster cert isn't valid for `localhost`. Set `elastic.insecure_certificates: true` (done automatically by `get-config --local`). |
 | Elastic `403 security_exception` for `cluster:monitor/*` | Not a connection problem — the `thorium` user simply lacks that privilege. Auth succeeded; querying a Thorium index works. |
 | API fails to bind / "permission denied" on port 80 | Running as non-root with `thorium.port: 80`. Use a non-privileged port (`get-config --local` sets `8888`). |
-| `expose` reports a forward, but connections are refused | The forward process may have died; check its log under `~/.cache/minithor/expose-logs/` and re-run `minithor expose --dev`. Stale forwards on a port are auto-killed on the next `expose`. |
+| `expose` reports a forward, but connections are refused | The forward process may have died; check its log under `~/.cache/minithor/expose-logs/` and re-run `minithor expose --dev`. Your own stale forward on a port is replaced on the next `expose`; a port held by anything else is reported and left alone. |
 | Stale Scylla loopback alias after a crash | `minithor expose --stop` removes all aliases; or remove manually with `sudo ip addr del <ip>/32 dev lo` (Linux) / `sudo ifconfig lo0 -alias <ip>` (macOS). |
 
 **macOS notes:** the loopback-alias and port-forward approach works on macOS too (it's
@@ -529,13 +559,14 @@ on macOS and falls back from `ss` to `lsof` for stale-port detection.
 
 ### Container Registry
 
-`minithor deploy --registry` deploys a container registry in the `thorium` namespace; use
-`--registry-user <name>` to enable it with basic auth (password auto-generated and printed).
+`minithor deploy --registry` deploys a container registry in the `thorium` namespace
+(`<prefix>-thorium` with `--namespace-prefix`); use `--registry-user <name>` to enable it with
+basic auth (password generated; `minithor credentials --all` prints it as `registryPassword`).
 
 | Context | Registry Address |
 |---------|-----------------|
 | From the host (push/pull) | `localhost:5000` (requires `minithor expose`) |
-| From within Thorium (image references) | `registry.thorium.svc.cluster.local:5000` |
+| From within Thorium (image references) | `docker-registry.thorium.svc.cluster.local:5000` (`docker-registry.<prefix>-thorium...` with a prefix) |
 
 To push an image and reference it in Thorium:
 
@@ -548,7 +579,7 @@ docker push localhost:5000/path/to/image:tag
 When configuring a Thorium image/tool to use it, reference the in-cluster address:
 
 ```
-registry.thorium.svc.cluster.local:5000/path/to/image:tag
+docker-registry.thorium.svc.cluster.local:5000/path/to/image:tag
 ```
 
 ## Step 8: Python Client
@@ -732,7 +763,7 @@ tool dir (recorded in `toolbox.json` so import finds it); `import --image-path-p
 loads, retags, and pushes them into the offline registry. You don't need to know the offline
 registry at export time.
 
-For registry addresses (e.g. `localhost:5000` vs `registry.thorium.svc.cluster.local:5000`), see Step 7.
+For registry addresses (e.g. `localhost:5000` vs `docker-registry.thorium.svc.cluster.local:5000`), see Step 7.
 
 ### Single tools as code — `images`/`pipelines import`/`export`
 

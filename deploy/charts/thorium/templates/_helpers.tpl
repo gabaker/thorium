@@ -9,7 +9,7 @@ into "thorium" gives no prefix, installing into "dev-thorium" gives "dev-". The 
 must be a lowercase DNS label of at most 32 characters, matching megathor's namespace_prefix.
 */}}
 {{- define "thorium.prefix" -}}
-{{- if not (hasSuffix "thorium" .Release.Namespace) -}}
+{{- if not (or (eq .Release.Namespace "thorium") (hasSuffix "-thorium" .Release.Namespace)) -}}
 {{- fail (printf "install the thorium chart into the thorium namespace or <prefix>-thorium, such as dev-thorium (got %q)" .Release.Namespace) -}}
 {{- end -}}
 {{- $prefix := trimSuffix "thorium" .Release.Namespace -}}
@@ -135,4 +135,41 @@ Usage: include "thorium.elasticIndices" $ | fromYaml
 {{- define "thorium.elasticIndices" -}}
 {{- $defaults := dict "sampleResults" "thorium_sample_results" "repoResults" "thorium_repo_results" "sampleTags" "thorium_sample_tags" "repoTags" "thorium_repo_tags" -}}
 {{- toYaml (mustMergeOverwrite $defaults (deepCopy (((.Values.global).elasticIndices) | default dict))) -}}
+{{- end -}}
+
+{{/*
+Whether Quickwit is enabled (global.quickwit.enabled, also the quickwit subchart's condition), so
+the subcharts only deploy and point at what Quickwit needs while it is. Renders "true" or nothing.
+Usage: include "thorium.quickwit" $
+*/}}
+{{- define "thorium.quickwit" -}}
+{{- if dig "quickwit" "enabled" true (((.Values.global) | default dict)) -}}true{{- end -}}
+{{- end -}}
+
+{{/*
+Fail when a value this chart doesn't read is set, naming the value to use instead. Helm ignores
+unknown keys, so without this check a value under an unused name would silently have no effect (a
+pull secret or basic auth that is never applied, a credential that is generated instead of the one
+given). "moved" lists [path, advice] pairs, with paths relative to "values" and shown with
+"prefix" in front.
+Usage: include "thorium.movedValues" (dict "values" .Values "prefix" "secrets." "moved" (list
+  (list "quickwitS3Endpoint" "use global.quickwit.s3Endpoint")))
+*/}}
+{{- define "thorium.movedValues" -}}
+{{- $values := .values -}}
+{{- $prefix := .prefix -}}
+{{- range .moved -}}
+{{- $node := $values -}}
+{{- $found := true -}}
+{{- range splitList "." (first .) -}}
+{{- if and $found (kindIs "map" $node) (hasKey $node .) -}}
+{{- $node = index $node . -}}
+{{- else -}}
+{{- $found = false -}}
+{{- end -}}
+{{- end -}}
+{{- if $found -}}
+{{- fail (printf "%s%s is not a chart value; %s" $prefix (first .) (last .)) -}}
+{{- end -}}
+{{- end -}}
 {{- end -}}

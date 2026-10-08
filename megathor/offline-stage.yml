@@ -1,65 +1,206 @@
 ---
-- name: Download Helm Charts locally for use during offline deployments
+# Saves what an offline deployment needs into files/: the Helm charts deploy.yml installs and
+# offline-images.txt, every image the deployment pulls as "<source image> <path in the mirror
+# registry>" lines for scripts/mirror-images.bash. Run it with the inventory you deploy with, so
+# the charts and images follow the same settings.
+- name: Stage the Helm charts and image list for an offline deployment
   hosts: localhost
   gather_facts: no
+  # the roles are listed only so their defaults are loaded (beneath the inventory's settings) for
+  # rendering the values deploy.yml generates; the never tag keeps their tasks from running
+  roles:
+    - { role: common, tags: [never] }
+    - { role: rook, tags: [never] }
+    - { role: s3, tags: [never] }
+    - { role: traefik, tags: [never] }
+    - { role: infra_operators, tags: [never] }
+    - { role: thorium, tags: [never] }
+  vars:
+    # the rendered values hold placeholder credentials and are only read for their images
+    offline_stage_dir: "{{ playbook_dir }}/artifacts/offline-stage"
+    # values are rendered as an online deployment, from the upstream registries the role defaults
+    # use, so every image is listed under its source rather than its offline_registry mirror
+    offline_stage_render_vars: &offline_stage_render_vars
+      offline: false
+      k8s_registry: "registry.k8s.io"
+      rook_container_registry: "docker.io"
+      ceph_container_registry: "quay.io"
+      traefik_container_registry: "docker.io"
+      thorium_secret: "render-only"
+      redis_password: "render-only"
+      scylla_password: "render-only"
+      elastic_password: "render-only"
+      s3_access_key: "render-only"
+      s3_secret_key: "render-only"
+      quickwit_postgres_super_password: "render-only"
+      thorium_admin_password: "render-only"
+    offline_stage_python: "{{ ansible_playbook_python }}"
+    # list-images.sh ships with the charts' source rather than in their packages, so it is taken
+    # from thorium_stage_charts_from when that is set and otherwise from the Thorium repository
+    # checkout megathor sits in
+    offline_stage_list_images: >-
+      {{ (thorium_stage_charts_from ~ '/scripts/list-images.sh') if thorium_stage_charts_from is defined
+         else (playbook_dir ~ '/../deploy/charts/scripts/list-images.sh') }}
   tasks:
-    - name: Ensure Helm is installed
-      command: helm version
-      register: helm_version
-      ignore_errors: yes
+    # Helm is a prerequisite, like for deploy.yml, rather than installed from an unpinned script
+    - name: Check that Helm is installed
+      ansible.builtin.command: helm version --short
+      changed_when: false
 
-    - name: Install Helm if not present
-      shell: curl -fsSL https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-3 | bash
-      when: helm_version.rc != 0
+    # cleared first so lists left by an earlier run for components since disabled aren't combined
+    - name: Clear the staging directory for rendered values
+      ansible.builtin.file:
+        path: "{{ offline_stage_dir }}"
+        state: absent
+
+    - name: Create the staging directory for rendered values
+      ansible.builtin.file:
+        path: "{{ offline_stage_dir }}"
+        state: directory
+        mode: "0700"
 
     - name: Add Helm Traefik repo
       kubernetes.core.helm_repository:
         name: "traefik"
         repo_url: "https://helm.traefik.io/traefik"
+      when: traefik_enabled | bool
 
     - name: Pull the Traefik Helm chart
-      command: helm pull traefik/traefik --version {{ traefik_helm_chart_version }} --destination ./files/
+      ansible.builtin.command: helm pull traefik/traefik --version {{ traefik_helm_chart_version }} --destination ./files/
       args:
         chdir: "{{ playbook_dir }}"
+      when: traefik_enabled | bool
+
+    - name: Add Helm Rook repo
+      kubernetes.core.helm_repository:
+        name: "rook-release"
+        repo_url: "https://charts.rook.io/release"
+      when: rook_enabled | bool
+
+    - name: Pull the Rook Operator Helm chart
+      ansible.builtin.command: helm pull rook-release/rook-ceph --version {{ rook_helm_chart_version }} --destination ./files/
+      args:
+        chdir: "{{ playbook_dir }}"
+      when: rook_enabled | bool
+
+    - name: Pull the Rook Ceph Cluster Helm chart
+      ansible.builtin.command: helm pull rook-release/rook-ceph-cluster --version {{ rook_helm_chart_version }} --destination ./files/
+      args:
+        chdir: "{{ playbook_dir }}"
+      when: rook_enabled | bool
 
     # The thorium and infra-operators charts carry every subchart, so each is one file. Set
-    # thorium_stage_charts_from to a deploy/charts directory to package unpublished charts.
+    # thorium_stage_charts_from to a deploy/charts directory to package unpublished charts; they are
+    # packaged as thorium_chart_version, the file name deploy.yml installs offline
     - name: Pull the Thorium Helm charts
-      command: "helm pull {{ thorium_chart_repo }}/{{ item }} --version {{ thorium_chart_version }} --destination ./files/"
+      ansible.builtin.command: "helm pull {{ thorium_chart_repo }}/{{ item }} --version {{ thorium_chart_version }} --destination ./files/"
       args:
         chdir: "{{ playbook_dir }}"
       loop: [thorium, infra-operators]
       when: thorium_stage_charts_from is not defined
 
     - name: Package the Thorium Helm charts from source
-      command: "helm package {{ thorium_stage_charts_from }}/{{ item }} --destination ./files/"
+      ansible.builtin.command: "helm package {{ thorium_stage_charts_from }}/{{ item }} --version {{ thorium_chart_version }} --destination ./files/"
       args:
         chdir: "{{ playbook_dir }}"
       loop: [thorium, infra-operators]
       when: thorium_stage_charts_from is defined
 
-    # The images the charts deploy, as "<source> <path>" lines for scripts/mirror-images.bash
-    - name: List the images the Thorium charts deploy
-      shell: >-
-        {{ playbook_dir }}/../deploy/charts/scripts/list-images.sh {{ thorium_values_files | default([]) | map('quote') | join(' ') }}
-        > ./files/thorium-images.txt
+    - name: Render the values deploy.yml generates
+      ansible.builtin.template:
+        src: "{{ playbook_dir }}/roles/{{ item.role }}/templates/{{ item.template }}"
+        dest: "{{ offline_stage_dir }}/{{ item.dest }}"
+        mode: "0600"
+      vars: *offline_stage_render_vars
+      loop:
+        - { role: thorium, template: values.yaml.j2, dest: thorium.yaml }
+        - { role: infra_operators, template: values.yaml.j2, dest: infra-operators.yaml }
+        - { role: rook, template: operator.yaml.j2, dest: rook-operator.yaml }
+        - { role: rook, template: cluster.yaml.j2, dest: rook-cluster.yaml }
+        - { role: traefik, template: traefik.yaml.j2, dest: traefik.yaml }
+
+    # applied last, so values files that point the charts at a mirror still list the sources
+    - name: Write the values that clear the charts' mirror registry
+      ansible.builtin.copy:
+        dest: "{{ offline_stage_dir }}/no-mirror.yaml"
+        mode: "0600"
+        content: |
+          global:
+            imageRegistry: ""
+
+    - name: Find list-images.sh
+      ansible.builtin.stat:
+        path: "{{ offline_stage_list_images }}"
+      register: offline_stage_list_images_stat
+      when: thorium_enabled | bool
+
+    - name: Ensure list-images.sh exists
+      ansible.builtin.assert:
+        that:
+          - offline_stage_list_images_stat.stat.exists
+        fail_msg: >-
+          {{ offline_stage_list_images }} does not exist. Run offline-stage.yml from a full Thorium
+          repository checkout (megathor/ next to deploy/), or set thorium_stage_charts_from to the
+          deploy/charts directory of one.
+      when: thorium_enabled | bool
+
+    # list-images.sh adds the images the operators create from custom resources (Scylla,
+    # Elasticsearch, Kibana, and the Thorium components)
+    - name: List the images the thorium chart deploys
+      ansible.builtin.shell: >-
+        {{ offline_stage_list_images | quote }}
+        {{ ([offline_stage_dir ~ '/thorium.yaml'] + thorium_values_files + [offline_stage_dir ~ '/no-mirror.yaml']) | map('quote') | join(' ') }}
+        > {{ (offline_stage_dir ~ '/thorium-images.txt') | quote }}
       args:
         chdir: "{{ playbook_dir }}"
       environment:
         THORIUM_CHART: "{{ playbook_dir }}/files/thorium-{{ thorium_chart_version }}.tgz"
         INFRA_OPERATORS_CHART: "{{ playbook_dir }}/files/infra-operators-{{ thorium_chart_version }}.tgz"
+      when: thorium_enabled | bool
 
-    - name: Add Helm Rook repo
-      kubernetes.core.helm_repository:
-        name: "rook-release"
-        repo_url: "https://charts.rook.io/release" 
+    - name: List the images the infra-operators chart deploys
+      ansible.builtin.shell: >-
+        set -o pipefail;
+        helm template infra-operators {{ (playbook_dir ~ '/files/infra-operators-' ~ thorium_chart_version ~ '.tgz') | quote }}
+        -n {{ infra_operators_namespace | quote }}
+        {{ ([offline_stage_dir ~ '/infra-operators.yaml'] + infra_operators_values_files + [offline_stage_dir ~ '/no-mirror.yaml']) | map('quote') | map('regex_replace', '^', '-f ') | join(' ') }}
+        | {{ offline_stage_python | quote }} scripts/chart-images.py > {{ (offline_stage_dir ~ '/infra-operators-images.txt') | quote }}
+      args:
+        chdir: "{{ playbook_dir }}"
+        executable: /bin/bash
+      when: infra_operators_enabled | bool
 
-    - name: Pull the Rook Operator Helm chart
-      command: helm pull rook-release/rook-ceph --version {{ rook_helm_chart_version }} --destination ./files/
+    - name: List the images Rook deploys
+      ansible.builtin.shell: >-
+        set -o pipefail;
+        { helm template rook-release {{ (playbook_dir ~ '/files/rook-ceph-' ~ rook_helm_chart_version ~ '.tgz') | quote }}
+        -n {{ rook_namespace | quote }} -f {{ (offline_stage_dir ~ '/rook-operator.yaml') | quote }};
+        helm template rook-ceph-cluster {{ (playbook_dir ~ '/files/rook-ceph-cluster-' ~ rook_helm_chart_version ~ '.tgz') | quote }}
+        -n {{ rook_namespace | quote }} -f {{ (offline_stage_dir ~ '/rook-cluster.yaml') | quote }}; }
+        | {{ offline_stage_python | quote }} scripts/chart-images.py > {{ (offline_stage_dir ~ '/rook-images.txt') | quote }}
+      args:
+        chdir: "{{ playbook_dir }}"
+        executable: /bin/bash
+      when: rook_enabled | bool
+
+    - name: List the images Traefik deploys
+      ansible.builtin.shell: >-
+        set -o pipefail;
+        helm template traefik {{ (playbook_dir ~ '/files/traefik-' ~ traefik_helm_chart_version ~ '.tgz') | quote }}
+        -n {{ traefik_namespace | quote }} -f {{ (offline_stage_dir ~ '/traefik.yaml') | quote }}
+        | {{ offline_stage_python | quote }} scripts/chart-images.py > {{ (offline_stage_dir ~ '/traefik-images.txt') | quote }}
+      args:
+        chdir: "{{ playbook_dir }}"
+        executable: /bin/bash
+      when: traefik_enabled | bool
+
+    - name: Combine the image lists into files/offline-images.txt
+      ansible.builtin.shell: >-
+        cat {{ (offline_stage_dir ~ '/') | quote }}*-images.txt | sort -u > files/offline-images.txt
       args:
         chdir: "{{ playbook_dir }}"
 
-    - name: Pull the Rook Ceph Cluster Helm chart
-      command: helm pull rook-release/rook-ceph-cluster --version {{ rook_helm_chart_version }} --destination ./files/
-      args:
-        chdir: "{{ playbook_dir }}"
+    - name: Remove the rendered values
+      ansible.builtin.file:
+        path: "{{ offline_stage_dir }}"
+        state: absent

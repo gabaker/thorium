@@ -1,3 +1,4 @@
+{{/* Patched by deploy/charts/scripts/vendor-charts.sh */}}
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -31,11 +32,11 @@ spec:
       {{- end }}
       containers:
       - name: {{ .Chart.Name }}
-        image: {{ .Values.image.repository }}/scylla-operator:{{ .Values.image.tag | default .Chart.AppVersion }}
+        image: {{ include "infra-operators.image" (dict "root" $ "image" (printf "%s/scylla-operator:%s" .Values.image.repository (.Values.image.tag | default .Chart.AppVersion | toString))) }}
         imagePullPolicy: {{ .Values.image.pullPolicy }}
         env:
         - name: SCYLLA_OPERATOR_IMAGE
-          value: {{ .Values.image.repository }}/scylla-operator:{{ .Values.image.tag | default .Chart.AppVersion }}
+          value: {{ include "infra-operators.image" (dict "root" $ "image" (printf "%s/scylla-operator:%s" .Values.image.repository (.Values.image.tag | default .Chart.AppVersion | toString))) }}
         args:
         - operator
         - --loglevel={{ .Values.logLevel }}

@@ -69,6 +69,16 @@ jobs:
           helm template thorium "$CHARTS/thorium" -n dev-thorium --set secrets.renderOnly=true > /dev/null
           helm template thorium "$CHARTS/thorium" -n thorium -f "$CHARTS/thorium/values-production.yaml" \
             --set secrets.renderOnly=true > /dev/null
+      # the example values files in the docs must keep rendering, alone and layered
+      - name: Render the example values files
+        run: |
+          for example in "$CHARTS"/examples/*.yaml "$CHARTS/thorium/values-production.yaml"; do
+            echo "rendering $example"
+            helm template thorium "$CHARTS/thorium" -n thorium --set secrets.renderOnly=true \
+              -f "$example" > /dev/null
+          done
+          helm template thorium "$CHARTS/thorium" -n thorium --set secrets.renderOnly=true \
+            -f "$CHARTS/thorium/values-production.yaml" -f "$CHARTS/examples/site.yaml" > /dev/null
       - name: Check the chart refuses to regenerate credentials without renderOnly
         run: |
           if stderr=$(helm template thorium "$CHARTS/thorium" -n thorium 2>&1 > /dev/null); then
@@ -106,6 +116,15 @@ jobs:
             | grep -v 'mirror.invalid' || true)
           if [ -n "$stray" ]; then
             echo "Images not using global.imageRegistry:"
+            echo "$stray"
+            exit 1
+          fi
+          stray=$(helm template infra-operators "$CHARTS/infra-operators" -n infra-operators \
+            --set global.imageRegistry=mirror.invalid \
+            | grep -E '^\s*(- )?(image|scyllaUtilsImage|unsupportedBashToolsImageOverride):\s*\S' \
+            | grep -v 'mirror.invalid' || true)
+          if [ -n "$stray" ]; then
+            echo "infra-operators images not using global.imageRegistry:"
             echo "$stray"
             exit 1
           fi

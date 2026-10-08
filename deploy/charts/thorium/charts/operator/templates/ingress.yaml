@@ -1,6 +1,16 @@
 {{- $ns := include "thorium.namespace" . }}
 {{- $i := .Values.ingress }}
+{{- /* only the Traefik IngressRoute has a registry route, so fail rather than silently drop it */}}
+{{- if and $i.registryHost (ne $i.type "traefik") }}
+{{- fail "operator.ingress.registryHost is only routed with operator.ingress.type traefik" }}
+{{- end }}
 {{- if eq $i.type "nginx" }}
+{{- /* user annotations replace the chart's defaults key by key, so no key is rendered twice */}}
+{{- $annotations := dict "nginx.ingress.kubernetes.io/proxy-body-size" "0" }}
+{{- if not $i.tls.secretName }}
+{{- $_ := set $annotations "nginx.ingress.kubernetes.io/ssl-redirect" "false" }}
+{{- end }}
+{{- $annotations = mustMergeOverwrite $annotations (deepCopy ($i.annotations | default dict)) }}
 ---
 apiVersion: networking.k8s.io/v1
 kind: Ingress
@@ -10,12 +20,8 @@ metadata:
   labels:
     {{- include "operator.labels" . | nindent 4 }}
   annotations:
-    nginx.ingress.kubernetes.io/proxy-body-size: "0"
-    {{- if not $i.tls.secretName }}
-    nginx.ingress.kubernetes.io/ssl-redirect: "false"
-    {{- end }}
-    {{- with $i.annotations }}
-    {{- toYaml . | nindent 4 }}
+    {{- range $key, $value := $annotations }}
+    {{ $key }}: {{ $value | toString | quote }}
     {{- end }}
 spec:
   ingressClassName: {{ $i.className }}
@@ -52,7 +58,7 @@ metadata:
 spec:
   minVersion: VersionTLS12
   maxVersion: VersionTLS13
-{{- if and $i.tls.secretName $i.tls.defaultStore }}
+{{- if and $i.tls.secretName $i.tls.traefikDefaultStore }}
 ---
 apiVersion: traefik.io/v1alpha1
 kind: TLSStore

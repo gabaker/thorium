@@ -1,46 +1,113 @@
-# Storage class for every PVC; empty uses the cluster default
+# Backing services for Thorium. Whether Redis, SeaweedFS, Scylla, Elasticsearch, and Postgres are
+# deployed is chosen by global.managed (an `enabled` key under any of them fails rendering).
+# Every `image` is a full reference and follows global.imageRegistry; every `resources` is a
+# standard Kubernetes resources block, where a "0" request reserves nothing on the node. Every
+# podSecurityContext/securityContext is a standard Kubernetes block whose defaults run the
+# container unprivileged as the image's own non-root user; set a key to null to drop one of
+# them. Values that mirror a field of an upstream resource keep that field's name:
+# scylla.members (the ScyllaCluster rack's members) and elastic.count (the ECK node set's
+# count), while replica counts of resources the chart defines are `replicas`.
+
+# Storage class for every PVC; empty uses the cluster default. Set it before the first install:
+# a PVC's storage class can't change, so changing it later fails the upgrade or isn't applied by
+# the Scylla, ECK, and Kubegres operators
 storageClass: ""
 
 # Redis: Thorium's cache and job queues (password from the redis-auth secret); deployed when
 # global.managed.redis is true
 redis:
   image: docker.io/redis:7.4.11
+  # the PVC size; it can only grow, and only with a storage class that allows expansion
   storage: 16Gi
   resources:
     requests: { cpu: "0", memory: "0" }
     limits: { cpu: 500m, memory: 512Mi }
+  # the official image's redis user (999); fsGroup gives it the data volume, changing ownership
+  # only when the volume's root doesn't already match
+  podSecurityContext:
+    runAsNonRoot: true
+    runAsUser: 999
+    runAsGroup: 999
+    fsGroup: 999
+    fsGroupChangePolicy: OnRootMismatch
+    seccompProfile:
+      type: RuntimeDefault
+  # Redis only writes to its data volume
+  securityContext:
+    allowPrivilegeEscalation: false
+    readOnlyRootFilesystem: true
+    capabilities:
+      drop: [ALL]
 
 # SeaweedFS: single-process S3 store (`weed mini`) on one PVC for single-node deployments;
 # deployed when global.managed.s3 is true
 seaweedfs:
   # pinned because `weed mini` defaults may change between SeaweedFS releases
   image: docker.io/chrislusf/seaweedfs:4.48
+  # the volume size, part of the StatefulSet's volumeClaimTemplates, which Kubernetes doesn't
+  # allow to change, so it is fixed after the first install
   storage: 8Gi
-  # buckets created for services other than Thorium (the operator creates Thorium's own); an
-  # external S3 store needs these created by the site
+  # buckets Quickwit needs, created by a setup job only while global.quickwit.enabled is true
+  # (the operator creates Thorium's own); an external S3 store needs these created by the site.
+  # Must include the bucket in quickwit.config.default_index_root_uri
   buckets:
     - quickwit
   resources:
     requests: { cpu: 256m, memory: 512Mi }
     limits: { cpu: "1", memory: 1Gi }
+  # the image's seaweed user (1000), which its entrypoint otherwise switches to after taking
+  # ownership of /data as root; fsGroup gives the user the data volume instead. Also used by the
+  # bucket job
+  podSecurityContext:
+    runAsNonRoot: true
+    runAsUser: 1000
+    runAsGroup: 1000
+    fsGroup: 1000
+    fsGroupChangePolicy: OnRootMismatch
+    seccompProfile:
+      type: RuntimeDefault
+  # SeaweedFS writes to its data volume and /tmp (an emptyDir)
+  securityContext:
+    allowPrivilegeEscalation: false
+    readOnlyRootFilesystem: true
+    capabilities:
+      drop: [ALL]
 
 # ScyllaDB cluster managed by the Scylla operator (the operator must already be installed);
 # deployed when global.managed.scylla is true
 scylla:
-  # image repositories (moved to global.imageRegistry when one is set)
+  # image repositories without a tag (moved to global.imageRegistry when one is set); the tags
+  # come from version and agentVersion. These mirror the ScyllaCluster spec, whose version the
+  # Scylla operator also reads to plan upgrades, rather than taking full image references
   repository: docker.io/scylladb/scylla
   agentRepository: docker.io/scylladb/scylla-manager-agent
   version: 6.2.3
   agentVersion: 3.4.2
+  # skip Scylla's hardware checks so it runs on any disk; turn off for production
   developerMode: true
+  # the datacenter and rack names Scylla reports for its nodes
   datacenter: us-east-1
   rack: us-east-1a
+  # the number of Scylla nodes in the rack (the ScyllaCluster rack's members); keep
+  # operator.backends.scylla.replication at most this
   members: 1
+  # the volume size of each node, fixed after the first install
   storage: 32Gi
   resources:
     requests: { cpu: "0", memory: "0" }
     limits: { cpu: "2", memory: 4Gi }
-  # the scylla.yaml handed to every Scylla node (developer_mode is appended from developerMode)
+  # Mount a host directory into every Scylla node at /tmp/coredumps, where Scylla writes core
+  # dumps, so they outlive the pod. A hostPath volume isn't allowed by the baseline or restricted
+  # Pod Security levels; turn it off for namespaces that enforce them. Changing it restarts the
+  # Scylla nodes one at a time
+  coredumps:
+    enabled: true
+    # the host directory
+    path: /tmp/coredumps
+  # the scylla.yaml handed to every Scylla node (developer_mode is appended from developerMode).
+  # The Scylla operator passes each node's own addresses and seeds on the command line, which
+  # take precedence over the address and seed settings here. Thorium needs PasswordAuthenticator
+  # and CassandraAuthorizer, since the operator logs in with credentials to create its role
   config: |
     num_tokens: 256
     commitlog_sync: periodic
@@ -74,57 +141,128 @@ scylla:
 # Elasticsearch (and optionally Kibana) managed by ECK (the ECK operator must already be
 # installed); deployed when global.managed.elastic is true
 elastic:
-  # full images; empty uses ECK's defaults (docker.elastic.co, or global.imageRegistry when set)
+  # the full Elasticsearch image; empty uses ECK's default (docker.elastic.co, or
+  # global.imageRegistry when set)
   image: ""
-  kibanaImage: ""
+  # the Elasticsearch and Kibana version; ECK upgrades the nodes in place when it changes
   version: 8.19.2
+  # the number of Elasticsearch nodes (the ECK node set's count)
   count: 1
-  # extra elasticsearch.yml settings for every node (merged over the chart's)
+  # extra elasticsearch.yml settings for every node (merged over the chart's
+  # node.store.allow_mmap: true and http.max_content_length: 1024mb). allow_mmap needs the
+  # vm.max_map_count kernel setting at 262144 or more on every node Elasticsearch runs on, or
+  # Elasticsearch fails its bootstrap check; set it on the nodes, turn on setMaxMapCount, or set
+  # node.store.allow_mmap: false here (slower searches, no kernel setting needed)
   config: {}
-  # the JVM heap; empty lets Elasticsearch size it from the memory limit
+  # set vm.max_map_count to 262144 on each Elasticsearch node from a privileged init container
+  # (a node-wide kernel setting, so it needs a namespace that allows privileged pods)
+  setMaxMapCount: false
+  # the JVM heap (ES_JAVA_OPTS); empty lets Elasticsearch size it from the memory limit
   javaOpts: -Xms1g -Xmx1g
+  # the volume size of each node; it can only grow, and only with a storage class that allows
+  # expansion
   storage: 32Gi
   resources:
     requests: { cpu: "0", memory: "0" }
     limits: { cpu: "1", memory: 2Gi }
+  # a single Kibana instance connected to the chart's Elasticsearch
   kibana:
     enabled: true
+    # the full Kibana image; empty uses ECK's default (docker.elastic.co, or
+    # global.imageRegistry when set)
+    image: ""
     resources:
       requests: { cpu: "0", memory: "0" }
       limits: { cpu: "1", memory: 1Gi }
 
 # Postgres for the Quickwit metastore in the quickwit namespace, managed by Kubegres (Kubegres
-# must already be installed); deployed along with the metastore database when
-# global.managed.postgres is true
+# must already be installed); deployed along with the quickwit-metastore database (the name the
+# Quickwit metastore URI uses) when global.managed.postgres and global.quickwit.enabled are true
 postgres:
   image: docker.io/postgres:17
+  # the number of Postgres instances (one primary, the rest replicas)
   replicas: 1
+  # the volume size of each instance
   storage: 32Gi
-  database: quickwit-metastore
   resources:
     requests: { cpu: "0", memory: "0" }
     limits: { cpu: "1", memory: 2Gi }
 
-# Jaeger query UI reading traces from Quickwit
+# Jaeger query UI reading traces from Quickwit (quickwit-searcher in <prefix>-quickwit), so it is
+# only deployed while global.quickwit.enabled is true as well
 jaeger:
   enabled: true
   image: docker.io/jaegertracing/jaeger-query:1.76.0
   resources:
     requests: { cpu: "0", memory: "0" }
     limits: { cpu: "1", memory: 1Gi }
+  # the image's own user (10001)
+  podSecurityContext:
+    runAsNonRoot: true
+    runAsUser: 10001
+    runAsGroup: 10001
+    seccompProfile:
+      type: RuntimeDefault
+  # Jaeger only reads from Quickwit and writes nothing to disk
+  securityContext:
+    allowPrivilegeEscalation: false
+    readOnlyRootFilesystem: true
+    capabilities:
+      drop: [ALL]
 
-# An optional container registry for Thorium tool images, deployed in the thorium namespace
+# An optional container registry for Thorium tool images, deployed in the thorium namespace as
+# the docker-registry service on port 5000 (route it with operator.ingress.registryHost)
 registry:
   enabled: false
   image: docker.io/registry:2
+  # the PVC size; it can only grow, and only with a storage class that allows expansion
   storage: 64Gi
-  # an existing secret with an `htpasswd` key enables basic auth
+  # an existing secret with an `htpasswd` key enables basic auth; set it to registry-auth to use
+  # the one the secrets subchart renders from secrets.registryBasicAuth
   htpasswdSecret: ""
   resources:
     requests: { cpu: "0", memory: "0" }
     limits: { cpu: "1", memory: 1Gi }
+  # The image has no user of its own and the registry needs none; fsGroup gives this user the
+  # data volume, changing ownership only when the volume's root doesn't already match
+  podSecurityContext:
+    runAsNonRoot: true
+    runAsUser: 1000
+    runAsGroup: 1000
+    fsGroup: 1000
+    fsGroupChangePolicy: OnRootMismatch
+    seccompProfile:
+      type: RuntimeDefault
+  # the registry writes to its data volume and /tmp (an emptyDir)
+  securityContext:
+    allowPrivilegeEscalation: false
+    readOnlyRootFilesystem: true
+    capabilities:
+      drop: [ALL]
 
-# Settings for the setup jobs (bucket and metastore database creation)
+# Settings for the setup jobs (bucket and metastore database creation). They are ordinary
+# resources installed alongside the services they set up, so helm --wait, Argo CD, and Flux
+# converge: Quickwit restarts until its bucket and database exist. Each job is named after a hash
+# of its spec, so a changed spec runs a new job, and both are safe to repeat
 jobs:
-  # how many times each job retries before failing the release
+  # how many times each job retries while its service is unreachable before giving up (Kubernetes
+  # waits 10s, 20s, 40s, ... up to 6 minutes between attempts, so 30 covers hours)
   backoffLimit: 30
+  # The jobs run as their image's own non-root user and only write to /tmp (an emptyDir): the
+  # bucket job with seaweedfs.podSecurityContext, the metastore database job with
+  # metastorePodSecurityContext (the official postgres image's postgres user, 999)
+  metastorePodSecurityContext:
+    runAsNonRoot: true
+    runAsUser: 999
+    runAsGroup: 999
+    seccompProfile:
+      type: RuntimeDefault
+  # the container securityContext of both jobs
+  securityContext:
+    allowPrivilegeEscalation: false
+    readOnlyRootFilesystem: true
+    capabilities:
+      drop: [ALL]
+  resources:
+    requests: { cpu: 10m, memory: 32Mi }
+    limits: { cpu: 500m, memory: 256Mi }

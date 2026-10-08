@@ -784,7 +784,7 @@ service:
   ## -- Single service is using `MixedProtocolLBService` feature gate.
   ## -- When set to false, it will create two Service, one for TCP and one for UDP.
   single: true
-  type: LoadBalancer
+  type: {{ traefik_service_type }}
   # -- Additional annotations applied to both TCP and UDP services (e.g. for cloud provider specific config)
   annotations: {}
   # -- Additional annotations for TCP service only
@@ -807,10 +807,13 @@ service:
   ## One of SingleStack, PreferDualStack, or RequireDualStack.
   # ipFamilyPolicy: SingleStack
   ## List of IP families (e.g. IPv4 and/or IPv6).
+{# left out when empty, since the Service then needs no externalIPs at all #}
+{% if traefik_external_ips | length > 0 %}
   externalIPs:
    {% for item in traefik_external_ips %}
    - {{ item }}
    {% endfor %} 
+{% endif %}
 
   ## ref: https://kubernetes.io/docs/concepts/services-networking/dual-stack/#services
   # ipFamilies:

@@ -13,19 +13,25 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use std::collections::BTreeMap;
+use std::sync::{Arc, Mutex, PoisonError};
 use thorium::Error;
+use thorium::models::upgrades::{UpgradeApproval, UpgradeStatus};
 
 /// A struct representing an environment variable
 #[derive(Serialize, Deserialize, Clone, Debug, JsonSchema, Hash, Eq, PartialEq)]
 pub struct EnvVar {
+    /// The name of the environment variable
     pub name: String,
+    /// The value of the environment variable (empty when unset)
     pub value: Option<String>,
 }
 
-/// A struct representing the cpu an memory resources of a container
+/// A struct representing the cpu and memory resources of a container
 #[derive(Serialize, Deserialize, Clone, Debug, JsonSchema, Hash, Eq, PartialEq)]
 pub struct Resources {
+    /// The CPU to request and limit the container to in millicpus (1000 is one core)
     pub cpu: u64,
+    /// The memory to request and limit the container to in mebibytes
     pub memory: u64,
 }
 
@@ -39,26 +45,20 @@ fn default_resources() -> Resources {
     }
 }
 
-/// COPIED FROM API without ephemeral/gpus
-// used when casting to a quantity
-macro_rules! quantity {
-    ($($raw:tt)+) => {serde_json::from_value(json!($($raw)+))}
-}
 impl Resources {
-    /// converts a resource request to a BTreeMap
+    /// Convert a resource request to the quantities k8s expects
     ///
-    /// This will ignore any value that is None
+    /// CPU is in millicpus and memory in mebibytes.
     ///
     /// # Arguments
     ///
     /// * `raw` - The resource request to convert
-    pub fn request_conv(raw: &Resources) -> Result<BTreeMap<String, Quantity>, Error> {
-        // creat btreemap of requests
-        let mut btree = BTreeMap::default();
-        // build the resource request map
-        btree.insert("cpu".to_owned(), quantity!(format!("{}m", raw.cpu))?);
-        btree.insert("memory".to_owned(), quantity!(format!("{}Mi", raw.memory))?);
-        Ok(btree)
+    pub fn request_conv(raw: &Resources) -> BTreeMap<String, Quantity> {
+        // express the cpu in millicpus and the memory in mebibytes
+        BTreeMap::from([
+            ("cpu".to_owned(), Quantity(format!("{}m", raw.cpu))),
+            ("memory".to_owned(), Quantity(format!("{}Mi", raw.memory))),
+        ])
     }
 }
 
@@ -67,11 +67,11 @@ fn default_envs() -> Vec<EnvVar> {
     vec![
         EnvVar {
             name: "http_proxy".to_owned(),
-            value: Some("".to_owned()),
+            value: Some(String::new()),
         },
         EnvVar {
             name: "https_proxy".to_owned(),
-            value: Some("".to_owned()),
+            value: Some(String::new()),
         },
         EnvVar {
             name: "no_proxy".to_owned(),
@@ -79,11 +79,11 @@ fn default_envs() -> Vec<EnvVar> {
         },
         EnvVar {
             name: "HTTP_PROXY".to_owned(),
-            value: Some("".to_owned()),
+            value: Some(String::new()),
         },
         EnvVar {
             name: "HTTPS_PROXY".to_owned(),
-            value: Some("".to_owned()),
+            value: Some(String::new()),
         },
         EnvVar {
             name: "NO_PROXY".to_owned(),
@@ -127,7 +127,7 @@ pub struct ThoriumApi {
     /// Commands to run in API container
     #[serde(default = "default_api_cmd")]
     pub cmd: Vec<String>,
-    // Args to pass to command in API container
+    /// Args to pass to command in API container
     #[serde(default = "default_api_args")]
     pub args: Vec<String>,
     /// The CPU and Memory needed by the API
@@ -146,16 +146,6 @@ impl Default for ThoriumApi {
             resources: default_api_resources(),
         }
     }
-}
-
-/// Serde helper for default kube config path
-fn default_scaler_envs() -> Vec<EnvVar> {
-    let mut envs = default_envs();
-    envs.push(EnvVar {
-        name: "KUBECONFIG".to_owned(),
-        value: Some("/root/.kube/config".to_owned()),
-    });
-    envs
 }
 
 /// Serde helper for default scaler container cmd (entrypoint in a Dockerfile)
@@ -182,12 +172,12 @@ fn default_service_account() -> bool {
 #[derive(Serialize, Deserialize, Clone, Debug, JsonSchema, Hash, Eq, PartialEq)]
 pub struct ThoriumScaler {
     /// Environment variables to apply in container
-    #[serde(default = "default_scaler_envs")]
+    #[serde(default = "default_envs")]
     pub env: Vec<EnvVar>,
     /// Commands to run in scaler container
     #[serde(default = "default_scaler_cmd")]
     pub cmd: Vec<String>,
-    // Args to pass to command in scaler container
+    /// Args to pass to command in scaler container
     #[serde(default = "default_scaler_args")]
     pub args: Vec<String>,
     /// The CPU and Memory for a scaler container
@@ -209,12 +199,12 @@ fn default_baremetal_scaler_args() -> Vec<String> {
 #[derive(Serialize, Deserialize, Clone, Debug, JsonSchema, Hash, Eq, PartialEq)]
 pub struct ThoriumBaremetalScaler {
     /// Environment variables to apply in container
-    #[serde(default = "default_scaler_envs")]
+    #[serde(default = "default_envs")]
     pub env: Vec<EnvVar>,
     /// Commands to run in scaler container
     #[serde(default = "default_scaler_cmd")]
     pub cmd: Vec<String>,
-    // Args to pass to command in scaler container
+    /// Args to pass to command in scaler container
     #[serde(default = "default_baremetal_scaler_args")]
     pub args: Vec<String>,
     /// The CPU and Memory for a scaler container
@@ -246,7 +236,7 @@ pub struct ThoriumSearchStreamer {
     /// Commands to run in search-streamer container
     #[serde(default = "default_search_streamer_cmd")]
     pub cmd: Vec<String>,
-    // Args to pass to command in search-streamer container
+    /// Args to pass to command in search-streamer container
     #[serde(default = "default_search_streamer_args")]
     pub args: Vec<String>,
     /// The CPU and Memory needed by the search-streamer
@@ -278,7 +268,7 @@ pub struct ThoriumEventHandler {
     /// Commands to run in event-handler container
     #[serde(default = "default_event_handler_cmd")]
     pub cmd: Vec<String>,
-    // Args to pass to command in event-handler container
+    /// Args to pass to command in event-handler container
     #[serde(default = "default_event_handler_args")]
     pub args: Vec<String>,
     /// The CPU and Memory needed by the event-handler
@@ -414,6 +404,24 @@ pub struct ThoriumBootstrap {
     pub elastic: Option<ElasticBootstrap>,
 }
 
+/// How the operator moves a `ThoriumCluster` between revisions
+///
+/// A cluster behind the operator's latest revision is only upgraded once a target is set,
+/// either explicitly or by `auto_target_dev`; until then it stays in `UpgradeRequired` and
+/// nothing in it is changed.
+#[derive(Serialize, Deserialize, Clone, Debug, Default, JsonSchema)]
+pub struct UpgradeSpec {
+    /// The revision (`YYYY-MM-vNN`) to upgrade this cluster to
+    #[schemars(pattern(thorium::models::upgrades::REVISION_PATTERN))]
+    pub target_revision: Option<String>,
+    /// Target the operator's latest revision when no target is set (for dev clusters)
+    #[serde(default)]
+    pub auto_target_dev: bool,
+    /// Approvals, with backup confirmations, for steps that change data or need manual work
+    #[serde(default)]
+    pub approvals: Vec<UpgradeApproval>,
+}
+
 /// The phase a `ThoriumCluster` is in
 #[derive(Serialize, Deserialize, Clone, Copy, Debug, JsonSchema, PartialEq, Eq)]
 pub enum ClusterPhase {
@@ -423,6 +431,10 @@ pub enum ClusterPhase {
     Ready,
     /// The last reconcile of this cluster failed
     Error,
+    /// This cluster is behind the operator's revision and waits for a target revision
+    UpgradeRequired,
+    /// The operator is running the steps that bring this cluster to its target revision
+    Upgrading,
 }
 
 /// The observed state of a `ThoriumCluster`
@@ -438,6 +450,8 @@ pub struct ThoriumClusterStatus {
     pub observed_generation: Option<i64>,
     /// A hash of the bootstrap spec and referenced Secrets the last completed bootstrap used
     pub bootstrap_hash: Option<String>,
+    /// The revision this cluster is at and any upgrade steps left to run
+    pub upgrade: Option<UpgradeStatus>,
 }
 
 /// Remove `required` constraints from a JSON schema so any field may be omitted
@@ -511,6 +525,8 @@ fn partial_conf_schema(generator: &mut schemars::SchemaGenerator) -> schemars::S
 }
 
 /// ThoriumCluster CRD definition
+// this doc is also the spec description in the published CRD, so it stays plain text
+#[allow(clippy::doc_markdown)]
 #[derive(CustomResource, Serialize, Deserialize, Clone, Debug, JsonSchema)]
 #[kube(
     group = "sandia.gov",
@@ -519,6 +535,7 @@ fn partial_conf_schema(generator: &mut schemars::SchemaGenerator) -> schemars::S
     namespaced,
     status = "ThoriumClusterStatus",
     printcolumn = r#"{"name":"Phase","type":"string","jsonPath":".status.phase"}"#,
+    printcolumn = r#"{"name":"Revision","type":"string","jsonPath":".status.upgrade.current"}"#,
     printcolumn = r#"{"name":"Message","type":"string","jsonPath":".status.message","priority":1}"#,
     doc = "Custom resource representing a ThoriumCluster"
 )]
@@ -566,9 +583,12 @@ pub struct ThoriumClusterSpec {
     /// own pod must mount the same Secret at the same path (the Helm chart does this).
     #[serde(default)]
     pub elastic_ca_secret: Option<CaSecretRef>,
+    /// How the operator upgrades this cluster between revisions
+    #[serde(default)]
+    pub upgrade: UpgradeSpec,
 }
 
-/// Methods operating on a ThoriumCluster resource
+/// Methods operating on a `ThoriumCluster` resource
 impl ThoriumCluster {
     /// Get the full image path within the registry
     pub fn get_image(&self) -> String {
@@ -582,38 +602,22 @@ impl ThoriumCluster {
 
     /// Get the scaler component spec
     pub fn get_scaler_spec(&self) -> Option<&ThoriumScaler> {
-        if let Some(spec) = &self.spec.components.scaler {
-            Some(&spec)
-        } else {
-            None
-        }
+        self.spec.components.scaler.as_ref()
     }
 
     /// Get the baremetal scaler component spec
     pub fn get_baremetal_scaler_spec(&self) -> Option<&ThoriumBaremetalScaler> {
-        if let Some(spec) = &self.spec.components.baremetal_scaler {
-            Some(&spec)
-        } else {
-            None
-        }
+        self.spec.components.baremetal_scaler.as_ref()
     }
 
     /// Get the event handler component spec
     pub fn get_event_handler_spec(&self) -> Option<&ThoriumEventHandler> {
-        if let Some(spec) = &self.spec.components.event_handler {
-            Some(&spec)
-        } else {
-            None
-        }
+        self.spec.components.event_handler.as_ref()
     }
 
     /// Get the search streamer component spec
     pub fn get_search_streamer_spec(&self) -> Option<&ThoriumSearchStreamer> {
-        if let Some(spec) = &self.spec.components.search_streamer {
-            Some(&spec)
-        } else {
-            None
-        }
+        self.spec.components.search_streamer.as_ref()
     }
 
     /// List the image pull secrets every Thorium pod should reference
@@ -711,59 +715,29 @@ impl ThoriumCluster {
             || self.mounted_secret_names().contains(&name)
     }
 
-    /// List the components in the ThoriumCluster
+    /// List the deployment names of the components in the `ThoriumCluster`
     pub fn list_component_names(&self) -> Vec<String> {
-        // a list of component names
-        let mut names: Vec<String> = Vec::new();
-        // always add the api name
-        names.push("api".to_owned());
-        if let Some(_) = self.spec.components.scaler {
-            names.push("scaler".to_owned());
-        }
-        if let Some(_) = self.spec.components.baremetal_scaler {
-            names.push("baremetal-scaler".to_owned());
-        }
-        if let Some(_) = self.spec.components.search_streamer {
-            names.push("search-streamer".to_owned());
-        }
-        if let Some(_) = self.spec.components.event_handler {
-            names.push("event-handler".to_owned());
-        }
+        // the api is always deployed
+        let mut names = vec!["api".to_owned()];
+        // add each optional component the spec has
+        let components = &self.spec.components;
+        let optional = [
+            (components.scaler.is_some(), "scaler"),
+            (components.baremetal_scaler.is_some(), "baremetal-scaler"),
+            (components.search_streamer.is_some(), "search-streamer"),
+            (components.event_handler.is_some(), "event-handler"),
+        ];
+        names.extend(
+            optional
+                .into_iter()
+                .filter(|(present, _)| *present)
+                .map(|(_, name)| name.to_owned()),
+        );
         names
     }
 }
 
-/// Build ThoriumCluster stub for testing
-#[allow(dead_code)]
-pub async fn get_stub_resource() -> Result<ThoriumCluster, Error> {
-    let raw_thorium_cluster_spec = json!({
-        "name": "ThoriumExample",
-        "nodes": ["server1", "server2", "server3"],
-        "components": {
-            "api": {"replicas": 1, "urls": ["some_url"], "ports": [80, 443]},
-            "scaler": {},
-            "baremetal_scaler": {},
-            "search_streamer": {},
-        },
-        "registry": "url:port/path/to/image",
-        "tag": "tag",
-        "config": {},
-        "config_secrets": [{"name": "thorium-config-secrets"}]
-    });
-    // build ThoriumCluster spec from json
-    let thorium_cluster_spec: ThoriumClusterSpec =
-        serde_json::from_value(raw_thorium_cluster_spec)?;
-    // create the ThoriumCluster cr using the ThoriumCluster spec
-    let thorium_cluster = ThoriumCluster::new("ThoriumProduction", thorium_cluster_spec);
-    // print the ThoriumCluster as yaml
-    println!(
-        "{}",
-        serde_norway::to_string(&thorium_cluster)
-            .expect("could not turn ThoriumCluster to YAML string")
-    );
-    Ok(thorium_cluster)
-}
-
+/// Build `ThoriumCluster` stub for testing
 /// Print the `ThoriumCluster` CRD as YAML
 pub fn print_crd() {
     // serialize the CRD for this operator version
@@ -773,6 +747,83 @@ pub fn print_crd() {
     print!("{crd}");
 }
 
+/// A `ThoriumCluster` along with the status this operator last saw or wrote for it
+///
+/// A reconcile works from a snapshot of the cluster taken when it started, so comparing a new
+/// status against that snapshot would skip a write that restores the starting status after this
+/// reconcile changed it (a `Ready` cluster set to `Provisioning` while a rollout finishes would
+/// never get back to `Ready`). Every status update made during a reconcile goes through one
+/// tracker so updates are compared against the status last written instead.
+#[derive(Debug)]
+pub struct StatusTracker {
+    /// The cluster as it was when the reconcile started
+    cluster: Arc<ThoriumCluster>,
+    /// The status as of the last successful patch, or the snapshot's status before any
+    current: Mutex<ThoriumClusterStatus>,
+}
+
+impl StatusTracker {
+    /// Start tracking the status of a `ThoriumCluster` from its current snapshot
+    ///
+    /// # Arguments
+    ///
+    /// * `cluster` - The cluster being reconciled
+    pub fn new(cluster: Arc<ThoriumCluster>) -> Self {
+        // start from the status the snapshot reports
+        let current = Mutex::new(cluster.status.clone().unwrap_or_default());
+        StatusTracker { cluster, current }
+    }
+
+    /// Get the cluster this tracker reports the status of
+    pub fn cluster(&self) -> &Arc<ThoriumCluster> {
+        &self.cluster
+    }
+
+    /// Get the status as of the last successful patch
+    pub fn current(&self) -> ThoriumClusterStatus {
+        // a panic while holding the lock can't leave the status half written, so a poisoned
+        // lock is still safe to read
+        self.current
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clone()
+    }
+
+    /// Record a status merge patch the API server accepted
+    ///
+    /// # Arguments
+    ///
+    /// * `patch` - The status fields that were merged
+    fn record(&self, patch: &serde_json::Value) {
+        // lock the status so concurrent updates apply one at a time
+        let mut current = self.current.lock().unwrap_or_else(PoisonError::into_inner);
+        // apply the patch the same way the API server merged it
+        let mut merged = serde_json::to_value(&*current).unwrap_or_default();
+        json_patch::merge(&mut merged, patch);
+        // keep the merged status, which always fits since it came from our own fields
+        if let Ok(status) = serde_json::from_value(merged) {
+            *current = status;
+        }
+    }
+}
+
+/// Describe an error for a `ThoriumCluster`'s status message
+///
+/// The status already puts a failed cluster in the error phase, so a plain message is used
+/// without the "Error: " prefix an error displays with; errors carrying a status code keep it.
+///
+/// # Arguments
+///
+/// * `error` - The error to describe
+pub fn error_message(error: &Error) -> String {
+    match (error.status(), error.msg()) {
+        // a plain message reads on its own
+        (None, Some(message)) => message,
+        // anything else keeps its code or kind
+        _ => error.to_string(),
+    }
+}
+
 /// Set a `ThoriumCluster`'s status if it has changed
 ///
 /// Failures are logged rather than returned so a status update never fails a reconcile.
@@ -780,17 +831,17 @@ pub fn print_crd() {
 /// # Arguments
 ///
 /// * `client` - The kube client to patch the status with
-/// * `cluster` - The `ThoriumCluster` to update
+/// * `tracker` - The cluster to update and the status last written for it
 /// * `phase` - The new phase for this `ThoriumCluster`
 /// * `message` - Details about the new phase
 pub async fn set_status(
     client: &Client,
-    cluster: &ThoriumCluster,
+    tracker: &StatusTracker,
     phase: ClusterPhase,
     message: Option<String>,
 ) {
     // update the status without touching the bootstrap hash
-    patch_status(client, cluster, phase, message, None).await;
+    patch_status(client, tracker, phase, message, None).await;
 }
 
 /// Set a `ThoriumCluster`'s status along with the hash of its completed bootstrap
@@ -798,42 +849,137 @@ pub async fn set_status(
 /// # Arguments
 ///
 /// * `client` - The kube client to patch the status with
-/// * `cluster` - The `ThoriumCluster` to update
+/// * `tracker` - The cluster to update and the status last written for it
 /// * `phase` - The new phase for this `ThoriumCluster`
 /// * `message` - Details about the new phase
 /// * `bootstrap_hash` - The hash of the bootstrap inputs that were just applied
 pub async fn set_status_with_bootstrap(
     client: &Client,
-    cluster: &ThoriumCluster,
+    tracker: &StatusTracker,
     phase: ClusterPhase,
     message: Option<String>,
     bootstrap_hash: String,
 ) {
     // update the status and record the bootstrap we completed
-    patch_status(client, cluster, phase, message, Some(bootstrap_hash)).await;
+    patch_status(client, tracker, phase, message, Some(bootstrap_hash)).await;
+}
+
+/// Set a `ThoriumCluster`'s phase together with its upgrade progress if either changed
+///
+/// Failures are logged rather than returned so a status update never fails a reconcile.
+///
+/// # Arguments
+///
+/// * `client` - The kube client to patch the status with
+/// * `tracker` - The cluster to update and the status last written for it
+/// * `phase` - The new phase for this `ThoriumCluster`
+/// * `message` - Details about the new phase
+/// * `upgrade` - The upgrade progress to report
+pub async fn set_upgrade_status(
+    client: &Client,
+    tracker: &StatusTracker,
+    phase: ClusterPhase,
+    message: Option<String>,
+    upgrade: UpgradeStatus,
+) {
+    // skip the update if nothing changed so we don't trigger needless watch events
+    let current = tracker.current();
+    let generation = tracker.cluster.metadata.generation;
+    if status_unchanged(&current, generation, phase, message.as_ref(), None)
+        && current.upgrade.as_ref() == Some(&upgrade)
+    {
+        return;
+    }
+    // the transition time only moves when the phase or message does
+    let transitioned = current.phase != Some(phase) || current.message != message;
+    // patch the phase, message, and upgrade progress together
+    let mut status = json!({
+        "phase": phase,
+        "message": message,
+        "observed_generation": generation,
+        "upgrade": upgrade,
+    });
+    if transitioned {
+        status["last_transition"] = json!(chrono::Utc::now().to_rfc3339());
+    }
+    send_status_patch(client, tracker, status).await;
+}
+
+/// Set only a `ThoriumCluster`'s upgrade progress if it changed, leaving its phase alone
+///
+/// # Arguments
+///
+/// * `client` - The kube client to patch the status with
+/// * `tracker` - The cluster to update and the status last written for it
+/// * `upgrade` - The upgrade progress to report
+pub async fn set_upgrade_progress(
+    client: &Client,
+    tracker: &StatusTracker,
+    upgrade: UpgradeStatus,
+) {
+    // skip the update if the progress didn't change
+    if tracker.current().upgrade.as_ref() == Some(&upgrade) {
+        return;
+    }
+    // patch just the upgrade progress
+    send_status_patch(client, tracker, json!({ "upgrade": upgrade })).await;
+}
+
+/// Send a merge patch to a `ThoriumCluster`'s status subresource, logging any failure
+///
+/// A patch the API server accepts is recorded in the tracker so later updates in the same
+/// reconcile compare against it.
+///
+/// # Arguments
+///
+/// * `client` - The kube client to patch the status with
+/// * `tracker` - The cluster to update and the status last written for it
+/// * `status` - The status fields to merge
+async fn send_status_patch(client: &Client, tracker: &StatusTracker, status: serde_json::Value) {
+    // get this cluster's name and namespace
+    let cluster = &tracker.cluster;
+    let (Some(name), Some(namespace)) = (&cluster.metadata.name, &cluster.metadata.namespace)
+    else {
+        println!("Cannot set the status of a ThoriumCluster without a name and namespace");
+        return;
+    };
+    // a merge patch replaces lists, so the planned steps are always replaced as a whole
+    let patch = json!({ "status": status });
+    let api: Api<ThoriumCluster> = Api::namespaced(client.clone(), namespace);
+    match api
+        .patch_status(name, &PatchParams::default(), &Patch::Merge(&patch))
+        .await
+    {
+        // remember what we wrote so the next update compares against it
+        Ok(_) => tracker.record(&status),
+        // leave the tracked status alone so the next update retries this one
+        Err(error) => {
+            println!("Failed to set status of ThoriumCluster {namespace}/{name}: {error}");
+        }
+    }
 }
 
 /// Check whether a `ThoriumCluster`'s status already matches an update
 ///
 /// # Arguments
 ///
-/// * `cluster` - The `ThoriumCluster` whose current status to compare against
+/// * `current` - The status to compare against
+/// * `generation` - The `metadata.generation` of the cluster's spec
 /// * `phase` - The new phase for this `ThoriumCluster`
 /// * `message` - Details about the new phase
 /// * `bootstrap_hash` - The new bootstrap hash, or None to keep the current one
 fn status_unchanged(
-    cluster: &ThoriumCluster,
+    current: &ThoriumClusterStatus,
+    generation: Option<i64>,
     phase: ClusterPhase,
     message: Option<&String>,
     bootstrap_hash: Option<&String>,
 ) -> bool {
-    // get the current status of this cluster
-    let current = cluster.status.clone().unwrap_or_default();
     // the phase, message, and described generation must all match, and a new bootstrap hash
     // must match the recorded one
     current.phase == Some(phase)
         && current.message.as_ref() == message
-        && current.observed_generation == cluster.metadata.generation
+        && current.observed_generation == generation
         && (bootstrap_hash.is_none() || current.bootstrap_hash.as_ref() == bootstrap_hash)
 }
 
@@ -842,54 +988,60 @@ fn status_unchanged(
 /// # Arguments
 ///
 /// * `client` - The kube client to patch the status with
-/// * `cluster` - The `ThoriumCluster` to update
+/// * `tracker` - The cluster to update and the status last written for it
 /// * `phase` - The new phase for this `ThoriumCluster`
 /// * `message` - Details about the new phase
 /// * `bootstrap_hash` - The new bootstrap hash, or None to keep the current one
 async fn patch_status(
     client: &Client,
-    cluster: &ThoriumCluster,
+    tracker: &StatusTracker,
     phase: ClusterPhase,
     message: Option<String>,
     bootstrap_hash: Option<String>,
 ) {
     // get the spec generation this status describes
-    let generation = cluster.metadata.generation;
-    // skip the update if nothing changed so we don't trigger needless watch events
-    if status_unchanged(cluster, phase, message.as_ref(), bootstrap_hash.as_ref()) {
+    let generation = tracker.cluster.metadata.generation;
+    // skip the update if nothing changed since our last write so we don't trigger needless
+    // watch events
+    let current = tracker.current();
+    if status_unchanged(
+        &current,
+        generation,
+        phase,
+        message.as_ref(),
+        bootstrap_hash.as_ref(),
+    ) {
         return;
     }
-    // get this cluster's name and namespace
-    let (Some(name), Some(namespace)) = (&cluster.metadata.name, &cluster.metadata.namespace)
-    else {
-        println!("Cannot set the status of a ThoriumCluster without a name and namespace");
-        return;
-    };
+    // the transition time only moves when the phase or message does
+    let transitioned = current.phase != Some(phase) || current.message != message;
     // build the new status
     let mut status = json!({
         "phase": phase,
         "message": message,
-        "last_transition": chrono::Utc::now().to_rfc3339(),
         "observed_generation": generation,
     });
+    if transitioned {
+        status["last_transition"] = json!(chrono::Utc::now().to_rfc3339());
+    }
     // only set a new bootstrap hash so the merge patch keeps the current one otherwise
     if let Some(bootstrap_hash) = bootstrap_hash {
         status["bootstrap_hash"] = json!(bootstrap_hash);
     }
-    // build the status patch
-    let patch = json!({ "status": status });
     // patch the status subresource
-    let api: Api<ThoriumCluster> = Api::namespaced(client.clone(), namespace);
-    if let Err(error) = api
-        .patch_status(name, &PatchParams::default(), &Patch::Merge(&patch))
-        .await
-    {
-        println!("Failed to set status of ThoriumCluster {namespace}/{name}: {error}");
-    }
+    send_status_patch(client, tracker, status).await;
 }
 
-/// Create or update the ThoriumCluster CRD
+/// Create or update the `ThoriumCluster` CRD
+///
+/// The CRD is applied server-side with the same field manager the chart's conversion script
+/// uses, forcing ownership so this operator's schema always wins.
+///
+/// # Arguments
+///
+/// * `client` - The kube client for the k8s cluster to apply the CRD in
 pub async fn create_or_update(client: &Client) -> Result<(), Error> {
+    // apply the CRD as our field manager
     let params = PatchParams::apply("thorium_cluster_apply").force();
     let crd_api: Api<CustomResourceDefinition> = Api::all(client.clone());
     // create the CRD for this operator version or patch it if it already exists
@@ -902,19 +1054,40 @@ pub async fn create_or_update(client: &Client) -> Result<(), Error> {
     let result = tokio::time::timeout(tokio::time::Duration::from_secs(30), established).await;
     // ensure CRD is established before continuing on
     match result {
-        Ok(_) => println!("ThoriumCluster CRD applied"),
-        Err(_) => {
-            return Err(Error::new(format!(
-                "Timed out waiting for ThoriumCluster CRD to be established"
-            )));
+        Ok(Ok(_)) => {
+            println!("ThoriumCluster CRD applied");
+            Ok(())
         }
+        Ok(Err(error)) => Err(Error::new(format!(
+            "Failed waiting for ThoriumCluster CRD to be established: {error}"
+        ))),
+        Err(_) => Err(Error::new(
+            "Timed out waiting for ThoriumCluster CRD to be established",
+        )),
     }
-    Ok(())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Status messages drop the "Error: " prefix of plain errors but keep status codes
+    #[test]
+    fn error_messages_without_prefix() {
+        // a plain error reads as its message
+        let plain = Error::new("ConfigMap thorium/thorium-upgrade-state is not valid");
+        assert_eq!(
+            error_message(&plain),
+            "ConfigMap thorium/thorium-upgrade-state is not valid"
+        );
+        // an error with a status code keeps it
+        let coded = Error::Thorium {
+            code: reqwest::StatusCode::NOT_FOUND,
+            msg: Some("config secret missing not found".to_owned()),
+        };
+        assert_eq!(error_message(&coded), coded.to_string());
+        assert!(error_message(&coded).contains("404"));
+    }
 
     /// Find every `required` list outside of a `oneOf`/`anyOf`/`allOf` member
     ///
@@ -998,17 +1171,6 @@ mod tests {
         let member = &schema["properties"]["a"]["oneOf"][0];
         assert_eq!(member["required"], serde_json::json!(["Grpc"]));
         assert!(member["properties"]["Grpc"].get("required").is_none());
-    }
-
-    /// The stub resource deserializes into a `ThoriumCluster`
-    #[tokio::test]
-    async fn stub_resource_deserializes() {
-        // build the stub resource
-        let cluster = get_stub_resource().await.expect("stub should deserialize");
-        // the config secret key falls back to its default
-        assert_eq!(cluster.spec.config_secrets[0].key, "thorium.yml");
-        // components left out of the stub are unset
-        assert!(cluster.spec.components.event_handler.is_none());
     }
 
     /// A cluster references its config secrets and every bootstrap secret
@@ -1121,6 +1283,31 @@ mod tests {
         assert_eq!(value["phase"], "Ready");
     }
 
+    /// Check whether a cluster's snapshot status already matches an update
+    ///
+    /// # Arguments
+    ///
+    /// * `cluster` - The cluster whose snapshot status to compare against
+    /// * `phase` - The new phase
+    /// * `message` - The new message
+    /// * `bootstrap_hash` - The new bootstrap hash, or None to keep the current one
+    fn snapshot_unchanged(
+        cluster: &ThoriumCluster,
+        phase: ClusterPhase,
+        message: Option<&String>,
+        bootstrap_hash: Option<&String>,
+    ) -> bool {
+        // compare against the status the snapshot reports
+        let current = cluster.status.clone().unwrap_or_default();
+        status_unchanged(
+            &current,
+            cluster.metadata.generation,
+            phase,
+            message,
+            bootstrap_hash,
+        )
+    }
+
     /// A status update is skipped only when the phase, message, generation, and any new
     /// bootstrap hash already match
     #[test]
@@ -1144,28 +1331,33 @@ mod tests {
         let ready = "ready".to_owned();
         let hash = "hash".to_owned();
         // the same status is a no-op, with or without the same bootstrap hash
-        assert!(status_unchanged(
+        assert!(snapshot_unchanged(
             &cluster,
             ClusterPhase::Ready,
             Some(&ready),
             None
         ));
-        assert!(status_unchanged(
+        assert!(snapshot_unchanged(
             &cluster,
             ClusterPhase::Ready,
             Some(&ready),
             Some(&hash)
         ));
         // a new phase, message, or bootstrap hash is written
-        assert!(!status_unchanged(
+        assert!(!snapshot_unchanged(
             &cluster,
             ClusterPhase::Provisioning,
             Some(&ready),
             None
         ));
-        assert!(!status_unchanged(&cluster, ClusterPhase::Ready, None, None));
+        assert!(!snapshot_unchanged(
+            &cluster,
+            ClusterPhase::Ready,
+            None,
+            None
+        ));
         let other = "other".to_owned();
-        assert!(!status_unchanged(
+        assert!(!snapshot_unchanged(
             &cluster,
             ClusterPhase::Ready,
             Some(&ready),
@@ -1173,7 +1365,7 @@ mod tests {
         ));
         // a new spec generation is written even when nothing else changed
         cluster.metadata.generation = Some(3);
-        assert!(!status_unchanged(
+        assert!(!snapshot_unchanged(
             &cluster,
             ClusterPhase::Ready,
             Some(&ready),
@@ -1181,11 +1373,434 @@ mod tests {
         ));
         // a cluster without a status is always written
         cluster.status = None;
-        assert!(!status_unchanged(
+        assert!(!snapshot_unchanged(
             &cluster,
             ClusterPhase::Ready,
             Some(&ready),
             None
         ));
+    }
+
+    /// Build a ready cluster in the test namespace with a recorded bootstrap
+    fn ready_cluster() -> ThoriumCluster {
+        // a cluster that was ready at generation 1 when the reconcile started
+        let mut cluster = crate::k8s::clusters::tests::namespaced_cluster(
+            crate::k8s::clusters::tests::full_spec(),
+        );
+        cluster.metadata.generation = Some(1);
+        cluster.status = Some(ThoriumClusterStatus {
+            phase: Some(ClusterPhase::Ready),
+            observed_generation: Some(1),
+            bootstrap_hash: Some("hash".to_owned()),
+            ..ThoriumClusterStatus::default()
+        });
+        cluster
+    }
+
+    /// Build a fake kube API that accepts status patches for the test cluster
+    ///
+    /// # Arguments
+    ///
+    /// * `cluster` - The cluster the patches answer with
+    fn accepting_status(cluster: &ThoriumCluster) -> crate::k8s::clusters::tests::FakeKube {
+        crate::k8s::clusters::tests::FakeKube::default().route(
+            "PATCH",
+            "/apis/sandia.gov/v1/namespaces/thorium/thoriumclusters/thorium/status",
+            200,
+            serde_json::to_value(cluster).expect("cluster serializes"),
+        )
+    }
+
+    /// Get the status fields of every patch a fake kube API received
+    ///
+    /// # Arguments
+    ///
+    /// * `fake` - The fake kube API that received the patches
+    fn patched(fake: &crate::k8s::clusters::tests::FakeKube) -> Vec<serde_json::Value> {
+        fake.writes()
+            .into_iter()
+            .map(|request| request.body["status"].clone())
+            .collect()
+    }
+
+    /// A ready cluster set to provisioning while a rollout finishes gets back to ready in the
+    /// same reconcile even though ready is what the reconcile started from
+    #[tokio::test]
+    async fn ready_restored_after_provisioning() {
+        // track a ready cluster like a reconcile does
+        let cluster = ready_cluster();
+        let fake = accepting_status(&cluster);
+        let client = fake.client();
+        let tracker = StatusTracker::new(Arc::new(cluster));
+        // the rollout wait reports provisioning
+        set_status(
+            &client,
+            &tracker,
+            ClusterPhase::Provisioning,
+            Some("Waiting for api to roll out".to_owned()),
+        )
+        .await;
+        // the finished reconcile reports ready with the same bootstrap it started with
+        set_status_with_bootstrap(
+            &client,
+            &tracker,
+            ClusterPhase::Ready,
+            None,
+            "hash".to_owned(),
+        )
+        .await;
+        // both were written and the cluster ends ready without a message
+        let patches = patched(&fake);
+        assert_eq!(patches.len(), 2, "{patches:?}");
+        assert_eq!(patches[0]["phase"], "Provisioning");
+        assert_eq!(patches[1]["phase"], "Ready");
+        assert_eq!(patches[1]["message"], serde_json::Value::Null);
+        // the tracker reflects the last write and a repeat of it is skipped
+        assert_eq!(tracker.current().phase, Some(ClusterPhase::Ready));
+        assert_eq!(tracker.current().message, None);
+        set_status(&client, &tracker, ClusterPhase::Ready, None).await;
+        assert_eq!(patched(&fake).len(), 2);
+    }
+
+    /// Rewriting the same phase and message with a new bootstrap hash or generation keeps the
+    /// transition time, while a new phase or message moves it
+    #[tokio::test]
+    async fn transition_time_moves_only_with_phase_or_message() {
+        // track a ready cluster like a reconcile does
+        let cluster = ready_cluster();
+        let fake = accepting_status(&cluster);
+        let client = fake.client();
+        let tracker = StatusTracker::new(Arc::new(cluster));
+        // a new bootstrap hash alone is written without moving the transition time
+        set_status_with_bootstrap(
+            &client,
+            &tracker,
+            ClusterPhase::Ready,
+            None,
+            "new".to_owned(),
+        )
+        .await;
+        // a new message moves it
+        set_status(
+            &client,
+            &tracker,
+            ClusterPhase::Ready,
+            Some("note".to_owned()),
+        )
+        .await;
+        // and so does a new phase
+        set_status(
+            &client,
+            &tracker,
+            ClusterPhase::Error,
+            Some("note".to_owned()),
+        )
+        .await;
+        let patches = patched(&fake);
+        assert_eq!(patches.len(), 3, "{patches:?}");
+        assert!(patches[0].get("last_transition").is_none(), "{patches:?}");
+        assert_eq!(patches[0]["bootstrap_hash"], "new");
+        assert!(patches[1].get("last_transition").is_some(), "{patches:?}");
+        assert!(patches[2].get("last_transition").is_some(), "{patches:?}");
+    }
+
+    /// A status patch the API server rejects isn't recorded, so the server's status is still
+    /// what later updates compare against
+    #[tokio::test]
+    async fn failed_status_patch_not_recorded() {
+        // a fake kube API that rejects every status patch
+        let fake = crate::k8s::clusters::tests::FakeKube::default();
+        let client = fake.client();
+        let tracker = StatusTracker::new(Arc::new(ready_cluster()));
+        // the provisioning patch fails
+        set_status(&client, &tracker, ClusterPhase::Provisioning, None).await;
+        assert_eq!(tracker.current().phase, Some(ClusterPhase::Ready));
+        // so the cluster is still ready and ready isn't written again
+        set_status(&client, &tracker, ClusterPhase::Ready, None).await;
+        assert_eq!(fake.writes().len(), 1);
+    }
+
+    /// Get the schema of `spec.<field>` from the generated CRD
+    ///
+    /// # Arguments
+    ///
+    /// * `field` - The spec field to get
+    fn spec_schema(field: &str) -> serde_json::Value {
+        // serialize the CRD so we can walk its schema
+        let crd = serde_json::to_value(ThoriumCluster::crd()).expect("CRD should serialize");
+        crd["spec"]["versions"][0]["schema"]["openAPIV3Schema"]["properties"]["spec"]["properties"]
+            [field]
+            .clone()
+    }
+
+    /// The CRD validates target revisions with the catalog's pattern
+    #[test]
+    fn crd_target_revision_has_pattern() {
+        // get the upgrade schema
+        let upgrade = spec_schema("upgrade");
+        // the target revision is validated by the shared revision pattern
+        assert_eq!(
+            upgrade["properties"]["target_revision"]["pattern"],
+            thorium::models::upgrades::REVISION_PATTERN
+        );
+        // auto targeting is a plain boolean
+        assert_eq!(upgrade["properties"]["auto_target_dev"]["type"], "boolean");
+        // approvals keep their required fields since only spec.config is made optional
+        let mut required = upgrade["properties"]["approvals"]["items"]["required"]
+            .as_array()
+            .cloned()
+            .unwrap_or_default();
+        required.sort_by_key(ToString::to_string);
+        assert_eq!(
+            required,
+            vec![serde_json::json!("backup"), serde_json::json!("step")]
+        );
+    }
+
+    /// The status schema lists the upgrade phases and step states and the CRD prints the
+    /// revision
+    #[test]
+    fn crd_status_lists_upgrade_phases() {
+        // serialize the CRD so we can walk its schema
+        let crd = serde_json::to_value(ThoriumCluster::crd()).expect("CRD should serialize");
+        let version = &crd["spec"]["versions"][0];
+        let status_schema =
+            &version["schema"]["openAPIV3Schema"]["properties"]["status"]["properties"];
+        // every phase is allowed, including the upgrade phases
+        let phases = status_schema["phase"]["enum"]
+            .as_array()
+            .cloned()
+            .unwrap_or_default();
+        for phase in [
+            "Provisioning",
+            "Ready",
+            "Error",
+            "UpgradeRequired",
+            "Upgrading",
+        ] {
+            assert!(
+                phases.contains(&serde_json::json!(phase)),
+                "{phase} missing"
+            );
+        }
+        // every step state is allowed
+        let states =
+            status_schema["upgrade"]["properties"]["steps"]["items"]["properties"]["state"]["enum"]
+                .as_array()
+                .cloned()
+                .unwrap_or_default();
+        assert_eq!(states.len(), 6);
+        // the revision is printed from the upgrade status
+        let columns = version["additionalPrinterColumns"]
+            .as_array()
+            .cloned()
+            .unwrap_or_default();
+        assert!(columns.iter().any(|column| column["name"] == "Revision"
+            && column["jsonPath"] == ".status.upgrade.current"));
+    }
+
+    /// A minimal spec waits for an upgrade target with no approvals and takes the defaults
+    /// the components expect
+    #[test]
+    fn minimal_spec_defaults() {
+        // a spec with only the required fields and a config secret without a key
+        let spec: ThoriumClusterSpec = serde_json::from_value(serde_json::json!({
+            "components": {"api": {}},
+            "registry": "registry/thorium",
+            "config": {},
+            "config_secrets": [{"name": "thorium-config-secrets"}]
+        }))
+        .expect("spec should deserialize");
+        // the config secret key falls back to the chart's key
+        assert_eq!(spec.config_secrets[0].key, "thorium.yml");
+        // components left out are unset
+        assert!(spec.components.scaler.is_none());
+        assert!(spec.components.event_handler.is_none());
+        // no target, no auto targeting, and no approvals
+        assert_eq!(spec.upgrade.target_revision, None);
+        assert!(!spec.upgrade.auto_target_dev);
+        assert_eq!(spec.upgrade.approvals, Vec::new());
+        // the remaining defaults match what the components expect
+        assert_eq!(spec.version, "latest");
+        assert_eq!(spec.image_pull_policy, "Always");
+        assert_eq!(spec.image_pull_secrets, Vec::<String>::new());
+        assert!(spec.elastic_ca_secret.is_none());
+    }
+
+    /// A cluster as the Helm chart's template renders it deserializes with every field kept
+    #[test]
+    fn chart_rendered_cr_deserializes() {
+        // the fields deploy/charts/thorium/charts/operator/templates/thoriumcluster.yaml writes
+        let spec: ThoriumClusterSpec = serde_json::from_value(serde_json::json!({
+            "components": {"api": {"replicas": 2}, "scaler": {"service_account": true}},
+            "registry": "registry/thorium",
+            "version": "1.8.1",
+            "image_pull_policy": "IfNotPresent",
+            "image_pull_secrets": ["thorium-image-pull"],
+            "config": {"thorium": {"cors": {"insecure": false}}},
+            "config_secrets": [{"name": "thorium-config-secrets", "key": "thorium.yml"}],
+            "bootstrap": {
+                "admin": {"secret": {"name": "thorium-admin", "username_key": "username", "password_key": "password"}},
+                "scylla": {
+                    "drop_default_role": true,
+                    "admin_secret": {"name": "scylla-admin", "username": "cassandra", "password_key": "password"}
+                },
+                "elastic": {"admin_secret": {"name": "elastic-es-elastic-user", "username": "elastic", "password_key": "elastic"}}
+            },
+            "elastic_ca_secret": {"name": "elastic-ca", "key": "ca.crt"},
+            "upgrade": {
+                "target_revision": "2026-10-v02",
+                "auto_target_dev": false,
+                "approvals": [{"step": "elastic-reindex-keyword-mappings", "backup": "snap-1"}]
+            }
+        }))
+        .expect("chart spec should deserialize");
+        // the upgrade settings come through
+        assert_eq!(spec.upgrade.target_revision.as_deref(), Some("2026-10-v02"));
+        assert_eq!(spec.upgrade.approvals[0].backup, "snap-1");
+        // and so do the other chart fields
+        assert_eq!(spec.components.api.replicas, 2);
+        assert_eq!(spec.config_secrets[0].name, "thorium-config-secrets");
+        assert_eq!(
+            spec.bootstrap
+                .as_ref()
+                .and_then(|bootstrap| bootstrap.admin.as_ref())
+                .map(|admin| admin.secret.name.as_str()),
+            Some("thorium-admin")
+        );
+        // the Scylla and Elastic bootstrap settings the chart renders come through
+        let bootstrap = spec.bootstrap.as_ref().expect("bootstrap");
+        let scylla = bootstrap.scylla.as_ref().expect("scylla bootstrap");
+        assert!(scylla.drop_default_role);
+        assert_eq!(
+            scylla
+                .admin_secret
+                .as_ref()
+                .and_then(|secret| secret.username.as_deref()),
+            Some("cassandra")
+        );
+        let elastic = bootstrap.elastic.as_ref().expect("elastic bootstrap");
+        assert_eq!(elastic.admin_secret.password_key, "elastic");
+    }
+
+    /// The image and component list follow the spec
+    #[test]
+    fn component_names_and_image() {
+        // a cluster with every component
+        let cluster = crate::k8s::clusters::tests::cluster_from_spec(
+            crate::k8s::clusters::tests::full_spec(),
+        );
+        assert_eq!(cluster.get_image(), "registry/thorium:1.8.1");
+        assert_eq!(
+            cluster.list_component_names(),
+            [
+                "api",
+                "scaler",
+                "baremetal-scaler",
+                "search-streamer",
+                "event-handler"
+            ]
+        );
+        // only the api is always deployed
+        let api_only = crate::k8s::clusters::tests::cluster_from_spec(serde_json::json!({
+            "components": {"api": {}},
+            "registry": "registry/thorium",
+            "config": {}
+        }));
+        assert_eq!(api_only.list_component_names(), ["api"]);
+        assert!(api_only.get_scaler_spec().is_none());
+    }
+
+    /// Build an empty upgrade progress at a revision
+    ///
+    /// # Arguments
+    ///
+    /// * `current` - The revision to report
+    fn progress_at(current: &str) -> UpgradeStatus {
+        UpgradeStatus {
+            current: Some(current.to_owned()),
+            ..UpgradeStatus::default()
+        }
+    }
+
+    /// Upgrade statuses are only written when they change and move the transition time only
+    /// when the phase or message does
+    #[tokio::test]
+    async fn upgrade_status_patches() {
+        // a cluster already reporting a held upgrade at generation 1
+        let mut cluster = crate::k8s::clusters::tests::namespaced_cluster(
+            crate::k8s::clusters::tests::full_spec(),
+        );
+        cluster.metadata.generation = Some(1);
+        cluster.status = Some(ThoriumClusterStatus {
+            phase: Some(ClusterPhase::UpgradeRequired),
+            message: Some("held".to_owned()),
+            observed_generation: Some(1),
+            upgrade: Some(progress_at("2026-10-v01")),
+            ..ThoriumClusterStatus::default()
+        });
+        let fake = crate::k8s::clusters::tests::FakeKube::default();
+        let client = fake.client();
+        let tracker = StatusTracker::new(Arc::new(cluster));
+        // the same status and progress aren't written again
+        set_upgrade_status(
+            &client,
+            &tracker,
+            ClusterPhase::UpgradeRequired,
+            Some("held".to_owned()),
+            progress_at("2026-10-v01"),
+        )
+        .await;
+        set_upgrade_progress(&client, &tracker, progress_at("2026-10-v01")).await;
+        assert!(fake.requests().is_empty());
+        // new progress alone is written without moving the transition time
+        set_upgrade_status(
+            &client,
+            &tracker,
+            ClusterPhase::UpgradeRequired,
+            Some("held".to_owned()),
+            progress_at("2026-10-v02"),
+        )
+        .await;
+        // a new phase moves the transition time
+        set_upgrade_status(
+            &client,
+            &tracker,
+            ClusterPhase::Upgrading,
+            Some("held".to_owned()),
+            progress_at("2026-10-v01"),
+        )
+        .await;
+        // new progress through the progress update only patches the progress
+        set_upgrade_progress(&client, &tracker, progress_at("2026-10-v02")).await;
+        let patches = fake
+            .writes()
+            .into_iter()
+            .map(|request| request.body["status"].clone())
+            .collect::<Vec<_>>();
+        assert_eq!(patches.len(), 3);
+        assert!(patches[0].get("last_transition").is_none());
+        assert_eq!(patches[0]["upgrade"]["current"], "2026-10-v02");
+        assert_eq!(patches[0]["observed_generation"], 1);
+        assert_eq!(patches[1]["phase"], "Upgrading");
+        assert!(patches[1].get("last_transition").is_some());
+        assert_eq!(
+            patches[2],
+            serde_json::json!({"upgrade": progress_at("2026-10-v02")})
+        );
+    }
+
+    /// A cluster without a name or namespace can't have its status patched
+    #[tokio::test]
+    async fn status_needs_name_and_namespace() {
+        // a cluster that was never placed in a namespace
+        let cluster = crate::k8s::clusters::tests::cluster_from_spec(
+            crate::k8s::clusters::tests::full_spec(),
+        );
+        let fake = crate::k8s::clusters::tests::FakeKube::default();
+        // the update is dropped without a request
+        let tracker = StatusTracker::new(Arc::new(cluster));
+        set_status(&fake.client(), &tracker, ClusterPhase::Ready, None).await;
+        assert!(fake.requests().is_empty());
     }
 }

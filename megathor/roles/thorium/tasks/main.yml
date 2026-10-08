@@ -3,7 +3,7 @@
 - name: Choose the thorium chart
   ansible.builtin.set_fact:
     thorium_chart_ref: >-
-      {{ thorium_chart if thorium_chart | length > 0
+      {{ thorium_chart if thorium_chart | default('', true) | length > 0
          else (playbook_dir ~ '/files/thorium-' ~ thorium_chart_version ~ '.tgz') if offline | bool
          else thorium_chart_repo ~ '/thorium' }}
 
@@ -17,6 +17,8 @@
         mode: "0600"
       no_log: true
 
+    # the helm module returns the release's values, credentials included, so its result stays out
+    # of the log and only the error is shown
     - name: Install the thorium chart
       kubernetes.core.helm:
         name: thorium
@@ -26,25 +28,144 @@
         release_namespace: "{{ thorium_namespace }}"
         create_namespace: true
         values_files: "{{ ['./artifacts/thorium-values.yaml'] + thorium_values_files }}"
+      register: thorium_helm
+      ignore_errors: true
+      no_log: true
+
+    - name: Fail when the thorium chart couldn't be installed
+      ansible.builtin.fail:
+        msg: "{{ thorium_helm.msg | default('helm failed') }} {{ thorium_helm.stderr | default('', true) }}"
+      when: thorium_helm is failed
   always:
     - name: Remove the thorium chart values
       ansible.builtin.file:
         path: ./artifacts/thorium-values.yaml
         state: absent
 
-- name: Wait for the operator to report the ThoriumCluster ready
+# The release namespace holds exactly one ThoriumCluster, named thorium_deployment_name by the chart
+# (or dev on a converted pre-Helm deployment), so it is found by listing the namespace. A
+# deployment behind the operator's revision waits in UpgradeRequired until
+# thorium_upgrade_target_revision is set, which is a finished deploy rather than a failure. The
+# status only counts once the operator reported on the current spec (observed_generation), so a
+# status left from before this run's changes isn't mistaken for the result; an Error phase or a
+# Blocked upgrade step on the current spec stops the wait at once.
+- name: Wait for the operator to finish reconciling the ThoriumCluster
   kubernetes.core.k8s_info:
     api_version: sandia.gov/v1
     kind: ThoriumCluster
-    name: "{{ thorium_deployment_name }}"
     namespace: "{{ thorium_namespace }}"
   register: thorium_cluster
-  until: (thorium_cluster.resources | first | default({})).status.phase | default('') == 'Ready'
+  until: >-
+    thorium_cluster.resources | default([]) | length > 0
+    and (thorium_cluster.resources[0].status | default({}, true)).observed_generation | default(-1)
+      == thorium_cluster.resources[0].metadata.generation
+    and (
+      (thorium_cluster.resources[0].status | default({}, true)).phase | default('', true)
+        in ['Ready', 'UpgradeRequired', 'Error']
+      or ((thorium_cluster.resources[0].status | default({}, true)).upgrade | default({}, true)).steps
+        | default([], true) | selectattr('state', 'defined') | selectattr('state', 'equalto', 'Blocked')
+        | list | length > 0
+    )
   retries: "{{ (thorium_ready_timeout | int / 10) | int }}"
   delay: 10
+  # running out of retries is reported with the ThoriumCluster's status by the tasks below
+  ignore_errors: true
+
+- name: Read the ThoriumCluster's status
+  ansible.builtin.set_fact:
+    thorium_cluster_resource: "{{ thorium_cluster.resources | default([]) | first | default({}) }}"
+    thorium_cluster_status: "{{ (thorium_cluster.resources | default([]) | first | default({})).status | default({}, true) }}"
+
+- name: Read the blocked upgrade steps
+  ansible.builtin.set_fact:
+    thorium_blocked_steps: >-
+      {{ (thorium_cluster_status.upgrade | default({}, true)).steps | default([], true)
+         | selectattr('state', 'defined') | selectattr('state', 'equalto', 'Blocked') | list }}
+
+- name: Fail when there is no ThoriumCluster
+  ansible.builtin.fail:
+    msg: >-
+      No ThoriumCluster appeared in {{ thorium_namespace }} within {{ thorium_ready_timeout }}
+      seconds; check the operator (kubectl -n {{ thorium_namespace }} logs deploy/operator)
+  when: thorium_cluster_resource | length == 0
+
+- name: Fail when the ThoriumCluster failed or an upgrade step is blocked
+  ansible.builtin.fail:
+    msg:
+      - "The ThoriumCluster {{ thorium_cluster_resource.metadata.name }} is in phase {{ thorium_cluster_status.phase | default('unknown') }}: {{ thorium_cluster_status.message | default('no message') }}"
+      - "Blocked steps: {{ thorium_blocked_steps | map(attribute='step') | join(', ') or 'none' }}"
+      - "Blocked step messages: {{ thorium_blocked_steps | map(attribute='message') | select | join('; ') or 'none' }}"
+  when: thorium_cluster_status.phase | default('', true) == 'Error' or thorium_blocked_steps | length > 0
+
+- name: Fail when the ThoriumCluster didn't become ready in time
+  ansible.builtin.fail:
+    msg: >-
+      The ThoriumCluster {{ thorium_cluster_resource.metadata.name }} did not become ready within
+      {{ thorium_ready_timeout }} seconds (phase {{ thorium_cluster_status.phase | default('unknown') }},
+      observed generation {{ thorium_cluster_status.observed_generation | default('none') }} of
+      {{ thorium_cluster_resource.metadata.generation }}): {{ thorium_cluster_status.message | default('no message') }}
+  when: >-
+    thorium_cluster_status.phase | default('', true) not in ['Ready', 'UpgradeRequired']
+    or thorium_cluster_status.observed_generation | default(-1) != thorium_cluster_resource.metadata.generation
+
+- name: Show the upgrade the deployment is waiting for
+  ansible.builtin.debug:
+    msg:
+      - "{{ thorium_cluster_status.message | default('', true) }}"
+      - "Steps: {{ (thorium_cluster_status.upgrade | default({}, true)).steps | default([], true) | map(attribute='step') | join(', ') }}"
+  when: thorium_cluster_status.phase == 'UpgradeRequired'
+
+# The admin bootstrap can be turned off (a converted deployment keeps the users it already has),
+# in which case neither the thorium-admin secret nor a megathor-created admin exists
+- name: Read the ThoriumCluster's admin bootstrap
+  ansible.builtin.set_fact:
+    thorium_admin_bootstrap: "{{ ((thorium_cluster_resource.spec | default({}, true)).bootstrap | default({}, true)).admin | default({}, true) }}"
+
+# A values file (such as a conversion's) can replace the admin login megathor generated, so the
+# login is read from the Secret the bootstrap uses rather than assumed to be the vault's
+- name: Read the admin bootstrap Secret
+  kubernetes.core.k8s_info:
+    api_version: v1
+    kind: Secret
+    name: "{{ thorium_admin_bootstrap.secret.name | default('thorium-admin') }}"
+    namespace: "{{ thorium_namespace }}"
+  register: thorium_admin_secret
+  when:
+    - thorium_cluster_status.phase == 'Ready'
+    - thorium_admin_bootstrap | length > 0
+  no_log: true
+
+- name: Find the admin login in the bootstrap Secret
+  ansible.builtin.set_fact:
+    thorium_admin_login_user: >-
+      {{ (thorium_admin_secret_data[thorium_admin_bootstrap.secret.username_key] | b64decode)
+         if thorium_admin_bootstrap.secret.username_key | default('', true) in thorium_admin_secret_data
+         else thorium_admin_bootstrap.secret.username | default(thorium_admin_username, true) }}
+    thorium_admin_password_in_vault: >-
+      {{ thorium_admin_secret_data[thorium_admin_bootstrap.secret.password_key | default('password', true)]
+         | default('', true) | b64decode == thorium_admin_password }}
+  vars:
+    thorium_admin_secret_data: "{{ (thorium_admin_secret.resources | default([]) | first | default({})).data | default({}, true) }}"
+  when:
+    - thorium_cluster_status.phase == 'Ready'
+    - thorium_admin_bootstrap | length > 0
+  no_log: true
 
 - name: Show how to get the admin credentials
   ansible.builtin.debug:
     msg: >-
-      Thorium is ready. Admin user {{ thorium_admin_username }}; its password is in the vault
-      (thorium_admin_password) and in the thorium-admin secret in {{ thorium_namespace }}.
+      Thorium is ready. Admin user {{ thorium_admin_login_user }}; its password is in the
+      {{ thorium_admin_bootstrap.secret.name | default('thorium-admin') }} secret in
+      {{ thorium_namespace }}{{ ' and in the vault (thorium_admin_password)' if thorium_admin_password_in_vault | bool else '' }}.
+  when:
+    - thorium_cluster_status.phase == 'Ready'
+    - thorium_admin_bootstrap | length > 0
+
+- name: Show that no admin user was created
+  ansible.builtin.debug:
+    msg: >-
+      Thorium is ready. The admin bootstrap is disabled in this ThoriumCluster, so no admin user
+      was created from megathor's credentials; log in with an existing Thorium account.
+  when:
+    - thorium_cluster_status.phase == 'Ready'
+    - thorium_admin_bootstrap | length == 0

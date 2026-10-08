@@ -1,3 +1,4 @@
+{{/* Patched by deploy/charts/scripts/vendor-charts.sh */}}
 ---
 {{- $metricsPort := int (include "eck-operator.metrics.port" .)}}
 apiVersion: apps/v1
@@ -51,7 +52,7 @@ spec:
         {{- toYaml . | nindent 8 }}
       {{- end }}
       containers:
-        - image: "{{ .Values.image.repository }}{{- if .Values.config.ubiOnly -}}-ubi{{- end -}}{{- if .Values.image.fips -}}-fips{{- end -}}:{{ default .Chart.AppVersion .Values.image.tag }}"
+        - image: {{ include "infra-operators.image" (dict "root" $ "image" (printf "%s%s%s:%s" .Values.image.repository (ternary "-ubi" "" (not (empty .Values.config.ubiOnly))) (ternary "-fips" "" (not (empty .Values.image.fips))) (default .Chart.AppVersion .Values.image.tag | toString))) | quote }}
           imagePullPolicy: {{ .Values.image.pullPolicy }}
           name: manager
           args:

@@ -9,7 +9,7 @@ metadata:
   labels:
     {{- include "infra.labels" . | nindent 4 }}
 spec:
-  version: {{ .Values.elastic.version }}
+  version: {{ .Values.elastic.version | quote }}
   {{- with .Values.elastic.image | default (and $.Values.global.imageRegistry (printf "docker.elastic.co/elasticsearch/elasticsearch:%s" $.Values.elastic.version)) }}
   image: {{ include "thorium.image" (dict "root" $ "image" .) | quote }}
   {{- end }}
@@ -26,6 +26,15 @@ spec:
       count: {{ .Values.elastic.count }}
       podTemplate:
         spec:
+          {{- if .Values.elastic.setMaxMapCount }}
+          # allow_mmap needs vm.max_map_count of at least 262144, a node-wide kernel setting
+          initContainers:
+            - name: sysctl
+              securityContext:
+                privileged: true
+                runAsUser: 0
+              command: ["sh", "-c", "sysctl -w vm.max_map_count=262144"]
+          {{- end }}
           containers:
             - name: elasticsearch
               {{- with .Values.elastic.javaOpts }}
@@ -57,8 +66,8 @@ metadata:
   labels:
     {{- include "infra.labels" . | nindent 4 }}
 spec:
-  version: {{ .Values.elastic.version }}
-  {{- with .Values.elastic.kibanaImage | default (and $.Values.global.imageRegistry (printf "docker.elastic.co/kibana/kibana:%s" $.Values.elastic.version)) }}
+  version: {{ .Values.elastic.version | quote }}
+  {{- with .Values.elastic.kibana.image | default (and $.Values.global.imageRegistry (printf "docker.elastic.co/kibana/kibana:%s" $.Values.elastic.version)) }}
   image: {{ include "thorium.image" (dict "root" $ "image" .) | quote }}
   {{- end }}
   count: 1

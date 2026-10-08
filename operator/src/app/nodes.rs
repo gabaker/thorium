@@ -7,7 +7,7 @@ use crate::k8s::clusters::ClusterMeta;
 
 /// Add worker nodes to Thorium
 ///
-/// Each Thorium worker must be added Thorium via the API with an empty resource spec before
+/// Each Thorium worker must be added to Thorium via the API with an empty resource spec before
 /// the scaler can schedule pods on them.
 ///
 /// # Arguments
@@ -15,31 +15,29 @@ use crate::k8s::clusters::ClusterMeta;
 /// * `meta` - Thorium cluster client and metadata
 /// * `thorium` - The Thorium client being used for API interactions
 pub async fn add_nodes_to_thorium(meta: &ClusterMeta, thorium: &Thorium) -> Result<(), Error> {
-    // use default resources for initial node registration
+    // register nodes with empty resources; their agents report the real ones later
     let resources = Resources::default();
     // add each cluster's nodes to Thorium
     let clusters = meta.conf.thorium.scaler.k8s.clusters.clone();
     for (name, k8s_cluster) in &clusters {
         // get the node names in our conf, or every node when none are listed
         let nodes = crate::k8s::nodes::resolve_nodes(meta, k8s_cluster).await?;
+        // Thorium knows a cluster by its alias when it has one
+        let cluster = k8s_cluster.alias.clone().unwrap_or_else(|| name.clone());
         for node in &nodes {
             // build node registration object
             let node_reg = NodeRegistration {
-                cluster: if k8s_cluster.alias.is_some() {
-                    k8s_cluster.alias.clone().unwrap()
-                } else {
-                    name.clone()
-                },
+                cluster: cluster.clone(),
                 name: node.clone(),
                 resources,
             };
-            // register node config w/ Thorium API
+            // register this node, which the API skips if it is already registered
             let reg_result = thorium.system.register_node(&node_reg).await?;
             // return any non-success result codes
             if reg_result.status() != 201 {
                 return Err(Error::new(format!(
-                    "Failed to init system settings: {}",
-                    &reg_result.status()
+                    "Failed to register node {node} in cluster {cluster}: {}",
+                    reg_result.status()
                 )));
             }
         }

@@ -6,6 +6,7 @@ mod args;
 mod backup;
 mod census;
 mod error;
+mod migrate;
 mod provision;
 mod settings;
 mod shared;
@@ -26,9 +27,10 @@ async fn main() {
         args::SubCommands::Provision(provision_args) => provision::handle(provision_args).await,
         args::SubCommands::Census(census_cmd) => census::handle(census_cmd, &args).await,
         args::SubCommands::Users(users_cmd) => users::handle(users_cmd, &args).await,
+        args::SubCommands::Migrate(migrate_cmd) => migrate::handle(migrate_cmd),
     } {
         eprintln!("{err}");
-        // TODO: return the proper exit code based on the error
-        std::process::exit(1);
+        // exit with the code for this kind of error
+        std::process::exit(err.exit_code());
     }
 }

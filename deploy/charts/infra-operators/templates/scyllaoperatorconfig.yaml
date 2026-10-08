@@ -1,0 +1,22 @@
+{{- /*
+The Scylla operator's cluster-wide ScyllaOperatorConfig, rendered to move its auxiliary images to
+global.imageRegistry. Without it the operator creates an empty "cluster" and falls back to its
+built-in upstream images, which global.imageRegistry can't reach.
+The webhook server validates ScyllaOperatorConfigs and isn't running yet on a first install, but
+Helm creates kinds it doesn't know in alphabetical order, so this is created before the
+ValidatingWebhookConfiguration and is never sent to the webhook then.
+*/ -}}
+{{- $config := .Values.scyllaOperatorConfig -}}
+{{- if and (index .Values "scylla-operator" "enabled") (or (.Values.global).imageRegistry $config.create) }}
+apiVersion: scylla.scylladb.com/v1alpha1
+kind: ScyllaOperatorConfig
+metadata:
+  name: cluster
+  labels:
+    app.kubernetes.io/name: scylla-operator
+    app.kubernetes.io/instance: {{ .Release.Name }}
+    app.kubernetes.io/managed-by: {{ .Release.Service }}
+spec:
+  scyllaUtilsImage: {{ include "infra-operators.image" (dict "root" $ "image" $config.scyllaDBUtilsImage) | quote }}
+  unsupportedBashToolsImageOverride: {{ include "infra-operators.image" (dict "root" $ "image" $config.bashToolsImage) | quote }}
+{{- end }}

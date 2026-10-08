@@ -1,3 +1,75 @@
+{{- /*
+The spec of the Job creating SeaweedFS's non-Thorium buckets. The Job is named after a hash of
+this rendered spec, since a Job's pod template is immutable: any change to it creates a new Job
+rather than failing to patch the existing one.
+*/ -}}
+{{- define "infra.bucketsJobSpec" -}}
+{{- $host := include "thorium.host" (dict "root" $ "service" "seaweedfs" "ns" "seaweedfs") -}}
+backoffLimit: {{ .Values.jobs.backoffLimit }}
+template:
+  metadata:
+    labels:
+      app: seaweedfs-admin
+  spec:
+    restartPolicy: Never
+    automountServiceAccountToken: false
+    {{- with .Values.seaweedfs.podSecurityContext }}
+    securityContext:
+      {{- toYaml . | nindent 6 }}
+    {{- end }}
+    containers:
+      - name: weed-shell
+        image: {{ include "thorium.image" (dict "root" $ "image" .Values.seaweedfs.image) }}
+        imagePullPolicy: IfNotPresent
+        {{- with .Values.jobs.securityContext }}
+        securityContext:
+          {{- toYaml . | nindent 10 }}
+        {{- end }}
+        {{- with .Values.jobs.resources }}
+        resources:
+          {{- toYaml . | nindent 10 }}
+        {{- end }}
+        env:
+          - name: HOME
+            value: /tmp
+        volumeMounts:
+          - mountPath: /tmp
+            name: tmp
+        command:
+          - /bin/sh
+          - -c
+          - |
+            set -e
+            # wait for the master and filer to answer, since weed shell blocks without output
+            # until the master is reachable
+            attempt=1
+            until wget -q -T 5 -O /dev/null http://{{ $host }}:9333/cluster/status &&
+              wget -q -T 5 -O /dev/null http://{{ $host }}:8888/; do
+              if [ "$attempt" -ge 60 ]; then
+                echo "SeaweedFS at {{ $host }} is unreachable, failing this attempt"
+                exit 1
+              fi
+              echo "Waiting for SeaweedFS ($attempt/60)..."
+              attempt=$((attempt + 1))
+              sleep 5
+            done
+            # bound each weed shell call so losing SeaweedFS fails the attempt and the Job retries;
+            # weed shell exits 0 on SIGTERM, so only SIGKILL turns a timeout into a failure
+            shell() { echo "$1" | timeout -s KILL 60 weed shell -master={{ $host }}:9333 -filer={{ $host }}:8888; }
+            has_bucket() { shell "s3.bucket.list" | awk -v b="$1" '$1 == b { found = 1 } END { exit !found }'; }
+            for bucket in {{ join " " .Values.seaweedfs.buckets }}; do
+              if has_bucket "$bucket"; then
+                echo "Bucket $bucket already exists"
+              else
+                shell "s3.bucket.create -name $bucket"
+              fi
+              has_bucket "$bucket"
+            done
+    volumes:
+      - name: tmp
+        emptyDir:
+          sizeLimit: 64Mi
+{{- end -}}
 {{- if include "infra.managed" (dict "root" $ "service" "s3" "key" "seaweedfs") }}
 {{- $ns := include "thorium.ns" (dict "root" $ "name" "seaweedfs") }}
 {{- $host := include "thorium.host" (dict "root" $ "service" "seaweedfs" "ns" "seaweedfs") }}
@@ -24,10 +96,19 @@ spec:
       labels:
         app: seaweedfs
     spec:
+      automountServiceAccountToken: false
+      {{- with .Values.seaweedfs.podSecurityContext }}
+      securityContext:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
       containers:
         - name: seaweedfs
           image: {{ include "thorium.image" (dict "root" $ "image" .Values.seaweedfs.image) }}
           imagePullPolicy: IfNotPresent
+          {{- with .Values.seaweedfs.securityContext }}
+          securityContext:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
           args:
             - mini
             - -dir=/data
@@ -53,10 +134,15 @@ spec:
             - mountPath: /etc/seaweedfs
               name: s3-config
               readOnly: true
+            - mountPath: /tmp
+              name: tmp
       volumes:
         - name: s3-config
           secret:
             secretName: seaweedfs-s3-config
+        - name: tmp
+          emptyDir:
+            sizeLimit: 256Mi
   volumeClaimTemplates:
     - metadata:
         name: seaweedfs-data
@@ -113,46 +199,21 @@ spec:
         - podSelector:
             matchLabels:
               app: seaweedfs
-{{- if .Values.seaweedfs.buckets }}
+{{- if and .Values.seaweedfs.buckets (include "thorium.quickwit" $) }}
+{{- $spec := include "infra.bucketsJobSpec" . }}
 ---
-# Creates the non-Thorium buckets once SeaweedFS is reachable; `s3.bucket.create` fails if
-# the bucket exists, so the listing is checked first to stay idempotent
+# Creates the non-Thorium buckets once SeaweedFS is reachable, retrying until it is up: each
+# attempt checks SeaweedFS 60 times, 5s apart, and bounds every weed shell call, then fails so
+# the Job retries. `s3.bucket.create` fails if the bucket exists, so the listing is checked
+# first to stay idempotent. It is named after a hash of its spec (see infra.bucketsJobSpec)
 apiVersion: batch/v1
 kind: Job
 metadata:
-  name: seaweedfs-create-buckets
+  name: seaweedfs-create-buckets-{{ sha256sum $spec | trunc 10 }}
   namespace: {{ $ns }}
   labels:
     {{- include "infra.labels" . | nindent 4 }}
-  annotations:
-    helm.sh/hook: post-install,post-upgrade
-    helm.sh/hook-delete-policy: before-hook-creation
 spec:
-  backoffLimit: {{ .Values.jobs.backoffLimit }}
-  template:
-    metadata:
-      labels:
-        app: seaweedfs-admin
-    spec:
-      restartPolicy: Never
-      containers:
-        - name: weed-shell
-          image: {{ include "thorium.image" (dict "root" $ "image" .Values.seaweedfs.image) }}
-          imagePullPolicy: IfNotPresent
-          command:
-            - /bin/sh
-            - -c
-            - |
-              set -e
-              shell() { echo "$1" | weed shell -master={{ $host }}:9333 -filer={{ $host }}:8888; }
-              has_bucket() { shell "s3.bucket.list" | awk -v b="$1" '$1 == b { found = 1 } END { exit !found }'; }
-              for bucket in {{ join " " .Values.seaweedfs.buckets }}; do
-                if has_bucket "$bucket"; then
-                  echo "Bucket $bucket already exists"
-                else
-                  shell "s3.bucket.create -name $bucket"
-                fi
-                has_bucket "$bucket"
-              done
+  {{- $spec | nindent 2 }}
 {{- end }}
 {{- end }}

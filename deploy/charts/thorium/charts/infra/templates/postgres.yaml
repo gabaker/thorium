@@ -1,6 +1,74 @@
-{{- if include "infra.managed" (dict "root" $ "service" "postgres") }}
+{{- /*
+The spec of the Job creating the Quickwit metastore database. The Job is named after a hash of
+this rendered spec, since a Job's pod template is immutable: any change to it creates a new Job
+rather than failing to patch the existing one.
+*/ -}}
+{{- define "infra.metastoreDbJobSpec" -}}
+{{- $host := include "thorium.host" (dict "root" $ "service" "postgres" "ns" "quickwit") -}}
+backoffLimit: {{ .Values.jobs.backoffLimit }}
+template:
+  spec:
+    restartPolicy: Never
+    automountServiceAccountToken: false
+    {{- with .Values.jobs.metastorePodSecurityContext }}
+    securityContext:
+      {{- toYaml . | nindent 6 }}
+    {{- end }}
+    containers:
+      - name: createdb
+        image: {{ include "thorium.image" (dict "root" $ "image" .Values.postgres.image) }}
+        imagePullPolicy: IfNotPresent
+        {{- with .Values.jobs.securityContext }}
+        securityContext:
+          {{- toYaml . | nindent 10 }}
+        {{- end }}
+        {{- with .Values.jobs.resources }}
+        resources:
+          {{- toYaml . | nindent 10 }}
+        {{- end }}
+        volumeMounts:
+          - mountPath: /tmp
+            name: tmp
+        env:
+          - name: HOME
+            value: /tmp
+          - name: PGHOST
+            value: {{ $host | quote }}
+          - name: PGUSER
+            value: postgres
+          - name: PGPASSWORD
+            valueFrom:
+              secretKeyRef:
+                name: postgres-cluster-auth
+                key: superUserPassword
+          # the database the Quickwit metastore URI rendered by the secrets subchart names
+          - name: DATABASE
+            value: quickwit-metastore
+        command:
+          - /bin/sh
+          - -c
+          - |
+            set -e
+            for attempt in $(seq 1 60); do
+              psql -c "SELECT 1" >/dev/null 2>&1 && break
+              echo "Waiting for Postgres to accept connections ($attempt/60)..."
+              sleep 5
+            done
+            if psql -tAc "SELECT 1 FROM pg_database WHERE datname='$DATABASE'" | grep -q 1; then
+              echo "Database $DATABASE already exists"
+            else
+              createdb "$DATABASE"
+            fi
+    volumes:
+      - name: tmp
+        emptyDir:
+          sizeLimit: 64Mi
+{{- end -}}
+{{- /* the chart's Postgres only backs the Quickwit metastore */}}
+{{- if and (include "infra.managed" (dict "root" $ "service" "postgres")) (include "thorium.quickwit" $) }}
 {{- $ns := include "thorium.ns" (dict "root" $ "name" "quickwit") }}
 {{- $host := include "thorium.host" (dict "root" $ "service" "postgres" "ns" "quickwit") }}
+{{- $spec := include "infra.metastoreDbJobSpec" . }}
 ---
 apiVersion: kubegres.reactive-tech.io/v1
 kind: Kubegres
@@ -31,51 +99,16 @@ spec:
           name: postgres-cluster-auth
           key: replicationUserPassword
 ---
-# Creates the Quickwit metastore database once Postgres accepts the saved password
+# Creates the Quickwit metastore database once Postgres accepts the saved password. It runs
+# alongside Postgres and Quickwit (which restarts until the database exists), retrying until
+# Postgres is up; it is named after a hash of its spec (see infra.metastoreDbJobSpec)
 apiVersion: batch/v1
 kind: Job
 metadata:
-  name: quickwit-create-metastore-db
+  name: quickwit-create-metastore-db-{{ sha256sum $spec | trunc 10 }}
   namespace: {{ $ns }}
   labels:
     {{- include "infra.labels" . | nindent 4 }}
-  annotations:
-    helm.sh/hook: post-install,post-upgrade
-    helm.sh/hook-delete-policy: before-hook-creation
 spec:
-  backoffLimit: {{ .Values.jobs.backoffLimit }}
-  template:
-    spec:
-      restartPolicy: Never
-      containers:
-        - name: createdb
-          image: {{ include "thorium.image" (dict "root" $ "image" .Values.postgres.image) }}
-          imagePullPolicy: IfNotPresent
-          env:
-            - name: PGHOST
-              value: {{ $host | quote }}
-            - name: PGUSER
-              value: postgres
-            - name: PGPASSWORD
-              valueFrom:
-                secretKeyRef:
-                  name: postgres-cluster-auth
-                  key: superUserPassword
-            - name: DATABASE
-              value: {{ .Values.postgres.database | quote }}
-          command:
-            - /bin/sh
-            - -c
-            - |
-              set -e
-              for attempt in $(seq 1 60); do
-                psql -c "SELECT 1" >/dev/null 2>&1 && break
-                echo "Waiting for Postgres to accept connections ($attempt/60)..."
-                sleep 5
-              done
-              if psql -tAc "SELECT 1 FROM pg_database WHERE datname='$DATABASE'" | grep -q 1; then
-                echo "Database $DATABASE already exists"
-              else
-                createdb "$DATABASE"
-              fi
+  {{- $spec | nindent 2 }}
 {{- end }}

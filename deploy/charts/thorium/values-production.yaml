@@ -3,6 +3,9 @@
 #
 #   helm upgrade --install thorium <chart> -n thorium --create-namespace \
 #     -f values-production.yaml -f site.yaml
+#
+# Storage sizes and the storage class can't be changed in place for every service after the
+# first install (see charts/infra/values.yaml), so size them before installing.
 
 infra:
   # e.g. ceph-block with Rook, or your cluster's replicated storage class
@@ -12,6 +15,8 @@ infra:
     resources:
       limits: { cpu: "2", memory: 8Gi }
   scylla:
+    # production mode enforces the hardware checks (such as XFS-backed storage) that developer
+    # mode skips
     developerMode: false
     members: 3
     storage: 500Gi
@@ -20,6 +25,7 @@ infra:
       limits: { cpu: "4", memory: 16Gi }
   elastic:
     count: 3
+    # half of the memory limit, leaving the rest to the filesystem cache
     javaOpts: -Xms8g -Xmx8g
     storage: 500Gi
     resources:
@@ -34,14 +40,16 @@ infra:
 global:
   managed:
     s3: false
+  quickwit:
+    # the S3 store Quickwit keeps traces in (your S3 endpoint)
+    s3Endpoint: http://rook-ceph-rgw-thorium-s3.rook-ceph.svc.cluster.local
 
 secrets:
-  # the S3 store Quickwit keeps traces in (your S3 endpoint)
-  quickwitS3Endpoint: http://rook-ceph-rgw-thorium-s3.rook-ceph.svc.cluster.local
-  # supply the S3 credentials your store issued; others are generated once if left empty
+  # supply the S3 credentials your store issued (required, since global.managed.s3 is false);
+  # the other credentials are generated once if left empty
   credentials:
     s3AccessKey: ""
-    s3SecretKey: ""
+    s3SecretToken: ""
 
 quickwit:
   metastore:
@@ -52,19 +60,23 @@ quickwit:
 operator:
   backends:
     scylla:
+      # the keyspace replication factor; keep it at most infra.scylla.members
       replication: 3
     s3:
+      # Thorium's S3 endpoint, normally the same store as global.quickwit.s3Endpoint
       endpoint: http://rook-ceph-rgw-thorium-s3.rook-ceph.svc.cluster.local
   cluster:
     components:
       api:
         replicas: 3
     scaler:
-      # the nodes Thorium may run jobs on (an empty list means every node)
-      nodes: []
+      k8s:
+        # the nodes Thorium may run jobs on (an empty list means every node)
+        nodes: []
   ingress:
     type: traefik
     host: thorium.example.com
     tls:
-      # an existing kubernetes.io/tls secret in the thorium namespace
+      # an existing kubernetes.io/tls secret in the thorium namespace; with the default
+      # tls.traefikDefaultStore it also becomes Traefik's cluster-wide default certificate
       secretName: thorium-tls

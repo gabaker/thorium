@@ -10,16 +10,15 @@ use crate::k8s::secrets;
 
 /// Create a thorium user account or auth if the account exists
 ///
-/// The operator often needs to create a new admin user accounts. For existing clusters
+/// The operator often needs to create new admin user accounts. For existing clusters
 /// configured initially without an operator, the user accounts may already exist but with
-/// passwords that the operator does not know. The force option when passed in with an
-/// admin user token will optionally allow the operator to override and update passwords
-/// for existing users.
+/// passwords that the operator does not know. When an admin Thorium client is passed in, an
+/// existing user whose stored password doesn't authenticate has its password reset to it.
 ///
 /// # Arguments
 ///
 /// * `meta` - Thorium cluster client and metadata
-/// * `url` - The Thorium API URL passed to the operator as an argument
+/// * `url` - The url the operator reaches the Thorium API at
 /// * `username` - Name of the user
 /// * `password` - Password for the user
 /// * `admin` - Should the user be an admin
@@ -42,19 +41,16 @@ pub async fn create_or_auth_user(
         .skip_verification()
         // set local auth to true in case cluster is LDAP enabled
         .local();
+    // bound the create request with the operator's API timeouts
     let settings = super::helpers::client_settings();
-    // key is none for non-admin users
-    let mut key: Option<String> = None;
-    // pass in thorium secret_key if creating an admin account
-    if admin {
-        key = Some(meta.conf.thorium.secret_key.clone());
-    }
+    // only admin accounts are created with Thorium's secret key
+    let key = admin.then(|| meta.conf.thorium.secret_key.clone());
     // attempt to create the user account if it doesn't exist
     let result = thorium::client::Users::create(url, user_req, key.as_deref(), &settings).await;
-    // user was created
+    // use a new user's login or fall back to logging in as an existing one
     match result {
         Ok(auth_result) => {
-            println!("Created {} user", username);
+            println!("Created {username} user");
             Ok(auth_result)
         }
         Err(error) => {
@@ -92,8 +88,7 @@ pub async fn create_or_auth_user(
                     }
                 }
                 _ => Err(Error::new(format!(
-                    "Failed to create {} user: {}",
-                    username, error
+                    "Failed to create {username} user: {error}"
                 ))),
             }
         }
@@ -116,7 +111,7 @@ fn needs_reset(current: &Result<AuthResponse, Error>) -> bool {
 ///
 /// The operator user account is used to configure all other admin accounts and its token
 /// is used for subsequent admin actions such as adding nodes and initializing system
-/// settings. If this method fails, further configuration of the ThoriumCluster cannot
+/// settings. If this method fails, further configuration of the `ThoriumCluster` cannot
 /// continue. This returns the token of the operator user if account creation/auth was a
 /// success. The operator user can be an existing account so long as there is a
 /// corresponding kubernetes secret that contains the user's password.
@@ -124,8 +119,9 @@ fn needs_reset(current: &Result<AuthResponse, Error>) -> bool {
 /// # Arguments
 ///
 /// * `meta` - Thorium cluster client and metadata
-/// * `url` - The Thorium API URL passed to the operator as an argument
+/// * `url` - The url the operator reaches the Thorium API at
 pub async fn create_operator(meta: &ClusterMeta, url: &str) -> Result<String, Error> {
+    // the operator always runs as this user
     let username = "thorium-operator";
     // try and create secret if does not exist
     let mut password = secrets::create_user_secret(username, meta).await?;
@@ -138,15 +134,9 @@ pub async fn create_operator(meta: &ClusterMeta, url: &str) -> Result<String, Er
     match password {
         Some(operator_pass) => {
             println!("Creating operator user");
-            let maybe_authed = create_or_auth_user(
-                meta,
-                url,
-                "thorium-operator",
-                operator_pass.as_ref(),
-                true,
-                None,
-            )
-            .await?;
+            let maybe_authed =
+                create_or_auth_user(meta, url, username, operator_pass.as_ref(), true, None)
+                    .await?;
             // check if this user has to verify their email for some reason
             // this should never happen unless the API is broken
             match maybe_authed {
@@ -174,8 +164,7 @@ pub async fn create_operator(meta: &ClusterMeta, url: &str) -> Result<String, Er
 ///
 /// * `meta` - Thorium cluster client and metadata
 /// * `thorium` - Thorium API client to use for forced password updates
-/// * `url` - The Thorium API URL passed to the operator as an argument
-/// * `token` - Admin token to use for overriding user passwords
+/// * `url` - The url the operator reaches the Thorium API at
 /// * `username` - Name of user to create
 pub async fn create(
     meta: &ClusterMeta,
@@ -186,13 +175,13 @@ pub async fn create(
     // try and create secret, otherwise grab existing secret
     let mut password = secrets::create_user_secret(username, meta).await?;
     if password.is_none() {
-        println!("{} user secret exists, not updating password", username);
+        println!("{username} user secret exists, not updating password");
         password = secrets::get_user_password(username, meta).await?;
     }
-    // create the operator user: thorium-operator
+    // create or log in as this user with its stored password
     match password {
         Some(user_pass) => {
-            println!("Creating {} user", username);
+            println!("Creating {username} user");
             // create or authenticate a Thorium admin account
             let maybe_authed =
                 create_or_auth_user(meta, url, username, user_pass.as_ref(), true, Some(thorium))
@@ -202,9 +191,9 @@ pub async fn create(
             match maybe_authed {
                 AuthResponse::Authed { token, .. } => Ok((user_pass, token)),
                 AuthResponse::VerifyEmail(_) => {
-                    // return an error saying we have to verify the operator
+                    // return an error saying we have to verify this user's
                     // email for some reason
-                    Err(Error::new("thorium-operator needs to verify email!?"))
+                    Err(Error::new(format!("{username} needs to verify email!?")))
                 }
             }
         }

@@ -15,15 +15,19 @@ use super::{crds, secrets};
 pub struct ClusterMeta {
     /// namespace in k8s
     pub namespace: String,
-    /// name of ThoriumCluster instance
+    /// name of the `ThoriumCluster` instance
     pub name: String,
+    /// The name of the kube context the `ThoriumCluster`'s k8s cluster is reached through
+    pub context: String,
     /// kube api client
     pub client: Client,
     /// thorium cluster custom resource spec
     pub cluster: Arc<crds::ThoriumCluster>,
+    /// The cluster's status as last written by the current reconcile
+    pub status: Arc<crds::StatusTracker>,
     /// The Thorium config built from the spec's config merged with its config secrets
     pub conf: Conf,
-    /// k8s api instance for ConfigMaps
+    /// k8s api instance for `ConfigMaps`
     pub cm_api: Api<ConfigMap>,
     /// k8s api instance for Deployments
     pub deploy_api: Api<Deployment>,
@@ -42,9 +46,16 @@ impl ClusterMeta {
     ///
     /// # Arguments
     ///
-    /// * `cluster` - Thorium cluster definition
+    /// * `status` - The cluster being reconciled and the status last written for it
     /// * `client` - The kube client to build APIs with
-    pub async fn new(cluster: &Arc<crds::ThoriumCluster>, client: &Client) -> Result<Self, Error> {
+    /// * `context` - The name of the kube context `client` reaches its k8s cluster through
+    pub async fn new(
+        status: &Arc<crds::StatusTracker>,
+        client: &Client,
+        context: &str,
+    ) -> Result<Self, Error> {
+        // get the cluster snapshot this reconcile works from
+        let cluster = status.cluster();
         // grab the cluster name and namespace from ThoriumCluster metadata
         let (name, namespace) = cluster_name_and_namespace(cluster)?;
         // build kube api client
@@ -59,9 +70,11 @@ impl ClusterMeta {
         // return the built cluster
         Ok(ClusterMeta {
             name,
+            context: context.to_owned(),
             client: client.clone(),
             namespace,
             cluster: cluster.clone(),
+            status: status.clone(),
             conf,
             cm_api,
             deploy_api,
@@ -391,6 +404,256 @@ pub(crate) mod tests {
         let spec: crds::ThoriumClusterSpec =
             serde_json::from_value(spec).expect("spec should deserialize");
         crds::ThoriumCluster::new("thorium", spec)
+    }
+
+    /// Build a `ThoriumCluster` named `thorium` in the `thorium` namespace from a JSON spec
+    ///
+    /// # Arguments
+    ///
+    /// * `spec` - The spec to deserialize
+    pub(crate) fn namespaced_cluster(spec: serde_json::Value) -> crds::ThoriumCluster {
+        // build the cluster and place it in its namespace like the API server would
+        let mut cluster = cluster_from_spec(spec);
+        cluster.metadata.namespace = Some("thorium".to_owned());
+        cluster
+    }
+
+    /// Build a chart shaped spec with every optional component enabled
+    pub(crate) fn full_spec() -> serde_json::Value {
+        json!({
+            "components": {
+                "api": {},
+                "scaler": {},
+                "baremetal_scaler": {},
+                "search_streamer": {},
+                "event_handler": {}
+            },
+            "registry": "registry/thorium",
+            "version": "1.8.1",
+            "image_pull_secrets": ["thorium-image-pull"],
+            "config": {},
+            "config_secrets": [{"name": "thorium-config-secrets"}]
+        })
+    }
+
+    /// Build a spec shaped like the ones the pre-Helm minithor and megathor scripts deployed,
+    /// with Thorium's secret key inline and no config secrets
+    pub(crate) fn pre_helm_spec() -> serde_json::Value {
+        json!({
+            "components": {"api": {}},
+            "registry": "registry/thorium",
+            "config": {"thorium": {"secret_key": "inline"}}
+        })
+    }
+
+    /// The kube context test cluster metadata is placed in
+    pub(crate) const TEST_CONTEXT: &str = "kubernetes-admin@cluster.local";
+
+    /// Build cluster metadata for a cluster without contacting the kube API
+    ///
+    /// The config is [`sample_conf`] rather than one resolved from Secrets.
+    ///
+    /// # Arguments
+    ///
+    /// * `cluster` - The cluster to wrap, which must have a name and namespace
+    /// * `client` - The kube client the metadata's APIs use
+    pub(crate) fn meta_for(cluster: crds::ThoriumCluster, client: &Client) -> ClusterMeta {
+        // get the cluster's name and namespace
+        let (name, namespace) = cluster_name_and_namespace(&cluster).expect("name and namespace");
+        // track the cluster's status from its snapshot like a reconcile does
+        let cluster = Arc::new(cluster);
+        let status = Arc::new(crds::StatusTracker::new(cluster.clone()));
+        // build every API against the given client like ClusterMeta::new does
+        ClusterMeta {
+            name,
+            context: TEST_CONTEXT.to_owned(),
+            client: client.clone(),
+            cm_api: Api::namespaced(client.clone(), &namespace),
+            deploy_api: Api::namespaced(client.clone(), &namespace),
+            node_api: Api::all(client.clone()),
+            pod_api: Api::namespaced(client.clone(), &namespace),
+            secret_api: Api::namespaced(client.clone(), &namespace),
+            service_api: Api::namespaced(client.clone(), &namespace),
+            namespace,
+            cluster,
+            status,
+            conf: sample_conf(),
+        }
+    }
+
+    /// A request the fake kube API received
+    #[derive(Debug, Clone)]
+    pub(crate) struct FakeRequest {
+        /// The HTTP method of the request
+        pub method: String,
+        /// The path of the request without its query
+        pub path: String,
+        /// The JSON body of the request, or null when it had none
+        pub body: serde_json::Value,
+    }
+
+    /// A canned answer the fake kube API gives every request with a method and path
+    #[derive(Debug, Clone)]
+    struct FakeRoute {
+        /// The HTTP method to answer
+        method: &'static str,
+        /// The exact path to answer
+        path: String,
+        /// The status code to answer with
+        status: u16,
+        /// The JSON body to answer with
+        body: serde_json::Value,
+    }
+
+    /// An in-process fake of the kube API that gives canned answers and records every request
+    ///
+    /// A request without a matching route gets a 404 `Status`, which kube reports as a
+    /// missing object.
+    #[derive(Debug, Clone, Default)]
+    pub(crate) struct FakeKube {
+        /// The canned answers, the first matching one winning
+        routes: Arc<std::sync::Mutex<Vec<FakeRoute>>>,
+        /// Every request received, oldest first
+        requests: Arc<std::sync::Mutex<Vec<FakeRequest>>>,
+    }
+
+    /// Build the `Status` body the kube API answers a failed request with
+    ///
+    /// # Arguments
+    ///
+    /// * `code` - The HTTP status code
+    /// * `reason` - The machine readable reason (e.g. `AlreadyExists`)
+    pub(crate) fn kube_status(code: u16, reason: &str) -> serde_json::Value {
+        json!({
+            "kind": "Status",
+            "apiVersion": "v1",
+            "metadata": {},
+            "status": "Failure",
+            "message": format!("fake {reason}"),
+            "reason": reason,
+            "code": code
+        })
+    }
+
+    impl FakeKube {
+        /// Add a canned answer for every request with a method and path
+        ///
+        /// # Arguments
+        ///
+        /// * `method` - The HTTP method to answer
+        /// * `path` - The exact path to answer
+        /// * `status` - The status code to answer with
+        /// * `body` - The JSON body to answer with
+        pub(crate) fn route(
+            self,
+            method: &'static str,
+            path: &str,
+            status: u16,
+            body: serde_json::Value,
+        ) -> Self {
+            // add the answer after any earlier ones so those still win
+            self.routes.lock().expect("routes lock").push(FakeRoute {
+                method,
+                path: path.to_owned(),
+                status,
+                body,
+            });
+            self
+        }
+
+        /// Get every request received so far
+        pub(crate) fn requests(&self) -> Vec<FakeRequest> {
+            self.requests.lock().expect("requests lock").clone()
+        }
+
+        /// Get every request received so far that could change something
+        pub(crate) fn writes(&self) -> Vec<FakeRequest> {
+            // anything but a read may change the cluster
+            self.requests()
+                .into_iter()
+                .filter(|request| request.method != "GET")
+                .collect()
+        }
+
+        /// Build a kube client whose requests this fake answers
+        ///
+        /// The client spawns a buffer task, so it must be built inside a tokio runtime.
+        pub(crate) fn client(&self) -> Client {
+            // answer each request from the routes and record it
+            let fake = self.clone();
+            let service = tower::service_fn(move |request: http::Request<kube::client::Body>| {
+                // give each request its own handle on the fake
+                let fake = fake.clone();
+                async move {
+                    // record the request with its JSON body
+                    let method = request.method().to_string();
+                    let path = request.uri().path().to_owned();
+                    let raw = request.into_body().collect_bytes().await?;
+                    let body = serde_json::from_slice(&raw).unwrap_or(serde_json::Value::Null);
+                    fake.requests
+                        .lock()
+                        .expect("requests lock")
+                        .push(FakeRequest {
+                            method: method.clone(),
+                            path: path.clone(),
+                            body,
+                        });
+                    // find the canned answer, treating anything unknown as missing
+                    let (status, body) = fake
+                        .routes
+                        .lock()
+                        .expect("routes lock")
+                        .iter()
+                        .find(|route| route.method == method && route.path == path)
+                        .map_or_else(
+                            || (404, kube_status(404, "NotFound")),
+                            |route| (route.status, route.body.clone()),
+                        );
+                    // answer with the JSON body
+                    let response = http::Response::builder()
+                        .status(status)
+                        .header("content-type", "application/json")
+                        .body(kube::client::Body::from(serde_json::to_vec(&body)?))?;
+                    Ok::<_, Box<dyn std::error::Error + Send + Sync>>(response)
+                }
+            });
+            // hand the fake to a kube client defaulting to the test namespace
+            Client::new(service, "thorium")
+        }
+    }
+
+    /// A cluster without a name or namespace is a permanent config error
+    #[test]
+    fn name_and_namespace_required() {
+        // a cluster with both is fine
+        let cluster = namespaced_cluster(full_spec());
+        assert_eq!(
+            cluster_name_and_namespace(&cluster).expect("both set"),
+            ("thorium".to_owned(), "thorium".to_owned())
+        );
+        // a cluster without a namespace can't be placed and retrying won't help
+        let error =
+            cluster_name_and_namespace(&cluster_from_spec(full_spec())).expect_err("no namespace");
+        assert!(is_permanent_config_error(&error));
+    }
+
+    /// The fake kube API answers routes, treats anything else as missing, and records requests
+    #[tokio::test]
+    async fn fake_kube_answers_and_records() {
+        // answer one ConfigMap read
+        let fake = FakeKube::default().route(
+            "GET",
+            "/api/v1/namespaces/thorium/configmaps/present",
+            200,
+            json!({"apiVersion": "v1", "kind": "ConfigMap", "metadata": {"name": "present"}}),
+        );
+        let api: Api<ConfigMap> = Api::namespaced(fake.client(), "thorium");
+        // the routed object is found and anything else is missing
+        assert!(api.get_opt("present").await.expect("get").is_some());
+        assert!(api.get_opt("absent").await.expect("get").is_none());
+        // both reads were recorded and none of them wrote anything
+        assert_eq!(fake.requests().len(), 2);
+        assert!(fake.writes().is_empty());
     }
 
     /// A config with every value already the right type parses

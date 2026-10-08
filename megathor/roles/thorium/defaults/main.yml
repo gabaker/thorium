@@ -1,6 +1,7 @@
 thorium_enabled: true
 # The ThoriumCluster's name and the namespace this deployment runs in (the thorium chart's
-# release namespace; every other namespace gets the same prefix)
+# release namespace; every other namespace gets the same prefix). thorium_namespace follows
+# namespace_prefix, which is how Thorium's namespaces are renamed
 thorium_deployment_name: "thorium"
 thorium_namespace: "{{ namespace_prefix_dashed }}thorium"
 # The chart to install; empty uses the published chart online or files/ offline
@@ -9,8 +10,17 @@ thorium_chart: ""
 thorium_values_files: []
 # How long to wait for the operator to report the ThoriumCluster ready
 thorium_ready_timeout: 1800
+# The upgrade revision (YYYY-MM-vNN) the operator brings this deployment to. A deployment behind
+# the operator's latest revision waits in the UpgradeRequired phase, changing nothing, until this
+# is set (see "Upgrading Thorium" in the Thorium deployment docs)
+thorium_upgrade_target_revision: ""
+# Approvals for upgrade steps that change data or need manual work, each naming the backup taken
+# first: [{step: <step id>, backup: <where the backup is>}]
+thorium_upgrade_approvals: []
 
-# The Thorium image; an empty version uses the chart's appVersion
+# The Thorium image (<thorium_container_registry>/<thorium_image>, or just thorium_image with an
+# empty registry); an empty version uses the chart's appVersion. Offline deployments pull it from
+# offline_registry instead of thorium_container_registry
 thorium_container_registry: "ghcr.io"
 thorium_image: "cisagov/thorium/infrastructure/thorium"
 thorium_version: ""
@@ -83,6 +93,7 @@ kibana_cpu_limits: "1"
 kibana_memory_requests: "1G"
 kibana_memory_limits: "1G"
 
+# Jaeger reads traces from the chart's Quickwit, so it is only deployed with quickwit_enabled
 jaeger_enabled: true
 jaeger_cpu_requests: "512m"
 jaeger_memory_requests: "512Mi"
@@ -90,16 +101,21 @@ jaeger_cpu_limits: "1"
 jaeger_memory_limits: "1G"
 
 quickwit_enabled: true
+# The OTLP gRPC collector Thorium sends traces to; empty uses the chart's Quickwit indexer, so set
+# it when quickwit_enabled is false
+thorium_tracing_endpoint: ""
 quickwit_metastore_replica_count: 1
 quickwit_searcher_replica_count: 1
 quickwit_postgres_replicas: 1
-quickwit_postgress_storage_size: "32G"
+# the Quickwit metastore Postgres volume size; inventories that still set the deprecated
+# quickwit_postgress_storage_size keep working, but that name will be removed
+quickwit_postgres_storage_size: "{{ quickwit_postgress_storage_size | default('32G') }}"
 quickwit_postgres_memory_requests: "1Gi"
 quickwit_postgres_cpu_requests: "1"
 quickwit_postgres_memory_limits: "2Gi"
 quickwit_postgres_cpu_limits: "2"
 
-# External services, for backends the chart doesn't deploy (see deploy/README.md, "External
+# External services, for backends the chart doesn't deploy (see "Configure the Helm Charts", "External
 # services"). Each is required when its toggle above is false: redis_enabled -> the Redis host
 # (and redis_password set to the password it requires), scylla_enabled -> the Scylla nodes,
 # elastic_enabled -> the Elasticsearch node. S3 without seaweedfs_enabled uses s3_endpoint,

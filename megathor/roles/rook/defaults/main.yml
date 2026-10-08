@@ -18,6 +18,8 @@ ceph_mon_replicas: 3
 ceph_mgr_replicas: 2 # 1
 ceph_block_replicas: 3
 ceph_object_metadata_replicas: 3
+# the erasure coding of the object store's data pool, used only if the commented-out
+# erasureCoded section of templates/cluster.yaml.j2 replaces its replicated pool
 ceph_object_ec_data_chunks: 3
 ceph_object_ec_coding_chunks: 2
 ceph_rgw_memory_limits: "16Gi"

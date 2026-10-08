@@ -1,0 +1,43 @@
+# Thorium against backing services the site runs itself, so the chart deploys none of them.
+# Replace every example endpoint and <placeholder>. External Scylla and Elasticsearch already
+# hold Thorium's role and user here (no bootstrap), so their credentials must be given; see
+# "External services" in the deployment docs for letting the operator create them instead.
+global:
+  managed:
+    scylla: false
+    elastic: false
+    redis: false
+    s3: false
+    postgres: false
+  quickwit:
+    # Quickwit stores traces in the site's S3 store and keeps its metastore in the site's
+    # Postgres (create the quickwit bucket and the database first)
+    s3Endpoint: http://s3.example.com
+    metastoreUri: postgres://quickwit:<password>@postgres.example.com:5432/quickwit-metastore
+secrets:
+  credentials:
+    redisPassword: <redis password>
+    scyllaUsername: thorium
+    scyllaPassword: <scylla password>
+    elasticUsername: thorium
+    elasticPassword: <elastic password>
+    s3AccessKey: <access key>
+    s3SecretToken: <secret key>
+operator:
+  backends:
+    redis:
+      host: redis.example.com
+      port: 6379
+    scylla:
+      nodes: [scylla-1.example.com, scylla-2.example.com, scylla-3.example.com]
+      replication: 3
+    elastic:
+      node: https://elastic.example.com:9200
+      # a Secret in the thorium namespace holding the CA that signed Elasticsearch's
+      # certificate, so the certificate is verified
+      caSecret:
+        name: elastic-ca
+        key: ca.crt
+    s3:
+      endpoint: http://s3.example.com
+      region: us-east-1

@@ -8,6 +8,7 @@
 //! The admin Secrets the privileged steps read may be deleted once setup is done: each step
 //! first checks whether its work is already done and only reads its Secret when it isn't.
 
+use chrono::{DateTime, Utc};
 use elasticsearch::Elasticsearch;
 use elasticsearch::auth::Credentials as ElasticAuth;
 use elasticsearch::http::Url;
@@ -32,7 +33,9 @@ use thorium::{Error, client};
 
 use super::helpers::{CheckError, error_chain};
 use crate::k8s::clusters::ClusterMeta;
-use crate::k8s::crds::{SecretCredentials, ThoriumBootstrap, ThoriumCluster};
+use crate::k8s::crds::{
+    ClusterPhase, SecretCredentials, ThoriumBootstrap, ThoriumCluster, ThoriumClusterStatus,
+};
 use crate::k8s::secrets;
 
 /// How long to wait when connecting to a backend
@@ -1078,6 +1081,139 @@ fn access_problems(indexes: &[(&str, IndexState)], body: &serde_json::Value) -> 
     missing
 }
 
+/// Check whether an Elastic node is reached through an in-cluster ECK HTTP service
+///
+/// ECK names the HTTP service of an Elasticsearch `<name>-es-http`, and the chart's own
+/// Elasticsearch is one of these, getting Thorium's user from ECK's file realm.
+///
+/// # Arguments
+///
+/// * `node` - The url of the Elastic node
+fn is_eck_service(node: &str) -> bool {
+    // get the host of this node
+    let Some(host) = Url::parse(node)
+        .ok()
+        .and_then(|url| url.host_str().map(str::to_owned))
+    else {
+        return false;
+    };
+    // the service name is the first label and an in-cluster name is short or under .svc
+    let mut labels = host.split('.');
+    let service = labels.next().unwrap_or_default();
+    let in_cluster = !host.contains('.') || labels.any(|label| label == "svc");
+    service.ends_with("-es-http") && in_cluster
+}
+
+/// How long Elastic may keep rejecting Thorium's credentials before an ECK service fails
+///
+/// ECK's file realm applies the chart's users within a minute or two, so a rejection that
+/// outlasts this is a wrong password rather than one still propagating.
+const ECK_CREDENTIALS_GRACE_SECS: i64 = 300;
+
+/// Check whether a cluster's status shows Elastic has rejected Thorium's credentials long enough
+///
+/// This is true when the cluster already failed on rejected credentials, or when it has
+/// reported the same wait on them (and nothing else) for longer than the grace period. A wait
+/// reported by an upgrade step is embedded in a longer message, so the status only has to
+/// contain the wait.
+///
+/// # Arguments
+///
+/// * `current` - The status last written for this cluster
+/// * `waiting` - The message reported while waiting on the credentials
+/// * `rejected` - Text every failure on these rejected credentials contains
+/// * `now` - The current time
+fn rejected_past_grace(
+    current: &ThoriumClusterStatus,
+    waiting: &str,
+    rejected: &str,
+    now: DateTime<Utc>,
+) -> bool {
+    // get the message this cluster last reported
+    let Some(message) = current.message.as_deref() else {
+        return false;
+    };
+    // a cluster already failed on these credentials keeps failing instead of waiting again
+    if current.phase == Some(ClusterPhase::Error) && message.contains(rejected) {
+        return true;
+    }
+    // otherwise it must have reported this wait since a transition past the grace period
+    if !message.contains(waiting) {
+        return false;
+    }
+    current
+        .last_transition
+        .as_deref()
+        .and_then(|since| DateTime::parse_from_rfc3339(since).ok())
+        .is_some_and(|since| {
+            now.signed_duration_since(since) > chrono::Duration::seconds(ECK_CREDENTIALS_GRACE_SECS)
+        })
+}
+
+/// Classify Elastic rejecting Thorium's own credentials
+///
+/// An Elasticsearch behind an ECK service (like the chart's) gets Thorium's user from ECK's
+/// file realm, which can take a minute to apply, so it is waited on for a few minutes. The
+/// operator can't tell the chart's ECK from another one (like a converted deployment's), so a
+/// rejection that outlasts that grace period fails with how to fix it. Any other Elasticsearch
+/// answering 401 without `bootstrap.elastic` set won't start accepting the credentials on its
+/// own, so that fails right away. Every other status is waited on.
+///
+/// # Arguments
+///
+/// * `conf` - The Elastic config for this cluster
+/// * `status` - The status Elastic answered the authenticate request with
+/// * `bootstrapped` - Whether `bootstrap.elastic` is set so the operator creates the user
+/// * `error` - The error Elastic answered with
+/// * `current` - The status last written for this cluster
+/// * `now` - The current time
+fn rejected_credentials(
+    conf: &Elastic,
+    status: StatusCode,
+    bootstrapped: bool,
+    error: &str,
+    current: &ThoriumClusterStatus,
+    now: DateTime<Utc>,
+) -> CheckError {
+    // every failure on rejected credentials names them the same way
+    let rejected = format!("rejected Thorium's credentials (user {})", conf.username);
+    // an external Elastic without a bootstrap won't create the user by itself
+    let unauthorized = status == StatusCode::UNAUTHORIZED && !bootstrapped;
+    if unauthorized && !is_eck_service(&conf.node) {
+        return CheckError::Failed(Error::new(format!(
+            "Elastic {} {rejected}: {error}. This Elasticsearch isn't one the Thorium chart \
+             manages, so Thorium's user must already exist with the password in the config: \
+             create it with the privileges Thorium needs, or set bootstrap.elastic (Helm \
+             value operator.cluster.bootstrap.elastic) with an Elastic superuser Secret so \
+             the operator creates it",
+            conf.node
+        )));
+    }
+    // describe the wait for ECK's file realm to apply the user
+    let waiting = format!(
+        "Waiting for Elastic to accept Thorium's credentials (user {}): {error}. The chart's \
+         Elasticsearch gets this user from ECK's file realm, which can take a minute to \
+         apply; an external Elasticsearch needs the user created by the site or by \
+         bootstrap.elastic",
+        conf.username
+    );
+    // an ECK service still rejecting the credentials after the grace period won't accept them
+    if unauthorized && rejected_past_grace(current, &waiting, &rejected, now) {
+        return CheckError::Failed(Error::new(format!(
+            "Elastic {} has {rejected} for over {} minutes: {error}. ECK's file realm applies \
+             the chart's users within a minute or two, so the password in Thorium's config is \
+             likely wrong for this Elasticsearch (such as the ECK of a converted pre-Helm \
+             deployment): set the password Thorium's user has there in Thorium's config, \
+             create the user with that password and the privileges Thorium needs, or set \
+             bootstrap.elastic (Helm value operator.cluster.bootstrap.elastic) with an \
+             Elastic superuser Secret so the operator creates it",
+            conf.node,
+            ECK_CREDENTIALS_GRACE_SECS / 60
+        )));
+    }
+    CheckError::Waiting(waiting)
+}
+
 /// Verify Thorium's own Elastic credentials before any component is deployed
 ///
 /// This authenticates as Thorium's user, checks which configured indexes already exist, and
@@ -1111,15 +1247,22 @@ pub async fn elastic_access(meta: &ClusterMeta) -> Result<Vec<String>, CheckErro
             conf,
             "authenticate Thorium's Elastic user",
         ))?;
-    if !response.status_code().is_success() {
+    let status = response.status_code();
+    if !status.is_success() {
         let error = elastic_error(response).await;
-        return Err(CheckError::Waiting(format!(
-            "Waiting for Elastic to accept Thorium's credentials (user {}): {error}. The chart's \
-             Elasticsearch gets this user from ECK's file realm, which can take a minute to \
-             apply; an external Elasticsearch needs the user created by the site or by \
-             bootstrap.elastic",
-            conf.username
-        )));
+        // a rejection is judged by the bootstrap and how long this cluster has reported it
+        let bootstrap = meta.cluster.spec.bootstrap.as_ref();
+        let bootstrapped = bootstrap.is_some_and(|bootstrap| bootstrap.elastic.is_some());
+        let current = meta.status.current();
+        let now = Utc::now();
+        return Err(rejected_credentials(
+            conf,
+            status,
+            bootstrapped,
+            &error,
+            &current,
+            now,
+        ));
     }
     // check which indexes exist with Thorium's own credentials
     let mut indexes = Vec::with_capacity(4);
@@ -1194,6 +1337,81 @@ pub async fn elastic_access(meta: &ClusterMeta) -> Result<Vec<String>, CheckErro
         }
     }
     Ok(notes)
+}
+
+/// List Thorium's existing Elastic indexes that don't map `group` as a keyword
+///
+/// Indexes that don't exist yet are left out since the search streamer creates them with the
+/// right mappings. Reading the mappings needs only Thorium's own credentials.
+///
+/// # Arguments
+///
+/// * `meta` - Thorium cluster client and metadata
+pub async fn indexes_needing_reindex(meta: &ClusterMeta) -> Result<Vec<String>, CheckError> {
+    // get the Elastic config for this cluster
+    let conf = &meta.conf.elastic;
+    // authenticate as Thorium's own user
+    let creds = Credentials {
+        username: conf.username.clone(),
+        password: conf.password.clone(),
+    };
+    let client = elastic_client(conf, &creds).await?;
+    // check each configured index that exists
+    let mut bad = Vec::new();
+    for index in elastic_indexes() {
+        // ask whether this index exists
+        let name = index.full_name(conf);
+        let exists = client
+            .indices()
+            .exists(IndicesExistsParts::Index(&[name]))
+            .send()
+            .await
+            .map_err(elastic_send_error(
+                conf,
+                &format!("check for Elastic index {name}"),
+            ))?;
+        let status = exists.status_code();
+        match IndexState::from_status(status) {
+            // missing indexes are created correctly by the search streamer
+            Some(IndexState::Missing) => continue,
+            Some(IndexState::Exists) => (),
+            // anything else means we can't tell
+            _ => {
+                let error = elastic_error(exists).await;
+                return Err(elastic_status_failure(
+                    status,
+                    format!(
+                        "Failed to check for Elastic index {name} as user {}: {error}",
+                        conf.username
+                    ),
+                ));
+            }
+        }
+        // read this index's mappings
+        let response = client
+            .indices()
+            .get_mapping(IndicesGetMappingParts::Index(&[name]))
+            .send()
+            .await
+            .map_err(elastic_send_error(
+                conf,
+                &format!("read the mappings of Elastic index {name}"),
+            ))?;
+        let status = response.status_code();
+        if !status.is_success() {
+            let error = elastic_error(response).await;
+            return Err(elastic_status_failure(
+                status,
+                format!("Failed to read the mappings of Elastic index {name}: {error}"),
+            ));
+        }
+        // keep indexes whose group field isn't a keyword
+        let mapping: serde_json::Value = response.json().await.map_err(Error::from)?;
+        if !group_is_keyword(&mapping) {
+            bad.push(name.to_owned());
+        }
+    }
+    Ok(bad)
 }
 
 /// Get the bootstrap admin's username when it is known without reading its Secret
@@ -1875,5 +2093,186 @@ mod tests {
         assert!(debug.contains("thorium"));
         assert!(debug.contains("***"));
         assert!(!debug.contains("hunter2"));
+    }
+
+    /// Only in-cluster ECK HTTP services count as the chart's kind of Elasticsearch
+    #[test]
+    fn eck_services_detected() {
+        // the chart's Elasticsearch and other in-cluster ECK services
+        assert!(is_eck_service(
+            "https://elastic-es-http.elastic.svc.cluster.local:9200"
+        ));
+        assert!(is_eck_service(
+            "https://elastic-es-http.dev-elastic.svc:9200"
+        ));
+        assert!(is_eck_service("https://elastic-es-http:9200"));
+        // external Elasticsearches and other services
+        assert!(!is_eck_service("https://elastic.example.com:9200"));
+        assert!(!is_eck_service("https://search-es-http.example.com:9200"));
+        assert!(!is_eck_service(
+            "https://elastic.elastic.svc.cluster.local:9200"
+        ));
+        assert!(!is_eck_service("not a url"));
+    }
+
+    /// Classify Elastic answering 401 to Thorium's credentials for a cluster's status
+    ///
+    /// # Arguments
+    ///
+    /// * `conf` - The Elastic config for this cluster
+    /// * `bootstrapped` - Whether `bootstrap.elastic` is set so the operator creates the user
+    /// * `current` - The status last written for this cluster
+    /// * `now` - The current time
+    fn reject(
+        conf: &Elastic,
+        bootstrapped: bool,
+        current: &ThoriumClusterStatus,
+        now: DateTime<Utc>,
+    ) -> CheckError {
+        rejected_credentials(
+            conf,
+            StatusCode::UNAUTHORIZED,
+            bootstrapped,
+            "denied",
+            current,
+            now,
+        )
+    }
+
+    /// Rejected credentials fail for an external Elastic without a bootstrap and are waited on
+    /// otherwise
+    #[test]
+    fn rejected_credentials_by_backend() {
+        // a cluster that hasn't reported anything yet
+        let fresh = ThoriumClusterStatus::default();
+        let now = Utc::now();
+        // an external Elastic without a bootstrap fails with how to fix it
+        let mut conf = sample_conf().elastic;
+        conf.node = "https://elastic.example.com:9200".to_owned();
+        let failed = reject(&conf, false, &fresh, now);
+        let CheckError::Failed(error) = failed else {
+            panic!("an external Elastic rejecting credentials should fail");
+        };
+        assert!(error.to_string().contains("bootstrap.elastic"));
+        assert!(error.to_string().contains("elastic.example.com"));
+        // with a bootstrap the user is being created, so it is waited on
+        assert!(matches!(
+            reject(&conf, true, &fresh, now),
+            CheckError::Waiting(_)
+        ));
+        // so is an Elastic that isn't ready to answer yet
+        assert!(matches!(
+            rejected_credentials(
+                &conf,
+                StatusCode::SERVICE_UNAVAILABLE,
+                false,
+                "starting",
+                &fresh,
+                now
+            ),
+            CheckError::Waiting(_)
+        ));
+        // the chart's ECK file realm can take a minute to apply
+        let chart = sample_conf().elastic;
+        assert!(matches!(
+            reject(&chart, false, &fresh, now),
+            CheckError::Waiting(_)
+        ));
+    }
+
+    /// An ECK service rejecting Thorium's credentials is waited on for the grace period only
+    #[test]
+    fn rejected_eck_credentials_fail_after_grace() {
+        // the wait an in-cluster ECK service rejecting the credentials reports
+        let chart = sample_conf().elastic;
+        let start = Utc::now();
+        let fresh = ThoriumClusterStatus::default();
+        let CheckError::Waiting(waiting) = reject(&chart, false, &fresh, start) else {
+            panic!("a fresh rejection by an ECK service should be waited on");
+        };
+        // build a status that has reported a message since a given time
+        let reported =
+            |phase: ClusterPhase, message: &str, since: DateTime<Utc>| ThoriumClusterStatus {
+                phase: Some(phase),
+                message: Some(message.to_owned()),
+                last_transition: Some(since.to_rfc3339()),
+                ..ThoriumClusterStatus::default()
+            };
+        let waited = reported(ClusterPhase::Provisioning, &waiting, start);
+        // within the grace period the rejection is still waited on
+        let early = start + chrono::Duration::seconds(ECK_CREDENTIALS_GRACE_SECS - 30);
+        assert!(matches!(
+            reject(&chart, false, &waited, early),
+            CheckError::Waiting(_)
+        ));
+        // past it the rejection fails with how to fix it
+        let late = start + chrono::Duration::seconds(ECK_CREDENTIALS_GRACE_SECS + 30);
+        let CheckError::Failed(error) = reject(&chart, false, &waited, late) else {
+            panic!("a rejection outlasting the grace period should fail");
+        };
+        let failure = error.to_string();
+        assert!(failure.contains("for over 5 minutes"), "{failure}");
+        assert!(failure.contains("bootstrap.elastic"), "{failure}");
+        // an upgrade step embedding the wait in its message is bounded the same way
+        let step = reported(
+            ClusterPhase::Upgrading,
+            &format!("Step elastic-identity is waiting: {waiting}"),
+            start,
+        );
+        assert!(matches!(
+            reject(&chart, false, &step, late),
+            CheckError::Failed(_)
+        ));
+        // a cluster that already failed on these credentials keeps failing instead of waiting
+        let errored = reported(ClusterPhase::Error, &failure, late);
+        assert!(matches!(
+            reject(&chart, false, &errored, late),
+            CheckError::Failed(_)
+        ));
+        // a different long wait doesn't count toward the credentials' grace period
+        let other = reported(ClusterPhase::Provisioning, "Waiting for Redis", start);
+        assert!(matches!(
+            reject(&chart, false, &other, late),
+            CheckError::Waiting(_)
+        ));
+        // a bootstrap creating the user is still waited on however long it takes
+        assert!(matches!(
+            reject(&chart, true, &waited, late),
+            CheckError::Waiting(_)
+        ));
+    }
+
+    /// Answer every Elastic request with a 401
+    ///
+    /// # Arguments
+    ///
+    /// * `_method` - The request method
+    /// * `_path` - The request path
+    fn unauthorized_elastic(_method: &str, _path: &str) -> (u16, String) {
+        (
+            401,
+            r#"{"error":{"type":"security_exception","reason":"unable to authenticate user"}}"#
+                .to_owned(),
+        )
+    }
+
+    /// The access check fails right away when an external Elastic rejects Thorium's user
+    #[tokio::test]
+    async fn external_elastic_rejection_fails_access_check() {
+        // a cluster pointed at an external Elastic that rejects every request
+        let fake = crate::k8s::clusters::tests::FakeKube::default();
+        let mut meta = crate::k8s::clusters::tests::meta_for(
+            crate::k8s::clusters::tests::namespaced_cluster(
+                crate::k8s::clusters::tests::full_spec(),
+            ),
+            &fake.client(),
+        );
+        meta.conf.elastic.node = crate::upgrades::tests::fake_elastic(unauthorized_elastic).await;
+        // the check fails instead of waiting forever
+        let error = elastic_access(&meta).await.expect_err("rejected");
+        let CheckError::Failed(error) = error else {
+            panic!("an external Elastic rejecting credentials should fail: {error}");
+        };
+        assert!(error.to_string().contains("unable to authenticate user"));
     }
 }

@@ -2,8 +2,9 @@
 # Single-quoted `sh -c` scripts are expanded inside pods (so secrets arrive over
 # stdin instead of host command lines), not by this shell
 # shellcheck disable=SC2016
-# -E makes ERR traps fire inside functions (kctl and every helper is one)
-set -Eeuo pipefail
+# Runs under the bash 3.2 macOS ships, so bash 4+ features (mapfile, associative arrays, case
+# conversion expansions, ...) are avoided
+set -euo pipefail
 
 ########################################
 # Shared utilities
@@ -149,8 +150,14 @@ log() { echo -e "\n====== $1 ======\n"; }
 # it must not live in a shared location another user could write to.
 MINITHOR_STATE_DIR="${XDG_CACHE_HOME:-$HOME/.cache}/minithor"
 EXPOSE_LOG_DIR="${MINITHOR_STATE_DIR}/expose-logs"
-LOOPBACK_STATE_FILE="${MINITHOR_STATE_DIR}/loopback-aliases"
 CURRENT_UID="$(id -u)"
+
+# Print the file listing the loopback aliases expose created for the selected profile. Each
+# profile has its own, so stopping or deleting one profile leaves the others' aliases alone. It
+# is computed on use since --profile is parsed after this point.
+loopback_state_file() {
+    echo "${MINITHOR_STATE_DIR}/loopback-aliases$(profile_suffix)"
+}
 
 # Create the private state directories used by expose
 ensure_state_dir() {
@@ -331,11 +338,7 @@ stop_thorium_forwards() {
     local svc ip
     while read -r svc ip; do
         [ -n "$ip" ] || continue
-        loopback_alias_del "$ip"
-        if [ -f "$LOOPBACK_STATE_FILE" ]; then
-            grep -vxF "$ip" "$LOOPBACK_STATE_FILE" > "${LOOPBACK_STATE_FILE}.tmp" || true
-            mv "${LOOPBACK_STATE_FILE}.tmp" "$LOOPBACK_STATE_FILE"
-        fi
+        loopback_alias_release "$ip"
     done <<< "$(discover_scylla_nodes)"
 }
 
@@ -453,12 +456,13 @@ loopback_alias_present() {
 }
 
 # Add an IP as a loopback alias so a port-forward can bind to it, recording it
-# in the state file so teardown knows to remove it. Idempotent.
+# in the profile's state file so teardown knows to remove it. Idempotent.
 loopback_alias_add() {
-    local ip=$1
+    local ip=$1 state
+    state="$(loopback_state_file)"
     ensure_state_dir
-    if ! { [ -f "$LOOPBACK_STATE_FILE" ] && grep -qxF "$ip" "$LOOPBACK_STATE_FILE"; }; then
-        echo "$ip" >> "$LOOPBACK_STATE_FILE"
+    if ! { [ -f "$state" ] && grep -qxF "$ip" "$state"; }; then
+        echo "$ip" >> "$state"
     fi
     if loopback_alias_present "$ip"; then
         return 0
@@ -482,15 +486,54 @@ loopback_alias_del() {
     fi
 }
 
-# Remove every loopback alias expose created and clear the state file.
+# Does another profile's state file still list this IP? Profiles share one service CIDR, so
+# their Scylla nodes can advertise the same address and share one alias.
+#
+#   loopback_alias_used_elsewhere <ip>
+loopback_alias_used_elsewhere() {
+    local ip=$1 own file
+    own="$(loopback_state_file)"
+    for file in "${MINITHOR_STATE_DIR}/loopback-aliases" "${MINITHOR_STATE_DIR}"/loopback-aliases-*; do
+        # profile names can't contain dots, so *.tmp is only ever a file being rewritten
+        [ -f "$file" ] && [ "$file" != "$own" ] && [[ "$file" != *.tmp ]] || continue
+        if grep -qxF "$ip" "$file"; then
+            return 0
+        fi
+    done
+    return 1
+}
+
+# Drop an IP from the profile's state file and remove its loopback alias, unless another
+# profile still uses it
+#
+#   loopback_alias_release <ip>
+loopback_alias_release() {
+    local ip=$1 state
+    state="$(loopback_state_file)"
+    if [ -f "$state" ]; then
+        grep -vxF "$ip" "$state" > "${state}.tmp" || true
+        mv "${state}.tmp" "$state"
+    fi
+    if loopback_alias_used_elsewhere "$ip"; then
+        echo "  Kept loopback alias $ip (another minikube profile still uses it)"
+        return 0
+    fi
+    loopback_alias_del "$ip"
+}
+
+# Remove every loopback alias expose created for the selected profile (keeping those another
+# profile still uses) and delete its state file.
 remove_all_loopback_aliases() {
-    [ -f "$LOOPBACK_STATE_FILE" ] || return 0
-    local ip
+    local ip state ips
+    state="$(loopback_state_file)"
+    [ -f "$state" ] || return 0
+    # read the list up front, since releasing each alias rewrites the file
+    ips="$(cat "$state")"
     while IFS= read -r ip; do
         [ -n "$ip" ] || continue
-        loopback_alias_del "$ip"
-    done < "$LOOPBACK_STATE_FILE"
-    rm -f "$LOOPBACK_STATE_FILE"
+        loopback_alias_release "$ip"
+    done <<< "$ips"
+    rm -f "$state"
 }
 
 # Discover Thorium's Scylla nodes and the address each advertises to clients
@@ -512,13 +555,19 @@ discover_scylla_nodes() {
     done
 }
 
-# Start a port-forward without aborting the caller on failure, counting the
-# failure in EXPOSE_FAILURES so expose can report it and exit non-zero at the end
+# Start a port-forward, counting a failure in EXPOSE_FAILURES so expose can report it and exit
+# non-zero at the end. Returns non-zero when the forward isn't running, so callers check it in a
+# condition (which also keeps set -e from aborting expose).
 run_forward() {
-    start_forward "$@" || EXPOSE_FAILURES=$((EXPOSE_FAILURES + 1))
+    if start_forward "$@"; then
+        return 0
+    fi
+    EXPOSE_FAILURES=$((EXPOSE_FAILURES + 1))
+    return 1
 }
 
-# Set up dev port-forwards for Scylla. A plain localhost forward does NOT work:
+# Set up dev port-forwards for Scylla, adding "<member service> <ip>" to SCYLLA_FORWARDS (one
+# per line) for each forward that runs. A plain localhost forward does NOT work:
 # the driver connects to the seed, learns each node's advertised
 # broadcast_rpc_address (the per-pod ClusterIP) and re-dials *that* address,
 # which a localhost tunnel can't satisfy. So for each node we add its advertised
@@ -526,10 +575,11 @@ run_forward() {
 # connection and the driver's re-dial land on the forward.
 forward_scylla_dev() {
     local nodes
+    SCYLLA_FORWARDS=""
     nodes=$(discover_scylla_nodes)
     if [ -z "$nodes" ]; then
         echo "  scylla: SKIPPED (no Scylla nodes found in namespace $SCYLLA_NAMESPACE)"
-        return 1
+        return 0
     fi
     local svc ip
     while read -r svc ip; do
@@ -539,8 +589,10 @@ forward_scylla_dev() {
             EXPOSE_FAILURES=$((EXPOSE_FAILURES + 1))
             continue
         fi
-        run_forward --address "$ip" "${NAMESPACE_PREFIX:+$NAMESPACE_PREFIX-}scylla-$svc" "$SCYLLA_NAMESPACE" "$svc" \
-            "$SCYLLA_CQL_PORT:$SCYLLA_CQL_PORT"
+        if run_forward --address "$ip" "${NAMESPACE_PREFIX:+$NAMESPACE_PREFIX-}scylla-$svc" "$SCYLLA_NAMESPACE" "$svc" \
+            "$SCYLLA_CQL_PORT:$SCYLLA_CQL_PORT"; then
+            SCYLLA_FORWARDS+="$svc $ip"$'\n'
+        fi
     done <<< "$nodes"
 }
 
@@ -580,12 +632,15 @@ select_driver() {
     fi
 }
 
-# Set DRIVER/CONTAINER_CMD from the existing minikube profile, which is the
-# driver the cluster was actually created with. Returns 1 when no profile exists.
+# Set DRIVER/CONTAINER_CMD from the selected profile's saved config, which holds the driver
+# the cluster was actually created with. Returns 1 when the profile doesn't exist.
 detect_profile_driver() {
-    local profile_driver
-    profile_driver=$(minikube profile list -o json 2>/dev/null \
-        | grep -o '"Driver": *"[^"]*"' | head -1 | sed 's/.*"\([^"]*\)"$/\1/') || true
+    local config profile_driver=""
+    config="$(minikube_profile_config)"
+    if [ -r "$config" ]; then
+        profile_driver=$(tr -d '\n' < "$config" | grep -o '"Driver":[[:space:]]*"[^"]*"' | head -n1 \
+            | sed 's/.*:[[:space:]]*"\([^"]*\)"/\1/') || true
+    fi
     [ -n "$profile_driver" ] || return 1
     DRIVER="$profile_driver"
     case "$DRIVER" in
@@ -632,7 +687,9 @@ minikube_start() {
 fix_container_config() {
     if [ -n "$CONTAINER_CMD" ]; then
         local api_port cluster
-        api_port="$($CONTAINER_CMD port "$MINIKUBE_PROFILE" 8443/tcp | awk -F: '{print $2}')"
+        # docker is asked without DOCKER_HOST, like minikube_start and has_docker, so the
+        # local daemon that runs the node answers
+        api_port="$(env -u DOCKER_HOST "$CONTAINER_CMD" port "$MINIKUBE_PROFILE" 8443/tcp | awk -F: '{print $2}')"
         cluster="$(kctl config view --minify -o jsonpath='{.contexts[0].context.cluster}')"
         kctl config set-cluster "$cluster" --server="https://127.0.0.1:${api_port}"
     fi
@@ -670,80 +727,10 @@ ensure_minikube_running() {
     fi
 }
 
-wait_for_rollout() {
-    local resource=$1 namespace=$2 timeout=${3:-300}
-    kctl rollout status --watch --timeout="${timeout}s" "$resource" -n "$namespace"
-}
-
-wait_for_resource() {
-    local resource_type=$1 resource_name=$2 namespace=$3 timeout=${4:-300}
-    local elapsed=0
-    local ns_flag=()
-    if [ -n "$namespace" ]; then
-        ns_flag=(-n "$namespace")
-    fi
-    echo "Waiting for $resource_type/$resource_name${namespace:+ in $namespace} (timeout: ${timeout}s)..."
-    until kctl get "$resource_type" "$resource_name" ${ns_flag[@]+"${ns_flag[@]}"} &>/dev/null; do
-        sleep 5
-        elapsed=$((elapsed + 5))
-        if [ "$elapsed" -ge "$timeout" ]; then
-            echo "ERROR: Timed out waiting for $resource_type/$resource_name${namespace:+ in $namespace}" >&2
-            return 1
-        fi
-    done
-}
-
-# Wait until at least one pod matching a selector exists and all matching pods
-# are Ready. A bare `kubectl wait -l` fails immediately with "no matching
-# resources" when the controller hasn't created the pods yet.
-#
-#   wait_for_pods_ready <namespace> <selector> [timeout]
-wait_for_pods_ready() {
-    local namespace=$1 selector=$2 timeout=${3:-300}
-    local elapsed=0
-    echo "Waiting for pods ($selector) in $namespace to be Ready (timeout: ${timeout}s)..."
-    until [ -n "$(kctl get pods -n "$namespace" -l "$selector" -o name 2>/dev/null)" ]; do
-        sleep 5
-        elapsed=$((elapsed + 5))
-        if [ "$elapsed" -ge "$timeout" ]; then
-            echo "ERROR: Timed out waiting for pods ($selector) in $namespace to be created" >&2
-            return 1
-        fi
-    done
-    kctl wait --for=condition=Ready pod -l "$selector" -n "$namespace" --timeout="$((timeout - elapsed))s"
-}
-
-# Wait for a Job to succeed, failing fast (with its logs) once the Job is marked
-# Failed instead of waiting out the whole timeout
-#
-#   wait_for_job <namespace> <job> [timeout]
-wait_for_job() {
-    local namespace=$1 job=$2 timeout=${3:-300}
-    local elapsed=0 succeeded failed
-    while :; do
-        succeeded=$(kctl get job "$job" -n "$namespace" -o jsonpath='{.status.succeeded}' 2>/dev/null || true)
-        if [ "${succeeded:-0}" -ge 1 ]; then
-            return 0
-        fi
-        failed=$(kctl get job "$job" -n "$namespace" \
-            -o jsonpath='{.status.conditions[?(@.type=="Failed")].status}' 2>/dev/null || true)
-        if [ "$failed" = "True" ] || [ "$elapsed" -ge "$timeout" ]; then
-            if [ "$failed" = "True" ]; then
-                echo "ERROR: job/$job in $namespace failed; last logs:" >&2
-            else
-                echo "ERROR: Timed out after ${timeout}s waiting for job/$job in $namespace; last logs:" >&2
-            fi
-            kctl logs -n "$namespace" "job/$job" --tail=50 >&2 || true
-            return 1
-        fi
-        sleep 5
-        elapsed=$((elapsed + 5))
-    done
-}
-
 wait_for_port_forward() {
     local port=$1 max_attempts=${2:-20}
-    for attempt in $(seq 1 "$max_attempts"); do
+    local _attempt
+    for _attempt in $(seq 1 "$max_attempts"); do
         if curl -sf -o /dev/null "http://localhost:$port" 2>/dev/null; then return 0; fi
         sleep 1
     done
@@ -759,23 +746,10 @@ run_step() {
     fi
 }
 
-# Raise the kernel limits Scylla/Elastic need on the host or on minikube nodes
-#
-#   tune_kernel_params [host|minikube|node:<name>]
-#
-# "minikube" tunes every node in the profile; "node:<name>" tunes one node.
+# Raise the kernel limits Scylla/Elastic need on every node of the selected profile. Each node
+# is tuned separately, since a VM driver gives every node its own kernel; the settings don't
+# survive a node restart, so deploy and start apply them again.
 tune_kernel_params() {
-    local target="${1:-host}"
-    # tune each node separately since every node has its own kernel settings
-    if [ "$target" = "minikube" ]; then
-        local node
-        for node in $(list_minikube_nodes); do
-            echo "  Node $node:"
-            tune_kernel_params "node:$node"
-        done
-        return 0
-    fi
-    local node_name="${target#node:}"
     # fs.aio-max-nr is kernel-wide and each Scylla node reserves a large share,
     # so the Scylla nodes of a multi-node cluster or of a second profile on this host
     # fail to start at the 65536 default
@@ -786,39 +760,24 @@ tune_kernel_params() {
         "fs.nr_open=1048576"
         "vm.max_map_count=262144"
     )
-    local persisted=()
-    for param in "${params[@]}"; do
-        local key="${param%%=*}"
-        local desired="${param#*=}"
-        local current
-        if [ "$target" != "host" ]; then
-            current=$(minikube ssh -n "$node_name" -- /sbin/sysctl -n "$key" 2>/dev/null | tr -d '\r') || true
-        else
-            current=$(sysctl -n "$key" 2>/dev/null) || true
-        fi
-        if [ -z "$current" ]; then
-            echo "  $key: could not read current value, skipping"
-            continue
-        fi
-        if [ "$current" -ge "$desired" ] 2>/dev/null; then
-            echo "  $key = $current (already >= $desired)"
-            # persist the higher current value so a reboot never lowers it
-            persisted+=("$key=$current")
-        else
-            persisted+=("$param")
-            echo "  $key: $current -> $desired"
-            if [ "$target" != "host" ]; then
-                minikube ssh -n "$node_name" -- sudo /sbin/sysctl -w "$param" >/dev/null 2>&1 || echo "    WARNING: failed to set $key on node $node_name"
+    local node param key desired current
+    for node in $(list_minikube_nodes); do
+        echo "  Node $node:"
+        for param in "${params[@]}"; do
+            key="${param%%=*}"
+            desired="${param#*=}"
+            current=$(minikube ssh -n "$node" -- /sbin/sysctl -n "$key" 2>/dev/null | tr -d '\r') || true
+            if [ -z "$current" ]; then
+                echo "  $key: could not read current value, skipping"
+            elif [ "$current" -ge "$desired" ] 2>/dev/null; then
+                echo "  $key = $current (already >= $desired)"
             else
-                sudo sysctl -w "$param" >/dev/null 2>&1 || echo "    WARNING: failed to set $key (may require root)"
+                echo "  $key: $current -> $desired"
+                minikube ssh -n "$node" -- sudo /sbin/sysctl -w "$param" >/dev/null 2>&1 \
+                    || echo "    WARNING: failed to set $key on node $node"
             fi
-        fi
+        done
     done
-    if [ "$target" = "host" ] && [ "$OS" = "Linux" ] && [ "${#persisted[@]}" -gt 0 ]; then
-        local conf="/etc/sysctl.d/99-minithor.conf"
-        echo "  Persisting to $conf"
-        printf '%s\n' "${persisted[@]}" | sudo tee "$conf" >/dev/null 2>&1 || echo "    WARNING: failed to write $conf"
-    fi
 }
 
 # Print the path of the selected minikube profile's saved config. minikube keeps its state
@@ -1161,9 +1120,11 @@ minithor start — start a stopped minikube cluster
 
 Usage: minithor start
 
-Detects the container driver, starts minikube, corrects the kubeconfig
-API server address if needed, and cleans up pods stuck in terminal
-failure states.
+Starts the selected profile's cluster with the driver it was created with,
+corrects the kubeconfig API server address if needed, re-applies the node
+proxy settings, kernel parameters, and registry host entry, and cleans up pods
+stuck in terminal failure states. A profile that doesn't exist yet is created
+with 'minithor minikube install' instead.
 EOF
 }
 
@@ -1175,7 +1136,10 @@ Usage: minithor [--namespace-prefix <prefix>] deploy [options]
 
 Installs the infra-operators chart (once per cluster, skipping operators that already run)
 and the thorium chart, waits for Thorium to be ready, installs thorctl, and imports the
-default toolbox. Generated credentials are kept on redeploys.
+default toolbox. Generated credentials are kept on redeploys, but no other option is: each
+deploy renders the values from its own options alone (helm --reset-values), so repeat them
+(--registry, --no-kibana, --values, ...) on every redeploy. A cluster runs one Thorium
+deployment, so deploy refuses when one already exists under another namespace prefix.
 
 Charts (default: ${CHART_REPO}/{thorium,infra-operators} at ${CHART_VERSION}):
   --chart <path|oci-ref>      The thorium chart: a local chart directory, a packaged
@@ -1186,9 +1150,13 @@ Charts (default: ${CHART_REPO}/{thorium,infra-operators} at ${CHART_VERSION}):
   --chart-version <version>   Chart version for oci:// charts (default: ${CHART_VERSION})
 
 Configuration:
-  --user <name>               Admin username (default: test)
-  --password <pass>           Admin password (default: INSECURE_DEV_PASSWORD)
-  --rand-password             Let the chart generate the admin password (see 'credentials')
+  --user <name>               Admin username (default: the stored one on a redeploy, else
+                              test)
+  --password <pass>           Admin password (default: the stored one on a redeploy, else
+                              INSECURE_DEV_PASSWORD)
+  --rand-password             Let the chart generate the admin password on the first deploy;
+                              a redeploy without --password keeps the stored one (see
+                              'credentials'). Can't be combined with --password
   --version <tag>             Thorium image tag (default: the chart's appVersion)
   --registry                  Deploy a container registry at
                               docker-registry.<thorium namespace>.svc.cluster.local:${REGISTRY_PORT}
@@ -1248,9 +1216,10 @@ Usage: minithor [--namespace-prefix <prefix>] cleanup --confirm [options]
 Deletes the ThoriumCluster (letting its operator clean up), uninstalls the thorium Helm
 release, and deletes Thorium's namespaces, including PVCs and the generated credentials,
 along with the group namespaces the k8s scaler created (labelled
-app.kubernetes.io/managed-by=thorium-scaler) and the job data in them. Group namespaces
-created by a scaler that didn't label them must be deleted by hand. The minikube cluster is
-left alone.
+app.kubernetes.io/managed-by=thorium-scaler) and the job data in them. The group namespaces
+are only deleted when the thorium release exists in the selected namespace, so a wrong
+--namespace-prefix never deletes another deployment's jobs. Group namespaces created by a
+scaler that didn't label them must be deleted by hand. The minikube cluster is left alone.
 
 Options:
   --confirm            Required
@@ -1306,16 +1275,17 @@ Options:
   --port-offset <n> Add <n> to every local port (API, Elastic, Kibana, Redis,
                    SeaweedFS, registry) so two minikube profiles (separate
                    clusters) can be exposed at once
-  --stop           Stop your port-forwards into this profile and remove
-                   loopback aliases
+  --stop           Stop your port-forwards into this profile and remove the
+                   loopback aliases expose added for it (an alias another
+                   profile's forwards also use is kept)
   --status         Show which port-forwards are running
   -h, --help       Show this help message
 
 Forwards the Thorium API, plus the container registry on port 5000 when one
 was deployed with 'minithor deploy --registry'. Exits non-zero if any forward
 fails to start; a port held by something other than your own stale forward is
-reported and skipped rather than killed. Logs and loopback alias state live in
-${MINITHOR_STATE_DIR}.
+reported and skipped rather than killed. Logs and the loopback aliases each
+profile added (loopback-aliases[-<profile>]) live in ${MINITHOR_STATE_DIR}.
 EOF
 }
 
@@ -1434,19 +1404,19 @@ cmd_minikube_install() {
     case "$OS" in
         Darwin)
             if [ "$ARCH" = "arm64" ]; then
-                curl -LO --output-dir "$tmp_dir" https://storage.googleapis.com/minikube/releases/latest/minikube-darwin-arm64
+                curl -fL -o "$tmp_dir/minikube-darwin-arm64" https://storage.googleapis.com/minikube/releases/latest/minikube-darwin-arm64
                 sudo install "$tmp_dir/minikube-darwin-arm64" /usr/local/bin/minikube
             else
-                curl -LO --output-dir "$tmp_dir" https://storage.googleapis.com/minikube/releases/latest/minikube-darwin-amd64
+                curl -fL -o "$tmp_dir/minikube-darwin-amd64" https://storage.googleapis.com/minikube/releases/latest/minikube-darwin-amd64
                 sudo install "$tmp_dir/minikube-darwin-amd64" /usr/local/bin/minikube
             fi
             ;;
         Linux)
             if [ "$ARCH" = "x86_64" ]; then
-                curl -LO --output-dir "$tmp_dir" https://storage.googleapis.com/minikube/releases/latest/minikube-linux-amd64
+                curl -fL -o "$tmp_dir/minikube-linux-amd64" https://storage.googleapis.com/minikube/releases/latest/minikube-linux-amd64
                 sudo install "$tmp_dir/minikube-linux-amd64" /usr/local/bin/minikube
             elif [ "$ARCH" = "aarch64" ] || [ "$ARCH" = "arm64" ]; then
-                curl -LO --output-dir "$tmp_dir" https://storage.googleapis.com/minikube/releases/latest/minikube-linux-arm64
+                curl -fL -o "$tmp_dir/minikube-linux-arm64" https://storage.googleapis.com/minikube/releases/latest/minikube-linux-arm64
                 sudo install "$tmp_dir/minikube-linux-arm64" /usr/local/bin/minikube
             else
                 echo "Unsupported Linux architecture: $ARCH"
@@ -1607,8 +1577,16 @@ cmd_start() {
         esac
     done
 
-    select_driver
-    echo "Detected driver: $DRIVER"
+    # restart with the driver the cluster was created with, even if another one has become
+    # available since; a profile that was never created is left to 'minikube install', which
+    # sizes it
+    if ! detect_profile_driver; then
+        local opts=""
+        [ "$MINIKUBE_PROFILE" != "minikube" ] && opts=" --profile $MINIKUBE_PROFILE"
+        echo "ERROR: there is no minikube cluster for profile $MINIKUBE_PROFILE; create it with: minithor${opts} minikube install" >&2
+        exit 1
+    fi
+    echo "Using the cluster's driver: $DRIVER"
 
     minikube_start
     fix_container_config
@@ -1618,7 +1596,7 @@ cmd_start() {
     setup_node_pull_env ""
 
     log "Tuning minikube node kernel parameters on every node"
-    tune_kernel_params minikube
+    tune_kernel_params
 
     sleep 30
 
@@ -1662,6 +1640,16 @@ cmd_stop() {
 need_value() {
     if [ "$2" -lt 2 ]; then
         echo "ERROR: $1 requires a value" >&2
+        exit 1
+    fi
+}
+
+# Fail unless an option's value is a positive whole number
+#
+#   need_number <option> <value>
+need_number() {
+    if ! [[ "$2" =~ ^[1-9][0-9]*$ ]]; then
+        echo "ERROR: $1 requires a positive number of seconds" >&2
         exit 1
     fi
 }
@@ -1798,7 +1786,7 @@ embedded_values() {
     cat <<'EOF'
 # minithor development defaults for the thorium chart
 # every backing service runs in the cluster; pass --values with global.managed.<service>: false
-# and the matching external settings to use an external one (see deploy/README.md, "External
+# and the matching external settings to use an external one (see "Configure the Helm Charts", "External
 # services")
 global:
   managed:
@@ -1822,10 +1810,6 @@ infra:
 EOF
 }
 
-# Install thorctl from the deployed API and log it in as the admin user. A private port-forward
-# on a port kubectl picks is used so it never collides with `minithor expose`.
-#
-#   install_thorctl <bin dir> <user> <password>
 # The thorctl config deploy logs in to: thorctl's default config for the default profile,
 # and a separate one for any other profile so a deploy never replaces another cluster's login
 thorctl_config_path() {
@@ -1839,13 +1823,18 @@ set_thorctl_api() {
     sed -i.tmp "s#^\(  api: \).*#\1http://localhost:$2#" "$1" && rm -f "$1.tmp"
 }
 
+# Install thorctl from the deployed API and log it in as the admin user, or only install it when
+# no user is given. A private port-forward on a port kubectl picks is used so it never collides
+# with `minithor expose`.
+#
+#   install_thorctl <bin dir> [user] [password]
 install_thorctl() {
-    local bin_dir="$1" user="$2" password="$3" pf_port="" attempt
+    local bin_dir="$1" user="${2:-}" password="${3:-}" pf_port="" _attempt
     PF_LOG=$(mktemp)
     kctl -n "$THORIUM_NAMESPACE" port-forward svc/thorium-api :80 >"$PF_LOG" 2>&1 &
     PF_PID=$!
     trap 'kill_tree "$PF_PID"; rm -f "$PF_LOG"; true' EXIT
-    for attempt in $(seq 1 20); do
+    for _attempt in $(seq 1 20); do
         pf_port=$(sed -n 's/^Forwarding from 127\.0\.0\.1:\([0-9]*\) .*/\1/p' "$PF_LOG" | head -1)
         [ -n "$pf_port" ] && break
         kill -0 "$PF_PID" 2>/dev/null || break
@@ -1859,16 +1848,33 @@ install_thorctl() {
     local url="http://localhost:$pf_port" os hw sudo_cmd=""
     os=$(uname -s | awk '{print tolower($0)}')
     hw=$(uname -m | tr '_' '-')
+    # create a missing --bin directory, with sudo when its parent isn't writable
+    if [ ! -d "$bin_dir" ]; then
+        echo "Creating $bin_dir for thorctl..."
+        if ! mkdir -p "$bin_dir" 2>/dev/null && ! sudo mkdir -p "$bin_dir"; then
+            echo "ERROR: could not create the thorctl directory $bin_dir" >&2
+            return 1
+        fi
+    fi
     [ -w "$bin_dir" ] || sudo_cmd="sudo"
     echo "Downloading thorctl to $bin_dir/thorctl for $os/$hw..."
-    $sudo_cmd curl -sf "$url/api/binaries/$os/$hw/thorctl" -o "$bin_dir/thorctl"
-    $sudo_cmd chmod 755 "$bin_dir/thorctl"
+    if ! $sudo_cmd curl -fsS "$url/api/binaries/$os/$hw/thorctl" -o "$bin_dir/thorctl"; then
+        echo "ERROR: failed to download thorctl from $url/api/binaries/$os/$hw/thorctl to $bin_dir/thorctl" >&2
+        return 1
+    fi
+    $sudo_cmd chmod 755 "$bin_dir/thorctl" || return 1
+    if [ -z "$user" ]; then
+        kill_tree "$PF_PID"
+        return 0
+    fi
     THORCTL_CONFIG="$(thorctl_config_path)"
     mkdir -p "$(dirname "$THORCTL_CONFIG")"
     if [ -f "$THORCTL_CONFIG" ]; then
         cp -p "$THORCTL_CONFIG" "$THORCTL_CONFIG.bak"
         echo "Backed up the existing thorctl config to $THORCTL_CONFIG.bak"
     fi
+    # thorctl login only takes a password on its command line or from a terminal prompt, so the
+    # password is briefly visible to other local users in the process list while it runs
     "$bin_dir/thorctl" --config "$THORCTL_CONFIG" login "$url" --user "$user" --password "$password" || return 1
     # the port-forward above closes when deploy exits, so the config points at the API
     # 'minithor expose' serves by default; expose updates it to the port it actually uses
@@ -1877,13 +1883,162 @@ install_thorctl() {
     kill_tree "$PF_PID"
 }
 
+# Fail unless deploying into THORIUM_NAMESPACE keeps the cluster at one Thorium deployment.
+# Thorium supports one deployment per Kubernetes cluster (its scaler and operator act
+# cluster-wide), and a namespace prefix only renames the namespaces, so a thorium release or
+# ThoriumCluster in any other namespace means another deployment already owns this cluster. A
+# ThoriumCluster Helm doesn't manage in THORIUM_NAMESPACE was made by the pre-Helm scripts and
+# must be converted before the chart can take it over.
+check_single_deployment() {
+    local releases clusters ns name helm_release opts=""
+    [ "$MINIKUBE_PROFILE" != "minikube" ] && opts=" --profile $MINIKUBE_PROFILE"
+    # every thorium release on the cluster, whatever state it is in, as its namespace
+    releases="$(helm_cmd list -A -a -f "^${THORIUM_RELEASE}\$" 2>/dev/null | awk 'NR > 1 {print $2}' || true)"
+    for ns in $releases; do
+        if [ "$ns" != "$THORIUM_NAMESPACE" ]; then
+            local prefix="${ns%thorium}"
+            prefix="${prefix%-}"
+            echo "ERROR: a thorium release already exists in namespace $ns, and a cluster runs only one Thorium deployment" >&2
+            echo "  Pass the namespace prefix it was deployed with:  minithor${opts}${prefix:+ --namespace-prefix $prefix} deploy" >&2
+            echo "  or remove it first:  minithor${opts}${prefix:+ --namespace-prefix $prefix} cleanup --confirm" >&2
+            exit 1
+        fi
+    done
+    # ThoriumClusters as "<namespace> <name> <release annotation>"; none when the CRD is missing
+    clusters="$(kctl get thoriumclusters.sandia.gov -A -o jsonpath='{range .items[*]}{.metadata.namespace}{" "}{.metadata.name}{" "}{.metadata.annotations.meta\.helm\.sh/release-name}{"\n"}{end}' 2>/dev/null || true)"
+    while read -r ns name helm_release; do
+        [ -n "$ns" ] || continue
+        if [ "$ns" != "$THORIUM_NAMESPACE" ]; then
+            echo "ERROR: ThoriumCluster $ns/$name already exists, and a cluster runs only one Thorium deployment" >&2
+            echo "  Deploy with the namespace prefix of $ns, or remove that deployment first" >&2
+            exit 1
+        fi
+        if [ -z "$helm_release" ]; then
+            echo "ERROR: ThoriumCluster $ns/$name was deployed by a pre-Helm minithor or megathor and must be converted first" >&2
+            echo "  See \"Existing minithor deployments\" in minithor/README.md and \"Converting a Pre-Helm" >&2
+            echo "  Deployment\" in the Thorium deployment docs" >&2
+            exit 1
+        fi
+    done <<< "$clusters"
+}
+
+# Wait until every ThoriumCluster in the Thorium namespace is Ready for its current spec,
+# failing as soon as one reports the Error phase, the UpgradeRequired phase (its upgrade target,
+# such as a targetRevision from --values or --set, is older than the operator's latest
+# revision), or an upgrade step that is Blocked (such as one waiting for an approval), since none
+# of these resolves by waiting. A status only counts once its
+# observed_generation matches metadata.generation, so the phase left over from the previous
+# spec is never mistaken for the result of this deploy. Every ThoriumCluster is checked because
+# a deployment converted from the pre-Helm scripts keeps its old ThoriumCluster name.
+#
+#   wait_for_thorium_ready <timeout seconds>
+wait_for_thorium_ready() {
+    local timeout=$1 elapsed=0 rows name generation observed phase blocked ready
+    local status_path='{range .items[*]}{.metadata.name}{"|"}{.metadata.generation}{"|"}{.status.observed_generation}{"|"}{.status.phase}{"|"}{.status.upgrade.steps[?(@.state=="Blocked")].step}{"\n"}{end}'
+    while :; do
+        rows="$(kctl -n "$THORIUM_NAMESPACE" get thoriumclusters.sandia.gov -o jsonpath="$status_path" 2>/dev/null || true)"
+        ready=false
+        [ -n "$rows" ] && ready=true
+        while IFS='|' read -r name generation observed phase blocked; do
+            [ -n "$name" ] || continue
+            # a status written for an older spec says nothing about this one yet
+            if [ "$observed" != "$generation" ]; then
+                ready=false
+                continue
+            fi
+            if [ "$phase" = "Error" ] || [ "$phase" = "UpgradeRequired" ] || [ -n "$blocked" ]; then
+                if [ -n "$blocked" ]; then
+                    echo "ERROR: ThoriumCluster $name has blocked upgrade steps:" >&2
+                    kctl -n "$THORIUM_NAMESPACE" get thoriumclusters.sandia.gov "$name" \
+                        -o jsonpath='{range .status.upgrade.steps[?(@.state=="Blocked")]}  {.step}: {.message}{"\n"}{end}' >&2 || true
+                else
+                    echo "ERROR: ThoriumCluster $name is in the $phase phase" >&2
+                fi
+                echo "  status.message: $(kctl -n "$THORIUM_NAMESPACE" get thoriumclusters.sandia.gov "$name" -o jsonpath='{.status.message}' 2>/dev/null || true)" >&2
+                exit 1
+            fi
+            [ "$phase" = "Ready" ] || ready=false
+        done <<< "$rows"
+        [ "$ready" = true ] && return 0
+        if [ "$elapsed" -ge "$timeout" ]; then
+            echo "ERROR: Thorium did not become ready within ${timeout}s; status:" >&2
+            kctl -n "$THORIUM_NAMESPACE" get thoriumclusters.sandia.gov -o jsonpath='{range .items[*]}{.metadata.name}: {.status}{"\n"}{end}' >&2 || true
+            exit 1
+        fi
+        # a backend that never becomes reachable keeps the cluster provisioning until the
+        # timeout, so show what it is waiting on every minute
+        if [ "$elapsed" -gt 0 ] && [ $((elapsed % 60)) -eq 0 ]; then
+            kctl -n "$THORIUM_NAMESPACE" get thoriumclusters.sandia.gov \
+                -o jsonpath='{range .items[*]}{.metadata.name}{"|"}{.status.phase}{"|"}{.status.message}{"\n"}{end}' 2>/dev/null \
+                | while IFS='|' read -r name phase message; do
+                    [ -n "$name" ] || continue
+                    echo "  still waiting after ${elapsed}s: $name is ${phase:-not reconciled yet}${message:+: ${message:0:300}}"
+                done || true
+        fi
+        sleep 10
+        elapsed=$((elapsed + 10))
+    done
+}
+
+# Print "<secret>|<username key>|<literal username>|<password key>" for the admin bootstrap of
+# the ThoriumCluster in the Thorium namespace, or nothing when its spec.bootstrap.admin is unset.
+# The admin bootstrap is off in a deployment converted without an admin login, and then the
+# thorium-admin secret the chart still renders names no real user.
+admin_bootstrap() {
+    kctl -n "$THORIUM_NAMESPACE" get thoriumclusters.sandia.gov \
+        -o jsonpath='{range .items[*]}{.spec.bootstrap.admin.secret.name}{"|"}{.spec.bootstrap.admin.secret.username_key}{"|"}{.spec.bootstrap.admin.secret.username}{"|"}{.spec.bootstrap.admin.secret.password_key}{"\n"}{end}' 2>/dev/null \
+        | awk -F'|' '$1 != "" {print; exit}' || true
+}
+
+# Print the admin bootstrap's username and password, one per line, read from the Secret the
+# ThoriumCluster's spec.bootstrap.admin names; prints nothing when the bootstrap is off
+admin_login() {
+    local secret user_key literal password_key
+    IFS='|' read -r secret user_key literal password_key <<< "$(admin_bootstrap)"
+    [ -n "$secret" ] || return 0
+    # the username key takes precedence over a literal username, as in the operator
+    if [ -n "$user_key" ]; then
+        kctl -n "$THORIUM_NAMESPACE" get secret "$secret" -o go-template="{{index .data \"$user_key\" | base64decode}}{{\"\\n\"}}"
+    else
+        echo "$literal"
+    fi
+    kctl -n "$THORIUM_NAMESPACE" get secret "$secret" -o go-template="{{index .data \"$password_key\" | base64decode}}{{\"\\n\"}}"
+}
+
+# Print the admin username and password to render into the chart values, one per line; an
+# empty password lets the chart keep the stored one (or generate one on the first deploy). The
+# operator creates the admin once and never changes an existing admin's password, so a redeploy
+# keeps the login stored in thorium-credentials unless --user, --password, or --rand-password
+# ask for another one.
+#
+#   resolve_admin_login <--user value> <--password value> <whether --rand-password was given>
+resolve_admin_login() {
+    local user="$1" password="$2" rand_password="$3" stored_user="" stored_password=""
+    if kctl get secret thorium-credentials -n "$THORIUM_NAMESPACE" &>/dev/null; then
+        stored_user="$(kctl get secret thorium-credentials -n "$THORIUM_NAMESPACE" \
+            -o go-template='{{with index .data "adminUsername"}}{{. | base64decode}}{{end}}')"
+        stored_password="$(kctl get secret thorium-credentials -n "$THORIUM_NAMESPACE" \
+            -o go-template='{{with index .data "adminPassword"}}{{. | base64decode}}{{end}}')"
+    fi
+    [ -n "$user" ] || user="${stored_user:-test}"
+    if [ "$rand_password" = true ]; then
+        password=""
+    elif [ -z "$password" ] && [ -z "$stored_password" ]; then
+        password="INSECURE_DEV_PASSWORD"
+    elif [ -n "$password" ] && [ -n "$stored_password" ] && [ "$password" != "$stored_password" ]; then
+        echo "WARNING: --password changes the thorium-admin secret, but the operator doesn't change the" >&2
+        echo "  password of the existing admin user; change it in Thorium too, or log in with the old one" >&2
+    fi
+    printf '%s\n%s\n' "$user" "$password"
+}
+
 ########################################
 # Subcommand: deploy
 ########################################
 
 cmd_deploy() {
-    local chart="" operators_chart="" chart_version="" user="test"
-    local password="INSECURE_DEV_PASSWORD" rand_password=false version="" registry=false
+    local chart="" operators_chart="" chart_version="" user=""
+    local password="" password_given=false rand_password=false version="" registry=false
     local registry_user="" toolbox="$DEFAULT_TOOLBOX_URL" banner="" docker_config=""
     local bin_dir="/usr/local/bin" kibana=true skip_operators=false thorctl=true
     local timeout=1800
@@ -1899,7 +2054,7 @@ cmd_deploy() {
             --values)          need_value "$1" $#; user_values+=("$2"); shift ;;
             --set)             need_value "$1" $#; user_sets+=("$2"); shift ;;
             --user)            need_value "$1" $#; user="$2"; shift ;;
-            --password)        need_value "$1" $#; password="$2"; shift ;;
+            --password)        need_value "$1" $#; password="$2"; password_given=true; shift ;;
             --rand-password)   rand_password=true ;;
             --version)         need_value "$1" $#; version="$2"; shift ;;
             --registry)        registry=true ;;
@@ -1914,11 +2069,16 @@ cmd_deploy() {
             --proxy)           need_value "$1" $#; proxy="$2"; shift ;;
             --no-proxy)        need_value "$1" $#; extra_no_proxy="$2"; shift ;;
             --skip-operators)  skip_operators=true ;;
-            --timeout)         need_value "$1" $#; timeout="$2"; shift ;;
+            --timeout)         need_value "$1" $#; need_number "$1" "$2"; timeout="$2"; shift ;;
             *) echo "Unknown option: $1"; usage_deploy; exit 1 ;;
         esac
         shift
     done
+    # the admin password comes from one source: the given one or a generated one
+    if [ "$password_given" = true ] && [ "$rand_password" = true ]; then
+        echo "ERROR: --password and --rand-password can't be combined; pass one or the other" >&2
+        exit 1
+    fi
     ensure_minikube_running
     # the node's container runtime only pulls over HTTP from registries trusted at start
     [ "$registry" = true ] && check_registry_trusted
@@ -1927,16 +2087,24 @@ cmd_deploy() {
     umask 077
 
     log "Tuning minikube node kernel parameters on every node"
-    tune_kernel_params minikube
+    tune_kernel_params
 
     log "Preparing Helm and the charts"
     ensure_helm
     echo "Using helm $("$HELM" version --template '{{.Version}}') at $HELM"
     resolve_charts "$chart" "$operators_chart" "$chart_version"
+    check_single_deployment
+
+    # pick the admin login to render, keeping the stored one on a redeploy
+    local login_values
+    login_values="$(resolve_admin_login "$user" "$password" "$rand_password")"
+    user="$(printf '%s\n' "$login_values" | sed -n 1p)"
+    password="$(printf '%s\n' "$login_values" | sed -n 2p)"
 
     log "Writing deployment values"
     local defaults_file="${MINITHOR_STATE_DIR}/values-defaults.yaml"
-    local values_file="${MINITHOR_STATE_DIR}/values$(profile_suffix).yaml"
+    local values_file
+    values_file="${MINITHOR_STATE_DIR}/values$(profile_suffix).yaml"
     embedded_values > "$defaults_file"
     {
         echo "# Generated by minithor deploy for namespace prefix '${NAMESPACE_PREFIX:-none}'"
@@ -1947,12 +2115,12 @@ cmd_deploy() {
         echo "secrets:"
         echo "  credentials:"
         echo "    adminUsername: $(yaml_str "$user")"
-        # without a password the chart generates one once and keeps it
-        if [ "$rand_password" = false ]; then
+        # without a password the chart keeps the stored one, or generates one on the first deploy
+        if [ -n "$password" ]; then
             echo "    adminPassword: $(yaml_str "$password")"
         fi
         if [ -n "$registry_user" ]; then
-            echo "  registryAuth:"
+            echo "  registryBasicAuth:"
             echo "    username: $(yaml_str "$registry_user")"
         fi
         echo "infra:"
@@ -1975,9 +2143,11 @@ cmd_deploy() {
         if [ -n "$version" ]; then
             echo "    version: $(yaml_str "$version")"
         fi
+        # dev clusters take every upgrade revision their operator ships
+        echo "    upgrade:"
+        echo "      autoTargetDev: true"
         if [ -n "$proxy" ] && [ "$proxy" != none ]; then
-            # the scaler reaches registries through the proxy; replacing the scaler's env
-            # also replaces the operator's default KUBECONFIG, so it is set again
+            # the scaler reaches registries through the proxy
             local no_proxy_value
             no_proxy_value="$(scaler_no_proxy "$extra_no_proxy")"
             echo "    components:"
@@ -1990,11 +2160,9 @@ cmd_deploy() {
             for var in no_proxy NO_PROXY; do
                 echo "          - { name: $var, value: $(yaml_str "$no_proxy_value") }"
             done
-            echo "          - { name: KUBECONFIG, value: /root/.kube/config }"
         fi
         if [ -n "$docker_config" ]; then
-            echo "  imagePullSecret:"
-            echo "    create: true"
+            echo "  createImagePullSecret: true"
         fi
     } > "$values_file"
     echo "Values written to $values_file"
@@ -2004,7 +2172,8 @@ cmd_deploy() {
     for f in ${user_values[@]+"${user_values[@]}"}; do values_args+=(-f "$f"); done
     if [ -n "$toolbox" ]; then
         # fetch the toolbox on this host (which has the proxy settings), not in the cluster
-        local toolbox_file="${MINITHOR_STATE_DIR}/toolbox$(profile_suffix).json"
+        local toolbox_file
+        toolbox_file="${MINITHOR_STATE_DIR}/toolbox$(profile_suffix).json"
         if [[ "$toolbox" =~ ^https?:// ]]; then
             echo "Downloading toolbox from $toolbox..."
             curl -fsSL -o "$toolbox_file" "$toolbox"
@@ -2014,7 +2183,7 @@ cmd_deploy() {
         values_args+=(--set-file "operator.toolbox.json=$toolbox_file")
     fi
     [ -n "$banner" ] && values_args+=(--set-file "operator.banner=$banner")
-    [ -n "$docker_config" ] && values_args+=(--set-file "operator.imagePullSecret.dockerconfigjson=$docker_config")
+    [ -n "$docker_config" ] && values_args+=(--set-file "operator.dockerConfigJson=$docker_config")
     for s in ${user_sets[@]+"${user_sets[@]}"}; do values_args+=(--set "$s"); done
 
     log "Deploying cluster-wide operators"
@@ -2022,7 +2191,10 @@ cmd_deploy() {
         echo "Skipping operators (--skip-operators)"
     else
         local -a disable_args=()
-        mapfile -t disable_args < <(operator_disable_flags)
+        local arg
+        while IFS= read -r arg; do
+            disable_args+=("$arg")
+        done < <(operator_disable_flags)
         if [ "${#disable_args[@]}" -eq 6 ] && ! helm_cmd status infra-operators -n "$OPERATORS_NAMESPACE" &>/dev/null; then
             echo "Every operator already runs on this cluster"
         else
@@ -2036,20 +2208,22 @@ cmd_deploy() {
     helm_cmd upgrade --install "$THORIUM_RELEASE" "$THORIUM_CHART" ${THORIUM_CHART_ARGS[@]+"${THORIUM_CHART_ARGS[@]}"} \
         -n "$THORIUM_NAMESPACE" --create-namespace "${values_args[@]}" --reset-values --timeout "${timeout}s"
     echo "Waiting for the ThoriumCluster to be ready (up to ${timeout}s)..."
-    if ! kctl -n "$THORIUM_NAMESPACE" wait thoriumcluster/thorium \
-        --for=jsonpath='{.status.phase}'=Ready --timeout="${timeout}s"; then
-        echo "ERROR: Thorium did not become ready; status:" >&2
-        kctl -n "$THORIUM_NAMESPACE" get thoriumcluster thorium -o jsonpath='{.status}' >&2 || true
-        echo >&2
-        exit 1
+    wait_for_thorium_ready "$timeout"
+    if [ "$registry" = true ]; then
+        ensure_registry_node_dns
     fi
-    [ "$registry" = true ] && ensure_registry_node_dns
 
-    local admin_password
-    admin_password="$(kctl -n "$THORIUM_NAMESPACE" get secret thorium-admin -o jsonpath='{.data.password}' | base64 -d)"
+    # the admin login the operator bootstraps, which a --values file (such as the converted
+    # values) may have changed and a converted deployment may not have at all
+    local admin_user="" admin_password="" login
+    login="$(admin_login)"
+    if [ -n "$login" ]; then
+        admin_user="$(printf '%s\n' "$login" | sed -n 1p)"
+        admin_password="$(printf '%s\n' "$login" | sed -n 2p)"
+    fi
     if [ "$thorctl" = true ]; then
         log "Installing thorctl"
-        install_thorctl "$bin_dir" "$user" "$admin_password" \
+        install_thorctl "$bin_dir" "$admin_user" "$admin_password" \
             || echo "WARNING: thorctl was not installed (see above)" >&2
     fi
 
@@ -2063,10 +2237,14 @@ cmd_deploy() {
     local opts=""
     [ -n "$NAMESPACE_PREFIX" ] && opts=" --namespace-prefix $NAMESPACE_PREFIX"
     [ "$MINIKUBE_PROFILE" != "minikube" ] && opts+=" --profile $MINIKUBE_PROFILE"
-    if [ "$rand_password" = true ]; then
-        echo "Admin user: $user (password generated; run 'minithor${opts} credentials')"
+    if [ -z "$admin_user" ]; then
+        echo "The ThoriumCluster's admin bootstrap is off, so no admin user was created; log in"
+        echo "with an existing Thorium account (thorctl: thorctl login http://localhost:8080)"
+    elif [ "$admin_password" = INSECURE_DEV_PASSWORD ] \
+        || { [ -n "$password" ] && [ "$admin_password" = "$password" ]; }; then
+        echo "Admin user: $admin_user / $admin_password"
     else
-        echo "Admin user: $user / $password"
+        echo "Admin user: $admin_user (password: run 'minithor${opts} credentials')"
     fi
     if [ -n "$registry_user" ]; then
         echo "Registry user: $registry_user (password: run 'minithor${opts} credentials --all')"
@@ -2095,12 +2273,18 @@ cmd_credentials() {
         shift
     done
     ensure_minikube_running
-    if ! kctl get secret thorium-admin -n "$THORIUM_NAMESPACE" &>/dev/null; then
-        echo "ERROR: Thorium is not deployed (no thorium-admin secret in $THORIUM_NAMESPACE)" >&2
+    if ! kctl get secret thorium-credentials -n "$THORIUM_NAMESPACE" &>/dev/null; then
+        echo "ERROR: Thorium is not deployed (no thorium-credentials secret in $THORIUM_NAMESPACE)" >&2
         exit 1
     fi
-    kctl get secret thorium-admin -n "$THORIUM_NAMESPACE" \
-        -o go-template='username: {{.data.username | base64decode}}{{"\n"}}password: {{.data.password | base64decode}}{{"\n"}}'
+    # the admin login the ThoriumCluster bootstraps, if its admin bootstrap is on
+    local login
+    login="$(admin_login)"
+    if [ -n "$login" ]; then
+        printf '%s\n' "$login" | awk 'NR == 1 {print "username: " $0} NR == 2 {print "password: " $0}'
+    else
+        echo "The ThoriumCluster's admin bootstrap is off, so no admin user was created" >&2
+    fi
     # every generated backend credential, from the canonical store the secrets subchart keeps
     if [ "$show_all" = true ]; then
         kctl get secret thorium-credentials -n "$THORIUM_NAMESPACE" \
@@ -2141,17 +2325,23 @@ translate_config_local() {
     # $(...) strips the trailing newline from scylla_lines, so re-add one with \n
     # (for multi-node repl the inner newlines are preserved and only the final
     # one was stripped, so printing one back yields exactly the right output).
-    awk -v repl="$scylla_lines" -v host="  - $SCYLLA_CLUSTER_HOST" '
-        $0 == host { printf "%s\n", repl; next }
+    # The lines go through the environment because BSD/macOS awk rejects a -v
+    # value containing newlines.
+    MINITHOR_SCYLLA_LINES="$scylla_lines" awk -v host="  - $SCYLLA_CLUSTER_HOST" '
+        $0 == host { printf "%s\n", ENVIRON["MINITHOR_SCYLLA_LINES"]; next }
         { print }
     ' "$file" > "${file}.tmp" && mv "${file}.tmp" "$file"
 
-    # Null out external tracing (the in-cluster collector is not reachable from
-    # the host and only produces connection noise).
+    # Null out thorium.tracing.external (the in-cluster collector is not reachable
+    # from the host and only produces connection noise). Its block is every more
+    # deeply indented (or blank) line after it, so whatever follows the block is
+    # kept no matter which key comes next.
     awk '
-        /^    external:$/ { print "    external: null"; skip=1; next }
-        skip && /^    local:$/ { skip=0 }
-        skip { next }
+        skip && (/^     / || /^[[:space:]]*$/) { next }
+        { skip=0 }
+        /^[^ ]/ || /^  [^ ]/ { tracing=0 }
+        /^  tracing:[[:space:]]*$/ { tracing=1 }
+        tracing && /^    external:/ { print "    external: null"; skip=1; next }
         { print }
     ' "$file" > "${file}.tmp" && mv "${file}.tmp" "$file"
 }
@@ -2178,7 +2368,8 @@ cmd_get_config() {
     # every file written here holds backend credentials, so keep them owner-only
     umask 077
 
-    local output="${HOME}/thorium$(profile_suffix).yml"
+    local output
+    output="${HOME}/thorium$(profile_suffix).yml"
     [ "$local_mode" = true ] && output="${HOME}/thorium$(profile_suffix).local.yml"
 
     echo "Extracting Thorium config from cluster secret..."
@@ -2288,9 +2479,14 @@ cmd_expose() {
         has_registry=true
     fi
 
+    # every forward that runs, so the summary only lists what is actually reachable
+    local api_up=false registry_up=false es_up=false kb_up=false redis_up=false s3_up=false
+    SCYLLA_FORWARDS=""
     # --no-api forwards only the backing services so a locally-run API can use them
     if [ "$NO_API" = false ]; then
-        run_forward "${NAMESPACE_PREFIX:+$NAMESPACE_PREFIX-}thorium-api" "$THORIUM_NAMESPACE" thorium-api "$API_PORT:80"
+        if run_forward "${NAMESPACE_PREFIX:+$NAMESPACE_PREFIX-}thorium-api" "$THORIUM_NAMESPACE" thorium-api "$API_PORT:80"; then
+            api_up=true
+        fi
         # keep this cluster's thorctl login pointed at the port it is exposed on; a config for
         # any non-local Thorium is left alone
         local thorctl_config
@@ -2299,27 +2495,34 @@ cmd_expose() {
             set_thorctl_api "$thorctl_config" "$API_PORT"
         fi
         # the registry is optional (deploy --registry), so only forward it when deployed
-        if [ "$has_registry" = true ]; then
-            run_forward docker-registry "$THORIUM_NAMESPACE" docker-registry "$((5000 + port_offset)):5000"
+        if [ "$has_registry" = true ] \
+            && run_forward docker-registry "$THORIUM_NAMESPACE" docker-registry "$((5000 + port_offset)):5000"; then
+            registry_up=true
         fi
     fi
 
     # forward the backing services for --dev or when only the infrastructure is wanted
     if [ "$DEV_MODE" = true ] || [ "$NO_API" = true ]; then
-        # a service the chart doesn't manage (global.managed.<service>: false) has nothing to
-        # forward, so each one is only forwarded when the chart deployed it
-        if kctl get svc elastic-es-http -n "$ELASTIC_NAMESPACE" &>/dev/null; then
-            run_forward "${NAMESPACE_PREFIX:+$NAMESPACE_PREFIX-}elastic" "$ELASTIC_NAMESPACE" elastic-es-http "$es_port:9200"
+        # a service the chart doesn't manage (global.managed.<service>: false, or a deployment
+        # converted from the pre-Helm scripts, whose databases stay in their old namespaces) has
+        # nothing to forward, so each one is only forwarded when its service exists in the
+        # selected namespaces
+        if kctl get svc elastic-es-http -n "$ELASTIC_NAMESPACE" &>/dev/null \
+            && run_forward "${NAMESPACE_PREFIX:+$NAMESPACE_PREFIX-}elastic" "$ELASTIC_NAMESPACE" elastic-es-http "$es_port:9200"; then
+            es_up=true
         fi
         # Kibana is optional (deploy --no-kibana)
-        if kctl get svc elastic-kb-http -n "$ELASTIC_NAMESPACE" &>/dev/null; then
-            run_forward "${NAMESPACE_PREFIX:+$NAMESPACE_PREFIX-}kibana" "$ELASTIC_NAMESPACE" elastic-kb-http "$kb_port:5601"
+        if kctl get svc elastic-kb-http -n "$ELASTIC_NAMESPACE" &>/dev/null \
+            && run_forward "${NAMESPACE_PREFIX:+$NAMESPACE_PREFIX-}kibana" "$ELASTIC_NAMESPACE" elastic-kb-http "$kb_port:5601"; then
+            kb_up=true
         fi
-        if kctl get svc redis -n "$REDIS_NAMESPACE" &>/dev/null; then
-            run_forward "${NAMESPACE_PREFIX:+$NAMESPACE_PREFIX-}redis" "$REDIS_NAMESPACE" redis "$redis_port:6379"
+        if kctl get svc redis -n "$REDIS_NAMESPACE" &>/dev/null \
+            && run_forward "${NAMESPACE_PREFIX:+$NAMESPACE_PREFIX-}redis" "$REDIS_NAMESPACE" redis "$redis_port:6379"; then
+            redis_up=true
         fi
-        if kctl get svc seaweedfs -n "$SEAWEEDFS_NAMESPACE" &>/dev/null; then
-            run_forward "${NAMESPACE_PREFIX:+$NAMESPACE_PREFIX-}seaweedfs" "$SEAWEEDFS_NAMESPACE" seaweedfs "$s3_port:8333"
+        if kctl get svc seaweedfs -n "$SEAWEEDFS_NAMESPACE" &>/dev/null \
+            && run_forward "${NAMESPACE_PREFIX:+$NAMESPACE_PREFIX-}seaweedfs" "$SEAWEEDFS_NAMESPACE" seaweedfs "$s3_port:8333"; then
+            s3_up=true
         fi
         # Scylla needs per-node loopback-aliased forwards (see forward_scylla_dev)
         forward_scylla_dev
@@ -2329,22 +2532,18 @@ cmd_expose() {
     echo "Port-forward status:"
     show_status
     echo ""
-    if [ "$NO_API" = false ]; then
-        echo "Thorium API available at http://localhost:$API_PORT"
-        if [ "$has_registry" = true ]; then
-            echo "Registry at http://localhost:$((5000 + port_offset))"
-        fi
-    fi
-    if [ "$DEV_MODE" = true ] || [ "$NO_API" = true ]; then
-        echo "Elasticsearch at https://localhost:$es_port"
-        echo "Kibana at https://localhost:$kb_port"
-        echo "Redis at localhost:$redis_port"
-        echo "SeaweedFS S3 at http://localhost:$s3_port"
+    [ "$api_up" = false ] || echo "Thorium API available at http://localhost:$API_PORT"
+    [ "$registry_up" = false ] || echo "Registry at http://localhost:$((5000 + port_offset))"
+    [ "$es_up" = false ] || echo "Elasticsearch at https://localhost:$es_port"
+    [ "$kb_up" = false ] || echo "Kibana at https://localhost:$kb_port"
+    [ "$redis_up" = false ] || echo "Redis at localhost:$redis_port"
+    [ "$s3_up" = false ] || echo "SeaweedFS S3 at http://localhost:$s3_port"
+    if [ -n "$SCYLLA_FORWARDS" ]; then
         local scy_svc scy_ip
         while read -r scy_svc scy_ip; do
             [ -n "$scy_svc" ] || continue
             echo "Scylla CQL ($scy_svc) at ${scy_ip}:${SCYLLA_CQL_PORT}"
-        done <<< "$(discover_scylla_nodes)"
+        done <<< "$SCYLLA_FORWARDS"
         echo "  (Scylla is bound to its advertised cluster IP via a loopback alias;"
         echo "   point scylla.nodes at the address above, or use 'minithor get-config --local')"
     fi
@@ -2392,7 +2591,7 @@ cmd_cleanup() {
             -h|--help)   usage_cleanup; return 0 ;;
             --confirm)   confirm=true ;;
             --operators) operators=true ;;
-            --timeout)   need_value "$1" $#; cleanup_timeout="$2"; shift ;;
+            --timeout)   need_value "$1" $#; need_number "$1" "$2"; cleanup_timeout="$2"; shift ;;
             *) echo "Unknown option: $1"; usage_cleanup; exit 1 ;;
         esac
         shift
@@ -2420,7 +2619,9 @@ cmd_cleanup() {
     fi
 
     log "Removing the thorium release from $THORIUM_NAMESPACE"
+    local release_found=false
     if helm_cmd status "$THORIUM_RELEASE" -n "$THORIUM_NAMESPACE" &>/dev/null; then
+        release_found=true
         run_step helm_cmd uninstall "$THORIUM_RELEASE" -n "$THORIUM_NAMESPACE" --wait \
             --timeout "${cleanup_timeout}s"
     fi
@@ -2431,10 +2632,17 @@ cmd_cleanup() {
         run_step kctl delete ns "$ns" --ignore-not-found --wait=false
     done
     # a cluster runs one Thorium deployment, so every namespace its scaler created for a group
-    # (and the job data in it) belongs to the deployment being removed
-    log "Deleting the group namespaces the k8s scaler created"
-    run_step kctl delete ns -l app.kubernetes.io/managed-by=thorium-scaler --ignore-not-found \
-        --wait=false
+    # (and the job data in it) belongs to the deployment being removed. The scaler's namespaces
+    # carry no namespace prefix, so they are only deleted when the selected release existed;
+    # otherwise a wrong or missing --namespace-prefix would delete another deployment's jobs.
+    if [ "$release_found" = true ]; then
+        log "Deleting the group namespaces the k8s scaler created"
+        run_step kctl delete ns -l app.kubernetes.io/managed-by=thorium-scaler --ignore-not-found \
+            --wait=false
+    else
+        echo "No thorium release in $THORIUM_NAMESPACE, so the k8s scaler's group namespaces are left alone"
+        echo "  (pass the deployment's --namespace-prefix to remove them)"
+    fi
     wait_for_thorium_ns_gone "$cleanup_timeout" || true
 
     if [ "$operators" = true ]; then
@@ -2464,6 +2672,16 @@ cmd_cleanup() {
     fi
 }
 
+# the pre-Helm minithor's MINITHOR_INSTANCE, which would otherwise be ignored silently and leave
+# every command on the unprefixed namespaces
+if [ -n "${MINITHOR_INSTANCE:-}" ]; then
+    echo "ERROR: MINITHOR_INSTANCE was replaced by MINITHOR_NAMESPACE_PREFIX (or --namespace-prefix), which" >&2
+    echo "  names the same namespaces; unset MINITHOR_INSTANCE. A deployment made by the pre-Helm minithor" >&2
+    echo "  must be converted before this minithor manages it; see \"Converting a Pre-Helm Deployment\" in" >&2
+    echo "  the Thorium deployment docs" >&2
+    exit 1
+fi
+
 # --namespace-prefix and --profile may appear anywhere on the command line (before or after
 # the subcommand), so pull them out before dispatching
 args=()
@@ -2492,6 +2710,14 @@ while [ $# -gt 0 ]; do
         --profile=*)
             set_profile "${1#--profile=}"
             shift
+            ;;
+        # the pre-Helm minithor's instance option, whose namespaces --namespace-prefix now names
+        --instance|--instance=*)
+            echo "ERROR: --instance was replaced by --namespace-prefix, which names the same namespaces" >&2
+            echo "  (<prefix>-thorium, <prefix>-redis, ...). A deployment made by the pre-Helm minithor" >&2
+            echo "  must be converted before this minithor manages it; see \"Existing minithor deployments\"" >&2
+            echo "  in minithor/README.md and \"Converting a Pre-Helm Deployment\" in the Thorium deployment docs" >&2
+            exit 1
             ;;
         *)
             args+=("$1")

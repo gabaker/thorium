@@ -1,6 +1,6 @@
 {
   "$schema": "http://json-schema.org/draft-07/schema#",
-  "title": "Thorium chart values",
+  "title": "Thorium operator subchart values",
   "type": "object",
   "properties": {
     "image": {
@@ -22,19 +22,85 @@
         }
       }
     },
-    "imagePullSecret": {
+    "imagePullSecrets": {
+      "type": [
+        "array",
+        "null"
+      ],
+      "items": {
+        "type": "string",
+        "minLength": 1
+      }
+    },
+    "createImagePullSecret": {
+      "type": "boolean"
+    },
+    "dockerConfigJson": {
+      "type": "string"
+    },
+    "controller": {
       "type": "object",
       "properties": {
-        "create": {
+        "watchOwnNamespaceOnly": {
           "type": "boolean"
         },
-        "dockerconfigjson": {
-          "type": "string"
+        "resources": {
+          "type": [
+            "object",
+            "null"
+          ]
         },
-        "name": {
-          "type": "string"
+        "proxy": {
+          "type": [
+            "object",
+            "null"
+          ],
+          "properties": {
+            "httpProxy": {
+              "type": "string"
+            },
+            "httpsProxy": {
+              "type": "string"
+            },
+            "noProxy": {
+              "type": "string"
+            }
+          }
+        },
+        "nodeSelector": {
+          "type": [
+            "object",
+            "null"
+          ],
+          "additionalProperties": {
+            "type": "string"
+          }
+        },
+        "tolerations": {
+          "type": [
+            "array",
+            "null"
+          ],
+          "items": {
+            "type": "object"
+          }
+        },
+        "securityContext": {
+          "type": [
+            "object",
+            "null"
+          ]
+        },
+        "podSecurityContext": {
+          "type": [
+            "object",
+            "null"
+          ]
         }
       }
+    },
+    "banner": {
+      "type": "string"
     },
     "cluster": {
       "type": "object",
@@ -42,6 +108,9 @@
         "name": {
           "type": "string",
           "minLength": 1
+        },
+        "version": {
+          "type": "string"
         },
         "imagePullPolicy": {
           "enum": [
@@ -51,6 +120,33 @@
             "Never"
           ]
         },
+        "components": {
+          "type": "object",
+          "propertyNames": {
+            "enum": [
+              "api",
+              "scaler",
+              "baremetal_scaler",
+              "search_streamer",
+              "event_handler"
+            ]
+          },
+          "additionalProperties": {
+            "type": [
+              "object",
+              "null"
+            ]
+          }
+        },
+        "registryAuth": {
+          "type": [
+            "object",
+            "null"
+          ],
+          "additionalProperties": {
+            "type": "string"
+          }
+        },
         "namespaceBlacklist": {
           "type": "array",
           "items": {
@@ -59,6 +155,22 @@
         },
         "config": {
           "type": "object"
+        },
+        "cors": {
+          "type": "object",
+          "properties": {
+            "insecure": {
+              "type": "boolean"
+            }
+          }
+        },
+        "crane": {
+          "type": "object",
+          "properties": {
+            "insecure": {
+              "type": "boolean"
+            }
+          }
         },
         "configSecrets": {
           "type": "array",
@@ -86,8 +198,22 @@
                 "enabled": {
                   "type": "boolean"
                 },
-                "secretName": {
-                  "type": "string"
+                "secret": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "properties": {
+                    "name": {
+                      "type": "string"
+                    },
+                    "usernameKey": {
+                      "type": "string",
+                      "minLength": 1
+                    },
+                    "passwordKey": {
+                      "type": "string",
+                      "minLength": 1
+                    }
+                  }
                 }
               }
             },
@@ -153,6 +279,143 @@
               }
             }
           }
+        },
+        "upgrade": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "targetRevision": {
+              "type": "string",
+              "pattern": "^([0-9]{4}-[0-9]{2}-v[0-9]{2})?$"
+            },
+            "autoTargetDev": {
+              "type": "boolean"
+            },
+            "approvals": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": [
+                  "step",
+                  "backup"
+                ],
+                "properties": {
+                  "step": {
+                    "type": "string",
+                    "minLength": 1
+                  },
+                  "backup": {
+                    "type": "string",
+                    "minLength": 1
+                  }
+                }
+              }
+            }
+          }
+        },
+        "scaler": {
+          "type": "object",
+          "properties": {
+            "k8s": {
+              "type": "object",
+              "properties": {
+                "context": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "alias": {
+                  "type": "string"
+                },
+                "nodes": {
+                  "type": [
+                    "array",
+                    "null"
+                  ],
+                  "items": {
+                    "type": "string"
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "backends": {
+      "type": "object",
+      "properties": {
+        "redis": {
+          "type": "object",
+          "properties": {
+            "host": {
+              "type": "string"
+            },
+            "port": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 65535
+            }
+          }
+        },
+        "scylla": {
+          "type": "object",
+          "properties": {
+            "nodes": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            },
+            "replication": {
+              "type": "integer",
+              "minimum": 1
+            }
+          }
+        },
+        "elastic": {
+          "type": "object",
+          "properties": {
+            "node": {
+              "type": "string"
+            },
+            "insecureCertificates": {
+              "type": "boolean"
+            },
+            "caSecret": {
+              "type": "object",
+              "properties": {
+                "name": {
+                  "type": "string"
+                },
+                "key": {
+                  "type": "string"
+                }
+              }
+            }
+          }
+        },
+        "s3": {
+          "type": "object",
+          "properties": {
+            "endpoint": {
+              "type": "string"
+            },
+            "region": {
+              "type": "string"
+            },
+            "usePathStyle": {
+              "type": "boolean"
+            }
+          }
+        },
+        "tracing": {
+          "type": "object",
+          "properties": {
+            "grpcEndpoint": {
+              "type": "string"
+            }
+          }
         }
       }
     },
@@ -167,13 +430,22 @@
           "minimum": 10
         },
         "resources": {
-          "type": ["object", "null"]
+          "type": [
+            "object",
+            "null"
+          ]
         },
         "podSecurityContext": {
-          "type": ["object", "null"]
+          "type": [
+            "object",
+            "null"
+          ]
         },
         "securityContext": {
-          "type": ["object", "null"]
+          "type": [
+            "object",
+            "null"
+          ]
         }
       }
     },
@@ -186,12 +458,44 @@
             "nginx",
             "traefik"
           ]
+        },
+        "className": {
+          "type": "string"
+        },
+        "host": {
+          "type": "string"
+        },
+        "annotations": {
+          "type": [
+            "object",
+            "null"
+          ],
+          "additionalProperties": {
+            "type": "string"
+          }
+        },
+        "tls": {
+          "type": "object",
+          "properties": {
+            "secretName": {
+              "type": "string"
+            },
+            "traefikDefaultStore": {
+              "type": "boolean"
+            }
+          }
+        },
+        "registryHost": {
+          "type": "string"
         }
       }
     },
     "toolbox": {
       "type": "object",
       "properties": {
+        "enabled": {
+          "type": "boolean"
+        },
         "url": {
           "type": "string",
           "pattern": "^(https?://.*)?$"
@@ -207,6 +511,52 @@
         },
         "groupOverride": {
           "type": "string"
+        },
+        "groups": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "networkPolicies": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": [
+              "name"
+            ],
+            "properties": {
+              "name": {
+                "type": "string",
+                "minLength": 1
+              }
+            }
+          }
+        },
+        "backoffLimit": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "thorctlPath": {
+          "type": "string"
+        },
+        "resources": {
+          "type": [
+            "object",
+            "null"
+          ]
+        },
+        "podSecurityContext": {
+          "type": [
+            "object",
+            "null"
+          ]
+        },
+        "securityContext": {
+          "type": [
+            "object",
+            "null"
+          ]
         }
       }
     }

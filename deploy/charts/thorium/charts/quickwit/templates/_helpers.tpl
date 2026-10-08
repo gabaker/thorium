@@ -214,7 +214,7 @@ Quickwit environment
 - name: QW_ADVERTISE_ADDRESS
   value: "$(POD_IP)"
 - name: QW_CLUSTER_ENDPOINT
-  value: http://{{ include "quickwit.fullname" $ }}-metastore.{{ include "quickwit.namespace" $ }}.svc.{{ .Values.clusterDomain }}:7280
+  value: http://{{ include "quickwit.fullname" $ }}-metastore.{{ include "quickwit.namespace" $ }}.svc.{{ ((.Values.global).clusterDomain) | default .Values.clusterDomain }}:7280
 {{- if .Values.enableStandaloneCompactors }}
 - name: QW_ENABLE_STANDALONE_COMPACTORS
   value: "true"

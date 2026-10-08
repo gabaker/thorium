@@ -1,3 +1,14 @@
+{{- /* the subcharts check their own moved values; this one is the umbrella's */ -}}
+{{- include "thorium.movedValues" (dict "values" .Values "prefix" "" "moved" (list
+  (list "quickwit.enabled" "use global.quickwit.enabled")
+)) -}}
+{{- /*
+The registry route sends a hostname to the infra subchart's docker-registry service, which only
+exists with infra.registry.enabled.
+*/ -}}
+{{- if and (dig "ingress" "registryHost" "" (.Values.operator | default dict)) (not (dig "registry" "enabled" false (.Values.infra | default dict))) -}}
+{{- fail "operator.ingress.registryHost routes to the infra subchart's registry, so it needs infra.registry.enabled" -}}
+{{- end -}}
 {{- /*
 Fail early when Quickwit is enabled but a backing service it needs isn't managed by this chart
 and nothing points Quickwit at an external one. The secrets subchart renders Quickwit's
@@ -6,12 +17,13 @@ subchart fails on its own when an external Redis, S3, Scylla, or Elasticsearch e
 missing.
 */ -}}
 {{- $secrets := .Values.secrets | default dict -}}
-{{- if .Values.quickwit.enabled -}}
+{{- $quickwit := ((.Values.global).quickwit) | default dict -}}
+{{- if include "thorium.quickwit" . -}}
 {{- if not (include "thorium.managed" (dict "root" $ "service" "s3")) -}}
-{{- $_ := required "secrets.quickwitS3Endpoint is required with Quickwit when global.managed.s3 is false (and the quickwit bucket must already exist in that store)" (dig "quickwitS3Endpoint" "" $secrets) -}}
+{{- $_ := required "global.quickwit.s3Endpoint is required with Quickwit when global.managed.s3 is false (and the quickwit bucket must already exist in that store)" (dig "s3Endpoint" "" $quickwit) -}}
 {{- end -}}
 {{- if not (include "thorium.managed" (dict "root" $ "service" "postgres")) -}}
-{{- $_ := required "secrets.quickwitMetastoreUri is required with Quickwit when global.managed.postgres is false (and the metastore database must already exist)" (dig "quickwitMetastoreUri" "" $secrets) -}}
+{{- $_ := required "global.quickwit.metastoreUri is required with Quickwit when global.managed.postgres is false (and the metastore database must already exist)" (dig "metastoreUri" "" $quickwit) -}}
 {{- end -}}
 {{- end -}}
 {{- /*
@@ -43,5 +55,49 @@ a real install or upgrade always enforces it.
 {{- if not (or (index $credentials .) (hasKey $stored .) $renderOnly) -}}
 {{- fail (printf "%s (secrets.credentials.%s is not set)" $message .) -}}
 {{- end -}}
+{{- end -}}
+{{- end -}}
+{{- /*
+Refuse to install next to a ThoriumCluster this release doesn't own. The operator reconciles every
+ThoriumCluster in the namespace against the same component Deployments, so a second one (such as
+the chart's default "thorium" next to a pre-Helm "dev") would fight over them. A pre-Helm
+deployment must be converted with deploy/charts/scripts/convert-to-helm.sh first, which hands its
+ThoriumCluster to this release. Skipped when lookup can't reach a cluster (helm template), and on
+a cluster without the ThoriumCluster CRD, where there is nothing to find and Helm's lookup of an
+unknown kind fails instead of returning nothing (such as helm install --dry-run=server before the
+first install).
+*/ -}}
+{{- $hasClusters := .Capabilities.APIVersions.Has "sandia.gov/v1/ThoriumCluster" -}}
+{{- $clusterName := dig "cluster" "name" "thorium" (.Values.operator | default dict) -}}
+{{- $existing := dict -}}
+{{- if $hasClusters -}}
+{{- $existing = lookup "sandia.gov/v1" "ThoriumCluster" (include "thorium.namespace" .) "" -}}
+{{- end -}}
+{{- range (dig "items" list ($existing | default dict)) -}}
+{{- $found := .metadata.name -}}
+{{- $release := dig "metadata" "annotations" "meta.helm.sh/release-name" "" . -}}
+{{- if not $release -}}
+{{- fail (printf "namespace %s already holds ThoriumCluster %s, which Helm doesn't manage. A deployment from the pre-Helm minithor or megathor scripts must be converted with deploy/charts/scripts/convert-to-helm.sh first (see \"Converting a Pre-Helm Deployment\" in the Thorium deployment docs)" (include "thorium.namespace" $) $found) -}}
+{{- else if ne $release $.Release.Name -}}
+{{- fail (printf "namespace %s already holds ThoriumCluster %s from Helm release %s; only one Thorium release may use a namespace" (include "thorium.namespace" $) $found $release) -}}
+{{- else if ne $found $clusterName -}}
+{{- fail (printf "namespace %s already holds ThoriumCluster %s from this release, but operator.cluster.name is %s; set operator.cluster.name to %s (renaming the cluster would leave two clusters reconciling the same components)" (include "thorium.namespace" $) $found $clusterName $found) -}}
+{{- end -}}
+{{- end -}}
+{{- /*
+Thorium supports one deployment per Kubernetes cluster: node labels, node provisioning, and
+cluster-scoped resources are shared, and the operator only manages the oldest ThoriumCluster it
+sees. Refuse to install when a ThoriumCluster already exists in any other namespace, since a
+namespace prefix only renames the namespaces and doesn't make a second deployment independent.
+Skipped when lookup can't reach a cluster (helm template) or the ThoriumCluster CRD is missing.
+*/ -}}
+{{- $everywhere := dict -}}
+{{- if $hasClusters -}}
+{{- $everywhere = lookup "sandia.gov/v1" "ThoriumCluster" "" "" -}}
+{{- end -}}
+{{- range (dig "items" list ($everywhere | default dict)) -}}
+{{- $otherNs := .metadata.namespace -}}
+{{- if ne $otherNs (include "thorium.namespace" $) -}}
+{{- fail (printf "ThoriumCluster %s/%s already exists. Thorium supports one deployment per Kubernetes cluster, and namespace prefixes only rename namespaces; uninstall that deployment before installing this one in namespace %s" $otherNs .metadata.name (include "thorium.namespace" $)) -}}
 {{- end -}}
 {{- end -}}

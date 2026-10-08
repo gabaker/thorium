@@ -57,6 +57,8 @@ pub enum Error {
     StripPrefix(std::path::StripPrefixError),
     // An error from dialoguer
     Dialoguer(dialoguer::Error),
+    /// The requested operation exists but is not implemented yet
+    NotImplemented(String),
 }
 
 impl Error {
@@ -67,6 +69,18 @@ impl Error {
     /// * `msg` - The error message to use
     pub fn new<T: Into<String>>(msg: T) -> Self {
         Error::Generic(msg.into())
+    }
+
+    /// The exit code thoradm returns for this error
+    ///
+    /// Operations that aren't implemented yet exit with 3 so scripts can tell them apart from
+    /// failures; everything else exits with 1.
+    #[must_use]
+    pub fn exit_code(&self) -> i32 {
+        match self {
+            Error::NotImplemented(_) => 3,
+            _ => 1,
+        }
     }
 }
 
@@ -103,6 +117,7 @@ impl std::fmt::Display for Error {
             Error::RkyvDesererialize(err) => write!(f, "RkyvDeserialize Error: {err}"),
             Error::StripPrefix(err) => write!(f, "StripPrefix Error: {err}"),
             Error::Dialoguer(err) => write!(f, "Dialoguer: {err}"),
+            Error::NotImplemented(err) => write!(f, "Not implemented: {err}"),
         }
     }
 }

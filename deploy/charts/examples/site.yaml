@@ -1,0 +1,23 @@
+# A minimal site values file for the thorium chart: the storage class, how Thorium is reached,
+# and which nodes run analysis jobs. Layer it over values-production.yaml on multi-node clusters:
+#   helm install thorium <chart> -n thorium --create-namespace \
+#     -f values-production.yaml -f site.yaml
+infra:
+  # the StorageClass for every backing service's volumes (empty uses the cluster default)
+  storageClass: fast-ssd
+operator:
+  ingress:
+    type: nginx
+    host: thorium.example.com
+    tls:
+      # an existing kubernetes.io/tls Secret in the thorium namespace
+      secretName: thorium-tls
+  cluster:
+    # accept API requests only from the UI the API serves (list other origins in
+    # operator.cluster.config.thorium.cors.domains)
+    cors:
+      insecure: false
+    scaler:
+      k8s:
+        # the nodes Thorium may run analysis jobs on (an empty list means every node)
+        nodes: [worker-1, worker-2, worker-3]

@@ -1,14 +1,165 @@
+{{- /*
+The toolbox ConfigMap's name, which tracks its contents so a new toolbox gets a new ConfigMap.
+*/ -}}
+{{- define "operator.toolboxConfigMap" -}}
+{{- printf "toolbox-%s" (sha256sum .Values.toolbox.json | trunc 10) -}}
+{{- end -}}
+{{- /*
+The toolbox import Job's spec. The Job is named after a hash of this rendered spec: a Job's pod
+template is immutable, so any change to it (the toolbox settings, the image, pull settings, the
+admin secret, scheduling, ...) must create a new Job rather than patch the existing one.
+*/ -}}
+{{- define "operator.toolboxJobSpec" -}}
 {{- $t := .Values.toolbox }}
-{{- if or $t.url $t.json }}
 {{- $ns := include "thorium.namespace" . }}
 {{- $source := ternary "/toolbox/toolbox.json" $t.url (empty $t.url) }}
-{{- $hash := sha256sum (printf "%s%s%s%s%s%s" $t.url $t.json $t.mode $t.groupOverride (toJson $t.groups) (toJson $t.networkPolicies)) | trunc 10 }}
+{{- $admin := .Values.cluster.bootstrap.admin.secret -}}
+backoffLimit: {{ $t.backoffLimit }}
+template:
+  spec:
+    restartPolicy: Never
+    automountServiceAccountToken: false
+    {{- with include "operator.imagePullSecrets" . }}
+    imagePullSecrets:
+      {{- . | nindent 6 }}
+    {{- end }}
+    {{- with $t.podSecurityContext }}
+    securityContext:
+      {{- toYaml . | nindent 6 }}
+    {{- end }}
+    containers:
+      - name: import
+        image: {{ printf "%s:%s" (include "thorium.image" (dict "root" $ "image" .Values.image.repository)) (include "operator.tag" .) }}
+        imagePullPolicy: {{ .Values.image.pullPolicy }}
+        {{- with $t.securityContext }}
+        securityContext:
+          {{- toYaml . | nindent 10 }}
+        {{- end }}
+        {{- with $t.resources }}
+        resources:
+          {{- toYaml . | nindent 10 }}
+        {{- end }}
+        env:
+          - name: HOME
+            value: /tmp
+          - name: THORIUM_URL
+            value: {{ printf "http://thorium-api.%s.svc.%s" $ns (.Values.global.clusterDomain | default "cluster.local") | quote }}
+          - name: TOOLBOX
+            value: {{ $source | quote }}
+          - name: THORCTL
+            value: {{ $t.thorctlPath | quote }}
+          - name: THORIUM_USER
+            valueFrom:
+              secretKeyRef:
+                name: {{ required "operator.cluster.bootstrap.admin.secret.name is required for the toolbox import" $admin.name | quote }}
+                key: {{ $admin.usernameKey | default "username" | quote }}
+          - name: THORIUM_PASSWORD
+            valueFrom:
+              secretKeyRef:
+                name: {{ $admin.name | quote }}
+                key: {{ $admin.passwordKey | default "password" | quote }}
+        command:
+          - /bin/sh
+          - -c
+          - |
+            set -e
+            # the Thorium image ships thorctl under the API's binary names (only linux/x86-64 is built), so other
+            # architectures need operator.toolbox.thorctlPath
+            thorctl="$THORCTL"
+            if [ -z "$thorctl" ]; then
+              case "$(uname -m)" in
+                x86_64) arch=x86-64 ;;
+                aarch64|arm64) arch=arm64 ;;
+                *) arch="$(uname -m)" ;;
+              esac
+              thorctl="/app/binaries/linux/$arch/thorctl"
+            fi
+            if [ ! -x "$thorctl" ]; then
+              echo "$thorctl doesn't exist in this image; set operator.toolbox.thorctlPath to its thorctl"
+              exit 1
+            fi
+            for attempt in $(seq 1 90); do
+              curl -sf "$THORIUM_URL/api/health" >/dev/null && break
+              echo "Waiting for the Thorium API ($attempt/90)..."
+              sleep 10
+            done
+            # credentials go to curl on stdin as a curl config line with backslashes and quotes
+            # escaped (printf is a shell builtin and sed reads them from a pipe), so they never
+            # appear in the process list
+            creds() { printf 'user = "%s"\n' "$(printf '%s:%s' "$THORIUM_USER" "$THORIUM_PASSWORD" | sed 's/[\\"]/\\&/g')"; }
+            # the API turns healthy before the operator has created the admin user, so wait for its login
+            for attempt in $(seq 1 30); do
+              code="$(creds | curl -K - -s -o /dev/null -w '%{http_code}' -X POST "$THORIUM_URL/api/users/auth" || true)"
+              [ "$code" = 200 ] && break
+              if [ "$attempt" = 30 ]; then
+                echo "The admin user $THORIUM_USER still can't log in to Thorium (HTTP $code)"
+                exit 1
+              fi
+              echo "Waiting for the admin user $THORIUM_USER to log in (HTTP $code, $attempt/30)..."
+              sleep 10
+            done
+            # thorctl login only takes a password as an argument, so thorctl's config is written
+            # directly with the credentials as YAML single-quoted strings
+            yaml_quote() { printf "'%s'" "$(printf '%s' "$1" | sed "s/'/''/g")"; }
+            # only this user may read the config, from the moment it is created
+            umask 077
+            mkdir -p "$HOME/.thorium"
+            {
+              printf 'keys:\n'
+              printf '  api: %s\n' "$(yaml_quote "$THORIUM_URL")"
+              printf '  username: %s\n' "$(yaml_quote "$THORIUM_USER")"
+              printf '  password: %s\n' "$(yaml_quote "$THORIUM_PASSWORD")"
+              printf 'skip_insecure_warning: true\n'
+              printf 'skip_update: true\n'
+            } > "$HOME/.thorium/config.yml"
+            chmod 600 "$HOME/.thorium/config.yml"
+            # create the groups and network policies the toolbox references; existing ones are left as is
+            post() { creds | curl -K - -s -o /dev/null -w "$1 -> %{http_code}\n" -H "Content-Type: application/json" -X POST "$THORIUM_URL$1" -d "$2"; }
+            {{- range $t.groups }}
+            post /api/groups/ {{ include "operator.shellQuote" (dict "name" . | toJson) }}
+            {{- end }}
+            {{- range $t.networkPolicies }}
+            post /api/network-policies {{ include "operator.shellQuote" (toJson .) }}
+            {{- end }}
+            "$thorctl" toolbox import "$TOOLBOX" --{{ $t.mode }}{{ with $t.groupOverride }} --group-override {{ include "operator.shellQuote" . }}{{ end }}
+        # thorctl writes its config under HOME, so the root filesystem can stay read-only
+        volumeMounts:
+          - name: tmp
+            mountPath: /tmp
+          {{- if $t.json }}
+          - name: toolbox
+            mountPath: /toolbox
+            readOnly: true
+          {{- end }}
+    volumes:
+      - name: tmp
+        emptyDir:
+          sizeLimit: 64Mi
+      {{- if $t.json }}
+      - name: toolbox
+        configMap:
+          name: {{ include "operator.toolboxConfigMap" . }}
+      {{- end }}
+    {{- /* run where the operator runs, e.g. on nodes reserved for infrastructure */}}
+    {{- with .Values.controller.nodeSelector }}
+    nodeSelector:
+      {{- toYaml . | nindent 6 }}
+    {{- end }}
+    {{- with .Values.controller.tolerations }}
+    tolerations:
+      {{- toYaml . | nindent 6 }}
+    {{- end }}
+{{- end -}}
+{{- $t := .Values.toolbox }}
+{{- if and $t.enabled (or $t.url $t.json) }}
+{{- $ns := include "thorium.namespace" . }}
+{{- $spec := include "operator.toolboxJobSpec" . }}
 {{- if $t.json }}
 ---
 apiVersion: v1
 kind: ConfigMap
 metadata:
-  name: toolbox-{{ $hash }}
+  name: {{ include "operator.toolboxConfigMap" . }}
   namespace: {{ $ns }}
   labels:
     {{- include "operator.labels" . | nindent 4 }}
@@ -16,75 +167,15 @@ data:
   toolbox.json: {{ $t.json | quote }}
 {{- end }}
 ---
-# Imports the toolbox once the API is healthy; the name tracks the toolbox source so a new
-# toolbox runs a new import instead of mutating a finished Job
+# Imports the toolbox once the API is healthy; a changed spec runs a new import (see
+# operator.toolboxJobSpec) instead of mutating a finished Job
 apiVersion: batch/v1
 kind: Job
 metadata:
-  name: toolbox-import-{{ $hash }}
+  name: toolbox-import-{{ sha256sum $spec | trunc 10 }}
   namespace: {{ $ns }}
   labels:
     {{- include "operator.labels" . | nindent 4 }}
 spec:
-  backoffLimit: {{ $t.backoffLimit }}
-  template:
-    spec:
-      restartPolicy: Never
-      imagePullSecrets:
-        {{- include "operator.imagePullSecrets" . | nindent 8 }}
-      containers:
-        - name: import
-          image: {{ printf "%s:%s" (include "thorium.image" (dict "root" $ "image" .Values.image.repository)) (include "operator.tag" .) }}
-          imagePullPolicy: {{ .Values.image.pullPolicy }}
-          env:
-            - name: HOME
-              value: /tmp
-            - name: THORIUM_URL
-              value: {{ printf "http://thorium-api.%s.svc.%s" $ns (.Values.global.clusterDomain | default "cluster.local") | quote }}
-            - name: TOOLBOX
-              value: {{ $source | quote }}
-            - name: THORIUM_USER
-              valueFrom:
-                secretKeyRef:
-                  name: {{ .Values.cluster.bootstrap.admin.secretName }}
-                  key: username
-            - name: THORIUM_PASSWORD
-              valueFrom:
-                secretKeyRef:
-                  name: {{ .Values.cluster.bootstrap.admin.secretName }}
-                  key: password
-          command:
-            - /bin/sh
-            - -c
-            - |
-              set -e
-              thorctl=/app/binaries/linux/x86-64/thorctl
-              for attempt in $(seq 1 90); do
-                curl -sf "$THORIUM_URL/api/health" >/dev/null && break
-                echo "Waiting for the Thorium API ($attempt/90)..."
-                sleep 10
-              done
-              $thorctl login "$THORIUM_URL" --user "$THORIUM_USER" --password "$THORIUM_PASSWORD"
-              # create the groups and network policies the toolbox references; existing ones are left as is
-              # credentials go to curl on stdin so they never appear in the process list
-              post() { printf 'user = "%s:%s"\n' "$THORIUM_USER" "$THORIUM_PASSWORD" | curl -K - -s -o /dev/null -w "$1 -> %{http_code}\n" -H "Content-Type: application/json" -X POST "$THORIUM_URL$1" -d "$2"; }
-              {{- range $t.groups }}
-              post /api/groups/ {{ dict "name" . | toJson | squote }}
-              {{- end }}
-              {{- range $t.networkPolicies }}
-              post /api/network-policies {{ toJson . | squote }}
-              {{- end }}
-              $thorctl toolbox import "$TOOLBOX" --{{ $t.mode }}{{ with $t.groupOverride }} --group-override {{ . | quote }}{{ end }}
-          {{- if $t.json }}
-          volumeMounts:
-            - name: toolbox
-              mountPath: /toolbox
-              readOnly: true
-          {{- end }}
-      {{- if $t.json }}
-      volumes:
-        - name: toolbox
-          configMap:
-            name: toolbox-{{ $hash }}
-      {{- end }}
+  {{- $spec | nindent 2 }}
 {{- end }}

@@ -1,0 +1,337 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "Thorium infra subchart values",
+  "type": "object",
+  "properties": {
+    "storageClass": {
+      "type": "string"
+    },
+    "redis": {
+      "type": "object",
+      "properties": {
+        "image": {
+          "type": "string",
+          "minLength": 1
+        },
+        "storage": {
+          "type": [
+            "string",
+            "integer"
+          ],
+          "pattern": "^[0-9]+(\\.[0-9]+)?([EPTGMK]i?|[mkMGTPE])?$"
+        },
+        "resources": {
+          "type": [
+            "object",
+            "null"
+          ]
+        },
+        "podSecurityContext": {
+          "type": [
+            "object",
+            "null"
+          ]
+        },
+        "securityContext": {
+          "type": [
+            "object",
+            "null"
+          ]
+        }
+      }
+    },
+    "seaweedfs": {
+      "type": "object",
+      "properties": {
+        "image": {
+          "type": "string",
+          "minLength": 1
+        },
+        "storage": {
+          "type": [
+            "string",
+            "integer"
+          ],
+          "pattern": "^[0-9]+(\\.[0-9]+)?([EPTGMK]i?|[mkMGTPE])?$"
+        },
+        "buckets": {
+          "type": [
+            "array",
+            "null"
+          ],
+          "items": {
+            "type": "string",
+            "pattern": "^[a-z0-9][a-z0-9.-]{1,61}[a-z0-9]$"
+          }
+        },
+        "resources": {
+          "type": [
+            "object",
+            "null"
+          ]
+        },
+        "podSecurityContext": {
+          "type": [
+            "object",
+            "null"
+          ]
+        },
+        "securityContext": {
+          "type": [
+            "object",
+            "null"
+          ]
+        }
+      }
+    },
+    "scylla": {
+      "type": "object",
+      "properties": {
+        "repository": {
+          "type": "string",
+          "minLength": 1
+        },
+        "agentRepository": {
+          "type": "string",
+          "minLength": 1
+        },
+        "version": {
+          "type": "string",
+          "minLength": 1
+        },
+        "agentVersion": {
+          "type": "string",
+          "minLength": 1
+        },
+        "developerMode": {
+          "type": "boolean"
+        },
+        "datacenter": {
+          "type": "string",
+          "minLength": 1
+        },
+        "rack": {
+          "type": "string",
+          "minLength": 1
+        },
+        "members": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "storage": {
+          "type": [
+            "string",
+            "integer"
+          ],
+          "pattern": "^[0-9]+(\\.[0-9]+)?([EPTGMK]i?|[mkMGTPE])?$"
+        },
+        "resources": {
+          "type": [
+            "object",
+            "null"
+          ]
+        },
+        "coredumps": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "enabled": {
+              "type": "boolean"
+            },
+            "path": {
+              "type": "string",
+              "pattern": "^/"
+            }
+          }
+        },
+        "config": {
+          "type": "string"
+        }
+      }
+    },
+    "elastic": {
+      "type": "object",
+      "properties": {
+        "image": {
+          "type": "string"
+        },
+        "version": {
+          "type": "string",
+          "pattern": "^[0-9]+\\.[0-9]+\\.[0-9]+"
+        },
+        "count": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "config": {
+          "type": [
+            "object",
+            "null"
+          ]
+        },
+        "setMaxMapCount": {
+          "type": "boolean"
+        },
+        "javaOpts": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "storage": {
+          "type": [
+            "string",
+            "integer"
+          ],
+          "pattern": "^[0-9]+(\\.[0-9]+)?([EPTGMK]i?|[mkMGTPE])?$"
+        },
+        "resources": {
+          "type": [
+            "object",
+            "null"
+          ]
+        },
+        "kibana": {
+          "type": "object",
+          "properties": {
+            "enabled": {
+              "type": "boolean"
+            },
+            "image": {
+              "type": "string"
+            },
+            "resources": {
+              "type": [
+                "object",
+                "null"
+              ]
+            }
+          }
+        }
+      }
+    },
+    "postgres": {
+      "type": "object",
+      "properties": {
+        "image": {
+          "type": "string",
+          "minLength": 1
+        },
+        "replicas": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "storage": {
+          "type": [
+            "string",
+            "integer"
+          ],
+          "pattern": "^[0-9]+(\\.[0-9]+)?([EPTGMK]i?|[mkMGTPE])?$"
+        },
+        "resources": {
+          "type": [
+            "object",
+            "null"
+          ]
+        }
+      }
+    },
+    "jaeger": {
+      "type": "object",
+      "properties": {
+        "image": {
+          "type": "string",
+          "minLength": 1
+        },
+        "enabled": {
+          "type": "boolean"
+        },
+        "resources": {
+          "type": [
+            "object",
+            "null"
+          ]
+        },
+        "podSecurityContext": {
+          "type": [
+            "object",
+            "null"
+          ]
+        },
+        "securityContext": {
+          "type": [
+            "object",
+            "null"
+          ]
+        }
+      }
+    },
+    "registry": {
+      "type": "object",
+      "properties": {
+        "image": {
+          "type": "string",
+          "minLength": 1
+        },
+        "enabled": {
+          "type": "boolean"
+        },
+        "storage": {
+          "type": [
+            "string",
+            "integer"
+          ],
+          "pattern": "^[0-9]+(\\.[0-9]+)?([EPTGMK]i?|[mkMGTPE])?$"
+        },
+        "htpasswdSecret": {
+          "type": "string"
+        },
+        "resources": {
+          "type": [
+            "object",
+            "null"
+          ]
+        },
+        "podSecurityContext": {
+          "type": [
+            "object",
+            "null"
+          ]
+        },
+        "securityContext": {
+          "type": [
+            "object",
+            "null"
+          ]
+        }
+      }
+    },
+    "jobs": {
+      "type": "object",
+      "properties": {
+        "backoffLimit": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "metastorePodSecurityContext": {
+          "type": [
+            "object",
+            "null"
+          ]
+        },
+        "securityContext": {
+          "type": [
+            "object",
+            "null"
+          ]
+        },
+        "resources": {
+          "type": [
+            "object",
+            "null"
+          ]
+        }
+      }
+    }
+  }
+}

@@ -10,7 +10,7 @@
   kubernetes.core.helm_repository:
     name: "traefik"
     repo_url: "https://helm.traefik.io/traefik" 
-  when: offline == false
+  when: not (offline | bool)
 
 - name: Deploy helm chart with values (online)
   kubernetes.core.helm:
@@ -19,8 +19,8 @@
     release_namespace: "{{ traefik_namespace }}"
     chart_version: "{{ traefik_helm_chart_version }}"
     values: "{{ lookup('template', 'traefik.yaml.j2') | from_yaml }}"
-    wait: true
-  when: offline == false
+    wait: "{{ traefik_wait | bool }}"
+  when: not (offline | bool)
 
 - name: Deploy helm chart with values (offline only)
   kubernetes.core.helm:
@@ -28,6 +28,19 @@
     chart_ref: "{{ playbook_dir }}/files/traefik-{{ traefik_helm_chart_version }}.tgz"
     release_namespace: "{{ traefik_namespace }}"
     values: "{{ lookup('template', 'traefik.yaml.j2') | from_yaml }}"
-    wait: true
-  when: offline == true
+    wait: "{{ traefik_wait | bool }}"
+  when: offline | bool
 
+# without Helm's wait (see traefik_wait) still make sure Traefik itself came up
+- name: Wait for the Traefik Deployment to be available
+  kubernetes.core.k8s_info:
+    api_version: apps/v1
+    kind: Deployment
+    name: "traefik"
+    namespace: "{{ traefik_namespace }}"
+    wait: true
+    wait_condition:
+      type: Available
+      status: "True"
+    wait_timeout: "{{ service_wait_timeout | default(300) }}"
+  when: not (traefik_wait | bool)

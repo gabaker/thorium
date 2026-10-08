@@ -9,25 +9,21 @@ The Thorium image tag.
 The cluster-scoped RBAC rules the operator always needs.
 */}}
 {{- define "operator.clusterRules" -}}
-# the operator applies the ThoriumCluster CRD on startup (server-side apply) and waits for it
+# the operator applies the ThoriumCluster CRD on startup (server-side apply) and waits for it to
+# be established. Server-side apply is a PATCH, and a PATCH that creates a missing CRD is also
+# authorized as create, which RBAC can't limit by name
 - apiGroups: ["apiextensions.k8s.io"]
   resources: ["customresourcedefinitions"]
-  verbs: ["get", "list", "watch", "create", "update", "patch"]
-# watching ThoriumClusters, managing their finalizer, and reporting status
-- apiGroups: ["sandia.gov"]
-  resources: ["thoriumclusters"]
-  verbs: ["get", "list", "watch", "update", "patch"]
-- apiGroups: ["sandia.gov"]
-  resources: ["thoriumclusters/status"]
-  verbs: ["get", "update", "patch"]
+  verbs: ["get", "list", "watch", "create"]
+# the operator only ever changes its own CRD
+- apiGroups: ["apiextensions.k8s.io"]
+  resources: ["customresourcedefinitions"]
+  resourceNames: ["thoriumclusters.sandia.gov"]
+  verbs: ["update", "patch"]
 # watching, labelling, and provisioning the nodes the scaler schedules on
 - apiGroups: [""]
   resources: ["nodes"]
   verbs: ["get", "list", "watch", "patch"]
-# creating the ThoriumCluster's namespace if it is missing
-- apiGroups: [""]
-  resources: ["namespaces"]
-  verbs: ["get", "create"]
 {{- end -}}
 
 {{/*
@@ -35,6 +31,13 @@ The RBAC rules for the resources the operator manages in a ThoriumCluster's name
 bound in the thorium namespace with watchOwnNamespaceOnly and cluster-wide otherwise.
 */}}
 {{- define "operator.namespacedRules" -}}
+# watching ThoriumClusters, managing their finalizer, and reporting status
+- apiGroups: ["sandia.gov"]
+  resources: ["thoriumclusters"]
+  verbs: ["get", "list", "watch", "update", "patch"]
+- apiGroups: ["sandia.gov"]
+  resources: ["thoriumclusters/status"]
+  verbs: ["get", "update", "patch"]
 # the config, bootstrap, and rendered Secrets (watched by metadata for changes)
 - apiGroups: [""]
   resources: ["secrets"]
@@ -90,25 +93,43 @@ and ConfigMaps across namespaces with field selectors, so these can't be namespa
 {{- end -}}
 
 {{/*
-The name of the image pull secret the chart creates or references, or nothing when there is none.
+The name of the image pull secret the chart renders from dockerConfigJson.
 */}}
-{{- define "operator.pullSecretName" -}}
-{{- if .Values.imagePullSecret.create -}}
+{{- define "operator.createdPullSecret" -}}
 thorium-image-pull
-{{- else -}}
-{{- .Values.imagePullSecret.name -}}
-{{- end -}}
 {{- end -}}
 
 {{/*
-The imagePullSecrets of the pods the chart runs: the chart's pull secret, plus registry-token, which
-the operator renders from cluster.registryAuth.
+The names of the Thorium image pull secrets as a YAML list (the ThoriumCluster's
+image_pull_secrets): the one the chart renders, then imagePullSecrets, without duplicates.
+Usage: include "operator.pullSecretNames" . | fromYamlArray
+*/}}
+{{- define "operator.pullSecretNames" -}}
+{{- $names := list -}}
+{{- if .Values.createImagePullSecret -}}
+{{- $names = append $names (include "operator.createdPullSecret" .) -}}
+{{- end -}}
+{{- range .Values.imagePullSecrets | default list -}}
+{{- if eq (toString .) "registry-token" -}}
+{{- fail "operator.imagePullSecrets must not list registry-token: the operator renders it from operator.cluster.registryAuth and references it whenever registryAuth is set" -}}
+{{- end -}}
+{{- $names = append $names (toString .) -}}
+{{- end -}}
+{{- toYaml ($names | uniq) -}}
+{{- end -}}
+
+{{/*
+The imagePullSecrets of the pods the chart runs: the Thorium image pull secrets, plus
+registry-token, which the operator renders from cluster.registryAuth and adds to every Thorium
+pod only while registryAuth is set. Renders nothing when there are none.
 */}}
 {{- define "operator.imagePullSecrets" -}}
-{{- with include "operator.pullSecretName" . }}
-- name: {{ . }}
+{{- range include "operator.pullSecretNames" . | fromYamlArray }}
+- name: {{ . | quote }}
 {{- end }}
+{{- if .Values.cluster.registryAuth }}
 - name: registry-token
+{{- end }}
 {{- end -}}
 
 {{/*
@@ -127,6 +148,7 @@ set. Secrets are merged in by the operator from configSecrets.
 */}}
 {{- define "operator.defaultConfig" -}}
 {{- $b := .Values.backends -}}
+{{- $k8s := .Values.cluster.scaler.k8s -}}
 {{- $indices := include "thorium.elasticIndices" . | fromYaml -}}
 {{- $scyllaNodes := $b.scylla.nodes -}}
 {{- if not $scyllaNodes -}}
@@ -160,14 +182,21 @@ thorium:
   namespace_blacklist:
     {{- include "operator.namespaceBlacklist" . | nindent 4 }}
   tracing:
+    {{- /* without an endpoint or Quickwit there is no collector, so no external traces are sent */}}
+    {{- $tracing := $b.tracing.grpcEndpoint }}
+    {{- if and (not $tracing) (include "thorium.quickwit" .) }}
+    {{- $tracing = printf "http://%s:7281" (include "thorium.host" (dict "root" . "service" "quickwit-indexer" "ns" "quickwit")) }}
+    {{- end }}
+    {{- with $tracing }}
     external:
       Grpc:
-        endpoint: {{ $b.tracing.endpoint | default (printf "http://%s:7281" (include "thorium.host" (dict "root" . "service" "quickwit-indexer" "ns" "quickwit"))) | quote }}
+        endpoint: {{ . | quote }}
         level: Info
+    {{- end }}
     local:
       level: Info
   cors:
-    insecure: true
+    insecure: {{ .Values.cluster.cors.insecure }}
   files:
     bucket: thorium-files
     earliest: 1610596807
@@ -189,12 +218,13 @@ thorium:
     use_path_style: {{ $b.s3.usePathStyle }}
   scaler:
     crane:
-      insecure: true
+      insecure: {{ .Values.cluster.crane.insecure }}
     k8s:
+      primary_cluster: {{ $k8s.context | quote }}
       clusters:
-        {{ .Values.cluster.scaler.context | quote }}:
-          alias: {{ .Values.cluster.scaler.alias | quote }}
-          nodes: {{ .Values.cluster.scaler.nodes | toJson }}
+        {{ $k8s.context | quote }}:
+          alias: {{ $k8s.alias | quote }}
+          nodes: {{ $k8s.nodes | default list | toJson }}
 redis:
   host: {{ $redisHost | quote }}
   port: {{ $b.redis.port }}
@@ -243,14 +273,14 @@ the thorium namespace.
 Usage: include "operator.secretCredentials" .Values.cluster.bootstrap.scylla.adminSecret
 */}}
 {{- define "operator.secretCredentials" -}}
-name: {{ required "a bootstrap adminSecret needs a name" .name }}
+name: {{ required "a bootstrap adminSecret needs a name" .name | quote }}
 {{- with .username }}
-username: {{ . }}
+username: {{ . | quote }}
 {{- end }}
 {{- with .usernameKey }}
-username_key: {{ . }}
+username_key: {{ . | quote }}
 {{- end }}
-password_key: {{ .passwordKey | default "password" }}
+password_key: {{ .passwordKey | default "password" | quote }}
 {{- end -}}
 
 {{/*
@@ -276,4 +306,13 @@ Usage: include "operator.elasticCaSecret" .
 {{- end -}}
 {{- $ca.name -}}
 {{- end -}}
+{{- end -}}
+
+{{/*
+A string quoted for a POSIX shell: wrapped in single quotes, with each single quote inside it
+closed, escaped, and reopened, so the shell passes it on unchanged.
+Usage: include "operator.shellQuote" "it's"
+*/}}
+{{- define "operator.shellQuote" -}}
+{{- printf "'%s'" (replace "'" "'\\''" (toString .)) -}}
 {{- end -}}

@@ -53,14 +53,16 @@ pub fn start(
     // create a cr watcher
     watchers.spawn(thorium_cr::start(
         client.clone(),
+        name.clone(),
         args.clone(),
         shared.clone(),
     ));
     // create a node watcher
-    watchers.spawn(nodes::start(name, client.clone(), shared.clone()));
+    watchers.spawn(nodes::start(name.clone(), client.clone(), shared.clone()));
     // create an mcp pod watcher
     watchers.spawn(mcp::start(
         client.clone(),
+        name,
         args.namespace.clone(),
         shared.clone(),
     ));
