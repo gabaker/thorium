@@ -1,154 +1,146 @@
-## Deploy Tracing (Jaeger + Quickwit)
+# Tracing (Quickwit and Jaeger)
 
-### 1) Deploy Postgres DB (using Kubegres)
+This page sets up the tracing stack the `thorium` chart deploys when `global.quickwit.enabled`
+is true: Quickwit stores Thorium's traces in S3 with its metastore in Postgres, and the Jaeger
+query UI reads them back from Quickwit. Use it when you run tracing yourself, for example with
+`global.quickwit.enabled: false` and an external collector, or with the operator without Helm.
+Tracing is optional: without an external collector Thorium only logs locally. Any OTLP gRPC
+collector works in place of Quickwit.
 
-Quickwit will need a Postgres database to store metadata. This guide uses the Kubegres operator to deploy
-a distributed instance of Postgres. Using Kubegres is optional, any Postgres deployment method may be used
-included external (to K8s) options.
+## 1) Create the metastore database
 
-#### Deploy Kubegres CRD and operator
+Quickwit keeps its metastore in Postgres. Any Postgres works; create a database for it
+(the chart names it `quickwit-metastore`). To run Postgres in the cluster the way the chart does,
+install Kubegres (1.19) with the `infra-operators` chart and create a `Kubegres` resource:
 
 ```bash
-kubectl apply -f https://raw.githubusercontent.com/reactive-tech/kubegres/refs/tags/v1.19/kubegres.yaml
-kubectl rollout status --watch --timeout=600s deployment.apps/kubegres-controller-manager -n kubegres-system
+helm install infra-operators oci://ghcr.io/cisagov/thorium/charts/infra-operators \
+  --version $VERSION -n infra-operators --create-namespace --wait \
+  --set scylla-operator.enabled=false --set eck-operator.enabled=false
+kubectl create namespace quickwit
+POSTGRES_PASSWORD=$(openssl rand -hex 24)
+kubectl -n quickwit create secret generic postgres-cluster-auth \
+  --from-literal=superUserPassword="$POSTGRES_PASSWORD" \
+  --from-literal=replicationUserPassword="$POSTGRES_PASSWORD"
 ```
 
-#### Create PostgresDB user password secrets
-
-Update `SUPER_USER_PASSWORD` and `REPLICATION_PASSWORD` with secure values and save those to
-put in the Quickwit helm values YAML file later in this guide.
-
-```bash,editable
-kubectl create ns quickwit
-cat <<EOF | kubectl apply -f -
-apiVersion: v1
-kind: Secret
-metadata:
-  name: postgres-cluster-auth
-  namespace: quickwit
-type: Opaque
-stringData:
-  superUserPassword: <SUPER_USER_PASSWORD>
-  replicationUserPassword: <REPLICATION_PASSWORD>
-EOF
-```
-
-#### Create a Kubegres postgres DB
-
-Use the following command to deploy a Postgres cluster using Kubegres. It may be necessary to edit
-the DB size, Postgres version, and `storageClassName` depending on the deployment environment.
-
-```bash,editable
-cat <<EOF | kubectl apply -f -
+```yaml
 apiVersion: kubegres.reactive-tech.io/v1
 kind: Kubegres
 metadata:
   name: postgres
   namespace: quickwit
 spec:
-   replicas: 3
-   image: docker.io/postgres:17
-   database:
-      storageClassName: csi-rbd-sc
-      size: 4Ti
-   env:
-      - name: POSTGRES_PASSWORD
-        valueFrom:
-           secretKeyRef:
-              name: postgres-cluster-auth
-              key: superUserPassword
-      - name: POSTGRES_REPLICATION_PASSWORD
-        valueFrom:
-           secretKeyRef:
-              name: postgres-cluster-auth
-              key: replicationUserPassword
-EOF
+  replicas: 1
+  image: docker.io/postgres:17
+  database:
+    size: 32Gi
+    # storageClassName: <your storage class>
+  env:
+    - name: POSTGRES_PASSWORD
+      valueFrom:
+        secretKeyRef:
+          name: postgres-cluster-auth
+          key: superUserPassword
+    - name: POSTGRES_REPLICATION_PASSWORD
+      valueFrom:
+        secretKeyRef:
+          name: postgres-cluster-auth
+          key: replicationUserPassword
 ```
 
-#### Set password for Postgres Quickwit user role
-
-After Kubegres has completed deployment of Postgres, create a Quickwit Postgres user role using the
-following command. Before running the command, update `INSECURE_QUICKWIT_PASSWORD` to a secure value.
-
-```bash,editable
-kubectl rollout status --watch --timeout=600s statefulset/postgres-1 -n quickwit
-kubectl -n quickwit exec -it pod/postgres-1-0 -- /bin/bash -c "PGPASSWORD=INSECURE_QUICKWIT_PASSWORD su postgres -c \"createdb quickwit-metastore\""
-```
-
-### 4) Deploy Quickwit
-
-#### Add the Quickwit Helm repo
+Once Postgres is running, create the database on the primary instance:
 
 ```bash
-helm repo add quickwit https://helm.quickwit.io
-helm repo update quickwit
+PRIMARY=$(kubectl -n quickwit get pods -l app=postgres,replicationRole=primary -o name)
+kubectl -n quickwit exec -it "$PRIMARY" -- \
+  env PGPASSWORD="$POSTGRES_PASSWORD" createdb -U postgres quickwit-metastore
 ```
 
-#### Create a Quickwit Helm values config: `quickwit-values.yml`
+The metastore URI is then
+`postgres://postgres:<password>@postgres.quickwit.svc.cluster.local:5432/quickwit-metastore`
+(URL-encode the password if it holds special characters).
 
-Update the `POSTGRES_PASSWORD`, `ACCESS_ID`, and `SECRET_KEY` values before deploying Quickwit.
-For non-rook deployments, the `endpoint` may also need to be updated to point at the correct S3
-endpoint. Edit the hostname om `QW_METASTORE_URI` for Postgres instances that were not setup using
-Kubegres.
+## 2) Create the bucket
 
-```yaml,editable
+Quickwit stores its indexes in an S3 bucket (`quickwit` by default) that must exist before it
+starts. Nothing in Thorium creates it outside the chart's own SeaweedFS. Create it with your S3
+service's tools, for example:
+
+```bash
+aws --endpoint-url "$S3_ENDPOINT" s3 mb s3://quickwit
+```
+
+## 3) Deploy Quickwit
+
+Install the Quickwit Helm chart (0.8.17, image v0.8.2). Keep the credentials in a Secret that
+Quickwit expands at startup, so none of them appear in its ConfigMap:
+
+```bash
+kubectl -n quickwit create secret generic quickwit-credentials \
+  --from-literal=QW_METASTORE_URI="postgres://postgres:$POSTGRES_PASSWORD@postgres.quickwit.svc.cluster.local:5432/quickwit-metastore" \
+  --from-literal=QW_S3_ENDPOINT="$S3_ENDPOINT" \
+  --from-literal=AWS_ACCESS_KEY_ID="$S3_ACCESS_KEY" \
+  --from-literal=AWS_SECRET_ACCESS_KEY="$S3_SECRET_KEY"
+```
+
+Save these values as `quickwit-values.yaml` (the same settings the `thorium` chart uses):
+
+```yaml
+# name the services quickwit-<component> whatever the release is called
+fullnameOverride: quickwit
 image:
   repository: docker.io/quickwit/quickwit
   pullPolicy: IfNotPresent
-  # Overrides the image tag whose default is the chart appVersion.
-  #tag: v0.6.4
-metastore:
-  replicaCount: 1
-  # Extra env for metastore
-  extraEnv:
-    QW_METASTORE_URI: "postgres://postgres:<POSTGRES_PASSWORD>@postgres.quickwit.svc.cluster.local:5432/quickwit-metastore"
+environmentFrom:
+  - secretRef:
+      name: quickwit-credentials
 config:
   default_index_root_uri: s3://quickwit/quickwit-indexes
+  metastore_uri: ${QW_METASTORE_URI}
   storage:
     s3:
-      flavor: minio
-      region: default
-      endpoint: http://rook-ceph-rgw-thorium-s3-store.rook-ceph.svc.cluster.local
+      region: us-east-1
+      endpoint: ${QW_S3_ENDPOINT}
       force_path_style_access: true
-      access_key_id: "<ACCESS_ID>"
-      secret_access_key: "<SECRET_KEY>"
+      access_key_id: ${AWS_ACCESS_KEY_ID}
+      secret_access_key: ${AWS_SECRET_ACCESS_KEY}
+      # flavor: minio   # for Rook/Ceph object stores
+metastore:
+  replicaCount: 1
+searcher:
+  replicaCount: 1
 ```
-
-#### Now use that values file to install Quickwit
 
 ```bash
-helm install quickwit quickwit/quickwit -n quickwit -f quickwit-values.yml
+helm repo add quickwit https://helm.quickwit.io
+helm repo update
+helm install quickwit quickwit/quickwit --version 0.8.17 -n quickwit -f quickwit-values.yaml
+kubectl -n quickwit get pods
 ```
 
-#### Verify Quickwit pods are all running
+Set `storage.s3.region` to the region your S3 service expects (`thorium-s3` for the Rook object
+store from [Rook](./install-rook.md)).
 
-```bash
-kubectl get pods -n quickwit
-# NAME                                      READY   STATUS    RESTARTS   AGE
-# postgres-2-0                              1/1     Running   0          1h
-# postgres-3-0                              1/1     Running   0          1h
-# postgres-4-0                              1/1     Running   0          1h
-# quickwit-control-plane-HASH               1/1     Running   0          1h
-# quickwit-indexer-0                        1/1     Running   0          1h
-# quickwit-janitor-HASH                     1/1     Running   0          1h
-# quickwit-metastore-HASH                   1/1     Running   0          1h
-# quickwit-searcher-0                       1/1     Running   0          1h
-# quickwit-searcher-1                       1/1     Running   0          1h
-# quickwit-searcher-2                       1/1     Running   0          1h
-```
+## 4) Deploy Jaeger
 
-### 5) Deploy Jaeger
+The Jaeger query UI reads traces from the Quickwit searcher over gRPC:
 
-#### Create a namespace for Jaeger
-
-```bash
-kubectl create ns jaeger
-```
-
-#### Create the Jaeger Statefulset
-
-```bash,editable
-cat <<EOF | kubectl apply -f -
+```yaml
+apiVersion: v1
+kind: Service
+metadata:
+  name: jaeger
+  namespace: jaeger
+spec:
+  type: ClusterIP
+  selector:
+    app: jaeger
+  ports:
+    - name: jaeger
+      port: 16686
+      targetPort: 16686
+---
 apiVersion: apps/v1
 kind: StatefulSet
 metadata:
@@ -165,51 +157,57 @@ spec:
   template:
     metadata:
       labels:
-          app: jaeger
+        app: jaeger
     spec:
+      automountServiceAccountToken: false
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        runAsGroup: 10001
+        seccompProfile:
+          type: RuntimeDefault
       containers:
         - name: jaeger
-          image: jaegertracing/jaeger-query:latest
-          imagePullPolicy: Always
+          image: docker.io/jaegertracing/jaeger-query:1.76.0
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: [ALL]
           env:
             - name: SPAN_STORAGE_TYPE
-              value: "grpc"
+              value: grpc
             - name: GRPC_STORAGE_SERVER
-              value: "quickwit-searcher.quickwit.svc.cluster.local:7281"
+              value: quickwit-searcher.quickwit.svc.cluster.local:7281
           resources:
-            requests:
-              memory: "8Gi"
-              cpu: "2"
             limits:
-              memory: "8Gi"
-              cpu: "2"
-EOF
+              cpu: "1"
+              memory: 1Gi
 ```
-
-#### Create the Jaeger service
-
-```bash,editable
-cat <<EOF | kubectl apply -f -
-apiVersion: v1
-kind: Service
-metadata:
-  name: jaeger
-  namespace: jaeger
-spec:
-  type: ClusterIP
-  selector:
-    app: jaeger
-  ports:
-  - name: jaeger
-    port: 16686
-    targetPort: 16686
-EOF
-```
-
-#### Verify the Jaeger pod is running
 
 ```bash
-kubectl get pods -n jaeger
-# NAME       READY   STATUS    RESTARTS   AGE
-# jaeger-0   1/1     Running   0          1h
+kubectl create namespace jaeger
+kubectl apply -f jaeger.yaml
+kubectl -n jaeger port-forward svc/jaeger 16686   # Jaeger UI at http://localhost:16686
 ```
+
+## Thorium settings
+
+Thorium sends traces to the Quickwit indexer's OTLP gRPC port:
+
+- **Helm:** set `operator.backends.tracing.grpcEndpoint` to
+  `http://quickwit-indexer.quickwit.svc.cluster.local:7281`. With `global.quickwit.enabled: false`
+  and no endpoint, Thorium sends no external traces.
+- **Without Helm:** set it in the `ThoriumCluster`'s `spec.config` in map form (the operator
+  doesn't accept YAML tags such as `!Grpc`):
+
+  ```yaml
+  thorium:
+    tracing:
+      external:
+        Grpc:
+          endpoint: http://quickwit-indexer.quickwit.svc.cluster.local:7281
+          level: Info
+      local:
+        level: Info
+  ```

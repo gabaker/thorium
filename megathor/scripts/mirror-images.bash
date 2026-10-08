@@ -4,9 +4,10 @@
 #   scripts/mirror-images.bash <registry> [image-list]
 #
 # <registry> is the offline_registry value (e.g. 10.0.0.1:5000). The image list
-# defaults to scripts/offline-images.txt, one "<source image> <destination path>"
-# pair per line. Uses docker (or podman when docker is missing); run it on a
-# machine with internet access that can push to the registry.
+# defaults to files/offline-images.txt, written by offline-stage.yml, with one
+# "<source image> <destination path>" pair per line. Uses docker (or podman when
+# docker is missing); run it on a machine with internet access that can push to
+# the registry.
 set -euo pipefail
 
 if [ $# -lt 1 ]; then
@@ -14,7 +15,11 @@ if [ $# -lt 1 ]; then
     exit 1
 fi
 registry="$1"
-list="${2:-$(dirname "$0")/offline-images.txt}"
+list="${2:-$(dirname "$0")/../files/offline-images.txt}"
+if [ ! -f "$list" ]; then
+    echo "Image list ${list} not found; run offline-stage.yml first or pass a list" >&2
+    exit 1
+fi
 
 # prefer docker but fall back to podman
 cli=docker
@@ -30,7 +35,9 @@ while read -r source destination _; do
     esac
     target="${registry}/${destination}"
     echo "==> ${source} -> ${target}"
-    if "$cli" pull "$source" && "$cli" tag "$source" "$target" && "$cli" push "$target"; then
+    # the CLI's stdin is closed so it can't consume the rest of the image list
+    if "$cli" pull "$source" </dev/null && "$cli" tag "$source" "$target" </dev/null \
+        && "$cli" push "$target" </dev/null; then
         continue
     fi
     echo "FAILED: ${source}" >&2

@@ -1,0 +1,22 @@
+# A cluster that reaches the internet only through an HTTP proxy. The operator uses the proxy for
+# outbound calls; the k8s scaler needs it to inspect tool images in registries such as ghcr.io.
+global:
+  # the cluster's service and pod CIDRs (these are the kubeadm/minikube defaults), added to
+  # noProxy so in-cluster traffic addressed by IP never goes through the proxy
+  clusterCIDRs: [10.96.0.0/12, 10.244.0.0/16]
+operator:
+  controller:
+    proxy:
+      httpsProxy: http://proxy.example.com:3128
+      # extra hosts that bypass the proxy, appended after the cluster's own names and CIDRs
+      noProxy: .corp.example.com
+  cluster:
+    components:
+      scaler:
+        service_account: true
+        # replacing the scaler's env replaces its default proxy variables
+        env:
+          - { name: https_proxy, value: http://proxy.example.com:3128 }
+          - { name: HTTPS_PROXY, value: http://proxy.example.com:3128 }
+          - { name: no_proxy, value: "localhost,127.0.0.1,.svc,.svc.cluster.local,cluster.local,10.96.0.0/12,10.244.0.0/16,.corp.example.com" }
+          - { name: NO_PROXY, value: "localhost,127.0.0.1,.svc,.svc.cluster.local,cluster.local,10.96.0.0/12,10.244.0.0/16,.corp.example.com" }

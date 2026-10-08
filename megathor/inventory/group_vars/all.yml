@@ -1,10 +1,10 @@
 offline: false
-use_proxy: false
 service_wait_timeout: 300
-resource_creation_timeout: 30
 # storage_class: ceph-block # use with rook
 # storage_class: hostpath # use with docker desktop k8s
 storage_class: local-path
+# The file holding the password megathor encrypts its secrets vault with; create it before the
+# first run and pass it to ansible-playbook with --vault-password-file so the vault can be read
 vault_password_file: "artifacts/vault_pass"
 # vault_path: "artifacts/secrets.yml"
 
@@ -19,9 +19,12 @@ thorium_chart_version: "1.8.1"
 # Extra values files for the thorium chart, applied after the values megathor generates
 # (see deploy/charts/thorium/values.yaml for every setting)
 # thorium_values_files: []
+# Extra values files for the infra-operators chart
+# infra_operators_values_files: []
 
-# Prefix Thorium's namespaces ("<namespace_prefix>-thorium", ...); a lowercase DNS
-# label of at most 32 characters (see "Namespace Prefix" in the README)
+# Prefix Thorium's namespaces ("<namespace_prefix>-thorium", ...); a lowercase DNS label of at
+# most 32 characters (see "Namespaces and the namespace prefix" in the Thorium deployment docs).
+# Thorium's own namespace, thorium_namespace, is derived from it
 # namespace_prefix: ""
 
 # The cluster-wide operators (infra-operators chart); disable any the cluster already runs
@@ -39,12 +42,18 @@ scylla_enabled: true
 # scylla_members: 3
 # scylla_replication_factor: 3
 # scylla_developer_mode: false
+# Jaeger reads traces from Quickwit, so it is only deployed with quickwit_enabled
 jaeger_enabled: true
 quickwit_enabled: true
 quickwit_bucket: "quickwit"
+# The OTLP gRPC collector Thorium sends traces to; empty uses the chart's Quickwit indexer, so set
+# it when quickwit_enabled is false
+# thorium_tracing_endpoint: ""
 # An external Postgres for the Quickwit metastore instead of the chart's (create the database first)
 # quickwit_metastore_uri: "postgres://user:password@host:5432/quickwit-metastore"
-# An external Redis instead of the chart's (redis_password must be the password it requires)
+# An external Redis instead of the chart's. redis_password is required and must be the password it
+# requires; megathor neither generates it nor saves it to its vault, so keep it in an
+# ansible-vault encrypted vars file
 # redis_enabled: false
 # thorium_external_redis_host: "redis.example.com"
 # redis_password: ""
@@ -89,6 +98,8 @@ ceph_health_check_retries: 1
 # s3_region: "us-east-1"
 # s3_flavor: "" # Quickwit flavor ("minio" covers rook/ceph)
 # s3_use_path_style: false
+# The keys for an external S3 service are required and, like an external redis_password, never
+# generated or saved to megathor's vault
 # s3_access_key: ""
 # s3_secret_key: ""
 s3_validate_certs: true
@@ -97,22 +108,33 @@ s3_validate_certs: true
 traefik_enabled: true
 traefik_helm_chart_version: "37.1.0"
 # traefik_namespace: "traefik"
-traefik_external_ips:
-  - "0.0.0.0"
+# the type of Traefik's Service. A LoadBalancer Service needs a load balancer controller (MetalLB,
+# a cloud provider) to assign its address, or traefik_external_ips; without either use NodePort
+# traefik_service_type: "LoadBalancer"
+# the node addresses Traefik's Service is reachable on (its externalIPs), e.g.
+# ["10.0.0.11", "10.0.0.12"]; empty leaves them out, for a cluster whose load balancer assigns
+# the address. Kubernetes rejects unspecified (0.0.0.0, ::), loopback, and link-local addresses
+traefik_external_ips: []
+# wait for the whole Traefik release, Service included; by default skipped for a LoadBalancer
+# Service without externalIPs, which only a load balancer controller can make ready (the role
+# then waits for Traefik's Deployment alone)
+# traefik_wait: true
 
 # Thorium
 thorium_enabled: true
 # thorium_deployment_name: "thorium"
+# thorium_container_registry: "ghcr.io"
+# thorium_image: "cisagov/thorium/infrastructure/thorium"
 # thorium_version: "" # defaults to the chart's appVersion
 # thorium_image_pull_policy: "Always" # IfNotPresent to run from images cached on the nodes
 # thorium_admin_username: "admin"
-# The Kubernetes nodes Thorium may schedule jobs on
+# The Kubernetes nodes Thorium may schedule jobs on (an empty list means every node)
 thorium_nodes: []
 # Pull secret value is just a stub placeholder base64(thorium:corn)
 # thorium_image_pull_secret:
 #   auths:
 #     "registry.domain:port":
-#       "auth: "dGhvcml1bTpjb3JuCg=="
+#       auth: "dGhvcml1bTpjb3JuCg=="
 # thorium_ui_banner: |
 #   Welcome to Thorium. <Please place you banner here>
 #

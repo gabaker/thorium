@@ -1,4 +1,5 @@
-{{- if .Values.jaeger.enabled }}
+{{- /* Jaeger only reads traces from the chart's Quickwit */}}
+{{- if and .Values.jaeger.enabled (include "thorium.quickwit" $) }}
 {{- $ns := include "thorium.ns" (dict "root" $ "name" "jaeger") }}
 ---
 apiVersion: v1
@@ -36,10 +37,19 @@ spec:
       labels:
         app: jaeger
     spec:
+      automountServiceAccountToken: false
+      {{- with .Values.jaeger.podSecurityContext }}
+      securityContext:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
       containers:
         - name: jaeger
           image: {{ include "thorium.image" (dict "root" $ "image" .Values.jaeger.image) }}
           imagePullPolicy: IfNotPresent
+          {{- with .Values.jaeger.securityContext }}
+          securityContext:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
           env:
             - name: SPAN_STORAGE_TYPE
               value: grpc

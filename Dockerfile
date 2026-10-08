@@ -57,4 +57,11 @@ RUN chmod +x thorium-api \
     tar xzf go-containerregistry.tar.gz crane && \
     rm go-containerregistry.tar.gz
 
+# run as an unprivileged user with a fixed uid/gid, which the operator also sets on the component
+# pods (runAsUser) so runAsNonRoot can be checked; its home holds the scaler's credentials
+RUN groupadd --system --gid 10001 thorium && \
+    useradd --system --uid 10001 --gid thorium --create-home --home-dir /home/thorium \
+      --shell /usr/sbin/nologin thorium
+USER 10001:10001
+
 ENTRYPOINT ["./thorium-operator", "operate"]

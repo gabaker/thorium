@@ -1,18 +1,18 @@
 {{- $ns := include "thorium.namespace" . }}
-{{- if .Values.imagePullSecret.create }}
+{{- if .Values.createImagePullSecret }}
 ---
 # Pulls the Thorium image for the operator, the chart's jobs, and (through the ThoriumCluster's
 # image_pull_secrets) every Thorium component; registry-token is the operator's own secret
 apiVersion: v1
 kind: Secret
 metadata:
-  name: {{ include "operator.pullSecretName" . }}
+  name: {{ include "operator.createdPullSecret" . }}
   namespace: {{ $ns }}
   labels:
     {{- include "operator.labels" . | nindent 4 }}
 type: kubernetes.io/dockerconfigjson
 data:
-  .dockerconfigjson: {{ required "imagePullSecret.dockerconfigjson is required when imagePullSecret.create is true" .Values.imagePullSecret.dockerconfigjson | b64enc | quote }}
+  .dockerconfigjson: {{ required "operator.dockerConfigJson is required when operator.createImagePullSecret is true" .Values.dockerConfigJson | b64enc | quote }}
 {{- end }}
 ---
 apiVersion: v1
@@ -48,9 +48,11 @@ spec:
     spec:
       serviceAccountName: thorium-operator
       automountServiceAccountToken: true
+      {{- with include "operator.imagePullSecrets" . }}
       imagePullSecrets:
-        {{- include "operator.imagePullSecrets" . | nindent 8 }}
-      {{- with .Values.operator.podSecurityContext }}
+        {{- . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.controller.podSecurityContext }}
       securityContext:
         {{- toYaml . | nindent 8 }}
       {{- end }}
@@ -58,16 +60,16 @@ spec:
         - name: operator
           image: {{ printf "%s:%s" (include "thorium.image" (dict "root" $ "image" .Values.image.repository)) (include "operator.tag" .) }}
           imagePullPolicy: {{ .Values.image.pullPolicy }}
-          {{- with .Values.operator.securityContext }}
+          {{- with .Values.controller.securityContext }}
           securityContext:
             {{- toYaml . | nindent 12 }}
           {{- end }}
-          {{- if .Values.operator.watchOwnNamespaceOnly }}
+          {{- if .Values.controller.watchOwnNamespaceOnly }}
           # appended to the image entrypoint (`thorium-operator operate`)
           args: ["--namespace", {{ $ns | quote }}]
           {{- end }}
           env:
-            {{- with .Values.operator.proxy }}
+            {{- with .Values.controller.proxy }}
             {{- $noProxy := compact (splitList "," (.noProxy | default "" | nospace)) }}
             {{- if or .httpProxy .httpsProxy }}
             {{- /* with a proxy set, in-cluster services (the Thorium API and its backends) are still
@@ -90,7 +92,7 @@ spec:
             - { name: NO_PROXY, value: {{ $noProxy | quote }} }
             {{- end }}
           resources:
-            {{- toYaml .Values.operator.resources | nindent 12 }}
+            {{- toYaml .Values.controller.resources | nindent 12 }}
           {{- if include "operator.elasticCaSecret" . }}
           # the operator validates an external Elastic against the same path as the components
           volumeMounts:
@@ -107,11 +109,11 @@ spec:
               - key: {{ $.Values.backends.elastic.caSecret.key | default "ca.crt" }}
                 path: ca.crt
       {{- end }}
-      {{- with .Values.operator.nodeSelector }}
+      {{- with .Values.controller.nodeSelector }}
       nodeSelector:
         {{- toYaml . | nindent 8 }}
       {{- end }}
-      {{- with .Values.operator.tolerations }}
+      {{- with .Values.controller.tolerations }}
       tolerations:
         {{- toYaml . | nindent 8 }}
       {{- end }}

@@ -1,0 +1,13 @@
+# An air-gapped install that pulls every image from a local mirror. Mirror the images listed by
+# deploy/charts/scripts/list-images.sh first, and set the same global.imageRegistry when
+# installing the infra-operators chart.
+global:
+  # docker.io/library/redis:7.4.11 is pulled as 10.0.0.1:5000/redis:7.4.11, and so on
+  imageRegistry: 10.0.0.1:5000
+operator:
+  image:
+    # pull the Thorium image from the mirror once per node and reuse the cached copy, rather
+    # than checking the mirror for a newer one whenever a pod starts
+    pullPolicy: IfNotPresent
+  # existing image pull secrets in the thorium namespace for the mirror, if it needs auth
+  imagePullSecrets: [mirror-pull]
