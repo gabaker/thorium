@@ -36,11 +36,14 @@ with how many findings it hid, and `<tool>-ignored.txt` lists them for audit.
 On GitHub pull requests and GitLab merge request pipelines the ignore file is
 read from the base commit, so new or changed ignore entries take effect only
 once merged; a change that adds the file to a base that has none uses its own
-copy, with a warning to review it. Other runs, including GitHub push runs of a pull request's branch
-and every GitLab push or child pipeline, read it from the commit being checked,
-and the summary flags pushes that change it. Tool configuration such as
-.hadolint.yaml and inline suppression comments are always read from the commit
-being checked; they are visible in review, so review them like the ignore file.
+copy, with a warning to review it. Other runs, including GitHub push runs of a
+pull request's branch and every GitLab push or child pipeline, read it from the
+commit being checked. Where the changed files are known (pull requests, and
+GitLab pushes whose before SHA is in the clone) the summary flags a change to
+the ignore file; GitHub push runs have no changed-file list, so they cannot.
+Tool configuration such as .hadolint.yaml and inline suppression comments are
+always read from the commit being checked; they are visible in review, so
+review them like the ignore file.
 
 Scanner output describes code under review, so every message is escaped before
 it is used in a workflow command, the readable GitHub log section is wrapped in
@@ -110,7 +113,6 @@ CONTROL_RE = re.compile(r"[\x00-\x08\x0b-\x1f\x7f]")
 NULL_SHA_RE = re.compile(r"^0+$")
 # rustc's closing tallies, which are not findings themselves
 CARGO_TALLY_RE = re.compile(r"^(\d+ warnings? emitted|aborting due to)")
-# the header rustfmt prints before each hunk of its diff
 # the header rustfmt prints before each hunk of its diff; older releases print
 # `Diff in <path> at line <n>:` instead of `Diff in <path>:<n>:`
 RUSTFMT_HUNK_RE = re.compile(r"^Diff in (?P<path>.+?)(?::| at line )(?P<line>\d+):\s*$")

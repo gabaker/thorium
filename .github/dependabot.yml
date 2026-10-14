@@ -1,11 +1,13 @@
 version: 2
 updates:
-  # GitHub Actions used by .github/workflows (pinned by commit SHA)
+  # actions are pinned by commit SHA, which Dependabot updates along with the
+  # version comment, so pins don't go stale
   - package-ecosystem: "github-actions"
     directory: "/"
     schedule:
       interval: "weekly"
-    # wait for new releases to age before proposing them
+    # a week's wait gives a compromised or broken release time to be pulled
+    # before it is proposed
     cooldown:
       default-days: 7
     groups:
@@ -15,11 +17,10 @@ updates:
     commit-message:
       prefix: "fix(ci)"
 
-  # base images for the published Thorium and thorctl images (pinned by tag, so
-  # updates are new Ubuntu releases; security updates within a release come from
-  # rebuilding);
-  # base/ is not listed because its images come from an internal registry
-  # Dependabot cannot reach
+  # base images for the published Thorium and thorctl images; they are pinned by
+  # tag, so this proposes new Ubuntu releases while security updates within a
+  # release come from rebuilding. base/ is left out because its images come from
+  # an internal registry Dependabot cannot reach
   - package-ecosystem: "docker"
     directories:
       - "/"
@@ -35,7 +36,6 @@ updates:
     commit-message:
       prefix: "fix(docker)"
 
-  # Rust workspace dependencies
   - package-ecosystem: "cargo"
     directory: "/"
     schedule:
@@ -51,7 +51,6 @@ updates:
     commit-message:
       prefix: "fix(deps)"
 
-  # UI dependencies
   - package-ecosystem: "npm"
     directory: "/ui"
     schedule:

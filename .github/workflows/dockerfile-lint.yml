@@ -8,9 +8,9 @@
 # - Actions are pinned by full commit SHA.
 # - Every finding, at every severity, is written to the job log, inline
 #   annotations, the job summary, and a `<scanner>-report` artifact by
-#   .github/scripts/lint_report.py, in addition to code scanning. The reporter
-#   also gates each job: hadolint fails on error-level findings and Trivy on
-#   HIGH and CRITICAL ones.
+#   .github/scripts/lint_report.py; hadolint and Trivy findings also go to code
+#   scanning. The reporter also gates each job: hadolint fails on error-level
+#   findings and Trivy on HIGH and CRITICAL ones.
 # - Findings matching .github/lint-ignore.toml are left out of the reports, the
 #   gate, and code scanning. On pull requests that file is read from the base
 #   branch, so new entries take effect once merged; push runs read it from the
@@ -23,7 +23,8 @@
 #   Its `tool-versions.json` artifact lists every pin with its latest release.
 #
 # To bump a scanner, resolve the new tag's multi-arch index digest from ghcr.io
-# and update both the tag comment and the digest.
+# and update both the tag comment and the digest. The Trivy digest is shared
+# with security-scan.yml, image-rescan.yml and deploy.yml; keep them in step.
 name: Dockerfile Lint
 
 on:
@@ -104,7 +105,7 @@ jobs:
 
       - name: Store hadolint report
         if: ${{ !cancelled() }}
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: hadolint-report
           path: ${{ runner.temp }}/hadolint/
@@ -117,7 +118,7 @@ jobs:
       # .github/lint-ignore.toml.
       - name: Upload hadolint SARIF
         if: ${{ !cancelled() && steps.hadolint.outputs.exit-code == '0' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) }}
-        uses: github/codeql-action/upload-sarif@2892aa5e19bbd11bc0cff5427e3b750a04d9e3c2 # v4.38.2
+        uses: github/codeql-action/upload-sarif@24c54180a607b1449ed407dd24f251e4e9147c8d # v4.38.3
         with:
           sarif_file: ${{ runner.temp }}/hadolint/hadolint-filtered.sarif
           category: hadolint
@@ -176,7 +177,7 @@ jobs:
 
       - name: Store Trivy report
         if: ${{ !cancelled() && steps.trivy.outcome == 'success' }}
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: trivy-config-report
           path: ${{ runner.temp }}/trivy-out/
@@ -187,7 +188,7 @@ jobs:
       # leaves out findings ignored by .github/lint-ignore.toml.
       - name: Upload Trivy SARIF
         if: ${{ !cancelled() && steps.trivy.outcome == 'success' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) }}
-        uses: github/codeql-action/upload-sarif@2892aa5e19bbd11bc0cff5427e3b750a04d9e3c2 # v4.38.2
+        uses: github/codeql-action/upload-sarif@24c54180a607b1449ed407dd24f251e4e9147c8d # v4.38.3
         with:
           sarif_file: ${{ runner.temp }}/trivy-out/trivy-config-filtered.sarif
           category: trivy-config
@@ -227,7 +228,7 @@ jobs:
 
       - name: Store tool version report
         if: ${{ !cancelled() }}
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: tool-versions-report
           path: ${{ runner.temp }}/tool-versions/

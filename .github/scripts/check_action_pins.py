@@ -79,7 +79,7 @@ def parse_version(text):
 
     Returns a `(major, minor, patch)` tuple, or None when `text` is not a version.
     """
-    # pull out the numeric components, treating a missing patch as zero
+    # a missing patch counts as zero, so `v4` and `v4.0.0` compare equal
     match = SEMVER_RE.match(text.strip()) if text else None
     if not match:
         return None
@@ -97,7 +97,7 @@ def api_get(path, token):
     Returns None for missing resources so callers can fall back, and raises
     `http_retry.HttpError` for any other failure after retries.
     """
-    # build the request with the recommended headers and optional auth
+    # the token only raises the rate limit; public lookups work without it
     headers = {"Accept": "application/vnd.github+json", "X-GitHub-Api-Version": "2022-11-28"}
     if token:
         headers["Authorization"] = f"Bearer {token}"
@@ -142,7 +142,7 @@ def collect_uses(root):
 
     * `root` - The repository root
     """
-    # gather workflow files and any local composite action definitions
+    # local composite actions can pin third-party actions too
     github_dir = root / ".github"
     files = sorted(github_dir.glob("workflows/*.y*ml")) + sorted(github_dir.glob("actions/**/action.y*ml"))
     found = []
@@ -166,7 +166,7 @@ def collect_uses(root):
                         }
                     )
                 continue
-            # skip local actions and docker image references
+            # local actions and docker:// images have no GitHub release to compare against
             if match["action"].startswith(("./", "docker://")):
                 continue
             # reduce `owner/repo/sub/path` to the repository that hosts it
@@ -259,7 +259,6 @@ def main():
     parser.add_argument("--json", required=True, help="where to write every reference and its status")
     parser.add_argument("--sarif", required=True, help="where to write the problems as SARIF")
     args = parser.parse_args()
-    # read the optional token and locate the repo root
     # GitHub Actions provides GITHUB_TOKEN and GITHUB_WORKSPACE; GitLab CI
     # provides CI_PROJECT_DIR and a GH_TOKEN project variable when configured
     token = os.environ.get("GITHUB_TOKEN") or os.environ.get("GH_TOKEN", "")

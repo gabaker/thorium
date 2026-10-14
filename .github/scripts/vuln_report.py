@@ -15,8 +15,8 @@ Both feeds are downloaded in full (the EPSS CSV is about 3 MB gzipped and the
 KEV catalog about 1.5 MB), so no CVE IDs, image names or other data about the
 scanned images leave the runner. `--epss-file` and `--kev-file` read local
 copies instead, for mirrors and offline runs, and `--offline` skips both. A
-feed that cannot be fetched after retries is noted in the report, and findings
-fall back to severity-only ranking; it never fails the run.
+feed that cannot be fetched after retries is noted in the report rather than
+failing the run, since ranking is best effort and vulnerabilities only warn.
 
 Each finding gets one of these tiers, using the same thresholds as OWASP
 DockSec, plus KEV:
@@ -27,8 +27,11 @@ DockSec, plus KEV:
     MEDIUM/LOW/UNKNOWN and top 10% EPSS         -> Monitor
     MEDIUM/LOW/UNKNOWN                          -> Low Priority
 
-A finding with no EPSS score that is not in KEV is left untiered, since a
-missing score is not evidence of low risk.
+A finding with no EPSS score is ranked by its severity alone, since a missing
+score is not evidence of low risk: the EPSS feed may be unavailable, and
+advisories without a CVE ID (GHSA, RUSTSEC) are never scored. So CRITICAL and
+HIGH findings always reach at least Fix Soon and the table of findings to act
+on.
 
 Three files are written:
 
@@ -75,7 +78,6 @@ TIERS = {
     "fix-soon": ("Fix Soon", "warning"),
     "monitor": ("Monitor", "warning"),
     "low-priority": ("Low Priority", "note"),
-    "untiered": ("Untiered", "note"),
 }
 SEVERITIES = ("CRITICAL", "HIGH", "MEDIUM", "LOW", "UNKNOWN")
 # code scanning's security-severity score for each severity
@@ -184,10 +186,9 @@ def tier(severity, percentile, in_kev):
     """
     if in_kev:
         return "fix-now"
-    if percentile is None:
-        return "untiered"
     high_impact = severity in ("CRITICAL", "HIGH")
-    high_exploitation = percentile >= HIGH_EXPLOITATION_PERCENTILE
+    # an unscored finding is never treated as likely exploited, but keeps its severity
+    high_exploitation = percentile is not None and percentile >= HIGH_EXPLOITATION_PERCENTILE
     if high_impact:
         return "fix-now" if high_exploitation else "fix-soon"
     return "monitor" if high_exploitation else "low-priority"
@@ -393,8 +394,8 @@ def to_markdown(images, findings, statuses, subject="Image", inventories=()):
     lines += [
         "",
         "Findings never fail the pipeline. Fix Now: in CISA KEV, or CRITICAL/HIGH in the top 10% of EPSS; "
-        "Fix Soon: other CRITICAL/HIGH; Monitor: lower severity in the top 10% of EPSS; "
-        "Untiered: no EPSS score.",
+        "Fix Soon: other CRITICAL/HIGH; Monitor: lower severity in the top 10% of EPSS. "
+        "Findings with no EPSS score (blank below) are ranked by severity alone.",
         "",
         f"| {subject} | " + " | ".join(label for label, _ in TIERS.values()) + " | " + " | ".join(SEVERITIES) + " | Fixable |",
         "|---|" + "---:|" * (len(TIERS) + len(SEVERITIES) + 1),
@@ -455,7 +456,7 @@ def main():
     parser.add_argument("--kev-url", default=KEV_URL, help="the KEV catalog to download")
     parser.add_argument("--epss-file", help="a local EPSS CSV (optionally gzipped) to use instead of downloading")
     parser.add_argument("--kev-file", help="a local KEV catalog to use instead of downloading")
-    parser.add_argument("--offline", action="store_true", help="skip downloading the feeds and rank by severity only")
+    parser.add_argument("--offline", action="store_true", help="skip downloading the feeds, ranking by severity and any local feed files only")
     args = parser.parse_args()
     if args.image_name and len(args.input) != 1:
         parser.error("--image-name needs exactly one --input")

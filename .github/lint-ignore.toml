@@ -10,9 +10,9 @@
 # On GitHub pull requests and GitLab merge request pipelines this file is read
 # from the base branch, so new or changed entries take effect once they are
 # merged (the change that first adds this file uses its own copy, with a
-# warning). GitHub push, schedule and manual runs, and GitLab push pipelines,
-# read it from the commit being checked, and GitLab flags the change in the
-# summary. A branch can also change .hadolint.yaml or add inline ignore
+# warning). GitHub push, schedule and manual runs, and GitLab pipelines, read
+# it from the commit being checked, and GitLab flags a push that changes it in
+# the summary when the pushed range is in the clone. A branch can also change .hadolint.yaml or add inline ignore
 # comments, so review changes here, to .hadolint.yaml, and to the workflows
 # alike; code review, not this file, is what keeps findings from being hidden.
 #

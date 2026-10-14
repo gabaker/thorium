@@ -34,13 +34,13 @@ jobs:
         run: cargo install --locked --version 0.5.4 mdbook
       - name: Build mdbook docs
         run: mdbook build api/docs
-      # Save static docs site for container build
+      # the container image serves these docs from the API
       - name: Upload docs as artifacts (API hosted)
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: thorium-mdbook-bundle
           path: api/docs/book/
-      # Save docs site for hosting in Github pages (gh-pages branch)
+      # published to GitHub Pages by deploy-updated-pages
       - name: Upload docs as artifacts (Github pages)
         uses: actions/upload-pages-artifact@fc324d3547104276b827a68afc52ff2a11cc49c9 # v5.0.0
         with:
@@ -64,7 +64,7 @@ jobs:
           npm run validate-style
           npm run build
       - name: Upload UI Bundle Artifact
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: thorium-ui-bundle
           path: ui/dist/
@@ -86,13 +86,10 @@ jobs:
           rustup default nightly
           rustup install nightly
           lscpu
-          # build binaries
           cargo build --release --features vendored-openssl
-          # build the developer docs
           cargo doc --no-deps
-          # make a glibc dir
+          # gather the binaries the container build needs into one artifact
           mkdir glibc
-          # copy artifacts to the a glibc dir
           mv target/release/thoradm glibc/.
           mv target/release/thorctl glibc/.
           mv target/release/thorium-api glibc/.
@@ -104,12 +101,12 @@ jobs:
           mv target/release/thorium-operator glibc/.
           mv target/doc dev_docs
       - name: Upload glibc binaries as artifacts
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: thorium-glibc-binaries
           path: glibc/
       - name: Upload dev docs as artifacts
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: thorium-dev-docs-bundle
           path: dev_docs/
@@ -163,7 +160,7 @@ jobs:
           use-rust-cache: false
           cache-cross-binary: false
       - name: Upload ${{ matrix.platform.target }} binary artifacts
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: ${{ matrix.platform.target }}-binaries
           path: target/${{ matrix.platform.target }}/release
@@ -208,7 +205,7 @@ jobs:
           cache-cross-binary: false
           working-directory: ${{ matrix.build-target.path }}
       - name: Upload ${{ matrix.build-target.name }} x86_64-pc-windows-gnu binary artifact
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: x86_64-pc-windows-gnu-${{ matrix.build-target.name }}
           path: target/x86_64-pc-windows-gnu/release
@@ -236,57 +233,57 @@ jobs:
           fetch-depth: 0
           persist-credentials: false
       - name: Download UI Bundle Artifacts
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           name: thorium-ui-bundle
           path: ui/dist
       - name: Download mdBook Bundle Artifacts
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           name: thorium-mdbook-bundle
           path: user_docs
       - name: Download Developer Docs Artifacts
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           name: thorium-dev-docs-bundle
           path: dev_docs
       - name: Download Thorium glibc Binary Artifacts
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           name: thorium-glibc-binaries
           path: glibc
       - name: Download Thorium musl Binary Artifacts
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           name: x86_64-unknown-linux-musl-binaries
           path: musl
       #- name: Download Thorium Linux aarch64 Binary artifacts
-      #  uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+      #  uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
       #  with:
       #    name: aarch64-unknown-linux-musl-binaries
       #    path: aarch
       - name: Download Thorium Windows Agent Artifact
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
            name: x86_64-pc-windows-gnu-agent
            path: windows/agent
       - name: Download Thorium Windows Thorctl Artifact
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
            name: x86_64-pc-windows-gnu-thorctl
            path: windows/thorctl
       - name: Download Thorium Windows Reactor Artifact
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
            name: x86_64-pc-windows-gnu-reactor
            path: windows/reactor
       - name: Download Thorium macos x86_64 Binary Artifacts
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           name: x86_64-apple-darwin-binaries
           path: macos/x86_64
       - name: Download Thorium macos aarch64 Binary Artifacts
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           name: aarch64-apple-darwin-binaries
           path: macos/aarch64
@@ -400,11 +397,19 @@ jobs:
         env:
           IMAGE: ${{ steps.image.outputs.image }}
         run: docker save --output "${RUNNER_TEMP}/thorium-image.tar" "$IMAGE"
+      # uploaded before the scan so the warn-only scan steps can never delay or block publishing
+      - name: Upload Thorium Container Image
+        if: steps.image.outputs.publish == 'true'
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: thorium-core-image
+          path: ${{ runner.temp }}/thorium-image.tar
+          retention-days: 1
       # Every build is scanned before it is published, with the digest-pinned Trivy image the
-      # security workflows use (image-rescan.yml rescans published images weekly). Trivy reads the saved image, so it gets no Docker socket, and it needs
-      # the network only for its vulnerability database. The scan, SBOM and report steps never
-      # fail the job, and their timeouts keep a stalled download from timing out the job and
-      # blocking the publish: vulnerabilities only warn.
+      # security workflows use (image-rescan.yml rescans published images weekly). Trivy reads
+      # the saved image, so it gets no Docker socket, and needs the network only for its
+      # vulnerability database. Vulnerabilities only warn, so these steps never fail the job, and
+      # their timeouts keep a stalled download from running the job into its own timeout.
       - name: Scan Thorium Container Image
         id: scan
         if: steps.save.outcome == 'success'
@@ -459,18 +464,11 @@ jobs:
       - name: Store Thorium Container Image Scan
         if: ${{ !cancelled() && steps.scan.outcome == 'success' }}
         continue-on-error: true
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: trivy-image-report
           path: ${{ runner.temp }}/trivy-image/
           retention-days: 30
-      - name: Upload Thorium Container Image
-        if: steps.image.outputs.publish == 'true'
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
-        with:
-          name: thorium-core-image
-          path: ${{ runner.temp }}/thorium-image.tar
-          retention-days: 1
 
   # uploads the image scan to code scanning in a job that runs no build or scanner code, so the
   # `security-events: write` token never shares a job with them
@@ -490,7 +488,7 @@ jobs:
       security-events: write # upload SARIF results to code scanning
     steps:
       - name: Download Thorium Container Image Scan
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           name: trivy-image-report
           path: ${{ runner.temp }}/trivy-image
@@ -506,7 +504,7 @@ jobs:
       # the filtered SARIF leaves out findings ignored by .github/lint-ignore.toml
       - name: Upload Thorium Container Image Scan SARIF
         if: steps.sarif.outputs.found == 'true'
-        uses: github/codeql-action/upload-sarif@2892aa5e19bbd11bc0cff5427e3b750a04d9e3c2 # v4.38.2
+        uses: github/codeql-action/upload-sarif@24c54180a607b1449ed407dd24f251e4e9147c8d # v4.38.3
         with:
           sarif_file: ${{ runner.temp }}/trivy-image/trivy-image-filtered.sarif
           category: trivy-image-build
@@ -521,7 +519,7 @@ jobs:
       packages: write # push images to ghcr.io
     steps:
       - name: Download Thorium Container Image
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           name: thorium-core-image
           path: ${{ runner.temp }}/image
@@ -556,8 +554,8 @@ jobs:
           echo "Pointing latest at ${LATEST_SOURCE}"
           docker buildx imagetools create --tag "$LATEST_IMAGE" "$LATEST_SOURCE"
 
-  # Deploy the updated mdbook docs to github pages
-  # We only deploy docs from main on the core repo, and only once the container image is published
+  # docs deploy only from main on the core repo, and only after the container image is
+  # published, so the hosted docs never describe an image that failed to publish
   deploy-updated-pages:
     name: Deploy GitHub Pages
     if: ${{ github.ref_type == 'branch' && github.ref == 'refs/heads/main' && !github.event.repository.fork }}
