@@ -3,7 +3,8 @@
 Uses only the Python standard library. A request is retried with exponential
 backoff and jitter when it fails in a way that is likely to be transient:
 
-* network errors: connection failures, resets, timeouts and truncated reads
+* network errors: connection failures, resets, timeouts, TLS errors and
+  truncated reads
 * HTTP 429 and 5xx responses, honoring a `Retry-After` header
 * GitHub's rate limit (HTTP 403 with `x-ratelimit-remaining: 0`), but only when
   the limit resets soon enough to wait for it
@@ -19,7 +20,6 @@ import email.utils
 import http.client
 import json
 import random
-import socket
 import time
 import urllib.error
 import urllib.request
@@ -114,8 +114,10 @@ def get_bytes(url, headers=None, timeout=30, attempts=4):
             else:
                 raise HttpError(url, f"HTTP {status} {error.reason}", status) from error
             failure = HttpError(url, f"HTTP {status} {error.reason}", status)
-        # URLError wraps connection failures; the rest can surface while reading the body
-        except (urllib.error.URLError, socket.timeout, TimeoutError, ConnectionError, http.client.HTTPException) as error:
+        # URLError covers failures before a response; anything else, such as a TLS
+        # error or reset while reading the body, arrives as a bare OSError or
+        # HTTPException, and callers only expect HttpError
+        except (urllib.error.URLError, OSError, http.client.HTTPException) as error:
             reason = getattr(error, "reason", None) or error
             failure = HttpError(url, f"request failed: {reason}")
         if attempt == attempts:
