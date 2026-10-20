@@ -82,6 +82,72 @@ fn last_year_bucket(year: i32, partition_size: u16) -> u32 {
     u32::try_from(helpers::partition(last_second, year, partition_size)).unwrap_or_default()
 }
 
+/// The most rows a listing returns in one page unless its route sets its own cap
+pub const DEFAULT_LIMIT_CAP: usize = 10_000;
+
+/// The most stage-log lines one request returns
+pub const STAGE_LOG_LIMIT_CAP: usize = 250_000;
+
+/// Check a row limit from a request against the most its route allows
+///
+/// # Arguments
+///
+/// * `limit` - The limit the request asked for
+/// * `cap` - The largest limit this route allows
+/// * `name` - The name of the request parameter the limit came from
+pub fn check_limit(limit: usize, cap: usize, name: &str) -> Result<usize, ApiError> {
+    // a limit of 0 never fills a page and anything above the cap is too large to serve
+    if limit == 0 || limit > cap {
+        return bad!(format!("{name} must be between 1 and {cap}, got {limit}"));
+    }
+    Ok(limit)
+}
+
+/// Convert a row limit into the 32 bit signed integer a CQL `LIMIT` takes
+///
+/// # Arguments
+///
+/// * `limit` - The limit to convert
+pub fn limit_to_cql(limit: usize) -> Result<i32, ApiError> {
+    // refuse limits that don't fit instead of truncating them
+    i32::try_from(limit).map_err(|_| {
+        ApiError::new(
+            axum::http::StatusCode::BAD_REQUEST,
+            Some(format!("A limit of {limit} is too large")),
+        )
+    })
+}
+
+/// Convert a row limit plus the extra row cursors read to detect ties into a CQL `LIMIT`
+///
+/// # Arguments
+///
+/// * `limit` - The limit to convert
+pub fn limit_plus_one_to_cql(limit: usize) -> Result<i32, ApiError> {
+    // add our extra row without overflowing
+    match limit.checked_add(1) {
+        Some(plus_one) => limit_to_cql(plus_one),
+        None => bad!(format!("A limit of {limit} is too large")),
+    }
+}
+
+/// Compare two UUIDs the way Scylla orders a `uuid` clustering column
+///
+/// Scylla orders by UUID version first and then by the UUID's bytes, so this matches it for
+/// every random (version 4) id Thorium generates.
+///
+/// # Arguments
+///
+/// * `left` - The first UUID to compare
+/// * `right` - The second UUID to compare
+#[must_use]
+pub fn scylla_uuid_cmp(left: &Uuid, right: &Uuid) -> Ordering {
+    // compare versions first and then fall back to the raw bytes
+    left.get_version_num()
+        .cmp(&right.get_version_num())
+        .then_with(|| left.as_bytes().cmp(right.as_bytes()))
+}
+
 /// The data to retain throughout this cursors life
 #[derive(Serialize, Deserialize, Debug)]
 pub struct ScyllaCursorRetain<D: CursorCore> {
@@ -211,12 +277,12 @@ pub trait CursorCore: Debug + Serialize + for<'a> Deserialize<'a> {
         false
     }
 
-    /// Get our the max number of rows to return
+    /// Get the max number of rows to return, checked against the most a listing allows
     ///
     /// # Arguments
     ///
     /// * `params` - The params to use to build this cursor
-    fn get_limit(params: &Self::Params) -> usize;
+    fn get_limit(params: &Self::Params) -> Result<usize, ApiError>;
 
     /// Add an item to our tie breaker map
     ///
@@ -232,8 +298,8 @@ pub trait CursorCore: Debug + Serialize + for<'a> Deserialize<'a> {
     /// * `set` - The current set of deduped data
     fn dedupe_item(&self, dedupe_set: &mut HashSet<String>) -> bool;
 
-    /// Get the tag clustering key for a row without the timestamp
-    fn get_tag_clustering_key(&self) -> &String {
+    /// Get the tag clustering key for a row without the timestamp, as the tags table stores it
+    fn get_tag_clustering_key(&self) -> String {
         unimplemented!("This type does not support tags");
     }
 }
@@ -247,7 +313,7 @@ pub trait ScyllaCursorSupport: CursorCore {
     /// The unique key for this cursors row
     type UniqueType<'a>: Debug + PartialEq;
 
-    /// Add an item to our tie breaker map
+    /// Add an item to our tag tie breaker map, keeping any tie a group already has
     ///
     /// # Arguments
     ///
@@ -281,6 +347,16 @@ pub trait ScyllaCursorSupport: CursorCore {
 
     /// Get the unique key for this row
     fn get_unique_key<'a>(&'a self) -> Self::UniqueType<'a>;
+
+    /// Compare two rows that share a timestamp in the order a page consumes them
+    ///
+    /// This must match the order the tie query reads rows within one partition, so the rows
+    /// a page consumes from each partition are always the ones before its recorded tie.
+    ///
+    /// # Arguments
+    ///
+    /// * `other` - The row to compare against
+    fn cmp_ties(&self, other: &Self) -> Ordering;
 
     /// Add a group to a specific returned line
     fn add_group_to_line(&mut self, _group: String) {
@@ -425,7 +501,7 @@ pub trait ScyllaCursorSupport: CursorCore {
         // go through and get our clustering keys and insert them into our map
         for (index, row) in ambigous.drain(..).enumerate() {
             // get this rows clustering key
-            let ckey = row.get_tag_clustering_key().clone();
+            let ckey = row.get_tag_clustering_key();
             // insert this into our map
             sorted.insert(ckey, index);
             // add this row to our sort list
@@ -787,7 +863,7 @@ where
                 end_year,
                 end_bucket,
                 partition_size: chunk,
-                limit: D::get_limit(&params),
+                limit: D::get_limit(&params)?,
                 dedupe,
                 data: Vec::default(),
                 sorted: BTreeMap::default(),
@@ -872,7 +948,7 @@ where
                 end_year,
                 end_bucket,
                 partition_size: chunk,
-                limit: D::get_limit(&params),
+                limit: D::get_limit(&params)?,
                 dedupe,
                 data: Vec::default(),
                 sorted: BTreeMap::default(),
@@ -975,7 +1051,7 @@ where
                     username,
                     retain,
                     chunk,
-                    D::get_limit(&params),
+                    D::get_limit(&params)?,
                     dedupe,
                 )
             }
@@ -1350,10 +1426,12 @@ where
                     // we have a list of data to return
                     Some((timestamp, mut item)) => {
                         // if we have multiple rows with the same timestamp then disambiguate them
-                        // only tags have to do this
                         if tag_ties.is_some() && item.len() > 1 {
                             // sort our ambigous rows by their cluster key
                             D::sort_by_cluster_key(&mut item);
+                        } else if item.len() > 1 {
+                            // consume tied rows in the order their tie queries read them
+                            item.make_contiguous().sort_by(D::cmp_ties);
                         }
                         // consume only enough data to fill our data
                         while self.data.len() < self.limit {
@@ -1375,13 +1453,11 @@ where
                                 None => continue 'outer,
                             }
                         }
-                        // add every leftover row to our tie map so that rows in groups other
-                        // than the front row's aren't skipped by our next query
+                        // if this is a tags cursor add a tag tie for every group in our
+                        // remaining rows, keeping the first unconsumed row of each
                         if let Some(tag_ties) = &mut tag_ties {
-                            // tag ties overwrite each other so add them back to front so the
-                            // front most row in each group wins
-                            for tied_row in item.iter().rev() {
-                                // add this tie to our tag tie map
+                            for tied_row in &item {
+                                // add this row's groups to our tag tie map
                                 tied_row.add_tag_tie(tag_ties);
                             }
                         } else {
@@ -1427,7 +1503,7 @@ where
     #[instrument(name = "ScyllaCursor::next_general", skip_all, err(Debug))]
     async fn next_general(&mut self, shared: &Shared) -> Result<(), ApiError> {
         // Get the limit + 1 of data for each group so we can check if we end on any ties
-        let limit = (self.limit + 1) as i32;
+        let limit = limit_plus_one_to_cql(self.limit)?;
         // get the number of buckets to check at once
         let bucket_limit = D::bucket_limit(&self.retain.extra_filter);
         // get data from any previously tied queries
@@ -1622,11 +1698,18 @@ where
         mut tags_retain: TagsRetain,
         shared: &Shared,
     ) -> Result<TagsRetain, ApiError> {
+        // size our mapping for every tag of every row we may return without overflowing
+        let Some(capacity) = tags_retain.tags_required.checked_mul(self.limit) else {
+            return bad!(format!(
+                "{} tags with a limit of {} is too large",
+                tags_retain.tags_required, self.limit
+            ));
+        };
         // get the group by  this cusrsor will use
         // put it back when were done with the refs to avoid cloning
         let group_by = std::mem::take(&mut self.retain.group_by);
         // keep a mapping of the tags data we retrieved
-        let mut mapping = HashMap::with_capacity(tags_retain.tags_required * self.limit);
+        let mut mapping = HashMap::with_capacity(capacity);
         // get the right prepared statements depending on if this cursor is case insensitive
         let (ties_prepared, query_prepared) = if tags_retain.case_insensitive {
             (
@@ -1783,7 +1866,7 @@ pub trait SimpleCursorExt {
     async fn query(
         partition: &str,
         tie: &Option<String>,
-        limit: usize,
+        limit: i32,
         shared: &Shared,
     ) -> Result<QueryResult, ExecutionError>;
 
@@ -1940,7 +2023,7 @@ where
             let query = D::query(
                 &self.retain.partitions[self.retain.index],
                 &self.retain.tie,
-                limit,
+                limit_to_cql(limit)?,
                 shared,
             )
             .await?;
@@ -2238,6 +2321,15 @@ where
     D: GroupedScyllaCursorSupport,
     D: Debug,
 {
+    /// Get our limit plus the extra row we read to detect ties and exhausted rows
+    fn limit_plus_one(&self) -> Result<i32, ApiError> {
+        // add our extra row without overflowing
+        match self.limit.checked_add(1) {
+            Some(plus_one) => Ok(plus_one),
+            None => bad!(format!("A limit of {} is too large", self.limit)),
+        }
+    }
+
     /// Create a new cursor object from just params
     ///
     /// # Arguments
@@ -2396,7 +2488,7 @@ where
             &self.retain.ties,
             &self.retain.extra_filter,
             // get an extra row to check for more ties
-            self.limit + 1,
+            self.limit_plus_one()?,
             shared,
         );
         // wait for all of our futures to complete 50 at a time
@@ -2491,6 +2583,8 @@ where
         current_sort_by: &D::SortBy,
         shared: &Shared,
     ) -> Result<Vec<QueryResult>, ApiError> {
+        // get an extra row to check for exhausted rows and ties
+        let limit = self.limit_plus_one()?;
         // create our futures
         let mut futures = Vec::new();
         for group in &self.retain.group_by {
@@ -2498,8 +2592,7 @@ where
                 group,
                 &self.retain.extra_filter,
                 current_sort_by,
-                // get an extra row to check for exhausted rows and ties
-                self.limit + 1,
+                limit,
                 shared,
             ));
         }
@@ -2521,16 +2614,12 @@ where
     /// * `shared` - Shared Thorium objects
     #[instrument(name = "GroupedScyllaCursor::query", skip(self, shared), err(Debug))]
     async fn query(&self, shared: &Shared) -> Result<Vec<QueryResult>, ApiError> {
+        // get an extra row to check for exhausted rows and ties
+        let limit = self.limit_plus_one()?;
         // create our futures
         let mut futures = Vec::new();
         for group in &self.retain.group_by {
-            futures.push(D::pull(
-                group,
-                &self.retain.extra_filter,
-                // get an extra row to check for exhausted rows and ties
-                self.limit + 1,
-                shared,
-            ));
+            futures.push(D::pull(group, &self.retain.extra_filter, limit, shared));
         }
         // query for each group 50 at a time
         let query_results = stream::iter(futures)
@@ -3817,15 +3906,30 @@ impl<D: RedisCursorSupport> RedisCursor<D> {
 #[cfg(test)]
 mod tests {
     use super::{
-        ExistsCursor, GroupedScyllaCursor, GroupedScyllaCursorRetain, ScyllaCursor,
-        ScyllaCursorRetain, build_group_filter, build_query_string_clause,
-        scylla_cursor_save_expire, simple_scylla_delete_kind, simple_scylla_save_kind,
+        DEFAULT_LIMIT_CAP, ExistsCursor, GroupedScyllaCursor, GroupedScyllaCursorRetain,
+        GroupedScyllaCursorSupport, ScyllaCursor, ScyllaCursorRetain, build_group_filter,
+        build_query_string_clause, check_limit, last_year_bucket, limit_plus_one_to_cql,
+        limit_to_cql, scylla_cursor_save_expire, scylla_uuid_cmp, simple_scylla_delete_kind,
+        simple_scylla_save_kind,
     };
-    use crate::models::{NetworkPolicyListLine, NetworkPolicyListRow, SampleListLine};
+    use crate::models::{
+        NetworkPolicyListLine, NetworkPolicyListParams, NetworkPolicyListRow, SampleListLine,
+    };
     use crate::utils::helpers;
+    use axum::http::StatusCode;
     use chrono::prelude::*;
     use std::collections::{HashMap, HashSet};
     use uuid::Uuid;
+
+    /// The last bucket of a year is the bucket of its final second, so it counts the length of
+    /// that year: 366 days of 180 second buckets in 2024 and 365 days in 2025.
+    #[test]
+    fn last_year_bucket_counts_the_entered_year() {
+        // 2024 is a leap year with 366 * 480 buckets of 180 seconds
+        assert_eq!(last_year_bucket(2024, 180), 175_679);
+        // 2025 is a regular year with 365 * 480 buckets of 180 seconds
+        assert_eq!(last_year_bucket(2025, 180), 175_199);
+    }
 
     /// `SimpleScyllaCursor::save` builds the exhausted-cursor `DEL` key with the same
     /// `CursorKind` as the save key. The kind is part of the redis key, so this is what lets the
@@ -4069,6 +4173,24 @@ mod tests {
         }
     }
 
+    /// Give rows submissions that sort the way the rows are listed when tied rows are consumed
+    ///
+    /// Tied sample rows are consumed newest submission first, so this gives the first row the
+    /// highest submission id and each later row a lower one.
+    ///
+    /// # Arguments
+    ///
+    /// * `rows` - The rows to give submissions to
+    fn in_consume_order(rows: &mut [SampleListLine]) {
+        // generate a submission for every row and sort them the way they are consumed
+        let mut ids: Vec<Uuid> = rows.iter().map(|_| Uuid::new_v4()).collect();
+        ids.sort_by(|left, right| scylla_uuid_cmp(right, left));
+        // hand them out in that order
+        for (row, id) in rows.iter_mut().zip(ids) {
+            row.submission = Some(id);
+        }
+    }
+
     /// Add rows sharing one timestamp to a cursor's sorted buffer
     ///
     /// # Arguments
@@ -4094,6 +4216,7 @@ mod tests {
             .map(|i| sample(&format!("i{i}"), &["g2"], at))
             .collect();
         rows.extend((0..2).map(|i| sample(&format!("j{i}"), &["g1"], at)));
+        in_consume_order(&mut rows);
         add_sorted(&mut cursor, rows);
         // fill a page of 4
         cursor.consume_sorted(None);
@@ -4110,9 +4233,10 @@ mod tests {
     fn consume_sorted_records_tie_for_front_leftover_group() {
         let mut cursor = sample_cursor(sample_retain(), 4, false);
         let at = day(2026, 9, 1);
-        let rows: Vec<SampleListLine> = (0..5)
+        let mut rows: Vec<SampleListLine> = (0..5)
             .map(|i| sample(&format!("i{i}"), &["g2"], at))
             .collect();
+        in_consume_order(&mut rows);
         let fifth = rows[4].submission.unwrap().to_string();
         add_sorted(&mut cursor, rows);
         cursor.consume_sorted(None);
@@ -4256,5 +4380,72 @@ mod tests {
             cursor.retain.ties,
             vec![("c".to_owned(), vec!["g2".to_owned()])]
         );
+    }
+
+    /// UUIDs sort the way Scylla 6.2 returns a `uuid` clustering column: by version and then
+    /// by unsigned bytes
+    #[test]
+    fn scylla_uuid_cmp_matches_scylla_order() {
+        // the order Scylla returned these ids from one partition clustered by them
+        let scylla_order = [
+            "10000000-0000-1000-8000-000000000000",
+            "00000000-0000-4000-8000-000000000000",
+            "10000000-0000-4000-0f00-000000000000",
+            "10000000-0000-4000-ff00-000000000000",
+            "7fffffff-0000-4000-8000-000000000000",
+            "80000000-0000-4000-8000-000000000000",
+            "ffffffff-0000-4000-8000-000000000000",
+        ];
+        let expected: Vec<Uuid> = scylla_order
+            .iter()
+            .map(|id| Uuid::parse_str(id).unwrap())
+            .collect();
+        // sorting them in reverse with our comparator gives the same order
+        let mut sorted: Vec<Uuid> = expected.iter().rev().copied().collect();
+        sorted.sort_by(scylla_uuid_cmp);
+        assert_eq!(sorted, expected);
+    }
+
+    /// A limit of 0 or above the cap is refused with a 400, and 1 and the cap are accepted
+    #[test]
+    fn check_limit_bounds() {
+        // 0 and one past the cap are bad requests
+        for limit in [0, DEFAULT_LIMIT_CAP + 1, usize::MAX] {
+            let status = check_limit(limit, DEFAULT_LIMIT_CAP, "limit").map_err(|err| err.status());
+            assert_eq!(status, Err(StatusCode::BAD_REQUEST), "limit {limit}");
+        }
+        // 1 and the cap itself are allowed
+        for limit in [1, DEFAULT_LIMIT_CAP] {
+            assert_eq!(
+                check_limit(limit, DEFAULT_LIMIT_CAP, "limit").ok(),
+                Some(limit)
+            );
+        }
+    }
+
+    /// Converting a limit that doesn't fit in a CQL int is a 400, not a wrap or a truncation
+    #[test]
+    fn limit_conversions_are_checked() {
+        // one row past i32::MAX doesn't fit
+        let status = limit_plus_one_to_cql(i32::MAX as usize).map_err(|err| err.status());
+        assert_eq!(status, Err(StatusCode::BAD_REQUEST));
+        // a limit above u32::MAX doesn't fit
+        let status = limit_to_cql(u32::MAX as usize + 1).map_err(|err| err.status());
+        assert_eq!(status, Err(StatusCode::BAD_REQUEST));
+        // limits that fit convert unchanged
+        assert_eq!(limit_to_cql(50).ok(), Some(50));
+        assert_eq!(limit_plus_one_to_cql(50).ok(), Some(51));
+    }
+
+    /// Network policy listings refuse an `i32::MAX` limit, whose next row overflows
+    #[test]
+    fn network_policy_limit_is_capped() {
+        // build params asking for i32::MAX rows
+        let params = NetworkPolicyListParams {
+            limit: i32::MAX as usize,
+            ..NetworkPolicyListParams::default()
+        };
+        let status = NetworkPolicyListLine::get_limit(&params).map_err(|err| err.status());
+        assert_eq!(status, Err(StatusCode::BAD_REQUEST));
     }
 }

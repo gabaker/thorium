@@ -73,12 +73,11 @@ impl StreamDepth {
     /// * `depth` - The number of objects between two points in a stream
     /// * `start` - The earliest date that was used when counting objects
     /// * `end` - The latest date that was used when counting objects
-    pub(super) fn new(depth: i64, start: i64, end: i64) -> Self {
-        // convert start to DateTime
-        let start = DateTime::from_timestamp(start, 0).unwrap();
-        // convert end to DateTime
-        let end = DateTime::from_timestamp(end, 0).unwrap();
-        StreamDepth { start, end, depth }
+    pub(super) fn new(depth: i64, start: i64, end: i64) -> Result<Self, ApiError> {
+        // convert start and end to DateTimes, refusing timestamps no date can hold
+        let start = db::streams::to_datetime(start)?;
+        let end = db::streams::to_datetime(end)?;
+        Ok(StreamDepth { start, end, depth })
     }
 }
 
@@ -203,14 +202,7 @@ impl Stream {
         split: NonZeroU64,
         shared: &Shared,
     ) -> Result<Vec<StreamDepth>, ApiError> {
-        // get our split as an i64
-        let split_i64 = split.get() as i64;
-        // throw an error if we try to retrieve more then 10000 depths
-        if at_least!((end - start) / 10, 1) / split_i64 > 10_000 {
-            return bad!("cannot retrieve more then 10,000 depths at once".to_owned());
-        }
-
-        // get depths from correct backend
+        // get depths from correct backend, which refuses spans and splits that are too large
         db::streams::depth_range(&group.name, namespace, stream, start, end, split, shared).await
     }
 
@@ -274,9 +266,13 @@ impl Stream {
         shared: &Shared,
         span: &Span,
     ) -> Result<Vec<StreamDepth>, ApiError> {
+        // get the length of our span without overflowing
+        let Some(length) = end.checked_sub(start) else {
+            return bad!(format!("The span from {start} to {end} is too large"));
+        };
         // assume we can fit the entire range into one map
         // default to breaking it into 10 splits
-        let split = at_least!((end - start) / 10, 1);
+        let split = at_least!(length / 10, 1);
         // cast our split to a non zero u64
         // since this is always going to be at least 1 this unwrap will never fail
         // we could use the unsafe function here safely but I am choosing not too since an unwrap
@@ -447,7 +443,10 @@ mod tests {
     #[test]
     fn accumulated_depth_triggers_min_early_exit() {
         // a day-window whose mapped depths sum to 150 jobs
-        let new = vec![StreamDepth::new(100, 0, 1), StreamDepth::new(50, 1, 2)];
+        let new = vec![
+            StreamDepth::new(100, 0, 1).unwrap(),
+            StreamDepth::new(50, 1, 2).unwrap(),
+        ];
         // starting from a zero accumulator, 150 jobs must exceed a minimum bound of 100
         assert!(
             Stream::accumulated_depth_exceeds(0, &new, 100),
@@ -460,7 +459,7 @@ mod tests {
     #[test]
     fn accumulated_depth_below_min_does_not_exit() {
         // a day-window whose mapped depths sum to only 40 jobs
-        let new = vec![StreamDepth::new(40, 0, 1)];
+        let new = vec![StreamDepth::new(40, 0, 1).unwrap()];
         // 40 jobs is below a minimum bound of 100 so the early exit must not fire
         assert!(
             !Stream::accumulated_depth_exceeds(0, &new, 100),

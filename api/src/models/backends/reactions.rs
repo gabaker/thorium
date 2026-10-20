@@ -15,10 +15,10 @@ use super::db;
 use crate::models::ApiCursor;
 use crate::models::ReactionCursorParams;
 use crate::models::{
-    BulkReactionResponse, Group, GroupAllowAction, JobList, Pipeline, Reaction, ReactionCache,
-    ReactionCacheUpdate, ReactionDetailsList, ReactionExpire, ReactionList, ReactionRequest,
-    ReactionStatus, ReactionUpdate, Repo, RepoDependency, Sample, StageLogs, StageLogsAdd,
-    StatusUpdate, User, UserRole,
+    BulkReactionResponse, GenericJobOpts, Group, GroupAllowAction, JobList, Pipeline, Reaction,
+    ReactionCache, ReactionCacheUpdate, ReactionDetailsList, ReactionExpire, ReactionList,
+    ReactionRequest, ReactionStatus, ReactionUpdate, Repo, RepoDependency, Sample, StageLogs,
+    StageLogsAdd, StatusUpdate, User, UserRole,
 };
 use crate::utils::{ApiError, Shared, bounder};
 use crate::{
@@ -49,6 +49,45 @@ impl InternalReactionCacheFileUpdates {
     }
 }
 
+/// Validate a user may override the args of every image whose options override them
+///
+/// # Arguments
+///
+/// * `user` - The user trying to override args
+/// * `group` - The group the images are in
+/// * `group_name` - The name of the group the images are in
+/// * `opts` - The images and the options set for each of them
+/// * `shared` - Shared Thorium objects
+async fn can_override_opts<'a, I>(
+    user: &User,
+    group: &Group,
+    group_name: &str,
+    opts: I,
+    shared: &Shared,
+) -> Result<(), ApiError>
+where
+    I: IntoIterator<Item = (&'a String, &'a GenericJobOpts)>,
+{
+    // get the images we are overriding
+    let overrides = opts
+        .into_iter()
+        .filter(|(_, opts)| {
+            opts.override_positionals || opts.override_kwargs || opts.override_cmd.is_some()
+        })
+        .map(|(name, _)| name)
+        .collect::<Vec<&String>>();
+    // only validate reactions if we found some overrides
+    if !overrides.is_empty() {
+        // get these images scalers
+        let scalers = db::images::get_scalers(group_name, &overrides, shared).await?;
+        // make sure we have the right developer roles
+        if group.developer_many(user, &scalers).is_err() {
+            return unauthorized!();
+        }
+    }
+    Ok(())
+}
+
 impl ReactionRequest {
     /// Validate we are allowed to overwrite args for any images we try to
     ///
@@ -64,27 +103,10 @@ impl ReactionRequest {
         group: &Group,
         shared: &Shared,
     ) -> Result<(), ApiError> {
-        // get the images we are overriding
-        let overrides = self
-            .args
-            .iter()
-            .filter(|(_, args)| {
-                args.opts.override_positionals
-                    || args.opts.override_kwargs
-                    || args.opts.override_cmd.is_some()
-            })
-            .map(|(name, _)| name)
-            .collect::<Vec<&String>>();
-        // only validate reactions if we found some overrides
-        if !overrides.is_empty() {
-            // get these images scalers
-            let scalers = db::images::get_scalers(&self.group, &overrides, shared).await?;
-            // make sure we have the right developer roles
-            if group.developer_many(user, &scalers).is_err() {
-                return unauthorized!();
-            }
-        }
-        Ok(())
+        // get the options this request sets for each image
+        let opts = self.args.iter().map(|(name, args)| (name, &args.opts));
+        // make sure we may override args for any image whose options override them
+        can_override_opts(user, group, &self.group, opts, shared).await
     }
 
     /// Uploads any ephemeral files required for this sample to execute
@@ -283,6 +305,11 @@ impl Reaction {
 
     /// Creates a new reactions in bulk
     ///
+    /// Every request is checked before anything is created: if any one request
+    /// is refused (for example an argument override the user may not make, or a
+    /// sample the user cannot read), the whole bulk request is refused and no
+    /// reactions are created.
+    ///
     /// # Arguments
     ///
     /// * `user` - The user that is creating this reaction
@@ -311,26 +338,27 @@ impl Reaction {
                 e.insert(pipeline);
                 // check if this group is also not in the cache
                 group_cache.entry(&req.group).or_insert(group);
-                // get the images we are overriding args for
-                let overrides = req
-                    .args
-                    .iter()
-                    .filter(|(_, args)| {
-                        args.opts.override_positionals
-                            || args.opts.override_kwargs
-                            || args.opts.override_cmd.is_some()
-                    })
-                    .map(|(name, _)| name)
-                    .collect::<Vec<&String>>();
-                // if we are overriding args then add them to our map
-                if !overrides.is_empty() {
-                    // get an entry to this groups override set
-                    let entry = override_cache
-                        .entry(&req.group)
-                        .or_insert_with(|| HashSet::with_capacity(overrides.len()));
-                    // add our images
-                    entry.extend(overrides.into_iter());
-                }
+            }
+            // get the images this request overrides args for, including requests for a
+            // pipeline that is already cached
+            let overrides = req
+                .args
+                .iter()
+                .filter(|(_, args)| {
+                    args.opts.override_positionals
+                        || args.opts.override_kwargs
+                        || args.opts.override_cmd.is_some()
+                })
+                .map(|(name, _)| name)
+                .collect::<Vec<&String>>();
+            // if we are overriding args then add them to our map
+            if !overrides.is_empty() {
+                // get an entry to this group's override set
+                let entry = override_cache
+                    .entry(&req.group)
+                    .or_insert_with(|| HashSet::with_capacity(overrides.len()));
+                // add our images
+                entry.extend(overrides.into_iter());
             }
         }
         // make sure none of these pipelines are banned
@@ -350,6 +378,18 @@ impl Reaction {
             group.allowable(GroupAllowAction::Reactions)?;
             // make sure this group is editable
             group.editable(user)?;
+        }
+        // gather the samples of every request, each sample once
+        let samples = requests
+            .iter()
+            .flat_map(|req| req.samples.iter().cloned())
+            .collect::<HashSet<String>>()
+            .into_iter()
+            .collect::<Vec<String>>();
+        // make sure we have access to every sample we are trying to create reactions for
+        if !samples.is_empty() {
+            // authorize this user has access to all the samples to pass in to these reactions
+            Sample::authorize(user, &samples, shared).await?;
         }
         // make sure we can override args in each of the images we try too
         for (group, images) in override_cache {
@@ -373,10 +413,12 @@ impl Reaction {
 
     /// Creates a new reactions in bulk for different users
     ///
-    /// Reactions are not created for disabled users; their requests are
-    /// rejected with per-user error entries instead of failing the whole
-    /// request so bulk callers like the event handler can keep creating
-    /// reactions for their other users.
+    /// Reactions are not created for disabled users or for users whose bulk
+    /// request is refused (for example a sample they can no longer read);
+    /// their requests are rejected with per-user error entries instead of
+    /// failing the whole request so bulk callers like the event handler can
+    /// keep creating reactions for their other users. Server errors still
+    /// fail the whole request.
     ///
     /// # Arguments
     ///
@@ -413,8 +455,29 @@ impl Reaction {
                 // move on to the next user without creating any reactions
                 continue;
             }
+            // keep how many requests this user made in case their bulk request is refused
+            let req_count = reqs.len();
             // create this users reactions
-            let user_resp = Self::create_bulk(&other_user, reqs, shared).await?;
+            let user_resp = match Self::create_bulk(&other_user, reqs, shared).await {
+                Ok(user_resp) => user_resp,
+                // a refused bulk request creates nothing, so report it for this user alone
+                Err(error) if error.status().is_client_error() => {
+                    // only expose the message that is safe to show, or the status code otherwise
+                    let msg = error
+                        .public_msg()
+                        .unwrap_or_else(|| error.status().to_string());
+                    // build a response with an error entry for every refused request
+                    let mut user_resp = BulkReactionResponse::default();
+                    // add an error for each reaction request that was refused
+                    for index in 0..req_count {
+                        // add this request's error
+                        user_resp.errors.insert(index, msg.clone());
+                    }
+                    user_resp
+                }
+                // fail the whole call on server errors so the caller can retry it
+                Err(error) => return Err(error),
+            };
             // add the responses for creating this users reactions
             resp.insert(username, user_resp);
         }
@@ -799,6 +862,14 @@ impl Reaction {
         group.allowable(GroupAllowAction::Reactions)?;
         // make sure this user can modify this reaction
         can_modify!(self.creator, group, user);
+        // get the options this update sets that differ from each stage's current options
+        let changed = update
+            .args
+            .iter()
+            .filter_map(|(stage, args)| args.opts.as_ref().map(|opts| (stage, opts)))
+            .filter(|(stage, opts)| self.args.get(*stage).map(|args| &args.opts) != Some(*opts));
+        // make sure we may override args for any stage whose options this update changes
+        can_override_opts(user, group, &self.group, changed, shared).await?;
         // apply all updates to the args in this reaction
         for (stage, mut args) in update.args.drain() {
             // get args entry or insert a default one

@@ -6,6 +6,7 @@ use std::collections::{HashMap, HashSet};
 use tracing::{Level, event, instrument};
 use uuid::Uuid;
 
+use super::cursors::{DEFAULT_LIMIT_CAP, check_limit};
 use super::keys::{self, StreamKeys, SystemKeys, UserKeys};
 use super::{SimpleScyllaCursor, helpers};
 use crate::models::system::{
@@ -684,12 +685,14 @@ pub async fn list_nodes(
     params: NodeListParams,
     shared: &Shared,
 ) -> Result<SimpleScyllaCursor<NodeListLine>, ApiError> {
+    // make sure our page size is one we can serve
+    let page_size = check_limit(params.page_size, DEFAULT_LIMIT_CAP, "page_size")?;
     // if a cursor id was set then get it otherwise make a new cursor scoped to the creating user
     let mut cursor = match params.cursor {
         Some(cursor_id) => {
-            SimpleScyllaCursor::get(cursor_id, &user.username, params.page_size, shared).await?
+            SimpleScyllaCursor::get(cursor_id, &user.username, page_size, shared).await?
         }
-        None => SimpleScyllaCursor::new(params.clusters, &user.username, params.page_size),
+        None => SimpleScyllaCursor::new(params.clusters, &user.username, page_size),
     };
     // get the next page of data for this cursor
     cursor.next(shared).await?;
@@ -711,12 +714,14 @@ pub async fn list_node_details(
     params: NodeListParams,
     shared: &Shared,
 ) -> Result<ApiCursor<Node>, ApiError> {
+    // make sure our page size is one we can serve
+    let page_size = check_limit(params.page_size, DEFAULT_LIMIT_CAP, "page_size")?;
     // if a cursor id was set then get it otherwise make a new cursor scoped to the creating user
     let mut cursor: SimpleScyllaCursor<NodeRow> = match params.cursor {
         Some(cursor_id) => {
-            SimpleScyllaCursor::get(cursor_id, &user.username, params.page_size, shared).await?
+            SimpleScyllaCursor::get(cursor_id, &user.username, page_size, shared).await?
         }
-        None => SimpleScyllaCursor::new(params.clusters, &user.username, params.page_size),
+        None => SimpleScyllaCursor::new(params.clusters, &user.username, page_size),
     };
     // get the next page of data for this cursor
     cursor.next(shared).await?;

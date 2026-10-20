@@ -132,12 +132,27 @@ macro_rules! check {
     };
 }
 
-/// gets a timestamp N seconds from now
+/// gets a timestamp N seconds from now, saturating at the latest timestamp
 #[macro_export]
 macro_rules! from_now {
     ($seconds:expr) => {
-        chrono::Utc::now() + chrono::Duration::seconds($seconds)
+        $crate::libs::helpers::seconds_from_now($seconds)
     };
+}
+
+/// Get the timestamp a number of seconds from now
+///
+/// Offsets too large for a timestamp saturate at the latest one rather than panicking, since
+/// they come from image runtimes the scaler doesn't control.
+///
+/// # Arguments
+///
+/// * `seconds` - The number of seconds from now
+pub(crate) fn seconds_from_now(seconds: i64) -> chrono::DateTime<chrono::Utc> {
+    // build our offset and add it to now without overflowing
+    chrono::TimeDelta::try_seconds(seconds)
+        .and_then(|offset| chrono::Utc::now().checked_add_signed(offset))
+        .unwrap_or(chrono::DateTime::<chrono::Utc>::MAX_UTC)
 }
 
 /// checks that two things are the same and returns false if not
@@ -211,4 +226,22 @@ macro_rules! raw_entry_map_extend {
 /// * `it` - The iterator to assert
 pub fn assert_send_stream<R>(it: impl Send + Stream<Item = R>) -> impl Send + Stream<Item = R> {
     it
+}
+
+#[cfg(test)]
+mod tests {
+    /// Timestamps too far from now for chrono saturate instead of panicking
+    #[test]
+    fn from_now_saturates() {
+        // a normal offset is added
+        let before = chrono::Utc::now();
+        assert!(crate::from_now!(600) >= before + chrono::TimeDelta::seconds(600));
+        // offsets too large for a timestamp saturate at the latest timestamp
+        for seconds in [10_000_000_000_000, i64::MAX] {
+            assert_eq!(
+                crate::from_now!(seconds),
+                chrono::DateTime::<chrono::Utc>::MAX_UTC
+            );
+        }
+    }
 }

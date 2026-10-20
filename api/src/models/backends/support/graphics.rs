@@ -19,7 +19,11 @@ pub(crate) trait GraphicSupport {
     fn build_graphic_base_path<'a>(key: Self::GraphicKey<'a>) -> PathBuf;
 
     /// Build the base path for this graphic
-    fn build_graphic_base_path_from_self(&self) -> PathBuf;
+    ///
+    /// # Arguments
+    ///
+    /// * `shared` - Shared Thorium objects
+    fn build_graphic_base_path_from_self(&self, shared: &Shared) -> PathBuf;
 
     /// Upload a graphic associated with the given key
     ///

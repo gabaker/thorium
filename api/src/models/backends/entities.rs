@@ -604,7 +604,7 @@ impl Entity {
             // try to consume the field
             if let Some(image_field) = update_form.add(field).await? {
                 // get the base path for this entity
-                let base_path = Self::build_graphic_base_path_from_self(&self);
+                let base_path = self.build_graphic_base_path_from_self(shared);
                 // upload the graphic to S3
                 let path = Self::upload_graphic(base_path, image_field, None, shared).await?;
                 // set our new image
@@ -897,7 +897,11 @@ impl GraphicSupport for Entity {
     }
 
     /// Build the base path for this graphic
-    fn build_graphic_base_path_from_self(&self) -> PathBuf {
+    ///
+    /// # Arguments
+    ///
+    /// * `_shared` - Shared Thorium objects
+    fn build_graphic_base_path_from_self(&self, _shared: &Shared) -> PathBuf {
         // call our base path builder
         Self::build_graphic_base_path(&self.id)
     }
@@ -1824,8 +1828,14 @@ impl CursorCore for EntityListLine {
         }
     }
 
-    fn get_limit(params: &Self::Params) -> usize {
-        params.limit
+    /// Get the max number of rows to return
+    ///
+    /// # Arguments
+    ///
+    /// * `params` - The params to use to build this cursor
+    fn get_limit(params: &Self::Params) -> Result<usize, ApiError> {
+        // make sure this limit is one we can serve
+        db::cursors::check_limit(params.limit, db::cursors::DEFAULT_LIMIT_CAP, "limit")
     }
 
     fn add_tie(&self, ties: &mut Self::Ties) {
@@ -1851,6 +1861,12 @@ impl CursorCore for EntityListLine {
             true
         }
     }
+
+    /// Get the tag clustering key for a row without the timestamp
+    fn get_tag_clustering_key(&self) -> String {
+        // tags are clustered by the entity id they tag, stored as text
+        self.id.to_string()
+    }
 }
 
 #[async_trait::async_trait]
@@ -1862,8 +1878,9 @@ impl ScyllaCursorSupport for EntityListLine {
     fn add_tag_tie(&self, ties: &mut HashMap<String, String>) {
         // if its not already in the tie map then add each of its groups to our map
         for group in &self.groups {
-            // insert this groups tie
-            ties.insert(group.clone(), self.id.to_string());
+            // keep the tie of an earlier row in this group, since rows are consumed in order
+            ties.entry(group.clone())
+                .or_insert_with(|| self.id.to_string());
         }
     }
 
@@ -1885,6 +1902,16 @@ impl ScyllaCursorSupport for EntityListLine {
     fn get_unique_key(&self) -> Self::UniqueType<'_> {
         // the entity's id is a unique key
         self.id
+    }
+
+    /// Compare two entities that share a timestamp in the order a page consumes them
+    ///
+    /// # Arguments
+    ///
+    /// * `other` - The entity to compare against
+    fn cmp_ties(&self, other: &Self) -> std::cmp::Ordering {
+        // ids are read in descending order within a timestamp
+        db::cursors::scylla_uuid_cmp(&other.id, &self.id)
     }
 
     fn add_group_to_line(&mut self, group: String) {

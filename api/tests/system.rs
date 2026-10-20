@@ -1365,3 +1365,65 @@ async fn a_backup_without_the_newer_fields_restores() -> Result<(), Error> {
     );
     Ok(())
 }
+
+/// Send a GET to the API with this client's credentials and return its status and JSON body
+///
+/// # Arguments
+///
+/// * `client` - The client whose credentials to send
+/// * `path` - The path and query to request, starting with `/api/`
+async fn get_json(client: &Thorium, path: &str) -> Result<(u16, serde_json::Value), Error> {
+    // get the token for this client
+    let token = client.users.info().await?.token;
+    // build the auth header the client would send
+    let encoded = base64::engine::general_purpose::STANDARD.encode(token.as_bytes());
+    // send our raw request so every query parameter reaches the API unchanged
+    let resp = reqwest::Client::new()
+        .get(format!("{}{path}", client.host))
+        .header("authorization", format!("token {encoded}"))
+        .send()
+        .await?;
+    // get the status and body of the response
+    let status = resp.status().as_u16();
+    let body = resp.text().await?;
+    let json = serde_json::from_str(&body).unwrap_or(serde_json::Value::String(body));
+    Ok((status, json))
+}
+
+/// Getting nodes by name works when the cluster and node names span 100 or more pairs, which
+/// queries the nodes in chunks
+#[serial_test::serial]
+#[tokio::test]
+async fn get_many_nodes_in_chunks() -> Result<(), Error> {
+    // get admin client
+    let client = test_utilities::admin_client().await?;
+    // register one node in a cluster of its own
+    let cluster = format!("chunks-{}", uuid::Uuid::new_v4().simple());
+    generators::node(&cluster, "n0", Resources::default(), &client).await?;
+    // ask for that node among 100 and then 150 node names, on both node listing routes
+    for count in [100, 150] {
+        let nodes = (0..count)
+            .map(|index| format!("&nodes[]=n{index}"))
+            .collect::<Vec<String>>()
+            .concat();
+        for (route, field) in [("nodes/", "node"), ("nodes/details/", "name")] {
+            let path = format!("/api/system/{route}?clusters[]={cluster}{nodes}");
+            let (status, body) = get_json(&client, &path).await?;
+            is!(
+                status,
+                200,
+                format!("{route} with {count} nodes returned {body}")
+            );
+            // only the node we registered exists
+            let names = body["data"].as_array().map_or_else(Vec::new, |rows| {
+                rows.iter().map(|row| row[field].clone()).collect()
+            });
+            is!(
+                names,
+                vec![serde_json::json!("n0")],
+                format!("{route} with {count} nodes")
+            );
+        }
+    }
+    Ok(())
+}

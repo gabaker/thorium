@@ -1705,6 +1705,7 @@ const fn default_tags_earliest() -> i64 {
 pub struct TagsConfig {
     /// The number of seconds each partition in the database should cover
     #[serde(default = "default_tags_partition_size")]
+    #[schemars(range(min = 1))]
     pub partition_size: u16,
     /// The earliest date a tag will exist as a unix epoch
     #[serde(default = "default_tags_earliest")]
@@ -1818,6 +1819,7 @@ pub struct Files {
     pub earliest: i64,
     /// The number of seconds each partition in the database should cover
     #[serde(default = "default_files_partition_size")]
+    #[schemars(range(min = 1))]
     pub partition_size: u16,
 }
 
@@ -1859,6 +1861,7 @@ pub struct Results {
     pub earliest: i64,
     /// The number of seconds each partition in the database should cover
     #[serde(default = "default_results_partition_size")]
+    #[schemars(range(min = 1))]
     pub partition_size: u16,
 }
 
@@ -1977,6 +1980,7 @@ pub struct Repos {
     pub earliest: i64,
     /// The number of seconds each partition in the database should cover
     #[serde(default = "default_repos_partition_size")]
+    #[schemars(range(min = 1))]
     pub partition_size: u16,
 }
 
@@ -2008,6 +2012,7 @@ pub struct Events {
     pub retention: u64,
     /// The number of seconds each partition in the database should cover
     #[serde(default = "default_events_partition_size")]
+    #[schemars(range(min = 1))]
     pub partition_size: u16,
     /// The max depth to trigger new triggers at
     #[serde(default = "default_events_max_depth")]
@@ -2040,6 +2045,7 @@ fn default_entities_earliest() -> i64 {
 pub struct Entities {
     /// The number of seconds each partition in the database should cover
     #[serde(default = "default_entities_partition_size")]
+    #[schemars(range(min = 1))]
     pub partition_size: u16,
     /// The earliest we'll see an entity as a Unix timestamp
     #[serde(default = "default_entities_earliest")]
@@ -2070,6 +2076,7 @@ fn default_associations_earliest() -> i64 {
 pub struct Associations {
     /// The number of seconds each partition in the database should cover
     #[serde(default = "default_associations_partition_size")]
+    #[schemars(range(min = 1))]
     pub partition_size: u16,
     /// The earliest we'll see an entity as a Unix timestamp
     #[serde(default = "default_associations_earliest")]
@@ -2782,7 +2789,56 @@ impl Conf {
         validate_namespace(&conf.thorium.namespace).map_err(|error| {
             config::ConfigError::Message(format!("invalid thorium.namespace: {error}"))
         })?;
+        // refuse settings that can't work before anything uses them
+        conf.validate()?;
         Ok(conf)
+    }
+
+    /// Check that this config's settings hold values Thorium can use
+    pub fn validate(&self) -> Result<(), config::ConfigError> {
+        // get every partition size setting by its key path
+        let thorium = &self.thorium;
+        let partition_sizes = [
+            ("thorium.files.partition_size", thorium.files.partition_size),
+            (
+                "thorium.results.partition_size",
+                thorium.results.partition_size,
+            ),
+            ("thorium.repos.partition_size", thorium.repos.partition_size),
+            (
+                "thorium.events.partition_size",
+                thorium.events.partition_size,
+            ),
+            (
+                "thorium.entities.partition_size",
+                thorium.entities.partition_size,
+            ),
+            (
+                "thorium.associations.partition_size",
+                thorium.associations.partition_size,
+            ),
+            (
+                "thorium.tags.files.partition_size",
+                thorium.tags.files.partition_size,
+            ),
+            (
+                "thorium.tags.repos.partition_size",
+                thorium.tags.repos.partition_size,
+            ),
+            (
+                "thorium.tags.entities.partition_size",
+                thorium.tags.entities.partition_size,
+            ),
+        ];
+        // buckets are computed by dividing by the partition size, so it can't be 0
+        for (setting, size) in partition_sizes {
+            if size == 0 {
+                return Err(config::ConfigError::Message(format!(
+                    "{setting} must be at least 1 second"
+                )));
+            }
+        }
+        Ok(())
     }
 
     /// Change the namespace for this config
@@ -2804,6 +2860,7 @@ mod tests {
         Conf, NAMESPACE_MAX_LEN, Scaler, default_namespace_blacklist, parse_namespace,
         validate_namespace,
     };
+    use std::path::Path;
 
     #[test]
     fn default_namespace_blacklist_covers_privileged_namespaces() {
@@ -2987,5 +3044,136 @@ mod tests {
         let error = validate_namespace(&too_long).expect_err(&too_long);
         assert!(error.contains("at most 48 characters"), "{error}");
         assert_eq!(parse_namespace(&too_long), Err(error));
+    }
+
+    /// Every partition size setting, as its key path in the config
+    const PARTITION_SIZE_SETTINGS: [&str; 9] = [
+        "thorium.files.partition_size",
+        "thorium.results.partition_size",
+        "thorium.repos.partition_size",
+        "thorium.events.partition_size",
+        "thorium.entities.partition_size",
+        "thorium.associations.partition_size",
+        "thorium.tags.files.partition_size",
+        "thorium.tags.repos.partition_size",
+        "thorium.tags.entities.partition_size",
+    ];
+
+    /// Load the integration test config with one setting changed
+    ///
+    /// # Arguments
+    ///
+    /// * `setting` - The key path of the setting to change
+    /// * `value` - The value to set it to
+    fn load_with(setting: &str, value: u16) -> Result<Conf, config::ConfigError> {
+        // read the integration test config as JSON
+        let template = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/thorium-testing.yml");
+        let raw = std::fs::read_to_string(&template).expect("test config reads");
+        let mut raw: serde_json::Value = serde_norway::from_str(&raw).expect("config is YAML");
+        // walk to the parent of this setting, adding any maps it is missing
+        let (parents, key) = setting.rsplit_once('.').expect("setting has a parent");
+        let parent = parents.split('.').fold(&mut raw, |node, part| {
+            node.as_object_mut()
+                .expect("config node is a map")
+                .entry(part)
+                .or_insert_with(|| serde_json::json!({}))
+        });
+        // set our value
+        parent
+            .as_object_mut()
+            .expect("config node is a map")
+            .insert(key.to_owned(), serde_json::json!(value));
+        // write the changed config to a file of its own
+        let path = std::env::temp_dir().join(format!(
+            "thorium-conf-{}-{setting}-{value}.yml",
+            std::process::id()
+        ));
+        std::fs::write(
+            &path,
+            serde_norway::to_string(&raw).expect("config serializes"),
+        )
+        .expect("changed config writes");
+        // load the changed config the way the API does, then remove the file
+        let loaded = Conf::new(&path);
+        std::fs::remove_file(&path).expect("changed config is removed");
+        loaded
+    }
+
+    /// A partition size of 0 for any data type fails to load with an error naming the setting,
+    /// and a partition size of 1 loads
+    #[test]
+    fn partition_size_must_be_at_least_one() {
+        for setting in PARTITION_SIZE_SETTINGS {
+            // a partition size of 0 is refused, naming the setting
+            match load_with(setting, 0) {
+                Ok(_) => panic!("{setting}: 0 loaded"),
+                Err(error) => assert!(
+                    error.to_string().contains(setting),
+                    "{setting}: the error doesn't name the setting: {error}"
+                ),
+            }
+            // a partition size of 1 loads and is kept
+            let conf = load_with(setting, 1).unwrap_or_else(|error| panic!("{setting}: {error}"));
+            let value = serde_json::to_value(&conf).expect("config serializes");
+            let pointer = format!("/{}", setting.replace('.', "/"));
+            assert_eq!(
+                value.pointer(&pointer),
+                Some(&serde_json::json!(1)),
+                "{setting}"
+            );
+        }
+    }
+
+    /// Collect the schema of every `partition_size` property in a JSON schema
+    ///
+    /// # Arguments
+    ///
+    /// * `node` - The schema node to search
+    /// * `found` - The `partition_size` property schemas found so far
+    fn partition_size_schemas<'a>(
+        node: &'a serde_json::Value,
+        found: &mut Vec<&'a serde_json::Value>,
+    ) {
+        match node {
+            serde_json::Value::Object(map) => {
+                // keep this node's partition size property if it has one
+                if let Some(schema) = map
+                    .get("properties")
+                    .and_then(|props| props.get("partition_size"))
+                {
+                    found.push(schema);
+                }
+                // search every child node
+                map.values()
+                    .for_each(|child| partition_size_schemas(child, found));
+            }
+            serde_json::Value::Array(list) => list
+                .iter()
+                .for_each(|child| partition_size_schemas(child, found)),
+            _ => (),
+        }
+    }
+
+    /// The schema generated from the config, which the operator's CRD embeds, gives every
+    /// partition size a minimum of 1
+    #[test]
+    fn partition_size_schema_minimum_is_one() {
+        // generate the config's JSON schema
+        let schema = schemars::schema_for!(Conf);
+        let schema = serde_json::to_value(&schema).expect("schema serializes");
+        // find every partition size property
+        let mut found = Vec::new();
+        partition_size_schemas(&schema, &mut found);
+        // the files, results, repos, events, entities, associations, and tags settings
+        assert!(
+            found.len() >= 7,
+            "only {} partition sizes found",
+            found.len()
+        );
+        // each one has a minimum of 1
+        for prop in found {
+            let minimum = prop.get("minimum").and_then(serde_json::Value::as_f64);
+            assert_eq!(minimum, Some(1.0), "partition_size schema {prop}");
+        }
     }
 }

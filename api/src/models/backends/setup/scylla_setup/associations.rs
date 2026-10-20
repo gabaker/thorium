@@ -11,8 +11,10 @@ pub struct AssociationsPreparedStatements {
     pub insert: PreparedStatement,
     /// Delete an association
     pub delete: PreparedStatement,
-    /// List the ties for a associations cursor
+    /// List the ties for a associations cursor after the tied target
     pub list_ties: PreparedStatement,
+    /// List the remaining directions of the tied target for a associations cursor
+    pub list_ties_target: PreparedStatement,
     /// Get a page of data for a associations cursor
     pub list_pull: PreparedStatement,
 }
@@ -27,17 +29,30 @@ impl AssociationsPreparedStatements {
     pub async fn new(session: &Session, config: &Conf) -> Self {
         // setup our tables
         setup_associations_table(session, config).await;
+        // add the columns tables created before August 2026 lack
+        super::add_missing_column(
+            session,
+            config,
+            "associations",
+            "submissions_source",
+            "UUID",
+        )
+        .await;
+        super::add_missing_column(session, config, "associations", "submissions_other", "UUID")
+            .await;
         //setup_associations_to_table(session, config).await;
         // build our prepared statements
         let insert = insert(session, config).await;
         let delete = delete(session, config).await;
         let list_ties = list_ties(session, config).await;
+        let list_ties_target = list_ties_target(session, config).await;
         let list_pull = list_pull(session, config).await;
         // build our prepared statements object
         AssociationsPreparedStatements {
             insert,
             delete,
             list_ties,
+            list_ties_target,
             list_pull,
         }
     }
@@ -116,15 +131,14 @@ async fn delete(session: &Session, config: &Conf) -> PreparedStatement {
         .expect("Failed to prepare associations delete statement")
 }
 
-/// Gets any remaining rows from past ties in listing associations
+/// Gets the remaining rows after the tied target from past ties in listing associations
 ///
-/// Targets are clustered in ascending order so the remaining tied rows are at or
-/// after our tie breaker.
+/// Targets cluster in ascending order, so these are the targets after the tied one.
 ///
 /// # Arguments
 ///
-/// * `sessions` - The scylla session to use
-/// * `conf` - The Thorium config
+/// * `session` - The scylla session to use
+/// * `config` - The Thorium config
 async fn list_ties(session: &Session, config: &Conf) -> PreparedStatement {
     // build associations list ties prepared statement
     session
@@ -136,12 +150,39 @@ async fn list_ties(session: &Session, config: &Conf) -> PreparedStatement {
                 AND bucket = ? \
                 AND source = ?
                 AND created = ? \
-                AND target >= ? \
+                AND target > ? \
                 LIMIT ?",
             &config.thorium.namespace
         ))
         .await
         .expect("Failed to prepare scylla associations list ties statement")
+}
+
+/// Gets the remaining directions of the tied target from past ties in listing associations
+///
+/// Each target has at most one row per direction, so this needs no limit.
+///
+/// # Arguments
+///
+/// * `session` - The scylla session to use
+/// * `config` - The Thorium config
+async fn list_ties_target(session: &Session, config: &Conf) -> PreparedStatement {
+    // build associations list tied target prepared statement
+    session
+        .prepare(format!(
+            "SELECT group, kind, source, target, submitter, created, direction, extra_source, extra_target, submissions_source, submissions_other \
+                FROM {}.associations \
+                WHERE group = ? \
+                AND year = ? \
+                AND bucket = ? \
+                AND source = ? \
+                AND created = ? \
+                AND target = ? \
+                AND direction >= ?",
+            config.thorium.namespace
+        ))
+        .await
+        .expect("Failed to prepare scylla associations list tied target statement")
 }
 
 /// Pull the data needed to list associations

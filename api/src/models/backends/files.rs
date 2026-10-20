@@ -1407,8 +1407,9 @@ impl CursorCore for SampleListLine {
     /// # Arguments
     ///
     /// * `params` - The params to use to build this cursor
-    fn get_limit(params: &Self::Params) -> usize {
-        params.limit
+    fn get_limit(params: &Self::Params) -> Result<usize, ApiError> {
+        // make sure this limit is one we can serve
+        db::cursors::check_limit(params.limit, db::cursors::DEFAULT_LIMIT_CAP, "limit")
     }
 
     /// Get the partition size for this cursor
@@ -1459,8 +1460,9 @@ impl CursorCore for SampleListLine {
     }
 
     /// Get the tag clustering key for a row without the timestamp
-    fn get_tag_clustering_key(&self) -> &String {
-        &self.sha256
+    fn get_tag_clustering_key(&self) -> String {
+        // tags are clustered by the sha256 they tag
+        self.sha256.clone()
     }
 }
 
@@ -1481,8 +1483,9 @@ impl ScyllaCursorSupport for SampleListLine {
     fn add_tag_tie(&self, ties: &mut HashMap<String, String>) {
         // if its not already in the tie map then add each of its groups to our map
         for group in &self.groups {
-            // insert this groups tie
-            ties.insert(group.clone(), self.sha256.clone());
+            // keep the tie of an earlier row in this group, since rows are consumed in order
+            ties.entry(group.clone())
+                .or_insert_with(|| self.sha256.clone());
         }
     }
 
@@ -1518,6 +1521,20 @@ impl ScyllaCursorSupport for SampleListLine {
     /// Get the unique key for this row if it exists
     fn get_unique_key<'a>(&'a self) -> Self::UniqueType<'a> {
         self.submission
+    }
+
+    /// Compare two samples that share a timestamp in the order a page consumes them
+    ///
+    /// # Arguments
+    ///
+    /// * `other` - The line to compare against
+    fn cmp_ties(&self, other: &Self) -> std::cmp::Ordering {
+        // submission ids cluster in descending order within a timestamp
+        match (&self.submission, &other.submission) {
+            (Some(mine), Some(theirs)) => db::cursors::scylla_uuid_cmp(theirs, mine),
+            // lines built from tag rows have no submission and are ordered by the tags cursor
+            _ => std::cmp::Ordering::Equal,
+        }
     }
 
     /// Add a group to a specific returned line
