@@ -43,6 +43,9 @@ impl ResultsPreparedStatements {
     pub async fn new(session: &Session, config: &Conf) -> Self {
         // setup the results tables
         setup_results_table(session, config).await;
+        // add the column tables created before April 2026 lack
+        super::add_missing_column(session, config, "results", "entities", "MAP<TEXT, BIGINT>")
+            .await;
         setup_results_stream_table(session, config).await;
         // setup the results materialized views
         setup_results_auth_mat_view(session, config).await;

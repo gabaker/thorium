@@ -5,10 +5,11 @@ use tracing::{Level, event, instrument};
 
 use super::helpers;
 use super::keys::{EventKeys, GroupKeys, SystemKeys, UserKeys};
+use crate::models::backends::users::check_password_hash;
 use crate::models::{BackupProblem, ScopedToken, UnixInfo, User, UserRole, UserSettings};
 use crate::utils::{ApiError, Shared};
 use crate::{
-    conflict, conn, deserialize, deserialize_ext, deserialize_opt, extract, not_found, query,
+    bad, conflict, conn, deserialize, deserialize_ext, deserialize_opt, extract, not_found, query,
     serialize, unauthorized,
 };
 
@@ -262,6 +263,30 @@ fn restore_groups<'a>(pipe: &'a mut redis::Pipeline, user: &User, shared: &Share
     });
 }
 
+/// Check that every user in a backup can be restored
+///
+/// A user whose password hash names an algorithm or cost Thorium doesn't hash with is refused,
+/// since every login as them would recompute the hash at that cost.
+///
+/// # Arguments
+///
+/// * `users` - The users to check
+pub fn check_restorable(users: &[User]) -> Result<(), ApiError> {
+    // check every stored password hash
+    for user in users {
+        if let Some(hash) = &user.password {
+            // refuse the restore naming the user but never the hash
+            if let Err(reason) = check_password_hash(hash) {
+                return bad!(format!(
+                    "User {} has a password hash Thorium won't verify: {reason}",
+                    user.username
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
 /// Restore user data
 ///
 /// # Arguments
@@ -270,6 +295,8 @@ fn restore_groups<'a>(pipe: &'a mut redis::Pipeline, user: &User, shared: &Share
 /// * `shared` - Shared Thorium objects
 #[instrument(name = "db::users::restore", skip_all, err(Debug))]
 pub async fn restore(users: &[User], shared: &Shared) -> Result<(), ApiError> {
+    // refuse users whose password hashes Thorium won't verify
+    check_restorable(users)?;
     // build the our redis pipeline
     let mut pipe = redis::pipe();
     // crawl over users and build the pipeline to restore each one

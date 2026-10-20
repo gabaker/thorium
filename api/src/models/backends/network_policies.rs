@@ -851,12 +851,11 @@ impl GroupedScyllaCursorSupport for NetworkPolicyListLine {
     ///
     /// * `params` - The params to use to build this cursor
     fn get_limit(params: &Self::Params) -> Result<i32, ApiError> {
-        params.limit.try_into().map_err(|_| {
-            ApiError::new(
-                StatusCode::BAD_REQUEST,
-                Some("The per-request limit is larger than the database supports!".to_string()),
-            )
-        })
+        // make sure this limit is one we can serve
+        let limit =
+            db::cursors::check_limit(params.limit, db::cursors::DEFAULT_LIMIT_CAP, "limit")?;
+        // convert it to the type our queries bind
+        db::cursors::limit_to_cql(limit)
     }
 
     /// Get the `GroupBy` value from a casted row

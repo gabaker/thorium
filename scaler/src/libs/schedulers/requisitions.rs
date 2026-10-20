@@ -1,5 +1,4 @@
 use chrono::prelude::*;
-use chrono::{Duration, Utc};
 use hashbrown::HashMap;
 use std::collections::BTreeMap;
 use thorium::models::{Image, Pools, Requisition, Resources, SpawnedUpdate, Worker};
@@ -54,7 +53,7 @@ impl Spawned {
         // set a minimum bound on downscaling for at least 2 minutes
         let single_run_budget = std::cmp::max(image.runtime.ceil() as i64, 120);
         // calculate when this worker can be safely scaled down
-        let down_scalable = Utc::now() + Duration::seconds(single_run_budget);
+        let down_scalable = helpers::seconds_from_now(single_run_budget);
         // create our spawned object
         Spawned {
             req,
@@ -141,5 +140,68 @@ impl ReqMap {
             .or_insert_with(|| Vec::with_capacity(1));
         // add this spawn to this clusters scale down list
         entry.push(spawn);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::Spawned;
+    use thorium::models::{Image, Pools, Requisition, Resources, SecurityContext, SpawnLimits};
+
+    /// Build an image with a given average runtime
+    ///
+    /// # Arguments
+    ///
+    /// * `runtime` - The image's average runtime in seconds
+    fn image(runtime: f64) -> Image {
+        // build the image from JSON so only the runtime needs a real value
+        serde_json::from_value(serde_json::json!({
+            "group": "minerva",
+            "name": "harvest",
+            "creator": "io",
+            "version": null,
+            "image": null,
+            "lifetime": null,
+            "timeout": null,
+            "resources": Resources::default(),
+            "spawn_limit": SpawnLimits::default(),
+            "runtime": runtime,
+            "volumes": [],
+            "modifiers": null,
+            "description": null,
+            "security_context": SecurityContext::default(),
+            "used_by": [],
+            "collect_logs": false,
+            "generator": false,
+            "clean_up": null,
+            "kvm": null,
+            "bans": {},
+        }))
+        .unwrap()
+    }
+
+    /// Spawning a worker for an image whose stored runtime is too large for a timestamp
+    /// saturates its scale down time instead of panicking
+    #[test]
+    fn spawned_survives_huge_runtimes() {
+        for runtime in [1e13, 1e16, f64::MAX] {
+            // spawn a worker for an image with this runtime
+            let req = Requisition::new("io", "minerva", "corn", "harvest");
+            let spawned = Spawned::new("cluster0", "node0", req, &image(runtime), Pools::FairShare);
+            // it scales down at some point in the future
+            assert!(spawned.down_scalable > chrono::Utc::now());
+        }
+    }
+
+    /// A normal runtime still sets the scale down time that far out
+    #[test]
+    fn spawned_uses_the_runtime() {
+        // spawn a worker for an image with a ten minute runtime
+        let req = Requisition::new("io", "minerva", "corn", "harvest");
+        let before = chrono::Utc::now();
+        let spawned = Spawned::new("cluster0", "node0", req, &image(600.0), Pools::FairShare);
+        // it scales down ten minutes after it was spawned
+        assert!(spawned.down_scalable >= before + chrono::TimeDelta::seconds(600));
+        assert!(spawned.down_scalable <= chrono::Utc::now() + chrono::TimeDelta::seconds(600));
     }
 }
