@@ -6,7 +6,10 @@ mod helpers;
 mod impls;
 
 use crate::client::Error;
-pub use api::{CONF, admin_client, get_redis_client};
+pub use api::{
+    CONF, admin_client, get_redis_client, init_bucket, redis_pool, s3_client, scylla_session,
+    wipe_dbs,
+};
 
 // expose a blocking admin client for sync tests
 #[cfg(all(feature = "sync", not(feature = "python")))]

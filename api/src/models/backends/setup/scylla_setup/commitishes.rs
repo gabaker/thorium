@@ -19,8 +19,10 @@ pub struct CommitishesPreparedStatements {
     pub get_repo_data: PreparedStatement,
     /// Get the number of repo datas that have commits tied to them
     pub get_repo_data_count: PreparedStatement,
-    /// Get the ties for listing commitishes
+    /// Get the ties for listing commitishes, including rows with the tied key
     pub list_ties: PreparedStatement,
+    /// Get the ties for listing commitishes, only rows with keys below the tied key
+    pub list_ties_below: PreparedStatement,
     /// Get the data for a page for a commitish cursor
     pub list_pull: PreparedStatement,
 }
@@ -30,7 +32,7 @@ impl CommitishesPreparedStatements {
     ///
     /// # Arguments
     ///
-    /// * `sessions` - The scylla session to use
+    /// * `session` - The scylla session to use
     /// * `config` - The Thorium config
     pub async fn new(session: &Session, config: &Conf) -> Self {
         // setup the commitishes tables
@@ -46,6 +48,7 @@ impl CommitishesPreparedStatements {
         let get_repo_data = get_repo_data(session, config).await;
         let get_repo_data_count = get_repo_data_count(session, config).await;
         let list_ties = list_ties(session, config).await;
+        let list_ties_below = list_ties_below(session, config).await;
         let list_pull = list_pull(session, config).await;
         // build our prepared statement object
         CommitishesPreparedStatements {
@@ -56,6 +59,7 @@ impl CommitishesPreparedStatements {
             get_repo_data,
             get_repo_data_count,
             list_ties,
+            list_ties_below,
             list_pull,
         }
     }
@@ -262,10 +266,13 @@ async fn get_repo_data_count(session: &Session, config: &Conf) -> PreparedStatem
 
 /// Gets any remaining rows from past ties in listing repo commits
 ///
+/// This reads the rows with the tied key or below it, and at most one page of them from each
+/// partition.
+///
 /// # Arguments
 ///
-/// * `sessions` - The scylla session to use
-/// * `conf` - The Thorium config
+/// * `session` - The scylla session to use
+/// * `config` - The Thorium config
 async fn list_ties(session: &Session, config: &Conf) -> PreparedStatement {
     // build repo commit list ties prepared statement
     session
@@ -279,11 +286,37 @@ async fn list_ties(session: &Session, config: &Conf) -> PreparedStatement {
                 AND repo = ? \
                 AND timestamp = ? \
                 AND key <= ? \
-                LIMIT ?",
+                PER PARTITION LIMIT ?",
             &config.thorium.namespace
         ))
         .await
         .expect("Failed to prepare scylla repo commit list ties statement")
+}
+
+/// Gets any remaining rows below a tied key from past ties in listing repo commits
+///
+/// # Arguments
+///
+/// * `session` - The scylla session to use
+/// * `config` - The Thorium config
+async fn list_ties_below(session: &Session, config: &Conf) -> PreparedStatement {
+    // build repo commit list ties below a key prepared statement
+    session
+        .prepare(format!(
+            "SELECT kind, group, key, timestamp \
+                FROM {}.commitish_list \
+                WHERE kind in ? \
+                AND group = ? \
+                AND year = ? \
+                AND bucket = ? \
+                AND repo = ? \
+                AND timestamp = ? \
+                AND key < ? \
+                PER PARTITION LIMIT ?",
+            config.thorium.namespace
+        ))
+        .await
+        .expect("Failed to prepare scylla repo commit list ties below statement")
 }
 
 /// Pulls the data for listing commits in Thorium

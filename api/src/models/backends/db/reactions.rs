@@ -8,6 +8,7 @@ use std::collections::{BTreeMap, HashMap};
 use tracing::{Level, event, instrument};
 use uuid::Uuid;
 
+use super::cursors::{STAGE_LOG_LIMIT_CAP, check_limit, limit_to_cql};
 use super::keys::{
     ImageKeys, JobKeys, ReactionCacheKind, ReactionKeys, StreamKeys, SubReactionLists, logs,
 };
@@ -905,9 +906,30 @@ pub async fn complete(
     Ok(reaction)
 }
 
+/// Get the timestamp a job must start by to finish the rest of its reaction before the SLA
+///
+/// Runtimes too large to subtract from the SLA saturate at the earliest timestamp, so the job is
+/// due at once rather than the request failing.
+///
+/// # Arguments
+///
+/// * `sla` - The time the reaction should be done by
+/// * `remaining` - The seconds the rest of the reaction is expected to take
+fn sla_deadline(sla: DateTime<Utc>, remaining: f64) -> DateTime<Utc> {
+    // round our remaining time up to whole seconds; float to int casts saturate
+    #[allow(clippy::cast_possible_truncation)]
+    let seconds = remaining.ceil() as i64;
+    // subtract it from the SLA without overflowing
+    chrono::TimeDelta::try_seconds(seconds)
+        .and_then(|remaining| sla.checked_sub_signed(remaining))
+        .unwrap_or(DateTime::<Utc>::MIN_UTC)
+}
+
 /// Handles the creation of jobs for the current stage of the reaction
 ///
-/// If this is the last stage in a reaction it will complete it.
+/// If this is the last stage in a reaction it will complete it. Each job's deadline is the
+/// reaction's SLA minus the runtime left in the reaction, saturating at the earliest timestamp
+/// when that runtime is too large to subtract.
 ///
 /// # Arguments
 ///
@@ -915,7 +937,6 @@ pub async fn complete(
 /// * `pipeline` - The [`Pipeline`] this [`Reaction`] is built around
 /// * `reaction` - The [`Reaction`] to create jobs for
 /// * `shared` - Shared Thorium objects
-/// * `span` - The span to log traces under
 #[rustfmt::skip]
 #[instrument(name = "db::reactions::react", skip_all, err(Debug))]
 pub async fn react(
@@ -942,8 +963,9 @@ pub async fn react(
     for (index, sub) in stages.iter().enumerate() {
         // calculate cost to execute this job
         let cost = *next.get(index).unwrap_or(&600.0);
-        // get the timestamp we need to start this job by in order to meet the SLA
-        let deadline = reaction.sla - chrono::Duration::seconds((cost + rest).ceil() as i64);
+        // get the timestamp we need to start this job by in order to meet the SLA, saturating
+        // at the earliest timestamp when the runtimes are too large to subtract
+        let deadline = sla_deadline(reaction.sla, cost + rest);
         // build a raw job object for this stage
         let cast: RawJob = RawJob::build(&reaction, sub, deadline, &info).await?;
         // add job build command onto our redis pipeline
@@ -1265,18 +1287,26 @@ pub async fn add_stage_logs(
     Ok(())
 }
 
+/// A stage-log line read back from Scylla
 #[derive(Debug, DeserializeRow)]
 #[scylla(flavor = "enforce_order", skip_name_checks)]
 struct LogLine {
+    /// The position of this line in the stage's log
     position: i64,
+    /// The text of this line
     line: String,
 }
+
+/// The most stage-log buckets one query names, since scylla refuses more than 100 partition
+/// key values in an IN restriction
+const MAX_STAGE_LOG_BUCKETS_PER_QUERY: usize = 100;
 
 /// Compute the scylla buckets that cover a stage-log cursor/limit window
 ///
 /// Stage log lines are partitioned into scylla buckets of 2500 lines by position, so the window
 /// of positions `[cursor, cursor + limit)` spans every bucket from `cursor / 2500` through
-/// `(cursor + limit - 1) / 2500`.
+/// `(cursor + limit - 1) / 2500`. A cursor whose window ends past the largest position is
+/// refused.
 ///
 /// # Arguments
 ///
@@ -1285,14 +1315,21 @@ struct LogLine {
 fn stage_log_buckets(cursor: i64, limit: usize) -> Result<Vec<i32>, ApiError> {
     // always look at at least one line so we always query our current bucket
     let limit: i64 = std::cmp::max(limit, 1).try_into()?;
+    // get the position of the last line in our window without overflowing
+    let Some(last) = cursor.checked_add(limit - 1) else {
+        return bad!(format!("A cursor of {cursor} is too large"));
+    };
     // determine the first and last buckets in our window
     let first_bucket: i32 = (cursor / 2500).try_into()?;
-    let last_bucket: i32 = ((cursor + limit - 1) / 2500).try_into()?;
+    let last_bucket: i32 = (last / 2500).try_into()?;
     // query every bucket in our window
     Ok((first_bucket..=last_bucket).collect())
 }
 
-/// Gets stage logs for a stage in a reaction from Redis
+/// Gets stage logs for a stage in a reaction from Scylla
+///
+/// A limit of 0 or above [`STAGE_LOG_LIMIT_CAP`] is refused. The buckets covering the window are
+/// read in queries that name at most 100 of them each.
 ///
 /// # Arguments
 ///
@@ -1311,29 +1348,30 @@ pub async fn stage_logs(
 ) -> Result<StageLogs, ApiError> {
     // convert our cursor to an i64
     let cursor: i64 = cursor.try_into()?;
-    // if we want to crawl more then 250,000 things then return an error
-    if limit > 250_000 {
-        return bad!("Limit can be no more then 250,000 lines".to_owned());
-    }
+    // make sure this limit is one we can serve
+    let limit = check_limit(limit, STAGE_LOG_LIMIT_CAP, "limit")?;
+    // convert our limit to the type our query binds
+    let cql_limit = limit_to_cql(limit)?;
     // compute the scylla buckets that cover this cursor/limit window
     let buckets = stage_log_buckets(cursor, limit)?;
-    // get our log lines from scylla
-    let query = shared
-        .scylla
-        .session
-        .execute_unpaged(
-            &shared.scylla.prep.logs.get,
-            (&reaction.id, &stage, &buckets, cursor, limit as i32),
-        )
-        .await?;
     // assume we will pull the max number of logs we want
     let mut lines = Vec::with_capacity(limit);
-    // enable rows on this query response
-    let query_rows = query.into_rows_result()?;
-    // crawl over logs and deserialize them
-    for row in query_rows.rows::<LogLine>()? {
-        // try to deserialize this line
-        lines.push(row?);
+    // get our log lines from scylla, naming no more buckets per query than scylla allows
+    for chunk in buckets.chunks(MAX_STAGE_LOG_BUCKETS_PER_QUERY) {
+        let query = shared
+            .scylla
+            .session
+            .execute_unpaged(
+                &shared.scylla.prep.logs.get,
+                (&reaction.id, &stage, chunk, cursor, cql_limit),
+            )
+            .await?;
+        // enable rows on this query response
+        let query_rows = query.into_rows_result()?;
+        // crawl over logs and deserialize them
+        for row in query_rows.rows::<LogLine>()? {
+            lines.push(row?);
+        }
     }
     // each bucket returns up to limit lines, so sort our lines across buckets and only keep the
     // first limit lines
@@ -1735,8 +1773,11 @@ pub async fn update_cache_files(
 #[cfg(test)]
 #[allow(clippy::unwrap_used)]
 mod tests {
-    use super::{group_set_src_status, proceed_guard, set_updated_ephemeral, stage_log_buckets};
+    use super::{
+        group_set_src_status, proceed_guard, set_updated_ephemeral, sla_deadline, stage_log_buckets,
+    };
     use crate::models::ReactionStatus;
+    use chrono::prelude::*;
     use uuid::Uuid;
 
     /// `update` saves a reaction's updated ephemeral file list with an unconditional `HSET`.
@@ -1768,6 +1809,23 @@ mod tests {
         assert_eq!(args[1], b"reaction_data");
         assert_eq!(args[2], b"ephemeral");
         assert_eq!(args[3], serde_json::to_vec(&ephemeral).unwrap());
+    }
+
+    /// A job's deadline is the SLA minus the remaining runtime, and runtimes too large to
+    /// subtract saturate at the earliest timestamp instead of panicking
+    #[test]
+    fn sla_deadline_saturates() {
+        // pick the SLA to compute deadlines from
+        let sla = Utc.with_ymd_and_hms(2026, 10, 16, 0, 0, 0).unwrap();
+        // a normal runtime is subtracted, rounded up to whole seconds
+        assert_eq!(
+            sla_deadline(sla, 599.2),
+            sla - chrono::TimeDelta::seconds(600)
+        );
+        // runtimes too large for a timestamp saturate
+        for remaining in [1e13, 1e16, f64::MAX, f64::INFINITY] {
+            assert_eq!(sla_deadline(sla, remaining), DateTime::<Utc>::MIN_UTC);
+        }
     }
 
     /// Stage log lines are bucketed by position in blocks of 2500. The window the caller asks for
@@ -1847,5 +1905,13 @@ mod tests {
             group_set_src_status(&ReactionStatus::Started),
             ReactionStatus::Started
         );
+    }
+
+    /// A cursor so large that its window's last position overflows is refused rather than
+    /// wrapping around.
+    #[test]
+    fn bucket_window_refuses_overflowing_cursor() {
+        // the last position of this window doesn't fit in an i64
+        assert!(stage_log_buckets(i64::MAX, 2).is_err());
     }
 }

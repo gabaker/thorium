@@ -14,7 +14,7 @@ use super::{ExistsCursor, ScyllaCursor};
 use crate::models::backends::TagSupport;
 use crate::models::{
     Commitish, CommitishDetails, CommitishKinds, CommitishListParams, CommitishMapRequest, Repo,
-    RepoCheckout, RepoListLine, RepoListParams, RepoRequest, RepoRow, RepoScheme, RepoSubmission,
+    RepoCheckout, RepoListLine, RepoListParams, RepoRequest, RepoRow, RepoSubmission,
     RepoSubmissionChunk, RepoUrlComponents, TagRequest, TagType, User,
 };
 use crate::utils::{ApiError, Shared, helpers};
@@ -25,21 +25,27 @@ use crate::{
 
 /// Check if a user already has a matching repo submission
 ///
+/// Repos are looked up by the URL their components build (`provider/user/name`), which is how
+/// they are stored, so a URL submitted with a scheme or credentials finds its repo and its
+/// credentials never reach the database.
+///
 /// # Arguments
 ///
 /// * `user` - The user to check for submissions for
 /// * `req` - The repo to save to the backend
-/// * `scheme` - The scheme used to submit this repo
+/// * `url_components` - The components parsed from this repo's URL
 /// * `shared` - Shared Thorium objects
 #[instrument(name = "db::repos::submission_exists", skip_all, err(Debug))]
 pub async fn submission_exists(
     user: &User,
     req: &RepoRequest,
-    scheme: &RepoScheme,
+    url_components: &RepoUrlComponents,
     shared: &Shared,
 ) -> Result<Option<Repo>, ApiError> {
+    // get the scheme used to submit this repo
+    let scheme = &url_components.scheme;
     // try to get the base repo this submission is for
-    match get_base(&req.groups, user, &req.url, shared).await? {
+    match get_base(&req.groups, user, &url_components.get_url(), shared).await? {
         // this repo already exists in Thorium check its submission
         Some(repo) => {
             // check our existing submissions
@@ -207,12 +213,12 @@ async fn update_earliest(
 /// * `shared` - Shared Thorium objects
 #[instrument(name = "db::repos::create", skip_all, err(Debug))]
 pub async fn create(user: &User, req: RepoRequest, shared: &Shared) -> Result<String, ApiError> {
-    // log the repo url we are creating
-    event!(Level::INFO, repo = &req.url);
+    // log the repo url we are creating without any credentials it carries
+    event!(Level::INFO, repo = %helpers::redact_url(&req.url));
     // extract the required info from this repos url
     let url_components = RepoUrlComponents::parse(&req.url)?;
     // check if this user has already submitted this repo to these groups
-    let repo = match submission_exists(user, &req, &url_components.scheme, shared).await? {
+    let repo = match submission_exists(user, &req, &url_components, shared).await? {
         // this submission already exists so just return our repo object
         Some(mut repo) => {
             event!(Level::INFO, msg = "Existing repo submission found");
@@ -425,7 +431,14 @@ pub async fn authorize(
 }
 
 /// Gets a base repo object without its tags
-#[instrument(name = "db::repos::get_base", skip(user, shared), err(Debug))]
+///
+/// # Arguments
+///
+/// * `groups` - The groups to get the repo's submissions from
+/// * `user` - The user getting this repo
+/// * `url` - The repo's URL as its components build it (`provider/user/name`)
+/// * `shared` - Shared Thorium objects
+#[instrument(name = "db::repos::get_base", skip(user, url, shared), err(Debug))]
 async fn get_base(
     groups: &Vec<String>,
     user: &User,

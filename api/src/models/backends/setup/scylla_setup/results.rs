@@ -36,13 +36,18 @@ pub struct ResultsPreparedStatements {
 impl ResultsPreparedStatements {
     /// Build a new results prepared statement struct
     ///
+    /// Columns that tables created by older releases lack are added to them first.
+    ///
     /// # Arguments
     ///
-    /// * `sessions` - The scylla session to use
+    /// * `session` - The scylla session to use
     /// * `config` - The Thorium config
     pub async fn new(session: &Session, config: &Conf) -> Self {
         // setup the results tables
         setup_results_table(session, config).await;
+        // add the column tables created before April 2026 lack
+        super::add_missing_column(session, config, "results", "entities", "MAP<TEXT, BIGINT>")
+            .await;
         setup_results_stream_table(session, config).await;
         // setup the results materialized views
         setup_results_auth_mat_view(session, config).await;

@@ -15,8 +15,11 @@ use headers::{Header, HeaderName, HeaderValue};
 use ldap3::{Scope, SearchEntry};
 use rand::prelude::*;
 use std::collections::{HashMap, HashSet};
+use std::num::NonZeroUsize;
 use std::path::PathBuf;
 use std::str;
+use std::sync::{Arc, LazyLock};
+use tokio::sync::Semaphore;
 use tracing::{Level, Span, event, instrument};
 
 use super::db;
@@ -207,12 +210,89 @@ async fn scoped_token_auth(
     Ok(AuthedUser::Scoped(scoped_user))
 }
 
+/// Check that a stored password hash uses the algorithm and cost Thorium hashes with
+///
+/// Argon2 verification recomputes a hash with the algorithm and costs written in the stored hash,
+/// so a hash naming a huge memory or time cost would make every login as its user allocate or
+/// spin that much. Only argon2id with [`argon2::Params::default`] is accepted, which is what
+/// Thorium writes.
+///
+/// # Arguments
+///
+/// * `hash` - The stored password hash to check
+pub(crate) fn check_password_hash(hash: &str) -> Result<(), String> {
+    // parse the hash without computing anything
+    let parsed = PasswordHash::new(hash).map_err(|err| format!("unparsable hash: {err}"))?;
+    // only accept the algorithm Thorium hashes with
+    if parsed.algorithm != Algorithm::Argon2id.ident() {
+        return Err(format!("algorithm {} isn't argon2id", parsed.algorithm));
+    }
+    // only accept the costs Thorium hashes with
+    let params = argon2::Params::try_from(&parsed).map_err(|err| format!("bad costs: {err}"))?;
+    let default = argon2::Params::default();
+    if (params.m_cost(), params.t_cost(), params.p_cost())
+        != (default.m_cost(), default.t_cost(), default.p_cost())
+    {
+        return Err(format!(
+            "costs m={},t={},p={} aren't m={},t={},p={}",
+            params.m_cost(),
+            params.t_cost(),
+            params.p_cost(),
+            default.m_cost(),
+            default.t_cost(),
+            default.p_cost()
+        ));
+    }
+    Ok(())
+}
+
+/// Limits how many password verifications run at once, since each one allocates the full
+/// Argon2 memory cost and the blocking pool would otherwise run hundreds of them together
+static VERIFY_PERMITS: LazyLock<Arc<Semaphore>> =
+    LazyLock::new(|| Arc::new(Semaphore::new(verify_permits())));
+
+/// Get how many password verifications may run at once: one per available CPU
+fn verify_permits() -> usize {
+    // fall back to a single verification when the CPU count is unknown
+    std::thread::available_parallelism().map_or(1, NonZeroUsize::get)
+}
+
+/// Run a blocking task once a permit is free, holding the permit until the task finishes
+///
+/// The permit moves into the task, so a request that is dropped mid-verify doesn't free its
+/// permit while the verification still runs.
+///
+/// # Arguments
+///
+/// * `permits` - The permits that bound how many tasks run at once
+/// * `task` - The blocking task to run
+async fn bounded_blocking<T, F>(permits: &Arc<Semaphore>, task: F) -> Result<T, ApiError>
+where
+    T: Send + 'static,
+    F: FnOnce() -> T + Send + 'static,
+{
+    // wait for a free permit
+    let permit = Arc::clone(permits)
+        .acquire_owned()
+        .await
+        .map_err(|err| ApiError::new(StatusCode::INTERNAL_SERVER_ERROR, Some(err.to_string())))?;
+    // run our task on a blocking thread, releasing the permit when it finishes
+    tokio::task::spawn_blocking(move || {
+        let output = task();
+        drop(permit);
+        output
+    })
+    .await
+    .map_err(|err| ApiError::new(StatusCode::INTERNAL_SERVER_ERROR, Some(err.to_string())))
+}
+
 /// Authenticate a user with basic auth stored in redis
 ///
 /// # Arguments
 ///
-/// * `possible` - The user data we are authenticating against
+/// * `username` - The name of the user we are authenticating
 /// * `password` - The password to check against
+/// * `password_hash` - The user's stored password hash
 /// * `shared` - Shared objects in Thorium
 #[instrument(name = "backends::user::basic_auth_redis", skip_all, err(Debug))]
 async fn basic_auth_redis(
@@ -221,27 +301,44 @@ async fn basic_auth_redis(
     password_hash: &str,
     shared: &Shared,
 ) -> Result<(), ApiError> {
-    // parse our password hash
-    let parsed_hash = PasswordHash::new(password_hash)?;
-    // get our key
-    let secret_key = shared.config.thorium.secret_key.as_bytes();
-    // build an argon hasher
-    let argon = Argon2::new_with_secret(
-        secret_key,
-        Algorithm::Argon2id,
-        Version::V0x13,
-        argon2::Params::default(),
-    )?;
-    // verify this user provided the correct password
-    match argon.verify_password(password.as_bytes(), &parsed_hash) {
-        Ok(()) => Ok(()),
-        Err(error) => {
-            // log this authorization failure
-            event!(Level::ERROR, user = username, error = error.to_string(),);
-            // This user is not authorized to view this route/data
-            unauthorized!()
-        }
+    // refuse hashes whose algorithm or cost Thorium didn't choose before computing anything
+    if let Err(reason) = check_password_hash(password_hash) {
+        event!(
+            Level::ERROR,
+            user = username,
+            msg = "Refusing stored password hash",
+            reason = %reason
+        );
+        return unauthorized!();
     }
+    // verify on a blocking thread so the hash doesn't stall the async workers
+    let secret_key = shared.config.thorium.secret_key.clone();
+    let password = password.to_owned();
+    let password_hash = password_hash.to_owned();
+    let verified = bounded_blocking(&VERIFY_PERMITS, move || -> Result<bool, ApiError> {
+        // parse our password hash
+        let parsed_hash = PasswordHash::new(&password_hash)?;
+        // build an argon hasher
+        let argon = Argon2::new_with_secret(
+            secret_key.as_bytes(),
+            Algorithm::Argon2id,
+            Version::V0x13,
+            argon2::Params::default(),
+        )?;
+        // check if this user provided the correct password
+        Ok(argon
+            .verify_password(password.as_bytes(), &parsed_hash)
+            .is_ok())
+    })
+    .await??;
+    // reject users that provided the wrong password
+    if !verified {
+        // log this authorization failure
+        event!(Level::ERROR, user = username, msg = "Invalid password");
+        // This user is not authorized to view this route/data
+        return unauthorized!();
+    }
+    Ok(())
 }
 
 /// Reject an LDAP password that must never reach a simple bind
@@ -989,8 +1086,8 @@ impl User {
     /// * `field` - The multipart field containing the image data
     /// * `shared` - Shared Thorium objects
     pub async fn set_image(&mut self, field: Field<'_>, shared: &Shared) -> Result<(), ApiError> {
-        // build the base S3 path for this user's icon (keyed by username)
-        let base_path = Self::build_graphic_base_path(&self.username);
+        // build the base S3 path for this user's icon (keyed by namespace and username)
+        let base_path = self.build_graphic_base_path_from_self(shared);
         // stream the image to S3 under a fixed name; the extension comes from the content type
         let new_path =
             Self::upload_graphic(base_path, field, Some("icon".to_owned()), shared).await?;
@@ -1840,20 +1937,32 @@ impl From<User> for ScrubbedUser {
 
 // Add graphic support for users so profile icons reuse the shared S3 graphic pipeline
 impl GraphicSupport for User {
-    /// Users key their icon off their (immutable) username
-    type GraphicKey<'a> = &'a str;
+    /// Users key their icon off their Thorium namespace and their (immutable) username
+    type GraphicKey<'a> = (&'a str, &'a str);
 
     /// Build the base path for this user's graphic
-    fn build_graphic_base_path<'a>(key: Self::GraphicKey<'a>) -> PathBuf {
-        // namespace user icons under `users/` so a username that happens to be a UUID can't collide with an
-        // entity graphic (entities key off their UUID at the graphics-bucket root)
-        PathBuf::from("users").join(key)
+    ///
+    /// Icons live at `users/<namespace>/<username>/`, so Thorium namespaces sharing a graphics
+    /// bucket keep separate icons for users with the same name. Icons are read and deleted at the
+    /// path stored on the user, so icons stored at `users/<username>/` keep working.
+    ///
+    /// # Arguments
+    ///
+    /// * `key` - The Thorium namespace and the username
+    fn build_graphic_base_path((namespace, username): Self::GraphicKey<'_>) -> PathBuf {
+        // keep user icons under `users/` so a username that happens to be a UUID can't collide
+        // with an entity graphic (entities key off their UUID at the graphics-bucket root)
+        PathBuf::from("users").join(namespace).join(username)
     }
 
     /// Build the base path for this user's graphic
-    fn build_graphic_base_path_from_self(&self) -> PathBuf {
-        // call our base path builder
-        Self::build_graphic_base_path(&self.username)
+    ///
+    /// # Arguments
+    ///
+    /// * `shared` - Shared Thorium objects
+    fn build_graphic_base_path_from_self(&self, shared: &Shared) -> PathBuf {
+        // call our base path builder with this deployment's namespace
+        Self::build_graphic_base_path((&shared.config.thorium.namespace, &self.username))
     }
 }
 
@@ -1931,6 +2040,10 @@ where
 mod tests {
     use super::{Key, build_ldap_user_filter, reject_empty_ldap_password, secret_key_matches};
     use headers::{Header, HeaderValue};
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::time::Duration;
+    use tokio::sync::Semaphore;
 
     #[test]
     fn secret_key_matches_is_correct() {
@@ -2008,6 +2121,48 @@ mod tests {
             filter.contains("uid=analyst1"),
             "LDAP filter dropped a normal username: {filter}"
         );
+    }
+
+    use super::{bounded_blocking, verify_permits};
+
+    /// Password verifications get one permit per CPU, and always at least one
+    #[test]
+    fn verify_permits_follow_the_cpu_count() {
+        let cpus = std::thread::available_parallelism().map_or(1, std::num::NonZeroUsize::get);
+        assert_eq!(verify_permits(), cpus);
+        assert!(verify_permits() >= 1);
+    }
+
+    /// No more blocking tasks run at once than there are permits, however many are started
+    #[tokio::test(flavor = "multi_thread", worker_threads = 8)]
+    async fn bounded_blocking_limits_concurrency() {
+        let permits = Arc::new(Semaphore::new(3));
+        let running = Arc::new(AtomicUsize::new(0));
+        let peak = Arc::new(AtomicUsize::new(0));
+        // start far more tasks than there are permits
+        let mut handles = Vec::new();
+        for _ in 0..64 {
+            let permits = Arc::clone(&permits);
+            let running = Arc::clone(&running);
+            let peak = Arc::clone(&peak);
+            handles.push(tokio::spawn(async move {
+                bounded_blocking(&permits, move || {
+                    // count this task as running and track the most seen at once
+                    let now = running.fetch_add(1, Ordering::SeqCst) + 1;
+                    peak.fetch_max(now, Ordering::SeqCst);
+                    std::thread::sleep(Duration::from_millis(10));
+                    running.fetch_sub(1, Ordering::SeqCst);
+                })
+                .await
+            }));
+        }
+        // wait for every task to finish
+        for handle in handles {
+            handle.await.unwrap().unwrap();
+        }
+        let peak = peak.load(Ordering::SeqCst);
+        assert!(peak <= 3, "{peak} tasks ran at once with 3 permits");
+        assert!(peak >= 1, "no task ran");
     }
 
     /// Users, scrubbed users, and the authed users wrapping them keep their token values,
