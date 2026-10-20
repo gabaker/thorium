@@ -5,10 +5,11 @@ use tracing::{Level, event, instrument};
 
 use super::helpers;
 use super::keys::{EventKeys, GroupKeys, SystemKeys, UserKeys};
+use crate::models::backends::users::check_password_hash;
 use crate::models::{BackupProblem, ScopedToken, UnixInfo, User, UserRole, UserSettings};
 use crate::utils::{ApiError, Shared};
 use crate::{
-    conflict, conn, deserialize, deserialize_ext, deserialize_opt, extract, not_found, query,
+    bad, conflict, conn, deserialize, deserialize_ext, deserialize_opt, extract, not_found, query,
     serialize, unauthorized,
 };
 
@@ -262,7 +263,33 @@ fn restore_groups<'a>(pipe: &'a mut redis::Pipeline, user: &User, shared: &Share
     });
 }
 
+/// Check that every user in a backup can be restored
+///
+/// A user whose password hash names an algorithm or cost Thorium never wrote is refused, since
+/// every login as them would recompute the hash at that cost.
+///
+/// # Arguments
+///
+/// * `users` - The users to check
+pub fn check_restorable(users: &[User]) -> Result<(), ApiError> {
+    // check every stored password hash
+    for user in users {
+        if let Some(hash) = &user.password {
+            // refuse the restore naming the user but never the hash
+            if let Err(reason) = check_password_hash(hash) {
+                return bad!(format!(
+                    "User {} has a password hash Thorium won't verify: {reason}",
+                    user.username
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
 /// Restore user data, including when each user was last sent a verification email
+///
+/// Users whose password hashes Thorium won't verify are refused before anything is written.
 ///
 /// # Arguments
 ///
@@ -270,6 +297,8 @@ fn restore_groups<'a>(pipe: &'a mut redis::Pipeline, user: &User, shared: &Share
 /// * `shared` - Shared Thorium objects
 #[instrument(name = "db::users::restore", skip_all, err(Debug))]
 pub async fn restore(users: &[User], shared: &Shared) -> Result<(), ApiError> {
+    // refuse users whose password hashes Thorium won't verify
+    check_restorable(users)?;
     // build the our redis pipeline
     let mut pipe = redis::pipe();
     // crawl over users and build the pipeline to restore each one
@@ -738,6 +767,47 @@ pub async fn save(user: &User, shared: &Shared) -> Result<(), ApiError> {
         .query_async(conn!(shared))
         .await?;
     Ok(())
+}
+
+/// Replaces a user's stored password hash, but only if it is still the hash we expect
+///
+/// The swap is atomic, so a password set while the old hash was being verified is never
+/// overwritten. The user's tokens are left alone.
+///
+/// # Arguments
+///
+/// * `username` - The name of the user whose password hash to replace
+/// * `expected` - The password hash the user must still have
+/// * `replacement` - The password hash to store instead
+/// * `shared` - Shared Thorium objects
+#[instrument(
+    name = "db::users::upgrade_password",
+    skip(expected, replacement, shared),
+    err(Debug)
+)]
+pub async fn upgrade_password(
+    username: &str,
+    expected: &str,
+    replacement: &str,
+    shared: &Shared,
+) -> Result<bool, ApiError> {
+    // swap the hash only while the stored one is still the one we verified
+    let script = redis::Script::new(
+        r"
+        if redis.call('hget', KEYS[1], 'password') == ARGV[1] then
+            redis.call('hset', KEYS[1], 'password', ARGV[2]);
+            return 1;
+        end
+        return 0",
+    );
+    // run the swap against this user's data
+    let swapped: bool = script
+        .key(UserKeys::data(username, shared))
+        .arg(expected)
+        .arg(replacement)
+        .invoke_async(conn!(shared))
+        .await?;
+    Ok(swapped)
 }
 
 /// Updates a specific users unix info

@@ -247,12 +247,15 @@ async fn exists_groups(session: &Session, config: &Conf) -> PreparedStatement {
         .expect("Failed to prepare scylla entities exists statement")
 }
 
-/// Gets any remaining rows from past ties in listing repos
+/// Gets any remaining rows from past ties in listing entities
+///
+/// The table clusters in ascending order, so this reads newest first with `ORDER BY`, which
+/// Scylla only allows with `IN` on the partition key when the statement runs unpaged.
 ///
 /// # Arguments
 ///
-/// * `sessions` - The scylla session to use
-/// * `conf` - The Thorium config
+/// * `session` - The scylla session to use
+/// * `config` - The Thorium config
 async fn list_ties(session: &Session, config: &Conf) -> PreparedStatement {
     // build repo repo list ties prepared statement
     session
@@ -265,7 +268,8 @@ async fn list_ties(session: &Session, config: &Conf) -> PreparedStatement {
                 AND bucket = ? \
                 AND created = ? \
                 AND id <= ? \
-                LIMIT ?",
+                ORDER BY created DESC, id DESC \
+                PER PARTITION LIMIT ?",
             &config.thorium.namespace
         ))
         .await
@@ -274,10 +278,14 @@ async fn list_ties(session: &Session, config: &Conf) -> PreparedStatement {
 
 /// Pulls the data for listing entities in Thorium
 ///
+/// The table clusters in ascending order, so this reads each partition's newest rows first with
+/// `ORDER BY`, which Scylla only allows with `IN` on the partition key when the statement runs
+/// unpaged.
+///
 /// # Arguments
 ///
-/// * `sessions` - The scylla session to use
-/// * `conf` - The Thorium config
+/// * `session` - The scylla session to use
+/// * `config` - The Thorium config
 async fn list_pull(session: &Session, config: &Conf) -> PreparedStatement {
     // build entity list pull prepared statement
     session
@@ -290,6 +298,7 @@ async fn list_pull(session: &Session, config: &Conf) -> PreparedStatement {
                 AND bucket in ? \
                 AND created < ? \
                 AND created > ? \
+                ORDER BY created DESC, id DESC \
                 PER PARTITION LIMIT ?",
             &config.thorium.namespace
         ))

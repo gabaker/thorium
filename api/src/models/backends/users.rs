@@ -15,8 +15,11 @@ use headers::{Header, HeaderName, HeaderValue};
 use ldap3::{Scope, SearchEntry};
 use rand::prelude::*;
 use std::collections::{HashMap, HashSet};
+use std::num::NonZeroUsize;
 use std::path::PathBuf;
 use std::str;
+use std::sync::{Arc, LazyLock};
+use tokio::sync::Semaphore;
 use tracing::{Level, Span, event, instrument};
 
 use super::db;
@@ -207,12 +210,202 @@ async fn scoped_token_auth(
     Ok(AuthedUser::Scoped(scoped_user))
 }
 
-/// Authenticate a user with basic auth stored in redis
+/// The output length in bytes of every password hash Thorium has written
+const HASH_OUTPUT_LEN: usize = 32;
+
+/// The memory cost (KiB) of the password hashes argonautica wrote
+const ARGONAUTICA_M_COST: u32 = 4096;
+
+/// The time cost of the password hashes argonautica wrote
+const ARGONAUTICA_T_COST: u32 = 192;
+
+/// The most lanes an argonautica hash can have, since Argon2 needs 8 KiB of memory per lane
+const ARGONAUTICA_MAX_P_COST: u32 = ARGONAUTICA_M_COST / 8;
+
+/// A password hash configuration Thorium has written, so verifying it costs a known amount
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum HashScheme {
+    /// Argon2id v19 with [`argon2::Params::default`] (m=19456, t=2, p=1) from the argon2 crate,
+    /// which `hash_pw!` writes; Thorium has written these since July 2024 (1.105.4-0.1.0, and
+    /// every public release from 1.0.0)
+    Current,
+    /// Argon2id v19 with m=4096, t=192, and one lane per logical CPU of the API host that hashed
+    /// it, from argonautica 0.2's `Hasher::default()`; Thorium's local accounts were hashed this
+    /// way from August 2020 through 1.105.4 (July 2024). These cost about 20 times a current hash
+    /// to verify, so they are replaced with a current hash at the next successful login
+    Argonautica,
+}
+
+/// Check that a stored password hash uses an algorithm and cost Thorium has written
+///
+/// Argon2 verification recomputes a hash with the algorithm and costs written in the stored hash,
+/// so a hash naming a huge memory or time cost would make every login as its user allocate or
+/// spin that much. Only argon2id v19 with a 32 byte output and the costs of a [`HashScheme`] is
+/// accepted; anything else is refused without computing it.
 ///
 /// # Arguments
 ///
-/// * `possible` - The user data we are authenticating against
+/// * `hash` - The stored password hash to check
+pub(crate) fn check_password_hash(hash: &str) -> Result<HashScheme, String> {
+    // parse the hash without computing anything
+    let parsed = PasswordHash::new(hash).map_err(|err| format!("unparsable hash: {err}"))?;
+    // only accept the algorithm Thorium hashes with
+    if parsed.algorithm != Algorithm::Argon2id.ident() {
+        return Err(format!("algorithm {} isn't argon2id", parsed.algorithm));
+    }
+    // only accept the Argon2 version Thorium hashes with
+    if parsed.version != Some(Version::V0x13.into()) {
+        return Err(format!("version {:?} isn't 19", parsed.version));
+    }
+    // only accept the output length Thorium hashes with
+    let output_len = parsed.hash.map(|output| output.len());
+    if output_len != Some(HASH_OUTPUT_LEN) {
+        return Err(format!(
+            "output length {output_len:?} isn't {HASH_OUTPUT_LEN}"
+        ));
+    }
+    // only accept the costs of a scheme Thorium has hashed with
+    let params = argon2::Params::try_from(&parsed).map_err(|err| format!("bad costs: {err}"))?;
+    let default = argon2::Params::default();
+    let costs = (params.m_cost(), params.t_cost(), params.p_cost());
+    // the argon2 crate's default costs are what Thorium hashes with now
+    if costs == (default.m_cost(), default.t_cost(), default.p_cost()) {
+        return Ok(HashScheme::Current);
+    }
+    // argonautica's costs, with any lane count an API host could have had
+    if (costs.0, costs.1) == (ARGONAUTICA_M_COST, ARGONAUTICA_T_COST)
+        && (1..=ARGONAUTICA_MAX_P_COST).contains(&costs.2)
+    {
+        return Ok(HashScheme::Argonautica);
+    }
+    // refuse any other costs, naming the ones Thorium accepts
+    Err(format!(
+        "costs m={},t={},p={} aren't m={},t={},p={} or m={ARGONAUTICA_M_COST},\
+         t={ARGONAUTICA_T_COST},p=1..={ARGONAUTICA_MAX_P_COST}",
+        costs.0,
+        costs.1,
+        costs.2,
+        default.m_cost(),
+        default.t_cost(),
+        default.p_cost()
+    ))
+}
+
+/// The result of checking a password against a stored hash
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum PasswordCheck {
+    /// The password doesn't match the stored hash
+    Wrong,
+    /// The password matches the stored hash, which is current
+    Verified,
+    /// The password matches a legacy stored hash, and this current hash of it should replace it
+    Upgrade(String),
+}
+
+/// Check a password against a stored hash Thorium has written, rehashing it when it is legacy
+///
+/// This computes the hash, so the hash must already have passed [`check_password_hash`].
+///
+/// # Arguments
+///
+/// * `password` - The password to check
+/// * `password_hash` - The stored hash to check it against
+/// * `scheme` - The scheme [`check_password_hash`] found the stored hash uses
+/// * `secret_key` - Thorium's secret key, which every scheme mixes in as the Argon2 secret
+pub(crate) fn verify_password(
+    password: &str,
+    password_hash: &str,
+    scheme: HashScheme,
+    secret_key: &str,
+) -> Result<PasswordCheck, ApiError> {
+    // parse our password hash
+    let parsed_hash = PasswordHash::new(password_hash)?;
+    // build an argon hasher with our secret, which verifies with the stored hash's own costs
+    let argon = Argon2::new_with_secret(
+        secret_key.as_bytes(),
+        Algorithm::Argon2id,
+        Version::V0x13,
+        argon2::Params::default(),
+    )?;
+    // reject passwords that don't match
+    if argon
+        .verify_password(password.as_bytes(), &parsed_hash)
+        .is_err()
+    {
+        return Ok(PasswordCheck::Wrong);
+    }
+    // rehash a matching password whose stored hash is legacy
+    match scheme {
+        HashScheme::Current => Ok(PasswordCheck::Verified),
+        HashScheme::Argonautica => Ok(PasswordCheck::Upgrade(hash_pw!(password, secret_key))),
+    }
+}
+
+/// Limits how many password verifications run at once, since each one allocates the full
+/// Argon2 memory cost and the blocking pool would otherwise run hundreds of them together
+static VERIFY_PERMITS: LazyLock<Arc<Semaphore>> =
+    LazyLock::new(|| Arc::new(Semaphore::new(verify_permits())));
+
+/// Get how many password verifications may run at once: one per available CPU
+fn verify_permits() -> usize {
+    // fall back to a single verification when the CPU count is unknown
+    std::thread::available_parallelism().map_or(1, NonZeroUsize::get)
+}
+
+/// Limits how many legacy password verifications run at once, so logins as users with
+/// argonautica hashes, which cost about 20 times a current hash, can't take every verify permit
+static LEGACY_VERIFY_PERMITS: LazyLock<Arc<Semaphore>> =
+    LazyLock::new(|| Arc::new(Semaphore::new(legacy_verify_permits(verify_permits()))));
+
+/// Get how many legacy password verifications may run at once: a quarter of the verify permits
+///
+/// # Arguments
+///
+/// * `verify_permits` - How many password verifications of any scheme may run at once
+fn legacy_verify_permits(verify_permits: usize) -> usize {
+    // always allow at least one so legacy users can still log in and be upgraded
+    (verify_permits / 4).max(1)
+}
+
+/// Run a blocking task once a permit is free, holding the permit until the task finishes
+///
+/// The permit moves into the task, so a request that is dropped mid-verify doesn't free its
+/// permit while the verification still runs.
+///
+/// # Arguments
+///
+/// * `permits` - The permits that bound how many tasks run at once
+/// * `task` - The blocking task to run
+async fn bounded_blocking<T, F>(permits: &Arc<Semaphore>, task: F) -> Result<T, ApiError>
+where
+    T: Send + 'static,
+    F: FnOnce() -> T + Send + 'static,
+{
+    // wait for a free permit
+    let permit = Arc::clone(permits)
+        .acquire_owned()
+        .await
+        .map_err(|err| ApiError::new(StatusCode::INTERNAL_SERVER_ERROR, Some(err.to_string())))?;
+    // run our task on a blocking thread, releasing the permit when it finishes
+    tokio::task::spawn_blocking(move || {
+        let output = task();
+        drop(permit);
+        output
+    })
+    .await
+    .map_err(|err| ApiError::new(StatusCode::INTERNAL_SERVER_ERROR, Some(err.to_string())))
+}
+
+/// Authenticate a user with basic auth stored in redis
+///
+/// A legacy hash that verifies is replaced in Redis with a current hash of the password, which
+/// is returned so the caller's copy of the user carries it too.
+///
+/// # Arguments
+///
+/// * `username` - The name of the user we are authenticating
 /// * `password` - The password to check against
+/// * `password_hash` - The user's stored password hash
 /// * `shared` - Shared objects in Thorium
 #[instrument(name = "backends::user::basic_auth_redis", skip_all, err(Debug))]
 async fn basic_auth_redis(
@@ -220,26 +413,78 @@ async fn basic_auth_redis(
     password: &str,
     password_hash: &str,
     shared: &Shared,
-) -> Result<(), ApiError> {
-    // parse our password hash
-    let parsed_hash = PasswordHash::new(password_hash)?;
-    // get our key
-    let secret_key = shared.config.thorium.secret_key.as_bytes();
-    // build an argon hasher
-    let argon = Argon2::new_with_secret(
-        secret_key,
-        Algorithm::Argon2id,
-        Version::V0x13,
-        argon2::Params::default(),
-    )?;
-    // verify this user provided the correct password
-    match argon.verify_password(password.as_bytes(), &parsed_hash) {
-        Ok(()) => Ok(()),
-        Err(error) => {
+) -> Result<Option<String>, ApiError> {
+    // refuse hashes whose algorithm or cost Thorium never wrote before computing anything
+    let scheme = match check_password_hash(password_hash) {
+        Ok(scheme) => scheme,
+        Err(reason) => {
+            event!(
+                Level::ERROR,
+                user = username,
+                msg = "Refusing stored password hash",
+                reason = %reason
+            );
+            return unauthorized!();
+        }
+    };
+    // legacy hashes also need one of the few legacy permits, held until their verify finishes
+    let legacy_permit = match scheme {
+        HashScheme::Current => None,
+        HashScheme::Argonautica => Some(
+            Arc::clone(&LEGACY_VERIFY_PERMITS)
+                .acquire_owned()
+                .await
+                .map_err(|err| {
+                    ApiError::new(StatusCode::INTERNAL_SERVER_ERROR, Some(err.to_string()))
+                })?,
+        ),
+    };
+    // verify on a blocking thread so the hash doesn't stall the async workers
+    let secret_key = shared.config.thorium.secret_key.clone();
+    let password = password.to_owned();
+    let stored = password_hash.to_owned();
+    let check = bounded_blocking(&VERIFY_PERMITS, move || {
+        // check this password, rehashing it if its stored hash is legacy
+        let check = verify_password(&password, &stored, scheme, &secret_key);
+        drop(legacy_permit);
+        check
+    })
+    .await??;
+    match check {
+        // reject users that provided the wrong password
+        PasswordCheck::Wrong => {
             // log this authorization failure
-            event!(Level::ERROR, user = username, error = error.to_string(),);
+            event!(Level::ERROR, user = username, msg = "Invalid password");
             // This user is not authorized to view this route/data
             unauthorized!()
+        }
+        // accept a right password whose stored hash is current
+        PasswordCheck::Verified => Ok(None),
+        // replace a legacy hash so later logins pay a current hash's cost
+        PasswordCheck::Upgrade(upgraded) => {
+            match db::users::upgrade_password(username, password_hash, &upgraded, shared).await {
+                Ok(true) => {
+                    event!(
+                        Level::INFO,
+                        user = username,
+                        msg = "Upgraded legacy password hash",
+                        scheme = ?scheme
+                    );
+                    Ok(Some(upgraded))
+                }
+                // the stored hash changed since we read it, so the newer one is kept
+                Ok(false) => Ok(None),
+                // the password was right, so a failed upgrade only defers it to a later login
+                Err(err) => {
+                    event!(
+                        Level::WARN,
+                        user = username,
+                        msg = "Failed to upgrade legacy password hash",
+                        error = %err
+                    );
+                    Ok(None)
+                }
+            }
         }
     }
 }
@@ -359,7 +604,11 @@ async fn password_auth(username: &str, password: &str, shared: &Shared) -> Resul
     // try to authenticate against redis or ldap based on if a password is set
     if let Some(password_hash) = &possible.password {
         // a password is set use basic auth
-        basic_auth_redis(username, password, password_hash, shared).await?;
+        let upgraded = basic_auth_redis(username, password, password_hash, shared).await?;
+        // keep a legacy hash's replacement so saving this user doesn't write the old hash back
+        if upgraded.is_some() {
+            possible.password = upgraded;
+        }
     } else {
         // no password was set so use ldap
         let mut ldap = basic_auth_ldap(username, password, shared).await?;
@@ -989,8 +1238,8 @@ impl User {
     /// * `field` - The multipart field containing the image data
     /// * `shared` - Shared Thorium objects
     pub async fn set_image(&mut self, field: Field<'_>, shared: &Shared) -> Result<(), ApiError> {
-        // build the base S3 path for this user's icon (keyed by username)
-        let base_path = Self::build_graphic_base_path(&self.username);
+        // build the base S3 path for this user's icon (keyed by namespace and username)
+        let base_path = self.build_graphic_base_path_from_self(shared);
         // stream the image to S3 under a fixed name; the extension comes from the content type
         let new_path =
             Self::upload_graphic(base_path, field, Some("icon".to_owned()), shared).await?;
@@ -1840,20 +2089,32 @@ impl From<User> for ScrubbedUser {
 
 // Add graphic support for users so profile icons reuse the shared S3 graphic pipeline
 impl GraphicSupport for User {
-    /// Users key their icon off their (immutable) username
-    type GraphicKey<'a> = &'a str;
+    /// Users key their icon off their Thorium namespace and their (immutable) username
+    type GraphicKey<'a> = (&'a str, &'a str);
 
     /// Build the base path for this user's graphic
-    fn build_graphic_base_path<'a>(key: Self::GraphicKey<'a>) -> PathBuf {
-        // namespace user icons under `users/` so a username that happens to be a UUID can't collide with an
-        // entity graphic (entities key off their UUID at the graphics-bucket root)
-        PathBuf::from("users").join(key)
+    ///
+    /// Icons live at `users/<namespace>/<username>/`, so Thorium namespaces sharing a graphics
+    /// bucket keep separate icons for users with the same name. Icons are read and deleted at the
+    /// path stored on the user, so icons stored at `users/<username>/` keep working.
+    ///
+    /// # Arguments
+    ///
+    /// * `key` - The Thorium namespace and the username
+    fn build_graphic_base_path((namespace, username): Self::GraphicKey<'_>) -> PathBuf {
+        // keep user icons under `users/` so a username that happens to be a UUID can't collide
+        // with an entity graphic (entities key off their UUID at the graphics-bucket root)
+        PathBuf::from("users").join(namespace).join(username)
     }
 
     /// Build the base path for this user's graphic
-    fn build_graphic_base_path_from_self(&self) -> PathBuf {
-        // call our base path builder
-        Self::build_graphic_base_path(&self.username)
+    ///
+    /// # Arguments
+    ///
+    /// * `shared` - Shared Thorium objects
+    fn build_graphic_base_path_from_self(&self, shared: &Shared) -> PathBuf {
+        // call our base path builder with this deployment's namespace
+        Self::build_graphic_base_path((&shared.config.thorium.namespace, &self.username))
     }
 }
 
@@ -1929,8 +2190,19 @@ where
 
 #[cfg(test)]
 mod tests {
-    use super::{Key, build_ldap_user_filter, reject_empty_ldap_password, secret_key_matches};
+    use super::{
+        HashScheme, Key, PasswordCheck, build_ldap_user_filter, check_password_hash,
+        legacy_verify_permits, reject_empty_ldap_password, secret_key_matches, verify_password,
+    };
+    use crate::utils::ApiError;
+    use argon2::password_hash::rand_core::OsRng;
+    use argon2::password_hash::{PasswordHasher, SaltString};
+    use argon2::{Algorithm, Argon2, Version};
     use headers::{Header, HeaderValue};
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::time::Duration;
+    use tokio::sync::Semaphore;
 
     #[test]
     fn secret_key_matches_is_correct() {
@@ -2008,6 +2280,48 @@ mod tests {
             filter.contains("uid=analyst1"),
             "LDAP filter dropped a normal username: {filter}"
         );
+    }
+
+    use super::{bounded_blocking, verify_permits};
+
+    /// Password verifications get one permit per CPU, and always at least one
+    #[test]
+    fn verify_permits_follow_the_cpu_count() {
+        let cpus = std::thread::available_parallelism().map_or(1, std::num::NonZeroUsize::get);
+        assert_eq!(verify_permits(), cpus);
+        assert!(verify_permits() >= 1);
+    }
+
+    /// No more blocking tasks run at once than there are permits, however many are started
+    #[tokio::test(flavor = "multi_thread", worker_threads = 8)]
+    async fn bounded_blocking_limits_concurrency() {
+        let permits = Arc::new(Semaphore::new(3));
+        let running = Arc::new(AtomicUsize::new(0));
+        let peak = Arc::new(AtomicUsize::new(0));
+        // start far more tasks than there are permits
+        let mut handles = Vec::new();
+        for _ in 0..64 {
+            let permits = Arc::clone(&permits);
+            let running = Arc::clone(&running);
+            let peak = Arc::clone(&peak);
+            handles.push(tokio::spawn(async move {
+                bounded_blocking(&permits, move || {
+                    // count this task as running and track the most seen at once
+                    let now = running.fetch_add(1, Ordering::SeqCst) + 1;
+                    peak.fetch_max(now, Ordering::SeqCst);
+                    std::thread::sleep(Duration::from_millis(10));
+                    running.fetch_sub(1, Ordering::SeqCst);
+                })
+                .await
+            }));
+        }
+        // wait for every task to finish
+        for handle in handles {
+            handle.await.unwrap().unwrap();
+        }
+        let peak = peak.load(Ordering::SeqCst);
+        assert!(peak <= 3, "{peak} tasks ran at once with 3 permits");
+        assert!(peak >= 1, "no task ran");
     }
 
     /// Users, scrubbed users, and the authed users wrapping them keep their token values,
@@ -2134,5 +2448,188 @@ mod tests {
             printed.len()
         );
         assert!(printed.contains("api_key"));
+    }
+
+    /// The pepper the password hash tests mix in as Thorium's secret key
+    const PEPPER: &str = "jupiter-test-secret-key";
+
+    /// Hash a password exactly the way argonautica 0.2's `Hasher::default()` did
+    ///
+    /// Thorium hashed local passwords from August 2020 through 1.105.4 with:
+    ///
+    /// ```text
+    /// argonautica::Hasher::default()
+    ///     .configure_cpu_pool(futures_cpupool::CpuPool::new(2))
+    ///     .with_password($raw)
+    ///     .with_secret_key($secret_key)
+    ///     .hash()
+    ///     .unwrap()
+    /// ```
+    ///
+    /// argonautica's defaults are argon2id v19, 192 iterations, 4096 KiB of memory, one lane
+    /// per logical CPU, a 32 byte hash, and a random 32 byte salt, computed by the reference C
+    /// implementation with the secret key as the Argon2 secret. argonautica isn't a dependency,
+    /// so this computes the same hash with the argon2 crate; `argon2_secret_matches_rfc_9106`
+    /// shows the argon2 crate applies the secret the way the reference implementation does.
+    ///
+    /// # Arguments
+    ///
+    /// * `password` - The password to hash
+    /// * `secret_key` - The secret key to mix in
+    /// * `lanes` - The logical CPU count of the API host that hashed it
+    fn argonautica_hash(password: &str, secret_key: &str, lanes: u32) -> String {
+        // use argonautica's default costs and output length
+        let params = argon2::Params::new(4096, 192, lanes, Some(32)).unwrap();
+        // use a 32 byte salt like argonautica's default
+        let salt = argon2::password_hash::SaltString::encode_b64(&[7u8; 32]).unwrap();
+        // hash with the secret key as the Argon2 secret
+        argon2::Argon2::new_with_secret(
+            secret_key.as_bytes(),
+            argon2::Algorithm::Argon2id,
+            argon2::Version::V0x13,
+            params,
+        )
+        .unwrap()
+        .hash_password(password.as_bytes(), &salt)
+        .unwrap()
+        .to_string()
+    }
+
+    /// The argon2 crate applies a secret the way the reference implementation argonautica wrapped
+    /// does, reproducing RFC 9106's argon2id test vector, which uses a secret
+    #[test]
+    fn argon2_secret_matches_rfc_9106() {
+        // RFC 9106 section 5.3: 32 KiB, 3 passes, 4 lanes, a secret, and associated data
+        let params = argon2::ParamsBuilder::new()
+            .m_cost(32)
+            .t_cost(3)
+            .p_cost(4)
+            .data(argon2::AssociatedData::new(&[4u8; 12]).unwrap())
+            .output_len(32)
+            .build()
+            .unwrap();
+        let argon = argon2::Argon2::new_with_secret(
+            &[3u8; 8],
+            argon2::Algorithm::Argon2id,
+            argon2::Version::V0x13,
+            params,
+        )
+        .unwrap();
+        // compute the tag and compare it to the RFC's
+        let mut tag = [0u8; 32];
+        argon
+            .hash_password_into(&[1u8; 32], &[2u8; 16], &mut tag)
+            .unwrap();
+        assert_eq!(
+            hex::encode(tag),
+            "0d640df58d78766c08c037a34a8b53c9d01ef0452d75b65eb52520e96b01e659"
+        );
+    }
+
+    /// A hash an argonautica-era release wrote verifies with the right password and pepper, and
+    /// is replaced with a current hash that then verifies without another upgrade
+    #[test]
+    fn argonautica_hash_verifies_and_upgrades() {
+        // the hash the long-lived cluster's operator user had, from a 56 CPU API host
+        let legacy = argonautica_hash("CornSilkPw7Q9z", PEPPER, 56);
+        assert!(legacy.starts_with("$argon2id$v=19$m=4096,t=192,p=56$"));
+        assert_eq!(check_password_hash(&legacy), Ok(HashScheme::Argonautica));
+        // the right password verifies and comes back rehashed with current costs
+        let check =
+            verify_password("CornSilkPw7Q9z", &legacy, HashScheme::Argonautica, PEPPER).unwrap();
+        let PasswordCheck::Upgrade(upgraded) = check else {
+            panic!("a legacy hash wasn't upgraded: {check:?}");
+        };
+        assert!(upgraded.starts_with("$argon2id$v=19$m=19456,t=2,p=1$"));
+        assert_eq!(check_password_hash(&upgraded), Ok(HashScheme::Current));
+        // the upgraded hash verifies as current
+        assert_eq!(
+            verify_password("CornSilkPw7Q9z", &upgraded, HashScheme::Current, PEPPER).unwrap(),
+            PasswordCheck::Verified
+        );
+        // a single lane host's hash is accepted too
+        assert_eq!(
+            check_password_hash(&argonautica_hash("pw", PEPPER, 1)),
+            Ok(HashScheme::Argonautica)
+        );
+    }
+
+    /// A legacy hash checked with the wrong password or pepper is refused and not rehashed
+    #[test]
+    fn argonautica_hash_wrong_password_not_upgraded() {
+        // hash a password the argonautica way
+        let legacy = argonautica_hash("CornSilkPw7Q9z", PEPPER, 8);
+        // the wrong password is refused
+        assert_eq!(
+            verify_password("NotThePassword", &legacy, HashScheme::Argonautica, PEPPER).unwrap(),
+            PasswordCheck::Wrong
+        );
+        // the right password under another pepper is refused
+        assert_eq!(
+            verify_password("CornSilkPw7Q9z", &legacy, HashScheme::Argonautica, "other").unwrap(),
+            PasswordCheck::Wrong
+        );
+    }
+
+    /// A current hash verifies without being rehashed and a wrong password is refused
+    #[test]
+    fn current_hash_verifies_unchanged() -> Result<(), ApiError> {
+        // hash a password the way Thorium does now
+        let current = hash_pw!("CornSilkPw7Q9z", PEPPER);
+        assert_eq!(check_password_hash(&current), Ok(HashScheme::Current));
+        // the right password verifies with no upgrade
+        assert_eq!(
+            verify_password("CornSilkPw7Q9z", &current, HashScheme::Current, PEPPER)?,
+            PasswordCheck::Verified
+        );
+        // the wrong password is refused
+        assert_eq!(
+            verify_password("NotThePassword", &current, HashScheme::Current, PEPPER)?,
+            PasswordCheck::Wrong
+        );
+        Ok(())
+    }
+
+    /// Hashes whose algorithm, version, output length, or costs Thorium never wrote are refused
+    #[test]
+    fn unknown_hash_params_refused() {
+        // a 22 character salt and a 43 character (32 byte) output
+        let salt = "c2FsdHNhbHRzYWx0c2FsdA";
+        let output = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA";
+        let refused = [
+            // costs no Thorium release used
+            format!("$argon2id$v=19$m=65536,t=10,p=4${salt}${output}"),
+            format!("$argon2id$v=19$m=4096,t=191,p=56${salt}${output}"),
+            format!("$argon2id$v=19$m=8192,t=192,p=56${salt}${output}"),
+            format!("$argon2id$v=19$m=19456,t=3,p=1${salt}${output}"),
+            format!("$argon2id$v=19$m=4194304,t=1,p=1${salt}${output}"),
+            // more lanes than argonautica's 4 MiB can hold
+            format!("$argon2id$v=19$m=4096,t=192,p=513${salt}${output}"),
+            // other algorithms and versions
+            format!("$argon2i$v=19$m=19456,t=2,p=1${salt}${output}"),
+            format!("$argon2d$v=19$m=4096,t=192,p=8${salt}${output}"),
+            format!("$argon2id$v=16$m=19456,t=2,p=1${salt}${output}"),
+            format!("$argon2id$m=19456,t=2,p=1${salt}${output}"),
+            // another output length
+            format!("$argon2id$v=19$m=19456,t=2,p=1${salt}${output}{output}"),
+            // not an Argon2 hash at all
+            "plaintext".to_owned(),
+        ];
+        for hash in &refused {
+            assert!(
+                check_password_hash(hash).is_err(),
+                "{hash} should be refused"
+            );
+        }
+    }
+
+    /// Legacy verifications get a quarter of the verify permits but never fewer than one
+    #[test]
+    fn legacy_permits_are_a_quarter() {
+        // small hosts still let legacy users log in
+        assert_eq!(legacy_verify_permits(1), 1);
+        assert_eq!(legacy_verify_permits(4), 1);
+        // larger hosts give legacy verifications a quarter
+        assert_eq!(legacy_verify_permits(56), 14);
     }
 }

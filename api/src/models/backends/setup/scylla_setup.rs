@@ -235,6 +235,70 @@ async fn setup_keyspace(session: &Session, config: &Conf) {
         .expect("Failed to setup keyspace");
 }
 
+/// Check if a table in Thorium's keyspace has a column
+///
+/// # Arguments
+///
+/// * `session` - The scylla session to use
+/// * `config` - The Thorium config
+/// * `table` - The table to check
+/// * `column` - The column to look for
+async fn column_exists(session: &Session, config: &Conf, table: &str, column: &str) -> bool {
+    // Scylla stores unquoted identifiers in lower case, so look them up that way
+    let keyspace = config.thorium.namespace.to_lowercase();
+    let table = table.to_lowercase();
+    let column = column.to_lowercase();
+    // look for this column in the schema tables
+    session
+        .query_unpaged(
+            "SELECT column_name FROM system_schema.columns \
+                WHERE keyspace_name = ? AND table_name = ? AND column_name = ?",
+            (&keyspace, &table, &column),
+        )
+        .await
+        .unwrap_or_else(|err| panic!("Failed to read the columns of {table}: {err}"))
+        .into_rows_result()
+        .is_ok_and(|rows| rows.rows_num() > 0)
+}
+
+/// Add a column to a table that was created before the column was added to its create statement
+///
+/// Tables are created with `CREATE TABLE IF NOT EXISTS`, so a keyspace created by an older
+/// release keeps its old columns, and statements naming newer columns fail to prepare. A column
+/// that already exists, with any type, is left alone.
+///
+/// # Arguments
+///
+/// * `session` - The scylla session to use
+/// * `config` - The Thorium config
+/// * `table` - The table to add the column to
+/// * `column` - The column to add
+/// * `cql_type` - The type the table's create statement gives this column
+async fn add_missing_column(
+    session: &Session,
+    config: &Conf,
+    table: &str,
+    column: &str,
+    cql_type: &str,
+) {
+    // nothing needs to change when the column already exists
+    if column_exists(session, config, table, column).await {
+        return;
+    }
+    // add the column to the existing table
+    let alter = format!(
+        "ALTER TABLE {ns}.{table} ADD {column} {cql_type}",
+        ns = config.thorium.namespace
+    );
+    if let Err(err) = session.query_unpaged(alter, &[]).await {
+        // another API instance starting at the same time may have added it first
+        assert!(
+            column_exists(session, config, table, column).await,
+            "Failed to add column {column} to {table}: {err}"
+        );
+    }
+}
+
 /// Build a session and setup tables/materialized views/prepared statements
 async fn build(config: Conf) -> Scylla {
     // Create a new session for scylla

@@ -8,6 +8,7 @@ use chrono::prelude::*;
 use futures_util::Future;
 use scylla::errors::ExecutionError;
 use scylla::response::query_result::QueryResult;
+use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 use tracing::instrument;
 use url::Url;
@@ -21,6 +22,7 @@ use crate::models::{
     RepoSubmission, RepoSubmissionChunk, RepoUrlComponents, S3Objects, TagListRow, TagMap, TagType,
     User, UserRole,
 };
+use crate::utils::helpers::redact_url;
 use crate::utils::{ApiError, Shared};
 use crate::{
     bad, can_create_all, deserialize, deserialize_opt, for_groups, not_found, unauthorized,
@@ -44,6 +46,8 @@ macro_rules! get_string {
 impl RepoUrlComponents {
     /// Attempt to parse a repo URL into its components
     ///
+    /// Errors quote the URL without any credentials it carries.
+    ///
     /// # Arguments
     ///
     /// * `url` - The URL to parse
@@ -54,17 +58,19 @@ impl RepoUrlComponents {
             (false, false) => Url::parse(&format!("https://{url}"))?,
             _ => Url::parse(url)?,
         };
+        // errors quote this url without any credentials it carries
+        let redacted = redact_url(url.as_str());
         // try to extract the provider from this url
         let provider = get_string!(
             url.host_str(),
-            format!("{ERROR_PREFIX}: \"{}\" does not contain a host!", url)
+            format!("{ERROR_PREFIX}: \"{redacted}\" does not contain a host!")
         );
         // try to extract the user and repo name from the url
         if let Some(mut segments) = url.path_segments() {
             // get the user who created this repo
             let user = get_string!(
                 segments.next(),
-                format!("{ERROR_PREFIX}: '{url}' does not contain a username!",)
+                format!("{ERROR_PREFIX}: '{redacted}' does not contain a username!",)
             );
             // because nested repos exist the name of this repo will be the rest of the
             // path segments separated by '/'
@@ -79,12 +85,12 @@ impl RepoUrlComponents {
             // (see url::Url::path_segments)
             if name.contains("//") {
                 return bad!(format!(
-                    "{ERROR_PREFIX}: '{url}' contains empty path components!",
+                    "{ERROR_PREFIX}: '{redacted}' contains empty path components!",
                 ));
             }
             if name.is_empty() {
                 return bad!(format!(
-                    "{ERROR_PREFIX}: '{url}' does not contain a project name!",
+                    "{ERROR_PREFIX}: '{redacted}' does not contain a project name!",
                 ));
             }
             // try to extract the scheme
@@ -97,8 +103,7 @@ impl RepoUrlComponents {
             })
         } else {
             bad!(format!(
-                "Invalid repo URL: \"{}\" must contain a username and project name!",
-                url
+                "{ERROR_PREFIX}: \"{redacted}\" must contain a username and project name!"
             ))
         }
     }
@@ -135,7 +140,12 @@ impl Repo {
     /// * `user` - The user trying to save this repo
     /// * `req` - The repo request to save
     /// * `shared` - Shared objects in Thorium
-    #[instrument(name = "Repo::create", skip(user, shared), err(Debug))]
+    #[instrument(
+        name = "Repo::create",
+        skip_all,
+        fields(groups = ?req.groups, url = %redact_url(&req.url)),
+        err(Debug)
+    )]
     pub async fn create(
         user: &User,
         req: RepoRequest,
@@ -820,6 +830,51 @@ impl From<CommitishListRow> for Commitish {
     }
 }
 
+/// The first unconsumed commitish in a group when a page ends inside rows sharing a timestamp
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+#[serde(untagged)]
+pub enum CommitishTie {
+    /// The key and kind of the first unconsumed row
+    Row {
+        /// The key of the first unconsumed row
+        key: String,
+        /// The kind of the first unconsumed row
+        kind: CommitishKinds,
+    },
+    /// Only the key of the first unconsumed row, which resumes from that key in every kind
+    Key(String),
+}
+
+impl CommitishTie {
+    /// Get the key a tie query resumes from and split the kinds being listed by how they resume
+    ///
+    /// Rows sharing a timestamp are consumed by key, descending, and then by kind, so kinds
+    /// ordered at or after the tied kind still hold unconsumed rows with the tied key, and kinds
+    /// ordered before it hold only unconsumed rows with lower keys. Returns the key, the kinds
+    /// that resume at the key, and the kinds that resume below it.
+    ///
+    /// # Arguments
+    ///
+    /// * `kinds` - The kinds of commitish being listed
+    #[must_use]
+    pub fn bounds(
+        self,
+        kinds: &[CommitishKinds],
+    ) -> (String, Vec<CommitishKinds>, Vec<CommitishKinds>) {
+        match self {
+            Self::Row { key, kind } => {
+                // split our kinds on whether they sort before the tied kind
+                let (below, at) = kinds
+                    .iter()
+                    .partition(|listed| listed.as_str() < kind.as_str());
+                (key, at, below)
+            }
+            // a tie without a kind resumes at its key in every kind
+            Self::Key(key) => (key, kinds.to_vec(), Vec::new()),
+        }
+    }
+}
+
 // implement cursor for our results stream
 #[async_trait::async_trait]
 impl CursorCore for Commitish {
@@ -833,7 +888,7 @@ impl CursorCore for Commitish {
     type GroupBy = String;
 
     /// The data structure to store tie info in
-    type Ties = HashMap<String, String>;
+    type Ties = HashMap<String, CommitishTie>;
 
     /// The number of buckets to crawl at once for non tag queries
     ///
@@ -887,13 +942,14 @@ impl CursorCore for Commitish {
         unimplemented!("USE FROM PARAMS EXTRA INSTEAD!")
     }
 
-    /// Get our the max number of rows to return
+    /// Get the max number of rows to return, checked against the most a listing allows
     ///
     /// # Arguments
     ///
     /// * `params` - The params to use to build this cursor
-    fn get_limit(params: &Self::Params) -> usize {
-        params.limit
+    fn get_limit(params: &Self::Params) -> Result<usize, ApiError> {
+        // make sure this limit is one we can serve
+        db::cursors::check_limit(params.limit, db::cursors::DEFAULT_LIMIT_CAP, "limit")
     }
 
     /// Get the partition size for this cursor
@@ -908,6 +964,8 @@ impl CursorCore for Commitish {
 
     /// Add an item to our tie breaker map
     ///
+    /// Each group keeps the key and kind of the first row added for it.
+    ///
     /// # Arguments
     ///
     /// * `ties` - Our current ties
@@ -916,28 +974,25 @@ impl CursorCore for Commitish {
         for group in self.groups() {
             // if this group doesn't already have a tie entry then add it
             ties.entry(group.clone())
-                .or_insert_with(|| self.key().to_owned());
+                .or_insert_with(|| CommitishTie::Row {
+                    key: self.key().to_owned(),
+                    kind: self.kind(),
+                });
         }
     }
 
     /// Determines if a new item is a duplicate or not
     ///
+    /// Commitishes are deduped on their kind and key, since a branch and a tag can share a name.
+    ///
     /// # Arguments
     ///
-    /// * `set` - The current set of deduped data
+    /// * `dedupe_set` - The current set of deduped data
     fn dedupe_item(&self, dedupe_set: &mut HashSet<String>) -> bool {
-        // get our key
-        let key = self.key();
-        // if this is already in our dedupe set then skip it
-        if dedupe_set.contains(key) {
-            // we already have this commit so skip it
-            false
-        } else {
-            // add this new commit to our dedupe set
-            dedupe_set.insert(key.clone());
-            // keep this new commit
-            true
-        }
+        // key on our kind as well, since a branch and a tag can share a name
+        let key = format!("{}:{}", self.kind(), self.key());
+        // keep this commitish only if it isn't already in our dedupe set
+        dedupe_set.insert(key)
     }
 }
 
@@ -982,6 +1037,19 @@ impl ScyllaCursorSupport for Commitish {
     /// Get the unique key for this row if it exists
     fn get_unique_key<'a>(&'a self) -> Self::UniqueType<'a> {
         (self.kind(), self.key())
+    }
+
+    /// Compare two commitishes that share a timestamp in the order a page consumes them
+    ///
+    /// # Arguments
+    ///
+    /// * `other` - The commitish to compare against
+    fn cmp_ties(&self, other: &Self) -> std::cmp::Ordering {
+        // keys cluster in descending order within a timestamp, and kinds keep equal keys apart
+        other
+            .key()
+            .cmp(self.key())
+            .then_with(|| self.kind().as_str().cmp(other.kind().as_str()))
     }
 
     /// Add a group to a specific returned line
@@ -1031,16 +1099,18 @@ impl ScyllaCursorSupport for Commitish {
         }
     }
 
-    /// builds the query string for getting data from ties in the last query
+    /// Builds the queries for getting data from ties in the last query
+    ///
+    /// Each tie gets up to two queries, one for the kinds that still hold rows with the tied key
+    /// and one for the kinds that only hold rows below it.
     ///
     /// # Arguments
     ///
-    /// * `group` - The group that this query is for
-    /// * `_filters` - Any filters to apply to this query
+    /// * `ties` - The tie info saved for each group by the last page
+    /// * `extra` - Any extra filters to apply to these queries
     /// * `year` - The year to get data for
     /// * `bucket` - The bucket to get data for
     /// * `uploaded` - The timestamp to get the remaining tied values for
-    /// * `breaker` - The value to use as a tie breaker
     /// * `limit` - The max number of rows to return
     /// * `shared` - Shared Thorium objects
     fn ties_query(
@@ -1052,19 +1122,39 @@ impl ScyllaCursorSupport for Commitish {
         limit: i32,
         shared: &Shared,
     ) -> Result<Vec<impl Future<Output = Result<QueryResult, ExecutionError>>>, ApiError> {
-        // allocate space for 300 futures
-        let mut futures = Vec::with_capacity(ties.len());
+        // allocate space for up to two queries per tie
+        let mut futures = Vec::with_capacity(ties.len() * 2);
         // if any ties were found then get the rest of them and add them to data
-        for (group, hash) in ties.drain() {
-            // execute our query
-            let future = shared.scylla.session.execute_unpaged(
-                &shared.scylla.prep.commitishes.list_ties,
-                (
-                    &extra.0, group, year, bucket, &extra.1, uploaded, hash, limit,
-                ),
-            );
-            // add this future to our set
-            futures.push(future);
+        for (group, tie) in ties.drain() {
+            // get the tied key and which kinds resume at it or below it
+            let (key, at, below) = tie.bounds(&extra.0);
+            // query the kinds that still hold rows with the tied key, then those that don't
+            let queries = [
+                (&shared.scylla.prep.commitishes.list_ties, at),
+                (&shared.scylla.prep.commitishes.list_ties_below, below),
+            ];
+            for (prepared, kinds) in queries {
+                // skip a query with no kinds to list
+                if kinds.is_empty() {
+                    continue;
+                }
+                // execute our query
+                let future = shared.scylla.session.execute_unpaged(
+                    prepared,
+                    (
+                        kinds,
+                        group.clone(),
+                        year,
+                        bucket,
+                        &extra.1,
+                        uploaded,
+                        key.clone(),
+                        limit,
+                    ),
+                );
+                // add this future to our set
+                futures.push(future);
+            }
         }
         Ok(futures)
     }
@@ -1248,13 +1338,14 @@ impl CursorCore for RepoListLine {
         params.tags_case_insensitive
     }
 
-    /// Get our the max number of rows to return
+    /// Get the max number of rows to return, checked against the most a listing allows
     ///
     /// # Arguments
     ///
     /// * `params` - The params to use to build this cursor
-    fn get_limit(params: &Self::Params) -> usize {
-        params.limit
+    fn get_limit(params: &Self::Params) -> Result<usize, ApiError> {
+        // make sure this limit is one we can serve
+        db::cursors::check_limit(params.limit, db::cursors::DEFAULT_LIMIT_CAP, "limit")
     }
 
     /// Get the partition size for this cursor
@@ -1304,8 +1395,9 @@ impl CursorCore for RepoListLine {
     }
 
     /// Get the tag clustering key for a row without the timestamp
-    fn get_tag_clustering_key(&self) -> &String {
-        &self.url
+    fn get_tag_clustering_key(&self) -> String {
+        // tags are clustered by the url they tag
+        self.url.clone()
     }
 }
 
@@ -1318,7 +1410,7 @@ impl ScyllaCursorSupport for RepoListLine {
     /// The unique key for this cursors row
     type UniqueType<'a> = Option<Uuid>;
 
-    /// Add an item to our tag tie breaker map
+    /// Add an item to our tag tie breaker map, keeping the tie a group already has
     ///
     /// # Arguments
     ///
@@ -1326,8 +1418,9 @@ impl ScyllaCursorSupport for RepoListLine {
     fn add_tag_tie(&self, ties: &mut HashMap<String, String>) {
         // if its not already in the tie map then add each of its groups to our map
         for group in &self.groups {
-            // insert this groups tie
-            ties.insert(group.clone(), self.url.clone());
+            // keep the tie of an earlier row in this group, since rows are consumed in order
+            ties.entry(group.clone())
+                .or_insert_with(|| self.url.clone());
         }
     }
 
@@ -1363,6 +1456,20 @@ impl ScyllaCursorSupport for RepoListLine {
     /// Get the unique key for this row if it exists
     fn get_unique_key<'a>(&'a self) -> Self::UniqueType<'a> {
         self.submission
+    }
+
+    /// Compare two repos that share a timestamp in the order a page consumes them
+    ///
+    /// # Arguments
+    ///
+    /// * `other` - The line to compare against
+    fn cmp_ties(&self, other: &Self) -> std::cmp::Ordering {
+        // submission ids cluster in descending order within a timestamp
+        match (&self.submission, &other.submission) {
+            (Some(mine), Some(theirs)) => db::cursors::scylla_uuid_cmp(theirs, mine),
+            // lines built from tag rows have no submission and are ordered by the tags cursor
+            _ => std::cmp::Ordering::Equal,
+        }
     }
 
     /// Add a group to a specific returned line
@@ -1576,5 +1683,38 @@ where
             };
             Ok(default)
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::CommitishTie;
+    use crate::models::CommitishKinds;
+
+    /// A tie holds a key and kind, and a tie holding only a key still loads and resumes from
+    /// that key in every kind
+    #[test]
+    fn commitish_tie_forms_load() {
+        let kinds = CommitishKinds::all();
+        // a full tie round trips through JSON
+        let tie = CommitishTie::Row {
+            key: "v1".to_owned(),
+            kind: CommitishKinds::Commit,
+        };
+        let json = serde_json::to_string(&tie).unwrap();
+        let loaded: CommitishTie = serde_json::from_str(&json).unwrap();
+        assert_eq!(loaded, tie);
+        // kinds sorting before the tied kind resume below its key
+        assert_eq!(
+            loaded.bounds(&kinds),
+            (
+                "v1".to_owned(),
+                vec![CommitishKinds::Commit, CommitishKinds::Tag],
+                vec![CommitishKinds::Branch]
+            )
+        );
+        // a tie saved as just a key loads and resumes at that key in every kind
+        let loaded: CommitishTie = serde_json::from_str("\"v1\"").unwrap();
+        assert_eq!(loaded.bounds(&kinds), ("v1".to_owned(), kinds, Vec::new()));
     }
 }

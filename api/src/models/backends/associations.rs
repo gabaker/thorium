@@ -6,8 +6,10 @@ use chrono::prelude::*;
 use futures_util::Future;
 use scylla::errors::ExecutionError;
 use scylla::response::query_result::QueryResult;
+use serde::{Deserialize, Serialize};
 use std::collections::{BTreeSet, HashMap, HashSet};
 use std::hash::{Hash, Hasher};
+use std::pin::Pin;
 use uuid::Uuid;
 
 use super::db;
@@ -229,6 +231,41 @@ impl AssociationTarget {
     }
 }
 
+/// A boxed tie query, so the queries for a tie's target and the targets after it share a type
+type TieQuery<'a> = Pin<Box<dyn Future<Output = Result<QueryResult, ExecutionError>> + Send + 'a>>;
+
+/// The first unconsumed association in a group when a page ends inside rows sharing a timestamp
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+#[serde(untagged)]
+pub enum AssociationTie {
+    /// The target and direction of the first unconsumed row
+    Row {
+        /// The target of the first unconsumed row
+        target: String,
+        /// The direction of the first unconsumed row
+        direction: Directionality,
+    },
+    /// Only the target of the first unconsumed row, which resumes from that target's first
+    /// direction
+    Target(String),
+}
+
+impl AssociationTie {
+    /// Get the target and direction a tie query resumes from
+    ///
+    /// No direction is less than the empty string, so a tie without one resumes from every
+    /// direction of its target.
+    #[must_use]
+    pub fn bounds(self) -> (String, String) {
+        match self {
+            // a full tie resumes from its own direction
+            Self::Row { target, direction } => (target, direction.as_str().to_owned()),
+            // a tie without a direction resumes before every direction
+            Self::Target(target) => (target, String::new()),
+        }
+    }
+}
+
 // implement cursor for our results stream
 #[async_trait::async_trait]
 impl CursorCore for ListableAssociation {
@@ -242,7 +279,7 @@ impl CursorCore for ListableAssociation {
     type GroupBy = String;
 
     /// The data structure to store tie info in
-    type Ties = HashMap<String, String>;
+    type Ties = HashMap<String, AssociationTie>;
 
     /// Get our cursor id from params
     ///
@@ -285,13 +322,14 @@ impl CursorCore for ListableAssociation {
         unimplemented!("USE FROM PARAMS EXTRA INSTEAD!")
     }
 
-    /// Get our the max number of rows to return
+    /// Get the max number of rows to return, checked against the most a listing allows
     ///
     /// # Arguments
     ///
     /// * `params` - The params to use to build this cursor
-    fn get_limit(params: &Self::Params) -> usize {
-        params.limit
+    fn get_limit(params: &Self::Params) -> Result<usize, ApiError> {
+        // make sure this limit is one we can serve
+        db::cursors::check_limit(params.limit, db::cursors::DEFAULT_LIMIT_CAP, "limit")
     }
 
     /// Get the partition size for this cursor
@@ -306,6 +344,8 @@ impl CursorCore for ListableAssociation {
 
     /// Add an item to our tie breaker map
     ///
+    /// Each group keeps the target and direction of the first row added for it.
+    ///
     /// # Arguments
     ///
     /// * `ties` - Our current ties
@@ -314,7 +354,10 @@ impl CursorCore for ListableAssociation {
         for group in &self.groups {
             // if this group doesn't already have a tie entry then add it
             ties.entry(group.clone())
-                .or_insert_with(|| self.other.clone());
+                .or_insert_with(|| AssociationTie::Row {
+                    target: self.other.clone(),
+                    direction: self.direction,
+                });
         }
     }
 
@@ -380,6 +423,18 @@ impl ScyllaCursorSupport for ListableAssociation {
         (&self.other, self.direction)
     }
 
+    /// Compare two associations that share a timestamp in the order a page consumes them
+    ///
+    /// # Arguments
+    ///
+    /// * `other` - The association to compare against
+    fn cmp_ties(&self, other: &Self) -> std::cmp::Ordering {
+        // targets and then directions cluster in ascending order within a timestamp
+        self.other
+            .cmp(&other.other)
+            .then_with(|| self.direction.as_str().cmp(other.direction.as_str()))
+    }
+
     /// Add a group to a specific returned line
     ///
     /// # Arguments
@@ -422,16 +477,18 @@ impl ScyllaCursorSupport for ListableAssociation {
         }
     }
 
-    /// builds the query string for getting data from ties in the last query
+    /// Builds the queries for getting data from ties in the last query
+    ///
+    /// Each tie gets one query for the remaining directions of its tied target and one for the
+    /// targets after it.
     ///
     /// # Arguments
     ///
-    /// * `group` - The group that this query is for
-    /// * `_filters` - Any filters to apply to this query
+    /// * `ties` - The tie info saved for each group by the last page
+    /// * `extra` - Any extra filters to apply to these queries
     /// * `year` - The year to get data for
     /// * `bucket` - The bucket to get data for
     /// * `uploaded` - The timestamp to get the remaining tied values for
-    /// * `breaker` - The value to use as a tie breaker
     /// * `limit` - The max number of rows to return
     /// * `shared` - Shared Thorium objects
     fn ties_query(
@@ -443,17 +500,30 @@ impl ScyllaCursorSupport for ListableAssociation {
         limit: i32,
         shared: &Shared,
     ) -> Result<Vec<impl Future<Output = Result<QueryResult, ExecutionError>>>, ApiError> {
-        // allocate space for 300 futures
-        let mut futures = Vec::with_capacity(ties.len());
+        // allocate space for two futures for each tie
+        let mut futures: Vec<TieQuery<'_>> = Vec::with_capacity(ties.len() * 2);
         // if any ties were found then get the rest of them and add them to data
-        for (group, target) in ties.drain() {
-            // execute our query
-            let future = shared.scylla.session.execute_unpaged(
+        for (group, tie) in ties.drain() {
+            // get the target and direction to resume this group from
+            let (target, direction) = tie.bounds();
+            // get the remaining directions of the tied target
+            futures.push(Box::pin(shared.scylla.session.execute_unpaged(
+                &shared.scylla.prep.associations.list_ties_target,
+                (
+                    group.clone(),
+                    year,
+                    bucket,
+                    extra.clone(),
+                    uploaded,
+                    target.clone(),
+                    direction,
+                ),
+            )));
+            // get the targets after the tied one
+            futures.push(Box::pin(shared.scylla.session.execute_unpaged(
                 &shared.scylla.prep.associations.list_ties,
-                (group, year, bucket, extra, uploaded, target, limit),
-            );
-            // add this future to our set
-            futures.push(future);
+                (group, year, bucket, extra.clone(), uploaded, target, limit),
+            )));
         }
         Ok(futures)
     }
@@ -599,5 +669,35 @@ where
         } else {
             Ok(Self::default())
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::AssociationTie;
+    use crate::models::Directionality;
+
+    /// A tie holds a target and direction, and a tie holding only a target still loads and
+    /// resumes from every direction of that target
+    #[test]
+    fn association_tie_forms_load() {
+        // a full tie round trips through JSON
+        let tie = AssociationTie::Row {
+            target: "provider.tld/user/repo".to_owned(),
+            direction: Directionality::To,
+        };
+        let json = serde_json::to_string(&tie).unwrap();
+        let loaded: AssociationTie = serde_json::from_str(&json).unwrap();
+        assert_eq!(loaded, tie);
+        assert_eq!(
+            loaded.bounds(),
+            ("provider.tld/user/repo".to_owned(), "To".to_owned())
+        );
+        // a tie saved as just a target loads and resumes before any direction
+        let loaded: AssociationTie = serde_json::from_str("\"provider.tld/user/repo\"").unwrap();
+        assert_eq!(
+            loaded.bounds(),
+            ("provider.tld/user/repo".to_owned(), String::new())
+        );
     }
 }

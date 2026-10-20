@@ -76,6 +76,14 @@ async fn get_scylla_client(config: &Conf) -> Result<Session, Error> {
     Ok(scylla)
 }
 
+/// Open a scylla session to the test cluster
+///
+/// Each call opens its own session, since every test runs in its own runtime.
+pub async fn scylla_session() -> Result<Session, Error> {
+    // connect to the scylla cluster in our test config
+    get_scylla_client(&CONF).await
+}
+
 /// Setup a connection pool to the redis backend
 ///
 /// # Arguments
@@ -109,6 +117,12 @@ pub async fn get_redis_client(config: &Conf) -> Pool<RedisConnectionManager> {
         .build(manager)
         .await
         .expect("Failed to build redis connection pool")
+}
+
+/// Open a redis connection pool to the test redis
+pub async fn redis_pool() -> Pool<RedisConnectionManager> {
+    // connect to the redis in our test config
+    get_redis_client(&CONF).await
 }
 
 /// Drop the keyspace in Scylla
@@ -145,65 +159,119 @@ async fn wipe_scylla(config: &Conf) -> Result<(), Error> {
     Ok(())
 }
 
-/// Wipe Redis before running tests
+/// The prefix every namespace the harness may wipe starts with
+pub const TEST_NAMESPACE_PREFIX: &str = "testing_";
+
+/// The prefix every bucket the harness may create or change starts with
+pub const TEST_BUCKET_PREFIX: &str = "testing-";
+
+/// Delete this test namespace's keys from Redis before running tests
+///
+/// Only keys under the namespace's prefix are deleted, so other namespaces sharing the Redis
+/// database are left alone.
+///
+/// # Arguments
+///
+/// * `config` - The Thorium config we are using for tests
 async fn wipe_redis(config: &Conf) -> Result<(), Error> {
     // connect to redis
     let redis = get_redis_client(config).await;
-    // build our redis pipe
-    let mut pipe = redis::pipe();
-    // flush all data in this redis instance
-    pipe.cmd("FLUSHDB")
-        .exec_async(&mut *redis.get().await.map_err(|err| {
-            Error::new(format!("Error getting Redis connection from pool: {err}"))
-        })?)
+    let mut conn = redis
+        .get()
         .await
-        .map_err(|err| Error::new(format!("Error flushing data from Redis: {err}")))?;
+        .map_err(|err| Error::new(format!("Error getting Redis connection from pool: {err}")))?;
+    // match every key under our namespace, escaping any glob characters in its name
+    let escaped = config
+        .thorium
+        .namespace
+        .chars()
+        .fold(String::new(), |mut escaped, letter| {
+            if matches!(letter, '*' | '?' | '[' | ']' | '\\') {
+                escaped.push('\\');
+            }
+            escaped.push(letter);
+            escaped
+        });
+    let pattern = format!("{escaped}:*");
+    // scan for our keys and delete each batch we find until the scan wraps around
+    let mut cursor: u64 = 0;
+    loop {
+        let (next, keys): (u64, Vec<String>) = redis::cmd("SCAN")
+            .arg(cursor)
+            .arg("MATCH")
+            .arg(&pattern)
+            .arg("COUNT")
+            .arg(1000)
+            .query_async(&mut *conn)
+            .await
+            .map_err(|err| Error::new(format!("Error scanning keys in Redis: {err}")))?;
+        // delete this batch of keys if we found any
+        if !keys.is_empty() {
+            let (): () = redis::cmd("DEL")
+                .arg(&keys)
+                .query_async(&mut *conn)
+                .await
+                .map_err(|err| Error::new(format!("Error deleting keys from Redis: {err}")))?;
+        }
+        // stop once the scan has covered every key
+        if next == 0 {
+            break;
+        }
+        cursor = next;
+    }
     Ok(())
 }
 
 /// Wipe all of the databases under test (Scylla + Redis)
 ///
-/// We don't currently test against ES
+/// We don't currently test against ES. Only namespaces starting with [`TEST_NAMESPACE_PREFIX`]
+/// are wiped, and any other namespace is refused before either database is contacted, so a test
+/// config pointed at a real deployment can't drop its data.
 ///
 /// # Arguments
 ///
-/// * `conf` - The Thorium config we are using for tests
-async fn wipe_dbs(config: &Conf) -> Result<(), Error> {
-    // panic if our keyspace is Thorium
-    assert!(
-        config.thorium.namespace.to_lowercase() != "thorium",
-        "You cannot test against the Thorium namespace! Change your namespace to testing_thorium!"
-    );
+/// * `config` - The Thorium config we are using for tests
+pub async fn wipe_dbs(config: &Conf) -> Result<(), Error> {
+    // refuse any namespace that isn't marked as a test namespace
+    if !config.thorium.namespace.starts_with(TEST_NAMESPACE_PREFIX) {
+        return Err(Error::new(format!(
+            "Refusing to wipe namespace '{}': test namespaces must start with \
+            '{TEST_NAMESPACE_PREFIX}', such as testing_thorium",
+            config.thorium.namespace
+        )));
+    }
     tokio::try_join!(wipe_scylla(config), wipe_redis(config))?;
     Ok(())
 }
 
-/// Create a single bucket for integration tests with the given lifecycle and name
+/// Create a single bucket for integration tests and set its lifecycle
+///
+/// Only buckets starting with [`TEST_BUCKET_PREFIX`] are touched, and the lifecycle is set only
+/// when this call created the bucket, so an existing bucket keeps its own rules.
 ///
 /// # Arguments
 ///
 /// * `s3_client` - The S3 client to create the bucket
 /// * `lifecycle` - The lifecycle to set for this bucket
 /// * `bucket` - The name of the bucket to create
-async fn init_bucket(
+pub async fn init_bucket(
     s3_client: &aws_sdk_s3::Client,
     lifecycle: BucketLifecycleConfiguration,
     bucket: &str,
 ) -> Result<(), Error> {
+    // refuse any bucket that isn't marked as a test bucket
+    if !bucket.starts_with(TEST_BUCKET_PREFIX) {
+        return Err(Error::new(format!(
+            "Refusing to set up bucket '{bucket}': test buckets must start with \
+            '{TEST_BUCKET_PREFIX}'"
+        )));
+    }
     // attempt to create the bucket
     if let Err(err) = s3_client.create_bucket().bucket(bucket).send().await {
         match err.as_service_error() {
-            Some(service_err) => {
-                // check if it's just a 409 error we can ignore
-                if !service_err.is_bucket_already_owned_by_you() {
-                    return Err(Error::new(format!(
-                        "Error creating S3 bucket '{}': {}",
-                        bucket,
-                        DisplayErrorContext(&err)
-                    )));
-                }
-            }
-            None => {
+            // a bucket we already own existed before this run, so leave its lifecycle alone
+            Some(service_err) if service_err.is_bucket_already_owned_by_you() => return Ok(()),
+            _ => {
                 return Err(Error::new(format!(
                     "Error creating S3 bucket '{}': {}",
                     bucket,
@@ -212,7 +280,7 @@ async fn init_bucket(
             }
         }
     }
-    // set/update the lifecycle
+    // set the lifecycle on the bucket we just created
     s3_client
         .put_bucket_lifecycle_configuration()
         .bucket(bucket)
@@ -229,13 +297,13 @@ async fn init_bucket(
     Ok(())
 }
 
-/// Create required S3 buckets for testing with a strict lifecycle policy that
-/// removes objects automatically
+/// Build an S3 client for the test object store
 ///
 /// # Arguments
 ///
 /// * `s3_conf` - The S3 configuration from the main Thorium configuration to use
-async fn init_s3_buckets(s3_conf: &S3, conf: &Conf) -> Result<(), Error> {
+#[must_use]
+pub fn s3_client(s3_conf: &S3) -> aws_sdk_s3::Client {
     // get our s3 credentials
     let creds = aws_credential_types::Credentials::new(
         &s3_conf.access_key,
@@ -257,7 +325,19 @@ async fn init_s3_buckets(s3_conf: &S3, conf: &Conf) -> Result<(), Error> {
     // build our s3 config
     let s3_config = s3_config_builder.build();
     // build our s3 client
-    let s3_client = aws_sdk_s3::Client::from_conf(s3_config);
+    aws_sdk_s3::Client::from_conf(s3_config)
+}
+
+/// Create required S3 buckets for testing with a strict lifecycle policy that
+/// removes objects automatically
+///
+/// # Arguments
+///
+/// * `s3_conf` - The S3 configuration from the main Thorium configuration to use
+/// * `conf` - The Thorium config we are using for tests
+async fn init_s3_buckets(s3_conf: &S3, conf: &Conf) -> Result<(), Error> {
+    // build an s3 client
+    let s3_client = s3_client(s3_conf);
     // create a 1 day lifecycle to set for each bucket
     let lifecycle = BucketLifecycleConfiguration::builder()
         .rules(

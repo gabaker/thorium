@@ -14,8 +14,25 @@ use crate::models::{
 };
 use crate::utils::{ApiError, Shared};
 use crate::{
-    deserialize, deserialize_ext, deserialize_opt, extract, is_admin, not_found, serialize,
+    bad, deserialize, deserialize_ext, deserialize_opt, extract, is_admin, not_found, serialize,
 };
+
+/// The least a reported runtime may run over its image's runtime cap and still be recorded
+/// (five minutes)
+const MIN_RUNTIME_SLACK: u64 = 5 * 60;
+
+/// Gets how far a reported runtime may run over its image's runtime cap and still be recorded
+///
+/// Agents measure a runtime when they notice a job finished, which can be a little after the
+/// image's timeout, so runtimes within this slack are recorded as the cap instead of refused.
+///
+/// # Arguments
+///
+/// * `cap` - The longest a job of the image may run in seconds
+fn runtime_slack(cap: u64) -> u64 {
+    // allow a tenth of the cap, but never less than the minimum slack
+    (cap / 10).max(MIN_RUNTIME_SLACK)
+}
 
 impl JobList {
     /// Creates new raw jobs list object
@@ -177,7 +194,9 @@ impl RawJob {
     /// Proceeds with a job
     ///
     /// This will set the jobs status to complete and check if all other jobs in that stage have
-    /// completed. If they have it will then create the next stage of the reactions jobs.
+    /// completed. If they have it will then create the next stage of the reactions jobs. A
+    /// runtime far above what this job's image may run for is refused, and one a little above
+    /// it is recorded as the most the image may run for.
     ///
     /// # Arguments
     ///
@@ -197,6 +216,20 @@ impl RawJob {
     ) -> Result<JobHandleStatus, ApiError> {
         // make sure this user can proceed with jobs from this group
         group.editable(user)?;
+        // get the longest this job's image may run for
+        let cap = db::images::runtime_cap(&self.group, &self.stage, shared).await?;
+        // refuse runtimes far above that cap, since they would poison the image's average
+        // runtime and every deadline computed from it
+        let limit = cap.saturating_add(runtime_slack(cap));
+        if runtime > limit {
+            return bad!(format!(
+                "A runtime of {runtime} seconds is above the {limit} seconds image {} may run for",
+                self.stage
+            ));
+        }
+        // a runtime a little above the cap comes from an agent that noticed the finish late or
+        // an image whose timeout was lowered mid-run, so record the cap instead
+        let runtime = runtime.min(cap);
         // use correct backend to handle starting job
         db::jobs::proceed(self, runtime, logs, shared).await
     }
@@ -441,3 +474,18 @@ impl TryFrom<RawJob> for GenericJob {
 //    type Error = ApiError;
 //
 //}
+
+#[cfg(test)]
+mod tests {
+    use super::runtime_slack;
+
+    /// Short caps get the minimum slack and long caps get a tenth of the cap
+    #[test]
+    fn runtime_slack_bounds() {
+        assert_eq!(runtime_slack(0), 300);
+        assert_eq!(runtime_slack(300), 300);
+        assert_eq!(runtime_slack(3000), 300);
+        assert_eq!(runtime_slack(36_000), 3600);
+        assert_eq!(runtime_slack(u64::MAX), u64::MAX / 10);
+    }
+}

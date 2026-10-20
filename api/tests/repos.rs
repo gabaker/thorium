@@ -1,9 +1,11 @@
 //! Tests the repos routes in Thorium
 
-use std::collections::HashSet;
+use chrono::{DateTime, Duration, Utc};
+use std::collections::{HashMap, HashSet};
 
 use thorium::models::{
-    GroupUpdate, GroupUsersUpdate, RepoCheckout, RepoListLine, RepoListOpts, RepoRequest,
+    CommitRequest, CommitishMapRequest, CommitishRequest, GroupUpdate, GroupUsersUpdate,
+    RepoCheckout, RepoListLine, RepoListOpts, RepoRequest, TarredRepo,
 };
 use thorium::test_utilities::{self, generators};
 use thorium::{Error, contains, fail, is, is_desc};
@@ -286,5 +288,134 @@ async fn resubmitting_writes_no_partial_repo_rows() -> Result<(), Error> {
         .map(|(group, _)| group)
         .collect();
     assert!(partial.is_empty(), "repo rows without a url in {partial:?}");
+    Ok(())
+}
+
+/// Upload a repo data blob holding some content and return its sha256
+///
+/// # Arguments
+///
+/// * `client` - The client to upload with
+/// * `repo` - The repo to upload data for
+/// * `group` - The group to share this data with
+/// * `content` - The content of this data blob
+async fn upload_repo_data(
+    client: &thorium::Thorium,
+    repo: &str,
+    group: &str,
+    content: &str,
+) -> Result<String, Error> {
+    // write our content to a file of its own
+    let path =
+        std::env::temp_dir().join(format!("thorium-repo-data-{}", generators::gen_string(16)));
+    tokio::fs::write(&path, content).await?;
+    // upload this file as the repo's data
+    let tar = TarredRepo {
+        name: "data".to_owned(),
+        repo: path.clone(),
+    };
+    let resp = client.repos.upload(repo, tar, vec![group.to_owned()]).await;
+    // remove our file before checking the upload
+    tokio::fs::remove_file(&path).await?;
+    Ok(resp?.sha256)
+}
+
+/// Build a commit batch for one commit at a timestamp
+///
+/// # Arguments
+///
+/// * `group` - The group to save this commit to
+/// * `hash` - The hash of this commit
+/// * `timestamp` - When this commit was made
+/// * `end` - Whether this is the final batch of commits
+/// * `earliest` - The earliest commit in this repo, if known
+fn commit_batch(
+    group: &str,
+    hash: &str,
+    timestamp: DateTime<Utc>,
+    end: bool,
+    earliest: Option<DateTime<Utc>>,
+) -> CommitishMapRequest {
+    // build our single commit
+    let commit = CommitishRequest::Commit(CommitRequest {
+        author: "io".to_owned(),
+        timestamp,
+        topic: None,
+        description: None,
+        truncated: false,
+    });
+    CommitishMapRequest {
+        groups: vec![group.to_owned()],
+        earliest,
+        end,
+        commitishes: HashMap::from([(hash.to_owned(), commit)]),
+    }
+}
+
+/// A repo data blob whose commits are a few hours old survives the prune at the end of a
+/// later batch of commits for another blob
+#[tokio::test]
+async fn prune_keeps_data_with_recent_commits() -> Result<(), Error> {
+    // get admin client
+    let client = test_utilities::admin_client().await?;
+    // create a group and a repo in it
+    let group = generators::groups(1, &client).await?.remove(0).name;
+    let repo = generators::repos(&group, 1, &client).await?.remove(0).url;
+    // date our commits relative to now
+    let now = Utc::now();
+    // upload a first blob with a commit from two hours ago as the final batch
+    let first = upload_repo_data(&client, &repo, &group, "first blob").await?;
+    let two_hours = now - Duration::hours(2);
+    let batch = commit_batch(&group, "c1", two_hours, true, Some(two_hours));
+    let resp = client.repos.add_commits(&repo, &first, &batch).await?;
+    is!(resp.status().as_u16(), 204);
+    // upload a second blob with a commit from an hour ago, whose final batch prunes old blobs
+    let second = upload_repo_data(&client, &repo, &group, "second blob").await?;
+    let batch = commit_batch(&group, "c2", now - Duration::hours(1), true, None);
+    let resp = client.repos.add_commits(&repo, &second, &batch).await?;
+    is!(resp.status().as_u16(), 204);
+    // the first blob is still referenced by c1, so commits can still be added to it
+    let batch = commit_batch(&group, "c3", now - Duration::minutes(30), false, None);
+    let resp = client.repos.add_commits(&repo, &first, &batch).await;
+    assert!(
+        resp.is_ok(),
+        "the first blob was pruned while c1 still references it: {resp:?}"
+    );
+    Ok(())
+}
+
+/// Creating a repo again as the same user and groups, with or without a scheme, reuses the
+/// existing submission for that scheme instead of adding another
+#[tokio::test]
+async fn create_reuses_matching_submissions() -> Result<(), Error> {
+    // get admin client
+    let client = test_utilities::admin_client().await?;
+    // create a group to add repos to
+    let group = generators::groups(1, &client).await?.remove(0).name;
+    let path = format!("github.com/corn/{}", generators::gen_string(12));
+    // create the repo three times with the same credentials, with and without a scheme
+    for url in [
+        format!("https://alice:CornSilkPw7Q9z@{path}"),
+        format!("alice:CornSilkPw7Q9z@{path}"),
+        format!("https://alice:CornSilkPw7Q9z@{path}"),
+    ] {
+        let req = RepoRequest::new(&url, vec![group.as_str()], None);
+        client.repos.create(&req).await?;
+    }
+    // they share one submission
+    let repo = client.repos.get(&path).await?;
+    assert_eq!(repo.submissions.len(), 1, "authenticated creates");
+    // create the repo three times without credentials, with and without a scheme
+    for url in [
+        format!("https://{path}"),
+        path.clone(),
+        format!("https://{path}"),
+    ] {
+        let req = RepoRequest::new(&url, vec![group.as_str()], None);
+        client.repos.create(&req).await?;
+    }
+    // they share a second submission, since they pull the repo without credentials
+    let repo = client.repos.get(&path).await?;
+    assert_eq!(repo.submissions.len(), 2, "plain creates");
     Ok(())
 }

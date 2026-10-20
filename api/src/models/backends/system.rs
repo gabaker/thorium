@@ -1370,7 +1370,8 @@ impl Backup {
 
     /// Validates a backup, then replaces this namespace's Redis state with it
     ///
-    /// A backup with problems is refused before any key is deleted. Only the keys of this API's
+    /// A backup with problems, or with a user whose password hash Thorium won't verify, is
+    /// refused before any key is deleted. Only the keys of this API's
     /// namespace are deleted, unless `params` asks to flush the API's whole Redis database.
     ///
     /// # Arguments
@@ -1411,6 +1412,8 @@ impl Backup {
                 },
             });
         }
+        // refuse users whose password hashes use an algorithm or cost Thorium doesn't hash with
+        db::users::check_restorable(&self.users)?;
         // what each step wrote, for the error of a step that fails
         let mut written: Vec<(&str, usize)> = Vec::with_capacity(8);
         // delete this namespace's keys, or flush the whole database when asked, naming the step
@@ -1725,7 +1728,7 @@ impl SimpleCursorExt for NodeListLine {
     async fn query(
         partition: &str,
         tie: &Option<String>,
-        limit: usize,
+        limit: i32,
         shared: &Shared,
     ) -> Result<QueryResult, ExecutionError> {
         // if we have a node tie then query for the next page of data from our tie
@@ -1737,7 +1740,7 @@ impl SimpleCursorExt for NodeListLine {
                     .session
                     .execute_unpaged(
                         &shared.scylla.prep.nodes.list_ties,
-                        (partition, node, limit as i32),
+                        (partition, node, limit),
                     )
                     .await
             }
@@ -1746,7 +1749,7 @@ impl SimpleCursorExt for NodeListLine {
                 shared
                     .scylla
                     .session
-                    .execute_unpaged(&shared.scylla.prep.nodes.list, (partition, limit as i32))
+                    .execute_unpaged(&shared.scylla.prep.nodes.list, (partition, limit))
                     .await
             }
         }
@@ -1771,7 +1774,7 @@ impl SimpleCursorExt for NodeRow {
     async fn query(
         partition: &str,
         tie: &Option<String>,
-        limit: usize,
+        limit: i32,
         shared: &Shared,
     ) -> Result<QueryResult, ExecutionError> {
         // if we have a node tie then query for the next page of data from our tie
@@ -1783,7 +1786,7 @@ impl SimpleCursorExt for NodeRow {
                     .session
                     .execute_unpaged(
                         &shared.scylla.prep.nodes.list_details_ties,
-                        (partition, node, limit as i32),
+                        (partition, node, limit),
                     )
                     .await
             }
@@ -1792,10 +1795,7 @@ impl SimpleCursorExt for NodeRow {
                 shared
                     .scylla
                     .session
-                    .execute_unpaged(
-                        &shared.scylla.prep.nodes.list_details,
-                        (partition, limit as i32),
-                    )
+                    .execute_unpaged(&shared.scylla.prep.nodes.list_details, (partition, limit))
                     .await
             }
         }

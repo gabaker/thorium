@@ -2,13 +2,15 @@
 
 use data_encoding::BASE64;
 use std::collections::{HashMap, HashSet};
+use thorium::client::{ClientSettings, Users};
 use thorium::models::{
-    GenericJob, GenericJobArgsUpdate, ImageBan, ImageBanKind, ImageBanUpdate, ImageUpdate,
-    Pipeline, PipelineBan, PipelineBanKind, PipelineBanUpdate, PipelineRequest, PipelineUpdate,
-    ReactionCursorOpts, ReactionRequest, ReactionStatus, ReactionUpdate, Resources, UserRole,
-    UserUpdate,
+    GenericJob, GenericJobArgs, GenericJobArgsUpdate, GenericJobOpts, GroupUpdate,
+    GroupUsersUpdate, ImageBan, ImageBanKind, ImageBanUpdate, ImageUpdate, Pipeline, PipelineBan,
+    PipelineBanKind, PipelineBanUpdate, PipelineRequest, PipelineUpdate, ReactionCursorOpts,
+    ReactionListParams, ReactionRequest, ReactionStatus, ReactionUpdate, Resources, StageLogLine,
+    StageLogsAdd, UserCreate, UserRole, UserUpdate,
 };
-use thorium::test_utilities::{self, generators};
+use thorium::test_utilities::{self, CONF, generators};
 use thorium::{Error, Thorium, contains_key, fail, is, is_empty, is_in, is_not_in, vec_in_vec};
 use uuid::Uuid;
 
@@ -117,6 +119,292 @@ async fn create_bulk_by_user_disabled() -> Result<(), Error> {
     let enabled_resp = &creates[&enabled_info.username];
     is_empty!(enabled_resp.errors);
     is!(enabled_resp.created.len(), 1);
+    Ok(())
+}
+
+/// A bulk create by user reports one user's refused bulk request as per-request errors for that
+/// user and still creates the other users' reactions exactly once
+#[tokio::test]
+async fn create_bulk_by_user_one_refused() -> Result<(), Error> {
+    // get admin client
+    let admin = test_utilities::admin_client().await?;
+    // create a group for both users to create reactions in
+    let group = generators::groups(1, &admin).await?.remove(0).name;
+    // add a member whose requests are allowed and one whose requests will be refused
+    let allowed = group_member(&admin, &group, UserRole::User).await?;
+    let refused = group_member(&admin, &group, UserRole::User).await?;
+    // get both users names
+    let allowed_name = allowed.users.info().await?.username;
+    let refused_name = refused.users.info().await?.username;
+    // create a pipeline in this group
+    let pipe_req = generators::pipelines(&group, 1, false, &admin)
+        .await?
+        .remove(0);
+    // get the created pipeline
+    let pipe = admin.pipelines.get(&group, &pipe_req.name).await?;
+    // upload a sample as the refused user
+    let sub = refused.files.create(generators::gen_sample(&group)).await?;
+    // delete that sample again so the refused user can no longer read it
+    let opts = thorium::models::FileDeleteOpts::default().groups(vec![group.clone()]);
+    let deleted = refused.files.delete(&sub.sha256, &sub.id, &opts).await?;
+    is!(deleted.status().is_success(), true);
+    // build a plain request for the allowed user
+    let mut reqs = HashMap::default();
+    reqs.insert(
+        allowed_name.clone(),
+        vec![ReactionRequest::new(&group, &pipe.name)],
+    );
+    // build a plain request and one naming the deleted sample for the refused user
+    reqs.insert(
+        refused_name.clone(),
+        vec![
+            ReactionRequest::new(&group, &pipe.name),
+            ReactionRequest::new(&group, &pipe.name).sample(&sub.sha256),
+        ],
+    );
+    // bulk create reactions for both users as the admin
+    let creates = admin.reactions.create_bulk_by_user(&reqs).await?;
+    // make sure every request of the refused user got an indexed error entry
+    let refused_resp = &creates[&refused_name];
+    is_empty!(refused_resp.created);
+    is!(refused_resp.errors.len(), 2);
+    contains_key!(refused_resp.errors, &0);
+    contains_key!(refused_resp.errors, &1);
+    // make sure the allowed user's reaction was still created without errors
+    let allowed_resp = &creates[&allowed_name];
+    is_empty!(allowed_resp.errors);
+    is!(allowed_resp.created.len(), 1);
+    // list the reactions in this pipeline
+    let mut cursor = admin.reactions.list(&group, &pipe.name);
+    cursor.next().await?;
+    // make sure only the allowed user's reaction exists
+    is!(cursor.names.len(), 1);
+    is_in!(cursor.names, allowed_resp.created[0].to_string());
+    Ok(())
+}
+
+/// Create a user with a system role and add them to a group as a direct member with the user role
+///
+/// # Arguments
+///
+/// * `admin` - The admin client to create the user and update the group with
+/// * `group` - The group to add the user to
+/// * `role` - The system role to give the user
+async fn group_member(admin: &Thorium, group: &str, role: UserRole) -> Result<Thorium, Error> {
+    // add the user as a direct member and keep only their client
+    let (client, _, _) = group_member_ext(admin, group, role, false).await?;
+    Ok(client)
+}
+
+/// Create a user with a system role and add them to a group as a direct member or as a monitor
+///
+/// Returns the user's client, username, and password.
+///
+/// # Arguments
+///
+/// * `admin` - The admin client to create the user and update the group with
+/// * `group` - The group to add the user to
+/// * `role` - The system role to give the user
+/// * `monitor` - Whether to add the user as a monitor (a viewer) instead of a direct member
+async fn group_member_ext(
+    admin: &Thorium,
+    group: &str,
+    role: UserRole,
+    monitor: bool,
+) -> Result<(Thorium, String, String), Error> {
+    // generate a username for this user
+    let username = generators::gen_string(24);
+    // generate a password for this user
+    let password = generators::gen_string(64);
+    // build a user request that skips email verification and has the requested system role
+    let create = UserCreate::new(&username, &password, "fake@fake.gov")
+        .skip_verification()
+        .role(role);
+    // create the user
+    Users::create(
+        &admin.host,
+        create,
+        Some(&CONF.thorium.secret_key),
+        &ClientSettings::default(),
+    )
+    .await?;
+    // build the list of users to add to the group
+    let users = GroupUsersUpdate::default().direct_add(&username);
+    // build a group update adding the user as a monitor or as a direct member with the user role
+    let update = if monitor {
+        GroupUpdate::default().monitors(users)
+    } else {
+        GroupUpdate::default().users(users)
+    };
+    // add the user to the group
+    admin.groups.update(group, &update).await?;
+    // build a client for this user
+    let client = Thorium::build(&admin.host)
+        .basic_auth(username.clone(), password.clone())
+        .build()
+        .await?;
+    Ok((client, username, password))
+}
+
+/// A bulk create checks the samples of every request and creates nothing when the user can't
+/// see one of them
+#[tokio::test]
+async fn create_bulk_checks_samples() -> Result<(), Error> {
+    // get admin client
+    let admin = test_utilities::admin_client().await?;
+    // create a group for the member to create reactions in
+    let group = generators::groups(1, &admin).await?.remove(0).name;
+    // create a group the member isn't in
+    let hidden_group = generators::groups(1, &admin).await?.remove(0).name;
+    // add a member without a developer role to the first group
+    let user = group_member(&admin, &group, UserRole::User).await?;
+    // create a pipeline in the member's group
+    let pipe_req = generators::pipelines(&group, 1, false, &admin)
+        .await?
+        .remove(0);
+    // get the created pipeline
+    let pipe = admin.pipelines.get(&group, &pipe_req.name).await?;
+    // upload a sample the member can see
+    let visible = admin
+        .files
+        .create(generators::gen_sample(&group))
+        .await?
+        .sha256;
+    // upload a sample only in the group the member isn't in
+    let hidden = admin
+        .files
+        .create(generators::gen_sample(&hidden_group))
+        .await?
+        .sha256;
+    // build a request naming no samples
+    let plain = ReactionRequest::new(&group, &pipe.name);
+    // build a request naming the hidden sample
+    let hidden_req = ReactionRequest::new(&group, &pipe.name).sample(&hidden);
+    // a single create naming the hidden sample is refused
+    fail!(user.reactions.create(&hidden_req).await, 401);
+    // bulk create a reaction naming only the hidden sample
+    let resp = user
+        .reactions
+        .create_bulk(std::slice::from_ref(&hidden_req))
+        .await;
+    // make sure that bulk create was refused
+    fail!(resp, 401);
+    // bulk create reactions naming the hidden sample after a plain request
+    let resp = user
+        .reactions
+        .create_bulk(&[plain.clone(), hidden_req.clone()])
+        .await;
+    // make sure that bulk create was refused too
+    fail!(resp, 401);
+    // list the reactions in this pipeline
+    let mut cursor = admin.reactions.list(&group, &pipe.name);
+    cursor.next().await?;
+    // make sure the refused bulk creates made no reactions
+    is_empty!(cursor.names);
+    // build a request naming the sample the member can see
+    let visible_req = ReactionRequest::new(&group, &pipe.name).sample(&visible);
+    // bulk create reactions naming only samples the member can see
+    let resp = user.reactions.create_bulk(&[plain, visible_req]).await?;
+    // make sure both reactions were created without errors
+    is!(resp.created.len(), 2);
+    is_empty!(resp.errors);
+    Ok(())
+}
+
+/// A bulk create checks the argument overrides of every request, not just the first request
+/// for each pipeline, and creates nothing when one of them isn't allowed
+#[tokio::test]
+async fn create_bulk_checks_overrides_on_every_request() -> Result<(), Error> {
+    // get admin client
+    let admin = test_utilities::admin_client().await?;
+    // create a group to create reactions in
+    let group = generators::groups(1, &admin).await?.remove(0).name;
+    // add a member without a developer role
+    let user = group_member(&admin, &group, UserRole::User).await?;
+    // add a member with the developer role for k8s images only
+    let developer = group_member(
+        &admin,
+        &group,
+        UserRole::Developer {
+            k8s: true,
+            bare_metal: false,
+            windows: false,
+            kvm: false,
+            external: false,
+        },
+    )
+    .await?;
+    // create two pipelines in this group
+    let pipe_reqs = generators::pipelines(&group, 2, false, &admin).await?;
+    // get the first created pipeline
+    let first = admin.pipelines.get(&group, &pipe_reqs[0].name).await?;
+    // get the second created pipeline
+    let second = admin.pipelines.get(&group, &pipe_reqs[1].name).await?;
+    // build the command to replace an image's command with
+    let cmd = vec![
+        "/bin/sh".to_owned(),
+        "-c".to_owned(),
+        "echo overridden".to_owned(),
+    ];
+    // build options overriding an image's command, positionals, and kwargs
+    let opts = GenericJobOpts::new(true, true, Some(cmd));
+    // build a plain request for the first pipeline
+    let plain = ReactionRequest::new(&group, &first.name);
+    // build a request overriding args for the first pipeline's first image
+    let overridden = ReactionRequest::new(&group, &first.name).args(
+        &first.order[0][0],
+        GenericJobArgs::default().opts(opts.clone()),
+    );
+    // build a request overriding args for the second pipeline's first image
+    let second_overridden = ReactionRequest::new(&group, &second.name)
+        .args(&second.order[0][0], GenericJobArgs::default().opts(opts));
+    // a single create with overrides is refused
+    fail!(user.reactions.create(&overridden).await, 401);
+    // bulk create with an overriding request after a plain one for the same pipeline
+    let resp = user
+        .reactions
+        .create_bulk(&[plain.clone(), overridden.clone()])
+        .await;
+    // make sure that bulk create was refused
+    fail!(resp, 401);
+    // bulk create with the overriding request first
+    let resp = user
+        .reactions
+        .create_bulk(&[overridden.clone(), plain.clone()])
+        .await;
+    // make sure that bulk create was refused
+    fail!(resp, 401);
+    // bulk create overriding args in a different pipeline than the plain request's
+    let resp = user
+        .reactions
+        .create_bulk(&[plain.clone(), second_overridden])
+        .await;
+    // make sure that bulk create was refused
+    fail!(resp, 401);
+    // check both pipelines for reactions
+    for pipe in [&first, &second] {
+        // list the reactions in this pipeline
+        let mut cursor = admin.reactions.list(&group, &pipe.name);
+        cursor.next().await?;
+        // make sure the refused creates made no reactions in this pipeline
+        is_empty!(cursor.names);
+    }
+    // bulk create only plain requests as the member without a developer role
+    let resp = user
+        .reactions
+        .create_bulk(&[plain.clone(), plain.clone()])
+        .await?;
+    // make sure both reactions were created without errors
+    is!(resp.created.len(), 2);
+    is_empty!(resp.errors);
+    // bulk create a plain and an overriding request as the developer
+    let resp = developer
+        .reactions
+        .create_bulk(&[plain, overridden])
+        .await?;
+    // make sure the developer's overrides were allowed and both reactions created
+    is!(resp.created.len(), 2);
+    is_empty!(resp.errors);
     Ok(())
 }
 
@@ -2334,5 +2622,480 @@ async fn concurrent_user_proceed_does_not_duplicate_stage_jobs() -> Result<(), E
         );
     }
     generators::delete_worker("c5_04", &client).await?;
+    Ok(())
+}
+
+/// A stage-log page that crosses the boundary between two storage buckets of lines returns
+/// every requested line, in order
+#[tokio::test]
+async fn stage_logs_across_buckets() -> Result<(), Error> {
+    // get admin client
+    let client = test_utilities::admin_client().await?;
+    // create a reaction to save stage logs for
+    let group = generators::groups(1, &client).await?.remove(0).name;
+    let pipe_req = generators::pipelines(&group, 1, false, &client)
+        .await?
+        .remove(0);
+    let pipe = client.pipelines.get(&group, &pipe_req.name).await?;
+    let react_req = generators::gen_reaction(&group, &pipe, None);
+    let id = client.reactions.create(&react_req).await?.id;
+    // save lines at positions 2475 through 2524, which straddle the 2500 line boundary
+    let logs = StageLogsAdd {
+        index: 0,
+        logs: (2475..2525)
+            .map(|index| StageLogLine {
+                index,
+                line: format!("line{index}"),
+            })
+            .collect(),
+        return_code: None,
+    };
+    client
+        .reactions
+        .add_stage_logs(&group, &id, "harvest", &logs)
+        .await?;
+    // read pages that start before the boundary and end after it
+    for (cursor, limit) in [(2475, 50), (2490, 20)] {
+        let params = ReactionListParams { cursor, limit };
+        let read = client
+            .reactions
+            .logs(&group, &id, "harvest", &params)
+            .await?;
+        let expected = (cursor..cursor + limit)
+            .map(|index| format!("line{index}"))
+            .collect::<Vec<String>>();
+        is!(
+            read.logs,
+            expected,
+            format!("cursor={cursor}&limit={limit}")
+        );
+    }
+    Ok(())
+}
+
+/// The largest stage-log page read from a cursor off a bucket boundary spans more buckets than
+/// one query may name, and still returns every requested line in order
+#[tokio::test]
+async fn stage_logs_largest_page_unaligned() -> Result<(), Error> {
+    // get admin client
+    let client = test_utilities::admin_client().await?;
+    // create a reaction to save stage logs for
+    let group = generators::groups(1, &client).await?.remove(0).name;
+    let pipe_req = generators::pipelines(&group, 1, false, &client)
+        .await?
+        .remove(0);
+    let pipe = client.pipelines.get(&group, &pipe_req.name).await?;
+    let react_req = generators::gen_reaction(&group, &pipe, None);
+    let id = client.reactions.create(&react_req).await?.id;
+    // save lines before the window, in its first and last buckets of 2500 lines, and in the
+    // bucket after its last
+    let positions: [usize; 7] = [0, 1, 2, 2499, 247_501, 250_000, 252_500];
+    let logs = StageLogsAdd {
+        index: 0,
+        logs: positions
+            .iter()
+            .map(|index| StageLogLine {
+                index: *index as u64,
+                line: format!("line{index}"),
+            })
+            .collect(),
+        return_code: None,
+    };
+    client
+        .reactions
+        .add_stage_logs(&group, &id, "harvest", &logs)
+        .await?;
+    // read the largest pages from cursors off a bucket boundary
+    for (cursor, limit) in [(1, 250_000), (2499, 247_502)] {
+        let params = ReactionListParams { cursor, limit };
+        let read = client
+            .reactions
+            .logs(&group, &id, "harvest", &params)
+            .await?;
+        let expected = positions
+            .iter()
+            .filter(|index| (cursor..252_500).contains(*index))
+            .map(|index| format!("line{index}"))
+            .collect::<Vec<String>>();
+        is!(
+            read.logs,
+            expected,
+            format!("cursor={cursor}&limit={limit}")
+        );
+    }
+    Ok(())
+}
+
+/// The developer role for k8s images only
+fn k8s_developer() -> UserRole {
+    UserRole::Developer {
+        k8s: true,
+        bare_metal: false,
+        windows: false,
+        kvm: false,
+        external: false,
+    }
+}
+
+/// Creates a two stage pipeline in a group with one image per stage
+///
+/// # Arguments
+///
+/// * `admin` - The admin client to create the images and pipeline with
+/// * `group` - The group to create the pipeline in
+async fn two_stage_pipeline(admin: &Thorium, group: &str) -> Result<Pipeline, Error> {
+    // create one image per stage
+    let images = generators::images(group, 2, false, admin).await?;
+    // build a pipeline whose stages run one image each
+    let order = serde_json::json!([images[0].name, images[1].name]);
+    let name = format!("override-pipe-{}", generators::gen_string(8));
+    // create the pipeline
+    admin
+        .pipelines
+        .create(&PipelineRequest::new(group, &name, order))
+        .await?;
+    // get the created pipeline
+    admin.pipelines.get(group, &name).await
+}
+
+/// Builds options that replace an image's command, positionals, and kwargs
+///
+/// # Arguments
+///
+/// * `marker` - The text the replacement command echoes
+fn override_opts(marker: &str) -> GenericJobOpts {
+    // build the command to replace an image's command with
+    let cmd = vec![
+        "/bin/sh".to_owned(),
+        "-c".to_owned(),
+        format!("echo {marker}"),
+    ];
+    GenericJobOpts::new(true, true, Some(cmd))
+}
+
+/// Builds an update that sets the options of one stage of a reaction
+///
+/// # Arguments
+///
+/// * `stage` - The stage (image) to set options for
+/// * `opts` - The options to set
+fn opts_update(stage: &str, opts: GenericJobOpts) -> ReactionUpdate {
+    ReactionUpdate::default().arg(stage, GenericJobArgsUpdate::default().opts(opts))
+}
+
+/// A group member without the Developer role can't override another member's reaction's
+/// image command through an update, just as they can't on their own create
+#[tokio::test]
+async fn update_overrides_refused_for_member() -> Result<(), Error> {
+    // get admin client (the group owner)
+    let admin = test_utilities::admin_client().await?;
+    // register a node for workers to claim jobs on
+    let node = format!("override-node-{}", generators::gen_string(6));
+    generators::node("cluster0", &node, Resources::default(), &admin).await?;
+    // create the group
+    let group = generators::groups(1, &admin).await?.remove(0).name;
+    // add the creator and another member as plain users without a developer role
+    let creator = group_member(&admin, &group, UserRole::User).await?;
+    let member = group_member(&admin, &group, UserRole::User).await?;
+    // create a two stage pipeline
+    let pipe = two_stage_pipeline(&admin, &group).await?;
+    let stage_two = pipe.order[1][0].clone();
+    // the creator creates a reaction with no overrides
+    let id = creator
+        .reactions
+        .create(&ReactionRequest::new(&group, &pipe.name))
+        .await?
+        .id;
+    // build options overriding the second stage's command
+    let opts = override_opts("INJECTED");
+    // the other member's own create with that override is refused
+    let own = ReactionRequest::new(&group, &pipe.name)
+        .args(&stage_two, GenericJobArgs::default().opts(opts.clone()));
+    fail!(member.reactions.create(&own).await, 401);
+    // the other member's update of the creator's reaction with the same override is refused
+    let update = opts_update(&stage_two, opts);
+    fail!(member.reactions.update(&group, &id, &update).await, 401);
+    // make sure the stored reaction has no override for the second stage
+    let stored = admin.reactions.get(&group, id).await?;
+    is!(
+        stored.args.get(&stage_two).map(|args| args.opts.clone()),
+        None::<GenericJobOpts>
+    );
+    // run the first stage as an agent would so the second stage's job is created
+    let worker_one = format!("override-w1-{}", generators::gen_string(6));
+    generators::worker(
+        "cluster0",
+        &node,
+        &worker_one,
+        &group,
+        &pipe.name,
+        &pipe.order[0][0],
+        &admin,
+    )
+    .await?;
+    // jobs are queued per creator, so claim them with the creator's credentials
+    let jobs = creator
+        .jobs
+        .claim(
+            &group,
+            &pipe.name,
+            &pipe.order[0][0],
+            "cluster0",
+            &node,
+            &worker_one,
+            1,
+        )
+        .await?;
+    creator
+        .jobs
+        .proceed(&jobs[0], &generators::stage_logs(), 2)
+        .await?;
+    generators::delete_worker(&worker_one, &admin).await?;
+    // claim the second stage's job
+    let worker_two = format!("override-w2-{}", generators::gen_string(6));
+    generators::worker(
+        "cluster0",
+        &node,
+        &worker_two,
+        &group,
+        &pipe.name,
+        &stage_two,
+        &admin,
+    )
+    .await?;
+    let jobs = creator
+        .jobs
+        .claim(
+            &group,
+            &pipe.name,
+            &stage_two,
+            "cluster0",
+            &node,
+            &worker_two,
+            1,
+        )
+        .await?;
+    generators::delete_worker(&worker_two, &admin).await?;
+    // make sure the second stage's job runs the image's own command
+    is!(jobs.len(), 1);
+    is!(jobs[0].args.opts.override_cmd, None::<Vec<String>>);
+    Ok(())
+}
+
+/// The creator of a reaction can't override its image command through an update without
+/// the Developer role
+#[tokio::test]
+async fn update_overrides_refused_for_creator() -> Result<(), Error> {
+    // get admin client (the group owner)
+    let admin = test_utilities::admin_client().await?;
+    // create the group
+    let group = generators::groups(1, &admin).await?.remove(0).name;
+    // add the creator as a plain user without a developer role
+    let creator = group_member(&admin, &group, UserRole::User).await?;
+    // create a two stage pipeline
+    let pipe = two_stage_pipeline(&admin, &group).await?;
+    let stage_two = pipe.order[1][0].clone();
+    // the creator creates a reaction with no overrides
+    let id = creator
+        .reactions
+        .create(&ReactionRequest::new(&group, &pipe.name))
+        .await?
+        .id;
+    // the creator's update overriding only the command is refused
+    let cmd_only = GenericJobOpts::new(false, false, Some(vec!["/bin/true".to_owned()]));
+    let update = opts_update(&stage_two, cmd_only);
+    fail!(creator.reactions.update(&group, &id, &update).await, 401);
+    // the creator's update overriding the command, positionals, and kwargs is refused
+    let update = opts_update(&stage_two, override_opts("INJECTED"));
+    fail!(creator.reactions.update(&group, &id, &update).await, 401);
+    // make sure the stored reaction has no override for the second stage
+    let stored = admin.reactions.get(&group, id).await?;
+    is!(
+        stored.args.get(&stage_two).map(|args| args.opts.clone()),
+        None::<GenericJobOpts>
+    );
+    Ok(())
+}
+
+/// A creator with the Developer role for the image's scaler, another member with that role,
+/// and an admin can all override a reaction's image command through an update
+#[tokio::test]
+async fn update_overrides_allowed_for_developer_and_admin() -> Result<(), Error> {
+    // get admin client (the group owner)
+    let admin = test_utilities::admin_client().await?;
+    // create the group
+    let group = generators::groups(1, &admin).await?.remove(0).name;
+    // add a plain user and two k8s developers
+    let user = group_member(&admin, &group, UserRole::User).await?;
+    let developer = group_member(&admin, &group, k8s_developer()).await?;
+    let other_developer = group_member(&admin, &group, k8s_developer()).await?;
+    // create a two stage pipeline
+    let pipe = two_stage_pipeline(&admin, &group).await?;
+    let stage_two = pipe.order[1][0].clone();
+    // the developer creates a reaction with no overrides
+    let dev_id = developer
+        .reactions
+        .create(&ReactionRequest::new(&group, &pipe.name))
+        .await?
+        .id;
+    // the developer overrides their own reaction's second stage
+    let opts = override_opts("DEVELOPER");
+    let updated = developer
+        .reactions
+        .update(&group, &dev_id, &opts_update(&stage_two, opts.clone()))
+        .await?;
+    is!(updated.args[&stage_two].opts, opts);
+    // another developer overrides the same stage with a different command
+    let opts = override_opts("OTHER-DEVELOPER");
+    let updated = other_developer
+        .reactions
+        .update(&group, &dev_id, &opts_update(&stage_two, opts.clone()))
+        .await?;
+    is!(updated.args[&stage_two].opts, opts);
+    // the plain user creates a reaction with no overrides
+    let user_id = user
+        .reactions
+        .create(&ReactionRequest::new(&group, &pipe.name))
+        .await?
+        .id;
+    // the admin overrides the plain user's reaction's second stage
+    let opts = override_opts("ADMIN");
+    let updated = admin
+        .reactions
+        .update(&group, &user_id, &opts_update(&stage_two, opts.clone()))
+        .await?;
+    is!(updated.args[&stage_two].opts, opts);
+    // make sure both overrides were stored
+    let stored = admin.reactions.get(&group, dev_id).await?;
+    is!(
+        stored.args[&stage_two].opts,
+        override_opts("OTHER-DEVELOPER")
+    );
+    let stored = admin.reactions.get(&group, user_id).await?;
+    is!(stored.args[&stage_two].opts, opts);
+    Ok(())
+}
+
+/// A group member without the Developer role can still update another member's reaction
+/// when the update doesn't change any stage's options
+#[tokio::test]
+async fn update_without_opts_change_by_editor() -> Result<(), Error> {
+    // get admin client (the group owner)
+    let admin = test_utilities::admin_client().await?;
+    // create the group
+    let group = generators::groups(1, &admin).await?.remove(0).name;
+    // add a k8s developer as the creator and a plain user as the editor
+    let developer = group_member(&admin, &group, k8s_developer()).await?;
+    let editor = group_member(&admin, &group, UserRole::User).await?;
+    // create a two stage pipeline
+    let pipe = two_stage_pipeline(&admin, &group).await?;
+    let stage_two = pipe.order[1][0].clone();
+    // the developer creates a reaction overriding the second stage
+    let opts = override_opts("DEVELOPER");
+    let req = ReactionRequest::new(&group, &pipe.name)
+        .args(&stage_two, GenericJobArgs::default().opts(opts.clone()));
+    let id = developer.reactions.create(&req).await?.id;
+    // the editor updates tags, positionals, and kwargs without setting options
+    let update = ReactionUpdate::default().tag("edited").arg(
+        &stage_two,
+        GenericJobArgsUpdate::default()
+            .positionals(vec!["1", "2"])
+            .kwarg("--new", vec!["arg"]),
+    );
+    let updated = editor.reactions.update(&group, &id, &update).await?;
+    is!(updated, update);
+    // make sure the developer's override is untouched
+    is!(updated.args[&stage_two].opts, opts);
+    // the editor sends the stage's current options unchanged alongside a new tag
+    let update = opts_update(&stage_two, opts.clone()).tag("same-opts");
+    let updated = editor.reactions.update(&group, &id, &update).await?;
+    is!(updated.args[&stage_two].opts, opts);
+    is_in!(updated.tags, "same-opts".to_owned());
+    // the editor's update changing the override is refused
+    let update = opts_update(&stage_two, override_opts("EDITOR"));
+    fail!(editor.reactions.update(&group, &id, &update).await, 401);
+    // make sure the stored reaction keeps the developer's override
+    let stored = admin.reactions.get(&group, id).await?;
+    is!(stored.args[&stage_two].opts, opts);
+    Ok(())
+}
+
+/// Sends a proceed or fail command for a reaction with a user's basic credentials
+///
+/// Returns the response's status code, or 0 when the request couldn't be sent.
+///
+/// # Arguments
+///
+/// * `host` - The Thorium API host
+/// * `username` - The user sending the command
+/// * `password` - The user's password
+/// * `group` - The reaction's group
+/// * `id` - The reaction's id
+/// * `cmd` - `proceed` or `fail`
+async fn handle_status(
+    host: &str,
+    username: &str,
+    password: &str,
+    group: &str,
+    id: &Uuid,
+    cmd: &str,
+) -> u16 {
+    // build the handle url
+    let url = format!("{host}/api/reactions/handle/{group}/{id}/{cmd}");
+    // send the command with the user's basic credentials
+    reqwest::Client::new()
+        .post(&url)
+        .basic_auth(username, Some(password))
+        .send()
+        .await
+        .map_or(0, |resp| resp.status().as_u16())
+}
+
+/// A group viewer (monitor) can see a reaction but is refused an update, proceed, and fail
+#[tokio::test]
+async fn update_refused_for_viewer() -> Result<(), Error> {
+    // get admin client (the group owner)
+    let admin = test_utilities::admin_client().await?;
+    // create the group
+    let group = generators::groups(1, &admin).await?.remove(0).name;
+    // add the creator as a plain user and the viewer as a monitor
+    let creator = group_member(&admin, &group, UserRole::User).await?;
+    let (viewer, name, password) = group_member_ext(&admin, &group, UserRole::User, true).await?;
+    // create a two stage pipeline
+    let pipe = two_stage_pipeline(&admin, &group).await?;
+    let stage_two = pipe.order[1][0].clone();
+    // the creator creates a reaction with no overrides
+    let id = creator
+        .reactions
+        .create(&ReactionRequest::new(&group, &pipe.name))
+        .await?
+        .id;
+    // the viewer can see the reaction
+    viewer.reactions.get(&group, id).await?;
+    // the viewer's update overriding the second stage's command is refused
+    let opts = GenericJobOpts::new(false, false, Some(vec!["/bin/true".to_owned()]));
+    let update = opts_update(&stage_two, opts);
+    fail!(viewer.reactions.update(&group, &id, &update).await, 401);
+    // the viewer's update with no options is refused
+    let update = ReactionUpdate::default().tag("viewer");
+    fail!(viewer.reactions.update(&group, &id, &update).await, 401);
+    // the viewer's proceed and fail are refused
+    is!(
+        handle_status(&admin.host, &name, &password, &group, &id, "proceed").await,
+        401
+    );
+    is!(
+        handle_status(&admin.host, &name, &password, &group, &id, "fail").await,
+        401
+    );
+    // make sure the reaction is unchanged
+    let stored = admin.reactions.get(&group, id).await?;
+    is!(stored.status, ReactionStatus::Created);
+    is!(stored.current_stage, 0);
+    is!(
+        stored.args.get(&stage_two).map(|args| args.opts.clone()),
+        None::<GenericJobOpts>
+    );
+    is_not_in!(stored.tags, "viewer".to_owned());
     Ok(())
 }

@@ -106,7 +106,7 @@ async fn proceed() -> Result<(), thorium::Error> {
         is!(get_stats!(stats, group, pipe_req.name, stage).sleeping, 0);
         is!(get_stats!(stats, group, pipe_req.name, stage).total, 1);
         // proceed with this stage
-        client.jobs.proceed(&job[0], &logs, 12134).await?;
+        client.jobs.proceed(&job[0], &logs, 121).await?;
         // check our stage logs were correct
         client
             .reactions
@@ -368,7 +368,7 @@ async fn external_proceed() -> Result<(), thorium::Error> {
         // build random stage logs
         let logs = generators::stage_logs();
         // proceed with this stage
-        client.jobs.proceed(&job[0], &logs, 12134).await?;
+        client.jobs.proceed(&job[0], &logs, 121).await?;
         // delete our worker
         generators::delete_worker_ext("external_proceed", &client).await?;
     }
@@ -440,7 +440,7 @@ async fn checkpoint() -> Result<(), thorium::Error> {
             // build random stage logs
             let logs = generators::stage_logs();
             // proceed with this stage
-            client.jobs.proceed(&jobs[0], &logs, 12134).await?;
+            client.jobs.proceed(&jobs[0], &logs, 121).await?;
             // delete our worker
             generators::delete_worker_ext("checkpoint", &client).await?;
         }
@@ -498,7 +498,7 @@ async fn sleep() -> Result<(), thorium::Error> {
             // build random stage logs
             let logs = generators::stage_logs();
             // proceed with this stage
-            client.jobs.proceed(&jobs[0], &logs, 12134).await?;
+            client.jobs.proceed(&jobs[0], &logs, 121).await?;
             // delete our worker
             generators::delete_worker("sleep", &client).await?;
         }
