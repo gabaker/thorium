@@ -3,6 +3,8 @@
 use std::collections::HashSet;
 
 use super::definition::{ColumnDef, ColumnRole, ObjectDef, TableDef, ViewDef};
+use super::elastic::ElasticIndexDef;
+use crate::models::upgrades::{LayoutDef, SchemaBackend};
 
 /// The ordered set of every declared Scylla object, implemented by `#[thorium::keyspace]`
 pub trait Keyspace {
@@ -297,4 +299,26 @@ pub fn validate(objects: &[ObjectDef]) -> Result<(), Vec<RegistryError>> {
     } else {
         Err(errors)
     }
+}
+
+/// One declared schema object of any backend
+#[derive(Debug, Clone, PartialEq)]
+pub struct SchemaObject {
+    /// The backend the object belongs to
+    pub backend: SchemaBackend,
+    /// The object's name: a Scylla object, an Elastic index key, or a layout family
+    pub name: String,
+    /// The object's declarative definition
+    pub definition: SchemaDefinition,
+}
+
+/// The declarative definition of a schema object, the source its canonical form is built from
+#[derive(Debug, Clone, PartialEq)]
+pub enum SchemaDefinition {
+    /// A Scylla table or view, from its derive
+    Scylla(ObjectDef),
+    /// An Elastic index's mappings and settings, from the search-streamer's index body
+    Elastic(ElasticIndexDef),
+    /// A Redis or S3 layout version constant
+    Layout(LayoutDef),
 }
