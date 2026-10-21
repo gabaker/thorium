@@ -3,37 +3,24 @@
 //! The revisions and their steps come from the catalog shared with the operator
 //! (`thorium::models::upgrades`). Steps that change stored data name a thoradm migration,
 //! which the operator will eventually run in a pod it spawns. No migration is implemented
-//! yet: each one is registered here and reports the manual procedure instead.
+//! yet: each one is registered in [`registry`] and reports the manual procedure instead.
 
 use thorium::models::upgrades::{self, CATALOG, RevisionId, StepDef, UpgradeState};
 
 use crate::Error;
-use crate::args::{MigrateSubCommands, MigrationTarget, PlanMigrations};
+use crate::args::{Args, MigrateSubCommands, MigrationTarget, PlanMigrations};
+use crate::outcome::RunOutcome;
 
-/// The backend a data migration changes
-#[derive(Debug, Clone, Copy)]
-enum Backend {
-    /// Elasticsearch
-    Elastic,
-}
+mod check;
+mod issues;
+mod record;
+pub mod registry;
+mod reset_state;
+mod revert;
+mod run;
+mod verify;
 
-/// A data migration thoradm knows about
-#[derive(Debug, Clone, Copy)]
-struct MigrationDef {
-    /// The id of this migration, referenced by catalog steps
-    id: &'static str,
-    /// The backend this migration changes
-    backend: Backend,
-    /// Whether thoradm can run this migration yet
-    implemented: bool,
-}
-
-/// Every data migration thoradm knows about
-const MIGRATIONS: &[MigrationDef] = &[MigrationDef {
-    id: "elastic-keyword-mappings",
-    backend: Backend::Elastic,
-    implemented: false,
-}];
+use registry::{MIGRATIONS, MigrationDef};
 
 /// Find a registered migration by its id
 ///
@@ -209,11 +196,21 @@ fn not_implemented(migration: &MigrationDef, action: &str) -> Error {
 ///
 /// * `cmd` - The migration to run or verify
 /// * `action` - What to do with it ("run" or "verify")
-fn run_or_verify(cmd: &MigrationTarget, action: &str) -> Result<(), Error> {
+fn run_or_verify(cmd: &MigrationTarget, action: &str) -> Result<RunOutcome, Error> {
     // find the migration, every one of which is still a stub
-    let migration = find(&cmd.id)?;
+    let migration = find(cmd.id())?;
     // report how to perform it by hand since thoradm can't run it yet
     Err(not_implemented(migration, action))
+}
+
+/// Report that a migrate subcommand isn't built yet
+///
+/// # Arguments
+///
+/// * `command` - The subcommand, as typed after `thoradm migrate`
+fn not_built(command: &str) -> Error {
+    // name the subcommand so scripts can fall back to a manual procedure
+    Error::NotImplemented(format!("thoradm migrate {command} is not available yet"))
 }
 
 /// Handle a migrate subcommand
@@ -221,16 +218,22 @@ fn run_or_verify(cmd: &MigrationTarget, action: &str) -> Result<(), Error> {
 /// # Arguments
 ///
 /// * `cmd` - The migrate subcommand to handle
-pub fn handle(cmd: &MigrateSubCommands) -> Result<(), Error> {
+/// * `args` - The arguments thoradm was started with
+pub async fn handle(cmd: &MigrateSubCommands, args: &Args) -> Result<RunOutcome, Error> {
     // dispatch to the subcommand's handler
     match cmd {
         MigrateSubCommands::List => {
             list();
-            Ok(())
+            Ok(RunOutcome::Complete)
         }
-        MigrateSubCommands::Plan(plan_cmd) => plan(plan_cmd),
-        MigrateSubCommands::Run(target) => run_or_verify(target, "run"),
-        MigrateSubCommands::Verify(target) => run_or_verify(target, "verify"),
+        MigrateSubCommands::Plan(plan_cmd) => plan(plan_cmd).map(|()| RunOutcome::Complete),
+        MigrateSubCommands::Run(run_cmd) => run::handle(run_cmd, args).await,
+        MigrateSubCommands::Check(check_cmd) => check::handle(check_cmd, args).await,
+        MigrateSubCommands::Record(record_cmd) => record::handle(record_cmd, args).await,
+        MigrateSubCommands::Verify(target) => verify::handle(target, args).await,
+        MigrateSubCommands::Issues(issues_cmd) => issues::handle(issues_cmd, args).await,
+        MigrateSubCommands::Revert(revert_cmd) => revert::handle(revert_cmd, args).await,
+        MigrateSubCommands::ResetState(reset_cmd) => reset_state::handle(reset_cmd, args).await,
     }
 }
 
@@ -268,14 +271,16 @@ mod tests {
     fn stubs_report_the_procedure() {
         // run the reindex migration
         let target = MigrationTarget {
-            id: "elastic-keyword-mappings".to_owned(),
+            id: Some("elastic-keyword-mappings".to_owned()),
+            positional_id: None,
         };
         let error = run_or_verify(&target, "run").expect_err("stub should fail");
         assert_eq!(error.exit_code(), 3);
         assert!(error.to_string().contains("search-streamer"));
         // unknown migrations are ordinary errors
         let unknown = MigrationTarget {
-            id: "nope".to_owned(),
+            id: None,
+            positional_id: Some("nope".to_owned()),
         };
         assert_eq!(
             run_or_verify(&unknown, "verify")
@@ -452,5 +457,42 @@ mod tests {
             args.cmd,
             crate::args::SubCommands::Migrate(MigrateSubCommands::Run(_))
         ));
+    }
+
+    /// Run and verify take the migration id as `--id` or positionally, but exactly one of them
+    #[test]
+    fn run_and_verify_take_the_id_either_way() {
+        // parse a migrate command line
+        let parse = |rest: &[&str]| {
+            crate::args::Args::try_parse_from(["thoradm", "migrate"].iter().chain(rest))
+        };
+        // both forms name the same migration for run and for verify
+        for form in [
+            &["--id", "elastic-keyword-mappings"][..],
+            &["elastic-keyword-mappings"][..],
+        ] {
+            let run = parse(&[&["run"], form].concat()).expect("run should parse");
+            let crate::args::SubCommands::Migrate(MigrateSubCommands::Run(run)) = run.cmd else {
+                panic!("expected migrate run");
+            };
+            assert_eq!(run.target.id(), "elastic-keyword-mappings");
+            let verify = parse(&[&["verify"], form].concat()).expect("verify should parse");
+            let crate::args::SubCommands::Migrate(MigrateSubCommands::Verify(verify)) = verify.cmd
+            else {
+                panic!("expected migrate verify");
+            };
+            assert_eq!(verify.id(), "elastic-keyword-mappings");
+        }
+        // run keeps its other flags alongside --id
+        let run = parse(&["run", "--id", "a", "--objects", "x,y"]).expect("run should parse");
+        let crate::args::SubCommands::Migrate(MigrateSubCommands::Run(run)) = run.cmd else {
+            panic!("expected migrate run");
+        };
+        assert_eq!((run.target.id(), run.objects.len()), ("a", 2));
+        // a missing id, or both forms at once, is a usage error
+        for command in ["run", "verify"] {
+            assert!(parse(&[command]).is_err());
+            assert!(parse(&[command, "--id", "a", "b"]).is_err());
+        }
     }
 }

@@ -14,6 +14,7 @@ pub mod error;
 pub mod migrate;
 pub mod outcome;
 pub mod provision;
+pub mod schema;
 pub mod settings;
 pub mod shared;
 pub mod users;

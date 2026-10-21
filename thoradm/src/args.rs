@@ -8,10 +8,19 @@ use thorium::models::{
 };
 
 mod backup;
+mod migrate;
+mod schema;
 
 pub use backup::{
     BackupComponents, BackupSubCommands, CoverageBackup, NewBackup, RestoreBackup, ScrubBackup,
     VerifyBackup,
+};
+pub use migrate::{
+    CheckMigration, ListIssues, MigrateSubCommands, MigrationTarget, PlanMigrations,
+    RecordRevision, ResetState, RevertMigrations, RunMigration,
+};
+pub use schema::{
+    ApplySchema, DiffSchema, HashSchema, PrintSchema, SchemaSubCommands, StatusSchema, VerifyViews,
 };
 
 /// Provide a default admin config path
@@ -73,41 +82,9 @@ pub enum SubCommands {
     /// List and run the data migrations behind Thorium's upgrade revisions
     #[clap(subcommand)]
     Migrate(MigrateSubCommands),
-}
-
-/// The data migration subcommands
-#[derive(Parser, Debug, Clone)]
-pub enum MigrateSubCommands {
-    /// List every revision and its upgrade steps, with the migrations thoradm runs
-    #[clap(version, author)]
-    List,
-    /// Show the upgrade steps that bring a cluster from one revision to another
-    #[clap(version, author)]
-    Plan(PlanMigrations),
-    /// Run a data migration
-    #[clap(version, author)]
-    Run(MigrationTarget),
-    /// Check whether a data migration still needs to run
-    #[clap(version, author)]
-    Verify(MigrationTarget),
-}
-
-/// Show the upgrade steps between two revisions
-#[derive(Parser, Debug, Clone)]
-pub struct PlanMigrations {
-    /// The revision the cluster is at (e.g. 2026-10-v01)
-    #[clap(long)]
-    pub from: String,
-    /// The revision to upgrade to (defaults to the latest revision)
-    #[clap(long)]
-    pub to: Option<String>,
-}
-
-/// The data migration to run or verify
-#[derive(Parser, Debug, Clone)]
-pub struct MigrationTarget {
-    /// The id of the migration (see `thoradm migrate list`)
-    pub id: String,
+    /// Print, hash, apply, and diff Thorium's declared schema
+    #[clap(subcommand)]
+    Schema(SchemaSubCommands),
 }
 
 /// The user account specific subcommands
