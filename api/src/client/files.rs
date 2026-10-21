@@ -52,6 +52,14 @@ pub struct Files {
     client: reqwest::Client,
 }
 
+#[cfg(test)]
+impl Files {
+    /// The auth string this handler sends with its requests
+    pub(crate) fn auth_token(&self) -> &str {
+        &self.token
+    }
+}
+
 #[cfg_attr(
     feature = "sync",
     thorium_derive::blocking_struct(wrap_return(

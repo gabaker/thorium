@@ -117,7 +117,7 @@ pub struct ImageConfigAnswers {
     pub cpu: String,
     /// The memory request, in a unit Thorium accepts (e.g. "1024Mi")
     pub memory: String,
-    /// The scaler the image runs under (K8s, BareMetal, …)
+    /// The scaler the image runs under (`K8s`, `BareMetal`, …)
     pub scaler: String,
     /// How the tool's results are displayed in the UI
     pub display_type: String,
@@ -188,8 +188,8 @@ impl PipelineConfigAnswers {
             group: group.to_string(),
             name: name.to_string(),
             order: vec![images.to_vec()],
-            // one week in seconds, chosen to match the API's own default SLA
-            sla: 604_800,
+            // the API's default SLA of one week
+            sla: thorium::models::DEFAULT_PIPELINE_SLA,
             description: None,
         }
     }

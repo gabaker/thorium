@@ -44,12 +44,18 @@ async fn watch_reaction_complete(
     complete: Arc<AtomicBool>,
 ) -> Result<(), Error> {
     // Wait until the reaction is complete
-    while !matches!(
-        thorium.reactions.get(&group, id).await?.status,
-        ReactionStatus::Completed | ReactionStatus::Failed
-    ) {
-        sleep(REFRESH_RATE).await;
-    }
+    utils::watch::poll_until(
+        || thorium.reactions.get(&group, id),
+        |reaction| {
+            Ok(matches!(
+                reaction.status,
+                ReactionStatus::Completed | ReactionStatus::Failed
+            ))
+        },
+        None,
+        REFRESH_RATE,
+    )
+    .await?;
     // Notify the listeners
     complete.store(true, Ordering::Relaxed);
     Ok(())
@@ -75,11 +81,7 @@ async fn forward_logs(
         cursor.next().await?;
         // forward the log lines
         for line in &cursor.logs.logs {
-            if log_tx
-                .send((stage.clone(), line.to_string()))
-                .await
-                .is_err()
-            {
+            if log_tx.send((stage.clone(), line.clone())).await.is_err() {
                 break;
             }
         }
@@ -288,13 +290,17 @@ async fn write_results(
         let base_out_path = match run_mode {
             Mode::File => cmd.output.clone().unwrap_or(PathBuf::from(format!(
                 "{}_{}",
-                &cmd.sha256_or_repo, &cmd.pipeline
+                cmd.sha256_or_repo, cmd.pipeline
             ))),
             Mode::Repo => {
-                let repo = cmd.sha256_or_repo.split('/').last().unwrap_or_default();
+                let repo = cmd
+                    .sha256_or_repo
+                    .split('/')
+                    .next_back()
+                    .unwrap_or_default();
                 cmd.output
                     .clone()
-                    .unwrap_or(PathBuf::from(format!("{}_{}", repo, &cmd.pipeline)))
+                    .unwrap_or(PathBuf::from(format!("{}_{}", repo, cmd.pipeline)))
             }
         };
         tokio::fs::create_dir_all(&base_out_path).await?;
@@ -323,11 +329,11 @@ async fn write_results(
                     {
                         Ok(()) => println!(
                             "Successfully retrieved results from tool {}",
-                            &tool_name.color(*color).bold()
+                            tool_name.color(*color).bold()
                         ),
                         Err(err) => println!(
                             "An error occurred retrieving results from tool {}: {}",
-                            &tool_name.color(*color).bold(),
+                            tool_name.color(*color).bold(),
                             err.msg()
                                 .unwrap_or("An unknown error has occurred".to_string())
                         ),
@@ -337,7 +343,7 @@ async fn write_results(
         .await;
         println!(
             "Finished retrieving results! Results saved to \"{}\"",
-            &base_out_path.to_string_lossy()
+            base_out_path.to_string_lossy()
         );
     }
     Ok(())

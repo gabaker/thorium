@@ -64,6 +64,7 @@ pub(crate) fn redis_info(meta: &ClusterMeta) -> Result<ConnectionInfo, Error> {
     Ok(ConnectionInfo {
         addr: ConnectionAddr::Tcp(conf.host.clone(), conf.port),
         redis: RedisConnectionInfo {
+            db: i64::from(conf.db),
             username,
             password: conf.password.clone(),
             ..RedisConnectionInfo::default()
@@ -182,7 +183,8 @@ mod tests {
         assert!(!redis_unreachable(&response));
     }
 
-    /// A Redis password alone authenticates as the default user and a username needs one
+    /// A Redis password alone authenticates as the default user, a username needs one, and the
+    /// configured database is selected
     #[tokio::test]
     async fn redis_info_auth() {
         // build cluster metadata with the sample Redis password and no username
@@ -200,6 +202,10 @@ mod tests {
             info.addr,
             ConnectionAddr::Tcp("redis.redis.svc.cluster.local".to_owned(), 6379)
         );
+        // the default database is selected unless another is configured
+        assert_eq!(info.redis.db, 0);
+        meta.conf.redis.db = 4;
+        assert_eq!(redis_info(&meta).expect("info").redis.db, 4);
         // a configured username is used as is
         meta.conf.redis.username = Some("thorium".to_owned());
         assert_eq!(

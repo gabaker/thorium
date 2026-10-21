@@ -12,6 +12,9 @@ use thorium::{
 
 use super::render::{field, header, label, render_markdown};
 
+/// The maximum number of groups searched concurrently when looking up a resource's group
+const GROUP_SEARCH_CONCURRENCY: usize = 10;
+
 /// Write a single line to the output, mapping any IO error
 ///
 /// # Arguments
@@ -189,7 +192,8 @@ pub async fn find_image_group(thorium: &Thorium, image_name: &str) -> Result<Str
         ))
     }))
     // concurrently search for the image in each group and add matching groups to the list
-    .try_for_each_concurrent(None, |(cursor, group)| {
+    // bounded so a user in many groups doesn't open a request per group all at once
+    .try_for_each_concurrent(Some(GROUP_SEARCH_CONCURRENCY), |(cursor, group)| {
         search_image_cursor(cursor, group, image_name, matching_groups.clone())
     })
     .await?;
@@ -200,9 +204,16 @@ pub async fn find_image_group(thorium: &Thorium, image_name: &str) -> Result<Str
         .map_err(|_| Error::new("Poison mutex error retrieving image"))?;
     // ensure that only a single matching group was found
     match matching_groups.len() {
-        len if len < 1 => Err(Error::new("Image not found")),
+        0 => Err(Error::new(format!(
+            "Image '{image_name}' not found in any of your groups"
+        ))),
         len if len > 1 => Err(Error::new(format!(
-            "Images with the given name exist in more than one group: {matching_groups:?}. Please specify a group"
+            "Image '{image_name}' exists in multiple groups ({}); specify a group",
+            matching_groups
+                .iter()
+                .map(|group| super::resource_id(group, image_name))
+                .collect::<Vec<_>>()
+                .join(", ")
         ))),
         _ => matching_groups
             .into_iter()

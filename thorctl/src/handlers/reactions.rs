@@ -7,7 +7,8 @@ use futures::TryStreamExt;
 use futures::stream::{self, StreamExt};
 use itertools::Itertools;
 use owo_colors::OwoColorize;
-use thorium::models::{Reaction, ReactionListParams, ReactionStatus};
+use serde::Serialize;
+use thorium::models::{Reaction, ReactionListParams, ReactionStatus, StageLogs, StatusUpdate};
 use thorium::{CtlConf, Thorium};
 use tokio::io::AsyncWriteExt;
 use uuid::Uuid;
@@ -21,6 +22,9 @@ use crate::args::reactions::{
 use crate::args::{self, Args, DescribeCommand, SearchParameterized};
 use crate::handlers::Controller;
 use crate::utils;
+use crate::utils::output::{self, OutputFormat, View};
+use crate::utils::reactions::ReactionsView;
+use crate::utils::watch;
 
 pub mod create;
 pub mod delete;
@@ -233,10 +237,10 @@ async fn info_specific(thorium: &Thorium, cmd: &GetReactions) -> Result<(), Erro
     // crawl over all reaction ids and get info on them
     stream::iter(&cmd.targets)
         .map(|target| async move {
-            match thorium.reactions.get(&cmd.group, target.clone()).await {
+            match thorium.reactions.get(&cmd.group, *target).await {
                 Ok(info) => InfoLine::info(&info),
                 Err(err) => InfoLine::error(target, &err),
-            };
+            }
             Ok(())
         })
         .buffer_unordered(25)
@@ -258,20 +262,73 @@ async fn delete_specific(thorium: &Thorium, cmd: &DeleteReactions) -> Result<(),
     stream::iter(&cmd.targets)
         .map(|target| async move {
             // get this reactions info
-            match thorium.reactions.get(&cmd.group, target.clone()).await {
+            match thorium.reactions.get(&cmd.group, *target).await {
                 // delete this reaction
                 Ok(info) => match thorium.reactions.delete(&info.group, &info.id).await {
                     Ok(_) => InfoLine::info(&info),
                     Err(err) => InfoLine::error(target, &err),
                 },
                 Err(err) => InfoLine::error(target, &err),
-            };
+            }
             Ok(())
         })
         .buffer_unordered(25)
         .collect::<Vec<Result<(), Error>>>()
         .await;
     Ok(())
+}
+
+/// Collect every reaction a cursor returns
+///
+/// # Arguments
+///
+/// * `cursor` - The cursor to crawl
+async fn collect_cursor(
+    mut cursor: thorium::client::Cursor<Reaction>,
+) -> Result<Vec<Reaction>, Error> {
+    // gather reactions until our cursor is exhausted
+    let mut reactions = Vec::new();
+    loop {
+        // take the reactions from this page
+        reactions.append(&mut cursor.details);
+        // stop once our cursor has been exhausted
+        if cursor.exhausted {
+            break;
+        }
+        // get the next page of data
+        cursor.next().await?;
+    }
+    Ok(reactions)
+}
+
+/// Retrieve the reactions a get command shows
+///
+/// # Arguments
+///
+/// * `thorium` - A Thorium client
+/// * `cmd` - The full get command/args
+async fn fetch_reactions(thorium: &Thorium, cmd: &GetReactions) -> Result<ReactionsView, Error> {
+    // determine the correct reactions to get based on the args specified
+    let cursor = match (cmd.targets.is_empty(), &cmd.pipeline, &cmd.status, &cmd.tag) {
+        // get specific reactions by id, keeping the order they were given in
+        (false, None, None, None) => {
+            let reactions = stream::iter(&cmd.targets)
+                .map(|target| thorium.reactions.get(&cmd.group, *target))
+                .buffered(25)
+                .try_collect()
+                .await?;
+            return Ok(ReactionsView(reactions));
+        }
+        // get reactions for a specific pipeline
+        (true, Some(pipe), None, None) => crawl_pipeline!(thorium, pipe, cmd).await?,
+        // get reactions for a specific pipeline and status
+        (true, Some(pipe), Some(status), None) => crawl_status!(thorium, pipe, status, cmd).await?,
+        // get reactions for a specific tag
+        (true, None, None, Some(tag)) => crawl_tag!(thorium, tag, cmd).await?,
+        _ => return Err(Error::new(HELPFUL_ARG_COMBO_ERROR)),
+    };
+    // collect every reaction our cursor returns
+    Ok(ReactionsView(collect_cursor(cursor).await?))
 }
 
 /// Calls the right get info method
@@ -281,6 +338,15 @@ async fn delete_specific(thorium: &Thorium, cmd: &DeleteReactions) -> Result<(),
 /// * `thorium` - A Thorium client
 /// * `cmd` - The full get command/args
 async fn get(thorium: &Thorium, cmd: &GetReactions) -> Result<(), Error> {
+    // print through the shared output helpers if any of their flags were set
+    if cmd.format.format.is_some() || cmd.watch.watch || cmd.wait.wait_for.is_some() {
+        // default to a table
+        let format = cmd.format.format.unwrap_or(OutputFormat::Table);
+        return watch::show(format, &cmd.watch, Some(&cmd.wait), || {
+            fetch_reactions(thorium, cmd)
+        })
+        .await;
+    }
     // determine the correct action to take based on the args specified
     let mut cursor = match (cmd.targets.is_empty(), &cmd.pipeline, &cmd.status, &cmd.tag) {
         // get info on specific reactions by id
@@ -320,6 +386,29 @@ async fn get(thorium: &Thorium, cmd: &GetReactions) -> Result<(), Error> {
 /// * `thorium` - The Thorium client
 /// * `cmd` - The describe reactions command to execute
 async fn describe(thorium: &Thorium, cmd: &DescribeReactions) -> Result<(), Error> {
+    // wait for every described reaction to match our condition, then describe them once
+    if let Some(condition) = &cmd.wait.wait_for {
+        // convert each reaction to JSON so the condition can check it
+        let items = |reactions: &Vec<Reaction>| {
+            reactions
+                .iter()
+                .map(output::to_value)
+                .collect::<Result<Vec<_>, Error>>()
+        };
+        watch::wait_until(
+            || cmd.collect(thorium),
+            items,
+            condition,
+            cmd.wait.timeout,
+            cmd.watch.interval,
+        )
+        .await?;
+        return cmd.describe(thorium).await;
+    }
+    // re-describe our reactions until interrupted
+    if cmd.watch.watch {
+        return watch::repeat(cmd.watch.interval, || cmd.describe(thorium)).await;
+    }
     cmd.describe(thorium).await
 }
 
@@ -730,13 +819,323 @@ async fn logs_search(
         .await
 }
 
-/// Retrieve reaction logs
+/// One stage's logs in a reaction logs view
+#[derive(Serialize)]
+struct StageLogsView {
+    /// The name of the stage
+    stage: String,
+    /// The API's response for this stage's logs
+    #[serde(flatten)]
+    logs: StageLogs,
+}
+
+/// One reaction's status and stage logs in a reaction logs view
+#[derive(Serialize)]
+struct ReactionLogsView {
+    /// The id of the reaction
+    reaction: Uuid,
+    /// The group the reaction is in
+    group: String,
+    /// The pipeline the reaction runs
+    pipeline: String,
+    /// The API's response for the reaction's status logs
+    status: Vec<StatusUpdate>,
+    /// The logs of each stage in pipeline order
+    stages: Vec<StageLogsView>,
+}
+
+impl ReactionLogsView {
+    /// Render this reaction's logs as human-readable text
+    ///
+    /// # Arguments
+    ///
+    /// * `ansi` - Whether to style the text with ANSI escape codes
+    fn human(&self, ansi: bool) -> String {
+        // style a heading only when asked to
+        let paint = |text: String, stage: bool| match (ansi, stage) {
+            (false, _) => text,
+            (true, false) => text.bright_green().to_string(),
+            (true, true) => text.bright_yellow().to_string(),
+        };
+        // start with the reaction heading and its status logs
+        let mut lines = vec![paint(
+            format!(
+                "Reaction '{}' (Pipeline '{}')",
+                self.reaction, self.pipeline
+            ),
+            false,
+        )];
+        lines.extend(
+            self.status
+                .iter()
+                .map(|log| format!("    {}", status_update_to_string!(log))),
+        );
+        // add each stage's heading, its lines, and a blank line
+        for stage in &self.stages {
+            lines.push(paint(format!("Stage '{}'", stage.stage), true));
+            lines.extend(stage.logs.logs.iter().cloned());
+            lines.push(String::new());
+        }
+        lines.join("\n")
+    }
+}
+
+/// The logs of the reactions one logs command shows
+#[derive(Serialize)]
+#[serde(transparent)]
+struct LogsView(Vec<ReactionLogsView>);
+
+impl View for LogsView {
+    /// Render the logs as a table with one row per line
+    fn table(&self) -> String {
+        // build a row for each status log and each stage log line
+        let mut rows = Vec::new();
+        for reaction in &self.0 {
+            // add the status logs under a status stage
+            for log in &reaction.status {
+                rows.push(vec![
+                    reaction.reaction.to_string(),
+                    "status".to_owned(),
+                    status_update_to_string!(log),
+                ]);
+            }
+            // add each stage's lines
+            for stage in &reaction.stages {
+                for line in &stage.logs.logs {
+                    rows.push(vec![
+                        reaction.reaction.to_string(),
+                        stage.stage.clone(),
+                        line.clone(),
+                    ]);
+                }
+            }
+        }
+        output::table_from(&["REACTION", "STAGE", "LINE"], rows)
+    }
+
+    /// Render the logs as human-readable text
+    ///
+    /// # Arguments
+    ///
+    /// * `ansi` - Whether to style the text with ANSI escape codes
+    fn human(&self, ansi: bool) -> String {
+        self.0
+            .iter()
+            .map(|reaction| reaction.human(ansi))
+            .collect::<Vec<String>>()
+            .join("\n")
+    }
+}
+
+/// Retrieve one reaction's status and stage logs
+///
+/// # Arguments
+///
+/// * `thorium` - The Thorium client
+/// * `reaction` - The reaction to retrieve logs for
+/// * `params` - The params to set when retrieving logs
+async fn fetch_reaction_logs(
+    thorium: &Thorium,
+    reaction: Reaction,
+    params: &ReactionListParams,
+) -> Result<ReactionLogsView, Error> {
+    // retrieve information about the reaction's pipeline
+    let pipeline = error_and_return!(
+        thorium
+            .pipelines
+            .get(&reaction.group, &reaction.pipeline)
+            .await,
+        format!("Unable to retrieve pipeline for reaction '{}'", reaction.id)
+    )?;
+    // retrieve each stage's logs in pipeline order
+    let stages = futures::stream::iter(pipeline.order.into_iter().flatten().unique())
+        .map(|stage| async {
+            let logs = error_and_return!(
+                thorium
+                    .reactions
+                    .logs(&reaction.group, &reaction.id, &stage, params)
+                    .await,
+                format!(
+                    "Unable to retrieve logs for stage '{stage}' in reaction '{}'",
+                    reaction.id
+                )
+            )?;
+            Ok::<StageLogsView, Error>(StageLogsView { stage, logs })
+        })
+        .buffered(100)
+        .try_collect()
+        .await?;
+    // retrieve the reaction's status logs
+    let status = error_and_return!(
+        thorium
+            .reactions
+            .status_logs(&reaction.group, &reaction.id)
+            .await,
+        format!(
+            "Unable to retrieve reaction status logs for reaction '{}'",
+            reaction.id
+        )
+    )?;
+    Ok(ReactionLogsView {
+        reaction: reaction.id,
+        group: reaction.group,
+        pipeline: reaction.pipeline,
+        status,
+        stages,
+    })
+}
+
+/// Retrieve every reaction a logs command targets
+///
+/// # Arguments
+///
+/// * `thorium` - The Thorium client
+/// * `cmd` - The reaction logs command to execute
+async fn collect_log_reactions(
+    thorium: &Thorium,
+    cmd: &LogsReactions,
+) -> Result<Vec<Reaction>, Error> {
+    // gather the reactions given as arguments
+    let mut targets: Vec<String> = cmd.reactions.clone();
+    // add the reactions in a list file if one was given
+    if let Some(list_file) = &cmd.reaction_list {
+        let raw = error_and_return!(
+            tokio::fs::read_to_string(list_file).await,
+            format!(
+                "Unable to open list file at '{}'",
+                list_file.to_string_lossy()
+            )
+        )?;
+        targets.extend(raw.lines().map(ToOwned::to_owned));
+    }
+    // retrieve each targeted reaction in order
+    let mut reactions: Vec<Reaction> = futures::stream::iter(targets)
+        .map(|target| async move {
+            ReactionTarget::try_from(target)?
+                .get_reaction(thorium)
+                .await
+        })
+        .buffered(25)
+        .try_collect()
+        .await?;
+    // add the reactions found with a search if the command has parameters
+    if cmd.has_parameters() {
+        for cursor in args::reactions::params_to_cursors(thorium, cmd, &cmd.pipelines).await? {
+            reactions.append(&mut collect_cursor(cursor).await?);
+        }
+    }
+    Ok(reactions)
+}
+
+/// Retrieve the logs view a logs command shows
+///
+/// # Arguments
+///
+/// * `thorium` - The Thorium client
+/// * `cmd` - The reaction logs command to execute
+/// * `params` - The params to set when retrieving logs
+async fn fetch_logs(
+    thorium: &Thorium,
+    cmd: &LogsReactions,
+    params: &ReactionListParams,
+) -> Result<LogsView, Error> {
+    // retrieve the targeted reactions
+    let reactions = collect_log_reactions(thorium, cmd).await?;
+    // retrieve each reaction's logs in order
+    let views = futures::stream::iter(reactions)
+        .map(|reaction| fetch_reaction_logs(thorium, reaction, params))
+        .buffered(10)
+        .try_collect()
+        .await?;
+    Ok(LogsView(views))
+}
+
+/// Write each reaction's logs document to `<output>/<pipeline>/<reaction>.<json|yaml>`
+///
+/// # Arguments
+///
+/// * `thorium` - The Thorium client
+/// * `cmd` - The reaction logs command to execute
+/// * `output` - The base output path to write logs to
+/// * `format` - The document format to write in (json or yaml)
+/// * `params` - The params to set when retrieving logs
+async fn write_logs_documents(
+    thorium: &Thorium,
+    cmd: &LogsReactions,
+    output: &Path,
+    format: OutputFormat,
+    params: &ReactionListParams,
+) -> Result<(), Error> {
+    // retrieve every targeted reaction's logs
+    let view = fetch_logs(thorium, cmd, params).await?;
+    for reaction in &view.0 {
+        // serialize this reaction's logs document and pick its extension
+        let (document, extension) = match format {
+            OutputFormat::Yaml => (output::to_yaml(reaction)?, "yaml"),
+            _ => (output::to_json(reaction)?, "json"),
+        };
+        // create the directory for this reaction's pipeline
+        let dir = output.join(&reaction.pipeline);
+        error_and_return!(
+            tokio::fs::create_dir_all(&dir).await,
+            format!("Unable to create directory '{}'", dir.to_string_lossy())
+        )?;
+        // write this reaction's logs document
+        let path = dir.join(format!("{}.{extension}", reaction.reaction));
+        error_and_return!(
+            tokio::fs::write(&path, document).await,
+            format!("Unable to write '{}'", path.to_string_lossy())
+        )?;
+    }
+    Ok(())
+}
+
+/// Retrieve reaction logs, printing or writing them in a format or re-printing them
 ///
 /// # Arguments
 ///
 /// * `thorium` - The Thorium client
 /// * `cmd` - The reaction logs command to execute
 async fn logs(thorium: &Thorium, cmd: &LogsReactions) -> Result<(), Error> {
+    // without an output flag, write logs to directories or print them as plain text
+    if cmd.format.format.is_none() && !cmd.watch.watch {
+        return logs_text(thorium, cmd).await;
+    }
+    cmd.validate_search()?;
+    // create params for listing logs (specifically containing the max number of log lines)
+    let params = ReactionListParams::default().limit(cmd.log_limit);
+    // default to human-readable text
+    let format = cmd.format.format.unwrap_or(OutputFormat::Human);
+    match (&cmd.output, format) {
+        // files on disk can't be re-printed
+        (Some(_), _) if cmd.watch.watch => Err(Error::new(
+            "--watch prints logs to stdout and can't be used with --output",
+        )),
+        // text output to a directory uses the per-stage file layout
+        (Some(_), OutputFormat::Human) => logs_text(thorium, cmd).await,
+        // tables only go to stdout
+        (Some(_), OutputFormat::Table) => Err(Error::new(
+            "table logs print to stdout; use --format json or yaml with --output",
+        )),
+        // write each reaction's document to the output directory
+        (Some(output), format) => write_logs_documents(thorium, cmd, output, format, &params).await,
+        // print our logs view, re-printing it if asked to
+        (None, format) => {
+            watch::show(format, &cmd.watch, None, || {
+                fetch_logs(thorium, cmd, &params)
+            })
+            .await
+        }
+    }
+}
+
+/// Retrieve reaction logs and write them to organized directories or print them as text
+///
+/// # Arguments
+///
+/// * `thorium` - The Thorium client
+/// * `cmd` - The reaction logs command to execute
+async fn logs_text(thorium: &Thorium, cmd: &LogsReactions) -> Result<(), Error> {
     cmd.validate_search()?;
     // create a progress bar if not printing to stdout
     let progress = cmd

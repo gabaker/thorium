@@ -237,18 +237,18 @@ pub async fn scylla_session() -> Result<Session, Error> {
 pub async fn get_redis_client(config: &Conf) -> Pool<RedisConnectionManager> {
     // get redis config
     let redis = &config.redis;
-    // build url to server using authentication if its configured
+    // build url to the configured database using authentication if its configured
     let url = match (&redis.username, &redis.password) {
         // redis with username/password auth setup
         (Some(user), Some(password)) => format!(
-            "redis://{}:{}@{}:{}/",
-            user, password, redis.host, redis.port
+            "redis://{}:{}@{}:{}/{}",
+            user, password, redis.host, redis.port, redis.db
         ),
         (None, Some(password)) => format!(
-            "redis://default:{}@{}:{}/",
-            password, redis.host, redis.port
+            "redis://default:{}@{}:{}/{}",
+            password, redis.host, redis.port, redis.db
         ),
-        (None, None) => format!("redis://{}:{}/", redis.host, redis.port),
+        (None, None) => format!("redis://{}:{}/{}", redis.host, redis.port, redis.db),
         _ => panic!("Redis Setup Error - Password must be set if username is set"),
     };
     // build manager
@@ -387,6 +387,26 @@ pub async fn wipe_dbs(config: &Conf) -> Result<(), Error> {
     }
     tokio::try_join!(wipe_scylla(config), wipe_redis(config))?;
     Ok(())
+}
+
+/// Bind the address the test API serves on, failing if another process already holds it
+///
+/// Holding the port before anything is wiped means a second run on the same port stops here,
+/// instead of wiping the first run's data and then bootstrapping against the first run's API.
+///
+/// # Arguments
+///
+/// * `config` - The Thorium config we are using for tests
+fn bind_api_port(config: &Conf) -> Result<std::net::TcpListener, Error> {
+    // bind the same interface and port the API would
+    let interface = config.thorium.interface.as_str();
+    let port = config.thorium.port;
+    std::net::TcpListener::bind((interface, port)).map_err(|err| {
+        Error::new(format!(
+            "The test API port {interface}:{port} is in use by another process ({err}), so \
+            nothing was wiped! Stop that process or pick another THORIUM__THORIUM__PORT."
+        ))
+    })
 }
 
 /// Create a single bucket for integration tests and set its lifecycle
@@ -692,6 +712,26 @@ fn addr_of(conf: &Conf) -> String {
 ///
 /// Panics if the runtime for the API's thread can't be built.
 pub async fn start_api(conf: &Conf, attempts: u32) -> Result<AuthResponse, Error> {
+    // bind the configured address when the API starts
+    start_api_on(conf, attempts, None).await
+}
+
+/// Run the API on its own thread, serving on an already bound listener if one is given
+///
+/// # Arguments
+///
+/// * `conf` - The Thorium config to run the API with
+/// * `attempts` - How many one-second bootstrap attempts to make while the API is running
+/// * `listener` - A listener already bound to the config's interface and port, if any
+///
+/// # Panics
+///
+/// Panics if the runtime for the API's thread can't be built.
+async fn start_api_on(
+    conf: &Conf,
+    attempts: u32,
+    listener: Option<std::net::TcpListener>,
+) -> Result<AuthResponse, Error> {
     // spawn the api
     let api_conf = conf.clone();
     let api = std::thread::spawn(move || {
@@ -702,7 +742,9 @@ pub async fn start_api(conf: &Conf, attempts: u32) -> Result<AuthResponse, Error
             .build()
             .expect("Failed to spawn tokio runtime for the test API");
         // run our api, returning the startup refusal if there is one
-        rt.block_on(async move { crate::axum_with(api_conf, StartupOpts::default()).await })
+        rt.block_on(async move {
+            crate::axum_with_listener(api_conf, StartupOpts::default(), listener).await
+        })
     });
     let addr = addr_of(conf);
     // try to bootstrap until it works
@@ -755,11 +797,13 @@ pub async fn start_api(conf: &Conf, attempts: u32) -> Result<AuthResponse, Error
 /// Bootstrap a test API, running the API on another thread and returning
 /// a token for authenticating with the running API
 async fn bootstrap_test_api() -> Result<String, Error> {
+    // take the API port first so a port in use stops us before anything is wiped
+    let listener = bind_api_port(&CONF)?;
     // wipe the databases, create the buckets, and apply the schema, unless the config came from
     // an override and the harness is read-only
     prepare_backends(&CONF, read_only()).await?;
-    // run the api and bootstrap an admin on it for up to five minutes
-    let resp = start_api(&CONF, 300).await?;
+    // run the api on the port we hold and bootstrap an admin on it for up to five minutes
+    let resp = start_api_on(&CONF, 300, Some(listener)).await?;
     // get our auth token if we got one
     let auth_token = match resp {
         AuthResponse::Authed { token, .. } => token,

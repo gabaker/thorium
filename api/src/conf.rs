@@ -2558,6 +2558,30 @@ pub struct Redis {
     pub username: Option<String>,
     /// A password to use if redis has authentication enabled
     pub password: Option<String>,
+    /// The numbered Redis database to select, so several Thorium instances or test runs can
+    /// share one Redis without sharing Redis keys
+    ///
+    /// This only separates Redis. Instances or test runs that also share a Scylla cluster need
+    /// their own namespace as well, since the keyspace is named after the namespace.
+    #[serde(default)]
+    pub db: u32,
+}
+
+/// The highest database index Redis accepts, one less than the largest `databases` setting
+pub const MAX_REDIS_DB: u32 = 2_147_483_646;
+
+impl Redis {
+    /// Check that these settings can be used to connect to Redis
+    pub fn validate(&self) -> Result<(), String> {
+        // the database index must be one Redis can select
+        if self.db > MAX_REDIS_DB {
+            return Err(format!(
+                "redis.db must be between 0 and {MAX_REDIS_DB}, got {}",
+                self.db
+            ));
+        }
+        Ok(())
+    }
 }
 
 /// Helps serde default the amount of time for scylla to get setup
@@ -2837,6 +2861,10 @@ impl Conf {
         })?;
         // refuse settings that can't work before anything uses them
         conf.validate()?;
+        // refuse Redis settings we can't connect with
+        conf.redis
+            .validate()
+            .map_err(config::ConfigError::Message)?;
         // report settings that work but probably aren't what was meant
         for warning in conf.warnings() {
             println!(
@@ -2960,10 +2988,48 @@ impl Conf {
 #[cfg(test)]
 mod tests {
     use super::{
-        Conf, NAMESPACE_MAX_LEN, Scaler, default_namespace_blacklist, parse_namespace,
-        validate_namespace,
+        Conf, MAX_REDIS_DB, NAMESPACE_MAX_LEN, Redis, Scaler, default_namespace_blacklist,
+        parse_namespace, validate_namespace,
     };
     use std::path::Path;
+
+    /// A Redis config without a database selects database 0
+    #[test]
+    fn redis_db_defaults_to_zero() {
+        // parse Redis settings that don't set a database
+        let redis: Redis =
+            serde_norway::from_str("host: localhost\nport: 6379\n").expect("redis config parses");
+        assert_eq!(redis.db, 0);
+        assert!(redis.validate().is_ok());
+    }
+
+    /// A Redis config keeps the database it sets
+    #[test]
+    fn redis_db_parses() {
+        // parse Redis settings that select database 3
+        let redis: Redis = serde_norway::from_str("host: localhost\nport: 6379\ndb: 3\n")
+            .expect("redis config parses");
+        assert_eq!(redis.db, 3);
+        assert!(redis.validate().is_ok());
+    }
+
+    /// A Redis database outside the range Redis accepts is refused, and the bounds are accepted
+    #[test]
+    fn redis_db_range() {
+        // build Redis settings at the largest database index Redis accepts
+        let mut redis: Redis =
+            serde_norway::from_str("host: localhost\nport: 6379\n").expect("redis config parses");
+        redis.db = MAX_REDIS_DB;
+        assert!(redis.validate().is_ok());
+        // one past the largest index is refused with a message naming the setting
+        redis.db = MAX_REDIS_DB + 1;
+        let error = redis
+            .validate()
+            .expect_err("an out of range database is refused");
+        assert!(error.contains("redis.db"), "unexpected error: {error}");
+        // a negative database doesn't parse
+        assert!(serde_norway::from_str::<Redis>("host: localhost\nport: 6379\ndb: -1\n").is_err());
+    }
 
     #[test]
     fn default_namespace_blacklist_covers_privileged_namespaces() {

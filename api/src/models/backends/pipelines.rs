@@ -7,8 +7,9 @@ use uuid::Uuid;
 
 use crate::models::backends::{NotificationSupport, db};
 use crate::models::{
-    Group, GroupAllowAction, Pipeline, PipelineBanKind, PipelineBanUpdate, PipelineDetailsList,
-    PipelineKey, PipelineList, PipelineRequest, PipelineStats, PipelineUpdate, User,
+    DEFAULT_PIPELINE_SLA, Group, GroupAllowAction, Pipeline, PipelineBanKind, PipelineBanUpdate,
+    PipelineDetailsList, PipelineKey, PipelineList, PipelineRequest, PipelineStats, PipelineUpdate,
+    User,
 };
 use crate::utils::{ApiError, Shared, bounder};
 use crate::{
@@ -32,7 +33,7 @@ impl PipelineRequest {
         shared: &Shared,
     ) -> Result<Pipeline, ApiError> {
         // if no sla is given assume 1 week
-        let sla = self.sla.unwrap_or(640_800);
+        let sla = self.sla.unwrap_or(DEFAULT_PIPELINE_SLA);
         // bounds check sla
         bounder::number(sla as i64, "sla", 1, 3.154e+9 as i64)?;
         // bounds check our pipeline order

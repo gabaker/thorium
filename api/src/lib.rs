@@ -292,6 +292,30 @@ pub async fn axum_with(
     config: Conf,
     opts: utils::StartupOpts,
 ) -> Result<(), models::schema::SchemaCheckError> {
+    // bind our configured interface and port ourselves
+    axum_with_listener(config, opts, None).await
+}
+
+#[cfg(feature = "api")]
+/// Launches the Thorium api using axum, serving first on an already bound listener if one is given
+///
+/// Binding before launching lets a caller learn that the port is taken before it does anything
+/// else, and keeps the port from being taken while the API sets up its databases.
+///
+/// # Arguments
+///
+/// * `config` - The Thorium config to run the API with
+/// * `opts` - The startup options
+/// * `listener` - A listener already bound to the configured interface and port, if any
+///
+/// # Panics
+///
+/// Will panic if we cannot connect to any databases or execute db setup commands.
+pub async fn axum_with_listener(
+    config: Conf,
+    opts: utils::StartupOpts,
+    mut listener: Option<std::net::TcpListener>,
+) -> Result<(), models::schema::SchemaCheckError> {
     // setup shared object, which refuses a schema this build can't run on
     let shared = Box::pin(utils::Shared::with_opts(config.clone(), opts)).await?;
     // get our log level
@@ -340,10 +364,20 @@ pub async fn axum_with(
     let mut attempts = 0;
     // bind and start handling requests
     loop {
-        // try to bind the listener for our server
-        let listener = tokio::net::TcpListener::bind(&addr)
-            .await
-            .unwrap_or_else(|_| panic!("Failed to bind to {addr}"));
+        // serve on the listener we were given, or bind a new one for our server
+        let listener = match listener.take() {
+            Some(bound) => {
+                // tokio requires its listeners to be non-blocking
+                bound
+                    .set_nonblocking(true)
+                    .unwrap_or_else(|err| panic!("Failed to configure listener on {addr}: {err}"));
+                tokio::net::TcpListener::from_std(bound)
+                    .unwrap_or_else(|err| panic!("Failed to use listener on {addr}: {err}"))
+            }
+            None => tokio::net::TcpListener::bind(&addr)
+                .await
+                .unwrap_or_else(|_| panic!("Failed to bind to {addr}")),
+        };
         // start handling requests
         match axum::serve(listener, app.clone()).await {
             Ok(()) => break,

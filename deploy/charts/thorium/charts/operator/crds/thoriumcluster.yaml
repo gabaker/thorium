@@ -578,6 +578,16 @@ spec:
                   redis:
                     description: Redis settings
                     properties:
+                      db:
+                        default: 0
+                        description: |-
+                          The numbered Redis database to select, so several Thorium instances or test runs can
+                          share one Redis without sharing Redis keys
+
+                          This only separates Redis. Instances or test runs that also share a Scylla cluster need
+                          their own namespace as well, since the keyspace is named after the namespace.
+                        minimum: 0.0
+                        type: integer
                       host:
                         description: The host redis is reachable at
                         type: string

@@ -191,6 +191,9 @@ pub async fn list(
     // with names+kinds because tag rows don't have them
     if cursor.retain.tags_retain.is_some() {
         supplement_tag_lines(&mut cursor.data, shared).await?;
+        // tag rows aren't partitioned by kind, so keep only the requested kinds
+        let kinds = &cursor.retain.extra_filter;
+        cursor.data.retain(|line| kinds.contains(&line.kind));
     }
     // save this cursor
     cursor.save(shared).await?;

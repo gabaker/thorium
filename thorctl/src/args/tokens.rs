@@ -2,6 +2,8 @@
 
 use clap::Parser;
 
+use super::helpers::{FormatArgs, WaitForArgs, WatchArgs};
+
 /// The commands to send to the tokens task handler
 #[derive(Parser, Debug)]
 pub enum Tokens {
@@ -45,7 +47,17 @@ pub struct CreateScopedToken {
 
 /// A command to get a table of all available scoped tokens
 #[derive(Parser, Debug)]
-pub struct GetTokens {}
+pub struct GetTokens {
+    /// The format to print scoped tokens in (a table by default); values are always redacted
+    #[clap(flatten)]
+    pub format: FormatArgs,
+    /// Re-read and re-print the scoped tokens until interrupted
+    #[clap(flatten)]
+    pub watch: WatchArgs,
+    /// Wait until every scoped token matches a condition
+    #[clap(flatten)]
+    pub wait: WaitForArgs,
+}
 
 /// A command to update a scoped token
 #[derive(Parser, Debug)]
@@ -93,11 +105,20 @@ pub struct DescribeTokens {
     /// Any specific scoped tokens to describe (describes all when omitted)
     pub names: Vec<String>,
     /// Show each scoped tokens value
-    #[clap(long)]
+    #[clap(long, conflicts_with_all = ["format", "watch", "wait_for"])]
     pub show_token: bool,
     /// Output details in a condensed format (no formatting/whitespace)
-    #[clap(long)]
+    #[clap(long, conflicts_with = "format")]
     pub condensed: bool,
+    /// The format to describe scoped tokens in (JSON by default); values are always redacted
+    #[clap(flatten)]
+    pub format: FormatArgs,
+    /// Re-read and re-describe the scoped tokens until interrupted
+    #[clap(flatten)]
+    pub watch: WatchArgs,
+    /// Wait until every described scoped token matches a condition
+    #[clap(flatten)]
+    pub wait: WaitForArgs,
 }
 
 /// A command to activate a scoped token

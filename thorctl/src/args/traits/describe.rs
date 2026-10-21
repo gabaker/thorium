@@ -1,6 +1,6 @@
 //! Traits and logic to allow for handlers to describe entities based on a user command
 
-use std::io::{IsTerminal, Write};
+use std::io::Write;
 use std::{io::BufRead, path::PathBuf};
 
 use futures::StreamExt;
@@ -27,7 +27,12 @@ pub enum DescribeFormat {
     Human,
     /// The full entity details as JSON
     Json,
-    // Yaml is intentionally reserved for a future addition
+    /// The same document as JSON, written as YAML (only through a command's own format flag)
+    #[value(skip)]
+    Yaml,
+    /// A table with one row per entity (only through a command's own format flag)
+    #[value(skip)]
+    Table,
 }
 
 /// A sink that consumes each described datum (serialize it, print it, etc.)
@@ -63,7 +68,7 @@ where
 
     /// Drain the data stored within the cursor
     fn drain_data(&mut self) -> Vec<T> {
-        self.data.drain(..).collect()
+        std::mem::take(&mut self.data)
     }
 }
 
@@ -84,7 +89,7 @@ where
     /// Drain the details stored within the cursor; will return an empty Vec if
     /// details are not enabled
     fn drain_data(&mut self) -> Vec<T> {
-        self.details.drain(..).collect()
+        std::mem::take(&mut self.details)
     }
 }
 
@@ -189,6 +194,24 @@ pub trait DescribeSealed: SearchParameterized {
         Err(Error::new(
             "human-readable output is not supported for this command",
         ))
+    }
+
+    /// The column names of this command's table output, or `None` if it has no table output
+    ///
+    /// Commands that return [`DescribeFormat::Table`] from [`DescribeSealed::format`] must
+    /// override this and [`DescribeSealed::table_row`].
+    fn table_columns(&self) -> Option<&'static [&'static str]> {
+        None
+    }
+
+    /// Render a single datum as one table row with a value for each of
+    /// [`DescribeSealed::table_columns`]
+    ///
+    /// # Arguments
+    ///
+    /// * `_datum` - The datum to render
+    fn table_row(&self, _datum: &Self::Data) -> Vec<String> {
+        Vec::new()
     }
 
     /// Calculate a bound on how much data will be retrieved if possible
@@ -362,6 +385,151 @@ pub trait DescribeSealed: SearchParameterized {
 
 /// A command that can describe some kind of data in Thorium
 pub trait DescribeCommand: DescribeSealed {
+    /// Describe data as one JSON list, pretty-printed unless `--condensed` is set
+    ///
+    /// # Arguments
+    ///
+    /// * `thorium` - The Thorium client
+    /// * `writer` - The writer to write the JSON to
+    /// * `progress` - An optional progress bar
+    /// * `to_stdout` - Whether the writer is stdout
+    async fn describe_json(
+        &self,
+        thorium: &Thorium,
+        writer: &mut dyn Write,
+        progress: Option<&Bar>,
+        to_stdout: bool,
+    ) -> Result<usize, Error> {
+        // serialize each datum into the JSON sequence as it arrives
+        let num_described = if self.condensed() {
+            let mut ser = serde_json::Serializer::new(&mut *writer);
+            let mut seq = ser.serialize_seq(None)?;
+            // scope the sink so its borrow on `seq` ends before `seq.end`
+            let num = {
+                let mut sink = |datum: &Self::Data| {
+                    seq.serialize_element(datum)
+                        .map_err(|err| Error::new(format!("Error serializing data: {err}")))
+                };
+                self.describe_sealed(thorium, &mut sink, progress).await?
+            };
+            seq.end()?;
+            num
+        } else {
+            let mut ser = serde_json::Serializer::pretty(&mut *writer);
+            let mut seq = ser.serialize_seq(None)?;
+            // scope the sink so its borrow on `seq` ends before `seq.end`
+            let num = {
+                let mut sink = |datum: &Self::Data| {
+                    seq.serialize_element(datum)
+                        .map_err(|err| Error::new(format!("Error serializing data: {err}")))
+                };
+                self.describe_sealed(thorium, &mut sink, progress).await?
+            };
+            seq.end()?;
+            num
+        };
+        // serde doesn't add a trailing newline, so add one for the terminal
+        if to_stdout {
+            writeln!(writer).map_err(|err| Error::new(format!("Error writing output: {err}")))?;
+        }
+        Ok(num_described)
+    }
+
+    /// Describe data in the human-readable format, with a rule between data
+    ///
+    /// # Arguments
+    ///
+    /// * `thorium` - The Thorium client
+    /// * `writer` - The writer to write the description to
+    /// * `progress` - An optional progress bar
+    /// * `to_stdout` - Whether the writer is stdout
+    async fn describe_human(
+        &self,
+        thorium: &Thorium,
+        writer: &mut dyn Write,
+        progress: Option<&Bar>,
+        to_stdout: bool,
+    ) -> Result<usize, Error> {
+        // only emit ANSI styling for an interactive terminal
+        let ansi = to_stdout && utils::output::stdout_ansi();
+        // track the first datum so the rule only goes between data
+        let mut first = true;
+        let mut sink = |datum: &Self::Data| -> Result<(), Error> {
+            if first {
+                first = false;
+            } else {
+                // separate consecutive entities with a rule
+                writeln!(writer, "\n{}\n", utils::render::separator(ansi))
+                    .map_err(|err| Error::new(format!("Error writing output: {err}")))?;
+            }
+            self.render_human(datum, &mut *writer, ansi)?;
+            writeln!(writer).map_err(|err| Error::new(format!("Error writing output: {err}")))?;
+            Ok(())
+        };
+        // render each datum as it arrives
+        self.describe_sealed(thorium, &mut sink, progress).await
+    }
+
+    /// Describe data as one YAML list, the same document as the JSON format
+    ///
+    /// # Arguments
+    ///
+    /// * `thorium` - The Thorium client
+    /// * `writer` - The writer to write the YAML to
+    /// * `progress` - An optional progress bar
+    async fn describe_yaml(
+        &self,
+        thorium: &Thorium,
+        writer: &mut dyn Write,
+        progress: Option<&Bar>,
+    ) -> Result<usize, Error> {
+        // collect every datum as a JSON value so the YAML document matches the JSON one
+        let mut documents = Vec::new();
+        let num_described = {
+            let mut sink = |datum: &Self::Data| -> Result<(), Error> {
+                documents.push(utils::output::to_value(datum)?);
+                Ok(())
+            };
+            self.describe_sealed(thorium, &mut sink, progress).await?
+        };
+        // write our collected data as one YAML list
+        write!(writer, "{}", utils::output::to_yaml(&documents)?)
+            .map_err(|err| Error::new(format!("Error writing output: {err}")))?;
+        Ok(num_described)
+    }
+
+    /// Describe data as one table with a row per datum
+    ///
+    /// # Arguments
+    ///
+    /// * `thorium` - The Thorium client
+    /// * `writer` - The writer to write the table to
+    /// * `progress` - An optional progress bar
+    async fn describe_table(
+        &self,
+        thorium: &Thorium,
+        writer: &mut dyn Write,
+        progress: Option<&Bar>,
+    ) -> Result<usize, Error> {
+        // make sure this command can render a table before retrieving anything
+        let Some(columns) = self.table_columns() else {
+            return Err(Error::new("table output is not supported for this command"));
+        };
+        // collect one row for each datum
+        let mut rows = Vec::new();
+        let num_described = {
+            let mut sink = |datum: &Self::Data| -> Result<(), Error> {
+                rows.push(self.table_row(datum));
+                Ok(())
+            };
+            self.describe_sealed(thorium, &mut sink, progress).await?
+        };
+        // write our rows as one table
+        writeln!(writer, "{}", utils::output::table_from(columns, rows))
+            .map_err(|err| Error::new(format!("Error writing output: {err}")))?;
+        Ok(num_described)
+    }
+
     /// Describe data, retrieving it from the Thorium API, serializing it, then
     /// outputting to either stdout or an output file
     ///
@@ -438,61 +606,19 @@ pub trait DescribeCommand: DescribeSealed {
         // describe the data, saving the actual number described in case it doesn't match the bound
         let num_described = match format {
             DescribeFormat::Json => {
-                // serialize each datum into the JSON sequence as it arrives
-                let num_described = if self.condensed() {
-                    let mut ser = serde_json::Serializer::new(&mut *writer);
-                    let mut seq = ser.serialize_seq(None)?;
-                    // scope the sink so its borrow on `seq` ends before `seq.end`
-                    let num = {
-                        let mut sink = |datum: &Self::Data| {
-                            seq.serialize_element(datum)
-                                .map_err(|err| Error::new(format!("Error serializing data: {err}")))
-                        };
-                        self.describe_sealed(thorium, &mut sink, progress.as_ref())
-                            .await?
-                    };
-                    seq.end()?;
-                    num
-                } else {
-                    let mut ser = serde_json::Serializer::pretty(&mut *writer);
-                    let mut seq = ser.serialize_seq(None)?;
-                    // scope the sink so its borrow on `seq` ends before `seq.end`
-                    let num = {
-                        let mut sink = |datum: &Self::Data| {
-                            seq.serialize_element(datum)
-                                .map_err(|err| Error::new(format!("Error serializing data: {err}")))
-                        };
-                        self.describe_sealed(thorium, &mut sink, progress.as_ref())
-                            .await?
-                    };
-                    seq.end()?;
-                    num
-                };
-                // serde doesn't add a trailing newline, so add one for the terminal
-                if to_stdout {
-                    writeln!(writer)
-                        .map_err(|err| Error::new(format!("Error writing output: {err}")))?;
-                }
-                num_described
+                self.describe_json(thorium, &mut *writer, progress.as_ref(), to_stdout)
+                    .await?
             }
             DescribeFormat::Human => {
-                // only emit ANSI styling for an interactive terminal
-                let ansi = to_stdout && std::io::stdout().is_terminal();
-                let mut first = true;
-                let mut sink = |datum: &Self::Data| -> Result<(), Error> {
-                    if first {
-                        first = false;
-                    } else {
-                        // separate consecutive entities with a rule
-                        writeln!(writer, "\n{}\n", utils::render::separator(ansi))
-                            .map_err(|err| Error::new(format!("Error writing output: {err}")))?;
-                    }
-                    self.render_human(datum, &mut *writer, ansi)?;
-                    writeln!(writer)
-                        .map_err(|err| Error::new(format!("Error writing output: {err}")))?;
-                    Ok(())
-                };
-                self.describe_sealed(thorium, &mut sink, progress.as_ref())
+                self.describe_human(thorium, &mut *writer, progress.as_ref(), to_stdout)
+                    .await?
+            }
+            DescribeFormat::Yaml => {
+                self.describe_yaml(thorium, &mut *writer, progress.as_ref())
+                    .await?
+            }
+            DescribeFormat::Table => {
+                self.describe_table(thorium, &mut *writer, progress.as_ref())
                     .await?
             }
         };

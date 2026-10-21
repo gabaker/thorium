@@ -34,7 +34,7 @@ pub mod clusters;
 pub mod config;
 pub mod files;
 pub mod groups;
-mod helpers;
+pub mod helpers;
 pub mod images;
 pub mod network_policies;
 pub mod pipelines;

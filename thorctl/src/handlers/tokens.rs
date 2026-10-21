@@ -1,6 +1,7 @@
 //! Handles scoped token commands
 
 use chrono::{DateTime, NaiveDateTime, Utc};
+use serde::Serialize;
 use tabled::settings::Style;
 use tabled::{Table, Tabled};
 use thorium::client::conf::ActiveScopedToken;
@@ -14,6 +15,8 @@ use crate::args::tokens::{
     GetTokens, Tokens, UpdateScopedToken,
 };
 use crate::utils;
+use crate::utils::output::{self, OutputFormat, REDACTED, View};
+use crate::utils::watch;
 
 /// Parse an optional expiration date with the given format
 ///
@@ -83,18 +86,98 @@ fn expiration_time(scoped: &ScopedToken) -> String {
 /// * `scoped` - The scoped token to print
 /// * `show_token` - Whether to show this scoped tokens value
 fn print_token(scoped: &ScopedToken, show_token: bool) {
-    // print this scoped tokens name
-    println!("{}:", scoped.name);
-    // print the groups this scoped token is limited to
-    println!("  groups: {}", scoped.groups.join(", "));
-    // print the time until this scoped tokens value rotates
-    println!("  refresh: {}", refresh_time(scoped));
-    // print the time until this scoped token permanently expires
-    println!("  expires: {}", expiration_time(scoped));
-    // only show this scoped tokens value if it was requested
+    // render and print this scoped token's info
+    println!("{}", token_text(scoped, show_token));
+}
+
+/// Render a scoped token's info as text
+///
+/// The scoped token's value is only included when `show_token` is set.
+///
+/// # Arguments
+///
+/// * `scoped` - The scoped token to render
+/// * `show_token` - Whether to include this scoped token's value
+fn token_text(scoped: &ScopedToken, show_token: bool) -> String {
+    // start with this scoped token's name
+    let mut lines = vec![format!("{}:", scoped.name)];
+    // add the groups this scoped token is limited to
+    lines.push(format!("  groups: {}", scoped.groups.join(", ")));
+    // add the time until this scoped token's value rotates
+    lines.push(format!("  refresh: {}", refresh_time(scoped)));
+    // add the time until this scoped token permanently expires
+    lines.push(format!("  expires: {}", expiration_time(scoped)));
+    // only include this scoped token's value if it was requested
     if show_token {
-        println!("  token: {}", scoped.token);
+        lines.push(format!("  token: {}", scoped.token));
     }
+    lines.join("\n")
+}
+
+/// The scoped tokens one command shows, with every token value redacted
+#[derive(Serialize)]
+#[serde(transparent)]
+struct TokensView(Vec<ScopedToken>);
+
+impl TokensView {
+    /// Build a view of scoped tokens, redacting each of their values
+    ///
+    /// # Arguments
+    ///
+    /// * `tokens` - The scoped tokens to show
+    fn new(mut tokens: Vec<ScopedToken>) -> Self {
+        // replace every token value so no format can print it
+        for scoped in &mut tokens {
+            REDACTED.clone_into(&mut scoped.token);
+        }
+        TokensView(tokens)
+    }
+}
+
+impl View for TokensView {
+    /// Render the scoped tokens as a table
+    fn table(&self) -> String {
+        output::table(self.0.iter().map(TokenRow::from))
+    }
+
+    /// Render the scoped tokens as text
+    ///
+    /// # Arguments
+    ///
+    /// * `_ansi` - Whether to style the text (scoped token text is never styled)
+    fn human(&self, _ansi: bool) -> String {
+        self.0
+            .iter()
+            .map(|scoped| token_text(scoped, false))
+            .collect::<Vec<String>>()
+            .join("\n")
+    }
+}
+
+/// Limit scoped tokens to the requested names, erroring if any requested name is missing
+///
+/// All scoped tokens are kept when no names are requested.
+///
+/// # Arguments
+///
+/// * `tokens` - The scoped tokens to limit
+/// * `names` - The names of the scoped tokens to keep
+fn select_tokens(
+    mut tokens: Vec<ScopedToken>,
+    names: &[String],
+) -> Result<Vec<ScopedToken>, Error> {
+    // limit our tokens to the requested names if any were given
+    if !names.is_empty() {
+        // make sure all of the requested names exist
+        for name in names {
+            if !tokens.iter().any(|scoped| &scoped.name == name) {
+                return Err(Error::new(format!("Scoped token {name} not found")));
+            }
+        }
+        // drop any tokens that were not requested
+        tokens.retain(|scoped| names.contains(&scoped.name));
+    }
+    Ok(tokens)
 }
 
 /// Write an updated Thorctl config to disk
@@ -195,7 +278,16 @@ impl From<&ScopedToken> for TokenRow {
 ///
 /// * `thorium` - The Thorium client
 /// * `cmd` - The get command to execute
-async fn get(thorium: Thorium, _cmd: &GetTokens) -> Result<(), Error> {
+async fn get(thorium: Thorium, cmd: &GetTokens) -> Result<(), Error> {
+    // print through the shared output helpers if any of their flags were set
+    if cmd.format.format.is_some() || cmd.watch.watch || cmd.wait.wait_for.is_some() {
+        // default to a table
+        let format = cmd.format.format.unwrap_or(OutputFormat::Table);
+        return watch::show(format, &cmd.watch, Some(&cmd.wait), || async {
+            Ok(TokensView::new(thorium.users.list_scoped_tokens().await?))
+        })
+        .await;
+    }
     // list all of our scoped tokens
     let tokens = thorium.users.list_scoped_tokens().await?;
     // build a table row for each of our scoped tokens
@@ -214,19 +306,18 @@ async fn get(thorium: Thorium, _cmd: &GetTokens) -> Result<(), Error> {
 /// * `thorium` - The Thorium client
 /// * `cmd` - The describe command to execute
 async fn describe(thorium: Thorium, cmd: &DescribeTokens) -> Result<(), Error> {
-    // list all of our scoped tokens
-    let mut tokens = thorium.users.list_scoped_tokens().await?;
-    // limit our tokens to the requested names if any were given
-    if !cmd.names.is_empty() {
-        // make sure all of the requested names exist
-        for name in &cmd.names {
-            if !tokens.iter().any(|scoped| &scoped.name == name) {
-                return Err(Error::new(format!("Scoped token {name} not found")));
-            }
-        }
-        // drop any tokens that were not requested
-        tokens.retain(|scoped| cmd.names.contains(&scoped.name));
+    // print through the shared output helpers if any of their flags were set
+    if cmd.format.format.is_some() || cmd.watch.watch || cmd.wait.wait_for.is_some() {
+        // default to JSON
+        let format = cmd.format.format.unwrap_or(OutputFormat::Json);
+        return watch::show(format, &cmd.watch, Some(&cmd.wait), || async {
+            let tokens = thorium.users.list_scoped_tokens().await?;
+            Ok(TokensView::new(select_tokens(tokens, &cmd.names)?))
+        })
+        .await;
     }
+    // list the requested scoped tokens
+    let tokens = select_tokens(thorium.users.list_scoped_tokens().await?, &cmd.names)?;
     // serialize our scoped tokens redacting values if needed
     let mut details = Vec::with_capacity(tokens.len());
     for scoped in tokens {
@@ -235,7 +326,7 @@ async fn describe(thorium: Thorium, cmd: &DescribeTokens) -> Result<(), Error> {
             .map_err(|err| Error::new(format!("Failed to serialize scoped token: {err}")))?;
         // redact this scoped tokens value unless it was requested
         if !cmd.show_token {
-            value["token"] = serde_json::Value::String("<redacted>".to_owned());
+            value["token"] = serde_json::Value::String(REDACTED.to_owned());
         }
         details.push(value);
     }
@@ -459,5 +550,73 @@ pub async fn handle(args: &Args, cmd: &Tokens) -> Result<(), Error> {
         Tokens::Delete(cmd) => delete(thorium, cmd).await,
         Tokens::Describe(cmd) => describe(thorium, cmd).await,
         Tokens::Current(cmd) => current(args, conf, thorium, cmd).await,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use chrono::{Duration, Utc};
+    use thorium::models::{ScopedToken, ScopedTokenRole};
+
+    use super::{TokensView, select_tokens};
+    use crate::utils::output::{OutputFormat, REDACTED, render};
+
+    /// Build a scoped token holding a known secret value
+    ///
+    /// # Arguments
+    ///
+    /// * `name` - The name of the scoped token
+    fn scoped(name: &str) -> ScopedToken {
+        ScopedToken {
+            name: name.to_owned(),
+            owner: "owner".to_owned(),
+            role: ScopedTokenRole::User,
+            groups: vec!["corn".to_owned()],
+            token: "super-secret-token-value".to_owned(),
+            token_expiration: Utc::now() + Duration::days(1),
+            expires: None,
+        }
+    }
+
+    /// No format of a scoped token view contains a token value
+    #[test]
+    fn no_format_contains_a_token() {
+        // build a view of two scoped tokens
+        let view = TokensView::new(vec![scoped("one"), scoped("two")]);
+        for format in [
+            OutputFormat::Table,
+            OutputFormat::Human,
+            OutputFormat::Json,
+            OutputFormat::Yaml,
+        ] {
+            // render our view in this format
+            let rendered = render(&view, format, false).unwrap();
+            // the token value never appears but the token names do
+            assert!(
+                !rendered.contains("super-secret-token-value"),
+                "{format:?} printed a token"
+            );
+            assert!(rendered.contains("one") && rendered.contains("two"));
+        }
+        // the JSON document keeps the response's fields with the value redacted
+        let json: serde_json::Value =
+            serde_json::from_str(&render(&view, OutputFormat::Json, false).unwrap()).unwrap();
+        assert_eq!(json[0]["token"], REDACTED);
+        assert_eq!(json[0]["owner"], "owner");
+    }
+
+    /// Selecting names keeps only those tokens and rejects missing names
+    #[test]
+    fn select_names() {
+        // build three scoped tokens
+        let tokens = vec![scoped("a"), scoped("b"), scoped("c")];
+        // no names keeps them all
+        assert_eq!(select_tokens(tokens.clone(), &[]).unwrap().len(), 3);
+        // names keep only those tokens
+        let picked = select_tokens(tokens.clone(), &["b".to_owned()]).unwrap();
+        assert_eq!(picked.len(), 1);
+        assert_eq!(picked[0].name, "b");
+        // a missing name is an error
+        assert!(select_tokens(tokens, &["z".to_owned()]).is_err());
     }
 }

@@ -379,11 +379,46 @@ async fn bulk_running(
     Ok(Json(running))
 }
 
+/// Read one job by its id
+///
+/// Only admins can read a job by its id alone, and this is meant for tests.
+///
+/// # Arguments
+///
+/// * `user` - The user that is reading a job
+/// * `id` - The id of the job to read
+/// * `state` - Shared Thorium objects
+#[utoipa::path(
+    get,
+    path = "/api/jobs/{id}",
+    params(
+        ("id" = Uuid, Path, description = "The id of the job to read"),
+    ),
+    responses(
+        (status = 200, description = "The job", body = RawJob),
+        (status = 401, description = "This user is not an admin"),
+        (status = 404, description = "The job does not exist"),
+    ),
+    security(
+        ("basic" = []),
+    )
+)]
+#[instrument(name = "routes::jobs::get_job", skip_all, err(Debug))]
+async fn get_job(
+    user: AuthedUser,
+    Path(id): Path<Uuid>,
+    State(state): State<AppState>,
+) -> Result<Json<RawJob>, ApiError> {
+    // read this job as an admin
+    let job = RawJob::admin_get(&user, &id, &state.shared).await?;
+    Ok(Json(job))
+}
+
 /// The struct containing our openapi docs
 #[derive(OpenApi)]
 #[openapi(
-    paths(claim, proceed, error, sleep, checkpoint, bulk_reset, read_deadlines, bulk_running),
-    components(schemas(Checkpoint, CommitishKinds, Deadline, GenericJob, GenericJobArgs, GenericJobOpts, HandleJobResponse, ImageScaler, JobHandleStatus, JobListOpts, JobResetRequestor, JobResets, JobHandleStatus, JobStatus, RepoDependency, RunningJob, StageLogLine, StageLogsAdd, SystemComponents)),
+    paths(claim, proceed, error, sleep, checkpoint, bulk_reset, read_deadlines, bulk_running, get_job),
+    components(schemas(Checkpoint, CommitishKinds, Deadline, GenericJob, GenericJobArgs, GenericJobOpts, HandleJobResponse, ImageScaler, JobHandleStatus, JobListOpts, JobResetRequestor, JobResets, JobHandleStatus, JobStatus, RawJob, RepoDependency, RunningJob, StageLogLine, StageLogsAdd, SystemComponents)),
     modifiers(&OpenApiSecurity),
 )]
 pub struct JobApiDocs;
@@ -401,6 +436,7 @@ async fn openapi() -> Json<utoipa::openapi::OpenApi> {
 // * `router` - The router to add routes too
 pub fn mount(router: Router<AppState>) -> Router<AppState> {
     router
+        .route("/jobs/{id}", get(get_job))
         .route(
             "/jobs/claim/{group}/{pipeline}/{stage}/{cluster}/{node}/{worker}/{limit}",
             patch(claim),

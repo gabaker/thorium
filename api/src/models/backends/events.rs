@@ -8,7 +8,8 @@ use uuid::Uuid;
 use super::db::{self};
 use crate::models::backends::TagSupport;
 use crate::models::{
-    EventCacheStatus, EventPopOpts, OutputKey, SigmaRuleAppliesTo, SigmaScannableResultsEvent,
+    EventCacheStatus, EventPeekOpts, EventPopOpts, OutputKey, SigmaRuleAppliesTo,
+    SigmaScannableResultsEvent,
 };
 use crate::{
     is_admin,
@@ -130,6 +131,29 @@ impl Event {
         db::events::pop(kind, count, shared).await
     }
 
+    /// Read the queued events of a specific queue without moving them in flight
+    ///
+    /// Only admins can peek at events.
+    ///
+    /// # Arguments
+    ///
+    /// * `user` - The user that is peeking at events
+    /// * `kind` - The kind of events to peek at
+    /// * `limit` - The number of events to return at most
+    /// * `shared` - Shared Thorium objects
+    #[instrument(name = "Event::peek", skip(user, shared), err(Debug))]
+    pub async fn peek(
+        user: &User,
+        kind: EventType,
+        limit: usize,
+        shared: &Shared,
+    ) -> Result<Vec<Event>, ApiError> {
+        // only admins can peek at events
+        is_admin!(user);
+        // read the queued events from redis
+        db::events::peek(kind, limit, shared).await
+    }
+
     /// Clear some events from a specific queue
     #[instrument(name = "Event::clear", skip(user, ids, shared), fields(count = ids.len()), err(Debug))]
     pub async fn clear(
@@ -191,5 +215,34 @@ where
         } else {
             Ok(Self::default())
         }
+    }
+}
+
+impl<S> FromRequestParts<S> for EventPeekOpts
+where
+    S: Send + Sync,
+{
+    type Rejection = ApiError;
+
+    /// Extract the event peek options from a request's query string
+    ///
+    /// # Arguments
+    ///
+    /// * `parts` - The request parts to extract from
+    /// * `_state` - The shared state (unused)
+    fn from_request_parts(
+        parts: &mut Parts,
+        _state: &S,
+    ) -> impl Future<Output = Result<Self, Self::Rejection>> + Send {
+        // deserialize our query string if one was sent, or use the defaults
+        let opts = match parts.uri.query() {
+            Some(query) => serde_qs::Config::new()
+                .max_depth(5)
+                .deserialize_str(query)
+                .map_err(ApiError::from),
+            None => Ok(Self::default()),
+        };
+        // these options are ready without waiting on anything
+        std::future::ready(opts)
     }
 }

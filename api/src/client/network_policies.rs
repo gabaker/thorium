@@ -28,6 +28,14 @@ pub struct NetworkPolicies {
     client: reqwest::Client,
 }
 
+#[cfg(test)]
+impl NetworkPolicies {
+    /// The auth string this handler sends with its requests
+    pub(crate) fn auth_token(&self) -> &str {
+        &self.token
+    }
+}
+
 /// Create a new list cursor; helpful because the list and `list_details` routes
 /// will likely always be identical except for their URL's
 macro_rules! list_cursor {

@@ -10,6 +10,28 @@ use crate::utils::s3::S3Client;
 use crate::utils::{ApiError, Shared};
 use crate::{bad, internal_err_unwrapped};
 
+/// Make sure a client's graphic file name is a single file name
+///
+/// Pushing an absolute name onto a path replaces the whole path, and `/` or `..` would move the key
+/// to another object's prefix or give it empty segments that backups can't keep.
+///
+/// # Arguments
+///
+/// * `name` - The file name the client sent with the graphic
+fn check_graphic_name(name: &str) -> Result<(), ApiError> {
+    // an empty name or `.` names no file and would leave the graphic beside its base path
+    if name.is_empty() || name == "." {
+        return bad!("Graphics must have a name!".to_owned());
+    }
+    // refuse separators and traversal so the key stays under the object's base path
+    if name.contains('/') || name.contains("..") {
+        return bad!(format!(
+            "Graphic names cannot contain '/' or '..': '{name}'"
+        ));
+    }
+    Ok(())
+}
+
 /// Support for graphics for objects in Thorium
 pub(crate) trait GraphicSupport {
     /// A unique, immutable key to use to reference the implementing object
@@ -42,7 +64,11 @@ pub(crate) trait GraphicSupport {
         // add the name for this path
         match (&name_override, field.file_name()) {
             (Some(name_override), _) => s3_path.push(name_override),
-            (None, Some(filename)) => s3_path.push(filename),
+            (None, Some(filename)) => {
+                // make sure the client's name can't move the graphic out from under our base path
+                check_graphic_name(filename)?;
+                s3_path.push(filename);
+            }
             // just use a random uuid
             (None, None) => return bad!("Graphics must have a name!".to_owned()),
         }
@@ -117,5 +143,37 @@ pub(crate) trait GraphicSupport {
     async fn delete_graphic(key: &str, shared: &Shared) -> Result<(), ApiError> {
         // delete our object
         shared.s3.graphics.delete(key).await
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use axum::http::StatusCode;
+
+    use super::check_graphic_name;
+
+    /// Plain file names are allowed and names that would leave the base path are bad requests
+    #[test]
+    fn graphic_names_stay_under_their_base_path() {
+        // ordinary names keep working, with or without an extension
+        for name in ["logo.png", "logo", "my logo.png", ".hidden.png", "a\\b.png"] {
+            assert!(check_graphic_name(name).is_ok(), "{name:?} was refused");
+        }
+        // absolute names, separators, traversal, and empty names are refused as bad requests
+        for name in [
+            "/evil.png",
+            "/a/logo.png",
+            "x//y.png",
+            "a/b.png",
+            "../a.png",
+            "..",
+            "a..png",
+            "",
+            ".",
+            "a/",
+        ] {
+            let status = check_graphic_name(name).map_err(|err| err.status());
+            assert_eq!(status, Err(StatusCode::BAD_REQUEST), "{name:?}");
+        }
     }
 }

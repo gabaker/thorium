@@ -23,6 +23,14 @@ pub struct Trees {
     client: reqwest::Client,
 }
 
+#[cfg(test)]
+impl Trees {
+    /// The auth string this handler sends with its requests
+    pub(crate) fn auth_token(&self) -> &str {
+        &self.token
+    }
+}
+
 #[cfg_attr(feature = "sync", thorium_derive::blocking_struct)]
 impl Trees {
     /// Creates a new trees handler
@@ -92,7 +100,7 @@ impl Trees {
     )]
     pub async fn start(&self, opts: &TreeOpts, query: &TreeQuery) -> Result<Tree, Error> {
         // build url for claiming a job
-        let url = format!("{base}/api/trees/", base = &self.host,);
+        let url = format!("{base}/api/trees/", base = self.host);
         // build our query params
         let mut query_params = vec![("limit", opts.limit.to_string())];
         add_query!(query_params, "gather_parents", opts.gather_parents);
@@ -145,7 +153,7 @@ impl Trees {
     )]
     pub async fn get(&self, id: Uuid) -> Result<Tree, Error> {
         // build url for getting an existing tree
-        let url = format!("{base}/api/trees/{id}", base = &self.host, id = id);
+        let url = format!("{base}/api/trees/{id}", base = self.host, id = id);
         // build request
         let req = self.client.get(&url).header("authorization", &self.token);
         // send this request and build a tree from the response
@@ -199,7 +207,7 @@ impl Trees {
         // build url for claiming a job
         let url = format!(
             "{base}/api/trees/{cursor}",
-            base = &self.host,
+            base = self.host,
             cursor = cursor
         );
         // build our query params
