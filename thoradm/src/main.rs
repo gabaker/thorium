@@ -3,7 +3,7 @@
 use clap::Parser;
 use std::process::ExitCode;
 use thoradm::outcome::RunOutcome;
-use thoradm::{args, backup, census, migrate, provision, settings, users};
+use thoradm::{args, backup, census, migrate, provision, schema, settings, users};
 use tracing::error;
 
 /// Runs one thoradm command and exits with its outcome's code
@@ -25,7 +25,8 @@ async fn main() -> ExitCode {
     };
     // send every error and summary to stderr
     thoradm::shared::progress::init_logging();
-    // execute the right handler; only backup and census commands can finish with failures
+    // execute the right handler; backup, census, migrate, and schema commands return their own
+    // outcome so they can exit with a nonzero code
     let outcome = match &args.cmd {
         args::SubCommands::Backup(backup_cmd) => backup::handle(backup_cmd, &args).await,
         args::SubCommands::Settings(settings_cmd) => settings::handle(settings_cmd, &args)
@@ -38,9 +39,8 @@ async fn main() -> ExitCode {
         args::SubCommands::Users(users_cmd) => users::handle(users_cmd, &args)
             .await
             .map(|()| RunOutcome::Complete),
-        args::SubCommands::Migrate(migrate_cmd) => {
-            migrate::handle(migrate_cmd).map(|()| RunOutcome::Complete)
-        }
+        args::SubCommands::Migrate(migrate_cmd) => migrate::handle(migrate_cmd, &args).await,
+        args::SubCommands::Schema(schema_cmd) => schema::handle(schema_cmd, &args).await,
     };
     // an error that ended the command early is an abort
     match outcome {
