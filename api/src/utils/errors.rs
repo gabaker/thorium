@@ -8,8 +8,8 @@ use std::fmt;
 use tracing::{Level, event, span};
 use utoipa::ToSchema;
 
-use crate::models::InvalidEnum;
 use crate::models::conversions::ConversionError;
+use crate::models::{BackupProblems, InvalidEnum};
 use crate::utils::trace;
 
 /// Different actions in s3 that can fail
@@ -75,6 +75,15 @@ pub enum ApiError {
         code: StatusCode,
         /// The error message to return
         msg: Option<String>,
+    },
+    /// A backup or restore that found problems with some records, each listed in the body
+    ///
+    /// These messages are always safe to expose to users.
+    Problems {
+        /// The status code to return
+        code: StatusCode,
+        /// What failed and every problem found
+        body: BackupProblems,
     },
     /// A user tried to build an enum from an invalid value
     InvalidEnum(InvalidEnum),
@@ -192,7 +201,7 @@ impl ApiError {
     pub fn status(&self) -> StatusCode {
         match self {
             // Thorium errors carry their own status code
-            ApiError::Thorium { code, .. } => *code,
+            ApiError::Thorium { code, .. } | ApiError::Problems { code, .. } => *code,
             // errors from parsing user provided data are bad requests
             ApiError::InvalidEnum(_)
             | ApiError::Conversion(_)
@@ -248,6 +257,7 @@ impl ApiError {
     pub fn msg(&self) -> Option<String> {
         match self {
             ApiError::Thorium { msg, .. } => msg.clone(),
+            ApiError::Problems { body, .. } => Some(problems_msg(body)),
             ApiError::InvalidEnum(error) => Some(error.to_string()),
             ApiError::Conversion(error) => Some(format!("Unable to convert value {error:#?}")),
             ApiError::Uuid(error) => Some(format!("Failed cast to Uuid {error:#?}")),
@@ -317,6 +327,7 @@ impl ApiError {
         match self {
             // Thorium generated messages are always safe to expose
             ApiError::Thorium { msg, .. } => msg.clone(),
+            ApiError::Problems { body, .. } => Some(problems_msg(body)),
             // errors from parsing user provided data are safe to expose
             ApiError::InvalidEnum(_)
             | ApiError::Conversion(_)
@@ -367,6 +378,7 @@ impl ApiError {
     pub fn kind(&self) -> &'static str {
         match self {
             ApiError::Thorium { .. } => "Thorium",
+            ApiError::Problems { .. } => "Problems",
             ApiError::InvalidEnum(_) => "InvalidEnum",
             ApiError::Conversion(_) => "Conversion",
             ApiError::Uuid(_) => "Uuid",
@@ -432,6 +444,28 @@ impl fmt::Display for ApiError {
 // mark that this is an error struct
 impl std::error::Error for ApiError {}
 
+/// Joins what failed and the first problems into one message, for logs and the error's text
+///
+/// Only the first [`BackupProblems::LOGGED`] problems are listed and the rest are counted, so a
+/// large list can't flood the logs; the response body still holds every problem.
+///
+/// # Arguments
+///
+/// * `body` - What failed and every problem found
+fn problems_msg(body: &BackupProblems) -> String {
+    // each listed problem as its key and error
+    let (listed, more) = body.logged();
+    let mut problems: Vec<String> = listed
+        .iter()
+        .map(|problem| format!("{}: {}", problem.key, problem.error))
+        .collect();
+    // count the problems left out
+    if more > 0 {
+        problems.push(format!("and {more} more"));
+    }
+    format!("{} ({})", body.error, problems.join("; "))
+}
+
 /// The JSON body returned for API errors
 #[derive(Debug, Serialize, ToSchema)]
 pub struct ApiErrorResponse {
@@ -445,6 +479,9 @@ pub struct ApiErrorResponse {
 
 impl IntoResponse for ApiError {
     /// Allow Axum to build a response from error messages
+    ///
+    /// An [`ApiError::Problems`] responds with its [`BackupProblems`] as the body; every other
+    /// error responds with the message that is safe to expose and the trace id, when it has them.
     fn into_response(self) -> Response {
         // get our trace id
         let trace = trace::get_trace();
@@ -453,6 +490,10 @@ impl IntoResponse for ApiError {
         event!(parent: &span, Level::ERROR, kind = self.kind(), msg = self.msg());
         // get the status code to return for this error
         let code = self.status();
+        // a list of problems is returned as its own body
+        if let ApiError::Problems { body, .. } = self {
+            return (code, Json(body)).into_response();
+        }
         // get the message that is safe to expose to users
         let error = match self.public_msg() {
             // this message is safe to expose
@@ -1243,6 +1284,8 @@ impl From<ApiError> for rmcp::ErrorData {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::models::BackupProblem;
+    use tracing::instrument;
 
     /// Get the body of a response as a string
     ///
@@ -1256,6 +1299,30 @@ mod tests {
             .expect("Failed to read response body");
         // cast our body to a string
         String::from_utf8(bytes.to_vec()).expect("Response body was not utf8")
+    }
+
+    /// Serializes the tests that log through [`ApiError::into_response`]
+    ///
+    /// Tracing caches each callsite's interest for the whole process, and while a single scoped
+    /// subscriber is the only one registered it computes a newly registered callsite's interest
+    /// from the registering thread's own default subscriber. A test thread with no subscriber
+    /// that first reaches the response's error event while another test captures logs would
+    /// cache that event as never enabled and drop it from the capture, so every test that builds
+    /// a response holds this lock while doing so.
+    static RESPONSE_LOGS: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    /// Builds a response from an error while no other test builds one
+    ///
+    /// # Arguments
+    ///
+    /// * `error` - The error to build a response from
+    fn respond(error: ApiError) -> Response {
+        // wait for any other test building a response, even one that panicked
+        let _guard = RESPONSE_LOGS
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        // build the response
+        error.into_response()
     }
 
     /// Build a Redis error containing a secret internal detail
@@ -1272,7 +1339,7 @@ mod tests {
         // build a Thorium generated error
         let error: Result<(), ApiError> = bad!("Corn must be shucked!".to_owned());
         // build a response from this error
-        let response = error.unwrap_err().into_response();
+        let response = respond(error.unwrap_err());
         // make sure the status code and message are exposed
         assert_eq!(response.status(), StatusCode::BAD_REQUEST);
         assert!(
@@ -1287,7 +1354,7 @@ mod tests {
         // build an error from parsing user provided data
         let error = ApiError::from(uuid::Uuid::try_parse("not-a-uuid").unwrap_err());
         // build a response from this error
-        let response = error.into_response();
+        let response = respond(error);
         // make sure the status code and message are exposed
         assert_eq!(response.status(), StatusCode::BAD_REQUEST);
         assert!(body_string(response).await.contains("Failed cast to Uuid"));
@@ -1300,7 +1367,7 @@ mod tests {
         // make sure the full info is still available for tracing events
         assert!(error.msg().unwrap().contains("secret internal detail"));
         // build a response from this error
-        let response = error.into_response();
+        let response = respond(error);
         // make sure this error was abstracted to a generic 500
         assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
         let body = body_string(response).await;
@@ -1313,7 +1380,7 @@ mod tests {
         // build an internal OAuth error with a secret detail
         let error = ApiError::OAuth("secret oauth detail".to_owned());
         // build a response from this error
-        let response = error.into_response();
+        let response = respond(error);
         // make sure this error is a 401 with no error message
         assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
         assert!(!body_string(response).await.contains("secret oauth detail"));
@@ -1341,6 +1408,103 @@ mod tests {
         assert_eq!(parse.kind(), "Uuid");
         assert_eq!(hidden.kind(), "Redis");
         assert_eq!(oauth.kind(), "OAuth");
+    }
+
+    /// A log writer that keeps every line written to it
+    #[derive(Clone, Default)]
+    struct CapturedLogs(std::sync::Arc<std::sync::Mutex<Vec<u8>>>);
+
+    impl std::io::Write for CapturedLogs {
+        /// Keeps the bytes written
+        ///
+        /// # Arguments
+        ///
+        /// * `buf` - The bytes to keep
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            // append these bytes to the captured logs
+            self.0.lock().unwrap().extend_from_slice(buf);
+            Ok(buf.len())
+        }
+
+        /// Does nothing, since every write is kept as it is made
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    impl tracing_subscriber::fmt::MakeWriter<'_> for CapturedLogs {
+        /// The writer each log line is written to
+        type Writer = Self;
+
+        /// Gets a writer onto the same captured logs
+        fn make_writer(&self) -> Self::Writer {
+            self.clone()
+        }
+    }
+
+    /// Fails with an error, logging it as the API's instrumented functions do
+    ///
+    /// # Arguments
+    ///
+    /// * `error` - The error to fail with
+    #[instrument(skip_all, err(Debug))]
+    fn fail_with(error: ApiError) -> Result<(), ApiError> {
+        // fail so the instrument logs the error
+        Err(error)
+    }
+
+    /// A backup or restore error with more problems than a log holds logs only a count from its
+    /// instrument, and the first 100 problems and a count of the rest from its response and its
+    /// text, while the 422 body still holds every problem
+    #[tokio::test]
+    async fn long_problem_lists_are_capped_in_logs() {
+        // build more problems than a log holds
+        let problems: Vec<BackupProblem> = (0..150)
+            .map(|i| BackupProblem::new(format!("problem-{i:03}"), "doesn't parse"))
+            .collect();
+        let build = || ApiError::Problems {
+            code: StatusCode::UNPROCESSABLE_ENTITY,
+            body: BackupProblems {
+                error: "150 records in Redis don't parse".to_owned(),
+                problems: problems.clone(),
+            },
+        };
+        // capture this thread's logs in a subscriber scoped to this test
+        let logs = CapturedLogs::default();
+        let subscriber = tracing_subscriber::fmt()
+            .with_writer(logs.clone())
+            .with_ansi(false)
+            .finish();
+        // keep other tests from building responses while the logs are captured
+        let guard = RESPONSE_LOGS
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        // log the error from an instrumented function and from building its response
+        let response = tracing::subscriber::with_default(subscriber, || {
+            let _ = fail_with(build());
+            build().into_response()
+        });
+        // let other tests build responses again
+        drop(guard);
+        // the instrument's line counts the problems without listing them
+        let logs = String::from_utf8(logs.0.lock().unwrap().clone()).unwrap();
+        let lines: Vec<&str> = logs.lines().collect();
+        assert_eq!(lines.len(), 2, "{logs}");
+        assert_eq!(lines[0].matches("problem-").count(), 0, "{}", lines[0]);
+        assert!(lines[0].contains("150 problems"), "{}", lines[0]);
+        // the response's line lists only the first 100 problems and a count of the rest
+        assert_eq!(lines[1].matches("problem-").count(), 100, "{}", lines[1]);
+        assert!(lines[1].contains("problem-099"), "{}", lines[1]);
+        assert!(!lines[1].contains("problem-100"), "{}", lines[1]);
+        assert!(lines[1].contains("and 50 more"), "{}", lines[1]);
+        // the error's text is capped the same way
+        let text = build().to_string();
+        assert_eq!(text.matches("problem-").count(), 100, "{text}");
+        assert!(text.contains("and 50 more"), "{text}");
+        // the 422 body still holds every problem
+        assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
+        let body: BackupProblems = serde_json::from_str(&body_string(response).await).unwrap();
+        assert_eq!(body.problems, problems);
     }
 
     #[test]

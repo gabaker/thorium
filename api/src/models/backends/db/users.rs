@@ -5,7 +5,7 @@ use tracing::{Level, event, instrument};
 
 use super::helpers;
 use super::keys::{EventKeys, GroupKeys, SystemKeys, UserKeys};
-use crate::models::{ScopedToken, UnixInfo, User, UserRole, UserSettings};
+use crate::models::{BackupProblem, ScopedToken, UnixInfo, User, UserRole, UserSettings};
 use crate::utils::{ApiError, Shared};
 use crate::{
     conflict, conn, deserialize, deserialize_ext, deserialize_opt, extract, not_found, query,
@@ -211,13 +211,13 @@ pub async fn get(username: &str, shared: &Shared) -> Result<User, ApiError> {
     Ok(user)
 }
 
-/// Get a list of users with details to backup
+/// Get a list of users with details to backup, and a problem for each user that doesn't parse
 ///
 /// # Arguments
 ///
 /// * `shared` - Shared Thorium objects
 #[instrument(name = "db::users::backup", skip_all, err(Debug))]
-pub async fn backup(shared: &Shared) -> Result<Vec<User>, ApiError> {
+pub async fn backup(shared: &Shared) -> Result<(Vec<User>, Vec<BackupProblem>), ApiError> {
     // build key to user global set
     let key = UserKeys::global(shared);
     // get a list of user names
@@ -232,10 +232,16 @@ pub async fn backup(shared: &Shared) -> Result<Vec<User>, ApiError> {
     });
     // get raw user data
     let raw: Vec<UserData> = pipe.query_async(conn!(shared)).await?;
-    // cast to user docs
-    raw.into_iter()
-        .map(|(data, groups)| cast(data, groups))
-        .collect::<Result<Vec<User>, _>>()
+    // cast to user docs, keeping every user that doesn't parse as a problem
+    let mut users = Vec::with_capacity(raw.len());
+    let mut problems = Vec::new();
+    for (name, (data, groups)) in names.iter().zip(raw) {
+        match cast(data, groups) {
+            Ok(user) => users.push(user),
+            Err(error) => problems.push(helpers::unparsable(UserKeys::data(name, shared), &error)),
+        }
+    }
+    Ok((users, problems))
 }
 
 /// Adds a user to groups based on the user object
@@ -256,7 +262,7 @@ fn restore_groups<'a>(pipe: &'a mut redis::Pipeline, user: &User, shared: &Share
     });
 }
 
-/// Restore user data
+/// Restore user data, including when each user was last sent a verification email
 ///
 /// # Arguments
 ///
@@ -274,12 +280,89 @@ pub async fn restore(users: &[User], shared: &Shared) -> Result<(), ApiError> {
             let keys = UserKeys::new(user, shared);
             // restore this users groups
             restore_groups(&mut pipe, user, shared);
+            // restore when this user was last sent a verification email
+            if let Some(sent) = &user.verification_sent {
+                pipe.cmd("hset")
+                    .arg(&keys.data)
+                    .arg("verification_sent")
+                    .arg(serialize!(sent));
+            }
             // restore the rest of the users data
             build(&mut pipe, &keys, user, true, shared)
         })
         .collect::<Result<Vec<()>, ApiError>>()?;
     // restore all user data
     let _: () = pipe.atomic().query_async(conn!(shared)).await?;
+    Ok(())
+}
+
+/// Gets every scoped token of the given users for a backup, and a problem for each scoped token
+/// that doesn't parse
+///
+/// # Arguments
+///
+/// * `usernames` - The users whose scoped tokens to get
+/// * `shared` - Shared Thorium objects
+#[instrument(name = "db::users::backup_scoped_tokens", skip_all, err(Debug))]
+pub async fn backup_scoped_tokens(
+    usernames: &[String],
+    shared: &Shared,
+) -> Result<(Vec<ScopedToken>, Vec<BackupProblem>), ApiError> {
+    // get every user's scoped token data in one round trip
+    let mut pipe = redis::pipe();
+    for username in usernames {
+        pipe.cmd("hgetall")
+            .arg(UserKeys::scoped_data(username, shared));
+    }
+    let raw: Vec<HashMap<String, String>> = pipe.query_async(conn!(shared)).await?;
+    // parse each scoped token, keeping every one that doesn't parse as a problem
+    let mut tokens = Vec::new();
+    let mut problems = Vec::new();
+    for (username, entries) in usernames.iter().zip(raw) {
+        // list a user's tokens in name order so backups of the same state match
+        let entries: std::collections::BTreeMap<String, String> = entries.into_iter().collect();
+        for (name, entry) in entries {
+            match serde_json::from_str::<ScopedToken>(&entry) {
+                Ok(token) => tokens.push(token),
+                Err(_) => problems.push(BackupProblem::new(
+                    UserKeys::scoped_data(username, shared),
+                    format!("its scoped token {name} doesn't parse"),
+                )),
+            }
+        }
+    }
+    Ok((tokens, problems))
+}
+
+/// Restores scoped tokens and the map from their values to them
+///
+/// # Arguments
+///
+/// * `tokens` - The scoped tokens to restore
+/// * `shared` - Shared Thorium objects
+#[instrument(name = "db::users::restore_scoped_tokens", skip_all, err(Debug))]
+pub async fn restore_scoped_tokens(
+    tokens: &[ScopedToken],
+    shared: &Shared,
+) -> Result<(), ApiError> {
+    // nothing to write without tokens
+    if tokens.is_empty() {
+        return Ok(());
+    }
+    // write each token's data and its entry in the scoped token map
+    let map_key = UserKeys::scoped_tokens(shared);
+    let mut pipe = redis::pipe();
+    for token in tokens {
+        pipe.cmd("hset")
+            .arg(UserKeys::scoped_data(&token.owner, shared))
+            .arg(&token.name)
+            .arg(serialize!(token))
+            .cmd("hset")
+            .arg(&map_key)
+            .arg(&token.token)
+            .arg(serialize!(&(&token.owner, &token.name)));
+    }
+    let () = pipe.atomic().query_async(conn!(shared)).await?;
     Ok(())
 }
 

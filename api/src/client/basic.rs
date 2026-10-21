@@ -98,3 +98,23 @@ impl Basic {
         Ok(send!(self.client, req)?.status().is_success())
     }
 }
+
+#[cfg_attr(feature = "sync", thorium_derive::blocking_struct)]
+impl Basic {
+    /// Returns the Thorium version the API reports in its `thorium-version` header, or `None`
+    /// when its answer carries no such header or one that isn't text
+    ///
+    /// The API sets the header on every answer, so the identify route is asked, which needs no
+    /// token, and the answer's status doesn't matter.
+    pub async fn version(&self) -> Result<Option<String>, Error> {
+        // ask the identify route
+        let resp = self.client.get(format!("{}/api", self.host)).send().await?;
+        // read the version header as text
+        let version = resp
+            .headers()
+            .get("thorium-version")
+            .and_then(|value| value.to_str().ok())
+            .map(ToOwned::to_owned);
+        Ok(version)
+    }
+}

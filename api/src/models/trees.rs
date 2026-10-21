@@ -784,6 +784,10 @@ pub enum TreeRelationships {
 }
 
 /// The direction this branch is going
+///
+/// Archived backups store each variant as its position in this list, so variants are
+/// append-only: never reorder, remove, or insert one; a new variant goes at the end. The
+/// golden-bytes test of archived enums in thoradm's offline suite fails if the order changes.
 #[derive(Debug, Clone, Serialize, Deserialize, Eq, PartialEq, Hash, Copy)]
 #[cfg_attr(
     feature = "rkyv-support",
@@ -979,5 +983,7 @@ mod tests {
                 "{direction:?} did not round trip through its str"
             );
         }
+        // text that names no direction is refused
+        assert!(Directionality::from_str("Directionality").is_err());
     }
 }

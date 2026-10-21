@@ -1,6 +1,7 @@
 use bb8_redis::{RedisConnectionManager, bb8};
 use std::collections::HashMap;
 
+use crate::models::BackupProblem;
 use crate::utils::{ApiError, Shared};
 use crate::{bad, unavailable};
 
@@ -162,6 +163,44 @@ pub fn extract(map: &mut HashMap<String, String>, key: &str) -> Result<String, A
         Some(value) => Ok(value),
         None => bad!(format!("Failed to extract {}", key)),
     }
+}
+
+/// Describes a Redis record that doesn't parse, naming its field but never its stored value
+///
+/// Parse errors can quote the value they failed on, and a record can hold credentials, so only
+/// the field and the kind of failure are kept.
+///
+/// # Arguments
+///
+/// * `key` - The record's Redis key
+/// * `error` - Why it didn't parse
+#[must_use]
+pub fn unparsable(key: String, error: &ApiError) -> BackupProblem {
+    // the casts name the field first in each message they build
+    let msg = match error {
+        ApiError::Thorium { msg: Some(msg), .. } => msg.as_str(),
+        _ => "",
+    };
+    // reads the field a message names between a prefix and an end marker
+    let field = |prefix: &str, end: &str| {
+        msg.strip_prefix(prefix)
+            .and_then(|rest| rest.split_once(end))
+            .map(|(field, _)| field.to_owned())
+    };
+    // describe the failure by its field when the message names one, and by its kind otherwise
+    let described = if let Some(field) = field("Failed to deserialize ", " with error ") {
+        format!("its {field} field doesn't parse")
+    } else if let Some(field) = msg.strip_prefix("Failed to extract ") {
+        format!("its {field} field is missing")
+    } else if let Some(field) = field("Failed to coerce ", "(") {
+        format!("its {field} field isn't a bool")
+    } else if error.status() == axum::http::StatusCode::NOT_FOUND {
+        "the record is empty".to_owned()
+    } else {
+        format!("the record doesn't parse ({})", error.kind())
+    };
+    // the record's key and what is wrong with it
+    BackupProblem::new(key, described)
 }
 
 /// Coerces a string to a bool

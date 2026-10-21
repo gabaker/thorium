@@ -4,7 +4,9 @@ use tracing::{Level, Span, instrument, span};
 
 use super::helpers;
 use super::keys::{EventKeys, GroupKeys, UserKeys};
-use crate::models::{Group, GroupList, GroupRequest, Image, NetworkPolicy, Pipeline, User};
+use crate::models::{
+    BackupProblem, Group, GroupList, GroupRequest, Image, NetworkPolicy, Pipeline, User,
+};
 use crate::utils::{ApiError, Shared};
 use crate::{
     conn, hset_del_opt_serialize, hsetnx_opt_serialize, log_err, not_found, query, serialize,
@@ -243,14 +245,15 @@ where
     Ok(groups)
 }
 
-/// gets details on all groups in redis for a backup
+/// gets details on all groups in redis for a backup, and a problem for each group that doesn't
+/// parse
 ///
 /// # Arguments
 ///
 /// * `shared` - Shared Thorium objects
 #[rustfmt::skip]
 #[instrument(name = "db::groups::backup", skip_all, err(Debug))]
-pub async fn backup(shared: &Shared) -> Result<Vec<Group>, ApiError> {
+pub async fn backup(shared: &Shared) -> Result<(Vec<Group>, Vec<BackupProblem>), ApiError> {
     // build key to group set
     let key = GroupKeys::set(shared);
     // get all group names
@@ -278,18 +281,20 @@ pub async fn backup(shared: &Shared) -> Result<Vec<Group>, ApiError> {
     let analysts: HashSet<String> = query!(cmd("smembers").arg(analyst_key), shared).await?;
     // combine the data retrieved with the list of names and cast it to group objects
     let zip_iter = itertools::izip!(names, raw_members, raw_data);
-    // cast the zipped iter to a vector of groups
-    //let groups = cast!(zip_iter, Group::try_from);
-    // cast the zipped iter to a vector of groups
-    let groups = zip_iter
-        .into_iter()
-        .map(|(name, members, data)| Group::try_from((name, members, data, &analysts)))
-        .filter_map(|res| log_err!(res))
-        .collect();
-    Ok(groups)
+    // cast each group, keeping every group that doesn't parse as a problem
+    let mut groups = Vec::new();
+    let mut problems = Vec::new();
+    for (name, members, data) in zip_iter {
+        let key = GroupKeys::data(&name, shared);
+        match Group::try_from((name, members, data, &analysts)) {
+            Ok(group) => groups.push(group),
+            Err(error) => problems.push(helpers::unparsable(key, &error)),
+        }
+    }
+    Ok((groups, problems))
 }
 
-/// Restore group data
+/// Restore group data: each group's members, description, and allowed data
 ///
 /// # Arguments
 ///
@@ -332,6 +337,11 @@ pub async fn restore(groups: &[Group], shared: &Shared, span: &Span) -> Result<(
         );
         // add command to update description
         hset_del_opt_serialize!(pipe, &keys.data, "description", &group.description);
+        // set the data types the group allows
+        pipe.cmd("hset")
+            .arg(&keys.data)
+            .arg("allowed")
+            .arg(serialize!(&group.allowed));
     }
     // restore this group to redis
     () = pipe.atomic().query_async(conn!(shared)).await?;

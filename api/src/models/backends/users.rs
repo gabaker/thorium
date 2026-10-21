@@ -907,6 +907,8 @@ impl User {
 
     /// Lists users with details
     ///
+    /// Fails with a 400 naming the record when a user's Redis record doesn't parse.
+    ///
     /// # Arguments
     ///
     /// * `shared` - Shared Thorium objects
@@ -914,7 +916,11 @@ impl User {
         // only admins can list user details
         is_admin!(self);
         // just get a backup since we want all users anyways
-        let users = db::users::backup(shared).await?;
+        let (users, problems) = db::users::backup(shared).await?;
+        // a user that doesn't parse fails the listing
+        if let Some(problem) = problems.first() {
+            return bad!(format!("{}: {}", problem.key, problem.error));
+        }
         // cast these users to scrubbed users
         let scrubbed = users.into_iter().map(ScrubbedUser::from).collect();
         Ok(scrubbed)
@@ -2002,5 +2008,131 @@ mod tests {
             filter.contains("uid=analyst1"),
             "LDAP filter dropped a normal username: {filter}"
         );
+    }
+
+    /// Users, scrubbed users, and the authed users wrapping them keep their token values,
+    /// password hashes, and verification tokens out of their debug output while printing their
+    /// other fields
+    #[test]
+    fn token_values_stay_out_of_debug() {
+        // a user authenticated with a scoped token carries its value, a password hash, and a
+        // verification token
+        let value = "tok-callisto-4f1d9e";
+        let hash = "argon2-hash-io-7b3c55";
+        let verification = "verify-amalthea-2e6d04";
+        let user = crate::models::User {
+            username: "europa".to_owned(),
+            password: Some(hash.to_owned()),
+            email: "europa@example.com".to_owned(),
+            role: crate::models::UserRole::User,
+            groups: vec!["jupiter".to_owned()],
+            actual_groups: Vec::new(),
+            token: value.to_owned(),
+            token_expiration: chrono::Utc::now(),
+            unix: None,
+            settings: crate::models::UserSettings::default(),
+            verified: true,
+            verification_token: Some(verification.to_owned()),
+            verification_sent: None,
+            aliases: std::collections::HashMap::new(),
+            image: None,
+        };
+        let authed = crate::models::AuthedUser::Scoped(crate::models::ScopedUser {
+            user: user.clone(),
+            name: "harvester".to_owned(),
+        });
+        for printed in [format!("{user:?}"), format!("{authed:?}")] {
+            assert!(
+                !printed.contains(value),
+                "user token value printed: {}",
+                printed.len()
+            );
+            assert!(
+                !printed.contains(hash),
+                "user password hash printed: {}",
+                printed.len()
+            );
+            assert!(
+                !printed.contains(verification),
+                "user verification token printed: {}",
+                printed.len()
+            );
+            assert!(printed.contains("europa@example.com"));
+        }
+        // the scrubbed user returned to clients carries it too
+        let scrubbed = crate::models::ScrubbedUser {
+            username: "europa".to_owned(),
+            role: crate::models::UserRole::User,
+            email: "europa@example.com".to_owned(),
+            groups: vec!["jupiter".to_owned()],
+            actual_groups: Vec::new(),
+            token: value.to_owned(),
+            token_expiration: chrono::Utc::now(),
+            unix: None,
+            settings: crate::models::UserSettings::default(),
+            local: true,
+            verified: true,
+            has_image: false,
+        };
+        let printed = format!("{scrubbed:?}");
+        assert!(
+            !printed.contains(value),
+            "scrubbed token value printed: {}",
+            printed.len()
+        );
+        assert!(printed.contains("europa@example.com"));
+    }
+
+    /// Users whose settings hold an AI endpoint, and AI endpoint updates, keep the endpoint's
+    /// API key out of their debug output while printing its other fields
+    #[test]
+    fn ai_endpoint_keys_stay_out_of_debug() {
+        // a user whose AI settings hold an endpoint with a recognizable API key
+        let key = "sk-ganymede-9c41a7";
+        let mut ai = crate::models::AiSettings::default();
+        ai.endpoints.insert(
+            "jovian".to_owned(),
+            crate::models::AiEndpoint {
+                url: "https://llm.example.com".to_owned(),
+                api_key: key.to_owned(),
+                model: "himalia-7b".to_owned(),
+            },
+        );
+        let user = crate::models::User {
+            username: "europa".to_owned(),
+            password: None,
+            email: "europa@example.com".to_owned(),
+            role: crate::models::UserRole::User,
+            groups: vec!["jupiter".to_owned()],
+            actual_groups: Vec::new(),
+            token: "tok-callisto-4f1d9e".to_owned(),
+            token_expiration: chrono::Utc::now(),
+            unix: None,
+            settings: crate::models::UserSettings {
+                ai: Some(ai),
+                ..Default::default()
+            },
+            verified: true,
+            verification_token: None,
+            verification_sent: None,
+            aliases: std::collections::HashMap::new(),
+            image: None,
+        };
+        let printed = format!("{user:?}");
+        assert!(
+            !printed.contains(key),
+            "AI endpoint key printed: {}",
+            printed.len()
+        );
+        assert!(printed.contains("https://llm.example.com") && printed.contains("himalia-7b"));
+        // an update that sets a new key
+        let update = crate::models::AiEndpointUpdate::default().api_key(key);
+        let printed = format!("{update:?}");
+        assert!(
+            !printed.contains(key),
+            "AI endpoint update key printed: {}",
+            printed.len()
+        );
+        assert!(printed.contains("api_key"));
     }
 }

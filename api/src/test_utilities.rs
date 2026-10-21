@@ -6,7 +6,7 @@ mod helpers;
 mod impls;
 
 use crate::client::Error;
-pub use api::{CONF, admin_client};
+pub use api::{CONF, admin_client, get_redis_client};
 
 // expose a blocking admin client for sync tests
 #[cfg(all(feature = "sync", not(feature = "python")))]

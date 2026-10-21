@@ -55,7 +55,7 @@ pub struct Ipv4Block {
     pub cidr: Ipv4Cidr,
     /// A subset of the [`Ipv4Block::cidr`] to exclude
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    #[cfg_attr(feature = "api", schema(value_type = String))]
+    #[cfg_attr(feature = "api", schema(value_type = Option<Vec<String>>))]
     pub except: Option<Vec<Ipv4Cidr>>,
 }
 
@@ -93,7 +93,7 @@ pub struct Ipv6Block {
     pub cidr: Ipv6Cidr,
     /// A subset of the [`Ipv6Block::cidr`] to exclude
     #[serde(default)]
-    #[cfg_attr(feature = "api", schema(value_type = String))]
+    #[cfg_attr(feature = "api", schema(value_type = Option<Vec<String>>))]
     pub except: Option<Vec<Ipv6Cidr>>,
 }
 

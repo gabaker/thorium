@@ -40,6 +40,29 @@ async fn create() -> Result<(), thorium::Error> {
     Ok(())
 }
 
+/// A sample's file name is stored only as its metadata, never as an object key, so names that a
+/// path normalizes (empty, a doubled `/`, a trailing `/`, `/` alone) upload as before
+#[tokio::test]
+async fn create_with_names_a_path_normalizes() -> Result<(), thorium::Error> {
+    // get admin client
+    let client = test_utilities::admin_client().await?;
+    // Create a group
+    let group = generators::groups(1, &client).await?.remove(0).name;
+    // upload a distinct buffer under each name
+    for name in ["", "a//b", "dir/", "/"] {
+        let mut data = vec![0u8; 64];
+        rand::rng().fill_bytes(&mut data);
+        let buffer = Buffer::new(data).name(name);
+        let file_req = SampleRequest::new_buffer(buffer, vec![group.clone()]);
+        let created = client.files.create(file_req).await;
+        assert!(
+            created.is_ok(),
+            "a sample named {name:?} was refused: {created:?}"
+        );
+    }
+    Ok(())
+}
+
 #[tokio::test]
 async fn download() -> Result<(), thorium::Error> {
     // the data to be uploaded, then downloaded and verified;

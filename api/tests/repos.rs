@@ -232,3 +232,59 @@ async fn list_tagged() -> Result<(), Error> {
     }
     Ok(())
 }
+
+/// Opens a Scylla session to the test cluster, to read rows the API's routes never return
+async fn scylla_session() -> scylla::client::session::Session {
+    // connect to every node the test config lists, with its credentials when it has them
+    let conf = &*test_utilities::CONF;
+    let mut builder =
+        scylla::client::session_builder::SessionBuilder::new().known_nodes(&conf.scylla.nodes);
+    if let Some(auth) = &conf.scylla.auth {
+        builder = builder.user(&auth.username, &auth.password);
+    }
+    builder.build().await.expect("failed to connect to Scylla")
+}
+
+/// Changing the default checkout of a repo submitted to several groups by several submissions
+/// writes no repo rows that lack the repo's own columns
+#[tokio::test]
+async fn resubmitting_writes_no_partial_repo_rows() -> Result<(), Error> {
+    // Get admin client and two groups
+    let client = test_utilities::admin_client().await?;
+    let mut groups = generators::groups(2, &client).await?;
+    let (first, second) = (groups.remove(0).name, groups.remove(0).name);
+    let url = format!("github.com/thorium-tests/{}", generators::gen_string(12));
+    // Submit the repo to one group, then to both, then to both again with another checkout
+    for (groups, branch) in [
+        (vec![first.clone()], "main"),
+        (vec![first.clone(), second.clone()], "main"),
+        (vec![first.clone(), second.clone()], "dev"),
+    ] {
+        let req = RepoRequest::new(&url, groups, Some(RepoCheckout::branch(branch)));
+        client.repos.create(&req).await?;
+    }
+    // The repo takes the latest default checkout
+    let repo = client.repos.get(&url).await?;
+    is!(repo.default_checkout, Some(RepoCheckout::branch("dev")));
+    // Every row of the repo list for these groups holds the repo's url
+    let session = scylla_session().await;
+    let query = format!(
+        "SELECT group, url FROM {}.repos_list",
+        test_utilities::CONF.thorium.namespace
+    );
+    let rows = session
+        .query_unpaged(query, ())
+        .await
+        .expect("failed to read the repo list")
+        .into_rows_result()
+        .expect("the repo list returned no rows");
+    let partial: Vec<String> = rows
+        .rows::<(String, Option<String>)>()
+        .expect("unexpected repo list columns")
+        .filter_map(Result::ok)
+        .filter(|(group, url)| url.is_none() && (*group == first || *group == second))
+        .map(|(group, _)| group)
+        .collect();
+    assert!(partial.is_empty(), "repo rows without a url in {partial:?}");
+    Ok(())
+}

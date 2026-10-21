@@ -3,6 +3,7 @@
 use chrono::prelude::*;
 use schemars::JsonSchema;
 use std::collections::HashMap;
+use std::fmt;
 
 use crate::{matches_vec, same};
 
@@ -213,7 +214,7 @@ pub struct UnixInfo {
 }
 
 /// An AI endpoint configuration
-#[derive(Debug, Serialize, Deserialize, Clone, PartialEq)]
+#[derive(Serialize, Deserialize, Clone, PartialEq)]
 #[cfg_attr(feature = "api", derive(utoipa::ToSchema))]
 pub struct AiEndpoint {
     /// The URL endpoint for the AI service
@@ -222,6 +223,22 @@ pub struct AiEndpoint {
     pub api_key: String,
     /// The model to use from this AI service
     pub model: String,
+}
+
+impl fmt::Debug for AiEndpoint {
+    /// Write this endpoint without its API key
+    ///
+    /// # Arguments
+    ///
+    /// * `f` - The formatter to write to
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        // never print the key itself
+        f.debug_struct("AiEndpoint")
+            .field("url", &self.url)
+            .field("api_key", &"<redacted>")
+            .field("model", &self.model)
+            .finish()
+    }
 }
 
 /// AI settings for a user
@@ -283,7 +300,7 @@ impl UserSettings {
 }
 
 /// An update to an AI endpoint configuration
-#[derive(Debug, Serialize, Deserialize, Clone, Default, PartialEq)]
+#[derive(Serialize, Deserialize, Clone, Default, PartialEq)]
 #[cfg_attr(feature = "api", derive(utoipa::ToSchema))]
 pub struct AiEndpointUpdate {
     /// The URL endpoint for the AI service
@@ -292,6 +309,22 @@ pub struct AiEndpointUpdate {
     pub api_key: Option<String>,
     /// The model to use from this AI service
     pub model: Option<String>,
+}
+
+impl fmt::Debug for AiEndpointUpdate {
+    /// Write this update without its API key
+    ///
+    /// # Arguments
+    ///
+    /// * `f` - The formatter to write to
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        // only say whether a key is set
+        f.debug_struct("AiEndpointUpdate")
+            .field("url", &self.url)
+            .field("api_key", &self.api_key.as_ref().map(|_| "<redacted>"))
+            .field("model", &self.model)
+            .finish()
+    }
 }
 
 impl AiEndpointUpdate {
@@ -478,7 +511,7 @@ impl UserSettingsUpdate {
 }
 
 /// A user within Thorium
-#[derive(Debug, Serialize, Deserialize, Clone)]
+#[derive(Serialize, Deserialize, Clone)]
 #[cfg_attr(feature = "api", derive(utoipa::ToSchema))]
 pub struct User {
     /// The username of this user
@@ -513,8 +546,40 @@ pub struct User {
     pub image: Option<String>,
 }
 
+impl fmt::Debug for User {
+    /// Write this user without its password hash, its verification token, or its token, which
+    /// is a scoped token's value when the user authenticated with one
+    ///
+    /// # Arguments
+    ///
+    /// * `f` - The formatter to write to
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        // never print the credentials themselves, only whether the optional ones are set
+        f.debug_struct("User")
+            .field("username", &self.username)
+            .field("password", &self.password.as_ref().map(|_| "<redacted>"))
+            .field("email", &self.email)
+            .field("role", &self.role)
+            .field("groups", &self.groups)
+            .field("actual_groups", &self.actual_groups)
+            .field("token", &"<redacted>")
+            .field("token_expiration", &self.token_expiration)
+            .field("unix", &self.unix)
+            .field("settings", &self.settings)
+            .field("verified", &self.verified)
+            .field(
+                "verification_token",
+                &self.verification_token.as_ref().map(|_| "<redacted>"),
+            )
+            .field("verification_sent", &self.verification_sent)
+            .field("aliases", &self.aliases)
+            .field("image", &self.image)
+            .finish()
+    }
+}
+
 /// A user within Thorium that does not have its password
-#[derive(Debug, Serialize, Deserialize, Clone)]
+#[derive(Serialize, Deserialize, Clone)]
 #[cfg_attr(feature = "api", derive(utoipa::ToSchema))]
 pub struct ScrubbedUser {
     /// The username of this user
@@ -546,6 +611,31 @@ pub struct ScrubbedUser {
     /// The icon itself is fetched lazily from `GET /users/user/{username}/image` rather than
     /// embedded here, so cheap/frequent calls like `whoami` don't ship the image bytes.
     pub has_image: bool,
+}
+
+impl fmt::Debug for ScrubbedUser {
+    /// Write this user without its token
+    ///
+    /// # Arguments
+    ///
+    /// * `f` - The formatter to write to
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        // never print the token itself
+        f.debug_struct("ScrubbedUser")
+            .field("username", &self.username)
+            .field("role", &self.role)
+            .field("email", &self.email)
+            .field("groups", &self.groups)
+            .field("actual_groups", &self.actual_groups)
+            .field("token", &"<redacted>")
+            .field("token_expiration", &self.token_expiration)
+            .field("unix", &self.unix)
+            .field("settings", &self.settings)
+            .field("local", &self.local)
+            .field("verified", &self.verified)
+            .field("has_image", &self.has_image)
+            .finish()
+    }
 }
 
 impl PartialEq<ScrubbedUser> for ScrubbedUser {
