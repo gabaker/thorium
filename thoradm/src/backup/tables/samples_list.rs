@@ -3,22 +3,19 @@
 use ahash::AHasher;
 use bytecheck::CheckBytes;
 use chrono::prelude::*;
-use futures::stream::{FuturesUnordered, StreamExt};
-use indicatif::ProgressBar;
 use rkyv::{Archive, Deserialize, Serialize};
 use scylla::DeserializeRow;
 use scylla::client::session::Session;
-use scylla::errors::{ExecutionError, PrepareError};
+use scylla::errors::PrepareError;
 use scylla::statement::prepared::PreparedStatement;
 use std::hash::Hasher;
-use std::sync::Arc;
 use thorium::Conf;
 use uuid::Uuid;
 
-use crate::Error;
-use crate::backup::{Backup, Restore, Scrub, Utils, utils};
+use super::Versioned;
+use crate::backup::{Backup, Restore, Scrub, Utils};
 
-/// The samples list table
+/// A samples list row as format 2 archives it; `None` is a cell the source row held unset
 #[derive(Debug, Archive, Serialize, Deserialize, DeserializeRow)]
 #[archive_attr(derive(Debug, CheckBytes))]
 #[scylla(flavor = "enforce_order", skip_name_checks)]
@@ -30,11 +27,11 @@ pub struct SamplesList {
     /// the bucket this sample is in
     pub bucket: i32,
     /// The sha256 of this sample
-    pub sha256: String,
+    pub sha256: Option<String>,
     /// The sha1 of this sample
-    pub sha1: String,
+    pub sha1: Option<String>,
     /// The md5 of this sample
-    pub md5: String,
+    pub md5: Option<String>,
     /// A UUID for this submission
     pub id: Uuid,
     /// The name of this sample if one was specified
@@ -42,10 +39,10 @@ pub struct SamplesList {
     /// A description for this sample
     pub description: Option<String>,
     /// The user who submitted this sample
-    pub submitter: String,
+    pub submitter: Option<String>,
     /// Where this sample originates from if anywhere in serial form
     pub origin: Option<String>,
-    // When this sample was uploaded
+    /// When this sample was uploaded
     pub uploaded: DateTime<Utc>,
 }
 
@@ -59,6 +56,11 @@ impl Utils for SamplesList {
 /// Implement backup support for the samples list table
 #[async_trait::async_trait]
 impl Backup for SamplesList {
+    /// The columns of this table's partition key, used to name rows that fail to decode
+    fn partition_key() -> &'static [&'static str] {
+        &["group", "year", "bucket"]
+    }
+
     /// The prepared statement to use when retrieving data from Scylla
     ///
     /// # Arguments
@@ -104,12 +106,21 @@ impl Restore for SamplesList {
     // the size itself
     type PartitionConf = u16;
 
-    /// The steps to once run before restoring data
-    async fn prep(scylla: &Session, ns: &str) -> Result<(), ExecutionError> {
-        // drop the materialized views for this table
-        utils::drop_materialized_view(ns, "samples", scylla).await?;
-        Ok(())
-    }
+    /// The group, year, bucket, hashes, id, name, description, submitter, origin, and upload time
+    type Values = (
+        String,
+        i32,
+        i32,
+        Option<String>,
+        Option<String>,
+        Option<String>,
+        Uuid,
+        Option<String>,
+        Option<String>,
+        Option<String>,
+        Option<String>,
+        DateTime<Utc>,
+    );
 
     /// The prepared statement to use when restoring data to scylla
     ///
@@ -141,78 +152,90 @@ impl Restore for SamplesList {
         config.thorium.files.partition_size
     }
 
-    /// Restore a single partition
+    /// Returns the values the restore's insert binds for this row, in a bucket of the target's
+    /// partition size
     ///
     /// # Arguments
     ///
-    /// * `buffer` - The buffer we should restore data from
-    /// * `scylla` - The client to use when talking to scylla
-    /// * `prepared` - The prepared statement to inject data with
-    async fn restore<'a>(
-        buffer: &'a [u8],
-        scylla: &Arc<Session>,
-        partition_size: &u16,
-        rows_restored: &mut usize,
-        progress: &mut ProgressBar,
-        prepared: &PreparedStatement,
-    ) -> Result<(), Error> {
-        // cast our buffer to its archived type
-        let rows = rkyv::check_archived_root::<Vec<SamplesList>>(buffer)?;
-        // build a set of futures
-        let mut futures = FuturesUnordered::new();
-        // build our queries to insert this partitions rows
-        for row in rows.iter() {
-            // deserialize this rows uploaded timestamp
-            let uploaded = row.uploaded.deserialize(&mut rkyv::Infallible)?;
-            // calculate the new bucket
-            let bucket = thorium::utils::helpers::partition(uploaded, row.year, *partition_size);
-            let query = scylla.execute_unpaged(
-                prepared,
-                (
-                    row.group.as_str(),
-                    row.year,
-                    bucket,
-                    row.sha256.as_str(),
-                    row.sha1.as_str(),
-                    row.md5.as_str(),
-                    row.id,
-                    row.name.as_ref().map(|name| name.as_str()),
-                    row.description
-                        .as_ref()
-                        .map(|description| description.as_str()),
-                    row.submitter.as_str(),
-                    row.origin.as_ref().map(|origin| origin.as_str()),
-                    uploaded,
-                ),
-            );
-            // add this to our futures
-            futures.push(query);
-            // if we have 1000 futures then wait for at least 500 of them to complete
-            if futures.len() > 1000 {
-                // poll our futures until one is complete
-                while let Some(query_result) = futures.next().await {
-                    // raise any errors
-                    query_result?;
-                    // increment our restored row count
-                    *rows_restored += 1;
-                    // set our current row count progress message
-                    progress.set_message(rows_restored.to_string());
-                    // if we have less then 100 future to go then refill our future set
-                    if futures.len() < 100 {
-                        break;
-                    }
-                }
-            }
-        }
-        // poll our futures until one is complete
-        while let Some(query_result) = futures.next().await {
-            // raise any errors
-            query_result?;
-            // increment our restored row count
-            *rows_restored += 1;
-            // set our current row count progress message
-            progress.set_message(rows_restored.to_string());
-        }
-        Ok(())
+    /// * `partition_size` - The partition size to bucket the row with
+    /// * `_format` - The format version the row was archived in
+    fn values(self, partition_size: &u16, _format: u32) -> Self::Values {
+        // calculate the new bucket
+        let bucket = thorium::utils::helpers::partition(self.uploaded, self.year, *partition_size);
+        (
+            self.group,
+            self.year,
+            bucket,
+            self.sha256,
+            self.sha1,
+            self.md5,
+            self.id,
+            self.name,
+            self.description,
+            self.submitter,
+            self.origin,
+            self.uploaded,
+        )
     }
+}
+
+/// A samples list row as format 1 archives it
+#[derive(Debug, Clone, Archive, Serialize, Deserialize)]
+#[archive_attr(derive(Debug, CheckBytes))]
+pub struct SamplesListV1 {
+    /// The group this sample is in
+    pub group: String,
+    /// The year this sample is from
+    pub year: i32,
+    /// the bucket this sample is in
+    pub bucket: i32,
+    /// The sha256 of this sample
+    pub sha256: String,
+    /// The sha1 of this sample
+    pub sha1: String,
+    /// The md5 of this sample
+    pub md5: String,
+    /// A UUID for this submission
+    pub id: Uuid,
+    /// The name of this sample if one was specified
+    pub name: Option<String>,
+    /// A description for this sample
+    pub description: Option<String>,
+    /// The user who submitted this sample
+    pub submitter: String,
+    /// Where this sample originates from if anywhere in serial form
+    pub origin: Option<String>,
+    /// When this sample was uploaded
+    pub uploaded: DateTime<Utc>,
+}
+
+impl From<SamplesListV1> for SamplesList {
+    /// Converts a format-1 row, whose required fields are always set
+    ///
+    /// # Arguments
+    ///
+    /// * `row` - The format-1 row
+    fn from(row: SamplesListV1) -> Self {
+        // format 1 could only hold rows with these cells set
+        SamplesList {
+            group: row.group,
+            year: row.year,
+            bucket: row.bucket,
+            sha256: Some(row.sha256),
+            sha1: Some(row.sha1),
+            md5: Some(row.md5),
+            id: row.id,
+            name: row.name,
+            description: row.description,
+            submitter: Some(row.submitter),
+            origin: row.origin,
+            uploaded: row.uploaded,
+        }
+    }
+}
+
+/// Format 1 archives `SamplesList` rows as [`SamplesListV1`]
+impl Versioned for SamplesList {
+    /// Format 1 rows decode as [`SamplesListV1`], which converts into `SamplesList`
+    type V1 = SamplesListV1;
 }

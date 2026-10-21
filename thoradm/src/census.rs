@@ -2,25 +2,61 @@
 
 use bb8_redis::RedisConnectionManager;
 use bb8_redis::bb8::Pool;
-use futures::StreamExt;
 use indicatif::{ProgressBar, ProgressStyle};
-use kanal::{AsyncReceiver, AsyncSender};
+use kanal::AsyncSender;
 use scylla::client::session::Session;
 use scylla::statement::prepared::PreparedStatement;
 use std::marker::PhantomData;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use thorium::Conf;
 use thorium::models::backends::TagSupport;
 use thorium::models::{
-    CensusSupport, Commitish, Repo, Sample, TagCensusCaseInsensitive, TagRequest,
+    Association, CensusSupport, Commitish, Entity, Repo, Sample, TagCensusCaseInsensitive,
+    TagRequest,
 };
 
 use crate::Error;
 use crate::args::{Args, CensusKinds, CensusSubCommands, NewCensus};
 use crate::backup::Utils;
+use crate::outcome::RunOutcome;
 use crate::shared::monitor::MonitorUpdate;
-use crate::shared::scylla::{ScyllaCrawlController, ScyllaCrawlSupport};
+use crate::shared::retry::RetryPolicy;
+use crate::shared::scylla::{RangeReader, ScyllaCrawlController, ScyllaCrawlSupport};
+use crate::shared::workers::Orders;
 
+/// What every worker of one census shares
+#[derive(Clone)]
+pub struct CensusArgs {
+    /// The redis client to write census streams with
+    pub redis: Pool<RedisConnectionManager>,
+    /// How many errors the census's workers logged
+    pub errors: Arc<AtomicU64>,
+}
+
+impl CensusArgs {
+    /// Starts the shared arguments of one census, with no errors logged yet
+    ///
+    /// # Arguments
+    ///
+    /// * `redis` - The redis client to write census streams with
+    #[must_use]
+    pub fn new(redis: Pool<RedisConnectionManager>) -> Self {
+        CensusArgs {
+            redis,
+            errors: Arc::new(AtomicU64::new(0)),
+        }
+    }
+
+    /// Returns how many errors the census's workers logged
+    #[must_use]
+    pub fn errors(&self) -> u64 {
+        // workers only ever add to the count
+        self.errors.load(Ordering::Relaxed)
+    }
+}
+
+/// A worker that counts the partitions of the token ranges it is sent for one census kind
 pub struct CensusWorker<T: CensusSupport> {
     /// The keyspace/namespace for this worker
     namespace: String,
@@ -40,12 +76,24 @@ pub struct CensusWorker<T: CensusSupport> {
     dry_run: bool,
     /// The table we are taking a census of
     phantom: PhantomData<T>,
+    /// How many errors this census's workers logged, shared by them all
+    errors: Arc<AtomicU64>,
 }
 
 impl<T: CensusSupport> CensusWorker<T> {
+    /// Builds a census worker
+    ///
+    /// # Arguments
+    ///
+    /// * `scylla` - The scylla client to read partitions with
+    /// * `args` - What every worker of this census shares
+    /// * `namespace` - The keyspace/namespace to take a census of
+    /// * `updates` - The channel to send progress updates on
+    /// * `dry_run` - Whether to leave the census streams unwritten
+    /// * `progress` - The progress bar to update
     pub async fn new(
         scylla: &Arc<Session>,
-        redis: &Pool<RedisConnectionManager>,
+        args: &CensusArgs,
         namespace: &str,
         updates: AsyncSender<MonitorUpdate>,
         dry_run: bool,
@@ -57,84 +105,81 @@ impl<T: CensusSupport> CensusWorker<T> {
         let worker = CensusWorker {
             namespace: namespace.to_owned(),
             scylla: scylla.clone(),
-            redis: redis.clone(),
+            redis: args.redis.clone(),
             prepared,
             updates,
             partitions_counted: 0,
             dry_run,
             progress,
             phantom: PhantomData,
+            errors: args.errors.clone(),
         };
         Ok(worker)
     }
 
-    /// Start backing up data and streaming it to archives
+    /// Start counting the partitions of each token range it is sent
+    ///
+    /// Each range is read a page at a time; a page that fails to arrive is requested again from
+    /// where the last page ended, and a range whose page still fails after every attempt is
+    /// logged and counted as an error.
     ///
     /// # Arguments
     ///
-    /// * `orders` - The channel to receive map paths on
-    #[rustfmt::skip]
-    pub async fn start(mut self, orders: AsyncReceiver<(i64, i64)>) -> Result<Self, Error> {
+    /// * `orders` - The token ranges to count
+    ///
+    /// # Panics
+    ///
+    /// Panics if no Redis connection can be taken from the pool.
+    pub async fn start(mut self, orders: Orders<(i64, i64)>) -> Result<Self, Error> {
+        // the session and statement outlive each range's reader, which borrows them
+        let (scylla, prepared) = (self.scylla.clone(), self.prepared.clone());
         // handle messages in our channel until its closed
         loop {
             // get the next message in the queue
             let (start, end) = match orders.recv().await {
-                Ok(path) => path,
-                Err(kanal::ReceiveError::Closed) => break,
-                Err(kanal::ReceiveError::SendClosed) => break,
-            };
-            // build and execute our paged query
-            let rows_stream = self
-                .scylla
-                .execute_iter(self.prepared.clone(), &(start, end))
-                .await?;
-            // build a typed iter for these rows
-            let mut typed_stream = match rows_stream.rows_stream::<T::Row>() {
-                Ok(typed_stream) => typed_stream,
-                Err(error) => {
-                    // build our error message
-                    let msg = format!("Failed to set type for row stream: with {:#?}", error);
-                    // log that we failed to cast this row
-                    self.progress.println(msg.clone());
-                    // continue to the next row
-                    continue;
-                }
+                Ok(range) => range,
+                Err(kanal::ReceiveError::Closed | kanal::ReceiveError::SendClosed) => break,
             };
             // build the redis command to insert info into redis
             let mut pipe = redis::pipe();
-            // track how many partitions we counted before we handle this stream
+            // track how many partitions we counted before we handle this range
             let old_counted = self.partitions_counted;
-            // crawl over our typed stream
-            while let Some(typed_row) = typed_stream.next().await {
-                // error out if any of our typed rows fail
-                let typed_row = match typed_row {
-                    Ok(typed_row) => typed_row,
-                    Err(error) => {
-                        // build our error message
-                        let msg = format!("Census failure: with {:#?}", error);
-                        // log that we failed to cast this row
-                        self.progress.println(msg.clone());
-                        // continue to the next row
-                        continue;
+            // read the range a page at a time, resuming a page that fails to arrive
+            let mut reader =
+                RangeReader::new(&scylla, &prepared, (start, end), RetryPolicy::default());
+            loop {
+                let page = match reader.next_page::<T::Row>().await {
+                    Ok(Some(page)) => page,
+                    Ok(None) => break,
+                    Err(failed) => {
+                        // log the range whose rest couldn't be read, and count it
+                        tracing::error!(range = ?(start, end), "Census failure: {failed}");
+                        self.errors.fetch_add(1, Ordering::Relaxed);
+                        break;
                     }
                 };
-                // increment our partition count
-                self.partitions_counted += 1;
-                // skip building a pipeline if this is a dry run
-                if !self.dry_run {
-                    // group this partitions count, bucket, and count grouping
-                    //let count = T::get_count(&typed_row);
-                    let bucket = T::get_bucket(&typed_row);
-                    //let grouping = bucket / 10_000;
-                    // build the key to this parititons counts/stream
-                    //let count_key = T::count_key_from_row(&self.namespace, &typed_row, grouping);
-                    let stream_key = T::stream_key_from_row(&self.namespace, &typed_row);
-                    // add data into redis
-                    pipe.cmd("zadd").arg(stream_key).arg(bucket).arg(bucket);
-                        //.cmd("hset").arg(count_key).arg(bucket).arg(count)
+                for typed_row in page {
+                    // log and count a row that can't be read, then go on with the rest
+                    let typed_row = match typed_row {
+                        Ok(typed_row) => typed_row,
+                        Err(error) => {
+                            tracing::error!("Census failure: {error}");
+                            self.errors.fetch_add(1, Ordering::Relaxed);
+                            continue;
+                        }
+                    };
+                    // increment our partition count
+                    self.partitions_counted += 1;
+                    // skip building a pipeline if this is a dry run
+                    if !self.dry_run {
+                        // add this partition's bucket to its census stream
+                        let bucket = T::get_bucket(&typed_row);
+                        let stream_key = T::stream_key_from_row(&self.namespace, &typed_row);
+                        pipe.cmd("zadd").arg(stream_key).arg(bucket).arg(bucket);
+                    }
                 }
             }
-                // skip saving things to redis if this is a dry run
+            // skip saving things to redis if this is a dry run
             if !self.dry_run {
                 // get a connection to our redis db
                 let mut conn = self.redis.get().await.unwrap();
@@ -144,8 +189,9 @@ impl<T: CensusSupport> CensusWorker<T> {
             // set our current row count progress message
             self.progress
                 .set_message(self.partitions_counted.to_string());
-            // calculate how many partitions we counted in this loop
-            let items = (self.partitions_counted - old_counted) as usize;
+            // calculate how many partitions we counted in this range
+            let items =
+                usize::try_from(self.partitions_counted - old_counted).unwrap_or(usize::MAX);
             // build the update to send to our controller
             let update = MonitorUpdate::Update { items, bytes: 0 };
             // send an update to our controller
@@ -157,7 +203,7 @@ impl<T: CensusSupport> CensusWorker<T> {
 
 impl<T: CensusSupport + Utils> ScyllaCrawlSupport for CensusWorker<T> {
     /// The arguments to specify when creating workers
-    type WorkerArgs = Pool<RedisConnectionManager>;
+    type WorkerArgs = CensusArgs;
 
     /// Set the progress bars style for workers
     fn bar_style() -> Result<ProgressStyle, Error> {
@@ -228,9 +274,13 @@ impl<T: CensusSupport + Utils> ScyllaCrawlSupport for CensusWorker<T> {
     }
 
     /// Start crawling data in scylla
-    async fn start(self, rx: AsyncReceiver<(i64, i64)>) -> Result<Self, Error> {
-        // TODO do this better
-        Ok(self.start(rx).await.unwrap())
+    ///
+    /// # Arguments
+    ///
+    /// * `rx` - The channel to receive token ranges to crawl on
+    async fn start(self, rx: Orders<(i64, i64)>) -> Result<Self, Error> {
+        // run the worker's own crawl, returning its error to the controller
+        self.start(rx).await
     }
 
     /// Shutdown this worker
@@ -241,26 +291,28 @@ impl<T: CensusSupport + Utils> ScyllaCrawlSupport for CensusWorker<T> {
 ///
 /// # Arguments
 ///
-/// * `args` - The command line args for thorctl
+/// * `config` - The config of the cluster to take a census of
+/// * `workers` - The number of workers to use
 /// * `dry_run` - Whether this is a dry run or not
-async fn new_tags(args: &Args, dry_run: bool) -> Result<(), Error> {
-    // load our config
-    let config = Conf::new(&args.cluster_conf)?;
+///
+/// Returns how many errors were logged while the census ran.
+async fn new_tags(config: &Conf, workers: usize, dry_run: bool) -> Result<u64, Error> {
     // build a new scylla client
-    let scylla = Arc::new(crate::shared::scylla::get_client(&config).await?);
-    // build a new redis client
-    let redis = crate::shared::redis::get_client(&config).await?;
+    let scylla = Arc::new(crate::shared::scylla::get_client(config).await?);
+    // build a new redis client, shared with an error count by every worker
+    let args = CensusArgs::new(crate::shared::redis::get_client(config).await?);
     // build a new tag census controller
     // we are using sample but the type doesn't matter for tag scans actually
     let mut controller = ScyllaCrawlController::<CensusWorker<TagRequest<Sample>>>::new(
         &config.thorium.namespace,
         &scylla,
-        redis,
-        args.workers,
+        args.clone(),
+        workers,
     )?;
     // start taking a census of tag data
-    controller.start(100000, dry_run).await?;
-    Ok(())
+    let ended = controller.start(100_000, dry_run).await?;
+    // count the errors the workers logged and the workers that ended early
+    Ok(args.errors() + ended as u64)
 }
 
 impl<T: TagSupport> Utils for TagCensusCaseInsensitive<T> {
@@ -273,27 +325,33 @@ impl<T: TagSupport> Utils for TagCensusCaseInsensitive<T> {
 ///
 /// # Arguments
 ///
-/// * `args` - The command line args for thorctl
+/// * `config` - The config of the cluster to take a census of
+/// * `workers` - The number of workers to use
 /// * `dry_run` - Whether this is a dry run or not
-async fn new_tags_case_insensitive(args: &Args, dry_run: bool) -> Result<(), Error> {
-    // load our config
-    let config = Conf::new(&args.cluster_conf)?;
+///
+/// Returns how many errors were logged while the census ran.
+async fn new_tags_case_insensitive(
+    config: &Conf,
+    workers: usize,
+    dry_run: bool,
+) -> Result<u64, Error> {
     // build a new scylla client
-    let scylla = Arc::new(crate::shared::scylla::get_client(&config).await?);
-    // build a new redis client
-    let redis = crate::shared::redis::get_client(&config).await?;
+    let scylla = Arc::new(crate::shared::scylla::get_client(config).await?);
+    // build a new redis client, shared with an error count by every worker
+    let args = CensusArgs::new(crate::shared::redis::get_client(config).await?);
     // build a new tag census controller
     // we are using sample but the type doesn't matter for tag scans actually
     let mut controller =
         ScyllaCrawlController::<CensusWorker<TagCensusCaseInsensitive<Sample>>>::new(
             &config.thorium.namespace,
             &scylla,
-            redis,
-            args.workers,
+            args.clone(),
+            workers,
         )?;
     // start taking a census of tag data
-    controller.start(1000, dry_run).await?;
-    Ok(())
+    let ended = controller.start(1000, dry_run).await?;
+    // count the errors the workers logged and the workers that ended early
+    Ok(args.errors() + ended as u64)
 }
 
 impl Utils for Sample {
@@ -306,25 +364,27 @@ impl Utils for Sample {
 ///
 /// # Arguments
 ///
-/// * `args` - The command line args for thorctl
+/// * `config` - The config of the cluster to take a census of
+/// * `workers` - The number of workers to use
 /// * `dry_run` - Whether this is a dry run or not
-async fn new_samples(args: &Args, dry_run: bool) -> Result<(), Error> {
-    // load our config
-    let config = Conf::new(&args.cluster_conf)?;
+///
+/// Returns how many errors were logged while the census ran.
+async fn new_samples(config: &Conf, workers: usize, dry_run: bool) -> Result<u64, Error> {
     // build a new scylla client
-    let scylla = Arc::new(crate::shared::scylla::get_client(&config).await?);
-    // build a new redis client
-    let redis = crate::shared::redis::get_client(&config).await?;
+    let scylla = Arc::new(crate::shared::scylla::get_client(config).await?);
+    // build a new redis client, shared with an error count by every worker
+    let args = CensusArgs::new(crate::shared::redis::get_client(config).await?);
     // build a new sample census controller
     let mut controller = ScyllaCrawlController::<CensusWorker<Sample>>::new(
         &config.thorium.namespace,
         &scylla,
-        redis,
-        args.workers,
+        args.clone(),
+        workers,
     )?;
     // start taking a census of tag data
-    controller.start(1000, dry_run).await?;
-    Ok(())
+    let ended = controller.start(1000, dry_run).await?;
+    // count the errors the workers logged and the workers that ended early
+    Ok(args.errors() + ended as u64)
 }
 
 impl Utils for Repo {
@@ -337,25 +397,27 @@ impl Utils for Repo {
 ///
 /// # Arguments
 ///
-/// * `args` - The command line args for thorctl
+/// * `config` - The config of the cluster to take a census of
+/// * `workers` - The number of workers to use
 /// * `dry_run` - Whether this is a dry run or not
-async fn new_repos(args: &Args, dry_run: bool) -> Result<(), Error> {
-    // load our config
-    let config = Conf::new(&args.cluster_conf)?;
+///
+/// Returns how many errors were logged while the census ran.
+async fn new_repos(config: &Conf, workers: usize, dry_run: bool) -> Result<u64, Error> {
     // build a new scylla client
-    let scylla = Arc::new(crate::shared::scylla::get_client(&config).await?);
-    // build a new redis client
-    let redis = crate::shared::redis::get_client(&config).await?;
+    let scylla = Arc::new(crate::shared::scylla::get_client(config).await?);
+    // build a new redis client, shared with an error count by every worker
+    let args = CensusArgs::new(crate::shared::redis::get_client(config).await?);
     // build a new repo census controller
     let mut controller = ScyllaCrawlController::<CensusWorker<Repo>>::new(
         &config.thorium.namespace,
         &scylla,
-        redis,
-        args.workers,
+        args.clone(),
+        workers,
     )?;
     // start taking a census of tag data
-    controller.start(1000, dry_run).await?;
-    Ok(())
+    let ended = controller.start(1000, dry_run).await?;
+    // count the errors the workers logged and the workers that ended early
+    Ok(args.errors() + ended as u64)
 }
 
 impl Utils for Commitish {
@@ -368,70 +430,223 @@ impl Utils for Commitish {
 ///
 /// # Arguments
 ///
-/// * `args` - The command line args for thorctl
+/// * `config` - The config of the cluster to take a census of
+/// * `workers` - The number of workers to use
 /// * `dry_run` - Whether this is a dry run or not
-async fn new_commitishes(args: &Args, dry_run: bool) -> Result<(), Error> {
-    // load our config
-    let config = Conf::new(&args.cluster_conf)?;
+///
+/// Returns how many errors were logged while the census ran.
+async fn new_commitishes(config: &Conf, workers: usize, dry_run: bool) -> Result<u64, Error> {
     // build a new scylla client
-    let scylla = Arc::new(crate::shared::scylla::get_client(&config).await?);
-    // build a new redis client
-    let redis = crate::shared::redis::get_client(&config).await?;
+    let scylla = Arc::new(crate::shared::scylla::get_client(config).await?);
+    // build a new redis client, shared with an error count by every worker
+    let args = CensusArgs::new(crate::shared::redis::get_client(config).await?);
     // build a new commitishes census controller
     let mut controller = ScyllaCrawlController::<CensusWorker<Commitish>>::new(
         &config.thorium.namespace,
         &scylla,
-        redis,
-        args.workers,
+        args.clone(),
+        workers,
     )?;
     // start taking a census of tag data
-    controller.start(100000, dry_run).await?;
-    Ok(())
+    let ended = controller.start(100_000, dry_run).await?;
+    // count the errors the workers logged and the workers that ended early
+    Ok(args.errors() + ended as u64)
+}
+
+impl Utils for Entity {
+    /// The table this census counts
+    fn name() -> &'static str {
+        "entities"
+    }
+}
+
+impl Utils for Association {
+    /// The table this census counts
+    fn name() -> &'static str {
+        "associations"
+    }
+}
+
+/// Take a new full census of one table, whose census support names its rows and streams
+///
+/// # Arguments
+///
+/// * `config` - The config of the cluster to take a census of
+/// * `workers` - The number of workers to use
+/// * `dry_run` - Whether this is a dry run or not
+///
+/// Returns how many errors were logged while the census ran.
+async fn new_census<T: CensusSupport + Utils>(
+    config: &Conf,
+    workers: usize,
+    dry_run: bool,
+) -> Result<u64, Error> {
+    // build a new scylla client
+    let scylla = Arc::new(crate::shared::scylla::get_client(config).await?);
+    // build a new redis client, shared with an error count by every worker
+    let args = CensusArgs::new(crate::shared::redis::get_client(config).await?);
+    // build a census controller for the table
+    let mut controller = ScyllaCrawlController::<CensusWorker<T>>::new(
+        &config.thorium.namespace,
+        &scylla,
+        args.clone(),
+        workers,
+    )?;
+    // count every partition of the table
+    let ended = controller.start(1000, dry_run).await?;
+    // count the errors the workers logged and the workers that ended early
+    Ok(args.errors() + ended as u64)
 }
 
 impl CensusKinds {
+    /// Every census kind `all` stands for
+    pub const ALL: [CensusKinds; 7] = [
+        CensusKinds::Tags,
+        CensusKinds::TagsCaseInsensitive,
+        CensusKinds::Files,
+        CensusKinds::Repos,
+        CensusKinds::Commitishes,
+        CensusKinds::Entities,
+        CensusKinds::Associations,
+    ];
+
+    /// Returns the census kinds that count a table's rows
+    ///
+    /// # Arguments
+    ///
+    /// * `table` - The table
+    #[must_use]
+    pub fn of_table(table: &str) -> &'static [CensusKinds] {
+        // each table's census streams
+        match table {
+            "tags" => &[CensusKinds::Tags, CensusKinds::TagsCaseInsensitive],
+            "samples_list" => &[CensusKinds::Files],
+            "repos_list" => &[CensusKinds::Repos],
+            "commitish_list" => &[CensusKinds::Commitishes],
+            "entities" => &[CensusKinds::Entities],
+            "associations" => &[CensusKinds::Associations],
+            _ => &[],
+        }
+    }
+
     /// Execute a specific census kind
     ///
     /// # Arguments
     ///
-    /// * `args` - The command line args for thorctl
+    /// * `config` - The config of the cluster to take a census of
+    /// * `workers` - The number of workers to use
     /// * `dry_run` - Whether this is a dry run or not
-    async fn start(self, args: &Args, dry_run: bool) -> Result<(), Error> {
+    ///
+    /// Returns how many errors were logged while the census ran.
+    async fn start(self, config: &Conf, workers: usize, dry_run: bool) -> Result<u64, Error> {
         // perform a specific kind of census
         match self {
             // All gets handled in the new function and shouldn't occur ever
             CensusKinds::All => panic!("All wasn't mapped to all census kinds?"),
-            CensusKinds::Tags => new_tags(args, dry_run).await,
-            CensusKinds::TagsCaseInsensitive => new_tags_case_insensitive(args, dry_run).await,
-            CensusKinds::Files => new_samples(args, dry_run).await,
-            CensusKinds::Repos => new_repos(args, dry_run).await,
-            CensusKinds::Commitishes => new_commitishes(args, dry_run).await,
+            CensusKinds::Tags => new_tags(config, workers, dry_run).await,
+            CensusKinds::TagsCaseInsensitive => {
+                new_tags_case_insensitive(config, workers, dry_run).await
+            }
+            CensusKinds::Files => new_samples(config, workers, dry_run).await,
+            CensusKinds::Repos => new_repos(config, workers, dry_run).await,
+            CensusKinds::Commitishes => new_commitishes(config, workers, dry_run).await,
+            CensusKinds::Entities => new_census::<Entity>(config, workers, dry_run).await,
+            CensusKinds::Associations => new_census::<Association>(config, workers, dry_run).await,
         }
     }
 }
 
+/// Lists the census stream member every partition of one table calls for: each partition's stream
+/// key and bucket
+///
+/// # Arguments
+///
+/// * `scylla` - The session to read the table with
+/// * `namespace` - The namespace the table is in
+/// * `retry` - How a page that fails to arrive is retried
+async fn members_of<T: CensusSupport>(
+    scylla: &Session,
+    namespace: &str,
+    retry: RetryPolicy,
+) -> Result<Vec<(String, i32)>, Error> {
+    // count every partition of the ring, a page at a time
+    let prepared = T::scan_prepared_statement(scylla, namespace).await?;
+    let mut reader = RangeReader::new(scylla, &prepared, (i64::MIN, i64::MAX), retry);
+    let mut members = Vec::new();
+    loop {
+        let page = match reader.next_page::<T::Row>().await {
+            Ok(Some(page)) => page,
+            Ok(None) => return Ok(members),
+            Err(failed) => return Err(Error::new(failed.to_string())),
+        };
+        for row in page {
+            let row = row.map_err(|error| Error::new(error.to_string()))?;
+            members.push((T::stream_key_from_row(namespace, &row), T::get_bucket(&row)));
+        }
+    }
+}
+
+/// Lists the census stream member every partition counted by a census kind calls for: each
+/// partition's stream key and bucket, as a census of that kind would add them
+///
+/// # Arguments
+///
+/// * `kind` - The census kind
+/// * `scylla` - The session to read the tables with
+/// * `namespace` - The namespace the tables are in
+/// * `retry` - How a page that fails to arrive is retried
+pub async fn expected_members(
+    kind: CensusKinds,
+    scylla: &Session,
+    namespace: &str,
+    retry: RetryPolicy,
+) -> Result<Vec<(String, i32)>, Error> {
+    // each kind counts one table through its census support
+    match kind {
+        CensusKinds::All => Ok(Vec::new()),
+        CensusKinds::Tags => members_of::<TagRequest<Sample>>(scylla, namespace, retry).await,
+        CensusKinds::TagsCaseInsensitive => {
+            members_of::<TagCensusCaseInsensitive<Sample>>(scylla, namespace, retry).await
+        }
+        CensusKinds::Files => members_of::<Sample>(scylla, namespace, retry).await,
+        CensusKinds::Repos => members_of::<Repo>(scylla, namespace, retry).await,
+        CensusKinds::Commitishes => members_of::<Commitish>(scylla, namespace, retry).await,
+        CensusKinds::Entities => members_of::<Entity>(scylla, namespace, retry).await,
+        CensusKinds::Associations => members_of::<Association>(scylla, namespace, retry).await,
+    }
+}
+
 /// Execute any requested censuses
-async fn new(cmd: &NewCensus, args: &Args) -> Result<(), Error> {
+///
+/// # Arguments
+///
+/// * `cmd` - The census to take
+/// * `config` - The config of the cluster to take a census of
+/// * `workers` - The number of workers to use
+///
+/// A census whose workers logged errors finishes with failures, since what it counted may be
+/// short.
+pub async fn new(cmd: &NewCensus, config: &Conf, workers: usize) -> Result<RunOutcome, Error> {
     // if we have all set then replace it with all of the census types
     let kinds = if cmd.census_kinds.contains(&CensusKinds::All) {
         // add all possible census kinds
-        vec![
-            CensusKinds::Tags,
-            CensusKinds::TagsCaseInsensitive,
-            CensusKinds::Files,
-            CensusKinds::Repos,
-            CensusKinds::Commitishes,
-        ]
+        CensusKinds::ALL.to_vec()
     } else {
         // clone our census kinds
         cmd.census_kinds.clone()
     };
-    // iterate over the requested census kinds and perform them
+    // iterate over the requested census kinds and perform them, counting logged errors
+    let mut errors = 0;
     for kind in &kinds {
         // perform a census on the correct data
-        kind.start(args, cmd.dry_run).await?;
+        errors += kind.start(config, workers, cmd.dry_run).await?;
     }
-    Ok(())
+    // a census that logged errors may have missed what it couldn't read
+    if errors > 0 {
+        tracing::warn!("census finished after {errors} errors, logged above");
+        return Ok(RunOutcome::CompletedWithFailures);
+    }
+    Ok(RunOutcome::Complete)
 }
 
 /// Handle census commands
@@ -439,9 +654,12 @@ async fn new(cmd: &NewCensus, args: &Args) -> Result<(), Error> {
 /// # Arguments
 ///
 /// * `cmd` - The census commands
-pub async fn handle(cmd: &CensusSubCommands, args: &Args) -> Result<(), Error> {
+/// * `args` - The command line arguments
+pub async fn handle(cmd: &CensusSubCommands, args: &Args) -> Result<RunOutcome, Error> {
+    // load our config
+    let config = Conf::new(&args.cluster_conf)?;
+    // take the requested census
     match cmd {
-        CensusSubCommands::New(cmd) => new(cmd, args).await?,
+        CensusSubCommands::New(cmd) => new(cmd, &config, args.workers).await,
     }
-    Ok(())
 }

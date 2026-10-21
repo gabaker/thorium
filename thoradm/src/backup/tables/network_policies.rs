@@ -2,25 +2,19 @@
 
 use ahash::AHasher;
 use chrono::{DateTime, Utc};
-use futures::{StreamExt, stream::FuturesUnordered};
-use indicatif::ProgressBar;
 use rkyv::{Archive, CheckBytes, Deserialize, Serialize};
 use scylla::{
-    DeserializeRow,
-    client::session::Session,
-    errors::{ExecutionError, PrepareError},
+    DeserializeRow, client::session::Session, errors::PrepareError,
     statement::prepared::PreparedStatement,
 };
-use std::{hash::Hasher, sync::Arc};
+use std::hash::Hasher;
 use thorium::Conf;
 use uuid::Uuid;
 
-use crate::{
-    Error,
-    backup::{Backup, Restore, Scrub, Utils, utils},
-};
+use super::Versioned;
+use crate::backup::{Backup, Restore, Scrub, Utils};
 
-/// A single line from the network policy table
+/// A network policies row as format 2 archives it; `None` is a cell the source row held unset
 #[derive(Debug, Archive, Serialize, Deserialize, DeserializeRow)]
 #[archive_attr(derive(Debug, CheckBytes))]
 #[scylla(flavor = "enforce_order", skip_name_checks)]
@@ -30,19 +24,19 @@ pub struct NetworkPolicy {
     /// The network policy's name
     pub name: String,
     /// The network policy's ID
-    pub id: Uuid,
+    pub id: Option<Uuid>,
     /// The network policy's unique name in K8's
-    pub k8s_name: String,
+    pub k8s_name: Option<String>,
     /// The date the network policy is created
-    pub created: DateTime<Utc>,
+    pub created: Option<DateTime<Utc>>,
     /// The ingress settings for this network policy
-    pub ingress: String,
+    pub ingress: Option<String>,
     /// The egress settings for this network policy
-    pub egress: String,
+    pub egress: Option<String>,
     /// Whether this network policy is forced in its group
-    pub forced_policy: bool,
+    pub forced_policy: Option<bool>,
     /// Whether this network policy is default in its group
-    pub default_policy: bool,
+    pub default_policy: Option<bool>,
 }
 
 impl Utils for NetworkPolicy {
@@ -53,6 +47,11 @@ impl Utils for NetworkPolicy {
 
 #[async_trait::async_trait]
 impl Backup for NetworkPolicy {
+    /// The columns of this table's partition key, used to name rows that fail to decode
+    fn partition_key() -> &'static [&'static str] {
+        &["group"]
+    }
+
     /// The prepared statement to use when retrieving data from Scylla
     ///
     /// # Arguments
@@ -95,13 +94,19 @@ impl Restore for NetworkPolicy {
     // Network policies are not partitioned by time, so just return unit type
     type PartitionConf = ();
 
-    /// The steps to once run before restoring data
-    async fn prep(scylla: &Session, ns: &str) -> Result<(), ExecutionError> {
-        // drop the materialized views for this table
-        utils::drop_materialized_view(ns, "network_policies_by_name", scylla).await?;
-        utils::drop_materialized_view(ns, "network_policies_default", scylla).await?;
-        Ok(())
-    }
+    /// The group, name, id, Kubernetes name, creation time, ingress, egress, and whether it is
+    /// forced and default
+    type Values = (
+        String,
+        String,
+        Option<Uuid>,
+        Option<String>,
+        Option<DateTime<Utc>>,
+        Option<String>,
+        Option<String>,
+        Option<bool>,
+        Option<bool>,
+    );
 
     /// The prepared statement to use when restoring data to scylla
     ///
@@ -131,78 +136,79 @@ impl Restore for NetworkPolicy {
     ///
     /// # Arguments
     ///
-    /// * `conf` - The Thorium config
+    /// * `_config` - The Thorium config, which has no partition size to give here
     fn partition_conf(_config: &Conf) -> Self::PartitionConf {}
 
-    /// Restore a single partition
+    /// Returns the values the restore's insert binds for this row
     ///
     /// # Arguments
     ///
-    /// * `buffer` - The buffer we should restore data from
-    /// * `scylla` - The client to use when talking to scylla
-    /// * `rows_restored` - The number of rows that have been restored
-    /// * `partition_conf` - The config defining the partition size to use when restoring data
-    /// * `progress` - The bar to report progress with
-    /// * `prepared` - The prepared statement to inject data with
-    async fn restore<'a>(
-        buffer: &'a [u8],
-        scylla: &Arc<Session>,
-        _partition_conf: &Self::PartitionConf,
-        rows_restored: &mut usize,
-        progress: &mut ProgressBar,
-        prepared: &PreparedStatement,
-    ) -> Result<(), Error> {
-        // cast our buffer to its archived type
-        let rows = rkyv::check_archived_root::<Vec<NetworkPolicy>>(buffer)?;
-        // build a set of futures
-        let mut futures = FuturesUnordered::new();
-        // build our queries to insert this partitions rows
-        for row in rows.iter() {
-            // deserialize this rows created timestamp
-            let created: DateTime<Utc> = row.created.deserialize(&mut rkyv::Infallible)?;
-            // restore this row back to scylla
-            let query = scylla.execute_unpaged(
-                prepared,
-                (
-                    row.group.as_str(),
-                    row.name.as_str(),
-                    row.id,
-                    row.k8s_name.as_str(),
-                    created,
-                    row.ingress.as_str(),
-                    row.egress.as_str(),
-                    row.forced_policy,
-                    row.default_policy,
-                ),
-            );
-            // add this to our futures
-            futures.push(query);
-            // if we have 1000 futures then wait for at least 500 of them to complete
-            if futures.len() > 1000 {
-                // poll our futures until one is complete
-                while let Some(query_result) = futures.next().await {
-                    // raise any errors
-                    query_result?;
-                    // increment our restored row count
-                    *rows_restored += 1;
-                    // set our current row count progress message
-                    progress.set_message(rows_restored.to_string());
-                    // if we have less then 100 future to go then refill our future set
-                    if futures.len() < 100 {
-                        break;
-                    }
-                }
-            }
-        }
-        // poll our futures until one is complete
-        while let Some(query_result) = futures.next().await {
-            // raise any errors
-            query_result?;
-            // increment our restored row count
-            *rows_restored += 1;
-            // set our current row count progress message
-            progress.set_message(rows_restored.to_string());
-        }
-        Ok(())
+    /// * `_partition_conf` - Unused, as network policies aren't bucketed
+    /// * `_format` - The format version the row was archived in
+    fn values(self, _partition_conf: &Self::PartitionConf, _format: u32) -> Self::Values {
+        // every column as the row holds it
+        (
+            self.group,
+            self.name,
+            self.id,
+            self.k8s_name,
+            self.created,
+            self.ingress,
+            self.egress,
+            self.forced_policy,
+            self.default_policy,
+        )
     }
+}
+
+/// A network policies row as format 1 archives it
+#[derive(Debug, Clone, Archive, Serialize, Deserialize)]
+#[archive_attr(derive(Debug, CheckBytes))]
+pub struct NetworkPolicyV1 {
+    /// The group the network policy is in
+    pub group: String,
+    /// The network policy's name
+    pub name: String,
+    /// The network policy's ID
+    pub id: Uuid,
+    /// The network policy's unique name in K8's
+    pub k8s_name: String,
+    /// The date the network policy is created
+    pub created: DateTime<Utc>,
+    /// The ingress settings for this network policy
+    pub ingress: String,
+    /// The egress settings for this network policy
+    pub egress: String,
+    /// Whether this network policy is forced in its group
+    pub forced_policy: bool,
+    /// Whether this network policy is default in its group
+    pub default_policy: bool,
+}
+
+impl From<NetworkPolicyV1> for NetworkPolicy {
+    /// Converts a format-1 row, whose required fields are always set
+    ///
+    /// # Arguments
+    ///
+    /// * `row` - The format-1 row
+    fn from(row: NetworkPolicyV1) -> Self {
+        // format 1 could only hold rows with these cells set
+        NetworkPolicy {
+            group: row.group,
+            name: row.name,
+            id: Some(row.id),
+            k8s_name: Some(row.k8s_name),
+            created: Some(row.created),
+            ingress: Some(row.ingress),
+            egress: Some(row.egress),
+            forced_policy: Some(row.forced_policy),
+            default_policy: Some(row.default_policy),
+        }
+    }
+}
+
+/// Format 1 archives `NetworkPolicy` rows as [`NetworkPolicyV1`]
+impl Versioned for NetworkPolicy {
+    /// Format 1 rows decode as [`NetworkPolicyV1`], which converts into `NetworkPolicy`
+    type V1 = NetworkPolicyV1;
 }
