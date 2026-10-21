@@ -1200,7 +1200,7 @@ impl TryFrom<(HashMap<String, String>, Vec<String>)> for Image {
             timeout: deserialize_ext!(map, "timeout", None),
             runtime: extract!(map, "runtime").parse::<f64>()?,
             volumes: deserialize_ext!(map, "volumes"),
-            env: deserialize_ext!(map, "env"),
+            env: deserialize_ext!(map, "env", HashMap::default()),
             args: deserialize_ext!(map, "args", ImageArgs::default()),
             modifiers: deserialize_ext!(map, "modifiers", None),
             description: deserialize_opt!(map, "description"),
@@ -1255,5 +1255,30 @@ impl ImageScaler {
             ImageScaler::External => EXTERNAL_CACHE_KEY,
             ImageScaler::Kvm => KVM_CACHE_KEY,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::Image;
+    use std::collections::HashMap;
+
+    /// An image stored without its environment reads it as empty, as its type's default says
+    #[test]
+    fn an_image_without_env_reads_an_empty_env() {
+        // only the fields an image can't be read without
+        let raw: HashMap<String, String> = [
+            ("group", "g"),
+            ("name", "i"),
+            ("creator", "c"),
+            ("runtime", "1.0"),
+            ("volumes", "[]"),
+        ]
+        .into_iter()
+        .map(|(field, value)| (field.to_owned(), value.to_owned()))
+        .collect();
+        // it reads with an empty environment
+        let image = Image::try_from((raw, Vec::new())).expect("an image without env didn't parse");
+        assert!(image.env.is_empty());
     }
 }

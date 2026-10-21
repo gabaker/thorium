@@ -2362,6 +2362,49 @@ fn default_namespace() -> String {
     "thorium".to_owned()
 }
 
+/// The longest namespace allowed, Scylla's limit on a keyspace name
+pub const NAMESPACE_MAX_LEN: usize = 48;
+
+/// Checks that a namespace can name a Scylla keyspace and prefix Thorium's Redis keys
+///
+/// A namespace holds only lowercase ASCII letters (`a-z`), digits and underscores, starts with a
+/// lowercase letter, and is at most [`NAMESPACE_MAX_LEN`] characters. Since `:` and glob
+/// characters are refused, the Redis keys of one namespace never match another's prefix. Uppercase
+/// letters are refused because Scylla folds an unquoted keyspace name to lowercase while Redis keys
+/// keep their case, so `Thorium` and `thorium` would share one keyspace but not their Redis data.
+///
+/// # Arguments
+///
+/// * `namespace` - The namespace to check
+pub fn validate_namespace(namespace: &str) -> Result<(), String> {
+    // a namespace starts with a lowercase letter and holds only lowercase letters, digits and
+    // underscores
+    let mut chars = namespace.chars();
+    let starts_with_letter = chars.next().is_some_and(|c| c.is_ascii_lowercase());
+    let rest_valid = chars.all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_');
+    // refuse a namespace that breaks any part of the rule, stating the whole rule
+    if starts_with_letter && rest_valid && namespace.len() <= NAMESPACE_MAX_LEN {
+        Ok(())
+    } else {
+        Err(format!(
+            "{namespace:?} isn't a valid namespace: a namespace holds only lowercase ASCII letters \
+             (a-z), digits and underscores, must start with a lowercase letter, and is at most \
+             {NAMESPACE_MAX_LEN} characters"
+        ))
+    }
+}
+
+/// Parses a namespace given on a command line, refusing one that breaks the namespace rule
+///
+/// # Arguments
+///
+/// * `namespace` - The namespace to parse
+pub fn parse_namespace(namespace: &str) -> Result<String, String> {
+    // check the namespace, then keep it as given
+    validate_namespace(namespace)?;
+    Ok(namespace.to_owned())
+}
+
 /// Provide a default set of namespaces to not allow Thorium to create
 fn default_namespace_blacklist() -> HashSet<String> {
     [
@@ -2393,7 +2436,10 @@ pub struct Thorium {
     /// The port to bind to
     #[serde(default = "default_api_port")]
     pub port: u16,
-    /// The namespace to use in the backend
+    /// The namespace to use in the backend: the Scylla keyspace and the Redis key prefix
+    ///
+    /// Only lowercase ASCII letters (`a-z`), digits and underscores, starting with a lowercase
+    /// letter, at most 48 characters; a config naming any other namespace fails to load.
     #[serde(default = "default_namespace")]
     pub namespace: String,
     /// The secret key used for generating secrets
@@ -2732,6 +2778,10 @@ impl Conf {
                 .map(std::borrow::ToOwned::to_owned)
                 .collect();
         }
+        // refuse a namespace that can't name the keyspace or prefix the Redis keys
+        validate_namespace(&conf.thorium.namespace).map_err(|error| {
+            config::ConfigError::Message(format!("invalid thorium.namespace: {error}"))
+        })?;
         Ok(conf)
     }
 
@@ -2750,7 +2800,10 @@ impl Conf {
 
 #[cfg(test)]
 mod tests {
-    use super::{Scaler, default_namespace_blacklist};
+    use super::{
+        Conf, NAMESPACE_MAX_LEN, Scaler, default_namespace_blacklist, parse_namespace,
+        validate_namespace,
+    };
 
     #[test]
     fn default_namespace_blacklist_covers_privileged_namespaces() {
@@ -2775,5 +2828,164 @@ mod tests {
         // make sure our concurrency limits fall back to their defaults
         assert_eq!(scaler.cache_concurrency, 10);
         assert_eq!(scaler.k8s.setup_concurrency, 25);
+    }
+
+    /// The test config, whose other settings every namespace check reuses
+    const TEST_CONF: &str = include_str!("../tests/thorium-testing.yml");
+
+    /// The line of the test config that names its namespace
+    const TEST_NAMESPACE_LINE: &str = "namespace: \"testing\"";
+
+    /// Loads the test config with a namespace, the way every Thorium service loads its config
+    ///
+    /// Returns `None` when `THORIUM__THORIUM__NAMESPACE` is set, since that override would
+    /// replace the namespace under test.
+    ///
+    /// # Arguments
+    ///
+    /// * `namespace` - The namespace to load
+    fn load(namespace: &str) -> Option<Result<Conf, config::ConfigError>> {
+        // an environment override would replace the namespace written to the file
+        if std::env::var_os("THORIUM__THORIUM__NAMESPACE").is_some() {
+            eprintln!("THORIUM__THORIUM__NAMESPACE is set; skipping the namespace check");
+            return None;
+        }
+        // write the test config with this namespace to a file of its own
+        assert!(TEST_CONF.contains(TEST_NAMESPACE_LINE));
+        let yaml = TEST_CONF.replacen(
+            TEST_NAMESPACE_LINE,
+            &format!("namespace: {}", serde_json::to_string(namespace).unwrap()),
+            1,
+        );
+        let path = std::env::temp_dir().join(format!("thorium-conf-{}.yml", uuid::Uuid::new_v4()));
+        std::fs::write(&path, yaml).unwrap();
+        // load it, then remove the file
+        let loaded = Conf::new(&path);
+        std::fs::remove_file(&path).unwrap();
+        Some(loaded)
+    }
+
+    /// Asserts that loading a namespace failed with an error naming the field, the value, and
+    /// the whole namespace rule
+    ///
+    /// # Arguments
+    ///
+    /// * `namespace` - The namespace that was loaded
+    /// * `loaded` - The result of loading it
+    fn assert_refused(namespace: &str, loaded: Result<Conf, config::ConfigError>) {
+        // the loaded config isn't printed, since it holds the secret key
+        let Err(error) = loaded.map(|_| ()) else {
+            panic!("the namespace {namespace:?} was accepted");
+        };
+        let error = error.to_string();
+        // the error names the field and the value
+        assert!(
+            error.contains("thorium.namespace"),
+            "{namespace:?}: {error}"
+        );
+        assert!(
+            error.contains(&format!("{namespace:?}")),
+            "{namespace:?}: {error}"
+        );
+        // the error states every part of the rule
+        assert!(
+            error.contains("lowercase ASCII letters (a-z), digits and underscores")
+                && error.contains("start with a lowercase letter")
+                && error.contains("at most 48 characters"),
+            "{namespace:?}: {error}"
+        );
+    }
+
+    /// Lowercase namespaces with digits and underscores, up to 48 characters, load as written
+    #[test]
+    fn valid_namespaces_load() {
+        // lowercase letters, digits after the first letter, underscores, and 48 characters
+        let longest = format!("n{}", "a".repeat(47));
+        for namespace in [
+            "thorium",
+            "testing_1",
+            "a",
+            "a3_x9",
+            "thorium_dev_2",
+            "z_",
+            &longest,
+        ] {
+            if let Some(loaded) = load(namespace) {
+                let conf = loaded.unwrap_or_else(|error| panic!("{namespace:?}: {error}"));
+                assert_eq!(conf.thorium.namespace, namespace);
+            }
+        }
+    }
+
+    /// Namespaces breaking the character, first-character, or length rule are refused
+    #[test]
+    fn invalid_namespaces_are_refused_naming_the_rule() {
+        // empty, a leading digit or underscore, a separator or glob character, or too long
+        let too_long = format!("n{}", "a".repeat(48));
+        for namespace in [
+            "",
+            "1thorium",
+            "_thorium",
+            "thorium-dev",
+            "thorium.dev",
+            "a:b",
+            "thorium dev",
+            "thorium*",
+            &too_long,
+        ] {
+            if let Some(loaded) = load(namespace) {
+                assert_refused(namespace, loaded);
+            }
+        }
+    }
+
+    /// Namespaces holding an uppercase letter anywhere are refused
+    #[test]
+    fn uppercase_namespaces_are_refused_naming_the_rule() {
+        // an uppercase letter leading, in the middle, at the end, throughout, or mixed in
+        for namespace in [
+            "Thorium",
+            "thoRium",
+            "thoriuM",
+            "THORIUM",
+            "Thorium_2",
+            "testing_Ab12",
+            "aB3_x9",
+            "A",
+        ] {
+            if let Some(loaded) = load(namespace) {
+                assert_refused(namespace, loaded);
+            }
+        }
+    }
+
+    /// The namespace rule refuses uppercase letters without loading a config, so it holds even
+    /// when an environment override replaces the namespace a config file names
+    #[test]
+    fn validate_namespace_requires_lowercase() {
+        // lowercase letters, digits and underscores pass, and parsing keeps them as given
+        for namespace in ["thorium", "testing_1", "thorium_dev_2"] {
+            assert_eq!(validate_namespace(namespace), Ok(()));
+            assert_eq!(parse_namespace(namespace).as_deref(), Ok(namespace));
+        }
+        // an uppercase letter anywhere is refused with the whole rule
+        for namespace in ["Thorium", "thoRium", "THORIUM", "Thorium_2", "aB3_x9"] {
+            let error = validate_namespace(namespace).expect_err(namespace);
+            assert!(
+                error.contains("lowercase ASCII letters (a-z), digits and underscores")
+                    && error.contains("start with a lowercase letter")
+                    && error.contains("at most 48 characters"),
+                "{namespace:?}: {error}"
+            );
+            assert_eq!(parse_namespace(namespace), Err(error));
+        }
+        // a namespace of exactly the longest length passes, and one character more is refused
+        let longest = format!("a{}", "b".repeat(NAMESPACE_MAX_LEN - 1));
+        assert_eq!(longest.len(), 48);
+        assert_eq!(validate_namespace(&longest), Ok(()));
+        let too_long = format!("{longest}c");
+        let error = validate_namespace(&too_long).expect_err(&too_long);
+        assert!(error.contains("at most 48 characters"), "{error}");
+        assert_eq!(parse_namespace(&too_long), Err(error));
     }
 }

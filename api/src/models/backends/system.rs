@@ -1,24 +1,26 @@
 use axum::extract::FromRequestParts;
+use axum::http::StatusCode;
 use axum::http::request::Parts;
 use futures::TryStreamExt;
 use futures::stream::{self, StreamExt};
 use itertools::Itertools;
 use scylla::errors::ExecutionError;
 use scylla::response::query_result::QueryResult;
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeSet, HashMap, HashSet};
 use std::path::PathBuf;
-use tracing::{Level, Span, instrument, span};
+use tracing::{Level, Span, event, instrument, span};
 use uuid::Uuid;
 
 use super::db::{self, SimpleCursorExt};
 use crate::models::backends::NotificationSupport;
 use crate::models::{
-    ApiCursor, Backup, Group, GroupRequest, GroupUsersRequest, HostPath, HostPathWhitelistUpdate,
-    Image, ImageBan, ImageBanKind, ImageBanUpdate, ImageKey, ImageScaler, Node, NodeGetParams,
-    NodeListLine, NodeListParams, NodeRegistration, NodeRow, NodeUpdate, Pipeline, PipelineBan,
-    PipelineBanKind, PipelineBanUpdate, PipelineKey, SystemInfo, SystemSettings,
-    SystemSettingsUpdate, SystemStats, User, VolumeTypes, Worker, WorkerDeleteMap,
-    WorkerRegistrationList, WorkerUpdate, conversions,
+    ApiCursor, Backup, BackupParams, BackupProblem, BackupProblems, Group, GroupRequest,
+    GroupUsers, GroupUsersRequest, HostPath, HostPathWhitelistUpdate, Image, ImageBan,
+    ImageBanKind, ImageBanUpdate, ImageKey, ImageScaler, Node, NodeGetParams, NodeListLine,
+    NodeListParams, NodeRegistration, NodeRow, NodeUpdate, Pipeline, PipelineBan, PipelineBanKind,
+    PipelineBanUpdate, PipelineKey, PruneAction, PrunedReference, PrunedReferent, RestoreParams,
+    SystemInfo, SystemSettings, SystemSettingsUpdate, SystemStats, User, VolumeTypes, Worker,
+    WorkerDeleteMap, WorkerRegistrationList, WorkerUpdate, conversions,
 };
 use crate::utils::{ApiError, Shared};
 use crate::{
@@ -447,13 +449,13 @@ impl SystemSettings {
     pub async fn consistency_scan(&self, user: &User, shared: &Shared) -> Result<(), ApiError> {
         // only admins can perform a scan
         is_admin!(user);
-        // update all images
-        stream::iter(db::images::backup(shared).await?)
+        // update all images that parse; records that don't parse are skipped
+        stream::iter(db::images::backup(shared).await?.0)
             .map(Ok)
             .try_for_each_concurrent(1000, |image| self.scan_helper_images(image, user, shared))
             .await?;
-        // update all pipelines
-        stream::iter(db::pipelines::backup(shared).await?)
+        // update all pipelines that parse
+        stream::iter(db::pipelines::backup(shared).await?.0)
             .map(Ok)
             .try_for_each_concurrent(1000, |pipeline| {
                 self.scan_helper_pipelines(pipeline, user, shared)
@@ -483,63 +485,952 @@ impl SystemSettings {
     }
 }
 
+/// How many times a backup reads Redis before it gives up on records that don't fit together
+const BACKUP_READS: u32 = 3;
+
+/// The bootstrap admin every deployment has, which a pruning backup makes the owner of a group
+/// that would otherwise be left with none
+const BOOTSTRAP_ADMIN: &str = "thorium";
+
+/// A reference among a backup's users and groups that names a record the backup doesn't hold
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+enum Dangling {
+    /// A group role naming a user
+    Member {
+        /// The group
+        group: String,
+        /// The role
+        role: &'static str,
+        /// The user
+        user: String,
+    },
+    /// A user's groups naming a group
+    Membership {
+        /// The user
+        user: String,
+        /// The group
+        group: String,
+    },
+    /// A scoped token's groups naming a group
+    TokenGroup {
+        /// The token's owner
+        owner: String,
+        /// The token's name
+        name: String,
+        /// The group
+        group: String,
+    },
+}
+
 impl Backup {
     /// Gets a backup of the current server
+    ///
+    /// Fails with 422, listing every record's key, when any user, group, image, pipeline, or
+    /// scoped token doesn't parse, rather than leaving it out of the backup; since a record deleted
+    /// between listing and reading it reads as one that doesn't parse, the records are read again
+    /// a few times before the backup fails. The backup must
+    /// also pass the checks a restore makes; since a change made while the records are read can
+    /// leave a reference dangling, the records are read again a few times before the backup
+    /// fails with 422, listing every problem, rather than returning a backup no restore accepts.
+    ///
+    /// With `prune_dangling`, a user or group reference that every read finds dangling, and whose
+    /// user or group a direct check of Redis confirms is gone, is dropped instead and listed in
+    /// the backup's `pruned`; every other problem still fails the backup.
+    ///
+    /// # Arguments
+    ///
+    /// * `user` - The user that is getting a system backup
+    /// * `params` - The backup params
+    /// * `shared` - Shared Thorium objects
+    #[instrument(name = "Backup::new", skip_all, fields(prune_dangling = params.prune_dangling), err(Debug))]
+    pub async fn new(
+        user: &User,
+        params: &BackupParams,
+        shared: &Shared,
+    ) -> Result<Self, ApiError> {
+        // only admins can backup data
+        is_admin!(user);
+        // the reads made so far, counting the one in progress
+        let mut read = 1;
+        // the dangling references every read so far found, which alone may be pruned
+        let mut lasting: Option<BTreeSet<Dangling>> = None;
+        loop {
+            // read every record, with what a restore would refuse and what a prune would drop; a record
+            // deleted between listing and reading it reads as one that doesn't parse, so read again
+            // until the last read rather than failing at once
+            let mut backup = match Self::read(user, shared).await {
+                Ok(backup) => backup,
+                Err(ApiError::Problems { code, body })
+                    if code == StatusCode::UNPROCESSABLE_ENTITY && read < BACKUP_READS =>
+                {
+                    // wait a moment for a deletion in progress to finish, then read again
+                    event!(
+                        Level::WARN,
+                        msg = "A backup read records that don't parse; reading them again",
+                        read,
+                        problems = body.problems.len()
+                    );
+                    tokio::time::sleep(std::time::Duration::from_millis(200 * u64::from(read)))
+                        .await;
+                    read += 1;
+                    continue;
+                }
+                Err(error) => return Err(error),
+            };
+            let problems = backup.problems();
+            let dangling = if params.prune_dangling {
+                backup.dangling()
+            } else {
+                BTreeSet::new()
+            };
+            // return the backup once a restore would accept it and nothing is left to prune
+            if problems.is_empty() && dangling.is_empty() {
+                return Ok(backup);
+            }
+            // keep only the references this read finds dangling too
+            let still = match lasting.take() {
+                Some(before) => before.intersection(&dangling).cloned().collect(),
+                None => dangling,
+            };
+            // once every read is done, prune what is confirmed gone and fail on what is left
+            if read == BACKUP_READS {
+                let problems = if still.is_empty() {
+                    problems
+                } else {
+                    let gone = Self::confirm_gone(still, shared).await?;
+                    backup.pruned = backup.apply_prune(&gone);
+                    backup.problems()
+                };
+                if problems.is_empty() {
+                    // say what the backup dropped, which it lists in full
+                    if !backup.pruned.is_empty() {
+                        event!(
+                            Level::WARN,
+                            msg = "A backup dropped dangling user and group references",
+                            pruned = backup.pruned.len()
+                        );
+                    }
+                    return Ok(backup);
+                }
+                return Err(ApiError::Problems {
+                    code: StatusCode::UNPROCESSABLE_ENTITY,
+                    body: BackupProblems {
+                        error: format!(
+                            "the records in Redis don't fit together, so a restore would refuse \
+                             them: {} problems were left after {read} reads, and no backup was \
+                             built; repair them and back up again",
+                            problems.len()
+                        ),
+                        problems,
+                    },
+                });
+            }
+            lasting = Some(still);
+            // wait a moment for a change in progress to finish, then read again
+            event!(
+                Level::WARN,
+                msg = "A backup's records don't fit together; reading them again",
+                read,
+                problems = problems.len()
+            );
+            tokio::time::sleep(std::time::Duration::from_millis(200 * u64::from(read))).await;
+            read += 1;
+        }
+    }
+
+    /// Keeps the dangling references whose user or group a direct check of Redis says is gone
+    ///
+    /// # Arguments
+    ///
+    /// * `dangling` - The references every read found dangling
+    /// * `shared` - Shared Thorium objects
+    async fn confirm_gone(
+        dangling: BTreeSet<Dangling>,
+        shared: &Shared,
+    ) -> Result<BTreeSet<Dangling>, ApiError> {
+        // whether each user and group exists, each checked once
+        let mut users: HashMap<String, bool> = HashMap::new();
+        let mut groups: HashMap<String, bool> = HashMap::new();
+        let mut gone = BTreeSet::new();
+        for reference in dangling {
+            // check the user or group the reference names
+            let exists = match &reference {
+                Dangling::Member { user, .. } => {
+                    if let Some(exists) = users.get(user) {
+                        *exists
+                    } else {
+                        let exists = db::users::exists(user, shared).await?;
+                        users.insert(user.clone(), exists);
+                        exists
+                    }
+                }
+                Dangling::Membership { group, .. } | Dangling::TokenGroup { group, .. } => {
+                    if let Some(exists) = groups.get(group) {
+                        *exists
+                    } else {
+                        let exists =
+                            db::groups::exists(std::slice::from_ref(group), shared).await?;
+                        groups.insert(group.clone(), exists);
+                        exists
+                    }
+                }
+            };
+            // a reference to a user or group that exists is kept
+            if !exists {
+                gone.insert(reference);
+            }
+        }
+        Ok(gone)
+    }
+
+    /// Reads every record a backup holds, failing with 422 when any of them doesn't parse
     ///
     /// # Arguments
     ///
     /// * `user` - The user that is getting a system backup
     /// * `shared` - Shared Thorium objects
-    #[instrument(name = "Backup::new", skip_all, err(Debug))]
-    pub async fn new(user: &User, shared: &Shared) -> Result<Self, ApiError> {
-        // only admins can backup data
-        is_admin!(user);
+    async fn read(user: &User, shared: &Shared) -> Result<Self, ApiError> {
         // get the current system settings
         let settings = SystemSettings::get(user, shared).await?;
         // get lists of users/groups/images/pipelines to backup
-        let users = db::users::backup(shared).await?;
-        let groups = db::groups::backup(shared).await?;
-        let images = db::images::backup(shared).await?;
-        let pipelines = db::pipelines::backup(shared).await?;
+        let (users, mut problems) = db::users::backup(shared).await?;
+        let (groups, group_problems) = db::groups::backup(shared).await?;
+        let (images, image_problems) = db::images::backup(shared).await?;
+        let (pipelines, pipeline_problems) = db::pipelines::backup(shared).await?;
+        // get the scoped tokens of the users read above, so no token's owner is missing
+        let mut usernames: Vec<String> = users.iter().map(|user| user.username.clone()).collect();
+        usernames.sort_unstable();
+        let (scoped_tokens, token_problems) =
+            db::users::backup_scoped_tokens(&usernames, shared).await?;
+        // get every group's network-policy set
+        let mut group_names: Vec<String> = groups.iter().map(|group| group.name.clone()).collect();
+        group_names.sort_unstable();
+        let network_policy_sets = db::network_policies::backup_sets(&group_names, shared).await?;
+        // a record that doesn't parse fails the backup instead of going missing from it
+        problems.extend(group_problems);
+        problems.extend(image_problems);
+        problems.extend(pipeline_problems);
+        problems.extend(token_problems);
+        if !problems.is_empty() {
+            return Err(ApiError::Problems {
+                code: StatusCode::UNPROCESSABLE_ENTITY,
+                body: BackupProblems {
+                    error: format!(
+                        "{} records in Redis don't parse, so no backup was built; repair them and \
+                         back up again",
+                        problems.len()
+                    ),
+                    problems,
+                },
+            });
+        }
         let backup = Backup {
             settings,
             users,
             groups,
             images,
             pipelines,
+            scoped_tokens,
+            network_policy_sets,
+            pruned: Vec::new(),
         };
         Ok(backup)
     }
 
-    /// Wipes the backend and restores a backup
+    /// Lists every reason this backup can't be restored as it is
+    ///
+    /// Every name must be a valid Redis key segment and appear once; every group member and owner
+    /// must be a user in the backup, and every group a user is in a group in the backup; every image and pipeline must name a group in the backup;
+    /// every image a pipeline runs must be an image of the pipeline's group in the backup; every
+    /// user must hold a primary token no other user holds; every scoped token must belong to a
+    /// user in the backup and hold a value no primary or other scoped token holds; and every
+    /// network-policy set must name a group in the backup.
+    #[must_use]
+    pub fn problems(&self) -> Vec<BackupProblem> {
+        let mut problems = Vec::new();
+        // the users and groups, which the other records refer to
+        let (users, groups) = self.people_problems(&mut problems);
+        // the images and pipelines of the groups
+        self.image_problems(&groups, &mut problems);
+        // the users' primary and scoped tokens, and the groups' network-policy sets
+        self.token_problems(&users, &mut problems);
+        self.policy_set_problems(&groups, &mut problems);
+        problems
+    }
+
+    /// Records the problems of the backup's users and groups, returning their names
+    ///
+    /// # Arguments
+    ///
+    /// * `problems` - The problems found so far
+    fn people_problems(&self, problems: &mut Vec<BackupProblem>) -> (HashSet<&str>, HashSet<&str>) {
+        // each user appears once under a valid name
+        let mut users = HashSet::with_capacity(self.users.len());
+        for user in &self.users {
+            let key = format!("users/{}", user.username);
+            check_segment(problems, &key, "username", &user.username);
+            if !users.insert(user.username.as_str()) {
+                problems.push(BackupProblem::new(
+                    &key,
+                    "the backup holds this user more than once",
+                ));
+            }
+        }
+        // each group appears once under a valid name, and its members are users in the backup
+        let mut groups = HashSet::with_capacity(self.groups.len());
+        for group in &self.groups {
+            let key = format!("groups/{}", group.name);
+            check_segment(problems, &key, "name", &group.name);
+            if !groups.insert(group.name.as_str()) {
+                problems.push(BackupProblem::new(
+                    &key,
+                    "the backup holds this group more than once",
+                ));
+            }
+            for (role, members) in roles(group) {
+                // the direct and combined members, each named once and in a stable order
+                let names: BTreeSet<&String> =
+                    members.direct.iter().chain(&members.combined).collect();
+                for name in names {
+                    if !users.contains(name.as_str()) {
+                        problems.push(BackupProblem::new(
+                            &key,
+                            format!("its {role} include {name}, a user the backup doesn't hold"),
+                        ));
+                    }
+                }
+            }
+        }
+        // each user's groups are groups in the backup
+        for user in &self.users {
+            let names: BTreeSet<&String> = user.groups.iter().collect();
+            for name in names {
+                if !groups.contains(name.as_str()) {
+                    problems.push(BackupProblem::new(
+                        format!("users/{}", user.username),
+                        format!("its groups include {name}, a group the backup doesn't hold"),
+                    ));
+                }
+            }
+        }
+        // the names the other records refer to
+        (users, groups)
+    }
+
+    /// Lists the references among the backup's users and groups that name a user or group the
+    /// backup doesn't hold: group members, users' groups, and scoped tokens' groups
+    fn dangling(&self) -> BTreeSet<Dangling> {
+        // the users and groups the backup holds
+        let users: HashSet<&str> = self
+            .users
+            .iter()
+            .map(|user| user.username.as_str())
+            .collect();
+        let groups: HashSet<&str> = self
+            .groups
+            .iter()
+            .map(|group| group.name.as_str())
+            .collect();
+        let mut dangling = BTreeSet::new();
+        // group members, direct and combined, that aren't users in the backup
+        for group in &self.groups {
+            for (role, members) in roles(group) {
+                for user in members.direct.iter().chain(&members.combined) {
+                    if !users.contains(user.as_str()) {
+                        dangling.insert(Dangling::Member {
+                            group: group.name.clone(),
+                            role,
+                            user: user.clone(),
+                        });
+                    }
+                }
+            }
+        }
+        // users' groups that aren't in the backup
+        for user in &self.users {
+            for group in &user.groups {
+                if !groups.contains(group.as_str()) {
+                    dangling.insert(Dangling::Membership {
+                        user: user.username.clone(),
+                        group: group.clone(),
+                    });
+                }
+            }
+        }
+        // scoped tokens' groups that aren't in the backup
+        for token in &self.scoped_tokens {
+            for group in &token.groups {
+                if !groups.contains(group.as_str()) {
+                    dangling.insert(Dangling::TokenGroup {
+                        owner: token.owner.clone(),
+                        name: token.name.clone(),
+                        group: group.clone(),
+                    });
+                }
+            }
+        }
+        dangling
+    }
+
+    /// Drops dangling references from the backup, returning every change it made
+    ///
+    /// A group whose last direct owner is dropped, and which has no owner metagroup, gets the
+    /// bootstrap admin as its direct owner, since the API never leaves a group without an owner;
+    /// without that admin in the backup, the group's owners are kept, so their problem stays. A
+    /// scoped token left with no group is deleted, since the API never holds such a token.
+    ///
+    /// # Arguments
+    ///
+    /// * `gone` - The references to drop
+    fn apply_prune(&mut self, gone: &BTreeSet<Dangling>) -> Vec<PrunedReference> {
+        // the changes, in the order they are made
+        let mut pruned = Vec::new();
+        // group members first, since an owner the admin replaces makes the admin a member
+        self.prune_members(gone, &mut pruned);
+        // then users' groups and scoped tokens' groups
+        self.prune_memberships(gone, &mut pruned);
+        self.prune_tokens(gone, &mut pruned);
+        pruned
+    }
+
+    /// Drops the group members that are gone, giving a group left without an owner the
+    /// bootstrap admin as owner, and records each change
+    ///
+    /// # Arguments
+    ///
+    /// * `gone` - The references to drop
+    /// * `pruned` - The changes made so far
+    fn prune_members(&mut self, gone: &BTreeSet<Dangling>, pruned: &mut Vec<PrunedReference>) {
+        // only a backup holding the admin can give it a group
+        let has_admin = self
+            .users
+            .iter()
+            .any(|user| user.username == BOOTSTRAP_ADMIN);
+        // the groups the admin now owns
+        let mut owned = Vec::new();
+        // drop each group's members that are gone, role by role
+        for group in &mut self.groups {
+            let name = group.name.clone();
+            let owned_before = owned.len();
+            let roles = [
+                ("owners", &mut group.owners),
+                ("managers", &mut group.managers),
+                ("users", &mut group.users),
+                ("monitors", &mut group.monitors),
+            ];
+            for (role, members) in roles {
+                // the members of this role that are gone
+                let dropped: BTreeSet<&String> = gone
+                    .iter()
+                    .filter_map(|reference| match reference {
+                        Dangling::Member {
+                            group,
+                            role: of,
+                            user,
+                        } if *group == name && *of == role => Some(user),
+                        _ => None,
+                    })
+                    .collect();
+                if dropped.is_empty() {
+                    continue;
+                }
+                // a group never loses its last owner: the admin takes its place, if it can
+                let ownerless = role == "owners"
+                    && members.metagroups.is_empty()
+                    && members.direct.iter().all(|user| dropped.contains(user));
+                if ownerless && !has_admin {
+                    continue;
+                }
+                // drop each member from the direct and combined members
+                for user in dropped {
+                    members.direct.remove(user);
+                    members.combined.remove(user);
+                    pruned.push(PrunedReference {
+                        record: format!("groups/{name}"),
+                        field: role.to_owned(),
+                        action: PruneAction::Dropped,
+                        name: Some(user.clone()),
+                        referent: Some(PrunedReferent::User),
+                        reason: "the user isn't in the backup and doesn't exist".to_owned(),
+                    });
+                }
+                // and make the admin the owner of a group left without one
+                if ownerless {
+                    members.direct.insert(BOOTSTRAP_ADMIN.to_owned());
+                    members.combined.insert(BOOTSTRAP_ADMIN.to_owned());
+                    owned.push(name.clone());
+                    pruned.push(PrunedReference {
+                        record: format!("groups/{name}"),
+                        field: role.to_owned(),
+                        action: PruneAction::Added,
+                        name: Some(BOOTSTRAP_ADMIN.to_owned()),
+                        referent: Some(PrunedReferent::User),
+                        reason: "the group would be left with no owner, which the API never \
+                                 allows, so the bootstrap admin owns it"
+                            .to_owned(),
+                    });
+                }
+            }
+            // an owner holds no lower role, as the API keeps it, so the admin leaves those it held
+            if owned.len() > owned_before {
+                let lower = [
+                    ("managers", &mut group.managers),
+                    ("users", &mut group.users),
+                    ("monitors", &mut group.monitors),
+                ];
+                for (role, members) in lower {
+                    let direct = members.direct.remove(BOOTSTRAP_ADMIN);
+                    let combined = members.combined.remove(BOOTSTRAP_ADMIN);
+                    if direct || combined {
+                        pruned.push(PrunedReference {
+                            record: format!("groups/{name}"),
+                            field: role.to_owned(),
+                            action: PruneAction::Dropped,
+                            name: Some(BOOTSTRAP_ADMIN.to_owned()),
+                            referent: Some(PrunedReferent::User),
+                            reason: "the bootstrap admin now owns the group, and the API gives \
+                                     a group's owner no lower role"
+                                .to_owned(),
+                        });
+                    }
+                }
+            }
+        }
+        // the admin is a member of every group it now owns, as an owner the API adds is
+        if let Some(admin) = self
+            .users
+            .iter_mut()
+            .find(|user| user.username == BOOTSTRAP_ADMIN)
+        {
+            for group in owned {
+                if !admin.groups.contains(&group) {
+                    admin.groups.push(group);
+                }
+            }
+        }
+    }
+
+    /// Drops the groups that are gone from users' groups, and records each drop
+    ///
+    /// # Arguments
+    ///
+    /// * `gone` - The references to drop
+    /// * `pruned` - The changes made so far
+    fn prune_memberships(&mut self, gone: &BTreeSet<Dangling>, pruned: &mut Vec<PrunedReference>) {
+        for user in &mut self.users {
+            // the groups of this user that are gone
+            let dropped: BTreeSet<String> = gone
+                .iter()
+                .filter_map(|reference| match reference {
+                    Dangling::Membership { user: of, group } if *of == user.username => {
+                        Some(group.clone())
+                    }
+                    _ => None,
+                })
+                .collect();
+            // drop them from the user's groups
+            user.groups.retain(|group| !dropped.contains(group));
+            for group in dropped {
+                pruned.push(PrunedReference {
+                    record: format!("users/{}", user.username),
+                    field: "groups".to_owned(),
+                    action: PruneAction::Dropped,
+                    name: Some(group),
+                    referent: Some(PrunedReferent::Group),
+                    reason: "the group isn't in the backup and doesn't exist".to_owned(),
+                });
+            }
+        }
+    }
+
+    /// Narrows each scoped token to the groups that exist, deleting a token left with none, and
+    /// records each change
+    ///
+    /// # Arguments
+    ///
+    /// * `gone` - The references to drop
+    /// * `pruned` - The changes made so far
+    fn prune_tokens(&mut self, gone: &BTreeSet<Dangling>, pruned: &mut Vec<PrunedReference>) {
+        // the positions of the tokens left with no group
+        let mut emptied = HashSet::new();
+        for (index, token) in self.scoped_tokens.iter_mut().enumerate() {
+            // the groups of this token that are gone
+            let record = format!("scoped_tokens/{}/{}", token.owner, token.name);
+            let dropped: BTreeSet<String> = gone
+                .iter()
+                .filter_map(|reference| match reference {
+                    Dangling::TokenGroup { owner, name, group }
+                        if *owner == token.owner && *name == token.name =>
+                    {
+                        Some(group.clone())
+                    }
+                    _ => None,
+                })
+                .collect();
+            if dropped.is_empty() {
+                continue;
+            }
+            // drop them from the token's groups, narrowing it
+            token.groups.retain(|group| !dropped.contains(group));
+            for group in dropped {
+                pruned.push(PrunedReference {
+                    record: record.clone(),
+                    field: "groups".to_owned(),
+                    action: PruneAction::Dropped,
+                    name: Some(group),
+                    referent: Some(PrunedReferent::Group),
+                    reason: "the group isn't in the backup and doesn't exist".to_owned(),
+                });
+            }
+            // a token left with no group is deleted
+            if token.groups.is_empty() {
+                emptied.insert(index);
+                pruned.push(PrunedReference {
+                    record,
+                    field: "groups".to_owned(),
+                    action: PruneAction::Deleted,
+                    name: None,
+                    referent: None,
+                    reason: "a scoped token must be limited to at least one group, and every \
+                             group it named is gone"
+                        .to_owned(),
+                });
+            }
+        }
+        // remove the emptied tokens, keeping the others in order
+        let mut index = 0;
+        self.scoped_tokens.retain(|_| {
+            let keep = !emptied.contains(&index);
+            index += 1;
+            keep
+        });
+    }
+
+    /// Records the problems of the backup's images and pipelines
+    ///
+    /// # Arguments
+    ///
+    /// * `groups` - The names of the backup's groups
+    /// * `problems` - The problems found so far
+    fn image_problems(&self, groups: &HashSet<&str>, problems: &mut Vec<BackupProblem>) {
+        // each image appears once under valid names, in a group in the backup
+        let mut images = HashSet::with_capacity(self.images.len());
+        for image in &self.images {
+            let key = format!("images/{}/{}", image.group, image.name);
+            check_segment(problems, &key, "group", &image.group);
+            check_segment(problems, &key, "name", &image.name);
+            if !groups.contains(image.group.as_str()) {
+                problems.push(BackupProblem::new(
+                    &key,
+                    format!("its group {} isn't in the backup", image.group),
+                ));
+            }
+            if !images.insert((image.group.as_str(), image.name.as_str())) {
+                problems.push(BackupProblem::new(
+                    &key,
+                    "the backup holds this image more than once",
+                ));
+            }
+        }
+        // each pipeline appears once under valid names, in a group in the backup, and runs
+        // only images of that group in the backup
+        let mut pipelines = HashSet::with_capacity(self.pipelines.len());
+        for pipeline in &self.pipelines {
+            let key = format!("pipelines/{}/{}", pipeline.group, pipeline.name);
+            check_segment(problems, &key, "group", &pipeline.group);
+            check_segment(problems, &key, "name", &pipeline.name);
+            if !groups.contains(pipeline.group.as_str()) {
+                problems.push(BackupProblem::new(
+                    &key,
+                    format!("its group {} isn't in the backup", pipeline.group),
+                ));
+            }
+            if !pipelines.insert((pipeline.group.as_str(), pipeline.name.as_str())) {
+                problems.push(BackupProblem::new(
+                    &key,
+                    "the backup holds this pipeline more than once",
+                ));
+            }
+            let order: BTreeSet<&String> = pipeline.order.iter().flatten().collect();
+            for image in order {
+                if !images.contains(&(pipeline.group.as_str(), image.as_str())) {
+                    problems.push(BackupProblem::new(
+                        &key,
+                        format!(
+                            "it runs image {image}, which the backup doesn't hold in group {}",
+                            pipeline.group
+                        ),
+                    ));
+                }
+            }
+        }
+    }
+
+    /// Records the problems of the backup's primary and scoped tokens
+    ///
+    /// A token value logs in as whoever holds it, so no two users may share a primary token and
+    /// no scoped token may hold a primary token's value or another scoped token's.
+    ///
+    /// # Arguments
+    ///
+    /// * `users` - The names of the backup's users
+    /// * `problems` - The problems found so far
+    fn token_problems(&self, users: &HashSet<&str>, problems: &mut Vec<BackupProblem>) {
+        // each user's primary token is a value no other user holds
+        let mut primaries = HashSet::with_capacity(self.users.len());
+        for user in &self.users {
+            if !primaries.insert(user.token.as_str()) {
+                problems.push(BackupProblem::new(
+                    format!("users/{}", user.username),
+                    "another user in the backup holds the same token",
+                ));
+            }
+        }
+        // each scoped token appears once, under valid names, for a user in the backup, with a
+        // value of its own
+        let mut tokens = HashSet::with_capacity(self.scoped_tokens.len());
+        let mut values = HashSet::with_capacity(self.scoped_tokens.len());
+        for token in &self.scoped_tokens {
+            let key = format!("scoped_tokens/{}/{}", token.owner, token.name);
+            check_segment(problems, &key, "owner", &token.owner);
+            check_segment(problems, &key, "name", &token.name);
+            if !users.contains(token.owner.as_str()) {
+                problems.push(BackupProblem::new(
+                    &key,
+                    format!("its owner {} isn't in the backup", token.owner),
+                ));
+            }
+            if !tokens.insert((token.owner.as_str(), token.name.as_str())) {
+                problems.push(BackupProblem::new(
+                    &key,
+                    "the backup holds this scoped token more than once",
+                ));
+            }
+            if primaries.contains(token.token.as_str()) {
+                problems.push(BackupProblem::new(
+                    &key,
+                    "a user in the backup holds its value as a primary token",
+                ));
+            }
+            if !values.insert(token.token.as_str()) {
+                problems.push(BackupProblem::new(
+                    &key,
+                    "another scoped token in the backup holds the same value",
+                ));
+            }
+        }
+    }
+
+    /// Records the problems of the backup's network-policy sets
+    ///
+    /// # Arguments
+    ///
+    /// * `groups` - The names of the backup's groups
+    /// * `problems` - The problems found so far
+    fn policy_set_problems(&self, groups: &HashSet<&str>, problems: &mut Vec<BackupProblem>) {
+        // each network-policy set appears once, for a group in the backup, under valid names
+        let mut sets = HashSet::with_capacity(self.network_policy_sets.len());
+        for set in &self.network_policy_sets {
+            let key = format!("network_policy_sets/{}", set.group);
+            check_segment(problems, &key, "group", &set.group);
+            if !groups.contains(set.group.as_str()) {
+                problems.push(BackupProblem::new(
+                    &key,
+                    format!("its group {} isn't in the backup", set.group),
+                ));
+            }
+            if !sets.insert(set.group.as_str()) {
+                problems.push(BackupProblem::new(
+                    &key,
+                    "the backup holds this group's network-policy set more than once",
+                ));
+            }
+            for policy in &set.policies {
+                check_segment(problems, &key, "policy", policy);
+            }
+        }
+    }
+
+    /// Validates a backup, then replaces this namespace's Redis state with it
+    ///
+    /// A backup with problems is refused before any key is deleted. Only the keys of this API's
+    /// namespace are deleted, unless `params` asks to flush the API's whole Redis database.
     ///
     /// # Arguments
     ///
     /// * `user` - The user that is restoring Thorium data
+    /// * `params` - The restore params
     /// * `shared` - Shared Thorium objects
     /// * `span` - The span to log traces under
-    pub async fn restore(&self, user: &User, shared: &Shared, span: &Span) -> Result<(), ApiError> {
+    pub async fn restore(
+        &self,
+        user: &User,
+        params: &RestoreParams,
+        shared: &Shared,
+        span: &Span,
+    ) -> Result<(), ApiError> {
         // start our system restore span
         let span = span!(
             parent: span,
             Level::INFO,
             "System Restore",
-            user = user.username
+            user = user.username,
+            flush_db = params.flush_db
         );
         // only admins can restore data
         is_admin!(user);
-        // wipe backends now
-        db::system::wipe(shared).await?;
-        // initialie the system and restore settings
-        db::system::init(shared).await?;
-        db::system::restore_settings(&self.settings, shared).await?;
-        // restore user/group/pipeline data
-        db::users::restore(&self.users, shared).await?;
-        db::groups::restore(&self.groups, shared, &span).await?;
-        db::images::restore(&self.images, shared).await?;
-        db::pipelines::restore(&self.pipelines, shared).await?;
+        // refuse a backup whose records don't fit together before anything is deleted
+        let problems = self.problems();
+        if !problems.is_empty() {
+            return Err(ApiError::Problems {
+                code: StatusCode::BAD_REQUEST,
+                body: BackupProblems {
+                    error: format!(
+                        "the backup can't be restored: {} problems were found, and nothing was \
+                         changed",
+                        problems.len()
+                    ),
+                    problems,
+                },
+            });
+        }
+        // what each step wrote, for the error of a step that fails
+        let mut written: Vec<(&str, usize)> = Vec::with_capacity(8);
+        // delete this namespace's keys, or flush the whole database when asked, naming the step
+        // that ran in its error
+        let deleted = if params.flush_db {
+            db::system::flush_db(shared)
+                .await
+                .map_err(|error| step_failed("flush", &written, &error))?
+        } else {
+            db::system::wipe(shared)
+                .await
+                .map_err(|error| step_failed("wipe", &written, &error))?
+        };
+        written.push((
+            "deleted keys",
+            usize::try_from(deleted).unwrap_or(usize::MAX),
+        ));
+        // initialize the system and restore settings
+        db::system::init(shared)
+            .await
+            .map_err(|error| step_failed("init", &written, &error))?;
+        db::system::restore_settings(&self.settings, shared)
+            .await
+            .map_err(|error| step_failed("settings", &written, &error))?;
+        written.push(("settings", 1));
+        // restore users with their scoped tokens
+        db::users::restore(&self.users, shared)
+            .await
+            .map_err(|error| step_failed("users", &written, &error))?;
+        written.push(("users", self.users.len()));
+        db::users::restore_scoped_tokens(&self.scoped_tokens, shared)
+            .await
+            .map_err(|error| step_failed("scoped tokens", &written, &error))?;
+        written.push(("scoped tokens", self.scoped_tokens.len()));
+        // restore groups, images, and pipelines
+        db::groups::restore(&self.groups, shared, &span)
+            .await
+            .map_err(|error| step_failed("groups", &written, &error))?;
+        written.push(("groups", self.groups.len()));
+        db::images::restore(&self.images, shared)
+            .await
+            .map_err(|error| step_failed("images", &written, &error))?;
+        written.push(("images", self.images.len()));
+        db::pipelines::restore(&self.pipelines, shared)
+            .await
+            .map_err(|error| step_failed("pipelines", &written, &error))?;
+        written.push(("pipelines", self.pipelines.len()));
+        // restore the network policies each group holds
+        db::network_policies::restore_sets(&self.network_policy_sets, shared)
+            .await
+            .map_err(|error| step_failed("network-policy sets", &written, &error))?;
         Ok(())
     }
+}
+
+/// Builds the error of a restore step that failed, naming the step and what the steps before it
+/// wrote
+///
+/// The step's own error is logged, not returned, since it can hold internal details. Until the
+/// users step lands, the namespace may hold no users, so the error of a step at or before it says
+/// how an admin gets back in to run the restore again.
+///
+/// # Arguments
+///
+/// * `step` - The step that failed
+/// * `written` - What each step before it wrote
+/// * `error` - Why the step failed
+fn step_failed(step: &str, written: &[(&str, usize)], error: &ApiError) -> ApiError {
+    // log the full error for the cluster's operators
+    event!(
+        Level::ERROR,
+        msg = "A restore step failed",
+        step,
+        kind = error.kind(),
+        error = error.msg()
+    );
+    // name the step, the kind of failure, and what was written before it
+    let before = if written.is_empty() {
+        "before any step wrote anything".to_owned()
+    } else {
+        let counts: Vec<String> = written
+            .iter()
+            .map(|(name, count)| format!("{name} {count}"))
+            .collect();
+        format!("after the steps before it wrote {}", counts.join(", "))
+    };
+    // say how to run it again, which needs an admin who can log in
+    let rerun = if written.iter().any(|(name, _)| *name == "users") {
+        "the same restore can be run again once the cause is fixed"
+    } else {
+        "the namespace may hold no users now, so no one can log in to run it again: once the \
+         cause is fixed, bootstrap an admin with the API's secret key and run the same restore \
+         again as that admin"
+    };
+    ApiError::new(
+        StatusCode::INTERNAL_SERVER_ERROR,
+        Some(format!(
+            "the restore failed in the {step} step ({} error) {before}; {rerun}",
+            error.kind()
+        )),
+    )
+}
+
+/// Records a problem when a name can't be one segment of a Redis key
+///
+/// A name must be non-empty and hold no `:`, which separates key segments; keys are binary safe,
+/// so any other character is allowed.
+///
+/// # Arguments
+///
+/// * `problems` - The problems found so far
+/// * `key` - The record the name belongs to
+/// * `field` - Which of the record's names this is
+/// * `name` - The name
+fn check_segment(problems: &mut Vec<BackupProblem>, key: &str, field: &str, name: &str) {
+    // an empty name or a separator would change which key is written
+    if name.is_empty() || name.contains(':') {
+        problems.push(BackupProblem::new(
+            key,
+            format!("its {field} isn't a valid Redis key segment"),
+        ));
+    }
+}
+
+/// Returns the members of each role of a group, by the role's name
+///
+/// # Arguments
+///
+/// * `group` - The group
+fn roles(group: &Group) -> [(&'static str, &GroupUsers); 4] {
+    // every role a member can hold
+    [
+        ("owners", &group.owners),
+        ("managers", &group.managers),
+        ("users", &group.users),
+        ("monitors", &group.monitors),
+    ]
 }
 
 impl Node {
@@ -1015,7 +1906,13 @@ impl From<NodeRow> for NodeListLine {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use super::{BOOTSTRAP_ADMIN, check_segment};
+    use crate::models::{
+        Backup, Group, GroupAllowed, GroupUsers, Pipeline, PruneAction, PrunedReferent,
+        SystemSettings, User, UserRole, UserSettings,
+    };
     use clap::ValueEnum;
+    use std::collections::{HashMap, HashSet};
 
     /// The backend `default_scalers` expansions for node list and get params expand an empty
     /// scaler list to every scaler, including `ImageScaler::Kvm`, so a node listing or node get
@@ -1048,5 +1945,273 @@ mod tests {
         let mut get = NodeGetParams::default().scaler(ImageScaler::Windows);
         get.default_scalers();
         assert_eq!(get.scalers, vec![ImageScaler::Windows]);
+    }
+
+    /// Builds a user of the given groups holding a token of its own name
+    ///
+    /// # Arguments
+    ///
+    /// * `name` - The username
+    /// * `groups` - The groups the user is in
+    fn user(name: &str, groups: &[&str]) -> User {
+        // a plain user with nothing but a name, groups, and a token
+        User {
+            username: name.to_owned(),
+            password: None,
+            email: format!("{name}@example.invalid"),
+            role: UserRole::User,
+            groups: groups.iter().map(|group| (*group).to_owned()).collect(),
+            actual_groups: Vec::new(),
+            token: format!("token-{name}"),
+            token_expiration: chrono::Utc::now(),
+            unix: None,
+            settings: UserSettings::default(),
+            verified: true,
+            verification_token: None,
+            verification_sent: None,
+            aliases: HashMap::new(),
+            image: None,
+        }
+    }
+
+    /// Builds the members of one role of a group
+    ///
+    /// # Arguments
+    ///
+    /// * `direct` - The direct members, who are the combined members too
+    fn members(direct: &[&str]) -> GroupUsers {
+        // no metagroups, so the combined members are the direct ones
+        let direct: HashSet<String> = direct.iter().map(|name| (*name).to_owned()).collect();
+        GroupUsers {
+            combined: direct.clone(),
+            direct,
+            metagroups: HashSet::new(),
+        }
+    }
+
+    /// Builds a group with owners and users
+    ///
+    /// # Arguments
+    ///
+    /// * `name` - The group's name
+    /// * `owners` - Its direct owners
+    /// * `users` - Its direct users
+    fn group(name: &str, owners: &[&str], users: &[&str]) -> Group {
+        // no managers or monitors
+        Group {
+            name: name.to_owned(),
+            owners: members(owners),
+            managers: members(&[]),
+            analysts: HashSet::new(),
+            users: members(users),
+            monitors: members(&[]),
+            description: None,
+            allowed: GroupAllowed::default(),
+        }
+    }
+
+    /// Builds a backup of users and groups
+    ///
+    /// # Arguments
+    ///
+    /// * `users` - The users
+    /// * `groups` - The groups
+    fn backup(users: Vec<User>, groups: Vec<Group>) -> Backup {
+        // nothing but users and groups
+        Backup {
+            settings: SystemSettings::default(),
+            users,
+            groups,
+            images: Vec::new(),
+            pipelines: Vec::new(),
+            scoped_tokens: Vec::new(),
+            network_policy_sets: Vec::new(),
+            pruned: Vec::new(),
+        }
+    }
+
+    /// Returns whether a problem names a record and some text
+    ///
+    /// # Arguments
+    ///
+    /// * `backup` - The backup to check
+    /// * `key` - The record
+    /// * `text` - Text its error must contain
+    fn has_problem(backup: &Backup, key: &str, text: &str) -> bool {
+        // the record and the text, in one problem
+        backup
+            .problems()
+            .iter()
+            .any(|problem| problem.key == key && problem.error.contains(text))
+    }
+
+    /// A user's membership in a group the backup doesn't hold is a problem, as a member that
+    /// isn't a user is
+    #[test]
+    fn a_membership_in_a_missing_group_is_a_problem() {
+        // alice is in a group that isn't there
+        let held = backup(
+            vec![
+                user(BOOTSTRAP_ADMIN, &["vesta"]),
+                user("alice", &["vesta", "ghost"]),
+            ],
+            vec![group("vesta", &[BOOTSTRAP_ADMIN], &["alice"])],
+        );
+        assert!(
+            has_problem(&held, "users/alice", "ghost"),
+            "{:?}",
+            held.problems()
+        );
+        assert_eq!(held.problems().len(), 1, "{:?}", held.problems());
+    }
+
+    /// Pruning the last direct owner of a group without owner metagroups adds the bootstrap admin
+    /// as its owner and member; without that admin in the backup the owner stays, and so does
+    /// its problem
+    #[test]
+    fn the_last_owner_is_replaced_by_the_admin_or_stays_fatal() {
+        // a group owned only by a user that is gone
+        let mut held = backup(
+            vec![user(BOOTSTRAP_ADMIN, &[]), user("alice", &["vesta"])],
+            vec![group("vesta", &["ghost"], &["alice"])],
+        );
+        let dangling = held.dangling();
+        let pruned = held.apply_prune(&dangling);
+        // the admin owns the group and is in it
+        let admin: HashSet<String> = [BOOTSTRAP_ADMIN.to_owned()].into();
+        assert_eq!(held.groups[0].owners.direct, admin);
+        assert_eq!(held.groups[0].owners.combined, admin);
+        assert!(held.users[0].groups.contains(&"vesta".to_owned()));
+        assert!(held.problems().is_empty(), "{:?}", held.problems());
+        // the drop and the addition are recorded, in that order
+        let changes: Vec<(PruneAction, Option<&str>)> = pruned
+            .iter()
+            .map(|change| (change.action, change.name.as_deref()))
+            .collect();
+        assert_eq!(
+            changes,
+            vec![
+                (PruneAction::Dropped, Some("ghost")),
+                (PruneAction::Added, Some(BOOTSTRAP_ADMIN))
+            ]
+        );
+        assert!(pruned.iter().all(|change| change.record == "groups/vesta"
+            && change.field == "owners"
+            && change.referent == Some(PrunedReferent::User)));
+        // without the admin the owner is kept and still a problem
+        let mut held = backup(
+            vec![user("alice", &["vesta"])],
+            vec![group("vesta", &["ghost"], &["alice"])],
+        );
+        let dangling = held.dangling();
+        let pruned = held.apply_prune(&dangling);
+        assert!(pruned.is_empty(), "{pruned:?}");
+        assert!(held.groups[0].owners.direct.contains("ghost"));
+        assert!(
+            has_problem(&held, "groups/vesta", "ghost"),
+            "{:?}",
+            held.problems()
+        );
+        // an owner beside the one that is gone keeps the group owned, so no admin is added
+        let mut held = backup(
+            vec![user(BOOTSTRAP_ADMIN, &[]), user("alice", &["vesta"])],
+            vec![group("vesta", &["ghost", "alice"], &[])],
+        );
+        let dangling = held.dangling();
+        let pruned = held.apply_prune(&dangling);
+        assert_eq!(pruned.len(), 1, "{pruned:?}");
+        let alice: HashSet<String> = ["alice".to_owned()].into();
+        assert_eq!(held.groups[0].owners.direct, alice);
+    }
+
+    /// Pruning the last direct owner of a group with an owner metagroup only drops that owner,
+    /// since the metagroup keeps the group owned, so the bootstrap admin isn't added
+    #[test]
+    fn an_owner_metagroup_keeps_the_group_owned_without_the_admin() {
+        // a group whose only direct owner is gone, beside an owner metagroup
+        let mut vesta = group("vesta", &["ghost"], &["alice"]);
+        vesta.owners.metagroups.insert("vesta-owners".to_owned());
+        let mut held = backup(
+            vec![user(BOOTSTRAP_ADMIN, &[]), user("alice", &["vesta"])],
+            vec![vesta],
+        );
+        let dangling = held.dangling();
+        let pruned = held.apply_prune(&dangling);
+        // the owner is dropped and nothing is added in its place
+        let changes: Vec<(PruneAction, Option<&str>)> = pruned
+            .iter()
+            .map(|change| (change.action, change.name.as_deref()))
+            .collect();
+        assert_eq!(changes, vec![(PruneAction::Dropped, Some("ghost"))]);
+        assert!(held.groups[0].owners.direct.is_empty());
+        assert!(!held.groups[0].owners.combined.contains(BOOTSTRAP_ADMIN));
+        // the admin isn't made a member of the group
+        assert!(!held.users[0].groups.contains(&"vesta".to_owned()));
+        assert!(held.problems().is_empty(), "{:?}", held.problems());
+    }
+
+    /// Pruning drops only user and group references: an image or pipeline naming a group that is
+    /// gone, a pipeline running an image its group lacks, a shared token, and an invalid name stay
+    /// problems
+    #[test]
+    fn pruning_leaves_every_other_problem() {
+        // a dangling member beside problems pruning never touches
+        let mut held = backup(
+            vec![
+                user(BOOTSTRAP_ADMIN, &["vesta"]),
+                user("alice", &["vesta", "ghost"]),
+            ],
+            vec![
+                group("vesta", &[BOOTSTRAP_ADMIN, "gone"], &["alice"]),
+                group("bad:name", &[BOOTSTRAP_ADMIN], &[]),
+            ],
+        );
+        let shared = held.users[0].token.clone();
+        held.users[1].token = shared;
+        let pipeline: Pipeline = serde_json::from_value(serde_json::json!({
+            "group": "ghost-group", "name": "flow", "creator": BOOTSTRAP_ADMIN,
+            "order": [["ghost-image"]], "sla": 1, "triggers": {}, "description": null,
+            "bans": {},
+        }))
+        .unwrap();
+        held.pipelines.push(pipeline);
+        let dangling = held.dangling();
+        let pruned = held.apply_prune(&dangling);
+        // the member and the membership are pruned
+        assert_eq!(pruned.len(), 2, "{pruned:?}");
+        assert!(!has_problem(&held, "groups/vesta", "gone"));
+        assert!(!has_problem(&held, "users/alice", "ghost"));
+        // and everything else is still a problem
+        assert!(has_problem(
+            &held,
+            "pipelines/ghost-group/flow",
+            "ghost-group"
+        ));
+        assert!(has_problem(
+            &held,
+            "pipelines/ghost-group/flow",
+            "ghost-image"
+        ));
+        assert!(has_problem(&held, "users/alice", "same token"));
+        assert!(has_problem(
+            &held,
+            "groups/bad:name",
+            "valid Redis key segment"
+        ));
+    }
+
+    /// A key segment may hold any character but the separator, and may not be empty
+    #[test]
+    fn key_segments_allow_any_character_but_the_separator() {
+        // unicode, a NUL, and spaces are fine in a binary-safe key
+        let mut problems = Vec::new();
+        for name in ["io", "é€😀éשלום\u{0}name", "a b", "a-b_c.d"] {
+            check_segment(&mut problems, "users/x", "username", name);
+        }
+        assert!(problems.is_empty(), "{problems:?}");
+        // a separator or an empty name is a problem
+        check_segment(&mut problems, "users/x", "username", "a:b");
+        check_segment(&mut problems, "users/x", "username", "");
+        assert_eq!(problems.len(), 2, "{problems:?}");
     }
 }

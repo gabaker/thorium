@@ -629,6 +629,11 @@ impl TagSupport for Entity {
 }
 
 /// The specific kind an entity is, including any data unique to its kind
+///
+/// Archived backups store each variant of `EntityKinds`, which lists this enum's variants in the
+/// same order, as its position in that list, so variants are append-only: never reorder, remove,
+/// or insert one; a new variant goes at the end. The golden-bytes test of archived enums in
+/// thoradm's offline suite fails if the order changes.
 #[derive(Debug, Clone, Serialize, Deserialize, EnumDiscriminants)]
 // generate type just containing the entity kind's name with no data
 #[strum_discriminants(name(EntityKinds))]
@@ -2155,5 +2160,87 @@ impl EntityParentInfo {
             }
             _ => false,
         }
+    }
+}
+
+/// The number of entities in one partition of the entities table, read to rebuild its census
+#[derive(Debug)]
+#[cfg_attr(feature = "scylla-utils", derive(scylla::DeserializeRow))]
+#[cfg_attr(
+    feature = "scylla-utils",
+    scylla(flavor = "enforce_order", skip_name_checks)
+)]
+pub struct EntityCensusRow {
+    /// The kind of the partition's entities
+    pub kind: String,
+    /// The group the partition's entities are in
+    pub group: String,
+    /// The year the partition's entities were created in
+    pub year: i32,
+    /// The partition's bucket within its year
+    pub bucket: i32,
+    /// How many entities the partition holds
+    pub count: i64,
+}
+
+#[cfg(feature = "scylla-utils")]
+impl super::CensusSupport for Entity {
+    /// The type returned by our prepared statement
+    type Row = EntityCensusRow;
+
+    /// Build the prepared statement for getting partition count info
+    ///
+    /// # Arguments
+    ///
+    /// * `scylla` - The session to prepare the statement with
+    /// * `ns` - The namespace the entities table is in
+    async fn scan_prepared_statement(
+        scylla: &scylla::client::session::Session,
+        ns: &str,
+    ) -> Result<scylla::statement::prepared::PreparedStatement, scylla::errors::PrepareError> {
+        // count each partition of a token range
+        scylla
+            .prepare(format!(
+                "SELECT kind, group, year, bucket, count(*) \
+                FROM {ns}.entities \
+                WHERE token(kind, group, year, bucket) >= ? \
+                AND token(kind, group, year, bucket) <= ? \
+                GROUP BY kind, group, year, bucket",
+            ))
+            .await
+    }
+
+    /// Get the count for this partition
+    ///
+    /// # Arguments
+    ///
+    /// * `row` - The partition's census row
+    fn get_count(row: &EntityCensusRow) -> i64 {
+        row.count
+    }
+
+    /// Get the bucket for this partition
+    ///
+    /// # Arguments
+    ///
+    /// * `row` - The partition's census row
+    fn get_bucket(row: &EntityCensusRow) -> i32 {
+        row.bucket
+    }
+
+    /// Build the sorted set key for this census operation; every kind of a group and year shares
+    /// one stream, as when entities are created
+    ///
+    /// # Arguments
+    ///
+    /// * `namespace` - The namespace the census is in
+    /// * `row` - The partition's census row
+    fn stream_key_from_row(namespace: &str, row: &Self::Row) -> String {
+        // build the stream key for this row
+        format!(
+            "{namespace}:census:entities:stream:{group}:{year}",
+            group = row.group,
+            year = row.year,
+        )
     }
 }

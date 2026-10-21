@@ -15,6 +15,10 @@ use super::backends::TagSupport;
 use pyo3::pyclass;
 
 /// The different types of tags
+///
+/// Archived backups store each variant as its position in this list, so variants are
+/// append-only: never reorder, remove, or insert one; a new variant goes at the end. The
+/// golden-bytes test of archived enums in thoradm's offline suite fails if the order changes.
 #[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Hash, Eq)]
 #[cfg_attr(
     feature = "rkyv-support",

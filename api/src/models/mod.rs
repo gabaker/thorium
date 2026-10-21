@@ -11,6 +11,7 @@ mod errors;
 pub mod events;
 pub mod files;
 pub mod git;
+pub mod graphics;
 pub mod groups;
 pub mod helpers;
 pub mod images;
@@ -138,12 +139,13 @@ pub use search::events::{
 };
 pub use streams::{Stream, StreamDepth, StreamObj};
 pub use system::{
-    ActiveJob, Backup, HostPathWhitelistUpdate, Node, NodeGetParams, NodeHealth, NodeListLine,
-    NodeListParams, NodeRegistration, NodeUpdate, Pools, ScalerStats, SpawnMap, StreamerInfoUpdate,
-    SystemComponents, SystemInfo, SystemInfoParams, SystemSettings, SystemSettingsResetParams,
-    SystemSettingsUpdate, SystemSettingsUpdateParams, SystemStats, Worker, WorkerDelete,
-    WorkerDeleteMap, WorkerList, WorkerRegistration, WorkerRegistrationList, WorkerStatus,
-    WorkerUpdate,
+    ActiveJob, Backup, BackupParams, BackupProblem, BackupProblems, HostPathWhitelistUpdate,
+    NetworkPolicySet, Node, NodeGetParams, NodeHealth, NodeListLine, NodeListParams,
+    NodeRegistration, NodeUpdate, Pools, PruneAction, PrunedReference, PrunedReferent,
+    RestoreParams, ScalerStats, SpawnMap, StreamerInfoUpdate, SystemComponents, SystemInfo,
+    SystemInfoParams, SystemSettings, SystemSettingsResetParams, SystemSettingsUpdate,
+    SystemSettingsUpdateParams, SystemStats, Worker, WorkerDelete, WorkerDeleteMap, WorkerList,
+    WorkerRegistration, WorkerRegistrationList, WorkerStatus, WorkerUpdate,
 };
 pub use tags::{TagCounts, TagKeyCounts};
 pub use trees::{

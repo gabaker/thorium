@@ -199,7 +199,7 @@ impl Sample {
                     return bad!("A content type must be set for the data form entry!".to_owned());
                 }
                 // make sure our file name does not cannot contain bad paths
-                file_opt = bounder::multipart_path(&data_field, "File name", true)?;
+                file_opt = bounder::multipart_name(&data_field, "File name", true)?;
                 // cart and stream this file into s3
                 let hashes = shared
                     .s3

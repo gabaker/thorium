@@ -914,7 +914,11 @@ impl User {
         // only admins can list user details
         is_admin!(self);
         // just get a backup since we want all users anyways
-        let users = db::users::backup(shared).await?;
+        let (users, problems) = db::users::backup(shared).await?;
+        // a user that doesn't parse fails the listing
+        if let Some(problem) = problems.first() {
+            return bad!(format!("{}: {}", problem.key, problem.error));
+        }
         // cast these users to scrubbed users
         let scrubbed = users.into_iter().map(ScrubbedUser::from).collect();
         Ok(scrubbed)

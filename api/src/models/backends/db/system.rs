@@ -90,7 +90,8 @@ pub async fn init(shared: &Shared) -> Result<(), ApiError> {
 /// # Arguments
 ///
 /// * `raw` - The hashmap to cast
-fn cast(mut raw: HashMap<String, String>) -> Result<SystemInfo, ApiError> {
+/// * `namespace` - The namespace this API serves
+fn cast(mut raw: HashMap<String, String>, namespace: &str) -> Result<SystemInfo, ApiError> {
     // return 404 if hashmap is empty
     if raw.is_empty() {
         return not_found!("SystemInfo not found".to_owned());
@@ -102,6 +103,7 @@ fn cast(mut raw: HashMap<String, String>) -> Result<SystemInfo, ApiError> {
         windows_cache: helpers::extract_bool(&mut raw, WINDOWS_CACHE_KEY)?,
         kvm_cache: helpers::extract_bool(&mut raw, KVM_CACHE_KEY)?,
         external_cache: helpers::extract_bool(&mut raw, EXTERNAL_CACHE_KEY)?,
+        namespace: Some(namespace.to_owned()),
     };
     Ok(info)
 }
@@ -126,12 +128,12 @@ pub async fn get_info(reset: Option<ImageScaler>, shared: &Shared) -> Result<Sys
             .query_async(conn!(shared))
             .await?;
         // cast raw data to system info
-        cast(raw)
+        cast(raw, &shared.config.thorium.namespace)
     } else {
         // just get system info
         let raw = query!(cmd("hgetall").arg(&keys.data), shared).await?;
         // cast raw data to system info
-        cast(raw)
+        cast(raw, &shared.config.thorium.namespace)
     }
 }
 
@@ -323,30 +325,121 @@ pub async fn update_settings(settings: &SystemSettings, shared: &Shared) -> Resu
 pub async fn restore_settings(settings: &SystemSettings, shared: &Shared) -> Result<(), ApiError> {
     // build system keys
     let keys = SystemKeys::new(shared);
-    // build a redis pipeline to restore the system settings
+    // build a redis pipeline that replaces the defaults init wrote with the backed-up settings
     let _: () = redis::pipe()
         .atomic()
-        .cmd("hsetnx").arg(&keys.settings).arg("reserved_cpu").arg(settings.reserved_cpu)
-        .cmd("hsetnx").arg(&keys.settings).arg("reserved_memory").arg(settings.reserved_memory)
-        .cmd("hsetnx").arg(&keys.settings).arg("reserved_storage").arg(settings.reserved_storage)
-        .cmd("hsetnx").arg(&keys.settings).arg("fairshare_cpu").arg(settings.fairshare_cpu)
-        .cmd("hsetnx").arg(&keys.settings).arg("fairshare_memory").arg(settings.fairshare_memory)
-        .cmd("hsetnx").arg(&keys.settings).arg("fairshare_storage").arg(settings.fairshare_storage)
-        .cmd("hsetnx").arg(&keys.settings).arg("host_path_whitelist").arg(serialize!(&settings.host_path_whitelist))
-        .cmd("hsetnx").arg(&keys.settings).arg("allow_unrestricted_host_paths").arg(serialize!(&settings.allow_unrestricted_host_paths))
+        .cmd("hset").arg(&keys.settings).arg("reserved_cpu").arg(settings.reserved_cpu)
+        .cmd("hset").arg(&keys.settings).arg("reserved_memory").arg(settings.reserved_memory)
+        .cmd("hset").arg(&keys.settings).arg("reserved_storage").arg(settings.reserved_storage)
+        .cmd("hset").arg(&keys.settings).arg("fairshare_cpu").arg(settings.fairshare_cpu)
+        .cmd("hset").arg(&keys.settings).arg("fairshare_memory").arg(settings.fairshare_memory)
+        .cmd("hset").arg(&keys.settings).arg("fairshare_storage").arg(settings.fairshare_storage)
+        .cmd("hset").arg(&keys.settings).arg("host_path_whitelist").arg(serialize!(&settings.host_path_whitelist))
+        .cmd("hset").arg(&keys.settings).arg("allow_unrestricted_host_paths").arg(serialize!(&settings.allow_unrestricted_host_paths))
         .query_async(conn!(shared)).await?;
     Ok(())
 }
 
-/// Wipes all Thorium controlled databases
+/// How many passes over the namespace's keys a wipe makes at most
+///
+/// A `SCAN` only promises the keys that exist for its whole run, so a key written during a pass
+/// can be missed by it; passes repeat until one finds nothing.
+const WIPE_PASSES: usize = 5;
+
+/// How many keys one `SCAN` call of a wipe asks for
+const WIPE_BATCH: usize = 1000;
+
+/// Escapes the characters a Redis `MATCH` pattern treats as glob syntax
+///
+/// # Arguments
+///
+/// * `text` - The literal text to match
+pub(crate) fn escape_glob(text: &str) -> String {
+    // put a backslash before every glob character
+    let mut escaped = String::with_capacity(text.len());
+    for chr in text.chars() {
+        if matches!(chr, '*' | '?' | '[' | ']' | '\\') {
+            escaped.push('\\');
+        }
+        escaped.push(chr);
+    }
+    escaped
+}
+
+/// Deletes every Redis key of this API's namespace, leaving other namespaces' keys alone
+///
+/// Keys are found with `SCAN MATCH {namespace}:*` and deleted with `UNLINK` in batches. A key
+/// written by another client while the wipe runs may survive it, as it would a `FLUSHDB`.
 ///
 /// # Arguments
 ///
 /// * `shared` - Shared Thorium objects
-pub async fn wipe(shared: &Shared) -> Result<(), ApiError> {
-    // wipe the currently selected redis db
-    let _: () = exec_query!(cmd("flushdb"), shared).await?;
-    Ok(())
+pub async fn wipe(shared: &Shared) -> Result<u64, ApiError> {
+    // every key of the namespace, and no key of a namespace whose name only starts with it
+    let pattern = format!("{}:*", escape_glob(&shared.config.thorium.namespace));
+    let mut deleted = 0;
+    for _ in 0..WIPE_PASSES {
+        // walk the namespace's keys, deleting each page as it comes
+        let mut found = 0;
+        let mut cursor: u64 = 0;
+        loop {
+            let (next, keys): (u64, Vec<Vec<u8>>) = query!(
+                cmd("scan")
+                    .arg(cursor)
+                    .arg("match")
+                    .arg(&pattern)
+                    .arg("count")
+                    .arg(WIPE_BATCH),
+                shared
+            )
+            .await?;
+            if !keys.is_empty() {
+                found += keys.len() as u64;
+                let () = exec_query!(cmd("unlink").arg(&keys), shared).await?;
+            }
+            cursor = next;
+            if cursor == 0 {
+                break;
+            }
+        }
+        deleted += found;
+        // a pass that finds nothing means the namespace is empty
+        if found == 0 {
+            return Ok(deleted);
+        }
+    }
+    // keys still appearing are being written by another client while the restore runs
+    event!(
+        Level::WARN,
+        msg = "Keys kept appearing in the namespace while it was wiped",
+        deleted
+    );
+    Ok(deleted)
+}
+
+/// Deletes every key in this API's Redis database with `FLUSHDB ASYNC`, returning how many keys
+/// it held
+///
+/// Every namespace's keys in the database are deleted, not only this API's; Redis's other
+/// databases are left alone, as this is not `FLUSHALL`. The flush returns at once and Redis frees
+/// the memory in the background.
+///
+/// # Arguments
+///
+/// * `shared` - Shared Thorium objects
+pub async fn flush_db(shared: &Shared) -> Result<u64, ApiError> {
+    // count the keys and flush them in one transaction, so the count is what the flush deleted
+    let (held,): (u64,) = query!(
+        redis::pipe()
+            .atomic()
+            .cmd("dbsize")
+            .cmd("flushdb")
+            .arg("async")
+            .ignore(),
+        shared
+    )
+    .await?;
+    Ok(held)
 }
 
 /// Save a node to scylla
@@ -911,6 +1004,7 @@ pub async fn delete_workers(
 #[cfg(test)]
 #[allow(clippy::unwrap_used)]
 mod tests {
+    use super::escape_glob;
     use super::*;
     use axum::http::StatusCode;
     use clap::ValueEnum;
@@ -1017,5 +1111,14 @@ mod tests {
             check_worker_owners("alice", &other).unwrap_err().status(),
             StatusCode::UNAUTHORIZED
         );
+    }
+
+    /// A namespace holding glob characters matches only itself once escaped
+    #[test]
+    fn glob_characters_in_a_namespace_are_escaped() {
+        // plain names pass unchanged
+        assert_eq!(escape_glob("testing_thorium"), "testing_thorium");
+        // each glob character gets a backslash
+        assert_eq!(escape_glob("th*r?u[m]\\"), "th\\*r\\?u\\[m\\]\\\\");
     }
 }

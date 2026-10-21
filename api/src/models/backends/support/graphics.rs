@@ -5,6 +5,7 @@ use axum::extract::multipart::Field;
 use mime::Mime;
 use std::path::PathBuf;
 
+use crate::models::graphics::graphic_extension;
 use crate::utils::s3::S3Client;
 use crate::utils::{ApiError, Shared};
 use crate::{bad, internal_err_unwrapped};
@@ -50,19 +51,13 @@ pub(crate) trait GraphicSupport {
                     Ok(ctype) => ctype,
                     Err(_) => return bad!(format!("Invalid content type: {unparsed}")),
                 };
-                // set our extension from the parsed content type; the explicit allowlist is the only
-                // gate (animated GIF and short video clips are valid graphics alongside static images),
-                // so anything not matched here is rejected as an unsupported type
-                match ctype.essence_str() {
-                    "image/bmp" => s3_path.set_extension("bmp"),
-                    "image/gif" => s3_path.set_extension("gif"),
-                    "image/jpeg" => s3_path.set_extension("jpeg"),
-                    "image/png" => s3_path.set_extension("png"),
-                    "image/svg+xml" => s3_path.set_extension("svg"),
-                    "video/mp4" => s3_path.set_extension("mp4"),
-                    "video/webm" => s3_path.set_extension("webm"),
+                // set our extension from the parsed content type; the allowlist in `GRAPHIC_TYPES` is
+                // the only gate (animated GIF and short video clips are valid graphics alongside static
+                // images), so anything not listed there is rejected as an unsupported type
+                match graphic_extension(ctype.essence_str()) {
+                    Some(extension) => s3_path.set_extension(extension),
                     // don't allow arbitrary content types
-                    _ => {
+                    None => {
                         return bad!(
                             "Only BMP, GIF, JPEG, PNG, SVG, MP4, and WebM graphics are supported"
                                 .to_owned()

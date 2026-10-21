@@ -1,6 +1,10 @@
 thorium:
   interface: "127.0.0.1"
   port: 38000
+  # the Scylla keyspace and Redis key prefix: lowercase ASCII letters (a-z), digits and
+  # underscores only, starting with a lowercase letter, at most 48 characters; Thorium refuses
+  # to start with any other namespace, so a namespace with uppercase letters must be renamed,
+  # and the Redis state under its old prefix isn't found or migrated
   namespace: "<NAMESPACE>"
   secret_key: "<SECRET_KEY>"
   tracing:
