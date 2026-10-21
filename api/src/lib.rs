@@ -38,6 +38,10 @@ pub mod client;
 #[cfg(feature = "client")]
 pub use client::{ContainerRuntime, CtlConf, Cursor, Error, Keys, SearchDate, Thorium};
 
+// expose the tool renderers harnesses use if the client is enabled
+#[cfg(feature = "client")]
+pub mod tools;
+
 // if the sync client is enabled then also rexport that along with the
 // static tokio runtime
 #[cfg(feature = "sync")]

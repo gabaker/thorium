@@ -1,0 +1,24 @@
+{
+  "name": "thorpal-model-egress",
+  "groups": [
+    "thorpal"
+  ],
+  "ingress": [],
+  "egress": [
+    {
+      "allowed_ips": [
+        {
+          "cidr": "192.0.2.10/32"
+        }
+      ],
+      "ports": [
+        {
+          "port": 18300,
+          "protocol": "TCP"
+        }
+      ]
+    }
+  ],
+  "forced_policy": false,
+  "default_policy": false
+}

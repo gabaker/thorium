@@ -1,0 +1,54 @@
+{
+  "Harness": {
+    "capabilities": {
+      "credential_kinds": [
+        "ApiKey"
+      ],
+      "file_io": true,
+      "mechanisms": [
+        "ThoriumApi"
+      ],
+      "model_apis": [
+        "AnthropicMessages"
+      ],
+      "per_agent_models": false
+    },
+    "orphaned_runs": "Delete",
+    "workload": {
+      "data": {
+        "dependencies": {
+          "ephemeral": {
+            "strategy": "Disabled"
+          },
+          "samples": {
+            "strategy": "Disabled"
+          }
+        },
+        "display_type": "String"
+      },
+      "environment": {
+        "K8s": {
+          "image": "",
+          "network_policies": [
+            "thorpal-model-egress"
+          ],
+          "scheduling": {
+            "resources": {
+              "cpu": 500,
+              "memory": 512
+            },
+            "spawn_limit": "Unlimited"
+          }
+        }
+      },
+      "execution": {
+        "args": {
+          "entrypoint": [
+            "/usr/local/bin/thorpal-harness"
+          ]
+        },
+        "timeout": 900
+      }
+    }
+  }
+}

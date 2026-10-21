@@ -1,0 +1,103 @@
+# The ThorPal harness for Thorium workflow runs, built from source
+#
+# The build context is a directory holding this repository's committed tree at the commit being
+# built, in thorium/. `../build-harness-image.sh --from-source` (or `--stage <DIR>`) stages it from
+# git, so the context holds only committed files and no credentials or .git directory. Cargo fetches the workspace's git dependencies (rig and
+# ghidra-cli among them) from their public repositories at the commits Cargo.lock pins. Build it
+# with `docker build -f <context>/thorium/thorpal/toolbox/harness/Dockerfile.source <context>`.
+#
+# The builder stage compiles thorpal-harness with a pinned nightly toolchain; the runtime stage
+# holds only the binary, the CA bundle, and the OpenSSL 3 libraries it links, and runs as an
+# unprivileged user. The harness's agents use no Ghidra tools, so the image carries neither Ghidra
+# nor a JDK. ./Dockerfile packages a prebuilt binary into the same runtime, for quick local builds.
+#
+# The base of both stages, pinned by digest so a moved tag can't change the build; to bump it,
+# resolve the tag's multi-arch index digest and update both. The builder and the runtime must share
+# it: the binary needs a glibc at least as new as the one it was built against.
+ARG IMAGE="docker.io/library/ubuntu:24.04@sha256:fe81560990fae86dc4743202b2cb4d3df98d0bcf949173cecef15ce1127ef852"
+
+FROM ${IMAGE} AS builder
+
+# the PEM text of a CA to trust while the builder stage downloads the toolchain and crates, such as
+# a TLS-intercepting proxy's; only the builder stage reads it, so it is neither trusted by nor
+# recorded in the published image
+ARG BUILD_CA_CERT=""
+
+# fail a RUN step if any command in a pipeline fails
+SHELL ["/bin/bash", "-o", "pipefail", "-c"]
+
+# install the compilers and libraries the harness and its dependencies build with, then trust
+# BUILD_CA_CERT when it is set
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends build-essential ca-certificates clang curl git \
+      libssl-dev pkg-config && \
+    rm -rf /var/lib/apt/lists/* && \
+    if [ -n "$BUILD_CA_CERT" ]; then \
+      printf '%s\n' "$BUILD_CA_CERT" > /usr/local/share/ca-certificates/build-ca.crt && \
+      update-ca-certificates; \
+    fi
+
+# the rustup release to install and the sha256 of its x86_64 Linux rustup-init from static.rust-lang.org
+# renovate: datasource=github-tags depName=rust-lang/rustup
+ARG RUSTUP_VERSION=1.29.1
+ARG RUSTUP_INIT_SHA256=dda7234360b7f578ca8b0ddcb80145646fa61a67c1720a5abc7051b35c9fcb71
+# the dated nightly the harness builds with (the workspace uses nightly features); bump it when
+# the workspace needs a newer one
+ARG RUST_TOOLCHAIN=nightly-2026-10-29
+
+# rustup and cargo live outside any home directory, and cargo checks TLS against the system bundle
+# (which holds BUILD_CA_CERT when it is set); cargo fetches the git dependencies with the git CLI,
+# which goes through the proxy settings and CA bundle as curl does
+ENV RUSTUP_HOME=/opt/rustup \
+    CARGO_HOME=/opt/cargo \
+    PATH=/opt/cargo/bin:${PATH} \
+    CARGO_HTTP_CAINFO=/etc/ssl/certs/ca-certificates.crt \
+    CARGO_NET_GIT_FETCH_WITH_CLI=true
+
+# download and verify rustup-init, then install the pinned toolchain
+RUN curl --proto '=https' --tlsv1.2 -sSf -o /tmp/rustup-init "https://static.rust-lang.org/rustup/archive/${RUSTUP_VERSION}/x86_64-unknown-linux-gnu/rustup-init" && \
+    echo "${RUSTUP_INIT_SHA256}  /tmp/rustup-init" | sha256sum -c - && \
+    chmod +x /tmp/rustup-init && \
+    /tmp/rustup-init -y --no-modify-path --profile minimal --default-toolchain "$RUST_TOOLCHAIN" && \
+    rm /tmp/rustup-init
+
+# this repository's source tree
+COPY thorium /src/thorium
+
+# the most parallel compile jobs cargo runs; empty uses every CPU
+ARG BUILD_JOBS=""
+
+# build the harness against Cargo.lock, which pins every crate and git dependency; gxhash needs the AES and SSE2 target features on x86_64
+WORKDIR /src/thorium
+RUN RUSTFLAGS="-C target-feature=+aes,+sse2" \
+      cargo build --release --locked ${BUILD_JOBS:+--jobs "$BUILD_JOBS"} -p thorpal --bin thorpal-harness && \
+    cp target/release/thorpal-harness /usr/local/bin/thorpal-harness && \
+    /usr/local/bin/thorpal-harness --capabilities > /dev/null
+
+FROM ${IMAGE}
+
+# fail a RUN step if any command in a pipeline fails
+SHELL ["/bin/bash", "-o", "pipefail", "-c"]
+
+# install the CA bundle and the OpenSSL 3 shared libraries the harness links
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends ca-certificates libssl3t64 && \
+    rm -rf /var/lib/apt/lists/*
+
+# run as an unprivileged user with a fixed uid/gid when the pod names no other (Thorium runs a
+# job as its user's uid when that user has one)
+RUN groupadd --system --gid 10001 thorpal && \
+    useradd --system --uid 10001 --gid thorpal --create-home --home-dir /home/thorpal \
+      --shell /usr/sbin/nologin thorpal
+
+# the run timeout in seconds; a run still going when it expires fails
+ENV THORPAL_HARNESS_TIMEOUT_SECS=600
+
+# the harness reads the run's files from the standard Thorium paths
+COPY --from=builder /usr/local/bin/thorpal-harness /usr/local/bin/thorpal-harness
+
+USER 10001:10001
+
+ENTRYPOINT ["/usr/local/bin/thorpal-harness"]
+# the harness takes no default arguments, so drop the base image's default command (bash)
+CMD []

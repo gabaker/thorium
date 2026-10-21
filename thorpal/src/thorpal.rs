@@ -815,6 +815,22 @@ impl ThorPalBuilder {
         self
     }
 
+    /// Add a tool whose name and schema are only known at runtime to the main agent
+    ///
+    /// Like [`ThorPalBuilder::tool`], the tool is attached at build time, in the
+    /// order it was added among the other caller-supplied tools.
+    ///
+    /// # Arguments
+    ///
+    /// * `tool` - The runtime-defined tool to add to the main agent
+    #[must_use]
+    pub fn dynamic_tool(mut self, tool: rig::tool::DynamicTool) -> Self {
+        // record a closure that adds this tool to the agent builder at build time
+        self.tools
+            .push(Box::new(move |agent| agent.dynamic_tool(tool)));
+        self
+    }
+
     /// Attach a single configured sub-agent as an agents-as-tools tool
     ///
     /// # Arguments

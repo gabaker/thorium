@@ -1,0 +1,237 @@
+{
+  "flat": {
+    "definition": {
+      "type": "function",
+      "name": "get_sample",
+      "description": "Run get_sample on a sample",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "sha256": {
+            "type": "string"
+          },
+          "depth": {
+            "type": "integer"
+          }
+        },
+        "required": [
+          "sha256",
+          "depth"
+        ],
+        "additionalProperties": false
+      },
+      "strict": true
+    },
+    "strict": true,
+    "warnings": []
+  },
+  "optional": {
+    "definition": {
+      "type": "function",
+      "name": "get_results",
+      "description": "Run get_results on a sample",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "sha256": {
+            "type": "string"
+          },
+          "depth": {
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "verbose": {
+            "type": [
+              "boolean",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "sha256",
+          "depth",
+          "verbose"
+        ],
+        "additionalProperties": false
+      },
+      "strict": true
+    },
+    "strict": true,
+    "warnings": []
+  },
+  "nested": {
+    "definition": {
+      "type": "function",
+      "name": "carve",
+      "description": "Run carve on a sample",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "target": {
+            "type": "object",
+            "properties": {
+              "sha256": {
+                "type": "string"
+              },
+              "path": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              }
+            },
+            "required": [
+              "sha256",
+              "path"
+            ],
+            "additionalProperties": false
+          }
+        },
+        "required": [
+          "target"
+        ],
+        "additionalProperties": false
+      },
+      "strict": true
+    },
+    "strict": true,
+    "warnings": []
+  },
+  "enum": {
+    "definition": {
+      "type": "function",
+      "name": "scan_mode",
+      "description": "Run scan_mode on a sample",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "mode": {
+            "type": "string",
+            "enum": [
+              "fast",
+              "full"
+            ]
+          }
+        },
+        "required": [
+          "mode"
+        ],
+        "additionalProperties": false
+      },
+      "strict": true
+    },
+    "strict": true,
+    "warnings": []
+  },
+  "bounds": {
+    "definition": {
+      "type": "function",
+      "name": "bounded",
+      "description": "Run bounded on a sample",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "depth": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 10
+          },
+          "name": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 64
+          }
+        },
+        "required": [
+          "depth",
+          "name"
+        ],
+        "additionalProperties": false
+      },
+      "strict": true
+    },
+    "strict": true,
+    "warnings": []
+  },
+  "examples": {
+    "definition": {
+      "type": "function",
+      "name": "yara_scan",
+      "description": "Run yara_scan on a sample",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "sha256": {
+            "type": "string"
+          },
+          "depth": {
+            "type": "integer"
+          }
+        },
+        "required": [
+          "sha256",
+          "depth"
+        ],
+        "additionalProperties": false
+      },
+      "strict": true
+    },
+    "strict": true,
+    "warnings": []
+  },
+  "deferred": {
+    "definition": {
+      "type": "function",
+      "name": "strings",
+      "description": "Run strings on a sample",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "sha256": {
+            "type": "string"
+          },
+          "depth": {
+            "type": "integer"
+          }
+        },
+        "required": [
+          "sha256",
+          "depth"
+        ],
+        "additionalProperties": false
+      },
+      "strict": true,
+      "defer_loading": true
+    },
+    "strict": true,
+    "warnings": []
+  },
+  "icons": {
+    "definition": {
+      "type": "function",
+      "name": "capa",
+      "description": "Run capa on a sample",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "sha256": {
+            "type": "string"
+          },
+          "depth": {
+            "type": "integer"
+          }
+        },
+        "required": [
+          "sha256",
+          "depth"
+        ],
+        "additionalProperties": false
+      },
+      "strict": true
+    },
+    "strict": true,
+    "warnings": []
+  }
+}

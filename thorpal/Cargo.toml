@@ -25,6 +25,7 @@ rmcp = { version = "2", features = [
 # TLS backend comes from rmcp's enabled reqwest features)
 reqwest = { version = "0.13", default-features = false }
 thorium-derive = { workspace = true, features = ["thorpal"] }
+thorium-api = { workspace = true, default-features = false, features = ["client"] }
 inventory = { workspace = true }
 tokio = { workspace = true }
 anyhow = "1"
@@ -66,6 +67,8 @@ yara-x = { version = "1.21.0", default-features = false, features = [
     "elf-module", "lnk-module", "macho-module", "math-module",
     "hash-module", "pe-module", "string-module", "time-module", "vt-module",
 ] }
+# the harness keys run files by tool instance and agent id
+uuid = { version = "1", features = ["serde", "v4"] }
 
 [dev-dependencies]
 tempfile = "3"

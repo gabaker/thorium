@@ -1,0 +1,203 @@
+{
+  "flat": {
+    "definition": {
+      "name": "get_sample",
+      "description": "Run get_sample on a sample",
+      "parametersJsonSchema": {
+        "type": "object",
+        "properties": {
+          "sha256": {
+            "type": "string"
+          },
+          "depth": {
+            "type": "integer"
+          }
+        },
+        "required": [
+          "sha256",
+          "depth"
+        ]
+      }
+    },
+    "strict": false,
+    "warnings": []
+  },
+  "optional": {
+    "definition": {
+      "name": "get_results",
+      "description": "Run get_results on a sample",
+      "parametersJsonSchema": {
+        "type": "object",
+        "properties": {
+          "sha256": {
+            "type": "string"
+          },
+          "depth": {
+            "type": "integer"
+          },
+          "verbose": {
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "sha256"
+        ]
+      }
+    },
+    "strict": false,
+    "warnings": []
+  },
+  "nested": {
+    "definition": {
+      "name": "carve",
+      "description": "Run carve on a sample",
+      "parametersJsonSchema": {
+        "type": "object",
+        "properties": {
+          "target": {
+            "type": "object",
+            "properties": {
+              "sha256": {
+                "type": "string"
+              },
+              "path": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "sha256"
+            ]
+          }
+        },
+        "required": [
+          "target"
+        ]
+      }
+    },
+    "strict": false,
+    "warnings": []
+  },
+  "enum": {
+    "definition": {
+      "name": "scan_mode",
+      "description": "Run scan_mode on a sample",
+      "parametersJsonSchema": {
+        "type": "object",
+        "properties": {
+          "mode": {
+            "type": "string",
+            "enum": [
+              "fast",
+              "full"
+            ]
+          }
+        },
+        "required": [
+          "mode"
+        ]
+      }
+    },
+    "strict": false,
+    "warnings": []
+  },
+  "bounds": {
+    "definition": {
+      "name": "bounded",
+      "description": "Run bounded on a sample",
+      "parametersJsonSchema": {
+        "type": "object",
+        "properties": {
+          "depth": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 10
+          },
+          "name": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 64
+          }
+        },
+        "required": [
+          "depth",
+          "name"
+        ]
+      }
+    },
+    "strict": false,
+    "warnings": []
+  },
+  "examples": {
+    "definition": {
+      "name": "yara_scan",
+      "description": "Run yara_scan on a sample",
+      "parametersJsonSchema": {
+        "type": "object",
+        "properties": {
+          "sha256": {
+            "type": "string"
+          },
+          "depth": {
+            "type": "integer"
+          }
+        },
+        "required": [
+          "sha256",
+          "depth"
+        ],
+        "example": {
+          "sha256": "abc123",
+          "depth": 2
+        }
+      }
+    },
+    "strict": false,
+    "warnings": []
+  },
+  "deferred": {
+    "definition": {
+      "name": "strings",
+      "description": "Run strings on a sample",
+      "parametersJsonSchema": {
+        "type": "object",
+        "properties": {
+          "sha256": {
+            "type": "string"
+          },
+          "depth": {
+            "type": "integer"
+          }
+        },
+        "required": [
+          "sha256",
+          "depth"
+        ]
+      }
+    },
+    "strict": false,
+    "warnings": []
+  },
+  "icons": {
+    "definition": {
+      "name": "capa",
+      "description": "Run capa on a sample",
+      "parametersJsonSchema": {
+        "type": "object",
+        "properties": {
+          "sha256": {
+            "type": "string"
+          },
+          "depth": {
+            "type": "integer"
+          }
+        },
+        "required": [
+          "sha256",
+          "depth"
+        ]
+      }
+    },
+    "strict": false,
+    "warnings": []
+  }
+}

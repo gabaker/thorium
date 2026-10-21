@@ -13872,10 +13872,12 @@ dependencies = [
  "sha1 0.10.7",
  "sha2 0.10.9",
  "tempfile",
+ "thorium-api",
  "thorium-derive",
  "tokio",
  "tracing",
  "tracing-subscriber",
+ "uuid",
  "yara-x",
  "zip 4.6.1",
 ]

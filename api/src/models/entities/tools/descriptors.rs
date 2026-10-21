@@ -70,6 +70,49 @@ pub struct HarnessToolEntry {
     pub invocation: ToolInvocation,
 }
 
+#[cfg(any(feature = "api", feature = "client"))]
+impl HarnessToolEntry {
+    /// Check a model's arguments for a call to this tool against its input schema
+    ///
+    /// # Arguments
+    ///
+    /// * `arguments` - The decoded arguments
+    pub fn check_arguments(&self, arguments: &serde_json::Value) -> Result<(), String> {
+        // compile the input schema offline with the tool schema limits
+        let validator = super::portability::compile("input_schema", &self.input_schema)?;
+        // arguments that break the schema are refused, naming where
+        validator.validate(arguments).map_err(|error| {
+            format!(
+                "{} was called with arguments that don't match its input_schema at #{}: {error}",
+                self.function_name,
+                error.instance_path()
+            )
+        })
+    }
+
+    /// Check a tool's JSON result against its output schema, if it has one
+    ///
+    /// # Arguments
+    ///
+    /// * `output` - The JSON value the tool returned
+    pub fn check_output(&self, output: &serde_json::Value) -> Result<(), String> {
+        // a tool without an output schema can return anything
+        let Some(output_schema) = &self.output_schema else {
+            return Ok(());
+        };
+        // compile the output schema offline with the tool schema limits
+        let validator = super::portability::compile("output_schema", output_schema)?;
+        // a result that breaks the schema is refused, naming where
+        validator.validate(output).map_err(|error| {
+            format!(
+                "{} returned a result that doesn't match its output_schema at #{}: {error}",
+                self.function_name,
+                error.instance_path()
+            )
+        })
+    }
+}
+
 /// A workflow run's request file (`run.json`, written by the API, read by the harness)
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[cfg_attr(feature = "api", derive(utoipa::ToSchema))]

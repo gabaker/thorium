@@ -17,6 +17,7 @@
     - [Tools and Tool Instances](./developers/tools.md)
     - [AI Agents, Toolsets, and Workflows](./developers/agents_workflows.md)
     - [Harnesses](./developers/harnesses.md)
+    - [Registering the ThorPal Harness](./developers/thorpal_harness.md)
     - [Editing Resources](./developers/editing_resources.md)
     - [Generators](./developers/generators.md)
 

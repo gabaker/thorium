@@ -1,0 +1,13 @@
+type = "tool"
+name = "thorpal-harness"
+version = "0.1.0"
+latest = true
+kind = "harness"
+groups = ["thorpal"]
+spec_from = "thorpal-harness.json"
+# the spec's image is derived as <config.toml registry>/thorpal-harness:<version>; the build context
+# needs the thorpal-harness binary beside the Dockerfile, which ../build-harness-image.sh builds and
+# stages
+build_path = "./"
+image_name = "thorpal-harness"
+network_policies_from = ["thorpal-model-egress.policy.json"]

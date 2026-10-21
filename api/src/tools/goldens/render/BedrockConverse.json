@@ -1,0 +1,244 @@
+{
+  "flat": {
+    "definition": {
+      "toolSpec": {
+        "name": "get_sample",
+        "description": "Run get_sample on a sample",
+        "inputSchema": {
+          "json": {
+            "type": "object",
+            "properties": {
+              "sha256": {
+                "type": "string"
+              },
+              "depth": {
+                "type": "integer"
+              }
+            },
+            "required": [
+              "sha256",
+              "depth"
+            ],
+            "additionalProperties": false
+          }
+        },
+        "strict": true
+      }
+    },
+    "strict": true,
+    "warnings": []
+  },
+  "optional": {
+    "definition": {
+      "toolSpec": {
+        "name": "get_results",
+        "description": "Run get_results on a sample",
+        "inputSchema": {
+          "json": {
+            "type": "object",
+            "properties": {
+              "sha256": {
+                "type": "string"
+              },
+              "depth": {
+                "type": "integer"
+              },
+              "verbose": {
+                "type": "boolean"
+              }
+            },
+            "required": [
+              "sha256"
+            ],
+            "additionalProperties": false
+          }
+        },
+        "strict": true
+      }
+    },
+    "strict": true,
+    "warnings": []
+  },
+  "nested": {
+    "definition": {
+      "toolSpec": {
+        "name": "carve",
+        "description": "Run carve on a sample",
+        "inputSchema": {
+          "json": {
+            "type": "object",
+            "properties": {
+              "target": {
+                "type": "object",
+                "properties": {
+                  "sha256": {
+                    "type": "string"
+                  },
+                  "path": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "sha256"
+                ],
+                "additionalProperties": false
+              }
+            },
+            "required": [
+              "target"
+            ],
+            "additionalProperties": false
+          }
+        },
+        "strict": true
+      }
+    },
+    "strict": true,
+    "warnings": []
+  },
+  "enum": {
+    "definition": {
+      "toolSpec": {
+        "name": "scan_mode",
+        "description": "Run scan_mode on a sample",
+        "inputSchema": {
+          "json": {
+            "type": "object",
+            "properties": {
+              "mode": {
+                "type": "string",
+                "enum": [
+                  "fast",
+                  "full"
+                ]
+              }
+            },
+            "required": [
+              "mode"
+            ],
+            "additionalProperties": false
+          }
+        },
+        "strict": true
+      }
+    },
+    "strict": true,
+    "warnings": []
+  },
+  "bounds": {
+    "definition": {
+      "toolSpec": {
+        "name": "bounded",
+        "description": "Run bounded on a sample",
+        "inputSchema": {
+          "json": {
+            "type": "object",
+            "properties": {
+              "depth": {
+                "type": "integer"
+              },
+              "name": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "depth",
+              "name"
+            ],
+            "additionalProperties": false
+          }
+        },
+        "strict": true
+      }
+    },
+    "strict": true,
+    "warnings": []
+  },
+  "examples": {
+    "definition": {
+      "toolSpec": {
+        "name": "yara_scan",
+        "description": "Run yara_scan on a sample",
+        "inputSchema": {
+          "json": {
+            "type": "object",
+            "properties": {
+              "sha256": {
+                "type": "string"
+              },
+              "depth": {
+                "type": "integer"
+              }
+            },
+            "required": [
+              "sha256",
+              "depth"
+            ],
+            "additionalProperties": false
+          }
+        },
+        "strict": true
+      }
+    },
+    "strict": true,
+    "warnings": []
+  },
+  "deferred": {
+    "definition": {
+      "toolSpec": {
+        "name": "strings",
+        "description": "Run strings on a sample",
+        "inputSchema": {
+          "json": {
+            "type": "object",
+            "properties": {
+              "sha256": {
+                "type": "string"
+              },
+              "depth": {
+                "type": "integer"
+              }
+            },
+            "required": [
+              "sha256",
+              "depth"
+            ],
+            "additionalProperties": false
+          }
+        },
+        "strict": true
+      }
+    },
+    "strict": true,
+    "warnings": []
+  },
+  "icons": {
+    "definition": {
+      "toolSpec": {
+        "name": "capa",
+        "description": "Run capa on a sample",
+        "inputSchema": {
+          "json": {
+            "type": "object",
+            "properties": {
+              "sha256": {
+                "type": "string"
+              },
+              "depth": {
+                "type": "integer"
+              }
+            },
+            "required": [
+              "sha256",
+              "depth"
+            ],
+            "additionalProperties": false
+          }
+        },
+        "strict": true
+      }
+    },
+    "strict": true,
+    "warnings": []
+  }
+}
