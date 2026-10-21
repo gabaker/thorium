@@ -15,7 +15,52 @@ use thorium::models::{
     NetworkPolicyListOpts, NetworkPolicyRequest, NetworkPolicyRuleRaw, NetworkPolicyUpdate,
 };
 use thorium::test_utilities;
-use thorium::{contains, fail, is, is_empty, iter_in_iter, vec_in_vec};
+use thorium::{Thorium, contains, fail, is, is_empty, iter_in_iter, vec_in_vec};
+
+/// Generate a network policy request with a name no other policy in Thorium shares
+///
+/// Generated names can be a single character, and two policies sharing a name collide: a create
+/// in the same group is refused or overwrites the other, and listing details merges same-named
+/// policies from every group the caller can see. Each name ends with a UUID so tests running
+/// at once never share one.
+///
+/// # Arguments
+///
+/// * `groups` - The groups the network policy should be in
+fn gen_policy(groups: &[String]) -> NetworkPolicyRequest {
+    // generate a random request
+    let mut req = generators::gen_network_policy(groups);
+    // keep the generated name first, so listings still sort on it
+    req.name = format!("{}-{}", req.name, Uuid::new_v4().simple());
+    req
+}
+
+/// Create network policies with names no other policy in Thorium shares
+///
+/// # Arguments
+///
+/// * `groups` - The groups the network policies should be in
+/// * `cnt` - The number of network policies to create
+/// * `client` - The Thorium client
+async fn unique_policies(
+    groups: &[String],
+    cnt: usize,
+    client: &Thorium,
+) -> Result<Vec<NetworkPolicyRequest>, thorium::Error> {
+    // generate the requests
+    let reqs = (0..cnt)
+        .map(|_| gen_policy(groups))
+        .collect::<Vec<NetworkPolicyRequest>>();
+    // create the network policies concurrently
+    stream::iter(reqs.iter())
+        .map(Ok::<&NetworkPolicyRequest, thorium::Error>)
+        .try_for_each_concurrent(100, |req| async {
+            client.network_policies.create(req.clone()).await?;
+            Ok(())
+        })
+        .await?;
+    Ok(reqs)
+}
 
 #[tokio::test]
 async fn create() -> Result<(), thorium::Error> {
@@ -28,7 +73,7 @@ async fn create() -> Result<(), thorium::Error> {
         .map(|req| req.name)
         .collect::<Vec<String>>();
     // create a network policy request
-    let req = generators::gen_network_policy(&groups);
+    let req = gen_policy(&groups);
     // test that we create the network policy successfully
     let resp = client.network_policies.create(req).await?;
     is!(resp.status().as_u16(), 204);
@@ -48,7 +93,7 @@ async fn create_bad() -> Result<(), thorium::Error> {
         .map(|req| req.name)
         .collect::<Vec<String>>();
     // create a network policy request
-    let mut req = generators::gen_network_policy(&groups);
+    let mut req = gen_policy(&groups);
     // fail to create a network policy as a non-admin
     let resp = user_client.network_policies.create(req.clone()).await;
     fail!(resp, 401);
@@ -57,14 +102,14 @@ async fn create_bad() -> Result<(), thorium::Error> {
     let resp = client.network_policies.create(req).await;
     fail!(resp, 400);
     // fail to create a network policy request with settings with empty groups
-    let mut req = generators::gen_network_policy(&groups);
+    let mut req = gen_policy(&groups);
     req = req.add_egress_rule(NetworkPolicyRuleRaw::default().group(""));
     let resp = client.network_policies.create(req).await;
     fail!(resp, 400);
     // fail to create a network policy when a network policy with that name already exists in a group
-    let req = generators::gen_network_policy(&groups);
+    let req = gen_policy(&groups);
     client.network_policies.create(req.clone()).await?;
-    let mut already_exists_req = generators::gen_network_policy(&groups);
+    let mut already_exists_req = gen_policy(&groups);
     already_exists_req.name = req.name;
     let resp = client
         .network_policies
@@ -72,12 +117,12 @@ async fn create_bad() -> Result<(), thorium::Error> {
         .await;
     fail!(resp, 400, "already exists");
     // fail to create a network policy for groups that don't exist
-    let mut req = generators::gen_network_policy(&groups);
+    let mut req = gen_policy(&groups);
     req.groups = vec!["no-exists".to_string()];
     let resp = client.network_policies.create(req).await;
     fail!(resp, 404, "groups doesn't exist");
     // fail to create a network policy with bad labels
-    let mut req = generators::gen_network_policy(&groups);
+    let mut req = gen_policy(&groups);
     req = req.add_ingress_rule(NetworkPolicyRuleRaw::default().custom_rule(
         NetworkPolicyCustomK8sRule::new(
             Some(vec![NetworkPolicyCustomLabel::new(
@@ -90,7 +135,7 @@ async fn create_bad() -> Result<(), thorium::Error> {
     let resp = client.network_policies.create(req).await;
     fail!(resp, 400, "THIS*#(IS@()NOT_(ALLOWED");
     // fail to create a network policy with a bad cidr
-    let mut req = generators::gen_network_policy(&groups);
+    let mut req = gen_policy(&groups);
     // here the cidr's network length is wrong
     req = req.add_ingress_rule(NetworkPolicyRuleRaw::default().ip_block("10.0.0.1/24", None));
     let resp = client.network_policies.create(req).await;
@@ -113,7 +158,7 @@ async fn get() -> Result<(), thorium::Error> {
     // create a group for the user
     let user_group = generators::groups(1, &user_client).await?.remove(0).name;
     // create a network policy request
-    let req = generators::gen_network_policy(&groups);
+    let req = gen_policy(&groups);
     // create the network policy
     client.network_policies.create(req.clone()).await?;
     // create an image with that network policy
@@ -136,7 +181,7 @@ async fn get() -> Result<(), thorium::Error> {
         .cloned()
         .chain(iter::once(user_group.clone()))
         .collect::<Vec<String>>();
-    let mut req = generators::gen_network_policy(&groups_combined);
+    let mut req = gen_policy(&groups_combined);
     client.network_policies.create(req.clone()).await?;
     // attempt to get that network policy as the user who is in one of the groups
     let network_policy = user_client.network_policies.get(&req.name, None).await?;
@@ -172,8 +217,8 @@ async fn get_bad() -> Result<(), thorium::Error> {
         .map(|g| g.name)
         .collect::<Vec<String>>();
     // create a network policy request
-    let req = generators::gen_network_policy(&[groups[0].clone()]);
-    let mut req_2 = generators::gen_network_policy(&[groups[1].clone()]);
+    let req = gen_policy(&[groups[0].clone()]);
+    let mut req_2 = gen_policy(&[groups[1].clone()]);
     req_2.name.clone_from(&req.name);
     // create different network policies with the same name
     client.network_policies.create(req.clone()).await?;
@@ -195,7 +240,7 @@ async fn update() -> Result<(), thorium::Error> {
         .map(|g| g.name)
         .collect::<Vec<String>>();
     // create a network policy request
-    let req = generators::gen_network_policy(&groups)
+    let req = gen_policy(&groups)
         // ensure that the policy has rules
         .add_ingress_rule(generators::gen_network_policy_rule(&groups))
         .add_egress_rule(generators::gen_network_policy_rule(&groups));
@@ -308,7 +353,7 @@ async fn update_bad() -> Result<(), thorium::Error> {
     let user_group = generators::groups(1, &user_client).await?.remove(0).name;
     groups.push(user_group);
     // create a network policy request
-    let req = generators::gen_network_policy(&groups);
+    let req = gen_policy(&groups);
     // create the network policy
     client.network_policies.create(req.clone()).await?;
     // create an image with that network policy
@@ -409,7 +454,7 @@ async fn delete() -> Result<(), thorium::Error> {
         .map(|g| g.name)
         .collect::<Vec<String>>();
     // create a network policy request
-    let req = generators::gen_network_policy(&groups);
+    let req = gen_policy(&groups);
     // create the network policy
     client.network_policies.create(req.clone()).await?;
     // create an image with that network policy
@@ -424,7 +469,7 @@ async fn delete() -> Result<(), thorium::Error> {
     let image = client.images.get(&groups[0], &image_req.name).await?;
     is_empty!(image.network_policies);
     // create a network policy request
-    let req = generators::gen_network_policy(&groups);
+    let req = gen_policy(&groups);
     // create the network policy
     client.network_policies.create(req.clone()).await?;
     // get the network policy (to get its ID)
@@ -459,7 +504,7 @@ async fn delete_bad() -> Result<(), thorium::Error> {
     let user_group = generators::groups(1, &user_client).await?.remove(0).name;
     groups.push(user_group);
     // create a network policy request
-    let req = generators::gen_network_policy(&groups);
+    let req = gen_policy(&groups);
     // create the network policy
     client.network_policies.create(req.clone()).await?;
     // try to delete the network policy as a user and expect an unauthorized error
@@ -477,14 +522,14 @@ async fn get_all_default() -> Result<(), thorium::Error> {
     let num_non_default_policies = 100;
     let default_policy_reqs: Vec<NetworkPolicyRequest> = (0..num_default_policies)
         .map(|_| {
-            let mut req = generators::gen_network_policy(&[group.clone()]);
+            let mut req = gen_policy(std::slice::from_ref(&group));
             req.default_policy = true;
             req
         })
         .collect();
     let non_default_policy_reqs: Vec<NetworkPolicyRequest> = (0..num_non_default_policies)
         .map(|_| {
-            let mut req = generators::gen_network_policy(&[group.clone()]);
+            let mut req = gen_policy(std::slice::from_ref(&group));
             req.default_policy = false;
             req
         })
@@ -542,7 +587,7 @@ async fn list_names() -> Result<(), thorium::Error> {
         .collect::<Vec<String>>();
     // generate a ton of policies
     let num_policies = 100;
-    let policy_reqs = generators::network_policies(&groups, num_policies, &client).await?;
+    let policy_reqs = unique_policies(&groups, num_policies, &client).await?;
     // set limit higher to check that the cursor doesn't get stuck
     let opts = NetworkPolicyListOpts::default()
         .groups(&groups)
@@ -584,7 +629,7 @@ async fn list_details() -> Result<(), thorium::Error> {
         .collect::<Vec<String>>();
     // generate a ton of policies
     let num_policies = 100;
-    let policy_reqs = generators::network_policies(&groups, num_policies, &client).await?;
+    let policy_reqs = unique_policies(&groups, num_policies, &client).await?;
     // set limit higher to check that the cursor doesn't get stuck
     let opts = NetworkPolicyListOpts::default()
         .groups(&groups)
@@ -602,7 +647,11 @@ async fn list_details() -> Result<(), thorium::Error> {
         cursor.refill().await?;
     }
     // make sure we got all policies
-    is!(policies.len(), num_policies, "correct number of policies listed");
+    is!(
+        policies.len(),
+        num_policies,
+        "correct number of policies listed"
+    );
     vec_in_vec!(policies, policy_reqs, "listed all policies details");
     // make sure the policies returned are sorted by name
     let mut policies_sorted = policies.clone();
@@ -616,7 +665,7 @@ async fn list_details() -> Result<(), thorium::Error> {
         .collect::<Vec<String>>();
     let num_policies = 5;
     let num_policies_req = 3;
-    let policy_reqs = generators::network_policies(&groups, num_policies, &client).await?;
+    let policy_reqs = unique_policies(&groups, num_policies, &client).await?;
     let opts = NetworkPolicyListOpts::default()
         .groups(&groups)
         .limit(num_policies_req);
@@ -653,7 +702,7 @@ async fn list_details_from_partial_group() -> Result<(), thorium::Error> {
         .collect::<Vec<String>>();
     // generate policies
     let num_policies = 10;
-    let policy_reqs = generators::network_policies(&groups, num_policies, &client).await?;
+    let policy_reqs = unique_policies(&groups, num_policies, &client).await?;
     // make sure when the user lists network policies we don't get any of the groups the user can't see
     let opts = NetworkPolicyListOpts::default()
         .groups([groups.first().unwrap().clone()])
@@ -692,7 +741,7 @@ async fn list_details_user() -> Result<(), thorium::Error> {
     groups.push(user_group.clone());
     // generate policies
     let num_policies = 10;
-    let _ = generators::network_policies(&groups, num_policies, &client).await?;
+    let _ = unique_policies(&groups, num_policies, &client).await?;
     // make sure when the user lists network policies we don't get any of the groups the user can't see
     let opts = NetworkPolicyListOpts::default()
         .groups([user_group.clone()])
@@ -752,7 +801,7 @@ async fn used_by() -> Result<(), thorium::Error> {
     let user_group = generators::groups(1, &user_client).await?.remove(0).name;
     // create a network policy request in both groups
     let groups = &[group.clone(), user_group.clone()];
-    let req = generators::gen_network_policy(groups);
+    let req = gen_policy(groups);
     // create the network policy
     client.network_policies.create(req.clone()).await?;
     // create two images with that network policy in different groups

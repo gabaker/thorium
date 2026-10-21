@@ -7,7 +7,8 @@ use super::helpers;
 use super::keys::{GroupKeys, ImageKeys, SystemKeys};
 use crate::models::backends::NotificationSupport;
 use crate::models::{
-    Group, Image, ImageBan, ImageJobInfo, ImageKey, ImageList, ImageRequest, ImageScaler, User,
+    BackupProblem, Group, Image, ImageBan, ImageJobInfo, ImageKey, ImageList, ImageRequest,
+    ImageScaler, User,
 };
 use crate::utils::{ApiError, Shared};
 use crate::{
@@ -386,35 +387,46 @@ pub async fn list_details(
     Ok(images)
 }
 
-/// List all images in all groups with details for backups
+/// List all images in all groups with details for backups, and a problem for each image that
+/// doesn't parse
 ///
 /// # Arguments
 ///
 /// * `shared` - Shared Thorium objects
 #[instrument(name = "db::images::backup", skip_all, err(Debug))]
-pub async fn backup(shared: &Shared) -> Result<Vec<Image>, ApiError> {
+pub async fn backup(shared: &Shared) -> Result<(Vec<Image>, Vec<BackupProblem>), ApiError> {
     // build key to group set
     let key = GroupKeys::set(shared);
     // get all group names
     let groups: Vec<String> = query!(cmd("smembers").arg(key), shared).await?;
-    // build pipeline to retrieve all image data
+    // build pipeline to retrieve all image data, keeping each image's data key
     let mut pipe = redis::pipe();
+    let mut keys = Vec::new();
     for group in &groups {
         // get all image names
         let image_key = ImageKeys::set(group, shared);
         let names: Vec<String> = query!(cmd("smembers").arg(image_key), shared).await?;
-        names.iter().fold(&mut pipe, |pipe, name| {
+        for name in &names {
+            let data_key = ImageKeys::data(group, name, shared);
             pipe.cmd("hgetall")
-                .arg(ImageKeys::data(group, name, shared))
+                .arg(&data_key)
                 .cmd("smembers")
-                .arg(ImageKeys::used_by(group, name, shared))
-        });
+                .arg(ImageKeys::used_by(group, name, shared));
+            keys.push(data_key);
+        }
     }
     // execute pipeline to get all image data
     let raw: Vec<RawUserData> = pipe.query_async(conn!(shared)).await?;
-    // cast to a vector of images
-    let images = cast!(raw, Image::try_from);
-    Ok(images)
+    // cast each image, keeping every image that doesn't parse as a problem
+    let mut images = Vec::with_capacity(raw.len());
+    let mut problems = Vec::new();
+    for (key, data) in keys.into_iter().zip(raw) {
+        match Image::try_from(data) {
+            Ok(image) => images.push(image),
+            Err(error) => problems.push(helpers::unparsable(key, &error)),
+        }
+    }
+    Ok((images, problems))
 }
 
 /// Count the number of updates that will return true
@@ -447,6 +459,8 @@ fn add_opts(image: &Image) -> usize {
     cnt += usize::from(image.description.is_some());
     cnt += usize::from(image.clean_up.is_some());
     cnt += usize::from(image.kvm.is_some());
+    // bans are only written for an image that has some
+    cnt += usize::from(!image.bans.is_empty());
     cnt
 }
 
@@ -459,11 +473,17 @@ fn add_opts(image: &Image) -> usize {
 pub async fn restore(images: &[Image], shared: &Shared) -> Result<(), ApiError> {
     // build our redis pipeline
     let mut pipe = redis::pipe();
-    // crawl over images and build the pipeline to restore each one
-    images
-        .iter()
-        .map(|image| build(&mut pipe, image, shared))
-        .collect::<Result<Vec<()>, ApiError>>()?;
+    // crawl over images and build the pipeline to restore each one, with its bans if it has
+    // any, as banning writes them
+    for image in images {
+        build(&mut pipe, image, shared)?;
+        if !image.bans.is_empty() {
+            pipe.cmd("hset")
+                .arg(ImageKeys::data(&image.group, &image.name, shared))
+                .arg("bans")
+                .arg(serialize!(&image.bans));
+        }
+    }
     // try to save images into redis
     let status: Vec<bool> = pipe.atomic().query_async(conn!(shared)).await?;
     // get the number of commands that succeeded
@@ -475,6 +495,20 @@ pub async fn restore(images: &[Image], shared: &Shared) -> Result<(), ApiError> 
         return conflict!(format!(
             "Failed to restore images expected {expected} but found {real}"
         ));
+    }
+    // rebuild which images use each network policy
+    for image in images
+        .iter()
+        .filter(|image| !image.network_policies.is_empty())
+    {
+        super::network_policies::set_used_by(
+            &image.group,
+            image.network_policies.iter(),
+            std::iter::empty::<&String>(),
+            &image.name,
+            shared,
+        )
+        .await?;
     }
     Ok(())
 }

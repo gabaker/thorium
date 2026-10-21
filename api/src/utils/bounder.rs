@@ -140,7 +140,8 @@ pub fn file_name(input: &str, name: &'static str, min: usize, max: usize) -> Res
     Ok(())
 }
 
-/// Validate a path in a multipart form data field
+/// Validate a path in a multipart form data field that becomes an S3 key, such as a result
+/// file's name, segment by segment (see [`file_path`])
 ///
 /// # Arguments
 ///
@@ -152,37 +153,107 @@ pub fn multipart_path(
     name: &str,
     allow_absolute: bool,
 ) -> Result<Option<String>, ApiError> {
-    // try to get the name for this file
-    match field.file_name() {
-        Some(file_name) => {
-            // convert our file name to a path to validate it
-            let path = PathBuf::from_str(file_name)?;
-            // validate this file name is not an absolute path
-            if !allow_absolute && path.is_absolute() {
-                return bad!(format!("{name} paths cannot be an absolute: {path:?}"));
-            }
-            // make sure this path not contain a component with just '.'s
-            for component in path.components() {
-                // convert this component to an os str
-                match component.as_os_str().to_str() {
-                    Some(comp_str) => {
-                        if comp_str.chars().all(|chr| chr == '.') {
-                            return bad!(format!(
-                                "{name} paths cannot have components that have .. in them: {path:?}"
-                            ));
-                        }
-                    }
-                    None => {
-                        return bad!(format!("{name} paths must be valid utf-8"));
-                    }
+    // try to get the name for this file, validating it when there is one
+    field
+        .file_name()
+        .map(|file_name| file_path(file_name, name, allow_absolute))
+        .transpose()
+}
+
+/// Validate a file name in a multipart form data field that is stored only as metadata, such as a
+/// sample's name: it may not be absolute (unless allowed), hold a component of only dots, or be
+/// invalid UTF-8, while segments a path's parsing normalizes (an empty name, a doubled or trailing
+/// `/`) pass, since the name never becomes a key
+///
+/// # Arguments
+///
+/// * `field` - The field to get the file name from
+/// * `name` - The name of the field to use in error messages
+/// * `allow_absolute` - Whether to allow absolute paths or not
+pub fn multipart_name(
+    field: &Field<'_>,
+    name: &str,
+    allow_absolute: bool,
+) -> Result<Option<String>, ApiError> {
+    // try to get the name for this file, validating it when there is one
+    field
+        .file_name()
+        .map(|file_name| file_name_path(file_name, name, allow_absolute))
+        .transpose()
+}
+
+/// Validate a file name stored only as metadata, by the components a path parses it into
+///
+/// # Arguments
+///
+/// * `file_name` - The name to validate
+/// * `name` - The name of the field to use in error messages
+/// * `allow_absolute` - Whether to allow absolute paths or not
+pub fn file_name_path(
+    file_name: &str,
+    name: &str,
+    allow_absolute: bool,
+) -> Result<String, ApiError> {
+    // convert our file name to a path to validate it
+    let path = PathBuf::from_str(file_name)?;
+    // validate this file name is not an absolute path
+    if !allow_absolute && path.is_absolute() {
+        return bad!(format!("{name} paths cannot be an absolute: {path:?}"));
+    }
+    // make sure this path not contain a component with just '.'s
+    for component in path.components() {
+        // convert this component to an os str
+        match component.as_os_str().to_str() {
+            Some(comp_str) => {
+                if comp_str.chars().all(|chr| chr == '.') {
+                    return bad!(format!(
+                        "{name} paths cannot have components that have .. in them: {path:?}"
+                    ));
                 }
             }
-            // return our validated file name
-            Ok(Some(file_name.to_owned()))
+            None => {
+                return bad!(format!("{name} paths must be valid utf-8"));
+            }
         }
-        // we don't have a filename to validate/return
-        None => Ok(None),
     }
+    // return our validated file name
+    Ok(file_name.to_owned())
+}
+
+/// Validate a path a client named that becomes an S3 key, such as a result file's name
+///
+/// The name is checked as given, segment by segment, since it is stored and later used as an S3
+/// key unchanged: an empty segment, a segment of only dots, or a trailing `/` would be dropped by
+/// a path's own parsing but stay in the key.
+///
+/// # Arguments
+///
+/// * `file_name` - The path to validate
+/// * `name` - The name of the field to use in error messages
+/// * `allow_absolute` - Whether to allow absolute paths or not
+pub fn file_path(file_name: &str, name: &str, allow_absolute: bool) -> Result<String, ApiError> {
+    // convert our file name to a path to validate it
+    let path = PathBuf::from_str(file_name)?;
+    // validate this file name is not an absolute path
+    if !allow_absolute && path.is_absolute() {
+        return bad!(format!("{name} paths cannot be an absolute: {path:?}"));
+    }
+    // an absolute path starts with one separator; every segment after it must hold a name
+    let relative = file_name.strip_prefix('/').unwrap_or(file_name);
+    for segment in relative.split('/') {
+        if segment.is_empty() {
+            return bad!(format!(
+                "{name} paths cannot have empty segments or end with '/': {path:?}"
+            ));
+        }
+        if segment.chars().all(|chr| chr == '.') {
+            return bad!(format!(
+                "{name} paths cannot have components that have .. in them: {path:?}"
+            ));
+        }
+    }
+    // return our validated file name
+    Ok(file_name.to_owned())
 }
 
 /// Bounds check a JsonValue that should be cast as a string
@@ -377,4 +448,41 @@ pub fn triggers(triggers: &HashMap<String, EventTrigger>) -> Result<(), ApiError
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{file_name_path, file_path};
+
+    /// A sample's name is only metadata, so names a path normalizes pass while `..` and absolute
+    /// names (unless allowed) are still refused
+    #[test]
+    fn metadata_file_names_keep_the_component_check() {
+        // names whose segments a path drops pass unchanged
+        for name in ["", "a//b", "dir/", "/", "a/./b"] {
+            assert_eq!(file_name_path(name, "File name", true).unwrap(), name);
+        }
+        // a component of only dots, and an absolute name unless allowed, are refused
+        assert!(file_name_path("a/../b", "File name", true).is_err());
+        assert!(file_name_path("/a/b", "File name", false).is_err());
+    }
+
+    /// A stored file name becomes its object's key unchanged, so names whose segments a path
+    /// would normalize away are refused, and ordinary names pass unchanged
+    #[test]
+    fn file_paths_with_segments_a_path_drops_are_refused() {
+        // empty segments, `.` segments, and a trailing slash are refused, relative or absolute
+        for name in [
+            "a//b", "a/./b", "a/", "./a", "a/..", "/a//b", "/a/./b", "/a/",
+        ] {
+            assert!(file_path(name, "Result", true).is_err(), "{name} passed");
+        }
+        // an absolute name is refused unless allowed
+        assert!(file_path("/a/b", "Result", false).is_err());
+        assert_eq!(file_path("/a/b", "Result", true).unwrap(), "/a/b");
+        // ordinary names pass unchanged, including dots inside a segment
+        for name in ["out.txt", "nested/out.txt", "a/b.c/d..e", ".hidden/file"] {
+            assert_eq!(file_path(name, "Result", false).unwrap(), name);
+        }
+    }
 }

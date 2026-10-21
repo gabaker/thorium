@@ -20,6 +20,10 @@ pub enum AssociationTarget {
 }
 
 /// The different possible associations
+///
+/// Archived backups store each variant as its position in this list, so variants are
+/// append-only: never reorder, remove, or insert one; a new variant goes at the end. The
+/// golden-bytes test of archived enums in thoradm's offline suite fails if the order changes.
 #[derive(
     Debug,
     Serialize,
@@ -651,5 +655,90 @@ impl AssociationListParams {
                 )),
             },
         }
+    }
+}
+
+/// The number of associations in one partition of the associations table, read to rebuild its
+/// census
+#[derive(Debug)]
+#[cfg_attr(feature = "scylla-utils", derive(scylla::DeserializeRow))]
+#[cfg_attr(
+    feature = "scylla-utils",
+    scylla(flavor = "enforce_order", skip_name_checks)
+)]
+pub struct AssociationCensusRow {
+    /// The group the partition's associations are in
+    pub group: String,
+    /// The year the partition's associations were created in
+    pub year: i32,
+    /// The partition's bucket within its year
+    pub bucket: i32,
+    /// The entity or object the partition's associations are from, as stored
+    pub source: String,
+    /// How many associations the partition holds
+    pub count: i64,
+}
+
+#[cfg(feature = "scylla-utils")]
+impl super::CensusSupport for Association {
+    /// The type returned by our prepared statement
+    type Row = AssociationCensusRow;
+
+    /// Build the prepared statement for getting partition count info
+    ///
+    /// # Arguments
+    ///
+    /// * `scylla` - The session to prepare the statement with
+    /// * `ns` - The namespace the associations table is in
+    async fn scan_prepared_statement(
+        scylla: &scylla::client::session::Session,
+        ns: &str,
+    ) -> Result<scylla::statement::prepared::PreparedStatement, scylla::errors::PrepareError> {
+        // count each partition of a token range
+        scylla
+            .prepare(format!(
+                "SELECT group, year, bucket, source, count(*) \
+                FROM {ns}.associations \
+                WHERE token(group, year, bucket, source) >= ? \
+                AND token(group, year, bucket, source) <= ? \
+                GROUP BY group, year, bucket, source",
+            ))
+            .await
+    }
+
+    /// Get the count for this partition
+    ///
+    /// # Arguments
+    ///
+    /// * `row` - The partition's census row
+    fn get_count(row: &AssociationCensusRow) -> i64 {
+        row.count
+    }
+
+    /// Get the bucket for this partition
+    ///
+    /// # Arguments
+    ///
+    /// * `row` - The partition's census row
+    fn get_bucket(row: &AssociationCensusRow) -> i32 {
+        row.bucket
+    }
+
+    /// Build the sorted set key for this census operation; each association is stored from both
+    /// of its sides, so counting each side's partition fills the streams of both, as creating it
+    /// does
+    ///
+    /// # Arguments
+    ///
+    /// * `namespace` - The namespace the census is in
+    /// * `row` - The partition's census row
+    fn stream_key_from_row(namespace: &str, row: &Self::Row) -> String {
+        // build the stream key for this row
+        format!(
+            "{namespace}:census:associations:stream:{group}:{source}:{year}",
+            group = row.group,
+            source = row.source,
+            year = row.year,
+        )
     }
 }

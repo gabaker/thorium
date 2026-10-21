@@ -3,6 +3,9 @@ use std::str::FromStr;
 
 use crate::models::InvalidEnum;
 
+/// Archived backups store each variant as its position in this list, so variants are
+/// append-only: never reorder, remove, or insert one; a new variant goes at the end. The
+/// golden-bytes test of archived enums in thoradm's offline suite fails if the order changes.
 #[derive(Debug, Clone, Copy)]
 #[cfg_attr(
     feature = "rkyv-support",

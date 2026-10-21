@@ -87,8 +87,14 @@ async fn update_default_checkout(
         let chunk_size = shared.config.thorium.repos.partition_size;
         // get the partition to write this repo off too
         let bucket = helpers::partition(submission.uploaded, year, chunk_size);
-        // update our default checkout behavior for all the groups this repo submission is in
-        for group in repo.groups().iter().filter(|group| groups.contains(group)) {
+        // update our default checkout behavior in the requested groups this submission is in;
+        // an update in a group the submission isn't in would create a row holding only the
+        // default checkout
+        for group in submission
+            .groups
+            .iter()
+            .filter(|group| groups.contains(group))
+        {
             // log that we are updating this submissions default checkout for a specific group
             event!(
                 Level::INFO,
