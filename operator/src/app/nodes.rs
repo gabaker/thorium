@@ -1,6 +1,6 @@
 use thorium::{
-    models::{NodeRegistration, Resources},
     Error, Thorium,
+    models::{NodeRegistration, Resources},
 };
 
 use crate::k8s::clusters::ClusterMeta;

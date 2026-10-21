@@ -1,6 +1,6 @@
 use chrono::prelude::*;
 use thorium::models::Pools;
-use tracing::{event, instrument, Level};
+use tracing::{Level, event, instrument};
 
 use super::Target;
 

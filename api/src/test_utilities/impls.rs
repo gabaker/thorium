@@ -6,10 +6,10 @@ use uuid::Uuid;
 use crate::models::helpers::matches_vecs_helper;
 use crate::models::{
     CollectionEntity, CollectionEntityRequest, Country, DeviceEntity, DeviceEntityRequest, Entity,
-    EntityMetadata, EntityMetadataRequest, EntityMetadataUpdate, EntityRequest, EntityUpdate, Group,
-    GroupRequest, Image,
-    ImageRequest, NetworkPolicy, NetworkPolicyRequest, NetworkPolicyRule, NetworkPolicyRuleRaw,
-    NetworkPolicyUpdate, Pipeline, PipelineRequest, VendorEntity, VendorEntityRequest,
+    EntityMetadata, EntityMetadataRequest, EntityMetadataUpdate, EntityRequest, EntityUpdate,
+    Group, GroupRequest, Image, ImageRequest, NetworkPolicy, NetworkPolicyRequest,
+    NetworkPolicyRule, NetworkPolicyRuleRaw, NetworkPolicyUpdate, Pipeline, PipelineRequest,
+    VendorEntity, VendorEntityRequest,
 };
 use crate::{
     matches_adds, matches_adds_iter, matches_clear, matches_clear_vec_opt, matches_removes,
@@ -338,7 +338,9 @@ impl PartialEq<EntityRequest> for Entity {
             (EntityMetadata::FileSystem(resp), EntityMetadataRequest::FileSystem(req)) => {
                 json_eq(resp, req)
             }
-            (EntityMetadata::Folder(resp), EntityMetadataRequest::Folder(req)) => json_eq(resp, req),
+            (EntityMetadata::Folder(resp), EntityMetadataRequest::Folder(req)) => {
+                json_eq(resp, req)
+            }
             (EntityMetadata::WindowsProcess(resp), EntityMetadataRequest::WindowsProcess(req)) => {
                 json_eq(resp, req)
             }
@@ -678,8 +680,7 @@ impl PartialEq<EntityUpdate> for Entity {
                 ) => {
                     // protocol/state have no PartialEq, so compare their display form
                     if let Some(val) = protocol {
-                        if conn.protocol.as_ref().map(ToString::to_string)
-                            != Some(val.to_string())
+                        if conn.protocol.as_ref().map(ToString::to_string) != Some(val.to_string())
                         {
                             return false;
                         }

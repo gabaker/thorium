@@ -9,13 +9,13 @@ use kanal::{AsyncReceiver, AsyncSender};
 use std::path::PathBuf;
 use tokio::task::JoinHandle;
 
+use crate::Error;
 use crate::args::ScrubBackup;
 use crate::backup::tables::{
     Comment, Commitish, CommitishList, Node, Output, OutputStream, RepoData, RepoList, S3Id,
     SamplesList, Tag,
 };
 use crate::backup::{Monitor, MonitorUpdate, Scrub, ScrubWorker};
-use crate::Error;
 
 /// A controller for a single table to scrub
 pub struct TableScrub<S: Scrub> {

@@ -112,6 +112,5 @@ pub trait GrepClient {
     ///
     /// * `key` - The key of the item to grep
     /// * `opts` - The options to use when grepping
-    async fn grep_key<K: AsRef<str>>(&self, key: K, opts: GrepOpts)
-    -> Result<GrepMatches, Error>;
+    async fn grep_key<K: AsRef<str>>(&self, key: K, opts: GrepOpts) -> Result<GrepMatches, Error>;
 }

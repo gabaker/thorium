@@ -5,8 +5,8 @@ mod restore;
 mod scrub;
 mod utils;
 
-use crate::args::{Args, BackupSubCommands};
 use crate::Error;
+use crate::args::{Args, BackupSubCommands};
 
 /// Spawn the correct backup specific controller
 pub async fn handle(sub: &BackupSubCommands, args: &Args) -> Result<(), Error> {

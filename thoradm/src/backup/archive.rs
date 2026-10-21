@@ -68,7 +68,7 @@ impl ArchiveReader {
                 return Err(Error::new(format!(
                     "Failed to get archive id from {:?}",
                     path
-                )))
+                )));
             }
         };
         // open our map file

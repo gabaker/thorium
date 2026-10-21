@@ -1,14 +1,13 @@
 use bb8_redis::redis::cmd;
 use std::collections::{HashMap, HashSet};
-use tracing::{instrument, span, Level, Span};
+use tracing::{Level, Span, instrument, span};
 
 use super::helpers;
 use super::keys::{EventKeys, GroupKeys, UserKeys};
 use crate::models::{Group, GroupList, GroupRequest, Image, NetworkPolicy, Pipeline, User};
 use crate::utils::{ApiError, Shared};
 use crate::{
-    conn, hset_del_opt_serialize, hsetnx_opt_serialize, log_err, not_found,
-    query, serialize,
+    conn, hset_del_opt_serialize, hsetnx_opt_serialize, log_err, not_found, query, serialize,
 };
 
 /// Adds the commands to modify users groups to a redis pipeline

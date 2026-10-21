@@ -170,8 +170,8 @@ const OAuthRegisterForm: React.FC<OAuthRegisterFormProps> = ({
       <Subtitle>Link {label} to a Thorium account</Subtitle>
       {isLinkMode && (
         <AlertBanner severity={Severity.Warning}>
-          An account named &quot;{username.trim()}&quot; already exists. If it&apos;s yours and your {label} email matches
-          it, we&apos;ll send a link to that account&apos;s email to connect your {label} sign-in.
+          An account named &quot;{username.trim()}&quot; already exists. If it&apos;s yours and your {label} email matches it, we&apos;ll
+          send a link to that account&apos;s email to connect your {label} sign-in.
         </AlertBanner>
       )}
       <Field>
@@ -198,8 +198,7 @@ const OAuthRegisterForm: React.FC<OAuthRegisterFormProps> = ({
             autoComplete="email"
           />
           <Hint $tone="muted">
-            Your {label} sign-in didn&apos;t provide an email, so enter one here. You&apos;ll need to
-            verify it before you can sign in.
+            Your {label} sign-in didn&apos;t provide an email, so enter one here. You&apos;ll need to verify it before you can sign in.
           </Hint>
         </Field>
       )}

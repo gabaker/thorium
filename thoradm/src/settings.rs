@@ -3,8 +3,8 @@
 use thorium::Thorium;
 
 use crate::{
-    args::{Args, ResetSettings, SettingsSubCommands, UpdateSettings},
     Error,
+    args::{Args, ResetSettings, SettingsSubCommands, UpdateSettings},
 };
 
 /// Get Thorium `SystemSettings` and print them to stdout

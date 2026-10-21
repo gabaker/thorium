@@ -1,6 +1,6 @@
 use k8s_openapi::api::core::v1::Namespace;
 use kube::api::{Api, ListParams, ObjectList, PostParams};
-use tracing::{event, instrument, Level, Span};
+use tracing::{Level, Span, event, instrument};
 
 /// Wrapper for namespace commands in k8s
 pub struct Namespaces {

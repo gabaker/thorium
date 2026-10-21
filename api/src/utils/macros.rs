@@ -516,7 +516,11 @@ pub fn log_err<T>(res: Result<T, crate::utils::ApiError>) -> Option<T> {
         Ok(res) => Some(res),
         Err(error) => {
             // log this error
-            tracing::event!(tracing::Level::ERROR, kind = error.kind(), msg = error.msg());
+            tracing::event!(
+                tracing::Level::ERROR,
+                kind = error.kind(),
+                msg = error.msg()
+            );
             None
         }
     }
@@ -531,7 +535,11 @@ macro_rules! log_err {
         match $result {
             Ok(res) => Some(res),
             Err(error) => {
-                tracing::event!(tracing::Level::ERROR, kind = error.kind(), msg = error.msg());
+                tracing::event!(
+                    tracing::Level::ERROR,
+                    kind = error.kind(),
+                    msg = error.msg()
+                );
                 None
             }
         }
@@ -548,7 +556,11 @@ macro_rules! log_scylla_err {
             Ok(res) => Some(res),
             Err(error) => {
                 let error = $crate::utils::ApiError::from(error);
-                tracing::event!(tracing::Level::ERROR, kind = error.kind(), msg = error.msg());
+                tracing::event!(
+                    tracing::Level::ERROR,
+                    kind = error.kind(),
+                    msg = error.msg()
+                );
                 None
             }
         }

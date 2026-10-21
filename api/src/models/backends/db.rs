@@ -30,8 +30,8 @@ pub mod users;
 
 pub use cursors::{
     CursorCore, ElasticCursor, ExistsCursor, GrepCursor, GrepCursorRetain, GroupedScyllaCursor,
-    GroupedScyllaCursorRetain,
-    GroupedScyllaCursorSupport, RedisCursor, RedisCursorName, RedisCursorRetain,
-    RedisCursorSupport, RedisGroupCursor, ScyllaCursor, ScyllaCursorRetain, ScyllaCursorSupport,
-    ScyllaTagCountCursor, SimpleCursorExt, SimpleScyllaCursor, TagCountCursorSupport,
+    GroupedScyllaCursorRetain, GroupedScyllaCursorSupport, RedisCursor, RedisCursorName,
+    RedisCursorRetain, RedisCursorSupport, RedisGroupCursor, ScyllaCursor, ScyllaCursorRetain,
+    ScyllaCursorSupport, ScyllaTagCountCursor, SimpleCursorExt, SimpleScyllaCursor,
+    TagCountCursorSupport,
 };

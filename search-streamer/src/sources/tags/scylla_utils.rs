@@ -1,7 +1,7 @@
+use scylla::DeserializeRow;
 use scylla::client::session::Session;
 use scylla::statement::prepared::PreparedStatement;
-use scylla::DeserializeRow;
-use thorium::{models::TagType, Error};
+use thorium::{Error, models::TagType};
 
 /// Prepared statements to get data for tags
 #[derive(Clone)]

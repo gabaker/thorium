@@ -11,7 +11,9 @@ use axum::http::request::Parts;
 use futures::stream::{self, StreamExt};
 use grep::matcher::Matcher;
 use grep::regex::{RegexMatcher, RegexMatcherBuilder};
-use grep::searcher::{BinaryDetection, MmapChoice, Searcher, SearcherBuilder, Sink, SinkFinish, SinkMatch};
+use grep::searcher::{
+    BinaryDetection, MmapChoice, Searcher, SearcherBuilder, Sink, SinkFinish, SinkMatch,
+};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -337,8 +339,11 @@ impl GrepSearchWorker {
                 // search this document on a blocking thread so we never stall the runtime
                 let searched = tokio::task::spawn_blocking(move || {
                     // search our document, capped the same way a streamed document is
-                    let result =
-                        searcher.search_slice(&matcher, cap_document(body.as_bytes(), max), &mut sink);
+                    let result = searcher.search_slice(
+                        &matcher,
+                        cap_document(body.as_bytes(), max),
+                        &mut sink,
+                    );
                     // hand back our sink either way so partial matches are not lost
                     (result, sink)
                 })
@@ -479,7 +484,10 @@ fn build_searcher(limits: &Grep, multi_line: bool, in_memory: bool) -> Searcher 
         // limit, before the read that would observe EOF, so the limit must sit two
         // bytes past the cap: one for the truncation sentinel byte our capped reader
         // feeds and one so that capped stream still sees EOF instead of a full buffer
-        Some(usize::try_from(limits.max_document_size.as_u64().saturating_add(2)).unwrap_or(usize::MAX))
+        Some(
+            usize::try_from(limits.max_document_size.as_u64().saturating_add(2))
+                .unwrap_or(usize::MAX),
+        )
     } else {
         Some(usize::try_from(limits.max_line_size.as_u64()).unwrap_or(usize::MAX))
     };
@@ -1565,7 +1573,9 @@ mod tests {
         let remaining = Arc::new(AtomicUsize::new(limits.max_matches));
         let mut sink = GrepSink::new(matcher.clone(), remaining.clone(), &limits, 0);
         let mut searcher = build_searcher(&limits, false, true);
-        searcher.search_slice(&matcher, b"corn\n", &mut sink).unwrap();
+        searcher
+            .search_slice(&matcher, b"corn\n", &mut sink)
+            .unwrap();
         // classifying an errored search must keep the matches the sink collected
         let matches = classify_search(Err(std::io::Error::other("corn error")), sink, 1024);
         assert_eq!(matches.matches.len(), 1);
@@ -1583,7 +1593,9 @@ mod tests {
         let remaining = Arc::new(AtomicUsize::new(limits.max_matches));
         let mut sink = GrepSink::new(oversized.clone(), remaining, &limits, 0);
         let mut searcher = build_searcher(&limits, false, true);
-        searcher.search_slice(&oversized, b"corn\n", &mut sink).unwrap();
+        searcher
+            .search_slice(&oversized, b"corn\n", &mut sink)
+            .unwrap();
         // a clean search that read past the limit is a truncated document
         let matches = classify_search(Ok(()), sink, 4);
         assert_eq!(matches.truncated, Some(TruncationReason::MaxDocumentSize));
@@ -1592,7 +1604,9 @@ mod tests {
         let remaining = Arc::new(AtomicUsize::new(limits.max_matches));
         let mut sink = GrepSink::new(binary.clone(), remaining, &limits, 0);
         let mut searcher = build_searcher(&limits, false, true);
-        searcher.search_slice(&binary, b"corn\0here\n", &mut sink).unwrap();
+        searcher
+            .search_slice(&binary, b"corn\0here\n", &mut sink)
+            .unwrap();
         let matches = classify_search(Ok(()), sink, 1);
         assert_eq!(matches.truncated, Some(TruncationReason::Binary));
     }
@@ -1648,7 +1662,12 @@ mod tests {
         limits.regex_size_limit = bytesize::ByteSize::b(16);
         limits.dfa_size_limit = bytesize::ByteSize::b(16);
         // a pattern that compiles to more then our size limit should be rejected
-        let built = matcher("[a-zA-Z0-9]{64}corn(apples|oranges|pears)+", false, false, &limits);
+        let built = matcher(
+            "[a-zA-Z0-9]{64}corn(apples|oranges|pears)+",
+            false,
+            false,
+            &limits,
+        );
         assert!(built.is_err());
     }
 
@@ -1896,7 +1915,12 @@ mod tests {
         let workers = vec![
             scanned_worker(done.clone(), 0, 3, None),
             scanned_worker(cut_off.clone(), 2, 3, Some(TruncationReason::MatchBudget)),
-            scanned_worker(never_started.clone(), 4, 0, Some(TruncationReason::MatchBudget)),
+            scanned_worker(
+                never_started.clone(),
+                4,
+                0,
+                Some(TruncationReason::MatchBudget),
+            ),
             scanned_worker(binary.clone(), 0, 1, Some(TruncationReason::Binary)),
             scanned_worker(errored.clone(), 1, 2, Some(TruncationReason::Error)),
         ];

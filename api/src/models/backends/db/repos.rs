@@ -7,7 +7,7 @@ use itertools::Itertools;
 use scylla::response::query_result::QueryResult;
 use std::collections::hash_map::Entry::{Occupied, Vacant};
 use std::collections::{BTreeMap, HashMap, HashSet};
-use tracing::{event, instrument, Level};
+use tracing::{Level, event, instrument};
 use uuid::Uuid;
 
 use super::{ExistsCursor, ScyllaCursor};
@@ -17,7 +17,7 @@ use crate::models::{
     RepoCheckout, RepoListLine, RepoListParams, RepoRequest, RepoRow, RepoScheme, RepoSubmission,
     RepoSubmissionChunk, RepoUrlComponents, TagRequest, TagType, User,
 };
-use crate::utils::{helpers, ApiError, Shared};
+use crate::utils::{ApiError, Shared, helpers};
 use crate::{
     bad, deserialize, internal_err, log_scylla_err, not_found, same_vec, serialize, serialize_opt,
     unauthorized,
@@ -805,7 +805,11 @@ pub async fn add_commitishes(
 /// * `dedupe` - Whether to dedupe any data that is returned
 /// * `shared` - Shared Thorium objects
 /// * `span` - The span to log traces under
-#[instrument(name = "db::repos::commitishes", skip(user, params, shared), err(Debug))]
+#[instrument(
+    name = "db::repos::commitishes",
+    skip(user, params, shared),
+    err(Debug)
+)]
 pub async fn commitishes(
     user: &User,
     repo: &Repo,
@@ -1057,7 +1061,7 @@ async fn is_ambiguous(
                 return not_found!(format!(
                     "Commitish {} does not exist for {}",
                     commitish, repo
-                ))
+                ));
             }
         };
         // if we have a previous kind then confirm they are still the same
@@ -1193,7 +1197,11 @@ pub async fn list(
 /// * `params` - The query params to use when listing repos
 /// * `retain` - The serialized retained state of the list cursor to resume
 /// * `shared` - Shared Thorium objects
-#[instrument(name = "db::repos::list_greppable", skip(user, retain, shared), err(Debug))]
+#[instrument(
+    name = "db::repos::list_greppable",
+    skip(user, retain, shared),
+    err(Debug)
+)]
 pub async fn list_greppable(
     user: &User,
     params: RepoListParams,
@@ -1202,9 +1210,13 @@ pub async fn list_greppable(
 ) -> Result<ScyllaCursor<RepoListLine>, ApiError> {
     // resume our cursor from its retained state or build a new one from our params
     let mut cursor = match retain {
-        Some(retain) => {
-            ScyllaCursor::from_retain(deserialize!(&retain), &user.username, params.limit, true, shared)?
-        }
+        Some(retain) => ScyllaCursor::from_retain(
+            deserialize!(&retain),
+            &user.username,
+            params.limit,
+            true,
+            shared,
+        )?,
         None => ScyllaCursor::from_params(params, &user.username, true, shared).await?,
     };
     // get the next page of data for this cursor

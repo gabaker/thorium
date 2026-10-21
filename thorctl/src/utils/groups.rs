@@ -1,6 +1,6 @@
 //! Utility functions relating to images
 
-use thorium::{models::UserRole, Thorium};
+use thorium::{Thorium, models::UserRole};
 
 /// Get all groups the user is a part of or all groups if the user is an admin
 ///
@@ -16,7 +16,7 @@ pub async fn get_all_groups(thorium: &Thorium) -> Result<Vec<String>, thorium::E
             return Err(thorium::Error::new(format!(
                 "Unable to retrieve the user's groups: {}",
                 err.msg().unwrap_or("an unknown error occurred".to_string())
-            )))
+            )));
         }
     };
     match user.role {

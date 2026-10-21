@@ -13,8 +13,9 @@ use super::shared::graphics;
 use crate::models::AuthedUser;
 use crate::models::backends::{self, GraphicSupport, TagSupport};
 use crate::models::{
-    ApiCursor, Association, AssociationListParams, AssociationTargetColumn, Entity, EntityListLine, EntityListParams, EntityResponse, GrepMatches, GrepQueryParams, GrepRequest,
-    TagDeleteRequest, TagRequest,
+    ApiCursor, Association, AssociationListParams, AssociationTargetColumn, Entity, EntityListLine,
+    EntityListParams, EntityResponse, GrepMatches, GrepQueryParams, GrepRequest, TagDeleteRequest,
+    TagRequest,
 };
 use crate::not_found;
 use crate::utils::{ApiError, AppState};

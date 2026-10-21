@@ -51,7 +51,12 @@ pub fn print_pipeline_details(
     }
     // list the trigger names (full trigger config is available via --format json)
     if !pipeline.triggers.is_empty() {
-        let names = pipeline.triggers.keys().cloned().collect::<Vec<_>>().join(", ");
+        let names = pipeline
+            .triggers
+            .keys()
+            .cloned()
+            .collect::<Vec<_>>()
+            .join(", ");
         write_line(out, &field("Triggers", &names, ansi))?;
     }
     // bans are important, so call them out in red
@@ -66,7 +71,14 @@ pub fn print_pipeline_details(
                 }
             };
             let line = format!("  - {message}");
-            write_line(out, &if ansi { line.bright_red().to_string() } else { line })?;
+            write_line(
+                out,
+                &if ansi {
+                    line.bright_red().to_string()
+                } else {
+                    line
+                },
+            )?;
         }
     }
     // render the full description markdown
@@ -88,7 +100,11 @@ pub async fn list_all_pipelines(thorium: &Thorium, group: &str) -> Result<Vec<Pi
     let mut pipelines = Vec::new();
     // a single group can't realistically exceed this limit; the cursor still
     // pages underneath it
-    let mut cursor = thorium.pipelines.list(group).limit(super::LIST_ALL_LIMIT).details();
+    let mut cursor = thorium
+        .pipelines
+        .list(group)
+        .limit(super::LIST_ALL_LIMIT)
+        .details();
     loop {
         cursor
             .next()
@@ -162,11 +178,12 @@ where
     // wrap in an Arc<Mutex<>> to add to the list concurrently
     let matching_groups = Arc::new(matching_groups);
     // create pipeline cursors for each group
-    stream::iter(
-        groups
-            .into_iter()
-            .map(|group| Ok((thorium.pipelines.list(&group).limit(super::LIST_ALL_LIMIT), group))),
-    )
+    stream::iter(groups.into_iter().map(|group| {
+        Ok((
+            thorium.pipelines.list(&group).limit(super::LIST_ALL_LIMIT),
+            group,
+        ))
+    }))
     // concurrently search for the pipeline in each group and add matching groups to the list
     .try_for_each_concurrent(None, |(cursor, group)| {
         search_pipeline_cursor(cursor, group, matching_groups.clone())

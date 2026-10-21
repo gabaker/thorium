@@ -421,7 +421,11 @@ pub async fn tag_streamed(src: &str, dst: &str) -> Result<(), Error> {
     // build `<runtime> tag <src> <dst>` to alias an extra reference onto a local image
     let cmd = command(["tag", src, dst]);
     // stream it so it shares the same live-output framing as the surrounding build/push
-    run_streamed(cmd, format!("{} tag failed ('{src}' -> '{dst}')", runtime())).await
+    run_streamed(
+        cmd,
+        format!("{} tag failed ('{src}' -> '{dst}')", runtime()),
+    )
+    .await
 }
 
 /// Push an image, streaming the runtime's output to the terminal
@@ -461,7 +465,9 @@ mod tests {
     #[test]
     fn resolve_falls_back_to_config() {
         // with no flag, the config value should beat the detection fallback
-        let chosen = resolve(None, Some(ContainerRuntime::Podman), || ContainerRuntime::Docker);
+        let chosen = resolve(None, Some(ContainerRuntime::Podman), || {
+            ContainerRuntime::Docker
+        });
         assert_eq!(chosen, ContainerRuntime::Podman);
     }
     /// The detection fallback is used when neither flag nor config is set
@@ -505,7 +511,10 @@ mod tests {
     #[test]
     fn build_args_no_cache_only() {
         // only no_cache is set, so --no-cache appears but --pull must not
-        let opts = BuildOptions { no_cache: true, pull: false };
+        let opts = BuildOptions {
+            no_cache: true,
+            pull: false,
+        };
         let args = build_command_args("reg/x:1", Path::new("ctx"), &[], opts);
         assert!(args.contains(&"--no-cache".to_string()));
         assert!(!args.contains(&"--pull".to_string()));
@@ -515,7 +524,10 @@ mod tests {
     #[test]
     fn build_args_pull_only() {
         // only pull is set, so --pull appears but --no-cache must not
-        let opts = BuildOptions { no_cache: false, pull: true };
+        let opts = BuildOptions {
+            no_cache: false,
+            pull: true,
+        };
         let args = build_command_args("reg/x:1", Path::new("ctx"), &[], opts);
         assert!(args.contains(&"--pull".to_string()));
         assert!(!args.contains(&"--no-cache".to_string()));
@@ -525,7 +537,10 @@ mod tests {
     #[test]
     fn build_args_both_flags() {
         // both options set, so both flags must be present
-        let opts = BuildOptions { no_cache: true, pull: true };
+        let opts = BuildOptions {
+            no_cache: true,
+            pull: true,
+        };
         let args = build_command_args("reg/x:1", Path::new("ctx"), &[], opts);
         assert!(args.contains(&"--no-cache".to_string()));
         assert!(args.contains(&"--pull".to_string()));
@@ -536,8 +551,12 @@ mod tests {
     fn build_args_render_build_args_then_context() {
         // two build args exercise both the rendering and the ordering guarantee
         let build_args = vec![arg("IMAGE", "ubuntu:22.04"), arg("VERSION", "1")];
-        let args =
-            build_command_args("reg/x:1", Path::new("ctx"), &build_args, BuildOptions::default());
+        let args = build_command_args(
+            "reg/x:1",
+            Path::new("ctx"),
+            &build_args,
+            BuildOptions::default(),
+        );
         // join into one string so the `--build-arg key=value` pairing can be asserted
         let joined = args.join(" ");
         assert!(joined.contains("--build-arg IMAGE=ubuntu:22.04"));

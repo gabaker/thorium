@@ -12,6 +12,7 @@ mod backends_reexport {
     pub mod entities;
     pub mod events;
     pub mod files;
+    pub mod grep;
     pub mod groups;
     pub mod helpers;
     pub mod images;
@@ -32,7 +33,6 @@ mod backends_reexport {
     pub mod users;
     pub mod version;
     pub mod volumes;
-    pub mod grep;
 
     pub use comments::CommentSupport;
 }

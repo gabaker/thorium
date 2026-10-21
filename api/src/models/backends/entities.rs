@@ -556,7 +556,9 @@ impl Entity {
                 // add new tools that decompiled this function
                 decomp.tools.append(&mut form.add_tools);
                 // remove any old tools from this function
-                decomp.tools.retain(|tool| !form.remove_tools.contains(tool));
+                decomp
+                    .tools
+                    .retain(|tool| !form.remove_tools.contains(tool));
             }
             EntityMetadata::PeSection(section) => {
                 // update any section details that were set in the form
@@ -1423,7 +1425,10 @@ impl EntityUpdateForm {
             .await
             .map_err(|err| {
                 // log that we could not verify these added groups exist
-                event!(Level::ERROR, msg = "Unable to verify that added groups exist");
+                event!(
+                    Level::ERROR,
+                    msg = "Unable to verify that added groups exist"
+                );
                 // propagate the original error so internal info stays hidden
                 err
             })?

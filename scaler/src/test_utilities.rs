@@ -16,7 +16,7 @@ pub async fn scaler(conf: Conf, thorium: Thorium) -> Result<Scaler, Error> {
         thorium,
         ImageScaler::K8s,
         true,
-        &"kubernetes-admin@cluster.local".to_owned()
+        &"kubernetes-admin@cluster.local".to_owned(),
     )
     .await
 }

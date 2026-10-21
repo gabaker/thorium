@@ -1,7 +1,7 @@
 //! Contains generic functions for interacting with notifications from a route
 
-use axum::http::StatusCode;
 use axum::Json;
+use axum::http::StatusCode;
 use tracing::instrument;
 use uuid::Uuid;
 

@@ -1,9 +1,9 @@
 use std::collections::HashMap;
 
+use scylla::DeserializeRow;
 use scylla::client::session::Session;
 use scylla::statement::prepared::PreparedStatement;
-use scylla::DeserializeRow;
-use thorium::{models::OutputKind, Error};
+use thorium::{Error, models::OutputKind};
 use uuid::Uuid;
 
 /// The prepared statements for results in scylla
