@@ -1,8 +1,6 @@
 import React from 'react';
 import { Col, Container, Row, Spinner } from 'react-bootstrap';
 
-// spec: ./LoadingSpinner.spec.md
-
 interface SpinnerProps {
   loading: boolean; // whether spinner is in view
 }

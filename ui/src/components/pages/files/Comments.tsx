@@ -9,8 +9,6 @@ import { getFileDetails } from '@thorpi/files';
 import { downloadAttachment, postFileComments } from '@thorpi/comments';
 import type { Comment } from '@models/files';
 
-// spec: ./files.spec.md
-
 interface CommentsProps {
   sha256: string;
 }

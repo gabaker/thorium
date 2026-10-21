@@ -11,8 +11,6 @@ import TextInput from '@components/shared/inputs/TextInput';
 import { Entities } from '@models/entities/entities';
 import { BlankCreatePeSection, PeSectionCreateMetaFields } from '@models/entities/pe';
 
-// spec: ../EntityCreate.spec.md
-
 const PeSectionMetaInfo = ({ entity, onChange }: CreateMetadataProps<Entities.PeSection>): JSX.Element => {
   function updatePendingMeta<T extends keyof PeSectionCreateMetaFields>(field: T, value: PeSectionCreateMetaFields[T]): void {
     const updates: PeSectionCreateMetaFields = structuredClone(entity.metadata.PeSection);

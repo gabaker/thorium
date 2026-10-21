@@ -11,8 +11,6 @@ import TextInput from '@components/shared/inputs/TextInput';
 import { Entities } from '@models/entities/entities';
 import { BlankCreateIncident, IncidentCreateMetaFields } from '@models/entities/incident';
 
-// spec: ../EntityCreate.spec.md
-
 const LIST_FIELDS: {
   field: keyof Pick<IncidentCreateMetaFields, 'mission_teams' | 'networks' | 'machines' | 'locations'>;
   label: string;

@@ -13,8 +13,6 @@ import SelectInputArray from '@components/shared/inputs/selectable/SelectInputAr
 import { Entities } from '@models/entities';
 import { BlankPeImport, PeImportMetaFields } from '@models/entities/pe';
 
-// spec: ../EntityDetails.spec.md
-
 const PeImportMetaInfo = ({ entity, pendingEntity, handleUpdate, editing }: DetailsMetadataProps<Entities.PeImport>): JSX.Element => {
   // apply a single metadata field change and hand the updated metadata back to the entity update
   function updatePendingMeta<T extends keyof PeImportMetaFields>(field: T, value: PeImportMetaFields[T]): void {

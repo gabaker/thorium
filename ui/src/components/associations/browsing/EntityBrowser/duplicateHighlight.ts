@@ -1,5 +1,3 @@
-// spec: ./EntityBrowser.spec.md
-
 /**
  * The class toggled on a row header to visually mark it as part of the currently highlighted duplicate
  * group. Applied imperatively (not via React) to every visible occurrence of a node id so a re-render of a

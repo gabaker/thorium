@@ -1,7 +1,6 @@
 // project imports
 import { RenderableInput, RenderKind } from './types';
 import { FormatType } from '@utilities/rules/types';
-// spec: ./SPEC.md
 
 /** Extensions that map directly to the read-only YARA editor. */
 const YARA_EXTENSIONS = new Set(['yar', 'yara']);

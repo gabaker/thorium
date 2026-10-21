@@ -12,7 +12,6 @@ import OverlayBody from './OverlayBody';
 import OverlayHeader from './OverlayHeader';
 import OverlayWrapper from './OverlayWrapper';
 import ResizeButtons from './ResizeButtons';
-// spec: ./OverlayWindow.spec.md
 
 // Floating close button for headerless windows
 const FloatingCloseButton = styled(CloseButton)<{ $zindex: number }>`
@@ -31,7 +30,6 @@ const DEFAULT_EDGE_PADDING: Padding = { start: 4, end: 4, top: 4, bottom: 4 };
 
 /**
  * Draggable, resizable floating window coordinated by WindowManager for cross-window z-index.
- * See OverlayWindow.spec.md for the full prop/behavior contract.
  */
 const OverlayWindow: React.FC<{
   className?: string;

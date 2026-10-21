@@ -1,5 +1,3 @@
-// spec: ./SPEC.md
-
 import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { FaCheck, FaChevronDown } from 'react-icons/fa6';
 import styled from 'styled-components';

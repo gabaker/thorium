@@ -1,5 +1,3 @@
-// spec: ./EntityBrowser.spec.md
-
 // project imports
 import { TreeEdge, TreeOrientation } from '../treeHelpers';
 import { RequestTags } from '@models/tags';

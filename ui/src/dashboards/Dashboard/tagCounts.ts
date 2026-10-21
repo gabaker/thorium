@@ -2,8 +2,6 @@
 import { getNodeTags } from '@components/associations/browsing/EntityBrowser/browserHelpers';
 import type { TreeNode } from '@models/trees';
 
-// spec: ./SPEC.md
-
 /**
  * Tag keys that are **never** shown in the tags filter, regardless of the omnibar's `hidden tags` clause.
  *

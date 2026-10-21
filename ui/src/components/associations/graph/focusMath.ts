@@ -2,8 +2,6 @@
 import { getLinkEndpoints } from './data';
 import type { GraphLink, GraphNode } from './types';
 
-// spec: ./AssociationGraph.spec.md
-
 /** Camera-to-target distance floor so focusing never lands uselessly close */
 export const MIN_FOCUS_DISTANCE = 120;
 /** World-unit breathing room added beyond the exact neighborhood fit distance */

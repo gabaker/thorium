@@ -1,4 +1,3 @@
-// spec: ./EntityBrowser.spec.md
 import React from 'react';
 import { BsArrowsCollapse, BsArrowsExpand } from 'react-icons/bs';
 import { FaEyeSlash } from 'react-icons/fa6';

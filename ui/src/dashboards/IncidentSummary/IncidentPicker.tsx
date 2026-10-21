@@ -1,5 +1,3 @@
-// spec: ./SPEC.md
-
 import React, { useCallback, useEffect, useMemo, useState } from 'react';
 
 // project imports

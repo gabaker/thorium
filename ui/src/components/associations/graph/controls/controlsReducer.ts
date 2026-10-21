@@ -10,8 +10,6 @@ import { SIZE_SCALED_KEYS } from './sizeDefaults';
 import { VisualState } from '../types';
 import type { GraphNode, GraphLink, GraphInstance, D3ChargeForce, D3LinkForce } from '../types';
 
-// spec: ./GraphControlsToolbar.spec.md
-
 export type LabelEntry = { sprite: THREE.Object3D; degree: number; isInitial: boolean; baseScale: THREE.Vector3 };
 
 // Directional arrows land at `cbrt(nodeVal) * nodeRelSize` from the node center

@@ -16,8 +16,6 @@ import type { GraphInstance } from '../types';
 import ScrollableSelect from '@components/shared/inputs/ScrollableSelect';
 import { OverlayTipTop } from '@components/shared/overlay/tips';
 
-// spec: ./GraphControlsToolbar.spec.md
-
 interface GraphControlsToolbarProps {
   graphId: string;
   controls: GraphControls;

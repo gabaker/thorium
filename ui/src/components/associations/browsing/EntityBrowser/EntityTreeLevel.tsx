@@ -1,4 +1,3 @@
-// spec: ./EntityBrowser.spec.md
 import React, { Fragment, useMemo, useState } from 'react';
 
 // project imports

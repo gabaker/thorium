@@ -1,4 +1,3 @@
-// spec: ../ToolResult.spec.md
 import React, { useCallback, useState } from 'react';
 import { FaCheck, FaChevronDown, FaChevronRight, FaPlus } from 'react-icons/fa6';
 import { toast } from 'react-toastify';

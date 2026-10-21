@@ -20,8 +20,6 @@ import { formatAddress } from '@utilities/disassembly';
 import { Entities, entityLabel } from '@models/entities/entities';
 import { DecompiledFunction } from '@models/entities/functions';
 
-// spec: ../EntityBrowsing.spec.md
-
 const DecompiledFunctionListHeaders = () => {
   return (
     <BrowsingCard>

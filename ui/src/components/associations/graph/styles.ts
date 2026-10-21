@@ -43,8 +43,6 @@ import VendorSVG from '@assets/icons/vendor.svg?raw';
 import { VisualState } from './types';
 import { NodeType } from '@models/trees';
 
-// spec: ./AssociationGraph.spec.md
-
 const LIGHT_DARKEN_FACTOR = 0.5;
 
 const darkenHex = (hex: string, factor: number): string => {

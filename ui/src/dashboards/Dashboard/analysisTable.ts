@@ -1,5 +1,3 @@
-// spec: ./SPEC.md
-
 // project imports
 import { Reaction } from '@models/reactions';
 

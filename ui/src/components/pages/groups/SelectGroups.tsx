@@ -1,8 +1,6 @@
 import React from 'react';
 import { Button } from 'react-bootstrap';
 
-// spec: ./groups.spec.md
-
 type SelectGroupsProps = {
   groups: Record<string, boolean>;
   setGroups: (groups: Record<string, boolean>) => void;

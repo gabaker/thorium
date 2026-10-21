@@ -5,8 +5,6 @@ import { getGroupRoleBadge } from '@utilities/role';
 import { Group } from '@models/groups';
 import { UserInfo } from '@models/users';
 
-// spec: ./groups.spec.md
-
 interface GroupRoleBadgeProps {
   group: Group;
   user: UserInfo;

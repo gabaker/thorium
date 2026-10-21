@@ -10,8 +10,6 @@ import { scrollToSection } from '@utilities/interactions';
 import { getResults } from '@thorpi/results';
 import { OutputDisplayType, type Output } from '@models/results';
 
-// spec: ./files.spec.md
-
 type ParsedResults = Record<string, Output[]>;
 
 interface ResultsTableOfContentsProps {

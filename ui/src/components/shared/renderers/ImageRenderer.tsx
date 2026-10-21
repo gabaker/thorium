@@ -4,7 +4,6 @@ import styled from 'styled-components';
 // project imports
 import { imageMimeForName } from './detect';
 import { FileRendererProps } from './types';
-// spec: ./SPEC.md
 
 const ImageWrapper = styled.div`
   display: flex;

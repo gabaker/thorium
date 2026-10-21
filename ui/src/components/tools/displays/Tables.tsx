@@ -7,8 +7,6 @@ import AlertBanner, { Severity } from '@components/shared/alerts/AlertBanner';
 import { formatResultBody } from '../alerts';
 import { ResultRenderProps } from '../props';
 
-// spec: ../ToolResult.spec.md
-
 /** Render a JSON array-of-arrays result as a striped table, or a warning if the shape is unexpected. */
 const JsonTable = ({ results }: { results: string }) => {
   if (results && Array.isArray(results)) {

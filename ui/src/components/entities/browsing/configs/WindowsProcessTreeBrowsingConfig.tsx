@@ -20,8 +20,6 @@ import { Entities } from '@models/entities/entities';
 import { WindowsProcessTree } from '@models/entities/process_trees';
 import { getDetailsBasePathByEntity } from '@components/entities/details/EntityDetailsRoutes';
 
-// spec: ../EntityBrowsing.spec.md
-
 // Fetch Windows process trees using search filters and an optional pagination cursor.
 const getWindowsProcessTrees = async (filters: Filters, cursor: string | null, errorHandler: (error: string) => void) => {
   const listFilters = structuredClone(filters);

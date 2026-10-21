@@ -5,8 +5,6 @@ import { exportJPEG, exportPNG } from '../export';
 import type { GraphSectionProps } from './types';
 import { MenuList, MenuItem } from './Toolbar.styled';
 
-// spec: ./GraphControlsToolbar.spec.md
-
 const ExportSection: React.FC<GraphSectionProps> = ({ graphId, graphInstance }) => (
   <MenuList>
     <MenuItem onClick={() => exportPNG(graphId, graphInstance)}>PNG</MenuItem>

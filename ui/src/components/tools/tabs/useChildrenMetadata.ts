@@ -1,4 +1,3 @@
-// spec: ../ToolResult.spec.md
 import { useCallback, useEffect, useRef, useState } from 'react';
 
 // project imports

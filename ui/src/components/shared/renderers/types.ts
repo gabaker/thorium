@@ -1,6 +1,5 @@
 // project imports
 import { FormatType } from '@utilities/rules/types';
-// spec: ./SPEC.md
 
 /** The kinds of content the modular renderer system knows how to display. */
 export enum RenderKind {

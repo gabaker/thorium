@@ -18,8 +18,6 @@ import { FormatType } from '@utilities/rules/types';
 import { Entities } from '@models/entities';
 import { BlankDecompiledFunction, DecompiledFunctionMetaFields } from '@models/entities/functions';
 
-// spec: ../EntityDetails.spec.md
-
 const DecompiledFunctionMetaInfo = ({
   entity,
   pendingEntity,

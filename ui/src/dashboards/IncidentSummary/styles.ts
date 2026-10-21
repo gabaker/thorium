@@ -1,7 +1,5 @@
 import styled from 'styled-components';
 
-// spec: ./SPEC.md
-
 /// The header row above the seeded dashboard: incident title on the left, "Change incident" on the right.
 export const IncidentHeader = styled.div`
   display: flex;

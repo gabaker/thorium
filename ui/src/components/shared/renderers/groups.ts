@@ -2,8 +2,6 @@
 import { detectRenderKind } from './detect';
 import { RenderKind } from './types';
 
-// spec: ./SPEC.md
-
 /**
  * The set of renderers offered for a file, plus which one to show first. `options[0]` is always
  * the default, so `default` is a convenience alias for it.

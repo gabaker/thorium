@@ -7,8 +7,6 @@ import { prettifiedSeed } from './prettify';
 import { FileRendererProps } from './types';
 import CodeEditor from '@components/shared/inputs/code/CodeEditor';
 
-// spec: ./SPEC.md
-
 const Wrapper = styled.div`
   display: flex;
   flex-direction: column;

@@ -2,8 +2,6 @@ import React, { useEffect, useId, useRef, useState } from 'react';
 import { Dropdown } from 'react-bootstrap';
 import { FaChevronUp, FaChevronDown } from 'react-icons/fa';
 
-// spec: ./ScrollableSelect.spec.md
-
 interface ScrollableSelectProps {
   value: number;
   onChange: (value: number) => void;

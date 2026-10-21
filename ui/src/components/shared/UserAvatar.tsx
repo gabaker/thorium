@@ -4,8 +4,6 @@ import { FaCircleUser } from 'react-icons/fa6';
 // project imports
 import { useUserImage } from '@utilities/useUserImage';
 
-// spec: ./UserAvatar.spec.md
-
 /** Round avatar image sized to the caller-provided pixel dimension. */
 const AvatarImage = styled.img<{ $size: number }>`
   width: ${(p) => p.$size}px;

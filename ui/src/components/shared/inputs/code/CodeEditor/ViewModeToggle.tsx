@@ -4,8 +4,6 @@ import styled from 'styled-components';
 // project imports
 import { BUTTON_BAR_GAP } from '@components/shared/buttons/tokens';
 
-// spec: ./CodeEditor.spec.md
-
 export enum ViewMode {
   Form = 'form',
   Editor = 'editor',

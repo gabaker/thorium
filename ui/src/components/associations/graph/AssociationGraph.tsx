@@ -49,8 +49,6 @@ import {
 } from './Shared';
 import RenderErrorAlert from '@components/shared/alerts/RenderErrorAlert';
 
-// spec: ./AssociationGraph.spec.md
-
 interface AssociationGraphProps {
   inView: boolean;
   bordered?: boolean;

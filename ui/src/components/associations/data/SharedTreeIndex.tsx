@@ -5,8 +5,6 @@ import { buildTreeIndex, TreeIndex } from '../browsing/treeHelpers';
 import { useGraphData } from './GraphDataContext';
 import { Graph } from '@models/trees';
 
-// spec: ./SharedTreeIndex.spec.md
-
 /**
  * Shared, version-memoized {@link TreeIndex} derived once per graph and consumed by every tree view under the
  * same {@link GraphDataProvider} (the entity browser AND the association-tree overlay). This is the single

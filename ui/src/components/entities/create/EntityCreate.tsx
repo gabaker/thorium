@@ -19,8 +19,6 @@ import { entityLabel, EntityCreateTypeMap, EntityTypeMap, UISupportedEntityCreat
 import { getDetailsBasePathByEntity } from '../details/EntityDetailsRoutes';
 import AlertBanner from '@components/shared/alerts/AlertBanner';
 
-// spec: ./EntityCreate.spec.md
-
 export type CreateMetadataProps<K extends UISupportedEntityCreateKind> = {
   entity: EntityCreateTypeMap[K];
   onChange: <F extends keyof EntityCreateTypeMap[K]>(field: F, value: EntityCreateTypeMap[K][F]) => void;

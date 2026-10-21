@@ -1,7 +1,5 @@
 import React, { Fragment } from 'react';
 
-// spec: ./Time.spec.md
-
 interface TimeProps {
   children: string;
   className?: string;

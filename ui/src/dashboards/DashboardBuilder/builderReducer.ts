@@ -1,5 +1,3 @@
-// spec: ./SPEC.md
-
 // project imports
 import { labelFor } from './builderDescriptors';
 import { decodeSeedParams } from '../Dashboard/seedParams';

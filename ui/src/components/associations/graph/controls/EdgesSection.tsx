@@ -7,8 +7,6 @@ import { PopoverBody, Divider } from './Toolbar.styled';
 import LabeledRange from './LabeledRange';
 import { EDGE_LABEL_MAX_PX, EDGE_LABEL_MIN_PX, EDGE_LABEL_TARGET_PX } from '../labelScale';
 
-// spec: ./GraphControlsToolbar.spec.md
-
 const EdgesSection: React.FC<SectionProps> = ({ controls, updateControls }) => (
   <PopoverBody>
     <LabeledRange

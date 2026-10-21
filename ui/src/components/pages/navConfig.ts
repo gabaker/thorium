@@ -30,9 +30,6 @@ import { getBrowsingPathByEntity } from '@components/entities/browsing/EntityBro
 import { Entities } from '@models/entities/entities';
 import SigmaIcon from '@components/shared/icons/SigmaIcon';
 
-// spec: ./SPEC.md
-// spec: ./Page.spec.md
-
 export type NavIcon = IconType | React.ComponentType<{ size?: number }>;
 
 export interface NavSubItem {

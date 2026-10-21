@@ -7,8 +7,6 @@ import { normalizeResultText } from '../alerts';
 import { ResultRenderProps } from '../props';
 import AlertBanner, { Severity } from '@components/shared/alerts/AlertBanner';
 
-// spec: ../ToolResult.spec.md
-
 // results larger than this are truncated before highlighting to keep rendering responsive
 const MAX_LENGTH = 100000;
 

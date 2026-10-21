@@ -33,8 +33,6 @@ import { GraphDataProvider } from '@components/associations/data/GraphDataContex
 import { getBrowsingPathByEntity } from '../browsing/EntityBrowsingRoutes';
 import AlertBanner from '@components/shared/alerts/AlertBanner';
 
-// spec: ./EntityDetails.spec.md
-
 export type DetailsMetadataProps<T extends keyof EntityTypeMap> = {
   entity: EntityTypeMap[T];
   pendingEntity: EntityTypeMap[T];

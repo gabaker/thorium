@@ -1,6 +1,5 @@
 // project imports
 import { HexSelection } from './types';
-// spec: ../SPEC.md
 
 /** A single decoded interpretation of the selected bytes. */
 export interface HexValueEntry {

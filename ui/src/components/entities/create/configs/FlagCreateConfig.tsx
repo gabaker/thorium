@@ -12,8 +12,6 @@ import TextInput from '@components/shared/inputs/TextInput';
 import { Entities } from '@models/entities/entities';
 import { BlankCreateFlag, Confidence, FlagCreateMetaFields } from '@models/entities/flag';
 
-// spec: ../EntityCreate.spec.md
-
 // Native select styled to match the shared TextInput (no shared themed select primitive exists yet).
 const Select = styled.select`
   width: 100%;

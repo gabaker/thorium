@@ -1,7 +1,5 @@
 import React, { useMemo, useState } from 'react';
 
-// spec: ./SPEC.md
-
 // project imports
 import { collectTypeCounts, countTagKey } from './chartData';
 import { ChartBlock, ChartHeader, ChartsRow, ChartTitle, KeyPicker } from './charts/charts.styled';

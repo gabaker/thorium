@@ -21,8 +21,6 @@ import { Entities } from '@models/entities/entities';
 import { WindowsProcess } from '@models/entities/processes';
 import { getDetailsBasePathByEntity } from '@components/entities/details/EntityDetailsRoutes';
 
-// spec: ../EntityBrowsing.spec.md
-
 // Fetch Windows processes using search filters and an optional pagination cursor.
 const getWindowsProcesses = async (filters: Filters, cursor: string | null, errorHandler: (error: string) => void) => {
   const listFilters = structuredClone(filters);

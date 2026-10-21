@@ -9,8 +9,6 @@ import {
 } from './treeHelpers';
 import { Graph } from '@models/trees';
 
-// spec: ./AssociationTree.spec.md
-
 /**
  * The overlay tree is a 2D projection of a DAG. Nodes on the *structural backbone* (the hoisted ancestor
  * spine and its structural descendants) are keyed by their RAW node id — so focus sync, duplicate highlight,

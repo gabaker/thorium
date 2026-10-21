@@ -3,8 +3,6 @@ import React, { ReactNode, useMemo } from 'react';
 // project imports
 import { BarChartContainer, BarCount, BarFill, BarIcon, BarLabel, BarRow, BarTrack } from './BarChart.styled';
 
-// spec: ./SPEC.md
-
 /** Default fill color used when a bar does not specify its own `color`. */
 const DEFAULT_BAR_COLOR = 'var(--thorium-link-text, #5b9bd5)';
 

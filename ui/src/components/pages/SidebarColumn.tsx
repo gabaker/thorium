@@ -11,9 +11,6 @@ import { RequireAuth, useAuth } from '@utilities/auth';
 import { RoleKey, UserInfo } from '@models/users';
 import { CanvasMargin, scaling } from '@styles';
 
-// spec: ./SPEC.md
-// spec: ./Page.spec.md
-
 const ICON_SIZE = 22;
 const FLYOUT_DELAY_MS = 200;
 const FLYOUT_GAP = 4;

@@ -1,5 +1,3 @@
-// spec: ./SPEC.md
-
 import React, { useCallback, useEffect, useMemo, useReducer, useState } from 'react';
 import { useNavigate, useSearchParams } from 'react-router-dom';
 

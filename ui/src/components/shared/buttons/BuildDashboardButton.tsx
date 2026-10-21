@@ -8,8 +8,6 @@ import { OverlayTipBottom } from '@components/shared/overlay/tips';
 import { seedLabelParams } from '@dashboards/DashboardBuilder/builderReducer';
 import { SelectionKind } from '@dashboards/DashboardBuilder/types';
 
-// spec: ./Button.spec.md
-
 /**
  * The kinds of resource a custom dashboard can be seeded from. Each maps to the
  * matching seed query-param key consumed by the dashboard builder / dashboard.

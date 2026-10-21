@@ -4,8 +4,6 @@ import { createContext, ReactNode, RefObject } from 'react';
 import { Margin } from '../bounds';
 import { ZRange } from './models';
 
-// spec: ./WindowManager.spec.md
-
 type WindowContextType = {
   zRange: ZRange;
   canvasMargin: Margin;

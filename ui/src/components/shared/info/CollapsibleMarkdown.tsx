@@ -5,8 +5,6 @@ import styled from 'styled-components';
 import Collapsible from './Collapsible';
 import Markdown from '@components/shared/syntax/Markdown';
 
-// spec: ./SPEC.md
-
 // tightens markdown block spacing for the summary preview context (applied to the Collapsible clip)
 const MarkdownClip = styled.div`
   p,
