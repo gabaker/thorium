@@ -15,7 +15,7 @@ test-support = []
 
 
 [dependencies]
-thorium-api = { workspace = true, features = ["scylla-utils", "rkyv-support", "client"] }
+thorium-api = { workspace = true, features = ["scylla-utils", "rkyv-support", "client", "upgrades-runtime"] }
 tokio = { workspace = true }
 tokio-util = { version = "0.7", features = ["io"] }
 scylla = { version = "1.2", features = ["chrono-04"] }
