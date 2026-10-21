@@ -9,7 +9,8 @@ use crate::models::conversions;
 use crate::{Conf, matches_adds, matches_removes, matches_update};
 
 use super::{
-    Group, GroupStats, Image, ImageScaler, InvalidEnum, Pipeline, Requisition, Resources, User,
+    Group, GroupStats, Image, ImageScaler, InvalidEnum, Pipeline, Requisition, Resources,
+    ScopedToken, User,
 };
 
 /// The default IFF to use when initializing Thorium
@@ -47,6 +48,10 @@ pub struct SystemInfo {
     pub kvm_cache: bool,
     /// Whether the external scaler cache needs to be updated
     pub external_cache: bool,
+    /// The Thorium namespace this API serves (its `thorium.namespace`); `None` from an API that
+    /// doesn't report it
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub namespace: Option<String>,
 }
 
 impl SystemInfo {
@@ -232,11 +237,11 @@ impl SystemSettingsUpdateParams {
 pub struct HostPathWhitelistUpdate {
     /// The set of paths to add to the whitelist
     #[serde(default)]
-    #[cfg_attr(feature = "api", schema(value_type = String))]
+    #[cfg_attr(feature = "api", schema(value_type = HashSet<String>))]
     pub add_paths: HashSet<PathBuf>,
     /// The set of paths to remove from the whitelist
     #[serde(default)]
-    #[cfg_attr(feature = "api", schema(value_type = String))]
+    #[cfg_attr(feature = "api", schema(value_type = HashSet<String>))]
     pub remove_paths: HashSet<PathBuf>,
 }
 
@@ -453,7 +458,7 @@ pub struct SystemSettings {
     /// Users can mount to any of the paths in the whitelist or to a path whose parent is
     /// in the whitelist.
     #[serde(default)]
-    #[cfg_attr(feature = "api", schema(value_type = String))]
+    #[cfg_attr(feature = "api", schema(value_type = HashSet<String>))]
     pub host_path_whitelist: HashSet<PathBuf>,
     /// Allow users to create any host path, ignoring the whitelist; defaults to false
     #[serde(default)]
@@ -495,6 +500,180 @@ pub struct Backup {
     pub images: Vec<Image>,
     /// The pipelines on this server
     pub pipelines: Vec<Pipeline>,
+    /// Every user's scoped tokens; empty in backups taken before scoped tokens were backed up
+    #[serde(default)]
+    pub scoped_tokens: Vec<ScopedToken>,
+    /// The network policies each group holds; empty in backups taken before these sets were
+    /// backed up
+    #[serde(default)]
+    pub network_policy_sets: Vec<NetworkPolicySet>,
+    /// The dangling references a backup taken with `prune_dangling` dropped, and the owners it
+    /// added; left out when nothing was pruned, which is always the case without the param
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub pruned: Vec<PrunedReference>,
+}
+
+/// The params for taking a backup
+#[derive(Serialize, Deserialize, Debug, Default, Clone, Copy, PartialEq, Eq)]
+#[cfg_attr(feature = "api", derive(utoipa::ToSchema))]
+pub struct BackupParams {
+    /// Drop the user and group references that are still dangling after every read of the
+    /// backup and whose referent is confirmed gone, instead of failing the backup
+    #[serde(default)]
+    pub prune_dangling: bool,
+}
+
+impl BackupParams {
+    /// Drops confirmed-dangling user and group references instead of failing the backup
+    #[must_use]
+    pub fn prune_dangling(mut self) -> Self {
+        // ask the API to prune what stays dangling
+        self.prune_dangling = true;
+        self
+    }
+}
+
+/// The params for restoring a backup
+#[derive(Serialize, Deserialize, Debug, Default, Clone, Copy, PartialEq, Eq)]
+#[cfg_attr(feature = "api", derive(utoipa::ToSchema))]
+pub struct RestoreParams {
+    /// Delete every key in the API's Redis database with `FLUSHDB ASYNC` before writing the
+    /// backup, other namespaces' keys included, instead of only this namespace's keys
+    #[serde(default)]
+    pub flush_db: bool,
+}
+
+impl RestoreParams {
+    /// Flushes the API's whole Redis database instead of deleting only this namespace's keys
+    #[must_use]
+    pub fn flush_db(mut self) -> Self {
+        // ask the API to flush its database before writing the backup
+        self.flush_db = true;
+        self
+    }
+}
+
+/// What a backup did to a record when it pruned a dangling reference
+#[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg_attr(feature = "api", derive(utoipa::ToSchema))]
+#[serde(rename_all = "snake_case")]
+pub enum PruneAction {
+    /// A name of a record or group that is gone was dropped from the record
+    Dropped,
+    /// A name was added to the record, so it stays valid after a drop
+    Added,
+    /// The whole record was deleted, since a drop left it invalid
+    Deleted,
+}
+
+/// The kind of record a pruned name refers to
+#[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg_attr(feature = "api", derive(utoipa::ToSchema))]
+#[serde(rename_all = "snake_case")]
+pub enum PrunedReferent {
+    /// A user
+    User,
+    /// A group
+    Group,
+}
+
+/// One change a backup taken with `prune_dangling` made to a record; it names records and
+/// referents, never a stored secret value
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(feature = "api", derive(utoipa::ToSchema))]
+pub struct PrunedReference {
+    /// The record changed: `groups/<group>`, `users/<user>`, or `scoped_tokens/<owner>/<name>`
+    pub record: String,
+    /// The field changed: a group role (`owners`, `managers`, `users`, `monitors`) or `groups`
+    pub field: String,
+    /// What was done
+    pub action: PruneAction,
+    /// The name dropped or added; `None` when the whole record was deleted
+    pub name: Option<String>,
+    /// The kind of record the name refers to; `None` when the whole record was deleted
+    pub referent: Option<PrunedReferent>,
+    /// Why the change was made
+    pub reason: String,
+}
+
+/// The network policies available in one group (its `netpols` set in Redis)
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(feature = "api", derive(utoipa::ToSchema))]
+pub struct NetworkPolicySet {
+    /// The group
+    pub group: String,
+    /// The names of the network policies in the group
+    pub policies: Vec<String>,
+}
+
+/// One reason a backup can't be built or restored, returned in the error body
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(feature = "api", derive(utoipa::ToSchema))]
+pub struct BackupProblem {
+    /// The Redis key, or the record's type and name for a validation problem
+    pub key: String,
+    /// What is wrong with it
+    pub error: String,
+}
+
+impl BackupProblem {
+    /// Builds a problem with a record or key
+    ///
+    /// # Arguments
+    ///
+    /// * `key` - The Redis key, or the record's type and name
+    /// * `error` - What is wrong with it
+    pub fn new<K: Into<String>, E: Into<String>>(key: K, error: E) -> Self {
+        // the record and what is wrong with it
+        BackupProblem {
+            key: key.into(),
+            error: error.into(),
+        }
+    }
+}
+
+/// The body of an error that lists every problem a backup or restore found
+///
+/// Its `Debug` output counts the problems without listing them, so an error logged through
+/// `Debug` doesn't repeat a list its message already logs.
+#[derive(Serialize, Deserialize, Clone, PartialEq, Eq)]
+#[cfg_attr(feature = "api", derive(utoipa::ToSchema))]
+pub struct BackupProblems {
+    /// What failed
+    pub error: String,
+    /// Every problem found
+    pub problems: Vec<BackupProblem>,
+}
+
+impl BackupProblems {
+    /// The most problems a log line lists; the rest are only counted
+    pub const LOGGED: usize = 100;
+
+    /// Gets the problems a log line lists and how many more were found
+    #[must_use]
+    pub fn logged(&self) -> (&[BackupProblem], usize) {
+        // list the first problems and count the rest
+        let listed = self.problems.len().min(Self::LOGGED);
+        (&self.problems[..listed], self.problems.len() - listed)
+    }
+}
+
+impl std::fmt::Debug for BackupProblems {
+    /// Writes what failed and how many problems were found
+    ///
+    /// # Arguments
+    ///
+    /// * `f` - The formatter to write to
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        // count the problems rather than listing them
+        f.debug_struct("BackupProblems")
+            .field("error", &self.error)
+            .field(
+                "problems",
+                &format_args!("{} problems", self.problems.len()),
+            )
+            .finish()
+    }
 }
 
 /// An update for a specific streamer info
@@ -542,6 +721,10 @@ impl NodeRegistration {
 }
 
 /// The current health of this node
+///
+/// Archived backups store each variant as its position in this list, so variants are
+/// append-only: never reorder, remove, or insert one; a new variant goes at the end. The
+/// golden-bytes test of archived enums in thoradm's offline suite fails if the order changes.
 #[derive(Serialize, Deserialize, Debug, Clone)]
 #[cfg_attr(
     feature = "rkyv-support",
@@ -1493,5 +1676,54 @@ mod tests {
         let mut params = windows_params(&[]);
         params.clusters_from_config_ref(&windows_conf());
         assert_eq!(params.clusters, vec!["prod".to_owned(), "dev".to_owned()]);
+    }
+}
+
+#[cfg(all(test, feature = "api"))]
+mod schema_tests {
+    use serde_json::{Value, json};
+    use utoipa::PartialSchema;
+
+    use super::{HostPathWhitelistUpdate, SystemSettings};
+    use crate::models::{Ipv4Block, Ipv6Block};
+
+    /// Returns one property of a schema without its description, serialized to JSON
+    ///
+    /// # Arguments
+    ///
+    /// * `schema` - The schema holding the property
+    /// * `name` - The property's name
+    fn property(schema: &Value, name: &str) -> Value {
+        // the generated schema lists every field under properties, with its doc comment
+        let mut property = schema["properties"][name].clone();
+        if let Some(fields) = property.as_object_mut() {
+            fields.remove("description");
+        }
+        property
+    }
+
+    /// Host path sets are described as arrays of distinct strings, matching how they serialize
+    #[test]
+    fn host_path_sets_are_arrays_of_distinct_strings() {
+        // a set of paths serializes as a JSON array whose order means nothing
+        let set = json!({"type": "array", "items": {"type": "string"}, "uniqueItems": true});
+        let settings = serde_json::to_value(SystemSettings::schema()).unwrap();
+        assert_eq!(property(&settings, "host_path_whitelist"), set);
+        let update = serde_json::to_value(HostPathWhitelistUpdate::schema()).unwrap();
+        assert_eq!(property(&update, "add_paths"), set);
+        assert_eq!(property(&update, "remove_paths"), set);
+    }
+
+    /// The CIDRs a network policy block excludes are described as an optional list of strings
+    #[test]
+    fn excluded_cidrs_are_optional_lists_of_strings() {
+        // an absent exclusion list serializes as nothing or null, a present one as an array
+        let list = json!({"type": ["array", "null"], "items": {"type": "string"}});
+        for block in [
+            serde_json::to_value(Ipv4Block::schema()).unwrap(),
+            serde_json::to_value(Ipv6Block::schema()).unwrap(),
+        ] {
+            assert_eq!(property(&block, "except"), list, "{block}");
+        }
     }
 }

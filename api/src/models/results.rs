@@ -661,6 +661,10 @@ pub struct OutputChunk {
 }
 
 /// The type of display class to use in the UI for this output
+///
+/// Archived backups store each variant as its position in this list, so variants are
+/// append-only: never reorder, remove, or insert one; a new variant goes at the end. The
+/// golden-bytes test of archived enums in thoradm's offline suite fails if the order changes.
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Copy, clap::ValueEnum)]
 #[cfg_attr(
     feature = "rkyv-support",

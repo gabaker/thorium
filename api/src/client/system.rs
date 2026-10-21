@@ -1,9 +1,9 @@
 use super::Error;
 use crate::models::{
-    Backup, Cursor, ImageScaler, Node, NodeGetParams, NodeListLine, NodeListParams,
-    NodeRegistration, NodeUpdate, SystemInfo, SystemSettings, SystemSettingsResetParams,
-    SystemSettingsUpdate, SystemSettingsUpdateParams, SystemStats, Worker, WorkerDeleteMap,
-    WorkerRegistrationList, WorkerUpdate,
+    Backup, BackupParams, Cursor, ImageScaler, Node, NodeGetParams, NodeListLine, NodeListParams,
+    NodeRegistration, NodeUpdate, RestoreParams, SystemInfo, SystemSettings,
+    SystemSettingsResetParams, SystemSettingsUpdate, SystemSettingsUpdateParams, SystemStats,
+    Worker, WorkerDeleteMap, WorkerRegistrationList, WorkerUpdate,
 };
 use crate::{add_query, add_query_list, send, send_build};
 
@@ -389,6 +389,9 @@ impl System {
 
     /// Get a backup of data in Thorium
     ///
+    /// The API fails the backup with a 422 listing every record that doesn't parse or doesn't fit
+    /// together; see [`System::backup_with`] to drop dangling references instead.
+    ///
     /// # Examples
     ///
     /// ```
@@ -408,15 +411,59 @@ impl System {
     /// # });
     /// ```
     pub async fn backup(&self) -> Result<Backup, Error> {
+        // take a backup with the default params
+        self.backup_with(&BackupParams::default()).await
+    }
+
+    /// Get a backup of data in Thorium with params, such as pruning dangling references
+    ///
+    /// # Arguments
+    ///
+    /// * `params` - The params to take the backup with
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use thorium::Thorium;
+    /// use thorium::models::BackupParams;
+    /// # use thorium::Error;
+    ///
+    /// # async fn exec() -> Result<(), Error> {
+    /// // create Thorium client
+    /// let thorium = Thorium::build("http://127.0.0.1").token("<token>").build().await?;
+    /// // get a backup that drops the user and group references that stay dangling
+    /// let backup = thorium.system.backup_with(&BackupParams::default().prune_dangling()).await?;
+    /// // the references it dropped
+    /// println!("{:?}", backup.pruned);
+    /// # // allow test code to be compiled but don't unwrap as no API instance would be up
+    /// # Ok(())
+    /// # }
+    /// # tokio_test::block_on(async {
+    /// #    exec().await
+    /// # });
+    /// ```
+    pub async fn backup_with(&self, params: &BackupParams) -> Result<Backup, Error> {
         // build url for backing up
         let url = format!("{}/api/system/backup", self.host);
+        // send the prune param only when it is set, so a default backup asks what it always has
+        let mut query = Vec::new();
+        if params.prune_dangling {
+            query.push(("prune_dangling", "true"));
+        }
         // build request
-        let req = self.client.get(&url).header("authorization", &self.token);
+        let req = self
+            .client
+            .get(&url)
+            .header("authorization", &self.token)
+            .query(&query);
         // send this request and build a Backup from the response
         send_build!(self.client, req, Backup)
     }
 
     /// restore a backup of data in Thorium
+    ///
+    /// This deletes every Redis key of the API's namespace before writing the backup; see
+    /// [`System::restore_with`] to flush the API's whole Redis database instead.
     ///
     /// # Arguments
     ///
@@ -443,13 +490,56 @@ impl System {
     /// # });
     /// ```
     pub async fn restore(&self, backup: &Backup) -> Result<reqwest::Response, Error> {
+        // restore with the default params
+        self.restore_with(backup, &RestoreParams::default()).await
+    }
+
+    /// Restore a backup of data in Thorium with params, such as flushing the Redis database
+    ///
+    /// # Arguments
+    ///
+    /// * `backup` - The backup to restore from
+    /// * `params` - The params to restore the backup with
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use thorium::Thorium;
+    /// use thorium::models::RestoreParams;
+    /// # use thorium::Error;
+    ///
+    /// # async fn exec() -> Result<(), Error> {
+    /// // create Thorium client
+    /// let thorium = Thorium::build("http://127.0.0.1").token("<token>").build().await?;
+    /// // get a backup from Thorium or load an older one from disk somewhere
+    /// let backup = thorium.system.backup().await?;
+    /// // restore that backup, flushing the API's whole Redis database first
+    /// thorium.system.restore_with(&backup, &RestoreParams::default().flush_db()).await?;
+    /// # // allow test code to be compiled but don't unwrap as no API instance would be up
+    /// # Ok(())
+    /// # }
+    /// # tokio_test::block_on(async {
+    /// #    exec().await
+    /// # });
+    /// ```
+    pub async fn restore_with(
+        &self,
+        backup: &Backup,
+        params: &RestoreParams,
+    ) -> Result<reqwest::Response, Error> {
         // build url for restoring a backup
         let url = format!("{}/api/system/restore", self.host);
+        // send the flush param only when it is set, so a default restore asks what it always has
+        let mut query = Vec::new();
+        if params.flush_db {
+            query.push(("flush_db", "true"));
+        }
         // build request
         let req = self
             .client
             .post(&url)
             .header("authorization", &self.token)
+            .query(&query)
             .json(backup);
         // send this request
         send!(self.client, req)

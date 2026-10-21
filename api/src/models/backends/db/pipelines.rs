@@ -6,8 +6,8 @@ use super::helpers;
 use super::keys::{EventKeys, GroupKeys, ImageKeys, JobKeys, PipelineKeys};
 use crate::models::backends::NotificationSupport;
 use crate::models::{
-    Group, JobStatus, Pipeline, PipelineKey, PipelineList, PipelineRequest, PipelineStats,
-    Reaction, StageStats, User,
+    BackupProblem, Group, JobStatus, Pipeline, PipelineKey, PipelineList, PipelineRequest,
+    PipelineStats, Reaction, StageStats, User,
 };
 use crate::utils::{ApiError, Shared};
 use crate::{
@@ -132,36 +132,45 @@ pub async fn list_details(
     Ok(pipelines)
 }
 
-/// Lists all pipelines in redis for a backup
+/// Lists all pipelines in redis for a backup, and a problem for each pipeline that doesn't parse
 ///
 /// # Arguments
 ///
 /// * `shared` - Shared Thorium objects
 #[instrument(name = "db::pipelines::backup", skip_all, err(Debug))]
-pub async fn backup(shared: &Shared) -> Result<Vec<Pipeline>, ApiError> {
+pub async fn backup(shared: &Shared) -> Result<(Vec<Pipeline>, Vec<BackupProblem>), ApiError> {
     // build key to group set
     let key = GroupKeys::set(shared);
     // get all group names
     let groups: Vec<String> = query!(cmd("smembers").arg(key), shared).await?;
-    // build pipeline to retrieve all pipeline data
+    // build pipeline to retrieve all pipeline data, keeping each pipeline's data key
     let mut pipe = redis::pipe();
+    let mut keys = Vec::new();
     for group in &groups {
         // get all pipeline names
         let image_key = PipelineKeys::set(group, shared);
         let names: Vec<String> = query!(cmd("smembers").arg(image_key), shared).await?;
-        names.iter().fold(&mut pipe, |pipe, name| {
-            pipe.cmd("hgetall")
-                .arg(PipelineKeys::data(group, name, shared))
-        });
+        for name in &names {
+            let data_key = PipelineKeys::data(group, name, shared);
+            pipe.cmd("hgetall").arg(&data_key);
+            keys.push(data_key);
+        }
     }
     // execute pipeline to get all pipeline data
     let raw: Vec<HashMap<String, String>> = pipe.query_async(conn!(shared)).await?;
-    // cast to a vector of pipelines
-    let pipelines = cast!(raw, Pipeline::try_from);
-    Ok(pipelines)
+    // cast each pipeline, keeping every pipeline that doesn't parse as a problem
+    let mut pipelines = Vec::with_capacity(raw.len());
+    let mut problems = Vec::new();
+    for (key, data) in keys.into_iter().zip(raw) {
+        match Pipeline::try_from(data) {
+            Ok(pipeline) => pipelines.push(pipeline),
+            Err(error) => problems.push(helpers::unparsable(key, &error)),
+        }
+    }
+    Ok((pipelines, problems))
 }
 
-/// Restore pipeline data
+/// Restore pipeline data, including each pipeline's bans
 ///
 /// # Arguments
 ///
@@ -170,11 +179,17 @@ pub async fn backup(shared: &Shared) -> Result<Vec<Pipeline>, ApiError> {
 pub async fn restore(pipelines: &[Pipeline], shared: &Shared) -> Result<(), ApiError> {
     // build our redis pipeline
     let mut pipe = redis::pipe();
-    // crawl over pipeline and build the pipeline to restore each one
-    pipelines
-        .iter()
-        .map(|pipeline| build(&mut pipe, pipeline, shared))
-        .collect::<Result<Vec<()>, ApiError>>()?;
+    // crawl over pipeline and build the pipeline to restore each one, with its bans if it has
+    // any, as banning writes them
+    for pipeline in pipelines {
+        build(&mut pipe, pipeline, shared)?;
+        if !pipeline.bans.is_empty() {
+            pipe.cmd("hset")
+                .arg(PipelineKeys::data(&pipeline.group, &pipeline.name, shared))
+                .arg("bans")
+                .arg(serialize!(&pipeline.bans));
+        }
+    }
     // try to save pipelines into redis
     () = pipe.atomic().query_async(conn!(shared)).await?;
     Ok(())

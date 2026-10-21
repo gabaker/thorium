@@ -11,7 +11,7 @@ use super::keys::{NetworkPolicyKeys, SystemKeys};
 use crate::models::system::K8S_CACHE_KEY;
 use crate::models::{
     Group, NetworkPolicy, NetworkPolicyListLine, NetworkPolicyListParams, NetworkPolicyListRow,
-    NetworkPolicyRequest, NetworkPolicyRow, NetworkPolicyUpdate, User,
+    NetworkPolicyRequest, NetworkPolicyRow, NetworkPolicySet, NetworkPolicyUpdate, User,
 };
 use crate::utils::{ApiError, Shared, helpers};
 use crate::{bad, conn, log_scylla_err, serialize};
@@ -672,6 +672,66 @@ pub async fn used_by(
         })
         .collect();
     Ok(images_with_groups)
+}
+
+/// Gets the network policies each of the given groups holds in Redis, for a backup
+///
+/// Groups whose set is empty are left out, and each set's policies are sorted.
+///
+/// # Arguments
+///
+/// * `groups` - The groups whose sets to get
+/// * `shared` - Shared Thorium objects
+#[instrument(name = "db::network_policies::backup_sets", skip_all, err(Debug))]
+pub async fn backup_sets(
+    groups: &[String],
+    shared: &Shared,
+) -> Result<Vec<NetworkPolicySet>, ApiError> {
+    // get every group's set in one round trip
+    let mut pipe = redis::pipe();
+    for group in groups {
+        pipe.cmd("smembers")
+            .arg(NetworkPolicyKeys::netpols(group, shared));
+    }
+    let raw: Vec<Vec<String>> = pipe.query_async(conn!(shared)).await?;
+    // keep each group that holds any policy
+    let sets = groups
+        .iter()
+        .zip(raw)
+        .filter(|(_, policies)| !policies.is_empty())
+        .map(|(group, mut policies)| {
+            policies.sort_unstable();
+            NetworkPolicySet {
+                group: group.clone(),
+                policies,
+            }
+        })
+        .collect();
+    Ok(sets)
+}
+
+/// Restores the network policies each group holds in Redis
+///
+/// # Arguments
+///
+/// * `sets` - The sets to restore
+/// * `shared` - Shared Thorium objects
+#[instrument(name = "db::network_policies::restore_sets", skip_all, err(Debug))]
+pub async fn restore_sets(sets: &[NetworkPolicySet], shared: &Shared) -> Result<(), ApiError> {
+    // nothing to write without a set that holds policies
+    let sets: Vec<&NetworkPolicySet> = sets.iter().filter(|set| !set.policies.is_empty()).collect();
+    if sets.is_empty() {
+        return Ok(());
+    }
+    // add each group's policies to its set
+    let mut pipe = redis::pipe();
+    for set in sets {
+        pipe.cmd("sadd")
+            .arg(NetworkPolicyKeys::netpols(&set.group, shared))
+            .arg(&set.policies);
+    }
+    let () = pipe.atomic().query_async(conn!(shared)).await?;
+    Ok(())
 }
 
 /// Add/remove an image that one or more network policies `used_by` set
