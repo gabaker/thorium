@@ -9,7 +9,7 @@ use std::str::FromStr;
 use thorium::client::ResultsClient;
 use thorium::models::{Output, OutputDisplayType, ResultGetParams};
 use thorium::{Error, Thorium};
-use tokio::fs::{create_dir_all, File};
+use tokio::fs::{File, create_dir_all};
 use tokio::io::AsyncWriteExt;
 use uuid::Uuid;
 

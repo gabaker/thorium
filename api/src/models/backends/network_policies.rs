@@ -654,7 +654,10 @@ impl NetworkPolicyUpdate {
             .await
             .map_err(|err| {
                 // log that we could not verify these added groups exist
-                event!(Level::ERROR, msg = "Unable to verify that added groups exist");
+                event!(
+                    Level::ERROR,
+                    msg = "Unable to verify that added groups exist"
+                );
                 // propagate the original error so internal info stays hidden
                 err
             })?

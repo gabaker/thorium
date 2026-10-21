@@ -78,9 +78,7 @@ impl Volume {
                     return bad!(format!(
                         "The host path '{}' in volume '{}' is not in the list of allowed host paths. \
                         {} or choose a different path.",
-                        host_path.path,
-                        self.name,
-                        admin_error_msg
+                        host_path.path, self.name, admin_error_msg
                     ));
                 }
                 // make sure the host path is valid
@@ -88,8 +86,7 @@ impl Volume {
                     return bad!(format!(
                         "The host path '{}' in volume '{}' is invalid! Host paths must be absolute \
                         and must not contain relative traversal ('.', '..', etc.)",
-                        host_path.path,
-                        self.name
+                        host_path.path, self.name
                     ));
                 }
                 Ok(())

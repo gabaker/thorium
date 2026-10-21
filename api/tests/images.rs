@@ -8,13 +8,13 @@ use thorium::models::{
     ArgStrategy, AutoTagLogic, AutoTagUpdate, ChildFilters, ChildFiltersUpdate, CleanupUpdate,
     DependenciesUpdate, DependencyPassStrategy, EphemeralDependencySettingsUpdate,
     FileSystemDependencySettingsUpdate, FilesHandlerUpdate, GroupUpdate, GroupUsersUpdate,
-    HostPathWhitelistUpdate, ImageBan,
-    ImageBanKind, ImageBanUpdate, ImageLifetime, ImageNetworkPolicyUpdate, ImageScaler,
-    ImageUpdate, ImageVersion, NetworkPolicyRequest, NotificationLevel, NotificationParams,
-    NotificationRequest, OutputCollectionUpdate, OutputDisplayType, OutputHandler, PipelineRequest,
-    RepoDependencySettingsUpdate, ResourcesUpdate, ResultDependencySettingsUpdate,
-    SampleDependencySettingsUpdate, SystemSettingsResetParams, SystemSettingsUpdate,
-    SystemSettingsUpdateParams, Volume, VolumeTypes,
+    HostPathWhitelistUpdate, ImageBan, ImageBanKind, ImageBanUpdate, ImageLifetime,
+    ImageNetworkPolicyUpdate, ImageScaler, ImageUpdate, ImageVersion, NetworkPolicyRequest,
+    NotificationLevel, NotificationParams, NotificationRequest, OutputCollectionUpdate,
+    OutputDisplayType, OutputHandler, PipelineRequest, RepoDependencySettingsUpdate,
+    ResourcesUpdate, ResultDependencySettingsUpdate, SampleDependencySettingsUpdate,
+    SystemSettingsResetParams, SystemSettingsUpdate, SystemSettingsUpdateParams, Volume,
+    VolumeTypes,
 };
 use thorium::test_utilities::{self, generators};
 use thorium::{Error, contains, fail, is, is_in, unwrap_variant, vec_in_vec};

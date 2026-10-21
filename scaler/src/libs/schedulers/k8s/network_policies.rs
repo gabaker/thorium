@@ -10,7 +10,7 @@ use thorium::{conf::BaseNetworkPolicy, models::NetworkPolicyRule};
 use uuid::Uuid;
 
 use crate::{
-    libs::{helpers, Cache},
+    libs::{Cache, helpers},
     raw_entry_vec_extend, same,
 };
 

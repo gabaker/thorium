@@ -399,8 +399,11 @@ fn classify_policy(
             }
             // surface the first rule/flag drift we find (group membership ignored)
             if drift.is_empty() {
-                let diff =
-                    diff_fields_excluding(policy, &NetworkPolicyRequest::from(existing_policy), &["groups"]);
+                let diff = diff_fields_excluding(
+                    policy,
+                    &NetworkPolicyRequest::from(existing_policy),
+                    &["groups"],
+                );
                 if !diff.is_empty() {
                     drift = diff;
                 }
@@ -511,8 +514,11 @@ fn build_updates(mismatch: &PolicyMismatch) -> Vec<PolicyUpdatePlan> {
     for (idx, policy) in existing.iter().enumerate() {
         // recompute drift against this specific policy: distinct policies sharing a name
         // can differ from the toolbox in different ways
-        let drift =
-            diff_fields_excluding(&mismatch.chosen, &NetworkPolicyRequest::from(policy), &["groups"]);
+        let drift = diff_fields_excluding(
+            &mismatch.chosen,
+            &NetworkPolicyRequest::from(policy),
+            &["groups"],
+        );
         // only the truly-missing groups (no existing policy anywhere) need adding, and
         // they go to the first policy; groups already covered by a sibling policy are
         // left alone so we never create a duplicate name within a group
@@ -908,7 +914,10 @@ mod tests {
         ]);
         let (policies, warnings) = dedupe_policies(&m, None);
         assert_eq!(policies.len(), 1);
-        assert!(!policies[0].default_policy, "the 'a' definition should be kept");
+        assert!(
+            !policies[0].default_policy,
+            "the 'a' definition should be kept"
+        );
         assert_eq!(warnings.len(), 1);
         // the warning names both images involved and the kept side
         assert!(warnings[0].contains("defined differently by two images"));
@@ -1229,7 +1238,12 @@ mod tests {
         let updates = build_updates(&mismatch);
         assert_eq!(updates.len(), 1);
         assert_eq!(updates[0].id, Uuid::from_u128(2));
-        assert!(updates[0].drift.iter().any(|field| field == "default_policy"));
+        assert!(
+            updates[0]
+                .drift
+                .iter()
+                .any(|field| field == "default_policy")
+        );
     }
 
     /// A coverage gap is folded into the first existing policy as an additive group add

@@ -220,7 +220,10 @@ impl Entities {
         // build url for deleting an entity
         let url = format!("{base}/api/entities/{id}", base = self.host);
         // build request
-        let req = self.client.delete(&url).header("authorization", &self.token);
+        let req = self
+            .client
+            .delete(&url)
+            .header("authorization", &self.token);
         // send this request
         send!(self.client, req)
     }

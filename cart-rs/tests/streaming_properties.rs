@@ -261,8 +261,11 @@ fn payload(min: usize, max: usize) -> impl Strategy<Value = Vec<u8>> {
         // one enormous run, the most compressible thing there is
         (any::<u8>(), big.clone()).prop_map(|(byte, len)| vec![byte; len]),
         // a short pattern repeated, which compresses very well but not perfectly
-        (prop::collection::vec(any::<u8>(), 1..64), big.clone())
-            .prop_map(|(seed, len)| seed.into_iter().cycle().take(len).collect()),
+        (prop::collection::vec(any::<u8>(), 1..64), big.clone()).prop_map(|(seed, len)| seed
+            .into_iter()
+            .cycle()
+            .take(len)
+            .collect()),
         // runs broken up by noise, so the expansion ratio swings around mid stream
         (prop::collection::vec(any::<u8>(), 1..64), big).prop_map(|(seed, len)| (0..len)
             .map(|i| if i % 64 < 56 { 0 } else { seed[i % seed.len()] })

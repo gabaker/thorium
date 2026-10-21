@@ -4,9 +4,10 @@ use results::ResultSearchEvents;
 use tags::TagSearchEvents;
 
 use crate::{
+    Error,
     client::traits::GenericClient,
     models::{SearchEvent, SearchEventPopOpts, SearchEventStatus},
-    send, send_build, Error,
+    send, send_build,
 };
 
 pub mod results;

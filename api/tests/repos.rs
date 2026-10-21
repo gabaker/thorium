@@ -8,7 +8,7 @@ use thorium::models::{
     RepoCheckout, RepoListLine, RepoListOpts, RepoRequest, TarredRepo,
 };
 use thorium::test_utilities::{self, generators};
-use thorium::{contains, fail, is, is_desc, Error};
+use thorium::{Error, contains, fail, is, is_desc};
 
 #[tokio::test]
 async fn create() -> Result<(), Error> {

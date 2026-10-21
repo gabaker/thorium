@@ -326,7 +326,10 @@ fn overlay(mut tags: RawTags, path: &Path, logs: &mut Sender<String>) -> Result<
                             // The value for this is just a bool so just add it
                             Value::Bool(value) => tags.add_ref(&key, value.to_string()),
                             // error out on unsupported types
-                            _ => fail!(logs, "ERROR: Only strings, numbers, or bools are allowed in nested tag arrays"),
+                            _ => fail!(
+                                logs,
+                                "ERROR: Only strings, numbers, or bools are allowed in nested tag arrays"
+                            ),
                         }
                     }
                 }

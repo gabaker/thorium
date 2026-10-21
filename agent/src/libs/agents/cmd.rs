@@ -1150,7 +1150,10 @@ mod tests {
         // generate a job
         let mut job = generate_job();
         // the job replaces the split "--depth" kwarg and overrides positionals
-        job.args = job.args.kwarg("--depth", vec!["5"]).positionals(vec!["pos1"]);
+        job.args = job
+            .args
+            .kwarg("--depth", vec!["5"])
+            .positionals(vec!["pos1"]);
         // enable positional overrides so the stale value competes for the positional budget
         job.args.opts.override_positionals = true;
         // build the command: a single-binary entrypoint with a default split kwarg whose
@@ -2159,7 +2162,9 @@ mod tests {
         // generate a job carrying a malicious, whitespace-free positional that would be
         // parsed as a second command if it ever reached `cmd.exe /C`
         let mut job = generate_job();
-        job.args = job.args.positionals(vec!["&powershell", "-nop", "-enc", "ZQBjAGgAbwA="]);
+        job.args = job
+            .args
+            .positionals(vec!["&powershell", "-nop", "-enc", "ZQBjAGgAbwA="]);
         // build the command the way the Windows executor does: overlay args, then finalize.
         // The Windows path spawns the tool binary directly, so there is no shell-wrapping step
         let cmd = CmdBuilder::new(

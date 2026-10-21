@@ -4,8 +4,8 @@ use chrono::NaiveDateTime;
 use uuid::Uuid;
 
 use thorium::{
-    models::{FileListOpts, NetworkPolicyListOpts, RepoListOpts},
     Error,
+    models::{FileListOpts, NetworkPolicyListOpts, RepoListOpts},
 };
 
 /// The parameters used for a cursor search in Thorium

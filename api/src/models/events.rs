@@ -365,7 +365,11 @@ mod tests {
     /// * `key` - The tag key to set
     /// * `value` - The tag value to set under the key
     /// * `group` - The group the value is visible in
-    fn tag(key: &str, value: &str, group: &str) -> HashMap<String, HashMap<String, HashSet<String>>> {
+    fn tag(
+        key: &str,
+        value: &str,
+        group: &str,
+    ) -> HashMap<String, HashMap<String, HashSet<String>>> {
         // build the innermost set of groups the value is visible in
         let mut groups = HashSet::new();
         groups.insert(group.to_owned());

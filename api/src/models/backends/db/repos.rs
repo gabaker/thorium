@@ -6,7 +6,7 @@ use futures::stream::{self, StreamExt};
 use itertools::Itertools;
 use std::collections::hash_map::Entry::{Occupied, Vacant};
 use std::collections::{BTreeMap, HashMap, HashSet};
-use tracing::{event, instrument, Level};
+use tracing::{Level, event, instrument};
 use uuid::Uuid;
 
 use super::{ExistsCursor, ScyllaCursor};
@@ -19,7 +19,7 @@ use crate::models::{
     CommitishRepoDataRow, Repo, RepoCheckout, RepoListLine, RepoListParams, RepoRequest,
     RepoSubmission, RepoSubmissionChunk, RepoUrlComponents, TagRequest, TagType, User,
 };
-use crate::utils::{helpers, ApiError, Shared};
+use crate::utils::{ApiError, Shared, helpers};
 use crate::{bad, internal_err, log_scylla_err, not_found, same_vec, unauthorized};
 
 /// Check if a user already has a matching repo submission
@@ -970,7 +970,7 @@ async fn is_ambiguous(
                 return not_found!(format!(
                     "Commitish {} does not exist for {}",
                     commitish, repo
-                ))
+                ));
             }
         };
         // if we have a previous kind then confirm they are still the same

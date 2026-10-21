@@ -5,12 +5,12 @@ use std::collections::{HashMap, HashSet};
 use tracing::instrument;
 use uuid::Uuid;
 
-use crate::models::backends::{db, NotificationSupport};
+use crate::models::backends::{NotificationSupport, db};
 use crate::models::{
     Group, GroupAllowAction, Pipeline, PipelineBanKind, PipelineBanUpdate, PipelineDetailsList,
     PipelineKey, PipelineList, PipelineRequest, PipelineStats, PipelineUpdate, User,
 };
-use crate::utils::{bounder, ApiError, Shared};
+use crate::utils::{ApiError, Shared, bounder};
 use crate::{
     bad, can_delete, can_develop_many, conflict, deserialize_ext, deserialize_opt, extract,
     is_admin, not_found, update_clear, update_opt_empty,
@@ -126,7 +126,10 @@ impl PipelineBanUpdate {
         // check that all bans to be added don't already exist
         for ban_add in &self.bans_added {
             if pipeline.bans.contains_key(&ban_add.id) {
-                return bad!(format!("A ban with id '{}' already exists. Bans cannot be updated, only added or removed.", ban_add.id));
+                return bad!(format!(
+                    "A ban with id '{}' already exists. Bans cannot be updated, only added or removed.",
+                    ban_add.id
+                ));
             }
         }
         // add the requested bans

@@ -1,5 +1,5 @@
 use crate::provision;
-use crate::{args::ProvisionSubCommands, Error};
+use crate::{Error, args::ProvisionSubCommands};
 
 /// Provision Throrium resources such as worker nodes
 pub async fn handle(cmd: &ProvisionSubCommands) -> Result<(), Error> {

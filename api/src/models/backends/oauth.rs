@@ -279,7 +279,10 @@ impl OAuthClient {
                 // reject an IdP email that is not permitted by this provider's approved regexes
                 if !self.email_allowed(email) {
                     // log the rejection so this decision is auditable
-                    event!(Level::WARN, msg = "OAuth email not permitted for this provider");
+                    event!(
+                        Level::WARN,
+                        msg = "OAuth email not permitted for this provider"
+                    );
                     // fail closed as the IdP email is not on this provider's allow list
                     return unauthorized!(
                         "This email is not permitted for this OAuth provider".to_owned()
@@ -499,7 +502,8 @@ impl OAuthUserCreate {
                 if user_email != &session_email {
                     // fail closed as the user tried to register with a different email than the IdP's
                     return bad!(
-                        "The supplied email must match the email from the OAuth provider".to_owned()
+                        "The supplied email must match the email from the OAuth provider"
+                            .to_owned()
                     );
                 }
             }

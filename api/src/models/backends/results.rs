@@ -456,7 +456,10 @@ impl OutputMap {
 ///
 /// * `result_id` - The result id whose prefix contains the file
 /// * `file_path` - The user-supplied relative path to the result file
-fn build_result_file_key(result_id: &Uuid, file_path: &std::path::Path) -> Result<String, ApiError> {
+fn build_result_file_key(
+    result_id: &Uuid,
+    file_path: &std::path::Path,
+) -> Result<String, ApiError> {
     // only accept a path built entirely from plain relative components so the key can never
     // escape the `{result_id}/` prefix. A backslash is an ordinary character on Linux, so a
     // Windows-style path (`..\11..\report.json`) parses as one innocent `Normal` component here;

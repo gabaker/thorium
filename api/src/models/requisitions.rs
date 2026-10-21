@@ -3,9 +3,9 @@ use std::collections::BTreeMap;
 use std::fmt;
 
 use super::{Deadline, Pools, Resources, Worker};
-use crate::same;
 #[cfg(feature = "client")]
 use crate::Error;
+use crate::same;
 
 /// Extract a label or return an error
 macro_rules! extract_label {

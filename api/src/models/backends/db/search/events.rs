@@ -3,11 +3,11 @@
 //! The search event queues are currently stored in Redis
 
 use chrono::Utc;
-use tracing::{event, instrument, Level};
+use tracing::{Level, event, instrument};
 
 use crate::models::backends::db::events;
 use crate::models::backends::db::keys::SearchEventKeys;
-use crate::models::{backends, SearchEventBackend, SearchEventStatus};
+use crate::models::{SearchEventBackend, SearchEventStatus, backends};
 use crate::utils::{ApiError, Shared};
 use crate::{conn, exec_query, query, serialize};
 

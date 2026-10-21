@@ -5,8 +5,8 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use clap::Parser;
-use thorium::models::{TreeOpts, TreeQuery};
 use thorium::Error;
+use thorium::models::{TreeOpts, TreeQuery};
 use uuid::Uuid;
 
 /// The commands to send to the trees task handler

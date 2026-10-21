@@ -12,7 +12,7 @@ use serde_json::Value;
 use std::time::Duration;
 use thorium::models::ElasticIndex;
 use thorium::{Conf, Error};
-use tracing::{event, instrument, Level};
+use tracing::{Level, event, instrument};
 use url::Url;
 
 use super::SearchStore;

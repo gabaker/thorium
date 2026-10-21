@@ -54,7 +54,10 @@ impl AppliedAction {
             Self::CreatedPipeline { group, name } => format!("created pipeline '{group}:{name}'"),
             Self::CreatedNetworkPolicy { name } => format!("created network policy '{name}'"),
             Self::UpdatedNetworkPolicy { original } => {
-                format!("updated network policy '{}' (id {})", original.name, original.id)
+                format!(
+                    "updated network policy '{}' (id {})",
+                    original.name, original.id
+                )
             }
             Self::UpdatedImage { original } => {
                 format!("updated image '{}:{}'", original.group, original.name)
@@ -211,7 +214,10 @@ impl Journal {
                         // groups, unlike the additive-only import path)
                         let live = thorium.network_policies.get(&name, Some(id)).await?;
                         let revert = network_policy_restore(&original, &live);
-                        thorium.network_policies.update(&name, Some(id), &revert).await?;
+                        thorium
+                            .network_policies
+                            .update(&name, Some(id), &revert)
+                            .await?;
                     }
                     AppliedAction::UpdatedImage { original } => {
                         // unbox the owned snapshot; clone only the identity we need after
