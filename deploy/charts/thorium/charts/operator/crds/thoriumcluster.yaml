@@ -2582,8 +2582,30 @@ spec:
                     items:
                       description: An approval for a step that needs one
                       properties:
+                        accept_backup_gaps:
+                          description: |-
+                            Let a lossy step run although a field it loses isn't covered by today's backups, as its
+                            loss report shows
+                          type: boolean
+                        accept_issues:
+                          description: |-
+                            Reason codes whose issue groups don't fail this step's run, taken from the check report or
+                            a failed run's status; adding or changing them on a failed step re-approves it, and they
+                            are consumed when the step runs
+                          items:
+                            type: string
+                          type: array
+                        accept_loss:
+                          description: Accept the loss a lossy downgrade step declares
+                          type: boolean
                         backup:
                           description: Where the backup taken before this step is (a path, snapshot name, or ticket)
+                          type: string
+                        confirm:
+                          description: |-
+                            The confirmation code the blocked lossy step shows in the status, repeated to approve that
+                            one occurrence of the step; a code already recorded in the history never matches again
+                          nullable: true
                           type: string
                         step:
                           description: The id of the approved step
@@ -2597,6 +2619,48 @@ spec:
                     default: false
                     description: Target the operator's latest revision when no target is set (for dev clusters)
                     type: boolean
+                  dangerous_downgrade_lossy:
+                    description: |-
+                      Accept the loss of every lossy downgrade step without per-step confirmation or a backup;
+                      honored only on a dev cluster (`auto_target_dev` and the Namespace's dev label), and ignored
+                      on any other with a `LossySettingRefused` condition
+                    type: boolean
+                  drift_acknowledged:
+                    description: '`unexpected` schema objects an admin acknowledged, so they raise no `SchemaDrift` condition'
+                    items:
+                      description: An `unexpected` schema object an admin acknowledged
+                      properties:
+                        backend:
+                          description: The backend the object belongs to
+                          enum:
+                          - scylla
+                          - elastic
+                          - redis
+                          - s3
+                          - unknown
+                          type: string
+                        fingerprint:
+                          description: |-
+                            The observed fingerprint acknowledged; when set, the acknowledgement lapses if the object
+                            changes again
+                          nullable: true
+                          type: string
+                        object:
+                          description: The object as `thoradm schema diff` names it, such as `samples_list.preview`
+                          type: string
+                      required:
+                      - backend
+                      - object
+                      type: object
+                    type: array
+                  starting_revision:
+                    description: |-
+                      The revision a keyspace without a `schema_migrations` record is at, read only when the
+                      upgrade state `ConfigMap` is missing and `thoradm schema status` finds data but no record;
+                      reported as stale once a record exists
+                    nullable: true
+                    pattern: ^[0-9]{4}-[0-9]{2}-v[0-9]{2}$
+                    type: string
                   target_revision:
                     description: The revision (`YYYY-MM-vNN`) to upgrade this cluster to
                     nullable: true
@@ -2647,20 +2711,214 @@ spec:
                 description: The revision this cluster is at and any upgrade steps left to run
                 nullable: true
                 properties:
+                  conditions:
+                    description: Conditions an admin should see, such as `SchemaDrift` and `MigrationIssues`
+                    items:
+                      description: A condition on the upgrade, shown in `status.upgrade.conditions`
+                      properties:
+                        message:
+                          description: What an admin should do, such as the `thoradm` command to run
+                          type: string
+                        status:
+                          description: '`"True"` while the condition holds, `"False"` once it cleared'
+                          type: string
+                        type:
+                          description: What the condition is about
+                          enum:
+                          - SchemaDrift
+                          - MigrationIssues
+                          - SchemaSkew
+                          - CatalogSkew
+                          - LossySettingRefused
+                          - SearchIncomplete
+                          - Unknown
+                          type: string
+                      required:
+                      - message
+                      - status
+                      - type
+                      type: object
+                    type: array
                   current:
                     description: The revision the cluster is at
                     nullable: true
                     type: string
+                  drift:
+                    description: Drift counts and the first 20 unacknowledged objects; `thoradm schema diff` has the rest
+                    nullable: true
+                    properties:
+                      acknowledged:
+                        description: Objects covered by an acknowledgement (the spec's or the catalog's)
+                        minimum: 0.0
+                        type: integer
+                      changed:
+                        description: Unacknowledged `changed` objects
+                        minimum: 0.0
+                        type: integer
+                      missing:
+                        description: Unacknowledged `missing` objects and fields
+                        minimum: 0.0
+                        type: integer
+                      more:
+                        default: 0
+                        description: How many unacknowledged objects aren't listed
+                        minimum: 0.0
+                        type: integer
+                      objects:
+                        default: []
+                        description: The first 20 unacknowledged objects, in `thoradm schema diff` order
+                        items:
+                          description: One drifted object in the status
+                          properties:
+                            backend:
+                              description: The backend the object belongs to
+                              enum:
+                              - scylla
+                              - elastic
+                              - redis
+                              - s3
+                              - unknown
+                              type: string
+                            fingerprint:
+                              description: The observed fingerprint, to copy into an acknowledgement (absent for `missing`)
+                              nullable: true
+                              type: string
+                            kind:
+                              description: How it differs
+                              enum:
+                              - missing
+                              - changed
+                              - unexpected
+                              - unknown
+                              type: string
+                            lapsed:
+                              description: Whether an acknowledgement for it lapsed because the object changed
+                              type: boolean
+                            object:
+                              description: The object as `thoradm schema diff` names it
+                              type: string
+                          required:
+                          - backend
+                          - kind
+                          - object
+                          type: object
+                        type: array
+                      unexpected:
+                        description: Unacknowledged `unexpected` objects and fields
+                        minimum: 0.0
+                        type: integer
+                      unfingerprinted:
+                        default: 0
+                        description: Of those, the acknowledgements without a fingerprint, which never lapse
+                        minimum: 0.0
+                        type: integer
+                    required:
+                    - acknowledged
+                    - changed
+                    - missing
+                    - unexpected
+                    type: object
+                  failure:
+                    description: The last failed Job of the current step, for reading its logs
+                    nullable: true
+                    properties:
+                      job:
+                        description: The Job's name
+                        type: string
+                      log_tail:
+                        default: []
+                        description: |-
+                          At most the last 20 log lines of that pod, in the status only; empty in history entries,
+                          so log lines never reach `schema_migrations` or backups
+                        items:
+                          type: string
+                        type: array
+                      pod:
+                        description: The pod whose logs were read, if one existed
+                        nullable: true
+                        type: string
+                    required:
+                    - job
+                    type: object
                   latest:
                     description: The newest revision the operator knows about
                     nullable: true
                     type: string
+                  loss:
+                    description: What a lossy downgrade will lose across its path, estimated before approval
+                    nullable: true
+                    properties:
+                      steps:
+                        description: Each lossy step's loss, in the order the steps run
+                        items:
+                          description: What one lossy step will lose, or lost
+                          properties:
+                            description:
+                              description: The step's human-readable loss description
+                              type: string
+                            fields:
+                              description: The fields filled and how many objects each affects
+                              items:
+                                description: One field a lossy step fills
+                                properties:
+                                  backed_up:
+                                    default: false
+                                    description: |-
+                                      Whether today's `thoradm backup` covers this field; a lossy step losing an uncovered field
+                                      needs `accept_backup_gaps` in its approval
+                                    type: boolean
+                                  field:
+                                    description: The column or field
+                                    type: string
+                                  objects:
+                                    description: How many objects hold a value that will be filled
+                                    minimum: 0.0
+                                    type: integer
+                                required:
+                                - field
+                                - objects
+                                type: object
+                              type: array
+                            revision:
+                              description: The revision the step belongs to
+                              type: string
+                            step:
+                              description: The step id
+                              type: string
+                          required:
+                          - description
+                          - fields
+                          - revision
+                          - step
+                          type: object
+                        type: array
+                    required:
+                    - steps
+                    type: object
+                  schema:
+                    additionalProperties:
+                      description: A backend's schema status as shown in `status.upgrade.schema`
+                      enum:
+                      - ok
+                      - drift
+                      - unknown
+                      type: string
+                    description: Each backend's schema status against the recorded revision
+                    type: object
+                  stale_approvals:
+                    description: Approvals naming steps that aren't in the plan or are already done
+                    items:
+                      type: string
+                    type: array
                   steps:
                     default: []
                     description: The steps left to reach the target (or the latest revision when there is no target)
                     items:
                       description: A step planned to bring a cluster to its target revision
                       properties:
+                        blocked:
+                          description: What the step is waiting for, when it is `Blocked`
+                          x-kubernetes-preserve-unknown-fields: true
                         description:
                           description: What this step does
                           type: string
@@ -2671,9 +2929,56 @@ spec:
                           - Infra
                           - Data
                           - Manual
+                          - Unknown
                           type: string
+                        loss:
+                          description: What this step will lose, estimated by its check before approval
+                          nullable: true
+                          properties:
+                            description:
+                              description: The step's human-readable loss description
+                              type: string
+                            fields:
+                              description: The fields filled and how many objects each affects
+                              items:
+                                description: One field a lossy step fills
+                                properties:
+                                  backed_up:
+                                    default: false
+                                    description: |-
+                                      Whether today's `thoradm backup` covers this field; a lossy step losing an uncovered field
+                                      needs `accept_backup_gaps` in its approval
+                                    type: boolean
+                                  field:
+                                    description: The column or field
+                                    type: string
+                                  objects:
+                                    description: How many objects hold a value that will be filled
+                                    minimum: 0.0
+                                    type: integer
+                                required:
+                                - field
+                                - objects
+                                type: object
+                              type: array
+                            revision:
+                              description: The revision the step belongs to
+                              type: string
+                            step:
+                              description: The step id
+                              type: string
+                          required:
+                          - description
+                          - fields
+                          - revision
+                          - step
+                          type: object
                         message:
                           description: Details about the state of this step
+                          nullable: true
+                          type: string
+                        pass:
+                          description: The family of the fused pass this step runs in, when it runs in one
                           nullable: true
                           type: string
                         pause:
@@ -2693,8 +2998,24 @@ spec:
                             - BaremetalScaler
                             - EventHandler
                             - SearchStreamer
+                            - Unknown
                             type: string
                           type: array
+                        phase:
+                          description: Where a step sits in the expand, migrate, contract sequence
+                          enum:
+                          - Expand
+                          - Migrate
+                          - Contract
+                          - Unknown
+                          nullable: true
+                          type: string
+                        prerelease:
+                          description: Whether this step belongs to a pre-release edge
+                          type: boolean
+                        reverse:
+                          description: Whether this step is on a downgrade path
+                          type: boolean
                         revision:
                           description: The revision this step belongs to
                           type: string
@@ -2707,6 +3028,9 @@ spec:
                           - Skipped
                           - Blocked
                           - Failed
+                          - Reingesting
+                          - Waiting
+                          - Unknown
                           type: string
                         step:
                           description: The id of this step

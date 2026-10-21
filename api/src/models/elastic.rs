@@ -241,6 +241,16 @@ pub struct ElasticDoc {
     pub sort: Vec<i64>,
 }
 
+/// One of the search-streamer's independent sources; deleting any index of a source makes the
+/// streamer resync both of its indexes
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+pub enum ElasticSource {
+    /// Results: the `SampleResults` and `RepoResults` indexes
+    Results,
+    /// Tags: the `SampleTags` and `RepoTags` indexes
+    Tags,
+}
+
 #[cfg(test)]
 mod tests {
     use super::ElasticIndex;

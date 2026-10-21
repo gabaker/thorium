@@ -5,13 +5,22 @@
 //! object in creation order. This module holds the types and traits the generated code builds
 //! definitions from and calls into.
 
+mod apply;
+mod check;
 mod checks;
 mod cql_type;
 mod cursors;
 mod definition;
+mod elastic;
+mod fingerprint;
+mod markers;
+mod migrations;
+mod probe;
 pub mod queries;
 mod queries_runtime;
 mod registry;
+#[cfg(feature = "upgrades-runtime")]
+mod runner;
 pub mod scylla;
 mod session;
 pub mod statements;
@@ -29,6 +38,11 @@ mod tests;
 #[cfg(test)]
 mod validate_tests;
 
+pub use crate::models::upgrades::{
+    BackendSchemaStatus, DriftKind, Enumeration, LayoutDef, SchemaBackend,
+};
+pub use apply::{ApplyError, ApplyOptions, ApplyReport, ApplyTarget, ConfigChange};
+pub use check::{SchemaCheckError, SchemaCheckPass};
 pub use cql_type::{CqlDesc, CqlNative, CqlType, JsonText};
 pub use cursors::{
     BucketLimitError, CursorFuture, CursorLimitClause, ExistsStatement, GroupedCursorStatements,
@@ -39,13 +53,26 @@ pub use definition::{
     BindColumns, ClusterOrder, ColumnAt, ColumnDef, ColumnRole, ObjectDef, ProjectedAt, Projection,
     ScyllaObject, TableDef, TableStatements, TtlSource, ViewDef, with_keyspace,
 };
+pub use elastic::ElasticIndexDef;
+pub use fingerprint::{Fingerprint, RevisionSnapshot, SnapshotObject};
+pub use markers::{AppliedSchema, ConfigRecord, DeploymentRecord, RecordStatus};
+pub use migrations::{
+    CatalogIdentity, CheckReport, CheckWait, FinishedStep, GroupTally, IssueReport,
+    MigrationRecordKind, MigrationRunStatus, ObjectClass, PassCheckpoint, PassCounts,
+    ReasonSummary, ReportCounts, ReportSummary, StatusReport,
+};
+pub use probe::{BackendDrift, DriftReport, FieldDrift, ObjectDrift, ObservedSchema};
 pub use queries_runtime::{
     Bucket, BucketError, Census, Cursor, CursorLimit, DEFAULT_IN_CHUNK, DEFAULT_LIMIT_CAP, Delete,
     IN_PRODUCT_LIMIT, InKind, InList, Insert, LimitError, Limits, NotText, QueryError, Raw,
     Restriction, RowResult, STAGE_LOG_LIMIT_CAP, Select, Update, WithTtl, plan_in_chunks,
     run_chunks, run_chunks_any, text_of,
 };
-pub use registry::{Keyspace, RegistryError, validate};
+pub use registry::{Keyspace, RegistryError, SchemaDefinition, SchemaObject, validate};
+#[cfg(feature = "upgrades-runtime")]
+pub use runner::{
+    Batch, MigrateError, MigrationRunner, Outcome, RunBackends, RunContext, RunMode, Slice,
+};
 pub use session::{connect, session_builder};
 pub use thorium_derive::{
     ScyllaProjection, ScyllaStoreAsStr, ScyllaStoreJson, ScyllaTable, ScyllaView,

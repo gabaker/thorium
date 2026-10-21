@@ -1,7 +1,7 @@
 //! The operator's executor for each upgrade step in the catalog
 
 use thorium::Error;
-use thorium::models::upgrades::{StepDef, UpgradeApproval};
+use thorium::models::upgrades::{StepDef, UpgradeApproval, Work};
 
 use crate::app;
 use crate::app::bootstrap::StepOutcome;
@@ -127,15 +127,6 @@ async fn elastic_identity(meta: &ClusterMeta) -> Result<StepResult, Error> {
         Ok(_) => Ok(StepResult::Done(None)),
         Err(error) => interrupted(error),
     }
-}
-
-/// What a guarded step's check found
-#[derive(Debug, Clone, PartialEq, Eq)]
-enum Work {
-    /// Nothing needs changing, and why
-    Nothing(String),
-    /// Data needs changing, and what
-    Needed(String),
 }
 
 /// What to do with a guarded step once its check ran
@@ -380,6 +371,7 @@ mod tests {
         UpgradeApproval {
             step: step.to_owned(),
             backup: backup.to_owned(),
+            ..UpgradeApproval::default()
         }
     }
 
@@ -468,6 +460,7 @@ mod tests {
                 pause: &[],
                 thoradm_migration: None,
                 manual_procedure: None,
+                ..StepDef::BASE
             };
             let error = execute(&meta, &step, &[]).await.expect_err("mismatch");
             assert!(error.to_string().contains(id), "{error}");
@@ -510,6 +503,7 @@ mod tests {
             pause: &[],
             thoradm_migration: None,
             manual_procedure: None,
+            ..StepDef::BASE
         };
         let error = execute(&meta, &unknown, &[]).await.expect_err("unknown");
         assert!(error.to_string().contains("from-a-newer-catalog"));

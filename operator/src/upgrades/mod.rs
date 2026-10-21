@@ -106,6 +106,7 @@ fn progress(
         target: target.map(ToString::to_string),
         latest: Some(upgrades::latest().to_string()),
         steps,
+        ..UpgradeStatus::default()
     }
 }
 
@@ -179,6 +180,7 @@ fn starting_state(detected: Detected, at: String) -> Result<(UpgradeState, &'sta
         message: Some(message.to_owned()),
         at: Some(at),
         by: Some(format!("thorium-operator {OPERATOR_VERSION}")),
+        ..AppliedStep::default()
     });
     Ok((state, message))
 }
@@ -527,6 +529,7 @@ async fn run_step(
         message: details,
         at: Some(chrono::Utc::now().to_rfc3339()),
         by: Some(format!("thorium-operator {OPERATOR_VERSION}")),
+        ..AppliedStep::default()
     });
     pending
         .stored
@@ -560,6 +563,7 @@ async fn record_block(
         message: step.message.clone(),
         at: Some(chrono::Utc::now().to_rfc3339()),
         by: Some(format!("thorium-operator {OPERATOR_VERSION}")),
+        ..AppliedStep::default()
     };
     pending.stored.state.record(applied);
     // save it at the version read, like a finished step
@@ -736,6 +740,7 @@ pub(crate) mod tests {
             target_revision: target.map(str::to_owned),
             auto_target_dev,
             approvals: Vec::new(),
+            ..UpgradeSpec::default()
         }
     }
 
@@ -755,6 +760,7 @@ pub(crate) mod tests {
                 message: None,
                 at: None,
                 by: None,
+                ..AppliedStep::default()
             });
         }
     }
@@ -844,6 +850,7 @@ pub(crate) mod tests {
             message: Some("Waiting for manual work".to_owned()),
             at: None,
             by: None,
+            ..AppliedStep::default()
         });
     }
 
@@ -1228,6 +1235,7 @@ pub(crate) mod tests {
             message: None,
             at: Some("2026-10-08T00:00:00Z".to_owned()),
             by: Some("convert-to-helm.sh".to_owned()),
+            ..AppliedStep::default()
         });
         state
     }
@@ -2397,6 +2405,7 @@ pub(crate) mod tests {
             message: Some("bootstrap.elastic.admin_secret elastic-admin is missing".to_owned()),
             at: None,
             by: None,
+            ..AppliedStep::default()
         });
         let (fake, pending) = pending_upgrade(&cluster, &state).await;
         // Thorium's user now holds every privilege, so the admin Secret isn't needed
