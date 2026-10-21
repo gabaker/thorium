@@ -1,0 +1,1 @@
+view secrets_by_url.password reads a redacted column; mark the field #[thorium(redact)]

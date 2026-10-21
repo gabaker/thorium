@@ -264,6 +264,8 @@ async fn a_wipe_replaces_the_target_with_the_backup() {
         !orphans.is_empty(),
         "B left no object: {before_wipe_files:?}"
     );
+    // the events table an older release left, which the wipe keeps like the other excluded data
+    common::legacy::create_events(harness).await;
     let scylla = harness.scylla().await;
     // excluded data: a stage log line, an event, and an ephemeral object, none of which expire
     scylla

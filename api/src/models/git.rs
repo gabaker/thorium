@@ -21,5 +21,9 @@ pub(crate) use repos::tar_entry_is_contained;
 
 pub use branches::{Branch, BranchDetails};
 
+// the census rows are read by the generated census statements
+pub use commits::CommitishCensusRow;
+pub use repos::RepoCensusRow;
+
 #[cfg(feature = "api")]
 pub use repos::RepoDataForm;

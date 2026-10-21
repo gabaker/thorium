@@ -3,13 +3,7 @@ use bb8_redis::redis::cmd;
 use chrono::prelude::*;
 use elasticsearch::SearchParts;
 use futures::stream::{self, StreamExt, TryStreamExt};
-use futures_util::Future;
-use scylla::client::pager::QueryPager;
-use scylla::deserialize::row::DeserializeRow;
-use scylla::errors::{ExecutionError, PagerExecutionError};
-use scylla::response::query_result::QueryResult;
-use scylla::serialize::value::SerializeValue;
-use scylla::statement::prepared::PreparedStatement;
+use scylla::client::pager::TypedRowStream;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use std::cmp::{Ord, Ordering};
@@ -21,9 +15,13 @@ use uuid::Uuid;
 
 use super::elastic::{self, ElasticResponse};
 use super::keys::{cursors, tags};
+use crate::models::schema::{
+    Bucket, CursorLimit, ExistsStatement, GroupedCursorStatements, PagedTimeCursorStatements,
+    QueryError, RowResult, SimpleCursorStatements, TimeCursorStatements,
+};
 use crate::models::{ApiCursor, ElasticDoc, TagCounts, TagKeyCounts, TagListRow, TagMap, User};
 use crate::models::{ElasticSearchParams, TagType};
-use crate::utils::{ApiError, Shared, helpers};
+use crate::utils::{ApiError, Shared};
 use crate::{
     bad, conn, deserialize, internal_err, internal_err_unwrapped, log_scylla_err, not_found, query,
     serialize,
@@ -63,94 +61,16 @@ impl CursorKind {
     }
 }
 
-/// Get the last partition bucket of a year
-///
-/// This is the bucket of the final second of the year, so it accounts for the length of this
-/// year (leap years included) rather than the year before it.
-///
-/// # Arguments
-///
-/// * `year` - The year to get the last bucket for
-/// * `partition_size` - The size of each partition in seconds
-fn last_year_bucket(year: i32, partition_size: u16) -> u32 {
-    // get the final second of this year, which always exists for the years we crawl
-    let last_second = NaiveDate::from_ymd_opt(year, 12, 31)
-        .and_then(|date| date.and_hms_opt(23, 59, 59))
-        .map(|time| time.and_utc())
-        .unwrap_or_default();
-    // get the bucket this last second is in
-    u32::try_from(helpers::partition(last_second, year, partition_size)).unwrap_or_default()
-}
+/// The tie type of a time cursor's statements
+type TieOf<D> = <<D as ScyllaCursorSupport>::Statements as TimeCursorStatements>::Tie;
 
-/// The most rows a listing returns in one page unless its route sets its own cap
-pub const DEFAULT_LIMIT_CAP: usize = 10_000;
-
-/// The most stage-log lines one request returns
-pub const STAGE_LOG_LIMIT_CAP: usize = 250_000;
-
-/// Check a row limit from a request against the most its route allows
-///
-/// # Arguments
-///
-/// * `limit` - The limit the request asked for
-/// * `cap` - The largest limit this route allows
-/// * `name` - The name of the request parameter the limit came from
-pub fn check_limit(limit: usize, cap: usize, name: &str) -> Result<usize, ApiError> {
-    // a limit of 0 never fills a page and anything above the cap is too large to serve
-    if limit == 0 || limit > cap {
-        return bad!(format!("{name} must be between 1 and {cap}, got {limit}"));
-    }
-    Ok(limit)
-}
-
-/// Convert a row limit into the 32 bit signed integer a CQL `LIMIT` takes
-///
-/// # Arguments
-///
-/// * `limit` - The limit to convert
-pub fn limit_to_cql(limit: usize) -> Result<i32, ApiError> {
-    // refuse limits that don't fit instead of truncating them
-    i32::try_from(limit).map_err(|_| {
-        ApiError::new(
-            axum::http::StatusCode::BAD_REQUEST,
-            Some(format!("A limit of {limit} is too large")),
-        )
-    })
-}
-
-/// Convert a row limit plus the extra row cursors read to detect ties into a CQL `LIMIT`
-///
-/// # Arguments
-///
-/// * `limit` - The limit to convert
-pub fn limit_plus_one_to_cql(limit: usize) -> Result<i32, ApiError> {
-    // add our extra row without overflowing
-    match limit.checked_add(1) {
-        Some(plus_one) => limit_to_cql(plus_one),
-        None => bad!(format!("A limit of {limit} is too large")),
-    }
-}
-
-/// Compare two UUIDs the way Scylla orders a `uuid` clustering column
-///
-/// Scylla orders by UUID version first and then by the UUID's bytes, so this matches it for
-/// every random (version 4) id Thorium generates.
-///
-/// # Arguments
-///
-/// * `left` - The first UUID to compare
-/// * `right` - The second UUID to compare
-#[must_use]
-pub fn scylla_uuid_cmp(left: &Uuid, right: &Uuid) -> Ordering {
-    // compare versions first and then fall back to the raw bytes
-    left.get_version_num()
-        .cmp(&right.get_version_num())
-        .then_with(|| left.as_bytes().cmp(right.as_bytes()))
-}
+/// The tie scope type of a time cursor's statements
+type ScopeOf<D> = <<D as ScyllaCursorSupport>::Statements as TimeCursorStatements>::TieScope;
 
 /// The data to retain throughout this cursors life
 #[derive(Serialize, Deserialize, Debug)]
-pub struct ScyllaCursorRetain<D: CursorCore> {
+#[serde(bound = "")]
+pub struct ScyllaCursorRetain<D: ScyllaCursorSupport> {
     /// The start timestamp for this cursor
     pub start: DateTime<Utc>,
     /// The end timestamp for this cursor
@@ -159,8 +79,9 @@ pub struct ScyllaCursorRetain<D: CursorCore> {
     pub extra_filter: D::ExtraFilters,
     /// The values to group the rows from this cursor by
     pub group_by: Vec<D::GroupBy>,
-    /// Any ties in past iterations of this cursor
-    pub ties: D::Ties,
+    /// The first unconsumed tie of each partition a page ended inside of, at the start
+    /// timestamp
+    pub ties: Vec<(ScopeOf<D>, TieOf<D>)>,
     /// Tags data to retain if this is a tags cursor
     pub tags_retain: Option<TagsRetain>,
     /// The values already returned by this cursor when deduping, retained so that duplicates
@@ -185,13 +106,37 @@ pub struct TagsRetain {
     pub ties: HashMap<String, String>,
 }
 
+impl<D: ScyllaCursorSupport> ScyllaCursorRetain<D> {
+    /// Narrow this cursor to the groups a request may list, dropping the saved ties of every
+    /// other group's partitions so they are never read
+    ///
+    /// Returns whether any saved group is left.
+    ///
+    /// # Arguments
+    ///
+    /// * `allowed` - The groups the request may list
+    fn narrow(&mut self, allowed: &HashSet<D::GroupBy>) -> bool {
+        // keep only the saved groups this request may still list
+        self.group_by.retain(|group| allowed.contains(group));
+        // drop the ties of partitions in any other group
+        self.ties
+            .retain(|(scope, _)| allowed.contains(D::Statements::scope_group(scope)));
+        // tag ties are kept by the group's name, so drop those of any other group too
+        if let Some(tags_retain) = &mut self.tags_retain {
+            let names: HashSet<String> = allowed.iter().map(ToString::to_string).collect();
+            tags_retain.ties.retain(|group, _| names.contains(group));
+        }
+        !self.group_by.is_empty()
+    }
+}
+
 /// The core logic all cursors must implement
 pub trait CursorCore: Debug + Serialize + for<'a> Deserialize<'a> {
     /// The params to build this cursor form
     type Params;
 
     /// The extra info to filter with
-    type ExtraFilters: Debug + Serialize + for<'a> Deserialize<'a>;
+    type ExtraFilters: Debug + Serialize + for<'a> Deserialize<'a> + Send + Sync;
 
     /// The type of data to group our rows by
     type GroupBy: std::fmt::Display
@@ -201,22 +146,9 @@ pub trait CursorCore: Debug + Serialize + for<'a> Deserialize<'a> {
         + Eq
         + PartialEq
         + Serialize
-        + SerializeValue
-        + for<'a> Deserialize<'a>;
-
-    /// The data structure to store tie info in
-    type Ties: Debug + Default + Serialize + for<'a> Deserialize<'a>;
-
-    /// The number of buckets to crawl at once for non tag queries
-    ///
-    /// This is 99 by default
-    ///
-    /// # Arguments
-    ///
-    /// * `extra_filters` - The extra filters for this query
-    fn bucket_limit(_extra_filters: &Self::ExtraFilters) -> u32 {
-        99
-    }
+        + for<'a> Deserialize<'a>
+        + Send
+        + Sync;
 
     /// Get the partition size for this cursor
     ///
@@ -232,11 +164,12 @@ pub trait CursorCore: Debug + Serialize + for<'a> Deserialize<'a> {
     /// * `params` - The params to use to build this cursor
     fn get_id(params: &Self::Params) -> Option<Uuid>;
 
-    // Get our start and end timestamps
+    /// Get our start and end timestamps
     ///
     /// # Arguments
     ///
     /// * `params` - The params to use to build this cursor
+    /// * `shared` - Shared Thorium objects
     fn get_start_end(
         params: &Self::Params,
         shared: &Shared,
@@ -282,14 +215,7 @@ pub trait CursorCore: Debug + Serialize + for<'a> Deserialize<'a> {
     /// # Arguments
     ///
     /// * `params` - The params to use to build this cursor
-    fn get_limit(params: &Self::Params) -> Result<usize, ApiError>;
-
-    /// Add an item to our tie breaker map
-    ///
-    /// # Arguments
-    ///
-    /// * `ties` - Our current ties
-    fn add_tie(&self, ties: &mut Self::Ties);
+    fn get_limit(params: &Self::Params) -> Result<CursorLimit, ApiError>;
 
     /// Determines if a new item is a duplicate or not
     ///
@@ -305,13 +231,27 @@ pub trait CursorCore: Debug + Serialize + for<'a> Deserialize<'a> {
 }
 
 /// Abstracts cursor logic across different tables and data types
-#[async_trait::async_trait]
 pub trait ScyllaCursorSupport: CursorCore {
     /// The intermediate list row to use
-    type IntermediateRow: Into<Self> + for<'frame, 'metadata> DeserializeRow<'frame, 'metadata>;
+    type IntermediateRow: Into<Self>
+        + for<'frame, 'metadata> scylla::deserialize::row::DeserializeRow<'frame, 'metadata>;
+
+    /// The statements this cursor pages with
+    type Statements: TimeCursorStatements<
+            Extra = Self::ExtraFilters,
+            Group = Self::GroupBy,
+            Row = Self::IntermediateRow,
+        >;
 
     /// The unique key for this cursors row
     type UniqueType<'a>: Debug + PartialEq;
+
+    /// Get the statements this cursor pages with
+    ///
+    /// # Arguments
+    ///
+    /// * `shared` - Shared Thorium objects
+    fn statements(shared: &Shared) -> &Self::Statements;
 
     /// Add an item to our tag tie breaker map, keeping any tie a group already has
     ///
@@ -322,18 +262,7 @@ pub trait ScyllaCursorSupport: CursorCore {
         unimplemented!("This type does not support tags");
     }
 
-    /// Get the timestamp from this items intermediate row
-    ///
-    /// # Arguments
-    ///
-    /// * `intermediate` - The intermediate row to get a timestamp for
-    fn get_intermediate_timestamp(intermediate: &Self::IntermediateRow) -> DateTime<Utc>;
-
     /// Get the timestamp for this item
-    ///
-    /// # Arguments
-    ///
-    /// * `item` - The item to get a timestamp for
     fn get_timestamp(&self) -> DateTime<Utc>;
 
     /// Get the unique key for this intermediate row
@@ -347,16 +276,6 @@ pub trait ScyllaCursorSupport: CursorCore {
 
     /// Get the unique key for this row
     fn get_unique_key<'a>(&'a self) -> Self::UniqueType<'a>;
-
-    /// Compare two rows that share a timestamp in the order a page consumes them
-    ///
-    /// This must match the order the tie query reads rows within one partition, so the rows
-    /// a page consumes from each partition are always the ones before its recorded tie.
-    ///
-    /// # Arguments
-    ///
-    /// * `other` - The row to compare against
-    fn cmp_ties(&self, other: &Self) -> Ordering;
 
     /// Add a group to a specific returned line
     fn add_group_to_line(&mut self, _group: String) {
@@ -380,144 +299,42 @@ pub trait ScyllaCursorSupport: CursorCore {
     }
 
     /// Build all of the keys needs to retrieve census data
+    ///
+    /// # Arguments
+    ///
+    /// * `groups` - The values to group our rows by
+    /// * `extra` - The extra values required to list this data
+    /// * `year` - The year we are looking for census data for
+    /// * `bucket` - The newest bucket to look for census data from
+    /// * `keys` - The vec to add our census stream keys too
+    /// * `shared` - Shared Thorium objects
     fn census_keys<'a>(
-        groups: &'a Vec<Self::GroupBy>,
+        groups: &'a [Self::GroupBy],
         extra: &Self::ExtraFilters,
         year: i32,
-        bucket: u32,
-        keys: &mut Vec<(&'a Self::GroupBy, String, i32)>,
+        bucket: Bucket,
+        keys: &mut Vec<(&'a Self::GroupBy, String, Bucket)>,
         shared: &Shared,
     );
 
-    /// builds the query string for getting data from ties in the last query
+    /// Sort the tied rows of a tags cursor by the clustering key the tags table stores them by
+    ///
+    /// Only tags cursors call this, since `get_tag_clustering_key` is unimplemented for types
+    /// that don't support tags.
     ///
     /// # Arguments
     ///
-    /// * `group` - The group that this query is for
-    /// * `filters` - Any filters to apply to this query
-    /// * `year` - The year to get data for
-    /// * `bucket` - The bucket to get data for
-    /// * `uploaded` - The timestamp to get the remaining tied values for
-    /// * `breaker` - The value to use as a tie breaker
-    /// * `limit` - The max number of rows to return
-    /// * `shared` - Shared Thorium objects
-    #[allow(clippy::too_many_arguments)]
-    fn ties_query(
-        ties: &mut Self::Ties,
-        extra: &Self::ExtraFilters,
-        year: i32,
-        bucket: i32,
-        uploaded: DateTime<Utc>,
-        limit: i32,
-        shared: &Shared,
-    ) -> Result<Vec<impl Future<Output = Result<QueryResult, ExecutionError>>>, ApiError>;
-
-    /// builds the query string for getting the next page of values
-    ///
-    /// # Arguments
-    ///
-    /// * `groups` - The groups to restrict our query too
-    /// * `filters` - Any filters to apply to this query
-    /// * `year` - The year to get data for
-    /// * `buckets` - The buckets to get data for
-    /// * `start` - The earliest timestamp to get data from
-    /// * `end` - The oldest timestamp to get data from
-    /// * `limit` - The max amount of data to get from this query
-    /// * `shared` - Shared Thorium objects
-    #[allow(clippy::too_many_arguments)]
-    async fn pull(
-        group: &Self::GroupBy,
-        extra: &Self::ExtraFilters,
-        year: i32,
-        buckets: Vec<i32>,
-        start: DateTime<Utc>,
-        end: DateTime<Utc>,
-        limit: i32,
-        shared: &Shared,
-    ) -> Result<QueryResult, ExecutionError>;
-
-    /// Convert [`QueryResult`]s into a sorted Vec of self
-    ///
-    /// # Arguments
-    ///
-    /// * `queries` - The queries to cast and sort
-    /// * `sorted` - The map to store sorted data in
-    /// * `mapped` - The currently available number of rows we have sorted
-    /// * `tags` - Whether this a tags cursor not not
-    /// * `span` - The span to log traces under
-    async fn sort(
-        queries: Vec<QueryResult>,
-        sorted: &mut BTreeMap<DateTime<Utc>, VecDeque<Self>>,
-        mapped: &mut usize,
-    ) -> Result<(), ApiError>
+    /// * `tied` - The lines sharing one timestamp
+    fn sort_tied_rows_by_tag_clustering_key(tied: &mut VecDeque<SortedLine<Self>>)
     where
         Self: Sized,
     {
-        // crawl over each stream and cast their rows to partition counts
-        for query in queries {
-            // enable casting to types for this query
-            let query_rows = query.into_rows_result()?;
-            // set the type to cast this stream too
-            let typed_stream = query_rows.rows::<Self::IntermediateRow>()?;
-            // cast our rows to typed values
-            for row in typed_stream {
-                // raise any errors from casting
-                let cast = row?;
-                // get the timestamp and unique key for our intermediate row
-                let timestamp = Self::get_intermediate_timestamp(&cast);
-                let inter_unique = Self::get_intermediate_unique_key(&cast);
-                // get an entry to the list for this timestamp
-                let entry = sorted.entry(timestamp).or_default();
-                // check if this entry has already been added to this vec
-                let pos = entry
-                    .iter()
-                    .position(|item| inter_unique == item.get_unique_key());
-                // drop our reference to our interemdiate unique value
-                drop(inter_unique);
-                // if we found this item already exists then add our intermediate row
-                match pos {
-                    Some(pos) => {
-                        // get the right list line and add our intermediate row
-                        entry.get_mut(pos).unwrap().add_intermediate_to_line(cast);
-                    }
-                    None => {
-                        // cast our row and add it
-                        entry.push_back(cast.into());
-                        // increment our mapped count
-                        *mapped += 1;
-                    }
-                }
-            }
-        }
-        Ok(())
+        // sort the lines by the clustering key the tags table stores them by
+        tied.make_contiguous()
+            .sort_by_cached_key(|sorted| sorted.line.get_tag_clustering_key());
     }
 
-    /// Sort any possibly ambigous rows by their cluster key
-    fn sort_by_cluster_key(ambigous: &mut VecDeque<Self>) {
-        // create a btreemap to sort this data
-        let mut sorted = BTreeMap::default();
-        // keep a list of our ambigous rows
-        let mut to_sort = HashMap::with_capacity(ambigous.len());
-        // go through and get our clustering keys and insert them into our map
-        for (index, row) in ambigous.drain(..).enumerate() {
-            // get this rows clustering key
-            let ckey = row.get_tag_clustering_key();
-            // insert this into our map
-            sorted.insert(ckey, index);
-            // add this row to our sort list
-            to_sort.insert(index, row);
-        }
-        // rebuild this ambiguous row list in order
-        for index in sorted.values() {
-            // get this row and insert it
-            if let Some(row) = to_sort.remove(index) {
-                // add this row in the correct order
-                ambigous.push_back(row);
-            }
-        }
-    }
-
-    /// Convert [`QueryResult`]s into a sorted Vec of self for tag based queries
+    /// Convert tag rows into a sorted Vec of self for tag based queries
     ///
     /// # Arguments
     ///
@@ -528,7 +345,7 @@ pub trait ScyllaCursorSupport: CursorCore {
     fn sort_tags(
         mapping: &mut HashMap<String, TagMapping>,
         tags: &HashMap<String, Vec<String>>,
-        sorted: &mut BTreeMap<DateTime<Utc>, VecDeque<Self>>,
+        sorted: &mut BTreeMap<DateTime<Utc>, VecDeque<SortedLine<Self>>>,
         mapped_count: &mut usize,
     ) -> Result<(), ApiError>
     where
@@ -552,13 +369,56 @@ pub trait ScyllaCursorSupport: CursorCore {
                 let timestamp = line.get_timestamp();
                 // get an entry to the list for this timestamp
                 let entry = sorted.entry(timestamp).or_default();
-                // add our new sample list line
-                entry.push_back(line);
+                // add our new line, whose ties the tags cursor tracks itself
+                entry.push_back(SortedLine {
+                    line,
+                    tie: None,
+                    scopes: Vec::new(),
+                });
                 // increment our mapped count
                 *mapped_count += 1;
             }
         }
         Ok(())
+    }
+}
+
+/// A line a time cursor read but hasn't returned yet, with the tie and partitions of its rows
+#[derive(Debug)]
+pub struct SortedLine<D: ScyllaCursorSupport> {
+    /// The line
+    line: D,
+    /// The tie its rows share, or `None` for a line built from tag rows
+    tie: Option<TieOf<D>>,
+    /// The partitions its rows were read from
+    scopes: Vec<ScopeOf<D>>,
+}
+
+impl<D: ScyllaCursorSupport> SortedLine<D> {
+    /// The first of this line's partitions in key order, which orders lines sharing a tie
+    fn first_scope(&self) -> Option<&ScopeOf<D>> {
+        self.scopes
+            .iter()
+            .min_by(|left, right| D::Statements::cmp_scopes(left, right))
+    }
+
+    /// Compare two lines sharing a timestamp in the order a page consumes them: by their tie
+    /// in the order the tie queries read it, then by their first partition
+    ///
+    /// # Arguments
+    ///
+    /// * `other` - The line to compare against
+    fn cmp_consumed(&self, other: &Self) -> Ordering {
+        // lines built from tag rows have no tie and are ordered by the tags cursor
+        let ties = match (&self.tie, &other.tie) {
+            (Some(mine), Some(theirs)) => D::Statements::cmp_ties(mine, theirs),
+            _ => Ordering::Equal,
+        };
+        // lines sharing a tie, such as a branch and a tag of one name, go by partition
+        ties.then_with(|| match (self.first_scope(), other.first_scope()) {
+            (Some(mine), Some(theirs)) => D::Statements::cmp_scopes(mine, theirs),
+            _ => Ordering::Equal,
+        })
     }
 }
 
@@ -585,65 +445,7 @@ pub struct CursorCount {
     pub count: i64,
 }
 
-/// A tie query for data based on tags
-#[expect(clippy::too_many_arguments)]
-async fn ties_tags_query_helper<'a>(
-    ties_prepared: &PreparedStatement,
-    kind: TagType,
-    group: &str,
-    year: i32,
-    bucket: i32,
-    key: &'a str,
-    value: &'a str,
-    start: DateTime<Utc>,
-    breaker: &str,
-    shared: &Shared,
-) -> Result<(&'a str, &'a str, QueryPager), PagerExecutionError> {
-    // build a paged cursor for this data
-    let query = shared
-        .scylla
-        .session
-        .execute_iter(
-            ties_prepared.clone(),
-            (kind, group, year, bucket, key, value, start, breaker),
-        )
-        .await?;
-    Ok((key, value, query))
-}
-
-/// A query for data based on tags
-#[instrument(
-    name = "ScyllaCursor::tags_query_helper",
-    skip_all,
-    fields(kind, key, value, buckets_len = buckets.len()),
-    err(Debug)
-)]
-#[expect(clippy::too_many_arguments)]
-async fn tags_query_helper<'a, D: CursorCore>(
-    query_prepared: &PreparedStatement,
-    kind: TagType,
-    group: &D::GroupBy,
-    year: i32,
-    buckets: Vec<i32>,
-    key: &'a str,
-    value: &'a str,
-    start: DateTime<Utc>,
-    end: DateTime<Utc>,
-    shared: &Shared,
-) -> Result<(&'a str, &'a str, QueryPager), PagerExecutionError> {
-    // build the query to pull a page of matching tag data
-    let query = shared
-        .scylla
-        .session
-        .execute_iter(
-            query_prepared.clone(),
-            (kind, group, year, buckets, key, value, start, end),
-        )
-        .await?;
-    // check if there is more
-    Ok((key, value, query))
-}
-
+/// The rows of one tagged item and the tag keys and values they matched
 #[derive(Default, Debug)]
 pub struct TagMapping {
     /// They key/values this data has
@@ -668,14 +470,18 @@ impl TagMapping {
     }
 }
 
+/// Read every row of some tag queries into a mapping from each item to its rows
+///
+/// # Arguments
+///
+/// * `queries` - Each query's key, value, and rows
+/// * `mapping` - The mapping to add the rows to
 async fn parse_tag_queries<'a>(
-    queries: Vec<(&'a str, &'a str, QueryPager)>,
+    queries: Vec<(&'a str, &'a str, TypedRowStream<TagListRow>)>,
     mapping: &mut HashMap<String, TagMapping>,
 ) -> Result<(), ApiError> {
     // crawl over our queries and deserialize them
-    for (key, value, query) in queries.into_iter() {
-        // set the type to cast this stream too
-        let mut typed_stream = query.rows_stream::<TagListRow>()?;
+    for (key, value, mut typed_stream) in queries {
         // cast our rows to typed values
         while let Some(row) = typed_stream.next().await {
             // check if we failed to deserialize this row
@@ -687,6 +493,47 @@ async fn parse_tag_queries<'a>(
         }
     }
     Ok(())
+}
+
+/// Run some cursor statements 50 at a time, keeping the results of all of them
+///
+/// # Arguments
+///
+/// * `futures` - The statements to run
+async fn run_all<T, F>(futures: Vec<F>) -> Result<Vec<T>, ApiError>
+where
+    F: std::future::Future<Output = Result<T, QueryError>>,
+{
+    // run the statements 50 at a time and raise the first error
+    let results = stream::iter(futures)
+        .buffer_unordered(50)
+        .collect::<Vec<Result<T, QueryError>>>()
+        .await
+        .into_iter()
+        .collect::<Result<Vec<T>, QueryError>>()?;
+    Ok(results)
+}
+
+/// The statements of a tag listing, which page through the tags table or its case-insensitive
+/// view
+trait TagCursorStatements:
+    PagedTimeCursorStatements<
+        Extra = (TagType, String, String),
+        Group = String,
+        Row = TagListRow,
+        Tie = String,
+    >
+{
+}
+
+impl<S> TagCursorStatements for S where
+    S: PagedTimeCursorStatements<
+            Extra = (TagType, String, String),
+            Group = String,
+            Row = TagListRow,
+            Tie = String,
+        >
+{
 }
 
 /// A cursor for a listing group permisisoned data within scylla
@@ -707,21 +554,21 @@ where
     /// The year that we last got data from
     pub year: i32,
     /// The bucket that we last got data from
-    pub bucket: u32,
+    pub bucket: Bucket,
     /// The final year we are going to get data from
     pub end_year: i32,
     /// The final bucket we will get data from
-    pub end_bucket: u32,
+    pub end_bucket: Bucket,
     /// The partition size to use
     partition_size: u16,
     /// The max number of items to return at once
-    pub limit: usize,
+    pub limit: CursorLimit,
     /// Whether to dedupe this data or not
     pub dedupe: bool,
     /// The data this cursor has retrieved
     pub data: Vec<D>,
     /// The internal sorted data to return to the user
-    pub sorted: BTreeMap<DateTime<Utc>, VecDeque<D>>,
+    sorted: BTreeMap<DateTime<Utc>, VecDeque<SortedLine<D>>>,
     /// The currently available number of rows we have sorted
     pub mapped: usize,
     /// whether this cursor has been exhausted or not
@@ -759,6 +606,27 @@ fn maybe_lower_tags<D: ScyllaCursorSupport>(
     }
 }
 
+/// Build the filters of each tag key and value a tag listing matches
+///
+/// # Arguments
+///
+/// * `tags_retain` - Tag data retained for tags cursors
+fn tag_filters(tags_retain: &TagsRetain) -> Vec<(&str, &str, (TagType, String, String))> {
+    tags_retain
+        .tags
+        .iter()
+        .flat_map(|(key, values)| {
+            values.iter().map(move |value| {
+                (
+                    key.as_str(),
+                    value.as_str(),
+                    (tags_retain.tag_type, key.clone(), value.clone()),
+                )
+            })
+        })
+        .collect()
+}
+
 impl<D> ScyllaCursor<D>
 where
     for<'de> D: Deserialize<'de> + Debug + std::marker::Send,
@@ -790,6 +658,115 @@ where
         }
     }
 
+    /// Build a cursor over the window between its start and end timestamps
+    ///
+    /// # Arguments
+    ///
+    /// * `id` - The cursor's id
+    /// * `username` - The username of the user this cursor is scoped to
+    /// * `retain` - The data the cursor keeps between pages
+    /// * `limit` - The most rows a page returns
+    /// * `dedupe` - Whether to dedupe items or not
+    /// * `new` - Whether this cursor is new rather than continued
+    /// * `shared` - Shared Thorium objects
+    fn build(
+        id: Uuid,
+        username: &str,
+        retain: ScyllaCursorRetain<D>,
+        limit: CursorLimit,
+        dedupe: bool,
+        new: bool,
+        shared: &Shared,
+    ) -> Result<Self, ApiError> {
+        // tag based cursors have a different partition size
+        let partition_size = match &retain.tags_retain {
+            Some(tags_retain) => {
+                shared
+                    .config
+                    .thorium
+                    .tags
+                    .map_type(&tags_retain.tag_type)
+                    .partition_size
+            }
+            None => D::partition_size(shared),
+        };
+        // get the years and buckets this cursor starts and ends in
+        let year = retain.start.year();
+        let end_year = retain.end.year();
+        let bucket = Bucket::of(retain.start, year, partition_size)?;
+        let end_bucket = Bucket::of(retain.end, end_year, partition_size)?;
+        Ok(ScyllaCursor {
+            id,
+            username: username.to_owned(),
+            retain,
+            year,
+            bucket,
+            end_year,
+            end_bucket,
+            partition_size,
+            limit,
+            dedupe,
+            data: Vec::default(),
+            sorted: BTreeMap::default(),
+            mapped: 0,
+            buckets_exhausted: false,
+            new,
+        })
+    }
+
+    /// Create a new cursor from params, with its extra filters if they're given separately
+    ///
+    /// # Arguments
+    ///
+    /// * `params` - The params to build this cursor from
+    /// * `extra_filter` - The extra filters to use, or `None` to take them from the params
+    /// * `username` - The username of the user this cursor is scoped to
+    /// * `dedupe` - Whether to dedupe items or not
+    /// * `shared` - Shared Thorium objects
+    fn create(
+        mut params: D::Params,
+        extra_filter: Option<D::ExtraFilters>,
+        username: &str,
+        dedupe: bool,
+        shared: &Shared,
+    ) -> Result<Self, ApiError> {
+        // get the start/end timestamps from our cursor
+        let (start, end) = D::get_start_end(&params, shared)?;
+        // make sure that start is not before end
+        if start < end {
+            return bad!("You cannot start before you end!".to_owned());
+        }
+        // get the retain info for tags if this a tag based cursor
+        let tags_retain = Self::get_tags_retain(&mut params);
+        // get our extra filters if they weren't given
+        let extra_filter = match extra_filter {
+            Some(extra_filter) => extra_filter,
+            None => D::get_extra_filters(&mut params),
+        };
+        // get our group restrictions
+        let group_by = D::get_group_by(&mut params);
+        // build the inital data to retain across cursor iterations
+        let retain = ScyllaCursorRetain {
+            start,
+            end,
+            extra_filter,
+            group_by,
+            ties: Vec::new(),
+            tags_retain,
+            dedupe_set: HashSet::default(),
+        };
+        let limit = D::get_limit(&params)?;
+        Self::build(
+            Uuid::new_v4(),
+            username,
+            retain,
+            limit,
+            dedupe,
+            true,
+            shared,
+        )
+    }
+
     /// Create a new cursor object from just params
     ///
     /// # Arguments
@@ -804,74 +781,15 @@ where
         err(Debug)
     )]
     pub async fn from_params(
-        mut params: D::Params,
+        params: D::Params,
         username: &str,
         dedupe: bool,
         shared: &Shared,
     ) -> Result<ScyllaCursor<D>, ApiError> {
         // if we have a cursor id then try to get our cursor from the DB
-        if let Some(id) = D::get_id(&params) {
-            ScyllaCursor::get(id, username, params, dedupe, shared).await
-        } else {
-            // this is a new cursor
-            // get the start/end timestamps from our cursor
-            let (start, end) = D::get_start_end(&params, shared)?;
-            // make sure that start is not before end
-            if start < end {
-                return bad!("You cannot start before you end!".to_owned());
-            }
-            // get the years this cursor should start and end in
-            let year = start.year();
-            let end_year = end.year();
-            // get the retain info for tags if this a tag based cursor
-            let tags_retain = Self::get_tags_retain(&mut params);
-            // get our tag filters
-            let tags = D::get_tag_filters(&mut params);
-            // get our partition size
-            // tag based cursors have a different chunk size
-            let chunk = if let Some((tag_type, _)) = &tags {
-                // this is a tag based cursor so use our tag partition size
-                shared.config.thorium.tags.map_type(tag_type).partition_size
-            } else {
-                // this is not a tag based query so use our types partitions size
-                D::partition_size(shared)
-            };
-            // get our buckets
-            let bucket = u32::try_from(helpers::partition(start, year, chunk))?;
-            let end_bucket = u32::try_from(helpers::partition(end, end_year, chunk))?;
-            // get our extra filters
-            let extra_filter = D::get_extra_filters(&mut params);
-            // get our group restrictions
-            let groups = D::get_group_by(&mut params);
-            // build the inital data to retain across cursor iterations
-            let retain = ScyllaCursorRetain {
-                start,
-                end,
-                extra_filter,
-                group_by: groups,
-                ties: D::Ties::default(),
-                tags_retain,
-                dedupe_set: HashSet::default(),
-            };
-            // build our cursor
-            let cursor = ScyllaCursor {
-                id: Uuid::new_v4(),
-                username: username.to_owned(),
-                retain,
-                year,
-                bucket,
-                end_year,
-                end_bucket,
-                partition_size: chunk,
-                limit: D::get_limit(&params)?,
-                dedupe,
-                data: Vec::default(),
-                sorted: BTreeMap::default(),
-                mapped: 0,
-                buckets_exhausted: false,
-                new: true,
-            };
-            Ok(cursor)
+        match D::get_id(&params) {
+            Some(id) => ScyllaCursor::get(id, username, params, dedupe, shared).await,
+            None => Self::create(params, None, username, dedupe, shared),
         }
     }
 
@@ -890,122 +808,17 @@ where
         err(Debug)
     )]
     pub async fn from_params_extra(
-        mut params: D::Params,
+        params: D::Params,
         extra_filter: D::ExtraFilters,
         username: &str,
         dedupe: bool,
         shared: &Shared,
     ) -> Result<ScyllaCursor<D>, ApiError> {
         // if we have a cursor id then try to get our cursor from the DB
-        if let Some(id) = D::get_id(&params) {
-            ScyllaCursor::get(id, username, params, dedupe, shared).await
-        } else {
-            // this is a new cursor
-            // get the start/end timestamps from our cursor
-            let (start, end) = D::get_start_end(&params, shared)?;
-            // make sure that start is not before end
-            if start < end {
-                return bad!("You cannot start before you end!".to_owned());
-            }
-            // get the years this cursor should start and end in
-            let year = start.year();
-            let end_year = end.year();
-            // get the retain info for tags if this a tag based cursor
-            let tags_retain = Self::get_tags_retain(&mut params);
-            // get our tag filters
-            let tags = D::get_tag_filters(&mut params);
-            // get our partition size
-            // tag based cursors have a different chunk size
-            let chunk = if let Some((tags, _)) = &tags {
-                // this is a tag based cursor so use our tag partition size
-                shared.config.thorium.tags.map_type(tags).partition_size
-            } else {
-                // this is not a tag based query so use our types partitions size
-                D::partition_size(shared)
-            };
-            // get our buckets
-            let bucket = u32::try_from(helpers::partition(start, year, chunk))?;
-            let end_bucket = u32::try_from(helpers::partition(end, end_year, chunk))?;
-            // get our group restrictions
-            let groups = D::get_group_by(&mut params);
-            // build the inital data to retain across cursor iterations
-            let retain = ScyllaCursorRetain {
-                start,
-                end,
-                extra_filter,
-                group_by: groups,
-                ties: D::Ties::default(),
-                tags_retain,
-                dedupe_set: HashSet::default(),
-            };
-            // build our cursor
-            let cursor = ScyllaCursor {
-                id: Uuid::new_v4(),
-                username: username.to_owned(),
-                retain,
-                year,
-                bucket,
-                end_year,
-                end_bucket,
-                partition_size: chunk,
-                limit: D::get_limit(&params)?,
-                dedupe,
-                data: Vec::default(),
-                sorted: BTreeMap::default(),
-                mapped: 0,
-                buckets_exhausted: false,
-                new: true,
-            };
-            Ok(cursor)
+        match D::get_id(&params) {
+            Some(id) => ScyllaCursor::get(id, username, params, dedupe, shared).await,
+            None => Self::create(params, Some(extra_filter), username, dedupe, shared),
         }
-    }
-
-    /// Rebuild a cursor from the data it retained in redis
-    ///
-    /// The set of items already returned for deduping is part of the retained data, so an item
-    /// whose duplicates fall on different pages is only returned once.
-    ///
-    /// # Arguments
-    ///
-    /// * `cursor_id` - The uuid of the cursor being rebuilt
-    /// * `username` - The username of the user this cursor is scoped to
-    /// * `retain` - The data this cursor retained in redis
-    /// * `chunk` - The partition size to use
-    /// * `limit` - The max number of items to return at once
-    /// * `dedupe` - Whether to dedupe items or not
-    fn rebuild(
-        cursor_id: Uuid,
-        username: &str,
-        retain: ScyllaCursorRetain<D>,
-        chunk: u16,
-        limit: usize,
-        dedupe: bool,
-    ) -> Result<Self, ApiError> {
-        // determin our current year and our end year
-        let year = retain.start.year();
-        let end_year = retain.end.year();
-        // get our starting/ending bucket
-        let bucket = u32::try_from(helpers::partition(retain.start, year, chunk))?;
-        let end_bucket = u32::try_from(helpers::partition(retain.end, end_year, chunk))?;
-        // rebuild our cursor scoped to the creating user
-        let cursor = ScyllaCursor {
-            id: cursor_id,
-            username: username.to_owned(),
-            retain,
-            year,
-            bucket,
-            end_year,
-            end_bucket,
-            partition_size: chunk,
-            limit,
-            dedupe,
-            data: Vec::default(),
-            sorted: BTreeMap::default(),
-            mapped: 0,
-            buckets_exhausted: false,
-            new: false,
-        };
-        Ok(cursor)
     }
 
     /// Gets a cursors data from Redis
@@ -1021,7 +834,7 @@ where
     pub async fn get(
         cursor_id: Uuid,
         username: &str,
-        params: D::Params,
+        mut params: D::Params,
         dedupe: bool,
         shared: &Shared,
     ) -> Result<ScyllaCursor<D>, ApiError> {
@@ -1033,30 +846,71 @@ where
         match data {
             Some(data) => {
                 // try to deseruialize this cursors retained data
-                let retain: ScyllaCursorRetain<D> = deserialize!(&data);
-                // tag based cursors have a different chunk size
-                let chunk = if let Some(tag_retain) = &retain.tags_retain {
-                    // get the type of tag this cursor is for
-                    let tag_type = &tag_retain.tag_type;
-                    // get the right chunk size based on the type of tags this is
-                    shared.config.thorium.tags.map_type(tag_type).partition_size
-                } else {
-                    // this is not a tag based query so use our types partitions size
-                    D::partition_size(shared)
-                };
-
-                // rebuild our cursor scoped to the creating user
-                Self::rebuild(
-                    cursor_id,
-                    username,
-                    retain,
-                    chunk,
-                    D::get_limit(&params)?,
-                    dedupe,
-                )
+                let mut retain: ScyllaCursorRetain<D> = deserialize!(&data);
+                // get the groups this request was authorized to list, which a scoped token, a
+                // deleted group, or a user's removal from a group can make narrower than the
+                // groups saved with it
+                let allowed: HashSet<D::GroupBy> =
+                    D::get_group_by(&mut params).into_iter().collect();
+                // resume over the saved groups still allowed, and answer as for an unknown id
+                // when none are left
+                if !retain.narrow(&allowed) {
+                    return not_found!(format!("Cursor {} doesn't exist", cursor_id));
+                }
+                // rebuild our cursor
+                let limit = D::get_limit(&params)?;
+                Self::build(cursor_id, username, retain, limit, dedupe, false, shared)
             }
             None => not_found!(format!("Cursor {} doesn't exist", cursor_id)),
         }
+    }
+
+    /// Cast the rows of some statements and sort them by timestamp, merging rows of the same
+    /// item into one line
+    ///
+    /// # Arguments
+    ///
+    /// * `results` - The rows each statement read
+    fn sort(&mut self, results: Vec<Vec<RowResult<D::IntermediateRow>>>) -> Result<(), ApiError> {
+        // crawl over each statement's rows
+        for row in results.into_iter().flatten() {
+            // raise any errors from casting
+            let cast = row?;
+            // get the timestamp, tie, and partition of this row
+            let timestamp = D::Statements::row_time(&cast);
+            let tie = D::Statements::row_tie(&cast);
+            let scope = D::Statements::row_scope(&cast);
+            // get an entry to the list for this timestamp
+            let entry = self.sorted.entry(timestamp).or_default();
+            // check if this item has already been added to this list
+            let inter_unique = D::get_intermediate_unique_key(&cast);
+            let pos = entry
+                .iter()
+                .position(|item| inter_unique == item.line.get_unique_key());
+            // drop our reference to our interemdiate unique value
+            drop(inter_unique);
+            match pos {
+                // add this row to the line it belongs to, noting its partition
+                Some(pos) => {
+                    let sorted = &mut entry[pos];
+                    sorted.line.add_intermediate_to_line(cast);
+                    if !sorted.scopes.contains(&scope) {
+                        sorted.scopes.push(scope);
+                    }
+                }
+                // cast our row into a new line
+                None => {
+                    entry.push_back(SortedLine {
+                        line: cast.into(),
+                        tie: Some(tie),
+                        scopes: vec![scope],
+                    });
+                    // increment our mapped count
+                    self.mapped += 1;
+                }
+            }
+        }
+        Ok(())
     }
 
     /// Check if we have any ties queries
@@ -1068,80 +922,102 @@ where
     #[instrument(name = "ScyllaCursor::query_ties", skip(self, shared), err(Debug))]
     async fn query_ties(
         &mut self,
-        limit: i32,
+        limit: CursorLimit,
         shared: &Shared,
-    ) -> Result<Vec<QueryResult>, ApiError> {
-        // build our tie query futures
-        let futures = D::ties_query(
-            &mut self.retain.ties,
-            &self.retain.extra_filter,
-            self.year,
-            self.bucket as i32,
-            self.retain.start,
-            limit,
-            shared,
-        )?;
-        // wait for all of our futures to complete 50 at a time
-        let queries = stream::iter(futures)
-            .buffer_unordered(50)
-            .collect::<Vec<Result<QueryResult, ExecutionError>>>()
-            .await
-            .into_iter()
-            .collect::<Result<Vec<QueryResult>, ExecutionError>>()?;
-        Ok(queries)
+    ) -> Result<Vec<Vec<RowResult<D::IntermediateRow>>>, ApiError> {
+        // these ties are read now, so only ties left over from this page remain
+        let ties = std::mem::take(&mut self.retain.ties);
+        let statements = D::statements(shared);
+        // read each tied partition from its tie onward at our start timestamp
+        let futures = ties
+            .iter()
+            .map(|(scope, tie)| {
+                statements.ties(
+                    &shared.scylla.session,
+                    &self.retain.extra_filter,
+                    scope,
+                    self.year,
+                    self.bucket,
+                    self.retain.start,
+                    tie,
+                    limit,
+                )
+            })
+            .collect::<Vec<_>>();
+        run_all(futures).await
     }
 
     /// Find the buckets that have been confirmed to contain data
     ///
     /// # Arguments
     ///
-    /// * `bucket_limit` - The most buckets to return for each group
+    /// * `bucket_limit` - The most buckets to return for each census stream
     /// * `stream_keys` - the stream keys to look for data in
     /// * `found` - The buckets that we found that contain data
     /// * `shared` - Shared Thorium objects
-    #[rustfmt::skip]
     async fn find_buckets<'a>(
         &self,
         bucket_limit: u32,
-        stream_keys: &mut Vec<(&'a D::GroupBy, String, i32)>,
-        found: &mut HashMap<&'a D::GroupBy, Vec<i32>>,
+        stream_keys: &mut Vec<(&'a D::GroupBy, String, Bucket)>,
+        found: &mut HashMap<&'a D::GroupBy, Vec<Bucket>>,
         shared: &Shared,
     ) -> Result<(), ApiError> {
-        // set our end bucket to be f64::MAX or our end bucket if we are the end year
+        // stop at our end bucket in our end year, or the first bucket of other years
         let end = if self.year == self.end_year {
             self.end_bucket
         } else {
-            0
+            Bucket::new(0)
         };
-        // have an allocated vec to swap with our stream keys vec
-        let mut swap: Vec<(&D::GroupBy, String, i32)> = Vec::with_capacity(self.retain.group_by.len());
-        // build a redis pipeline to get all of the valid buckets for these tags
+        // build a redis pipeline to get the newest buckets with data from each stream
         let mut pipe = redis::pipe();
-        // do this for each stream key
-        for (_, stream_key, oldest_first) in stream_keys.iter() {
-            // get the next 100 items
-            pipe.cmd("zrange").arg(stream_key).arg(oldest_first).arg(end)
-                    .arg("byscore").arg("limit").arg(0).arg(bucket_limit).arg("rev");
+        for (_, stream_key, newest) in stream_keys.iter() {
+            pipe.cmd("zrange")
+                .arg(stream_key)
+                .arg(newest.get())
+                .arg(end.get())
+                .arg("byscore")
+                .arg("limit")
+                .arg(0)
+                .arg(bucket_limit)
+                .arg("rev");
         }
         // execute our queries
         let bucket_strings: Vec<Vec<String>> = pipe.query_async(conn!(shared)).await?;
-        // swap our stream keys
-        std::mem::swap(stream_keys, &mut swap);
-        // convert all of our buckets to signed ints
-        for (buckets_string, (group, stream_key, _)) in bucket_strings.into_iter().zip(swap.into_iter()) {
-            // convert these buckets to an i32
-            let buckets = buckets_string
-                .iter()
-                .map(|val| val.parse::<i32>())
-                .collect::<Result<Vec<i32>, _>>()?;
-            // get the final item in this list
-            if let Some(oldest_first) = buckets.last() {
-                // decrement our oldest first by 1 so we don't loop over buckets
-                let decr_oldest_first = *oldest_first - 1;
-                // add our new oldest first
-                stream_keys.push((group, stream_key, decr_oldest_first));
-                // add these buckets to our found buckets
-                found.insert(group, buckets);
+        // parse each stream's buckets, refusing any that isn't a bucket number
+        let parsed = bucket_strings
+            .iter()
+            .map(|strings| {
+                strings
+                    .iter()
+                    .map(|val| Bucket::from_stored(val))
+                    .collect::<Result<Vec<Bucket>, _>>()
+            })
+            .collect::<Result<Vec<Vec<Bucket>>, _>>()?;
+        // a stream that returned its limit may have unread buckets just below its oldest one,
+        // so no stream reads below the newest such bucket until those buckets are read; a page
+        // then fills from the newest rows of every group
+        let floor = parsed
+            .iter()
+            .filter(|buckets| buckets.len() >= bucket_limit as usize)
+            .filter_map(|buckets| buckets.last().copied())
+            .max();
+        // keep only the streams that still have buckets to read
+        let streams = std::mem::take(stream_keys);
+        for (mut buckets, (group, stream_key, _)) in parsed.into_iter().zip(streams) {
+            // skip any stream that has no buckets left
+            let Some(oldest) = buckets.last().copied() else {
+                continue;
+            };
+            // continue below the oldest bucket read now, unless it's the year's first bucket
+            let read_to = floor.map_or(oldest, |floor| oldest.max(floor));
+            if let Some(next) = read_to.prev() {
+                stream_keys.push((group, stream_key, next));
+            }
+            // leave the buckets below the floor for a later read
+            buckets.retain(|bucket| *bucket >= read_to);
+            // add these buckets to those of any other census stream of this group
+            if !buckets.is_empty() {
+                found.entry(group).or_default().extend(buckets);
             }
         }
         Ok(())
@@ -1152,34 +1028,55 @@ where
     /// # Arguments
     ///
     /// * `limit` - The max number of rows to return to the user plus 1
+    /// * `bucket_limit` - The most buckets one pull reads
     /// * `shared` - Shared Thorium objects
     #[instrument(name = "ScyllaCursor::query", skip(self, shared), err(Debug))]
     async fn query(
         &mut self,
-        limit: i32,
+        limit: CursorLimit,
         bucket_limit: u32,
         shared: &Shared,
     ) -> Result<(), ApiError> {
-        // allocate space for the futures we are about to spawn
-        let mut futures = Vec::with_capacity(self.retain.group_by.len());
-        // build all of the keys we are getting valid buckets for
-        let mut stream_keys = Vec::with_capacity(self.retain.group_by.len());
+        // take our groups so the census keys can borrow them while we update our position
+        let group_by = std::mem::take(&mut self.retain.group_by);
+        let result = self
+            .query_groups(&group_by, limit, bucket_limit, shared)
+            .await;
+        // put our groups back
+        self.retain.group_by = group_by;
+        result
+    }
+
+    /// Crawl the partitions of some groups and pull data from them
+    ///
+    /// # Arguments
+    ///
+    /// * `group_by` - The groups to crawl
+    /// * `limit` - The max number of rows to return to the user plus 1
+    /// * `bucket_limit` - The most buckets one pull reads
+    /// * `shared` - Shared Thorium objects
+    async fn query_groups(
+        &mut self,
+        group_by: &[D::GroupBy],
+        limit: CursorLimit,
+        bucket_limit: u32,
+        shared: &Shared,
+    ) -> Result<(), ApiError> {
+        let statements = D::statements(shared);
+        // build the keys for each census stream we are going to crawl this year
+        let mut stream_keys = Vec::with_capacity(group_by.len());
+        D::census_keys(
+            group_by,
+            &self.retain.extra_filter,
+            self.year,
+            self.bucket,
+            &mut stream_keys,
+            shared,
+        );
         // keep a map of the buckets we have found by group
-        let mut found = HashMap::with_capacity(self.retain.group_by.len());
+        let mut found = HashMap::with_capacity(group_by.len());
         // loop until we have enough data to return
         loop {
-            // if stream keys are empty then recreate them
-            if stream_keys.is_empty() {
-                // build the keys for each census stream we are going to crawl
-                D::census_keys(
-                    &self.retain.group_by,
-                    &self.retain.extra_filter,
-                    self.year,
-                    self.bucket,
-                    &mut stream_keys,
-                    shared,
-                );
-            }
             // get the next buckets that contain data
             self.find_buckets(bucket_limit, &mut stream_keys, &mut found, shared)
                 .await?;
@@ -1187,182 +1084,176 @@ where
             if found.is_empty() {
                 // if we are in the final year then this cursor is exhausted
                 if self.year <= self.end_year {
-                    // set this cursors buckets  to be exhausted
                     self.buckets_exhausted = true;
-                    // this cursor is exhausted so return
                     return Ok(());
                 }
-                // there is no more data in this year but we have more years to check
-                // decrement our year
+                // there is no more data in this year, so move to the end of the year before
                 self.year = self.year.saturating_sub(1);
-                // reset our bucket to the last possible partition of the year
-                self.bucket = last_year_bucket(self.year, self.partition_size);
-                // go to the next loop iteration
-                continue;
-            }
-            // query against these buckets
-            for (group, buckets) in found.drain() {
-                // build the future for this group and its set of buckets
-                let future = D::pull(
-                    group,
+                self.bucket = Bucket::last_of_year(self.year, self.partition_size)?;
+                stream_keys.clear();
+                D::census_keys(
+                    group_by,
                     &self.retain.extra_filter,
                     self.year,
-                    buckets,
-                    self.retain.start,
-                    self.retain.end,
-                    limit,
+                    self.bucket,
+                    &mut stream_keys,
                     shared,
                 );
-                // add the futures to our set
-                futures.push(future);
+                continue;
             }
-            // wait for all of our futures to complete 50 at a time
-            let queries = stream::iter(futures.drain(..))
-                .buffer_unordered(50)
-                .collect::<Vec<Result<QueryResult, ExecutionError>>>()
-                .await
-                .into_iter()
-                .collect::<Result<Vec<QueryResult>, ExecutionError>>()?;
+            // a group's census streams can share buckets, so pull each bucket once
+            let windows = found
+                .drain()
+                .map(|(group, mut buckets)| {
+                    buckets.sort_unstable_by(|left, right| right.cmp(left));
+                    buckets.dedup();
+                    (group, buckets)
+                })
+                .collect::<Vec<_>>();
+            // pull no more buckets at once than keeps the statement within its limits
+            let mut futures = Vec::with_capacity(windows.len());
+            for (group, buckets) in &windows {
+                for chunk in buckets.chunks(bucket_limit.max(1) as usize) {
+                    futures.push(statements.pull(
+                        &shared.scylla.session,
+                        &self.retain.extra_filter,
+                        group,
+                        self.year,
+                        chunk,
+                        self.retain.start,
+                        self.retain.end,
+                        limit,
+                    ));
+                }
+            }
+            let results = run_all(futures).await?;
             // cast and sort the rows we just retrieved
-            D::sort(queries, &mut self.sorted, &mut self.mapped).await?;
+            self.sort(results)?;
             // if we found enough data for this page of our cursor then break out
-            if self.mapped >= self.limit || self.exhausted_time() {
+            if self.mapped >= self.limit.get() || self.exhausted_time() {
                 break;
             }
         }
         Ok(())
     }
 
-    /// Filter down ordered lists of buckets to their intersecting ranges and the oldest bucket to skip too
+    /// Filter down ordered lists of buckets to their intersecting ranges and the bucket to
+    /// continue from
+    ///
+    /// Returns the buckets every tag has data in, and the bucket below the newest of the
+    /// oldest buckets each stream found, or `None` when the year's first bucket was reached.
     ///
     /// # Arguments
     ///
+    /// * `group_by` - The groups being listed
     /// * `tags` - The tags to find bucket intersections for
     /// * `tags_required` - The number of tags required
     /// * `pre_filter` - The unfiltered buckets for our tags
-    /// * `next_bucket` - The next bucket to start listing from next time
     /// * `possible` - Whether an intersection is still possible
     #[instrument(name = "ScyllaCursor::filter_bucket_intersection", skip_all)]
     fn filter_bucket_intersection(
-        &self,
-        group_by: &Vec<D::GroupBy>,
+        group_by: &[D::GroupBy],
         tags: &HashMap<String, Vec<String>>,
         tags_required: usize,
-        pre_filter: Vec<Vec<i32>>,
-        next_bucket: &mut i32,
+        pre_filter: Vec<Vec<Bucket>>,
         possible: &mut bool,
-    ) -> Vec<i32> {
+    ) -> (Vec<Bucket>, Option<Bucket>) {
         // get the first and last bucket that we know contains data
-        let mut first = 0;
-        let mut last = 0;
+        let mut first = Bucket::new(0);
+        let mut last = Bucket::new(0);
         // build a map of our buckets by tag key/value pair
-        let mut map: HashMap<(&String, &String), BTreeSet<i32>> =
+        let mut map: HashMap<(&String, &String), BTreeSet<Bucket>> =
             HashMap::with_capacity(tags_required);
-        // convert our bucket list into a stream
-        let mut bucket_stream = pre_filter.into_iter();
         // step over our bucket data in the same order we retrieved it
-        // get each tag key we are going to be querying for
+        let mut bucket_stream = pre_filter.into_iter();
         for (key, values) in tags {
             // get all the buckets that contain data for each value
             for value in values {
                 // check for census info for each group
                 for _ in group_by {
                     // get this values buckets
-                    let buckets = bucket_stream.next().unwrap();
+                    let buckets = bucket_stream.next().unwrap_or_default();
                     // skip any empty bucket lists
-                    if !buckets.is_empty() {
-                        // get our first and last items in this bucket list
-                        let local_first = *buckets.first().unwrap();
-                        let local_last = *buckets.last().unwrap();
-                        // check if this bucket range moves the first bucket with data up
-                        if local_first > first {
-                            first = local_first;
-                        }
-                        // check if this bucket range brings the overlaping buckets with data up
-                        if local_last > last {
-                            last = local_last;
-                        }
-                        // get an entry to this key/value bucket set
-                        let entry: &mut BTreeSet<i32> = map.entry((key, value)).or_default();
+                    if let (Some(local_first), Some(local_last)) = (buckets.first(), buckets.last())
+                    {
+                        // move the first and last buckets with data up
+                        first = first.max(*local_first);
+                        last = last.max(*local_last);
                         // add the buckets for this group
-                        entry.extend(buckets);
+                        map.entry((key, value)).or_default().extend(buckets);
                     }
                 }
             }
         }
-        // set our oldest first to be our last
-        *next_bucket = last.saturating_sub(1);
+        // continue below the newest of the oldest buckets each stream found
+        let next_bucket = last.prev();
         // check if we didn't find data for every tag key/value pair
         if map.len() < tags_required {
-            // set that it is no longer possible to have an intersection
+            // it's no longer possible to have an intersection this year
             *possible = false;
-            // just return an empty vec since its no longer possible to have an intersection
-            return vec![];
+            return (Vec::new(), next_bucket);
         }
-        // build a hashset of buckets in any order
-        let mut in_range: HashMap<i32, i32> = HashMap::with_capacity(1000);
-        // add all of our valid buckets
+        // count how many key/value pairs have data in each bucket of the overlapping range
+        let mut in_range: HashMap<Bucket, usize> = HashMap::with_capacity(1000);
         for buckets in map.values() {
-            // check each potential bucket in this bucket range
             for bucket in buckets {
-                // check if this bucket is in our overlapping range
                 if *bucket <= first && *bucket >= last {
-                    // add this potential overlapping bucket or increment its count
-                    let entry: &mut i32 = in_range.entry(*bucket).or_default();
-                    // increment its count
-                    *entry += 1;
+                    *in_range.entry(*bucket).or_default() += 1;
                 }
             }
         }
-        // filter down to buckets in all of our bucket ranges
-        in_range
-            .iter()
-            .filter(|(_, count)| **count as usize == tags_required)
-            .map(|(bucket, _)| *bucket)
-            .collect::<Vec<i32>>()
+        // keep the buckets every key/value pair has data in
+        let intersection = in_range
+            .into_iter()
+            .filter(|(_, count)| *count == tags_required)
+            .map(|(bucket, _)| bucket)
+            .collect();
+        (intersection, next_bucket)
     }
 
     /// Finds the next chunk of buckets that contain data for some tags
     ///
     /// # Arguments
     ///
+    /// * `group_by` - The groups being listed
     /// * `tags_retain` - Tag data retained for tags cursors
     /// * `shared` - Shared Thorium objects
-    #[rustfmt::skip]
     #[instrument(name = "ScyllaCursor::tags_find_buckets", skip_all, err(Debug))]
     async fn tags_find_buckets(
         &self,
-        group_by: &Vec<D::GroupBy>,
+        group_by: &[D::GroupBy],
         tags_retain: &TagsRetain,
         shared: &Shared,
-    ) -> Result<Vec<i32>, ApiError> {
-        // set our end bucket to be f64::MAX or our end bucket if we are the end year
+    ) -> Result<Vec<Bucket>, ApiError> {
+        // stop at our end bucket in our end year, or the first bucket of other years
         let end = if self.year == self.end_year {
             self.end_bucket
         } else {
-            0
+            Bucket::new(0)
         };
-        // track the oldest first bucket we have seen in this loop so far
-        let mut next_bucket = self.bucket as i32;
+        // track the bucket to read from next
+        let mut next_bucket = self.bucket;
         // track whether an intersection is possible this year
         let mut possible = true;
-        // build all of the keys we are getting valid buckets for
-        let mut stream_keys = Vec::with_capacity(10);
         // decide on which census stream function to call based on if we're case insensitive
         let census_stream_fn = if tags_retain.case_insensitive {
             tags::census_stream_case_insensitive
         } else {
             tags::census_stream
         };
-        // get each tag key we are going to be querying for
+        // build a census stream key for each tag key, value, and group
+        let mut stream_keys = Vec::with_capacity(10);
         for (key, values) in &tags_retain.tags {
-            // get all the buckets that contain data for each value
             for value in values {
-                // check for census info for each group
                 for group in group_by {
-                    // build the key for this tags bucket stream
-                    let stream_key = census_stream_fn(tags_retain.tag_type, group, key, value, self.year, shared);
-                    // add this stream key to our list
+                    let stream_key = census_stream_fn(
+                        tags_retain.tag_type,
+                        group,
+                        key,
+                        value,
+                        self.year,
+                        shared,
+                    );
                     stream_keys.push(stream_key);
                 }
             }
@@ -1371,34 +1262,46 @@ where
         loop {
             // build a redis pipeline to get all of the valid buckets for these tags
             let mut pipe = redis::pipe();
-            // do this for each stream key
             for stream_key in &stream_keys {
-                // get the next 100 items
-                pipe.cmd("zrange").arg(stream_key).arg(next_bucket).arg(end)
-                        .arg("byscore").arg("limit").arg(0).arg(100).arg("rev");
+                pipe.cmd("zrange")
+                    .arg(stream_key)
+                    .arg(next_bucket.get())
+                    .arg(end.get())
+                    .arg("byscore")
+                    .arg("limit")
+                    .arg(0)
+                    .arg(100)
+                    .arg("rev");
             }
             // execute our queries
             let bucket_strings: Vec<Vec<String>> = pipe.query_async(conn!(shared)).await?;
-            // preallocate a list for all of our different tag key buckets
-            let mut pre_intersection = Vec::with_capacity(tags_retain.tags.len());
-            // convert all of our buckets to signed ints
-            for buckets_string in bucket_strings {
-                // convert these buckets to an i32
-                let buckets = buckets_string
-                    .iter()
-                    .map(|val| val.parse::<i32>())
-                    .collect::<Result<Vec<i32>, _>>()?;
-                // add this tag key/val combo
-                pre_intersection.push(buckets);
-            }
+            // parse each stream's buckets, refusing any that isn't a bucket number
+            let pre_intersection = bucket_strings
+                .iter()
+                .map(|buckets| {
+                    buckets
+                        .iter()
+                        .map(|val| Bucket::from_stored(val))
+                        .collect::<Result<Vec<Bucket>, _>>()
+                })
+                .collect::<Result<Vec<Vec<Bucket>>, _>>()?;
             // get the intersection of all buckets that all tags are in
-            let mut intersection =
-                self.filter_bucket_intersection(group_by, &tags_retain.tags, tags_retain.tags_required, pre_intersection, &mut next_bucket, &mut possible);
-            // if we have intersecting buckets or an intersection is not possible for this year then return
+            let (mut intersection, next) = Self::filter_bucket_intersection(
+                group_by,
+                &tags_retain.tags,
+                tags_retain.tags_required,
+                pre_intersection,
+                &mut possible,
+            );
+            // return any intersecting buckets, or none once no intersection is left this year
             if !intersection.is_empty() || !possible {
-                // sort our intersection
                 intersection.sort_unstable();
                 return Ok(intersection);
+            }
+            // continue below the buckets we just checked, if any are left this year
+            match next {
+                Some(next) => next_bucket = next,
+                None => return Ok(Vec::new()),
             }
         }
     }
@@ -1415,57 +1318,80 @@ where
         self.year <= self.end_year && self.bucket <= self.end_bucket
     }
 
+    /// Record the first unconsumed tie of every partition a line left at the page boundary
+    /// was read from
+    ///
+    /// # Arguments
+    ///
+    /// * `remaining` - The lines left at the page boundary, in consumption order
+    fn record_ties(&mut self, remaining: &VecDeque<SortedLine<D>>) {
+        for sorted in remaining {
+            // lines built from tag rows are tracked by the tags cursor
+            let Some(tie) = &sorted.tie else {
+                continue;
+            };
+            // keep the tie of an earlier line in each partition, since lines are consumed in
+            // order
+            for scope in &sorted.scopes {
+                if !self.retain.ties.iter().any(|(tied, _)| tied == scope) {
+                    self.retain.ties.push((scope.clone(), tie.clone()));
+                }
+            }
+        }
+    }
+
     /// Consume our sorted data in order to fill our user facing data buffer
+    ///
+    /// Returns whether a full page was filled.
+    ///
+    /// # Arguments
+    ///
+    /// * `tag_ties` - The ties of a tags cursor, or `None` for a general cursor
     fn consume_sorted(&mut self, mut tag_ties: Option<&mut HashMap<String, String>>) -> bool {
+        let limit = self.limit.get();
         // keep looping until we have enough data to return or no more sorted data
         loop {
             // keep consuming until our user facing data buffer is full
-            'outer: while self.data.len() < self.limit {
+            'outer: while self.data.len() < limit {
                 // keep popping data from the end of our btree
                 match self.sorted.pop_last() {
                     // we have a list of data to return
                     Some((timestamp, mut item)) => {
                         // if we have multiple rows with the same timestamp then disambiguate them
                         if tag_ties.is_some() && item.len() > 1 {
-                            // sort our ambigous rows by their cluster key
-                            D::sort_by_cluster_key(&mut item);
+                            // sort our tied rows by the tags table's clustering key
+                            D::sort_tied_rows_by_tag_clustering_key(&mut item);
                         } else if item.len() > 1 {
                             // consume tied rows in the order their tie queries read them
-                            item.make_contiguous().sort_by(D::cmp_ties);
+                            item.make_contiguous().sort_by(SortedLine::cmp_consumed);
                         }
                         // consume only enough data to fill our data
-                        while self.data.len() < self.limit {
+                        while self.data.len() < limit {
                             match item.pop_front() {
-                                Some(item) => {
+                                Some(sorted) => {
                                     // consume this mapped value
                                     self.mapped -= 1;
                                     // only dedupe if we are configured too
-                                    if self.dedupe {
-                                        // dedupe our data and then see if we need to get more
-                                        if !item.dedupe_item(&mut self.retain.dedupe_set) {
-                                            // this is a duplicate item so skip it
-                                            continue;
-                                        }
+                                    if self.dedupe
+                                        && !sorted.line.dedupe_item(&mut self.retain.dedupe_set)
+                                    {
+                                        // this is a duplicate item so skip it
+                                        continue;
                                     }
                                     // add this data to our user facing vec
-                                    self.data.push(item);
+                                    self.data.push(sorted.line);
                                 }
                                 None => continue 'outer,
                             }
                         }
-                        // if this is a tags cursor add a tag tie for every group in our
-                        // remaining rows, keeping the first unconsumed row of each
-                        if let Some(tag_ties) = &mut tag_ties {
-                            for tied_row in &item {
-                                // add this row's groups to our tag tie map
-                                tied_row.add_tag_tie(tag_ties);
+                        // record a tie for every group or partition in our remaining rows
+                        match &mut tag_ties {
+                            Some(tag_ties) => {
+                                for tied in &item {
+                                    tied.line.add_tag_tie(tag_ties);
+                                }
                             }
-                        } else {
-                            // regular ties keep the first tie for each group
-                            for tied_row in &item {
-                                // add this to our regular query tie map
-                                tied_row.add_tie(&mut self.retain.ties);
-                            }
+                            None => self.record_ties(&item),
                         }
                         // this item still has more data so readd it
                         self.sorted.insert(timestamp, item);
@@ -1476,7 +1402,6 @@ where
                     None => {
                         // update our start timestamp if we found some data
                         if let Some(last) = self.data.last() {
-                            // update our start timestamp
                             self.retain.start = last.get_timestamp();
                         }
                         return false;
@@ -1484,10 +1409,9 @@ where
                 }
             }
             // check if we have enough data to try and return yet
-            if self.data.len() >= self.limit {
+            if self.data.len() >= limit {
                 // update our start timestamp if we found some data
                 if let Some(last) = self.data.last() {
-                    // update our start timestamp
                     self.retain.start = last.get_timestamp();
                 }
                 return true;
@@ -1502,16 +1426,16 @@ where
     /// * `shared` - Shared Thorium objects
     #[instrument(name = "ScyllaCursor::next_general", skip_all, err(Debug))]
     async fn next_general(&mut self, shared: &Shared) -> Result<(), ApiError> {
-        // Get the limit + 1 of data for each group so we can check if we end on any ties
-        let limit = limit_plus_one_to_cql(self.limit)?;
+        // get the limit + 1 of data for each group so we can check if we end on any ties
+        let limit = self.limit.plus_one();
         // get the number of buckets to check at once
-        let bucket_limit = D::bucket_limit(&self.retain.extra_filter);
+        let bucket_limit = D::Statements::bucket_limit(&self.retain.extra_filter)?;
         // get data from any previously tied queries
         let tied_queries = self.query_ties(limit, shared).await?;
         // if we had any queries based on ties then consume them
         if !tied_queries.is_empty() {
             // cast and sort the rows we just retrieved
-            D::sort(tied_queries, &mut self.sorted, &mut self.mapped).await?;
+            self.sort(tied_queries)?;
             // consume our sorted data and check if we have enough data to return
             if self.consume_sorted(None) {
                 // we have enough data so return
@@ -1525,49 +1449,42 @@ where
         Ok(())
     }
 
+    /// Read the rows tied at our start timestamp from each group's tie onward, for every key
+    /// and value
+    ///
+    /// # Arguments
+    ///
+    /// * `statements` - The tag listing's statements
+    /// * `tags_retain` - Tag data retained for tags cursors
+    /// * `mapping` - The mapping of items to their tag rows
+    /// * `shared` - Shared Thorium objects
     #[instrument(name = "ScyllaCursor::tag_ties", skip_all, err(Debug))]
-    async fn tag_ties(
+    async fn tag_ties<S: TagCursorStatements>(
         &self,
+        statements: &S,
         tags_retain: &mut TagsRetain,
         mapping: &mut HashMap<String, TagMapping>,
-        prepared: &PreparedStatement,
         shared: &Shared,
     ) -> Result<(), ApiError> {
-        // calculate the number of futures we will be spawning
-        let capacity = tags_retain.ties.len() * tags_retain.tags_required;
-        // build a list of futures for our queries
-        let mut futures = Vec::with_capacity(capacity);
-        // query for each of our ties
+        let filters = tag_filters(tags_retain);
+        // query each tie for each tag key and value
+        let mut futures = Vec::with_capacity(tags_retain.ties.len() * filters.len());
         for (group, breaker) in &tags_retain.ties {
-            // query for each tag key and all of its values
-            for (key, values) in &tags_retain.tags {
-                // query for each value for this tag key
-                for value in values {
-                    // execute the query to get this group/tag/key combos rows
-                    let query = ties_tags_query_helper(
-                        prepared,
-                        tags_retain.tag_type,
-                        group,
-                        self.year,
-                        self.bucket as i32,
-                        key,
-                        value,
-                        self.retain.start,
-                        breaker,
-                        shared,
-                    );
-                    // add this future out our futures list
-                    futures.push(query);
-                }
+            for (key, value, extra) in &filters {
+                let query = statements.ties(
+                    &shared.scylla.session,
+                    extra,
+                    group,
+                    self.year,
+                    self.bucket,
+                    self.retain.start,
+                    breaker,
+                );
+                futures.push(async move { Ok::<_, QueryError>((*key, *value, query.await?)) });
             }
         }
         // execute our futures 50 at a time
-        let queries = stream::iter(futures)
-            .buffer_unordered(50)
-            .collect::<Vec<Result<(&str, &str, QueryPager), PagerExecutionError>>>()
-            .await
-            .into_iter()
-            .collect::<Result<Vec<(&str, &str, QueryPager)>, PagerExecutionError>>()?;
+        let queries = run_all(futures).await?;
         // build our tag mapping object
         parse_tag_queries(queries, mapping).await?;
         // clear our tag ties
@@ -1575,59 +1492,57 @@ where
         Ok(())
     }
 
+    /// Read the rows of the next buckets every tag has data in until a page is full
+    ///
+    /// # Arguments
+    ///
+    /// * `statements` - The tag listing's statements
+    /// * `group_by` - The groups being listed
+    /// * `tags_retain` - Tag data retained for tags cursors
+    /// * `mapping` - The mapping of items to their tag rows
+    /// * `shared` - Shared Thorium objects
     #[instrument(name = "ScyllaCursor::tag_query", skip_all, err(Debug))]
-    async fn tag_query(
+    async fn tag_query<S: TagCursorStatements>(
         &mut self,
-        group_by: &Vec<D::GroupBy>,
+        statements: &S,
+        group_by: &[D::GroupBy],
         tags_retain: &mut TagsRetain,
         mapping: &mut HashMap<String, TagMapping>,
-        prepared: &PreparedStatement,
         shared: &Shared,
     ) -> Result<(), ApiError> {
-        // calculate the size of the futures were about to spawn
-        let capacity = tags_retain.tags_required * self.retain.group_by.len();
-        // have a vec of futures
-        let mut futures = Vec::with_capacity(capacity);
+        // the tags tables name each group as text
+        let groups = group_by
+            .iter()
+            .map(ToString::to_string)
+            .collect::<Vec<String>>();
         // loop until we have found enough data to return
         loop {
             // get the next 100 buckets that contain data
             let buckets = self
                 .tags_find_buckets(group_by, tags_retain, shared)
                 .await?;
-            // query for each tag key/value
-            for (key, values) in &tags_retain.tags {
-                // query for each value for this tag key
-                for value in values {
-                    // build this query for each group
-                    for group in group_by {
-                        // chunk our buckets into groups of 100
-                        for bucket_chunk in buckets.chunks(100) {
-                            // execute the query to get this group/tag/key combos rows
-                            let query = tags_query_helper::<D>(
-                                prepared,
-                                tags_retain.tag_type,
-                                group,
-                                self.year,
-                                bucket_chunk.to_vec(),
-                                key,
-                                value,
-                                self.retain.start,
-                                self.retain.end,
-                                shared,
-                            );
-                            // add this future out our futures list
-                            futures.push(query);
-                        }
+            // query each tag key and value in each group, 100 buckets at a time
+            let filters = tag_filters(tags_retain);
+            let mut futures = Vec::with_capacity(filters.len() * groups.len());
+            for (key, value, extra) in &filters {
+                for group in &groups {
+                    for chunk in buckets.chunks(100) {
+                        let query = statements.pull(
+                            &shared.scylla.session,
+                            extra,
+                            group,
+                            self.year,
+                            chunk,
+                            self.retain.start,
+                            self.retain.end,
+                        );
+                        futures
+                            .push(async move { Ok::<_, QueryError>((*key, *value, query.await?)) });
                     }
                 }
             }
             // execute our futures 50 at a time
-            let queries = stream::iter(futures.drain(..))
-                .buffer_unordered(50)
-                .collect::<Vec<Result<(&str, &str, QueryPager), PagerExecutionError>>>()
-                .await
-                .into_iter()
-                .collect::<Result<Vec<(&str, &str, QueryPager)>, PagerExecutionError>>()?;
+            let queries = run_all(futures).await?;
             // build our tag mapping object
             parse_tag_queries(queries, mapping).await?;
             // only retain mappings that matched on all of the required tags
@@ -1642,42 +1557,49 @@ where
             // consume our sorted data and return if needed
             self.consume_sorted(Some(&mut tags_retain.ties));
             // if we have enough data to return then return
-            if self.mapped >= self.limit {
+            if self.mapped >= self.limit.get() {
                 break;
             }
             // update our bucket counter correctly
-            // this can't be moved to a function due to borrow check sadness
-            match (self.year.cmp(&self.end_year), buckets.is_empty()) {
-                // we have more buckets this year too query so just update our bucket
-                (Ordering::Greater | Ordering::Equal, false) => {
-                    self.bucket = (buckets.first().unwrap() - 1) as u32;
-                }
+            match (self.year.cmp(&self.end_year), buckets.first()) {
+                // we have more buckets this year to query so continue below the oldest one
+                (Ordering::Greater | Ordering::Equal, Some(first)) => match first.prev() {
+                    Some(bucket) => self.bucket = bucket,
+                    // the year's first bucket was read, so move to the year before
+                    None if self.year > self.end_year => {
+                        self.year = self.year.saturating_sub(1);
+                        self.bucket = Bucket::last_of_year(self.year, self.partition_size)?;
+                    }
+                    // the end year's first bucket was read, so this cursor is exhausted
+                    None => {
+                        self.bucket = self.end_bucket;
+                        self.buckets_exhausted = true;
+                        break;
+                    }
+                },
                 // we have more years to query so decrement our year and update our bucket
-                (Ordering::Greater, true) => {
+                (Ordering::Greater, None) => {
                     // decrement our year
                     self.year = self.year.saturating_sub(1);
                     // reset our bucket to the last possible partition of the year
-                    self.bucket = last_year_bucket(self.year, self.partition_size);
+                    self.bucket = Bucket::last_of_year(self.year, self.partition_size)?;
                 }
                 // we have reached our end bucket and end year
-                (Ordering::Equal | Ordering::Less, true) => {
-                    match buckets.last() {
-                        Some(bucket) => self.bucket = *bucket as u32,
-                        None => self.bucket = self.end_bucket,
-                    }
+                (Ordering::Equal | Ordering::Less, None) => {
+                    self.bucket = self.end_bucket;
                     // set this cursor to be exhausted
                     self.buckets_exhausted = true;
                     break;
                 }
                 // we have gone past our end year bounds somehow
-                (Ordering::Less, false) => {
+                (Ordering::Less, Some(_)) => {
                     event!(
                         Level::ERROR,
                         msg = "Gone past end year bound?",
                         year = self.year,
                         end_year = self.end_year,
-                        bucket = self.bucket,
-                        end_bucket = self.bucket
+                        bucket = self.bucket.get(),
+                        end_bucket = self.end_bucket.get()
                     );
                     // return an error to the user
                     return internal_err!("Cursor Failure".to_owned());
@@ -1687,71 +1609,58 @@ where
         Ok(())
     }
 
-    /// Gets the next page of queries for this cursor for data for general queries
+    /// Gets the next page of a tag listing through the statements of its tags table or view
     ///
     /// # Arguments
     ///
+    /// * `statements` - The tag listing's statements
+    /// * `tags_retain` - Tag data retained for tags cursors
     /// * `shared` - Shared Thorium objects
-    #[instrument(name = "ScyllaCursor::next_tags", skip(self, shared), err(Debug))]
-    async fn next_tags(
+    #[instrument(name = "ScyllaCursor::next_tags", skip_all, err(Debug))]
+    async fn next_tags<S: TagCursorStatements>(
         &mut self,
+        statements: &S,
         mut tags_retain: TagsRetain,
         shared: &Shared,
     ) -> Result<TagsRetain, ApiError> {
-        // size our mapping for every tag of every row we may return without overflowing
-        let Some(capacity) = tags_retain.tags_required.checked_mul(self.limit) else {
-            return bad!(format!(
-                "{} tags with a limit of {} is too large",
-                tags_retain.tags_required, self.limit
-            ));
-        };
-        // get the group by  this cusrsor will use
-        // put it back when were done with the refs to avoid cloning
+        // size our mapping for every tag of every row we may return
+        let capacity = tags_retain.tags_required.saturating_mul(self.limit.get());
+        // get the group by this cursor will use, putting it back when we're done
         let group_by = std::mem::take(&mut self.retain.group_by);
         // keep a mapping of the tags data we retrieved
         let mut mapping = HashMap::with_capacity(capacity);
-        // get the right prepared statements depending on if this cursor is case insensitive
-        let (ties_prepared, query_prepared) = if tags_retain.case_insensitive {
-            (
-                &shared.scylla.prep.tags.list_ties_case_insensitive,
-                &shared.scylla.prep.tags.list_pull_case_insensitive,
-            )
-        } else {
-            (
-                &shared.scylla.prep.tags.list_ties,
-                &shared.scylla.prep.tags.list_pull,
-            )
-        };
-        // check if we have any current ties
-        if !tags_retain.ties.is_empty() {
-            // get any tie data
-            self.tag_ties(&mut tags_retain, &mut mapping, ties_prepared, shared)
-                .await?;
-        }
-        // add our mapped data to our sorted items
-        D::sort_tags(
-            &mut mapping,
-            &tags_retain.tags,
-            &mut self.sorted,
-            &mut self.mapped,
-        )?;
-        // consume our sorted data
-        self.consume_sorted(Some(&mut tags_retain.ties));
-        // only query for more data if we don't have enough to return
-        if self.mapped < self.limit {
-            // get tag data using normal queries
-            self.tag_query(
-                &group_by,
-                &mut tags_retain,
+        // read any tie data, then query for more if we don't have a page yet
+        let result = async {
+            if !tags_retain.ties.is_empty() {
+                self.tag_ties(statements, &mut tags_retain, &mut mapping, shared)
+                    .await?;
+            }
+            // add our mapped data to our sorted items
+            D::sort_tags(
                 &mut mapping,
-                query_prepared,
-                shared,
-            )
-            .await?;
+                &tags_retain.tags,
+                &mut self.sorted,
+                &mut self.mapped,
+            )?;
+            // consume our sorted data
+            self.consume_sorted(Some(&mut tags_retain.ties));
+            // only query for more data if we don't have enough to return
+            if self.mapped < self.limit.get() {
+                self.tag_query(
+                    statements,
+                    &group_by,
+                    &mut tags_retain,
+                    &mut mapping,
+                    shared,
+                )
+                .await?;
+            }
+            Ok::<(), ApiError>(())
         }
+        .await;
         // put our group by back
         self.retain.group_by = group_by;
-        Ok(tags_retain)
+        result.map(|()| tags_retain)
     }
 
     /// Gets the next page of data for this cursor
@@ -1766,16 +1675,22 @@ where
             // consume our remaining sorted values
             self.consume_sorted(None);
             // if we have enough data then return
-            if self.data.len() >= self.limit {
+            if self.data.len() >= self.limit.get() {
                 return Ok(());
             }
         }
         // crawl over the tags table if we have tag filters
         match self.retain.tags_retain.take() {
-            // we have tags to filter on
+            // we have tags to filter on, as written or in any case
             Some(tags_retain) => {
-                // get the next page of data based on tags
-                let tags_retain = self.next_tags(tags_retain, shared).await?;
+                let queries = &shared.scylla.queries;
+                let tags_retain = if tags_retain.case_insensitive {
+                    let statements = &queries.tags_case_insensitive.list;
+                    self.next_tags(statements, tags_retain, shared).await?
+                } else {
+                    self.next_tags(&queries.tags.list, tags_retain, shared)
+                        .await?
+                };
                 // restore our retained tags data
                 self.retain.tags_retain = Some(tags_retain);
                 Ok(())
@@ -1843,52 +1758,29 @@ where
 
 /// The data retained for the lifetime of this scylla simple cursor
 #[derive(Serialize, Deserialize, Debug)]
-pub struct SimpleScyllaCursorRetain {
+pub struct SimpleScyllaCursorRetain<T> {
     /// The partitions we are crawling for data
     partitions: Vec<String>,
     /// Our current position in our partitions vec
     index: usize,
-    /// The clustering key to start listing values at next time
-    tie: Option<String>,
+    /// The clustering key to start listing values after next time
+    tie: Option<T>,
 }
 
+/// The tie type of a simple cursor's statements
+type SimpleTieOf<D> = <<D as SimpleCursorExt>::Statements as SimpleCursorStatements>::Tie;
+
 /// Abstracts simple cursor logic across different tables and data types
-#[async_trait::async_trait]
-pub trait SimpleCursorExt {
-    /// Query scylla for the next page of data for this simple cursor
+pub trait SimpleCursorExt: Sized {
+    /// The statements this cursor pages with
+    type Statements: SimpleCursorStatements<Row = Self, Partition = String>;
+
+    /// Get the statements this cursor pages with
     ///
     /// # Arguments
     ///
-    /// * `partition` - The partition to query data for
-    /// * `tie` - The cluster key to use when breaking ties
-    /// * `limit` - The max amount of data to retrieve at once
     /// * `shared` - Shared Thorium objects
-    async fn query(
-        partition: &str,
-        tie: &Option<String>,
-        limit: i32,
-        shared: &Shared,
-    ) -> Result<QueryResult, ExecutionError>;
-
-    /// Gets the cluster key to start the next page of data after
-    fn get_tie(&self) -> Option<String>;
-}
-
-/// The [`CursorKind`] the exhausted-cursor delete path in [`SimpleScyllaCursor::save`] uses
-///
-/// This must match [`simple_scylla_save_kind`], since the kind is part of the key and deleting
-/// under any other kind never removes the cursor from redis.
-fn simple_scylla_delete_kind() -> CursorKind {
-    CursorKind::SimpleScylla
-}
-
-/// The [`CursorKind`] the write path in [`SimpleScyllaCursor::save`] uses
-///
-/// Split out of the save key construction so it can be unit tested against the delete path's
-/// kind. The delete path must use this same kind, or the exhausted-cursor `DEL` targets a key
-/// that never exists (the kind is part of the key) and never removes the cursor from redis.
-fn simple_scylla_save_kind() -> CursorKind {
-    CursorKind::SimpleScylla
+    fn statements(shared: &Shared) -> &Self::Statements;
 }
 
 /// A simple non group permissioned cursor
@@ -1904,9 +1796,9 @@ where
     /// The username of the user this cursor is scoped to
     pub username: String,
     /// The dta that is retained thoughout this cursors life
-    pub retain: SimpleScyllaCursorRetain,
+    pub retain: SimpleScyllaCursorRetain<SimpleTieOf<D>>,
     /// The max number of items to return at once
-    pub limit: usize,
+    pub limit: CursorLimit,
     /// Whether this cursor is exhausted or not
     pub exhausted: bool,
     /// Whether this cursor has data in redis or not
@@ -1920,11 +1812,8 @@ where
     for<'de> D: Deserialize<'de>,
     D: Serialize,
     D: SimpleCursorExt,
-    D: for<'a, 'b> DeserializeRow<'a, 'b>,
 {
     /// Create a new simple cursor object
-    ///
-    /// This will default to a limit of 50 if its not passed in
     ///
     /// # Arguments
     ///
@@ -1932,14 +1821,14 @@ where
     /// * `username` - The username of the user this cursor is scoped to
     /// * `limit` - The max number of items to return at once
     #[must_use]
-    pub fn new(partitions: Vec<String>, username: &str, limit: usize) -> Self {
+    pub fn new(partitions: Vec<String>, username: &str, limit: CursorLimit) -> Self {
         // create an initial simple scylla cursor
         let retain = SimpleScyllaCursorRetain {
             partitions,
             index: 0,
             tie: None,
         };
-        // build our simple cursor scoped to the creating user
+        // build our simple cursor
         SimpleScyllaCursor {
             id: Uuid::new_v4(),
             username: username.to_owned(),
@@ -1947,7 +1836,7 @@ where
             limit,
             exhausted: false,
             in_redis: false,
-            data: Vec::with_capacity(limit),
+            data: Vec::with_capacity(limit.get()),
         }
     }
 
@@ -1957,7 +1846,7 @@ where
     ///
     /// * `limit` - The max number of items that should be returned at once
     #[must_use]
-    pub fn limit(mut self, limit: usize) -> Self {
+    pub fn limit(mut self, limit: CursorLimit) -> Self {
         // update the limit for this cursor
         self.limit = limit;
         self
@@ -1975,7 +1864,7 @@ where
     pub async fn get(
         cursor_id: Uuid,
         username: &str,
-        limit: usize,
+        limit: CursorLimit,
         shared: &Shared,
     ) -> Result<SimpleScyllaCursor<D>, ApiError> {
         // build the key to our cursor data in redis scoped to the creating user
@@ -1994,7 +1883,7 @@ where
                     limit,
                     exhausted: false,
                     in_redis: true,
-                    data: Vec::with_capacity(limit),
+                    data: Vec::with_capacity(limit.get()),
                 };
                 Ok(cursor)
             }
@@ -2015,33 +1904,32 @@ where
             self.exhausted = true;
             return Ok(());
         }
-        // loop until we find enough data or exhaust our partitions
-        loop {
-            // get the number of items to try to get this loop
-            let limit = self.limit - self.data.len();
-            // query scylla for the data for this simple cursor
-            let query = D::query(
-                &self.retain.partitions[self.retain.index],
-                &self.retain.tie,
-                limit_to_cql(limit)?,
-                shared,
-            )
-            .await?;
-            // enable casting to types for this query
-            let query_rows = query.into_rows_result()?;
-            // get the number of rows in this typed stream
-            let cnt = query_rows.rows_num();
-            // set the type to cast this stream too
-            let typed_iter = query_rows.rows::<D>()?;
-            // if we found any rows then cast them and add them to our data
-            if cnt > 0 {
-                // cast our rows into the correct objects and log any errors
-                let found = typed_iter.filter_map(|res| log_scylla_err!(res));
-                // add this data to the data to return
-                self.data.extend(found);
-            }
+        let statements = D::statements(shared);
+        // loop until we find enough data or exhaust our partitions, reading the rows left of
+        // our limit each time, which is never 0
+        while let Some(limit) = self.limit.remaining(self.data.len()) {
+            let remaining = limit.get();
+            let partition = &self.retain.partitions[self.retain.index];
+            // query scylla for the rows after our tie, or the first rows of this partition
+            let rows = match &self.retain.tie {
+                Some(tie) => {
+                    statements
+                        .after(&shared.scylla.session, partition, tie, limit)
+                        .await?
+                }
+                None => {
+                    statements
+                        .first(&shared.scylla.session, partition, limit)
+                        .await?
+                }
+            };
+            // get the number of rows we read
+            let cnt = rows.len();
+            // cast our rows into the correct objects and log any errors
+            self.data
+                .extend(rows.into_iter().filter_map(|res| log_scylla_err!(res)));
             // getting fewer rows than our limit means this partition is exhausted
-            if cnt < limit {
+            if cnt < remaining {
                 // check if we are at the last index
                 if self.retain.index == self.retain.partitions.len() - 1 {
                     // we are at the last index so just return what we have
@@ -2054,10 +1942,10 @@ where
                 self.retain.tie = None;
             }
             // if we have all the data we need then return
-            if self.data.len() == self.limit {
+            if self.data.len() == self.limit.get() {
                 // set our tie value if we have any data
                 if let Some(last) = self.data.last() {
-                    self.retain.tie = last.get_tie();
+                    self.retain.tie = Some(D::Statements::row_tie(last));
                 }
                 break;
             }
@@ -2073,12 +1961,7 @@ where
     #[instrument(name = "SimpleScyllaCursor::save", skip_all, err(Debug))]
     pub async fn save(&self, shared: &Shared) -> Result<(), ApiError> {
         // build the key to save this cursor data too scoped to the creating user
-        let key = cursors::data(
-            simple_scylla_delete_kind(),
-            &self.username,
-            &self.id,
-            shared,
-        );
+        let key = cursors::data(CursorKind::SimpleScylla, &self.username, &self.id, shared);
         // either save or delete this cursor based on whether its exhausted or not
         if self.exhausted {
             // only delete if this cursor was actually written to redis
@@ -2089,8 +1972,6 @@ where
         } else {
             // serialize our paritions
             let data = serialize!(&self.retain);
-            // build the key to save this cursor data too scoped to the creating user
-            let key = cursors::data(simple_scylla_save_kind(), &self.username, &self.id, shared);
             // save this cursors data to redis
             let _: () = query!(
                 cmd("set").arg(key).arg(data).arg("EX").arg(2_628_000),
@@ -2136,7 +2017,8 @@ pub trait GroupedScyllaCursorSupport: Sized {
     type ExtraFilters: Clone + Debug + Serialize + for<'a> Deserialize<'a>;
 
     /// The intermediary component type casted from a Scylla row that is used to build `Self`
-    type RowType: Into<Self> + for<'frame, 'metadata> DeserializeRow<'frame, 'metadata>;
+    type RowType: Into<Self>
+        + for<'frame, 'metadata> scylla::deserialize::row::DeserializeRow<'frame, 'metadata>;
 
     /// The type of data our rows are grouped by (AKA the partition key)
     type GroupBy: Hash + Eq + Debug + Serialize + for<'a> Deserialize<'a>;
@@ -2149,6 +2031,21 @@ pub trait GroupedScyllaCursorSupport: Sized {
     /// groups, but they are unique entities (i.e. the two entities have the same name, but
     /// none of the same groups)
     type SortTieBreaker: Eq;
+
+    /// The statements this cursor pages with
+    type Statements: GroupedCursorStatements<
+            Row = Self::RowType,
+            Group = Self::GroupBy,
+            SortBy = Self::SortBy,
+            TieBreaker = Self::SortTieBreaker,
+        >;
+
+    /// Get the statements this cursor pages with
+    ///
+    /// # Arguments
+    ///
+    /// * `shared` - Shared Thorium objects
+    fn statements(shared: &Shared) -> &Self::Statements;
 
     /// Get our cursor id from params
     ///
@@ -2176,28 +2073,7 @@ pub trait GroupedScyllaCursorSupport: Sized {
     /// # Arguments
     ///
     /// * `params` - The params to use to build this cursor
-    fn get_limit(params: &Self::Params) -> Result<i32, ApiError>;
-
-    /// Get the `GroupBy` value from a casted row
-    ///
-    /// # Arguments
-    ///
-    /// * `row` - The row to get the `GroupBy` value from
-    fn row_get_group_by(row: &Self::RowType) -> Self::GroupBy;
-
-    /// Get the `SortBy` value from a casted row
-    ///
-    /// # Arguments
-    ///
-    /// * `row` - The row to get the `SortBy` value from
-    fn row_get_sort_by(row: &Self::RowType) -> Self::SortBy;
-
-    /// Get the tie-breaking value from the casted row
-    ///
-    /// # Arguments
-    ///
-    /// * `row` - The row to get the `SortBy` value from
-    fn row_get_tie_breaker(row: &Self::RowType) -> &Self::SortTieBreaker;
+    fn get_limit(params: &Self::Params) -> Result<CursorLimit, ApiError>;
 
     /// Return the value we're sorting by from `self`
     fn get_sort_by(&self) -> Self::SortBy;
@@ -2214,65 +2090,6 @@ pub trait GroupedScyllaCursorSupport: Sized {
     ///
     /// * `row` - The component row to add
     fn add_row(&mut self, row: Self::RowType);
-
-    /// Builds the query string for getting data from ties in the last query
-    ///
-    /// Ties occur when two groups have the same `SortBy` value and we weren't
-    /// able to return them all last iteration. These would be skipped if we
-    /// proceeded to query from our last `SortBy` value, so we need to get them
-    /// explicitly
-    ///
-    /// # Arguments
-    ///
-    /// * `ties` - The ties to get data for
-    /// * `extra` - Any extra filters to apply to this query
-    /// * `limit` - The max number of rows to return
-    /// * `shared` - Shared Thorium objects
-    fn ties_query(
-        ties: &[(Self::SortBy, Vec<Self::GroupBy>)],
-        extra: &Self::ExtraFilters,
-        limit: i32,
-        shared: &Shared,
-    ) -> Vec<impl Future<Output = Result<QueryResult, ExecutionError>>>;
-
-    /// Builds the query for getting the first page of values
-    ///
-    /// The Scylla query must have a `PER PARTITION LIMIT` equal to [`Self::limit`] as
-    /// defined by [`Self::Params`]
-    ///
-    /// # Arguments
-    ///
-    /// * `group` - The group to restrict our query too
-    /// * `extra` - Any extra filters to apply to this query
-    /// * `limit` - The max amount of data to get from this query
-    /// * `shared` - Shared Thorium objects
-    fn pull(
-        group: &Self::GroupBy,
-        extra: &Self::ExtraFilters,
-        limit: i32,
-        shared: &Shared,
-    ) -> impl Future<Output = Result<QueryResult, ExecutionError>>;
-
-    /// Builds the query for getting the next page of values
-    ///
-    /// The Scylla query must have a `PER PARTITION LIMIT` equal to [`Self::limit`] as
-    /// defined by [`Self::Params`], as well as pull from everything greater than
-    /// `current_sort_by` to work properly
-    ///
-    /// # Arguments
-    ///
-    /// * `group` - The group to restrict our query too
-    /// * `extra` - Any extra filters to apply to this query
-    /// * `current_sort_by` - The current sort value we left off at
-    /// * `limit` - The max amount of data to get from this query
-    /// * `shared` - Shared Thorium objects
-    fn pull_more(
-        group: &Self::GroupBy,
-        extra: &Self::ExtraFilters,
-        current_sort_by: &Self::SortBy,
-        limit: i32,
-        shared: &Shared,
-    ) -> impl Future<Output = Result<QueryResult, ExecutionError>>;
 }
 
 /// The data to retain throughout this cursors life
@@ -2287,6 +2104,27 @@ pub struct GroupedScyllaCursorRetain<D: GroupedScyllaCursorSupport> {
     pub ties: Vec<(D::SortBy, Vec<D::GroupBy>)>,
     /// The current sort value we left off at last query
     pub current_sort_by: Option<D::SortBy>,
+}
+
+impl<D: GroupedScyllaCursorSupport> GroupedScyllaCursorRetain<D> {
+    /// Narrow this cursor to the groups a request may list, dropping every other group from the
+    /// saved ties so they are never read
+    ///
+    /// Returns whether any saved group is left.
+    ///
+    /// # Arguments
+    ///
+    /// * `allowed` - The groups the request may list
+    fn narrow(&mut self, allowed: &HashSet<D::GroupBy>) -> bool {
+        // keep only the saved groups this request may still list
+        self.group_by.retain(|group| allowed.contains(group));
+        // drop any other group from each tie, and the ties left with no group
+        for (_, groups) in &mut self.ties {
+            groups.retain(|group| allowed.contains(group));
+        }
+        self.ties.retain(|(_, groups)| !groups.is_empty());
+        !self.group_by.is_empty()
+    }
 }
 
 /// A cursor for a listing group permisisoned data within scylla
@@ -2305,7 +2143,7 @@ where
     /// The cursor settings/data to retain across cursor iterations
     pub retain: GroupedScyllaCursorRetain<D>,
     /// The max number of items to return at once
-    pub limit: i32,
+    pub limit: CursorLimit,
     /// Whether this cursor has data in redis or not
     pub in_redis: bool,
     /// The data this cursor has retrieved
@@ -2321,15 +2159,6 @@ where
     D: GroupedScyllaCursorSupport,
     D: Debug,
 {
-    /// Get our limit plus the extra row we read to detect ties and exhausted rows
-    fn limit_plus_one(&self) -> Result<i32, ApiError> {
-        // add our extra row without overflowing
-        match self.limit.checked_add(1) {
-            Some(plus_one) => Ok(plus_one),
-            None => bad!(format!("A limit of {} is too large", self.limit)),
-        }
-    }
-
     /// Create a new cursor object from just params
     ///
     /// # Arguments
@@ -2349,32 +2178,13 @@ where
         dedupe: bool,
         shared: &Shared,
     ) -> Result<GroupedScyllaCursor<D>, ApiError> {
-        // if we have a cursor id then try to get our cursor from the DB
-        if let Some(id) = D::get_id(&mut params) {
-            GroupedScyllaCursor::get(id, username, params, dedupe, shared).await
-        } else {
-            // get our extra filters
-            let extra_filter = D::get_extra_filters(&mut params);
-            // get our group restrictions
-            let groups = D::get_groups(&mut params);
-            // build the inital data to retain across cursor iterations
-            let retain = GroupedScyllaCursorRetain {
-                extra_filter,
-                group_by: groups,
-                ties: Vec::default(),
-                current_sort_by: None,
-            };
-            // build our cursor
-            let cursor = GroupedScyllaCursor {
-                id: Uuid::new_v4(),
-                username: username.to_owned(),
-                retain,
-                limit: D::get_limit(&params)?,
-                in_redis: false,
-                data: Vec::default(),
-                new: true,
-            };
-            Ok(cursor)
+        // get our extra filters unless we're continuing a cursor
+        match D::get_id(&mut params) {
+            Some(id) => GroupedScyllaCursor::get(id, username, params, dedupe, shared).await,
+            None => {
+                let extra_filter = D::get_extra_filters(&mut params);
+                Self::create(params, extra_filter, username)
+            }
         }
     }
 
@@ -2400,30 +2210,43 @@ where
         shared: &Shared,
     ) -> Result<GroupedScyllaCursor<D>, ApiError> {
         // if we have a cursor id then try to get our cursor from the DB
-        if let Some(id) = D::get_id(&mut params) {
-            GroupedScyllaCursor::get(id, username, params, dedupe, shared).await
-        } else {
-            // get our group restrictions
-            let groups = D::get_groups(&mut params);
-            // build the inital data to retain across cursor iterations
-            let retain = GroupedScyllaCursorRetain {
-                extra_filter,
-                group_by: groups,
-                ties: Vec::default(),
-                current_sort_by: None,
-            };
-            // build our cursor
-            let cursor = GroupedScyllaCursor {
-                id: Uuid::new_v4(),
-                username: username.to_owned(),
-                retain,
-                limit: D::get_limit(&params)?,
-                in_redis: false,
-                data: Vec::default(),
-                new: true,
-            };
-            Ok(cursor)
+        match D::get_id(&mut params) {
+            Some(id) => GroupedScyllaCursor::get(id, username, params, dedupe, shared).await,
+            None => Self::create(params, extra_filter, username),
         }
+    }
+
+    /// Create a new cursor from params and its extra filters
+    ///
+    /// # Arguments
+    ///
+    /// * `params` - The params to build this cursor from
+    /// * `extra_filter` - The extra filters to use in this cursor
+    /// * `username` - The username of the user this cursor is scoped to
+    fn create(
+        mut params: D::Params,
+        extra_filter: D::ExtraFilters,
+        username: &str,
+    ) -> Result<Self, ApiError> {
+        // get our group restrictions
+        let groups = D::get_groups(&mut params);
+        // build the inital data to retain across cursor iterations
+        let retain = GroupedScyllaCursorRetain {
+            extra_filter,
+            group_by: groups,
+            ties: Vec::default(),
+            current_sort_by: None,
+        };
+        // build our cursor
+        Ok(GroupedScyllaCursor {
+            id: Uuid::new_v4(),
+            username: username.to_owned(),
+            retain,
+            limit: D::get_limit(&params)?,
+            in_redis: false,
+            data: Vec::default(),
+            new: true,
+        })
     }
 
     /// Gets a cursors data from scylla
@@ -2439,7 +2262,7 @@ where
     pub async fn get(
         cursor_id: Uuid,
         username: &str,
-        params: D::Params,
+        mut params: D::Params,
         dedupe: bool,
         shared: &Shared,
     ) -> Result<GroupedScyllaCursor<D>, ApiError> {
@@ -2451,7 +2274,19 @@ where
         match data {
             Some(data) => {
                 // deserialize our retained data
-                let retain: GroupedScyllaCursorRetain<D> = deserialize!(&data);
+                let mut retain: GroupedScyllaCursorRetain<D> = deserialize!(&data);
+                // get the groups this request was authorized to list, which a scoped token, a
+                // deleted group, or a user's removal from a group can make narrower than the
+                // groups saved with it
+                let allowed = D::get_groups(&mut params);
+                // resume over the saved groups still allowed, and answer as for an unknown id
+                // when none are left
+                if !retain.narrow(&allowed) {
+                    return not_found!(format!(
+                        "cursor '{}' was not found; maybe it expired?",
+                        cursor_id
+                    ));
+                }
                 // build and return our cursor
                 let cursor = GroupedScyllaCursor {
                     id: cursor_id,
@@ -2482,23 +2317,21 @@ where
         skip(self, shared),
         err(Debug)
     )]
-    async fn query_ties(&self, shared: &Shared) -> Result<Vec<QueryResult>, ApiError> {
-        // build our tie query futures
-        let futures = D::ties_query(
-            &self.retain.ties,
-            &self.retain.extra_filter,
-            // get an extra row to check for more ties
-            self.limit_plus_one()?,
-            shared,
-        );
-        // wait for all of our futures to complete 50 at a time
-        let queries = stream::iter(futures)
-            .buffer_unordered(50)
-            .collect::<Vec<Result<QueryResult, ExecutionError>>>()
-            .await
-            .into_iter()
-            .collect::<Result<Vec<QueryResult>, ExecutionError>>()?;
-        Ok(queries)
+    async fn query_ties(
+        &self,
+        shared: &Shared,
+    ) -> Result<Vec<Vec<RowResult<D::RowType>>>, ApiError> {
+        let statements = D::statements(shared);
+        // get an extra row to check for more ties
+        let limit = self.limit.plus_one();
+        // read each tied sort value in each of its groups
+        let mut futures = Vec::new();
+        for (sort_by, groups) in &self.retain.ties {
+            for group in groups {
+                futures.push(statements.ties(&shared.scylla.session, group, sort_by, limit));
+            }
+        }
+        run_all(futures).await
     }
 
     /// Remove any groups from our list that didn't return any data
@@ -2507,10 +2340,10 @@ where
     ///
     /// * `rows` - The casted rows we retrieved last query
     fn prune_exhausted_groups(&mut self, rows: &[D::RowType]) {
-        // create a map of group to the number of rows it returned
+        // collect the groups that returned rows
         let mut non_empty_groups: HashSet<D::GroupBy> = HashSet::new();
         for row in rows {
-            non_empty_groups.insert(D::row_get_group_by(row));
+            non_empty_groups.insert(D::Statements::row_group(row));
         }
         // retain only groups that are not empty
         self.retain
@@ -2530,11 +2363,11 @@ where
         let mut map: BTreeMap<D::SortBy, VecDeque<D>> = BTreeMap::new();
         for row in rows {
             // get the list of entities by their sort name
-            let entity_list = map.entry(D::row_get_sort_by(&row)).or_default();
+            let entity_list = map.entry(D::Statements::row_sort(&row)).or_default();
             // see if we've seen this entity before using our tie breakers
             if let Some(entity) = entity_list
                 .iter_mut()
-                .find(|n| n.get_tie_breaker() == D::row_get_tie_breaker(&row))
+                .find(|n| n.get_tie_breaker() == D::Statements::row_tie_breaker(&row))
             {
                 // if we've already seen this policy, add the row to it
                 entity.add_row(row);
@@ -2550,86 +2383,45 @@ where
     ///
     /// # Arguments
     ///
-    /// * `queries` - The queries to cast
+    /// * `results` - The rows each statement read
     #[instrument(name = "GroupedScyllaCursor::cast_rows", skip_all, err(Debug))]
-    fn cast_rows(queries: Vec<QueryResult>) -> Result<Vec<D::RowType>, ApiError> {
-        let mut casts = Vec::new();
-        // cast each row into the RowType
-        for query in queries {
-            // convert this into a rows query
-            let query_rows = query.into_rows_result()?;
-            // get each row returned by this query
-            for row in query_rows.rows::<D::RowType>()? {
-                // raise any errors from casting
-                casts.push(row?);
-            }
-        }
+    fn cast_rows(results: Vec<Vec<RowResult<D::RowType>>>) -> Result<Vec<D::RowType>, ApiError> {
+        // raise any errors from casting
+        let casts = results
+            .into_iter()
+            .flatten()
+            .collect::<Result<Vec<D::RowType>, _>>()?;
         Ok(casts)
     }
 
-    /// Crawl partitions and pull more data from them starting from the first item
-    /// after `current_sort_by`
+    /// Crawl partitions and pull data from them, starting after `current_sort_by` if we
+    /// left off somewhere
     ///
     /// # Arguments
     ///
-    /// * `shared` - Shared Thorium objects
-    #[instrument(
-        name = "GroupedScyllaCursor::query_more",
-        skip(self, shared),
-        err(Debug)
-    )]
-    async fn query_more(
-        &self,
-        current_sort_by: &D::SortBy,
-        shared: &Shared,
-    ) -> Result<Vec<QueryResult>, ApiError> {
-        // get an extra row to check for exhausted rows and ties
-        let limit = self.limit_plus_one()?;
-        // create our futures
-        let mut futures = Vec::new();
-        for group in &self.retain.group_by {
-            futures.push(D::pull_more(
-                group,
-                &self.retain.extra_filter,
-                current_sort_by,
-                limit,
-                shared,
-            ));
-        }
-        // query for each group 50 at a time
-        let query_results = stream::iter(futures)
-            .buffer_unordered(50)
-            .collect::<Vec<Result<QueryResult, ExecutionError>>>()
-            .await
-            .into_iter()
-            .collect::<Result<Vec<QueryResult>, ExecutionError>>()?;
-        // return our results
-        Ok(query_results)
-    }
-
-    /// Crawl partitions and pull data from them
-    ///
-    /// # Arguments
-    ///
+    /// * `current_sort_by` - The sort value we left off at, if any
     /// * `shared` - Shared Thorium objects
     #[instrument(name = "GroupedScyllaCursor::query", skip(self, shared), err(Debug))]
-    async fn query(&self, shared: &Shared) -> Result<Vec<QueryResult>, ApiError> {
+    async fn query(
+        &self,
+        current_sort_by: Option<&D::SortBy>,
+        shared: &Shared,
+    ) -> Result<Vec<Vec<RowResult<D::RowType>>>, ApiError> {
+        let statements = D::statements(shared);
         // get an extra row to check for exhausted rows and ties
-        let limit = self.limit_plus_one()?;
-        // create our futures
-        let mut futures = Vec::new();
+        let limit = self.limit.plus_one();
+        // query each group from where we left off, or from its start
+        let mut futures = Vec::with_capacity(self.retain.group_by.len());
         for group in &self.retain.group_by {
-            futures.push(D::pull(group, &self.retain.extra_filter, limit, shared));
+            let session = &shared.scylla.session;
+            futures.push(async move {
+                match current_sort_by {
+                    Some(after) => statements.pull_more(session, group, after, limit).await,
+                    None => statements.pull(session, group, limit).await,
+                }
+            });
         }
-        // query for each group 50 at a time
-        let query_results = stream::iter(futures)
-            .buffer_unordered(50)
-            .collect::<Vec<Result<QueryResult, ExecutionError>>>()
-            .await
-            .into_iter()
-            .collect::<Result<Vec<QueryResult>, ExecutionError>>()?;
-        // return our results
-        Ok(query_results)
+        run_all(futures).await
     }
 
     /// Consume our sorted data map in order to fill our user facing data buffer
@@ -2638,33 +2430,25 @@ where
     ///
     /// * `sorted_map` - The data sorted by the `SortBy` value mapped to a list of
     ///   unique entities containing that `SortBy` value
-    ///
-    /// # Panics
-    ///
-    /// Panics if the 32-bit signed integer `limit` is larger than the underlying
-    /// system's addressing size, which should never happen for 32 and 64-bit systems
     fn consume_sorted(&mut self, mut sorted_map: BTreeMap<D::SortBy, VecDeque<D>>) {
-        let limit: usize = self.limit.try_into().unwrap();
+        let limit = self.limit.get();
         // keep consuming until our user facing data buffer is full or we run out of data
-        // TODO: use let chains when we upgrade to Rust 2024
         while self.data.len() < limit {
-            if let Some((_sort_by, mut list)) = sorted_map.pop_first() {
-                // keep consuming from each list until our user facing data buffer is full or we run out of data
-                while self.data.len() < limit {
-                    if let Some(item) = list.pop_front() {
-                        // add this data to our user facing vec
-                        self.data.push(item);
-                    } else {
-                        break;
-                    }
-                }
-                if !list.is_empty() {
-                    // if we still have data left, we must have had ties;
-                    // save those ties to our cursor to get next iteration
-                    self.retain.ties = list.into_iter().map(D::to_tie).collect();
-                }
-            } else {
+            let Some((_sort_by, mut list)) = sorted_map.pop_first() else {
                 break;
+            };
+            // keep consuming from each list until our user facing data buffer is full or we
+            // run out of data
+            while self.data.len() < limit {
+                match list.pop_front() {
+                    Some(item) => self.data.push(item),
+                    None => break,
+                }
+            }
+            if !list.is_empty() {
+                // if we still have data left, we must have had ties;
+                // save those ties to our cursor to get next iteration
+                self.retain.ties = list.into_iter().map(D::to_tie).collect();
             }
         }
     }
@@ -2679,13 +2463,14 @@ where
     ///
     /// * `rows` - The rows returned by our tie queries
     fn consume_tied_rows(&mut self, rows: Vec<D::RowType>) -> bool {
+        // sort the tied rows into entities by their sort value
         let sorted_map = Self::build_sorted_map(rows);
         // our ties have been queried so clear them before any new leftover tie is recorded
         self.retain.ties.clear();
         // consume the sorted data and add it to our user-facing data buffer
         self.consume_sorted(sorted_map);
         // see if our ties returned all we needed
-        self.data.len() >= self.limit as usize
+        self.data.len() >= self.limit.get()
     }
 
     /// Gets the next page of queries for this cursor for data for general queries
@@ -2693,32 +2478,20 @@ where
     /// # Arguments
     ///
     /// * `shared` - Shared Thorium objects
-    ///
-    /// # Panics
-    ///
-    /// Panics if the 32-bit signed integer `limit` is larger than the underlying
-    /// system's addressing size, which should never happen for 32 and 64-bit systems
     #[instrument(name = "GroupedScyllaCursor::next", skip_all, err(Debug))]
     pub async fn next(&mut self, shared: &Shared) -> Result<(), ApiError> {
         // get data from any previously tied queries
         let tied_query_results = self.query_ties(shared).await?;
-        // if we had any queries based on ties then consume them
-        if !tied_query_results.is_empty() {
-            // cast the rows we just retrieved
-            let rows = Self::cast_rows(tied_query_results)?;
-            // consume our tied rows and return early if they returned all we needed
-            if self.consume_tied_rows(rows) {
-                return Ok(());
-            }
+        // cast the rows we just retrieved
+        let rows = Self::cast_rows(tied_query_results)?;
+        // consume our tied rows and return early if they returned all we needed
+        if self.consume_tied_rows(rows) {
+            return Ok(());
         }
-        // retrieve data
-        let query_results = if let Some(current_sort_by) = &self.retain.current_sort_by {
-            // if this is a subsequent search, continue from where we left off
-            self.query_more(current_sort_by, shared).await?
-        } else {
-            // start from the beginning if this is a new cursor
-            self.query(shared).await?
-        };
+        // retrieve data, continuing from where we left off if this is a subsequent search
+        let query_results = self
+            .query(self.retain.current_sort_by.as_ref(), shared)
+            .await?;
         // cast the rows we just retrieved to the component row type
         let rows = Self::cast_rows(query_results)?;
         // prune any groups that returned no rows
@@ -2751,8 +2524,6 @@ where
         } else {
             // serialize our paritions
             let data = serialize!(&self.retain);
-            // build the key to save this cursor data too scoped to the creating user
-            let key = cursors::data(CursorKind::GroupedScylla, &self.username, &self.id, shared);
             // if this is a new cursor only hold onto it for 8 hours
             // if its an existing cursor that is being paged then hold onto it for 7 days
             let ttl = if self.new { 28_800 } else { 604_800 };
@@ -2799,13 +2570,13 @@ pub struct ExistsCursor {
     /// The year we are last got data from
     pub year: i32,
     /// The bucket chunk we last got data from
-    pub bucket: u32,
+    pub bucket: Bucket,
     /// The final date that our cursor should get data from
     pub end: DateTime<Utc>,
     /// The final year we are going to get data from
     pub end_year: i32,
     /// The final bucket we will get data from
-    pub end_bucket: u32,
+    pub end_bucket: Bucket,
     /// The size of the partitions in seconds
     pub partition_size: u16,
 }
@@ -2830,11 +2601,11 @@ impl ExistsCursor {
         let cursor = ExistsCursor {
             start,
             year,
-            bucket: u32::try_from(helpers::partition(start, year, partition_size))?,
+            bucket: Bucket::of(start, year, partition_size)?,
             end,
             end_year,
             // the walk stops at the end timestamp's bucket in the end year
-            end_bucket: u32::try_from(helpers::partition(end, end_year, partition_size))?,
+            end_bucket: Bucket::of(end, end_year, partition_size)?,
             partition_size,
         };
         Ok(cursor)
@@ -2842,116 +2613,88 @@ impl ExistsCursor {
 
     /// Get the next window of partitions [`ExistsCursor::exists`] checks and advance past it
     ///
-    /// Split out of the partition walk in `exists` so it can be unit tested (the walk never
-    /// depends on query results, so advancing before the window is queried is identical).
-    /// Returns the year and buckets to query and whether this is the final window.
-    /// The walk stops at `end_bucket` in `end_year`.
-    fn next_window(&mut self) -> (i32, Vec<i32>, bool) {
+    /// The walk never depends on query results, so advancing before the window is queried
+    /// behaves the same as advancing after. Returns the year and buckets to query and whether
+    /// this is the final window. The walk stops at `end_bucket` in `end_year`.
+    fn next_window(&mut self) -> Result<(i32, Vec<Bucket>, bool), ApiError> {
         // get the year this window is in
         let year = self.year;
         // check if we are in the final year to list and stop at the correct bucket
+        let lowest = Bucket::new(self.bucket.get().saturating_sub(99));
         let end = if self.year == self.end_year {
-            std::cmp::max(self.bucket.saturating_sub(99), self.end_bucket)
+            std::cmp::max(lowest, self.end_bucket)
         } else {
-            self.bucket.saturating_sub(99)
+            lowest
         };
-        let buckets = (end..=self.bucket)
-            .map(|bucket| bucket as i32)
-            .collect::<Vec<i32>>();
+        // get the buckets in this window
+        let buckets = (end.get()..=self.bucket.get())
+            .map(Bucket::new)
+            .collect::<Vec<Bucket>>();
         // update our bucket counter correctly
-        let done = match (
-            self.year.cmp(&self.end_year),
-            end == 0,
-            end <= self.end_bucket,
-        ) {
+        let done = match (end.prev(), self.year.cmp(&self.end_year)) {
             // we have more buckets this year to query so just update our bucket
-            (Ordering::Greater, false, _) | (Ordering::Equal, _, false) => {
-                self.bucket = end - 1;
+            (Some(below), Ordering::Greater) => {
+                self.bucket = below;
                 false
             }
-            // we have more years to query to decrement our year and update our bucket
-            (Ordering::Greater, true, _) => {
+            (Some(below), Ordering::Equal) if end > self.end_bucket => {
+                self.bucket = below;
+                false
+            }
+            // we have more years to query so decrement our year and update our bucket
+            (None, Ordering::Greater) => {
                 // decrement our year
                 self.year = self.year.saturating_sub(1);
                 // reset our bucket to the last possible partition of the year
-                self.bucket = last_year_bucket(self.year, self.partition_size);
+                self.bucket = Bucket::last_of_year(self.year, self.partition_size)?;
                 false
             }
-            // were done querying so update our bucket and break
-            (_, _, _) => {
-                self.bucket = end.saturating_sub(1);
+            // were done querying so update our bucket
+            (below, _) => {
+                self.bucket = below.unwrap_or(end);
                 true
             }
         };
-        (year, buckets, done)
+        Ok((year, buckets, done))
     }
 
     /// Check if any rows exist across all partitions
     ///
     /// # Arguments
     ///
-    /// * `prepared` - The statment to execute
+    /// * `statement` - The statement checking a window of buckets for the key
     /// * `key` - The key to use when checking for the existence of rows
     /// * `shared` - Shared Thorium objects
-    /// * `span` - The span to log traces under
-    #[instrument(
-        name = "ExistsCursor::exists",
-        skip(self, prepared, shared),
-        err(Debug)
-    )]
-    pub async fn exists(
+    #[instrument(name = "ExistsCursor::exists", skip_all, err(Debug))]
+    pub async fn exists<S: ExistsStatement>(
         mut self,
-        prepared: &PreparedStatement,
-        key: &str,
+        statement: &S,
+        key: &S::Key,
         shared: &Shared,
     ) -> Result<bool, ApiError> {
-        // create a weeks worth of futures polling
-        let mut futures = Vec::with_capacity(100);
+        // walk every window of buckets to check before checking any
+        let mut windows = Vec::with_capacity(100);
         loop {
             // get the next window of partitions to check and advance our cursor
-            let (year, buckets, done) = self.next_window();
-            // build the query to see if data exists in these partitions
-            let query = shared
-                .scylla
-                .session
-                .execute_unpaged(prepared, (year, buckets, key));
-            // add this future out our futures list
-            futures.push(query);
-            // if we have have more then 100 futures to crawl then send them all at once
-            if futures.len() >= 100 {
-                // build our stream of futures
-                let mut stream = stream::iter(futures.drain(..)).buffer_unordered(50);
-                // check all partitons for data
-                while let Some(query) = stream.next().await {
-                    // unwrap our query
-                    let query = query?;
-                    // convert our query into a rows query
-                    let query_rows = query.into_rows_result()?;
-                    // check if any rows were returned
-                    if query_rows.rows_num() > 0 {
-                        // log that we found data
-                        event!(Level::INFO, exists = true);
-                        return Ok(true);
-                    }
-                }
-            }
-            // stop once we have queried our final window
+            let (year, buckets, done) = self.next_window()?;
+            windows.push((year, buckets));
+            // stop once we have our final window
             if done {
                 break;
             }
         }
-        // if we hae any remaining futures then execute them
-        if !futures.is_empty() {
-            // build our stream of futures
-            let mut stream = stream::iter(futures.drain(..)).buffer_unordered(50);
+        // check the windows 100 at a time, 50 at once, stopping at the first that has data
+        for chunk in windows.chunks(100) {
+            // build this chunk's checks before streaming them
+            let futures = chunk
+                .iter()
+                .map(|(year, buckets)| statement.any(&shared.scylla.session, *year, buckets, key))
+                .collect::<Vec<_>>();
+            let mut stream = stream::iter(futures).buffer_unordered(50);
             // check all partitons for data
-            while let Some(query) = stream.next().await {
-                // unwrap our query
-                let query = query?;
-                // convert our query into a rows query
-                let query_rows = query.into_rows_result()?;
+            while let Some(found) = stream.next().await {
                 // check if any rows were returned
-                if query_rows.rows_num() > 0 {
+                if found? {
                     // log that we found data
                     event!(Level::INFO, exists = true);
                     return Ok(true);
@@ -2963,7 +2706,6 @@ impl ExistsCursor {
         Ok(false)
     }
 }
-
 pub trait TagCountCursorSupport: ScyllaCursorSupport + Send {
     /// The type for our data with tags
     type Details;
@@ -3096,8 +2838,9 @@ impl<D: TagCountCursorSupport + Send> ScyllaTagCountCursor<D> {
                 match data {
                     // deserialize our cursor data
                     Some(data) => (id, deserialize!(&data), false),
-                    // this cursor data is missing so return an error
-                    None => return not_found!(format!("Cursor {id} not found!")),
+                    // this cursor data is missing, so answer as its backing cursor does for an
+                    // id that isn't found under this user
+                    None => return not_found!(format!("Cursor {id} doesn't exist")),
                 }
             }
             None => (
@@ -3906,92 +3649,20 @@ impl<D: RedisCursorSupport> RedisCursor<D> {
 #[cfg(test)]
 mod tests {
     use super::{
-        DEFAULT_LIMIT_CAP, ExistsCursor, GroupedScyllaCursor, GroupedScyllaCursorRetain,
-        GroupedScyllaCursorSupport, ScyllaCursor, ScyllaCursorRetain, build_group_filter,
-        build_query_string_clause, check_limit, last_year_bucket, limit_plus_one_to_cql,
-        limit_to_cql, scylla_cursor_save_expire, scylla_uuid_cmp, simple_scylla_delete_kind,
-        simple_scylla_save_kind,
+        ExistsCursor, GroupedScyllaCursor, GroupedScyllaCursorRetain, GroupedScyllaCursorSupport,
+        ScyllaCursor, ScyllaCursorRetain, SortedLine, TagsRetain, build_group_filter,
+        build_query_string_clause, scylla_cursor_save_expire,
     };
+    use crate::models::schema::{Bucket, CursorLimit, DEFAULT_LIMIT_CAP};
     use crate::models::{
         NetworkPolicyListLine, NetworkPolicyListParams, NetworkPolicyListRow, SampleListLine,
+        TagType,
     };
-    use crate::utils::helpers;
+    use crate::utils::ApiError;
     use axum::http::StatusCode;
     use chrono::prelude::*;
-    use std::collections::{HashMap, HashSet};
+    use std::collections::{BTreeMap, HashMap, HashSet};
     use uuid::Uuid;
-
-    /// The last bucket of a year is the bucket of its final second, so it counts the length of
-    /// that year: 366 days of 180 second buckets in 2024 and 365 days in 2025.
-    #[test]
-    fn last_year_bucket_counts_the_entered_year() {
-        // 2024 is a leap year with 366 * 480 buckets of 180 seconds
-        assert_eq!(last_year_bucket(2024, 180), 175_679);
-        // 2025 is a regular year with 365 * 480 buckets of 180 seconds
-        assert_eq!(last_year_bucket(2025, 180), 175_199);
-    }
-
-    /// `SimpleScyllaCursor::save` builds the exhausted-cursor `DEL` key with the same
-    /// `CursorKind` as the save key. The kind is part of the redis key, so this is what lets the
-    /// delete actually remove the exhausted simple cursor it wrote.
-    #[test]
-    fn simple_scylla_delete_kind_matches_save_kind() {
-        // the delete path must key on the same cursor kind the save path wrote, or the DEL is a
-        // no-op against a nonexistent key and the exhausted cursor lingers forever
-        assert_eq!(
-            simple_scylla_delete_kind().as_str(),
-            simple_scylla_save_kind().as_str(),
-            "the exhausted-cursor delete key must use the same CursorKind as the save key"
-        );
-    }
-
-    /// the group filter must reject an empty group list rather than emit an empty `should`
-    /// array that Elasticsearch rewrites to `match_all` (a full cross-tenant search read).
-    #[test]
-    fn group_filter_rejects_empty_groups() {
-        // building a filter with no groups must fail rather than match every tenant's documents
-        assert!(
-            build_group_filter(&[]).is_err(),
-            "empty group list produced a filter (match_all cross-tenant leak)"
-        );
-    }
-
-    /// A normal, non-empty group list must still build one exact-match clause per group so tenant
-    /// isolation works for the common case.
-    #[test]
-    fn group_filter_builds_a_clause_per_group() {
-        // build a filter scoped to two groups
-        let filter = build_group_filter(&["team-a".to_owned(), "team-b".to_owned()])
-            .expect("non-empty group list should build a filter");
-        // the filter must be an array with exactly one clause per group
-        let clauses = filter
-            .as_array()
-            .expect("group filter should be a JSON array of match clauses");
-        assert_eq!(
-            clauses.len(),
-            2,
-            "expected one match clause per group in the tenant-isolation filter"
-        );
-    }
-
-    /// the user `query_string` clause must be cost-bounded so a single crafted query cannot
-    /// enumerate the entire term dictionary of the shared indexes and exhaust the search
-    /// threadpools. At minimum leading wildcards must be disabled.
-    #[test]
-    fn query_string_clause_disables_leading_wildcards() {
-        // build the clause for an arbitrary user query
-        let clause = build_query_string_clause("password OR flag");
-        // dig into the query_string options the clause carries
-        let options = clause
-            .get("query_string")
-            .expect("clause should carry a query_string object");
-        // leading wildcards must be explicitly disabled to bound multi-term expansion cost
-        assert_eq!(
-            options.get("allow_leading_wildcard"),
-            Some(&serde_json::Value::Bool(false)),
-            "query_string clause did not disable leading wildcards (DoS)"
-        );
-    }
 
     /// Build a UTC timestamp at midnight on a day
     ///
@@ -4001,7 +3672,19 @@ mod tests {
     /// * `month` - The month of this timestamp
     /// * `day` - The day of this timestamp
     fn day(year: i32, month: u32, day: u32) -> DateTime<Utc> {
+        // every test date is a real day, so it always builds
         Utc.with_ymd_and_hms(year, month, day, 0, 0, 0).unwrap()
+    }
+
+    /// The bucket a timestamp falls in within a year
+    ///
+    /// # Arguments
+    ///
+    /// * `timestamp` - The timestamp
+    /// * `year` - The year the bucket is counted in
+    /// * `partition_size` - The size of each bucket in seconds
+    fn bucket_of(timestamp: DateTime<Utc>, year: i32, partition_size: u16) -> u32 {
+        Bucket::of(timestamp, year, partition_size).unwrap().get()
     }
 
     /// Walk every window an exists cursor queries and collect the buckets checked in each year
@@ -4009,12 +3692,18 @@ mod tests {
     /// # Arguments
     ///
     /// * `cursor` - The exists cursor to walk
-    fn walk(mut cursor: ExistsCursor) -> HashMap<i32, HashSet<i32>> {
-        let mut checked: HashMap<i32, HashSet<i32>> = HashMap::new();
+    fn walk(mut cursor: ExistsCursor) -> HashMap<i32, HashSet<u32>> {
+        // track the buckets checked in each year
+        let mut checked: HashMap<i32, HashSet<u32>> = HashMap::new();
         // cap the walk so a broken cursor can't loop forever
         for _ in 0..100_000 {
-            let (year, buckets, done) = cursor.next_window();
-            checked.entry(year).or_default().extend(buckets);
+            // get the next window and record the buckets it checks
+            let (year, buckets, done) = cursor.next_window().unwrap();
+            checked
+                .entry(year)
+                .or_default()
+                .extend(buckets.into_iter().map(Bucket::get));
+            // stop once the cursor says this was its final window
             if done {
                 return checked;
             }
@@ -4033,8 +3722,8 @@ mod tests {
         let cursor = ExistsCursor::new(start, end, 3_600).unwrap();
         // the walk must stop at the end timestamp's bucket
         assert_eq!(
-            cursor.end_bucket,
-            helpers::partition(end, 2020, 3_600) as u32,
+            cursor.end_bucket.get(),
+            bucket_of(end, 2020, 3_600),
             "the end bucket must be computed from the end timestamp and end year"
         );
     }
@@ -4044,11 +3733,10 @@ mod tests {
     /// deleted.
     #[test]
     fn exists_walk_covers_end_year_early_buckets() {
-        let start = day(2026, 9, 24);
-        let end = day(2020, 2, 1);
-        let checked = walk(ExistsCursor::new(start, end, 3_600).unwrap());
+        // walk from Sept 24 2026 back to Feb 1 2020
+        let checked = walk(ExistsCursor::new(day(2026, 9, 24), day(2020, 2, 1), 3_600).unwrap());
         // a commit on March 1 2020 is inside the requested range
-        let march = helpers::partition(day(2020, 3, 1), 2020, 3_600);
+        let march = bucket_of(day(2020, 3, 1), 2020, 3_600);
         assert!(
             checked
                 .get(&2020)
@@ -4061,15 +3749,28 @@ mod tests {
     /// the start's window.
     #[test]
     fn exists_walk_covers_same_year_range() {
-        let start = day(2026, 9, 24);
-        let end = day(2026, 1, 15);
-        let checked = walk(ExistsCursor::new(start, end, 3_600).unwrap());
-        let march = helpers::partition(day(2026, 3, 1), 2026, 3_600);
+        // walk from Sept 24 2026 back to Jan 15 2026
+        let checked = walk(ExistsCursor::new(day(2026, 9, 24), day(2026, 1, 15), 3_600).unwrap());
+        // a commit on March 1 2026 is inside the requested range
+        let march = bucket_of(day(2026, 3, 1), 2026, 3_600);
         assert!(
             checked
                 .get(&2026)
                 .is_some_and(|buckets| buckets.contains(&march)),
             "the exists walk must check every bucket between its start and end"
+        );
+    }
+
+    /// Buckets in the years between the start and end years are checked.
+    #[test]
+    fn exists_walk_covers_middle_years() {
+        // walk from Sept 24 2026 back to Feb 1 2020
+        let checked = walk(ExistsCursor::new(day(2026, 9, 24), day(2020, 2, 1), 3_600).unwrap());
+        // bucket 100 of 2023 lies between the start and end years
+        assert!(
+            checked
+                .get(&2023)
+                .is_some_and(|buckets| buckets.contains(&100))
         );
     }
 
@@ -4080,11 +3781,10 @@ mod tests {
     /// Dec 31 2024.
     #[test]
     fn exists_walk_covers_leap_year_december_31() {
-        let start = day(2026, 9, 24);
-        let end = day(2020, 2, 1);
-        let checked = walk(ExistsCursor::new(start, end, 3_600).unwrap());
+        // walk from Sept 24 2026 back to Feb 1 2020
+        let checked = walk(ExistsCursor::new(day(2026, 9, 24), day(2020, 2, 1), 3_600).unwrap());
         // the last hour of 2024 (a leap year) is inside the requested range
-        let last_hour = helpers::partition(
+        let last_hour = bucket_of(
             Utc.with_ymd_and_hms(2024, 12, 31, 23, 30, 0).unwrap(),
             2024,
             3_600,
@@ -4100,11 +3800,10 @@ mod tests {
     /// Rolling back into a regular year after a leap year checks that year's final hour.
     #[test]
     fn exists_walk_covers_regular_year_december_31() {
-        let start = day(2026, 9, 24);
-        let end = day(2020, 2, 1);
-        let checked = walk(ExistsCursor::new(start, end, 3_600).unwrap());
+        // walk from Sept 24 2026 back to Feb 1 2020
+        let checked = walk(ExistsCursor::new(day(2026, 9, 24), day(2020, 2, 1), 3_600).unwrap());
         // the last hour of 2025 (a regular year after the 2024 leap year) is inside the range
-        let last_hour = helpers::partition(
+        let last_hour = bucket_of(
             Utc.with_ymd_and_hms(2025, 12, 31, 23, 30, 0).unwrap(),
             2025,
             3_600,
@@ -4116,17 +3815,116 @@ mod tests {
         );
     }
 
-    /// Buckets in the years between the start and end years are checked.
+    /// The last bucket of a year is the bucket of its final second, so it counts the length of
+    /// that year: 366 days of 180 second buckets in 2024 and 365 days in 2025.
     #[test]
-    fn exists_walk_covers_middle_years() {
-        let start = day(2026, 9, 24);
-        let end = day(2020, 2, 1);
-        let checked = walk(ExistsCursor::new(start, end, 3_600).unwrap());
+    fn last_year_bucket_counts_the_entered_year() {
+        // 2024 is a leap year with 366 * 480 buckets of 180 seconds
+        assert_eq!(Bucket::last_of_year(2024, 180), Ok(Bucket::new(175_679)));
+        // 2025 is a regular year with 365 * 480 buckets of 180 seconds
+        assert_eq!(Bucket::last_of_year(2025, 180), Ok(Bucket::new(175_199)));
+    }
+
+    /// A limit of 0 or above the cap is refused with a 400, and 1 and the cap are accepted
+    #[test]
+    fn check_limit_bounds() {
+        // 0 and one past the cap are bad requests
+        for limit in [0, DEFAULT_LIMIT_CAP as usize + 1, usize::MAX] {
+            let status = CursorLimit::from_user(limit, DEFAULT_LIMIT_CAP, "limit")
+                .map_err(|err| ApiError::from(err).status());
+            assert_eq!(status, Err(StatusCode::BAD_REQUEST), "limit {limit}");
+        }
+        // 1 and the cap itself are allowed
+        for limit in [1, DEFAULT_LIMIT_CAP as usize] {
+            let checked = CursorLimit::from_user(limit, DEFAULT_LIMIT_CAP, "limit").unwrap();
+            assert_eq!(checked.get(), limit);
+        }
+    }
+
+    /// A limit that doesn't fit a CQL int is a 400, not a wrap or a truncation, and a limit
+    /// plus the row cursors read to detect ties always fits
+    #[test]
+    fn limit_conversions_are_checked() {
+        // limits whose next row or whose own value don't fit an int are refused
+        for limit in [i32::MAX as usize, u32::MAX as usize + 1] {
+            let status = CursorLimit::from_user(limit, DEFAULT_LIMIT_CAP, "limit")
+                .map_err(|err| ApiError::from(err).status());
+            assert_eq!(status, Err(StatusCode::BAD_REQUEST), "limit {limit}");
+        }
+        // limits that fit convert unchanged
+        let limit = CursorLimit::from_user(50, DEFAULT_LIMIT_CAP, "limit").unwrap();
+        assert_eq!(limit.to_cql(), 50);
+        assert_eq!(limit.plus_one().to_cql(), 51);
+        // what's left of a limit is never 0
+        assert_eq!(limit.remaining(49).map(CursorLimit::get), Some(1));
+        assert_eq!(limit.remaining(50), None);
+    }
+
+    /// Network policy listings refuse an `i32::MAX` limit, whose next row overflows
+    #[test]
+    fn network_policy_limit_is_capped() {
+        // build params asking for i32::MAX rows
+        let params = NetworkPolicyListParams {
+            limit: i32::MAX as usize,
+            ..NetworkPolicyListParams::default()
+        };
+        let status = NetworkPolicyListLine::get_limit(&params).map_err(|err| err.status());
+        assert_eq!(status, Err(StatusCode::BAD_REQUEST));
+    }
+
+    /// The group filter must reject an empty group list rather than emit an empty `should`
+    /// array that Elasticsearch rewrites to `match_all` (a full cross-tenant search read)
+    #[test]
+    fn group_filter_rejects_empty_groups() {
+        // building a filter with no groups must fail rather than match every tenant's documents
         assert!(
-            checked
-                .get(&2023)
-                .is_some_and(|buckets| buckets.contains(&100))
+            build_group_filter(&[]).is_err(),
+            "empty group list produced a filter (match_all cross-tenant leak)"
         );
+    }
+
+    /// A non-empty group list builds one exact-match clause per group
+    #[test]
+    fn group_filter_builds_a_clause_per_group() {
+        // build a filter scoped to two groups
+        let filter = build_group_filter(&["team-a".to_owned(), "team-b".to_owned()])
+            .expect("non-empty group list should build a filter");
+        // the filter must be an array with exactly one clause per group
+        let clauses = filter
+            .as_array()
+            .expect("group filter should be a JSON array of match clauses");
+        assert_eq!(
+            clauses.len(),
+            2,
+            "expected one match clause per group in the tenant-isolation filter"
+        );
+    }
+
+    /// The user `query_string` clause disables leading wildcards, so one crafted query can't
+    /// enumerate the term dictionary of the shared indexes
+    #[test]
+    fn query_string_clause_disables_leading_wildcards() {
+        // build the clause for an arbitrary user query
+        let clause = build_query_string_clause("password OR flag");
+        // dig into the query_string options the clause carries
+        let options = clause
+            .get("query_string")
+            .expect("clause should carry a query_string object");
+        // leading wildcards must be explicitly disabled to bound multi-term expansion cost
+        assert_eq!(
+            options.get("allow_leading_wildcard"),
+            Some(&serde_json::Value::Bool(false)),
+            "query_string clause did not disable leading wildcards"
+        );
+    }
+
+    /// `ScyllaCursor::save` holds a new cursor in redis for 8 hours and a paged one for 7 days
+    #[test]
+    fn scylla_cursor_save_expiry() {
+        // a new cursor is only held for 8 hours
+        assert_eq!(scylla_cursor_save_expire(true), 28_800);
+        // a cursor being paged is held for 7 days
+        assert_eq!(scylla_cursor_save_expire(false), 604_800);
     }
 
     /// Build a listed sample in some groups
@@ -4145,7 +3943,20 @@ mod tests {
         }
     }
 
-    /// Build a sample listing cursor over 2020-2026 with some retained data
+    /// Build fresh retained data for a sample listing cursor over 2020-2026
+    fn sample_retain() -> ScyllaCursorRetain<SampleListLine> {
+        ScyllaCursorRetain {
+            start: day(2026, 9, 24),
+            end: day(2020, 1, 2),
+            extra_filter: (),
+            group_by: vec!["g1".to_owned(), "g2".to_owned()],
+            ties: Vec::new(),
+            tags_retain: None,
+            dedupe_set: HashSet::new(),
+        }
+    }
+
+    /// Build a sample listing cursor with some retained data
     ///
     /// # Arguments
     ///
@@ -4157,95 +3968,93 @@ mod tests {
         limit: usize,
         dedupe: bool,
     ) -> ScyllaCursor<SampleListLine> {
-        ScyllaCursor::rebuild(Uuid::new_v4(), "user", retain, 3_600, limit, dedupe).unwrap()
-    }
-
-    /// Build fresh retained data for a sample listing cursor over 2020-2026
-    fn sample_retain() -> ScyllaCursorRetain<SampleListLine> {
-        ScyllaCursorRetain {
-            start: day(2026, 9, 24),
-            end: day(2020, 1, 2),
-            extra_filter: (),
-            group_by: vec!["g1".to_owned(), "g2".to_owned()],
-            ties: HashMap::new(),
-            tags_retain: None,
-            dedupe_set: HashSet::new(),
+        ScyllaCursor {
+            id: Uuid::new_v4(),
+            username: "user".to_owned(),
+            retain,
+            year: 2026,
+            bucket: Bucket::new(0),
+            end_year: 2020,
+            end_bucket: Bucket::new(0),
+            partition_size: 3_600,
+            limit: CursorLimit::from_user(limit, DEFAULT_LIMIT_CAP, "limit").unwrap(),
+            dedupe,
+            data: Vec::default(),
+            sorted: BTreeMap::default(),
+            mapped: 0,
+            buckets_exhausted: false,
+            new: false,
         }
     }
 
-    /// Give rows submissions that sort the way the rows are listed when tied rows are consumed
-    ///
-    /// Tied sample rows are consumed newest submission first, so this gives the first row the
-    /// highest submission id and each later row a lower one.
+    /// Add lines sharing one timestamp to a cursor's sorted buffer, each read from the
+    /// partitions of its groups with its submission as its tie
     ///
     /// # Arguments
     ///
-    /// * `rows` - The rows to give submissions to
-    fn in_consume_order(rows: &mut [SampleListLine]) {
-        // generate a submission for every row and sort them the way they are consumed
-        let mut ids: Vec<Uuid> = rows.iter().map(|_| Uuid::new_v4()).collect();
-        ids.sort_by(|left, right| scylla_uuid_cmp(right, left));
-        // hand them out in that order
-        for (row, id) in rows.iter_mut().zip(ids) {
-            row.submission = Some(id);
-        }
+    /// * `cursor` - The cursor to add lines to
+    /// * `lines` - The lines to add, all sharing one timestamp
+    fn add_sorted(cursor: &mut ScyllaCursor<SampleListLine>, lines: Vec<SampleListLine>) {
+        let timestamp = lines[0].uploaded;
+        cursor.mapped += lines.len();
+        // wrap each line with the tie and partitions its rows were read with
+        let sorted = lines.into_iter().map(|line| SortedLine {
+            tie: line.submission,
+            scopes: line.groups.iter().cloned().collect(),
+            line,
+        });
+        cursor.sorted.entry(timestamp).or_default().extend(sorted);
     }
 
-    /// Add rows sharing one timestamp to a cursor's sorted buffer
-    ///
-    /// # Arguments
-    ///
-    /// * `cursor` - The cursor to add rows to
-    /// * `rows` - The rows to add, all sharing one timestamp
-    fn add_sorted(cursor: &mut ScyllaCursor<SampleListLine>, rows: Vec<SampleListLine>) {
-        let timestamp = rows[0].uploaded;
-        cursor.mapped += rows.len();
-        cursor.sorted.entry(timestamp).or_default().extend(rows);
-    }
-
-    /// When a page ends inside a run of rows sharing one timestamp, `consume_sorted` records a
-    /// tie for the groups of every leftover row, not just the front one. The next page only pulls
-    /// rows strictly older than that timestamp, so without a tie the leftover rows of group g1
-    /// (which trail g2's in the run) would never be returned.
+    /// When a page ends inside a run of rows sharing one timestamp, a tie is recorded for the
+    /// partition of every leftover row, not just the front one, so the next page returns the
+    /// leftover rows of both groups
     #[test]
     fn consume_sorted_records_ties_for_all_leftover_groups() {
-        let mut cursor = sample_cursor(sample_retain(), 4, false);
-        // at one timestamp g2 has five rows followed by g1's two
+        let mut cursor = sample_cursor(sample_retain(), 1, false);
+        // at one timestamp g2 has five rows and g1 has two
         let at = day(2026, 9, 1);
         let mut rows: Vec<SampleListLine> = (0..5)
             .map(|i| sample(&format!("i{i}"), &["g2"], at))
             .collect();
         rows.extend((0..2).map(|i| sample(&format!("j{i}"), &["g1"], at)));
-        in_consume_order(&mut rows);
         add_sorted(&mut cursor, rows);
-        // fill a page of 4
+        // fill a page of 1, which leaves rows of both groups whichever row it returns
         cursor.consume_sorted(None);
-        // g1's leftover rows at this timestamp must get a tie so the next page returns them
-        assert!(
-            cursor.retain.ties.contains_key("g1"),
-            "every group with leftover rows at the page boundary needs a tie, got {:?}",
-            cursor.retain.ties
-        );
+        // every group's leftover rows at this timestamp get a tie so the next page returns them
+        for group in ["g1", "g2"] {
+            assert!(
+                cursor.retain.ties.iter().any(|(scope, _)| scope == group),
+                "{group} has leftover rows at the page boundary but no tie: {:?}",
+                cursor.retain.ties
+            );
+        }
     }
 
-    /// The front leftover row's group gets a tie and the page is filled in order.
+    /// The front leftover row's partition gets a tie at that row and the page is filled
     #[test]
     fn consume_sorted_records_tie_for_front_leftover_group() {
         let mut cursor = sample_cursor(sample_retain(), 4, false);
         let at = day(2026, 9, 1);
-        let mut rows: Vec<SampleListLine> = (0..5)
+        let rows: Vec<SampleListLine> = (0..5)
             .map(|i| sample(&format!("i{i}"), &["g2"], at))
             .collect();
-        in_consume_order(&mut rows);
-        let fifth = rows[4].submission.unwrap().to_string();
+        let ids: Vec<Uuid> = rows.iter().filter_map(|row| row.submission).collect();
         add_sorted(&mut cursor, rows);
         cursor.consume_sorted(None);
         assert_eq!(cursor.data.len(), 4);
-        assert_eq!(cursor.retain.ties.get("g2"), Some(&fifth));
+        // the row left over is the one the page didn't return
+        let returned: Vec<Uuid> = cursor
+            .data
+            .iter()
+            .filter_map(|row| row.submission)
+            .collect();
+        let last = ids.into_iter().find(|id| !returned.contains(id)).unwrap();
+        assert_eq!(cursor.retain.ties, vec![("g2".to_owned(), last)]);
     }
 
-    /// The set of samples already returned by a deduped listing is retained between pages, so a
-    /// sample whose submissions fall on different pages (here X) is only returned on the first.
+    /// The samples a deduped listing already returned are retained between pages, so a sample
+    /// whose submissions fall on different pages (here X) is only returned on the first
     #[test]
     fn dedupe_persists_across_pages() {
         // page 1 returns sample X's newest submission
@@ -4274,7 +4083,7 @@ mod tests {
         );
     }
 
-    /// Duplicate submissions of a sample within one page are deduped.
+    /// Duplicate submissions of a sample within one page are deduped
     #[test]
     fn dedupe_within_one_page() {
         let mut cursor = sample_cursor(sample_retain(), 2, true);
@@ -4290,35 +4099,17 @@ mod tests {
         assert_eq!(returned, vec!["X", "Z"]);
     }
 
-    /// `ScyllaCursor::save` holds a new cursor in redis for 8 hours (28800 seconds), so abandoned
-    /// new cursors don't linger for a week.
-    #[test]
-    fn new_scylla_cursor_expires_in_8h() {
-        assert_eq!(
-            scylla_cursor_save_expire(true),
-            28_800,
-            "a new scylla cursor must only be held in redis for 8 hours"
-        );
-    }
-
-    /// A cursor that is being paged is held for 7 days.
-    #[test]
-    fn paged_scylla_cursor_expires_in_7d() {
-        assert_eq!(scylla_cursor_save_expire(false), 604_800);
-    }
-
     /// Build a listed network policy row in a group
     ///
     /// # Arguments
     ///
     /// * `group` - The group this row is in
     /// * `name` - The name of this network policy
-    /// * `id` - The id of this network policy
-    fn policy_row(group: &str, name: &str, id: Uuid) -> NetworkPolicyListRow {
+    fn policy_row(group: &str, name: &str) -> NetworkPolicyListRow {
         NetworkPolicyListRow {
             group: group.to_owned(),
             name: name.to_owned(),
-            id,
+            id: Uuid::new_v4(),
         }
     }
 
@@ -4329,7 +4120,7 @@ mod tests {
     /// * `limit` - The max number of items to return at once
     /// * `ties` - The ties retained from a previous page
     fn policy_cursor(
-        limit: i32,
+        limit: usize,
         ties: Vec<(String, Vec<String>)>,
     ) -> GroupedScyllaCursor<NetworkPolicyListLine> {
         GroupedScyllaCursor {
@@ -4341,22 +4132,21 @@ mod tests {
                 ties,
                 current_sort_by: Some("b".to_owned()),
             },
-            limit,
+            limit: CursorLimit::from_user(limit, DEFAULT_LIMIT_CAP, "limit").unwrap(),
             in_redis: true,
             data: Vec::default(),
             new: false,
         }
     }
 
-    /// `GroupedScyllaCursor::next` queries `retain.ties` at the start of every page and clears
-    /// them once the tied entities are consumed, even when no new leftover exists. This keeps
-    /// later pages from returning the same tied entity (here "c") again.
+    /// Consumed grouped ties are cleared even when no new leftover exists, so later pages don't
+    /// return the same tied entity (here "c") again
     #[test]
     fn grouped_cursor_clears_consumed_ties() {
         // page 1 left entity c behind as a tie
         let mut cursor = policy_cursor(2, vec![("c".to_owned(), vec!["g1".to_owned()])]);
         // page 2's tie query returns c, which fits on this page with room to spare
-        let filled = cursor.consume_tied_rows(vec![policy_row("g1", "c", Uuid::new_v4())]);
+        let filled = cursor.consume_tied_rows(vec![policy_row("g1", "c")]);
         assert!(!filled);
         assert_eq!(cursor.data.len(), 1);
         // the consumed tie must not be queried again on the next page
@@ -4367,14 +4157,11 @@ mod tests {
         );
     }
 
-    /// When tied rows overflow the page, the leftover is recorded as a tie.
+    /// When tied rows overflow the page, the leftover is recorded as a tie
     #[test]
     fn grouped_cursor_records_leftover_tie() {
         let mut cursor = policy_cursor(1, Vec::default());
-        let filled = cursor.consume_tied_rows(vec![
-            policy_row("g1", "c", Uuid::new_v4()),
-            policy_row("g2", "c", Uuid::new_v4()),
-        ]);
+        let filled = cursor.consume_tied_rows(vec![policy_row("g1", "c"), policy_row("g2", "c")]);
         assert!(filled);
         assert_eq!(
             cursor.retain.ties,
@@ -4382,70 +4169,92 @@ mod tests {
         );
     }
 
-    /// UUIDs sort the way Scylla 6.2 returns a `uuid` clustering column: by version and then
-    /// by unsigned bytes
-    #[test]
-    fn scylla_uuid_cmp_matches_scylla_order() {
-        // the order Scylla returned these ids from one partition clustered by them
-        let scylla_order = [
-            "10000000-0000-1000-8000-000000000000",
-            "00000000-0000-4000-8000-000000000000",
-            "10000000-0000-4000-0f00-000000000000",
-            "10000000-0000-4000-ff00-000000000000",
-            "7fffffff-0000-4000-8000-000000000000",
-            "80000000-0000-4000-8000-000000000000",
-            "ffffffff-0000-4000-8000-000000000000",
-        ];
-        let expected: Vec<Uuid> = scylla_order
-            .iter()
-            .map(|id| Uuid::parse_str(id).unwrap())
-            .collect();
-        // sorting them in reverse with our comparator gives the same order
-        let mut sorted: Vec<Uuid> = expected.iter().rev().copied().collect();
-        sorted.sort_by(scylla_uuid_cmp);
-        assert_eq!(sorted, expected);
+    /// Build the set of groups a request may list
+    ///
+    /// # Arguments
+    ///
+    /// * `groups` - The groups
+    fn allowed(groups: &[&str]) -> HashSet<String> {
+        groups.iter().map(|group| (*group).to_owned()).collect()
     }
 
-    /// A limit of 0 or above the cap is refused with a 400, and 1 and the cap are accepted
+    /// Narrowing a time cursor to the groups a request may list drops the other groups and the
+    /// ties of their partitions, so a tie in a dropped group is never read
     #[test]
-    fn check_limit_bounds() {
-        // 0 and one past the cap are bad requests
-        for limit in [0, DEFAULT_LIMIT_CAP + 1, usize::MAX] {
-            let status = check_limit(limit, DEFAULT_LIMIT_CAP, "limit").map_err(|err| err.status());
-            assert_eq!(status, Err(StatusCode::BAD_REQUEST), "limit {limit}");
-        }
-        // 1 and the cap itself are allowed
-        for limit in [1, DEFAULT_LIMIT_CAP] {
-            assert_eq!(
-                check_limit(limit, DEFAULT_LIMIT_CAP, "limit").ok(),
-                Some(limit)
-            );
-        }
+    fn narrow_drops_other_groups_and_their_ties() {
+        // a cursor over g1 and g2 that ended inside a tie in each
+        let (kept, dropped) = (Uuid::new_v4(), Uuid::new_v4());
+        let mut retain = sample_retain();
+        retain.ties = vec![("g1".to_owned(), kept), ("g2".to_owned(), dropped)];
+        // narrow it to g1
+        assert!(retain.narrow(&allowed(&["g1", "g3"])));
+        assert_eq!(retain.group_by, vec!["g1".to_owned()]);
+        assert_eq!(retain.ties, vec![("g1".to_owned(), kept)]);
     }
 
-    /// Converting a limit that doesn't fit in a CQL int is a 400, not a wrap or a truncation
+    /// Narrowing a tag listing drops the tag ties of the other groups
     #[test]
-    fn limit_conversions_are_checked() {
-        // one row past i32::MAX doesn't fit
-        let status = limit_plus_one_to_cql(i32::MAX as usize).map_err(|err| err.status());
-        assert_eq!(status, Err(StatusCode::BAD_REQUEST));
-        // a limit above u32::MAX doesn't fit
-        let status = limit_to_cql(u32::MAX as usize + 1).map_err(|err| err.status());
-        assert_eq!(status, Err(StatusCode::BAD_REQUEST));
-        // limits that fit convert unchanged
-        assert_eq!(limit_to_cql(50).ok(), Some(50));
-        assert_eq!(limit_plus_one_to_cql(50).ok(), Some(51));
+    fn narrow_drops_other_groups_tag_ties() {
+        // a tag listing over g1 and g2 that ended inside a tie in each
+        let mut retain = sample_retain();
+        retain.tags_retain = Some(TagsRetain {
+            tags: HashMap::new(),
+            tag_type: TagType::Files,
+            tags_required: 1,
+            case_insensitive: false,
+            ties: [("g1", "a"), ("g2", "b")]
+                .into_iter()
+                .map(|(group, tie)| (group.to_owned(), tie.to_owned()))
+                .collect(),
+        });
+        // narrow it to g1
+        assert!(retain.narrow(&allowed(&["g1"])));
+        let ties = retain.tags_retain.map_or_default(|tags| tags.ties);
+        assert_eq!(ties.keys().collect::<Vec<_>>(), vec!["g1"]);
     }
 
-    /// Network policy listings refuse an `i32::MAX` limit, whose next row overflows
+    /// A time cursor with none of its groups left is reported as having nothing to resume
     #[test]
-    fn network_policy_limit_is_capped() {
-        // build params asking for i32::MAX rows
-        let params = NetworkPolicyListParams {
-            limit: i32::MAX as usize,
-            ..NetworkPolicyListParams::default()
-        };
-        let status = NetworkPolicyListLine::get_limit(&params).map_err(|err| err.status());
-        assert_eq!(status, Err(StatusCode::BAD_REQUEST));
+    fn narrow_to_no_saved_group_is_empty() {
+        let mut retain = sample_retain();
+        assert!(!retain.narrow(&allowed(&["g3"])));
+        assert_eq!(retain.group_by, Vec::<String>::new());
+    }
+
+    /// Narrowing a grouped cursor drops the other groups from its ties, and the ties left with
+    /// no group, and reports when no saved group is left
+    #[test]
+    fn narrow_grouped_drops_other_groups_from_ties() {
+        // a cursor over g1 and g2 that left "c" tied in both and "d" tied in g2
+        let mut cursor = policy_cursor(
+            1,
+            vec![
+                ("c".to_owned(), vec!["g1".to_owned(), "g2".to_owned()]),
+                ("d".to_owned(), vec!["g2".to_owned()]),
+            ],
+        );
+        // narrow it to g1
+        assert!(cursor.retain.narrow(&allowed(&["g1"])));
+        assert_eq!(cursor.retain.group_by, allowed(&["g1"]));
+        assert_eq!(
+            cursor.retain.ties,
+            vec![("c".to_owned(), vec!["g1".to_owned()])]
+        );
+        // narrowing it to a group it wasn't saved over leaves nothing to resume
+        assert!(!cursor.retain.narrow(&allowed(&["g3"])));
+    }
+
+    /// The group of a tie's scope is its first column when the scope also holds `IN` filters
+    #[test]
+    fn scope_group_reads_the_group_of_a_filtered_scope() {
+        use crate::models::schema::TimeCursorStatements;
+        use crate::models::schema::queries::{CommitishListListCursor, EntitiesListCursor};
+        use crate::models::{CommitishKinds, EntityKinds};
+        // entity scopes hold the group and the kind
+        let scope = ("g1".to_owned(), EntityKinds::Vendor);
+        assert_eq!(EntitiesListCursor::scope_group(&scope), "g1");
+        // commitish scopes hold the group and the kind
+        let scope = ("g2".to_owned(), CommitishKinds::Commit);
+        assert_eq!(CommitishListListCursor::scope_group(&scope), "g2");
     }
 }

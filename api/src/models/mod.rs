@@ -24,6 +24,8 @@ pub mod pipelines;
 pub mod reactions;
 pub mod requisitions;
 pub mod results;
+#[cfg(feature = "scylla-utils")]
+pub mod schema;
 mod scylla_utils;
 pub mod search;
 pub mod streams;
@@ -214,18 +216,26 @@ cfg_if::cfg_if! {
 
         pub use scylla_utils::associations::{AssociationListRow, AssociationTargetColumn, ListableAssociation};
         pub use scylla_utils::repos::{
-            CommitishRow, CommitishListRow, RepoTagRow, FullRepoTagRow, RepoRow,
-            RepoListRow, CommitData, BranchData, GitTagData,
+            CommitishListRow, RepoRow,
+            RepoListRow, CommitData, BranchData, GitTagData, RepoAuthRow, RepoDataHashRow,
+            CommitishDataRow, CommitishRepoDataRow,
         };
-        pub use scylla_utils::graphics::GraphicInfoRow;
         pub use scylla_utils::entities::{EntityListRow, EntityListSupplementRow, EntityRow};
-        pub use scylla_utils::files::{SubmissionListRow, SubmissionRow, CommentRow};
-        pub use scylla_utils::results::{OutputId, OutputIdRow, OutputRow, OutputFormBuilder, OutputForm};
+        pub use scylla_utils::files::{
+            BasicSubmissionRow, CommentIdRow, CommentRow, S3IdRow, Sha256Row, SubmissionListRow,
+            SubmissionRow,
+        };
+        pub use scylla_utils::results::{
+            OutputId, OutputIdRow, OutputRow, OutputFormBuilder, OutputForm, ResultIdRow,
+            ResultUploadedRow,
+        };
         pub use scylla_utils::system::{WorkerRow, NodeRow, WorkerName};
-        pub use scylla_utils::tags::{TagRow, FullTagRow, TagListRow};
-        pub use scylla_utils::events::EventRow;
+        pub use scylla_utils::logs::{LogLineRow, NotificationBackupRow, NotificationRow};
+        pub use scylla_utils::tags::{TagRow, FullTagRow, TagListRow, TagBackupRow};
         pub use scylla_utils::s3::S3Objects;
-        pub use scylla_utils::network_policies::{NetworkPolicyRow, NetworkPolicyListRow};
+        pub use scylla_utils::network_policies::{
+            NetworkPolicyGroupRow, NetworkPolicyListRow, NetworkPolicyRow,
+        };
         pub use census::{CensusSupport, CensusKeys};
         pub use tags::TagCensusCaseInsensitive;
 

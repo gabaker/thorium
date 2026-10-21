@@ -228,6 +228,8 @@ async fn second_fixture(harness: &Harness, source_rows: &[String], overwritten: 
 ///
 /// * `harness` - The harness naming the namespace
 async fn excluded_data(harness: &Harness) {
+    // the events table an older release left, which restores keep like the other excluded data
+    common::legacy::create_events(harness).await;
     // rows that don't expire, so the comparison sees them unchanged
     let scylla = harness.scylla().await;
     let ns = &harness.conf.thorium.namespace;

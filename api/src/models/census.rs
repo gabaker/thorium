@@ -20,12 +20,28 @@ pub trait CensusSupport: 'static + Send {
     /// The type returned by our prepared statement
     type Row: 'static + Send + Debug + for<'frame, 'metadata> DeserializeRow<'frame, 'metadata>;
 
-    /// Build the prepared statement for getting partition count info
+    /// The text of the census statement generated for this table, which counts the rows of each
+    /// partition in a token range
+    ///
+    /// # Arguments
+    ///
+    /// * `ns` - The namespace the table is in
+    fn census_cql(ns: &str) -> String;
+
+    /// Prepare the census statement, which binds the first and last token of a range
+    ///
+    /// # Arguments
+    ///
+    /// * `scylla` - The session to prepare the statement with
+    /// * `ns` - The namespace the table is in
     #[allow(async_fn_in_trait)]
     async fn scan_prepared_statement(
         scylla: &Session,
         ns: &str,
-    ) -> Result<PreparedStatement, PrepareError>;
+    ) -> Result<PreparedStatement, PrepareError> {
+        // prepare the generated statement
+        scylla.prepare(Self::census_cql(ns)).await
+    }
 
     /// Get the count for this partition
     fn get_count(row: &Self::Row) -> i64;

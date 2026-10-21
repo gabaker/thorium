@@ -1,0 +1,1 @@
+a cursor with `order` runs unpaged, because Scylla can't page `ORDER BY` with `IN` on the partition key, so it can't also be `paged`

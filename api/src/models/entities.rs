@@ -1470,7 +1470,7 @@ impl EntityListParams {
             None => match Utc.timestamp_opt(shared.config.thorium.entities.earliest, 0) {
                 chrono::LocalResult::Single(default_end) => Ok(default_end),
                 _ => crate::internal_err!(format!(
-                    "default earliest repos timestamp is invalid or ambigous - {}",
+                    "default earliest repos timestamp is invalid or ambiguous - {}",
                     shared.config.thorium.entities.earliest
                 )),
             },
@@ -2165,10 +2165,13 @@ impl EntityParentInfo {
 
 /// The number of entities in one partition of the entities table, read to rebuild its census
 #[derive(Debug)]
-#[cfg_attr(feature = "scylla-utils", derive(scylla::DeserializeRow))]
 #[cfg_attr(
     feature = "scylla-utils",
-    scylla(flavor = "enforce_order", skip_name_checks)
+    derive(crate::models::schema::ScyllaProjection)
+)]
+#[cfg_attr(
+    feature = "scylla-utils",
+    thorium_projection(of = crate::models::schema::scylla::EntitiesTable)
 )]
 pub struct EntityCensusRow {
     /// The kind of the partition's entities
@@ -2180,6 +2183,7 @@ pub struct EntityCensusRow {
     /// The partition's bucket within its year
     pub bucket: i32,
     /// How many entities the partition holds
+    #[cfg_attr(feature = "scylla-utils", thorium(expr = "count(*)"))]
     pub count: i64,
 }
 
@@ -2188,26 +2192,14 @@ impl super::CensusSupport for Entity {
     /// The type returned by our prepared statement
     type Row = EntityCensusRow;
 
-    /// Build the prepared statement for getting partition count info
+    /// The generated census statement's text for a namespace
     ///
     /// # Arguments
     ///
-    /// * `scylla` - The session to prepare the statement with
-    /// * `ns` - The namespace the entities table is in
-    async fn scan_prepared_statement(
-        scylla: &scylla::client::session::Session,
-        ns: &str,
-    ) -> Result<scylla::statement::prepared::PreparedStatement, scylla::errors::PrepareError> {
-        // count each partition of a token range
-        scylla
-            .prepare(format!(
-                "SELECT kind, group, year, bucket, count(*) \
-                FROM {ns}.entities \
-                WHERE token(kind, group, year, bucket) >= ? \
-                AND token(kind, group, year, bucket) <= ? \
-                GROUP BY kind, group, year, bucket",
-            ))
-            .await
+    /// * `ns` - The namespace the table is in
+    fn census_cql(ns: &str) -> String {
+        // the census statement generated on the table's queries struct
+        crate::models::schema::queries::EntitiesQueries::census_cql(ns)
     }
 
     /// Get the count for this partition

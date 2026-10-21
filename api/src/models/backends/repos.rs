@@ -5,16 +5,14 @@ use axum::extract::multipart::Field;
 use axum::extract::{FromRequestParts, Multipart};
 use axum::http::request::Parts;
 use chrono::prelude::*;
-use futures_util::Future;
-use scylla::errors::ExecutionError;
-use scylla::response::query_result::QueryResult;
-use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 use tracing::instrument;
 use url::Url;
 use uuid::Uuid;
 
 use super::db::{self, CursorCore, ScyllaCursorSupport};
+use crate::models::schema::queries::{CommitishListListCursor, ReposListListCursor};
+use crate::models::schema::{Bucket, CursorLimit, DEFAULT_LIMIT_CAP};
 use crate::models::{
     ApiCursor, Branch, Commit, Commitish, CommitishDetails, CommitishKinds, CommitishListParams,
     CommitishListRow, CommitishMapRequest, GitTag, Group, GroupAllowAction, Repo, RepoDataForm,
@@ -497,25 +495,6 @@ impl Repo {
         Ok(ApiCursor::from(scylla_cursor))
     }
 
-    /// Make sure a commit exists for a repo
-    ///
-    /// # Arguments
-    ///
-    /// * `kind` - The kind of commitish to check
-    /// * `commit` - The commit to check the existence of
-    /// * `shared` - Shared Thorium objects
-    pub async fn commitish_exists(
-        &self,
-        kind: CommitishKinds,
-        commit: &str,
-        shared: &Shared,
-    ) -> Result<(), ApiError> {
-        // get the groups we can see this repo is in
-        let groups = self.groups();
-        // check if this commit exists for this repo
-        db::repos::commitish_exists(&groups, &self.url, kind, commit, shared).await
-    }
-
     /// Get the latest commit for this repo
     ///
     /// # Arguments
@@ -828,53 +807,7 @@ impl From<CommitishListRow> for Commitish {
     }
 }
 
-/// The first unconsumed commitish in a group when a page ends inside rows sharing a timestamp
-#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
-#[serde(untagged)]
-pub enum CommitishTie {
-    /// The key and kind of the first unconsumed row
-    Row {
-        /// The key of the first unconsumed row
-        key: String,
-        /// The kind of the first unconsumed row
-        kind: CommitishKinds,
-    },
-    /// Only the key of the first unconsumed row, which resumes from that key in every kind
-    Key(String),
-}
-
-impl CommitishTie {
-    /// Get the key a tie query resumes from and split the kinds being listed by how they resume
-    ///
-    /// Rows sharing a timestamp are consumed by key, descending, and then by kind, so kinds
-    /// ordered at or after the tied kind still hold unconsumed rows with the tied key, and kinds
-    /// ordered before it hold only unconsumed rows with lower keys. Returns the key, the kinds
-    /// that resume at the key, and the kinds that resume below it.
-    ///
-    /// # Arguments
-    ///
-    /// * `kinds` - The kinds of commitish being listed
-    #[must_use]
-    pub fn bounds(
-        self,
-        kinds: &[CommitishKinds],
-    ) -> (String, Vec<CommitishKinds>, Vec<CommitishKinds>) {
-        match self {
-            Self::Row { key, kind } => {
-                // split our kinds on whether they sort before the tied kind
-                let (below, at) = kinds
-                    .iter()
-                    .partition(|listed| listed.as_str() < kind.as_str());
-                (key, at, below)
-            }
-            // a tie without a kind resumes at its key in every kind
-            Self::Key(key) => (key, kinds.to_vec(), Vec::new()),
-        }
-    }
-}
-
 // implement cursor for our results stream
-#[async_trait::async_trait]
 impl CursorCore for Commitish {
     /// The params to build this cursor from
     type Params = CommitishListParams;
@@ -884,20 +817,6 @@ impl CursorCore for Commitish {
 
     /// The type of data to group our rows by
     type GroupBy = String;
-
-    /// The data structure to store tie info in
-    type Ties = HashMap<String, CommitishTie>;
-
-    /// The number of buckets to crawl at once for non tag queries
-    ///
-    /// # Arguments
-    ///
-    /// * `extra_filters` - The extra filters for this query
-    fn bucket_limit(extra_filters: &Self::ExtraFilters) -> u32 {
-        // keep our cartesian product under 98 by dividing the number of kinds
-        // we are searching against
-        (98 / extra_filters.0.len()) as u32
-    }
 
     /// Get our cursor id from params
     ///
@@ -945,9 +864,13 @@ impl CursorCore for Commitish {
     /// # Arguments
     ///
     /// * `params` - The params to use to build this cursor
-    fn get_limit(params: &Self::Params) -> Result<usize, ApiError> {
+    fn get_limit(params: &Self::Params) -> Result<CursorLimit, ApiError> {
         // make sure this limit is one we can serve
-        db::cursors::check_limit(params.limit, db::cursors::DEFAULT_LIMIT_CAP, "limit")
+        Ok(CursorLimit::from_user(
+            params.limit,
+            DEFAULT_LIMIT_CAP,
+            "limit",
+        )?)
     }
 
     /// Get the partition size for this cursor
@@ -958,23 +881,6 @@ impl CursorCore for Commitish {
     fn partition_size(shared: &Shared) -> u16 {
         // get our partition size
         shared.config.thorium.repos.partition_size
-    }
-
-    /// Add an item to our tie breaker map
-    ///
-    /// # Arguments
-    ///
-    /// * `ties` - Our current ties
-    fn add_tie(&self, ties: &mut Self::Ties) {
-        // if its not already in the tie map then add each of its groups to our map
-        for group in self.groups() {
-            // if this group doesn't already have a tie entry then add it
-            ties.entry(group.clone())
-                .or_insert_with(|| CommitishTie::Row {
-                    key: self.key().to_owned(),
-                    kind: self.kind(),
-                });
-        }
     }
 
     /// Determines if a new item is a duplicate or not
@@ -991,21 +897,23 @@ impl CursorCore for Commitish {
 }
 
 // implement cursor for our results stream
-#[async_trait::async_trait]
 impl ScyllaCursorSupport for Commitish {
     /// The intermediate list row to use
     type IntermediateRow = CommitishListRow;
 
+    /// The statements this cursor pages with
+    type Statements = CommitishListListCursor;
+
     /// The unique key for this cursors row
     type UniqueType<'a> = (CommitishKinds, &'a String);
 
-    /// Get the timestamp from this items intermediate row
+    /// Get the statements this cursor pages with
     ///
     /// # Arguments
     ///
-    /// * `intermediate` - The intermediate row to get a timestamp for
-    fn get_intermediate_timestamp(intermediate: &Self::IntermediateRow) -> DateTime<Utc> {
-        intermediate.timestamp
+    /// * `shared` - Shared Thorium objects
+    fn statements(shared: &Shared) -> &Self::Statements {
+        &shared.scylla.queries.commitish_list.list
     }
 
     /// Get the timestamp for this item
@@ -1031,19 +939,6 @@ impl ScyllaCursorSupport for Commitish {
     /// Get the unique key for this row if it exists
     fn get_unique_key<'a>(&'a self) -> Self::UniqueType<'a> {
         (self.kind(), self.key())
-    }
-
-    /// Compare two commitishes that share a timestamp in the order a page consumes them
-    ///
-    /// # Arguments
-    ///
-    /// * `other` - The commitish to compare against
-    fn cmp_ties(&self, other: &Self) -> std::cmp::Ordering {
-        // keys cluster in descending order within a timestamp, and kinds keep equal keys apart
-        other
-            .key()
-            .cmp(self.key())
-            .then_with(|| self.kind().as_str().cmp(other.kind().as_str()))
     }
 
     /// Add a group to a specific returned line
@@ -1072,11 +967,11 @@ impl ScyllaCursorSupport for Commitish {
     /// * `keys` - The vec to add our census stream keys too
     /// * `shared` - Shared Thorium objects
     fn census_keys<'a>(
-        group_by: &'a Vec<Self::GroupBy>,
+        group_by: &'a [Self::GroupBy],
         extra: &Self::ExtraFilters,
         year: i32,
-        bucket: u32,
-        keys: &mut Vec<(&'a Self::GroupBy, String, i32)>,
+        bucket: Bucket,
+        keys: &mut Vec<(&'a Self::GroupBy, String, Bucket)>,
         shared: &Shared,
     ) {
         // build the keys for each census stream we are going to crawl
@@ -1088,101 +983,9 @@ impl ScyllaCursorSupport for Commitish {
                     *kind, group, &extra.1, year, shared,
                 );
                 // add this key to our keys
-                keys.push((group, key, bucket as i32));
+                keys.push((group, key, bucket));
             }
         }
-    }
-
-    /// builds the query string for getting data from ties in the last query
-    ///
-    /// # Arguments
-    ///
-    /// * `group` - The group that this query is for
-    /// * `_filters` - Any filters to apply to this query
-    /// * `year` - The year to get data for
-    /// * `bucket` - The bucket to get data for
-    /// * `uploaded` - The timestamp to get the remaining tied values for
-    /// * `breaker` - The value to use as a tie breaker
-    /// * `limit` - The max number of rows to return
-    /// * `shared` - Shared Thorium objects
-    fn ties_query(
-        ties: &mut Self::Ties,
-        extra: &Self::ExtraFilters,
-        year: i32,
-        bucket: i32,
-        uploaded: DateTime<Utc>,
-        limit: i32,
-        shared: &Shared,
-    ) -> Result<Vec<impl Future<Output = Result<QueryResult, ExecutionError>>>, ApiError> {
-        // allocate space for up to two queries per tie
-        let mut futures = Vec::with_capacity(ties.len() * 2);
-        // if any ties were found then get the rest of them and add them to data
-        for (group, tie) in ties.drain() {
-            // get the tied key and which kinds resume at it or below it
-            let (key, at, below) = tie.bounds(&extra.0);
-            // query the kinds that still hold rows with the tied key, then those that don't
-            let queries = [
-                (&shared.scylla.prep.commitishes.list_ties, at),
-                (&shared.scylla.prep.commitishes.list_ties_below, below),
-            ];
-            for (prepared, kinds) in queries {
-                // skip a query with no kinds to list
-                if kinds.is_empty() {
-                    continue;
-                }
-                // execute our query
-                let future = shared.scylla.session.execute_unpaged(
-                    prepared,
-                    (
-                        kinds,
-                        group.clone(),
-                        year,
-                        bucket,
-                        &extra.1,
-                        uploaded,
-                        key.clone(),
-                        limit,
-                    ),
-                );
-                // add this future to our set
-                futures.push(future);
-            }
-        }
-        Ok(futures)
-    }
-
-    /// builds the query string for getting the next page of values
-    ///
-    /// # Arguments
-    ///
-    /// * `group` - The group to restrict our query too
-    /// * `_filters` - Any filters to apply to this query
-    /// * `year` - The year to get data for
-    /// * `bucket` - The bucket to get data for
-    /// * `start` - The earliest timestamp to get data from
-    /// * `end` - The oldest timestamp to get data from
-    /// * `limit` - The max amount of data to get from this query
-    /// * `shared` - Shared Thorium objects
-    #[allow(clippy::too_many_arguments)]
-    async fn pull(
-        group: &Self::GroupBy,
-        extra: &Self::ExtraFilters,
-        year: i32,
-        bucket: Vec<i32>,
-        start: DateTime<Utc>,
-        end: DateTime<Utc>,
-        limit: i32,
-        shared: &Shared,
-    ) -> Result<QueryResult, ExecutionError> {
-        // execute our query
-        shared
-            .scylla
-            .session
-            .execute_unpaged(
-                &shared.scylla.prep.commitishes.list_pull,
-                (&extra.0, group, year, bucket, &extra.1, start, end, limit),
-            )
-            .await
     }
 }
 
@@ -1251,7 +1054,6 @@ impl From<TagListRow> for RepoListLine {
 }
 
 // implement cursor for our results stream
-#[async_trait::async_trait]
 impl CursorCore for RepoListLine {
     /// The params to build this cursor from
     type Params = RepoListParams;
@@ -1261,9 +1063,6 @@ impl CursorCore for RepoListLine {
 
     /// The type of data to group our rows by
     type GroupBy = String;
-
-    /// The data structure to store tie info in
-    type Ties = HashMap<String, String>;
 
     /// Get our cursor id from params
     ///
@@ -1334,9 +1133,13 @@ impl CursorCore for RepoListLine {
     /// # Arguments
     ///
     /// * `params` - The params to use to build this cursor
-    fn get_limit(params: &Self::Params) -> Result<usize, ApiError> {
+    fn get_limit(params: &Self::Params) -> Result<CursorLimit, ApiError> {
         // make sure this limit is one we can serve
-        db::cursors::check_limit(params.limit, db::cursors::DEFAULT_LIMIT_CAP, "limit")
+        Ok(CursorLimit::from_user(
+            params.limit,
+            DEFAULT_LIMIT_CAP,
+            "limit",
+        )?)
     }
 
     /// Get the partition size for this cursor
@@ -1347,24 +1150,6 @@ impl CursorCore for RepoListLine {
     fn partition_size(shared: &Shared) -> u16 {
         // get our partition size
         shared.config.thorium.repos.partition_size
-    }
-
-    /// Add an item to our tie breaker map
-    ///
-    /// # Arguments
-    ///
-    /// * `ties` - Our current ties
-    fn add_tie(&self, ties: &mut Self::Ties) {
-        // if its not already in the tie map then add each of its groups to our map
-        for group in &self.groups {
-            // get an entry to this group tie
-            let entry = ties.entry(group.clone());
-            // if this tie has a submission then use that otherwise use the repo url
-            match &self.submission {
-                Some(submission) => entry.or_insert_with(|| submission.to_string()),
-                None => entry.or_insert_with(|| self.url.clone()),
-            };
-        }
     }
 
     /// Determines if a new item is a duplicate or not
@@ -1393,13 +1178,24 @@ impl CursorCore for RepoListLine {
 }
 
 // implement cursor for our results stream
-#[async_trait::async_trait]
 impl ScyllaCursorSupport for RepoListLine {
     /// The intermediate list row to use
     type IntermediateRow = RepoListRow;
 
+    /// The statements this cursor pages with
+    type Statements = ReposListListCursor;
+
     /// The unique key for this cursors row
     type UniqueType<'a> = Option<Uuid>;
+
+    /// Get the statements this cursor pages with
+    ///
+    /// # Arguments
+    ///
+    /// * `shared` - Shared Thorium objects
+    fn statements(shared: &Shared) -> &Self::Statements {
+        &shared.scylla.queries.repos_list.list
+    }
 
     /// Add an item to our tag tie breaker map
     ///
@@ -1413,15 +1209,6 @@ impl ScyllaCursorSupport for RepoListLine {
             ties.entry(group.clone())
                 .or_insert_with(|| self.url.clone());
         }
-    }
-
-    /// Get the timestamp from this items intermediate row
-    ///
-    /// # Arguments
-    ///
-    /// * `intermediate` - The intermediate row to get a timestamp for
-    fn get_intermediate_timestamp(intermediate: &Self::IntermediateRow) -> DateTime<Utc> {
-        intermediate.uploaded
     }
 
     /// Get the timestamp for this item
@@ -1447,20 +1234,6 @@ impl ScyllaCursorSupport for RepoListLine {
     /// Get the unique key for this row if it exists
     fn get_unique_key<'a>(&'a self) -> Self::UniqueType<'a> {
         self.submission
-    }
-
-    /// Compare two repos that share a timestamp in the order a page consumes them
-    ///
-    /// # Arguments
-    ///
-    /// * `other` - The line to compare against
-    fn cmp_ties(&self, other: &Self) -> std::cmp::Ordering {
-        // submission ids cluster in descending order within a timestamp
-        match (&self.submission, &other.submission) {
-            (Some(mine), Some(theirs)) => db::cursors::scylla_uuid_cmp(theirs, mine),
-            // lines built from tag rows have no submission and are ordered by the tags cursor
-            _ => std::cmp::Ordering::Equal,
-        }
     }
 
     /// Add a group to a specific returned line
@@ -1494,11 +1267,11 @@ impl ScyllaCursorSupport for RepoListLine {
     /// * `keys` - The vec to add our census stream keys too
     /// * `shared` - Shared Thorium objects
     fn census_keys<'a>(
-        group_by: &'a Vec<Self::GroupBy>,
+        group_by: &'a [Self::GroupBy],
         _extra: &Self::ExtraFilters,
         year: i32,
-        bucket: u32,
-        keys: &mut Vec<(&'a Self::GroupBy, String, i32)>,
+        bucket: Bucket,
+        keys: &mut Vec<(&'a Self::GroupBy, String, Bucket)>,
         shared: &Shared,
     ) {
         // build the keys for each census stream we are going to crawl
@@ -1506,79 +1279,8 @@ impl ScyllaCursorSupport for RepoListLine {
             // build the key for this commitish kinds census stream
             let key = super::db::keys::repos::census_stream(group, year, shared);
             // add this key to our keys
-            keys.push((group, key, bucket as i32));
+            keys.push((group, key, bucket));
         }
-    }
-
-    /// builds the query string for getting data from ties in the last query
-    ///
-    /// # Arguments
-    ///
-    /// * `group` - The group that this query is for
-    /// * `_filters` - Any filters to apply to this query
-    /// * `year` - The year to get data for
-    /// * `bucket` - The bucket to get data for
-    /// * `uploaded` - The timestamp to get the remaining tied values for
-    /// * `breaker` - The value to use as a tie breaker
-    /// * `limit` - The max number of rows to return
-    /// * `shared` - Shared Thorium objects
-    fn ties_query(
-        ties: &mut Self::Ties,
-        _extra: &Self::ExtraFilters,
-        year: i32,
-        bucket: i32,
-        uploaded: DateTime<Utc>,
-        limit: i32,
-        shared: &Shared,
-    ) -> Result<Vec<impl Future<Output = Result<QueryResult, ExecutionError>>>, ApiError> {
-        // allocate space for 300 futures
-        let mut futures = Vec::with_capacity(ties.len());
-        // if any ties were found then get the rest of them and add them to data
-        for (group, id) in ties.drain() {
-            // cast our id to a uuid
-            let id = Uuid::parse_str(&id)?;
-            // execute our query
-            let future = shared.scylla.session.execute_unpaged(
-                &shared.scylla.prep.repos.list_ties,
-                (group, year, bucket, uploaded, id, limit),
-            );
-            // add this future to our set
-            futures.push(future);
-        }
-        Ok(futures)
-    }
-
-    /// builds the query string for getting the next page of values
-    ///
-    /// # Arguments
-    ///
-    /// * `group` - The group to restrict our query too
-    /// * `_filters` - Any filters to apply to this query
-    /// * `year` - The year to get data for
-    /// * `bucket` - The bucket to get data for
-    /// * `start` - The earliest timestamp to get data from
-    /// * `end` - The oldest timestamp to get data from
-    /// * `limit` - The max amount of data to get from this query
-    /// * `shared` - Shared Thorium objects
-    async fn pull(
-        group: &Self::GroupBy,
-        _extra: &Self::ExtraFilters,
-        year: i32,
-        bucket: Vec<i32>,
-        start: DateTime<Utc>,
-        end: DateTime<Utc>,
-        limit: i32,
-        shared: &Shared,
-    ) -> Result<QueryResult, ExecutionError> {
-        // execute our query
-        shared
-            .scylla
-            .session
-            .execute_unpaged(
-                &shared.scylla.prep.repos.list_pull,
-                (group, year, bucket, start, end, limit),
-            )
-            .await
     }
 }
 
@@ -1673,38 +1375,5 @@ where
             };
             Ok(default)
         }
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::CommitishTie;
-    use crate::models::CommitishKinds;
-
-    /// A tie holds a key and kind, and a tie holding only a key still loads and resumes from
-    /// that key in every kind
-    #[test]
-    fn commitish_tie_forms_load() {
-        let kinds = CommitishKinds::all();
-        // a full tie round trips through JSON
-        let tie = CommitishTie::Row {
-            key: "v1".to_owned(),
-            kind: CommitishKinds::Commit,
-        };
-        let json = serde_json::to_string(&tie).unwrap();
-        let loaded: CommitishTie = serde_json::from_str(&json).unwrap();
-        assert_eq!(loaded, tie);
-        // kinds sorting before the tied kind resume below its key
-        assert_eq!(
-            loaded.bounds(&kinds),
-            (
-                "v1".to_owned(),
-                vec![CommitishKinds::Commit, CommitishKinds::Tag],
-                vec![CommitishKinds::Branch]
-            )
-        );
-        // a tie saved as just a key loads and resumes at that key in every kind
-        let loaded: CommitishTie = serde_json::from_str("\"v1\"").unwrap();
-        assert_eq!(loaded.bounds(&kinds), ("v1".to_owned(), kinds, Vec::new()));
     }
 }

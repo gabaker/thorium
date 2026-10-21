@@ -4,21 +4,20 @@ use ahash::AHasher;
 use bytecheck::CheckBytes;
 use chrono::prelude::*;
 use rkyv::{Archive, Deserialize, Serialize};
-use scylla::DeserializeRow;
-use scylla::client::session::Session;
-use scylla::errors::PrepareError;
-use scylla::statement::prepared::PreparedStatement;
+use scylla::SerializeRow;
 use std::hash::Hasher;
 use thorium::Conf;
 use thorium::models::{NodeHealth, Resources};
 
 use super::Versioned;
 use crate::backup::{Backup, Restore, Scrub, Utils};
+use thorium::models::schema::ScyllaProjection;
+use thorium::models::schema::scylla::NodesTable;
 
 /// A nodes row as format 2 archives it; `None` is a cell the source row held unset
-#[derive(Debug, Archive, Serialize, Deserialize, DeserializeRow)]
+#[derive(Debug, Archive, Serialize, Deserialize, ScyllaProjection)]
 #[archive_attr(derive(Debug, CheckBytes))]
-#[scylla(flavor = "enforce_order", skip_name_checks)]
+#[thorium_projection(of = NodesTable)]
 pub struct Node {
     /// The cluster this node is in
     pub cluster: String,
@@ -41,31 +40,12 @@ impl Utils for Node {
 
 #[async_trait::async_trait]
 impl Backup for Node {
+    /// The table this archive struct backs up, read through its generated statements
+    type Table = NodesTable;
+
     /// The columns of this table's partition key, used to name rows that fail to decode
     fn partition_key() -> &'static [&'static str] {
         &["cluster"]
-    }
-
-    /// The prepared statement to use when retrieving data from Scylla
-    ///
-    /// # Arguments
-    ///
-    /// * `scylla` - The scylla session to build a prepared statement with
-    /// * `ns` - The namespace for this prepared statement
-    async fn prepared_statement(
-        scylla: &Session,
-        ns: &str,
-    ) -> Result<PreparedStatement, PrepareError> {
-        // build logs get prepared statement
-        scylla
-            .prepare(format!(
-                "SELECT cluster, node, health, heart_beat, resources \
-                FROM {}.{} \
-                Where token(cluster) >= ? AND token(cluster) <= ?",
-                ns,
-                Self::name(),
-            ))
-            .await
     }
 
     /// Hash this partitions info to see if we have changed partitions
@@ -82,6 +62,21 @@ impl Backup for Node {
 /// Implement scrub support for the samples list table
 impl Scrub for Node {}
 
+/// The values a restored row binds by column name to the table's generated full-row insert
+#[derive(SerializeRow)]
+pub struct NodeValues {
+    /// The `cluster` column
+    pub cluster: String,
+    /// The `node` column
+    pub node: String,
+    /// The `health` column
+    pub health: NodeHealth,
+    /// The `heart_beat` column
+    pub heart_beat: Option<DateTime<Utc>>,
+    /// The `resources` column
+    pub resources: Option<Resources>,
+}
+
 /// Implement restore support for the samples list table
 #[async_trait::async_trait]
 impl Restore for Node {
@@ -89,35 +84,8 @@ impl Restore for Node {
     // the size itself
     type PartitionConf = u16;
 
-    /// The cluster, node, health, last heartbeat, and resources
-    type Values = (
-        String,
-        String,
-        NodeHealth,
-        Option<DateTime<Utc>>,
-        Option<Resources>,
-    );
-
-    /// The prepared statement to use when restoring data to scylla
-    ///
-    /// # Arguments
-    ///
-    /// * `scylla` - A scylla client
-    /// * `ns` - The namespace in scylla this table is from
-    async fn prepared_statement(
-        scylla: &Session,
-        ns: &str,
-    ) -> Result<PreparedStatement, PrepareError> {
-        scylla
-            .prepare(format!(
-                "INSERT INTO {}.{} \
-                (cluster, node, health, heart_beat, resources) \
-                VALUES (?, ?, ?, ?, ?)",
-                ns,
-                Self::name(),
-            ))
-            .await
-    }
+    /// The row the generated full-row insert binds by name
+    type Values = NodeValues;
 
     /// Get the partition size for this data type
     ///
@@ -138,13 +106,13 @@ impl Restore for Node {
     /// * `_format` - The format version the row was archived in
     fn values(self, _partition_size: &u16, _format: u32) -> Self::Values {
         // the health and heartbeat are reset; the rest is as the row holds it
-        (
-            self.cluster,
-            self.node,
-            NodeHealth::Registered,
-            None,
-            self.resources,
-        )
+        NodeValues {
+            cluster: self.cluster,
+            node: self.node,
+            health: NodeHealth::Registered,
+            heart_beat: None,
+            resources: self.resources,
+        }
     }
 }
 

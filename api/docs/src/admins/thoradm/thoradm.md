@@ -95,7 +95,7 @@ A backup doesn't hold runtime state, which is invalid after a restore, or data a
 
 | Not backed up | Why |
 |---|---|
-| The `logs` and `events` Scylla tables | Stage logs of reactions and trigger events of the event handler; both expire by TTL |
+| The `logs` and `events` Scylla tables | Stage logs of reactions, which expire by TTL, and a table of trigger events that nothing reads or writes, which only keyspaces older releases created hold |
 | The Redis keys of reactions, jobs, workers, and services: `reactions:*`, `reactions_group:*`, `reaction_data:*`, `reaction_jobs:*`, `reaction_tags:*`, `reaction_cache:*`, `sub_reactions:*`, `generators:*`, `stage_logs:*`, `logs:*`, `job_queue:*`, `job_data:*`, `workers:*`, `worker_data:*`, `streams:*`, `event-handler:*`, `search-streamer:*`, `cursors:*`, and `image_ttc:*` | Runtime state, invalid after a restore |
 | The OAuth keys `oauth:context:*`, `oauth:registration_sessions:*`, and `oauth:link_token:*` | Login contexts, registration sessions, and account-link tokens, which expire |
 | `netpol_used_by:*` | Rebuilt by the Redis restore from the restored images' network policies |
@@ -246,7 +246,7 @@ other.
 backed-up table the backup holds (after saving and dropping its views, which the restore
 recreates). It deletes nothing from object storage and sends no S3 request at all, so it never
 lists a bucket: every bucket is left as it is. It keeps what the backup doesn't hold: the stage logs
-and events tables and the buckets. After the restore, the tables and Redis equal the backup and
+table, the events table where an older release created it, and the buckets. After the restore, the tables and Redis equal the backup and
 every object the backup's rows name is present (an object at the same key is overwritten), but an
 object no restored row names, such as an object whose sample was deleted after the backup, may
 remain in a bucket. **Thoradm doesn't reclaim that space: the admin cleans up orphaned objects**,

@@ -3,21 +3,20 @@
 use ahash::AHasher;
 use chrono::{DateTime, Utc};
 use rkyv::{Archive, CheckBytes, Deserialize, Serialize};
-use scylla::{
-    DeserializeRow, client::session::Session, errors::PrepareError,
-    statement::prepared::PreparedStatement,
-};
+use scylla::SerializeRow;
 use std::hash::Hasher;
 use thorium::Conf;
 use uuid::Uuid;
 
 use super::Versioned;
 use crate::backup::{Backup, Restore, Scrub, Utils};
+use thorium::models::schema::ScyllaProjection;
+use thorium::models::schema::scylla::NetworkPoliciesTable;
 
 /// A network policies row as format 2 archives it; `None` is a cell the source row held unset
-#[derive(Debug, Archive, Serialize, Deserialize, DeserializeRow)]
+#[derive(Debug, Archive, Serialize, Deserialize, ScyllaProjection)]
 #[archive_attr(derive(Debug, CheckBytes))]
-#[scylla(flavor = "enforce_order", skip_name_checks)]
+#[thorium_projection(of = NetworkPoliciesTable)]
 pub struct NetworkPolicy {
     /// The group the network policy is in
     pub group: String,
@@ -47,31 +46,12 @@ impl Utils for NetworkPolicy {
 
 #[async_trait::async_trait]
 impl Backup for NetworkPolicy {
+    /// The table this archive struct backs up, read through its generated statements
+    type Table = NetworkPoliciesTable;
+
     /// The columns of this table's partition key, used to name rows that fail to decode
     fn partition_key() -> &'static [&'static str] {
         &["group"]
-    }
-
-    /// The prepared statement to use when retrieving data from Scylla
-    ///
-    /// # Arguments
-    ///
-    /// * `scylla` - The scylla session to build a prepared statement with
-    /// * `ns` - The namespace for this prepared statement
-    async fn prepared_statement(
-        scylla: &Session,
-        ns: &str,
-    ) -> Result<PreparedStatement, PrepareError> {
-        // build network policies get prepared statement
-        scylla
-            .prepare(format!(
-                "SELECT group, name, id, k8s_name, created, ingress, egress, forced_policy, default_policy \
-                FROM {}.{} \
-                WHERE token(group) >= ? AND token(group) <= ?",
-                ns,
-                Self::name(),
-            ))
-            .await
     }
 
     /// Hash this partitions info to see if we have changed partitions
@@ -88,46 +68,37 @@ impl Backup for NetworkPolicy {
 /// Implement scrub support for the network policies table
 impl Scrub for NetworkPolicy {}
 
+/// The values a restored row binds by column name to the table's generated full-row insert
+#[derive(SerializeRow)]
+pub struct NetworkPolicyValues {
+    /// The `group` column
+    pub group: String,
+    /// The `name` column
+    pub name: String,
+    /// The `id` column
+    pub id: Option<Uuid>,
+    /// The `k8s_name` column
+    pub k8s_name: Option<String>,
+    /// The `created` column
+    pub created: Option<DateTime<Utc>>,
+    /// The `ingress` column
+    pub ingress: Option<String>,
+    /// The `egress` column
+    pub egress: Option<String>,
+    /// The `forced_policy` column
+    pub forced_policy: Option<bool>,
+    /// The `default_policy` column
+    pub default_policy: Option<bool>,
+}
+
 /// Implement restore support for the network policies table
 #[async_trait::async_trait]
 impl Restore for NetworkPolicy {
     // Network policies are not partitioned by time, so just return unit type
     type PartitionConf = ();
 
-    /// The group, name, id, Kubernetes name, creation time, ingress, egress, and whether it is
-    /// forced and default
-    type Values = (
-        String,
-        String,
-        Option<Uuid>,
-        Option<String>,
-        Option<DateTime<Utc>>,
-        Option<String>,
-        Option<String>,
-        Option<bool>,
-        Option<bool>,
-    );
-
-    /// The prepared statement to use when restoring data to scylla
-    ///
-    /// # Arguments
-    ///
-    /// * `scylla` - A scylla client
-    /// * `ns` - The namespace in scylla this table is from
-    async fn prepared_statement(
-        scylla: &Session,
-        ns: &str,
-    ) -> Result<PreparedStatement, PrepareError> {
-        scylla
-            .prepare(format!(
-                "INSERT INTO {}.{} \
-                (group, name, id, k8s_name, created, ingress, egress, forced_policy, default_policy) \
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                ns,
-                Self::name(),
-            ))
-            .await
-    }
+    /// The row the generated full-row insert binds by name
+    type Values = NetworkPolicyValues;
 
     /// Get the partition size for this data type
     ///
@@ -147,17 +118,17 @@ impl Restore for NetworkPolicy {
     /// * `_format` - The format version the row was archived in
     fn values(self, _partition_conf: &Self::PartitionConf, _format: u32) -> Self::Values {
         // every column as the row holds it
-        (
-            self.group,
-            self.name,
-            self.id,
-            self.k8s_name,
-            self.created,
-            self.ingress,
-            self.egress,
-            self.forced_policy,
-            self.default_policy,
-        )
+        NetworkPolicyValues {
+            group: self.group,
+            name: self.name,
+            id: self.id,
+            k8s_name: self.k8s_name,
+            created: self.created,
+            ingress: self.ingress,
+            egress: self.egress,
+            forced_policy: self.forced_policy,
+            default_policy: self.default_policy,
+        }
     }
 }
 

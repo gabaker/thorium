@@ -5,10 +5,15 @@ use uuid::Uuid;
 use crate::models::backends::db::cursors::CursorKind;
 use crate::utils::Shared;
 
+/// The layout version of every cursor's saved state, so a cursor saved in an older layout is
+/// never read and its id is reported as not found
+pub const LAYOUT_VERSION: u32 = 2;
+
 /// Build the key to this cursors data
 ///
-/// The key nests the cursor id under the creating user's username so that cursors
-/// are scoped to the user that created them
+/// The key nests the cursor id under its layout version and the creating user's username, so
+/// cursors are scoped to the user that created them and a cursor saved in an older layout is
+/// never found
 ///
 /// # Arguments
 ///
@@ -19,7 +24,7 @@ use crate::utils::Shared;
 pub fn data(kind: CursorKind, user: &str, id: &Uuid, shared: &Shared) -> String {
     // scope this cursor to its creating user by nesting the id under the username
     format!(
-        "{ns}:cursors:{kind}:{user}:{id}",
+        "{ns}:cursors:{kind}:v{LAYOUT_VERSION}:{user}:{id}",
         kind = kind.as_str(),
         ns = &shared.config.thorium.namespace
     )

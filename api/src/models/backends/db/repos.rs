@@ -4,7 +4,6 @@ use axum::http::StatusCode;
 use chrono::prelude::*;
 use futures::stream::{self, StreamExt};
 use itertools::Itertools;
-use scylla::response::query_result::QueryResult;
 use std::collections::hash_map::Entry::{Occupied, Vacant};
 use std::collections::{BTreeMap, HashMap, HashSet};
 use tracing::{event, instrument, Level};
@@ -12,15 +11,16 @@ use uuid::Uuid;
 
 use super::{ExistsCursor, ScyllaCursor};
 use crate::models::backends::TagSupport;
+use crate::models::schema::queries::ReposListInsert;
+use crate::models::schema::scylla::{CommitishListTableRef, CommitishesTableRef, RepoDataTableRef};
+use crate::models::schema::{QueryError, RowResult};
 use crate::models::{
-    Commitish, CommitishDetails, CommitishKinds, CommitishListParams, CommitishMapRequest, Repo,
-    RepoCheckout, RepoListLine, RepoListParams, RepoRequest, RepoRow, RepoSubmission,
-    RepoSubmissionChunk, RepoUrlComponents, TagRequest, TagType, User,
+    Commitish, CommitishDetails, CommitishKinds, CommitishListParams, CommitishMapRequest,
+    CommitishRepoDataRow, Repo, RepoCheckout, RepoListLine, RepoListParams, RepoRequest,
+    RepoSubmission, RepoSubmissionChunk, RepoUrlComponents, TagRequest, TagType, User,
 };
 use crate::utils::{helpers, ApiError, Shared};
-use crate::{
-    bad, internal_err, log_scylla_err, not_found, same_vec, serialize, serialize_opt, unauthorized,
-};
+use crate::{bad, internal_err, log_scylla_err, not_found, same_vec, unauthorized};
 
 /// Check if a user already has a matching repo submission
 ///
@@ -83,8 +83,6 @@ async fn update_default_checkout(
     repo: &mut Repo,
     shared: &Shared,
 ) -> Result<(), ApiError> {
-    // serialize our default checkout
-    let default_checkout = serialize!(&checkout);
     // update each of this repos submissions
     for submission in &repo.submissions {
         // get this submissions year
@@ -113,17 +111,16 @@ async fn update_default_checkout(
             // update this repos submissions
             shared
                 .scylla
-                .session
-                .execute_unpaged(
-                    &shared.scylla.prep.repos.update_default_checkout,
-                    (
-                        &default_checkout,
-                        group,
-                        year,
-                        bucket,
-                        submission.uploaded,
-                        submission.id,
-                    ),
+                .queries
+                .repos_list
+                .update_default_checkout(
+                    &shared.scylla.session,
+                    Some(checkout),
+                    group,
+                    year,
+                    bucket,
+                    submission.uploaded,
+                    submission.id,
                 )
                 .await?;
         }
@@ -168,17 +165,16 @@ async fn update_earliest(
             // update this submission with our new earliest
             shared
                 .scylla
-                .session
-                .execute_unpaged(
-                    &shared.scylla.prep.repos.update_earliest,
-                    (
-                        earliest,
-                        group,
-                        year,
-                        bucket,
-                        submission.uploaded,
-                        submission.id,
-                    ),
+                .queries
+                .repos_list
+                .update_earliest(
+                    &shared.scylla.session,
+                    Some(earliest),
+                    group,
+                    year,
+                    bucket,
+                    submission.uploaded,
+                    submission.id,
                 )
                 .await?;
             // update this submissions earliest
@@ -233,37 +229,35 @@ pub async fn create(user: &User, req: RepoRequest, shared: &Shared) -> Result<St
             let chunk_size = shared.config.thorium.repos.partition_size;
             // get the partition to write this repo off too
             let bucket = helpers::partition(now, year, chunk_size);
-            // serialize our scheme
-            let scheme_raw = serialize!(&url_components.scheme);
-            // serialize our default checkout behavior if we have one
-            let default_checkout = serialize_opt!(&req.default_checkout);
             // get the current timestamp
             let now = Utc::now();
+            // Reduce the url only to it's components: "provider/user/name"
+            let url = url_components.get_url();
             // save this repo to scylla
             for group in &req.groups {
                 event!(Level::INFO, msg = "Creating new submission", group = group);
+                // build this group's submission, with its scheme and default checkout stored
+                // as JSON
+                let row = ReposListInsert {
+                    group,
+                    year,
+                    bucket,
+                    uploaded: now,
+                    id,
+                    url: &url,
+                    provider: &url_components.provider,
+                    user: &url_components.user,
+                    name: &url_components.name,
+                    creator: &user.username,
+                    scheme: &url_components.scheme,
+                    default_checkout: req.default_checkout.as_ref(),
+                };
                 // save this repos submission to this group in scylla
                 shared
                     .scylla
-                    .session
-                    .execute_unpaged(
-                        &shared.scylla.prep.repos.insert,
-                        (
-                            group,
-                            year,
-                            bucket,
-                            now,
-                            id,
-                            // Reduce the url only to it's components: "provider/user/name"
-                            &url_components.get_url(),
-                            &url_components.provider,
-                            &url_components.user,
-                            &url_components.name,
-                            &user.username,
-                            &scheme_raw,
-                            &default_checkout,
-                        ),
-                    )
+                    .queries
+                    .repos_list
+                    .insert(&shared.scylla.session, &row)
                     .await?;
             }
             // create a list to store our keys
@@ -373,15 +367,14 @@ pub async fn authorize(
         // our cartesian product will be low enough so just query for them all at once
         // get the number of tools or default to 10
         // check if any of our groups have access to this repo
-        let query = shared
+        let rows = shared
             .scylla
-            .session
-            .execute_unpaged(&shared.scylla.prep.repos.auth, (repos, groups))
+            .queries
+            .repos
+            .auth_chunk(&shared.scylla.session, repos, groups)
             .await?;
-        // cast this query to a rows query
-        let query_rows = query.into_rows_result()?;
         //  make sure we got back the same number of repos
-        if query_rows.rows_num() != repos.len() {
+        if rows.len() != repos.len() {
             return unauthorized!();
         }
     } else {
@@ -395,19 +388,18 @@ pub async fn authorize(
             .cartesian_product(repos[..].chunks(50))
         {
             // send a query to check if we have access to these repos
-            let query = shared
+            let rows = shared
                 .scylla
-                .session
-                .execute_unpaged(&shared.scylla.prep.repos.auth, (repos_chunk, groups_chunk))
+                .queries
+                .repos
+                .auth_chunk(&shared.scylla.session, repos_chunk, groups_chunk)
                 .await?;
-            // cast this query to a rows query
-            let query_rows = query.into_rows_result()?;
             // cast our rows to the right type
-            for typed_row in query_rows.rows::<(String,)>()? {
+            for typed_row in rows {
                 // check if we failed to cast this row
-                let (repo,) = typed_row?;
+                let row = typed_row?;
                 // add this repo to our authed repos
-                authed.insert(repo);
+                authed.insert(row.url);
             }
             // if we have authed all of our repos then return early
             if authed.len() == repos.len() {
@@ -437,73 +429,32 @@ async fn get_base(
 ) -> Result<Option<Repo>, ApiError> {
     // build a btree to sort our submissions
     let mut sorted: BTreeMap<DateTime<Utc>, Vec<RepoSubmission>> = BTreeMap::default();
-    // if we have more then 100 groups then chunk it into bathes of 100  otherwise just get our info
-    if groups.len() > 100 {
-        // break our groups into chunks of 100
-        for chunk in groups.chunks(100) {
-            // turn our group chunk into a vec
-            let chunk_vec = chunk.to_vec();
-            // get this chunks data
-            let query = shared
-                .scylla
-                .session
-                .execute_unpaged(&shared.scylla.prep.repos.get, (url, chunk_vec))
-                .await?;
-            // cast this query to a rows query
-            let query_rows = query.into_rows_result()?;
-            // set the type for the rows returned by this query
-            let typed_iter = query_rows.rows::<RepoRow>()?;
-            // cast our rows into submisison objects and add them to our btree
-            typed_iter
-                .filter_map(|res| log_scylla_err!(res))
-                .for_each(|sub| {
-                    // get an entry to the list for this timestamp
-                    let entry = sorted.entry(sub.uploaded).or_default();
-                    // crawl the entries for this timestamp and dedupe entries
-                    if let Some(pos) = entry.iter().position(|item| sub.id == item.id) {
-                        entry[pos].groups.push(sub.group);
-                    } else {
-                        // add this new submission to this timestamps list
-                        match RepoSubmission::try_from((sub, user)) {
-                            Ok(sub) => entry.push(sub),
-                            Err(error) => {
-                                event!(Level::ERROR, kind = error.kind(), msg = error.msg());
-                            }
-                        }
-                    }
-                });
-        }
-    } else {
-        // get all our data in one go
-        let query = shared
-            .scylla
-            .session
-            .execute_unpaged(&shared.scylla.prep.repos.get, (url, groups))
-            .await?;
-        // cast this query to a rows query
-        let query_rows = query.into_rows_result()?;
-        // set the type for the rows returned by this query
-        let typed_iter = query_rows.rows::<RepoRow>()?;
-        // cast our rows into submisison objects and add them to our btree
-        typed_iter
-            .filter_map(|res| log_scylla_err!(res))
-            .for_each(|sub| {
-                // get an entry to the list for this timestamp
-                let entry = sorted.entry(sub.uploaded).or_default();
-                // crawl the entries for this timestamp and dedupe entries
-                if let Some(pos) = entry.iter().position(|item| sub.id == item.id) {
-                    entry[pos].groups.push(sub.group);
-                } else {
-                    // add this new submission to this timestamps list
-                    match RepoSubmission::try_from((sub, user)) {
-                        Ok(sub) => entry.push(sub),
-                        Err(error) => {
-                            event!(Level::ERROR, kind = error.kind(), msg = error.msg());
-                        }
+    // get every submission in chunks of 100 groups
+    let rows = shared
+        .scylla
+        .queries
+        .repos
+        .get(&shared.scylla.session, url, groups)
+        .await?;
+    // cast our rows into submisison objects and add them to our btree
+    rows.into_iter()
+        .filter_map(|res| log_scylla_err!(res))
+        .for_each(|sub| {
+            // get an entry to the list for this timestamp
+            let entry = sorted.entry(sub.uploaded).or_default();
+            // crawl the entries for this timestamp and dedupe entries
+            if let Some(pos) = entry.iter().position(|item| sub.id == item.id) {
+                entry[pos].groups.push(sub.group);
+            } else {
+                // add this new submission to this timestamps list
+                match RepoSubmission::try_from((sub, user)) {
+                    Ok(sub) => entry.push(sub),
+                    Err(error) => {
+                        event!(Level::ERROR, kind = error.kind(), msg = error.msg());
                     }
                 }
-            });
-    }
+            }
+        });
     // get an iter of these submissions in descending order
     let mut descending = sorted.into_iter().rev().flat_map(|(_, sub)| sub);
     // get the first submission object and cast it to a sample
@@ -566,19 +517,15 @@ pub async fn list_details(
     let mut map = HashMap::with_capacity(repos.len());
     // split our groups and repos into chunks of 50
     for (repos_chunk, groups_chunk) in repos.chunks(50).cartesian_product(groups.chunks(50)) {
-        // turn our chunks into vecs
-        let groups_vec = groups_chunk.to_vec();
-        let repos_vec = repos_chunk.to_vec();
         // send a query to get this chunks data
-        let query = shared
+        let rows = shared
             .scylla
-            .session
-            .execute_unpaged(&shared.scylla.prep.repos.get_many, (repos_vec, groups_vec))
+            .queries
+            .repos
+            .get_many_chunk(&shared.scylla.session, repos_chunk, groups_chunk)
             .await?;
-        // cast this query to a rows query
-        let query_rows = query.into_rows_result()?;
         // crawl the rows returned by this query
-        for cast in query_rows.rows::<RepoRow>()? {
+        for cast in rows {
             // get this row if possible
             let row = cast?;
             // get an entry to this submissions timestamp list
@@ -628,10 +575,12 @@ pub async fn list_details(
 #[instrument(name = "db::repos::upload", skip(shared), err(Debug))]
 pub async fn upload(repo: &str, sha256: &str, shared: &Shared) -> Result<(), ApiError> {
     // insert this repo data blob into the repo data table in scylla
+    let row = RepoDataTableRef { repo, hash: sha256 };
     shared
         .scylla
-        .session
-        .execute_unpaged(&shared.scylla.prep.repos.insert_data, (repo, &sha256))
+        .queries
+        .repo_data
+        .insert_data(&shared.scylla.session, &row)
         .await?;
     Ok(())
 }
@@ -650,8 +599,9 @@ async fn delete_repo_data(repo: &str, hash: &str, shared: &Shared) -> Result<(),
     // detele this repos data from scylla
     shared
         .scylla
-        .session
-        .execute_unpaged(&shared.scylla.prep.repos.delete_data, (hash, repo))
+        .queries
+        .repo_data
+        .delete_data(&shared.scylla.session, repo, hash)
         .await?;
     Ok(())
 }
@@ -671,20 +621,19 @@ async fn prune_data(
     shared: &Shared,
 ) -> Result<(), ApiError> {
     // get the hashes of the data we have for this repo
-    let query = shared
+    let rows = shared
         .scylla
-        .session
-        .execute_unpaged(&shared.scylla.prep.repos.get_data, (repo,))
+        .queries
+        .repo_data
+        .get_data(&shared.scylla.session, repo)
         .await?;
-    // enable rows on this query response
-    let query_rows = query.into_rows_result()?;
     // check if we got any rows
-    if query_rows.rows_num() > 0 {
+    if !rows.is_empty() {
         // cast our rows to strings
-        let mut hashes = query_rows
-            .rows::<(String,)>()?
+        let mut hashes = rows
+            .into_iter()
             .filter_map(|res| log_scylla_err!(res))
-            .map(|tup| tup.0)
+            .map(|row| row.hash)
             .collect::<Vec<String>>();
         // remove the repo data hash we just uploaded
         if let Some(index) = hashes.iter().position(|item| item == hash) {
@@ -709,7 +658,11 @@ async fn prune_data(
             // check if any commits are still backed by this repo
             if !cursor
                 .exists(
-                    &shared.scylla.prep.commitishes.get_repo_data_count,
+                    &shared
+                        .scylla
+                        .queries
+                        .committed_repo_data
+                        .get_repo_data_count,
                     &repo_data,
                     shared,
                 )
@@ -733,15 +686,14 @@ async fn prune_data(
 #[instrument(name = "db::repos::repo_data_exists", skip(shared), err(Debug))]
 pub async fn repo_data_exists(repo: &str, data: &str, shared: &Shared) -> Result<(), ApiError> {
     // try to get this repos data
-    let query = shared
+    let exists = shared
         .scylla
-        .session
-        .execute_unpaged(&shared.scylla.prep.repos.data_exists, (repo, data))
+        .queries
+        .repo_data
+        .data_exists(&shared.scylla.session, repo, data)
         .await?;
-    // enable rows on this query response
-    let query_rows = query.into_rows_result()?;
     // if we don't get any rows then this repo doesn't exist
-    if query_rows.rows_num() == 0 {
+    if !exists {
         return not_found!(format!("{} does not have data {}", repo, data));
     }
     Ok(())
@@ -785,15 +737,11 @@ pub async fn add_commitishes(
         // crawl each group and insert into our commitish list table
         for group in &req.groups {
             // insert this commit into the commitish table in scylla
-            shared.scylla.session.execute_unpaged(
-                &shared.scylla.prep.commitishes.insert,
-                (kind, group, &repo.url, &key, timestamp, &commitish_data, &repo_data)
-            ).await?;
+            let details = CommitishesTableRef { kind: &kind, group, repo: &repo.url, key: &key, timestamp, data: &commitish_data, repo_data };
+            shared.scylla.queries.commitishes.insert(&shared.scylla.session, &details).await?;
             // insert this commit into the commitish list table in scylla for this group
-            shared.scylla.session.execute_unpaged(
-                &shared.scylla.prep.commitishes.insert_list,
-                (kind, group, year, bucket, &repo.url, timestamp, &key, &repo_data)
-            ).await?;
+            let listed = CommitishListTableRef { kind: &kind, group, year, bucket, repo: &repo.url, timestamp, key: &key, repo_data };
+            shared.scylla.queries.commitish_list.insert_list(&shared.scylla.session, &listed).await?;
         }
         // build the keys to update
         super::keys::commitishes::census_keys(&mut keys, &repo.url, kind, &req.groups, year, bucket, shared);
@@ -823,7 +771,11 @@ pub async fn add_commitishes(
 /// * `dedupe` - Whether to dedupe any data that is returned
 /// * `shared` - Shared Thorium objects
 /// * `span` - The span to log traces under
-#[instrument(name = "db::repos::commitishes", skip(user, params, shared), err(Debug))]
+#[instrument(
+    name = "db::repos::commitishes",
+    skip(user, params, shared),
+    err(Debug)
+)]
 pub async fn commitishes(
     user: &User,
     repo: &Repo,
@@ -885,20 +837,16 @@ async fn commitish_details_helper(
     let kind = commitish.kind();
     let key = commitish.key();
     let groups = commitish.groups();
-    // query scylla for this comittishes data
-    let query = shared
+    // query scylla for this comittishes data in one statement over all of its groups
+    let row = shared
         .scylla
-        .session
-        .execute_unpaged(
-            &shared.scylla.prep.commitishes.get_data,
-            (kind, groups, repo, key),
-        )
+        .queries
+        .commitishes
+        .get_data_chunk(&shared.scylla.session, &kind, groups, repo, key)
         .await?;
-    // enable rows on this response
-    let query_rows = query.into_rows_result()?;
     // get this commitishes data or return an error
-    match query_rows.maybe_first_row::<(String,)>()? {
-        Some((data,)) => return commitish.to_details(&data),
+    match row {
+        Some(row) => commitish.to_details(&row.data),
         None => {
             // build our error string
             let msg = format!("{}:{} is missing commitish details", repo, commitish.key());
@@ -940,67 +888,6 @@ pub async fn commitish_details(
         details.push(commitish_details);
     }
     Ok(details)
-}
-
-/// Check if a repo has a specific commit
-///
-/// # Arguments
-///
-/// * `groups` - The groups to look for commits in
-/// * `repo` - The repo to check if a commit exists in
-/// * `kind` - The kind of commitish to check
-/// * `commitish` - The commitish to check
-/// * `shared` - Shared Thorium objects
-#[instrument(name = "db::repos::commit_exists", skip(shared), err(Debug))]
-pub async fn commitish_exists(
-    groups: &HashSet<&String>,
-    repo: &str,
-    kind: CommitishKinds,
-    commit: &str,
-    shared: &Shared,
-) -> Result<(), ApiError> {
-    // if we have more then 100 groups then break them into chunks of 50
-    if groups.len() > 100 {
-        // cast our hashset to a vector so we can chunk it up
-        let group_cast = groups.iter().map(|name| *name).collect::<Vec<&String>>();
-        // chunk gour groups up into chunks of 100
-        for group_chunk in group_cast.chunks(100) {
-            // send this query to scylla
-            let query = shared
-                .scylla
-                .session
-                .execute_unpaged(
-                    &shared.scylla.prep.commitishes.exists,
-                    (kind, group_chunk, repo, commit),
-                )
-                .await?;
-            // enable rows on this response
-            let query_rows = query.into_rows_result()?;
-            // get the first row since this is a count operation
-            if query_rows.rows_num() > 0 {
-                // at least one row was found so this commit exists
-                return Ok(());
-            }
-        }
-    } else {
-        // send this query to scylla
-        let query = shared
-            .scylla
-            .session
-            .execute_unpaged(
-                &shared.scylla.prep.commitishes.exists,
-                (kind, groups, repo, commit),
-            )
-            .await?;
-        // enable rows on this response
-        let query_rows = query.into_rows_result()?;
-        // get the first row since this is a count operation
-        if query_rows.rows_num() > 0 {
-            // at least one row was found so this commit exists
-            return Ok(());
-        }
-    }
-    not_found!(format!("Repo {} does not have commit {}", repo, commit))
 }
 
 /// Get the latest commit for a repo
@@ -1056,20 +943,28 @@ pub async fn latest_commit(
 /// * `repo` - The repo to get the repo data hash for
 /// * `commitish` - The commitish we are searching for
 /// * `previous` - The previous commitish kind we found
-/// * `query` - The query to check
+/// * `query` - The rows the query returned
 #[instrument(name = "db::repos::is_ambiguous", skip(query), err(Debug))]
 async fn is_ambiguous(
     repo: &str,
     commitish: &str,
     previous: &mut Option<CommitishKinds>,
-    query: QueryResult,
+    query: Result<Vec<RowResult<CommitishRepoDataRow>>, QueryError>,
 ) -> Result<String, ApiError> {
-    // enable rows on this query response
-    let query_rows = query.into_rows_result()?;
+    // rows that don't type check mean the commitish wasn't found, like any other miss
+    let rows = match query {
+        Ok(rows) => Some(rows),
+        Err(QueryError::Rows(_)) => None,
+        Err(error) => return Err(error.into()),
+    };
     // check if all of our queries are for the same kind
-    if let Ok(mut rows) = query_rows.rows::<(CommitishKinds, String)>() {
+    if let Some(rows) = rows {
+        let mut rows = rows.into_iter();
         // track the first kind  and data hash we see
-        let (first_kind, repo_data) = match rows.next() {
+        let CommitishRepoDataRow {
+            kind: first_kind,
+            repo_data,
+        } = match rows.next() {
             Some(row) => row?,
             None => {
                 return not_found!(format!(
@@ -1083,7 +978,7 @@ async fn is_ambiguous(
             Some(previous_kind) => {
                 if *previous_kind != first_kind {
                     return bad!(format!(
-                        "{} is ambigous please restrict the commitish kind to download",
+                        "{} is ambiguous please restrict the commitish kind to download",
                         commitish
                     ));
                 }
@@ -1093,13 +988,13 @@ async fn is_ambiguous(
             }
         }
         // check if we find any other kinds
-        while let Some(row) = rows.next() {
+        for row in rows {
             // unwrap any errors from this row
-            let (kind, _) = row?;
+            let CommitishRepoDataRow { kind, .. } = row?;
             // check if this kind is different
             if kind != first_kind {
                 return bad!(format!(
-                    "{} is ambigous please restrict the commitish kind to download",
+                    "{} is ambiguous please restrict the commitish kind to download",
                     commitish
                 ));
             }
@@ -1132,24 +1027,25 @@ pub async fn repo_data_hash(
 ) -> Result<String, ApiError> {
     // track our previous kinds across checks
     let mut previous = None;
-    // if we have more then 100 groups then break them into chunks of 50
+    // bind the groups in the order the set yields them
+    let groups = groups
+        .iter()
+        .map(|name| (*name).clone())
+        .collect::<Vec<String>>();
+    // if we have more then 32 groups then break them into chunks of 32
     if groups.len() > 32 {
         // track the last repo_data hash
         let mut last_repo_data_hash = None;
-        // cast our hashset to a vector so we can chunk it up
-        let group_cast = groups.iter().map(|name| *name).collect::<Vec<&String>>();
-        // chunk gour groups up into chunks of 100
-        for group_chunk in group_cast.chunks(32) {
+        // chunk gour groups up into chunks of 32
+        for group_chunk in groups.chunks(32) {
             // retrieve submissions from scylla
             let query = shared
                 .scylla
-                .session
-                .execute_unpaged(
-                    &shared.scylla.prep.commitishes.get_repo_data,
-                    (kinds, group_chunk, repo, commitish),
-                )
-                .await?;
-            // check if this commitish is ambigous or not
+                .queries
+                .commitishes
+                .get_repo_data_chunk(&shared.scylla.session, kinds, group_chunk, repo, commitish)
+                .await;
+            // check if this commitish is ambiguous or not
             let repo_data = is_ambiguous(repo, commitish, &mut previous, query).await?;
             // set our repo data hash
             last_repo_data_hash = Some(repo_data);
@@ -1162,13 +1058,11 @@ pub async fn repo_data_hash(
         // retrieve submissions from scylla
         let query = shared
             .scylla
-            .session
-            .execute_unpaged(
-                &shared.scylla.prep.commitishes.get_repo_data,
-                (kinds, groups, repo, commitish),
-            )
-            .await?;
-        // check if this commitish is ambigous or not
+            .queries
+            .commitishes
+            .get_repo_data_chunk(&shared.scylla.session, kinds, &groups, repo, commitish)
+            .await;
+        // check if this commitish is ambiguous or not
         return is_ambiguous(repo, commitish, &mut previous, query).await;
     }
     not_found!(format!(
