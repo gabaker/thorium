@@ -21,8 +21,6 @@ import { Image } from '@models/images';
 import { RoleKey, UserInfo } from '@models/users';
 import SingleTimePicker from './timepicker/SingleTimePicker';
 
-// spec: ./SPEC.md
-
 type OmnibarTimeContainerProps = {
   clauses: Clause[];
   setClauses: (next: Clause[]) => void;

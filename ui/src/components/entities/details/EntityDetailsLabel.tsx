@@ -4,8 +4,6 @@ import { FaQuestionCircle } from 'react-icons/fa';
 import InfoHeader from '../shared/InfoHeader';
 import { OverlayTipBottom } from '@components/shared/overlay/tips';
 
-// spec: ./EntityDetails.spec.md
-
 type EntityDetailsLabelProps = {
   label: string;
   tip: string;

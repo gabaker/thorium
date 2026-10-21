@@ -5,8 +5,6 @@ import Select, { SelectComponentsConfig, GroupBase } from 'react-select';
 // project imports
 import { createReactSelectStyles } from '@utilities/select';
 
-// spec: ./selectable.spec.md
-
 // Object structure needed for select object values
 interface SelectOption {
   readonly label: string;

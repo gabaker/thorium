@@ -22,8 +22,6 @@ import { Filters } from '@models/search';
 import { listEntities } from '@thorpi/entities';
 import { getDetailsBasePathByEntity } from '@components/entities/details/EntityDetailsRoutes';
 
-// spec: ../EntityBrowsing.spec.md
-
 // Fetch vendors using search filters and an optional pagination cursor.
 const getVendors = async (filters: Filters, cursor: string | null, errorHandler: (error: string) => void) => {
   const listFilters = structuredClone(filters);

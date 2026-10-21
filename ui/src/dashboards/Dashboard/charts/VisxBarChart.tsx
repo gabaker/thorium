@@ -4,8 +4,6 @@ import { Group } from '@visx/group';
 import { scaleBand, scaleLinear } from '@visx/scale';
 import { Bar } from '@visx/shape';
 
-// spec: ./SPEC.md
-
 // project imports
 import { ChartContainer, ChartTooltip, ChartTooltipCount, EmptyChart } from './charts.styled';
 

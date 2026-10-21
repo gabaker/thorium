@@ -6,8 +6,6 @@ import { NavClusterContainer } from './Shared';
 import { ToolbarIconButton } from './controls/Toolbar.styled';
 import { OverlayTipLeft } from '@components/shared/overlay/tips';
 
-// spec: ./AssociationGraph.spec.md
-
 interface NavClusterProps {
   /** Dolly the camera toward the orbit target */
   onZoomIn: () => void;

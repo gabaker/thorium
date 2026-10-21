@@ -6,8 +6,6 @@ import { useResultAlerts } from './useResultAlerts';
 import { formatResultBody } from '../alerts';
 import { ResultRenderProps } from '../props';
 
-// spec: ../ToolResult.spec.md
-
 type StringResultRenderProps = ResultRenderProps & {
   warnings: string[];
   errors: string[];

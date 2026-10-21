@@ -5,8 +5,6 @@ import { WindowData, ZRange } from './models';
 import { Margin } from '../bounds';
 import { sortIntegerStrings } from '@utilities/sorting';
 
-// spec: ./WindowManager.spec.md
-
 export type WindowManagerProviderOptions = {
   zRange: ZRange;
   canvasMargin: Margin;

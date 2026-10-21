@@ -19,8 +19,6 @@ import { EntityDetailsConfig, makeGetEntityDetails } from './factory';
 import { Entities, EntityTypeMap } from '@models/entities';
 import SigmaRuleDetailsConfig from './SigmaRuleDetailsConfig';
 
-// spec: ../EntityDetails.spec.md
-
 // The details-config type and factory live in `./factory` to avoid an import cycle with the
 // per-kind config files (see the note in that module). Re-exported here so existing callers can
 // keep importing them from `./configs`.

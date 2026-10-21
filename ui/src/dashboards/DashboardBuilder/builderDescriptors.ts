@@ -1,5 +1,3 @@
-// spec: ./SPEC.md
-
 // project imports
 import { encodeSeedParams } from '../Dashboard/seedParams';
 import { BuilderSelection, SelectionKind } from './types';

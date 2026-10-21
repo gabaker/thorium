@@ -3,8 +3,6 @@ import styled, { keyframes } from 'styled-components';
 // project imports
 import { scaling, spacers } from '@styles';
 
-// spec: ./SPEC.md
-
 /// A continuous rotation used to spin the Refresh icon while a refresh is in flight.
 const spin = keyframes`
   from { transform: rotate(0deg); }

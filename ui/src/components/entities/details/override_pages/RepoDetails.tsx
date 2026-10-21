@@ -12,8 +12,6 @@ import { BuildDashboardButton, BuildDashboardResource, ButtonToolbar } from '@co
 import Subtitle from '@components/shared/titles/Subtitle';
 import Title from '@components/shared/titles/Title';
 
-// spec: ../EntityDetails.spec.md
-
 interface RepoDetailsContextType {
   // full URL of the repo the page is displaying
   repo: string | undefined;

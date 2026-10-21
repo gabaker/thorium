@@ -2,8 +2,6 @@
  * Used across a few different files; a little cleaner when all pulled out.
  * */
 
-// spec: ./TagSelect.spec.md
-
 export enum EditingMode {
   Disabled, // Not Editing -- tag select is inactive
   First, // editing first element of tag (tag key)

@@ -1,5 +1,3 @@
-// spec: ./AssociationGraph.spec.md
-
 /** Target on-screen height in pixels for node labels */
 export const LABEL_TARGET_PX = 12;
 /** Minimum on-screen height in pixels for node labels */

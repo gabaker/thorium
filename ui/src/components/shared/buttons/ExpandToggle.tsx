@@ -1,7 +1,5 @@
 import styled from 'styled-components';
 
-// spec: ./Button.spec.md
-
 /** Centered row that hosts an {@link ExpandToggle}. */
 export const ToggleRow = styled.div`
   display: flex;

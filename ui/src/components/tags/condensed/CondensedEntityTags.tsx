@@ -8,8 +8,6 @@ import { filterIncludedTags, filterExcludedTags } from '../utilities';
 import { Tags } from '@models/tags';
 import { Entities } from '@models/entities';
 
-// spec: ../tags.spec.md
-
 /** How a condensed tag list aligns its badges within the row. */
 export enum TagAlign {
   Left = 'left',

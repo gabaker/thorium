@@ -1,7 +1,5 @@
 import styled from 'styled-components';
 
-// spec: ./AssociationGraph.spec.md
-
 export const GraphWindow = styled.div<{ $bordered?: boolean }>`
   position: relative;
   background-color: var(--thorium-panel-bg);

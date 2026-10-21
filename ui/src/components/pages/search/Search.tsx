@@ -23,8 +23,6 @@ import { OmniClauseAndTimeToFilter } from '@utilities/search';
 import { ElasticDoc, SearchFilters } from '@models/search';
 import { scaling } from '@styles';
 
-// spec: ./Search.spec.md
-
 // get hash of a file from result ID
 const getSha256 = (id: string) => {
   const splitID = id.split('-');

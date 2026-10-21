@@ -1,8 +1,6 @@
 import React from 'react';
 import { FaCompress, FaExpand } from 'react-icons/fa';
 
-// spec: ./SPEC.md
-
 // project imports
 import { IconButton } from '@components/shared/buttons';
 import { OverlayTipBottom } from '@components/shared/overlay/tips';

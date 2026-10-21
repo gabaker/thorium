@@ -25,8 +25,6 @@ import { treeNodeToInfo } from '@components/shared/info/info';
 import { entityLabel } from '@models/entities';
 import { TreeNode } from '@models/trees';
 
-// spec: ./AssociationTree.spec.md
-
 interface TreeItemOverlayProps {
   nodeData: TreeNode | undefined;
   isDuplicate: boolean;

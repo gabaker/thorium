@@ -7,8 +7,6 @@ import CodeEditor from '@components/shared/inputs/code/CodeEditor';
 import { FormatType } from '@utilities/rules/types';
 import { YaraRuleChecker } from '@utilities/rules/yara';
 
-// spec: ./SPEC.md
-
 /**
  * Render bytes as a read-only YARA rule using the shared CodeEditor with the YARA language and
  * rule checker (view-only). The checker still surfaces lint diagnostics so the viewer matches

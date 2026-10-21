@@ -13,8 +13,6 @@ import { OmniClauseAndTimeToFilter } from '@utilities/search';
 import { Entities, entityLabel } from '@models/entities';
 import { Filters } from '@models/search';
 
-// spec: ../EntityBrowsing.spec.md
-
 interface BrowsingFiltersProps {
   // callback invoked whenever the active filters change
   onChange: (filters: Filters) => void;

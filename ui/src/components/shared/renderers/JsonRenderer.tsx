@@ -8,8 +8,6 @@ import { OceanJsonTheme, useJsonTreeInvert } from './jsonTheme';
 import TextRenderer from './TextRenderer';
 import { FileRendererProps } from './types';
 
-// spec: ./SPEC.md
-
 const TreeWrapper = styled.div`
   padding: 8px 12px;
   min-width: 0;

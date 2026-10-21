@@ -5,8 +5,6 @@ import { CONTAINER_ASSOCIATION_KINDS, NON_STRUCTURAL_ASSOCIATION_KINDS } from '@
 import { entityLabel } from '@models/entities';
 import { BranchNode, Direction, Graph, TreeRelationships } from '@models/trees';
 
-// spec: ./AssociationTree.spec.md
-
 /**
  * A single parent→child edge in a {@link TreeIndex}, carrying the graph's relationship metadata so
  * consumers (the entity browser's relationship badges) can describe *how* two nodes relate, not just that

@@ -1,4 +1,3 @@
-// spec: ../SPEC.md
 /** A contiguous byte selection within a hex view (`length` of 0 means no selection). */
 export interface HexSelection {
   offset: number;

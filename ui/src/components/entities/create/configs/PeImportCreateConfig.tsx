@@ -10,8 +10,6 @@ import SelectInputArray from '@components/shared/inputs/selectable/SelectInputAr
 import { Entities } from '@models/entities/entities';
 import { BlankCreatePeImport, PeImportCreateMetaFields } from '@models/entities/pe';
 
-// spec: ../EntityCreate.spec.md
-
 const PeImportMetaInfo = ({ entity, onChange }: CreateMetadataProps<Entities.PeImport>): JSX.Element => {
   function updatePendingMeta<T extends keyof PeImportCreateMetaFields>(field: T, value: PeImportCreateMetaFields[T]): void {
     const updates: PeImportCreateMetaFields = structuredClone(entity.metadata.PeImport);

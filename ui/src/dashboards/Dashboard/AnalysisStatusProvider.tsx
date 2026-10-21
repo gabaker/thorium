@@ -1,7 +1,5 @@
 import React, { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState } from 'react';
 
-// spec: ./SPEC.md
-
 // project imports
 import { useDashboardData } from './DashboardDataProvider';
 import { useAuth } from '@utilities/auth';

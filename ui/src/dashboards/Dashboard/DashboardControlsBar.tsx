@@ -2,8 +2,6 @@ import React from 'react';
 import { FaSearchPlus } from 'react-icons/fa';
 import { FaArrowsRotate, FaFilterCircleXmark } from 'react-icons/fa6';
 
-// spec: ./SPEC.md
-
 // project imports
 import { ControlsBar, SpinningIcon } from './styles';
 import { ButtonToolbar, IconButton } from '@components/shared/buttons';

@@ -1,4 +1,3 @@
-// spec: ../ToolResult.spec.md
 import { DiffMethod } from 'react-diff-viewer-continued';
 import { stringify as yamlStringify } from 'yaml';
 

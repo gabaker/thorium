@@ -22,8 +22,6 @@ import { Vendor } from '@models/entities/vendors';
 import { Device } from '@models/entities/devices';
 import { getDetailsBasePathByEntity } from '@components/entities/details/EntityDetailsRoutes';
 
-// spec: ../EntityBrowsing.spec.md
-
 // Fetch devices using search filters and an optional pagination cursor.
 const getDevices = async (filters: Filters, cursor: string | null, errorHandler: (error: string) => void) => {
   const listFilters = structuredClone(filters);

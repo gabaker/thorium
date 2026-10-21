@@ -17,8 +17,6 @@ import SuggestionPanel from './SuggestionPanel';
 import { createPreviewExtensions, addPreview } from './SuggestionPreview';
 import { type RuleChecker, type FieldSchema, FormatType, type Suggestion, Severity } from '@utilities/rules/types';
 
-// spec: ./CodeEditor.spec.md
-
 // When `height` is '100%' the editor fills its parent (flex column) instead of taking a fixed
 // pixel/vh height — used by the file-preview renderers so the editor sizes to the overlay window
 // and owns the single scroll for its content.

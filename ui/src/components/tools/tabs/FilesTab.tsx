@@ -1,4 +1,3 @@
-// spec: ../ToolResult.spec.md
 import React, { useCallback, useState } from 'react';
 import { FaDownload, FaEye } from 'react-icons/fa';
 import styled from 'styled-components';

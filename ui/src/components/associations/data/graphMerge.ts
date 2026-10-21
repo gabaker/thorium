@@ -3,8 +3,6 @@ import { getOrCreate } from '../utilities';
 import { canonicalizeGraphOrder } from '@thorpi/trees';
 import { Graph } from '@models/trees';
 
-// spec: ./GraphDataContext.spec.md
-
 /**
  * Merge a grow response into the current graph, producing a new {@link Graph}.
  *

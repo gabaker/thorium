@@ -10,8 +10,6 @@ import { TagEntry } from '@models/tags';
 import { createReactSelectStyles } from '@utilities/select';
 import { tagEntryIsEmpty } from '@utilities/tags';
 
-// spec: ./TagSelect.spec.md
-
 const TagEntryFieldDiv = styled.div`
   border: 1px solid var(--thorium-panel-border);
   color: var(--thorium-text);

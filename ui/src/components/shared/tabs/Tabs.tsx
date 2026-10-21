@@ -6,8 +6,6 @@ import { TabItem, TabsProps } from './types';
 import { firstEnabledTabIndex, lastEnabledTabIndex, nextEnabledTabIndex } from './step';
 import { OverlayTipTop } from '@components/shared/overlay/tips';
 
-// spec: ./Tabs.spec.md
-
 const TabList = styled.div<{ $flush: boolean }>`
   display: flex;
   align-items: stretch;

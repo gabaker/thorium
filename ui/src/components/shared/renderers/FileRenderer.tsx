@@ -8,8 +8,6 @@ import { FileRendererProps, RenderKind } from './types';
 import AlertBanner, { Severity } from '@components/shared/alerts/AlertBanner';
 import RenderErrorAlert from '@components/shared/alerts/RenderErrorAlert';
 
-// spec: ./SPEC.md
-
 /**
  * The single public entry point for the modular renderer system: given raw bytes (and an
  * optional file name), detect the content kind and render it with the matching renderer.

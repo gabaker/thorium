@@ -3,8 +3,6 @@ import { useContext } from 'react';
 // project imports
 import { WindowManagerContext } from './WindowManagerContext';
 
-// spec: ./WindowManager.spec.md
-
 export const useWindowManager = () => {
   const context = useContext(WindowManagerContext);
   if (context === undefined) {

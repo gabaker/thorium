@@ -3,8 +3,6 @@ import { Link } from 'react-router-dom';
 import { FaArrowsRotate } from 'react-icons/fa6';
 import { useInView } from 'react-intersection-observer';
 
-// spec: ./SPEC.md
-
 // project imports
 import { useAnalysisStatus } from './AnalysisStatusProvider';
 import { AnalysisSortColumn, SortDirection, sortReactions } from './analysisTable';

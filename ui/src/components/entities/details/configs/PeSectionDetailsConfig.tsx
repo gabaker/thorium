@@ -13,8 +13,6 @@ import TextInput from '@components/shared/inputs/TextInput';
 import { Entities } from '@models/entities';
 import { BlankPeSection, PeSectionMetaFields } from '@models/entities/pe';
 
-// spec: ../EntityDetails.spec.md
-
 const PeSectionMetaInfo = ({ entity, pendingEntity, handleUpdate, editing }: DetailsMetadataProps<Entities.PeSection>): JSX.Element => {
   // apply a single metadata field change and hand the updated metadata back to the entity update
   function updatePendingMeta<T extends keyof PeSectionMetaFields>(field: T, value: PeSectionMetaFields[T]): void {

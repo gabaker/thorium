@@ -3,8 +3,6 @@ import { getNodeTags } from '@components/associations/browsing/EntityBrowser/bro
 import { Entities, entityLabel } from '@models/entities';
 import { TreeNode, TreeNodeKey } from '@models/trees';
 
-// spec: ./SPEC.md
-
 /**
  * One bar of the dashboard's "types" chart: a node-type/entity-kind and how many nodes carry it.
  *

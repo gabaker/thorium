@@ -3,7 +3,6 @@ import styled from 'styled-components';
 
 // project imports
 import { HexByteStatus, HexSelection } from './types';
-// spec: ../SPEC.md
 
 const BYTES_PER_ROW = 16;
 const DEFAULT_MAX_BYTES = 16 * 1024;

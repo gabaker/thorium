@@ -24,8 +24,6 @@ import {
   KNOWN_TOP_LEVEL_FIELDS,
 } from './schema';
 
-// spec: ./validate.spec.md
-
 /**
  * Validate a parsed Sigma rule YAML document against the Sigma schema.
  *

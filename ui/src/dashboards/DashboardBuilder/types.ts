@@ -1,5 +1,3 @@
-// spec: ./SPEC.md
-
 // project imports
 import { Entities } from '@models/entities/entities';
 

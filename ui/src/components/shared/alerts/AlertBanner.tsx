@@ -1,8 +1,6 @@
 import React, { useState } from 'react';
 import styled from 'styled-components';
 
-// spec: ./AlertBanner.spec.md
-
 export enum Severity {
   Error = 'error',
   Warning = 'warning',

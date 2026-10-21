@@ -1,4 +1,3 @@
-// spec: ./EntityBrowser.spec.md
 import React from 'react';
 import { FaFlag } from 'react-icons/fa6';
 

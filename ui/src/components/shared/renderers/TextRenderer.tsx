@@ -4,7 +4,6 @@ import styled from 'styled-components';
 // project imports
 import { textOf } from './detect';
 import { FileRendererProps } from './types';
-// spec: ./SPEC.md
 
 const Pre = styled.pre`
   margin: 0;

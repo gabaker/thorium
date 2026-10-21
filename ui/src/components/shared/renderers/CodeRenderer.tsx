@@ -6,8 +6,6 @@ import { FileRendererProps } from './types';
 import CodeEditor from '@components/shared/inputs/code/CodeEditor';
 import { FormatType } from '@utilities/rules/types';
 
-// spec: ./SPEC.md
-
 export interface CodeRendererProps extends FileRendererProps {
   /** Force a specific editor format instead of inferring from the file name. */
   format?: FormatType;

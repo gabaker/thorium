@@ -6,8 +6,6 @@ import { useNavigate } from 'react-router-dom';
 import { OverlayTipBottom } from '@components/shared/overlay/tips';
 import { Collection, CollectionMeta } from '@models/entities/collections';
 
-// spec: ./EntityDetails.spec.md
-
 /**
  * Build the browsing URL that lists the members of a collection, carrying the collection's
  * filters (groups, tags, time range, case-sensitivity) as query params.

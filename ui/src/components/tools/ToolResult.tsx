@@ -1,4 +1,3 @@
-// spec: ./ToolResult.spec.md
 import React, { Suspense, useEffect, useMemo, useRef, useState } from 'react';
 import { FaAngleDown, FaAngleUp, FaArrowsRotate, FaCodeCompare, FaDownload, FaLink } from 'react-icons/fa6';
 import { InView } from 'react-intersection-observer';

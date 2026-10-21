@@ -1,7 +1,5 @@
 import { useMemo } from 'react';
 
-// spec: ./SPEC.md
-
 // project imports
 import { useEntityBrowser } from '@components/associations/browsing/EntityBrowser/EntityBrowserContext';
 import { useGraphData } from '@components/associations/data/GraphDataContext';

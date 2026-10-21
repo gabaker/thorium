@@ -1,7 +1,5 @@
 import { useEffect, useState } from 'react';
 
-// spec: ./SPEC.md
-
 /**
  * base16 "Ocean" theme for `react-json-tree`, theme-aware via `--thorium-*` for the base background.
  *

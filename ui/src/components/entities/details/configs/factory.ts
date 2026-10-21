@@ -5,8 +5,6 @@ import { MetadataComponent } from '../EntityDetails';
 import { getEntity } from '@thorpi/entities';
 import { EntityTypeMap } from '@models/entities';
 
-// spec: ../EntityDetails.spec.md
-
 // This module holds the shared details-config type and factory. It deliberately imports no
 // per-kind config files: the config files import `makeGetEntityDetails` from here, and
 // `configs.ts` imports the config files. Keeping the factory out of `configs.ts` breaks the

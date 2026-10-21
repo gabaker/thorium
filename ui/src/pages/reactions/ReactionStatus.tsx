@@ -14,8 +14,6 @@ import { deleteReaction, getReaction, getReactionLogs } from '@thorpi/reactions'
 import { getPipeline } from '@thorpi/pipelines';
 import { ReactionStatus as ReactionStatusEnum, type Reaction, type ReactionLogEntry } from '@models/reactions';
 
-// spec: ./ReactionStatus.spec.md
-
 interface ReactionLogsProps {
   logs: ReactionLogEntry[];
   width: number;

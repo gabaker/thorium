@@ -4,8 +4,6 @@ import AlertBanner, { Severity } from '@components/shared/alerts/AlertBanner';
 // project imports
 import { ResultRenderProps } from '@components/tools/props';
 
-// spec: ../../ToolResult.spec.md
-
 /**
  * Custom display for TitaniumCore (tc2): lists links to the unpacked children files, or an info
  * banner when no children were unpacked.

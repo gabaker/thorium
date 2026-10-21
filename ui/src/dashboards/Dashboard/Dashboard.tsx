@@ -1,8 +1,6 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { Link, useLocation, useNavigate, useSearchParams } from 'react-router-dom';
 
-// spec: ./SPEC.md
-
 // project imports
 import AnalysisStatusPanel from './AnalysisStatusPanel';
 import { AnalysisStatusProvider, useAnalysisStatus } from './AnalysisStatusProvider';
