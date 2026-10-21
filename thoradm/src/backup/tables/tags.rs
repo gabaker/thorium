@@ -3,21 +3,18 @@
 use ahash::AHasher;
 use bytecheck::CheckBytes;
 use chrono::prelude::*;
-use futures::stream::{FuturesUnordered, StreamExt};
-use indicatif::ProgressBar;
 use rkyv::{Archive, Deserialize, Serialize};
 use scylla::DeserializeRow;
 use scylla::client::session::Session;
-use scylla::errors::{ExecutionError, PrepareError};
+use scylla::errors::PrepareError;
 use scylla::statement::prepared::PreparedStatement;
 use std::hash::Hasher;
-use std::sync::Arc;
 use thorium::Conf;
 use thorium::models::backends::TagSupport;
 use thorium::models::{TagRequest, TagType};
 
-use crate::Error;
-use crate::backup::{Backup, Restore, Scrub, Utils, utils};
+use super::Versioned;
+use crate::backup::{Backup, Restore, Scrub, Utils};
 
 /// A single line of stage logs
 #[derive(Debug, Archive, Serialize, Deserialize, DeserializeRow)]
@@ -51,6 +48,11 @@ impl Utils for Tag {
 
 #[async_trait::async_trait]
 impl Backup for Tag {
+    /// The columns of this table's partition key, used to name rows that fail to decode
+    fn partition_key() -> &'static [&'static str] {
+        &["type", "group", "year", "bucket", "key", "value"]
+    }
+
     /// The prepared statement to use when retrieving data from Scylla
     ///
     /// # Arguments
@@ -98,13 +100,20 @@ impl Restore for Tag {
     // The partition config is within the tags config in the Thorium config
     type PartitionConf = thorium::conf::Tags;
 
-    /// The steps to once run before restoring data
-    async fn prep(scylla: &Session, ns: &str) -> Result<(), ExecutionError> {
-        // drop the materialized views for this table
-        utils::drop_materialized_view(ns, "tags_by_item", scylla).await?;
-        utils::drop_materialized_view(ns, "tags_case_insensitive", scylla).await?;
-        Ok(())
-    }
+    /// The tag type, group, item, year, bucket, key, value, upload time, and lower-cased key and
+    /// value
+    type Values = (
+        TagType,
+        String,
+        String,
+        i32,
+        i32,
+        String,
+        String,
+        DateTime<Utc>,
+        String,
+        String,
+    );
 
     /// The prepared statement to use when restoring data to scylla
     ///
@@ -136,86 +145,33 @@ impl Restore for Tag {
         config.thorium.tags.clone()
     }
 
-    /// Restore a single partition
+    /// Returns the values the restore's insert binds for this row, in a bucket of the partition
+    /// size the target gives its tag type, with its lower-cased key and value recomputed
     ///
     /// # Arguments
     ///
-    /// * `buffer` - The buffer we should restore data from
-    /// * `scylla` - The client to use when talking to scylla
-    /// * `rows_restored` - The number of rows that have been restored
-    /// * `partition_conf` - The config defining the partition size to use when restoring data
-    /// * `progress` - The bar to report progress with
-    /// * `prepared` - The prepared statement to inject data with
-    async fn restore<'a>(
-        buffer: &'a [u8],
-        scylla: &Arc<Session>,
-        partition_conf: &Self::PartitionConf,
-        rows_restored: &mut usize,
-        progress: &mut ProgressBar,
-        prepared: &PreparedStatement,
-    ) -> Result<(), Error> {
-        // cast our buffer to its archived type
-        let rows = rkyv::check_archived_root::<Vec<Tag>>(buffer)?;
-        // build a set of futures
-        let mut futures = FuturesUnordered::new();
-        // build our queries to insert this partitions rows
-        for row in rows.iter() {
-            // deserialize our tag type
-            let tag_type: TagType = row.tag_type.deserialize(&mut rkyv::Infallible)?;
-            // get the correct partition size based on tags
-            let partition_size = partition_conf.map_type(&tag_type).partition_size;
-            // deserialize this rows uploaded timestamp
-            let uploaded = row.uploaded.deserialize(&mut rkyv::Infallible)?;
-            // calculate the new bucket
-            let bucket = thorium::utils::helpers::partition(uploaded, row.year, partition_size);
-            // get the lowercase versions of key/value
-            let key_lower = row.key.to_lowercase();
-            let value_lower = row.value.to_lowercase();
-            // restore this row back to scylla
-            let query = scylla.execute_unpaged(
-                prepared,
-                (
-                    tag_type,
-                    row.group.as_str(),
-                    row.item.as_str(),
-                    row.year,
-                    bucket,
-                    row.key.as_str(),
-                    row.value.as_str(),
-                    uploaded,
-                    key_lower,
-                    value_lower,
-                ),
-            );
-            // add this to our futures
-            futures.push(query);
-            // if we have 1000 futures then wait for at least 500 of them to complete
-            if futures.len() > 1000 {
-                // poll our futures until one is complete
-                while let Some(query_result) = futures.next().await {
-                    // raise any errors
-                    query_result?;
-                    // increment our restored row count
-                    *rows_restored += 1;
-                    // set our current row count progress message
-                    progress.set_message(rows_restored.to_string());
-                    // if we have less then 100 future to go then refill our future set
-                    if futures.len() < 100 {
-                        break;
-                    }
-                }
-            }
-        }
-        // poll our futures until one is complete
-        while let Some(query_result) = futures.next().await {
-            // raise any errors
-            query_result?;
-            // increment our restored row count
-            *rows_restored += 1;
-            // set our current row count progress message
-            progress.set_message(rows_restored.to_string());
-        }
-        Ok(())
+    /// * `partition_conf` - The tag settings holding each tag type's partition size
+    /// * `_format` - The format version the row was archived in
+    fn values(self, partition_conf: &Self::PartitionConf, _format: u32) -> Self::Values {
+        // get the correct partition size based on tags
+        let partition_size = partition_conf.map_type(&self.tag_type).partition_size;
+        // calculate the new bucket
+        let bucket = thorium::utils::helpers::partition(self.uploaded, self.year, partition_size);
+        // get the lowercase versions of key/value
+        let key_lower = self.key.to_lowercase();
+        let value_lower = self.value.to_lowercase();
+        (
+            self.tag_type,
+            self.group,
+            self.item,
+            self.year,
+            bucket,
+            self.key,
+            self.value,
+            self.uploaded,
+            key_lower,
+            value_lower,
+        )
     }
 }
 
@@ -224,4 +180,9 @@ impl<T: TagSupport> Utils for TagRequest<T> {
     fn name() -> &'static str {
         "tags"
     }
+}
+
+/// Format 2 archives tags as format 1 did
+impl Versioned for Tag {
+    type V1 = Tag;
 }

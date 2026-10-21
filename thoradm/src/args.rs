@@ -9,7 +9,9 @@ use thorium::models::{
 
 mod backup;
 
-pub use backup::{BackupComponents, BackupSubCommands, NewBackup, RestoreBackup, ScrubBackup};
+pub use backup::{
+    BackupComponents, BackupSubCommands, NewBackup, RestoreBackup, ScrubBackup, VerifyBackup,
+};
 
 /// Provide a default admin config path
 fn default_cluster_conf_path() -> PathBuf {
@@ -30,8 +32,13 @@ fn default_ctl_conf_path() -> PathBuf {
 #[derive(Parser, Debug, Clone)]
 #[clap(version, author)]
 pub struct Args {
-    /// The number of workers to use
-    #[clap(short, long, default_value = "10")]
+    /// The number of workers to use; at least 1
+    #[clap(
+        short,
+        long,
+        default_value = "10",
+        value_parser = clap::builder::RangedU64ValueParser::<usize>::new().range(1..)
+    )]
     pub workers: usize,
     /// The sub command for to execute
     #[clap(subcommand)]
@@ -250,6 +257,10 @@ pub enum CensusKinds {
     Repos,
     /// Take a census of commitish data
     Commitishes,
+    /// Take a census of entity data
+    Entities,
+    /// Take a census of association data
+    Associations,
 }
 
 impl std::fmt::Display for CensusKinds {
@@ -261,6 +272,8 @@ impl std::fmt::Display for CensusKinds {
             &CensusKinds::Files => write!(f, "Files"),
             &CensusKinds::Repos => write!(f, "Repos"),
             &CensusKinds::Commitishes => write!(f, "Commitishes"),
+            &CensusKinds::Entities => write!(f, "Entities"),
+            &CensusKinds::Associations => write!(f, "Associations"),
         }
     }
 }

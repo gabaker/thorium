@@ -2,22 +2,21 @@
 
 use ahash::AHasher;
 use bytecheck::CheckBytes;
-use futures::stream::{FuturesUnordered, StreamExt};
-use indicatif::ProgressBar;
 use rkyv::{Archive, Deserialize, Serialize};
 use scylla::DeserializeRow;
 use scylla::client::session::Session;
-use scylla::errors::{ExecutionError, PrepareError};
+use scylla::errors::PrepareError;
 use scylla::statement::prepared::PreparedStatement;
 use std::hash::Hasher;
-use std::path::PathBuf;
-use std::sync::Arc;
+use std::path::{Path, PathBuf};
 use thorium::Conf;
 use thorium::models::{ArchivedS3Objects, S3Objects};
 use uuid::Uuid;
 
+use super::Versioned;
 use crate::Error;
-use crate::backup::{Backup, Restore, S3Backup, S3Restore, Scrub, Utils, utils};
+use crate::backup::s3::object_key;
+use crate::backup::{Backup, Restore, S3Backup, S3Restore, Scrub, Utils};
 
 /// A single line of stage logs
 #[derive(Debug, Archive, Serialize, Deserialize, DeserializeRow)]
@@ -41,6 +40,11 @@ impl Utils for S3Id {
 
 #[async_trait::async_trait]
 impl Backup for S3Id {
+    /// The columns of this table's partition key, used to name rows that fail to decode
+    fn partition_key() -> &'static [&'static str] {
+        &["type", "id"]
+    }
+
     /// The prepared statement to use when retrieving data from Scylla
     ///
     /// # Arguments
@@ -85,12 +89,8 @@ impl Restore for S3Id {
     // the size itself
     type PartitionConf = u16;
 
-    /// The steps to once run before restoring data
-    async fn prep(scylla: &Session, ns: &str) -> Result<(), ExecutionError> {
-        // drop the materialized views for this table
-        utils::drop_materialized_view(ns, "s3_sha256s", scylla).await?;
-        Ok(())
-    }
+    /// The object type, id, and sha256
+    type Values = (S3Objects, Uuid, String);
 
     /// The prepared statement to use when restoring data to scylla
     ///
@@ -122,64 +122,15 @@ impl Restore for S3Id {
         0
     }
 
-    /// Restore a single partition
+    /// Returns the values the restore's insert binds for this row
     ///
     /// # Arguments
     ///
-    /// * `buffer` - The buffer we should restore data from
-    /// * `scylla` - The client to use when talking to scylla
-    /// * `rows_restored` - The number of rows that have been restored
-    /// * `partition_size` - The partition size to use when restoring data
-    /// * `progress` - The bar to report progress with
-    /// * `prepared` - The prepared statement to inject data with
-    async fn restore<'a>(
-        buffer: &'a [u8],
-        scylla: &Arc<Session>,
-        _partition_size: &u16,
-        rows_restored: &mut usize,
-        progress: &mut ProgressBar,
-        prepared: &PreparedStatement,
-    ) -> Result<(), Error> {
-        // cast our buffer to its archived type
-        let rows = rkyv::check_archived_root::<Vec<S3Id>>(buffer)?;
-        // build a set of futures
-        let mut futures = FuturesUnordered::new();
-        // build our queries to insert this partitions rows
-        for row in rows.iter() {
-            // deserialize our object type
-            let object_type: S3Objects = row.object_type.deserialize(&mut rkyv::Infallible)?;
-            // restore this row back to scylla
-            let query =
-                scylla.execute_unpaged(prepared, (object_type, row.id, row.sha256.as_str()));
-            // add this to our futures
-            futures.push(query);
-            // if we have 1000 futures then wait for at least 500 of them to complete
-            if futures.len() > 1000 {
-                // poll our futures until one is complete
-                while let Some(query_result) = futures.next().await {
-                    // raise any errors
-                    query_result?;
-                    // increment our restored row count
-                    *rows_restored += 1;
-                    // set our current row count progress message
-                    progress.set_message(rows_restored.to_string());
-                    // if we have less then 100 future to go then refill our future set
-                    if futures.len() < 100 {
-                        break;
-                    }
-                }
-            }
-        }
-        // poll our futures until one is complete
-        while let Some(query_result) = futures.next().await {
-            // raise any errors
-            query_result?;
-            // increment our restored row count
-            *rows_restored += 1;
-            // set our current row count progress message
-            progress.set_message(rows_restored.to_string());
-        }
-        Ok(())
+    /// * `_partition_size` - Unused, as s3 ids aren't bucketed
+    /// * `_format` - The format version the row was archived in
+    fn values(self, _partition_size: &u16, _format: u32) -> Self::Values {
+        // every column as the row holds it
+        (self.object_type, self.id, self.sha256)
     }
 }
 
@@ -242,31 +193,32 @@ impl S3Backup for S3Id {
     }
 }
 
+/// Format 2 archives s3 ids as format 1 did
+impl Versioned for S3Id {
+    type V1 = S3Id;
+}
+
 impl S3Restore for S3Id {
-    /// Get the bucket and s3 path for this file
+    /// Get the bucket and key of a backed-up object from where the backup keeps it
     ///
     /// # Arguments
     ///
     /// * `path` - The path to the file we are restoring
+    /// * `objects` - The component's `objects/` directory, which `path` is under
     /// * `conf` - The Thorium for this cluster
-    fn parse<'a>(path: &PathBuf, conf: &'a Conf) -> Result<(String, String), Error> {
-        // build an iterator over this paths components
-        let chunks = path.components();
-        // skip the first 3 components
-        let mut chunks = chunks.skip(3);
-        // get the bucket for this sample
-        let bucket = match chunks.next().map(|comp| comp.as_os_str().to_str()) {
-            Some(Some("files")) => conf.thorium.files.bucket.clone(),
-            Some(Some("repos")) => conf.thorium.repos.bucket.clone(),
-            _ => return Err(Error::new("Uknown s3 id object type")),
+    fn parse(path: &Path, objects: &Path, conf: &Conf) -> Result<(String, String), Error> {
+        // the layout keeps samples and repos apart by bucket role
+        let (role, key) = object_key(path, objects, true)?;
+        let bucket = match role.as_deref() {
+            Some("files") => conf.thorium.files.bucket.clone(),
+            Some("repos") => conf.thorium.repos.bucket.clone(),
+            _ => {
+                return Err(Error::new(format!(
+                    "{} names an unknown bucket role",
+                    path.display()
+                )));
+            }
         };
-        // skip the partitioning component
-        let mut chunks = chunks.skip(1);
-        // get our s3 path
-        let s3_path = match chunks.next() {
-            Some(s3_path) => s3_path.as_os_str().to_string_lossy().to_string(),
-            None => return Err(Error::new("S3 ids path is not long enough")),
-        };
-        Ok((bucket, s3_path))
+        Ok((bucket, key))
     }
 }

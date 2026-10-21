@@ -3,22 +3,20 @@
 use ahash::AHasher;
 use bytecheck::CheckBytes;
 use chrono::prelude::*;
-use futures::stream::{FuturesUnordered, StreamExt};
-use indicatif::ProgressBar;
 use rkyv::{Archive, Deserialize, Serialize};
 use scylla::DeserializeRow;
 use scylla::client::session::Session;
-use scylla::errors::{ExecutionError, PrepareError};
+use scylla::errors::PrepareError;
 use scylla::statement::prepared::PreparedStatement;
+use scylla::value::MaybeUnset;
 use std::hash::Hasher;
-use std::sync::Arc;
 use thorium::Conf;
 use uuid::Uuid;
 
-use crate::Error;
-use crate::backup::{Backup, Restore, Scrub, Utils, utils};
+use super::{Versioned, added_in_format_2};
+use crate::backup::{Backup, Restore, Scrub, Utils};
 
-/// A single line of stage logs
+/// A repos list row as format 2 archives it; `None` is a cell the source row held unset
 #[derive(Debug, Archive, Serialize, Deserialize, DeserializeRow)]
 #[archive_attr(derive(Debug, CheckBytes))]
 #[scylla(flavor = "enforce_order", skip_name_checks)]
@@ -34,17 +32,21 @@ pub struct RepoList {
     /// The id for this repo
     pub id: Uuid,
     /// The user that added this repo to Thorium
-    pub creator: String,
+    pub creator: Option<String>,
     /// The name of this repo
-    pub name: String,
+    pub name: Option<String>,
     /// Where this repo comes from (github/gitlab/...)
-    pub provider: String,
+    pub provider: Option<String>,
     /// The scheme to use with this repo
-    pub scheme: String,
+    pub scheme: Option<String>,
     /// The url of this repo
-    pub url: String,
+    pub url: Option<String>,
     /// The user that uploaded this repo to its provider
-    pub user: String,
+    pub user: Option<String>,
+    /// The branch or commitish this repo checks out by default
+    pub default_checkout: Option<String>,
+    /// When the earliest commitish of this repo was made
+    pub earliest: Option<DateTime<Utc>>,
 }
 
 impl Utils for RepoList {
@@ -56,6 +58,11 @@ impl Utils for RepoList {
 
 #[async_trait::async_trait]
 impl Backup for RepoList {
+    /// The columns of this table's partition key, used to name rows that fail to decode
+    fn partition_key() -> &'static [&'static str] {
+        &["group", "year", "bucket"]
+    }
+
     /// The prepared statement to use when retrieving data from Scylla
     ///
     /// # Arguments
@@ -69,7 +76,8 @@ impl Backup for RepoList {
         // build repos get prepared statement
         scylla
             .prepare(format!(
-                "SELECT group, year, bucket, uploaded, id, creator, name, provider, scheme, url, user \
+                "SELECT group, year, bucket, uploaded, id, creator, name, provider, scheme, url, user, \
+                default_checkout, earliest \
                 FROM {}.{} \
                 Where token(group, year, bucket) >= ? AND token(group, year, bucket) <= ?",
                 ns,
@@ -101,12 +109,23 @@ impl Restore for RepoList {
     // the size itself
     type PartitionConf = u16;
 
-    /// The steps to once run before restoring data
-    async fn prep(scylla: &Session, ns: &str) -> Result<(), ExecutionError> {
-        // drop the materialized views for this table
-        utils::drop_materialized_view(ns, "repos", scylla).await?;
-        Ok(())
-    }
+    /// The group, year, bucket, upload time, id, url, provider, user, name, creator, scheme,
+    /// default checkout, and earliest commitish time
+    type Values = (
+        String,
+        i32,
+        i32,
+        DateTime<Utc>,
+        Uuid,
+        Option<String>,
+        Option<String>,
+        Option<String>,
+        Option<String>,
+        Option<String>,
+        Option<String>,
+        MaybeUnset<Option<String>>,
+        MaybeUnset<Option<DateTime<Utc>>>,
+    );
 
     /// The prepared statement to use when restoring data to scylla
     ///
@@ -121,8 +140,9 @@ impl Restore for RepoList {
         scylla
             .prepare(format!(
                 "INSERT INTO {}.{} \
-                (group, year, bucket, uploaded, id, url, provider, user, name, creator, scheme) \
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (group, year, bucket, uploaded, id, url, provider, user, name, creator, scheme, \
+                default_checkout, earliest) \
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 ns,
                 Self::name(),
             ))
@@ -138,80 +158,33 @@ impl Restore for RepoList {
         config.thorium.repos.partition_size
     }
 
-    /// Restore a single partition
+    /// Returns the values the restore's insert binds for this row, in a bucket of the target's
+    /// partition size
     ///
     /// # Arguments
     ///
-    /// * `buffer` - The buffer we should restore data from
-    /// * `scylla` - The client to use when talking to scylla
-    /// * `partition_size` - The partition size to use when restoring data
-    /// * `rows_restored` - The number of rows that have been restored
-    /// * `progress` - The bar to report progress with
-    /// * `prepared` - The prepared statement to inject data with
-    async fn restore<'a>(
-        buffer: &'a [u8],
-        scylla: &Arc<Session>,
-        partition_size: &u16,
-        rows_restored: &mut usize,
-        progress: &mut ProgressBar,
-        prepared: &PreparedStatement,
-    ) -> Result<(), Error> {
-        // cast our buffer to its archived type
-        let rows = rkyv::check_archived_root::<Vec<RepoList>>(buffer)?;
-        // build a set of futures
-        let mut futures = FuturesUnordered::new();
-        // build our queries to insert this partitions rows
-        for row in rows.iter() {
-            // deserialize this rows uploaded timestamp
-            let uploaded = row.uploaded.deserialize(&mut rkyv::Infallible)?;
-            // calculate the new bucket
-            let bucket = thorium::utils::helpers::partition(uploaded, row.year, *partition_size);
-            // restore this row back to scylla
-            let query = scylla.execute_unpaged(
-                prepared,
-                (
-                    row.group.as_str(),
-                    row.year,
-                    bucket,
-                    uploaded,
-                    row.id,
-                    row.url.as_str(),
-                    row.provider.as_str(),
-                    row.user.as_str(),
-                    row.name.as_str(),
-                    row.creator.as_str(),
-                    row.scheme.as_str(),
-                ),
-            );
-            // add this to our futures
-            futures.push(query);
-            // if we have 1000 futures then wait for at least 500 of them to complete
-            if futures.len() > 1000 {
-                // poll our futures until one is complete
-                while let Some(query_result) = futures.next().await {
-                    // raise any errors
-                    query_result?;
-                    // increment our restored row count
-                    *rows_restored += 1;
-                    // set our current row count progress message
-                    progress.set_message(rows_restored.to_string());
-                    // if we have less then 100 future to go then refill our future set
-                    if futures.len() < 100 {
-                        break;
-                    }
-                }
-            }
-        }
-        // poll our futures until one is complete
-        while let Some(query_result) = futures.next().await {
-            // raise any errors
-            query_result?;
-            // increment our restored row count
-            *rows_restored += 1;
-            // set our current row count progress message
-            progress.set_message(rows_restored.to_string());
-        }
-        Ok(())
+    /// * `partition_size` - The partition size to bucket the row with
+    /// * `format` - The format version the row was archived in
+    fn values(self, partition_size: &u16, format: u32) -> Self::Values {
+        // calculate the new bucket
+        let bucket = thorium::utils::helpers::partition(self.uploaded, self.year, *partition_size);
+        // every column, leaving the default checkout and earliest commit format 1 didn't archive
+        // unset
+        (
+            self.group,
+            self.year,
+            bucket,
+            self.uploaded,
+            self.id,
+            self.url,
+            self.provider,
+            self.user,
+            self.name,
+            self.creator,
+            self.scheme,
+            added_in_format_2(self.default_checkout, format),
+            added_in_format_2(self.earliest, format),
+        )
     }
 }
 
@@ -235,6 +208,11 @@ impl Utils for RepoData {
 
 #[async_trait::async_trait]
 impl Backup for RepoData {
+    /// The columns of this table's partition key, used to name rows that fail to decode
+    fn partition_key() -> &'static [&'static str] {
+        &["repo"]
+    }
+
     /// The prepared statement to use when retrieving data from Scylla
     ///
     /// # Arguments
@@ -279,10 +257,8 @@ impl Restore for RepoData {
     // the size itself
     type PartitionConf = u16;
 
-    /// The steps to once run before restoring data
-    async fn prep(_scylla: &Session, _ns: &str) -> Result<(), ExecutionError> {
-        Ok(())
-    }
+    /// The repo and the data's hash
+    type Values = (String, String);
 
     /// The prepared statement to use when restoring data to scylla
     ///
@@ -314,60 +290,78 @@ impl Restore for RepoData {
         config.thorium.repos.partition_size
     }
 
-    /// Restore a single partition
+    /// Returns the values the restore's insert binds for this row
     ///
     /// # Arguments
     ///
-    /// * `buffer` - The buffer we should restore data from
-    /// * `scylla` - The client to use when talking to scylla
-    /// * `rows_restored` - The number of rows that have been restored
-    /// * `partition_size` - The partition size to use when restoring data
-    /// * `progress` - The bar to report progress with
-    /// * `prepared` - The prepared statement to inject data with
-    async fn restore<'a>(
-        buffer: &'a [u8],
-        scylla: &Arc<Session>,
-        _partition_size: &u16,
-        rows_restored: &mut usize,
-        progress: &mut ProgressBar,
-        prepared: &PreparedStatement,
-    ) -> Result<(), Error> {
-        // cast our buffer to its archived type
-        let rows = rkyv::check_archived_root::<Vec<RepoData>>(buffer)?;
-        // build a set of futures
-        let mut futures = FuturesUnordered::new();
-        // build our queries to insert this partitions rows
-        for row in rows.iter() {
-            // restore this row back to scylla
-            let query = scylla.execute_unpaged(prepared, (row.repo.as_str(), row.hash.as_str()));
-            // add this to our futures
-            futures.push(query);
-            // if we have 1000 futures then wait for at least 500 of them to complete
-            if futures.len() > 1000 {
-                // poll our futures until one is complete
-                while let Some(query_result) = futures.next().await {
-                    // raise any errors
-                    query_result?;
-                    // increment our restored row count
-                    *rows_restored += 1;
-                    // set our current row count progress message
-                    progress.set_message(rows_restored.to_string());
-                    // if we have less then 100 future to go then refill our future set
-                    if futures.len() < 100 {
-                        break;
-                    }
-                }
-            }
-        }
-        // poll our futures until one is complete
-        while let Some(query_result) = futures.next().await {
-            // raise any errors
-            query_result?;
-            // increment our restored row count
-            *rows_restored += 1;
-            // set our current row count progress message
-            progress.set_message(rows_restored.to_string());
-        }
-        Ok(())
+    /// * `_partition_size` - Unused, as repo data isn't bucketed
+    /// * `_format` - The format version the row was archived in
+    fn values(self, _partition_size: &u16, _format: u32) -> Self::Values {
+        // both columns as the row holds them
+        (self.repo, self.hash)
     }
+}
+
+/// A repos list row as format 1 archives it
+#[derive(Debug, Clone, Archive, Serialize, Deserialize)]
+#[archive_attr(derive(Debug, CheckBytes))]
+pub struct RepoListV1 {
+    /// The group this repo is in
+    pub group: String,
+    /// The year this repo was uploaded
+    pub year: i32,
+    /// The bucket this repo is in
+    pub bucket: i32,
+    /// When this repo was uploaded
+    pub uploaded: DateTime<Utc>,
+    /// The id for this repo
+    pub id: Uuid,
+    /// The user that added this repo to Thorium
+    pub creator: String,
+    /// The name of this repo
+    pub name: String,
+    /// Where this repo comes from (github/gitlab/...)
+    pub provider: String,
+    /// The scheme to use with this repo
+    pub scheme: String,
+    /// The url of this repo
+    pub url: String,
+    /// The user that uploaded this repo to its provider
+    pub user: String,
+}
+
+impl From<RepoListV1> for RepoList {
+    /// Converts a format-1 row, whose required fields are always set and which carries none of the columns format 2 added
+    ///
+    /// # Arguments
+    ///
+    /// * `row` - The format-1 row
+    fn from(row: RepoListV1) -> Self {
+        // format 1 could only hold rows with these cells set, and didn't archive the added columns
+        RepoList {
+            group: row.group,
+            year: row.year,
+            bucket: row.bucket,
+            uploaded: row.uploaded,
+            id: row.id,
+            creator: Some(row.creator),
+            name: Some(row.name),
+            provider: Some(row.provider),
+            scheme: Some(row.scheme),
+            url: Some(row.url),
+            user: Some(row.user),
+            default_checkout: None,
+            earliest: None,
+        }
+    }
+}
+
+/// Format 1 archives `RepoList` rows as [`RepoListV1`]
+impl Versioned for RepoList {
+    type V1 = RepoListV1;
+}
+
+/// Format 2 archives repo data as format 1 did
+impl Versioned for RepoData {
+    type V1 = RepoData;
 }
