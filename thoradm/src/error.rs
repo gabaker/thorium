@@ -44,11 +44,34 @@ pub enum Error {
     SerdeYaml(serde_norway::Error),
     /// An s3 error
     S3 {
+        /// The HTTP status S3 answered with, or `None` when no response arrived
+        status: Option<u16>,
+        /// The S3 error code from the response body
         code: Option<String>,
+        /// The S3 error message from the response body
         message: Option<String>,
+        /// Whether the request was sent and no response came back: a timeout or a failed
+        /// connection, rather than a request that couldn't be built
+        no_response: bool,
     },
     /// An s3 bytestream error
     S3ByteStream(aws_sdk_s3::primitives::ByteStreamError),
+    /// A backup file that is damaged at an offset
+    Corruption {
+        /// The damaged file
+        path: std::path::PathBuf,
+        /// The byte offset where the damage was found
+        offset: u64,
+        /// What is wrong there
+        problem: String,
+    },
+    /// An S3 object's body ended before the length its response announced
+    ShortBody {
+        /// The length the response announced
+        expected: u64,
+        /// How many bytes arrived
+        received: u64,
+    },
     /// Failed to recieve data from a kanal channel
     KanalRecv(kanal::ReceiveError),
     /// An error with deserializing rkyv data
@@ -57,6 +80,9 @@ pub enum Error {
     StripPrefix(std::path::StripPrefixError),
     // An error from dialoguer
     Dialoguer(dialoguer::Error),
+    /// Every worker of a step ended early, or some did with orders left; each worker's error is
+    /// reported on its own, so this error isn't recorded again
+    WorkersEnded(String),
 }
 
 impl Error {
@@ -67,6 +93,16 @@ impl Error {
     /// * `msg` - The error message to use
     pub fn new<T: Into<String>>(msg: T) -> Self {
         Error::Generic(msg.into())
+    }
+
+    /// Returns true when S3 answered that the object isn't there: a 404 for a key, not a bucket
+    #[must_use]
+    pub fn is_missing_object(&self) -> bool {
+        // a missing bucket is also a 404, but it is a misconfiguration, not a broken link
+        matches!(
+            self,
+            Error::S3 { status: Some(404), code, .. } if code.as_deref() != Some("NoSuchBucket")
+        )
     }
 }
 
@@ -90,19 +126,39 @@ impl std::fmt::Display for Error {
             Error::Uuid(err) => write!(f, "Uuid Error: {err}"),
             Error::SerdeJson(err) => write!(f, "SerdeJson Error: {err}"),
             Error::SerdeYaml(err) => write!(f, "SerdeYaml Error: {err}"),
-            Error::S3 { code, message } => {
+            Error::S3 {
+                status,
+                code,
+                message,
+                ..
+            } => {
+                // name the status when S3 answered, so a 404 reads differently from a timeout
+                let status = status.map_or_else(|| "no response".to_owned(), |s| s.to_string());
                 write!(
                     f,
-                    "S3 Error {}: {}",
+                    "S3 Error ({status}) {}: {}",
                     code.clone().unwrap_or_default(),
                     message.clone().unwrap_or_default()
                 )
             }
             Error::S3ByteStream(err) => write!(f, "S3ByteStream Error: {err}"),
+            Error::Corruption {
+                path,
+                offset,
+                problem,
+            } => write!(
+                f,
+                "{} is corrupt at byte {offset}: {problem}",
+                path.display()
+            ),
+            Error::ShortBody { expected, received } => {
+                write!(f, "S3 body ended after {received} of {expected} bytes")
+            }
             Error::KanalRecv(err) => write!(f, "KanalRecv Error: {err}"),
             Error::RkyvDesererialize(err) => write!(f, "RkyvDeserialize Error: {err}"),
             Error::StripPrefix(err) => write!(f, "StripPrefix Error: {err}"),
             Error::Dialoguer(err) => write!(f, "Dialoguer: {err}"),
+            Error::WorkersEnded(msg) => write!(f, "{msg}"),
         }
     }
 }
@@ -215,13 +271,25 @@ impl
             aws_sdk_s3::operation::create_multipart_upload::CreateMultipartUploadError,
         >,
     ) -> Self {
+        // keep the HTTP status, which is gone once this becomes a service error
+        let status = error
+            .raw_response()
+            .map(|response| response.status().as_u16());
+        // a timeout or a failed connection never got an answer
+        let no_response = matches!(
+            error,
+            aws_sdk_s3::error::SdkError::TimeoutError(_)
+                | aws_sdk_s3::error::SdkError::DispatchFailure(_)
+        );
         // cast this error into a service error
         let service_error = error.into_service_error();
         // get this errors metadata
         let meta = service_error.meta();
         Error::S3 {
+            status,
             code: meta.code().map(ToOwned::to_owned),
             message: meta.message().map(ToOwned::to_owned),
+            no_response,
         }
     }
 }
@@ -232,13 +300,25 @@ impl From<aws_sdk_s3::error::SdkError<aws_sdk_s3::operation::upload_part::Upload
     fn from(
         error: aws_sdk_s3::error::SdkError<aws_sdk_s3::operation::upload_part::UploadPartError>,
     ) -> Self {
+        // keep the HTTP status, which is gone once this becomes a service error
+        let status = error
+            .raw_response()
+            .map(|response| response.status().as_u16());
+        // a timeout or a failed connection never got an answer
+        let no_response = matches!(
+            error,
+            aws_sdk_s3::error::SdkError::TimeoutError(_)
+                | aws_sdk_s3::error::SdkError::DispatchFailure(_)
+        );
         // cast this error into a service error
         let service_error = error.into_service_error();
         // get this errors metadata
         let meta = service_error.meta();
         Error::S3 {
+            status,
             code: meta.code().map(ToOwned::to_owned),
             message: meta.message().map(ToOwned::to_owned),
+            no_response,
         }
     }
 }
@@ -255,13 +335,25 @@ impl
             aws_sdk_s3::operation::complete_multipart_upload::CompleteMultipartUploadError,
         >,
     ) -> Self {
+        // keep the HTTP status, which is gone once this becomes a service error
+        let status = error
+            .raw_response()
+            .map(|response| response.status().as_u16());
+        // a timeout or a failed connection never got an answer
+        let no_response = matches!(
+            error,
+            aws_sdk_s3::error::SdkError::TimeoutError(_)
+                | aws_sdk_s3::error::SdkError::DispatchFailure(_)
+        );
         // cast this error into a service error
         let service_error = error.into_service_error();
         // get this errors metadata
         let meta = service_error.meta();
         Error::S3 {
+            status,
             code: meta.code().map(ToOwned::to_owned),
             message: meta.message().map(ToOwned::to_owned),
+            no_response,
         }
     }
 }
@@ -278,31 +370,102 @@ impl
             aws_sdk_s3::operation::abort_multipart_upload::AbortMultipartUploadError,
         >,
     ) -> Self {
+        // keep the HTTP status, which is gone once this becomes a service error
+        let status = error
+            .raw_response()
+            .map(|response| response.status().as_u16());
+        // a timeout or a failed connection never got an answer
+        let no_response = matches!(
+            error,
+            aws_sdk_s3::error::SdkError::TimeoutError(_)
+                | aws_sdk_s3::error::SdkError::DispatchFailure(_)
+        );
         // cast this error into a service error
         let service_error = error.into_service_error();
         // get this errors metadata
         let meta = service_error.meta();
         Error::S3 {
+            status,
             code: meta.code().map(ToOwned::to_owned),
             message: meta.message().map(ToOwned::to_owned),
+            no_response,
         }
+    }
+}
+
+impl Error {
+    /// Converts any S3 SDK error into an [`Error::S3`], keeping its HTTP status, code, and
+    /// message, and whether any answer arrived
+    ///
+    /// # Arguments
+    ///
+    /// * `error` - The SDK error
+    pub fn from_s3<E: aws_sdk_s3::error::ProvideErrorMetadata>(
+        error: &aws_sdk_s3::error::SdkError<E, aws_sdk_s3::config::http::HttpResponse>,
+    ) -> Self {
+        // the shared conversion keeps the status, code, and message
+        s3_error(error)
+    }
+}
+
+/// Converts an S3 SDK error into an [`Error::S3`], keeping its HTTP status, code, and message, and
+/// whether any answer arrived
+///
+/// # Arguments
+///
+/// * `error` - The SDK error
+fn s3_error<E: aws_sdk_s3::error::ProvideErrorMetadata>(
+    error: &aws_sdk_s3::error::SdkError<E, aws_sdk_s3::config::http::HttpResponse>,
+) -> Error {
+    use aws_sdk_s3::error::ProvideErrorMetadata;
+    // keep the HTTP status of any answer
+    let status = error
+        .raw_response()
+        .map(|response| response.status().as_u16());
+    // a timeout or a failed connection never got an answer
+    let no_response = matches!(
+        error,
+        aws_sdk_s3::error::SdkError::TimeoutError(_)
+            | aws_sdk_s3::error::SdkError::DispatchFailure(_)
+    );
+    // a service error's code and message; other errors carry neither
+    Error::S3 {
+        status,
+        code: error.code().map(ToOwned::to_owned),
+        message: error.message().map(ToOwned::to_owned),
+        no_response,
     }
 }
 
 impl From<aws_sdk_s3::error::SdkError<aws_sdk_s3::operation::get_object::GetObjectError>>
     for Error
 {
+    /// Converts a failed download into an [`Error::S3`]
+    ///
+    /// # Arguments
+    ///
+    /// * `error` - The SDK error
     fn from(
         error: aws_sdk_s3::error::SdkError<aws_sdk_s3::operation::get_object::GetObjectError>,
     ) -> Self {
-        // cast this error into a service error
-        let service_error = error.into_service_error();
-        // get this errors metadata
-        let meta = service_error.meta();
-        Error::S3 {
-            code: meta.code().map(ToOwned::to_owned),
-            message: meta.message().map(ToOwned::to_owned),
-        }
+        // the shared conversion keeps the status, code, and message
+        s3_error(&error)
+    }
+}
+
+impl From<aws_sdk_s3::error::SdkError<aws_sdk_s3::operation::head_object::HeadObjectError>>
+    for Error
+{
+    /// Converts a failed HEAD of an object into an [`Error::S3`]
+    ///
+    /// # Arguments
+    ///
+    /// * `error` - The SDK error
+    fn from(
+        error: aws_sdk_s3::error::SdkError<aws_sdk_s3::operation::head_object::HeadObjectError>,
+    ) -> Self {
+        // the shared conversion keeps the status, code, and message
+        s3_error(&error)
     }
 }
 

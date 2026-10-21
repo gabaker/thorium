@@ -2,26 +2,23 @@
 
 use ahash::AHasher;
 use chrono::{DateTime, Utc};
-use futures::{StreamExt, stream::FuturesUnordered};
-use indicatif::ProgressBar;
 use rkyv::{Archive, CheckBytes, Deserialize, Serialize};
 use scylla::{
-    DeserializeRow,
-    client::session::Session,
-    errors::{ExecutionError, PrepareError},
-    statement::prepared::PreparedStatement,
+    DeserializeRow, client::session::Session, errors::PrepareError,
+    statement::prepared::PreparedStatement, value::MaybeUnset,
 };
-use std::{hash::Hasher, sync::Arc};
+use std::hash::Hasher;
 use thorium::{
     Conf,
     models::{NotificationLevel, NotificationType},
 };
 use uuid::Uuid;
 
-use crate::Error;
+use super::Versioned;
 use crate::backup::{Backup, Restore, Scrub, Utils};
 
-/// A single row from the notifications table
+/// A notifications row as format 2 archives it, with its remaining TTL; `None` is a cell the
+/// source row held unset
 #[derive(Debug, Archive, Serialize, Deserialize, DeserializeRow)]
 #[archive_attr(derive(Debug, CheckBytes))]
 #[scylla(flavor = "enforce_order", skip_name_checks)]
@@ -35,11 +32,14 @@ pub struct Notification {
     /// The notification's unique ID
     pub id: Uuid,
     /// The notification's message
-    pub msg: String,
+    pub msg: Option<String>,
     /// The notification's level
-    pub level: NotificationLevel,
+    pub level: Option<NotificationLevel>,
     /// The id of a ban this notification is referencing if there is one
     pub ban_id: Option<Uuid>,
+    /// The seconds the row's message had left to live when it was backed up, or `None` when it
+    /// was permanent
+    pub ttl: Option<i32>,
 }
 
 impl Utils for Notification {
@@ -51,6 +51,11 @@ impl Utils for Notification {
 
 #[async_trait::async_trait]
 impl Backup for Notification {
+    /// The columns of this table's partition key, used to name rows that fail to decode
+    fn partition_key() -> &'static [&'static str] {
+        &["kind", "key"]
+    }
+
     /// The prepared statement to use when retrieving data from Scylla
     ///
     /// # Arguments
@@ -64,7 +69,7 @@ impl Backup for Notification {
         // build logs get prepared statement
         scylla
             .prepare(format!(
-                "SELECT kind, key, created, id, msg, level, ban_id \
+                "SELECT kind, key, created, id, msg, level, ban_id, TTL(msg) \
                 FROM {}.{} \
                 WHERE token(kind, key) >= ? AND token(kind, key) <= ?",
                 ns,
@@ -94,11 +99,17 @@ impl Restore for Notification {
     // notifications are not partitioned
     type PartitionConf = ();
 
-    /// The steps to once run before restoring data
-    async fn prep(_scylla: &Session, _ns: &str) -> Result<(), ExecutionError> {
-        // no prep steps needed
-        Ok(())
-    }
+    /// The kind, key, creation time, id, message, level, ban id, and TTL
+    type Values = (
+        NotificationType,
+        String,
+        DateTime<Utc>,
+        Uuid,
+        Option<String>,
+        Option<NotificationLevel>,
+        Option<Uuid>,
+        MaybeUnset<i32>,
+    );
 
     /// The prepared statement to use when restoring data to scylla
     ///
@@ -114,7 +125,7 @@ impl Restore for Notification {
             .prepare(format!(
                 "INSERT INTO {}.{} \
                 (kind, key, created, id, msg, level, ban_id) \
-                VALUES (?, ?, ?, ?, ?, ?, ?)",
+                VALUES (?, ?, ?, ?, ?, ?, ?) USING TTL ?",
                 ns,
                 Self::name(),
             ))
@@ -130,74 +141,76 @@ impl Restore for Notification {
         // notifications are not partitioned
     }
 
-    /// Restore a single partition
+    /// Returns the values the restore's insert binds for this row: a format-2 row keeps the TTL
+    /// it had left, 0 making a permanent row permanent again, while a format-1 row, which carries
+    /// no TTL, leaves it unset so the row takes the table's default TTL
     ///
     /// # Arguments
     ///
-    /// * `buffer` - The buffer we should restore data from
-    /// * `scylla` - The client to use when talking to scylla
-    /// * `rows_restored` - The number of rows that have been restored
-    /// * `partition_size` - The partition size to use when restoring data
-    /// * `progress` - The bar to report progress with
-    /// * `prepared` - The prepared statement to inject data with
-    async fn restore<'a>(
-        buffer: &'a [u8],
-        scylla: &Arc<Session>,
-        _partition_size: &(),
-        rows_restored: &mut usize,
-        progress: &mut ProgressBar,
-        prepared: &PreparedStatement,
-    ) -> Result<(), Error> {
-        // cast our buffer to its archived type
-        let rows = rkyv::check_archived_root::<Vec<Notification>>(buffer)?;
-        // build a set of futures
-        let mut futures = FuturesUnordered::new();
-        // build our queries to insert this partitions rows
-        for row in rows.iter() {
-            let kind: NotificationType = row.kind.deserialize(&mut rkyv::Infallible)?;
-            let level: NotificationLevel = row.level.deserialize(&mut rkyv::Infallible)?;
-            // deserialize this rows uploaded timestamp
-            let created: DateTime<Utc> = row.created.deserialize(&mut rkyv::Infallible)?;
-            let query = scylla.execute_unpaged(
-                prepared,
-                (
-                    kind,
-                    row.key.as_str(),
-                    created,
-                    row.id,
-                    row.msg.as_str(),
-                    level,
-                    row.ban_id.as_ref(),
-                ),
-            );
-            // add this to our futures
-            futures.push(query);
-            // if we have 1000 futures then wait for at least 500 of them to complete
-            if futures.len() > 1000 {
-                // poll our futures until one is complete
-                while let Some(query_result) = futures.next().await {
-                    // raise any errors
-                    query_result?;
-                    // increment our restored row count
-                    *rows_restored += 1;
-                    // set our current row count progress message
-                    progress.set_message(rows_restored.to_string());
-                    // if we have less then 100 future to go then refill our future set
-                    if futures.len() < 100 {
-                        break;
-                    }
-                }
-            }
-        }
-        // poll our futures until one is complete
-        while let Some(query_result) = futures.next().await {
-            // raise any errors
-            query_result?;
-            // increment our restored row count
-            *rows_restored += 1;
-            // set our current row count progress message
-            progress.set_message(rows_restored.to_string());
-        }
-        Ok(())
+    /// * `_partition_conf` - Unused, as notifications aren't bucketed
+    /// * `format` - The format version the row was archived in
+    fn values(self, _partition_conf: &(), format: u32) -> Self::Values {
+        // an unset TTL gives the row the table's default
+        let ttl = if format < 2 {
+            MaybeUnset::Unset
+        } else {
+            MaybeUnset::Set(self.ttl.unwrap_or(0))
+        };
+        (
+            self.kind,
+            self.key,
+            self.created,
+            self.id,
+            self.msg,
+            self.level,
+            self.ban_id,
+            ttl,
+        )
     }
+}
+
+/// A notifications row as format 1 archives it, without its TTL
+#[derive(Debug, Clone, Archive, Serialize, Deserialize)]
+#[archive_attr(derive(Debug, CheckBytes))]
+pub struct NotificationV1 {
+    /// The kind of notification this is
+    pub kind: NotificationType,
+    /// The key to the item this notification relates to
+    pub key: String,
+    /// The time this notification was created
+    pub created: DateTime<Utc>,
+    /// The notification's unique ID
+    pub id: Uuid,
+    /// The notification's message
+    pub msg: String,
+    /// The notification's level
+    pub level: NotificationLevel,
+    /// The id of a ban this notification is referencing if there is one
+    pub ban_id: Option<Uuid>,
+}
+
+impl From<NotificationV1> for Notification {
+    /// Converts a format-1 row, whose required fields are always set and which carries no TTL
+    ///
+    /// # Arguments
+    ///
+    /// * `row` - The format-1 row
+    fn from(row: NotificationV1) -> Self {
+        // format 1 could only hold rows with these cells set, and didn't archive the added columns
+        Notification {
+            kind: row.kind,
+            key: row.key,
+            created: row.created,
+            id: row.id,
+            msg: Some(row.msg),
+            level: Some(row.level),
+            ban_id: row.ban_id,
+            ttl: None,
+        }
+    }
+}
+
+/// Format 1 archives `Notification` rows as [`NotificationV1`]
+impl Versioned for Notification {
+    type V1 = NotificationV1;
 }

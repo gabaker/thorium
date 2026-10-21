@@ -54,6 +54,7 @@
         - [Create Notifications](./admins/notifications_admins.md)
         - [Setting Up KVM VMs for Reactor](./admins/reactor_kvm_setup.md)
     - [Admin Command Line Tool](./admins/thoradm/thoradm.md)
+        - [Taking Backups](./admins/thoradm/taking_backups.md)
     - [Common Issues](./admins/common_issues.md)
         - [Jobs Stuck At Created](./admins/common_issues/jobs_stuck_at_created.md)
     - [Network Policies](./admins/network_policies/network_policies.md)

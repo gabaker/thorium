@@ -2,23 +2,19 @@
 
 use ahash::AHasher;
 use chrono::{DateTime, Utc};
-use futures::{StreamExt, stream::FuturesUnordered};
-use indicatif::ProgressBar;
-use rkyv::{Archive, CheckBytes, Deserialize, Serialize, string::ArchivedString};
+use rkyv::{Archive, CheckBytes, Deserialize, Serialize};
 use scylla::{
-    DeserializeRow,
-    client::session::Session,
-    errors::{ExecutionError, PrepareError},
+    DeserializeRow, client::session::Session, errors::PrepareError,
     statement::prepared::PreparedStatement,
 };
-use std::{hash::Hasher, sync::Arc};
+use std::hash::Hasher;
 use thorium::{Conf, models::EntityKinds};
 use uuid::Uuid;
 
-use crate::Error;
-use crate::backup::{Backup, Restore, Scrub, Utils, utils};
+use super::Versioned;
+use crate::backup::{Backup, Restore, Scrub, Utils};
 
-/// A single row from the entities table
+/// An entities row as format 2 archives it; `None` is a cell the source row held unset
 #[derive(Debug, Archive, Serialize, Deserialize, DeserializeRow)]
 #[archive_attr(derive(Debug, CheckBytes))]
 #[scylla(flavor = "enforce_order", skip_name_checks)]
@@ -36,11 +32,11 @@ pub struct Entity {
     /// The entity's unique ID
     pub id: Uuid,
     /// The name of the entity
-    pub name: String,
+    pub name: Option<String>,
     /// The user who originally submitted the entity
-    pub submitter: String,
+    pub submitter: Option<String>,
     /// The data specific to the entity's kind
-    pub kind_data: String,
+    pub kind_data: Option<String>,
     /// The entity's description
     pub description: Option<String>,
     /// The path to this entities image if it has one
@@ -56,6 +52,11 @@ impl Utils for Entity {
 
 #[async_trait::async_trait]
 impl Backup for Entity {
+    /// The columns of this table's partition key, used to name rows that fail to decode
+    fn partition_key() -> &'static [&'static str] {
+        &["kind", "group", "year", "bucket"]
+    }
+
     /// The prepared statement to use when retrieving data from Scylla
     ///
     /// # Arguments
@@ -102,12 +103,21 @@ impl Restore for Entity {
     // the size itself
     type PartitionConf = u16;
 
-    /// The steps to once run before restoring data
-    async fn prep(scylla: &Session, ns: &str) -> Result<(), ExecutionError> {
-        // drop the materialized views for this table
-        utils::drop_materialized_view(ns, "entities_by_name", scylla).await?;
-        Ok(())
-    }
+    /// The kind, group, year, bucket, creation time, id, name, submitter, kind data,
+    /// description, and image
+    type Values = (
+        EntityKinds,
+        String,
+        i32,
+        i32,
+        DateTime<Utc>,
+        Uuid,
+        Option<String>,
+        Option<String>,
+        Option<String>,
+        Option<String>,
+        Option<String>,
+    );
 
     /// The prepared statement to use when restoring data to scylla
     ///
@@ -139,79 +149,85 @@ impl Restore for Entity {
         config.thorium.entities.partition_size
     }
 
-    /// Restore a single partition
+    /// Returns the values the restore's insert binds for this row, in a bucket of the target's
+    /// partition size
     ///
     /// # Arguments
     ///
-    /// * `buffer` - The buffer we should restore data from
-    /// * `scylla` - The client to use when talking to scylla
-    /// * `rows_restored` - The number of rows that have been restored
-    /// * `partition_size` - The partition size to use when restoring data
-    /// * `progress` - The bar to report progress with
-    /// * `prepared` - The prepared statement to inject data with
-    async fn restore<'a>(
-        buffer: &'a [u8],
-        scylla: &Arc<Session>,
-        partition_size: &u16,
-        rows_restored: &mut usize,
-        progress: &mut ProgressBar,
-        prepared: &PreparedStatement,
-    ) -> Result<(), Error> {
-        // cast our buffer to its archived type
-        let rows = rkyv::check_archived_root::<Vec<Entity>>(buffer)?;
-        // build a set of futures
-        let mut futures = FuturesUnordered::new();
-        // build our queries to insert this partitions rows
-        for row in rows.iter() {
-            let kind: EntityKinds = row.kind.deserialize(&mut rkyv::Infallible)?;
-            // deserialize this rows uploaded timestamp
-            let created = row.created.deserialize(&mut rkyv::Infallible)?;
-            // calculate the new bucket
-            let bucket = thorium::utils::helpers::partition(created, row.year, *partition_size);
-            let query = scylla.execute_unpaged(
-                prepared,
-                (
-                    kind,
-                    row.group.as_str(),
-                    row.year,
-                    bucket,
-                    created,
-                    row.id,
-                    row.name.as_str(),
-                    row.submitter.as_str(),
-                    row.kind_data.as_str(),
-                    row.description.as_ref().map(ArchivedString::as_str),
-                    row.image.as_ref().map(ArchivedString::as_str),
-                ),
-            );
-            // add this to our futures
-            futures.push(query);
-            // if we have 1000 futures then wait for at least 500 of them to complete
-            if futures.len() > 1000 {
-                // poll our futures until one is complete
-                while let Some(query_result) = futures.next().await {
-                    // raise any errors
-                    query_result?;
-                    // increment our restored row count
-                    *rows_restored += 1;
-                    // set our current row count progress message
-                    progress.set_message(rows_restored.to_string());
-                    // if we have less then 100 future to go then refill our future set
-                    if futures.len() < 100 {
-                        break;
-                    }
-                }
-            }
-        }
-        // poll our futures until one is complete
-        while let Some(query_result) = futures.next().await {
-            // raise any errors
-            query_result?;
-            // increment our restored row count
-            *rows_restored += 1;
-            // set our current row count progress message
-            progress.set_message(rows_restored.to_string());
-        }
-        Ok(())
+    /// * `partition_size` - The partition size to bucket the row with
+    /// * `_format` - The format version the row was archived in
+    fn values(self, partition_size: &u16, _format: u32) -> Self::Values {
+        // calculate the new bucket
+        let bucket = thorium::utils::helpers::partition(self.created, self.year, *partition_size);
+        (
+            self.kind,
+            self.group,
+            self.year,
+            bucket,
+            self.created,
+            self.id,
+            self.name,
+            self.submitter,
+            self.kind_data,
+            self.description,
+            self.image,
+        )
     }
+}
+
+/// An entities row as format 1 archives it
+#[derive(Debug, Clone, Archive, Serialize, Deserialize)]
+#[archive_attr(derive(Debug, CheckBytes))]
+pub struct EntityV1 {
+    /// The entity's kind as a raw string
+    pub kind: EntityKinds,
+    /// The group the entity is available to
+    pub group: String,
+    /// The year this entity is from
+    pub year: i32,
+    /// The bucket this entity is in
+    pub bucket: i32,
+    /// The time this policy was created
+    pub created: DateTime<Utc>,
+    /// The entity's unique ID
+    pub id: Uuid,
+    /// The name of the entity
+    pub name: String,
+    /// The user who originally submitted the entity
+    pub submitter: String,
+    /// The data specific to the entity's kind
+    pub kind_data: String,
+    /// The entity's description
+    pub description: Option<String>,
+    /// The path to this entities image if it has one
+    pub image: Option<String>,
+}
+
+impl From<EntityV1> for Entity {
+    /// Converts a format-1 row, whose required fields are always set
+    ///
+    /// # Arguments
+    ///
+    /// * `row` - The format-1 row
+    fn from(row: EntityV1) -> Self {
+        // format 1 could only hold rows with these cells set
+        Entity {
+            kind: row.kind,
+            group: row.group,
+            year: row.year,
+            bucket: row.bucket,
+            created: row.created,
+            id: row.id,
+            name: Some(row.name),
+            submitter: Some(row.submitter),
+            kind_data: Some(row.kind_data),
+            description: row.description,
+            image: row.image,
+        }
+    }
+}
+
+/// Format 1 archives `Entity` rows as [`EntityV1`]
+impl Versioned for Entity {
+    type V1 = EntityV1;
 }

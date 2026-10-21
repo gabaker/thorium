@@ -271,6 +271,22 @@ spec:
     <REGISTRY2.DOMAIN: <base64 USERNAME:PASSWORD>
 ```
 
+The example leaves out `config.thorium.namespace`, so Thorium uses its default namespace,
+`thorium`. The namespace names the Scylla keyspace and prefixes every Redis key Thorium writes. If
+you set it, it may hold only lowercase ASCII letters (`a-z`), digits and underscores, must start
+with a lowercase letter, and can be at most 48 characters long. Thorium's services refuse to start
+with any other namespace and name `thorium.namespace` in the error.
+
+A deployment whose namespace has uppercase letters is refused too: after the upgrade, the API
+refuses to start and its error names the rule. To start it, rename the namespace to its lowercase
+form. Its Scylla tables already live in the lowercase keyspace, since Scylla folds an unquoted
+keyspace name to lowercase, so they are found under the new name. Its Redis keys keep the old
+prefix with its uppercase letters, so the API doesn't find the old Redis state (users, groups,
+tokens, settings, queues and cursors) under the new prefix, and the deployment starts without it.
+Thorium provides no automatic migration of that state. To carry it over, rename the keys' prefix
+yourself or restore a `thoradm backup` taken before the upgrade; neither is a procedure Thorium
+provides or has tested.
+
 Thorium deployments that consist of multiple K8s clusters (managed by a single scaler pod) will
 require a dedicated `kubeconfig` secret rather than the use of a service account that is default
 for single cluster instances. This secret file must be built manually from the `kubeconfig` files
