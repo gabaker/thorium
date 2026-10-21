@@ -221,6 +221,7 @@ pub struct RepoSubmission {
 /// The scheme to use when pulling this repos data
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
 #[cfg_attr(feature = "api", derive(utoipa::ToSchema))]
+#[cfg_attr(feature = "scylla-utils", derive(thorium_derive::ScyllaStoreJson))]
 pub enum RepoScheme {
     /// Use https when pulling this repo
     Https,
@@ -280,6 +281,7 @@ pub struct RepoSubmissionChunk {
 /// The commit or branch to checkout
 #[derive(Serialize, Deserialize, Debug, Clone, Eq, PartialEq)]
 #[cfg_attr(feature = "api", derive(utoipa::ToSchema))]
+#[cfg_attr(feature = "scylla-utils", derive(thorium_derive::ScyllaStoreJson))]
 pub enum RepoCheckout {
     /// Checkout a commit in detached mode
     Commit(String),
@@ -1396,7 +1398,7 @@ impl RepoListParams {
             None => match Utc.timestamp_opt(shared.config.thorium.repos.earliest, 0) {
                 chrono::LocalResult::Single(default_end) => Ok(default_end),
                 _ => crate::internal_err!(format!(
-                    "default earliest repos timestamp is invalid or ambigous - {}",
+                    "default earliest repos timestamp is invalid or ambiguous - {}",
                     shared.config.thorium.repos.earliest
                 )),
             },
@@ -1472,16 +1474,26 @@ impl RepoDownloadOpts {
     }
 }
 
+/// The number of repo submissions in one partition of the repos list, read to rebuild its
+/// census
 #[derive(Debug)]
-#[cfg_attr(feature = "scylla-utils", derive(scylla::DeserializeRow))]
 #[cfg_attr(
     feature = "scylla-utils",
-    scylla(flavor = "enforce_order", skip_name_checks)
+    derive(crate::models::schema::ScyllaProjection)
+)]
+#[cfg_attr(
+    feature = "scylla-utils",
+    thorium_projection(of = crate::models::schema::scylla::ReposListTable)
 )]
 pub struct RepoCensusRow {
+    /// The group the partition is in
     pub group: String,
+    /// The year the partition is in
     pub year: i32,
+    /// The partition's bucket within its year
     pub bucket: i32,
+    /// How many rows the partition holds
+    #[cfg_attr(feature = "scylla-utils", thorium(expr = "count(*)"))]
     pub count: i64,
 }
 
@@ -1490,21 +1502,14 @@ impl crate::models::CensusSupport for Repo {
     /// The type returned by our prepared statement
     type Row = RepoCensusRow;
 
-    /// Build the prepared statement for getting partition count info
-    async fn scan_prepared_statement(
-        scylla: &scylla::client::session::Session,
-        ns: &str,
-    ) -> Result<scylla::statement::prepared::PreparedStatement, scylla::errors::PrepareError> {
-        // build tags get partition count prepared statement
-        scylla
-            .prepare(format!(
-                "SELECT group, year, bucket, count(*) \
-                FROM {}.repos_list \
-                WHERE token(group, year, bucket) >= ? AND token(group, year, bucket) <= ? \
-                GROUP BY group, year, bucket",
-                ns,
-            ))
-            .await
+    /// The generated census statement's text for a namespace
+    ///
+    /// # Arguments
+    ///
+    /// * `ns` - The namespace the table is in
+    fn census_cql(ns: &str) -> String {
+        // the census statement generated on the table's queries struct
+        crate::models::schema::queries::ReposListQueries::census_cql(ns)
     }
 
     /// Get the count for this partition

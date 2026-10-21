@@ -10,8 +10,9 @@ use tracing::{Level, event, instrument};
 
 use super::keys::tags;
 use crate::models::backends::TagSupport;
+use crate::models::schema::scylla::TagsTableRef;
 use crate::models::{
-    Event, FullTagRow, TagDeleteRequest, TagMap, TagRequest, TagRow, TagSearchEvent, TagType, User,
+    Event, FullTagRow, TagDeleteRequest, TagMap, TagRequest, TagSearchEvent, TagType, User,
 };
 use crate::utils::{ApiError, Shared, helpers};
 use crate::{bad, conn, log_scylla_err};
@@ -59,16 +60,10 @@ pub async fn create<T: TagSupport>(
                     for tag_value in tag_values {
                         let value_lower = tag_value.to_lowercase();
                         // save this tag into scylla
-                        shared
-                            .scylla
-                            .session
-                            .execute_unpaged(
-                                &shared.scylla.prep.tags.insert,
-                                (
-                                    kind, group, &key, year, bucket, tag_key, tag_value, *timestamp, &key_lower, &value_lower
-                                ),
-                            )
-                            .await?;
+                        let row = TagsTableRef {
+                            tag_type: &kind, group, year, bucket, key: tag_key, value: tag_value, uploaded: *timestamp, item: &key, key_lower: &key_lower, value_lower: &value_lower,
+                        };
+                        shared.scylla.queries.tags.insert(&shared.scylla.session, &row).await?;
                         let stream_key = tags::census_stream(
                             T::tag_kind(),
                             group,
@@ -163,25 +158,19 @@ pub async fn create_owned<T: TagSupport>(
                     for tag_value in tag_values {
                         let value_lower = tag_value.to_lowercase();
                         // save this tag into scylla
-                        shared
-                            .scylla
-                            .session
-                            .execute_unpaged(
-                                &shared.scylla.prep.tags.insert,
-                                (
-                                    kind,
-                                    group,
-                                    &key,
-                                    year,
-                                    bucket,
-                                    tag_key,
-                                    tag_value,
-                                    *timestamp,
-                                    &key_lower,
-                                    &value_lower,
-                                ),
-                            )
-                            .await?;
+                        let row = TagsTableRef {
+                            tag_type: &kind,
+                            group,
+                            year,
+                            bucket,
+                            key: tag_key,
+                            value: tag_value,
+                            uploaded: *timestamp,
+                            item: &key,
+                            key_lower: &key_lower,
+                            value_lower: &value_lower,
+                        };
+                        shared.scylla.queries.tags.insert(&shared.scylla.session, &row).await?;
                         // build the keys for this tags census info
                         let stream_key = tags::census_stream(
                             T::tag_kind(),
@@ -252,46 +241,15 @@ async fn get_tag_rows(
 ) -> Result<Vec<FullTagRow>, ApiError> {
     // default to 30 rows
     let mut full_rows = Vec::with_capacity(30);
-    // if we have more then 100 groups then chunk it into bathes of 100  otherwise just get our tag rows
-    if groups.len() > 100 {
-        // break our groups into chunks of 100
-        for chunk in groups.chunks(100) {
-            // turn our group chunk into a vec
-            let chunk_vec = chunk.to_vec();
-            // get the tag rows for this item
-            let query = shared
-                .scylla
-                .session
-                .execute_unpaged(
-                    &shared.scylla.prep.tags.get_rows,
-                    (tag_type, chunk_vec, item),
-                )
-                .await?;
-            // enable casting to types for this query
-            let query_rows = query.into_rows_result()?;
-            // crawl over rows and add them to our list while logging any errors
-            full_rows.extend(
-                query_rows
-                    .rows::<FullTagRow>()?
-                    .filter_map(|row| log_scylla_err!(row)),
-            );
-        }
-    } else {
-        // get the tag rows for this item
-        let query = shared
-            .scylla
-            .session
-            .execute_unpaged(&shared.scylla.prep.tags.get_rows, (tag_type, groups, item))
-            .await?;
-        // enable casting to types for this query
-        let query_rows = query.into_rows_result()?;
-        // crawl over rows and add them to our list while logging any errors
-        full_rows.extend(
-            query_rows
-                .rows::<FullTagRow>()?
-                .filter_map(|row| log_scylla_err!(row)),
-        );
-    }
+    // get the tag rows for this item in chunks of 100 groups
+    let rows = shared
+        .scylla
+        .queries
+        .tags_by_item
+        .get_rows(&shared.scylla.session, &tag_type, groups, item)
+        .await?;
+    // crawl over rows and add them to our list while logging any errors
+    full_rows.extend(rows.into_iter().filter_map(|row| log_scylla_err!(row)));
     Ok(full_rows)
 }
 
@@ -378,13 +336,18 @@ pub async fn delete<T: TagSupport>(
                                 // delete this tag row
                                 shared
                                     .scylla
-                                    .session
-                                    .execute_unpaged(
-                                        &shared.scylla.prep.tags.delete,
-                                        (
-                                            kind, group, year, bucket, tag_key, &value, *uploaded,
-                                            key,
-                                        ),
+                                    .queries
+                                    .tags
+                                    .delete(
+                                        &shared.scylla.session,
+                                        &kind,
+                                        group,
+                                        *year,
+                                        *bucket,
+                                        tag_key,
+                                        value,
+                                        *uploaded,
+                                        key,
                                     )
                                     .await?;
                                 // mark that we deleted at least one tag in this group
@@ -432,57 +395,23 @@ pub async fn get(
     map: &mut TagMap,
     shared: &Shared,
 ) -> Result<(), ApiError> {
-    // if we have more then 100 groups then chunk it into bathes of 100  otherwise just get our info
-    if groups.len() > 100 {
-        // break our groups into chunks of 100
-        for chunk in groups.chunks(100) {
-            // turn our group chunk into a vec
-            let chunk_vec = chunk.to_vec();
-            // get this chunks data
-            let query = shared
-                .scylla
-                .session
-                .execute_unpaged(&shared.scylla.prep.tags.get, (tag_type, chunk_vec, item))
-                .await?;
-            // enable casting to types for this query
-            let query_rows = query.into_rows_result()?;
-            // set the type to cast this stream too
-            let mut typed_stream = query_rows.rows::<TagRow>()?;
-            // cast our rows to typed values
-            while let Some(row) = typed_stream.next() {
-                // raise any errors from casting
-                if let Some(tag) = log_scylla_err!(row) {
-                    // get our key map oroinsert a default one
-                    let key_map = map.entry(tag.key).or_default();
-                    // get our value map or insert a default one
-                    let group_list = key_map.entry(tag.value).or_default();
-                    // extend our group list for this tag
-                    group_list.insert(tag.group);
-                }
-            }
-        }
-    } else {
-        // we have less then 100 groups so just get their data
-        let query = shared
-            .scylla
-            .session
-            .execute_unpaged(&shared.scylla.prep.tags.get, (tag_type, groups, item))
-            .await?;
-        // enable casting to types for this query
-        let query_rows = query.into_rows_result()?;
-        // set the type to cast this stream too
-        let mut typed_stream = query_rows.rows::<TagRow>()?;
-        // cast our rows to typed values
-        while let Some(row) = typed_stream.next() {
-            // raise any errors from casting
-            if let Some(tag) = log_scylla_err!(row) {
-                // get our key map oroinsert a default one
-                let key_map = map.entry(tag.key).or_default();
-                // get our value map or insert a default one
-                let group_list = key_map.entry(tag.value).or_default();
-                // extend our group list for this tag
-                group_list.insert(tag.group);
-            }
+    // get the tags for this item in chunks of 100 groups
+    let rows = shared
+        .scylla
+        .queries
+        .tags_by_item
+        .get(&shared.scylla.session, &tag_type, groups, item)
+        .await?;
+    // cast our rows to typed values
+    for row in rows {
+        // raise any errors from casting
+        if let Some(tag) = log_scylla_err!(row) {
+            // get our key map oroinsert a default one
+            let key_map = map.entry(tag.key).or_default();
+            // get our value map or insert a default one
+            let group_list = key_map.entry(tag.value).or_default();
+            // extend our group list for this tag
+            group_list.insert(tag.group);
         }
     }
     Ok(())

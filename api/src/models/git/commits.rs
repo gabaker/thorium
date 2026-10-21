@@ -458,18 +458,30 @@ impl Commitish {
     }
 }
 
+/// The number of commitishes in one partition of the commitish list, read to rebuild its
+/// census
 #[derive(Debug)]
-#[cfg_attr(feature = "scylla-utils", derive(scylla::DeserializeRow))]
 #[cfg_attr(
     feature = "scylla-utils",
-    scylla(flavor = "enforce_order", skip_name_checks)
+    derive(crate::models::schema::ScyllaProjection)
+)]
+#[cfg_attr(
+    feature = "scylla-utils",
+    thorium_projection(of = crate::models::schema::scylla::CommitishListTable)
 )]
 pub struct CommitishCensusRow {
+    /// The kind of the partition
     pub kind: CommitishKinds,
+    /// The group the partition is in
     pub group: String,
+    /// The year the partition is in
     pub year: i32,
+    /// The partition's bucket within its year
     pub bucket: i32,
+    /// The repo the partition is for
     pub repo: String,
+    /// How many rows the partition holds
+    #[cfg_attr(feature = "scylla-utils", thorium(expr = "count(*)"))]
     pub count: i64,
 }
 
@@ -478,21 +490,14 @@ impl crate::models::CensusSupport for Commitish {
     /// The type returned by our prepared statement
     type Row = CommitishCensusRow;
 
-    /// Build the prepared statement for getting partition count info
-    async fn scan_prepared_statement(
-        scylla: &scylla::client::session::Session,
-        ns: &str,
-    ) -> Result<scylla::statement::prepared::PreparedStatement, scylla::errors::PrepareError> {
-        // build tags get partition count prepared statement
-        scylla
-            .prepare(format!(
-                "SELECT kind, group, year, bucket, repo, count(*) \
-                FROM {}.commitish_list \
-                WHERE token(kind, group, year, bucket, repo) >= ? AND token(kind, group, year, bucket, repo) <= ? \
-                GROUP BY kind, group, year, bucket, repo",
-                ns,
-            ))
-            .await
+    /// The generated census statement's text for a namespace
+    ///
+    /// # Arguments
+    ///
+    /// * `ns` - The namespace the table is in
+    fn census_cql(ns: &str) -> String {
+        // the census statement generated on the table's queries struct
+        crate::models::schema::queries::CommitishListQueries::census_cql(ns)
     }
 
     /// Get the count for this partition
@@ -775,7 +780,7 @@ impl CommitishListParams {
             None => match Utc.timestamp_opt(shared.config.thorium.repos.earliest, 0) {
                 chrono::LocalResult::Single(default_end) => Ok(default_end),
                 _ => crate::internal_err!(format!(
-                    "default earliest repos timestamp is invalid or ambigous - {}",
+                    "default earliest repos timestamp is invalid or ambiguous - {}",
                     shared.config.thorium.repos.earliest
                 )),
             },

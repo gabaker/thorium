@@ -3,6 +3,7 @@ use tracing::instrument;
 use uuid::Uuid;
 
 use crate::models::S3Objects;
+use crate::models::schema::scylla::S3IdsTableRef;
 use crate::utils::{ApiError, Shared};
 use crate::{not_found, unavailable};
 
@@ -18,16 +19,14 @@ pub async fn s3_id_exists(
     s3_id: &Uuid,
     shared: &Shared,
 ) -> Result<bool, ApiError> {
-    // execute our query
-    let query = shared
+    // check whether scylla has at least one row for this id
+    let exists = shared
         .scylla
-        .session
-        .execute_unpaged(&shared.scylla.prep.s3.id_exists, (objects, &s3_id))
+        .queries
+        .s3_ids
+        .id_exists(&shared.scylla.session, &objects, *s3_id)
         .await?;
-    // cast this query to a rows query
-    let query_rows = query.into_rows_result()?;
-    // make sure we got at least one row from scylla
-    Ok(query_rows.rows_num() > 0)
+    Ok(exists)
 }
 
 /// Checks if we have an existing s3 object for a target sha256/path already
@@ -43,16 +42,14 @@ pub async fn object_exists(
     path: &str,
     shared: &Shared,
 ) -> Result<bool, ApiError> {
-    // execute our query
-    let query = shared
+    // check whether scylla has at least one row for this path
+    let exists = shared
         .scylla
-        .session
-        .execute_unpaged(&shared.scylla.prep.s3.object_exists, (object, path))
+        .queries
+        .s3_sha256s
+        .object_exists(&shared.scylla.session, path, &object)
         .await?;
-    // cast this query to a rows query
-    let query_rows = query.into_rows_result()?;
-    // make sure we got at least one row from scylla
-    Ok(query_rows.rows_num() > 0)
+    Ok(exists)
 }
 
 /// Insert a new s3 object id
@@ -69,13 +66,17 @@ pub async fn insert_s3_id(
     sha256: &str,
     shared: &Shared,
 ) -> Result<(), ApiError> {
+    // build the row for this id
+    let row = S3IdsTableRef {
+        object_type: &objects,
+        id: *s3_id,
+        sha256,
+    };
     shared
         .scylla
-        .session
-        .execute_unpaged(
-            &shared.scylla.prep.s3.insert,
-            (objects.as_str(), &s3_id, sha256),
-        )
+        .queries
+        .s3_ids
+        .insert(&shared.scylla.session, &row)
         .await?;
     Ok(())
 }
@@ -107,17 +108,15 @@ pub async fn generate_id(objects: S3Objects, shared: &Shared) -> Result<Uuid, Ap
 /// * `shared` - Shared Thorium objects
 #[instrument(name = "db::s3::get_s3_id", skip(shared), err(Debug))]
 pub async fn get_s3_id(objects: S3Objects, key: &str, shared: &Shared) -> Result<Uuid, ApiError> {
-    // execute our query
-    let query = shared
+    // get the first row for this key
+    let row = shared
         .scylla
-        .session
-        .execute_unpaged(&shared.scylla.prep.s3.get, (objects, key))
+        .queries
+        .s3_sha256s
+        .get(&shared.scylla.session, key, &objects)
         .await?;
-    // cast this query to a rows query
-    let query_rows = query.into_rows_result()?;
-    // try to get the first row
-    if let Some((s3_id,)) = query_rows.maybe_first_row::<(Uuid,)>()? {
-        Ok(s3_id)
+    if let Some(row) = row {
+        Ok(row.id)
     } else {
         // we didn't get any rows so this id does not exist
         not_found!(format!(
@@ -135,11 +134,12 @@ pub async fn get_s3_id(objects: S3Objects, key: &str, shared: &Shared) -> Result
 /// * `shared` - Shared Thorium objects
 #[instrument(name = "db::s3::delete", skip(id, shared), err(Debug))]
 pub async fn delete(objects: S3Objects, id: Uuid, shared: &Shared) -> Result<(), ApiError> {
-    // execute our query
+    // delete every row of this id
     shared
         .scylla
-        .session
-        .execute_unpaged(&shared.scylla.prep.s3.delete, (objects, id))
+        .queries
+        .s3_ids
+        .delete(&shared.scylla.session, &objects, id)
         .await?;
     Ok(())
 }

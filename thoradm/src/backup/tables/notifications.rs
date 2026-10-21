@@ -3,10 +3,8 @@
 use ahash::AHasher;
 use chrono::{DateTime, Utc};
 use rkyv::{Archive, CheckBytes, Deserialize, Serialize};
-use scylla::{
-    DeserializeRow, client::session::Session, errors::PrepareError,
-    statement::prepared::PreparedStatement, value::MaybeUnset,
-};
+use scylla::SerializeRow;
+use scylla::value::MaybeUnset;
 use std::hash::Hasher;
 use thorium::{
     Conf,
@@ -16,12 +14,15 @@ use uuid::Uuid;
 
 use super::Versioned;
 use crate::backup::{Backup, Restore, Scrub, Utils};
+use thorium::models::schema::ScyllaProjection;
+use thorium::models::schema::queries::NotificationsQueries;
+use thorium::models::schema::scylla::NotificationsTable;
 
 /// A notifications row as format 2 archives it, with its remaining TTL; `None` is a cell the
 /// source row held unset
-#[derive(Debug, Archive, Serialize, Deserialize, DeserializeRow)]
+#[derive(Debug, Archive, Serialize, Deserialize, ScyllaProjection)]
 #[archive_attr(derive(Debug, CheckBytes))]
-#[scylla(flavor = "enforce_order", skip_name_checks)]
+#[thorium_projection(of = NotificationsTable)]
 pub struct Notification {
     /// The kind of notification this is
     pub kind: NotificationType,
@@ -39,6 +40,7 @@ pub struct Notification {
     pub ban_id: Option<Uuid>,
     /// The seconds the row's message had left to live when it was backed up, or `None` when it
     /// was permanent
+    #[thorium(expr = "TTL(msg)")]
     pub ttl: Option<i32>,
 }
 
@@ -51,31 +53,23 @@ impl Utils for Notification {
 
 #[async_trait::async_trait]
 impl Backup for Notification {
-    /// The columns of this table's partition key, used to name rows that fail to decode
-    fn partition_key() -> &'static [&'static str] {
-        &["kind", "key"]
-    }
+    /// The table this archive struct backs up, read through its generated statements
+    type Table = NotificationsTable;
 
-    /// The prepared statement to use when retrieving data from Scylla
+    /// The generated statement reading a token range of notifications with the seconds each
+    /// message has left to live
     ///
     /// # Arguments
     ///
-    /// * `scylla` - The scylla session to build a prepared statement with
-    /// * `ns` - The namespace for this prepared statement
-    async fn prepared_statement(
-        scylla: &Session,
-        ns: &str,
-    ) -> Result<PreparedStatement, PrepareError> {
-        // build logs get prepared statement
-        scylla
-            .prepare(format!(
-                "SELECT kind, key, created, id, msg, level, ban_id, TTL(msg) \
-                FROM {}.{} \
-                WHERE token(kind, key) >= ? AND token(kind, key) <= ?",
-                ns,
-                Self::name(),
-            ))
-            .await
+    /// * `ns` - The namespace the table is in
+    fn scan_cql(ns: &str) -> String {
+        // the generated scan that also reads each message's remaining TTL
+        NotificationsQueries::backup_cql(ns)
+    }
+
+    /// The columns of this table's partition key, used to name rows that fail to decode
+    fn partition_key() -> &'static [&'static str] {
+        &["kind", "key"]
     }
 
     /// Hash this partitions info to see if we have changed partitions
@@ -93,43 +87,45 @@ impl Backup for Notification {
 /// Implement scrub support for the samples list table
 impl Scrub for Notification {}
 
+/// The values a restored row binds by column name to the table's generated full-row insert
+#[derive(SerializeRow)]
+pub struct NotificationValues {
+    /// The `kind` column
+    pub kind: NotificationType,
+    /// The `key` column
+    pub key: String,
+    /// The `created` column
+    pub created: DateTime<Utc>,
+    /// The `id` column
+    pub id: Uuid,
+    /// The `msg` column
+    pub msg: Option<String>,
+    /// The `level` column
+    pub level: Option<NotificationLevel>,
+    /// The `ban_id` column
+    pub ban_id: Option<Uuid>,
+    /// The seconds the row has left to live, unset for the table's default
+    #[scylla(rename = "[ttl]")]
+    pub ttl: MaybeUnset<i32>,
+}
+
 /// Implement restore support for the samples list table
 #[async_trait::async_trait]
 impl Restore for Notification {
     // notifications are not partitioned
     type PartitionConf = ();
 
-    /// The kind, key, creation time, id, message, level, ban id, and TTL
-    type Values = (
-        NotificationType,
-        String,
-        DateTime<Utc>,
-        Uuid,
-        Option<String>,
-        Option<NotificationLevel>,
-        Option<Uuid>,
-        MaybeUnset<i32>,
-    );
+    /// The row the generated full-row insert binds by name
+    type Values = NotificationValues;
 
-    /// The prepared statement to use when restoring data to scylla
+    /// The generated full-row insert that binds the seconds a restored row has left to live
     ///
     /// # Arguments
     ///
-    /// * `scylla` - A scylla client
-    /// * `ns` - The namespace in scylla this table is from
-    async fn prepared_statement(
-        scylla: &Session,
-        ns: &str,
-    ) -> Result<PreparedStatement, PrepareError> {
-        scylla
-            .prepare(format!(
-                "INSERT INTO {}.{} \
-                (kind, key, created, id, msg, level, ban_id) \
-                VALUES (?, ?, ?, ?, ?, ?, ?) USING TTL ?",
-                ns,
-                Self::name(),
-            ))
-            .await
+    /// * `ns` - The namespace the table is in
+    fn insert_cql(ns: &str) -> String {
+        // the generated full-row insert ending in `USING TTL ?`
+        NotificationsQueries::restore_cql(ns)
     }
 
     /// Get the partition size for this data type
@@ -156,16 +152,16 @@ impl Restore for Notification {
         } else {
             MaybeUnset::Set(self.ttl.unwrap_or(0))
         };
-        (
-            self.kind,
-            self.key,
-            self.created,
-            self.id,
-            self.msg,
-            self.level,
-            self.ban_id,
+        NotificationValues {
+            kind: self.kind,
+            key: self.key,
+            created: self.created,
+            id: self.id,
+            msg: self.msg,
+            level: self.level,
+            ban_id: self.ban_id,
             ttl,
-        )
+        }
     }
 }
 

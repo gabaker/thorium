@@ -4,10 +4,7 @@ use ahash::AHasher;
 use bytecheck::CheckBytes;
 use chrono::prelude::*;
 use rkyv::{Archive, Deserialize, Serialize};
-use scylla::DeserializeRow;
-use scylla::client::session::Session;
-use scylla::errors::PrepareError;
-use scylla::statement::prepared::PreparedStatement;
+use scylla::SerializeRow;
 use std::collections::HashMap;
 use std::hash::Hasher;
 use std::path::{Path, PathBuf};
@@ -18,11 +15,13 @@ use super::Versioned;
 use crate::Error;
 use crate::backup::s3::object_key;
 use crate::backup::{Backup, Restore, S3Backup, S3Restore, Scrub, Utils};
+use thorium::models::schema::ScyllaProjection;
+use thorium::models::schema::scylla::CommentsTable;
 
 /// A comment row as format 2 archives it; `None` is a cell the source row held unset
-#[derive(Debug, Archive, Serialize, Deserialize, DeserializeRow)]
+#[derive(Debug, Archive, Serialize, Deserialize, ScyllaProjection)]
 #[archive_attr(derive(Debug, CheckBytes))]
-#[scylla(flavor = "enforce_order", skip_name_checks)]
+#[thorium_projection(of = CommentsTable)]
 pub struct Comment {
     /// The group to share this comment with
     pub group: String,
@@ -49,31 +48,12 @@ impl Utils for Comment {
 
 #[async_trait::async_trait]
 impl Backup for Comment {
+    /// The table this archive struct backs up, read through its generated statements
+    type Table = CommentsTable;
+
     /// The columns of this table's partition key, used to name rows that fail to decode
     fn partition_key() -> &'static [&'static str] {
         &["group", "sha256"]
-    }
-
-    /// The prepared statement to use when retrieving data from Scylla
-    ///
-    /// # Arguments
-    ///
-    /// * `scylla` - The scylla session to build a prepared statement with
-    /// * `ns` - The namespace for this prepared statement
-    async fn prepared_statement(
-        scylla: &Session,
-        ns: &str,
-    ) -> Result<PreparedStatement, PrepareError> {
-        // build logs get prepared statement
-        scylla
-            .prepare(format!(
-                "SELECT group, sha256, uploaded, id, author, comment, files \
-                FROM {}.{} \
-                Where token(group, sha256) >= ? AND token(group, sha256) <= ?",
-                ns,
-                Self::name(),
-            ))
-            .await
     }
 
     /// Hash this partitions info to see if we have changed partitions
@@ -91,6 +71,25 @@ impl Backup for Comment {
 /// Implement scrub support for the samples list table
 impl Scrub for Comment {}
 
+/// The values a restored row binds by column name to the table's generated full-row insert
+#[derive(SerializeRow)]
+pub struct CommentValues {
+    /// The `group` column
+    pub group: String,
+    /// The `sha256` column
+    pub sha256: String,
+    /// The `uploaded` column
+    pub uploaded: DateTime<Utc>,
+    /// The `id` column
+    pub id: Uuid,
+    /// The `author` column
+    pub author: Option<String>,
+    /// The `comment` column
+    pub comment: Option<String>,
+    /// The `files` column
+    pub files: Option<String>,
+}
+
 /// Implement restore support for the samples list table
 #[async_trait::async_trait]
 impl Restore for Comment {
@@ -98,37 +97,8 @@ impl Restore for Comment {
     // the size itself
     type PartitionConf = u16;
 
-    /// The group, sha256, upload time, id, author, comment, and attachments
-    type Values = (
-        String,
-        String,
-        DateTime<Utc>,
-        Uuid,
-        Option<String>,
-        Option<String>,
-        Option<String>,
-    );
-
-    /// The prepared statement to use when restoring data to scylla
-    ///
-    /// # Arguments
-    ///
-    /// * `scylla` - A scylla client
-    /// * `ns` - The namespace in scylla this table is from
-    async fn prepared_statement(
-        scylla: &Session,
-        ns: &str,
-    ) -> Result<PreparedStatement, PrepareError> {
-        scylla
-            .prepare(format!(
-                "INSERT INTO {}.{} \
-                (group, sha256, uploaded, id, author, comment, files) \
-                VALUES (?, ?, ?, ?, ?, ?, ?)",
-                ns,
-                Self::name(),
-            ))
-            .await
-    }
+    /// The row the generated full-row insert binds by name
+    type Values = CommentValues;
 
     /// Get the partition size for this data type
     ///
@@ -147,15 +117,15 @@ impl Restore for Comment {
     /// * `_format` - The format version the row was archived in
     fn values(self, _partition_size: &u16, _format: u32) -> Self::Values {
         // every column as the row holds it
-        (
-            self.group,
-            self.sha256,
-            self.uploaded,
-            self.id,
-            self.author,
-            self.comment,
-            self.files,
-        )
+        CommentValues {
+            group: self.group,
+            sha256: self.sha256,
+            uploaded: self.uploaded,
+            id: self.id,
+            author: self.author,
+            comment: self.comment,
+            files: self.files,
+        }
     }
 }
 

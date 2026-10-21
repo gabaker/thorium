@@ -1134,11 +1134,15 @@ impl NodeListParams {
 #[derive(Serialize, Deserialize, Debug, Clone)]
 #[cfg_attr(
     feature = "scylla-utils",
-    derive(scylla::DeserializeRow, scylla::SerializeRow)
+    derive(crate::models::schema::ScyllaProjection, scylla::SerializeRow)
 )]
 #[cfg_attr(
     feature = "scylla-utils",
     scylla(flavor = "enforce_order", skip_name_checks)
+)]
+#[cfg_attr(
+    feature = "scylla-utils",
+    thorium_projection(of = crate::models::schema::scylla::NodesTable)
 )]
 #[cfg_attr(feature = "api", derive(utoipa::ToSchema))]
 pub struct NodeListLine {

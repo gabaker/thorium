@@ -5,10 +5,7 @@ use axum::extract::{FromRequestParts, Multipart};
 use axum::http::request::Parts;
 use chrono::{DateTime, Utc};
 use futures::stream::{self, StreamExt};
-use scylla::errors::ExecutionError;
-use scylla::response::query_result::QueryResult;
 use std::collections::{HashMap, HashSet};
-use std::future::Future;
 use std::path::PathBuf;
 use std::str::FromStr;
 use tracing::{Level, event, instrument};
@@ -20,6 +17,8 @@ use crate::models::backends::db::{CursorCore, ScyllaCursor, ScyllaCursorSupport}
 use crate::models::entities::EntityMetadataForm;
 use crate::models::entities::incident::Incident;
 use crate::models::entities::network_activity::{NetConState, NetworkConnection};
+use crate::models::schema::queries::EntitiesListCursor;
+use crate::models::schema::{Bucket, CursorLimit, DEFAULT_LIMIT_CAP};
 use crate::models::{
     ApiCursor, AssociationKind, AssociationListOpts, AssociationRequest, AssociationTarget,
     AssociationTargetColumn, CollectionEntity, CompiledFunction, Country, CriticalSector,
@@ -1780,18 +1779,6 @@ impl CursorCore for EntityListLine {
     /// The type of data to group our rows by
     type GroupBy = String;
 
-    /// The data structure to store tie info in
-    ///
-    /// For entities this is a mapping of group to a tuple of
-    /// name and ID
-    type Ties = HashMap<String, Uuid>;
-
-    fn bucket_limit(extra_filters: &Self::ExtraFilters) -> u32 {
-        // keep our cartesian product under 99 by dividing 99 by the number of kinds
-        // we are searching against
-        (99 / extra_filters.len()) as u32
-    }
-
     fn partition_size(shared: &Shared) -> u16 {
         shared.config.thorium.entities.partition_size
     }
@@ -1833,19 +1820,13 @@ impl CursorCore for EntityListLine {
     /// # Arguments
     ///
     /// * `params` - The params to use to build this cursor
-    fn get_limit(params: &Self::Params) -> Result<usize, ApiError> {
+    fn get_limit(params: &Self::Params) -> Result<CursorLimit, ApiError> {
         // make sure this limit is one we can serve
-        db::cursors::check_limit(params.limit, db::cursors::DEFAULT_LIMIT_CAP, "limit")
-    }
-
-    fn add_tie(&self, ties: &mut Self::Ties) {
-        // if its not already in the tie map then add each of its groups to our map
-        for group in &self.groups {
-            // get an entry to this group tie
-            let entry = ties.entry(group.clone());
-            // insert our entity id
-            entry.or_insert_with(|| self.id);
-        }
+        Ok(CursorLimit::from_user(
+            params.limit,
+            DEFAULT_LIMIT_CAP,
+            "limit",
+        )?)
     }
 
     fn dedupe_item(&self, dedupe_set: &mut HashSet<String>) -> bool {
@@ -1869,11 +1850,16 @@ impl CursorCore for EntityListLine {
     }
 }
 
-#[async_trait::async_trait]
 impl ScyllaCursorSupport for EntityListLine {
     type IntermediateRow = EntityListRow;
 
+    type Statements = EntitiesListCursor;
+
     type UniqueType<'a> = Uuid;
+
+    fn statements(shared: &Shared) -> &Self::Statements {
+        &shared.scylla.queries.entities.list
+    }
 
     fn add_tag_tie(&self, ties: &mut HashMap<String, String>) {
         // if its not already in the tie map then add each of its groups to our map
@@ -1882,11 +1868,6 @@ impl ScyllaCursorSupport for EntityListLine {
             ties.entry(group.clone())
                 .or_insert_with(|| self.id.to_string());
         }
-    }
-
-    fn get_intermediate_timestamp(intermediate: &Self::IntermediateRow) -> DateTime<Utc> {
-        // return the created time as the timestamp
-        intermediate.created
     }
 
     fn get_timestamp(&self) -> DateTime<Utc> {
@@ -1904,16 +1885,6 @@ impl ScyllaCursorSupport for EntityListLine {
         self.id
     }
 
-    /// Compare two entities that share a timestamp in the order a page consumes them
-    ///
-    /// # Arguments
-    ///
-    /// * `other` - The entity to compare against
-    fn cmp_ties(&self, other: &Self) -> std::cmp::Ordering {
-        // ids are read in descending order within a timestamp
-        db::cursors::scylla_uuid_cmp(&other.id, &self.id)
-    }
-
     fn add_group_to_line(&mut self, group: String) {
         self.groups.insert(group);
     }
@@ -1927,11 +1898,11 @@ impl ScyllaCursorSupport for EntityListLine {
     }
 
     fn census_keys<'a>(
-        group_by: &'a Vec<Self::GroupBy>,
+        group_by: &'a [Self::GroupBy],
         _extra: &Self::ExtraFilters,
         year: i32,
-        bucket: u32,
-        keys: &mut Vec<(&'a Self::GroupBy, String, i32)>,
+        bucket: Bucket,
+        keys: &mut Vec<(&'a Self::GroupBy, String, Bucket)>,
         shared: &Shared,
     ) {
         // build the keys for each census stream we are going to crawl
@@ -1944,68 +1915,8 @@ impl ScyllaCursorSupport for EntityListLine {
                 year = year,
             );
             // add this key to our keys
-            keys.push((group, key, bucket as i32));
+            keys.push((group, key, bucket));
         }
-    }
-
-    #[allow(clippy::too_many_arguments)]
-    fn ties_query(
-        ties: &mut Self::Ties,
-        kinds: &Self::ExtraFilters,
-        year: i32,
-        bucket: i32,
-        uploaded: DateTime<Utc>,
-        limit: i32,
-        shared: &Shared,
-    ) -> Result<Vec<impl Future<Output = Result<QueryResult, ExecutionError>>>, ApiError> {
-        // allocate space for 300 futures
-        let mut futures = Vec::with_capacity(ties.len());
-        // if any ties were found then get the rest of them and add them to data
-        for (group, id) in ties.drain() {
-            // execute our query
-            let future = shared.scylla.session.execute_unpaged(
-                &shared.scylla.prep.entities.list_ties,
-                (kinds, group, year, bucket, uploaded, id, limit),
-            );
-            // add this future to our set
-            futures.push(future);
-        }
-        Ok(futures)
-    }
-
-    /// Builds the query string for getting the next page of entity rows
-    ///
-    /// # Arguments
-    ///
-    /// * `group` - The group to restrict our query too
-    /// * `kinds` - The entity kinds to filter on
-    /// * `year` - The year to get data for
-    /// * `bucket` - The bucket to get data for
-    /// * `start` - The earliest timestamp to get data from
-    /// * `end` - The oldest timestamp to get data from
-    /// * `limit` - The max amount of data to get from this query
-    /// * `shared` - Shared Thorium objects
-    #[allow(clippy::too_many_arguments)]
-    #[allow(clippy::type_complexity, clippy::type_repetition_in_bounds)]
-    async fn pull(
-        group: &Self::GroupBy,
-        kinds: &Self::ExtraFilters,
-        year: i32,
-        buckets: Vec<i32>,
-        start: DateTime<Utc>,
-        end: DateTime<Utc>,
-        limit: i32,
-        shared: &Shared,
-    ) -> Result<QueryResult, ExecutionError> {
-        // execute our query
-        shared
-            .scylla
-            .session
-            .execute_unpaged(
-                &shared.scylla.prep.entities.list_pull,
-                (kinds, group, year, buckets, start, end, limit),
-            )
-            .await
     }
 }
 

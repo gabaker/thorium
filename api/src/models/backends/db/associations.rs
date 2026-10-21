@@ -2,12 +2,11 @@
 
 use chrono::prelude::*;
 use futures::stream::{self, StreamExt};
-use scylla::errors::ExecutionError;
 use tracing::instrument;
 
-use uuid::Uuid;
-
 use super::{ScyllaCursor, keys};
+use crate::models::schema::QueryError;
+use crate::models::schema::scylla::AssociationsTableRef;
 use crate::models::{
     AssociatedSubmissions, AssociationKind, AssociationListParams, AssociationTarget,
     AssociationTargetColumn, Directionality, ListableAssociation, User,
@@ -15,92 +14,32 @@ use crate::models::{
 use crate::serialize;
 use crate::utils::{ApiError, Shared, helpers};
 
-/// Insert both directional rows for a single association
-///
-/// This writes the `source -> target` row and its inverted `target -> source`
-/// counterpart so the association can be listed from either side.
+/// Write both directions of one association in one group, the forward row first
 ///
 /// # Arguments
 ///
-/// * `user` - The user creating this association
-/// * `group` - The group this association row belongs to
-/// * `year` - The year this association is being created in
-/// * `bucket` - The partition bucket for this association's timestamp
-/// * `now` - The timestamp for when this association is being created
-/// * `kind` - The kind of association being created
-/// * `source_str` - The serialized source of this association
-/// * `target_str` - The serialized target of this association
-/// * `extra_source` - Any extra info tied to the source, if set
-/// * `extra_target` - Any extra info tied to the target, if set
-/// * `submissions_source` - The submission id tied to the source, if set
-/// * `submissions_target` - The submission id tied to the target, if set
-/// * `direction` - The directionality of the `source -> target` row
+/// * `forward` - The source -> target row
+/// * `reverse` - The target -> source row
 /// * `shared` - Shared Thorium objects
 #[instrument(name = "db::associations::create_helper", skip_all, err(Debug))]
-#[expect(clippy::too_many_arguments)]
 async fn create_helper(
-    user: &User,
-    group: &String,
-    year: i32,
-    bucket: i32,
-    now: DateTime<Utc>,
-    kind: AssociationKind,
-    source_str: &String,
-    target_str: String,
-    extra_source: Option<String>,
-    extra_target: Option<String>,
-    submissions_source: Option<Uuid>,
-    submissions_target: Option<Uuid>,
-    direction: Directionality,
+    forward: AssociationsTableRef<'_>,
+    reverse: AssociationsTableRef<'_>,
     shared: &Shared,
-) -> Result<(), ExecutionError> {
+) -> Result<(), QueryError> {
     // This row is in the source -> target direction
     shared
         .scylla
-        .session
-        .execute_unpaged(
-            &shared.scylla.prep.associations.insert,
-            (
-                group,
-                year,
-                bucket,
-                now,
-                direction,
-                kind,
-                &source_str,
-                &target_str,
-                &user.username,
-                &extra_source,
-                &extra_target,
-                submissions_source,
-                submissions_target,
-            ),
-        )
+        .queries
+        .associations
+        .insert(&shared.scylla.session, &forward)
         .await?;
-    // get our opposite direction
-    let opposite_dir = direction.opposite();
-    // This row is in the target  -> source direction so swap our source/target info
+    // This row is in the target  -> source direction
     shared
         .scylla
-        .session
-        .execute_unpaged(
-            &shared.scylla.prep.associations.insert,
-            (
-                group,
-                year,
-                bucket,
-                now,
-                opposite_dir,
-                kind,
-                target_str,
-                &source_str,
-                &user.username,
-                extra_target,
-                extra_source,
-                submissions_target,
-                submissions_source,
-            ),
-        )
+        .queries
+        .associations
+        .insert(&shared.scylla.session, &reverse)
         .await?;
     Ok(())
 }
@@ -154,61 +93,79 @@ pub async fn create(
     let source_str = serialize!(&converted_src);
     // keep a set of keys of census info to update
     let mut keys = Vec::with_capacity(size_hint + 10);
-    // setup a list to store all of the futures were about to build
-    let mut futs = Vec::with_capacity(size_hint);
-    // build a set of groups that our associations_from table is getting rows for
-    let mut groups = Vec::with_capacity(10);
-    // iterate over all of our targets and build futures to add them
+    // serialize every target once, so the rows built below can borrow the results
+    let mut serialized = Vec::with_capacity(targets.len());
     for (target, target_groups) in targets {
         // clone and cast our target to a target column
         let (converted_targ, extra_targ) = target.clone().to_column()?;
-        // serialize our source info
+        // serialize our target info
         let target_str = serialize!(&converted_targ);
         // build the keys for our associations_to census cache
         keys::associations::census_keys(
             &mut keys,
-            &target_groups,
+            target_groups,
             year,
             bucket,
             &source_str,
             &target_str,
             shared,
         );
-        // create futures for each group for this target
-        for group in target_groups {
-            // if this group isn't already in our from_groups then add it
-            if groups.contains(&group) {
-                // add this group to our from groups list
-                groups.push(group);
-            }
-            // create a future to insert our associations
-            let fut = create_helper(
-                user,
+        serialized.push((target_str, extra_targ, target_groups));
+    }
+    // the reverse rows borrow the opposite direction, so it must outlive them too
+    let opposite = direction.opposite();
+    // borrow every shared value before building rows, so every row borrows data this
+    // function owns
+    let (source_str, extra_src, direction, kind, opposite, submitter) = (
+        source_str.as_str(),
+        extra_src.as_deref(),
+        &direction,
+        &kind,
+        &opposite,
+        user.username.as_str(),
+    );
+    // build both rows for every target and group, borrowing the serialized targets
+    let mut futs = Vec::with_capacity(size_hint);
+    for (target_str, extra_target, target_groups) in &serialized {
+        for group in *target_groups {
+            // the source -> target row
+            let forward = AssociationsTableRef {
                 group,
                 year,
                 bucket,
-                now,
+                source: source_str,
+                created: now,
+                target: target_str,
+                direction,
                 kind,
-                &source_str,
-                target_str.clone(),
-                extra_src.clone(),
-                extra_targ.clone(),
+                submitter,
+                extra_source: extra_src,
+                extra_target: extra_target.as_deref(),
                 submissions_source,
                 submissions_other,
-                direction,
-                shared,
-            );
-            // add this to our futures
-            futs.push(fut);
+            };
+            // the target -> source row: the same borrows with each pair swapped
+            let reverse = AssociationsTableRef {
+                source: target_str,
+                target: source_str,
+                direction: opposite,
+                extra_source: extra_target.as_deref(),
+                extra_target: extra_src,
+                submissions_source: submissions_other,
+                submissions_other: submissions_source,
+                ..forward
+            };
+            // create a future to insert both rows
+            futs.push(create_helper(forward, reverse, shared));
         }
     }
     // execute our to/from futures
     stream::iter(futs)
         .buffer_unordered(25)
-        .collect::<Vec<Result<(), ExecutionError>>>()
+        .collect::<Vec<Result<(), QueryError>>>()
         .await
         .into_iter()
-        .collect::<Result<Vec<()>, ExecutionError>>()?;
+        .collect::<Result<Vec<()>, QueryError>>()?;
     // update this samples census cache info
     super::census::incr_cache(keys, shared).await?;
     Ok(())
@@ -231,22 +188,21 @@ async fn delete_helper(
     source_serialized: &String,
     association: &ListableAssociation,
     shared: &Shared,
-) -> Result<(), ExecutionError> {
+) -> Result<(), QueryError> {
     // build the future to delete this association
     shared
         .scylla
-        .session
-        .execute_unpaged(
-            &shared.scylla.prep.associations.delete,
-            (
-                group_chunk,
-                year,
-                bucket,
-                &source_serialized,
-                association.created,
-                &association.other,
-                association.direction,
-            ),
+        .queries
+        .associations
+        .delete_chunk(
+            &shared.scylla.session,
+            group_chunk,
+            year,
+            bucket,
+            source_serialized,
+            association.created,
+            &association.other,
+            &association.direction,
         )
         .await?;
     // get our opposite direction
@@ -254,18 +210,17 @@ async fn delete_helper(
     // build the future to delete this association
     shared
         .scylla
-        .session
-        .execute_unpaged(
-            &shared.scylla.prep.associations.delete,
-            (
-                group_chunk,
-                year,
-                bucket,
-                &association.other,
-                association.created,
-                &source_serialized,
-                opposite_dir,
-            ),
+        .queries
+        .associations
+        .delete_chunk(
+            &shared.scylla.session,
+            group_chunk,
+            year,
+            bucket,
+            &association.other,
+            association.created,
+            source_serialized,
+            &opposite_dir,
         )
         .await?;
     Ok(())
@@ -306,10 +261,10 @@ pub async fn delete_many(
     // execute all of our deletes 10 at a time
     stream::iter(futs)
         .buffer_unordered(10)
-        .collect::<Vec<Result<(), ExecutionError>>>()
+        .collect::<Vec<Result<(), QueryError>>>()
         .await
         .into_iter()
-        .collect::<Result<Vec<()>, ExecutionError>>()?;
+        .collect::<Result<Vec<()>, QueryError>>()?;
     Ok(())
 }
 

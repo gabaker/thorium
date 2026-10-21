@@ -1,14 +1,15 @@
 //! The scylla utils for entities
 
 use chrono::{DateTime, Utc};
-use scylla::DeserializeRow;
 use uuid::Uuid;
 
+use crate::models::schema::ScyllaProjection;
+use crate::models::schema::scylla::{EntitiesByIdView, EntitiesTable};
 use crate::models::{EntityKinds, EntityMetadata};
 
 /// A single row of an entity from Scylla
-#[derive(Debug, Deserialize, DeserializeRow)]
-#[scylla(flavor = "enforce_order", skip_name_checks)]
+#[derive(Debug, Deserialize, ScyllaProjection)]
+#[thorium_projection(of = EntitiesByIdView)]
 pub struct EntityRow {
     /// The entity's unique ID
     pub id: Uuid,
@@ -23,6 +24,7 @@ pub struct EntityRow {
     /// The user who originally submitted the entity
     pub submitter: String,
     /// The data specific to the entity's kind
+    #[thorium(column = "kind_data")]
     pub metadata: EntityMetadata,
     /// The entity's description
     pub description: Option<String>,
@@ -31,8 +33,8 @@ pub struct EntityRow {
 }
 
 /// A single row from Scylla used for listing entities
-#[derive(Debug, DeserializeRow)]
-#[scylla(flavor = "enforce_order", skip_name_checks)]
+#[derive(Debug, ScyllaProjection)]
+#[thorium_projection(of = EntitiesTable)]
 pub struct EntityListRow {
     /// The kind of entity this is
     pub kind: EntityKinds,
@@ -48,8 +50,8 @@ pub struct EntityListRow {
 
 /// A single row from Scylla used to supplement tag rows missing name
 /// and kind
-#[derive(Debug, DeserializeRow)]
-#[scylla(flavor = "enforce_order", skip_name_checks)]
+#[derive(Debug, ScyllaProjection)]
+#[thorium_projection(of = EntitiesByIdView)]
 pub struct EntityListSupplementRow {
     /// The entity's unique ID
     pub id: Uuid,

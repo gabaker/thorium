@@ -6,6 +6,9 @@
 #[macro_use]
 extern crate serde;
 
+// generated schema code names this crate as `::thorium`, here as in downstream crates
+extern crate self as thorium;
+
 // import any API only structures
 cfg_if::cfg_if! {
     if #[cfg(feature = "api")] {
@@ -19,6 +22,8 @@ cfg_if::cfg_if! {
 
 mod args;
 pub mod conf;
+#[cfg(feature = "scylla-utils")]
+pub use thorium_derive::{keyspace, table_queries, view_queries};
 pub mod models;
 mod routes;
 pub mod utils;

@@ -10,7 +10,7 @@ mod scylla_utils_reexport {
     pub mod errors;
     pub mod events;
     pub mod files;
-    pub mod graphics;
+    pub mod logs;
     pub mod network_policies;
     pub mod repos;
     pub mod results;

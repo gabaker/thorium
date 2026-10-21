@@ -6,8 +6,8 @@ use scylla::client::session_builder::SessionBuilder;
 use scylla::policies::address_translator::AddressTranslator;
 #[cfg(feature = "test-support")]
 use std::sync::Arc;
-use std::time::Duration;
 use thorium::Conf;
+use thorium::models::schema::session_builder;
 
 mod controller;
 mod ranges;
@@ -80,25 +80,12 @@ fn translate(session: SessionBuilder, config: &Conf) -> SessionBuilder {
 ///
 /// * `config` - The config for this Thorium cluster
 fn builder(config: &Conf) -> SessionBuilder {
-    // start building our scylla client
-    let mut session = SessionBuilder::new();
-    // if we have auth info for scylla then add that
-    if let Some(creds) = &config.scylla.auth {
-        // inject our creds
-        session = session.user(&creds.username, &creds.password);
-    }
-    // set our request timeout
-    let session =
-        session.connection_timeout(Duration::from_secs(u64::from(config.scylla.setup_time)));
+    // start from the shared session settings for these nodes
+    let session = session_builder(config);
     // route through a test's proxy when one was registered for these nodes
     #[cfg(feature = "test-support")]
     let session = translate(session, config);
-    // add every configured node as a known node
-    config
-        .scylla
-        .nodes
-        .iter()
-        .fold(session, |builder, node| builder.known_node(node))
+    session
 }
 
 /// Build a scylla client for a specific cluster

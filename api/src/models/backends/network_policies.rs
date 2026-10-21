@@ -5,14 +5,14 @@
 use axum::extract::FromRequestParts;
 use axum::http::{StatusCode, request::Parts};
 use chrono::prelude::*;
-use futures::{Future, StreamExt, TryStreamExt, stream};
-use scylla::errors::ExecutionError;
-use scylla::response::query_result::QueryResult;
+use futures::{StreamExt, TryStreamExt, stream};
 use std::collections::{HashMap, HashSet};
 use tracing::{Level, event, instrument};
 use uuid::Uuid;
 
 use super::db::{self, GroupedScyllaCursorSupport};
+use crate::models::schema::queries::NetworkPoliciesListCursor;
+use crate::models::schema::{CursorLimit, DEFAULT_LIMIT_CAP};
 use crate::models::{
     ApiCursor, Group, ImageNetworkPolicyUpdate, ImageUpdate, NetworkPolicy, NetworkPolicyListLine,
     NetworkPolicyListParams, NetworkPolicyListRow, NetworkPolicyRequest, NetworkPolicyRow,
@@ -817,6 +817,18 @@ impl GroupedScyllaCursorSupport for NetworkPolicyListLine {
     /// none of the same groups)
     type SortTieBreaker = Uuid;
 
+    /// The statements this cursor pages with
+    type Statements = NetworkPoliciesListCursor;
+
+    /// Get the statements this cursor pages with
+    ///
+    /// # Arguments
+    ///
+    /// * `shared` - Shared Thorium objects
+    fn statements(shared: &Shared) -> &Self::Statements {
+        &shared.scylla.queries.network_policies.list
+    }
+
     /// Get our cursor id from params
     ///
     /// # Arguments
@@ -850,39 +862,13 @@ impl GroupedScyllaCursorSupport for NetworkPolicyListLine {
     /// # Arguments
     ///
     /// * `params` - The params to use to build this cursor
-    fn get_limit(params: &Self::Params) -> Result<i32, ApiError> {
+    fn get_limit(params: &Self::Params) -> Result<CursorLimit, ApiError> {
         // make sure this limit is one we can serve
-        let limit =
-            db::cursors::check_limit(params.limit, db::cursors::DEFAULT_LIMIT_CAP, "limit")?;
-        // convert it to the type our queries bind
-        db::cursors::limit_to_cql(limit)
-    }
-
-    /// Get the `GroupBy` value from a casted row
-    ///
-    /// # Arguments
-    ///
-    /// * `row` - The row to get the `GroupBy` value from
-    fn row_get_group_by(row: &Self::RowType) -> Self::GroupBy {
-        row.group.clone()
-    }
-
-    /// Get the `SortBy` value from a casted row
-    ///
-    /// # Arguments
-    ///
-    /// * `row` - The row to get the `SortBy` value from
-    fn row_get_sort_by(row: &Self::RowType) -> Self::SortBy {
-        row.name.clone()
-    }
-
-    /// Get the tie-breaking value from the casted row
-    ///
-    /// # Arguments
-    ///
-    /// * `row` - The row to get the `SortBy` value from
-    fn row_get_tie_breaker(row: &Self::RowType) -> &Self::SortTieBreaker {
-        &row.id
+        Ok(CursorLimit::from_user(
+            params.limit,
+            DEFAULT_LIMIT_CAP,
+            "limit",
+        )?)
     }
 
     /// Return the value we're sorting by from `self`
@@ -907,88 +893,6 @@ impl GroupedScyllaCursorSupport for NetworkPolicyListLine {
     /// * `row` - The component row to add
     fn add_row(&mut self, row: Self::RowType) {
         self.groups.push(row.group);
-    }
-
-    /// Builds the query string for getting data from ties in the last query
-    ///
-    /// Ties occur when two groups have the same `SortBy` value and we weren't
-    /// able to return them all last iteration. These would be skipped if we
-    /// proceeded to query from our last `SortBy` value, so we need to get them
-    /// explicitly
-    ///
-    /// # Arguments
-    ///
-    /// * `ties` - The ties to get data for
-    /// * `_extra` - Any extra filters to apply to this query
-    /// * `limit` - The max number of rows to return
-    /// * `shared` - Shared Thorium objects
-    fn ties_query(
-        ties: &[(Self::SortBy, Vec<Self::GroupBy>)],
-        _extra: &Self::ExtraFilters,
-        limit: i32,
-        shared: &Shared,
-    ) -> Vec<impl Future<Output = Result<QueryResult, ExecutionError>>> {
-        let mut futures = Vec::new();
-        for (name, groups) in ties {
-            for group in groups {
-                futures.push(shared.scylla.session.execute_unpaged(
-                    &shared.scylla.prep.network_policies.list_ties,
-                    (group, name, limit),
-                ));
-            }
-        }
-        futures
-    }
-
-    /// Builds the query for getting the first page of values
-    ///
-    /// The Scylla query must have a `PER PARTITION LIMIT` equal to [`Self::limit`] as
-    /// defined by [`Self::Params`]
-    ///
-    /// # Arguments
-    ///
-    /// * `group` - The group to restrict our query too
-    /// * `_extra` - Any extra filters to apply to this query
-    /// * `limit` - The max amount of data to get from this query
-    /// * `shared` - Shared Thorium objects
-    fn pull(
-        group: &Self::GroupBy,
-        _extra: &Self::ExtraFilters,
-        limit: i32,
-        shared: &Shared,
-    ) -> impl Future<Output = Result<QueryResult, ExecutionError>> {
-        // execute the query
-        shared.scylla.session.execute_unpaged(
-            &shared.scylla.prep.network_policies.list_pull,
-            (group, limit),
-        )
-    }
-
-    /// Builds and executes the query for getting the next page of values
-    ///
-    /// The Scylla query must have a `PER PARTITION LIMIT` equal to `limit` as
-    /// defined by `Self::Params`, as well as pull from everything greater than
-    /// `current_sort_by` to work properly
-    ///
-    /// # Arguments
-    ///
-    /// * `group` - The group to restrict our query too
-    /// * `_extra` - Any extra filters to apply to this query
-    /// * `current_sort_by` - The current sort value we left off at
-    /// * `limit` - The max amount of data to get from this query
-    /// * `shared` - Shared Thorium objects
-    fn pull_more(
-        group: &Self::GroupBy,
-        _extra: &Self::ExtraFilters,
-        current_sort_by: &Self::SortBy,
-        limit: i32,
-        shared: &Shared,
-    ) -> impl Future<Output = Result<QueryResult, ExecutionError>> {
-        // execute the query
-        shared.scylla.session.execute_unpaged(
-            &shared.scylla.prep.network_policies.list_pull_more,
-            (group, current_sort_by, limit),
-        )
     }
 }
 

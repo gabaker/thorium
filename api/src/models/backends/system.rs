@@ -4,8 +4,6 @@ use axum::http::request::Parts;
 use futures::TryStreamExt;
 use futures::stream::{self, StreamExt};
 use itertools::Itertools;
-use scylla::errors::ExecutionError;
-use scylla::response::query_result::QueryResult;
 use std::collections::{BTreeSet, HashMap, HashSet};
 use std::path::PathBuf;
 use tracing::{Level, Span, event, instrument, span};
@@ -13,6 +11,7 @@ use uuid::Uuid;
 
 use super::db::{self, SimpleCursorExt};
 use crate::models::backends::NotificationSupport;
+use crate::models::schema::queries::{NodesListCursor, NodesListDetailsCursor};
 use crate::models::{
     ApiCursor, Backup, BackupParams, BackupProblem, BackupProblems, Group, GroupRequest,
     GroupUsers, GroupUsersRequest, HostPath, HostPathWhitelistUpdate, Image, ImageBan,
@@ -1596,95 +1595,31 @@ impl TryFrom<NodeRow> for Node {
     }
 }
 
-#[async_trait::async_trait]
 impl SimpleCursorExt for NodeListLine {
-    /// Query scylla for the next page of data for this simple cursor
+    /// The statements this cursor pages with
+    type Statements = NodesListCursor;
+
+    /// Get the statements this cursor pages with
     ///
     /// # Arguments
     ///
-    /// * `partition` - The partition to query data for
-    /// * `tie` - The cluster key to use when breaking ties
-    /// * `limit` - The max amount of data to retrieve at once
     /// * `shared` - Shared Thorium objects
-    async fn query(
-        partition: &str,
-        tie: &Option<String>,
-        limit: i32,
-        shared: &Shared,
-    ) -> Result<QueryResult, ExecutionError> {
-        // if we have a node tie then query for the next page of data from our tie
-        match tie {
-            // we have a node name to skip too
-            Some(node) => {
-                shared
-                    .scylla
-                    .session
-                    .execute_unpaged(
-                        &shared.scylla.prep.nodes.list_ties,
-                        (partition, node, limit),
-                    )
-                    .await
-            }
-            // we do not have a node name to skip too
-            None => {
-                shared
-                    .scylla
-                    .session
-                    .execute_unpaged(&shared.scylla.prep.nodes.list, (partition, limit))
-                    .await
-            }
-        }
-    }
-
-    /// Gets the cluster key to start the next page of data after
-    fn get_tie(&self) -> Option<String> {
-        Some(self.node.clone())
+    fn statements(shared: &Shared) -> &Self::Statements {
+        &shared.scylla.queries.nodes.list
     }
 }
 
-#[async_trait::async_trait]
 impl SimpleCursorExt for NodeRow {
-    /// Query scylla for the next page of data for this simple cursor
+    /// The statements this cursor pages with
+    type Statements = NodesListDetailsCursor;
+
+    /// Get the statements this cursor pages with
     ///
     /// # Arguments
     ///
-    /// * `partition` - The partition to query data for
-    /// * `tie` - The cluster key to use when breaking ties
-    /// * `limit` - The max amount of data to retrieve at once
     /// * `shared` - Shared Thorium objects
-    async fn query(
-        partition: &str,
-        tie: &Option<String>,
-        limit: i32,
-        shared: &Shared,
-    ) -> Result<QueryResult, ExecutionError> {
-        // if we have a node tie then query for the next page of data from our tie
-        match tie {
-            // we have a node name to skip too
-            Some(node) => {
-                shared
-                    .scylla
-                    .session
-                    .execute_unpaged(
-                        &shared.scylla.prep.nodes.list_details_ties,
-                        (partition, node, limit),
-                    )
-                    .await
-            }
-            // we do not have a node name to skip too
-            None => {
-                shared
-                    .scylla
-                    .session
-                    .execute_unpaged(&shared.scylla.prep.nodes.list_details, (partition, limit))
-                    .await
-            }
-        }
-    }
-
-    /// Gets the cluster key to start the next page of data after
-    fn get_tie(&self) -> Option<String> {
-        Some(self.node.clone())
+    fn statements(shared: &Shared) -> &Self::Statements {
+        &shared.scylla.queries.nodes.list_details
     }
 }
 

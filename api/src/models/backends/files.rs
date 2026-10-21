@@ -5,10 +5,8 @@ use axum::extract::multipart::Field;
 use axum::extract::{FromRequestParts, Multipart};
 use axum::http::request::Parts;
 use chrono::prelude::*;
+use futures_util::TryStreamExt;
 use futures_util::stream::{self, StreamExt};
-use futures_util::{Future, TryStreamExt};
-use scylla::errors::ExecutionError;
-use scylla::response::query_result::QueryResult;
 use std::collections::{HashMap, HashSet};
 use std::str::FromStr;
 use tracing::instrument;
@@ -17,6 +15,8 @@ use uuid::Uuid;
 use super::CommentSupport;
 use super::db::{self, CursorCore, ScyllaCursorSupport, TagCountCursorSupport};
 use crate::models::backends::db::ScyllaCursor;
+use crate::models::schema::queries::SamplesListListCursor;
+use crate::models::schema::{Bucket, CursorLimit, DEFAULT_LIMIT_CAP};
 use crate::models::{
     ApiCursor, CarvedOrigin, CarvedOriginTypes, Comment, CommentForm, CommentResponse, CommentRow,
     DeleteCommentParams, DeleteSampleParams, Directionality, FileListParams, Group,
@@ -1335,9 +1335,6 @@ impl CursorCore for SampleListLine {
     /// The type of data to group our rows by
     type GroupBy = String;
 
-    /// The data structure to store tie info in
-    type Ties = HashMap<String, String>;
-
     /// Get our cursor id from params
     ///
     /// # Arguments
@@ -1407,9 +1404,13 @@ impl CursorCore for SampleListLine {
     /// # Arguments
     ///
     /// * `params` - The params to use to build this cursor
-    fn get_limit(params: &Self::Params) -> Result<usize, ApiError> {
+    fn get_limit(params: &Self::Params) -> Result<CursorLimit, ApiError> {
         // make sure this limit is one we can serve
-        db::cursors::check_limit(params.limit, db::cursors::DEFAULT_LIMIT_CAP, "limit")
+        Ok(CursorLimit::from_user(
+            params.limit,
+            DEFAULT_LIMIT_CAP,
+            "limit",
+        )?)
     }
 
     /// Get the partition size for this cursor
@@ -1420,25 +1421,6 @@ impl CursorCore for SampleListLine {
     fn partition_size(shared: &Shared) -> u16 {
         // get our partition size
         shared.config.thorium.files.partition_size
-    }
-
-    /// Add an item to our tie breaker map
-    ///
-    /// # Arguments
-    ///
-    /// * `ties` - Our current ties
-    /// * `tags` - Whether this is a tag tie or not
-    fn add_tie(&self, ties: &mut Self::Ties) {
-        // if its not already in the tie map then add each of its groups to our map
-        for group in &self.groups {
-            // get an entry to this group tie
-            let entry = ties.entry(group.clone());
-            // if this tie has a submission then use that otherwise use the repo url
-            match &self.submission {
-                Some(submission) => entry.or_insert_with(|| submission.to_string()),
-                None => entry.or_insert_with(|| self.sha256.clone()),
-            };
-        }
     }
 
     /// Determines if a new item is a duplicate or not
@@ -1467,13 +1449,24 @@ impl CursorCore for SampleListLine {
 }
 
 // implement cursor for our our files list
-#[async_trait::async_trait]
 impl ScyllaCursorSupport for SampleListLine {
     /// The intermediate list row to use
     type IntermediateRow = SubmissionListRow;
 
+    /// The statements this cursor pages with
+    type Statements = SamplesListListCursor;
+
     /// The unique key for this cursors row
     type UniqueType<'a> = Option<Uuid>;
+
+    /// Get the statements this cursor pages with
+    ///
+    /// # Arguments
+    ///
+    /// * `shared` - Shared Thorium objects
+    fn statements(shared: &Shared) -> &Self::Statements {
+        &shared.scylla.queries.samples_list.list
+    }
 
     /// Add an item to our tag tie breaker map
     ///
@@ -1487,15 +1480,6 @@ impl ScyllaCursorSupport for SampleListLine {
             ties.entry(group.clone())
                 .or_insert_with(|| self.sha256.clone());
         }
-    }
-
-    /// Get the timestamp from this items intermediate row
-    ///
-    /// # Arguments
-    ///
-    /// * `intermediate` - The intermediate row to get a timestamp for
-    fn get_intermediate_timestamp(intermediate: &Self::IntermediateRow) -> DateTime<Utc> {
-        intermediate.uploaded
     }
 
     /// Get the timestamp for this item
@@ -1521,20 +1505,6 @@ impl ScyllaCursorSupport for SampleListLine {
     /// Get the unique key for this row if it exists
     fn get_unique_key<'a>(&'a self) -> Self::UniqueType<'a> {
         self.submission
-    }
-
-    /// Compare two samples that share a timestamp in the order a page consumes them
-    ///
-    /// # Arguments
-    ///
-    /// * `other` - The line to compare against
-    fn cmp_ties(&self, other: &Self) -> std::cmp::Ordering {
-        // submission ids cluster in descending order within a timestamp
-        match (&self.submission, &other.submission) {
-            (Some(mine), Some(theirs)) => db::cursors::scylla_uuid_cmp(theirs, mine),
-            // lines built from tag rows have no submission and are ordered by the tags cursor
-            _ => std::cmp::Ordering::Equal,
-        }
     }
 
     /// Add a group to a specific returned line
@@ -1568,11 +1538,11 @@ impl ScyllaCursorSupport for SampleListLine {
     /// * `keys` - The vec to add our census stream keys too
     /// * `shared` - Shared Thorium objects
     fn census_keys<'a>(
-        group_by: &'a Vec<Self::GroupBy>,
+        group_by: &'a [Self::GroupBy],
         _extra: &Self::ExtraFilters,
         year: i32,
-        bucket: u32,
-        keys: &mut Vec<(&'a Self::GroupBy, String, i32)>,
+        bucket: Bucket,
+        keys: &mut Vec<(&'a Self::GroupBy, String, Bucket)>,
         shared: &Shared,
     ) {
         // build the keys for each census stream we are going to crawl
@@ -1580,81 +1550,8 @@ impl ScyllaCursorSupport for SampleListLine {
             // build the key for this commitish kinds census stream
             let key = db::keys::samples::census_stream(group, year, shared);
             // add this key to our keys
-            keys.push((group, key, bucket as i32));
+            keys.push((group, key, bucket));
         }
-    }
-
-    /// builds the query string for getting data from ties in the last query
-    ///
-    /// # Arguments
-    ///
-    /// * `group` - The group that this query is for
-    /// * `_filters` - Any filters to apply to this query
-    /// * `year` - The year to get data for
-    /// * `bucket` - The bucket to get data for
-    /// * `uploaded` - The timestamp to get the remaining tied values for
-    /// * `breaker` - The value to use as a tie breaker
-    /// * `limit` - The max number of rows to return
-    /// * `shared` - Shared Thorium objects
-    #[allow(clippy::too_many_arguments)]
-    fn ties_query(
-        ties: &mut Self::Ties,
-        _extra: &Self::ExtraFilters,
-        year: i32,
-        bucket: i32,
-        uploaded: DateTime<Utc>,
-        limit: i32,
-        shared: &Shared,
-    ) -> Result<Vec<impl Future<Output = Result<QueryResult, ExecutionError>>>, ApiError> {
-        // allocate space for 300 futures
-        let mut futures = Vec::with_capacity(ties.len());
-        // if any ties were found then get the rest of them and add them to data
-        for (group, id) in ties.drain() {
-            // cast our id to a uuid
-            let id = Uuid::parse_str(&id)?;
-            // build our query future
-            let future = shared.scylla.session.execute_unpaged(
-                &shared.scylla.prep.samples.list_ties,
-                (group, year, bucket, uploaded, id, limit),
-            );
-            // add this future to our set
-            futures.push(future);
-        }
-        Ok(futures)
-    }
-
-    /// builds the query string for getting the next page of values
-    ///
-    /// # Arguments
-    ///
-    /// * `group` - The group to restrict our query too
-    /// * `_filters` - Any filters to apply to this query
-    /// * `year` - The year to get data for
-    /// * `bucket` - The bucket to get data for
-    /// * `start` - The earliest timestamp to get data from
-    /// * `end` - The oldest timestamp to get data from
-    /// * `limit` - The max amount of data to get from this query
-    /// * `shared` - Shared Thorium objects
-    #[allow(clippy::too_many_arguments)]
-    async fn pull(
-        group: &Self::GroupBy,
-        _extra: &Self::ExtraFilters,
-        year: i32,
-        bucket: Vec<i32>,
-        start: DateTime<Utc>,
-        end: DateTime<Utc>,
-        limit: i32,
-        shared: &Shared,
-    ) -> Result<QueryResult, ExecutionError> {
-        // query the samples list table
-        shared
-            .scylla
-            .session
-            .execute_unpaged(
-                &shared.scylla.prep.samples.list_pull,
-                (group, year, bucket, start, end, limit),
-            )
-            .await
     }
 }
 

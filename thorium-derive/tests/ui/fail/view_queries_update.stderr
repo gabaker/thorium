@@ -1,0 +1,1 @@
+`update` statements can't be declared on a view; a view is written through its base table

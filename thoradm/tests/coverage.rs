@@ -553,8 +553,9 @@ async fn backed_up_columns_match_the_schema_and_the_archives() {
         Registry::backed_up(Store::ScyllaTable).count()
     );
     for (table, mut read) in statements {
-        // a row's remaining TTL, which notifications read beside their columns, isn't a column
-        read.retain(|column| !column.starts_with("ttl("));
+        // a row's remaining TTL, which notifications read beside their columns under the alias
+        // `ttl`, isn't a column
+        read.retain(|column| !column.starts_with("ttl(") && column != "ttl");
         let entry = Registry::classify(Store::ScyllaTable, &table)
             .unwrap_or_else(|| panic!("{table} has an archive but no entry"));
         assert!(matches!(entry.coverage, Coverage::BackedUp(_)), "{table}");

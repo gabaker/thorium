@@ -23,7 +23,7 @@ api = [
   ]
 
 # include scylla utility functions
-scylla-utils = ["scylla", "thorium-derive", "utoipa"]
+scylla-utils = ["scylla", "thorium-derive", "thorium-derive/schema", "utoipa"]
 
 # include rkyv support for some structs
 rkyv-support = ["rkyv", "bytecheck"]
@@ -66,7 +66,7 @@ dialoguer-err = ["dialoguer"]
 trace = ["tracing-opentelemetry", "opentelemetry", "opentelemetry_sdk", "opentelemetry-jaeger", "opentelemetry-otlp", "opentelemetry-semantic-conventions", "tracing", "tracing-subscriber", "tracing-core", "valuable"]
 
 # include features required for integration tests
-test-utilities = ["api"]
+test-utilities = ["api", "search-streamer"]
 
 # Force openssl-sys to staticly link in the openssl library. Necessary when
 # cross compiling to x86_64-unknown-linux-musl.
