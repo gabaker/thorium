@@ -28,7 +28,8 @@ pub use new_backup::{Backup, BackupWorker};
 // thoradm's own tests drive the archive writer directly, without Scylla
 #[cfg(feature = "test-support")]
 pub use new_backup::{ArchiveWriter, TableTally};
-pub(super) use restore::{Restore, RestoreWorker};
+pub use restore::Restore;
+pub(super) use restore::RestoreWorker;
 pub(super) use s3::{
     S3Backup, S3BackupWorker, S3Monitor, S3MonitorUpdate, S3Order, S3Restore, S3RestoreWorker,
 };

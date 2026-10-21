@@ -1,12 +1,16 @@
 //! The scylla utils for network policies
 
 use chrono::{DateTime, Utc};
-use scylla::DeserializeRow;
 use uuid::Uuid;
 
+use crate::models::schema::ScyllaProjection;
+use crate::models::schema::scylla::{
+    NetworkPoliciesByNameView, NetworkPoliciesDefaultView, NetworkPoliciesTable,
+};
+
 /// A single row of a network policy from Scylla
-#[derive(Debug, Deserialize, DeserializeRow)]
-#[scylla(flavor = "enforce_order", skip_name_checks)]
+#[derive(Debug, Deserialize, ScyllaProjection)]
+#[thorium_projection(of = NetworkPoliciesByNameView)]
 pub struct NetworkPolicyRow {
     /// The groups the network policy is available to
     pub group: String,
@@ -19,8 +23,10 @@ pub struct NetworkPolicyRow {
     /// The time this policy was created
     pub created: DateTime<Utc>,
     /// The rules for ingress to the tool as a raw serialized string
+    #[thorium(column = "ingress")]
     pub ingress_raw: String,
     /// The rules for egress from the tool as a raw serialized string
+    #[thorium(column = "egress")]
     pub egress_raw: String,
     /// This network policy should always be applied to all tools spawned in its group(s)
     ///
@@ -38,8 +44,8 @@ pub struct NetworkPolicyRow {
 }
 
 /// A single row retrieved when listing network policies
-#[derive(Debug, Deserialize, DeserializeRow)]
-#[scylla(flavor = "enforce_order", skip_name_checks)]
+#[derive(Debug, Deserialize, ScyllaProjection)]
+#[thorium_projection(of(NetworkPoliciesTable, NetworkPoliciesDefaultView))]
 pub struct NetworkPolicyListRow {
     /// One of the network policy's groups
     pub group: String,
@@ -47,4 +53,14 @@ pub struct NetworkPolicyListRow {
     pub name: String,
     /// The policy's unique ID
     pub id: Uuid,
+}
+
+/// The name and a group of a network policy, read to check which groups have it
+#[derive(Debug, ScyllaProjection)]
+#[thorium_projection(of = NetworkPoliciesByNameView)]
+pub struct NetworkPolicyGroupRow {
+    /// The name of the network policy
+    pub name: String,
+    /// The group the network policy is in
+    pub group: String,
 }

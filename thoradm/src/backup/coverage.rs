@@ -104,6 +104,9 @@ pub struct CoverageEntry {
     /// A known gap in how today's backup or restore covers this resource, stated until the
     /// change that closes it
     pub gap: Option<&'static str>,
+    /// For a table or view, whether only keyspaces older releases created hold it: the API's setup
+    /// doesn't create it, so thoradm acts on it where it exists and skips it elsewhere
+    pub legacy: bool,
 }
 
 /// The columns format 2 added to the archives, by table; a format-1 backup doesn't carry them, so
@@ -144,6 +147,7 @@ const fn table(
         coverage: Coverage::BackedUp(component),
         category: Category::Core,
         gap,
+        legacy: false,
     }
 }
 
@@ -169,6 +173,27 @@ const fn view(
         coverage: Coverage::BackedUp(component),
         category: Category::Core,
         gap: None,
+        legacy: false,
+    }
+}
+
+/// Builds an entry for a view only keyspaces older releases created hold, backed up through its
+/// base table where it exists
+///
+/// # Arguments
+///
+/// * `name` - The view name
+/// * `base` - The base table
+/// * `component` - The component that backs up the base table
+const fn legacy_view(
+    name: &'static str,
+    base: &'static str,
+    component: BackupComponents,
+) -> CoverageEntry {
+    // a legacy view is a view that restore and verification skip where it doesn't exist
+    CoverageEntry {
+        legacy: true,
+        ..view(name, base, component)
     }
 }
 
@@ -196,6 +221,7 @@ const fn backed_up(
         coverage: Coverage::BackedUp(component),
         category: Category::Core,
         gap,
+        legacy: false,
     }
 }
 
@@ -225,6 +251,7 @@ const fn excluded(
         coverage: Coverage::Excluded { reason },
         category,
         gap,
+        legacy: false,
     }
 }
 
@@ -458,13 +485,16 @@ pub const COVERAGE: &[CoverageEntry] = &[
         "stage logs of reactions, which are runtime state and expire by TTL",
         None,
     ),
-    excluded(
-        Store::ScyllaTable,
-        "events",
-        Category::Ephemeral,
-        "trigger events consumed by the event handler, which expire by TTL",
-        None,
-    ),
+    CoverageEntry {
+        legacy: true,
+        ..excluded(
+            Store::ScyllaTable,
+            "events",
+            Category::Ephemeral,
+            "a table of trigger events nothing reads or writes",
+            None,
+        )
+    },
     // Scylla views, rebuilt from their base tables
     view("samples", "samples_list", BackupComponents::SamplesList),
     view("s3_sha256s", "s3_ids", BackupComponents::S3Ids),
@@ -498,7 +528,7 @@ pub const COVERAGE: &[CoverageEntry] = &[
         BackupComponents::NetworkPolicies,
     ),
     view("entities_by_id", "entities", BackupComponents::Entities),
-    view("entities_by_name", "entities", BackupComponents::Entities),
+    legacy_view("entities_by_name", "entities", BackupComponents::Entities),
     // Redis families in the Redis backup
     backed_up(Store::Redis, "users", BackupComponents::Redis, None),
     backed_up(Store::Redis, "user_data:*", BackupComponents::Redis, None),
@@ -772,6 +802,7 @@ pub const COVERAGE: &[CoverageEntry] = &[
         coverage: Coverage::BackedUp(BackupComponents::ResultFiles),
         category: Category::Core,
         gap: None,
+        legacy: false,
     },
     backed_up(Store::S3, "graphics", BackupComponents::Graphics, None),
     excluded(
@@ -875,6 +906,19 @@ impl Registry {
             .map(|entry| entry.name)
     }
 
+    /// Returns whether a view is one only keyspaces older releases created hold
+    ///
+    /// # Arguments
+    ///
+    /// * `view` - The view name
+    #[must_use]
+    pub fn is_legacy_view(view: &str) -> bool {
+        // a view entry of that name marked legacy
+        COVERAGE
+            .iter()
+            .any(|entry| entry.store == Store::ScyllaView && entry.name == view && entry.legacy)
+    }
+
     /// Returns every excluded entry, for the restore preflight and the admin docs
     pub fn excluded() -> impl Iterator<Item = &'static CoverageEntry> {
         // keep only the entries marked excluded
@@ -919,6 +963,9 @@ impl Registry {
             }
             if let Some(base) = entry.base_table {
                 let _ = write!(resource, " (view of `{base}`)");
+            }
+            if entry.legacy {
+                resource.push_str(", only in keyspaces older releases created");
             }
             // say how it's covered
             let (classification, detail) = match entry.coverage {
@@ -1147,6 +1194,10 @@ mod tests {
         views.sort_unstable();
         assert_eq!(views, vec!["tags_by_item", "tags_case_insensitive"]);
         assert_eq!(Registry::views_of("nodes").count(), 0);
+        // only the view older releases created is a legacy view
+        assert!(Registry::is_legacy_view("entities_by_name"));
+        assert!(!Registry::is_legacy_view("entities_by_id"));
+        assert!(!Registry::is_legacy_view("events"));
         // excluded entries include the runtime tables and the ephemeral buckets
         let excluded: Vec<&str> = Registry::excluded().map(|entry| entry.name).collect();
         for name in ["logs", "events", "ephemeral", "reaction_cache", "census:*"] {

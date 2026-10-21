@@ -3,18 +3,18 @@ use bb8_redis::redis::cmd;
 use chrono::prelude::*;
 use futures::future::try_join_all;
 use futures::stream::{self, StreamExt};
-use scylla::DeserializeRow;
 use std::collections::{BTreeMap, HashMap};
 use tracing::{Level, event, instrument};
 use uuid::Uuid;
 
-use super::cursors::{STAGE_LOG_LIMIT_CAP, check_limit, limit_to_cql};
 use super::keys::{
     ImageKeys, JobKeys, ReactionCacheKind, ReactionKeys, StreamKeys, SubReactionLists, logs,
 };
 use super::{RedisCursor, helpers, images, jobs, pipelines, streams};
 use crate::models::backends::db::{RedisCursorSupport, RedisGroupCursor};
 use crate::models::backends::reactions::{InternalReactionCacheFileUpdates, ReactionCursorParam};
+use crate::models::schema::scylla::LogsTableRef;
+use crate::models::schema::{CursorLimit, STAGE_LOG_LIMIT_CAP};
 use crate::models::{
     ApiCursor, BulkReactionResponse, Group, JobHandleStatus, JobList, JobResetRequestor, JobResets,
     Pipeline, RawJob, Reaction, ReactionActions, ReactionCache, ReactionCacheUpdate,
@@ -1268,14 +1268,24 @@ pub async fn add_stage_logs(
     );
     // crawl over logs and insert them into scylla 10 at a time
     stream::iter(logs.logs)
-        .map(|line| {
-            // determine the bucket for this log line
-            let bucket: i32 = (line.index / 2500) as i32;
-            // send this log line to scylla
-            shared.scylla.session.execute_unpaged(
-                &shared.scylla.prep.logs.insert,
-                (reaction, stage, bucket, line.index as i64, line.line),
-            )
+        .map(|line| async move {
+            // determine the bucket for this log line, which must fit its int column
+            let bucket = i32::try_from(line.index / 2500)?;
+            // send this log line to scylla, its position checked against its bigint column
+            let row = LogsTableRef {
+                reaction: *reaction,
+                stage,
+                bucket,
+                position: line.index,
+                line: &line.line,
+            };
+            shared
+                .scylla
+                .queries
+                .logs
+                .insert(&shared.scylla.session, &row)
+                .await?;
+            Ok::<(), ApiError>(())
         })
         .buffer_unordered(10)
         .collect::<Vec<Result<_, _>>>()
@@ -1285,16 +1295,6 @@ pub async fn add_stage_logs(
             log_scylla_err!(res);
         });
     Ok(())
-}
-
-/// A stage-log line read back from Scylla
-#[derive(Debug, DeserializeRow)]
-#[scylla(flavor = "enforce_order", skip_name_checks)]
-struct LogLine {
-    /// The position of this line in the stage's log
-    position: i64,
-    /// The text of this line
-    line: String,
 }
 
 /// The most stage-log buckets one query names, since scylla refuses more than 100 partition
@@ -1346,30 +1346,35 @@ pub async fn stage_logs(
     limit: usize,
     shared: &Shared,
 ) -> Result<StageLogs, ApiError> {
-    // convert our cursor to an i64
+    // convert our cursor to an i64 for the bucket math and a position for the query
+    let position = u64::try_from(cursor)?;
     let cursor: i64 = cursor.try_into()?;
     // make sure this limit is one we can serve
-    let limit = check_limit(limit, STAGE_LOG_LIMIT_CAP, "limit")?;
+    let limit = CursorLimit::from_user(limit, STAGE_LOG_LIMIT_CAP, "limit")?;
     // convert our limit to the type our query binds
-    let cql_limit = limit_to_cql(limit)?;
+    let cql_limit = limit.to_cql();
+    let limit = limit.get();
     // compute the scylla buckets that cover this cursor/limit window
     let buckets = stage_log_buckets(cursor, limit)?;
     // assume we will pull the max number of logs we want
     let mut lines = Vec::with_capacity(limit);
     // get our log lines from scylla, naming no more buckets per query than scylla allows
     for chunk in buckets.chunks(MAX_STAGE_LOG_BUCKETS_PER_QUERY) {
-        let query = shared
+        let rows = shared
             .scylla
-            .session
-            .execute_unpaged(
-                &shared.scylla.prep.logs.get,
-                (&reaction.id, &stage, chunk, cursor, cql_limit),
+            .queries
+            .logs
+            .get_chunk(
+                &shared.scylla.session,
+                reaction.id,
+                stage,
+                chunk,
+                position,
+                cql_limit,
             )
             .await?;
-        // enable rows on this query response
-        let query_rows = query.into_rows_result()?;
         // crawl over logs and deserialize them
-        for row in query_rows.rows::<LogLine>()? {
+        for row in rows {
             lines.push(row?);
         }
     }

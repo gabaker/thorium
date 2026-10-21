@@ -562,6 +562,10 @@ impl<'a> ClusterVerifier<'a> {
         let existing = existing_views(self.scylla, keyspace).await?;
         for table in tables {
             for view in Registry::views_of(table) {
+                // a legacy view is checked only where an older release created it
+                if Registry::is_legacy_view(view) && !existing.contains(view) {
+                    continue;
+                }
                 // a view exists and every node reports it built
                 let error = if !existing.contains(view) {
                     format!("{keyspace}.{view} doesn't exist")

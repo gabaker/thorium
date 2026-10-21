@@ -20,6 +20,21 @@ use thoradm::backup::views::{ViewStatements, view_status};
 /// The components these tests back up: every table component and Redis, without objects
 const COMPONENTS: &str = "no-s3";
 
+/// The view only keyspaces older releases created hold
+const LEGACY_VIEW: &str = "entities_by_name";
+
+/// Returns view names as owned strings, sorted
+///
+/// # Arguments
+///
+/// * `names` - The view names
+fn sorted(names: &[&str]) -> Vec<String> {
+    // own and sort them the way `views` returns them
+    let mut owned: Vec<String> = names.iter().map(|name| (*name).to_owned()).collect();
+    owned.sort();
+    owned
+}
+
 /// Returns the names of the namespace's materialized views, sorted
 ///
 /// # Arguments
@@ -157,9 +172,9 @@ fn restore(harness: &Harness, backup: &Path, report_dir: Option<&Path>) -> Outpu
     command.output().expect("failed to run thoradm")
 }
 
-/// A restore drops every registered view of the tables it loads, both entity views included,
-/// saves their statements to `views.cql`, and recreates them, so the same views exist afterwards
-/// and the API serves a sample without a restart
+/// A restore drops every registered view of the tables it loads that the API's setup creates,
+/// the entity view included, saves their statements to `views.cql`, and recreates them, so the
+/// same views exist afterwards and the API serves a sample without a restart
 #[tokio::test]
 async fn views_are_saved_dropped_and_recreated_by_the_restore() {
     // a sample, and the namespace's views before the restore
@@ -169,9 +184,11 @@ async fn views_are_saved_dropped_and_recreated_by_the_restore() {
     let before = views(harness).await;
     let registered: Vec<&str> = Registry::backed_up(Store::ScyllaView)
         .map(|entry| entry.name)
+        .filter(|name| *name != LEGACY_VIEW)
         .collect();
-    assert_eq!(before.len(), 13, "{before:?}");
-    assert_eq!(registered.len(), 13, "{registered:?}");
+    assert_eq!(before.len(), 12, "{before:?}");
+    assert_eq!(registered.len(), 12, "{registered:?}");
+    assert_eq!(before, sorted(&registered));
     // restore into the emptied target, the API running all along
     empty_target(harness).await;
     let report = backup.parent().unwrap().join("report");
@@ -422,4 +439,49 @@ async fn the_wait_for_views_logs_the_views_it_finished() {
     assert!(status.built(), "{status:?}");
     assert_eq!(status.succeeded, status.reported);
     assert!(status.reported >= 1);
+}
+
+/// A view only keyspaces from older releases hold is left alone by a restore into a keyspace
+/// without it, and is dropped, saved to `views.cql`, and recreated by a restore into one with it
+#[tokio::test]
+async fn a_view_only_older_releases_created_is_kept_when_present_and_skipped_when_missing() {
+    // a backup of a fresh install, which lacks the view
+    let harness = Harness::get().await;
+    let _guard = harness.restore_guard().await;
+    let (backup, _) = seeded_backup(harness, "legacy-view").await;
+    let ns = harness.conf.thorium.namespace.clone();
+    assert!(
+        !views(harness).await.contains(&LEGACY_VIEW.to_owned()),
+        "a fresh install holds {LEGACY_VIEW}"
+    );
+    // a restore into a keyspace without the view succeeds and doesn't create it
+    empty_target(harness).await;
+    let report = backup.parent().unwrap().join("without-report");
+    let restored = restore(harness, &backup, Some(&report));
+    assert_eq!(restored.status.code(), Some(0), "{}", describe(&restored));
+    assert!(!views(harness).await.contains(&LEGACY_VIEW.to_owned()));
+    let saved = std::fs::read_to_string(report.join("views.cql")).unwrap();
+    assert!(!saved.contains(&format!("{ns}.{LEGACY_VIEW} ")), "{saved}");
+    // a restore into a keyspace an older release created, which holds the view, keeps it
+    empty_target(harness).await;
+    common::legacy::create_entities_by_name(harness).await;
+    let report = backup.parent().unwrap().join("with-report");
+    let restored = restore(harness, &backup, Some(&report));
+    let after = views(harness).await;
+    // drop the view again whatever happened, so later tests see a fresh install
+    if after.contains(&LEGACY_VIEW.to_owned()) {
+        drop_view(harness, LEGACY_VIEW).await;
+    }
+    assert_eq!(restored.status.code(), Some(0), "{}", describe(&restored));
+    assert!(after.contains(&LEGACY_VIEW.to_owned()), "{after:?}");
+    let stderr = String::from_utf8_lossy(&restored.stderr);
+    assert!(
+        stderr.contains(&format!("Dropped view {ns}.{LEGACY_VIEW}")),
+        "{LEGACY_VIEW} wasn't dropped:\n{stderr}"
+    );
+    let saved = std::fs::read_to_string(report.join("views.cql")).unwrap();
+    assert!(
+        saved.contains(&format!("CREATE MATERIALIZED VIEW {ns}.{LEGACY_VIEW} ")),
+        "views.cql lacks {LEGACY_VIEW}:\n{saved}"
+    );
 }

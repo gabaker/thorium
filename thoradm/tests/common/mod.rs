@@ -17,6 +17,7 @@ pub mod flush_guard;
 pub mod harness;
 pub mod kill;
 pub mod kinds;
+pub mod legacy;
 pub mod mock_s3;
 pub mod names;
 pub mod objects;

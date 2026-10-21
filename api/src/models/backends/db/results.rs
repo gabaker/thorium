@@ -4,14 +4,16 @@ use chrono::prelude::*;
 use futures::StreamExt;
 use futures::stream::{self};
 use itertools::Itertools;
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use tracing::{Level, event, instrument};
 use uuid::Uuid;
 
 use crate::models::backends::OutputSupport;
+use crate::models::schema::queries::ResultsInsert;
+use crate::models::schema::scylla::ResultsStreamTableRef;
 use crate::models::{
-    EntityKinds, Event, Output, OutputDisplayType, OutputForm, OutputId, OutputIdRow, OutputKey,
-    OutputKind, OutputMap, OutputRow, ResultSearchEvent, SigmaRuleAppliesTo, User,
+    EntityKinds, Event, Output, OutputDisplayType, OutputForm, OutputId, OutputKey, OutputKind,
+    OutputMap, ResultSearchEvent, SigmaRuleAppliesTo, User,
 };
 use crate::utils::{ApiError, Shared, helpers};
 use crate::{log_scylla_err, unauthorized};
@@ -51,46 +53,51 @@ pub async fn create<O: OutputSupport>(
     let bucket = helpers::partition(now, year, chunk_size);
     // get the current timestamp
     let now = Utc::now();
+    // the files column is a set and the entity counts are stored as checked unsigned integers
+    let files = form.files.iter().cloned().collect::<HashSet<String>>();
+    let entities = form
+        .entities
+        .iter()
+        .map(|(kind, count)| Ok((*kind, usize::try_from(*count)?)))
+        .collect::<Result<HashMap<EntityKinds, usize>, ApiError>>()?;
     // save the result object
+    let row = ResultsInsert {
+        id: form.id,
+        uploaded: now,
+        tool: Some(&form.tool),
+        tool_version: form.tool_version.as_ref(),
+        cmd: form.cmd.as_deref(),
+        result: Some(&form.result),
+        files: Some(&files),
+        entities: Some(&entities),
+        display_type: Some(&form.display_type),
+    };
     shared
         .scylla
-        .session
-        .execute_unpaged(
-            &shared.scylla.prep.results.insert,
-            (
-                &form.id,
-                now,
-                &form.tool,
-                &form.tool_version,
-                &form.cmd,
-                &form.result,
-                &form.files,
-                &form.entities,
-                form.display_type,
-            ),
-        )
+        .queries
+        .results
+        .insert(&shared.scylla.session, &row)
         .await?;
     // save the stream rows for this result into scylla
     for group in &form.groups {
+        let row = ResultsStreamTableRef {
+            kind: &kind,
+            group,
+            year,
+            bucket,
+            uploaded: now,
+            id: form.id,
+            key: &key_str,
+            tool: Some(&form.tool),
+            tool_version: form.tool_version.as_ref(),
+            display_type: Some(&form.display_type),
+            cmd: form.cmd.as_deref(),
+        };
         shared
             .scylla
-            .session
-            .execute_unpaged(
-                &shared.scylla.prep.results.insert_stream,
-                (
-                    kind,
-                    &group,
-                    year,
-                    bucket,
-                    &key_str,
-                    &form.tool,
-                    &form.tool_version,
-                    form.display_type,
-                    now,
-                    &form.cmd,
-                    &form.id,
-                ),
-            )
+            .queries
+            .results_stream
+            .insert_stream(&shared.scylla.session, &row)
             .await?;
     }
     // if we have more then our max results stored then delete any past that
@@ -142,54 +149,21 @@ pub async fn authorize(
     result_id: &Uuid,
     shared: &Shared,
 ) -> Result<(), ApiError> {
-    // if we have more then 100 groups then break this into chunks of 100
-    if groups.len() > 100 {
-        // we have more then 100 groups so break this into chunks of 100
-        for chunk in groups.chunks(100) {
-            // cast our chunk array into a vec
-            let chunk_vec = chunk.to_vec();
-            // check if any of our groups have access to this sample
-            let query = shared
-                .scylla
-                .session
-                .execute_unpaged(
-                    &shared.scylla.prep.results.get_id,
-                    (key, &kind, chunk_vec, tool),
-                )
-                .await?;
-            // cast this query to a rows query
-            let query_rows = query.into_rows_result()?;
-            // crawl over our rows and return early if we find our result id
-            for row in query_rows.rows::<(Uuid,)>()? {
-                // try to cast our id into a uuid
-                if let Some(cast) = log_scylla_err!(row) {
-                    // check if this matches our id
-                    if cast.0 == *result_id {
-                        // the id matches so return early
-                        return Ok(());
-                    }
-                }
-            }
-        }
-    } else {
-        // we have less then 100 groups so just query them all at aonce
+    // check our groups 100 at a time, returning early once one has our result id
+    for chunk in groups.chunks(100) {
         // check if any of our groups have access to this sample
-        let query = shared
+        let rows = shared
             .scylla
-            .session
-            .execute_unpaged(
-                &shared.scylla.prep.results.get_id,
-                (key, kind, groups, tool),
-            )
+            .queries
+            .results_auth
+            .get_id_chunk(&shared.scylla.session, key, &kind, chunk, tool)
             .await?;
-        // cast this query to a rows query
-        let query_rows = query.into_rows_result()?;
         // crawl over our rows and return early if we find our result id
-        for row in query_rows.rows::<(Uuid,)>()? {
+        for row in rows {
             // try to cast our id into a uuid
             if let Some(cast) = log_scylla_err!(row) {
                 // check if this matches our id
-                if cast.0 == *result_id {
+                if cast.id == *result_id {
                     // the id matches so return early
                     return Ok(());
                 }
@@ -232,21 +206,17 @@ async fn get_ids(
             // get our get result ids query
             shared
                 .scylla
-                .session
-                .execute_unpaged(
-                    &shared.scylla.prep.results.get_with_key,
-                    (kind, groups, key),
-                )
+                .queries
+                .results_auth
+                .get_with_key_chunk(&shared.scylla.session, key, &kind, groups)
                 .await?
         } else {
             // get our get result ids restricted by tools query
             shared
                 .scylla
-                .session
-                .execute_unpaged(
-                    &shared.scylla.prep.results.get_with_key_and_tool,
-                    (kind, groups, key, tools),
-                )
+                .queries
+                .results_auth
+                .get_with_key_and_tool_chunk(&shared.scylla.session, key, &kind, groups, tools)
                 .await?
         };
         // add our query
@@ -258,16 +228,17 @@ async fn get_ids(
             .chunks(10)
             .cartesian_product(tools[..].chunks(10))
         {
-            // turn our chunks into vecs
-            let groups_vec = groups_chunk.to_vec();
-            let tools_vec = tools_chunk.to_vec();
             // send get our get result ids restricted by tools query
             let query = shared
                 .scylla
-                .session
-                .execute_unpaged(
-                    &shared.scylla.prep.results.get_with_key_and_tool,
-                    (kind, groups_vec, key, tools_vec),
+                .queries
+                .results_auth
+                .get_with_key_and_tool_chunk(
+                    &shared.scylla.session,
+                    key,
+                    &kind,
+                    groups_chunk,
+                    tools_chunk,
                 )
                 .await?;
             // add our query
@@ -276,16 +247,12 @@ async fn get_ids(
     } else {
         // we have no tools so just crawl our groups
         for chunk in groups.chunks(100) {
-            // turn our chunks into vecs
-            let groups_vec = chunk.to_vec();
             // send our query
             let query = shared
                 .scylla
-                .session
-                .execute_unpaged(
-                    &shared.scylla.prep.results.get_with_key,
-                    (kind, groups_vec, key),
-                )
+                .queries
+                .results_auth
+                .get_with_key_chunk(&shared.scylla.session, key, &kind, chunk)
                 .await?;
             // add our query
             queries.push(query);
@@ -296,11 +263,7 @@ async fn get_ids(
     // build a map of timestamps and uuids
     let mut map: HashMap<Uuid, OutputId> = HashMap::with_capacity(10);
     // crawl our queries
-    for query in queries {
-        // enable rows in this query
-        let query_rows = query.into_rows_result()?;
-        // turn our query results into a typed iter
-        let typed_iter = query_rows.rows::<OutputIdRow>()?;
+    for typed_iter in queries {
         // dudplicate our rows based on id and build the correct order to return them in
         let mut order: BTreeMap<DateTime<Utc>, Uuid> = BTreeMap::default();
         // crawl over our output id rows
@@ -366,48 +329,22 @@ pub async fn get(
         return Ok(OutputMap::default());
     }
     // build a list of just ids
-    let id_list = ids.iter().map(|row| &row.id).collect::<Vec<&Uuid>>();
+    let id_list = ids.iter().map(|row| row.id).collect::<Vec<Uuid>>();
     // instance an empty result map to insert any retrieved rows into
     let mut temp = HashMap::with_capacity(id_list.len());
-    // if we have more then 100 ids then chunk it into bathes of 100  otherwise just get our info
-    if id_list.len() > 100 {
-        // break our ids into chunks of 100
-        for chunk in id_list.chunks(100) {
-            // turn our id chunk into a vec
-            let chunk_vec = chunk.to_vec();
-            // get this chunks data
-            let query = shared
-                .scylla
-                .session
-                .execute_unpaged(&shared.scylla.prep.results.get, (chunk_vec,))
-                .await?;
-            // cast this query to a rows query
-            let query_rows = query.into_rows_result()?;
-            // cast our rows to an output and insert into our map
-            query_rows
-                .rows::<OutputRow>()?
-                .filter_map(|res| log_scylla_err!(res))
-                .for_each(|row| {
-                    temp.insert(row.id, row);
-                });
-        }
-    } else {
-        // get this chunks data
-        let query = shared
-            .scylla
-            .session
-            .execute_unpaged(&shared.scylla.prep.results.get, (&id_list,))
-            .await?;
-        // cast this query to a rows query
-        let query_rows = query.into_rows_result()?;
-        // cast our rows to an output and insert into our map
-        query_rows
-            .rows::<OutputRow>()?
-            .filter_map(|res| log_scylla_err!(res))
-            .for_each(|row| {
-                temp.insert(row.id, row);
-            });
-    }
+    // get our results in chunks of 100 ids
+    let rows = shared
+        .scylla
+        .queries
+        .results
+        .get(&shared.scylla.session, &id_list)
+        .await?;
+    // cast our rows to an output and insert into our map
+    rows.into_iter()
+        .filter_map(|res| log_scylla_err!(res))
+        .for_each(|row| {
+            temp.insert(row.id, row);
+        });
     // build the ordered output map
     let mut outputs = OutputMap::default();
     // crawl our results and add them into our output map
@@ -452,20 +389,20 @@ async fn prune_helper(
     shared: &Shared,
 ) -> Result<(), ApiError> {
     // query scylla to see if this result is reachable
-    let query = shared
+    let rows = shared
         .scylla
-        .session
-        .execute_unpaged(&shared.scylla.prep.results.count, (kind, key, result_id))
+        .queries
+        .results_ids
+        .count(&shared.scylla.session, key, *result_id, &kind)
         .await?;
-    // cast this query to a rows query
-    let query_rows = query.into_rows_result()?;
     // delete any backing objects if its  no longer reachable
-    if query_rows.rows_num() == 0 {
+    if rows.is_empty() {
         // delete this result from scylla
         shared
             .scylla
-            .session
-            .execute_unpaged(&shared.scylla.prep.results.delete, (result_id,))
+            .queries
+            .results
+            .delete(&shared.scylla.session, *result_id)
             .await?;
         // try to delete all result files from s3
         // if any fail this will orphan things but orphaned result files are better
@@ -530,10 +467,16 @@ pub async fn prune(
                 // delete this result from the result stream
                 shared
                     .scylla
-                    .session
-                    .execute_unpaged(
-                        &shared.scylla.prep.results.delete_stream,
-                        (kind, group, year, bucket, result.uploaded, result.id),
+                    .queries
+                    .results_stream
+                    .delete_stream(
+                        &shared.scylla.session,
+                        &kind,
+                        group,
+                        year,
+                        bucket,
+                        result.uploaded,
+                        result.id,
                     )
                     .await?;
                 // track that we pruned a result
@@ -583,16 +526,14 @@ pub async fn delete(
                 stream::iter(&tool_result.groups)
                     .map(|group| {
                         // delete this result from the result stream
-                        shared.scylla.session.execute_unpaged(
-                            &shared.scylla.prep.results.delete_stream,
-                            (
-                                kind,
-                                group,
-                                year,
-                                bucket,
-                                tool_result.uploaded,
-                                tool_result.id,
-                            ),
+                        shared.scylla.queries.results_stream.delete_stream(
+                            &shared.scylla.session,
+                            &kind,
+                            group,
+                            year,
+                            bucket,
+                            tool_result.uploaded,
+                            tool_result.id,
                         )
                     })
                     .buffer_unordered(10),

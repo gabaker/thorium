@@ -29,6 +29,7 @@ use super::manifest::write_json_atomic;
 use super::sink::SinkFactory;
 use super::target::Target;
 use super::utils::drop_materialized_view;
+use super::views::droppable_views_of;
 use crate::Error;
 use crate::shared::retry::RetryPolicy;
 
@@ -880,7 +881,7 @@ impl Wiper<'_> {
         let keyspace = &self.target.keyspace;
         let table = report.tables[index].table.clone();
         // drop the views first, so no table is truncated while it has views
-        for view in Registry::views_of(&table) {
+        for view in droppable_views_of(self.scylla, keyspace, &table).await? {
             let dropped = self
                 .retry
                 .run(|| drop_materialized_view(keyspace, view, self.scylla))

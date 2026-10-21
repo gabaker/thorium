@@ -4,21 +4,20 @@ use ahash::AHasher;
 use bytecheck::CheckBytes;
 use chrono::prelude::*;
 use rkyv::{Archive, Deserialize, Serialize};
-use scylla::DeserializeRow;
-use scylla::client::session::Session;
-use scylla::errors::PrepareError;
-use scylla::statement::prepared::PreparedStatement;
+use scylla::SerializeRow;
 use std::hash::Hasher;
 use thorium::Conf;
 use thorium::models::CommitishKinds;
 
 use super::Versioned;
 use crate::backup::{Backup, Restore, Scrub, Utils};
+use thorium::models::schema::ScyllaProjection;
+use thorium::models::schema::scylla::{CommitishListTable, CommitishesTable};
 
 /// A commitishes row as format 2 archives it; `None` is a cell the source row held unset
-#[derive(Debug, Archive, Serialize, Deserialize, DeserializeRow)]
+#[derive(Debug, Archive, Serialize, Deserialize, ScyllaProjection)]
 #[archive_attr(derive(Debug, CheckBytes))]
-#[scylla(flavor = "enforce_order", skip_name_checks)]
+#[thorium_projection(of = CommitishesTable)]
 pub struct Commitish {
     /// The kind of commitish this row represents
     pub kind: CommitishKinds,
@@ -45,31 +44,12 @@ impl Utils for Commitish {
 
 #[async_trait::async_trait]
 impl Backup for Commitish {
+    /// The table this archive struct backs up, read through its generated statements
+    type Table = CommitishesTable;
+
     /// The columns of this table's partition key, used to name rows that fail to decode
     fn partition_key() -> &'static [&'static str] {
         &["kind", "group", "repo", "key"]
-    }
-
-    /// The prepared statement to use when retrieving data from Scylla
-    ///
-    /// # Arguments
-    ///
-    /// * `scylla` - The scylla session to build a prepared statement with
-    /// * `ns` - The namespace for this prepared statement
-    async fn prepared_statement(
-        scylla: &Session,
-        ns: &str,
-    ) -> Result<PreparedStatement, PrepareError> {
-        // build tags get prepared statement
-        scylla
-            .prepare(format!(
-                "SELECT kind, group, repo, key, data, repo_data, timestamp \
-                FROM {}.{} \
-                Where token(kind, group, repo, key) >= ? AND token(kind, group, repo, key) <= ?",
-                ns,
-                Self::name(),
-            ))
-            .await
     }
 
     /// Hash this partitions info to see if we have changed partitions
@@ -88,6 +68,25 @@ impl Backup for Commitish {
 /// Implement scrub support for the tags table
 impl Scrub for Commitish {}
 
+/// The values a restored row binds by column name to the table's generated full-row insert
+#[derive(SerializeRow)]
+pub struct CommitishValues {
+    /// The `kind` column
+    pub kind: CommitishKinds,
+    /// The `group` column
+    pub group: String,
+    /// The `repo` column
+    pub repo: String,
+    /// The `key` column
+    pub key: String,
+    /// The `timestamp` column
+    pub timestamp: Option<DateTime<Utc>>,
+    /// The `data` column
+    pub data: Option<String>,
+    /// The `repo_data` column
+    pub repo_data: Option<String>,
+}
+
 /// Implement restore support for the tags table
 #[async_trait::async_trait]
 impl Restore for Commitish {
@@ -95,37 +94,8 @@ impl Restore for Commitish {
     // the size itself
     type PartitionConf = u16;
 
-    /// The kind, group, repo, key, commit time, data, and repo data hash
-    type Values = (
-        CommitishKinds,
-        String,
-        String,
-        String,
-        Option<DateTime<Utc>>,
-        Option<String>,
-        Option<String>,
-    );
-
-    /// The prepared statement to use when restoring data to scylla
-    ///
-    /// # Arguments
-    ///
-    /// * `scylla` - A scylla client
-    /// * `ns` - The namespace in scylla this table is from
-    async fn prepared_statement(
-        scylla: &Session,
-        ns: &str,
-    ) -> Result<PreparedStatement, PrepareError> {
-        scylla
-            .prepare(format!(
-                "INSERT INTO {}.{} \
-                (kind, group, repo, key, timestamp, data, repo_data) \
-                VALUES (?, ?, ?, ?, ?, ?, ?)",
-                ns,
-                Self::name(),
-            ))
-            .await
-    }
+    /// The row the generated full-row insert binds by name
+    type Values = CommitishValues;
 
     /// Get the partition size for this data type
     ///
@@ -144,22 +114,22 @@ impl Restore for Commitish {
     /// * `_format` - The format version the row was archived in
     fn values(self, _partition_size: &u16, _format: u32) -> Self::Values {
         // every column as the row holds it
-        (
-            self.kind,
-            self.group,
-            self.repo,
-            self.key,
-            self.timestamp,
-            self.data,
-            self.repo_data,
-        )
+        CommitishValues {
+            kind: self.kind,
+            group: self.group,
+            repo: self.repo,
+            key: self.key,
+            timestamp: self.timestamp,
+            data: self.data,
+            repo_data: self.repo_data,
+        }
     }
 }
 
 /// A commitish list row as format 2 archives it; `None` is a cell the source row held unset
-#[derive(Debug, Archive, Serialize, Deserialize, DeserializeRow)]
+#[derive(Debug, Archive, Serialize, Deserialize, ScyllaProjection)]
 #[archive_attr(derive(Debug, CheckBytes))]
-#[scylla(flavor = "enforce_order", skip_name_checks)]
+#[thorium_projection(of = CommitishListTable)]
 pub struct CommitishList {
     /// The kind of commitish this row represents
     pub kind: CommitishKinds,
@@ -188,31 +158,12 @@ impl Utils for CommitishList {
 
 #[async_trait::async_trait]
 impl Backup for CommitishList {
+    /// The table this archive struct backs up, read through its generated statements
+    type Table = CommitishListTable;
+
     /// The columns of this table's partition key, used to name rows that fail to decode
     fn partition_key() -> &'static [&'static str] {
         &["kind", "group", "year", "bucket", "repo"]
-    }
-
-    /// The prepared statement to use when retrieving data from Scylla
-    ///
-    /// # Arguments
-    ///
-    /// * `scylla` - The scylla session to build a prepared statement with
-    /// * `ns` - The namespace for this prepared statement
-    async fn prepared_statement(
-        scylla: &Session,
-        ns: &str,
-    ) -> Result<PreparedStatement, PrepareError> {
-        // build tags get prepared statement
-        scylla
-            .prepare(format!(
-                "SELECT kind, group, year, bucket, repo, timestamp, key, repo_data \
-                FROM {}.{} \
-                Where token(kind, group, year, bucket, repo) >= ? AND token(kind, group, year, bucket, repo) <= ?",
-                ns,
-                Self::name(),
-            ))
-            .await
     }
 
     /// Hash this partitions info to see if we have changed partitions
@@ -232,6 +183,27 @@ impl Backup for CommitishList {
 /// Implement scrub support for the tags table
 impl Scrub for CommitishList {}
 
+/// The values a restored row binds by column name to the table's generated full-row insert
+#[derive(SerializeRow)]
+pub struct CommitishListValues {
+    /// The `kind` column
+    pub kind: CommitishKinds,
+    /// The `group` column
+    pub group: String,
+    /// The `year` column
+    pub year: i32,
+    /// The `bucket` column
+    pub bucket: i32,
+    /// The `repo` column
+    pub repo: String,
+    /// The `timestamp` column
+    pub timestamp: DateTime<Utc>,
+    /// The `key` column
+    pub key: String,
+    /// The `repo_data` column
+    pub repo_data: Option<String>,
+}
+
 /// Implement restore support for the tags table
 #[async_trait::async_trait]
 impl Restore for CommitishList {
@@ -239,38 +211,8 @@ impl Restore for CommitishList {
     // the size itself
     type PartitionConf = u16;
 
-    /// The kind, group, year, bucket, repo, commit time, key, and repo data hash
-    type Values = (
-        CommitishKinds,
-        String,
-        i32,
-        i32,
-        String,
-        DateTime<Utc>,
-        String,
-        Option<String>,
-    );
-
-    /// The prepared statement to use when restoring data to scylla
-    ///
-    /// # Arguments
-    ///
-    /// * `scylla` - A scylla client
-    /// * `ns` - The namespace in scylla this table is from
-    async fn prepared_statement(
-        scylla: &Session,
-        ns: &str,
-    ) -> Result<PreparedStatement, PrepareError> {
-        scylla
-            .prepare(format!(
-                "INSERT INTO {}.{} \
-                (kind, group, year, bucket, repo, timestamp, key, repo_data) \
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-                ns,
-                Self::name(),
-            ))
-            .await
-    }
+    /// The row the generated full-row insert binds by name
+    type Values = CommitishListValues;
 
     /// Get the partition size for this data type
     ///
@@ -291,16 +233,16 @@ impl Restore for CommitishList {
     fn values(self, partition_size: &u16, _format: u32) -> Self::Values {
         // calculate the new bucket
         let bucket = thorium::utils::helpers::partition(self.timestamp, self.year, *partition_size);
-        (
-            self.kind,
-            self.group,
-            self.year,
+        CommitishListValues {
+            kind: self.kind,
+            group: self.group,
+            year: self.year,
             bucket,
-            self.repo,
-            self.timestamp,
-            self.key,
-            self.repo_data,
-        )
+            repo: self.repo,
+            timestamp: self.timestamp,
+            key: self.key,
+            repo_data: self.repo_data,
+        }
     }
 }
 

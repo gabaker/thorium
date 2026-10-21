@@ -12,51 +12,20 @@ use uuid::Uuid;
 use super::ScyllaCursor;
 use crate::models::backends::TagSupport;
 use crate::models::backends::db::ScyllaTagCountCursor;
+use crate::models::schema::JsonText;
+use crate::models::schema::scylla::{CommentsTableRef, SamplesListTableRef};
 use crate::models::{
-    Comment, CommentForm, CommentRow, Event, FileListParams, OutputKind, ResultSearchEvent,
+    BasicSubmissionRow, Comment, CommentForm, Event, FileListParams, OutputKind, ResultSearchEvent,
     S3Objects, Sample, SampleCheck, SampleCheckResponse, SampleForm, SampleListLine,
-    SampleSubmissionResponse, Submission, SubmissionChunk, SubmissionRow, SubmissionUpdate,
-    TagDeleteRequest, TagRequest, TagSearchEvent, User,
+    SampleSubmissionResponse, Submission, SubmissionChunk, SubmissionUpdate, TagDeleteRequest,
+    TagRequest, TagSearchEvent, User,
 };
 use crate::utils::s3::StandardHashes;
 use crate::utils::{ApiError, Shared, helpers};
 use crate::{
     conflict, deserialize, for_groups, internal_err, log_scylla_err, not_found, same_vec,
-    serialize, unauthorized,
+    unauthorized,
 };
-
-/// Deletes a submission from multiple groups, breaking into chunks of 100 if > 100
-macro_rules! delete_from_groups {
-    ($shared:expr, $groups:expr, $year:expr, $bucket:expr, $uploaded:expr, $id:expr) => {
-        // if we have less then 100 groups then just delete them in one go
-        if $groups.len() <= 100 {
-            // remove any requested submissions
-            $shared
-                .scylla
-                .session
-                .execute_unpaged(
-                    &$shared.scylla.prep.samples.delete_multiple_groups,
-                    (&$groups, $year, $bucket, $uploaded, $id),
-                )
-                .await?;
-        } else {
-            // we have more then 100 groups so break them into chunks of 100
-            for chunk in $groups.chunks(100) {
-                // copy this chunk into a vec
-                let chunk_vec = chunk.to_vec();
-                // remove this chunks submissions
-                $shared
-                    .scylla
-                    .session
-                    .execute_unpaged(
-                        &$shared.scylla.prep.samples.delete_multiple_groups,
-                        (chunk_vec, $year, $bucket, $uploaded, $id),
-                    )
-                    .await?;
-            }
-        }
-    };
-}
 
 /// Check if a specific submission already exists in the DB
 ///
@@ -111,27 +80,15 @@ pub async fn sha256_exists(
     sha256: &str,
     shared: &Shared,
 ) -> Result<bool, ApiError> {
-    // check if this sample exists in any of the groups we can see
-    // break our group into chunks of 50 to stay under the cartesian product limit
-    for groups_chunk in groups.chunks(50) {
-        // build a query to check if the sample exists in this bucket of groups
-        let query = shared
-            .scylla
-            .session
-            .execute_unpaged(
-                &shared.scylla.prep.samples.auth,
-                (vec![sha256], groups_chunk),
-            )
-            .await?;
-        // cast this query to a rows query
-        let query_rows = query.into_rows_result()?;
-        // if we got any sha256s back then this sample must exist and be visible to this user
-        if query_rows.rows_num() > 0 {
-            // this sample exists
-            return Ok(true);
-        }
-    }
-    Ok(false)
+    // check if this sample exists in any of the groups we can see, 50 groups at a time to
+    // stay under the cartesian product limit, stopping at the first chunk that sees it
+    let exists = shared
+        .scylla
+        .queries
+        .samples
+        .auth_any(&shared.scylla.session, &[sha256.to_owned()], groups)
+        .await?;
+    Ok(exists)
 }
 
 /// Adds a child sample to its originating result
@@ -154,32 +111,33 @@ async fn add_child(
     if !results.is_empty() {
         // instance an empty result map to insert any retrieved rows into
         let mut temp = HashMap::with_capacity(results.len());
-        // execute our query
-        let query = shared
+        // get every result's upload time in one statement
+        let rows = shared
             .scylla
-            .session
-            .execute_unpaged(&shared.scylla.prep.results.get_uploaded_by_id, (results,))
+            .queries
+            .results
+            .get_uploaded_by_id_chunk(&shared.scylla.session, results)
             .await?;
-        // enable casting to types for this query
-        let query_rows = query.into_rows_result()?;
-        // set the type to cast this stream too
-        let typed_iter = query_rows.rows::<(Uuid, DateTime<Utc>)>()?;
         // crawl and consume these typed rows
-        for typed in typed_iter {
+        for typed in rows {
             // check if we ran into a problem casting this row
-            let (id, timestamp) = typed?;
+            let row = typed?;
             // add this to our temp map
-            temp.insert(id, timestamp);
+            temp.insert(row.id, row.uploaded);
         }
         // add this child to the target results
         for (result_id, uploaded) in temp.into_iter() {
             // update our child field in this result
             shared
                 .scylla
-                .session
-                .execute_unpaged(
-                    &shared.scylla.prep.results.update_children,
-                    (&sha256, submission, result_id, uploaded),
+                .queries
+                .results
+                .update_children(
+                    &shared.scylla.session,
+                    sha256,
+                    *submission,
+                    result_id,
+                    uploaded,
                 )
                 .await?;
         }
@@ -258,10 +216,22 @@ pub async fn create(
     // save submission objects into scylla
     // currently do it one at a time instead of with buffered_unordered to work around Fn Once
     for group in form.groups.iter() {
-        shared.scylla.session.execute_unpaged(
-            &shared.scylla.prep.samples.insert,
-            (group, &year, bucket, &hashes.sha256, &hashes.sha1, &hashes.md5, &id, &form.file_name, &form.description, &user.username, &origin_str, now)
-        ).await?;
+        // build this group's submission row from borrowed values
+        let row = SamplesListTableRef {
+            group,
+            year,
+            bucket,
+            uploaded: now,
+            id,
+            sha256: &hashes.sha256,
+            sha1: &hashes.sha1,
+            md5: &hashes.md5,
+            name: form.file_name.as_deref(),
+            description: form.description.as_deref(),
+            submitter: &user.username,
+            origin: origin_str.as_deref(),
+        };
+        shared.scylla.queries.samples_list.insert(&shared.scylla.session, &row).await?;
     }
     // build the keys for this items census cache
     let keys = super::keys::samples::census_keys(&form.groups, year, bucket, shared);
@@ -316,15 +286,14 @@ pub async fn authorize(
         // our cartesian product will be low enough so just query for them all at once
         // get the number of tools or default to 10
         // check if any of our groups have access to this sample
-        let query = shared
+        let rows = shared
             .scylla
-            .session
-            .execute_unpaged(&shared.scylla.prep.samples.auth, (sha256s, groups))
+            .queries
+            .samples
+            .auth_chunk(&shared.scylla.session, sha256s, groups)
             .await?;
-        // cast this to a rows query
-        let query_rows = query.into_rows_result()?;
         //  make sure we got back the same number of sha256s
-        if query_rows.rows_num() != sha256s.len() {
+        if rows.len() != sha256s.len() {
             return unauthorized!();
         }
     } else {
@@ -338,22 +307,18 @@ pub async fn authorize(
             .cartesian_product(sha256s[..].chunks(50))
         {
             // send a query to check if we have access to these samples
-            let query = shared
+            let rows = shared
                 .scylla
-                .session
-                .execute_unpaged(
-                    &shared.scylla.prep.samples.auth,
-                    (sha256s_chunk, groups_chunk),
-                )
+                .queries
+                .samples
+                .auth_chunk(&shared.scylla.session, sha256s_chunk, groups_chunk)
                 .await?;
-            // enable casting to types for this query
-            let query_rows = query.into_rows_result()?;
             // cast our rows to the right type
-            for typed_row in query_rows.rows::<(String,)>()? {
+            for typed_row in rows {
                 // check if we failed to cast this row
-                let (sha256,) = typed_row?;
+                let row = typed_row?;
                 // add this sha256 to our authed samples
-                authed.insert(sha256);
+                authed.insert(row.sha256);
             }
             // if we have authed all of our sha256s then return early
             if authed.len() == sha256s.len() {
@@ -385,62 +350,19 @@ async fn get_comments(
     list: &mut Vec<Comment>,
     shared: &Shared,
 ) -> Result<(), ApiError> {
-    // if we have more then 100 groups then chunk it into bathes of 100  otherwise just get our info
-    if groups.len() > 100 {
-        // break our groups into chunks of 100
-        for chunk in groups.chunks(100) {
-            // turn our group chunk into a vec
-            let chunk_vec = chunk.to_vec();
-            // get this chunks data
-            let query = shared
-                .scylla
-                .session
-                .execute_unpaged(&shared.scylla.prep.comments.get, (chunk_vec, sha256))
-                .await?;
-            // build a btreemap to collect all comments and then sort them
-            let mut map: BTreeMap<DateTime<Utc>, HashMap<Uuid, Comment>> = BTreeMap::default();
-            // enable casting to types for this query
-            let query_rows = query.into_rows_result()?;
-            // set the type to cast this stream too
-            let typed_iter = query_rows.rows::<CommentRow>()?;
-            // crawl over rows and add them to our tag map while logging any errors
-            typed_iter
-                .filter_map(|res| log_scylla_err!(res))
-                .for_each(|comment| {
-                    // get an entry to the nested map of comments by id
-                    let id_map = map.entry(comment.uploaded).or_default();
-                    // get our comments doc so we can add a group or insert it
-                    match id_map.entry(comment.id) {
-                        // this comment has already been added so just add a new group to it
-                        Occupied(entry) => entry.into_mut().groups.push(comment.group),
-                        Vacant(entry) => {
-                            // try to turn this row into a comment
-                            let res = Comment::try_from(comment);
-                            // if we can deserialize this string then insert it
-                            if let Some(cast) = log_scylla_err!(res) {
-                                entry.insert(cast);
-                            }
-                        }
-                    }
-                });
-            // flatten our map of comments and append it to our list of comments
-            list.extend(map.into_iter().flat_map(|(_, map)| map.into_values()));
-        }
-    } else {
-        // we have less then 100 groups so just get their data
-        let query = shared
+    // get the comments in chunks of 100 groups, merging each chunk's rows on their own
+    for chunk in groups.chunks(100) {
+        // get this chunks data
+        let rows = shared
             .scylla
-            .session
-            .execute_unpaged(&shared.scylla.prep.comments.get, (groups, sha256))
+            .queries
+            .comments
+            .get_chunk(&shared.scylla.session, chunk, sha256)
             .await?;
-        // enable casting to types for this query
-        let query_rows = query.into_rows_result()?;
-        // set the type to cast this stream too
-        let typed_iter = query_rows.rows::<CommentRow>()?;
         // build a btreemap to collect all comments and then sort them
         let mut map: BTreeMap<DateTime<Utc>, HashMap<Uuid, Comment>> = BTreeMap::default();
         // crawl over rows and add them to our tag map while logging any errors
-        typed_iter
+        rows.into_iter()
             .filter_map(|res| log_scylla_err!(res))
             .for_each(|comment| {
                 // get an entry to the nested map of comments by id
@@ -481,63 +403,27 @@ pub async fn get(
 ) -> Result<Option<Sample>, ApiError> {
     // build a btree to sort our submissions
     let mut sorted: BTreeMap<DateTime<Utc>, Vec<Submission>> = BTreeMap::default();
-    // if we have more then 100 groups then chunk it into bathes of 100  otherwise just get our info
-    if groups.len() > 100 {
-        // break our groups into chunks of 100
-        for chunk in groups.chunks(100) {
-            // turn our group chunk into a vec
-            let chunk_vec = chunk.to_vec();
-            // get this chunks data
-            let query = shared
-                .scylla
-                .session
-                .execute_unpaged(&shared.scylla.prep.samples.get, (sha256, chunk_vec))
-                .await?;
-            // enable casting to types for this query
-            let query_rows = query.into_rows_result()?;
-            // set the type to cast this stream too
-            let typed_iter = query_rows.rows::<SubmissionRow>()?;
-            // crawl over rows and add them to our tag map while logging any errors
-            typed_iter
-                .filter_map(|res| log_scylla_err!(res))
-                .for_each(|sub| {
-                    // get an entry to the list for this timestamp
-                    let entry = sorted.entry(sub.uploaded).or_default();
-                    // crawl the entries for this timestamp and dedupe entries
-                    if let Some(pos) = entry.iter().position(|item| sub.id == item.id) {
-                        entry[pos].groups.push(sub.group);
-                    } else {
-                        // add this new submission to this timestamps list
-                        entry.push(Submission::from(sub));
-                    }
-                });
-        }
-    } else {
-        // get this chunks data
-        let query = shared
-            .scylla
-            .session
-            .execute_unpaged(&shared.scylla.prep.samples.get, (sha256, groups))
-            .await?;
-        // enable casting to types for this query
-        let query_rows = query.into_rows_result()?;
-        // set the type to cast this stream too
-        let typed_iter = query_rows.rows::<SubmissionRow>()?;
-        // crawl over rows and add them to our tag map while logging any errors
-        typed_iter
-            .filter_map(|res| log_scylla_err!(res))
-            .for_each(|sub| {
-                // get an entry to the list for this timestamp
-                let entry = sorted.entry(sub.uploaded).or_default();
-                // crawl the entries for this timestamp and dedupe entries
-                if let Some(pos) = entry.iter().position(|item| sub.id == item.id) {
-                    entry[pos].groups.push(sub.group);
-                } else {
-                    // add this new submission to this timestamps list
-                    entry.push(Submission::from(sub));
-                }
-            });
-    }
+    // get every submission in chunks of 100 groups
+    let rows = shared
+        .scylla
+        .queries
+        .samples
+        .get(&shared.scylla.session, sha256, groups)
+        .await?;
+    // crawl over rows and add them to our tag map while logging any errors
+    rows.into_iter()
+        .filter_map(|res| log_scylla_err!(res))
+        .for_each(|sub| {
+            // get an entry to the list for this timestamp
+            let entry = sorted.entry(sub.uploaded).or_default();
+            // crawl the entries for this timestamp and dedupe entries
+            if let Some(pos) = entry.iter().position(|item| sub.id == item.id) {
+                entry[pos].groups.push(sub.group);
+            } else {
+                // add this new submission to this timestamps list
+                entry.push(Submission::from(sub));
+            }
+        });
     // get an iter of these submissions in descending order
     let mut descending = sorted.into_iter().rev().flat_map(|(_, sub)| sub);
     // get the first submission object and cast it to a sample
@@ -594,8 +480,20 @@ pub async fn delete_submission(
     let chunk_size = shared.config.thorium.files.partition_size;
     // determine what bucket to add data too
     let bucket = helpers::partition(sub.uploaded, year, chunk_size);
-    // delete the submissions from the db
-    delete_from_groups!(shared, groups, year, bucket, sub.uploaded, sub.id);
+    // delete the submissions from the db in chunks of 100 groups
+    shared
+        .scylla
+        .queries
+        .samples_list
+        .delete_multiple_groups(
+            &shared.scylla.session,
+            groups,
+            year,
+            bucket,
+            sub.uploaded,
+            sub.id,
+        )
+        .await?;
     // sleep for a second to ensure scylla has time to become consistent
     // this isn't very performant but deletes should be relatively rare and you can
     // perform then in parallel to work around performance issues
@@ -664,24 +562,22 @@ async fn other_submissions(
     shared: &Shared,
 ) -> Result<HashMap<String, HashSet<String>>, ApiError> {
     // get the groups and submitters for the sample
-    let query = shared
+    let rows = shared
         .scylla
-        .session
-        .execute_unpaged(
-            &shared.scylla.prep.samples.get_basic_submission_info,
-            &(sha256,),
-        )
+        .queries
+        .samples
+        .get_basic_submission_info(&shared.scylla.session, sha256)
         .await?;
-    // enable casting to types for this query
-    let query_rows = query.into_rows_result()?;
-    // set the type to cast this stream too
-    let typed_iter = query_rows.rows::<(String, String, Uuid)>()?;
     // size our map correctly for the number of rows returned
-    let mut map: HashMap<String, HashSet<String>> = HashMap::with_capacity(query_rows.rows_num());
+    let mut map: HashMap<String, HashSet<String>> = HashMap::with_capacity(rows.len());
     // cast our rows to typed values
-    for row in typed_iter {
+    for row in rows {
         // try to cast our row to the group, submitter, and id
-        let (group, submitter, id) = row?;
+        let BasicSubmissionRow {
+            group,
+            submitter,
+            id,
+        } = row?;
         // ignore row if it was supposed to be deleted, but the db
         // hasn't yet updated to reflect the delete
         if id == sub.id && groups.contains(&group) {
@@ -809,7 +705,8 @@ pub async fn list(
 /// List samples for a grep search without saving the list cursor
 ///
 /// Grep cursors embed the retained state of their inner list cursor, so the cursor
-/// built here is handed back unsaved for its owner to persist atomically.
+/// built here is handed back unsaved for its owner to persist atomically. A resumed
+/// cursor lists only the saved groups the params may still list.
 ///
 /// # Arguments
 ///
@@ -830,13 +727,10 @@ pub async fn list_greppable(
 ) -> Result<ScyllaCursor<SampleListLine>, ApiError> {
     // resume our cursor from its retained state or build a new one from our params
     let mut cursor = match retain {
-        Some(retain) => ScyllaCursor::from_retain(
-            deserialize!(&retain),
-            &user.username,
-            params.limit,
-            true,
-            shared,
-        )?,
+        // narrow the resumed cursor to the groups this page was authorized for
+        Some(retain) => {
+            ScyllaCursor::from_retain(deserialize!(&retain), params, &user.username, true, shared)?
+        }
         None => ScyllaCursor::from_params(params, &user.username, true, shared).await?,
     };
     // get the next page of data for this cursor
@@ -866,13 +760,11 @@ pub async fn list_details(
     let mut futures = Vec::with_capacity(100);
     // split our groups and samples into chunks of 50
     for (sha256s_chunk, groups_chunk) in sha256s.chunks(50).cartesian_product(groups.chunks(50)) {
-        // turn our chunks into vecs
-        let groups_vec = groups_chunk.to_vec();
-        let sha256s_vec = sha256s_chunk.to_vec();
         // build a query to get this chunks data
-        let query = shared.scylla.session.execute_unpaged(
-            &shared.scylla.prep.samples.get_many,
-            (sha256s_vec, groups_vec),
+        let query = shared.scylla.queries.samples.get_many_chunk(
+            &shared.scylla.session,
+            sha256s_chunk,
+            groups_chunk,
         );
         // add this future to our future set
         futures.push(query);
@@ -882,11 +774,9 @@ pub async fn list_details(
     // start getting our details from our queries
     while let Some(query) = stream.next().await {
         // unwrap our query
-        let query = query?;
-        // convert our query into a rows query
-        let query_rows = query.into_rows_result()?;
+        let rows = query?;
         // crawl the rows returned by this query
-        for cast in query_rows.rows::<SubmissionRow>()? {
+        for cast in rows {
             // get this row if possible
             let row = cast?;
             // get an entry to this submissions timestamp list
@@ -952,38 +842,43 @@ pub async fn update(
         let bucket = helpers::partition(sub.uploaded, year, chunk_size);
         // update all of the submission rows for this submission
         for group in sub.groups.iter() {
-            shared
-                .scylla
-                .session
-                .execute_unpaged(
-                    &shared.scylla.prep.samples.insert,
-                    (
-                        group,
-                        &year,
-                        &bucket,
-                        &sample.sha256,
-                        &sample.sha1,
-                        &sample.md5,
-                        &sub.id,
-                        &sub.name,
-                        &sub.description,
-                        &sub.submitter,
-                        &origin_str,
-                        sub.uploaded,
-                    ),
-                )
-                .await?;
-        }
-        // if any groups are set to be removed then remove them
-        if !update.remove_groups.is_empty() {
-            delete_from_groups!(
-                shared,
-                update.remove_groups,
+            // build this group's submission row from borrowed values
+            let row = SamplesListTableRef {
+                group,
                 year,
                 bucket,
-                sub.uploaded,
-                sub.id
-            );
+                uploaded: sub.uploaded,
+                id: sub.id,
+                sha256: &sample.sha256,
+                sha1: &sample.sha1,
+                md5: &sample.md5,
+                name: sub.name.as_deref(),
+                description: sub.description.as_deref(),
+                submitter: &sub.submitter,
+                origin: origin_str.as_deref(),
+            };
+            shared
+                .scylla
+                .queries
+                .samples_list
+                .insert(&shared.scylla.session, &row)
+                .await?;
+        }
+        // if any groups are set to be removed then remove them in chunks of 100
+        if !update.remove_groups.is_empty() {
+            shared
+                .scylla
+                .queries
+                .samples_list
+                .delete_multiple_groups(
+                    &shared.scylla.session,
+                    &update.remove_groups,
+                    year,
+                    bucket,
+                    sub.uploaded,
+                    sub.id,
+                )
+                .await?;
         }
         Ok(sample)
     } else {
@@ -1013,27 +908,24 @@ pub async fn create_comment<'v>(
     form: &CommentForm,
     shared: &Shared,
 ) -> Result<(), ApiError> {
-    // serialize our s3 paths
-    let paths = serialize!(&form.attachments);
     // get the current timestamp
     let now = Utc::now();
-    // create a comment row for each group
+    // create a comment row for each group, with its s3 paths serialized as JSON
     for group in form.groups.iter() {
+        let row = CommentsTableRef {
+            group,
+            sha256,
+            uploaded: now,
+            id: form.id,
+            author: &user.username,
+            comment: &form.comment,
+            files: JsonText(&form.attachments),
+        };
         shared
             .scylla
-            .session
-            .execute_unpaged(
-                &shared.scylla.prep.comments.insert,
-                (
-                    &group,
-                    &sha256,
-                    now,
-                    &form.id,
-                    &user.username,
-                    &form.comment,
-                    &paths,
-                ),
-            )
+            .queries
+            .comments
+            .insert(&shared.scylla.session, &row)
             .await?;
     }
     Ok(())
@@ -1088,27 +980,21 @@ pub async fn prune_comment_attachments(
 async fn comments_exist(ids: &[&Uuid], shared: &Shared) -> Result<HashSet<Uuid>, ApiError> {
     // build our hashset of comments
     let mut found = HashSet::with_capacity(ids.len());
-    // break these ids into chunks of 100
-    for ids_chunk in ids.chunks(100) {
-        // execute this query
-        let query = shared
-            .scylla
-            .session
-            .execute_unpaged(&shared.scylla.prep.comments.exists, (ids_chunk,))
-            .await?;
-        // enable casting to types for this query
-        let query_rows = query.into_rows_result()?;
-        // get the rows from this query if they were returned
-        for cast in query_rows.rows::<(Option<Uuid>,)>()? {
-            // raise instead of just logging errors as ignoring them can cause
-            // dangling references in the Db
-            let (id_opt,) = cast?;
-            // skip any rows without ids
-            if let Some(id) = id_opt {
-                // track that this comment id was still found
-                found.insert(id);
-            }
-        }
+    // look the ids up in chunks of 100
+    let ids = ids.iter().map(|id| **id).collect::<Vec<Uuid>>();
+    let rows = shared
+        .scylla
+        .queries
+        .comments_by_id
+        .exists(&shared.scylla.session, &ids)
+        .await?;
+    // get the rows from this query if they were returned
+    for cast in rows {
+        // raise instead of just logging errors as ignoring them can cause
+        // dangling references in the Db
+        let row = cast?;
+        // track that this comment id was still found
+        found.insert(row.id);
     }
     Ok(found)
 }
@@ -1134,13 +1020,17 @@ pub async fn delete_comment(
     event!(Level::INFO, comment = &comment.id.to_string());
     // delete this comment for each of our target groups
     for group in groups {
-        // delete this tag row
+        // delete this comment row
         shared
             .scylla
-            .session
-            .execute_unpaged(
-                &shared.scylla.prep.comments.delete,
-                (group, sha256, comment.uploaded, &comment.id),
+            .queries
+            .comments
+            .delete(
+                &shared.scylla.session,
+                group,
+                sha256,
+                comment.uploaded,
+                comment.id,
             )
             .await?;
     }

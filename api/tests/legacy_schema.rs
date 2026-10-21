@@ -18,6 +18,32 @@ const OLD_RESULTS: &str = "CREATE TABLE {ns}.results ( \
     files SET<TEXT>, display_type TEXT, children MAP<TEXT, UUID>, \
     PRIMARY KEY (id, uploaded)) WITH CLUSTERING ORDER BY (uploaded DESC)";
 
+/// The events table as older releases created it
+const OLD_EVENTS: &str = "CREATE TABLE IF NOT EXISTS {ns}.events (\
+    event_type TEXT, \
+    year INT, \
+    bucket INT, \
+    timestamp TIMESTAMP, \
+    id UUID, \
+    parent UUID, \
+    user TEXT, \
+    trigger_depth SMALLINT, \
+    data TEXT, \
+    PRIMARY KEY ((event_type, year, bucket), timestamp, id))
+    WITH default_time_to_live = {ttl}";
+
+/// The entities by name view as older releases created it
+const OLD_ENTITIES_BY_NAME: &str = "CREATE MATERIALIZED VIEW IF NOT EXISTS {ns}.entities_by_name AS \
+    SELECT name, group, kind, created, year, bucket, id, submitter, kind_data, description, image FROM {ns}.entities \
+    WHERE name IS NOT NULL \
+    AND group IS NOT NULL \
+    AND kind IS NOT NULL \
+    AND created IS NOT NULL \
+    AND year IS NOT NULL \
+    AND bucket IS NOT NULL \
+    AND id IS NOT NULL
+    PRIMARY KEY (name, group, kind, created, year, bucket, id)";
+
 /// Run a CQL statement, failing with its text on error
 ///
 /// # Arguments
@@ -223,6 +249,145 @@ async fn setup_handles_upper_case_namespaces() -> Result<(), Error> {
     assert!(
         results.iter().any(|name| name == "entities"),
         "results lacks entities"
+    );
+    // remove our keyspace
+    exec(&session, &format!("DROP KEYSPACE IF EXISTS {keyspace}")).await?;
+    Ok(())
+}
+
+/// Check whether a keyspace holds a table or a materialized view
+///
+/// # Arguments
+///
+/// * `session` - The Scylla session to use
+/// * `keyspace` - The keyspace to look in
+/// * `name` - The table or view to look for
+async fn object_exists(session: &Session, keyspace: &str, name: &str) -> Result<bool, Error> {
+    // look for the name among the keyspace's tables, then among its views
+    for (schema_table, column) in [("tables", "table_name"), ("views", "view_name")] {
+        let rows = session
+            .query_unpaged(
+                format!(
+                    "SELECT {column} FROM system_schema.{schema_table} \
+                    WHERE keyspace_name = ? AND {column} = ?"
+                ),
+                (keyspace, name),
+            )
+            .await
+            .map_err(|err| Error::new(err.to_string()))?
+            .into_rows_result()
+            .map_err(|err| Error::new(err.to_string()))?;
+        if rows.rows_num() > 0 {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
+/// Count the rows of a table or view
+///
+/// # Arguments
+///
+/// * `session` - The Scylla session to use
+/// * `keyspace` - The keyspace the table or view is in
+/// * `name` - The table or view to count
+async fn count_rows(session: &Session, keyspace: &str, name: &str) -> Result<i64, Error> {
+    // count every row of the table or view
+    let (count,) = session
+        .query_unpaged(format!("SELECT COUNT(*) FROM {keyspace}.{name}"), &())
+        .await
+        .map_err(|err| Error::new(err.to_string()))?
+        .into_rows_result()
+        .map_err(|err| Error::new(err.to_string()))?
+        .first_row::<(i64,)>()
+        .map_err(|err| Error::new(err.to_string()))?;
+    Ok(count)
+}
+
+/// The API's setup of an empty keyspace creates neither the `events` table nor the
+/// `entities_by_name` view, which nothing reads or writes
+#[tokio::test]
+async fn setup_creates_no_events_table_or_entities_by_name_view() -> Result<(), Error> {
+    // start the API's Scylla setup against an empty keyspace beside the run's own namespace
+    let keyspace = format!("{}_unused", CONF.thorium.namespace);
+    let session = test_utilities::scylla_session().await?;
+    exec(&session, &format!("DROP KEYSPACE IF EXISTS {keyspace}")).await?;
+    let mut conf = CONF.clone();
+    conf.thorium.namespace.clone_from(&keyspace);
+    let setup = tokio::spawn(async move { Scylla::new(&conf).await.session }).await;
+    assert!(setup.is_ok(), "setup failed on an empty keyspace");
+    // the declared objects exist and the unused ones don't
+    assert!(object_exists(&session, &keyspace, "entities").await?);
+    assert!(object_exists(&session, &keyspace, "entities_by_id").await?);
+    assert!(
+        !object_exists(&session, &keyspace, "events").await?,
+        "setup created the events table"
+    );
+    assert!(
+        !object_exists(&session, &keyspace, "entities_by_name").await?,
+        "setup created the entities_by_name view"
+    );
+    // remove our keyspace
+    exec(&session, &format!("DROP KEYSPACE IF EXISTS {keyspace}")).await?;
+    Ok(())
+}
+
+/// The API's setup starts on a keyspace an older release created with the `events` table and the
+/// `entities_by_name` view, and leaves both in place with their rows
+#[tokio::test]
+async fn setup_leaves_the_events_table_and_entities_by_name_view_in_place() -> Result<(), Error> {
+    // build the declared objects in a keyspace beside the run's own namespace
+    let keyspace = format!("{}_kept", CONF.thorium.namespace);
+    let session = test_utilities::scylla_session().await?;
+    exec(&session, &format!("DROP KEYSPACE IF EXISTS {keyspace}")).await?;
+    let mut conf = CONF.clone();
+    conf.thorium.namespace.clone_from(&keyspace);
+    let first = tokio::spawn({
+        let conf = conf.clone();
+        async move { Scylla::new(&conf).await.session }
+    })
+    .await;
+    assert!(first.is_ok(), "setup failed on an empty keyspace");
+    // add the events table and the entities by name view as an older release created them
+    let ttl = CONF.thorium.events.retention.to_string();
+    exec(
+        &session,
+        &OLD_EVENTS.replace("{ns}", &keyspace).replace("{ttl}", &ttl),
+    )
+    .await?;
+    exec(&session, &OLD_ENTITIES_BY_NAME.replace("{ns}", &keyspace)).await?;
+    // seed an event and an entity the view holds
+    exec(
+        &session,
+        &format!(
+            "INSERT INTO {keyspace}.events (event_type, year, bucket, timestamp, id, user, \
+            trigger_depth, data) VALUES ('NewTags', 2026, 7, '2026-01-02T03:04:05Z', \
+            0c1d2e3f-4a5b-4c6d-8e7f-8091a2b3c4d5, 'io', 0, '{{}}') USING TTL 0"
+        ),
+    )
+    .await?;
+    exec(
+        &session,
+        &format!(
+            "INSERT INTO {keyspace}.entities (kind, group, year, bucket, created, id, name, \
+            submitter) VALUES ('Device', 'minerva', 2026, 7, '2026-01-02T03:04:05Z', \
+            1d2e3f4a-5b6c-4d7e-8f90-a1b2c3d4e5f6, 'loom', 'io')"
+        ),
+    )
+    .await?;
+    // a second start succeeds on the keyspace holding both
+    let second = tokio::spawn(async move { Scylla::new(&conf).await.session }).await;
+    assert!(
+        second.is_ok(),
+        "setup failed on a keyspace holding the events table and entities_by_name view"
+    );
+    // both are still there with their rows
+    assert!(object_exists(&session, &keyspace, "events").await?);
+    assert!(object_exists(&session, &keyspace, "entities_by_name").await?);
+    assert_eq!(count_rows(&session, &keyspace, "events").await?, 1);
+    assert_eq!(
+        count_rows(&session, &keyspace, "entities_by_name").await?,
+        1
     );
     // remove our keyspace
     exec(&session, &format!("DROP KEYSPACE IF EXISTS {keyspace}")).await?;

@@ -1,0 +1,1 @@
+SecretsQueries.get: the projection reads `password`, which secrets redacts; mark its field #[thorium(redact)]

@@ -1,11 +1,12 @@
 //! The result specific scylla utils
 
 use chrono::prelude::*;
-use scylla::DeserializeRow;
 use std::collections::HashMap;
 use uuid::Uuid;
 
 use crate::models::backends::OutputSupport;
+use crate::models::schema::ScyllaProjection;
+use crate::models::schema::scylla::{ResultsAuthView, ResultsIdsView, ResultsTable};
 use crate::models::{EntityKinds, ImageVersion, OutputDisplayType};
 
 /// A request to store the output or result of a tool in scylla
@@ -77,8 +78,8 @@ impl<O: OutputSupport> Default for OutputFormBuilder<O> {
 }
 
 /// A row from scylla containing a single id + group for a result from a tool
-#[derive(Serialize, Deserialize, Debug, DeserializeRow)]
-#[scylla(flavor = "enforce_order", skip_name_checks)]
+#[derive(Serialize, Deserialize, Debug, ScyllaProjection)]
+#[thorium_projection(of = ResultsAuthView)]
 pub struct OutputIdRow {
     /// The id for the result this Id row is tied to
     pub id: Uuid,
@@ -110,8 +111,8 @@ pub struct OutputId {
 }
 
 /// A row from scylla containing a single result for a tool
-#[derive(Serialize, Deserialize, Debug, DeserializeRow)]
-#[scylla(flavor = "enforce_order", skip_name_checks)]
+#[derive(Serialize, Deserialize, Debug, ScyllaProjection)]
+#[thorium_projection(of = ResultsTable)]
 pub struct OutputRow {
     /// The unique id for this result
     pub id: Uuid,
@@ -133,4 +134,22 @@ pub struct OutputRow {
     pub display_type: OutputDisplayType,
     /// The children that were found when generating this result
     pub children: Option<HashMap<String, Uuid>>,
+}
+
+/// The id of a result, read to authorize it or to check it's still reachable
+#[derive(Debug, ScyllaProjection)]
+#[thorium_projection(of(ResultsAuthView, ResultsIdsView))]
+pub struct ResultIdRow {
+    /// The result id
+    pub id: Uuid,
+}
+
+/// The id and upload time of a result
+#[derive(Debug, ScyllaProjection)]
+#[thorium_projection(of = ResultsTable)]
+pub struct ResultUploadedRow {
+    /// The result id
+    pub id: Uuid,
+    /// When the result was uploaded
+    pub uploaded: DateTime<Utc>,
 }

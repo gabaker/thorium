@@ -1,8 +1,11 @@
 extern crate proc_macro;
 
 use proc_macro::TokenStream;
-use quote::quote;
-use syn::Ident;
+
+mod store;
+
+#[cfg(feature = "schema")]
+mod schema;
 
 #[cfg(feature = "sync")]
 mod sync;
@@ -15,155 +18,129 @@ mod python;
 #[cfg(any(feature = "sync", feature = "python"))]
 mod utils;
 
-/// Add the json based serialzie impl
-fn add_json_serialize(stream: &mut proc_macro2::TokenStream, name: &Ident) {
-    // extend our token stream
-    stream.extend(quote! {
-        impl scylla::serialize::value::SerializeValue for #name {
-            fn serialize<'b>(
-                &self,
-                typ: &scylla::frame::response::result::ColumnType,
-                writer: scylla::serialize::writers::CellWriter<'b>,
-            ) -> Result<scylla::serialize::writers::WrittenCellProof<'b>, scylla::serialize::SerializationError> {
-                // cast our tag kind as a str
-                let value = match serde_json::to_string(self) {
-                    Ok(value) => value,
-                    Err(error) => return Err(scylla::serialize::SerializationError::new(error)),
-                };
-                // serialize our tag kind
-                scylla::serialize::value::SerializeValue::serialize(&value, typ, writer)
-            }
-        }
-    });
-}
-
-/// Add the json based serialize impl
-fn add_json_deserialize(stream: &mut proc_macro2::TokenStream, name: &Ident) {
-    // extend our token stream
-    stream.extend(quote! {
-        impl<'frame, 'metadata> scylla::deserialize::value::DeserializeValue<'frame, 'metadata> for #name {
-            fn type_check(typ: &scylla::frame::response::result::ColumnType) -> Result<(), scylla::deserialize::TypeCheckError> {
-                if let scylla::frame::response::result::ColumnType::Native(scylla::cluster::metadata::NativeType::Text) = typ {
-                    return Ok(());
-                }
-                Err(scylla::deserialize::TypeCheckError::new(crate::models::scylla_utils::errors::DeserializationError::ExpectedText))
-            }
-
-            fn deserialize(
-                _typ: &'metadata scylla::frame::response::result::ColumnType<'metadata>,
-                v: Option<scylla::deserialize::FrameSlice<'frame>>,
-            ) -> Result<Self, scylla::deserialize::DeserializationError> {
-                // check if we got data
-                match v {
-                    Some(fslice) => {
-                        // get the correct value
-                        match serde_json::from_slice(fslice.as_slice()) {
-                            Ok(event_type) => Ok(event_type),
-                            Err(_) => Err(scylla::deserialize::DeserializationError::new(
-                                crate::models::scylla_utils::errors::DeserializationError::UnknownValue,
-                            )),
-                        }
-                    }
-                    None => Err(scylla::deserialize::DeserializationError::new(
-                        crate::models::scylla_utils::errors::DeserializationError::ExpectedNotNull,
-                    )),
-                }
-            }
-        }
-
-    });
-}
-
+/// Derive the Scylla conversions of a type stored as JSON in a `text` column
+///
+/// The type is written with `serde_json::to_string` and read with `serde_json::from_slice`, and
+/// its `CqlType` is `text`.
+///
+/// # Arguments
+///
+/// * `stream` - The type the derive is on
 #[proc_macro_derive(ScyllaStoreJson)]
 pub fn derive_scylla_store_json(stream: TokenStream) -> TokenStream {
-    // parse our input struct
+    // parse our input type
     let ast = syn::parse_macro_input!(stream as syn::DeriveInput);
-    // get the name of our ident
-    let name = &ast.ident;
-    // start with an empty stream
-    let mut output = quote! {};
-    // add our json derives
-    add_json_serialize(&mut output, name);
-    add_json_deserialize(&mut output, name);
-    output.into()
+    store::derive_store_json(&ast).into()
 }
 
-/// Add the as str based serialzie impl
-fn add_as_str_serialize(stream: &mut proc_macro2::TokenStream, name: &Ident) {
-    // extend our token stream
-    stream.extend(quote! {
-        impl scylla::serialize::value::SerializeValue for #name {
-            fn serialize<'b>(
-                &self,
-                typ: &scylla::frame::response::result::ColumnType,
-                writer: scylla::serialize::writers::CellWriter<'b>,
-            ) -> Result<scylla::serialize::writers::WrittenCellProof<'b>, scylla::serialize::SerializationError> {
-                // cast our value as a str
-                let value = &self.as_str();
-                // serialize our tag kind
-                scylla::serialize::value::SerializeValue::serialize(&value, typ, writer)
-            }
-        }
-    });
-}
-
-/// Add the as str based serialzie impl
-fn add_as_str_deserialize(stream: &mut proc_macro2::TokenStream, name: &Ident) {
-    // extend our token stream
-    stream.extend(quote! {
-        impl<'frame, 'metadata> scylla::deserialize::value::DeserializeValue<'frame, 'metadata> for #name {
-            fn type_check(typ: &scylla::frame::response::result::ColumnType) -> Result<(), scylla::deserialize::TypeCheckError> {
-                if let scylla::frame::response::result::ColumnType::Native(scylla::cluster::metadata::NativeType::Text) = typ {
-                    return Ok(());
-                }
-                Err(scylla::deserialize::TypeCheckError::new(crate::models::scylla_utils::errors::DeserializationError::ExpectedText))
-            }
-
-            fn deserialize(
-                _typ: &'metadata scylla::frame::response::result::ColumnType<'metadata>,
-                v: Option<scylla::deserialize::FrameSlice<'frame>>,
-            ) -> Result<Self, scylla::deserialize::DeserializationError> {
-                // check if we got data
-                match v {
-                    Some(fslice) => {
-                        // try to convert our slice to a str
-                        let converted = match std::str::from_utf8(fslice.as_slice()) {
-                            Ok(converted) => converted,
-                            Err(_) => {
-                                return Err(scylla::deserialize::DeserializationError::new(
-                                    crate::models::scylla_utils::errors::DeserializationError::ExpectedText,
-                                ))
-                            }
-                        };
-                        // get the correct kind
-                        match #name::from_str(converted) {
-                            Ok(event_type) => Ok(event_type),
-                            Err(_) => Err(scylla::deserialize::DeserializationError::new(
-                                crate::models::scylla_utils::errors::DeserializationError::UnknownValue,
-                            )),
-                        }
-                    }
-                    None => Err(scylla::deserialize::DeserializationError::new(
-                        crate::models::scylla_utils::errors::DeserializationError::ExpectedNotNull,
-                    )),
-                }
-            }
-        }
-    });
-}
-
+/// Derive the Scylla conversions of a type stored by name in a `text` column
+///
+/// The type is written with its `as_str` method and read with `from_str`, and its `CqlType` is
+/// `text`.
+///
+/// # Arguments
+///
+/// * `stream` - The type the derive is on
 #[proc_macro_derive(ScyllaStoreAsStr)]
 pub fn derive_scylla_store_as_str(stream: TokenStream) -> TokenStream {
+    // parse our input type
+    let ast = syn::parse_macro_input!(stream as syn::DeriveInput);
+    store::derive_store_as_str(&ast).into()
+}
+
+/// Declare a Scylla base table
+///
+/// Generates the table's definition, a borrowed row (`<Table>Ref`) with `as_ref`, by-name row
+/// serialization for both, checked unsigned conversions, and the full-row statements; views and
+/// projections are checked against its definition at compile time.
+///
+/// # Arguments
+///
+/// * `stream` - The struct the derive is on
+#[cfg(feature = "schema")]
+#[proc_macro_derive(ScyllaTable, attributes(thorium, thorium_table))]
+pub fn derive_scylla_table(stream: TokenStream) -> TokenStream {
     // parse our input struct
     let ast = syn::parse_macro_input!(stream as syn::DeriveInput);
-    // get the name of our ident
-    let name = &ast.ident;
-    // start with an empty stream
-    let mut output = quote! {};
-    // add our json derives
-    add_as_str_serialize(&mut output, name);
-    add_as_str_deserialize(&mut output, name);
-    output.into()
+    schema::table::derive(&ast).into()
+}
+
+/// Declare a Scylla materialized view over a base table
+///
+/// Generates the view's definition, and checks at compile time that every column exists in the
+/// base with the same type, that the view's key holds the base's, and that columns the base
+/// redacts are redacted.
+///
+/// # Arguments
+///
+/// * `stream` - The struct the derive is on
+#[cfg(feature = "schema")]
+#[proc_macro_derive(ScyllaView, attributes(thorium, thorium_view))]
+pub fn derive_scylla_view(stream: TokenStream) -> TokenStream {
+    // parse our input struct
+    let ast = syn::parse_macro_input!(stream as syn::DeriveInput);
+    schema::view::derive(&ast).into()
+}
+
+/// Declare the columns one query reads from a table or view
+///
+/// Generates the column list and a by-name row deserializer, and checks each field's type
+/// against its column at compile time.
+///
+/// # Arguments
+///
+/// * `stream` - The struct the derive is on
+#[cfg(feature = "schema")]
+#[proc_macro_derive(ScyllaProjection, attributes(thorium, thorium_projection))]
+pub fn derive_scylla_projection(stream: TokenStream) -> TokenStream {
+    // parse our input struct
+    let ast = syn::parse_macro_input!(stream as syn::DeriveInput);
+    schema::projection::derive(&ast).into()
+}
+
+/// Generate the prepared statements and typed methods of a table's queries struct
+///
+/// Each field is one statement, declared by its attribute; the struct is rewritten so each
+/// field holds the prepared statement, and it gains `prepare` and one method per statement.
+///
+/// # Arguments
+///
+/// * `args` - The attribute's arguments, naming the table
+/// * `input` - The queries struct
+#[cfg(feature = "schema")]
+#[proc_macro_attribute]
+pub fn table_queries(args: TokenStream, input: TokenStream) -> TokenStream {
+    schema::queries::expand(schema::queries::Target::Table, args.into(), input.into()).into()
+}
+
+/// Generate the prepared statements and typed methods of a view's queries struct
+///
+/// Like `table_queries`, but a view is read-only: Scylla writes views through their base
+/// table, so an insert, update, or delete fails to compile.
+///
+/// # Arguments
+///
+/// * `args` - The attribute's arguments, naming the view
+/// * `input` - The queries struct
+#[cfg(feature = "schema")]
+#[proc_macro_attribute]
+pub fn view_queries(args: TokenStream, input: TokenStream) -> TokenStream {
+    schema::queries::expand(schema::queries::Target::View, args.into(), input.into()).into()
+}
+
+/// Collect every declared Scylla object into one ordered keyspace
+///
+/// Each field's type is a table or view; the objects are listed in field order, which is the
+/// order they are created in, and two objects sharing a name fail to compile.
+///
+/// # Arguments
+///
+/// * `args` - The attribute's arguments, an optional `crate` override
+/// * `input` - The keyspace struct
+#[cfg(feature = "schema")]
+#[proc_macro_attribute]
+pub fn keyspace(args: TokenStream, input: TokenStream) -> TokenStream {
+    schema::keyspace::expand(args.into(), input.into()).into()
 }
 
 /// Creates a blocking client by wrapping the async client and calling its

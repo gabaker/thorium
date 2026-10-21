@@ -3,10 +3,8 @@
 use ahash::AHasher;
 use chrono::{DateTime, Utc};
 use rkyv::{Archive, CheckBytes, Deserialize, Serialize};
-use scylla::{
-    DeserializeRow, client::session::Session, errors::PrepareError,
-    statement::prepared::PreparedStatement, value::MaybeUnset,
-};
+use scylla::SerializeRow;
+use scylla::value::MaybeUnset;
 use std::hash::Hasher;
 use thorium::{
     Conf,
@@ -17,11 +15,13 @@ use uuid::Uuid;
 
 use super::{Versioned, added_in_format_2};
 use crate::backup::{Backup, Restore, Scrub, Utils};
+use thorium::models::schema::ScyllaProjection;
+use thorium::models::schema::scylla::AssociationsTable;
 
 /// An associations row as format 2 archives it; `None` is a cell the source row held unset
-#[derive(Debug, Archive, Serialize, Deserialize, DeserializeRow)]
+#[derive(Debug, Archive, Serialize, Deserialize, ScyllaProjection)]
 #[archive_attr(derive(Debug, CheckBytes))]
-#[scylla(flavor = "enforce_order", skip_name_checks)]
+#[thorium_projection(of = AssociationsTable)]
 pub struct Association {
     /// The group this association is for
     pub group: String,
@@ -38,12 +38,14 @@ pub struct Association {
     /// The source for this association
     pub source: String,
     /// The other serialized data this association is with
+    #[thorium(column = "target")]
     pub other: String,
     /// Who created this association
     pub submitter: Option<String>,
     /// Any extra info needed for the source column in this row
     pub extra_source: Option<String>,
     /// Any extra info needed for the target column in this row
+    #[thorium(column = "extra_target")]
     pub extra_other: Option<String>,
     /// The submission of the source this association was made for
     pub submissions_source: Option<Uuid>,
@@ -60,32 +62,12 @@ impl Utils for Association {
 
 #[async_trait::async_trait]
 impl Backup for Association {
+    /// The table this archive struct backs up, read through its generated statements
+    type Table = AssociationsTable;
+
     /// The columns of this table's partition key, used to name rows that fail to decode
     fn partition_key() -> &'static [&'static str] {
         &["group", "year", "bucket", "source"]
-    }
-
-    /// The prepared statement to use when retrieving data from Scylla
-    ///
-    /// # Arguments
-    ///
-    /// * `scylla` - The scylla session to build a prepared statement with
-    /// * `ns` - The namespace for this prepared statement
-    async fn prepared_statement(
-        scylla: &Session,
-        ns: &str,
-    ) -> Result<PreparedStatement, PrepareError> {
-        // build logs get prepared statement
-        scylla
-            .prepare(format!(
-                "SELECT group, year, bucket, created, direction, kind, source, target, submitter, extra_source, extra_target, \
-                submissions_source, submissions_other \
-                FROM {}.{} \
-                WHERE token(group, year, bucket, source) >= ? AND token(group, year, bucket, source) <= ?",
-                    ns,
-                    Self::name(),
-                ))
-                .await
     }
 
     /// Hash this partitions info to see if we have changed partitions
@@ -105,6 +87,37 @@ impl Backup for Association {
 /// Implement scrub support for the samples list table
 impl Scrub for Association {}
 
+/// The values a restored row binds by column name to the table's generated full-row insert
+#[derive(SerializeRow)]
+pub struct AssociationValues {
+    /// The `group` column
+    pub group: String,
+    /// The `year` column
+    pub year: i32,
+    /// The `bucket` column
+    pub bucket: i32,
+    /// The `created` column
+    pub created: DateTime<Utc>,
+    /// The `direction` column
+    pub direction: Directionality,
+    /// The `kind` column
+    pub kind: Option<AssociationKind>,
+    /// The `source` column
+    pub source: String,
+    /// The `target` column
+    pub target: String,
+    /// The `submitter` column
+    pub submitter: Option<String>,
+    /// The `extra_source` column
+    pub extra_source: Option<String>,
+    /// The `extra_target` column
+    pub extra_target: Option<String>,
+    /// The `submissions_source` column
+    pub submissions_source: MaybeUnset<Option<Uuid>>,
+    /// The `submissions_other` column
+    pub submissions_other: MaybeUnset<Option<Uuid>>,
+}
+
 /// Implement restore support for the samples list table
 #[async_trait::async_trait]
 impl Restore for Association {
@@ -112,45 +125,8 @@ impl Restore for Association {
     // the size itself
     type PartitionConf = u16;
 
-    /// The group, year, bucket, creation time, direction, kind, source, target, submitter, extra
-    /// data of each side, and submission of each side
-    type Values = (
-        String,
-        i32,
-        i32,
-        DateTime<Utc>,
-        Directionality,
-        Option<AssociationKind>,
-        String,
-        String,
-        Option<String>,
-        Option<String>,
-        Option<String>,
-        MaybeUnset<Option<Uuid>>,
-        MaybeUnset<Option<Uuid>>,
-    );
-
-    /// The prepared statement to use when restoring data to scylla
-    ///
-    /// # Arguments
-    ///
-    /// * `scylla` - A scylla client
-    /// * `ns` - The namespace in scylla this table is from
-    async fn prepared_statement(
-        scylla: &Session,
-        ns: &str,
-    ) -> Result<PreparedStatement, PrepareError> {
-        scylla
-            .prepare(format!(
-                "INSERT INTO {}.{} \
-                (group, year, bucket, created, direction, kind, source, target, submitter, extra_source, extra_target, \
-                submissions_source, submissions_other) \
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                ns,
-                Self::name(),
-            ))
-            .await
-    }
+    /// The row the generated full-row insert binds by name
+    type Values = AssociationValues;
 
     /// Get the partition size for this data type
     ///
@@ -172,21 +148,21 @@ impl Restore for Association {
         // calculate the new bucket
         let bucket = thorium::utils::helpers::partition(self.created, self.year, *partition_size);
         // every column, leaving the submissions format 1 didn't archive unset
-        (
-            self.group,
-            self.year,
+        AssociationValues {
+            group: self.group,
+            year: self.year,
             bucket,
-            self.created,
-            self.direction,
-            self.kind,
-            self.source,
-            self.other,
-            self.submitter,
-            self.extra_source,
-            self.extra_other,
-            added_in_format_2(self.submissions_source, format),
-            added_in_format_2(self.submissions_other, format),
-        )
+            created: self.created,
+            direction: self.direction,
+            kind: self.kind,
+            source: self.source,
+            target: self.other,
+            submitter: self.submitter,
+            extra_source: self.extra_source,
+            extra_target: self.extra_other,
+            submissions_source: added_in_format_2(self.submissions_source, format),
+            submissions_other: added_in_format_2(self.submissions_other, format),
+        }
     }
 }
 

@@ -4,10 +4,7 @@ use ahash::AHasher;
 use bytecheck::CheckBytes;
 use chrono::prelude::*;
 use rkyv::{Archive, Deserialize, Serialize};
-use scylla::DeserializeRow;
-use scylla::client::session::Session;
-use scylla::errors::PrepareError;
-use scylla::statement::prepared::PreparedStatement;
+use scylla::SerializeRow;
 use scylla::value::MaybeUnset;
 use std::collections::HashMap;
 use std::hash::Hasher;
@@ -22,6 +19,8 @@ use crate::backup::S3Backup;
 use crate::backup::S3Restore;
 use crate::backup::s3::{Crawl, Named, object_key};
 use crate::backup::{Backup, Restore, Scrub, Utils};
+use thorium::models::schema::ScyllaProjection;
+use thorium::models::schema::scylla::{ResultsStreamTable, ResultsTable};
 
 /// The directory under a result's id that holds the blob of each kind of entity it found
 /// (`{id}/__thorium_entities/{kind}.json`)
@@ -42,9 +41,9 @@ pub fn entity_kind(stored: &str) -> String {
 }
 
 /// A results row as format 2 archives it; `None` is a cell the source row held unset
-#[derive(Debug, Archive, Serialize, Deserialize, DeserializeRow)]
+#[derive(Debug, Archive, Serialize, Deserialize, ScyllaProjection)]
 #[archive_attr(derive(Debug, CheckBytes))]
-#[scylla(flavor = "enforce_order", skip_name_checks)]
+#[thorium_projection(of = ResultsTable)]
 pub struct Output {
     /// The unique id for this result
     pub id: Uuid,
@@ -78,31 +77,12 @@ impl Utils for Output {
 /// Implement backup support for the results table
 #[async_trait::async_trait]
 impl Backup for Output {
+    /// The table this archive struct backs up, read through its generated statements
+    type Table = ResultsTable;
+
     /// The columns of this table's partition key, used to name rows that fail to decode
     fn partition_key() -> &'static [&'static str] {
         &["id"]
-    }
-
-    /// The prepared statement to use when retrieving data from Scylla
-    ///
-    /// # Arguments
-    ///
-    /// * `scylla` - The scylla session to build a prepared statement with
-    /// * `ns` - The namespace for this prepared statement
-    async fn prepared_statement(
-        scylla: &Session,
-        ns: &str,
-    ) -> Result<PreparedStatement, PrepareError> {
-        // build output get prepared statement
-        scylla
-            .prepare(format!(
-                "SELECT id, tool, tool_version, cmd, uploaded, result, files, display_type, children, entities \
-                FROM {}.{} \
-                Where token(id) >= ? AND token(id) <= ?",
-                ns,
-                Self::name(),
-            ))
-            .await
     }
 
     /// Hash this partitions info to see if we have changed partitions
@@ -119,6 +99,31 @@ impl Backup for Output {
 /// Implement scrub support for the results table
 impl Scrub for Output {}
 
+/// The values a restored row binds by column name to the table's generated full-row insert
+#[derive(SerializeRow)]
+pub struct OutputValues {
+    /// The `id` column
+    pub id: Uuid,
+    /// The `uploaded` column
+    pub uploaded: DateTime<Utc>,
+    /// The `tool` column
+    pub tool: Option<String>,
+    /// The `tool_version` column
+    pub tool_version: MaybeUnset<Option<String>>,
+    /// The `cmd` column
+    pub cmd: Option<String>,
+    /// The `result` column
+    pub result: Option<String>,
+    /// The `files` column
+    pub files: Option<Vec<String>>,
+    /// The `display_type` column
+    pub display_type: Option<OutputDisplayType>,
+    /// The `children` column
+    pub children: Option<HashMap<String, Uuid>>,
+    /// The `entities` column
+    pub entities: MaybeUnset<Option<HashMap<String, i64>>>,
+}
+
 /// Implement restore support for the samples list table
 #[async_trait::async_trait]
 impl Restore for Output {
@@ -126,41 +131,8 @@ impl Restore for Output {
     // the size itself
     type PartitionConf = u16;
 
-    /// The id, upload time, tool, tool version, command, result, files, display type, children,
-    /// and entity counts
-    type Values = (
-        Uuid,
-        DateTime<Utc>,
-        Option<String>,
-        MaybeUnset<Option<String>>,
-        Option<String>,
-        Option<String>,
-        Option<Vec<String>>,
-        Option<OutputDisplayType>,
-        Option<HashMap<String, Uuid>>,
-        MaybeUnset<Option<HashMap<String, i64>>>,
-    );
-
-    /// The prepared statement to use when restoring data to scylla
-    ///
-    /// # Arguments
-    ///
-    /// * `scylla` - A scylla client
-    /// * `ns` - The namespace in scylla this table is from
-    async fn prepared_statement(
-        scylla: &Session,
-        ns: &str,
-    ) -> Result<PreparedStatement, PrepareError> {
-        scylla
-            .prepare(format!(
-                "INSERT INTO {}.{} \
-                (id, uploaded, tool, tool_version, cmd, result, files, display_type, children, entities) \
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                ns,
-                Self::name()
-            ))
-            .await
-    }
+    /// The row the generated full-row insert binds by name
+    type Values = OutputValues;
 
     /// Get the partition size for this data type
     ///
@@ -179,18 +151,18 @@ impl Restore for Output {
     /// * `format` - The format version the row was archived in
     fn values(self, _partition_size: &u16, format: u32) -> Self::Values {
         // every column as the row holds it, leaving the ones format 1 didn't archive unset
-        (
-            self.id,
-            self.uploaded,
-            self.tool,
-            added_in_format_2(self.tool_version, format),
-            self.cmd,
-            self.result,
-            self.files,
-            self.display_type,
-            self.children,
-            added_in_format_2(self.entities, format),
-        )
+        OutputValues {
+            id: self.id,
+            uploaded: self.uploaded,
+            tool: self.tool,
+            tool_version: added_in_format_2(self.tool_version, format),
+            cmd: self.cmd,
+            result: self.result,
+            files: self.files,
+            display_type: self.display_type,
+            children: self.children,
+            entities: added_in_format_2(self.entities, format),
+        }
     }
 }
 
@@ -266,9 +238,9 @@ impl S3Restore for Output {
 }
 
 /// A results stream row as format 2 archives it; `None` is a cell the source row held unset
-#[derive(Debug, Archive, Serialize, Deserialize, DeserializeRow)]
+#[derive(Debug, Archive, Serialize, Deserialize, ScyllaProjection)]
 #[archive_attr(derive(Debug, CheckBytes))]
-#[scylla(flavor = "enforce_order", skip_name_checks)]
+#[thorium_projection(of = ResultsStreamTable)]
 pub struct OutputStream {
     /// The kind of result this is for
     pub kind: String,
@@ -304,31 +276,12 @@ impl Utils for OutputStream {
 /// Implement backup support for the results table
 #[async_trait::async_trait]
 impl Backup for OutputStream {
+    /// The table this archive struct backs up, read through its generated statements
+    type Table = ResultsStreamTable;
+
     /// The columns of this table's partition key, used to name rows that fail to decode
     fn partition_key() -> &'static [&'static str] {
         &["kind", "group", "year", "bucket"]
-    }
-
-    /// The prepared statement to use when retrieving data from Scylla
-    ///
-    /// # Arguments
-    ///
-    /// * `scylla` - The scylla session to build a prepared statement with
-    /// * `ns` - The namespace for this prepared statement
-    async fn prepared_statement(
-        scylla: &Session,
-        ns: &str,
-    ) -> Result<PreparedStatement, PrepareError> {
-        // build output get prepared statement
-        scylla
-            .prepare(format!(
-                "SELECT kind, group, year, bucket, key, tool, tool_version, display_type, uploaded, cmd, id \
-                FROM {}.{} \
-                Where token(kind, group, year, bucket) >= ? AND token(kind, group, year, bucket) <= ?",
-                ns,
-                Self::name(),
-            ))
-            .await
     }
 
     /// Hash this partitions info to see if we have changed partitions
@@ -348,6 +301,33 @@ impl Backup for OutputStream {
 /// Implement scrub support for the results table
 impl Scrub for OutputStream {}
 
+/// The values a restored row binds by column name to the table's generated full-row insert
+#[derive(SerializeRow)]
+pub struct OutputStreamValues {
+    /// The `kind` column
+    pub kind: String,
+    /// The `group` column
+    pub group: String,
+    /// The `year` column
+    pub year: i32,
+    /// The `bucket` column
+    pub bucket: i32,
+    /// The `key` column
+    pub key: String,
+    /// The `tool` column
+    pub tool: Option<String>,
+    /// The `tool_version` column
+    pub tool_version: MaybeUnset<Option<String>>,
+    /// The `display_type` column
+    pub display_type: Option<OutputDisplayType>,
+    /// The `uploaded` column
+    pub uploaded: DateTime<Utc>,
+    /// The `cmd` column
+    pub cmd: Option<String>,
+    /// The `id` column
+    pub id: Uuid,
+}
+
 /// Implement restore support for the samples list table
 #[async_trait::async_trait]
 impl Restore for OutputStream {
@@ -355,42 +335,8 @@ impl Restore for OutputStream {
     // the size itself
     type PartitionConf = u16;
 
-    /// The kind, group, year, bucket, key, tool, tool version, display type, upload time,
-    /// command, and id
-    type Values = (
-        String,
-        String,
-        i32,
-        i32,
-        String,
-        Option<String>,
-        MaybeUnset<Option<String>>,
-        Option<OutputDisplayType>,
-        DateTime<Utc>,
-        Option<String>,
-        Uuid,
-    );
-
-    /// The prepared statement to use when restoring data to scylla
-    ///
-    /// # Arguments
-    ///
-    /// * `scylla` - A scylla client
-    /// * `ns` - The namespace in scylla this table is from
-    async fn prepared_statement(
-        scylla: &Session,
-        ns: &str,
-    ) -> Result<PreparedStatement, PrepareError> {
-        scylla
-            .prepare(format!(
-                "INSERT INTO {}.{} \
-                (kind, group, year, bucket, key, tool, tool_version, display_type, uploaded, cmd, id) \
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                ns,
-                Self::name()
-            ))
-            .await
-    }
+    /// The row the generated full-row insert binds by name
+    type Values = OutputStreamValues;
 
     /// Get the partition size for this data type
     ///
@@ -412,19 +358,19 @@ impl Restore for OutputStream {
         // calculate the new bucket
         let bucket = thorium::utils::helpers::partition(self.uploaded, self.year, *partition_size);
         // every column, leaving the tool version format 1 didn't archive unset
-        (
-            self.kind,
-            self.group,
-            self.year,
+        OutputStreamValues {
+            kind: self.kind,
+            group: self.group,
+            year: self.year,
             bucket,
-            self.key,
-            self.tool,
-            added_in_format_2(self.tool_version, format),
-            self.display_type,
-            self.uploaded,
-            self.cmd,
-            self.id,
-        )
+            key: self.key,
+            tool: self.tool,
+            tool_version: added_in_format_2(self.tool_version, format),
+            display_type: self.display_type,
+            uploaded: self.uploaded,
+            cmd: self.cmd,
+            id: self.id,
+        }
     }
 }
 

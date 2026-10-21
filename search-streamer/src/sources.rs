@@ -2,9 +2,9 @@
 
 use bytesize::ByteSize;
 use chrono::prelude::*;
+use scylla::client::pager::TypedRowStream;
 use scylla::client::session::Session;
 use scylla::deserialize::row::DeserializeRow;
-use scylla::statement::prepared::PreparedStatement;
 use serde_json::Value;
 use thorium::client::SearchEventsClient;
 use thorium::models::SearchEvent;
@@ -77,11 +77,20 @@ pub trait DataSource: Send + Clone {
     /// * `thorium` - The Thorium main client
     fn event_client(thorium: &Thorium) -> &Self::EventClient;
 
-    /// Return the enumerate prepared statement, using the Scylla `token()` function
-    /// to get all streaming data spread across our partitions
+    /// Page through the items to stream in one token range of the partitions they're spread
+    /// across, each item once
     ///
-    /// This prepared statement *must* pull items of type [`Self::InitRow`]
-    fn enumerate_prepared(&self) -> &PreparedStatement;
+    /// # Arguments
+    ///
+    /// * `scylla` - The Scylla client
+    /// * `start` - The first token of the range
+    /// * `end` - The last token of the range
+    async fn enumerate(
+        &self,
+        scylla: &Session,
+        start: i64,
+        end: i64,
+    ) -> Result<TypedRowStream<Self::InitRow>, Error>;
 
     /// Cast this data to one or more serialized Json values
     ///

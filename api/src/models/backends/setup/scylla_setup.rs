@@ -2,126 +2,22 @@
 
 use chrono::Duration;
 use chrono::prelude::*;
-use entities::EntitiesPreparedStatements;
 use futures::{poll, task::Poll};
 use scylla::client::session::Session;
-use scylla::client::session_builder::{GenericSessionBuilder, SessionBuilder};
 use std::time::Duration as StdDuration;
 
-mod associations;
-mod comments;
-mod commitishes;
-mod entities;
-mod events;
-mod logs;
-mod network_policies;
-mod nodes;
-mod notifications;
-mod repos;
-mod results;
-mod s3;
-mod samples;
-mod tags;
-mod tools;
-
-use associations::AssociationsPreparedStatements;
-use comments::CommentsPreparedStatements;
-use commitishes::CommitishesPreparedStatements;
-use events::EventsPreparedStatements;
-use logs::LogsPreparedStatements;
-use network_policies::NetworkPoliciesPreparedStatements;
-use nodes::NodesPreparedStatements;
-use notifications::NotificationsPreparedStatements;
-use repos::ReposPreparedStatements;
-use results::ResultsPreparedStatements;
-use s3::S3PreparedStatements;
-use samples::SamplesPreparedStatements;
-use tags::TagsPreparedStatements;
-//use tools::ToolsPreparedStatements;
-
+use crate::models::schema::queries::ScyllaQueries;
+use crate::models::schema::scylla::{AssociationsTable, ResultsTable, ThoriumKeyspace};
+use crate::models::schema::statements::prepare_all;
+use crate::models::schema::{Keyspace, ObjectDef, ScyllaObject, TableDef, connect};
 use crate::{Conf, setup};
-
-/// The diffferent groups of prepared statements for scylla
-pub struct ScyllaPreparedStatements {
-    /// The assocations related prepared statements
-    pub associations: AssociationsPreparedStatements,
-    /// The comments related prepared statements
-    pub comments: CommentsPreparedStatements,
-    /// The commitishes related prepared statements
-    pub commitishes: CommitishesPreparedStatements,
-    /// The entities related prepared statements
-    pub entities: EntitiesPreparedStatements,
-    /// The events related prepared statements
-    pub events: EventsPreparedStatements,
-    /// The logs related prepared statements
-    pub logs: LogsPreparedStatements,
-    /// The network policies related prepared statements
-    pub network_policies: NetworkPoliciesPreparedStatements,
-    /// The nodes related prepared statements
-    pub nodes: NodesPreparedStatements,
-    /// The notifications related prepared statements
-    pub notifications: NotificationsPreparedStatements,
-    /// The repos related prepared statements
-    pub repos: ReposPreparedStatements,
-    /// The results related prepared statements
-    pub results: ResultsPreparedStatements,
-    /// The s3 related prepared statements
-    pub s3: S3PreparedStatements,
-    /// The samples related prepared statements
-    pub samples: SamplesPreparedStatements,
-    /// The tags related prepared statements
-    pub tags: TagsPreparedStatements,
-}
-
-impl ScyllaPreparedStatements {
-    /// Create our scylla prepared statements
-    ///
-    /// # Arguments
-    ///
-    /// * `session` - A scylla session
-    /// * `config` - The Thorium config
-    pub async fn new(session: &Session, config: &Conf) -> Self {
-        // setup our preapred statements
-        let associations = AssociationsPreparedStatements::new(session, config).await;
-        let entities = EntitiesPreparedStatements::new(session, config).await;
-        let comments = CommentsPreparedStatements::new(session, config).await;
-        let commitishes = CommitishesPreparedStatements::new(session, config).await;
-        let events = EventsPreparedStatements::new(session, config).await;
-        let logs = LogsPreparedStatements::new(session, config).await;
-        let network_policies = NetworkPoliciesPreparedStatements::new(session, config).await;
-        let nodes = NodesPreparedStatements::new(session, config).await;
-        let notifications = NotificationsPreparedStatements::new(session, config).await;
-        let repos = ReposPreparedStatements::new(session, config).await;
-        let results = ResultsPreparedStatements::new(session, config).await;
-        let s3 = S3PreparedStatements::new(session, config).await;
-        let samples = SamplesPreparedStatements::new(session, config).await;
-        let tags = TagsPreparedStatements::new(session, config).await;
-        // build our grouped prepared statement object
-        ScyllaPreparedStatements {
-            associations,
-            entities,
-            comments,
-            commitishes,
-            events,
-            logs,
-            network_policies,
-            nodes,
-            notifications,
-            repos,
-            results,
-            s3,
-            samples,
-            tags,
-        }
-    }
-}
 
 /// The scylla client and prepared statments
 pub struct Scylla {
     /// The scylla session object
     pub session: Session,
-    /// prepared statements for scylla
-    pub prep: ScyllaPreparedStatements,
+    /// The generated statements, one queries struct per table and view
+    pub queries: ScyllaQueries,
 }
 
 impl Scylla {
@@ -180,7 +76,7 @@ impl Scylla {
 
 /// Create a new session to scylla
 ///
-/// Arguments
+/// # Arguments
 ///
 /// * `config` - The thorium config
 pub async fn new_session(config: &Conf) -> Session {
@@ -189,27 +85,15 @@ pub async fn new_session(config: &Conf) -> Session {
         config.thorium.tracing.local.level,
         format!("Connecting to scylla at {}", config.scylla.nodes.join(", "))
     );
-    // start building our scylla client
-    let mut session = SessionBuilder::new();
-    // if we have auth info for scylla then add that
+    // log the user we authenticate as, if any
     if let Some(creds) = &config.scylla.auth {
         setup!(
             config.thorium.tracing.local.level,
             format!("Authenticating to Scylla as {}", creds.username)
         );
-        // inject our creds
-        session = session.user(&creds.username, &creds.password);
     }
-    // set our request timeout
-    let session =
-        session.connection_timeout(StdDuration::from_secs(u64::from(config.scylla.setup_time)));
-    // build our session
-    config
-        .scylla
-        .nodes
-        .iter()
-        .fold(session, GenericSessionBuilder::known_node)
-        .build()
+    // connect with the shared session settings
+    connect(config)
         .await
         .expect("Failed to build scylla session")
 }
@@ -261,7 +145,7 @@ async fn column_exists(session: &Session, config: &Conf, table: &str, column: &s
         .is_ok_and(|rows| rows.rows_num() > 0)
 }
 
-/// Add a column to a table that was created before the column was added to its create statement
+/// Add a column to a table that was created before the column was added to its definition
 ///
 /// Tables are created with `CREATE TABLE IF NOT EXISTS`, so a keyspace created by an older
 /// release keeps its old columns, and statements naming newer columns fail to prepare. A column
@@ -271,42 +155,94 @@ async fn column_exists(session: &Session, config: &Conf, table: &str, column: &s
 ///
 /// * `session` - The scylla session to use
 /// * `config` - The Thorium config
-/// * `table` - The table to add the column to
+/// * `table` - The declared table to add the column to
 /// * `column` - The column to add
-/// * `cql_type` - The type the table's create statement gives this column
-async fn add_missing_column(
-    session: &Session,
-    config: &Conf,
-    table: &str,
-    column: &str,
-    cql_type: &str,
-) {
+async fn add_missing_column(session: &Session, config: &Conf, table: &TableDef, column: &str) {
     // nothing needs to change when the column already exists
-    if column_exists(session, config, table, column).await {
+    if column_exists(session, config, table.name, column).await {
         return;
     }
-    // add the column to the existing table
-    let alter = format!(
-        "ALTER TABLE {ns}.{table} ADD {column} {cql_type}",
-        ns = config.thorium.namespace
-    );
+    // add the column to the existing table with its declared type
+    let alter = table
+        .alter_add_cql(&config.thorium.namespace, column)
+        .unwrap_or_else(|| panic!("{} declares no column {column}", table.name));
     if let Err(err) = session.query_unpaged(alter, &[]).await {
         // another API instance starting at the same time may have added it first
         assert!(
-            column_exists(session, config, table, column).await,
-            "Failed to add column {column} to {table}: {err}"
+            column_exists(session, config, table.name, column).await,
+            "Failed to add column {column} to {}: {err}",
+            table.name
         );
     }
 }
 
-/// Build a session and setup tables/materialized views/prepared statements
+/// Get the definition of a declared table
+///
+/// # Arguments
+///
+/// * `object` - The declared table's definition
+fn table_def(object: ObjectDef) -> TableDef {
+    match object {
+        ObjectDef::Table(table) => table,
+        ObjectDef::View(view) => panic!("{} is a view, not a table", view.name),
+    }
+}
+
+/// Create every declared table and view that doesn't exist yet, in creation order, and add the
+/// columns keyspaces from older releases lack
+///
+/// # Arguments
+///
+/// * `session` - The scylla session to use
+/// * `config` - The Thorium config
+async fn create_declared_objects(session: &Session, config: &Conf) {
+    // every object goes in the namespace's keyspace, created in declaration order
+    let keyspace = &config.thorium.namespace;
+    for object in <ThoriumKeyspace as Keyspace>::OBJECTS {
+        // a table's default TTL comes from the setting its declaration names
+        let ttl = match object {
+            ObjectDef::Table(table) => table
+                .ttl
+                .and_then(|source| config.table_ttl(source.config_path)),
+            ObjectDef::View(_) => None,
+        };
+        // create the object if it's missing
+        let create = object.create_cql(keyspace, ttl);
+        session
+            .query_unpaged(create, &[])
+            .await
+            .unwrap_or_else(|err| panic!("Failed to create {}: {err}", object.name()));
+    }
+    // add the columns tables created before April 2026 lack
+    let results = table_def(<ResultsTable as ScyllaObject>::DEF);
+    add_missing_column(session, config, &results, "entities").await;
+    // add the columns tables created before August 2026 lack
+    let associations = table_def(<AssociationsTable as ScyllaObject>::DEF);
+    add_missing_column(session, config, &associations, "submissions_source").await;
+    add_missing_column(session, config, &associations, "submissions_other").await;
+}
+
+/// Build a session, create the declared tables and views, and prepare every registered and
+/// generated statement
+///
+/// # Arguments
+///
+/// * `config` - The Thorium config
 async fn build(config: Conf) -> Scylla {
     // Create a new session for scylla
     let session = new_session(&config).await;
     // setup our keyspace if it doesn't already exist
     setup_keyspace(&session, &config).await;
-    // get our tables/materialized views and prepared statements
-    let prep = ScyllaPreparedStatements::new(&session, &config).await;
+    // create the declared tables and views from their definitions
+    create_declared_objects(&session, &config).await;
+    // fail before serving when any registered statement doesn't prepare, naming each one
+    if let Err(err) = prepare_all(&session, &config.thorium.namespace).await {
+        panic!("{err}");
+    }
+    // prepare the generated statements
+    let queries = ScyllaQueries::prepare(&session, &config.thorium.namespace)
+        .await
+        .expect("Failed to prepare the generated scylla statements");
     // build our scylla client
-    Scylla { session, prep }
+    Scylla { session, queries }
 }

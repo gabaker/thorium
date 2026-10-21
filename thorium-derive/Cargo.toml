@@ -18,6 +18,9 @@ sync = []
 
 python = ["sync"]
 
+# the schema derives: tables, views, projections, and keyspaces
+schema = []
+
 [dependencies]
 syn = { version = "2.0", features = ["full"] }
 quote = "1.0"

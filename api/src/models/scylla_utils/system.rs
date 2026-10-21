@@ -1,16 +1,17 @@
 //! The scylla utils for systems structs
 use chrono::prelude::*;
-use scylla::DeserializeRow;
 use uuid::Uuid;
 
 #[cfg(feature = "api")]
 use crate::models::{ActiveJob, Worker};
 
+use crate::models::schema::ScyllaProjection;
+use crate::models::schema::scylla::NodesTable;
 use crate::models::{ImageScaler, Pools, WorkerStatus};
 
 /// An internal struct containing a single submission row in Scylla
-#[derive(Debug, Serialize, Deserialize, DeserializeRow)]
-#[scylla(flavor = "enforce_order", skip_name_checks)]
+#[derive(Debug, Serialize, Deserialize, ScyllaProjection)]
+#[thorium_projection(of = NodesTable)]
 pub struct NodeRow {
     /// The cluster this node is in
     pub cluster: String,

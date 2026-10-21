@@ -654,7 +654,7 @@ impl AssociationListParams {
             None => match Utc.timestamp_opt(shared.config.thorium.associations.earliest, 0) {
                 chrono::LocalResult::Single(default_end) => Ok(default_end),
                 _ => crate::internal_err!(format!(
-                    "default earliest association timestamp is invalid or ambigous - {}",
+                    "default earliest association timestamp is invalid or ambiguous - {}",
                     shared.config.thorium.associations.earliest
                 )),
             },
@@ -665,10 +665,13 @@ impl AssociationListParams {
 /// The number of associations in one partition of the associations table, read to rebuild its
 /// census
 #[derive(Debug)]
-#[cfg_attr(feature = "scylla-utils", derive(scylla::DeserializeRow))]
 #[cfg_attr(
     feature = "scylla-utils",
-    scylla(flavor = "enforce_order", skip_name_checks)
+    derive(crate::models::schema::ScyllaProjection)
+)]
+#[cfg_attr(
+    feature = "scylla-utils",
+    thorium_projection(of = crate::models::schema::scylla::AssociationsTable)
 )]
 pub struct AssociationCensusRow {
     /// The group the partition's associations are in
@@ -680,6 +683,7 @@ pub struct AssociationCensusRow {
     /// The entity or object the partition's associations are from, as stored
     pub source: String,
     /// How many associations the partition holds
+    #[cfg_attr(feature = "scylla-utils", thorium(expr = "count(*)"))]
     pub count: i64,
 }
 
@@ -688,26 +692,14 @@ impl super::CensusSupport for Association {
     /// The type returned by our prepared statement
     type Row = AssociationCensusRow;
 
-    /// Build the prepared statement for getting partition count info
+    /// The generated census statement's text for a namespace
     ///
     /// # Arguments
     ///
-    /// * `scylla` - The session to prepare the statement with
-    /// * `ns` - The namespace the associations table is in
-    async fn scan_prepared_statement(
-        scylla: &scylla::client::session::Session,
-        ns: &str,
-    ) -> Result<scylla::statement::prepared::PreparedStatement, scylla::errors::PrepareError> {
-        // count each partition of a token range
-        scylla
-            .prepare(format!(
-                "SELECT group, year, bucket, source, count(*) \
-                FROM {ns}.associations \
-                WHERE token(group, year, bucket, source) >= ? \
-                AND token(group, year, bucket, source) <= ? \
-                GROUP BY group, year, bucket, source",
-            ))
-            .await
+    /// * `ns` - The namespace the table is in
+    fn census_cql(ns: &str) -> String {
+        // the census statement generated on the table's queries struct
+        crate::models::schema::queries::AssociationsQueries::census_cql(ns)
     }
 
     /// Get the count for this partition

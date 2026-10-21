@@ -1,12 +1,12 @@
 //! Logic for interacting with notifications in the database
 
-use chrono::prelude::*;
 use tracing::instrument;
-use uuid::Uuid;
 
 use crate::{
     models::backends::NotificationSupport,
-    models::{Notification, NotificationLevel},
+    models::schema::scylla::NotificationsTableRef,
+    models::schema::{QueryError, text_of},
+    models::{Notification, NotificationLevel, NotificationRow},
     utils::{ApiError, Shared},
 };
 
@@ -26,41 +26,33 @@ pub async fn create<N: NotificationSupport>(
     // determine whether or not this notification should automatically expire
     // if no explicit setting was given, the notification should only expire if it's not an error
     let expire = expire.unwrap_or_else(|| notification.level != NotificationLevel::Error);
+    // the key is stored as the text it binds as
+    let key = text_of(&notification.key).map_err(QueryError::from)?;
+    let kind = N::notification_type();
+    let row = NotificationsTableRef {
+        kind: &kind,
+        key: &key,
+        created: notification.created,
+        id: notification.id,
+        msg: &notification.msg,
+        level: &notification.level,
+        ban_id: notification.ban_id,
+    };
     if expire {
         // save the notification to scylla
         shared
             .scylla
-            .session
-            .execute_unpaged(
-                &shared.scylla.prep.notifications.insert,
-                (
-                    N::notification_type(),
-                    notification.key,
-                    notification.created,
-                    notification.id,
-                    notification.msg,
-                    notification.level,
-                    notification.ban_id,
-                ),
-            )
+            .queries
+            .notifications
+            .insert(&shared.scylla.session, &row)
             .await?;
     } else {
         // save the notification to scylla with no expiration
         shared
             .scylla
-            .session
-            .execute_unpaged(
-                &shared.scylla.prep.notifications.insert_no_expire,
-                (
-                    N::notification_type(),
-                    notification.key,
-                    notification.created,
-                    notification.id,
-                    notification.msg,
-                    notification.level,
-                    notification.ban_id,
-                ),
-            )
+            .queries
+            .notifications
+            .insert_no_expire(&shared.scylla.session, &row)
             .await?;
     }
     Ok(())
@@ -77,35 +69,30 @@ pub async fn get_all<N: NotificationSupport>(
     key: &N::Key,
     shared: &Shared,
 ) -> Result<Vec<Notification<N>>, ApiError> {
-    // query for the notifications
-    let query = shared
+    // query for the notifications, binding the key as the text it's stored as
+    let stored = text_of(key).map_err(QueryError::from)?;
+    let rows = shared
         .scylla
-        .session
-        .execute_unpaged(
-            &shared.scylla.prep.notifications.get,
-            (N::notification_type(), key),
-        )
+        .queries
+        .notifications
+        .get(&shared.scylla.session, &N::notification_type(), &stored)
         .await?;
-    // enable rows on this query response
-    let query_rows = query.into_rows_result()?;
-    // cast the rows to notifications
-    let rows = query_rows.rows::<(
-        N::Key,
-        DateTime<Utc>,
-        Uuid,
-        String,
-        NotificationLevel,
-        Option<Uuid>,
-    )>()?;
     // instance a list of notification with the right size
-    let mut notifs = Vec::with_capacity(query_rows.rows_num());
+    let mut notifs = Vec::with_capacity(rows.len());
     // build our notifications
     for row in rows {
         // try to deserialie this row
-        let (key, created, id, msg, level, ban_id) = row?;
-        // build this notification and add it to our list
+        let NotificationRow {
+            created,
+            id,
+            msg,
+            level,
+            ban_id,
+            ..
+        } = row?;
+        // build this notification and add it to our list; its stored key is the one we bound
         notifs.push(Notification {
-            key,
+            key: key.clone(),
             created,
             id,
             msg,
@@ -127,18 +114,18 @@ pub async fn delete<N: NotificationSupport>(
     notification: &Notification<N>,
     shared: &Shared,
 ) -> Result<(), ApiError> {
-    // delete the notification in scylla
+    // delete the notification in scylla, binding the key as the text it's stored as
+    let key = text_of(&notification.key).map_err(QueryError::from)?;
     shared
         .scylla
-        .session
-        .execute_unpaged(
-            &shared.scylla.prep.notifications.delete,
-            (
-                N::notification_type(),
-                &notification.key,
-                &notification.created,
-                &notification.id,
-            ),
+        .queries
+        .notifications
+        .delete(
+            &shared.scylla.session,
+            &N::notification_type(),
+            &key,
+            notification.created,
+            notification.id,
         )
         .await?;
     Ok(())
@@ -155,14 +142,13 @@ pub async fn delete_all<N: NotificationSupport>(
     key: &N::Key,
     shared: &Shared,
 ) -> Result<(), ApiError> {
-    // delete all of the entity's notifications in scylla
+    // delete all of the entity's notifications in scylla, binding the key as stored
+    let key = text_of(key).map_err(QueryError::from)?;
     shared
         .scylla
-        .session
-        .execute_unpaged(
-            &shared.scylla.prep.notifications.delete_all,
-            (N::notification_type(), key),
-        )
+        .queries
+        .notifications
+        .delete_all(&shared.scylla.session, &N::notification_type(), &key)
         .await?;
     Ok(())
 }

@@ -17,6 +17,7 @@ use sha2::{Digest, Sha256};
 use std::fmt::Write;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
+use thorium::models::schema::{TableStatements, with_keyspace};
 use uuid::Uuid;
 
 use super::failures::{FailureLog, FailureRecord, Operation};
@@ -844,7 +845,7 @@ impl<T: Backup> BackupWorker<T> {
     }
 }
 
-/// A table whose rows thoradm reads out of Scylla and archives
+/// A table archive struct that is backed up by scanning its rows by token range
 #[async_trait::async_trait]
 pub trait Backup:
     Utils
@@ -855,11 +856,35 @@ pub trait Backup:
     + Serialize<AllocSerializer<1024>>
     + for<'frame, 'metadata> DeserializeRow<'frame, 'metadata>
 {
-    /// The prepared statement to use when retrieving data from Scylla
+    /// The table this archive struct backs up, read through its generated statements
+    type Table: TableStatements;
+
+    /// The text of the statement reading a token range of the table: its generated scan of
+    /// every column, which the archive struct reads by name
+    ///
+    /// # Arguments
+    ///
+    /// * `ns` - The namespace the table is in
+    #[must_use]
+    fn scan_cql(ns: &str) -> String {
+        // fill the generated scan's keyspace
+        with_keyspace(<Self::Table as TableStatements>::SCAN, ns)
+    }
+
+    /// The prepared statement to use when retrieving data from Scylla; it binds the first and
+    /// last token of a range
+    ///
+    /// # Arguments
+    ///
+    /// * `scylla` - The scylla session to prepare the statement with
+    /// * `ns` - The namespace the table is in
     async fn prepared_statement(
         scylla: &Session,
         ns: &str,
-    ) -> Result<PreparedStatement, PrepareError>;
+    ) -> Result<PreparedStatement, PrepareError> {
+        // prepare the generated statement
+        scylla.prepare(Self::scan_cql(ns)).await
+    }
 
     /// Hash this rows partitions key to see if we have changed partitions
     fn hash_partition(&self) -> u64;

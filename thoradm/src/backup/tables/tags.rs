@@ -4,10 +4,7 @@ use ahash::AHasher;
 use bytecheck::CheckBytes;
 use chrono::prelude::*;
 use rkyv::{Archive, Deserialize, Serialize};
-use scylla::DeserializeRow;
-use scylla::client::session::Session;
-use scylla::errors::PrepareError;
-use scylla::statement::prepared::PreparedStatement;
+use scylla::SerializeRow;
 use std::hash::Hasher;
 use thorium::Conf;
 use thorium::models::backends::TagSupport;
@@ -15,13 +12,17 @@ use thorium::models::{TagRequest, TagType};
 
 use super::Versioned;
 use crate::backup::{Backup, Restore, Scrub, Utils};
+use thorium::models::schema::ScyllaProjection;
+use thorium::models::schema::queries::TagsQueries;
+use thorium::models::schema::scylla::TagsTable;
 
 /// A single line of stage logs
-#[derive(Debug, Archive, Serialize, Deserialize, DeserializeRow)]
+#[derive(Debug, Archive, Serialize, Deserialize, ScyllaProjection)]
 #[archive_attr(derive(Debug, CheckBytes))]
-#[scylla(flavor = "enforce_order", skip_name_checks)]
+#[thorium_projection(of = TagsTable)]
 pub struct Tag {
     /// The type of object this tag is for
+    #[thorium(column = "type")]
     pub tag_type: TagType,
     /// The group this tag is a part of
     pub group: String,
@@ -48,31 +49,23 @@ impl Utils for Tag {
 
 #[async_trait::async_trait]
 impl Backup for Tag {
-    /// The columns of this table's partition key, used to name rows that fail to decode
-    fn partition_key() -> &'static [&'static str] {
-        &["type", "group", "year", "bucket", "key", "value"]
-    }
+    /// The table this archive struct backs up, read through its generated statements
+    type Table = TagsTable;
 
-    /// The prepared statement to use when retrieving data from Scylla
+    /// The generated statement reading a token range of tags without the lower-cased key and
+    /// value, which restore recomputes
     ///
     /// # Arguments
     ///
-    /// * `scylla` - The scylla session to build a prepared statement with
-    /// * `ns` - The namespace for this prepared statement
-    async fn prepared_statement(
-        scylla: &Session,
-        ns: &str,
-    ) -> Result<PreparedStatement, PrepareError> {
-        // build tags get prepared statement
-        scylla
-            .prepare(format!(
-                "SELECT type, group, year, bucket, key, value, uploaded, item \
-                FROM {}.{} \
-                Where token(type, group, year, bucket, key, value) >= ? AND token(type, group, year, bucket, key, value) <= ?",
-                ns,
-                Self::name(),
-            ))
-            .await
+    /// * `ns` - The namespace the table is in
+    fn scan_cql(ns: &str) -> String {
+        // the generated scan of the columns a tag archive holds
+        TagsQueries::backup_cql(ns)
+    }
+
+    /// The columns of this table's partition key, used to name rows that fail to decode
+    fn partition_key() -> &'static [&'static str] {
+        &["type", "group", "year", "bucket", "key", "value"]
     }
 
     /// Hash this partitions info to see if we have changed partitions
@@ -94,47 +87,40 @@ impl Backup for Tag {
 /// Implement scrub support for the tags table
 impl Scrub for Tag {}
 
+/// The values a restored row binds by column name to the table's generated full-row insert
+#[derive(SerializeRow)]
+pub struct TagValues {
+    /// The `type` column
+    #[scylla(rename = "type")]
+    pub kind: TagType,
+    /// The `group` column
+    pub group: String,
+    /// The `item` column
+    pub item: String,
+    /// The `year` column
+    pub year: i32,
+    /// The `bucket` column
+    pub bucket: i32,
+    /// The `key` column
+    pub key: String,
+    /// The `value` column
+    pub value: String,
+    /// The `uploaded` column
+    pub uploaded: DateTime<Utc>,
+    /// The `key_lower` column
+    pub key_lower: String,
+    /// The `value_lower` column
+    pub value_lower: String,
+}
+
 /// Implement restore support for the tags table
 #[async_trait::async_trait]
 impl Restore for Tag {
     // The partition config is within the tags config in the Thorium config
     type PartitionConf = thorium::conf::Tags;
 
-    /// The tag type, group, item, year, bucket, key, value, upload time, and lower-cased key and
-    /// value
-    type Values = (
-        TagType,
-        String,
-        String,
-        i32,
-        i32,
-        String,
-        String,
-        DateTime<Utc>,
-        String,
-        String,
-    );
-
-    /// The prepared statement to use when restoring data to scylla
-    ///
-    /// # Arguments
-    ///
-    /// * `scylla` - A scylla client
-    /// * `ns` - The namespace in scylla this table is from
-    async fn prepared_statement(
-        scylla: &Session,
-        ns: &str,
-    ) -> Result<PreparedStatement, PrepareError> {
-        scylla
-            .prepare(format!(
-                "INSERT INTO {}.{} \
-                (type, group, item, year, bucket, key, value, uploaded, key_lower, value_lower) \
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                ns,
-                Self::name(),
-            ))
-            .await
-    }
+    /// The row the generated full-row insert binds by name
+    type Values = TagValues;
 
     /// Get the partition size for this data type
     ///
@@ -160,18 +146,18 @@ impl Restore for Tag {
         // get the lowercase versions of key/value
         let key_lower = self.key.to_lowercase();
         let value_lower = self.value.to_lowercase();
-        (
-            self.tag_type,
-            self.group,
-            self.item,
-            self.year,
+        TagValues {
+            kind: self.tag_type,
+            group: self.group,
+            item: self.item,
+            year: self.year,
             bucket,
-            self.key,
-            self.value,
-            self.uploaded,
+            key: self.key,
+            value: self.value,
+            uploaded: self.uploaded,
             key_lower,
             value_lower,
-        )
+        }
     }
 }
 

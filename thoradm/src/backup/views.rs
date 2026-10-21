@@ -242,7 +242,8 @@ impl ViewStatements {
                         break;
                     }
                 }
-                if !found {
+                // a legacy view no file holds was never in this keyspace, so nothing recreates it
+                if !found && !Registry::is_legacy_view(&view) {
                     unfound.push(format!("{keyspace}.{view}"));
                 }
             }
@@ -380,6 +381,32 @@ pub struct Recreated {
     pub failed: Vec<(String, String)>,
 }
 
+/// Returns the views the registry lists for a table that a keyspace drops before the table is
+/// written: every view the API's setup creates, and each legacy view the keyspace holds
+///
+/// # Arguments
+///
+/// * `scylla` - The session to the target
+/// * `keyspace` - The target's keyspace
+/// * `table` - The base table
+pub async fn droppable_views_of(
+    scylla: &Session,
+    keyspace: &str,
+    table: &str,
+) -> Result<Vec<&'static str>, Error> {
+    // the keyspace's views are read only when the table has a legacy view
+    let views: Vec<&'static str> = Registry::views_of(table).collect();
+    if !views.iter().any(|view| Registry::is_legacy_view(view)) {
+        return Ok(views);
+    }
+    let existing = existing_views(scylla, keyspace).await?;
+    // a legacy view is dropped only where an older release created it
+    Ok(views
+        .into_iter()
+        .filter(|view| !Registry::is_legacy_view(view) || existing.contains(*view))
+        .collect())
+}
+
 /// Drops the views the registry lists for a table, before its rows are written
 ///
 /// # Arguments
@@ -388,8 +415,8 @@ pub struct Recreated {
 /// * `keyspace` - The target's keyspace
 /// * `table` - The table about to be restored
 pub async fn drop_views_of(scylla: &Session, keyspace: &str, table: &str) -> Result<(), Error> {
-    // exactly the registered views, each logged so the drop is visible
-    for view in Registry::views_of(table) {
+    // exactly the registered views the keyspace must drop, each logged so the drop is visible
+    for view in droppable_views_of(scylla, keyspace, table).await? {
         super::utils::drop_materialized_view(keyspace, view, scylla).await?;
         info!("Dropped view {keyspace}.{view}");
     }

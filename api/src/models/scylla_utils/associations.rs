@@ -1,11 +1,12 @@
 //! The scylla utils/structs for associations
 
 use chrono::prelude::*;
-use scylla::DeserializeRow;
 use std::hash::Hasher;
 use thorium_derive::ScyllaStoreJson;
 use uuid::Uuid;
 
+use crate::models::schema::ScyllaProjection;
+use crate::models::schema::scylla::AssociationsTable;
 use crate::models::{
     Association, AssociationKind, AssociationTarget, Directionality, Entity, TreeSupport,
 };
@@ -56,8 +57,9 @@ impl AssociationTargetColumn {
     }
 }
 
-#[derive(Debug, DeserializeRow)]
-#[scylla(flavor = "enforce_order", skip_name_checks)]
+/// One association row read when listing a source's associations
+#[derive(Debug, ScyllaProjection)]
+#[thorium_projection(of = AssociationsTable)]
 pub struct AssociationListRow {
     /// The group this association is for
     pub group: String,
@@ -66,6 +68,7 @@ pub struct AssociationListRow {
     /// The source for this association
     pub source: String,
     /// The other serialized data this association is with
+    #[thorium(column = "target")]
     pub other: String,
     /// Who created this association
     pub submitter: String,
@@ -76,6 +79,7 @@ pub struct AssociationListRow {
     /// Any extra info needed for the source column in this row
     pub extra_source: Option<String>,
     /// Any extra info needed for the target column in this row
+    #[thorium(column = "extra_target")]
     pub extra_other: Option<String>,
     /// The submission id tied to the source side of this row if it is a file/sample
     pub submissions_source: Option<Uuid>,

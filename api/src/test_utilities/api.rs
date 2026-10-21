@@ -7,11 +7,11 @@ use aws_sdk_s3::{
 use aws_types::region::Region;
 use bb8_redis::{RedisConnectionManager, bb8::Pool};
 use scylla::client::session::Session;
-use scylla::client::session_builder::SessionBuilder;
 use std::{sync::LazyLock, time::Duration};
 use tokio::sync::OnceCell;
 use tokio_util::time::FutureExt;
 
+use crate::models::schema::connect;
 use crate::{Conf, Error, Thorium, client::ClientSettings, conf::S3, models::AuthResponse};
 
 /// The path to a valid Thorium config in the testing directory
@@ -51,28 +51,9 @@ static ADDR: LazyLock<String> = LazyLock::new(|| {
 /// # Arguments
 ///
 /// * `config` - The config for this Thorium cluster
-#[allow(clippy::redundant_closure_for_method_calls)]
 async fn get_scylla_client(config: &Conf) -> Result<Session, Error> {
-    // start building our scylla client
-    let mut session = SessionBuilder::new();
-    // if we have auth info for scylla then add that
-    if let Some(creds) = &config.scylla.auth {
-        // inject our creds
-        session = session.user(&creds.username, &creds.password);
-    }
-    // set our request timeout
-    let session = session.connection_timeout(Duration::from_secs(config.scylla.setup_time.into()));
-    // build a scylla session
-    let scylla = Box::pin(
-        config
-            .scylla
-            .nodes
-            .iter()
-            .fold(session, |builder, node| builder.known_node(node))
-            .build(),
-    )
-    .await
-    .expect("Failed to connect to scylla!");
+    // connect with the shared session settings
+    let scylla = connect(config).await.expect("Failed to connect to scylla!");
     Ok(scylla)
 }
 

@@ -3041,7 +3041,7 @@ impl FileListParams {
             None => match Utc.timestamp_opt(shared.config.thorium.files.earliest, 0) {
                 chrono::LocalResult::Single(default_end) => Ok(default_end),
                 _ => crate::internal_err!(format!(
-                    "default earliest files timestamp is invalid or ambigous - {}",
+                    "default earliest files timestamp is invalid or ambiguous - {}",
                     shared.config.thorium.files.earliest
                 )),
             },
@@ -3494,16 +3494,25 @@ pub struct ZipDownloadParams {
     pub password: Option<String>,
 }
 
+/// The number of submissions in one partition of the samples list, read to rebuild its census
 #[derive(Debug)]
-#[cfg_attr(feature = "scylla-utils", derive(scylla::DeserializeRow))]
 #[cfg_attr(
     feature = "scylla-utils",
-    scylla(flavor = "enforce_order", skip_name_checks)
+    derive(crate::models::schema::ScyllaProjection)
+)]
+#[cfg_attr(
+    feature = "scylla-utils",
+    thorium_projection(of = crate::models::schema::scylla::SamplesListTable)
 )]
 pub struct SampleCensusRow {
+    /// The group the partition is in
     pub group: String,
+    /// The year the partition is in
     pub year: i32,
+    /// The partition's bucket within its year
     pub bucket: i32,
+    /// How many rows the partition holds
+    #[cfg_attr(feature = "scylla-utils", thorium(expr = "count(*)"))]
     pub count: i64,
 }
 
@@ -3512,21 +3521,14 @@ impl super::CensusSupport for Sample {
     /// The type returned by our prepared statement
     type Row = SampleCensusRow;
 
-    /// Build the prepared statement for getting partition count info
-    async fn scan_prepared_statement(
-        scylla: &scylla::client::session::Session,
-        ns: &str,
-    ) -> Result<scylla::statement::prepared::PreparedStatement, scylla::errors::PrepareError> {
-        // build tags get partition count prepared statement
-        scylla
-            .prepare(format!(
-                "SELECT group, year, bucket, count(*) \
-                FROM {}.samples_list \
-                WHERE token(group, year, bucket) >= ? AND token(group, year, bucket) <= ? \
-                GROUP BY group, year, bucket",
-                ns,
-            ))
-            .await
+    /// The generated census statement's text for a namespace
+    ///
+    /// # Arguments
+    ///
+    /// * `ns` - The namespace the table is in
+    fn census_cql(ns: &str) -> String {
+        // the census statement generated on the table's queries struct
+        crate::models::schema::queries::SamplesListQueries::census_cql(ns)
     }
 
     /// Get the count for this partition

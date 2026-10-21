@@ -95,13 +95,9 @@ where
     )]
     async fn handle_init(&mut self, start: i64, end: i64) -> Result<(), Error> {
         // enumerate the items we need to pull data for
-        let resp = self
-            .scylla
-            .execute_iter(self.source.enumerate_prepared().clone(), (start, end))
-            .await
-            .map_err(|err| Error::new(format!("Failed to enumerate data from Scylla: {err}")))?;
+        let typed_stream = self.source.enumerate(&self.scylla, start, end).await?;
         // chunk into how many things we want to pull and send to the store concurrently
-        let mut typed_stream = resp.rows_stream::<D::InitRow>()?.chunks(D::INIT_CONCURRENT);
+        let mut typed_stream = typed_stream.chunks(D::INIT_CONCURRENT);
         while let Some(rows) = typed_stream.next().await {
             // check for any errors getting the rows
             let rows = rows.into_iter().collect::<Result<Vec<_>, _>>()?;

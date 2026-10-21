@@ -1,0 +1,1 @@
+HarvestsQueries.crops: a distinct select reads only partition key columns of harvests, not `crop`

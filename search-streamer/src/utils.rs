@@ -1,8 +1,7 @@
 //! Utility functions for search-streamer
 
 use scylla::client::session::Session;
-use scylla::client::session_builder::SessionBuilder;
-use std::time::Duration;
+use thorium::models::schema::connect;
 use thorium::{Conf, Error};
 
 /// Build a scylla client for a specific cluster
@@ -11,23 +10,8 @@ use thorium::{Conf, Error};
 ///
 /// * `config` - The config for this Thorium cluster
 pub async fn get_scylla_client(conf: &Conf) -> Result<Session, Error> {
-    // start building our scylla client
-    let mut session = SessionBuilder::new();
-    // if we have auth info for scylla then add that
-    if let Some(creds) = &conf.scylla.auth {
-        // inject our creds
-        session = session.user(&creds.username, &creds.password);
-    }
-    // set our request timeout
-    let session =
-        session.connection_timeout(Duration::from_secs(u64::from(conf.scylla.setup_time)));
-    // build a scylla session
-    let scylla = conf
-        .scylla
-        .nodes
-        .iter()
-        .fold(session, |builder, node| builder.known_node(node))
-        .build()
+    // connect with the shared session settings
+    let scylla = connect(conf)
         .await
         .map_err(|err| Error::new(format!("Error connecting to Scylla: {err}")))?;
     Ok(scylla)

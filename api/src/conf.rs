@@ -2921,6 +2921,9 @@ impl Elastic {
     }
 }
 
+/// The longest TTL Scylla accepts on a write, 20 years in seconds
+const SCYLLA_MAX_WRITE_TTL: u64 = 630_720_000;
+
 /// configs for Thorium
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, JsonSchema)]
 pub struct Conf {
@@ -2973,6 +2976,13 @@ impl Conf {
         })?;
         // refuse settings that can't work before anything uses them
         conf.validate()?;
+        // report settings that work but probably aren't what was meant
+        for warning in conf.warnings() {
+            println!(
+                "{}",
+                serde_json::json!({"timestamp": chrono::Utc::now(), "level": "WARN", "msg": warning})
+            );
+        }
         Ok(conf)
     }
 
@@ -3034,7 +3044,57 @@ impl Conf {
                 )));
             }
         }
+        // a table's default TTL is a CQL int, so the table's DDL refuses anything larger
+        for (setting, ttl) in self.table_ttls() {
+            if i32::try_from(ttl).is_err() {
+                return Err(config::ConfigError::Message(format!(
+                    "{setting} must be at most {} seconds",
+                    i32::MAX
+                )));
+            }
+        }
         Ok(())
+    }
+
+    /// The settings that become a table's default TTL, by their key path
+    fn table_ttls(&self) -> [(&'static str, u64); 3] {
+        [
+            ("thorium.retention.logs", self.thorium.retention.logs),
+            (
+                "thorium.retention.notifications",
+                self.thorium.retention.notifications,
+            ),
+            ("thorium.events.retention", self.thorium.events.retention),
+        ]
+    }
+
+    /// Get the value of a setting that gives a table its default TTL
+    ///
+    /// # Arguments
+    ///
+    /// * `setting` - The setting's key path, such as `thorium.retention.logs`
+    #[must_use]
+    pub fn table_ttl(&self, setting: &str) -> Option<u64> {
+        self.table_ttls()
+            .into_iter()
+            .find(|(name, _)| *name == setting)
+            .map(|(_, ttl)| ttl)
+    }
+
+    /// The warnings this config's settings raise without being refused
+    #[must_use]
+    pub fn warnings(&self) -> Vec<String> {
+        // Scylla caps an explicit `USING TTL` at 20 years, but a table's default TTL may be longer
+        self.table_ttls()
+            .into_iter()
+            .filter(|(_, ttl)| *ttl > SCYLLA_MAX_WRITE_TTL)
+            .map(|(setting, ttl)| {
+                format!(
+                    "{setting} is {ttl} seconds, above Scylla's {SCYLLA_MAX_WRITE_TTL} second \
+                     limit for a TTL set on a write"
+                )
+            })
+            .collect()
     }
 
     /// Change the namespace for this config
@@ -3314,7 +3374,11 @@ mod tests {
     ///
     /// * `setting` - The key path of the setting to change
     /// * `value` - The value to set it to
-    fn load_with(setting: &str, value: u16) -> Result<Conf, config::ConfigError> {
+    fn load_with(
+        setting: &str,
+        value: impl Into<serde_json::Value>,
+    ) -> Result<Conf, config::ConfigError> {
+        let value = value.into();
         // read the integration test config as JSON
         let template = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/thorium-testing.yml");
         let raw = std::fs::read_to_string(&template).expect("test config reads");
@@ -3331,7 +3395,7 @@ mod tests {
         parent
             .as_object_mut()
             .expect("config node is a map")
-            .insert(key.to_owned(), serde_json::json!(value));
+            .insert(key.to_owned(), value.clone());
         // write the changed config to a file of its own
         let path = std::env::temp_dir().join(format!(
             "thorium-conf-{}-{setting}-{value}.yml",
@@ -3460,6 +3524,79 @@ mod tests {
             let minimum = prop.get("minimum").and_then(serde_json::Value::as_f64);
             assert_eq!(minimum, Some(1.0), "partition_size schema {prop}");
         }
+    }
+
+    /// The settings that become a table's default TTL
+    const TABLE_TTL_SETTINGS: [&str; 3] = [
+        "thorium.retention.logs",
+        "thorium.retention.notifications",
+        "thorium.events.retention",
+    ];
+
+    /// A table TTL above what Scylla's `default_time_to_live` accepts is refused when the config
+    /// loads, naming the setting; one above Scylla's 20-year write maximum loads with a warning
+    #[test]
+    fn table_ttls_are_validated() {
+        let largest = u64::try_from(i32::MAX).unwrap();
+        for setting in TABLE_TTL_SETTINGS {
+            // a TTL the table's DDL would refuse fails to load, naming the setting
+            match load_with(setting, largest + 1) {
+                Ok(_) => panic!("{setting}: a TTL above i32::MAX loaded"),
+                Err(error) => assert!(
+                    error.to_string().contains(setting),
+                    "{setting}: the error doesn't name the setting: {error}"
+                ),
+            }
+            // a TTL above the write maximum loads, with a warning naming the setting
+            let conf = load_with(setting, 999_999_999)
+                .unwrap_or_else(|error| panic!("{setting}: {error}"));
+            let warnings = conf.warnings();
+            assert!(
+                warnings.iter().any(|warning| warning.contains(setting)),
+                "{setting}: no warning names the setting: {warnings:?}"
+            );
+            // the largest TTL the DDL accepts loads
+            load_with(setting, largest).unwrap_or_else(|error| panic!("{setting}: {error}"));
+            // a TTL within the write maximum loads without a warning
+            let conf =
+                load_with(setting, 604_800).unwrap_or_else(|error| panic!("{setting}: {error}"));
+            assert!(
+                !conf
+                    .warnings()
+                    .iter()
+                    .any(|warning| warning.contains(setting)),
+                "{setting}: a one week TTL warns"
+            );
+        }
+    }
+
+    /// Every TTL setting a declared table names resolves to its configured value
+    #[cfg(feature = "scylla-utils")]
+    #[test]
+    fn declared_table_ttls_resolve() {
+        use crate::models::schema::scylla::ThoriumKeyspace;
+        use crate::models::schema::{Keyspace, ObjectDef};
+        let conf = load_with("thorium.retention.notifications", 4242)
+            .unwrap_or_else(|error| panic!("{error}"));
+        // every table's TTL source names a TTL setting
+        for object in <ThoriumKeyspace as Keyspace>::OBJECTS {
+            if let ObjectDef::Table(table) = object
+                && let Some(source) = table.ttl
+            {
+                assert!(
+                    conf.table_ttl(source.config_path).is_some(),
+                    "{} names an unknown TTL setting {}",
+                    table.name,
+                    source.config_path
+                );
+            }
+        }
+        // the value comes from the setting
+        assert_eq!(
+            conf.table_ttl("thorium.retention.notifications"),
+            Some(4242)
+        );
+        assert_eq!(conf.table_ttl("thorium.retention.nope"), None);
     }
 
     /// The namespaces the chart's operator helpers add to the blacklist unprefixed include
