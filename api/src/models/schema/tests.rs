@@ -922,3 +922,39 @@ fn session_builder_follows_the_config() {
     let conf = scylla_conf(&["127.0.0.1:9042"], Some(("thorium", "corn")));
     assert!(super::session_builder(&conf).config.authenticator.is_some());
 }
+
+/// A data-shaping record's `Debug` output hides the files password's hash
+#[test]
+fn config_record_debug_redacts_the_files_password() {
+    // build a record holding an argon2id hash
+    let record = super::ConfigRecord {
+        partition_sizes: BTreeMap::from([("files".to_owned(), 7)]),
+        earliest: BTreeMap::from([("files".to_owned(), 0)]),
+        files_password: "$argon2id$v=19$m=19456,t=2,p=1$c2FsdHNhbHQ$aGFzaGhhc2hoYXNo".to_owned(),
+    };
+    // the hash never reaches the debug text, while the settings do
+    let debug = format!("{record:?}");
+    assert!(!debug.contains("$argon2id"), "{debug}");
+    assert!(debug.contains("<redacted>"), "{debug}");
+    assert!(debug.contains("partition_sizes"), "{debug}");
+}
+
+/// Migration enums serialize as their variant names in JSON and are stored as `snake_case` text
+#[test]
+fn migration_enums_json_and_stored_text_differ() {
+    // JSON uses the variant names
+    assert_eq!(
+        serde_json::to_string(&super::ObjectClass::Unrecognized).unwrap(),
+        "\"Unrecognized\""
+    );
+    assert_eq!(
+        serde_json::to_string(&super::MigrationRunStatus::DoneWithIssues).unwrap(),
+        "\"DoneWithIssues\""
+    );
+    // the stored text is snake_case
+    assert_eq!(super::ObjectClass::Unrecognized.as_str(), "unrecognized");
+    assert_eq!(
+        super::MigrationRunStatus::DoneWithIssues.as_str(),
+        "done_with_issues"
+    );
+}

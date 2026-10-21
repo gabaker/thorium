@@ -15,7 +15,7 @@ use serde_json::json;
 use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex, PoisonError};
 use thorium::Error;
-use thorium::models::upgrades::{UpgradeApproval, UpgradeStatus};
+use thorium::models::upgrades::{SchemaBackend, UpgradeApproval, UpgradeStatus};
 
 /// A struct representing an environment variable
 #[derive(Serialize, Deserialize, Clone, Debug, JsonSchema, Hash, Eq, PartialEq)]
@@ -426,6 +426,33 @@ pub struct UpgradeSpec {
     /// Approvals, with backup confirmations, for steps that change data or need manual work
     #[serde(default)]
     pub approvals: Vec<UpgradeApproval>,
+    /// Accept the loss of every lossy downgrade step without per-step confirmation or a backup;
+    /// honored only on a dev cluster (`auto_target_dev` and the Namespace's dev label), and ignored
+    /// on any other with a `LossySettingRefused` condition
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub dangerous_downgrade_lossy: bool,
+    /// `unexpected` schema objects an admin acknowledged, so they raise no `SchemaDrift` condition
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub drift_acknowledged: Vec<DriftAcknowledgement>,
+    /// The revision a keyspace without a `schema_migrations` record is at, read only when the
+    /// upgrade state `ConfigMap` is missing and `thoradm schema status` finds data but no record;
+    /// reported as stale once a record exists
+    #[schemars(pattern(thorium::models::upgrades::REVISION_PATTERN))]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub starting_revision: Option<String>,
+}
+
+/// An `unexpected` schema object an admin acknowledged
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq, JsonSchema)]
+pub struct DriftAcknowledgement {
+    /// The backend the object belongs to
+    pub backend: SchemaBackend,
+    /// The object as `thoradm schema diff` names it, such as `samples_list.preview`
+    pub object: String,
+    /// The observed fingerprint acknowledged; when set, the acknowledgement lapses if the object
+    /// changes again
+    #[serde(default)]
+    pub fingerprint: Option<String>,
 }
 
 /// The phase a `ThoriumCluster` is in
@@ -1639,7 +1666,7 @@ mod tests {
                 .as_array()
                 .cloned()
                 .unwrap_or_default();
-        assert_eq!(states.len(), 6);
+        assert_eq!(states.len(), 9);
         // the revision is printed from the upgrade status
         let columns = version["additionalPrinterColumns"]
             .as_array()

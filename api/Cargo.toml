@@ -22,7 +22,10 @@ api = [
   ]
 
 # include scylla utility functions
-scylla-utils = ["scylla", "thorium-derive", "thorium-derive/schema", "utoipa"]
+scylla-utils = ["scylla", "thorium-derive", "thorium-derive/schema", "utoipa", "sha2"]
+
+# include the shared upgrade runtime: the migration runner API thoradm and the test harness run
+upgrades-runtime = ["scylla-utils", "async-trait", "tokio-util", "bb8-redis", "redis", "aws-sdk-s3"]
 
 # include rkyv support for some structs
 rkyv-support = ["rkyv", "bytecheck"]
