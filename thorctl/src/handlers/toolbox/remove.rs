@@ -172,15 +172,13 @@ pub async fn remove(thorium: Thorium, conf: CtlConf, cmd: &RemoveToolbox) -> Res
     // collapse duplicate (group, name) targets so we never delete the same
     // resource twice (the second call would error), and flag identities the
     // toolbox defines more than once
-    let (pipeline_targets, pipeline_dups) = dedup_targets(
-        pipelines.iter().map(|pipe| {
-            (
-                pipe.request.group.as_str(),
-                pipe.request.name.as_str(),
-                pipe.existing.is_some(),
-            )
-        }),
-    );
+    let (pipeline_targets, pipeline_dups) = dedup_targets(pipelines.iter().map(|pipe| {
+        (
+            pipe.request.group.as_str(),
+            pipe.request.name.as_str(),
+            pipe.existing.is_some(),
+        )
+    }));
     // same de-duplication for images, computed separately so image and pipeline
     // duplicate warnings can be labeled distinctly
     let (image_targets, image_dups) = dedup_targets(images.iter().map(|img| {

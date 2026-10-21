@@ -379,10 +379,7 @@ impl DependenciesUpdate {
             image.dependencies.filesystems.location,
             self.filesystems.location
         );
-        update_opt!(
-            image.dependencies.filesystems.kwarg,
-            self.filesystems.kwarg
-        );
+        update_opt!(image.dependencies.filesystems.kwarg, self.filesystems.kwarg);
         update_clear!(
             image.dependencies.filesystems.kwarg,
             self.filesystems.clear_kwarg

@@ -74,8 +74,7 @@ pub async fn run_disk_import(
                 "Creating groups",
                 BarKind::Bound(missing_groups.len() as u64),
             );
-            super::create_groups(thorium, missing_groups, opts.workers, progress, &journal)
-                .await?;
+            super::create_groups(thorium, missing_groups, opts.workers, progress, &journal).await?;
         }
         // import the images first since the pipelines reference them; a Quit
         // in the image pass stops the pipeline pass too

@@ -9,11 +9,11 @@ use elasticsearch::indices::{IndicesCreateParts, IndicesDeleteParts, IndicesExis
 use elasticsearch::{BulkParts, Elasticsearch};
 use itertools::Itertools;
 use serde::{Deserialize, Serialize};
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use std::time::Duration;
 use thorium::models::ElasticIndex;
 use thorium::{Conf, Error};
-use tracing::{event, instrument, Level};
+use tracing::{Level, event, instrument};
 use url::Url;
 
 use super::SearchStore;

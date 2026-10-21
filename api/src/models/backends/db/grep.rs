@@ -46,7 +46,8 @@ pub async fn grep<T: GrepSupport>(
     // get the earliest timestamp this type of item can exist at
     let earliest = T::grep_earliest(&shared.config);
     // get our cursor or build a new one scoped to this user
-    let mut cursor = GrepCursor::from_params(user, params, requested_groups, earliest, shared).await?;
+    let mut cursor =
+        GrepCursor::from_params(user, params, requested_groups, earliest, shared).await?;
     // a continued cursor searches the pattern it was created with, so rebuild the
     // matcher from its retained params instead of the resubmitted ones
     if !cursor.new {

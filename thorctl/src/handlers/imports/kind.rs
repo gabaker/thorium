@@ -176,7 +176,11 @@ impl ImportKind for PipelineKind {
         name: &str,
         update: &PipelineUpdate,
     ) -> Result<(), Error> {
-        thorium.pipelines.update(group, name, update).await.map(|_| ())
+        thorium
+            .pipelines
+            .update(group, name, update)
+            .await
+            .map(|_| ())
     }
     /// Compute the update needed to bring an existing pipeline in line with a request
     fn calculate_update(existing: Pipeline, req: PipelineRequest) -> Option<PipelineUpdate> {

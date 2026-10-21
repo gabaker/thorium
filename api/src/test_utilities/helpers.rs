@@ -312,7 +312,7 @@ macro_rules! fail {
                         return Err(thorium::Error::new(format!(
                             "Failed failure check with no status returned. Full response: {:#?}",
                             $check
-                        )))
+                        )));
                     }
                 }
             }
@@ -343,7 +343,7 @@ macro_rules! fail {
                         return Err(thorium::Error::new(format!(
                             "Failed failure check with no status returned. Full response: {:#?}",
                             $check
-                        )))
+                        )));
                     }
                 }
                 match e.msg() {
@@ -358,7 +358,7 @@ macro_rules! fail {
                     None => {
                         return Err(thorium::Error::new(
                             "Failed error message check with no message returned".to_owned(),
-                        ))
+                        ));
                     }
                 }
             }

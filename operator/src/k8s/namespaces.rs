@@ -1,7 +1,7 @@
 use k8s_openapi::api::core::v1::Namespace;
 use kube::{
-    api::{ListParams, ObjectList, PostParams},
     Api, Client,
+    api::{ListParams, ObjectList, PostParams},
 };
 use thorium::Error;
 

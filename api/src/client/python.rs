@@ -6,15 +6,15 @@
 mod files;
 
 use base64::Engine;
-use pyo3::{pymethods, types::PyType, Bound};
+use pyo3::{Bound, pymethods, types::PyType};
 use std::path::PathBuf;
 
 use crate::{
-    client::{
-        conf::default_client_timeout, helpers, BasicBlocking, ClientSettings, FilesBlocking,
-        JobsBlocking, ReactionsBlocking,
-    },
     Error, ThoriumBlocking,
+    client::{
+        BasicBlocking, ClientSettings, FilesBlocking, JobsBlocking, ReactionsBlocking,
+        conf::default_client_timeout, helpers,
+    },
 };
 
 #[pymethods]

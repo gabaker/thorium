@@ -104,22 +104,16 @@ fn orient(a: NodeKind, b: NodeKind) -> Orientation {
         // samples/repos contain the sub-entities extracted or carved from them
         (
             Sample | Repo,
-            E(FileSystem
-            | WindowsProcessTree
-            | PeSection
-            | PeImport
-            | NetworkConnection
-            | CompiledFunction
-            | DecompiledFunction),
+            E(
+                FileSystem | WindowsProcessTree | PeSection | PeImport | NetworkConnection
+                | CompiledFunction | DecompiledFunction,
+            ),
         ) => Orientation::FirstParent,
         (
-            E(FileSystem
-            | WindowsProcessTree
-            | PeSection
-            | PeImport
-            | NetworkConnection
-            | CompiledFunction
-            | DecompiledFunction),
+            E(
+                FileSystem | WindowsProcessTree | PeSection | PeImport | NetworkConnection
+                | CompiledFunction | DecompiledFunction,
+            ),
             Sample | Repo,
         ) => Orientation::SecondParent,
         // a filesystem contains its folders
@@ -433,7 +427,11 @@ fn debug_report(tree: &Tree, graph: &DeleteGraph, plan: &Plan) {
         .filter(|hash| tree.data_map.contains_key(hash))
         .count();
     // count the total number of displayed and hinted branch edges
-    let branches: usize = tree.branches.values().map(std::collections::HashSet::len).sum();
+    let branches: usize = tree
+        .branches
+        .values()
+        .map(std::collections::HashSet::len)
+        .sum();
     let hint_branches: usize = tree
         .hint_branches
         .values()
@@ -492,9 +490,7 @@ fn debug_report(tree: &Tree, graph: &DeleteGraph, plan: &Plan) {
         let reason = match decision {
             Decision::Delete => "DELETE".bright_red().to_string(),
             Decision::Initial => "KEEP: initial node".to_string(),
-            Decision::Unreachable => {
-                "KEEP: not reachable downward from initial nodes".to_string()
-            }
+            Decision::Unreachable => "KEEP: not reachable downward from initial nodes".to_string(),
             Decision::ExternalParent(surviving) => {
                 // list each surviving parent that protects this entity
                 let parents = surviving
@@ -590,7 +586,11 @@ pub async fn delete(thorium: &Thorium, args: &Args, cmd: &DeleteTree) -> Result<
         }
     }
     // build a bounded progress bar to track our deletions
-    let bar = Bar::new("Deleting entities", "", BarKind::Bound(targets.len() as u64));
+    let bar = Bar::new(
+        "Deleting entities",
+        "",
+        BarKind::Bound(targets.len() as u64),
+    );
     // delete each entity concurrently, letting the cascade clean up its links
     stream::iter(&targets)
         .map(|target| async {
@@ -671,11 +671,7 @@ mod tests {
     #[test]
     fn external_parent_protects_node() {
         // A -> B -> C, external D -> C, C -> E
-        let graph = graph(
-            &[A],
-            &[B, C, D, E],
-            &[(A, B), (B, C), (D, C), (C, E)],
-        );
+        let graph = graph(&[A], &[B, C, D, E], &[(A, B), (B, C), (D, C), (C, E)]);
         // only B is safe to delete; C is held by D and E hangs off the preserved C
         assert_eq!(sorted(graph.plan().to_delete), vec![B]);
     }
@@ -733,11 +729,7 @@ mod tests {
     #[test]
     fn plan_records_reasons() {
         // A -> B -> C, external D -> C, C -> E, plus a disconnected entity Z
-        let graph = graph(
-            &[A],
-            &[B, C, D, E, F],
-            &[(A, B), (B, C), (D, C), (C, E)],
-        );
+        let graph = graph(&[A], &[B, C, D, E, F], &[(A, B), (B, C), (D, C), (C, E)]);
         // build the plan so we can inspect its per entity decisions
         let plan = graph.plan();
         // B has only in-scope parents so it is deleted
@@ -765,8 +757,14 @@ mod tests {
             WindowsProcessTree,
         };
         // samples contain the functions extracted from them (either endpoint order)
-        assert_eq!(orient(Sample, E(CompiledFunction)), Orientation::FirstParent);
-        assert_eq!(orient(E(CompiledFunction), Sample), Orientation::SecondParent);
+        assert_eq!(
+            orient(Sample, E(CompiledFunction)),
+            Orientation::FirstParent
+        );
+        assert_eq!(
+            orient(E(CompiledFunction), Sample),
+            Orientation::SecondParent
+        );
         // a compiled function contains its decompiled form
         assert_eq!(
             orient(E(CompiledFunction), E(DecompiledFunction)),
@@ -807,7 +805,10 @@ mod tests {
     fn orient_by_direction_maps() {
         // To/Bidirectional keep the source as the parent
         assert_eq!(orient_by_direction(Directionality::To, 1, 2), (1, 2));
-        assert_eq!(orient_by_direction(Directionality::Bidirectional, 1, 2), (1, 2));
+        assert_eq!(
+            orient_by_direction(Directionality::Bidirectional, 1, 2),
+            (1, 2)
+        );
         // From makes the pointed-to node the parent
         assert_eq!(orient_by_direction(Directionality::From, 1, 2), (2, 1));
     }

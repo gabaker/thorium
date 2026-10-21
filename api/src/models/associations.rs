@@ -347,7 +347,9 @@ impl AssociationRequest {
     #[must_use]
     pub fn submission_other(mut self, submission: Uuid) -> Self {
         // get an entry to our submissions or insert a default and set the other side
-        self.submissions.get_or_insert_with(AssociatedSubmissions::default).other = Some(submission);
+        self.submissions
+            .get_or_insert_with(AssociatedSubmissions::default)
+            .other = Some(submission);
         self
     }
 
@@ -359,7 +361,9 @@ impl AssociationRequest {
     #[must_use]
     pub fn submission_source(mut self, submission: Uuid) -> Self {
         // get an entry to our submissions or insert a default and set the source side
-        self.submissions.get_or_insert_with(AssociatedSubmissions::default).source = Some(submission);
+        self.submissions
+            .get_or_insert_with(AssociatedSubmissions::default)
+            .source = Some(submission);
         self
     }
 }

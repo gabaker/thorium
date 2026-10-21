@@ -1,7 +1,7 @@
 use std::fs::Permissions;
 use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
-use thorium::{models::Component, Error, Thorium};
+use thorium::{Error, Thorium, models::Component};
 use tokio::fs;
 
 const THORIUM_PATH: &str = "/opt/thorium";

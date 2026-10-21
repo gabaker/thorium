@@ -17,11 +17,9 @@ use crate::models::{
     CollectionKind, CompiledFunction, CompiledInstruction, Confidence, CriticalSector,
     DecompiledFunction, Dependencies, DependencyPassStrategy, DeviceEntityRequest, Entity,
     EntityMetadata, EntityMetadataRequest, EntityMetadataUpdate, EntityRequest,
-    EphemeralDependencySettings, FileSystemEntity,
-    FileSystemFolderEntity, FilesHandler, Flag, GenericJobArgs, GroupRequest, GroupUpdate,
-    GroupUsersRequest, GroupUsersUpdate,
-    ImageLifetime, ImageRequest, ImageScaler, ImageVersion, IncidentRequest, IpBlock, IpBlockRaw,
-    Ipv4Block,
+    EphemeralDependencySettings, FileSystemEntity, FileSystemFolderEntity, FilesHandler, Flag,
+    GenericJobArgs, GroupRequest, GroupUpdate, GroupUsersRequest, GroupUsersUpdate, ImageLifetime,
+    ImageRequest, ImageScaler, ImageVersion, IncidentRequest, IpBlock, IpBlockRaw, Ipv4Block,
     Ipv6Block, KwargDependency, NetworkPolicyCustomK8sRule, NetworkPolicyCustomLabel,
     NetworkPolicyPort, NetworkPolicyRequest, NetworkPolicyRuleRaw, NetworkProtocol,
     NodeRegistration, OriginRequest, OutputCollection, OutputDisplayType, PeImportEntity,
@@ -1442,7 +1440,12 @@ pub fn gen_device_update(existing: &Entity) -> EntityMetadataUpdate {
     let (remove_urls, remove_critical_sectors) = match &existing.metadata {
         EntityMetadata::Device(dev) => (
             dev.urls.first().cloned().into_iter().collect(),
-            dev.critical_sectors.iter().next().copied().into_iter().collect(),
+            dev.critical_sectors
+                .iter()
+                .next()
+                .copied()
+                .into_iter()
+                .collect(),
         ),
         _ => (Vec::new(), Vec::new()),
     };
@@ -1627,7 +1630,12 @@ pub fn gen_incident_update(existing: &Entity) -> EntityMetadataUpdate {
     let (remove_mission_teams, remove_networks, remove_machines, remove_locations) =
         match &existing.metadata {
             EntityMetadata::Incident(incident) => (
-                incident.mission_teams.first().cloned().into_iter().collect(),
+                incident
+                    .mission_teams
+                    .first()
+                    .cloned()
+                    .into_iter()
+                    .collect(),
                 incident.networks.first().cloned().into_iter().collect(),
                 incident.machines.first().cloned().into_iter().collect(),
                 incident.locations.first().cloned().into_iter().collect(),
@@ -1719,9 +1727,13 @@ pub fn gen_pe_import_update(_existing: &Entity) -> EntityMetadataUpdate {
 #[must_use]
 pub fn gen_entity(group: &str, metadata: EntityMetadataRequest) -> EntityRequest {
     // build our entity request with a random name and two random tags
-    let mut req = EntityRequest::new(gen_string(gen_int!(8, 32)), metadata, vec![group.to_owned()])
-        .tag(gen_string(gen_int!(4, 16)), gen_string(gen_int!(4, 16)))
-        .tag(gen_string(gen_int!(4, 16)), gen_string(gen_int!(4, 16)));
+    let mut req = EntityRequest::new(
+        gen_string(gen_int!(8, 32)),
+        metadata,
+        vec![group.to_owned()],
+    )
+    .tag(gen_string(gen_int!(4, 16)), gen_string(gen_int!(4, 16)))
+    .tag(gen_string(gen_int!(4, 16)), gen_string(gen_int!(4, 16)));
     // add a random description
     req.description = Some(gen_string(gen_int!(8, 64)));
     req

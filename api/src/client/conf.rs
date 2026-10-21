@@ -261,10 +261,7 @@ impl CtlConf {
     ///
     /// * `file_body` - The raw YAML body of the config file
     /// * `env` - The `THORCTL_*` environment values to overlay, already stripped of the prefix
-    fn assemble_config(
-        file_body: &str,
-        env: config::Environment,
-    ) -> Result<Self, Error> {
+    fn assemble_config(file_body: &str, env: config::Environment) -> Result<Self, Error> {
         // build the Thorctl config from the file body first, then the environment overlay
         let mut config: CtlConf = config::Config::builder()
             // load from the file body first

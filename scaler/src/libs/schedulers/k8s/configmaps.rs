@@ -1,9 +1,9 @@
 use k8s_openapi::api::core::v1::ConfigMap;
 use kube::api::{Api, ListParams, ObjectList, PostParams};
 use std::collections::BTreeMap;
-use thorium::models::ScrubbedUser;
 use thorium::Error;
-use tracing::{event, instrument, Level};
+use thorium::models::ScrubbedUser;
+use tracing::{Level, event, instrument};
 
 /// ConfigMap wrappers for kubernetes
 pub struct ConfigMaps {

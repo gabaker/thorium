@@ -37,14 +37,36 @@ use crate::handlers::progress::Bar;
 /// static-marked forms.
 pub const IMAGE_FIELD_ORDER: &[&str] = &[
     // non-editable: identity + server/managed (shown for context, marked *...*, ignored on save)
-    "name", "group", "creator", "bans",
+    "name",
+    "group",
+    "creator",
+    "bans",
     // commonly edited basics (form order; runtime — non-editable — kept in its UI display slot)
-    "description", "version", "scaler", "image", "timeout", "lifetime", "runtime",
-    "display_type", "spawn_limit", "collect_logs", "generator",
+    "description",
+    "version",
+    "scaler",
+    "image",
+    "timeout",
+    "lifetime",
+    "runtime",
+    "display_type",
+    "spawn_limit",
+    "collect_logs",
+    "generator",
     // sub-sections (ImageCreate.jsx order; child_filters with output_collection;
     // clean_up/kvm/modifiers just before security_context)
-    "resources", "args", "output_collection", "child_filters", "dependencies", "env", "volumes",
-    "network_policies", "clean_up", "kvm", "modifiers", "security_context",
+    "resources",
+    "args",
+    "output_collection",
+    "child_filters",
+    "dependencies",
+    "env",
+    "volumes",
+    "network_policies",
+    "clean_up",
+    "kvm",
+    "modifiers",
+    "security_context",
 ];
 
 /// Curated top-level key order for the pipeline editor view. `name`/`group` only
@@ -446,11 +468,12 @@ pub(crate) async fn merge_pipeline_interactive(
     let incoming = MergeablePipeline::from(req.clone());
     // serialize both to canonical (sorted-key) YAML so reordered maps (triggers)
     // don't surface as spurious conflicts
-    let current_yaml = crate::utils::curated_yaml(&current, PIPELINE_FIELD_ORDER).map_err(|err| {
-        Error::new(format!(
-            "Failed to serialize current pipeline to YAML: {err}"
-        ))
-    })?;
+    let current_yaml =
+        crate::utils::curated_yaml(&current, PIPELINE_FIELD_ORDER).map_err(|err| {
+            Error::new(format!(
+                "Failed to serialize current pipeline to YAML: {err}"
+            ))
+        })?;
     let incoming_yaml =
         crate::utils::curated_yaml(&incoming, PIPELINE_FIELD_ORDER).map_err(|err| {
             Error::new(format!(
@@ -581,15 +604,17 @@ async fn apply_merge_update<K: ImportKind>(
     // resolve the resource's group and name for the update call and messages
     let group = K::group(&item.request);
     let name = K::name(&item.request);
-    K::update(thorium, group, name, update).await.map_err(|err| {
-        Error::new(format!(
-            "Error updating {} '{}:{}': {}",
-            K::NOUN,
-            item.name,
-            item.version,
-            err
-        ))
-    })?;
+    K::update(thorium, group, name, update)
+        .await
+        .map_err(|err| {
+            Error::new(format!(
+                "Error updating {} '{}:{}': {}",
+                K::NOUN,
+                item.name,
+                item.version,
+                err
+            ))
+        })?;
     // snapshot the pre-update state so the update can be reverted
     K::record_updated(journal, current.clone());
     println!(
@@ -625,7 +650,10 @@ mod tests {
     fn non_editable_image_fields_are_static_marked() {
         let yaml = serde_norway::to_string(&populated_mergeable_image()).unwrap();
         for marked in ["*group*", "*name*", "*creator*", "*runtime*", "*bans*"] {
-            assert!(yaml.contains(marked), "expected static marker {marked} in:\n{yaml}");
+            assert!(
+                yaml.contains(marked),
+                "expected static marker {marked} in:\n{yaml}"
+            );
         }
     }
 
@@ -685,7 +713,10 @@ mod tests {
             "Current (Thorium)",
             "Incoming (Manifest)",
         );
-        assert!(before.contains("<<<<<<<"), "expected a conflict before mirroring");
+        assert!(
+            before.contains("<<<<<<<"),
+            "expected a conflict before mirroring"
+        );
 
         // after mirroring, the two sides match and there is no conflict
         mirror_non_editable_fields(&mut incoming, &current);

@@ -30,13 +30,11 @@ use super::OpenApiSecurity;
 use crate::models::AuthedUser;
 use crate::models::backends::{self, TagSupport};
 use crate::models::{
-    ApiCursor,
-    Association, AssociationListParams, AssociationTargetColumn,
-    Branch, BranchDetails, BranchRequest, Commit, CommitDetails, CommitRequest,
-    Commitish, CommitishDetails, CommitishKinds, CommitishListParams, CommitishMapRequest,
-    CommitishRequest, GitTag, GitTagDetails, GitTagRequest, GrepDocumentMatches, GrepMatch,
-    GrepMatches, GrepQueryParams, GrepRequest, GrepSource, GrepStats, Output, OutputFormBuilder,
-    OutputKind, OutputMap,
+    ApiCursor, Association, AssociationListParams, AssociationTargetColumn, Branch, BranchDetails,
+    BranchRequest, Commit, CommitDetails, CommitRequest, Commitish, CommitishDetails,
+    CommitishKinds, CommitishListParams, CommitishMapRequest, CommitishRequest, GitTag,
+    GitTagDetails, GitTagRequest, GrepDocumentMatches, GrepMatch, GrepMatches, GrepQueryParams,
+    GrepRequest, GrepSource, GrepStats, Output, OutputFormBuilder, OutputKind, OutputMap,
     OutputResponse, Repo, RepoCheckout, RepoCreateResponse, RepoDataUploadResponse,
     RepoDownloadOpts, RepoListLine, RepoListParams, RepoRequest, RepoScheme, RepoSubmissionChunk,
     ResultFileDownloadParams, ResultGetParams, TagDeleteRequest, TagRequest, TruncationReason,
@@ -715,7 +713,8 @@ async fn grep_repo(
     // combine our query params and pattern into the full grep params
     let params = params.into_params(request);
     // grep this single repo
-    let matches = backends::grep::grep_one::<Repo>(&user, &repo_path, params, &state.shared).await?;
+    let matches =
+        backends::grep::grep_one::<Repo>(&user, &repo_path, params, &state.shared).await?;
     Ok(Json(matches))
 }
 

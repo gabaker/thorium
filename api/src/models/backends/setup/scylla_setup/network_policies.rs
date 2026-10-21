@@ -110,13 +110,13 @@ async fn setup_network_policies_table(session: &Session, config: &Conf) {
 async fn setup_network_policies_name_mat_view(session: &Session, config: &Conf) {
     // create network policies by name material view
     let table_create = format!(
-            "CREATE MATERIALIZED VIEW IF NOT EXISTS {ns}.network_policies_by_name AS \
+        "CREATE MATERIALIZED VIEW IF NOT EXISTS {ns}.network_policies_by_name AS \
             SELECT name, group, id, k8s_name, created, ingress, egress, forced_policy, default_policy FROM {ns}.network_policies \
             WHERE name IS NOT NULL \
             AND group IS NOT NULL \
             PRIMARY KEY (name, group)",
-            ns = &config.thorium.namespace,
-        );
+        ns = &config.thorium.namespace,
+    );
     session
         .query_unpaged(table_create, &[])
         .await

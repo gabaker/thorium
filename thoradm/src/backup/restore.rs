@@ -2,8 +2,8 @@
 
 use indicatif::ProgressBar;
 use kanal::{AsyncReceiver, AsyncSender};
-use rkyv::validation::validators::DefaultValidator;
 use rkyv::Archive;
+use rkyv::validation::validators::DefaultValidator;
 use scylla::client::session::Session;
 use scylla::errors::{ExecutionError, PrepareError};
 use scylla::statement::prepared::PreparedStatement;

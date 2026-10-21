@@ -4,8 +4,8 @@ mod core;
 mod dedupe;
 mod scan;
 
-use crate::args::{Args, UsersSubCommands};
 use crate::Error;
+use crate::args::{Args, UsersSubCommands};
 
 /// Handle the user management command
 ///

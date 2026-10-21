@@ -56,7 +56,7 @@ pub fn get_redis_client(conf: &Conf) -> Result<redis::Client, Error> {
         _ => {
             return Err(Error::new(
                 "Redis Setup Error: Password must be set if username is set",
-            ))
+            ));
         }
     };
     // build Redis client

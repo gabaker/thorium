@@ -170,7 +170,10 @@ impl<'a> ImportPlan<'a> {
     /// changes) proceeds without confirmation.
     pub fn has_conflicts(&self) -> bool {
         self.existing_images.iter().any(|i| image_would_change(i))
-            || self.existing_pipelines.iter().any(|p| pipeline_would_change(p))
+            || self
+                .existing_pipelines
+                .iter()
+                .any(|p| pipeline_would_change(p))
     }
 }
 
@@ -393,10 +396,7 @@ pub async fn list_export_configs(
 ///
 /// * `existing` - The categorized resources that already exist in Thorium
 /// * `progress` - The progress bar to log warnings through
-pub fn warn_skipped<K: kind::ImportKind>(
-    existing: &[&categorize::Categorized<K>],
-    progress: &Bar,
-) {
+pub fn warn_skipped<K: kind::ImportKind>(existing: &[&categorize::Categorized<K>], progress: &Bar) {
     for item in existing {
         // only changed resources warrant a warning
         let Some(current) = item.existing.as_ref() else {
@@ -448,7 +448,8 @@ pub async fn apply_existing<K: kind::ImportKind>(
         ConflictMode::Force => {
             // apply every incoming change without the editor, collecting any per-resource
             // failures so one bad update doesn't abort the rest
-            let failures = create::force_update::<K>(thorium, existing, workers, progress, journal).await;
+            let failures =
+                create::force_update::<K>(thorium, existing, workers, progress, journal).await;
             Ok(ApplyOutcome {
                 outcome: ImportOutcome::Completed,
                 failures,

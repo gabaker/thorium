@@ -1,8 +1,8 @@
 //! Cursors for data in Thorium
+use ::grep::regex::RegexMatcher;
 use bb8_redis::redis::cmd;
 use chrono::prelude::*;
 use elasticsearch::SearchParts;
-use ::grep::regex::RegexMatcher;
 use futures::stream::{self, StreamExt, TryStreamExt};
 use futures_util::Future;
 use scylla::client::pager::QueryPager;
@@ -3866,9 +3866,10 @@ impl GrepCursor {
                 // keep this items key since the resume state is moved into the search
                 let key = resume.key.clone();
                 // rebuild the params for this item with the budget we have left
-                let params = self
-                    .retain
-                    .params(self.remaining.load(AtomicOrdering::Relaxed), self.with_truncated);
+                let params = self.retain.params(
+                    self.remaining.load(AtomicOrdering::Relaxed),
+                    self.with_truncated,
+                );
                 // grep the rest of this items documents, skipping already returned matches
                 let scan = match grep::grep_item::<T>(
                     user,
@@ -3959,9 +3960,10 @@ impl GrepCursor {
                 break;
             };
             // rebuild the params for this item
-            let params = self
-                .retain
-                .params(self.remaining.load(AtomicOrdering::Relaxed), self.with_truncated);
+            let params = self.retain.params(
+                self.remaining.load(AtomicOrdering::Relaxed),
+                self.with_truncated,
+            );
             // grep this single item
             let scan = match grep::grep_item::<T>(
                 user,
@@ -4490,10 +4492,10 @@ impl<D: RedisCursorSupport> RedisCursor<D> {
 #[cfg(test)]
 mod tests {
     use super::{
-        ExistsCursor, GrepCursorRetain, GrepResume, GroupedScyllaCursor,
-        GroupedScyllaCursorRetain, ScyllaCursor, ScyllaCursorRetain, build_group_filter,
-        build_query_string_clause, grep_checkpoint_retain, scylla_cursor_save_expire,
-        simple_scylla_delete_kind, simple_scylla_save_kind,
+        ExistsCursor, GrepCursorRetain, GrepResume, GroupedScyllaCursor, GroupedScyllaCursorRetain,
+        ScyllaCursor, ScyllaCursorRetain, build_group_filter, build_query_string_clause,
+        grep_checkpoint_retain, scylla_cursor_save_expire, simple_scylla_delete_kind,
+        simple_scylla_save_kind,
     };
     use crate::models::{NetworkPolicyListLine, NetworkPolicyListRow, SampleListLine};
     use crate::utils::helpers;

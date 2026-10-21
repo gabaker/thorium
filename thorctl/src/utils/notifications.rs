@@ -1,7 +1,7 @@
 //! Contains useful functions for interacting with notifications
 
-use owo_colors::colors::{BrightBlue, BrightGreen, BrightRed, BrightYellow};
 use owo_colors::OwoColorize;
+use owo_colors::colors::{BrightBlue, BrightGreen, BrightRed, BrightYellow};
 use thorium::models::backends::NotificationSupport;
 use thorium::models::{Notification, NotificationLevel};
 

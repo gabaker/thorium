@@ -38,7 +38,10 @@ pub async fn load_request<K: ImportKind>(
         ))
     })?;
     let mut req: K::Request = serde_json::from_str(&data).map_err(|err| {
-        Error::new(format!("Failed to parse {} data for {name}: {err}", K::NOUN))
+        Error::new(format!(
+            "Failed to parse {} data for {name}: {err}",
+            K::NOUN
+        ))
     })?;
     // imports always land in the group given on the command line
     K::set_group(&mut req, group);

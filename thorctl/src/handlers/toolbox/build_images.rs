@@ -58,7 +58,10 @@ enum BaseResolution {
 ///
 /// * `cli` - The `--base-image ARG=IMAGE` override, if given
 /// * `entry` - This image's resolved `base_image` from `toolbox.json`, if any
-fn resolve_base_build_arg(cli: Option<&(String, String)>, entry: Option<&BaseImage>) -> BaseResolution {
+fn resolve_base_build_arg(
+    cli: Option<&(String, String)>,
+    entry: Option<&BaseImage>,
+) -> BaseResolution {
     // a substitution is "requested" if the operator passed --base-image or the entry carries its
     // own resolved image; this distinguishes a genuine opt-out (Withheld) from "nothing to do"
     let requested = cli.is_some() || entry.and_then(|base| base.image.as_ref()).is_some();
@@ -301,31 +304,32 @@ pub async fn build_images(cmd: &BuildImagesToolbox) -> Result<(), Error> {
         // resolve the base-image substitution into one decision that drives both the notice and
         // the build-arg, so they can't disagree (CLI escape hatch over the entry's resolved
         // base_image, gated by allow_override)
-        let base_override = match resolve_base_build_arg(cmd.base_image.as_ref(), entry.base_image.as_ref()) {
-            BaseResolution::Apply(arg, image) => {
-                // name where the override came from for "why this base?" debugging; the CLI flag
-                // always wins in resolve_base_build_arg, so its presence alone identifies the source
-                let source = if cmd.base_image.is_some() {
-                    "--base-image"
-                } else {
-                    "toolbox.json"
-                };
-                println!(
-                    "{} base image '{image}' (build-arg {arg}, from {source}) for {label}",
-                    "Overriding".bright_cyan()
-                );
-                Some((arg, image))
-            }
-            BaseResolution::Withheld => {
-                println!(
-                    "{} base image override for {label} (allow_override = false)",
-                    "Skipping".bright_yellow()
-                );
-                None
-            }
-            // either no substitution applies, or it was withheld above; either way pass no override
-            BaseResolution::NotApplicable => None,
-        };
+        let base_override =
+            match resolve_base_build_arg(cmd.base_image.as_ref(), entry.base_image.as_ref()) {
+                BaseResolution::Apply(arg, image) => {
+                    // name where the override came from for "why this base?" debugging; the CLI flag
+                    // always wins in resolve_base_build_arg, so its presence alone identifies the source
+                    let source = if cmd.base_image.is_some() {
+                        "--base-image"
+                    } else {
+                        "toolbox.json"
+                    };
+                    println!(
+                        "{} base image '{image}' (build-arg {arg}, from {source}) for {label}",
+                        "Overriding".bright_cyan()
+                    );
+                    Some((arg, image))
+                }
+                BaseResolution::Withheld => {
+                    println!(
+                        "{} base image override for {label} (allow_override = false)",
+                        "Skipping".bright_yellow()
+                    );
+                    None
+                }
+                // either no substitution applies, or it was withheld above; either way pass no override
+                BaseResolution::NotApplicable => None,
+            };
         // merge this image's effective build args: the generic --build-arg set with the resolved
         // base override layered on top (the override replaces a generic arg sharing its key)
         let build_args = resolve_build_args(&cmd.build_args, base_override.as_ref());
@@ -449,7 +453,11 @@ mod tests {
 
     /// A resolved `BaseImage` entry from an image, an optional arg, and an allow_override flag,
     /// for terse test fixtures
-    fn entry(image: Option<&str>, image_arg: Option<&str>, allow_override: Option<bool>) -> BaseImage {
+    fn entry(
+        image: Option<&str>,
+        image_arg: Option<&str>,
+        allow_override: Option<bool>,
+    ) -> BaseImage {
         BaseImage {
             image: image.map(str::to_string),
             image_arg: image_arg.map(str::to_string),
@@ -473,7 +481,10 @@ mod tests {
         let generic = vec![arg("VERSION", "1")];
         let base = arg("IMAGE", "ubuntu:22.04");
         let resolved = resolve_build_args(&generic, Some(&base));
-        assert_eq!(resolved, vec![arg("VERSION", "1"), arg("IMAGE", "ubuntu:22.04")]);
+        assert_eq!(
+            resolved,
+            vec![arg("VERSION", "1"), arg("IMAGE", "ubuntu:22.04")]
+        );
     }
 
     /// The `(arg, image)` of an `Apply` outcome, or `None` for `Withheld`/`NotApplicable`
@@ -549,7 +560,10 @@ mod tests {
     /// A non-empty suffix lands on the version; absent/empty leaves the tag unchanged
     #[test]
     fn apply_tag_suffix_appends_to_version() {
-        assert_eq!(apply_tag_suffix("reg/x:1.0", Some("-mybranch")), "reg/x:1.0-mybranch");
+        assert_eq!(
+            apply_tag_suffix("reg/x:1.0", Some("-mybranch")),
+            "reg/x:1.0-mybranch"
+        );
         assert_eq!(apply_tag_suffix("reg/x:1.0", None), "reg/x:1.0");
         assert_eq!(apply_tag_suffix("reg/x:1.0", Some("")), "reg/x:1.0");
     }
@@ -567,7 +581,10 @@ mod tests {
         assert_eq!(apply_tag_suffix("reg/x", Some("-br")), "reg/x");
         // a registry port is not a version, but the real version still gets the suffix
         assert_eq!(apply_tag_suffix("host:5000/x", Some("-br")), "host:5000/x");
-        assert_eq!(apply_tag_suffix("host:5000/x:1.0", Some("-br")), "host:5000/x:1.0-br");
+        assert_eq!(
+            apply_tag_suffix("host:5000/x:1.0", Some("-br")),
+            "host:5000/x:1.0-br"
+        );
     }
 
     /// On a key collision the override replaces the generic arg rather than producing a

@@ -3,8 +3,8 @@
 use thorium::Thorium;
 
 use super::core;
-use crate::args::{Args, ScanEmails};
 use crate::Error;
+use crate::args::{Args, ScanEmails};
 
 /// Scan Thorium for non-system accounts that share an email address
 ///
@@ -24,7 +24,10 @@ pub async fn scan(opts: &ScanEmails, args: &Args) -> Result<(), Error> {
     let groups = core::find_duplicate_groups(&users, &opts.system_email);
     // report that everything is unique if we found no duplicates
     if groups.is_empty() {
-        println!("No duplicate emails found ({} accounts scanned).", users.len());
+        println!(
+            "No duplicate emails found ({} accounts scanned).",
+            users.len()
+        );
         return Ok(());
     }
     // count how many accounts are involved in a duplicate

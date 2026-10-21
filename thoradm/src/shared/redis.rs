@@ -1,5 +1,5 @@
 //! The shared redis utilties for Thoradm
-use bb8_redis::{bb8::Pool, RedisConnectionManager};
+use bb8_redis::{RedisConnectionManager, bb8::Pool};
 use thorium::Conf;
 
 use crate::Error;
@@ -27,7 +27,7 @@ pub async fn get_client(config: &Conf) -> Result<Pool<RedisConnectionManager>, E
         _ => {
             return Err(Error::new(
                 "Redis Setup Error - Password must be set if username is set",
-            ))
+            ));
         }
     };
     // build manager

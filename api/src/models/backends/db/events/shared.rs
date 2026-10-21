@@ -1,7 +1,7 @@
 //! Logic shared between multiple types of events
 
 use chrono::{DateTime, Utc};
-use tracing::{event, instrument, Level};
+use tracing::{Level, event, instrument};
 
 use crate::utils::{ApiError, Shared};
 use crate::{conn, deserialize};

@@ -1,8 +1,8 @@
 //! The controllers used for thoradm working with data in scylla
 
 use ahash::AHasher;
-use futures::stream::FuturesUnordered;
 use futures::StreamExt;
+use futures::stream::FuturesUnordered;
 use indicatif::{MultiProgress, ProgressBar, ProgressStyle};
 use kanal::{AsyncReceiver, AsyncSender};
 use scylla::client::session::Session;
@@ -11,8 +11,8 @@ use std::hash::Hasher;
 use std::sync::Arc;
 use tokio::task::JoinHandle;
 
-use crate::shared::monitor::{Monitor, MonitorUpdate};
 use crate::Error;
+use crate::shared::monitor::{Monitor, MonitorUpdate};
 
 /// The trait required for scalably crawling data in scylla
 pub trait ScyllaCrawlSupport: Sized + Send + 'static {

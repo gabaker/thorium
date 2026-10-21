@@ -1,7 +1,7 @@
 //! Setup Scylla for Thorium
 
-use chrono::prelude::*;
 use chrono::Duration;
+use chrono::prelude::*;
 use entities::EntitiesPreparedStatements;
 use futures::{poll, task::Poll};
 use scylla::client::session::Session;
@@ -39,7 +39,7 @@ use samples::SamplesPreparedStatements;
 use tags::TagsPreparedStatements;
 //use tools::ToolsPreparedStatements;
 
-use crate::{setup, Conf};
+use crate::{Conf, setup};
 
 /// The diffferent groups of prepared statements for scylla
 pub struct ScyllaPreparedStatements {

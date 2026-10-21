@@ -213,7 +213,11 @@ pub async fn list(
 /// * `params` - The query params to use when listing entities
 /// * `retain` - The serialized retained state of the list cursor to resume
 /// * `shared` - Shared Thorium objects
-#[instrument(name = "db::entities::list_greppable", skip(user, retain, shared), err(Debug))]
+#[instrument(
+    name = "db::entities::list_greppable",
+    skip(user, retain, shared),
+    err(Debug)
+)]
 pub async fn list_greppable(
     user: &User,
     params: EntityListParams,
@@ -222,9 +226,13 @@ pub async fn list_greppable(
 ) -> Result<ScyllaCursor<EntityListLine>, ApiError> {
     // resume our cursor from its retained state or build a new one from our params
     let mut cursor = match retain {
-        Some(retain) => {
-            ScyllaCursor::from_retain(deserialize!(&retain), &user.username, params.limit, true, shared)?
-        }
+        Some(retain) => ScyllaCursor::from_retain(
+            deserialize!(&retain),
+            &user.username,
+            params.limit,
+            true,
+            shared,
+        )?,
         None => ScyllaCursor::from_params(params, &user.username, true, shared).await?,
     };
     // get the next page of data for this cursor

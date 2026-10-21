@@ -1450,7 +1450,11 @@ impl Reactions {
         opts: &ReactionCursorOpts,
     ) -> Result<SearchCursor<String>, Error> {
         // build url for listing reactions with this tag
-        let url = format!("{base}/api/reactions/tag/{tag}/", base = self.host, tag = tag);
+        let url = format!(
+            "{base}/api/reactions/tag/{tag}/",
+            base = self.host,
+            tag = tag
+        );
         // build our query params
         let query = Self::build_cursor_query(opts);
         // get the first page for this cursor

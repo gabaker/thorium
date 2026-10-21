@@ -1,4 +1,4 @@
-use bb8_redis::{bb8, RedisConnectionManager};
+use bb8_redis::{RedisConnectionManager, bb8};
 use std::collections::HashMap;
 
 use crate::utils::{ApiError, Shared};

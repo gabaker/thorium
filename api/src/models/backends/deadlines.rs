@@ -4,8 +4,8 @@
 use chrono::prelude::*;
 use tracing::instrument;
 
-use crate::models::{deadlines::DeadlineFragment, Deadline, ImageScaler, Stream, StreamObj, User};
-use crate::utils::{macros, ApiError, Shared};
+use crate::models::{Deadline, ImageScaler, Stream, StreamObj, User, deadlines::DeadlineFragment};
+use crate::utils::{ApiError, Shared, macros};
 use crate::{bad, internal_err};
 
 impl Deadline {
@@ -88,7 +88,7 @@ impl TryFrom<StreamObj> for Deadline {
                 return bad!(format!(
                     "failed to cast StreamObj to DeadlineFragment {}",
                     e
-                ))
+                ));
             }
         };
         // convert to DateTime

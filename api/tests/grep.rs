@@ -184,8 +184,11 @@ async fn seed_sample(client: &Thorium, group: &str) -> Result<String, Error> {
     // salt the buffer so every call uploads a distinct sample (identical content
     // in the same group would 409 as a duplicate submission)
     let file_req = SampleRequest::new_buffer(
-        Buffer::new(format!("sample body {NEEDLE} {}", generators::gen_string(16)))
-            .name(format!("{NEEDLE}.txt")),
+        Buffer::new(format!(
+            "sample body {NEEDLE} {}",
+            generators::gen_string(16)
+        ))
+        .name(format!("{NEEDLE}.txt")),
         vec![group.to_owned()],
     )
     .description(format!("a description with {NEEDLE} in it"))
@@ -271,8 +274,7 @@ async fn seed_truncated_sample(client: &Thorium, group: &str) -> Result<String, 
     // upload a sample with no needle in any greppable source; salt the buffer so
     // every call uploads a distinct sample
     let file_req = SampleRequest::new_buffer(
-        Buffer::new(format!("truncated body {}", generators::gen_string(16)))
-            .name("truncated.txt"),
+        Buffer::new(format!("truncated body {}", generators::gen_string(16))).name("truncated.txt"),
         vec![group.to_owned()],
     )
     .description("a plain description");
@@ -507,7 +509,10 @@ async fn grep_sample_max_matches_truncates() -> Result<(), Error> {
     // make sure we got exactly the one match we left room for
     is!(total_matches(&matches), 1);
     // make sure at least one document was flagged as truncated by our match budget
-    is!(any_truncated_for(&matches, TruncationReason::MatchBudget), true);
+    is!(
+        any_truncated_for(&matches, TruncationReason::MatchBudget),
+        true
+    );
     Ok(())
 }
 
@@ -1231,7 +1236,9 @@ async fn grep_files_scan_time_caps_request() -> Result<(), Error> {
     // and every seeded sample should have been found
     for sha256 in &seeded {
         is!(
-            identities.iter().any(|(path, _, _)| path.starts_with(sha256)),
+            identities
+                .iter()
+                .any(|(path, _, _)| path.starts_with(sha256)),
             true
         );
     }
@@ -1770,7 +1777,9 @@ async fn grep_repos_scans_past_empty_candidates() -> Result<(), Error> {
     }
     // a single default page should scan past every untagged repo and return matching
     // repos instead of the empty page an item scanned bound would have returned
-    let opts = GrepOpts::new(PATTERN).group(&group).source(GrepSource::Tags);
+    let opts = GrepOpts::new(PATTERN)
+        .group(&group)
+        .source(GrepSource::Tags);
     let page = client.repos.grep(opts).await?;
     is!(page.data.is_empty(), false);
     // collect every key this walk returns, starting with the first page
@@ -2105,7 +2114,10 @@ async fn grep_entity_respects_groups() -> Result<(), Error> {
     // exercises real listing and scoping instead of the no groups short circuit
     let other = generators::client_in_groups(&client, &[other_group.clone()]).await?;
     // make sure this user cannot grep an entity they cannot see
-    let check = other.entities.grep_key(&hidden, GrepOpts::new(PATTERN)).await;
+    let check = other
+        .entities
+        .grep_key(&hidden, GrepOpts::new(PATTERN))
+        .await;
     fail!(check, 404);
     // a corpus grep should find their own groups entity but never the hidden one
     let page = other.entities.grep(GrepOpts::new(PATTERN)).await?;
