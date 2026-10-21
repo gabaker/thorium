@@ -66,6 +66,10 @@ thorium:
 redis:
   host: "<REDIS_IP>"
   port: 6379
+  # The numbered Redis database to use (optional, defaults to 0). Give each Thorium instance or
+  # integration test run sharing one Redis its own database; Redis Cluster only supports 0.
+  # This only separates Redis: runs sharing a Scylla cluster also need their own namespace.
+  # db: 0
 scylla:
   nodes:
     - "<IP>"

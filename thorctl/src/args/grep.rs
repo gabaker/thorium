@@ -136,8 +136,9 @@ pub struct Grep {
     /// Also show documents that were truncated or errored without any matches
     #[clap(long)]
     pub with_truncated: bool,
-    /// The output format to use
-    ///     Note: Defaults to heading when printing to a terminal and flat when piped
+    /// The format to print in: heading, flat, or json (one object per item per line)
+    ///     Note: Defaults to heading on a terminal and flat when piped or when
+    ///           `NO_COLOR` or `TERM=dumb` asks for plain text
     #[clap(long, value_enum, ignore_case = true, verbatim_doc_comment)]
     pub format: Option<GrepFormat>,
 }

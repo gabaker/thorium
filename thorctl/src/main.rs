@@ -14,6 +14,8 @@ mod utils;
 
 use args::{Args, SubCommands};
 
+/// Parses the command line, runs the matching Thorctl command, and exits with a non-zero code
+/// after printing the error if the command fails
 #[tokio::main]
 async fn main() {
     // get the command line args that were passed in
@@ -56,7 +58,7 @@ async fn main() {
             Error::Generic(msg) => eprintln!("{msg}"),
             _ => eprintln!("{error:#?}"),
         }
-        // exit this program with an exit code of 1
-        std::process::exit(1);
+        // exit with the timeout code if a --wait-for timed out, or 1 otherwise
+        std::process::exit(utils::watch::exit_code());
     }
 }

@@ -8,6 +8,7 @@ use std::path::PathBuf;
 
 use clap::Parser;
 use clap::builder::NonEmptyStringValueParser;
+use futures::{StreamExt, TryStreamExt};
 use itertools::Itertools;
 use thorium::models::{
     GenericJobArgs, GenericJobKwargs, GenericJobOpts, Reaction, ReactionArgs, ReactionStatus,
@@ -19,9 +20,11 @@ use crate::handlers::reactions::create::ReactionArgsInfo;
 use crate::utils;
 
 use super::DescribeCommand;
+use super::helpers::{FormatArgs, WaitForArgs, WatchArgs};
 use super::pipelines::PipelineTarget;
-use super::traits::describe::DescribeSealed;
+use super::traits::describe::{DescribeFormat, DescribeSealed};
 use super::traits::search::{SearchParameterized, SearchParams, SearchSealed};
+use crate::utils::output::OutputFormat;
 
 /// The commands to send to the reactions task handler
 #[derive(Parser, Debug)]
@@ -74,6 +77,15 @@ pub struct GetReactions {
     /// Refrain from setting a limit when listing reactions
     #[clap(long, conflicts_with = "limit")]
     pub no_limit: bool,
+    /// The format to print reactions in
+    #[clap(flatten)]
+    pub format: FormatArgs,
+    /// Re-read and re-print the reactions until interrupted
+    #[clap(flatten)]
+    pub watch: WatchArgs,
+    /// Wait until every reaction matches a condition (e.g. status=Completed)
+    #[clap(flatten)]
+    pub wait: WaitForArgs,
 }
 
 /// A command to delete reactions
@@ -120,8 +132,17 @@ pub struct DescribeReactions {
     #[clap(short, long)]
     pub output: Option<PathBuf>,
     /// Output details in a condensed format (no formatting/whitespace)
-    #[clap(long)]
+    #[clap(long, conflicts_with = "format")]
     pub condensed: bool,
+    /// The format to describe reactions in (JSON by default)
+    #[clap(flatten)]
+    pub format: FormatArgs,
+    /// Re-read and re-describe the reactions until interrupted
+    #[clap(flatten)]
+    pub watch: WatchArgs,
+    /// Wait until every reaction matches a condition (e.g. status=Completed)
+    #[clap(flatten)]
+    pub wait: WaitForArgs,
     /// Any pipelines to describe reactions for
     ///     Note: Unlike other thorctl commands, `--pipelines` and `--tags` use OR logic rather than AND, meaning
     ///           "--pipelines harvest --tags Corn" will describe reactions from the "harvest" pipeline as well as
@@ -308,6 +329,50 @@ impl DescribeSealed for DescribeReactions {
         ReactionTarget::parse(raw, ':')
     }
 
+    /// The format to describe reactions in, which is JSON unless `--format` says otherwise
+    fn format(&self) -> Result<DescribeFormat, thorium::Error> {
+        // map our output format onto the describe formats
+        let format = match self.format.format {
+            None | Some(OutputFormat::Json) => DescribeFormat::Json,
+            Some(OutputFormat::Human) => DescribeFormat::Human,
+            Some(OutputFormat::Yaml) => DescribeFormat::Yaml,
+            Some(OutputFormat::Table) => DescribeFormat::Table,
+        };
+        Ok(format)
+    }
+
+    /// Render a reaction as human-readable text
+    ///
+    /// # Arguments
+    ///
+    /// * `datum` - The reaction to render
+    /// * `out` - The writer to render into
+    /// * `ansi` - Whether to style the output with ANSI escape codes
+    fn render_human(
+        &self,
+        datum: &Self::Data,
+        out: &mut dyn std::io::Write,
+        ansi: bool,
+    ) -> Result<(), thorium::Error> {
+        // render our reaction and write it out
+        write!(out, "{}", utils::reactions::reaction_human(datum, ansi))
+            .map_err(|err| Error::new(format!("Error writing output: {err}")))
+    }
+
+    /// The column names of a reaction table
+    fn table_columns(&self) -> Option<&'static [&'static str]> {
+        Some(utils::reactions::REACTION_COLUMNS)
+    }
+
+    /// Render a reaction as one table row
+    ///
+    /// # Arguments
+    ///
+    /// * `datum` - The reaction to render
+    fn table_row(&self, datum: &Self::Data) -> Vec<String> {
+        utils::reactions::reaction_row(datum)
+    }
+
     async fn retrieve_data(
         &self,
         target: Self::Target<'_>,
@@ -328,6 +393,57 @@ impl DescribeSealed for DescribeReactions {
 }
 
 impl DescribeCommand for DescribeReactions {}
+
+impl DescribeReactions {
+    /// Retrieve every reaction this command describes without printing them
+    ///
+    /// Unlike describing, which reports a target it can't retrieve and moves on, this fails on
+    /// the first listed reaction that can't be retrieved, so a wait never passes or times out
+    /// over a reaction that doesn't exist.
+    ///
+    /// # Arguments
+    ///
+    /// * `thorium` - The Thorium client
+    pub async fn collect(&self, thorium: &Thorium) -> Result<Vec<Reaction>, Error> {
+        // make sure our targets and search parameters are valid
+        self.validate_search()?;
+        // gather the raw targets given directly and in a target list
+        let mut raw_targets = self.raw_targets().to_vec();
+        if let Some(list_path) = self.target_list() {
+            // read the list, skipping blank lines
+            let list = tokio::fs::read_to_string(list_path).await.map_err(|err| {
+                Error::new(format!(
+                    "Error reading list file '{}': {err}",
+                    list_path.to_string_lossy()
+                ))
+            })?;
+            raw_targets.extend(
+                list.lines()
+                    .map(str::trim)
+                    .filter(|line| !line.is_empty())
+                    .map(ToOwned::to_owned),
+            );
+        }
+        // retrieve every listed reaction, failing on the first that can't be retrieved
+        let mut reactions: Vec<Reaction> = futures::stream::iter(raw_targets.iter())
+            .map(|raw| async move {
+                let target = self.parse_target(raw)?;
+                self.retrieve_data(target, thorium).await
+            })
+            .buffered(32)
+            .try_collect()
+            .await?;
+        // add the reactions a search finds
+        if self.has_parameters() || self.apply_to_all() {
+            let mut sink = |reaction: &Reaction| -> Result<(), Error> {
+                reactions.push(reaction.clone());
+                Ok(())
+            };
+            self.describe_search(thorium, &mut sink, None).await?;
+        }
+        Ok(reactions)
+    }
+}
 
 /// Provide a range for the max number of log lines to get per stage
 fn stage_logs_range(s: &str) -> Result<usize, String> {
@@ -385,6 +501,12 @@ pub struct LogsReactions {
     /// The number of reactions to retrieve per request
     #[clap(long, default_value_t = 50)]
     pub page_size: usize,
+    /// The format to print logs in; with `--output`, json and yaml write one file per reaction
+    #[clap(flatten)]
+    pub format: FormatArgs,
+    /// Re-read and re-print the logs until interrupted (not with `--output`)
+    #[clap(flatten)]
+    pub watch: WatchArgs,
 }
 
 impl SearchSealed for LogsReactions {
@@ -433,9 +555,10 @@ pub const BUNDLE_DELIMITER: char = ',';
 #[derive(Parser, Debug)]
 #[allow(clippy::struct_excessive_bools)]
 pub struct CreateReactions {
-    /// The pipelines to run, optionally specified with a group delimited with
-    /// ':' if more than one pipeline exists with the same name (i.e. <PIPELINE>:<GROUP>)
-    #[clap(short, long, value_delimiter = ',', required = true, value_parser = NonEmptyStringValueParser::new())]
+    /// The pipelines to run, optionally qualified with their group if more than one
+    /// pipeline exists with the same name (i.e. `<GROUP>/<PIPELINE>`; `<PIPELINE>:<GROUP>`
+    /// is also accepted)
+    #[clap(short, long, value_delimiter = ',', required = true, value_name = "[GROUP/]PIPELINE", value_parser = NonEmptyStringValueParser::new())]
     pub pipelines: Vec<String>,
     /// Any tags to set for the created reactions
     #[clap(short = 'T', long)]
@@ -611,10 +734,13 @@ pub struct CreateReactions {
 }
 
 impl CreateReactions {
+    /// Parse every pipeline given on the command line into a [`PipelineTarget`]
+    ///
+    /// Each pipeline can be given as `<GROUP>/<PIPELINE>`, `<PIPELINE>:<GROUP>`, or a bare `<PIPELINE>` whose group is looked up later.
     pub fn parse_pipelines(&self) -> Result<Vec<PipelineTarget>, Error> {
         self.pipelines
             .iter()
-            .map(|raw| PipelineTarget::parse(raw, ':'))
+            .map(|raw| PipelineTarget::parse(raw))
             .collect::<Vec<Result<_, _>>>()
             .into_iter()
             .collect()

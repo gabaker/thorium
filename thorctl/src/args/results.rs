@@ -8,6 +8,7 @@ use std::path::PathBuf;
 use thorium::models::OutputDisplayType;
 use uuid::Uuid;
 
+use super::helpers::{FormatArgs, WaitForArgs, WatchArgs};
 use super::traits::search::{SearchParameterized, SearchParams, SearchSealed};
 
 /// The commands to send to the results task handler
@@ -195,6 +196,15 @@ pub struct GetResults {
     /// The output directory to write these results too
     #[clap(short, long, default_value = "results")]
     pub output: String,
+    /// Print the results of the target files and repos in a format instead of downloading them
+    #[clap(flatten)]
+    pub format: FormatArgs,
+    /// Re-read and re-print the results until interrupted instead of downloading them
+    #[clap(flatten)]
+    pub watch: WatchArgs,
+    /// Wait until every target's results match a condition (e.g. `results.<tool>`), then print them
+    #[clap(flatten)]
+    pub wait: WaitForArgs,
 }
 
 impl SearchParameterized for GetResults {

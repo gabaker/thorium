@@ -179,6 +179,23 @@ impl RawJob {
         Ok((group, job))
     }
 
+    /// Gets a job object from the backend for an admin
+    ///
+    /// Only admins can read a job by its id alone; this is meant for tests.
+    ///
+    /// # Arguments
+    ///
+    /// * `user` - The user that is getting a job
+    /// * `id` - The id of the job to retrieve
+    /// * `shared` - Shared objects in Thorium
+    #[instrument(name = "RawJob::admin_get", skip(user, shared), err(Debug))]
+    pub async fn admin_get(user: &User, id: &Uuid, shared: &Shared) -> Result<RawJob, ApiError> {
+        // only admins can read any job
+        is_admin!(user);
+        // get the job from the backend
+        db::jobs::get(id, shared).await
+    }
+
     /// Lists all job details in a list of jobs
     ///
     /// # Arguments

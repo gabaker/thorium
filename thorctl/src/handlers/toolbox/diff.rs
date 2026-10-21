@@ -5,9 +5,12 @@
 //! resource present on only one side (only in the toolbox, or only in the
 //! instance's groups) is noted on a single line so a fully-new or fully-extra
 //! resource doesn't drown the real diff in full-body adds or deletes.
-//! Comparison happens on the normalized request forms (the same shapes the
-//! merge editor uses), so server-only fields like creators, bans, and
-//! timestamps never show up as drift.
+//! Whether a resource changed is decided by the same predicate an import uses
+//! ([`ImportKind::calculate_update`]), and hunks render the same normalized views
+//! the merge editor shows (omitted fields resolved against the live resource,
+//! set-like fields sorted, descriptions trimmed), so server-only fields like
+//! creators, bans, and timestamps never show up as drift and a clean diff means
+//! an import would change nothing.
 //!
 //! The toolbox runs through the same pre-processing an import would (structural and
 //! group-coherence validation, the group override, and non-interactive collision
@@ -17,15 +20,16 @@
 use colored::Colorize;
 use similar::TextDiff;
 use std::collections::HashSet;
-use thorium::models::{ImageRequest, PipelineRequest};
+use thorium::models::{Image, ImageRequest, Pipeline, PipelineRequest};
 use thorium::{CtlConf, Error, Thorium};
 
 use super::manifest::ToolboxManifest;
 use super::{build, collisions, import, policies, shared};
 use crate::args::toolbox::{BuildToolbox, DiffToolbox, ManifestLocation};
 use crate::handlers::imports::categorize;
-use crate::handlers::imports::merge::{MergeableImage, MergeablePipeline};
-use crate::handlers::progress::Bar;
+use crate::handlers::imports::kind::{ImageKind, ImportKind, PipelineKind};
+use crate::handlers::imports::merge::{self, MergeableImage, MergeablePipeline};
+use crate::handlers::progress::{self, Bar};
 use crate::utils;
 use crate::utils::images::list_all_images;
 use crate::utils::pipelines::list_all_pipelines;
@@ -106,61 +110,90 @@ fn print_diff(old_label: &str, new_label: &str, old_text: &str, new_text: &str) 
 /// * `absent_from` - The side it's missing from, for the trailing "not in …" clause
 fn print_only_in(root: &str, group: &str, name: &str, kind: &str, absent_from: &str) {
     println!(
-        "{} {root}/{group}/{name} ({kind}) — not in {absent_from}",
-        "only in".yellow()
+        "{} {root}/{} ({kind}) — not in {absent_from}",
+        "only in".yellow(),
+        utils::resource_id(group, name)
     );
 }
 
-/// Render a resource present on both sides: identical is silent, differing shows a hunk
+/// Render a resource present on both sides: unchanged is silent, changed shows a hunk
 ///
 /// # Arguments
 ///
 /// * `stats` - The running diff totals to update
+/// * `changed` - Whether an import would change this resource
 /// * `instance_label` - The instance-side header for the changed resource
 /// * `toolbox_path` - The toolbox-side header
 /// * `old_text` - The instance-side normalized YAML
 /// * `new_text` - The toolbox-side normalized YAML
 fn render_changed(
     stats: &mut DiffStats,
+    changed: bool,
     instance_label: &str,
     toolbox_path: &str,
     old_text: &str,
     new_text: &str,
 ) {
-    if old_text == new_text {
-        // present on both sides and identical: nothing to show
-        stats.unchanged += 1;
-    } else {
-        // present on both sides but changed: show the hunk
+    if changed {
+        // an import would update this resource: show the hunk
         stats.changed += 1;
         print_diff(instance_label, toolbox_path, old_text, new_text);
+    } else {
+        // an import would leave this resource alone: nothing to show
+        stats.unchanged += 1;
     }
 }
 
-/// Serialize an image request to the normalized YAML used for comparison
+/// Render the live and incoming views of an image as normalized YAML
 ///
-/// Uses a canonical (sorted-key) form so reordered map fields (e.g. `env`) don't
-/// show up as drift.
+/// Both sides use the views an import compares (see [`merge::incoming_image_view`]),
+/// with identity/server-managed fields dropped, in the same curated key order as
+/// exported image configs (see [`merge::IMAGE_FIELD_ORDER`]).
 ///
 /// # Arguments
 ///
-/// * `request` - The image request to serialize
-fn image_yaml(request: &ImageRequest) -> Result<String, Error> {
-    utils::canonical_yaml(&MergeableImage::from(request.clone()))
-        .map_err(|err| Error::new(format!("Failed to serialize image for diff: {err}")))
+/// * `existing` - The image as it exists in the instance
+/// * `request` - The toolbox's image request
+fn image_texts(existing: &Image, request: &ImageRequest) -> Result<(String, String), Error> {
+    // build both sides the same way the import comparison does
+    let mut current = MergeableImage::from(existing.clone());
+    let mut incoming = merge::incoming_image_view(existing, request.clone());
+    // identity/server-managed fields are never compared, so leave them out
+    current.strip_non_editable();
+    incoming.strip_non_editable();
+    // serialize both in the exported-config key order; nested maps and sets are sorted
+    // so nothing reorders between runs
+    let old_text = utils::curated_yaml(&current.canonical_value(), merge::IMAGE_FIELD_ORDER)
+        .map_err(|err| Error::new(format!("Failed to serialize image for diff: {err}")))?;
+    let new_text = utils::curated_yaml(&incoming.canonical_value(), merge::IMAGE_FIELD_ORDER)
+        .map_err(|err| Error::new(format!("Failed to serialize image for diff: {err}")))?;
+    Ok((old_text, new_text))
 }
 
-/// Serialize a pipeline request to the normalized YAML used for comparison
+/// Render the live and incoming views of a pipeline as normalized YAML
 ///
-/// Uses a canonical (sorted-key) form so reordered map fields (e.g. `triggers`)
-/// don't show up as drift.
+/// Both sides use the views an import compares (see [`merge::incoming_pipeline_view`])
+/// in the same curated key order as exported pipeline configs (see
+/// [`merge::PIPELINE_FIELD_ORDER`]).
 ///
 /// # Arguments
 ///
-/// * `request` - The pipeline request to serialize
-fn pipeline_yaml(request: &PipelineRequest) -> Result<String, Error> {
-    utils::canonical_yaml(&MergeablePipeline::from(request.clone()))
-        .map_err(|err| Error::new(format!("Failed to serialize pipeline for diff: {err}")))
+/// * `existing` - The pipeline as it exists in the instance
+/// * `request` - The toolbox's pipeline request
+fn pipeline_texts(
+    existing: &Pipeline,
+    request: &PipelineRequest,
+) -> Result<(String, String), Error> {
+    // build both sides the same way the import comparison does
+    let current = MergeablePipeline::from(existing.clone());
+    let incoming = merge::incoming_pipeline_view(existing, request.clone());
+    // serialize both in the exported-config key order; nested maps are sorted so
+    // nothing reorders between runs
+    let old_text = utils::curated_yaml(&current, merge::PIPELINE_FIELD_ORDER)
+        .map_err(|err| Error::new(format!("Failed to serialize pipeline for diff: {err}")))?;
+    let new_text = utils::curated_yaml(&incoming, merge::PIPELINE_FIELD_ORDER)
+        .map_err(|err| Error::new(format!("Failed to serialize pipeline for diff: {err}")))?;
+    Ok((old_text, new_text))
 }
 
 /// Whether a group-listing error just means the group isn't visible to us
@@ -223,7 +256,7 @@ async fn load_manifest(location: &ManifestLocation) -> Result<(ToolboxManifest, 
         );
         return Ok((manifest, progress));
     }
-    shared::get_manifest(location).await
+    shared::get_manifest_named(location, "toolbox diff").await
 }
 
 /// Reduce a Thorium API url to a `host[:port]` label for diff output
@@ -266,6 +299,48 @@ fn instance_host(api_url: &str) -> String {
     }
 }
 
+/// Rewrite bundled image urls the way an import would before they are compared
+///
+/// A bundled toolbox's images are pushed to and stored at
+/// `<prefix>/<group>/<name>:<tag>` on import, so comparing the raw urls would show
+/// every previously imported bundled image as changed. The prefix comes from
+/// `--image-path-prefix`, then the manifest's recorded prefix; diff never prompts,
+/// so with neither set the urls are compared unrewritten and a note says so.
+///
+/// # Arguments
+///
+/// * `cmd` - The toolbox diff command (provides the `--image-path-prefix` flag)
+/// * `manifest` - The toolbox manifest
+/// * `images` - The categorized images whose urls are rewritten in place
+/// * `progress` - The progress bar to log notes and warnings through
+fn apply_bundled_rewrite(
+    cmd: &DiffToolbox,
+    manifest: &ToolboxManifest,
+    images: &mut [categorize::CategorizedImage],
+    progress: &Bar,
+) {
+    // --image-path-prefix only affects bundled toolboxes; warn so it isn't a silent no-op
+    if !manifest.bundled_images {
+        if cmd.image_path_prefix.is_some() {
+            progress.warning(
+                "--image-path-prefix has no effect: this toolbox does not bundle container images",
+            );
+        }
+        return;
+    }
+    // rewrite with the configured prefix, or say the urls are compared as-is
+    match import::configured_image_path_prefix(cmd.image_path_prefix.as_deref(), manifest) {
+        Some(prefix) => {
+            import::rewrite_bundled_urls(prefix, images);
+        }
+        None => progress::note(
+            "This toolbox bundles container images and no image path prefix is set, so bundled \
+             image urls are compared unrewritten; pass --image-path-prefix to match the urls an \
+             import would store",
+        ),
+    }
+}
+
 /// Diff a toolbox against the instance and print the result
 ///
 /// # Arguments
@@ -293,12 +368,14 @@ pub async fn diff(thorium: Thorium, conf: &CtlConf, cmd: &DiffToolbox) -> Result
     collisions::resolve_collisions(&mut manifest, &sources, false, &progress)?;
     shared::warn_dropped(&manifest.validate_group_coherence(), &progress);
     // categorize everything against the live instance
-    let images = categorize::categorize_images(
+    let mut images = categorize::categorize_images(
         &thorium,
         import::flatten_manifest_images(&manifest),
         &progress,
     )
     .await?;
+    // compare bundled images at the registry location an import would store them under
+    apply_bundled_rewrite(cmd, &manifest, &mut images, &progress);
     let pipelines = categorize::categorize_pipelines(
         &thorium,
         import::flatten_manifest_pipelines(&manifest),
@@ -397,18 +474,20 @@ pub async fn diff(thorium: Thorium, conf: &CtlConf, cmd: &DiffToolbox) -> Result
                     &instance,
                 );
             }
-            // present on both sides: normalize the live image through its request form
-            // (so server-only fields don't show as drift) and diff
+            // present on both sides: decide with the import's own change predicate and
+            // render the normalized views for the hunk
             Some(existing) => {
-                let label = format!("{}/{}", img.request.group, img.request.name);
-                let new_text = image_yaml(&img.request)?;
-                let old_text = image_yaml(&ImageRequest::from(existing.clone()))?;
+                let label = utils::resource_id(&img.request.group, &img.request.name);
+                let changed =
+                    ImageKind::calculate_update(existing.clone(), img.request.clone()).is_some();
+                let (old_text, new_text) = image_texts(existing, &img.request)?;
                 render_changed(
                     &mut stats,
+                    changed,
                     &format!("{instance}/{label} (image)"),
-                    // use the config name on both sides so a differing manifest key doesn't read
-                    // like a rename
-                    &format!("toolbox/images/{}", img.request.name),
+                    // use the config's group and name on both sides so a differing manifest key
+                    // doesn't read like a rename
+                    &format!("toolbox/{label} (image)"),
                     &old_text,
                     &new_text,
                 );
@@ -429,15 +508,19 @@ pub async fn diff(thorium: Thorium, conf: &CtlConf, cmd: &DiffToolbox) -> Result
                     &instance,
                 );
             }
+            // present on both sides: the same predicate and rendering as images
             Some(existing) => {
-                let label = format!("{}/{}", pipe.request.group, pipe.request.name);
-                let new_text = pipeline_yaml(&pipe.request)?;
-                let old_text = pipeline_yaml(&PipelineRequest::from(existing.clone()))?;
+                let label = utils::resource_id(&pipe.request.group, &pipe.request.name);
+                let changed =
+                    PipelineKind::calculate_update(existing.clone(), pipe.request.clone())
+                        .is_some();
+                let (old_text, new_text) = pipeline_texts(existing, &pipe.request)?;
                 render_changed(
                     &mut stats,
+                    changed,
                     &format!("{instance}/{label} (pipeline)"),
-                    // use the config name on both sides (see the image header above)
-                    &format!("toolbox/pipelines/{}", pipe.request.name),
+                    // use the config's group and name on both sides (see the image header above)
+                    &format!("toolbox/{label} (pipeline)"),
                     &old_text,
                     &new_text,
                 );

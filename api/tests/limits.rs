@@ -1,6 +1,5 @@
 //! Tests that every listing route bounds the number of rows a request may ask for
 
-use base64::Engine;
 use thorium::models::{EntityListOpts, RepoRequest};
 use thorium::test_utilities::{self, generators};
 use thorium::{Error, Thorium};
@@ -20,12 +19,10 @@ const STAGE_LOG_CAP: usize = 250_000;
 async fn status_of(client: &Thorium, path: &str) -> Result<u16, Error> {
     // get the token for this client
     let token = client.users.info().await?.token;
-    // build the auth header the client would send
-    let encoded = base64::engine::general_purpose::STANDARD.encode(token.as_bytes());
     // send our raw request so the limit reaches the API unchanged
     let resp = reqwest::Client::new()
         .get(format!("{}{path}", client.host))
-        .header("authorization", format!("token {encoded}"))
+        .header("authorization", test_utilities::auth_header(&token))
         .send()
         .await?;
     Ok(resp.status().as_u16())

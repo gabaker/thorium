@@ -1,7 +1,6 @@
 //! Tests that every cursor family pages through rows spread over many buckets and several years,
 //! leap years included, returning each row once in order
 
-use base64::Engine;
 use chrono::{DateTime, Duration, TimeZone, Utc};
 use serde_json::Value;
 use std::collections::{HashMap, HashSet};
@@ -28,13 +27,12 @@ const END: &str = "2020-06-01T00:00:00Z";
 /// * `client` - The client whose credentials to send
 /// * `path` - The path and query to request, starting with `/api/`
 async fn get_json(client: &Thorium, path: &str) -> Result<Value, Error> {
-    // build the auth header the client would send
+    // get the token for this client
     let token = client.users.info().await?.token;
-    let encoded = base64::engine::general_purpose::STANDARD.encode(token.as_bytes());
     // send our raw request so the cursor and limit reach the API unchanged
     let resp = reqwest::Client::new()
         .get(format!("{}{path}", client.host))
-        .header("authorization", format!("token {encoded}"))
+        .header("authorization", test_utilities::auth_header(&token))
         .send()
         .await?;
     // fail on any error status

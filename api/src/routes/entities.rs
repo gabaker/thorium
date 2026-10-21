@@ -1,6 +1,6 @@
 //! Routes for entities
 
-use axum::extract::{Multipart, Path, Query, State};
+use axum::extract::{Multipart, Path, State};
 use axum::http::StatusCode;
 use axum::response::IntoResponse;
 use axum::routing::post;
@@ -439,11 +439,46 @@ async fn grep_entity(
     Ok(Json(matches))
 }
 
+/// List every association of an entity in both directions
+///
+/// Only admins can list an entity's associations this way, and this is meant for tests.
+///
+/// # Arguments
+///
+/// * `user` - The user that is listing associations
+/// * `id` - The id of the entity to list associations for
+/// * `state` - Shared Thorium objects
+#[utoipa::path(
+    get,
+    path = "/api/entities/{id}/associations",
+    params(
+        ("id" = Uuid, Path, description = "The entity id"),
+    ),
+    responses(
+        (status = 200, description = "Every association of the entity", body = Vec<Association>),
+        (status = 401, description = "This user is not an admin"),
+        (status = 404, description = "The entity does not exist"),
+    ),
+    security(
+        ("basic" = []),
+    )
+)]
+#[instrument(name = "routes::entities::associations", skip_all, err(Debug))]
+async fn associations(
+    user: AuthedUser,
+    Path(id): Path<Uuid>,
+    State(state): State<AppState>,
+) -> Result<Json<Vec<Association>>, ApiError> {
+    // list every association of this entity as an admin
+    let associations = Entity::admin_associations(&user, id, &state.shared).await?;
+    Ok(Json(associations))
+}
+
 /// Add the entities routes to our router
 ///
 /// # Arguments
 ///
-// * `router` - The router to add routes too
+/// * `router` - The router to add routes too
 pub fn mount(router: Router<AppState>) -> Router<AppState> {
     router
         .route("/entities/", post(create))
@@ -456,6 +491,10 @@ pub fn mount(router: Router<AppState>) -> Router<AppState> {
             axum::routing::get(get).patch(update).delete(delete),
         )
         .route("/entities/{id}/image", axum::routing::get(get_image))
+        .route(
+            "/entities/{id}/associations",
+            axum::routing::get(associations),
+        )
         .route("/entities/tags/{id}", post(tag).delete(delete_tags))
         .route(
             "/entities/associations/{id}",

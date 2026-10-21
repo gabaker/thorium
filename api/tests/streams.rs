@@ -1,6 +1,5 @@
 //! Tests the stream routes in Thorium
 
-use base64::Engine;
 use serde_json::Value;
 
 use thorium::test_utilities::{self, generators};
@@ -15,12 +14,10 @@ use thorium::{Error, Thorium};
 async fn get_json(client: &Thorium, path: &str) -> Result<(u16, Value), Error> {
     // get the token for this client
     let token = client.users.info().await?.token;
-    // build the auth header the client would send
-    let encoded = base64::engine::general_purpose::STANDARD.encode(token.as_bytes());
     // send our raw request so the path values reach the API unchanged
     let resp = reqwest::Client::new()
         .get(format!("{}{path}", client.host))
-        .header("authorization", format!("token {encoded}"))
+        .header("authorization", test_utilities::auth_header(&token))
         .send()
         .await?;
     // get the status and body of the response

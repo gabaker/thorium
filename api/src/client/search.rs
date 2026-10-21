@@ -24,6 +24,14 @@ pub struct Search {
     pub events: events::SearchEvents,
 }
 
+#[cfg(test)]
+impl Search {
+    /// The auth string this handler sends with its requests
+    pub(crate) fn auth_token(&self) -> &str {
+        &self.token
+    }
+}
+
 #[cfg_attr(feature = "sync", thorium_derive::blocking_struct)]
 impl Search {
     /// Creates a new search handler

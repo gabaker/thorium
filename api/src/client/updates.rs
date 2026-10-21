@@ -26,6 +26,14 @@ pub struct Updates {
     client: reqwest::Client,
 }
 
+#[cfg(test)]
+impl Updates {
+    /// The auth string this handler sends with its requests
+    pub(crate) fn auth_token(&self) -> &str {
+        &self.token
+    }
+}
+
 #[cfg_attr(feature = "sync", thorium_derive::blocking_struct)]
 impl Updates {
     /// Creates a new updates handler
@@ -135,7 +143,7 @@ impl Updates {
                 // get our response as a stream of bytes
                 let stream = resp
                     .bytes_stream()
-                    .map_err(|err| std::io::Error::new(std::io::ErrorKind::Other, err.to_string()));
+                    .map_err(|err| std::io::Error::other(err.to_string()));
                 // convert our async read to a buf reader
                 let mut reader = StreamReader::new(stream);
                 // make a file to save the response stream too
@@ -180,8 +188,7 @@ impl Updates {
             Ok(exe_path) => exe_path,
             Err(error) => {
                 return Err(Error::new(format!(
-                    "Failed to get current exe path: {:#?}",
-                    error
+                    "Failed to get current exe path: {error:#?}"
                 )));
             }
         };
@@ -266,14 +273,11 @@ impl Updates {
         path: P,
     ) -> Result<(), Error> {
         // get our current exes file name
-        let name = match path.as_ref().file_name() {
-            Some(name) => name,
-            None => {
-                return Err(Error::new(format!(
-                    "Failed to get exe name from {:#?}",
-                    path.as_ref()
-                )));
-            }
+        let Some(name) = path.as_ref().file_name() else {
+            return Err(Error::new(format!(
+                "Failed to get exe name from {}",
+                path.as_ref().display()
+            )));
         };
         // build a path to temp hidden update file
         if let Some(parent_path) = path.as_ref().parent() {
@@ -286,14 +290,13 @@ impl Updates {
             // rename the old file to a backup
             match tokio::fs::rename(&path, bak_path).await {
                 // rename the new agent file after renaming old
-                Ok(_) => tokio::fs::rename(temp_path, &path).await?,
+                Ok(()) => tokio::fs::rename(temp_path, &path).await?,
                 Err(e) => match e.kind() {
                     // rename the new agent even if old agent file wasn't found
                     std::io::ErrorKind::NotFound => tokio::fs::rename(temp_path, &path).await?,
                     _ => {
                         return Err(Error::new(format!(
-                            "Failed to rename old agent file: {:#?}",
-                            e
+                            "Failed to rename old agent file: {e:#?}"
                         )));
                     }
                 },

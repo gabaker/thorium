@@ -30,6 +30,14 @@ pub struct Images {
     client: reqwest::Client,
 }
 
+#[cfg(test)]
+impl Images {
+    /// The auth string this handler sends with its requests
+    pub(crate) fn auth_token(&self) -> &str {
+        &self.token
+    }
+}
+
 #[cfg_attr(feature = "sync", thorium_derive::blocking_struct)]
 impl Images {
     /// Creates a new images handler

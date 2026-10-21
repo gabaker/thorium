@@ -1,6 +1,7 @@
 //! Utilties for testing the Thorium API
 
 mod api;
+pub mod events;
 pub mod generators;
 #[cfg(test)]
 mod harness_tests;
@@ -8,6 +9,8 @@ mod helpers;
 mod impls;
 #[cfg(feature = "upgrades-runtime")]
 pub mod upgrade_harness;
+
+use base64::Engine;
 
 use crate::client::Error;
 pub use api::{
@@ -19,6 +22,21 @@ pub use api::{
 // expose a blocking admin client for sync tests
 #[cfg(all(feature = "sync", not(feature = "python")))]
 pub use api::admin_client_blocking;
+
+/// Build the authorization header value for a token, as the client sends it
+///
+/// Tests that send raw requests (for example to check how a route answers an unknown path
+/// value) use this to authenticate like the client does.
+///
+/// # Arguments
+///
+/// * `token` - The token to authenticate with
+#[must_use]
+pub fn auth_header(token: &str) -> String {
+    // the client sends base64 encoded tokens behind a "token" prefix
+    let encoded = base64::engine::general_purpose::STANDARD.encode(token.as_bytes());
+    format!("token {encoded}")
+}
 
 /// Assert that a result is an error carrying the expected HTTP status code
 ///

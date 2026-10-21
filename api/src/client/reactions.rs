@@ -42,6 +42,14 @@ pub struct Reactions {
     client: reqwest::Client,
 }
 
+#[cfg(test)]
+impl Reactions {
+    /// The auth string this handler sends with its requests
+    pub(crate) fn auth_token(&self) -> &str {
+        &self.token
+    }
+}
+
 #[cfg_attr(feature = "sync", thorium_derive::blocking_struct)]
 impl Reactions {
     /// Creates a new reactions handler
@@ -164,7 +172,7 @@ impl Reactions {
         // build url
         let url = format!(
             "{host}/api/reactions/{group}/{id}",
-            host = &self.host,
+            host = self.host,
             group = group,
             id = id
         );
@@ -346,7 +354,7 @@ impl Reactions {
         // build url
         let url = format!(
             "{host}/api/reactions/{group}/{id}/cache",
-            host = &self.host,
+            host = self.host,
             group = group,
             id = id
         );
@@ -396,7 +404,7 @@ impl Reactions {
         // build url
         let url = format!(
             "{host}/api/reactions/{group}/{id}/cache",
-            host = &self.host,
+            host = self.host,
             group = group,
             id = id
         );
@@ -451,7 +459,7 @@ impl Reactions {
         // build url
         let url = format!(
             "{host}/api/reactions/{group}/{id}/cache/files/",
-            host = &self.host,
+            host = self.host,
             group = group,
             id = id
         );
@@ -644,7 +652,7 @@ impl Reactions {
         // build url
         let url = format!(
             "{host}/api/reactions/logs/{group}/{reaction}/{stage}",
-            host = &self.host,
+            host = self.host,
             group = group,
             reaction = reaction,
             stage = stage
@@ -711,7 +719,7 @@ impl Reactions {
         // build url
         let url = format!(
             "{host}/api/reactions/logs/{group}/{id}/{stage}",
-            host = &self.host,
+            host = self.host,
             group = group,
             id = id,
             stage = stage,
@@ -773,7 +781,7 @@ impl Reactions {
         // build url
         let url = format!(
             "{host}/api/reactions/logs/{group}/{id}/{stage}",
-            host = &self.host,
+            host = self.host,
             group = group,
             id = id,
             stage = stage,
@@ -823,7 +831,7 @@ impl Reactions {
         // build url
         let url = format!(
             "{host}/api/reactions/logs/{group}/{id}",
-            host = &self.host,
+            host = self.host,
             group = group,
             id = id,
         );

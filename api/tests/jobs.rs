@@ -1,9 +1,12 @@
 //! Tests the Jobs routes in Thorium
 
 use chrono::prelude::*;
-use thorium::models::{ImageScaler, JobResets, ReactionListParams, ReactionStatus, Resources};
-use thorium::test_utilities::{self, generators};
-use thorium::{Error, is};
+use thorium::models::{
+    EventType, ImageScaler, JobResets, JobStatus, ReactionListParams, ReactionStatus, Resources,
+};
+use thorium::test_utilities::{self, events, generators};
+use thorium::{Error, fail, is};
+use uuid::Uuid;
 
 /// unwraps the status counts for a specific user and image
 macro_rules! get_stats {
@@ -666,5 +669,101 @@ async fn concurrent_error_and_proceed_apply_once() -> Result<(), Error> {
     }
     // delete our worker
     generators::delete_worker("adj_error", &client).await?;
+    Ok(())
+}
+
+/// An admin can read one job without changing it or any event queue
+#[tokio::test]
+async fn get_job() -> Result<(), thorium::Error> {
+    // get admin client
+    let client = test_utilities::admin_client().await?;
+    // create a group, pipeline, and reaction whose jobs we can read
+    let group = generators::groups(1, &client).await?.remove(0).name;
+    let pipe_req = generators::pipelines(&group, 1, false, &client)
+        .await?
+        .remove(0);
+    let pipe = client.pipelines.get(&group, &pipe_req.name).await?;
+    let req = generators::gen_reaction(&group, &pipe, None);
+    let id = client.reactions.create(&req).await?.id;
+    // get the reaction and its first job's id
+    let react = client.reactions.get(&group, id).await?;
+    let job_id = react.jobs[0];
+    // capture the event queues before reading the job
+    let triggers = events::queue_state(EventType::ReactionTrigger).await?;
+    let sigma = events::queue_state(EventType::SigmaScannableResults).await?;
+    // read the job as an admin
+    let job = client.jobs.get(job_id).await?;
+    // the job matches its reaction and first stage
+    is!(job.id, job_id);
+    is!(&job.group, &group);
+    is!(&job.pipeline, &pipe.name);
+    is!(job.reaction, id);
+    is!(&job.stage, &pipe.order[0][0]);
+    is!(&job.creator, &react.creator);
+    is!(job.status, JobStatus::Created);
+    // a second read returns the same job, so the read changed nothing
+    let again = client.jobs.get(job_id).await?;
+    is!(serde_json::to_value(&again)?, serde_json::to_value(&job)?);
+    // the reaction is unchanged by the read
+    let react_after = client.reactions.get(&group, id).await?;
+    is!(react_after.status, react.status);
+    is!(react_after.current_stage, react.current_stage);
+    // the event queues are unchanged by the read
+    is!(
+        events::queue_state(EventType::ReactionTrigger).await?,
+        triggers
+    );
+    is!(
+        events::queue_state(EventType::SigmaScannableResults).await?,
+        sigma
+    );
+    Ok(())
+}
+
+/// Reading a job needs an admin with a full token and a known job id
+#[tokio::test]
+async fn get_job_errors() -> Result<(), thorium::Error> {
+    // get admin client
+    let admin = test_utilities::admin_client().await?;
+    // an unknown job id is not found
+    fail!(admin.jobs.get(Uuid::new_v4()).await, 404);
+    // create a reaction whose job a non-admin tries to read
+    let group = generators::groups(1, &admin).await?.remove(0).name;
+    let pipe_req = generators::pipelines(&group, 1, false, &admin)
+        .await?
+        .remove(0);
+    let pipe = admin.pipelines.get(&group, &pipe_req.name).await?;
+    let req = generators::gen_reaction(&group, &pipe, None);
+    let id = admin.reactions.create(&req).await?.id;
+    let job_id = admin.reactions.get(&group, id).await?.jobs[0];
+    // a non-admin full token is refused
+    let user = generators::client(&admin).await?;
+    fail!(user.jobs.get(job_id).await, 401);
+    // a scoped token of an admin is refused
+    let scoped = generators::scoped_client(&admin).await?;
+    fail!(scoped.jobs.get(job_id).await, 401);
+    // a request without a token is refused
+    let url = format!("{}/api/jobs/{job_id}", admin.host);
+    let resp = reqwest::Client::new().get(&url).send().await?;
+    is!(resp.status().as_u16(), 401);
+    Ok(())
+}
+
+/// The job read route is documented under the job API docs
+#[tokio::test]
+async fn get_job_in_openapi() -> Result<(), thorium::Error> {
+    // get admin client
+    let client = test_utilities::admin_client().await?;
+    // get the job OpenAPI document
+    let url = format!("{}/api/jobs/openapi.json", client.host);
+    let doc: serde_json::Value = reqwest::Client::new()
+        .get(&url)
+        .send()
+        .await?
+        .error_for_status()?
+        .json()
+        .await?;
+    // the job read route is in the document's paths
+    is!(doc["paths"].get("/api/jobs/{id}").is_some(), true);
     Ok(())
 }
