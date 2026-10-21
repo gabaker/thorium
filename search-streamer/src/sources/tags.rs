@@ -5,11 +5,12 @@ use std::collections::{HashMap, HashSet};
 use bytesize::ByteSize;
 use chrono::{DateTime, Utc};
 use futures::StreamExt;
+use scylla::client::pager::TypedRowStream;
 use scylla::client::session::Session;
-use scylla::statement::prepared::PreparedStatement;
 use serde_json::{Value, json};
 use thorium::client::TagSearchEvents;
-use thorium::models::{ElasticIndex, TagRow, TagSearchEvent, TagType};
+use thorium::models::schema::queries::search::{SearchTagsByItemQueries, TagEnumerateRow};
+use thorium::models::{ElasticIndex, TagSearchEvent, TagType};
 use thorium::{Error, Thorium};
 use tracing::instrument;
 
@@ -19,13 +20,11 @@ use crate::events::CompactTagEvent;
 use crate::index::{IndexMapping, IndexTyped};
 use crate::stores::{Elastic, StoreIdentifiable, StoreLookup};
 
-mod scylla_utils;
-
-use scylla_utils::{TagEnumerateRow, TagEventRow, TagsPrepared};
-
+/// The source of tags to stream, with the statements it reads them with
 #[derive(Clone)]
 pub struct Tags {
-    prepared: TagsPrepared,
+    /// The statements on the `tags_by_item` view
+    queries: SearchTagsByItemQueries,
 }
 
 #[async_trait::async_trait]
@@ -46,18 +45,42 @@ impl DataSource for Tags {
 
     type EventClient = TagSearchEvents;
 
+    /// Prepare the statements the tags source reads with
+    ///
+    /// # Arguments
+    ///
+    /// * `scylla` - The Scylla session to prepare the statements on
+    /// * `ns` - The keyspace the tags tables and views are in
     async fn new(scylla: &Session, ns: &str) -> Result<Self, Error> {
-        // create prepared statements
-        let prepared = TagsPrepared::prepare(scylla, ns).await?;
-        Ok(Self { prepared })
+        // prepare the generated statements this source reads with
+        let queries = SearchTagsByItemQueries::prepare(scylla, ns)
+            .await
+            .map_err(|err| Error::new(format!("Failed to prepare tags statements: {err}")))?;
+        Ok(Self { queries })
     }
 
     fn event_client(thorium: &Thorium) -> &Self::EventClient {
         &thorium.search.events.tags
     }
 
-    fn enumerate_prepared(&self) -> &PreparedStatement {
-        &self.prepared.enumerate
+    /// Page through the tagged items in one token range, reading each item once
+    ///
+    /// # Arguments
+    ///
+    /// * `scylla` - The Scylla session to read with
+    /// * `start` - The first token of the range
+    /// * `end` - The last token of the range
+    async fn enumerate(
+        &self,
+        scylla: &Session,
+        start: i64,
+        end: i64,
+    ) -> Result<TypedRowStream<TagEnumerateRow>, Error> {
+        // page through the tagged items in this range
+        self.queries
+            .enumerate(scylla, start, end)
+            .await
+            .map_err(|err| Error::new(format!("Failed to enumerate data from Scylla: {err}")))
     }
 
     #[instrument(
@@ -158,12 +181,11 @@ impl Tags {
         // chunk into groups of 100
         for items_chunk in items.chunks(100) {
             // get init rows
-            let resp = scylla
-                .execute_iter(self.prepared.init.clone(), (tag_type, items_chunk))
+            let mut typed_stream = self
+                .queries
+                .init_chunk(scylla, tag_type, items_chunk)
                 .await
                 .map_err(|err| Error::new(format!("Error pulling tag init info: {err}")))?;
-            // cast to tag rows
-            let mut typed_stream = resp.rows_stream::<TagRow>().unwrap();
             while let Some(row) = typed_stream.next().await {
                 // make sure the row was successful
                 let row = row.unwrap();
@@ -198,19 +220,16 @@ impl Tags {
         let groups = compacted_event.groups.into_iter().collect::<Vec<_>>();
         // chunk groups by 100
         for groups_chunk in groups.chunks(100) {
-            let resp = scylla
-                .execute_iter(
-                    self.prepared.event.clone(),
-                    (
-                        &compacted_event.tag_type,
-                        &compacted_event.item,
-                        groups_chunk,
-                    ),
+            let mut typed_stream = self
+                .queries
+                .event_chunk(
+                    scylla,
+                    &compacted_event.tag_type,
+                    &compacted_event.item,
+                    groups_chunk,
                 )
                 .await
                 .map_err(|err| Error::new(format!("Error pulling tag event info: {err}")))?;
-            // cast to row
-            let mut typed_stream = resp.rows_stream::<TagEventRow>().unwrap();
             while let Some(row) = typed_stream.next().await {
                 // make sure the row was successful
                 let row = row.unwrap();

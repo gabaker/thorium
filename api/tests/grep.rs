@@ -871,6 +871,117 @@ async fn grep_files_cursor_rejects_other_user() -> Result<(), Error> {
     Ok(())
 }
 
+/// Continue a corpus grep of samples with a client's default groups until it is exhausted
+///
+/// Returns the keys every continued page found.
+///
+/// # Arguments
+///
+/// * `client` - The client to continue the grep with
+/// * `cursor` - The cursor to continue
+async fn continue_grep(client: &Thorium, cursor: uuid::Uuid) -> Result<Vec<String>, Error> {
+    // collect the keys every page finds, starting from the cursor we were given
+    let mut keys = Vec::new();
+    let mut next = Some(cursor);
+    // keep paging until our cursor is exhausted or we have made too many requests
+    for _ in 0..10 {
+        // stop once our cursor has been exhausted
+        let Some(cursor) = next.take() else {
+            break;
+        };
+        // continue this cursor without naming any groups
+        let opts = GrepOpts::new(PATTERN)
+            .source(GrepSource::Submissions)
+            .limit(1)
+            .cursor(cursor);
+        let page = client.files.grep(opts).await?;
+        // save the keys this page found and the cursor to continue with
+        keys.extend(page.data.iter().map(|matches| matches.key.clone()));
+        next = page.cursor;
+    }
+    // make sure our cursor ran to its end
+    if next.is_some() {
+        return Err(Error::new("the corpus grep was not exhausted"));
+    }
+    Ok(keys)
+}
+
+/// A grep cursor continues over only the groups its user is still in, and is not found once
+/// its user is in none of them
+#[tokio::test]
+async fn grep_cursor_continues_narrowed_after_group_removal() -> Result<(), Error> {
+    // get admin client
+    let client = test_utilities::admin_client().await?;
+    // create a group the user keeps, a group the user is removed from, and one more group so
+    // the user still has a group once removed
+    let mut groups = generators::groups(3, &client).await?;
+    let other = groups.remove(2).name;
+    let removed = groups.remove(1).name;
+    let kept = groups.remove(0).name;
+    // build a user in all three groups
+    let user =
+        generators::client_in_groups(&client, &[kept.clone(), removed.clone(), other.clone()])
+            .await?;
+    let username = user.users.info().await?.username;
+    // seed two samples in the group the user keeps and two in the group they lose
+    let kept_samples = [
+        seed_sample(&client, &kept).await?,
+        seed_sample(&client, &kept).await?,
+    ];
+    let removed_samples = [
+        seed_sample(&client, &removed).await?,
+        seed_sample(&client, &removed).await?,
+    ];
+    // start a corpus grep over both groups that leaves samples unsearched
+    let opts = GrepOpts::new(PATTERN)
+        .group(&kept)
+        .group(&removed)
+        .source(GrepSource::Submissions)
+        .limit(1);
+    let page = user.files.grep(opts).await?;
+    let mut keys: Vec<String> = page
+        .data
+        .iter()
+        .map(|matches| matches.key.clone())
+        .collect();
+    let Some(cursor) = page.cursor else {
+        return Err(Error::new("the corpus grep did not return a cursor"));
+    };
+    // start a corpus grep over only the group the user loses
+    let opts = GrepOpts::new(PATTERN)
+        .group(&removed)
+        .source(GrepSource::Submissions)
+        .limit(1);
+    let Some(lost) = user.files.grep(opts).await?.cursor else {
+        return Err(Error::new("the corpus grep did not return a cursor"));
+    };
+    // remove the user from one of the groups both cursors search
+    let remove = GroupUsersUpdate::default().direct_remove(&username);
+    client
+        .groups
+        .update(&removed, &GroupUpdate::default().users(remove))
+        .await?;
+    // the cursor over both groups continues, finding nothing in the group the user lost
+    let continued = continue_grep(&user, cursor).await?;
+    is!(
+        continued.iter().any(|key| removed_samples.contains(key)),
+        false
+    );
+    // every sample in the group the user kept is found across the cursor
+    keys.extend(continued);
+    for sample in &kept_samples {
+        is!(keys.contains(sample), true);
+    }
+    // the cursor over only the group the user lost is answered as an unknown cursor
+    let opts = GrepOpts::new(PATTERN)
+        .source(GrepSource::Submissions)
+        .limit(1)
+        .cursor(lost);
+    let check = user.files.grep(opts).await;
+    fail!(check, 404);
+    Ok(())
+}
+
 /// The start param bounds which samples a corpus grep searches
 #[tokio::test]
 async fn grep_files_time_window() -> Result<(), Error> {

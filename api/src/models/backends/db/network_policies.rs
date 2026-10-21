@@ -8,13 +8,15 @@ use uuid::Uuid;
 
 use super::GroupedScyllaCursor;
 use super::keys::{NetworkPolicyKeys, SystemKeys};
+use crate::models::schema::JsonText;
+use crate::models::schema::scylla::NetworkPoliciesTableRef;
 use crate::models::system::K8S_CACHE_KEY;
 use crate::models::{
     Group, NetworkPolicy, NetworkPolicyListLine, NetworkPolicyListParams, NetworkPolicyListRow,
     NetworkPolicyRequest, NetworkPolicyRow, NetworkPolicySet, NetworkPolicyUpdate, User,
 };
 use crate::utils::{ApiError, Shared, helpers};
-use crate::{bad, conn, log_scylla_err, serialize};
+use crate::{bad, conn, log_scylla_err};
 
 /// Create a `NetworkPolicy` in Scylla
 ///
@@ -30,25 +32,24 @@ pub async fn create(req: NetworkPolicyRequest, shared: &Shared) -> Result<(), Ap
     stream::iter(cast.groups.iter())
         .map(Ok::<&String, ApiError>)
         .try_for_each_concurrent(100, |group| {
-            let cast = &cast;
+            // build this group's row, with its rules stored as JSON
+            let row = NetworkPoliciesTableRef {
+                group,
+                name: &cast.name,
+                id: cast.id,
+                k8s_name: &cast.k8s_name,
+                created: cast.created,
+                ingress: JsonText(&cast.ingress),
+                egress: JsonText(&cast.egress),
+                forced_policy: cast.forced_policy,
+                default_policy: cast.default_policy,
+            };
             async move {
                 shared
                     .scylla
-                    .session
-                    .execute_unpaged(
-                        &shared.scylla.prep.network_policies.insert,
-                        (
-                            group,
-                            &cast.name,
-                            cast.id,
-                            &cast.k8s_name,
-                            &cast.created,
-                            serialize!(&cast.ingress),
-                            serialize!(&cast.egress),
-                            cast.forced_policy,
-                            cast.default_policy,
-                        ),
-                    )
+                    .queries
+                    .network_policies
+                    .insert(&shared.scylla.session, &row)
                     .await?;
                 Ok(())
             }
@@ -108,18 +109,14 @@ pub async fn list_details(
     for (names_chunk, groups_chunk) in policy_names.chunks(50).cartesian_product(groups.chunks(50))
     {
         // send a query to get this chunks data
-        let query = shared
+        let rows = shared
             .scylla
-            .session
-            .execute_unpaged(
-                &shared.scylla.prep.network_policies.get_many,
-                (names_chunk, groups_chunk),
-            )
+            .queries
+            .network_policies_by_name
+            .get_many_chunk(&shared.scylla.session, names_chunk, groups_chunk)
             .await?;
-        // enable rows on this query response
-        let query_rows = query.into_rows_result()?;
         // crawl the rows returned by this query
-        for row in query_rows.rows::<NetworkPolicyRow>()? {
+        for row in rows {
             // propagate any casting errors
             let row = row?;
             // see if we have this policy already
@@ -173,18 +170,13 @@ pub async fn get(
     let mut policy_row: Option<NetworkPolicyRow> = None;
     // break our groups into chunks of 100
     for chunk in groups.chunks(100) {
-        let query = shared
+        let typed_iter = shared
             .scylla
-            .session
-            .execute_unpaged(
-                &shared.scylla.prep.network_policies.get,
-                (policy_name, chunk),
-            )
-            .await?;
-        // enable rows on this query response
-        let query_rows = query.into_rows_result()?;
-        // set the type for our rows
-        let typed_iter = query_rows.rows::<NetworkPolicyRow>()?;
+            .queries
+            .network_policies_by_name
+            .get_chunk(&shared.scylla.session, policy_name, chunk)
+            .await?
+            .into_iter();
         // check if we have an id set
         if let Some(id) = &id {
             // if we specified an ID, filter out all rows that don't correspond to that ID
@@ -244,17 +236,16 @@ pub async fn get_all_default(
     shared: &Shared,
 ) -> Result<Vec<NetworkPolicyListLine>, ApiError> {
     // perform our query and cast to rows then list lines
-    let query = shared
+    let rows = shared
         .scylla
-        .session
-        .execute_unpaged(&shared.scylla.prep.network_policies.get_default, (group,))
+        .queries
+        .network_policies_default
+        .get_default(&shared.scylla.session, group)
         // propagate query errors
         .await?;
-    // enable rows in this query response
-    let query_rows = query.into_rows_result()?;
     // set the type for our returned rows
-    let netpol_list = query_rows
-        .rows::<NetworkPolicyListRow>()?
+    let netpol_list = rows
+        .into_iter()
         // propagate any into row errors
         .collect::<Result<Vec<NetworkPolicyListRow>, _>>()?
         .into_iter()
@@ -286,25 +277,14 @@ pub async fn exists(
         stream::iter(groups.iter())
             .map(|group| async move {
                 // check if the policy exists in this group
-                let query = shared
+                let row = shared
                     .scylla
-                    .session
-                    .execute_unpaged(&shared.scylla.prep.network_policies.exists, (name, group))
+                    .queries
+                    .network_policies_by_name
+                    .exists(&shared.scylla.session, name, group)
                     .await?;
-                // try to enable rows on this query response
-                let query_rows = query.into_rows_result()?;
-                // check if didn'tretrieve any rows
-                if query_rows.rows_num() == 0 {
-                    // no rows were returned, so the policy wasn't found
-                    Ok(None)
-                } else {
-                    // get the first row returned
-                    match query_rows.maybe_first_row::<(String, String)>()? {
-                        Some((_, group)) => Ok(Some(group)),
-                        // no rows were returned, so the policy wasn't found
-                        None => Ok(None),
-                    }
-                }
+                // a returned row names the group it was found in
+                Ok::<Option<String>, ApiError>(row.map(|row| row.group))
             })
             .buffer_unordered(100),
     )
@@ -434,26 +414,28 @@ pub async fn update(
     // concurrently insert the updated network policy for each group
     stream::iter(network_policy.groups.iter())
         .map(Ok::<&String, ApiError>)
-        .try_for_each_concurrent(100, |group| async move {
-            shared
-                .scylla
-                .session
-                .execute_unpaged(
-                    &shared.scylla.prep.network_policies.insert,
-                    (
-                        group,
-                        &network_policy.name,
-                        network_policy.id,
-                        &network_policy.k8s_name,
-                        &network_policy.created,
-                        serialize!(&network_policy.ingress),
-                        serialize!(&network_policy.egress),
-                        network_policy.forced_policy,
-                        network_policy.default_policy,
-                    ),
-                )
-                .await?;
-            Ok(())
+        .try_for_each_concurrent(100, |group| {
+            // build this group's row, with its rules stored as JSON
+            let row = NetworkPoliciesTableRef {
+                group,
+                name: &network_policy.name,
+                id: network_policy.id,
+                k8s_name: &network_policy.k8s_name,
+                created: network_policy.created,
+                ingress: JsonText(&network_policy.ingress),
+                egress: JsonText(&network_policy.egress),
+                forced_policy: network_policy.forced_policy,
+                default_policy: network_policy.default_policy,
+            };
+            async move {
+                shared
+                    .scylla
+                    .queries
+                    .network_policies
+                    .insert(&shared.scylla.session, &row)
+                    .await?;
+                Ok(())
+            }
         })
         .await?;
     // define a Redis pipeline to run, and the groups/policy name to delete from Scylla based
@@ -520,10 +502,12 @@ pub async fn update(
         async {
             shared
                 .scylla
-                .session
-                .execute_unpaged(
-                    &shared.scylla.prep.network_policies.delete,
-                    (&scylla_delete_groups, scylla_delete_name),
+                .queries
+                .network_policies
+                .delete_chunk(
+                    &shared.scylla.session,
+                    &scylla_delete_groups,
+                    scylla_delete_name,
                 )
                 .await
                 .map_err(ApiError::from)
@@ -570,10 +554,12 @@ pub async fn delete(network_policy: NetworkPolicy, shared: &Shared) -> Result<()
         async {
             shared
                 .scylla
-                .session
-                .execute_unpaged(
-                    &shared.scylla.prep.network_policies.delete,
-                    (&network_policy.groups, &network_policy.name),
+                .queries
+                .network_policies
+                .delete_chunk(
+                    &shared.scylla.session,
+                    &network_policy.groups,
+                    &network_policy.name,
                 )
                 .await
                 .map_err(ApiError::from)
@@ -626,11 +612,9 @@ pub async fn delete_all_group(group: &Group, shared: &Shared) -> Result<(), ApiE
         async {
             shared
                 .scylla
-                .session
-                .execute_unpaged(
-                    &shared.scylla.prep.network_policies.delete_all_in_group,
-                    (&group.name,),
-                )
+                .queries
+                .network_policies
+                .delete_all_in_group(&shared.scylla.session, &group.name)
                 .await
                 .map_err(ApiError::from)
         }

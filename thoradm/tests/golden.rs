@@ -87,6 +87,10 @@ const GOLDEN_LOSSES: &[GoldenLoss] = &[
     },
 ];
 
+/// The views the goldens' source namespaces held that the API's setup no longer creates, so a
+/// restore target holds them only when an older release created them there
+const UNCREATED_VIEWS: &[&str] = &["entities_by_name"];
+
 /// Returns the harness admin's login, reading it the first time, before any golden is restored
 ///
 /// # Arguments
@@ -480,7 +484,14 @@ async fn golden_differences(
         ));
     }
     // every column compared with what the golden's source held, minus the format's losses
-    let expected = Snapshot::load(&golden_root().join(name).join("expected/snapshot.json"));
+    let mut expected = Snapshot::load(&golden_root().join(name).join("expected/snapshot.json"));
+    // a view the golden's source held that the API's setup no longer creates is compared only
+    // when the restore target holds it
+    for view in UNCREATED_VIEWS {
+        if !found.scylla.contains_key(*view) {
+            expected.scylla.remove(*view);
+        }
+    }
     let oracle = Oracle {
         rules: ORACLE_RULES,
         format: Some(golden_format(name)),

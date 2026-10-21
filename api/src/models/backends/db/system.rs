@@ -6,9 +6,10 @@ use std::collections::{HashMap, HashSet};
 use tracing::{Level, event, instrument};
 use uuid::Uuid;
 
-use super::cursors::{DEFAULT_LIMIT_CAP, check_limit};
 use super::keys::{self, StreamKeys, SystemKeys, UserKeys};
 use super::{SimpleScyllaCursor, helpers};
+use crate::models::schema::queries::NodesInsert;
+use crate::models::schema::{CursorLimit, DEFAULT_LIMIT_CAP};
 use crate::models::system::{
     BARE_METAL_CACHE_KEY, DEFAULT_IFF, EXTERNAL_CACHE_KEY, K8S_CACHE_KEY, KVM_CACHE_KEY,
     WINDOWS_CACHE_KEY, WorkerStatus,
@@ -451,19 +452,18 @@ pub async fn flush_db(shared: &Shared) -> Result<u64, ApiError> {
 /// * `shared` - Shared Thorium objects
 #[instrument(name = "db::system::register", skip_all, fields(cluster = &node.cluster, node = &node.name), err(Debug))]
 pub async fn register(node: &NodeRegistration, shared: &Shared) -> Result<(), ApiError> {
-    // save this nodes info in scylla
+    // save this nodes info in scylla, with its health and resources stored as JSON
+    let row = NodesInsert {
+        cluster: &node.cluster,
+        node: &node.name,
+        health: &NodeHealth::Registered,
+        resources: &node.resources,
+    };
     shared
         .scylla
-        .session
-        .execute_unpaged(
-            &shared.scylla.prep.nodes.insert,
-            (
-                &node.cluster,
-                &node.name,
-                serialize!(&NodeHealth::Registered),
-                serialize!(&node.resources),
-            ),
-        )
+        .queries
+        .nodes
+        .insert(&shared.scylla.session, &row)
         .await?;
     Ok(())
 }
@@ -542,16 +542,14 @@ pub async fn get_node(
     params: &NodeGetParams,
     shared: &Shared,
 ) -> Result<Node, ApiError> {
-    // get this nodes info from scylla
-    let query = shared
+    // get this nodes info from scylla, trying to get the first row
+    let rows = shared
         .scylla
-        .session
-        .execute_unpaged(&shared.scylla.prep.nodes.get, (cluster, node))
+        .queries
+        .nodes
+        .get(&shared.scylla.session, cluster, node)
         .await?;
-    // enable casting to types for this query
-    let query_rows = query.into_rows_result()?;
-    // try to get the first row
-    if let Some(row) = query_rows.maybe_first_row::<NodeRow>()? {
+    if let Some(row) = rows.into_iter().next().transpose()? {
         // get this nodes workers if any exist
         let node = get_workers_for_node(row, &params.scalers, shared).await?;
         return Ok(node);
@@ -579,8 +577,9 @@ pub async fn get_node_rows(
         // execute this query
         let query = shared
             .scylla
-            .session
-            .execute_unpaged(&shared.scylla.prep.nodes.get_many, (clusters, nodes))
+            .queries
+            .nodes
+            .get_many_chunk(&shared.scylla.session, clusters, nodes)
             .await?;
         // add our query
         queries.push(query);
@@ -590,12 +589,13 @@ pub async fn get_node_rows(
             // break out nodes into chunks of one
             for chunk in nodes.chunks(100) {
                 // build the values to bind for this chunk
-                let binds = chunked_node_binds(cluster, chunk);
+                let (cluster_list, nodes_chunk) = chunked_node_binds(cluster, chunk);
                 // execute this query
                 let query = shared
                     .scylla
-                    .session
-                    .execute_unpaged(&shared.scylla.prep.nodes.get_many, binds)
+                    .queries
+                    .nodes
+                    .get_many_chunk(&shared.scylla.session, &cluster_list, &nodes_chunk)
                     .await?;
                 // add our query
                 queries.push(query);
@@ -606,14 +606,8 @@ pub async fn get_node_rows(
     let mut node_rows = Vec::with_capacity(nodes.len());
     // cast each query into node rows
     for query in queries {
-        // enable casting to types for this query
-        let query_rows = query.into_rows_result()?;
-        // set the type to cast this iter too
-        let typed_iter = query_rows
-            // set the type
-            .rows::<NodeRow>()?
-            // log any rows we fail to deserialize
-            .filter_map(|row| log_scylla_err!(row));
+        // log any rows we fail to deserialize
+        let typed_iter = query.into_iter().filter_map(|row| log_scylla_err!(row));
         // extend our vec with this queries node rows
         node_rows.extend(typed_iter);
     }
@@ -640,16 +634,15 @@ pub async fn update_node(
         // update this nodes info in scylla
         shared
             .scylla
-            .session
-            .execute_unpaged(
-                &shared.scylla.prep.nodes.update_heart_beat,
-                (
-                    serialize!(&update.health),
-                    serialize!(&update.resources),
-                    heart_beat,
-                    &node.cluster,
-                    &node.name,
-                ),
+            .queries
+            .nodes
+            .update_heart_beat(
+                &shared.scylla.session,
+                &update.health,
+                &update.resources,
+                Some(heart_beat),
+                &node.cluster,
+                &node.name,
             )
             .await?;
     } else {
@@ -657,15 +650,14 @@ pub async fn update_node(
         // update this nodes info in scylla
         shared
             .scylla
-            .session
-            .execute_unpaged(
-                &shared.scylla.prep.nodes.update,
-                (
-                    serialize!(&update.health),
-                    serialize!(&update.resources),
-                    &node.cluster,
-                    &node.name,
-                ),
+            .queries
+            .nodes
+            .update(
+                &shared.scylla.session,
+                &update.health,
+                &update.resources,
+                &node.cluster,
+                &node.name,
             )
             .await?;
     }
@@ -688,7 +680,7 @@ pub async fn list_nodes(
     shared: &Shared,
 ) -> Result<SimpleScyllaCursor<NodeListLine>, ApiError> {
     // make sure our page size is one we can serve
-    let page_size = check_limit(params.page_size, DEFAULT_LIMIT_CAP, "page_size")?;
+    let page_size = CursorLimit::from_user(params.page_size, DEFAULT_LIMIT_CAP, "page_size")?;
     // if a cursor id was set then get it otherwise make a new cursor scoped to the creating user
     let mut cursor = match params.cursor {
         Some(cursor_id) => {
@@ -719,7 +711,7 @@ pub async fn list_node_details(
     shared: &Shared,
 ) -> Result<ApiCursor<Node>, ApiError> {
     // make sure our page size is one we can serve
-    let page_size = check_limit(params.page_size, DEFAULT_LIMIT_CAP, "page_size")?;
+    let page_size = CursorLimit::from_user(params.page_size, DEFAULT_LIMIT_CAP, "page_size")?;
     // if a cursor id was set then get it otherwise make a new cursor scoped to the creating user
     let mut cursor: SimpleScyllaCursor<NodeRow> = match params.cursor {
         Some(cursor_id) => {

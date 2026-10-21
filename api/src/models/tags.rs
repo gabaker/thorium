@@ -440,19 +440,32 @@ impl<T: TagSupport> Default for TagDeleteRequest<T> {
     }
 }
 
+/// The number of tags in one partition of the tags table, read to rebuild its census
 #[derive(Debug)]
-#[cfg_attr(feature = "scylla-utils", derive(scylla::DeserializeRow))]
 #[cfg_attr(
     feature = "scylla-utils",
-    scylla(flavor = "enforce_order", skip_name_checks)
+    derive(crate::models::schema::ScyllaProjection)
+)]
+#[cfg_attr(
+    feature = "scylla-utils",
+    thorium_projection(of = crate::models::schema::scylla::TagsTable)
 )]
 pub struct TagCensusRow {
+    /// The kind of the partition
+    #[cfg_attr(feature = "scylla-utils", thorium(column = "type"))]
     pub kind: TagType,
+    /// The group the partition is in
     pub group: String,
+    /// The year the partition is in
     pub year: i32,
+    /// The partition's bucket within its year
     pub bucket: i32,
+    /// The tag key of the partition
     pub key: String,
+    /// The tag value of the partition
     pub value: String,
+    /// How many rows the partition holds
+    #[cfg_attr(feature = "scylla-utils", thorium(expr = "count(*)"))]
     pub count: i64,
 }
 
@@ -461,21 +474,14 @@ impl<T: TagSupport + 'static + Send> super::CensusSupport for TagRequest<T> {
     /// The type returned by our prepared statement
     type Row = TagCensusRow;
 
-    /// Build the prepared statement for getting partition count info
-    async fn scan_prepared_statement(
-        scylla: &scylla::client::session::Session,
-        ns: &str,
-    ) -> Result<scylla::statement::prepared::PreparedStatement, scylla::errors::PrepareError> {
-        // build tags get partition count prepared statement
-        scylla
-        .prepare(format!(
-            "SELECT type, group, year, bucket, key, value, count(*) \
-            FROM {}.tags \
-            WHERE token(type, group, year, bucket, key, value) >= ? AND token(type, group, year, bucket, key, value) <= ? \
-            GROUP BY type, group, year, bucket, key, value",
-            ns,
-        ))
-        .await
+    /// The generated census statement's text for a namespace
+    ///
+    /// # Arguments
+    ///
+    /// * `ns` - The namespace the table is in
+    fn census_cql(ns: &str) -> String {
+        // the census statement generated on the table's queries struct
+        crate::models::schema::queries::TagsQueries::census_cql(ns)
     }
 
     /// Get the count for this partition
@@ -509,19 +515,33 @@ pub struct TagCensusCaseInsensitive<T: TagSupport> {
     phantom: PhantomData<T>,
 }
 
+/// The number of tags in one partition of the case-insensitive tags view, read to rebuild its
+/// census
 #[derive(Debug)]
-#[cfg_attr(feature = "scylla-utils", derive(scylla::DeserializeRow))]
 #[cfg_attr(
     feature = "scylla-utils",
-    scylla(flavor = "enforce_order", skip_name_checks)
+    derive(crate::models::schema::ScyllaProjection)
+)]
+#[cfg_attr(
+    feature = "scylla-utils",
+    thorium_projection(of = crate::models::schema::scylla::TagsCaseInsensitiveView)
 )]
 pub struct TagCensusCaseInsensitiveRow {
+    /// The kind of the partition
+    #[cfg_attr(feature = "scylla-utils", thorium(column = "type"))]
     pub kind: TagType,
+    /// The group the partition is in
     pub group: String,
+    /// The year the partition is in
     pub year: i32,
+    /// The partition's bucket within its year
     pub bucket: i32,
+    /// The lowercased tag key of the partition
     pub key_lower: String,
+    /// The lowercased tag value of the partition
     pub value_lower: String,
+    /// How many rows the partition holds
+    #[cfg_attr(feature = "scylla-utils", thorium(expr = "count(*)"))]
     pub count: i64,
 }
 
@@ -530,20 +550,14 @@ impl<T: TagSupport + 'static + Send> super::CensusSupport for TagCensusCaseInsen
     /// The type returned by our prepared statement
     type Row = TagCensusCaseInsensitiveRow;
 
-    /// Build the prepared statement for getting partition count info
-    async fn scan_prepared_statement(
-        scylla: &scylla::client::session::Session,
-        ns: &str,
-    ) -> Result<scylla::statement::prepared::PreparedStatement, scylla::errors::PrepareError> {
-        // build tags case insensitive get partition count prepared statement
-        scylla
-        .prepare(format!(
-            "SELECT type, group, year, bucket, key_lower, value_lower, count(*) \
-            FROM {ns}.tags_case_insensitive \
-            WHERE token(type, group, year, bucket, key_lower, value_lower) >= ? AND token(type, group, year, bucket, key_lower, value_lower) <= ? \
-            GROUP BY type, group, year, bucket, key_lower, value_lower"
-        ))
-        .await
+    /// The generated census statement's text for a namespace
+    ///
+    /// # Arguments
+    ///
+    /// * `ns` - The namespace the table is in
+    fn census_cql(ns: &str) -> String {
+        // the census statement generated on the table's queries struct
+        crate::models::schema::queries::TagsCaseInsensitiveQueries::census_cql(ns)
     }
 
     /// Get the count for this partition

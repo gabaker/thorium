@@ -5,10 +5,13 @@ use std::collections::{HashMap, HashSet};
 use bytesize::ByteSize;
 use chrono::prelude::*;
 use futures::StreamExt;
+use scylla::client::pager::TypedRowStream;
 use scylla::client::session::Session;
-use scylla::statement::prepared::PreparedStatement;
 use serde_json::{Value, json};
 use thorium::client::ResultSearchEvents;
+use thorium::models::schema::queries::search::{
+    ResultEnumerateRow, SearchResultsAuthQueries, SearchResultsIdsQueries, SearchResultsQueries,
+};
 use thorium::models::{ElasticIndex, OutputKind, ResultSearchEvent};
 use thorium::{Error, Thorium};
 use tracing::{Level, event, instrument};
@@ -20,15 +23,15 @@ use crate::events::CompactResultEvent;
 use crate::index::{IndexMapping, IndexTyped};
 use crate::stores::{Elastic, StoreIdentifiable, StoreLookup};
 
-mod scylla_utils;
-
-use scylla_utils::{
-    ResultEnumerateRow, ResultEventInfoRow, ResultInitDataRow, ResultRow, ResultsPrepared,
-};
-
+/// The source of results to stream, with the statements it reads them with
 #[derive(Clone)]
 pub struct Results {
-    prepared: ResultsPrepared,
+    /// The statements on the `results_ids` view
+    ids: SearchResultsIdsQueries,
+    /// The statements on the results table
+    bodies: SearchResultsQueries,
+    /// The statements on the `results_auth` view
+    auth: SearchResultsAuthQueries,
 }
 
 #[async_trait::async_trait]
@@ -53,17 +56,48 @@ impl DataSource for Results {
 
     type EventClient = ResultSearchEvents;
 
+    /// Prepare the statements the results source reads with
+    ///
+    /// # Arguments
+    ///
+    /// * `scylla` - The Scylla session to prepare the statements on
+    /// * `ns` - The keyspace the results tables and views are in
     async fn new(scylla: &Session, ns: &str) -> Result<Self, Error> {
-        let prepared = ResultsPrepared::prepare(scylla, ns).await?;
-        Ok(Self { prepared })
+        // prepare the generated statements this source reads with
+        let ids = SearchResultsIdsQueries::prepare(scylla, ns)
+            .await
+            .map_err(|err| Error::new(format!("Failed to prepare results statements: {err}")))?;
+        let bodies = SearchResultsQueries::prepare(scylla, ns)
+            .await
+            .map_err(|err| Error::new(format!("Failed to prepare results statements: {err}")))?;
+        let auth = SearchResultsAuthQueries::prepare(scylla, ns)
+            .await
+            .map_err(|err| Error::new(format!("Failed to prepare results statements: {err}")))?;
+        Ok(Self { ids, bodies, auth })
     }
 
     fn event_client(thorium: &Thorium) -> &Self::EventClient {
         &thorium.search.events.results
     }
 
-    fn enumerate_prepared(&self) -> &PreparedStatement {
-        &self.prepared.enumerate
+    /// Page through the keys that have results in one token range, reading each key once
+    ///
+    /// # Arguments
+    ///
+    /// * `scylla` - The Scylla session to read with
+    /// * `start` - The first token of the range
+    /// * `end` - The last token of the range
+    async fn enumerate(
+        &self,
+        scylla: &Session,
+        start: i64,
+        end: i64,
+    ) -> Result<TypedRowStream<ResultEnumerateRow>, Error> {
+        // page through the keys with results in this range
+        self.ids
+            .enumerate(scylla, start, end)
+            .await
+            .map_err(|err| Error::new(format!("Failed to enumerate data from Scylla: {err}")))
     }
 
     #[instrument(
@@ -251,12 +285,12 @@ impl Results {
         let mut result_map = ResultsMap::with_capacity(ids.len());
         // chunk into groups of 100
         for ids_chunk in ids.chunks(100) {
-            let resp = scylla
-                .execute_iter(self.prepared.results.clone(), (ids_chunk,))
+            let ids_chunk = ids_chunk.iter().map(|id| **id).collect::<Vec<Uuid>>();
+            let mut typed_stream = self
+                .bodies
+                .results_chunk(scylla, &ids_chunk)
                 .await
                 .map_err(|err| Error::new(format!("Error pulling results: {err}")))?;
-            // cast to rows
-            let mut typed_stream = resp.rows_stream::<ResultRow>().unwrap();
             while let Some(row) = typed_stream.next().await {
                 // check the row is valid
                 let row = row.unwrap();
@@ -286,11 +320,15 @@ impl Results {
         // chunk into groups of 100
         for keys_chunk in keys.chunks(100) {
             // get info on results for the given keys
-            let resp = scylla
-                .execute_iter(self.prepared.init_data.clone(), (keys_chunk,))
+            let keys_chunk = keys_chunk
+                .iter()
+                .map(|key| (*key).clone())
+                .collect::<Vec<String>>();
+            let mut typed_stream = self
+                .ids
+                .init_data_chunk(scylla, &keys_chunk)
                 .await
                 .map_err(|err| Error::new(format!("Error pulling results info: {err}")))?;
-            let mut typed_stream = resp.rows_stream::<ResultInitDataRow>().unwrap();
             // organize the info by key
             while let Some(row) = typed_stream.next().await {
                 // make sure the row is valid
@@ -330,18 +368,16 @@ impl Results {
         // chunk groups by 100
         for groups_chunk in groups.chunks(100) {
             // get info on results for the given keys
-            let resp = scylla
-                .execute_iter(
-                    self.prepared.event_data.clone(),
-                    (
-                        &compacted_event.item,
-                        compacted_event.result_kind,
-                        groups_chunk,
-                    ),
+            let mut typed_stream = self
+                .auth
+                .event_data_chunk(
+                    scylla,
+                    &compacted_event.item,
+                    &compacted_event.result_kind,
+                    groups_chunk,
                 )
                 .await
                 .map_err(|err| Error::new(format!("Error pulling info on event: {err}")))?;
-            let mut typed_stream = resp.rows_stream::<ResultEventInfoRow>().unwrap();
             // organize the info by key
             while let Some(row) = typed_stream.next().await {
                 // make sure the row is valid

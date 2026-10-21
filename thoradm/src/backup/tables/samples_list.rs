@@ -4,21 +4,20 @@ use ahash::AHasher;
 use bytecheck::CheckBytes;
 use chrono::prelude::*;
 use rkyv::{Archive, Deserialize, Serialize};
-use scylla::DeserializeRow;
-use scylla::client::session::Session;
-use scylla::errors::PrepareError;
-use scylla::statement::prepared::PreparedStatement;
+use scylla::SerializeRow;
 use std::hash::Hasher;
 use thorium::Conf;
 use uuid::Uuid;
 
 use super::Versioned;
 use crate::backup::{Backup, Restore, Scrub, Utils};
+use thorium::models::schema::ScyllaProjection;
+use thorium::models::schema::scylla::SamplesListTable;
 
 /// A samples list row as format 2 archives it; `None` is a cell the source row held unset
-#[derive(Debug, Archive, Serialize, Deserialize, DeserializeRow)]
+#[derive(Debug, Archive, Serialize, Deserialize, ScyllaProjection)]
 #[archive_attr(derive(Debug, CheckBytes))]
-#[scylla(flavor = "enforce_order", skip_name_checks)]
+#[thorium_projection(of = SamplesListTable)]
 pub struct SamplesList {
     /// The group this sample is in
     pub group: String,
@@ -56,31 +55,12 @@ impl Utils for SamplesList {
 /// Implement backup support for the samples list table
 #[async_trait::async_trait]
 impl Backup for SamplesList {
+    /// The table this archive struct backs up, read through its generated statements
+    type Table = SamplesListTable;
+
     /// The columns of this table's partition key, used to name rows that fail to decode
     fn partition_key() -> &'static [&'static str] {
         &["group", "year", "bucket"]
-    }
-
-    /// The prepared statement to use when retrieving data from Scylla
-    ///
-    /// # Arguments
-    ///
-    /// * `scylla` - A scylla client
-    /// * `ns` - The namespace in scylla this table is from
-    async fn prepared_statement(
-        scylla: &Session,
-        ns: &str,
-    ) -> Result<PreparedStatement, PrepareError> {
-        // build samples insert prepared statement
-        scylla
-            .prepare(format!(
-                "Select group, year, bucket, sha256, sha1, md5, id, name, description, submitter, origin, uploaded \
-                From {}.{} \
-                Where token(group, year, bucket) >= ? AND token(group, year, bucket) <= ?",
-                ns,
-                Self::name(),
-            ))
-            .await
     }
 
     /// Hash this partitions info to see if we have changed partitions
@@ -99,6 +79,35 @@ impl Backup for SamplesList {
 /// Implement scrub support for the samples list table
 impl Scrub for SamplesList {}
 
+/// The values a restored row binds by column name to the table's generated full-row insert
+#[derive(SerializeRow)]
+pub struct SamplesListValues {
+    /// The `group` column
+    pub group: String,
+    /// The `year` column
+    pub year: i32,
+    /// The `bucket` column
+    pub bucket: i32,
+    /// The `sha256` column
+    pub sha256: Option<String>,
+    /// The `sha1` column
+    pub sha1: Option<String>,
+    /// The `md5` column
+    pub md5: Option<String>,
+    /// The `id` column
+    pub id: Uuid,
+    /// The `name` column
+    pub name: Option<String>,
+    /// The `description` column
+    pub description: Option<String>,
+    /// The `submitter` column
+    pub submitter: Option<String>,
+    /// The `origin` column
+    pub origin: Option<String>,
+    /// The `uploaded` column
+    pub uploaded: DateTime<Utc>,
+}
+
 /// Implement restore support for the samples list table
 #[async_trait::async_trait]
 impl Restore for SamplesList {
@@ -106,42 +115,8 @@ impl Restore for SamplesList {
     // the size itself
     type PartitionConf = u16;
 
-    /// The group, year, bucket, hashes, id, name, description, submitter, origin, and upload time
-    type Values = (
-        String,
-        i32,
-        i32,
-        Option<String>,
-        Option<String>,
-        Option<String>,
-        Uuid,
-        Option<String>,
-        Option<String>,
-        Option<String>,
-        Option<String>,
-        DateTime<Utc>,
-    );
-
-    /// The prepared statement to use when restoring data to scylla
-    ///
-    /// # Arguments
-    ///
-    /// * `scylla` - A scylla client
-    /// * `ns` - The namespace in scylla this table is from
-    async fn prepared_statement(
-        scylla: &Session,
-        ns: &str,
-    ) -> Result<PreparedStatement, PrepareError> {
-        scylla
-            .prepare(format!(
-                "INSERT INTO {}.{} \
-                (group, year, bucket, sha256, sha1, md5, id, name, description, submitter, origin, uploaded) \
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                ns,
-                Self::name(),
-            ))
-            .await
-    }
+    /// The row the generated full-row insert binds by name
+    type Values = SamplesListValues;
 
     /// Get the partition size for this data type
     ///
@@ -162,20 +137,20 @@ impl Restore for SamplesList {
     fn values(self, partition_size: &u16, _format: u32) -> Self::Values {
         // calculate the new bucket
         let bucket = thorium::utils::helpers::partition(self.uploaded, self.year, *partition_size);
-        (
-            self.group,
-            self.year,
+        SamplesListValues {
+            group: self.group,
+            year: self.year,
             bucket,
-            self.sha256,
-            self.sha1,
-            self.md5,
-            self.id,
-            self.name,
-            self.description,
-            self.submitter,
-            self.origin,
-            self.uploaded,
-        )
+            sha256: self.sha256,
+            sha1: self.sha1,
+            md5: self.md5,
+            id: self.id,
+            name: self.name,
+            description: self.description,
+            submitter: self.submitter,
+            origin: self.origin,
+            uploaded: self.uploaded,
+        }
     }
 }
 

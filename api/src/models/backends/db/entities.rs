@@ -11,12 +11,13 @@ use uuid::Uuid;
 
 use crate::models::backends::TagSupport;
 use crate::models::backends::db::ScyllaCursor;
+use crate::models::schema::scylla::EntitiesTableRef;
 use crate::models::{
-    Entity, EntityForm, EntityListLine, EntityListParams, EntityListSupplementRow, EntityRow,
-    KeySupport, TagDeleteRequest, TagRequest, User,
+    Entity, EntityForm, EntityListLine, EntityListParams, EntityListSupplementRow, KeySupport,
+    TagDeleteRequest, TagRequest, User,
 };
 use crate::utils::{ApiError, Shared, helpers};
-use crate::{deserialize, not_found, serialize};
+use crate::{deserialize, not_found};
 
 /// Create a `Entity` in Scylla
 ///
@@ -42,8 +43,6 @@ pub async fn create(
     let entity = form.cast(user, id, shared).await?;
     // populate our intrinsic tags
     entity.populate_intrinsic_tags(&mut tags)?;
-    // serialize our metadata
-    let serialized_meta = serialize!(&entity.metadata);
     // get the current timestamp for when this entity was created
     let now = Utc::now();
     let year = now.year();
@@ -55,28 +54,28 @@ pub async fn create(
     stream::iter(entity.groups.iter())
         .map(Ok::<&String, ApiError>)
         .try_for_each_concurrent(100, |group| {
-            let local_entity = &entity;
-            let local_meta = &serialized_meta;
+            // build this group's row: only `group` differs, and every other field borrows the
+            // entity, with its metadata stored as JSON
+            let row = EntitiesTableRef {
+                kind: &entity.kind,
+                group,
+                year,
+                bucket,
+                created: now,
+                id: entity.id,
+                name: &entity.name,
+                submitter: &user.username,
+                kind_data: &entity.metadata,
+                description: entity.description.as_deref(),
+                image: entity.image.as_deref(),
+            };
             async move {
+                // write this group's row
                 shared
                     .scylla
-                    .session
-                    .execute_unpaged(
-                        &shared.scylla.prep.entities.insert,
-                        (
-                            entity.kind,
-                            group,
-                            &year,
-                            &bucket,
-                            &now,
-                            &entity.id,
-                            &local_entity.name,
-                            &user.username,
-                            local_meta,
-                            &local_entity.description,
-                            &local_entity.image,
-                        ),
-                    )
+                    .queries
+                    .entities
+                    .insert(&shared.scylla.session, &row)
                     .await?;
                 Ok(())
             }
@@ -139,17 +138,14 @@ pub async fn get(groups: &[String], id: Uuid, shared: &Shared) -> Result<Entity,
     let mut entity: Option<Entity> = None;
     // break our groups into chunks of 100
     for groups_chunk in groups.chunks(100) {
-        let query = shared
+        let rows = shared
             .scylla
-            .session
-            .execute_unpaged(&shared.scylla.prep.entities.get, (&id, groups_chunk))
+            .queries
+            .entities_by_id
+            .get_chunk(&shared.scylla.session, id, groups_chunk)
             .await?;
-        // enable rows on this query response
-        let query_rows = query.into_rows_result()?;
-        // set the type for our rows
-        let typed_iter = query_rows.rows::<EntityRow>()?;
         // cast rows to entity rows and save the info
-        for row in typed_iter {
+        for row in rows {
             // make sure the row is valid
             let row = row?;
             // get the entity we are building or cast this row to one
@@ -205,7 +201,8 @@ pub async fn list(
 /// List entities for a grep search without saving the list cursor
 ///
 /// Grep cursors embed the retained state of their inner list cursor, so the cursor
-/// built here is handed back unsaved for its owner to persist atomically.
+/// built here is handed back unsaved for its owner to persist atomically. A resumed
+/// cursor lists only the saved groups the params may still list.
 ///
 /// # Arguments
 ///
@@ -226,13 +223,10 @@ pub async fn list_greppable(
 ) -> Result<ScyllaCursor<EntityListLine>, ApiError> {
     // resume our cursor from its retained state or build a new one from our params
     let mut cursor = match retain {
-        Some(retain) => ScyllaCursor::from_retain(
-            deserialize!(&retain),
-            &user.username,
-            params.limit,
-            true,
-            shared,
-        )?,
+        // narrow the resumed cursor to the groups this page was authorized for
+        Some(retain) => {
+            ScyllaCursor::from_retain(deserialize!(&retain), params, &user.username, true, shared)?
+        }
         None => ScyllaCursor::from_params(params, &user.username, true, shared).await?,
     };
     // get the next page of data for this cursor
@@ -267,18 +261,14 @@ pub async fn get_many(
     let mut data_map: HashMap<Uuid, Entity> = HashMap::new();
     for (ids_chunk, groups_chunk) in ids.chunks(50).cartesian_product(groups.chunks(50)) {
         // query for this chunk combo's data
-        let query = shared
+        let rows = shared
             .scylla
-            .session
-            .execute_unpaged(
-                &shared.scylla.prep.entities.get_many,
-                (ids_chunk, groups_chunk),
-            )
+            .queries
+            .entities_by_id
+            .get_many_chunk(&shared.scylla.session, ids_chunk, groups_chunk)
             .await?;
-        // make sure we got rows
-        let query_rows = query.into_rows_result()?;
         // try to cast rows to entiry rows
-        for cast in query_rows.rows::<EntityRow>()? {
+        for cast in rows {
             // make sure the row is valid
             let row = cast?;
             // get an entry to the timestamp map
@@ -339,27 +329,23 @@ async fn supplement_tag_lines(
         .map(|(index, line)| (line.id, index))
         .collect::<HashMap<_, _>>();
     // collect all our ids to a list to chunk them
-    let ids = lines.iter().map(|line| &line.id).collect::<Vec<_>>();
+    let ids = lines.iter().map(|line| line.id).collect::<Vec<_>>();
     // get all of the supplement rows concurrently
     let supplement_rows = helpers::assert_send_stream(
         stream::iter(ids.chunks(100))
             .map(|ids_chunk| async move {
                 // get the names/kinds from these ids
-                let query = shared
+                let found = shared
                     .scylla
-                    .session
-                    .execute_unpaged(
-                        &shared.scylla.prep.entities.get_names_kinds_by_ids,
-                        (ids_chunk,),
-                    )
+                    .queries
+                    .entities_by_id
+                    .get_names_kinds_by_ids_chunk(&shared.scylla.session, ids_chunk)
                     .await?;
-                // try to enable rows on this query response
-                let query_rows = query.into_rows_result()?;
                 let mut rows = Vec::new();
-                for row in query_rows.rows::<EntityListSupplementRow>()? {
+                for row in found {
                     rows.push(row?);
                 }
-                Ok(rows)
+                Ok::<Vec<EntityListSupplementRow>, ApiError>(rows)
             })
             .buffer_unordered(10),
     )
@@ -401,8 +387,6 @@ pub async fn update(
     entity.populate_intrinsic_tags(&mut tags)?;
     // drop any association specific data
     entity.drop_associated_data();
-    // serialize our metadata
-    let serialized_meta = serialize!(&entity.metadata);
     // ge the year this entity was created
     let year = entity.created.year();
     // get the partition size for repos
@@ -413,28 +397,28 @@ pub async fn update(
     stream::iter(entity.groups.iter())
         .map(Ok::<&String, ApiError>)
         .try_for_each_concurrent(100, |group| {
-            let local_entity = &entity;
-            let local_meta = &serialized_meta;
+            // build this group's row: only `group` differs, and every other field borrows the
+            // entity, with its metadata stored as JSON
+            let row = EntitiesTableRef {
+                kind: &entity.kind,
+                group,
+                year,
+                bucket,
+                created: entity.created,
+                id: entity.id,
+                name: &entity.name,
+                submitter: &entity.submitter,
+                kind_data: &entity.metadata,
+                description: entity.description.as_deref(),
+                image: entity.image.as_deref(),
+            };
             async move {
+                // write this group's row
                 shared
                     .scylla
-                    .session
-                    .execute_unpaged(
-                        &shared.scylla.prep.entities.insert,
-                        (
-                            entity.kind,
-                            group,
-                            &year,
-                            &bucket,
-                            &entity.created,
-                            &entity.id,
-                            &local_entity.name,
-                            &local_entity.submitter,
-                            local_meta,
-                            &local_entity.description,
-                            &local_entity.image,
-                        ),
-                    )
+                    .queries
+                    .entities
+                    .insert(&shared.scylla.session, &row)
                     .await?;
                 Ok(())
             }
@@ -448,17 +432,16 @@ pub async fn update(
         .try_for_each_concurrent(100, |groups_chunk| async move {
             shared
                 .scylla
-                .session
-                .execute_unpaged(
-                    &shared.scylla.prep.entities.delete,
-                    (
-                        entity.kind,
-                        groups_chunk,
-                        &year,
-                        &bucket,
-                        &entity.created,
-                        &entity.id,
-                    ),
+                .queries
+                .entities
+                .delete_chunk(
+                    &shared.scylla.session,
+                    &entity.kind,
+                    groups_chunk,
+                    year,
+                    bucket,
+                    entity.created,
+                    entity.id,
                 )
                 .await?;
             Ok(())
@@ -556,17 +539,16 @@ pub async fn delete(user: &User, entity: &Entity, shared: &Shared) -> Result<(),
         .try_for_each_concurrent(100, |groups_chunk| async move {
             shared
                 .scylla
-                .session
-                .execute_unpaged(
-                    &shared.scylla.prep.entities.delete,
-                    (
-                        entity.kind,
-                        groups_chunk,
-                        &year,
-                        &bucket,
-                        &entity.created,
-                        &entity.id,
-                    ),
+                .queries
+                .entities
+                .delete_chunk(
+                    &shared.scylla.session,
+                    &entity.kind,
+                    groups_chunk,
+                    year,
+                    bucket,
+                    entity.created,
+                    entity.id,
                 )
                 .await?;
             Ok(())

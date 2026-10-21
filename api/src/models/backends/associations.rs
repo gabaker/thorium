@@ -3,17 +3,14 @@
 use axum::extract::FromRequestParts;
 use axum::http::request::Parts;
 use chrono::prelude::*;
-use futures_util::Future;
-use scylla::errors::ExecutionError;
-use scylla::response::query_result::QueryResult;
-use serde::{Deserialize, Serialize};
-use std::collections::{BTreeSet, HashMap, HashSet};
+use std::collections::{BTreeSet, HashSet};
 use std::hash::{Hash, Hasher};
-use std::pin::Pin;
 use uuid::Uuid;
 
 use super::db;
 use crate::models::backends::db::{CursorCore, ScyllaCursor, ScyllaCursorSupport};
+use crate::models::schema::queries::AssociationsListCursor;
+use crate::models::schema::{Bucket, CursorLimit, DEFAULT_LIMIT_CAP};
 use crate::models::{
     ApiCursor, Association, AssociationDeleteRequest, AssociationListParams, AssociationListRow,
     AssociationRequest, AssociationTarget, AssociationTargetColumn, Directionality, Entity, Group,
@@ -231,43 +228,7 @@ impl AssociationTarget {
     }
 }
 
-/// A boxed tie query, so the queries for a tie's target and the targets after it share a type
-type TieQuery<'a> = Pin<Box<dyn Future<Output = Result<QueryResult, ExecutionError>> + Send + 'a>>;
-
-/// The first unconsumed association in a group when a page ends inside rows sharing a timestamp
-#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
-#[serde(untagged)]
-pub enum AssociationTie {
-    /// The target and direction of the first unconsumed row
-    Row {
-        /// The target of the first unconsumed row
-        target: String,
-        /// The direction of the first unconsumed row
-        direction: Directionality,
-    },
-    /// Only the target of the first unconsumed row, which resumes from that target's first
-    /// direction
-    Target(String),
-}
-
-impl AssociationTie {
-    /// Get the target and direction a tie query resumes from
-    ///
-    /// No direction is less than the empty string, so a tie without one resumes from every
-    /// direction of its target.
-    #[must_use]
-    pub fn bounds(self) -> (String, String) {
-        match self {
-            // a full tie resumes from its own direction
-            Self::Row { target, direction } => (target, direction.as_str().to_owned()),
-            // a tie without a direction resumes before every direction
-            Self::Target(target) => (target, String::new()),
-        }
-    }
-}
-
 // implement cursor for our results stream
-#[async_trait::async_trait]
 impl CursorCore for ListableAssociation {
     /// The params to build this cursor from
     type Params = AssociationListParams;
@@ -277,9 +238,6 @@ impl CursorCore for ListableAssociation {
 
     /// The type of data to group our rows by
     type GroupBy = String;
-
-    /// The data structure to store tie info in
-    type Ties = HashMap<String, AssociationTie>;
 
     /// Get our cursor id from params
     ///
@@ -327,9 +285,13 @@ impl CursorCore for ListableAssociation {
     /// # Arguments
     ///
     /// * `params` - The params to use to build this cursor
-    fn get_limit(params: &Self::Params) -> Result<usize, ApiError> {
+    fn get_limit(params: &Self::Params) -> Result<CursorLimit, ApiError> {
         // make sure this limit is one we can serve
-        db::cursors::check_limit(params.limit, db::cursors::DEFAULT_LIMIT_CAP, "limit")
+        Ok(CursorLimit::from_user(
+            params.limit,
+            DEFAULT_LIMIT_CAP,
+            "limit",
+        )?)
     }
 
     /// Get the partition size for this cursor
@@ -340,25 +302,6 @@ impl CursorCore for ListableAssociation {
     fn partition_size(shared: &Shared) -> u16 {
         // get our partition size
         shared.config.thorium.associations.partition_size
-    }
-
-    /// Add an item to our tie breaker map
-    ///
-    /// Each group keeps the target and direction of the first row added for it.
-    ///
-    /// # Arguments
-    ///
-    /// * `ties` - Our current ties
-    fn add_tie(&self, ties: &mut Self::Ties) {
-        // if its not already in the tie map then add each of its groups to our map
-        for group in &self.groups {
-            // if this group doesn't already have a tie entry then add it
-            ties.entry(group.clone())
-                .or_insert_with(|| AssociationTie::Row {
-                    target: self.other.clone(),
-                    direction: self.direction,
-                });
-        }
     }
 
     /// Determines if a new item is a duplicate or not
@@ -381,21 +324,23 @@ impl CursorCore for ListableAssociation {
 }
 
 // implement cursor for our results stream
-#[async_trait::async_trait]
 impl ScyllaCursorSupport for ListableAssociation {
     /// The intermediate list row to use
     type IntermediateRow = AssociationListRow;
 
+    /// The statements this cursor pages with
+    type Statements = AssociationsListCursor;
+
     /// The unique key for this cursors row
     type UniqueType<'a> = (&'a String, Directionality);
 
-    /// Get the timestamp from this items intermediate row
+    /// Get the statements this cursor pages with
     ///
     /// # Arguments
     ///
-    /// * `intermediate` - The intermediate row to get a timestamp for
-    fn get_intermediate_timestamp(intermediate: &Self::IntermediateRow) -> DateTime<Utc> {
-        intermediate.created
+    /// * `shared` - Shared Thorium objects
+    fn statements(shared: &Shared) -> &Self::Statements {
+        &shared.scylla.queries.associations.list
     }
 
     /// Get the timestamp for this item
@@ -423,18 +368,6 @@ impl ScyllaCursorSupport for ListableAssociation {
         (&self.other, self.direction)
     }
 
-    /// Compare two associations that share a timestamp in the order a page consumes them
-    ///
-    /// # Arguments
-    ///
-    /// * `other` - The association to compare against
-    fn cmp_ties(&self, other: &Self) -> std::cmp::Ordering {
-        // targets and then directions cluster in ascending order within a timestamp
-        self.other
-            .cmp(&other.other)
-            .then_with(|| self.direction.as_str().cmp(other.direction.as_str()))
-    }
-
     /// Add a group to a specific returned line
     ///
     /// # Arguments
@@ -458,14 +391,15 @@ impl ScyllaCursorSupport for ListableAssociation {
     /// * `group_by` - The values to group our the rows by
     /// * `extra` - The extra values required to list this data
     /// * `year` - The year we are looking for census data for
+    /// * `bucket` - The newest bucket to look for census data from
     /// * `keys` - The vec to add our census stream keys too
     /// * `shared` - Shared Thorium objects
     fn census_keys<'a>(
-        group_by: &'a Vec<Self::GroupBy>,
+        group_by: &'a [Self::GroupBy],
         extra: &Self::ExtraFilters,
         year: i32,
-        bucket: u32,
-        keys: &mut Vec<(&'a Self::GroupBy, String, i32)>,
+        bucket: Bucket,
+        keys: &mut Vec<(&'a Self::GroupBy, String, Bucket)>,
         shared: &Shared,
     ) {
         // build the keys for each census stream we are going to crawl
@@ -473,93 +407,8 @@ impl ScyllaCursorSupport for ListableAssociation {
             // build the key for this associations census stream
             let key = super::db::keys::associations::census_stream(group, year, extra, shared);
             // add this key to our keys
-            keys.push((group, key, bucket as i32));
+            keys.push((group, key, bucket));
         }
-    }
-
-    /// Builds the queries for getting data from ties in the last query
-    ///
-    /// Each tie gets one query for the remaining directions of its tied target and one for the
-    /// targets after it.
-    ///
-    /// # Arguments
-    ///
-    /// * `ties` - The tie info saved for each group by the last page
-    /// * `extra` - Any extra filters to apply to these queries
-    /// * `year` - The year to get data for
-    /// * `bucket` - The bucket to get data for
-    /// * `uploaded` - The timestamp to get the remaining tied values for
-    /// * `limit` - The max number of rows to return
-    /// * `shared` - Shared Thorium objects
-    fn ties_query(
-        ties: &mut Self::Ties,
-        extra: &Self::ExtraFilters,
-        year: i32,
-        bucket: i32,
-        uploaded: DateTime<Utc>,
-        limit: i32,
-        shared: &Shared,
-    ) -> Result<Vec<impl Future<Output = Result<QueryResult, ExecutionError>>>, ApiError> {
-        // allocate space for two futures for each tie
-        let mut futures: Vec<TieQuery<'_>> = Vec::with_capacity(ties.len() * 2);
-        // if any ties were found then get the rest of them and add them to data
-        for (group, tie) in ties.drain() {
-            // get the target and direction to resume this group from
-            let (target, direction) = tie.bounds();
-            // get the remaining directions of the tied target
-            futures.push(Box::pin(shared.scylla.session.execute_unpaged(
-                &shared.scylla.prep.associations.list_ties_target,
-                (
-                    group.clone(),
-                    year,
-                    bucket,
-                    extra.clone(),
-                    uploaded,
-                    target.clone(),
-                    direction,
-                ),
-            )));
-            // get the targets after the tied one
-            futures.push(Box::pin(shared.scylla.session.execute_unpaged(
-                &shared.scylla.prep.associations.list_ties,
-                (group, year, bucket, extra.clone(), uploaded, target, limit),
-            )));
-        }
-        Ok(futures)
-    }
-
-    /// builds the query string for getting the next page of values
-    ///
-    /// # Arguments
-    ///
-    /// * `group` - The group to restrict our query too
-    /// * `_filters` - Any filters to apply to this query
-    /// * `year` - The year to get data for
-    /// * `bucket` - The bucket to get data for
-    /// * `start` - The earliest timestamp to get data from
-    /// * `end` - The oldest timestamp to get data from
-    /// * `limit` - The max amount of data to get from this query
-    /// * `shared` - Shared Thorium objects
-    #[allow(clippy::too_many_arguments)]
-    async fn pull(
-        group: &Self::GroupBy,
-        extra: &Self::ExtraFilters,
-        year: i32,
-        bucket: Vec<i32>,
-        start: DateTime<Utc>,
-        end: DateTime<Utc>,
-        limit: i32,
-        shared: &Shared,
-    ) -> Result<QueryResult, ExecutionError> {
-        // execute our query
-        shared
-            .scylla
-            .session
-            .execute_unpaged(
-                &shared.scylla.prep.associations.list_pull,
-                (group, year, bucket, extra, start, end, limit),
-            )
-            .await
     }
 }
 
@@ -669,35 +518,5 @@ where
         } else {
             Ok(Self::default())
         }
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::AssociationTie;
-    use crate::models::Directionality;
-
-    /// A tie holds a target and direction, and a tie holding only a target still loads and
-    /// resumes from every direction of that target
-    #[test]
-    fn association_tie_forms_load() {
-        // a full tie round trips through JSON
-        let tie = AssociationTie::Row {
-            target: "provider.tld/user/repo".to_owned(),
-            direction: Directionality::To,
-        };
-        let json = serde_json::to_string(&tie).unwrap();
-        let loaded: AssociationTie = serde_json::from_str(&json).unwrap();
-        assert_eq!(loaded, tie);
-        assert_eq!(
-            loaded.bounds(),
-            ("provider.tld/user/repo".to_owned(), "To".to_owned())
-        );
-        // a tie saved as just a target loads and resumes before any direction
-        let loaded: AssociationTie = serde_json::from_str("\"provider.tld/user/repo\"").unwrap();
-        assert_eq!(
-            loaded.bounds(),
-            ("provider.tld/user/repo".to_owned(), String::new())
-        );
     }
 }

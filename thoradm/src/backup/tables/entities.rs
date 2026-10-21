@@ -3,21 +3,20 @@
 use ahash::AHasher;
 use chrono::{DateTime, Utc};
 use rkyv::{Archive, CheckBytes, Deserialize, Serialize};
-use scylla::{
-    DeserializeRow, client::session::Session, errors::PrepareError,
-    statement::prepared::PreparedStatement,
-};
+use scylla::SerializeRow;
 use std::hash::Hasher;
 use thorium::{Conf, models::EntityKinds};
 use uuid::Uuid;
 
 use super::Versioned;
 use crate::backup::{Backup, Restore, Scrub, Utils};
+use thorium::models::schema::ScyllaProjection;
+use thorium::models::schema::scylla::EntitiesTable;
 
 /// An entities row as format 2 archives it; `None` is a cell the source row held unset
-#[derive(Debug, Archive, Serialize, Deserialize, DeserializeRow)]
+#[derive(Debug, Archive, Serialize, Deserialize, ScyllaProjection)]
 #[archive_attr(derive(Debug, CheckBytes))]
-#[scylla(flavor = "enforce_order", skip_name_checks)]
+#[thorium_projection(of = EntitiesTable)]
 pub struct Entity {
     /// The entity's kind as a raw string
     pub kind: EntityKinds,
@@ -52,31 +51,12 @@ impl Utils for Entity {
 
 #[async_trait::async_trait]
 impl Backup for Entity {
+    /// The table this archive struct backs up, read through its generated statements
+    type Table = EntitiesTable;
+
     /// The columns of this table's partition key, used to name rows that fail to decode
     fn partition_key() -> &'static [&'static str] {
         &["kind", "group", "year", "bucket"]
-    }
-
-    /// The prepared statement to use when retrieving data from Scylla
-    ///
-    /// # Arguments
-    ///
-    /// * `scylla` - The scylla session to build a prepared statement with
-    /// * `ns` - The namespace for this prepared statement
-    async fn prepared_statement(
-        scylla: &Session,
-        ns: &str,
-    ) -> Result<PreparedStatement, PrepareError> {
-        // build logs get prepared statement
-        scylla
-            .prepare(format!(
-                "SELECT kind, group, year, bucket, created, id, name, submitter, kind_data, description, image \
-                FROM {}.{} \
-                WHERE token(kind, group, year, bucket) >= ? AND token(kind, group, year, bucket) <= ?",
-                    ns,
-                    Self::name(),
-                ))
-                .await
     }
 
     /// Hash this partitions info to see if we have changed partitions
@@ -96,6 +76,33 @@ impl Backup for Entity {
 /// Implement scrub support for the samples list table
 impl Scrub for Entity {}
 
+/// The values a restored row binds by column name to the table's generated full-row insert
+#[derive(SerializeRow)]
+pub struct EntityValues {
+    /// The `kind` column
+    pub kind: EntityKinds,
+    /// The `group` column
+    pub group: String,
+    /// The `year` column
+    pub year: i32,
+    /// The `bucket` column
+    pub bucket: i32,
+    /// The `created` column
+    pub created: DateTime<Utc>,
+    /// The `id` column
+    pub id: Uuid,
+    /// The `name` column
+    pub name: Option<String>,
+    /// The `submitter` column
+    pub submitter: Option<String>,
+    /// The `kind_data` column
+    pub kind_data: Option<String>,
+    /// The `description` column
+    pub description: Option<String>,
+    /// The `image` column
+    pub image: Option<String>,
+}
+
 /// Implement restore support for the samples list table
 #[async_trait::async_trait]
 impl Restore for Entity {
@@ -103,42 +110,8 @@ impl Restore for Entity {
     // the size itself
     type PartitionConf = u16;
 
-    /// The kind, group, year, bucket, creation time, id, name, submitter, kind data,
-    /// description, and image
-    type Values = (
-        EntityKinds,
-        String,
-        i32,
-        i32,
-        DateTime<Utc>,
-        Uuid,
-        Option<String>,
-        Option<String>,
-        Option<String>,
-        Option<String>,
-        Option<String>,
-    );
-
-    /// The prepared statement to use when restoring data to scylla
-    ///
-    /// # Arguments
-    ///
-    /// * `scylla` - A scylla client
-    /// * `ns` - The namespace in scylla this table is from
-    async fn prepared_statement(
-        scylla: &Session,
-        ns: &str,
-    ) -> Result<PreparedStatement, PrepareError> {
-        scylla
-            .prepare(format!(
-                "INSERT INTO {}.{} \
-                (kind, group, year, bucket, created, id, name, submitter, kind_data, description, image) \
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                ns,
-                Self::name(),
-            ))
-            .await
-    }
+    /// The row the generated full-row insert binds by name
+    type Values = EntityValues;
 
     /// Get the partition size for this data type
     ///
@@ -159,19 +132,19 @@ impl Restore for Entity {
     fn values(self, partition_size: &u16, _format: u32) -> Self::Values {
         // calculate the new bucket
         let bucket = thorium::utils::helpers::partition(self.created, self.year, *partition_size);
-        (
-            self.kind,
-            self.group,
-            self.year,
+        EntityValues {
+            kind: self.kind,
+            group: self.group,
+            year: self.year,
             bucket,
-            self.created,
-            self.id,
-            self.name,
-            self.submitter,
-            self.kind_data,
-            self.description,
-            self.image,
-        )
+            created: self.created,
+            id: self.id,
+            name: self.name,
+            submitter: self.submitter,
+            kind_data: self.kind_data,
+            description: self.description,
+            image: self.image,
+        }
     }
 }
 

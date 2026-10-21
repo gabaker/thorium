@@ -268,15 +268,23 @@ async fn every_stored_resource_is_classified() {
     // seed one of every resource
     let harness = Harness::get().await;
     fixture::broad(harness).await;
-    // the API created every table and view the registry knows
+    // the API created every table and view the registry knows, except those only keyspaces
+    // older releases created hold
     let tables: BTreeSet<String> = schema_names(harness, false).await.into_iter().collect();
     let views: BTreeSet<String> = schema_names(harness, true).await.into_iter().collect();
     for entry in COVERAGE {
-        match entry.store {
-            Store::ScyllaTable => assert!(tables.contains(entry.name), "no table {}", entry.name),
-            Store::ScyllaView => assert!(views.contains(entry.name), "no view {}", entry.name),
-            Store::Redis | Store::S3 => (),
-        }
+        let held = match entry.store {
+            Store::ScyllaTable => tables.contains(entry.name),
+            Store::ScyllaView => views.contains(entry.name),
+            Store::Redis | Store::S3 => continue,
+        };
+        assert_eq!(
+            held,
+            !entry.legacy,
+            "{} {} is held: {held}",
+            entry.store.label(),
+            entry.name
+        );
     }
     // nothing the namespace holds is unclassified
     assert_eq!(unclassified(harness).await, Vec::<String>::new());
@@ -551,8 +559,9 @@ async fn backed_up_columns_match_the_schema_and_the_archives() {
         Registry::backed_up(Store::ScyllaTable).count()
     );
     for (table, mut read) in statements {
-        // a row's remaining TTL, which notifications read beside their columns, isn't a column
-        read.retain(|column| !column.starts_with("ttl("));
+        // a row's remaining TTL, which notifications read beside their columns under the alias
+        // `ttl`, isn't a column
+        read.retain(|column| !column.starts_with("ttl(") && column != "ttl");
         let entry = Registry::classify(Store::ScyllaTable, &table)
             .unwrap_or_else(|| panic!("{table} has an archive but no entry"));
         assert!(matches!(entry.coverage, Coverage::BackedUp(_)), "{table}");

@@ -12,7 +12,7 @@ vendored-openssl = ["openssl/vendored"]
 [dependencies]
 clap = { workspace = true }
 tokio = { workspace = true }
-thorium-api = { workspace = true , default-features=false, features = ["client", "kanal-err", "trace", "scylla-utils"]}
+thorium-api = { workspace = true , default-features=false, features = ["client", "kanal-err", "trace", "scylla-utils", "search-streamer"]}
 chrono = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }

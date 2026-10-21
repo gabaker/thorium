@@ -436,7 +436,7 @@ lists what today's backup or restore doesn't carry yet. The Thoradm guide's
 | Scylla table | `notifications` | Backed up | `notifications` | CORE |  |
 | Scylla table | `nodes` | Backed up | `nodes` | CORE |  |
 | Scylla table | `logs` | Excluded | stage logs of reactions, which are runtime state and expire by TTL | EPHEMERAL |  |
-| Scylla table | `events` | Excluded | trigger events consumed by the event handler, which expire by TTL | EPHEMERAL |  |
+| Scylla table | `events`, only in keyspaces older releases created | Excluded | a table of trigger events nothing reads or writes | EPHEMERAL |  |
 | Scylla view | `samples` (view of `samples_list`) | Backed up | `samples-list` | CORE |  |
 | Scylla view | `s3_sha256s` (view of `s3_ids`) | Backed up | `s3-ids` | CORE |  |
 | Scylla view | `comments_by_id` (view of `comments`) | Backed up | `comments` | CORE |  |
@@ -449,7 +449,7 @@ lists what today's backup or restore doesn't carry yet. The Thoradm guide's
 | Scylla view | `network_policies_by_name` (view of `network_policies`) | Backed up | `network-policies` | CORE |  |
 | Scylla view | `network_policies_default` (view of `network_policies`) | Backed up | `network-policies` | CORE |  |
 | Scylla view | `entities_by_id` (view of `entities`) | Backed up | `entities` | CORE |  |
-| Scylla view | `entities_by_name` (view of `entities`) | Backed up | `entities` | CORE |  |
+| Scylla view | `entities_by_name` (view of `entities`), only in keyspaces older releases created | Backed up | `entities` | CORE |  |
 | Redis | `users` | Backed up | `redis` | CORE |  |
 | Redis | `user_data:*` | Backed up | `redis` | CORE |  |
 | Redis | `user_groups:*` | Backed up | `redis` | CORE |  |

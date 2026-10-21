@@ -11,11 +11,12 @@ use std::marker::PhantomData;
 use std::path::PathBuf;
 use std::sync::Arc;
 use thorium::Conf;
+use thorium::models::schema::{TableStatements, with_keyspace};
 
 use super::archive::check_partition;
 use super::failures::{FailureLog, FailureRecord, Operation};
 use super::tables::{Versioned, read_rows};
-use super::{ArchiveReader, MonitorUpdate, Utils};
+use super::{ArchiveReader, Backup, MonitorUpdate, Utils};
 use crate::Error;
 use crate::shared::workers::Orders;
 
@@ -119,7 +120,7 @@ impl<R: Restore> RestoreWorker<R> {
         // get our namespace
         let namespace = &conf.thorium.namespace;
         // get our prepared statement
-        let prepared = R::prepared_statement(&scylla, namespace).await?;
+        let prepared = <R as Restore>::prepared_statement(scylla, namespace).await?;
         // get our partition size
         let partition_conf = R::partition_conf(conf);
         // build our restore worker
@@ -252,18 +253,38 @@ impl<R: Restore> RestoreWorker<R> {
 
 /// A table whose archived rows thoradm writes back into Scylla
 #[async_trait::async_trait]
-pub trait Restore: Versioned + Utils + std::fmt::Debug + 'static + Send {
+pub trait Restore: Backup + Versioned + Utils + std::fmt::Debug + 'static + Send {
     /// The type that contains a partition size or sizes depending on the data/table/row
     type PartitionConf: Send + Sync;
 
     /// The values the restore's insert binds for one row
     type Values: SerializeRow + Send;
 
+    /// The text of the statement restoring one row: the table's generated full-row insert,
+    /// which binds every column by name
+    ///
+    /// # Arguments
+    ///
+    /// * `ns` - The namespace the table is in
+    #[must_use]
+    fn insert_cql(ns: &str) -> String {
+        // fill the generated insert's keyspace
+        with_keyspace(<<Self as Backup>::Table as TableStatements>::INSERT, ns)
+    }
+
     /// The prepared statement to use when restoring data to scylla
+    ///
+    /// # Arguments
+    ///
+    /// * `scylla` - The scylla session to prepare the statement with
+    /// * `ns` - The namespace the table is in
     async fn prepared_statement(
         scylla: &Session,
         ns: &str,
-    ) -> Result<PreparedStatement, PrepareError>;
+    ) -> Result<PreparedStatement, PrepareError> {
+        // prepare the generated statement
+        scylla.prepare(Self::insert_cql(ns)).await
+    }
 
     /// Get the partition size for this data type
     ///

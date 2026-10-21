@@ -12,33 +12,12 @@ use crate::models::{
 };
 use crate::{
     is_admin,
-    models::{Event, EventData, EventRow, EventType, TagRequest},
+    models::{Event, EventData, EventType, TagRequest},
 };
 use crate::{
     models::User,
     utils::{ApiError, Shared},
 };
-
-impl TryFrom<EventRow> for Event {
-    type Error = ApiError;
-    /// Cast an event row to an event
-    ///
-    /// # Arguments
-    ///
-    /// * `event_row` - The event row to cast
-    fn try_from(row: EventRow) -> Result<Event, Self::Error> {
-        // convert our event row to an event
-        let event = Event {
-            id: row.id,
-            timestamp: row.timestamp,
-            parent: row.parent,
-            user: row.user,
-            data: row.data,
-            depth: u8::try_from(row.trigger_depth)?,
-        };
-        Ok(event)
-    }
-}
 
 impl Event {
     /// Create a new tag event

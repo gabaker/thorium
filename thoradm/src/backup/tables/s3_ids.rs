@@ -3,10 +3,7 @@
 use ahash::AHasher;
 use bytecheck::CheckBytes;
 use rkyv::{Archive, Deserialize, Serialize};
-use scylla::DeserializeRow;
-use scylla::client::session::Session;
-use scylla::errors::PrepareError;
-use scylla::statement::prepared::PreparedStatement;
+use scylla::SerializeRow;
 use std::hash::Hasher;
 use std::path::{Path, PathBuf};
 use thorium::Conf;
@@ -17,13 +14,16 @@ use super::Versioned;
 use crate::Error;
 use crate::backup::s3::{Crawl, Named, object_key};
 use crate::backup::{Backup, Restore, S3Backup, S3Restore, Scrub, Utils};
+use thorium::models::schema::ScyllaProjection;
+use thorium::models::schema::scylla::S3IdsTable;
 
 /// A single line of stage logs
-#[derive(Debug, Archive, Serialize, Deserialize, DeserializeRow)]
+#[derive(Debug, Archive, Serialize, Deserialize, ScyllaProjection)]
 #[archive_attr(derive(Debug, CheckBytes))]
-#[scylla(flavor = "enforce_order", skip_name_checks)]
+#[thorium_projection(of = S3IdsTable)]
 pub struct S3Id {
     /// The type of object this id is for
+    #[thorium(column = "type")]
     pub object_type: S3Objects,
     /// The id of this object
     pub id: Uuid,
@@ -40,31 +40,12 @@ impl Utils for S3Id {
 
 #[async_trait::async_trait]
 impl Backup for S3Id {
+    /// The table this archive struct backs up, read through its generated statements
+    type Table = S3IdsTable;
+
     /// The columns of this table's partition key, used to name rows that fail to decode
     fn partition_key() -> &'static [&'static str] {
         &["type", "id"]
-    }
-
-    /// The prepared statement to use when retrieving data from Scylla
-    ///
-    /// # Arguments
-    ///
-    /// * `scylla` - The scylla session to build a prepared statement with
-    /// * `ns` - The namespace for this prepared statement
-    async fn prepared_statement(
-        scylla: &Session,
-        ns: &str,
-    ) -> Result<PreparedStatement, PrepareError> {
-        // build logs get prepared statement
-        scylla
-            .prepare(format!(
-                "SELECT type, id, sha256 \
-                FROM {}.{} \
-                Where token(type, id) >= ? AND token(type, id) <= ?",
-                ns,
-                Self::name(),
-            ))
-            .await
     }
 
     /// Hash this partitions info to see if we have changed partitions
@@ -82,6 +63,18 @@ impl Backup for S3Id {
 /// Implement scrub support for the samples list table
 impl Scrub for S3Id {}
 
+/// The values a restored row binds by column name to the table's generated full-row insert
+#[derive(SerializeRow)]
+pub struct S3IdValues {
+    /// The `type` column
+    #[scylla(rename = "type")]
+    pub kind: S3Objects,
+    /// The `id` column
+    pub id: Uuid,
+    /// The `sha256` column
+    pub sha256: String,
+}
+
 /// Implement restore support for the samples list table
 #[async_trait::async_trait]
 impl Restore for S3Id {
@@ -89,29 +82,8 @@ impl Restore for S3Id {
     // the size itself
     type PartitionConf = u16;
 
-    /// The object type, id, and sha256
-    type Values = (S3Objects, Uuid, String);
-
-    /// The prepared statement to use when restoring data to scylla
-    ///
-    /// # Arguments
-    ///
-    /// * `scylla` - A scylla client
-    /// * `ns` - The namespace in scylla this table is from
-    async fn prepared_statement(
-        scylla: &Session,
-        ns: &str,
-    ) -> Result<PreparedStatement, PrepareError> {
-        scylla
-            .prepare(format!(
-                "INSERT INTO {}.{} \
-                (type, id, sha256) \
-                VALUES (?, ?, ?)",
-                ns,
-                Self::name(),
-            ))
-            .await
-    }
+    /// The row the generated full-row insert binds by name
+    type Values = S3IdValues;
 
     /// Get the partition size for this data type
     ///
@@ -130,7 +102,11 @@ impl Restore for S3Id {
     /// * `_format` - The format version the row was archived in
     fn values(self, _partition_size: &u16, _format: u32) -> Self::Values {
         // every column as the row holds it
-        (self.object_type, self.id, self.sha256)
+        S3IdValues {
+            kind: self.object_type,
+            id: self.id,
+            sha256: self.sha256,
+        }
     }
 }
 

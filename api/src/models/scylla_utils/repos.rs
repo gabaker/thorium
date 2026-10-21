@@ -1,17 +1,20 @@
 //! The scylla utils and structs for repos
 
 use chrono::prelude::*;
-use scylla::DeserializeRow;
 use uuid::Uuid;
 
+use crate::models::schema::ScyllaProjection;
+use crate::models::schema::scylla::{
+    CommitishListTable, CommitishesTable, RepoDataTable, ReposListTable, ReposView,
+};
 use crate::models::{Commitish, CommitishKinds, CommitishRequest};
 
 #[cfg(feature = "api")]
 use crate::models::{BranchDetails, CommitDetails, CommitishDetails, GitTagDetails};
 
 /// An internal struct containing a single repo row in Scylla
-#[derive(Debug, DeserializeRow)]
-#[scylla(flavor = "enforce_order", skip_name_checks)]
+#[derive(ScyllaProjection)]
+#[thorium_projection(of = ReposView)]
 pub struct RepoRow {
     /// The group this repo submission is visible by
     pub group: String,
@@ -29,7 +32,8 @@ pub struct RepoRow {
     pub creator: String,
     /// When this repo was added to Thorium
     pub uploaded: DateTime<Utc>,
-    // The scheme to use when cloning this repo
+    /// The scheme to use when cloning this repo, which can hold credentials
+    #[thorium(redact)]
     pub scheme: String,
     /// The default checkout behavior for this repo
     pub default_checkout: Option<String>,
@@ -37,23 +41,58 @@ pub struct RepoRow {
     pub earliest: Option<DateTime<Utc>>,
 }
 
+/// The url of a repo some groups can see
+#[derive(Debug, ScyllaProjection)]
+#[thorium_projection(of = ReposView)]
+pub struct RepoAuthRow {
+    /// The reduced url of the repo
+    pub url: String,
+}
+
+/// The sha256 of one of a repo's data blobs
+#[derive(Debug, ScyllaProjection)]
+#[thorium_projection(of = RepoDataTable)]
+pub struct RepoDataHashRow {
+    /// The sha256 of the data blob
+    pub hash: String,
+}
+
+/// The serialized details of a commitish
+#[derive(Debug, ScyllaProjection)]
+#[thorium_projection(of = CommitishesTable)]
+pub struct CommitishDataRow {
+    /// The serialized kind-specific commitish data
+    pub data: String,
+}
+
+/// The kind of a commitish and the repo data blob holding it
+#[derive(Debug, ScyllaProjection)]
+#[thorium_projection(of = CommitishesTable)]
+pub struct CommitishRepoDataRow {
+    /// The kind of commitish
+    pub kind: CommitishKinds,
+    /// The sha256 of the repo data blob containing this commitish
+    pub repo_data: String,
+}
+
 /// An internal struct containing a single repo list row in Scylla
-#[derive(Debug, DeserializeRow)]
-#[scylla(flavor = "enforce_order", skip_name_checks)]
+#[derive(Debug, ScyllaProjection)]
+#[thorium_projection(of = ReposListTable)]
 pub struct RepoListRow {
     /// The group this commit is visible too
     pub group: String,
     /// The url for this repo
     pub url: String,
     /// The id for this repo submission
+    #[thorium(column = "id")]
     pub submission: Uuid,
     /// When this repo was submitted
     pub uploaded: DateTime<Utc>,
 }
 
 /// An internal struct containing a single repo commitish list row in Scylla
-#[derive(Debug, DeserializeRow)]
-#[scylla(flavor = "enforce_order", skip_name_checks)]
+#[derive(Debug, ScyllaProjection)]
+#[thorium_projection(of = CommitishListTable)]
 pub struct CommitishListRow {
     /// The kind of commitish this is
     pub kind: CommitishKinds,
@@ -63,43 +102,6 @@ pub struct CommitishListRow {
     pub key: String,
     /// When this commitish was added to this repo
     pub timestamp: DateTime<Utc>,
-}
-
-/// An internal struct containing a single commitish row in Scylla
-#[derive(Debug)]
-pub struct CommitishRow {
-    /// The kind of commitish this row represents
-    pub kind: CommitishKinds,
-}
-
-/// An internal struct containing one instance or row of a repo tag in scylla
-#[derive(Serialize, Deserialize, Debug, Clone)]
-pub struct RepoTagRow {
-    /// The group this tag is a part of
-    pub group: String,
-    /// The url of the repo this tag is for
-    pub repo: String,
-    /// The key for this tag
-    pub key: String,
-    /// The value for this tag
-    pub value: String,
-}
-
-/// An internal struct containing one instance or row of a repo tag in scylla
-#[derive(Serialize, Deserialize, Debug, Clone)]
-pub struct FullRepoTagRow {
-    /// The group this tag is a part of
-    pub group: String,
-    /// The year this tag was submitted
-    pub year: i32,
-    /// The hour this tag was submitted
-    pub hour: i32,
-    /// The key for this tag
-    pub key: String,
-    /// The value for this tag
-    pub value: String,
-    /// The timestamp this tag was submitted
-    pub uploaded: DateTime<Utc>,
 }
 
 /// The commit specific data serialied in scylla
