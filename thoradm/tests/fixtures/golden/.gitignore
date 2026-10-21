@@ -1,0 +1,2 @@
+# golden backups hold result files of every name, text files included
+!*.txt

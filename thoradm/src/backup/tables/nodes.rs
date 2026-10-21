@@ -3,22 +3,19 @@
 use ahash::AHasher;
 use bytecheck::CheckBytes;
 use chrono::prelude::*;
-use futures::stream::{FuturesUnordered, StreamExt};
-use indicatif::ProgressBar;
 use rkyv::{Archive, Deserialize, Serialize};
 use scylla::DeserializeRow;
 use scylla::client::session::Session;
-use scylla::errors::{ExecutionError, PrepareError};
+use scylla::errors::PrepareError;
 use scylla::statement::prepared::PreparedStatement;
 use std::hash::Hasher;
-use std::sync::Arc;
 use thorium::Conf;
 use thorium::models::{NodeHealth, Resources};
 
-use crate::Error;
+use super::Versioned;
 use crate::backup::{Backup, Restore, Scrub, Utils};
 
-/// A single node in a Thorium cluster
+/// A nodes row as format 2 archives it; `None` is a cell the source row held unset
 #[derive(Debug, Archive, Serialize, Deserialize, DeserializeRow)]
 #[archive_attr(derive(Debug, CheckBytes))]
 #[scylla(flavor = "enforce_order", skip_name_checks)]
@@ -28,11 +25,11 @@ pub struct Node {
     /// The name of this node
     pub node: String,
     /// The current health of this node
-    pub health: NodeHealth,
+    pub health: Option<NodeHealth>,
     /// When this node last checked in
     pub heart_beat: Option<DateTime<Utc>>,
     /// The resources this node has
-    pub resources: Resources,
+    pub resources: Option<Resources>,
 }
 
 impl Utils for Node {
@@ -44,6 +41,11 @@ impl Utils for Node {
 
 #[async_trait::async_trait]
 impl Backup for Node {
+    /// The columns of this table's partition key, used to name rows that fail to decode
+    fn partition_key() -> &'static [&'static str] {
+        &["cluster"]
+    }
+
     /// The prepared statement to use when retrieving data from Scylla
     ///
     /// # Arguments
@@ -87,10 +89,14 @@ impl Restore for Node {
     // the size itself
     type PartitionConf = u16;
 
-    /// The steps to once run before restoring data
-    async fn prep(_scylla: &Session, _ns: &str) -> Result<(), ExecutionError> {
-        Ok(())
-    }
+    /// The cluster, node, health, last heartbeat, and resources
+    type Values = (
+        String,
+        String,
+        NodeHealth,
+        Option<DateTime<Utc>>,
+        Option<Resources>,
+    );
 
     /// The prepared statement to use when restoring data to scylla
     ///
@@ -122,76 +128,62 @@ impl Restore for Node {
         0
     }
 
-    /// Restore a single partition
+    /// Returns the values the restore's insert binds for this row: a restored node is
+    /// registered but hasn't checked in since, so the scheduler counts none of its capacity until
+    /// it does; its workers were Redis state the restore drops
     ///
     /// # Arguments
     ///
-    /// * `buffer` - The buffer we should restore data from
-    /// * `scylla` - The client to use when talking to scylla
-    /// * `rows_restored` - The number of rows that have been restored
-    /// * `partition_size` - The partition size to use when restoring data
-    /// * `progress` - The bar to report progress with
-    /// * `prepared` - The prepared statement to inject data with
-    async fn restore<'a>(
-        buffer: &'a [u8],
-        scylla: &Arc<Session>,
-        _partition_size: &u16,
-        rows_restored: &mut usize,
-        progress: &mut ProgressBar,
-        prepared: &PreparedStatement,
-    ) -> Result<(), Error> {
-        // cast our buffer to its archived type
-        let rows = rkyv::check_archived_root::<Vec<Node>>(buffer)?;
-        // build a set of futures
-        let mut futures = FuturesUnordered::new();
-        // build our queries to insert this partitions rows
-        for row in rows.iter() {
-            // deserialize our node health
-            let health: NodeHealth = row.health.deserialize(&mut rkyv::Infallible)?;
-            // deserialize our node health
-            let heart_beat: Option<DateTime<Utc>> =
-                row.heart_beat.deserialize(&mut rkyv::Infallible)?;
-            // deserialize our resources
-            let resources: Resources = row.resources.deserialize(&mut rkyv::Infallible)?;
-            // insert this row
-            let query = scylla.execute_unpaged(
-                prepared,
-                (
-                    row.cluster.as_str(),
-                    row.node.as_str(),
-                    health,
-                    heart_beat,
-                    resources,
-                ),
-            );
-            // add this to our futures
-            futures.push(query);
-            // if we have 1000 futures then wait for at least 500 of them to complete
-            if futures.len() > 1000 {
-                // poll our futures until one is complete
-                while let Some(query_result) = futures.next().await {
-                    // raise any errors
-                    query_result?;
-                    // increment our restored row count
-                    *rows_restored += 1;
-                    // set our current row count progress message
-                    progress.set_message(rows_restored.to_string());
-                    // if we have less then 100 future to go then refill our future set
-                    if futures.len() < 100 {
-                        break;
-                    }
-                }
-            }
-        }
-        // poll our futures until one is complete
-        while let Some(query_result) = futures.next().await {
-            // raise any errors
-            query_result?;
-            // increment our restored row count
-            *rows_restored += 1;
-            // set our current row count progress message
-            progress.set_message(rows_restored.to_string());
-        }
-        Ok(())
+    /// * `_partition_size` - Unused, as nodes aren't bucketed
+    /// * `_format` - The format version the row was archived in
+    fn values(self, _partition_size: &u16, _format: u32) -> Self::Values {
+        // the health and heartbeat are reset; the rest is as the row holds it
+        (
+            self.cluster,
+            self.node,
+            NodeHealth::Registered,
+            None,
+            self.resources,
+        )
     }
+}
+
+/// A nodes row as format 1 archives it
+#[derive(Debug, Clone, Archive, Serialize, Deserialize)]
+#[archive_attr(derive(Debug, CheckBytes))]
+pub struct NodeV1 {
+    /// The cluster this node is in
+    pub cluster: String,
+    /// The name of this node
+    pub node: String,
+    /// The current health of this node
+    pub health: NodeHealth,
+    /// When this node last checked in
+    pub heart_beat: Option<DateTime<Utc>>,
+    /// The resources this node has
+    pub resources: Resources,
+}
+
+impl From<NodeV1> for Node {
+    /// Converts a format-1 row, whose required fields are always set
+    ///
+    /// # Arguments
+    ///
+    /// * `row` - The format-1 row
+    fn from(row: NodeV1) -> Self {
+        // format 1 could only hold rows with these cells set
+        Node {
+            cluster: row.cluster,
+            node: row.node,
+            health: Some(row.health),
+            heart_beat: row.heart_beat,
+            resources: Some(row.resources),
+        }
+    }
+}
+
+/// Format 1 archives `Node` rows as [`NodeV1`]
+impl Versioned for Node {
+    /// Format 1 rows decode as [`NodeV1`], which converts into `Node`
+    type V1 = NodeV1;
 }

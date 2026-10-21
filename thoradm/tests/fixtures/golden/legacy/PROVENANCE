@@ -1,0 +1,12 @@
+golden: legacy
+written by: thoradm built from 4e405bb
+toolchain: rustc 1.101.0-nightly (822182db4 2026-10-13)
+harness: thoradm/tests/golden.rs::generate_golden at 84373c7-dirty
+fixture: the value-class fixture without its size cases (large and near-limit values, collections of many elements, objects at the part size or uploaded in parts, near-limit keys) and without the unset cells of the columns format 1 can't hold unset; its values are generated afresh on each run (no seed), and expected/snapshot.json records the ones this backup holds
+commands:
+  thoradm --workers 4 backup new all -m 4 -o backup (exit Some(0))
+  thoradm --workers 4 backup new comment-attachments,result-files -m 4 -o backup (exit Some(0))
+namespace: testing_bv5goldleg2_golden
+secret_key (throwaway): bv3-throwaway-secret-key
+edited after generation: every generated user password hash in backup/redis.json and expected/snapshot.json was replaced with the valid argon2id hash PASSWORD_HASH (tests/common/classes.rs), since a restore refuses a hash that is not argon2id at Thorium's default costs; the backup is otherwise as its thoradm wrote it
+caution: backup/redis.json holds Admin users with live-format tokens and password hashes under the throwaway secret_key above; never restore this golden outside the thoradm test harness

@@ -9,7 +9,10 @@ use thorium::models::{
 
 mod backup;
 
-pub use backup::{BackupComponents, BackupSubCommands, NewBackup, RestoreBackup, ScrubBackup};
+pub use backup::{
+    BackupComponents, BackupSubCommands, CoverageBackup, NewBackup, RestoreBackup, ScrubBackup,
+    VerifyBackup,
+};
 
 /// Provide a default admin config path
 fn default_cluster_conf_path() -> PathBuf {
@@ -26,17 +29,22 @@ fn default_ctl_conf_path() -> PathBuf {
     default_config_path
 }
 
-/// The arguments for the backups and data restorations in Thorium
+/// The admin command line tool for a Thorium cluster
 #[derive(Parser, Debug, Clone)]
 #[clap(version, author)]
 pub struct Args {
-    /// The number of workers to use
-    #[clap(short, long, default_value = "10")]
+    /// The number of workers to use; at least 1
+    #[clap(
+        short,
+        long,
+        default_value = "10",
+        value_parser = clap::builder::RangedU64ValueParser::<usize>::new().range(1..)
+    )]
     pub workers: usize,
     /// The sub command for to execute
     #[clap(subcommand)]
     pub cmd: SubCommands,
-    /// The path to the config for the Thorium cluster to backup
+    /// The path to the Thorium cluster config (thorium.yml)
     #[clap(short, long, default_value = default_cluster_conf_path().into_os_string())]
     pub cluster_conf: PathBuf,
     /// The path to load our Thorctl config from
@@ -56,7 +64,7 @@ pub enum SubCommands {
     /// Provision Thorium resources including nodes
     #[clap(subcommand)]
     Provision(ProvisionSubCommands),
-    /// Censuse commands in Thorium
+    /// Take censuses of Thorium's data
     #[clap(subcommand)]
     Census(CensusSubCommands),
     /// Manage Thorium user accounts
@@ -250,9 +258,18 @@ pub enum CensusKinds {
     Repos,
     /// Take a census of commitish data
     Commitishes,
+    /// Take a census of entity data
+    Entities,
+    /// Take a census of association data
+    Associations,
 }
 
 impl std::fmt::Display for CensusKinds {
+    /// Writes this census kind's name
+    ///
+    /// # Arguments
+    ///
+    /// * `f` - The formatter to write to
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             &CensusKinds::All => write!(f, "All"),
@@ -261,6 +278,8 @@ impl std::fmt::Display for CensusKinds {
             &CensusKinds::Files => write!(f, "Files"),
             &CensusKinds::Repos => write!(f, "Repos"),
             &CensusKinds::Commitishes => write!(f, "Commitishes"),
+            &CensusKinds::Entities => write!(f, "Entities"),
+            &CensusKinds::Associations => write!(f, "Associations"),
         }
     }
 }

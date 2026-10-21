@@ -10,6 +10,8 @@ license-file = "../LICENSE"
 # Force openssl-sys to staticly link in the openssl library. Necessary when
 # cross compiling to x86_64-unknown-linux-musl.
 vendored-openssl = ["openssl/vendored"]
+# Compile the hooks thoradm's own tests use to put fault-injecting proxies in front of Scylla.
+test-support = []
 
 
 [dependencies]
@@ -47,3 +49,18 @@ dirs = "6"
 strum = { workspace = true }
 bb8-redis = "0.24"
 redis = { version = "0.32.1", default-features = false, features = ["tokio-comp", "script"] }
+tracing = { workspace = true }
+rand = "0.9"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+[dev-dependencies]
+thoradm = { path = ".", features = ["test-support"] }
+thorium-api = { workspace = true, features = ["api", "client", "trace", "ai", "scylla-utils", "rkyv-support", "test-utilities"] }
+axum = "0.8"
+libc = "0.2"
+reqwest = { workspace = true }
+semver = "1"
+utoipa = "5"
+socket2 = "0.6"
+openidconnect = "4"
+proptest = "1.7"

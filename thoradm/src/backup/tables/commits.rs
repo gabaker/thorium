@@ -3,22 +3,19 @@
 use ahash::AHasher;
 use bytecheck::CheckBytes;
 use chrono::prelude::*;
-use futures::stream::{FuturesUnordered, StreamExt};
-use indicatif::ProgressBar;
 use rkyv::{Archive, Deserialize, Serialize};
 use scylla::DeserializeRow;
 use scylla::client::session::Session;
-use scylla::errors::{ExecutionError, PrepareError};
+use scylla::errors::PrepareError;
 use scylla::statement::prepared::PreparedStatement;
 use std::hash::Hasher;
-use std::sync::Arc;
 use thorium::Conf;
 use thorium::models::CommitishKinds;
 
-use crate::Error;
-use crate::backup::{Backup, Restore, Scrub, Utils, utils};
+use super::Versioned;
+use crate::backup::{Backup, Restore, Scrub, Utils};
 
-/// A single line of stage logs
+/// A commitishes row as format 2 archives it; `None` is a cell the source row held unset
 #[derive(Debug, Archive, Serialize, Deserialize, DeserializeRow)]
 #[archive_attr(derive(Debug, CheckBytes))]
 #[scylla(flavor = "enforce_order", skip_name_checks)]
@@ -32,11 +29,11 @@ pub struct Commitish {
     /// The key for this commitish
     pub key: String,
     /// The data for this commitish
-    pub data: String,
+    pub data: Option<String>,
     /// The hash for this commits repo data blob
-    pub repo_data: String,
+    pub repo_data: Option<String>,
     /// When this commit was added to its repo
-    pub timestamp: DateTime<Utc>,
+    pub timestamp: Option<DateTime<Utc>>,
 }
 
 impl Utils for Commitish {
@@ -48,6 +45,11 @@ impl Utils for Commitish {
 
 #[async_trait::async_trait]
 impl Backup for Commitish {
+    /// The columns of this table's partition key, used to name rows that fail to decode
+    fn partition_key() -> &'static [&'static str] {
+        &["kind", "group", "repo", "key"]
+    }
+
     /// The prepared statement to use when retrieving data from Scylla
     ///
     /// # Arguments
@@ -93,10 +95,16 @@ impl Restore for Commitish {
     // the size itself
     type PartitionConf = u16;
 
-    /// The steps to once run before restoring data
-    async fn prep(_scylla: &Session, _ns: &str) -> Result<(), ExecutionError> {
-        Ok(())
-    }
+    /// The kind, group, repo, key, commit time, data, and repo data hash
+    type Values = (
+        CommitishKinds,
+        String,
+        String,
+        String,
+        Option<DateTime<Utc>>,
+        Option<String>,
+        Option<String>,
+    );
 
     /// The prepared statement to use when restoring data to scylla
     ///
@@ -128,80 +136,27 @@ impl Restore for Commitish {
         config.thorium.repos.partition_size
     }
 
-    /// Restore a single partition
+    /// Returns the values the restore's insert binds for this row
     ///
     /// # Arguments
     ///
-    /// * `buffer` - The buffer we should restore data from
-    /// * `scylla` - The client to use when talking to scylla
-    /// * `rows_restored` - The number of rows that have been restored
-    /// * `partition_size` - The partition size to use when restoring data
-    /// * `progress` - The bar to report progress with
-    /// * `prepared` - The prepared statement to inject data with
-    async fn restore<'a>(
-        buffer: &'a [u8],
-        scylla: &Arc<Session>,
-        _partition_size: &u16,
-        rows_restored: &mut usize,
-        progress: &mut ProgressBar,
-        prepared: &PreparedStatement,
-    ) -> Result<(), Error> {
-        // cast our buffer to its archived type
-        let rows = rkyv::check_archived_root::<Vec<Commitish>>(buffer)?;
-        // build a set of futures
-        let mut futures = FuturesUnordered::new();
-        // build our queries to insert this partitions rows
-        for row in rows.iter() {
-            // deserialize this rows uploaded timestamp
-            let timestamp: DateTime<Utc> = row.timestamp.deserialize(&mut rkyv::Infallible)?;
-            // deserialize our commitish kind
-            let kind: CommitishKinds = row.kind.deserialize(&mut rkyv::Infallible)?;
-            // restore this row back to scylla
-            let query = scylla.execute_unpaged(
-                prepared,
-                (
-                    kind,
-                    row.group.as_str(),
-                    row.repo.as_str(),
-                    row.key.as_str(),
-                    timestamp,
-                    row.data.as_str(),
-                    row.repo_data.as_str(),
-                ),
-            );
-            // add this to our futures
-            futures.push(query);
-            // if we have 1000 futures then wait for at least 500 of them to complete
-            if futures.len() > 1000 {
-                // poll our futures until one is complete
-                while let Some(query_result) = futures.next().await {
-                    // raise any errors
-                    query_result?;
-                    // increment our restored row count
-                    *rows_restored += 1;
-                    // set our current row count progress message
-                    progress.set_message(rows_restored.to_string());
-                    // if we have less then 100 future to go then refill our future set
-                    if futures.len() < 100 {
-                        break;
-                    }
-                }
-            }
-        }
-        // poll our futures until one is complete
-        while let Some(query_result) = futures.next().await {
-            // raise any errors
-            query_result?;
-            // increment our restored row count
-            *rows_restored += 1;
-            // set our current row count progress message
-            progress.set_message(rows_restored.to_string());
-        }
-        Ok(())
+    /// * `_partition_size` - Unused, as commitishes aren't bucketed
+    /// * `_format` - The format version the row was archived in
+    fn values(self, _partition_size: &u16, _format: u32) -> Self::Values {
+        // every column as the row holds it
+        (
+            self.kind,
+            self.group,
+            self.repo,
+            self.key,
+            self.timestamp,
+            self.data,
+            self.repo_data,
+        )
     }
 }
 
-/// A single row from the commit list table
+/// A commitish list row as format 2 archives it; `None` is a cell the source row held unset
 #[derive(Debug, Archive, Serialize, Deserialize, DeserializeRow)]
 #[archive_attr(derive(Debug, CheckBytes))]
 #[scylla(flavor = "enforce_order", skip_name_checks)]
@@ -221,7 +176,7 @@ pub struct CommitishList {
     /// The key of this commitish
     pub key: String,
     /// The hash for this commitish's repo data blob
-    pub repo_data: String,
+    pub repo_data: Option<String>,
 }
 
 impl Utils for CommitishList {
@@ -233,6 +188,11 @@ impl Utils for CommitishList {
 
 #[async_trait::async_trait]
 impl Backup for CommitishList {
+    /// The columns of this table's partition key, used to name rows that fail to decode
+    fn partition_key() -> &'static [&'static str] {
+        &["kind", "group", "year", "bucket", "repo"]
+    }
+
     /// The prepared statement to use when retrieving data from Scylla
     ///
     /// # Arguments
@@ -279,17 +239,17 @@ impl Restore for CommitishList {
     // the size itself
     type PartitionConf = u16;
 
-    /// The steps to once run before restoring data
-    ///
-    /// # Arguments
-    ///
-    /// * `scylla` - The scylla client to use
-    /// * `ns` - The namespace for any tables to remove/prep
-    async fn prep(scylla: &Session, ns: &str) -> Result<(), ExecutionError> {
-        // drop the materialized views for this table
-        utils::drop_materialized_view(ns, "committed_repo_data", scylla).await?;
-        Ok(())
-    }
+    /// The kind, group, year, bucket, repo, commit time, key, and repo data hash
+    type Values = (
+        CommitishKinds,
+        String,
+        i32,
+        i32,
+        String,
+        DateTime<Utc>,
+        String,
+        Option<String>,
+    );
 
     /// The prepared statement to use when restoring data to scylla
     ///
@@ -321,78 +281,120 @@ impl Restore for CommitishList {
         config.thorium.repos.partition_size
     }
 
-    /// Restore a single partition
+    /// Returns the values the restore's insert binds for this row, in a bucket of the target's
+    /// partition size
     ///
     /// # Arguments
     ///
-    /// * `buffer` - The buffer we should restore data from
-    /// * `scylla` - The client to use when talking to scylla
-    /// * `rows_restored` - The number of rows that have been restored
-    /// * `partition_size` - The partition size to use when restoring data
-    /// * `progress` - The bar to report progress with
-    /// * `prepared` - The prepared statement to inject data with
-    async fn restore<'a>(
-        buffer: &'a [u8],
-        scylla: &Arc<Session>,
-        partition_size: &u16,
-        rows_restored: &mut usize,
-        progress: &mut ProgressBar,
-        prepared: &PreparedStatement,
-    ) -> Result<(), Error> {
-        // cast our buffer to its archived type
-        let rows = rkyv::check_archived_root::<Vec<CommitishList>>(buffer)?;
-        // build a set of futures
-        let mut futures = FuturesUnordered::new();
-        // build our queries to insert this partitions rows
-        for row in rows.iter() {
-            // deserialize this rows uploaded timestamp
-            let timestamp = row.timestamp.deserialize(&mut rkyv::Infallible)?;
-            // deserialize our commitish kind
-            let kind: CommitishKinds = row.kind.deserialize(&mut rkyv::Infallible)?;
-            // calculate the new bucket
-            let bucket = thorium::utils::helpers::partition(timestamp, row.year, *partition_size);
-            // restore this row back to scylla
-            let query = scylla.execute_unpaged(
-                prepared,
-                (
-                    kind,
-                    row.group.as_str(),
-                    row.year,
-                    bucket,
-                    row.repo.as_str(),
-                    timestamp,
-                    row.key.as_str(),
-                    row.repo_data.as_str(),
-                ),
-            );
-            // add this to our futures
-            futures.push(query);
-            // if we have 1000 futures then wait for at least 500 of them to complete
-            if futures.len() > 1000 {
-                // poll our futures until one is complete
-                while let Some(query_result) = futures.next().await {
-                    // raise any errors
-                    query_result?;
-                    // increment our restored row count
-                    *rows_restored += 1;
-                    // set our current row count progress message
-                    progress.set_message(rows_restored.to_string());
-                    // if we have less then 100 future to go then refill our future set
-                    if futures.len() < 100 {
-                        break;
-                    }
-                }
-            }
-        }
-        // poll our futures until one is complete
-        while let Some(query_result) = futures.next().await {
-            // raise any errors
-            query_result?;
-            // increment our restored row count
-            *rows_restored += 1;
-            // set our current row count progress message
-            progress.set_message(rows_restored.to_string());
-        }
-        Ok(())
+    /// * `partition_size` - The partition size to bucket the row with
+    /// * `_format` - The format version the row was archived in
+    fn values(self, partition_size: &u16, _format: u32) -> Self::Values {
+        // calculate the new bucket
+        let bucket = thorium::utils::helpers::partition(self.timestamp, self.year, *partition_size);
+        (
+            self.kind,
+            self.group,
+            self.year,
+            bucket,
+            self.repo,
+            self.timestamp,
+            self.key,
+            self.repo_data,
+        )
     }
+}
+
+/// A commitishes row as format 1 archives it
+#[derive(Debug, Clone, Archive, Serialize, Deserialize)]
+#[archive_attr(derive(Debug, CheckBytes))]
+pub struct CommitishV1 {
+    /// The kind of commitish this row represents
+    pub kind: CommitishKinds,
+    /// The group this commitish is in
+    pub group: String,
+    /// The repo this commitish is for
+    pub repo: String,
+    /// The key for this commitish
+    pub key: String,
+    /// The data for this commitish
+    pub data: String,
+    /// The hash for this commits repo data blob
+    pub repo_data: String,
+    /// When this commit was added to its repo
+    pub timestamp: DateTime<Utc>,
+}
+
+impl From<CommitishV1> for Commitish {
+    /// Converts a format-1 row, whose required fields are always set
+    ///
+    /// # Arguments
+    ///
+    /// * `row` - The format-1 row
+    fn from(row: CommitishV1) -> Self {
+        // format 1 could only hold rows with these cells set
+        Commitish {
+            kind: row.kind,
+            group: row.group,
+            repo: row.repo,
+            key: row.key,
+            data: Some(row.data),
+            repo_data: Some(row.repo_data),
+            timestamp: Some(row.timestamp),
+        }
+    }
+}
+
+/// Format 1 archives `Commitish` rows as [`CommitishV1`]
+impl Versioned for Commitish {
+    /// Format 1 rows decode as [`CommitishV1`], which converts into `Commitish`
+    type V1 = CommitishV1;
+}
+
+/// A commitish list row as format 1 archives it
+#[derive(Debug, Clone, Archive, Serialize, Deserialize)]
+#[archive_attr(derive(Debug, CheckBytes))]
+pub struct CommitishListV1 {
+    /// The kind of commitish this row represents
+    pub kind: CommitishKinds,
+    /// The group this commitish is in
+    pub group: String,
+    /// The year this commitish was added to its repo
+    pub year: i32,
+    /// The bucket for this commitish
+    pub bucket: i32,
+    /// The repo this commitish is for
+    pub repo: String,
+    /// When this commitish was added to its repo
+    pub timestamp: DateTime<Utc>,
+    /// The key of this commitish
+    pub key: String,
+    /// The hash for this commitish's repo data blob
+    pub repo_data: String,
+}
+
+impl From<CommitishListV1> for CommitishList {
+    /// Converts a format-1 row, whose required fields are always set
+    ///
+    /// # Arguments
+    ///
+    /// * `row` - The format-1 row
+    fn from(row: CommitishListV1) -> Self {
+        // format 1 could only hold rows with these cells set
+        CommitishList {
+            kind: row.kind,
+            group: row.group,
+            year: row.year,
+            bucket: row.bucket,
+            repo: row.repo,
+            timestamp: row.timestamp,
+            key: row.key,
+            repo_data: Some(row.repo_data),
+        }
+    }
+}
+
+/// Format 1 archives `CommitishList` rows as [`CommitishListV1`]
+impl Versioned for CommitishList {
+    /// Format 1 rows decode as [`CommitishListV1`], which converts into `CommitishList`
+    type V1 = CommitishListV1;
 }

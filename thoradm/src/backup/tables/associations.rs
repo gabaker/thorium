@@ -2,25 +2,23 @@
 
 use ahash::AHasher;
 use chrono::{DateTime, Utc};
-use futures::{StreamExt, stream::FuturesUnordered};
-use indicatif::ProgressBar;
-use rkyv::{Archive, CheckBytes, Deserialize, Serialize, string::ArchivedString};
+use rkyv::{Archive, CheckBytes, Deserialize, Serialize};
 use scylla::{
-    DeserializeRow,
-    client::session::Session,
-    errors::{ExecutionError, PrepareError},
-    statement::prepared::PreparedStatement,
+    DeserializeRow, client::session::Session, errors::PrepareError,
+    statement::prepared::PreparedStatement, value::MaybeUnset,
 };
-use std::{hash::Hasher, sync::Arc};
+use std::hash::Hasher;
 use thorium::{
     Conf,
     models::{AssociationKind, Directionality},
 };
 
-use crate::Error;
+use uuid::Uuid;
+
+use super::{Versioned, added_in_format_2};
 use crate::backup::{Backup, Restore, Scrub, Utils};
 
-/// A single row from the associations table
+/// An associations row as format 2 archives it; `None` is a cell the source row held unset
 #[derive(Debug, Archive, Serialize, Deserialize, DeserializeRow)]
 #[archive_attr(derive(Debug, CheckBytes))]
 #[scylla(flavor = "enforce_order", skip_name_checks)]
@@ -36,17 +34,21 @@ pub struct Association {
     /// The direction for this association
     pub direction: Directionality,
     /// The kind of association this is
-    pub kind: AssociationKind,
+    pub kind: Option<AssociationKind>,
     /// The source for this association
     pub source: String,
     /// The other serialized data this association is with
     pub other: String,
     /// Who created this association
-    pub submitter: String,
+    pub submitter: Option<String>,
     /// Any extra info needed for the source column in this row
     pub extra_source: Option<String>,
     /// Any extra info needed for the target column in this row
     pub extra_other: Option<String>,
+    /// The submission of the source this association was made for
+    pub submissions_source: Option<Uuid>,
+    /// The submission of the other side this association was made for
+    pub submissions_other: Option<Uuid>,
 }
 
 impl Utils for Association {
@@ -58,6 +60,11 @@ impl Utils for Association {
 
 #[async_trait::async_trait]
 impl Backup for Association {
+    /// The columns of this table's partition key, used to name rows that fail to decode
+    fn partition_key() -> &'static [&'static str] {
+        &["group", "year", "bucket", "source"]
+    }
+
     /// The prepared statement to use when retrieving data from Scylla
     ///
     /// # Arguments
@@ -71,7 +78,8 @@ impl Backup for Association {
         // build logs get prepared statement
         scylla
             .prepare(format!(
-                "SELECT group, year, bucket, created, direction, kind, source, target, submitter, extra_source, extra_target \
+                "SELECT group, year, bucket, created, direction, kind, source, target, submitter, extra_source, extra_target, \
+                submissions_source, submissions_other \
                 FROM {}.{} \
                 WHERE token(group, year, bucket, source) >= ? AND token(group, year, bucket, source) <= ?",
                     ns,
@@ -104,11 +112,23 @@ impl Restore for Association {
     // the size itself
     type PartitionConf = u16;
 
-    /// The steps to once run before restoring data
-    async fn prep(_scylla: &Session, _ns: &str) -> Result<(), ExecutionError> {
-        // no prep steps needed
-        Ok(())
-    }
+    /// The group, year, bucket, creation time, direction, kind, source, target, submitter, extra
+    /// data of each side, and submission of each side
+    type Values = (
+        String,
+        i32,
+        i32,
+        DateTime<Utc>,
+        Directionality,
+        Option<AssociationKind>,
+        String,
+        String,
+        Option<String>,
+        Option<String>,
+        Option<String>,
+        MaybeUnset<Option<Uuid>>,
+        MaybeUnset<Option<Uuid>>,
+    );
 
     /// The prepared statement to use when restoring data to scylla
     ///
@@ -123,8 +143,9 @@ impl Restore for Association {
         scylla
             .prepare(format!(
                 "INSERT INTO {}.{} \
-                (group, year, bucket, created, direction, kind, source, target, submitter, extra_source, extra_target) \
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (group, year, bucket, created, direction, kind, source, target, submitter, extra_source, extra_target, \
+                submissions_source, submissions_other) \
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 ns,
                 Self::name(),
             ))
@@ -140,80 +161,92 @@ impl Restore for Association {
         config.thorium.associations.partition_size
     }
 
-    /// Restore a single partition
+    /// Returns the values the restore's insert binds for this row, in a bucket of the target's
+    /// partition size
     ///
     /// # Arguments
     ///
-    /// * `buffer` - The buffer we should restore data from
-    /// * `scylla` - The client to use when talking to scylla
-    /// * `rows_restored` - The number of rows that have been restored
-    /// * `partition_size` - The partition size to use when restoring data
-    /// * `progress` - The bar to report progress with
-    /// * `prepared` - The prepared statement to inject data with
-    async fn restore<'a>(
-        buffer: &'a [u8],
-        scylla: &Arc<Session>,
-        partition_size: &u16,
-        rows_restored: &mut usize,
-        progress: &mut ProgressBar,
-        prepared: &PreparedStatement,
-    ) -> Result<(), Error> {
-        // cast our buffer to its archived type
-        let rows = rkyv::check_archived_root::<Vec<Association>>(buffer)?;
-        // build a set of futures
-        let mut futures = FuturesUnordered::new();
-        // build our queries to insert this partitions rows
-        for row in rows.iter() {
-            let direction: Directionality = row.direction.deserialize(&mut rkyv::Infallible)?;
-            let kind: AssociationKind = row.kind.deserialize(&mut rkyv::Infallible)?;
-            // deserialize this rows uploaded timestamp
-            let created = row.created.deserialize(&mut rkyv::Infallible)?;
-            // calculate the new bucket
-            let bucket = thorium::utils::helpers::partition(created, row.year, *partition_size);
-            let query = scylla.execute_unpaged(
-                prepared,
-                (
-                    row.group.as_str(),
-                    row.year,
-                    bucket,
-                    created,
-                    direction,
-                    kind,
-                    row.source.as_str(),
-                    row.other.as_str(),
-                    row.submitter.as_str(),
-                    row.extra_source.as_ref().map(ArchivedString::as_str),
-                    row.extra_other.as_ref().map(ArchivedString::as_str),
-                ),
-            );
-            // add this to our futures
-            futures.push(query);
-            // if we have 1000 futures then wait for at least 500 of them to complete
-            if futures.len() > 1000 {
-                // poll our futures until one is complete
-                while let Some(query_result) = futures.next().await {
-                    // raise any errors
-                    query_result?;
-                    // increment our restored row count
-                    *rows_restored += 1;
-                    // set our current row count progress message
-                    progress.set_message(rows_restored.to_string());
-                    // if we have less then 100 future to go then refill our future set
-                    if futures.len() < 100 {
-                        break;
-                    }
-                }
-            }
-        }
-        // poll our futures until one is complete
-        while let Some(query_result) = futures.next().await {
-            // raise any errors
-            query_result?;
-            // increment our restored row count
-            *rows_restored += 1;
-            // set our current row count progress message
-            progress.set_message(rows_restored.to_string());
-        }
-        Ok(())
+    /// * `partition_size` - The partition size to bucket the row with
+    /// * `format` - The format version the row was archived in
+    fn values(self, partition_size: &u16, format: u32) -> Self::Values {
+        // calculate the new bucket
+        let bucket = thorium::utils::helpers::partition(self.created, self.year, *partition_size);
+        // every column, leaving the submissions format 1 didn't archive unset
+        (
+            self.group,
+            self.year,
+            bucket,
+            self.created,
+            self.direction,
+            self.kind,
+            self.source,
+            self.other,
+            self.submitter,
+            self.extra_source,
+            self.extra_other,
+            added_in_format_2(self.submissions_source, format),
+            added_in_format_2(self.submissions_other, format),
+        )
     }
+}
+
+/// An associations row as format 1 archives it
+#[derive(Debug, Clone, Archive, Serialize, Deserialize)]
+#[archive_attr(derive(Debug, CheckBytes))]
+pub struct AssociationV1 {
+    /// The group this association is for
+    pub group: String,
+    /// The year the association was created
+    pub year: i32,
+    /// The bucket the association is in
+    pub bucket: i32,
+    /// When this association was created
+    pub created: DateTime<Utc>,
+    /// The direction for this association
+    pub direction: Directionality,
+    /// The kind of association this is
+    pub kind: AssociationKind,
+    /// The source for this association
+    pub source: String,
+    /// The other serialized data this association is with
+    pub other: String,
+    /// Who created this association
+    pub submitter: String,
+    /// Any extra info needed for the source column in this row
+    pub extra_source: Option<String>,
+    /// Any extra info needed for the target column in this row
+    pub extra_other: Option<String>,
+}
+
+impl From<AssociationV1> for Association {
+    /// Converts a format-1 row, whose required fields are always set and which carries no
+    /// submissions
+    ///
+    /// # Arguments
+    ///
+    /// * `row` - The format-1 row
+    fn from(row: AssociationV1) -> Self {
+        // format 1 could only hold rows with these cells set, and didn't archive the submissions
+        Association {
+            group: row.group,
+            year: row.year,
+            bucket: row.bucket,
+            created: row.created,
+            direction: row.direction,
+            kind: Some(row.kind),
+            source: row.source,
+            other: row.other,
+            submitter: Some(row.submitter),
+            extra_source: row.extra_source,
+            extra_other: row.extra_other,
+            submissions_source: None,
+            submissions_other: None,
+        }
+    }
+}
+
+/// Format 1 archives `Association` rows as [`AssociationV1`]
+impl Versioned for Association {
+    /// Format 1 rows decode as [`AssociationV1`], which converts into `Association`
+    type V1 = AssociationV1;
 }

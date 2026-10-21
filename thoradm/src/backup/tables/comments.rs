@@ -3,24 +3,23 @@
 use ahash::AHasher;
 use bytecheck::CheckBytes;
 use chrono::prelude::*;
-use futures::stream::{FuturesUnordered, StreamExt};
-use indicatif::ProgressBar;
 use rkyv::{Archive, Deserialize, Serialize};
 use scylla::DeserializeRow;
 use scylla::client::session::Session;
-use scylla::errors::{ExecutionError, PrepareError};
+use scylla::errors::PrepareError;
 use scylla::statement::prepared::PreparedStatement;
 use std::collections::HashMap;
 use std::hash::Hasher;
-use std::path::PathBuf;
-use std::sync::Arc;
+use std::path::{Path, PathBuf};
 use thorium::Conf;
 use uuid::Uuid;
 
+use super::Versioned;
 use crate::Error;
-use crate::backup::{Backup, Restore, S3Backup, S3Restore, Scrub, Utils, utils};
+use crate::backup::s3::{Crawl, Named, SkippedRow, object_key};
+use crate::backup::{Backup, Restore, S3Backup, S3Restore, Scrub, Utils};
 
-/// A single line of stage logs
+/// A comment row as format 2 archives it; `None` is a cell the source row held unset
 #[derive(Debug, Archive, Serialize, Deserialize, DeserializeRow)]
 #[archive_attr(derive(Debug, CheckBytes))]
 #[scylla(flavor = "enforce_order", skip_name_checks)]
@@ -34,11 +33,11 @@ pub struct Comment {
     /// The uuid for this comment
     pub id: Uuid,
     /// The author for this comment
-    pub author: String,
+    pub author: Option<String>,
     /// The comment for this file
-    pub comment: String,
+    pub comment: Option<String>,
     /// Any paths in s3 to files/attachements for this comment
-    pub files: String,
+    pub files: Option<String>,
 }
 
 impl Utils for Comment {
@@ -50,6 +49,11 @@ impl Utils for Comment {
 
 #[async_trait::async_trait]
 impl Backup for Comment {
+    /// The columns of this table's partition key, used to name rows that fail to decode
+    fn partition_key() -> &'static [&'static str] {
+        &["group", "sha256"]
+    }
+
     /// The prepared statement to use when retrieving data from Scylla
     ///
     /// # Arguments
@@ -94,12 +98,16 @@ impl Restore for Comment {
     // the size itself
     type PartitionConf = u16;
 
-    /// The steps to once run before restoring data
-    async fn prep(scylla: &Session, ns: &str) -> Result<(), ExecutionError> {
-        // drop the materialized views for this table
-        utils::drop_materialized_view(ns, "comments_by_id", scylla).await?;
-        Ok(())
-    }
+    /// The group, sha256, upload time, id, author, comment, and attachments
+    type Values = (
+        String,
+        String,
+        DateTime<Utc>,
+        Uuid,
+        Option<String>,
+        Option<String>,
+        Option<String>,
+    );
 
     /// The prepared statement to use when restoring data to scylla
     ///
@@ -131,80 +139,32 @@ impl Restore for Comment {
         0
     }
 
-    /// Restore a single partition
+    /// Returns the values the restore's insert binds for this row
     ///
     /// # Arguments
     ///
-    /// * `buffer` - The buffer we should restore data from
-    /// * `scylla` - The client to use when talking to scylla
-    /// * `partition_size` - The partition size to use when restoring data
-    /// * `rows_restored` - The number of rows that have been restored
-    /// * `progress` - The bar to report progress with
-    /// * `prepared` - The prepared statement to inject data with
-    async fn restore<'a>(
-        buffer: &'a [u8],
-        scylla: &Arc<Session>,
-        _partition_size: &u16,
-        rows_restored: &mut usize,
-        progress: &mut ProgressBar,
-        prepared: &PreparedStatement,
-    ) -> Result<(), Error> {
-        // cast our buffer to its archived type
-        let rows = rkyv::check_archived_root::<Vec<Comment>>(buffer)?;
-        // build a set of futures
-        let mut futures = FuturesUnordered::new();
-        // build our queries to insert this partitions rows
-        for row in rows.iter() {
-            // deserialize this rows uploaded timestamp
-            let uploaded: DateTime<Utc> = row.uploaded.deserialize(&mut rkyv::Infallible)?;
-            // restore this row to scylla
-            let query = scylla.execute_unpaged(
-                prepared,
-                (
-                    row.group.as_str(),
-                    row.sha256.as_str(),
-                    uploaded,
-                    row.id,
-                    row.author.as_str(),
-                    row.comment.as_str(),
-                    row.files.as_str(),
-                ),
-            );
-            // add this to our futures
-            futures.push(query);
-            // if we have 1000 futures then wait for at least 500 of them to complete
-            if futures.len() > 1000 {
-                // poll our futures until one is complete
-                while let Some(query_result) = futures.next().await {
-                    // raise any errors
-                    query_result?;
-                    // increment our restored row count
-                    *rows_restored += 1;
-                    // set our current row count progress message
-                    progress.set_message(rows_restored.to_string());
-                    // if we have less then 100 future to go then refill our future set
-                    if futures.len() < 100 {
-                        break;
-                    }
-                }
-            }
-        }
-        // poll our futures until one is complete
-        while let Some(query_result) = futures.next().await {
-            // raise any errors
-            query_result?;
-            // increment our restored row count
-            *rows_restored += 1;
-            // set our current row count progress message
-            progress.set_message(rows_restored.to_string());
-        }
-        Ok(())
+    /// * `_partition_size` - Unused, as comments aren't bucketed
+    /// * `_format` - The format version the row was archived in
+    fn values(self, _partition_size: &u16, _format: u32) -> Self::Values {
+        // every column as the row holds it
+        (
+            self.group,
+            self.sha256,
+            self.uploaded,
+            self.id,
+            self.author,
+            self.comment,
+            self.files,
+        )
     }
 }
 
 #[async_trait::async_trait]
 impl S3Backup for Comment {
     /// Get the comment attachments and where to write them off to disk at
+    ///
+    /// A comment whose attachments column isn't valid JSON is returned as a skipped row, and
+    /// the attachments of the other comments are still listed.
     ///
     /// # Arguments
     ///
@@ -217,15 +177,31 @@ impl S3Backup for Comment {
         root: &PathBuf,
         chars: usize,
         buffer: &[u8],
-    ) -> Result<Vec<(String, String, PathBuf)>, Error> {
+    ) -> Result<Crawl, Error> {
         // cast our buffer to its archived type
         let rows = rkyv::check_archived_root::<Vec<Comment>>(buffer)?;
         // start with an empty list since most comments probably won't have attachments
         let mut downloads = Vec::default();
+        // the comments whose attachments column can't be read
+        let mut skipped = Vec::default();
         // crawl our comments and build a list of attachments to write off to disk
         for row in rows.iter() {
-            // deserialize our files map
-            let files: HashMap<String, Uuid> = serde_json::from_str(row.files.as_str())?;
+            // a comment without its attachments column names no attachments
+            let Some(files) = row.files.as_ref() else {
+                continue;
+            };
+            // deserialize our files map, skipping only this comment when the column isn't a files map
+            let files: HashMap<String, Uuid> = match serde_json::from_str(files.as_str()) {
+                Ok(files) => files,
+                Err(error) => {
+                    // name the comment so the rest of the archive's attachments are still backed up
+                    skipped.push(SkippedRow {
+                        referrer: format!("{}:{}/{}", Comment::name(), row.sha256, row.id),
+                        error: error.to_string(),
+                    });
+                    continue;
+                }
+            };
             // crawl the attachments for this comment
             for (_, id) in files.iter() {
                 // get the bucket for comment attachments
@@ -240,45 +216,76 @@ impl S3Backup for Comment {
                 path.push(row.sha256.as_str());
                 path.push(row.id.to_string());
                 path.push(id.to_string());
-                // add this attachment to our download list
-                downloads.push((bucket, key, path));
+                // add this attachment to our download list, named by the comment that holds it
+                downloads.push(Named {
+                    bucket,
+                    key,
+                    path,
+                    referrer: format!("{}:{}/{}", Comment::name(), row.sha256, row.id),
+                });
             }
         }
-        Ok(downloads)
+        Ok(Crawl { downloads, skipped })
     }
 }
 
+/// A comment row as format 1 archives it
+#[derive(Debug, Clone, Archive, Serialize, Deserialize)]
+#[archive_attr(derive(Debug, CheckBytes))]
+pub struct CommentV1 {
+    /// The group to share this comment with
+    pub group: String,
+    /// The sha256 this comment was for
+    pub sha256: String,
+    /// When this comment was uploaded
+    pub uploaded: DateTime<Utc>,
+    /// The uuid for this comment
+    pub id: Uuid,
+    /// The author for this comment
+    pub author: String,
+    /// The comment for this file
+    pub comment: String,
+    /// Any paths in s3 to files/attachements for this comment
+    pub files: String,
+}
+
+impl From<CommentV1> for Comment {
+    /// Converts a format-1 row, whose required fields are always set
+    ///
+    /// # Arguments
+    ///
+    /// * `row` - The format-1 row
+    fn from(row: CommentV1) -> Self {
+        // format 1 could only hold rows with these cells set
+        Comment {
+            group: row.group,
+            sha256: row.sha256,
+            uploaded: row.uploaded,
+            id: row.id,
+            author: Some(row.author),
+            comment: Some(row.comment),
+            files: Some(row.files),
+        }
+    }
+}
+
+/// Format 1 archives `Comment` rows as [`CommentV1`]
+impl Versioned for Comment {
+    /// Format 1 rows decode as [`CommentV1`], which converts into `Comment`
+    type V1 = CommentV1;
+}
+
 impl S3Restore for Comment {
-    /// Get the bucket and s3 path for this file
+    /// Get the bucket and key of a backed-up object from where the backup keeps it
     ///
     /// # Arguments
     ///
     /// * `path` - The path to the file we are restoring
+    /// * `objects` - The component's `objects/` directory, which `path` is under
     /// * `conf` - The Thorium for this cluster
-    fn parse(path: &PathBuf, conf: &Conf) -> Result<(String, String), Error> {
-        // get the bucket for this object
-        let bucket = conf.thorium.attachments.bucket.clone();
-        // build an iterator over this paths components
-        let chunks = path.components();
-        // skip the first 3 components
-        let mut chunks = chunks.skip(4);
-        // get the sha256 this comment attachment is for
-        let sha256 = match chunks.next() {
-            Some(sha256) => sha256.as_os_str().to_string_lossy(),
-            None => return Err(Error::new("sha256 is not in path")),
-        };
-        // get the id of this attachments comment
-        let comment_id = match chunks.next() {
-            Some(comment_id) => comment_id.as_os_str().to_string_lossy(),
-            None => return Err(Error::new("sha256 is not in path")),
-        };
-        // get this attachments id
-        let attachment_id = match chunks.next() {
-            Some(attachment_id) => attachment_id.as_os_str().to_string_lossy(),
-            None => return Err(Error::new("sha256 is not in path")),
-        };
-        // build the s3 path for this comment attachment
-        let s3_path = format!("{}/{}/{}", sha256, comment_id, attachment_id);
-        Ok((bucket, s3_path))
+    fn parse(path: &Path, objects: &Path, conf: &Conf) -> Result<(String, String), Error> {
+        // every attachment is in the attachments bucket, keyed by sample, comment, and id
+        let (_, key) = object_key(path, objects, false)?;
+        Ok((conf.thorium.attachments.bucket.clone(), key))
     }
 }

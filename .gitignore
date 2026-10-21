@@ -2,6 +2,8 @@ book
 keys.yml
 *.txt
 target
+# coverage reports the thoradm test harness writes
+/reports
 *.bak
 binaries
 built

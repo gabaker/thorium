@@ -31,6 +31,10 @@ thorium:
   # The port Thorium should bind to
   port: 80
   # The namespace to use in the redis and the k8s namespace for Thorium system pods
+  # Lowercase ASCII letters (a-z), digits and underscores only, starting with a lowercase
+  # letter, at most 48 characters; Thorium refuses to start with any other namespace, so a
+  # namespace with uppercase letters must be renamed, and the Redis state under its old prefix
+  # isn't found or migrated (see the ThoriumCluster deployment guide)
   namespace: "thorium"
   # A secret key used for generating secrets and for bootstrapping with the deployer
   # Make sure this is a longer string and its protected
