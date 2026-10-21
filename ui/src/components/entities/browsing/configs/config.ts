@@ -21,8 +21,6 @@ import { createEntityBrowsingPage } from '../EntityBrowsing';
 import SigmaRulesBrowsingConfig from './SigmaRuleBrowsingConfig';
 import { EntityBrowseConfig } from './entityFetcher';
 
-// spec: ../EntityBrowsing.spec.md
-
 // `EntityBrowseConfig` and `makeEntityFetcher` live in `./entityFetcher` (which imports no config files) to
 // avoid a circular import: `config.ts` imports every per-kind config, and those configs need the fetcher — so
 // sourcing it here would leave them accessing a value from a still-initializing module. Re-exported so existing

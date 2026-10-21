@@ -1,7 +1,5 @@
 import type { GraphInstance } from '../types';
 
-// spec: ./GraphControlsToolbar.spec.md
-
 export enum NodeRenderMode {
   Spheres = 'spheres',
   Icons = 'icons',

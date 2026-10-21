@@ -10,8 +10,6 @@ import { OceanJsonTheme, useJsonTreeInvert } from '@components/shared/renderers/
 import { getResultsFile } from '@thorpi/results';
 import { useAuth } from '@utilities/auth';
 
-// spec: ../ToolResult.spec.md
-
 // legacy display path — the modular ImageRenderer (detect.ts IMAGE_EXTENSIONS/imageMimeForName) is
 // the maintained image renderer; keep this list only until this display is migrated
 const SupportedImageFormats = ['png', 'jpeg', 'gif', 'apng', 'avif', 'svg', 'svgz', 'webp'];

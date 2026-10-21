@@ -1,8 +1,6 @@
 import React, { useCallback, useMemo, useRef, useState } from 'react';
 import { FaChevronDown, FaChevronUp } from 'react-icons/fa6';
 
-// spec: ./SPEC.md
-
 // project imports
 import { useVisibleNodes } from './nodes';
 import { ALWAYS_HIDDEN_TAG_KEYS, collectTagCounts, type TagValueCount } from './tagCounts';

@@ -1,4 +1,3 @@
-// spec: ./EntityBrowser.spec.md
 import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { FaEyeSlash } from 'react-icons/fa6';
 

@@ -1,4 +1,3 @@
-// spec: ./SPEC.md
 export { default as FileRenderer } from './FileRenderer';
 export { default as FilePreview } from './FilePreview';
 export type { FilePreviewProps } from './FilePreview';

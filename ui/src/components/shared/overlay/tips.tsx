@@ -3,8 +3,6 @@ import React from 'react';
 // project imports
 import OverlayTip, { OverlayTipProps, Placement } from './OverlayTip';
 
-// spec: ./OverlayTip.spec.md
-
 export const OverlayTipLeft: React.FC<OverlayTipProps> = ({ children, tip, wide = false, className = '', disabled, block }) => {
   return (
     <OverlayTip tip={tip} wide={wide} className={className} placement={Placement.Left} disabled={disabled} block={block}>

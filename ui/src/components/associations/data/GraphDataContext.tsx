@@ -6,8 +6,6 @@ import { SharedTreeIndexProvider } from './SharedTreeIndex';
 import { Seed, Graph, BlankGraph } from '@models/trees';
 import { getInitialTree, growTree } from '@thorpi/trees';
 
-// spec: ./GraphDataContext.spec.md
-
 export enum FocusSource {
   Tree = 'tree',
   Graph = 'graph',

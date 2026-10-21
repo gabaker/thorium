@@ -1,4 +1,3 @@
-// spec: ./EntityBrowser.spec.md
 import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { FaAngleUp, FaBullseye, FaChevronRight, FaEyeSlash, FaFlag, FaGear, FaSeedling, FaTags } from 'react-icons/fa6';
 

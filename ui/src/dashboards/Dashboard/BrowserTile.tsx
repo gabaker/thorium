@@ -1,7 +1,5 @@
 import React from 'react';
 
-// spec: ./SPEC.md
-
 // project imports
 import { EntityBrowserBody } from '@components/associations/browsing/EntityBrowser/EntityBrowser';
 

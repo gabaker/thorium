@@ -1,7 +1,5 @@
 import React, { createContext, useContext, useMemo } from 'react';
 
-// spec: ./SPEC.md
-
 // project imports
 import { collectSampleSha256s } from './deriveStats';
 import { useGraphData } from '@components/associations/data/GraphDataContext';

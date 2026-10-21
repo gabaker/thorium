@@ -4,7 +4,6 @@ import styled from 'styled-components';
 // project imports
 import { decodeHexValues } from './decode';
 import { HexByteStatus, HexSelection } from './types';
-// spec: ../SPEC.md
 
 const Panel = styled.div`
   flex: 0 0 auto;

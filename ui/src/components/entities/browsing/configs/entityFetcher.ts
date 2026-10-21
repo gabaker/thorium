@@ -5,8 +5,6 @@ import { listEntities } from '@thorpi/entities';
 import { ExtendedTypeMap } from '@models/entities/entities';
 import { Filters } from '@models/search';
 
-// spec: ../EntityBrowsing.spec.md
-
 // This module deliberately imports NO per-kind `*BrowsingConfig` file. `config.ts` imports every config, and
 // each config needs `makeEntityFetcher`; if that factory lived in `config.ts`, the configs would import a value
 // back from a module still mid-evaluation, hitting the temporal dead zone ("Cannot access 'makeEntityFetcher'

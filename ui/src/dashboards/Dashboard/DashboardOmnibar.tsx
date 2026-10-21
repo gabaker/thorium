@@ -1,8 +1,6 @@
 import React, { useMemo } from 'react';
 import { FaChevronDown, FaChevronUp, FaEyeSlash, FaGear, FaXmark } from 'react-icons/fa6';
 
-// spec: ./SPEC.md
-
 // project imports
 import {
   ClearHiddenButton,

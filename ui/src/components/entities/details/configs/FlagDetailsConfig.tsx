@@ -10,8 +10,6 @@ import InfoValue from '@entities/shared/InfoValue';
 import { Entities } from '@models/entities';
 import { BlankFlag } from '@models/entities/flag';
 
-// spec: ../EntityDetails.spec.md
-
 // Read-only display of a flag's metadata fields.
 const FlagMetaInfo = ({ entity }: DetailsMetadataProps<Entities.Flag>): JSX.Element => {
   const meta = entity.metadata.Flag;

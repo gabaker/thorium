@@ -8,8 +8,6 @@ import { PopoverBody, Divider, MenuList, MenuDropdown } from './Toolbar.styled';
 import LabeledRange from './LabeledRange';
 import { LABEL_MAX_PX, LABEL_MIN_PX, LABEL_TARGET_PX } from '../labelScale';
 
-// spec: ./GraphControlsToolbar.spec.md
-
 const NODE_STYLE_LABELS: Record<string, string> = {
   spheres: 'Spheres',
   icons: 'Icons',

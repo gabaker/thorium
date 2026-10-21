@@ -9,8 +9,6 @@ import { OverlayTipLeft } from '@components/shared/overlay/tips';
 import type { TreeNode } from '@models/trees';
 import { PreviewContainer, PreviewScroll, PreviewToggleButton, PreviewCollapseButton } from './Shared';
 
-// spec: ./AssociationGraph.spec.md
-
 interface DataPreviewPanelProps {
   selectedElement: SelectedElement | null;
   nodeData: TreeNode | undefined;

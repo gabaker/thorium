@@ -1,8 +1,6 @@
 // project imports
 import { ClauseCondition, ClauseIsMulti, type Clause } from '@components/shared/inputs/omnibar/ClauseTypes';
 
-// spec: ./SPEC.md
-
 /**
  * The omnibar clause `category` for a tag filter.
  *

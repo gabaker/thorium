@@ -1,4 +1,3 @@
-// spec: ./EntityBrowser.spec.md
 import React, { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState } from 'react';
 
 // project imports

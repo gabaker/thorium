@@ -14,8 +14,6 @@ import { ButtonSize } from '@components/shared/buttons/types';
 import { OverlayTipTop } from '@components/shared/overlay/tips';
 import { downloadBlob } from '@utilities/download';
 
-// spec: ./SPEC.md
-
 const PreviewWrapper = styled.div`
   display: flex;
   flex-direction: column;

@@ -6,8 +6,6 @@ import type { GraphSectionProps } from './types';
 import { computeSizeDefaults } from './sizeDefaults';
 import { MenuList, MenuItem, MenuDropdown, PopoverBody, Divider } from './Toolbar.styled';
 
-// spec: ./GraphControlsToolbar.spec.md
-
 const GraphSection: React.FC<GraphSectionProps> = ({ controls, updateControls, graphInstance, nodeCount }) => (
   <PopoverBody>
     <MenuList $inset>

@@ -45,8 +45,6 @@ import { pipelineToEditorObject } from '@utilities/transforms/pipeline';
 import type { Group } from '@models/groups';
 import type { EventTrigger, Pipeline, PipelineBan, PipelineUpdate } from '@models/pipelines';
 
-// spec: ./PipelineInfo.spec.md
-
 // Top-level editor keys managed by the Fields form
 const FIELDS_KEYS = new Set(['name', 'group', 'description', 'sla']);
 

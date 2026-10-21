@@ -1,7 +1,5 @@
 import styled from 'styled-components';
 
-// spec: ./SPEC.md
-
 // project imports
 import { scaling, spacers } from '@styles';
 

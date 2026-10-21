@@ -4,8 +4,6 @@ import type * as THREE from 'three';
 // project imports
 import { NodeType } from '@models/trees';
 
-// spec: ./AssociationGraph.spec.md
-
 export enum VisualState {
   Basic = 'basic',
   Growable = 'growable',

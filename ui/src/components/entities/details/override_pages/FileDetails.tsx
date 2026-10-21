@@ -24,8 +24,6 @@ import type { Output } from '@models/results';
 import LoadingSpinner from '@components/shared/fallback/LoadingSpinner';
 import FileInfo from './FileInfo';
 
-// spec: ../EntityDetails.spec.md
-
 // top-level file detail sections, in display order
 const FILE_TABS: TabItem[] = [
   { key: 'results', label: 'Results' },

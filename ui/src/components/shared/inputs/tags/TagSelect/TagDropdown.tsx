@@ -1,8 +1,6 @@
 import { useEffect, useRef } from 'react';
 import { styled } from 'styled-components';
 
-// spec: ./TagSelect.spec.md
-
 const TagDropdownDiv = styled.div`
   position: absolute;
   background-color: var(--thorium-secondary-panel-bg);

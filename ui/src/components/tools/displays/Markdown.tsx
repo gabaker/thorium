@@ -9,8 +9,6 @@ import { formatResultBody } from '../alerts';
 import { ResultRenderProps } from '../props';
 import '@styles/main.scss';
 
-// spec: ../ToolResult.spec.md
-
 /** Render a tool result as GitHub-flavored Markdown. */
 const Markdown: React.FC<ResultRenderProps> = ({ result }) => {
   const { errors, warnings, resultsJson, isJson } = useResultAlerts(result.result, true);

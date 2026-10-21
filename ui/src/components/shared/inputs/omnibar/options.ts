@@ -1,8 +1,6 @@
 import { TagOptions } from '@models/tags';
 import { ClauseCondition } from './ClauseTypes';
 
-// spec: ./SPEC.md
-
 export type OmnibarOptionMap = Record<string, OmnibarCategoryOption>;
 
 export type OmnibarCategoryOption = {

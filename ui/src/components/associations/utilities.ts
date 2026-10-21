@@ -1,5 +1,3 @@
-// spec: ./utilities.spec.md
-
 // project imports
 import { associationKindLabel } from '@models/associations';
 import { RequestTags } from '@models/tags';

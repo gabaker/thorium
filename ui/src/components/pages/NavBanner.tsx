@@ -11,8 +11,6 @@ import { useAuth } from '@utilities/auth';
 import { getApiUrl } from '@utilities/url';
 import { Badge } from 'react-bootstrap';
 
-// spec: ./Page.spec.md
-
 const StyledNavbar = styled.nav`
   display: flex;
   align-items: center;

@@ -11,7 +11,6 @@ import YaraRenderer from './YaraRenderer';
 import HexView from './hex/HexView';
 import { FileRendererProps, RenderKind } from './types';
 import { FormatType } from '@utilities/rules/types';
-// spec: ./SPEC.md
 
 /** Decompiled-source renderer: the shared read-only CodeRenderer forced to the decomp format. */
 const DecompRenderer: React.FC<FileRendererProps> = (props) => React.createElement(CodeRenderer, { ...props, format: FormatType.Decomp });

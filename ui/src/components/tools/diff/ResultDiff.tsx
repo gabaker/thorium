@@ -1,4 +1,3 @@
-// spec: ../ToolResult.spec.md
 import React, { useEffect, useMemo, useState } from 'react';
 import { ErrorBoundary } from 'react-error-boundary';
 import { DiffMethod } from 'react-diff-viewer-continued';

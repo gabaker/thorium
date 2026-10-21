@@ -1,7 +1,5 @@
 import React, { Suspense } from 'react';
 
-// spec: ./SPEC.md
-
 // project imports
 import PaneExpandToggle from './PaneExpandToggle';
 import { GraphContentTile, GraphFallbackContainer, TileHeader, TileHeaderRow } from './styles';

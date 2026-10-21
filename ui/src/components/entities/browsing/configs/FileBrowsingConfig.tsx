@@ -16,8 +16,6 @@ import { Entities } from '@models/entities/entities';
 import { scaling } from '@styles';
 import { getDetailsBasePathByEntity } from '@components/entities/details/EntityDetailsRoutes';
 
-// spec: ../EntityBrowsing.spec.md
-
 // Fetch files using search filters and an optional pagination cursor.
 const getFiles = async (filters: Filters, existingCursor: string | null) => {
   // request full file details so the listing can render submission metadata

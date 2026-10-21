@@ -1,7 +1,5 @@
 import React from 'react';
 
-// spec: ./Tabs.spec.md
-
 /**
  * An icon action rendered next to a tab's label while that tab is active (e.g. a "fetch" button).
  * When present on the active tab, its tooltip replaces the tab's own {@link TabItem.tip} so the two

@@ -1,8 +1,6 @@
 import { Popover } from 'react-bootstrap';
 import styled from 'styled-components';
 
-// spec: ./SPEC.md
-
 /**
  * The single themed popover shell for entity/file/repo summary previews (hover overlays + the graph's
  * cursor-anchored portal). Replaces the former per-surface `InfoPopover` and `PreviewPopover`.

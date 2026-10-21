@@ -1,5 +1,3 @@
-// spec: ./SPEC.md
-
 // project imports
 import { getUniqueFileNames } from '@utilities/files';
 import { TreeNode, TreeNodeKey, type Seed } from '@models/trees';

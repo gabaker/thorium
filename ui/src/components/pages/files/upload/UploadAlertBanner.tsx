@@ -5,8 +5,6 @@ import { Link } from 'react-router-dom';
 import RunReactionAlerts from '../reactions/RunReactionAlerts';
 import { ReactionSubmitResult } from './types';
 
-// spec: ./upload.spec.md
-
 interface UploadAlertBannerProps {
   uploadSHA256: string[];
   uploadError: string[];

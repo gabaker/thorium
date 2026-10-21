@@ -10,8 +10,6 @@ import { Origin } from '@models/files';
 import { Tags } from '@models/tags';
 import { TreeNode, TreeNodeKey } from '@models/trees';
 
-// spec: ./SPEC.md
-
 /**
  * Whether a field renders inline (`Label: value` on one line) or stacked (label above value). When a
  * field omits this, {@link resolveFieldLayout} derives it from the value kind / render type.

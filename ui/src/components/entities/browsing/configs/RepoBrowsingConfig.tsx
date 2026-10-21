@@ -12,8 +12,6 @@ import { Entities } from '@models/entities/entities';
 import { getDetailsBasePathByEntity } from '@components/entities/details/EntityDetailsRoutes';
 import { Repo } from '@models/repos';
 
-// spec: ../EntityBrowsing.spec.md
-
 // get repos using filters and an optional cursor
 const getRepos = async (filters: Filters, cursor: string | null) => {
   // request full repo details so the listing can render repo metadata

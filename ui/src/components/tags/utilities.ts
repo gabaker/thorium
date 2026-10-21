@@ -4,8 +4,6 @@ import { Entities } from '@models/entities';
 import { Tags, TagUpperKeyEnum, TagValueEnum } from '@models/tags';
 import { DangerTagKeys, FormattedFileInfoTagKeys } from './tag_groups';
 
-// spec: ./tags.spec.md
-
 /**
  * Build a browse-page URL for a resource pre-filtered by a single tag.
  *

@@ -13,8 +13,6 @@ import { FormatType } from '@utilities/rules/types';
 import { Entities } from '@models/entities/entities';
 import { BlankCreateDecompiledFunction, DecompiledFunctionCreateMetaFields } from '@models/entities/functions';
 
-// spec: ../EntityCreate.spec.md
-
 const DecompiledFunctionMetaInfo = ({ entity, onChange }: CreateMetadataProps<Entities.DecompiledFunction>): JSX.Element => {
   function updatePendingMeta<T extends keyof DecompiledFunctionCreateMetaFields>(
     field: T,

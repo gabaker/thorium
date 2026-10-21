@@ -6,8 +6,6 @@ import { textOf } from './detect';
 import { FileRendererProps } from './types';
 import Markdown from '@components/shared/syntax/Markdown';
 
-// spec: ./SPEC.md
-
 const MarkdownScroll = styled.div`
   padding: 8px 12px;
   min-width: 0;

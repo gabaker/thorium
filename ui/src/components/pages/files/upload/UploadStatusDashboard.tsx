@@ -9,8 +9,6 @@ import UploadStatusTable from './UploadStatusTable';
 import { useUpload } from './UploadContext';
 import { encodeSeedParams } from '@dashboards/Dashboard/seedParams';
 
-// spec: ./upload.spec.md
-
 const UploadStatusDashboard: React.FC = () => {
   const {
     uploadInProgress,

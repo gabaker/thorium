@@ -11,8 +11,6 @@ import NumberInput from '@components/shared/inputs/NumberInput';
 import { Entities } from '@models/entities/entities';
 import { BlankCreateCompiledFunction, CompiledFunctionCreateMetaFields } from '@models/entities/functions';
 
-// spec: ../EntityCreate.spec.md
-
 const CompiledFunctionMetaInfo = ({ entity, onChange }: CreateMetadataProps<Entities.CompiledFunction>): JSX.Element => {
   function updatePendingMeta<T extends keyof CompiledFunctionCreateMetaFields>(field: T, value: CompiledFunctionCreateMetaFields[T]): void {
     const updates: CompiledFunctionCreateMetaFields = structuredClone(entity.metadata.CompiledFunction);

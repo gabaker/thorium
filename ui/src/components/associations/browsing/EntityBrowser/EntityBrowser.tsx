@@ -1,4 +1,3 @@
-// spec: ./EntityBrowser.spec.md
 import React, { Fragment, useEffect, useMemo, useRef, useState } from 'react';
 import { FaHouse } from 'react-icons/fa6';
 

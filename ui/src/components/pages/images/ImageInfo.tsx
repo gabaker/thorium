@@ -60,8 +60,6 @@ import type { Volume } from '@models/volumes';
 import type { OutputCollection as OutputCollectionType } from '@models/results';
 import { RoleKey } from '@models/users';
 
-// spec: ./ImageInfo.spec.md
-
 export interface ImageInfoHandle {
   handleUpdate: () => void;
 }

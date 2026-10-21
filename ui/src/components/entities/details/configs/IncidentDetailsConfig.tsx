@@ -14,8 +14,6 @@ import TextInput from '@components/shared/inputs/TextInput';
 import { Entities } from '@models/entities';
 import { BlankIncident, IncidentMetaFields } from '@models/entities/incident';
 
-// spec: ../EntityDetails.spec.md
-
 // The incident list fields rendered identically as edit (multi-select) / view (badges) rows.
 const LIST_FIELDS: { field: keyof Pick<IncidentMetaFields, 'mission_teams' | 'networks' | 'machines' | 'locations'>; label: string }[] = [
   { field: 'mission_teams', label: 'Mission Teams' },

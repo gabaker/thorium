@@ -2,8 +2,6 @@ import React, { JSX } from 'react';
 import { Badge } from 'react-bootstrap';
 import styled from 'styled-components';
 
-// spec: ./FieldBadge.spec.md
-
 const TagBadge = styled(Badge)`
   text-wrap: pretty;
   white-space: break-spaces;

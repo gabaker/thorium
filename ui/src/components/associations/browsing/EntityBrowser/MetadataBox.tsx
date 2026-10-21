@@ -1,5 +1,3 @@
-// spec: ./EntityBrowser.spec.md
-
 // project imports
 import { MetadataContent, MetadataSection } from './EntityBrowser.styled';
 import LoadingSpinner from '@components/shared/fallback/LoadingSpinner';

@@ -1,5 +1,3 @@
-// spec: ./AssociationGraph.spec.md
-
 /** Ranked node labels shown at fit distance with the baseline density */
 export const NODE_LABEL_BUDGET = 40;
 /** Ranked edge labels shown at fit distance with the baseline density */

@@ -2,8 +2,6 @@
 import { buildPathByType } from '@entities/shared/routePaths';
 import { Entities, ExtendedTypeMap } from '@models/entities';
 
-// spec: ./EntityBrowsing.spec.md
-
 export const EntityBrowsingRoutes: Record<string, Entities> = {
   '/collections': Entities.Collection,
   '/collections/*': Entities.Collection,

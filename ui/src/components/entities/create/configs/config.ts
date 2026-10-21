@@ -12,8 +12,6 @@ import { Entities, EntityCreateTypeMap, UISupportedEntityCreateKind } from '@mod
 import createEntityCreatePage, { CreateMetadataComponent } from '../EntityCreate';
 import SigmaRuleCreateConfig from './SigmaRuleCreateConfig';
 
-// spec: ../EntityCreate.spec.md
-
 export type EntityCreateConfig<K extends UISupportedEntityCreateKind> = {
   kind: K;
   EntityMetadata: CreateMetadataComponent<K>;

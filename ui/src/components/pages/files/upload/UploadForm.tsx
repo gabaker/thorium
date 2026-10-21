@@ -14,8 +14,6 @@ import { getGroupedAssociationKinds } from './associations';
 import { useUpload } from './UploadContext';
 import { AssociationKind, associationKindLabel } from '@models/associations';
 
-// spec: ./upload.spec.md
-
 type UploadFieldProps = {
   label: string;
   marker?: '*' | 'T';

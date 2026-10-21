@@ -7,8 +7,6 @@ import { Entities, ENTITY_LABELS } from '@models/entities/entities';
 import { VisualState } from './types';
 import type { GraphNode, GraphLink, GraphData } from './types';
 
-// spec: ./AssociationGraph.spec.md
-
 export const getLinkEndpoints = (link: GraphLink): { source: string; target: string } => {
   const source = typeof link.source === 'object' ? (link.source as GraphNode).id : link.source;
   const target = typeof link.target === 'object' ? (link.target as GraphNode).id : link.target;

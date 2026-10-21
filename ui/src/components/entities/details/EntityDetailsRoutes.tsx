@@ -6,8 +6,6 @@ import { Entities, ExtendedTypeMap } from '@models/entities';
 const FileDetails = lazy(async () => await import('./override_pages/FileDetails'));
 const RepoDetails = lazy(async () => await import('./override_pages/RepoDetails'));
 
-// spec: ./EntityDetails.spec.md
-
 export const EntityDetailsRoutes: Record<
   string,
   { type: keyof ExtendedTypeMap; override_page?: React.LazyExoticComponent<() => JSX.Element> }

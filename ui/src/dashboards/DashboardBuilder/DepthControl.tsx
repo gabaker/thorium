@@ -1,5 +1,3 @@
-// spec: ./SPEC.md
-
 import React from 'react';
 
 // project imports

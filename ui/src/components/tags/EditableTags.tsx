@@ -20,8 +20,6 @@ import { Entities } from '@models/entities/entities';
 import rawAttackTagDefaults from '../../../mitre_tags/attackTagsList.tags?raw';
 import rawMbcTagDefaults from '../../../mitre_tags/MBCTagsList.tags?raw';
 
-// spec: ./tags.spec.md
-
 interface ThoriumTagSelectOption {
   value: string;
   label: string;

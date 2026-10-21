@@ -7,8 +7,6 @@ import { FaDownload } from 'react-icons/fa';
 import { downloadBlob } from '@utilities/download';
 import { getFile } from '@thorpi/files';
 
-// spec: ./files.spec.md
-
 type ArchiveFormat = 'CaRT' | 'Encrypted ZIP';
 const Formats: ArchiveFormat[] = ['CaRT', 'Encrypted ZIP'];
 

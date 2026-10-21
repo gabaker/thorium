@@ -5,8 +5,6 @@ import { detectRenderKind, extensionOf, textOf } from './detect';
 import { RenderableInput, RenderKind } from './types';
 import { FormatType } from '@utilities/rules/types';
 
-// spec: ./SPEC.md
-
 /**
  * Best-effort pretty-print of text for the raw editor's "prettify on open" behavior.
  *

@@ -8,8 +8,6 @@ import { filterIncludedTags, filterExcludedTags } from '../utilities';
 import { Tags } from '@models/tags';
 import { Entities } from '@models/entities';
 
-// spec: ../tags.spec.md
-
 const TagContainer = styled.div`
   display: flex;
   flex-wrap: wrap;

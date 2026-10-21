@@ -6,8 +6,6 @@ import { ResultRenderProps } from '../props';
 import CodeEditor from '@components/shared/inputs/code/CodeEditor';
 import { FormatType } from '@utilities/rules/types';
 
-// spec: ../ToolResult.spec.md
-
 /**
  * Render a tool result as read-only YAML using the shared CodeEditor (YAML syntax highlighting).
  *

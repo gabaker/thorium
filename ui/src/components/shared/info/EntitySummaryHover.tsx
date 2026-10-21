@@ -7,8 +7,6 @@ import { InfoModel, InfoNote } from './info';
 import { SummaryPopover } from './SummaryPopover';
 import { useHoverKeepOpen } from './useHoverKeepOpen';
 
-// spec: ./SPEC.md
-
 type Placement = React.ComponentProps<typeof Overlay>['placement'];
 
 export interface EntitySummaryHoverProps {

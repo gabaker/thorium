@@ -19,8 +19,6 @@ import { getDetailsBasePathByEntity } from '@components/entities/details/EntityD
 import { Entities, entityLabel } from '@models/entities/entities';
 import { PeImport } from '@models/entities/pe';
 
-// spec: ../EntityBrowsing.spec.md
-
 const PeImportListHeaders = () => {
   return (
     <BrowsingCard>

@@ -15,8 +15,6 @@ import {
   pipelineFieldCategory,
 } from './schema';
 
-// spec: ./SPEC.md
-
 // Push a "populate this null field" replace-suggestion when the field is present but set to `null`.
 function suggestNullReplace(
   field: string,

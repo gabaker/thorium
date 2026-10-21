@@ -1,4 +1,3 @@
-// spec: ./EntityBrowser.spec.md
 import React from 'react';
 
 // project imports

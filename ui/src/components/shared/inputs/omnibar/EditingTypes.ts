@@ -1,7 +1,5 @@
 import { Clause, ClauseDraft, ClausePart } from './ClauseTypes';
 
-// spec: ./SPEC.md
-
 export enum KeyName {
   Enter = 'Enter',
   Tab = 'Tab',

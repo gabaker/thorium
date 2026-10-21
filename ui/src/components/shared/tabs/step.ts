@@ -1,5 +1,3 @@
-// spec: ./Tabs.spec.md
-
 /** The minimal tab shape the keyboard-stepping helpers need: only whether a tab is selectable. */
 interface SteppableTab {
   /** Whether the tab is disabled (skipped by keyboard navigation). */

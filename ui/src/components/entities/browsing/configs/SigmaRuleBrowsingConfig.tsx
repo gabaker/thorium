@@ -21,8 +21,6 @@ import { Entities } from '@models/entities/entities';
 import { SigmaRule } from '@models/entities/rules/sigma';
 import { getDetailsBasePathByEntity } from '../../details/EntityDetailsRoutes';
 
-// spec: ../EntityBrowsing.spec.md
-
 interface SigmaRuleItemProps {
   sigma: SigmaRule;
 }

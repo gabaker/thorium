@@ -9,8 +9,6 @@ import { ResultRenderProps } from '../props';
 import { useJsonTreeInvert } from '@components/shared/renderers/jsonTheme';
 import '@styles/main.scss';
 
-// spec: ../ToolResult.spec.md
-
 // XMLViewer takes a fixed color palette rather than CSS variables, so provide two hand-tuned palettes.
 // The dark palette is the original Ocean pastel set; the light palette darkens the same token roles so
 // tags/text stay legible on the near-white/cream panel backgrounds of the Light and Crab themes.

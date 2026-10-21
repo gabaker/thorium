@@ -14,8 +14,6 @@ import TagBadge from '@components/tags/TagBadge';
 import { Entities } from '@models/entities';
 import { Tags } from '@models/tags';
 
-// spec: ./SPEC.md
-
 /** How compactly a summary renders. Chosen per surface (hover = compact, side panel = expanded). */
 export enum SummaryVariant {
   /** Dense, no delimiters, small font — hover popovers. */

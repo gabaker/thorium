@@ -1,7 +1,5 @@
 import { OmnibarOptionMap } from './options';
 
-// spec: ./SPEC.md
-
 /* Package for clause data and all clause related functions.
  *
  * */

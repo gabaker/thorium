@@ -21,8 +21,6 @@ import { PeImport, PeImportMetaFields, PeSection, PeSectionMetaFields } from '@m
 import { Entities, EntityCreateTypes, EntityTypes, UISupportedEntityCreateTypes } from '@models/entities/entities';
 import { EntityRequest, entityRequestKind } from '@models/entities/requests';
 
-// spec: ./utilities.spec.md
-
 export const DEFAULT_LIST_LIMIT = 25;
 
 /**

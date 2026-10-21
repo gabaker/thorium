@@ -1,7 +1,5 @@
 import type { GraphControls } from './types';
 
-// spec: ./GraphControlsToolbar.spec.md
-
 // Keys managed by auto-scaling — user overrides are tracked per-key
 export const SIZE_SCALED_KEYS: ReadonlyArray<keyof GraphControls> = [
   'chargeStrength',

@@ -9,8 +9,6 @@ import { OverlayTipBottom } from '@components/shared/overlay/tips';
 import { Entities, entityLabel } from '@models/entities';
 import { TagUpperKeyEnum } from '@models/tags';
 
-// spec: ./tags.spec.md
-
 interface TagBadgeProps {
   tag: string;
   value: string;

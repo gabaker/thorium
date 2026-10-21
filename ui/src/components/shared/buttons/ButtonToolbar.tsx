@@ -3,8 +3,6 @@ import styled from 'styled-components';
 // project imports
 import { spacers } from '@styles';
 
-// spec: ./Button.spec.md
-
 /**
  * A horizontal, centered row of action buttons for details-page toolbars.
  *

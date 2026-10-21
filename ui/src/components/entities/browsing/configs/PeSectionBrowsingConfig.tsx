@@ -19,8 +19,6 @@ import { getDetailsBasePathByEntity } from '@components/entities/details/EntityD
 import { Entities, entityLabel } from '@models/entities/entities';
 import { PeSection } from '@models/entities/pe';
 
-// spec: ../EntityBrowsing.spec.md
-
 // Compose a compact size/entropy summary for the card, skipping fields the section didn't report.
 const sectionSummary = (section: PeSection): string => {
   const meta = section.metadata.PeSection;

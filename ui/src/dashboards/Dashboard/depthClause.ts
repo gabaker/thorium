@@ -1,5 +1,3 @@
-// spec: ./SPEC.md
-
 // project imports
 import { ClauseCondition, type Clause } from '@components/shared/inputs/omnibar/ClauseTypes';
 

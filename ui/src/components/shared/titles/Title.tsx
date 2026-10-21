@@ -3,8 +3,6 @@ import React from 'react';
 // project imports
 import { TitleProps } from './props';
 
-// spec: ./titles.spec.md
-
 const Title: React.FC<TitleProps> = ({ children, className = '', small = false, ref }) => {
   if (small) {
     return (

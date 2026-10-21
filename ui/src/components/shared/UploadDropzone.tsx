@@ -5,8 +5,6 @@ import { useDropzone } from 'react-dropzone';
 import Subtitle from '@components/shared/titles/Subtitle';
 import { DropzoneFile } from '@components/pages/files/upload/types';
 
-// spec: ./UploadDropzone.spec.md
-
 interface DropzoneProperties {
   width: string; // width of dropzone area
   onChange: (files: DropzoneFile[]) => void;

@@ -19,8 +19,6 @@ import { getDetailsBasePathByEntity } from '@components/entities/details/EntityD
 import { Entities, entityLabel } from '@models/entities/entities';
 import { Incident } from '@models/entities/incident';
 
-// spec: ../EntityBrowsing.spec.md
-
 const IncidentListHeaders = () => {
   return (
     <BrowsingCard>

@@ -6,8 +6,6 @@ import CodeRenderer from '@components/shared/renderers/CodeRenderer';
 import { stringToRenderableInput } from '@components/shared/renderers/detect';
 import { FormatType } from '@utilities/rules/types';
 
-// spec: ../ToolResult.spec.md
-
 /**
  * Render a tool result as a read-only decompilation. Delegates to the shared {@link CodeRenderer}
  * (decomp syntax highlighting) so the viewer is identical to the entity view-only field and the

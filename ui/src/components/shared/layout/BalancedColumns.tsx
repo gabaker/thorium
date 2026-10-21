@@ -4,8 +4,6 @@ import styled from 'styled-components';
 // project imports
 import { spacers } from '@styles';
 
-// spec: ./BalancedColumns.spec.md
-
 /** Which of the two columns a flowable item is assigned to (two-column back-compat API). */
 export enum ColumnSide {
   /** The left column (hosting the static `left` slot). */

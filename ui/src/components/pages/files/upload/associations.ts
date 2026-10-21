@@ -5,8 +5,6 @@ import { BlankAssociationCreate } from './types';
 import { AssociationKind, associationKindLabel, CONTAINER_ASSOCIATION_KINDS } from '@models/associations';
 import { createAssociation } from '@thorpi/associations';
 
-// spec: ./upload.spec.md
-
 /**
  * Association kinds surfaced first on the upload page's picker, in priority order.
  *

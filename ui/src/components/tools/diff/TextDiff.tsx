@@ -1,4 +1,3 @@
-// spec: ../ToolResult.spec.md
 import React from 'react';
 import ReactDiffViewer, { DiffMethod } from 'react-diff-viewer-continued';
 import styled from 'styled-components';

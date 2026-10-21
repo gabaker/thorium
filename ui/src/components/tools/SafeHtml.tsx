@@ -8,8 +8,6 @@ import { ResultRenderProps } from './props';
 import AlertBanner, { Severity } from '@components/shared/alerts/AlertBanner';
 import '@styles/main.scss';
 
-// spec: ./ToolResult.spec.md
-
 /**
  * Render a tool result's HTML output safely: extracts alerts via {@link getAlerts}, sanitizes the
  * HTML with DOMPurify, and injects it via dangerouslySetInnerHTML.

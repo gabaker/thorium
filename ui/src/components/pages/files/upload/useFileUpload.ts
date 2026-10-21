@@ -16,8 +16,6 @@ import { SampleSubmissionResponse } from '@models/files';
 import { ReactionSelection } from '@models/reactions';
 import { submitReactions } from '../reactions/reactions';
 
-// spec: ./upload.spec.md
-
 export function createSemaphore(limit: number) {
   let active = 0;
   const waiting: (() => void)[] = [];

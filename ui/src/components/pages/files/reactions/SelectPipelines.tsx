@@ -14,8 +14,6 @@ import type { Pipeline } from '@models/pipelines';
 import type { ReactionSelection } from '@models/reactions';
 import type { UserInfo } from '@models/users';
 
-// spec: ../files.spec.md
-
 interface SelectPipelinesProps {
   userInfo: UserInfo | null;
   setReactionsList: (list: ReactionSelection[]) => void;

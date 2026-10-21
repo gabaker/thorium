@@ -33,8 +33,6 @@ import type {
 } from '@models/images';
 import { DependencyPassStrategy } from '@models/images';
 
-// spec: ./ImageInfo.spec.md
-
 const TOOLTIPS = {
   self: `The dependencies an image needs to run. These might include files, repos, results from other tools, or ephemeral files that passed in as reaction arguments.`,
   samples: {

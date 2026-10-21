@@ -26,8 +26,6 @@ import type { AutoTag } from '@models/images';
 import { OutputHandler } from '@models/images';
 import type { OutputCollection as OutputCollectionType } from '@models/results';
 
-// spec: ./ImageInfo.spec.md
-
 const TOOLTIPS = {
   self: `Configurations that determine how the Thorium agent will intake analysis artifacts after running this image.`,
   files: {

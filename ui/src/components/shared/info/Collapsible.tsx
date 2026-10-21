@@ -1,8 +1,6 @@
 import React, { useLayoutEffect, useRef, useState } from 'react';
 import styled from 'styled-components';
 
-// spec: ./SPEC.md
-
 // project imports
 import { spacers } from '@styles';
 

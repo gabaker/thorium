@@ -19,8 +19,6 @@ import { Entities, entityLabel } from '@models/entities/entities';
 import { Flag } from '@models/entities/flag';
 import { getDetailsBasePathByEntity } from '@components/entities/details/EntityDetailsRoutes';
 
-// spec: ../EntityBrowsing.spec.md
-
 interface FlagItemProps {
   entity: Flag;
 }

@@ -18,8 +18,6 @@ import { BUTTON_BADGE_GAP } from '@styles';
 import { ThoriumRole } from '@models/users';
 import TokenView from '@components/pages/users/TokenView';
 
-// spec: ./UserProfile.spec.md
-
 const ProfileCard = styled.div`
   border: none;
   background-color: var(--thorium-body-bg);

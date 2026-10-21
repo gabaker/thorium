@@ -21,8 +21,6 @@ import { OverlayTipRight } from '@components/shared/overlay/tips';
 import { cleanDescription } from '@utilities/description';
 import { DEFAULT_SLA } from '@utilities/transforms/pipeline';
 
-// spec: ./PipelineInfo.spec.md
-
 const TOOLTIPS = {
   name: `Pipeline name that contains only alpha-numeric characters and dashes.`,
   group: `The Thorium group that owns this pipeline. Images run within a pipeline must be in the same group.`,

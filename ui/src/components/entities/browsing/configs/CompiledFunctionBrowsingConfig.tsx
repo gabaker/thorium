@@ -20,8 +20,6 @@ import { formatAddress } from '@utilities/disassembly';
 import { Entities, entityLabel } from '@models/entities/entities';
 import { CompiledFunction } from '@models/entities/functions';
 
-// spec: ../EntityBrowsing.spec.md
-
 const CompiledFunctionListHeaders = () => {
   return (
     <BrowsingCard>

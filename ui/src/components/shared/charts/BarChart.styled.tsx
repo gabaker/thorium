@@ -1,7 +1,5 @@
 import styled from 'styled-components';
 
-// spec: ./SPEC.md
-
 /** Vertical stack that holds all bar rows. */
 export const BarChartContainer = styled.div`
   display: flex;

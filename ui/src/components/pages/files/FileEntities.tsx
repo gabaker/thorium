@@ -3,8 +3,6 @@ import React from 'react';
 // project imports
 import EntityBrowser from '@components/associations/browsing/EntityBrowser/EntityBrowser';
 
-// spec: ./files.spec.md
-
 // Depth to grow the shared graph to when the tab opens so nested structures (e.g. a memory dump's
 // filesystem → folders → files) load and nest automatically rather than one manual expand per level.
 // Growth is additive (no refetch) and converges with the Associations graph; users can go deeper via the

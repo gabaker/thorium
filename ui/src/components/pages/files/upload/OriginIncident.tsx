@@ -2,8 +2,6 @@ import React from 'react';
 import { useUpload } from './UploadContext';
 import OriginField from './OriginField';
 
-// spec: ./upload.spec.md
-
 const OriginIncident: React.FC = () => {
   const { originState, origin } = useUpload();
   const { incident, coverTerm, missionTeam, network, machine, location } = originState.incident;

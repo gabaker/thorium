@@ -4,8 +4,6 @@ import { JSX, lazy } from 'react';
 import { buildPathByType } from '@entities/shared/routePaths';
 import { Entities, ExtendedTypeMap } from '@models/entities';
 
-// spec: ./EntityCreate.spec.md
-
 const FileUpload = lazy(async () => await import('./override_pages/FileUpload'));
 
 export const EntityCreateRoutes: Record<string, { type: Entities; override_page?: React.LazyExoticComponent<() => JSX.Element> }> = {

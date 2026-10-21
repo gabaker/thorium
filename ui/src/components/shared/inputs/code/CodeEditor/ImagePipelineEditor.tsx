@@ -4,8 +4,6 @@ import { toText } from './serialize';
 import type { RuleChecker } from '@utilities/rules/types';
 import { FormatType } from '@utilities/rules/types';
 
-// spec: ./CodeEditor.spec.md
-
 export interface ImagePipelineEditorProps {
   value: Record<string, unknown>;
   onChange: (obj: Record<string, unknown> | null) => void;

@@ -20,8 +20,6 @@ import { NetworkConnection, NetworkConnectionMetaFields } from '@models/entities
 import { listEntities } from '@thorpi/entities';
 import { getDetailsBasePathByEntity } from '@components/entities/details/EntityDetailsRoutes';
 
-// spec: ../EntityBrowsing.spec.md
-
 // Fetch network connections using search filters and an optional pagination cursor.
 const getNetworkConnections = async (filters: Filters, cursor: string | null, errorHandler: (error: string) => void) => {
   const listFilters = structuredClone(filters);

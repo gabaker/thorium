@@ -55,8 +55,6 @@ import {
   AUTO_TAG_LOGIC_SCHEMA,
 } from './schema';
 
-// spec: ./validate.spec.md
-
 function validateSecurityContext(parentMap: unknown, parsed: Record<string, unknown>, lineIndex: LineIndex, diagnostics: Diagnostic[]) {
   const obj = validateObjectField(parentMap, parsed, 'security_context', lineIndex, diagnostics);
   if (!obj) return;

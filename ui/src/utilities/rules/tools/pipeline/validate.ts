@@ -14,8 +14,6 @@ import {
 } from '../shared';
 import { REQUIRED_PIPELINE_FIELDS, KNOWN_PIPELINE_FIELDS } from './schema';
 
-// spec: ./validate.spec.md
-
 /**
  * Validate a parsed pipeline-request YAML document against the pipeline schema.
  *

@@ -16,8 +16,6 @@ import { FormatType } from '@utilities/rules/types';
 import { Entities } from '@models/entities';
 import { BlankCompiledFunction, CompiledFunctionMetaFields } from '@models/entities/functions';
 
-// spec: ../EntityDetails.spec.md
-
 const CompiledFunctionMetaInfo = ({
   entity,
   pendingEntity,

@@ -6,7 +6,6 @@ import HexRenderer from './HexRenderer';
 import HexValueInspector from './HexValueInspector';
 import { HexSelection } from './types';
 import { FileRendererProps } from '../types';
-// spec: ../SPEC.md
 
 // wrap so the value inspector drops below the dump when the container is too narrow to hold both
 // side by side (instead of overlapping it); at wide widths they sit side by side
