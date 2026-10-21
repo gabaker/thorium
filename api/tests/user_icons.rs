@@ -8,7 +8,6 @@ use aws_sdk_s3::types::{
     BucketLifecycleConfiguration, ExpirationStatus, LifecycleExpiration, LifecycleRule,
     LifecycleRuleFilter,
 };
-use base64::Engine;
 use thorium::Error;
 use thorium::client::{ClientSettings, Users};
 use thorium::models::{AuthResponse, UserCreate};
@@ -121,17 +120,6 @@ async fn create_user(host: &str, name: &str) -> Result<String, Error> {
     }
 }
 
-/// Build the authorization header for a token
-///
-/// # Arguments
-///
-/// * `token` - The token to authorize with
-fn auth(token: &str) -> String {
-    // tokens are sent base64 encoded
-    let encoded = base64::engine::general_purpose::STANDARD.encode(token.as_bytes());
-    format!("token {encoded}")
-}
-
 /// Upload a PNG icon for the user a token belongs to
 ///
 /// # Arguments
@@ -147,7 +135,7 @@ async fn upload_icon(host: &str, token: &str, data: &'static [u8]) -> Result<(),
     let form = reqwest::multipart::Form::new().part("image", part);
     let resp = reqwest::Client::new()
         .post(format!("{host}/api/users/image"))
-        .header("authorization", auth(token))
+        .header("authorization", test_utilities::auth_header(token))
         .multipart(form)
         .send()
         .await?;
@@ -170,7 +158,7 @@ async fn get_icon(host: &str, token: &str, name: &str) -> Result<(u16, Vec<u8>),
     // request the user's icon
     let resp = reqwest::Client::new()
         .get(format!("{host}/api/users/user/{name}/image"))
-        .header("authorization", auth(token))
+        .header("authorization", test_utilities::auth_header(token))
         .send()
         .await?;
     let status = resp.status().as_u16();
@@ -187,7 +175,7 @@ async fn delete_icon(host: &str, token: &str) -> Result<(), Error> {
     // delete this user's icon
     let resp = reqwest::Client::new()
         .delete(format!("{host}/api/users/image"))
-        .header("authorization", auth(token))
+        .header("authorization", test_utilities::auth_header(token))
         .send()
         .await?;
     assert!(

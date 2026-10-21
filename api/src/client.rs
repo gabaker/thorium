@@ -305,51 +305,14 @@ impl ThoriumClientBuilder {
         let encoded = base64::engine::general_purpose::STANDARD.encode(token.as_bytes());
         // build token auth string
         let auth_str = format!("token {encoded}");
-        // build handlers
-        let basic = Basic::new(&self.host, &client);
-        let jobs = Jobs::new(&self.host, &auth_str, &client);
-        let reactions = Reactions::new(&self.host, &auth_str, &client);
-        let pipelines = Pipelines::new(&self.host, &auth_str, &client);
-        let groups = Groups::new(&self.host, &auth_str, &client);
-        let images = Images::new(&self.host, &auth_str, &client);
-        let streams = Streams::new(&self.host, &auth_str, &client);
-        let users = Users::new(&self.host, &auth_str, &client);
-        let system = System::new(&self.host, &auth_str, &client);
-        let search = Search::new(&self.host, &auth_str, &client);
-        let files = Files::new(&self.host, &auth_str, &client);
-        let repos = Repos::new(&self.host, &auth_str, &client);
-        let entities = Entities::new(&self.host, &auth_str, &client);
-        let associations = Associations::new(&self.host, &auth_str, &client);
-        let updates = Updates::new(&self.host, &auth_str, &client);
-        let events = Events::new(&self.host, &auth_str, &client);
-        let network_policies = NetworkPolicies::new(&self.host, &auth_str, &client);
-        let trees = Trees::new(&self.host, &auth_str, &client);
-        // build Thorium client
-        let client = Thorium {
-            basic,
-            jobs,
-            reactions,
-            pipelines,
-            groups,
-            images,
-            streams,
-            users,
-            system,
-            search,
-            files,
-            repos,
-            entities,
-            associations,
-            events,
-            network_policies,
-            trees,
-            host: self.host,
-            auth_str,
+        // build every handler with our token
+        Ok(Thorium::assemble(
+            self.host,
+            &auth_str,
+            auth_str.clone(),
             expires,
-            updates,
             client,
-        };
-        Ok(client)
+        ))
     }
 }
 
@@ -818,7 +781,9 @@ impl Thorium {
     /// Refresh this clients token
     ///
     /// This will invalidate the client current token and create a new one causing any other
-    /// clients using this token to fail.
+    /// clients using this token to fail. While masquerading, the client's own token is the one
+    /// logged out, the masqueraded user's token stays valid, and every handler moves back to
+    /// the new token, ending the masquerade.
     ///
     /// # Arguments
     ///
@@ -847,8 +812,11 @@ impl Thorium {
     /// # });
     /// ```
     pub async fn refresh<T: AsRef<str>>(&mut self, username: T, password: T) -> Result<(), Error> {
-        // logout and invalidate our token
-        self.users.logout().await?;
+        // logout and invalidate our own token, which is the revert target rather than the token
+        // of a user we may be masquerading as
+        Users::new(&self.host, &self.auth_str, &self.client)
+            .logout()
+            .await?;
         // authenticate and get new token
         let (token, expiration) = Self::auth(
             &self.host,
@@ -859,25 +827,8 @@ impl Thorium {
         .await?;
         // update token expiration
         self.expires = expiration;
-        // convert our buffer into a Vec<u8> and base64 it
-        let encoded = base64::engine::general_purpose::STANDARD.encode(token.as_bytes());
-        // build token auth string
-        let auth_str = format!("token {encoded}");
-        // update handlers
-        self.basic = Basic::new(&self.host, &self.client);
-        self.jobs = Jobs::new(&self.host, &auth_str, &self.client);
-        self.reactions = Reactions::new(&self.host, &auth_str, &self.client);
-        self.pipelines = Pipelines::new(&self.host, &auth_str, &self.client);
-        self.groups = Groups::new(&self.host, &auth_str, &self.client);
-        self.images = Images::new(&self.host, &auth_str, &self.client);
-        self.streams = Streams::new(&self.host, &auth_str, &self.client);
-        self.users = Users::new(&self.host, &auth_str, &self.client);
-        self.system = System::new(&self.host, &auth_str, &self.client);
-        self.files = Files::new(&self.host, &auth_str, &self.client);
-        self.repos = Repos::new(&self.host, &auth_str, &self.client);
-        self.events = Events::new(&self.host, &auth_str, &self.client);
-        self.network_policies = NetworkPolicies::new(&self.host, &auth_str, &self.client);
-        self.trees = Trees::new(&self.host, &auth_str, &self.client);
+        // move every handler and our revert target to the new token
+        self.set_token(&token);
         Ok(())
     }
 
@@ -891,40 +842,95 @@ impl Thorium {
         let encoded = base64::engine::general_purpose::STANDARD.encode(user.token.as_bytes());
         // build token auth string
         let auth_str = format!("token {encoded}");
-        // update handlers
-        self.basic = Basic::new(&self.host, &self.client);
-        self.jobs = Jobs::new(&self.host, &auth_str, &self.client);
-        self.reactions = Reactions::new(&self.host, &auth_str, &self.client);
-        self.pipelines = Pipelines::new(&self.host, &auth_str, &self.client);
-        self.groups = Groups::new(&self.host, &auth_str, &self.client);
-        self.images = Images::new(&self.host, &auth_str, &self.client);
-        self.streams = Streams::new(&self.host, &auth_str, &self.client);
-        self.users = Users::new(&self.host, &auth_str, &self.client);
-        self.system = System::new(&self.host, &auth_str, &self.client);
-        self.files = Files::new(&self.host, &auth_str, &self.client);
-        self.repos = Repos::new(&self.host, &auth_str, &self.client);
-        self.events = Events::new(&self.host, &auth_str, &self.client);
-        self.network_policies = NetworkPolicies::new(&self.host, &auth_str, &self.client);
-        self.trees = Trees::new(&self.host, &auth_str, &self.client);
+        // rebuild every handler with the user's auth string
+        self.rebuild_handlers(&auth_str);
     }
 
     /// Revert back to our original user from a masquerade
     pub fn revert_masquerade(&mut self) {
-        // update handlers
-        self.basic = Basic::new(&self.host, &self.client);
-        self.jobs = Jobs::new(&self.host, &self.auth_str, &self.client);
-        self.reactions = Reactions::new(&self.host, &self.auth_str, &self.client);
-        self.pipelines = Pipelines::new(&self.host, &self.auth_str, &self.client);
-        self.groups = Groups::new(&self.host, &self.auth_str, &self.client);
-        self.images = Images::new(&self.host, &self.auth_str, &self.client);
-        self.streams = Streams::new(&self.host, &self.auth_str, &self.client);
-        self.users = Users::new(&self.host, &self.auth_str, &self.client);
-        self.system = System::new(&self.host, &self.auth_str, &self.client);
-        self.files = Files::new(&self.host, &self.auth_str, &self.client);
-        self.repos = Repos::new(&self.host, &self.auth_str, &self.client);
-        self.events = Events::new(&self.host, &self.auth_str, &self.client);
-        self.network_policies = NetworkPolicies::new(&self.host, &self.auth_str, &self.client);
-        self.trees = Trees::new(&self.host, &self.auth_str, &self.client);
+        // rebuild every handler with our own auth string
+        let auth_str = self.auth_str.clone();
+        self.rebuild_handlers(&auth_str);
+    }
+
+    /// Use a new token for every handler and as the auth to revert to after a masquerade
+    ///
+    /// # Arguments
+    ///
+    /// * `token` - The token to authenticate with
+    fn set_token(&mut self, token: &str) {
+        // convert our buffer into a Vec<u8> and base64 it
+        let encoded = base64::engine::general_purpose::STANDARD.encode(token.as_bytes());
+        // keep this token's auth string as the one to revert to
+        self.auth_str = format!("token {encoded}");
+        // rebuild every handler with the new auth string
+        let auth_str = self.auth_str.clone();
+        self.rebuild_handlers(&auth_str);
+    }
+
+    /// Rebuild every handler with an auth string, keeping the auth to revert to
+    ///
+    /// # Arguments
+    ///
+    /// * `handler_auth` - The auth string every handler should send
+    fn rebuild_handlers(&mut self, handler_auth: &str) {
+        // take our host and revert auth so they carry over into the rebuilt client
+        let host = std::mem::take(&mut self.host);
+        let auth_str = std::mem::take(&mut self.auth_str);
+        // rebuild the client with every handler on the new auth string
+        *self = Thorium::assemble(
+            host,
+            handler_auth,
+            auth_str,
+            self.expires,
+            self.client.clone(),
+        );
+    }
+
+    /// Build a client with every handler sending the same auth string
+    ///
+    /// Every way of building or re-authenticating a client goes through here, so the struct
+    /// literal below is the one place a new handler has to be added.
+    ///
+    /// # Arguments
+    ///
+    /// * `host` - The host/url to reach Thorium at
+    /// * `handler_auth` - The auth string every handler should send
+    /// * `auth_str` - The auth string to revert to after a masquerade
+    /// * `expires` - When our token expires if we know it
+    /// * `client` - The reqwest client every handler shares
+    fn assemble(
+        host: String,
+        handler_auth: &str,
+        auth_str: String,
+        expires: Option<DateTime<Utc>>,
+        client: reqwest::Client,
+    ) -> Thorium {
+        // build every handler and the client that holds them
+        Thorium {
+            basic: Basic::new(&host, &client),
+            jobs: Jobs::new(&host, handler_auth, &client),
+            reactions: Reactions::new(&host, handler_auth, &client),
+            pipelines: Pipelines::new(&host, handler_auth, &client),
+            groups: Groups::new(host.as_str(), handler_auth, &client),
+            images: Images::new(&host, handler_auth, &client),
+            streams: Streams::new(&host, handler_auth, &client),
+            users: Users::new(&host, handler_auth, &client),
+            system: System::new(&host, handler_auth, &client),
+            search: Search::new(&host, handler_auth, &client),
+            files: Files::new(&host, handler_auth, &client),
+            repos: Repos::new(&host, handler_auth, &client),
+            entities: Entities::new(&host, handler_auth, &client),
+            associations: Associations::new(&host, handler_auth, &client),
+            updates: Updates::new(&host, handler_auth, &client),
+            events: Events::new(&host, handler_auth, &client),
+            network_policies: NetworkPolicies::new(&host, handler_auth, &client),
+            trees: Trees::new(&host, handler_auth, &client),
+            host,
+            auth_str,
+            expires,
+            client,
+        }
     }
 }
 
@@ -1045,5 +1051,309 @@ impl ThoriumBlocking {
         Self::build(ctl_conf.keys.api.clone())
             .from_ctl_conf(ctl_conf)?
             .build_blocking()
+    }
+}
+
+#[cfg(test)]
+mod masquerade_tests {
+    use base64::Engine as _;
+    use chrono::Utc;
+
+    use super::Thorium;
+    use crate::models::{ScrubbedUser, UserRole, UserSettings};
+
+    /// The token the base client authenticates with
+    const BASE_TOKEN: &str = "base-token";
+
+    /// Build the auth string a handler sends for a token
+    ///
+    /// # Arguments
+    ///
+    /// * `token` - The token to build an auth string for
+    fn auth_for(token: &str) -> String {
+        // base64 the token the same way the client does
+        let encoded = base64::engine::general_purpose::STANDARD.encode(token.as_bytes());
+        format!("token {encoded}")
+    }
+
+    /// Build a client authenticated with the base token without contacting an API
+    async fn base_client() -> Thorium {
+        // a token-authenticated build makes no requests
+        Thorium::build("http://127.0.0.1:1")
+            .token(BASE_TOKEN)
+            .build()
+            .await
+            .expect("building a token client needs no API")
+    }
+
+    /// Build a user to masquerade as
+    ///
+    /// # Arguments
+    ///
+    /// * `token` - The token this user authenticates with
+    fn user(token: &str) -> ScrubbedUser {
+        // build a minimal user carrying the given token
+        ScrubbedUser {
+            username: "masked".to_owned(),
+            role: UserRole::User,
+            email: "masked@example.com".to_owned(),
+            groups: Vec::default(),
+            actual_groups: Vec::default(),
+            token: token.to_owned(),
+            token_expiration: Utc::now(),
+            unix: None,
+            settings: UserSettings::default(),
+            local: true,
+            verified: true,
+            has_image: false,
+        }
+    }
+
+    /// Get the auth string of every handler on a client, by handler name
+    ///
+    /// The exhaustive destructure stops compiling when a field is added to `Thorium`, so a new
+    /// handler can't be left out of this check.
+    ///
+    /// # Arguments
+    ///
+    /// * `thorium` - The client to read handler auth strings from
+    fn handler_auths(thorium: &Thorium) -> Vec<(&'static str, String)> {
+        // name every field so a new one fails to compile here
+        let Thorium {
+            basic: _,
+            jobs,
+            reactions,
+            pipelines,
+            groups,
+            images,
+            streams,
+            users,
+            system,
+            search,
+            files,
+            repos,
+            entities,
+            associations,
+            updates,
+            events,
+            network_policies,
+            trees,
+            host: _,
+            auth_str: _,
+            expires: _,
+            client: _,
+        } = thorium;
+        // the basic handler sends no auth so only the authenticated handlers are listed
+        vec![
+            ("jobs", jobs.auth_token().to_owned()),
+            ("reactions", reactions.auth_token().to_owned()),
+            ("pipelines", pipelines.auth_token().to_owned()),
+            ("groups", groups.auth_token().to_owned()),
+            ("images", images.auth_token().to_owned()),
+            ("streams", streams.auth_token().to_owned()),
+            ("users", users.auth_token().to_owned()),
+            ("system", system.auth_token().to_owned()),
+            ("search", search.auth_token().to_owned()),
+            ("files", files.auth_token().to_owned()),
+            ("repos", repos.auth_token().to_owned()),
+            ("entities", entities.auth_token().to_owned()),
+            ("associations", associations.auth_token().to_owned()),
+            ("updates", updates.auth_token().to_owned()),
+            ("events", events.auth_token().to_owned()),
+            ("network_policies", network_policies.auth_token().to_owned()),
+            ("trees", trees.auth_token().to_owned()),
+        ]
+    }
+
+    /// Assert every handler on a client sends the expected auth string
+    ///
+    /// # Arguments
+    ///
+    /// * `thorium` - The client to check
+    /// * `expected` - The auth string every handler should send
+    /// * `context` - What the client just did, for the failure message
+    fn assert_all_handlers(thorium: &Thorium, expected: &str, context: &str) {
+        // collect any handler that sends a different auth string
+        let wrong = handler_auths(thorium)
+            .into_iter()
+            .filter(|(_, auth)| auth != expected)
+            .map(|(name, _)| name)
+            .collect::<Vec<_>>();
+        assert!(
+            wrong.is_empty(),
+            "{context}: handlers {wrong:?} kept another auth string"
+        );
+    }
+
+    /// After a masquerade every handler uses the user's auth string
+    #[tokio::test]
+    async fn masquerade_covers_every_handler() {
+        // build a base client and masquerade as a user
+        let mut thorium = base_client().await;
+        thorium.masquerade(&user("user-token"));
+        // every handler must now send the user's auth string
+        assert_all_handlers(&thorium, &auth_for("user-token"), "after masquerade");
+    }
+
+    /// Reverting a masquerade puts every handler back on the original auth string
+    #[tokio::test]
+    async fn revert_masquerade_restores_every_handler() {
+        // build a base client and masquerade as two users in a row
+        let mut thorium = base_client().await;
+        thorium.masquerade(&user("first-token"));
+        thorium.masquerade(&user("second-token"));
+        // revert back to the base user
+        thorium.revert_masquerade();
+        // every handler must be back on the base auth string
+        assert_all_handlers(&thorium, &auth_for(BASE_TOKEN), "after revert_masquerade");
+    }
+
+    /// Adopting a refreshed token moves every handler and the revert target to it
+    #[tokio::test]
+    async fn refreshed_token_covers_every_handler() {
+        // build a base client that is masquerading as a user
+        let mut thorium = base_client().await;
+        thorium.masquerade(&user("user-token"));
+        // adopt a refreshed token the way refresh does after authenticating
+        thorium.set_token("refreshed-token");
+        // every handler must send the refreshed auth string
+        assert_all_handlers(&thorium, &auth_for("refreshed-token"), "after refresh");
+        // reverting must return to the refreshed token rather than the stale one
+        thorium.revert_masquerade();
+        assert_all_handlers(
+            &thorium,
+            &auth_for("refreshed-token"),
+            "after refresh and revert",
+        );
+    }
+
+    /// The requests a mock server received, as (request line, authorization header) pairs
+    type Recorded = std::sync::Arc<std::sync::Mutex<Vec<(String, String)>>>;
+
+    /// Start a mock Thorium server that records each request's line and authorization header,
+    /// answers `/api/users/auth` with a token for `refreshed-token`, and anything else with an
+    /// empty `200`
+    ///
+    /// Returns the server's host and the requests it has received
+    async fn auth_server() -> (String, Recorded) {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        // bind to a random local port
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        // track the requests we receive
+        let recorded: Recorded = std::sync::Arc::default();
+        let inner = recorded.clone();
+        // answer requests in the background
+        tokio::spawn(async move {
+            loop {
+                // accept the next connection
+                let (mut stream, _) = listener.accept().await.unwrap();
+                // read until the end of the request head; these requests have no body
+                let mut buf = Vec::new();
+                let mut chunk = [0_u8; 4096];
+                while !String::from_utf8_lossy(&buf).contains("\r\n\r\n") {
+                    // read the next chunk of this request and stop if the client closed it
+                    let read = stream.read(&mut chunk).await.unwrap();
+                    if read == 0 {
+                        break;
+                    }
+                    buf.extend_from_slice(&chunk[..read]);
+                }
+                // record the request line and its authorization header
+                let text = String::from_utf8_lossy(&buf).to_string();
+                let line = text.lines().next().unwrap_or_default().to_owned();
+                let auth = text
+                    .lines()
+                    .find_map(|header| {
+                        header
+                            .split_once(':')
+                            .filter(|(name, _)| name.eq_ignore_ascii_case("authorization"))
+                            .map(|(_, value)| value.trim().to_owned())
+                    })
+                    .unwrap_or_default();
+                inner.lock().unwrap().push((line.clone(), auth));
+                // a login returns a new token and anything else returns nothing
+                let body = if line.contains("/api/users/auth") {
+                    r#"{"Authed":{"token":"refreshed-token","expires":"2099-01-01T00:00:00Z"}}"#
+                } else {
+                    ""
+                };
+                let resp = format!(
+                    "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
+                    body.len()
+                );
+                // answer and close the connection
+                stream.write_all(resp.as_bytes()).await.unwrap();
+                stream.shutdown().await.unwrap();
+            }
+        });
+        // return the server's address and the requests it records
+        (format!("http://{addr}"), recorded)
+    }
+
+    /// Get the authorization header the mock server saw on each logout
+    ///
+    /// # Arguments
+    ///
+    /// * `recorded` - The requests the mock server recorded
+    fn logout_auths(recorded: &Recorded) -> Vec<String> {
+        // keep only the logout requests
+        recorded
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|(line, _)| line.contains("/api/users/logout"))
+            .map(|(_, auth)| auth.clone())
+            .collect()
+    }
+
+    /// `refresh` logs out the client's own token, then moves every handler and the
+    /// revert target to the new token
+    #[tokio::test]
+    async fn refresh_logs_out_its_own_token() {
+        // build a client for a mock server and refresh it
+        let (host, recorded) = auth_server().await;
+        let mut thorium = Thorium::build(&host)
+            .token(BASE_TOKEN)
+            .build()
+            .await
+            .unwrap();
+        thorium.refresh("admin", "password").await.unwrap();
+        // the one logout went out with the base token
+        assert_eq!(logout_auths(&recorded), vec![auth_for(BASE_TOKEN)]);
+        // every handler is on the new token
+        assert_all_handlers(&thorium, &auth_for("refreshed-token"), "after refresh");
+    }
+
+    /// `refresh` while masquerading logs out the client's own token, not the
+    /// masqueraded user's, and ends the masquerade on the new token
+    #[tokio::test]
+    async fn refresh_while_masquerading_keeps_the_user_token() {
+        // build a client for a mock server and masquerade as a user
+        let (host, recorded) = auth_server().await;
+        let mut thorium = Thorium::build(&host)
+            .token(BASE_TOKEN)
+            .build()
+            .await
+            .unwrap();
+        thorium.masquerade(&user("user-token"));
+        // refresh our own token
+        thorium.refresh("admin", "password").await.unwrap();
+        // the logout went out with the base token, never the masqueraded user's
+        assert_eq!(logout_auths(&recorded), vec![auth_for(BASE_TOKEN)]);
+        // every handler is on the new token, and reverting stays there
+        assert_all_handlers(&thorium, &auth_for("refreshed-token"), "after refresh");
+        thorium.revert_masquerade();
+        assert_all_handlers(
+            &thorium,
+            &auth_for("refreshed-token"),
+            "after refresh and revert",
+        );
+        // a second refresh logs out the refreshed token
+        thorium.refresh("admin", "password").await.unwrap();
+        assert_eq!(
+            logout_auths(&recorded),
+            vec![auth_for(BASE_TOKEN), auth_for("refreshed-token")]
+        );
     }
 }

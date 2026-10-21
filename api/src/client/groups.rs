@@ -25,6 +25,14 @@ pub struct Groups {
     client: reqwest::Client,
 }
 
+#[cfg(test)]
+impl Groups {
+    /// The auth string this handler sends with its requests
+    pub(crate) fn auth_token(&self) -> &str {
+        &self.token
+    }
+}
+
 #[cfg_attr(feature = "sync", thorium_derive::blocking_struct)]
 impl Groups {
     /// Creates a new group handler
@@ -153,6 +161,7 @@ impl Groups {
     /// #    exec().await
     /// # });
     /// ```
+    #[must_use]
     pub fn list(&self) -> Cursor<Group> {
         // build url for listing groups
         let url = format!("{}/api/groups/", self.host);

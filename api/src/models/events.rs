@@ -34,6 +34,7 @@ pub enum EventType {
 
 impl EventType {
     /// Cast our event type to a str
+    #[must_use]
     pub fn as_str(&self) -> &str {
         self.as_ref()
     }
@@ -127,7 +128,8 @@ pub struct Event {
 impl Event {
     /// Check if all conditions of this tag trigger have been met or not
     ///
-    /// Unlike check_tag_trigger this does not return a potentially but will instead yes or no
+    /// Unlike `check_tag_trigger`, this returns a plain yes or no instead of a trigger potential
+    #[must_use]
     pub fn check_all_tag_trigger(
         visible: &Vec<String>,
         tags: &HashMap<String, HashMap<String, HashSet<String>>>,
@@ -214,6 +216,7 @@ impl Event {
         TriggerPotential::CanNot
     }
     /// Check if this event could potentially trigger a trigger
+    #[must_use]
     pub fn could_trigger(&self, trigger: &EventTrigger) -> TriggerPotential {
         match (&self.data, trigger) {
             (EventData::NewSample { .. }, EventTrigger::NewSample) => TriggerPotential::Confirmed,
@@ -279,7 +282,7 @@ pub struct EventPopOpts {
 }
 
 impl Default for EventPopOpts {
-    /// create a default EventPopOpts
+    /// Create a default `EventPopOpts`
     fn default() -> Self {
         EventPopOpts {
             limit: default_event_pop_limit(),
@@ -295,6 +298,43 @@ impl EventPopOpts {
     /// * `limit` - The limit to set
     #[must_use]
     pub fn limit(mut self, limit: usize) -> Self {
+        self.limit = limit;
+        self
+    }
+}
+
+/// Default the event peek limit to 1000
+fn default_event_peek_limit() -> usize {
+    1000
+}
+
+/// The params for peeking at queued events
+#[derive(Serialize, Deserialize, Debug, Clone)]
+#[cfg_attr(feature = "api", derive(utoipa::ToSchema))]
+pub struct EventPeekOpts {
+    /// The max number of queued events to return
+    #[serde(default = "default_event_peek_limit")]
+    pub limit: usize,
+}
+
+impl Default for EventPeekOpts {
+    /// Create a default `EventPeekOpts`
+    fn default() -> Self {
+        EventPeekOpts {
+            limit: default_event_peek_limit(),
+        }
+    }
+}
+
+impl EventPeekOpts {
+    /// Set the maximum number of queued events to return
+    ///
+    /// # Arguments
+    ///
+    /// * `limit` - The limit to set
+    #[must_use]
+    pub fn limit(mut self, limit: usize) -> Self {
+        // set our new limit
         self.limit = limit;
         self
     }

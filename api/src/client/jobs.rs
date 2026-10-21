@@ -6,8 +6,8 @@ use tracing::instrument;
 
 use super::Error;
 use crate::models::{
-    Checkpoint, Deadline, GenericJob, HandleJobResponse, ImageScaler, JobResets, RunningJob,
-    StageLogsAdd,
+    Checkpoint, Deadline, GenericJob, HandleJobResponse, ImageScaler, JobResets, RawJob,
+    RunningJob, StageLogsAdd,
 };
 use crate::{send, send_build};
 
@@ -26,6 +26,14 @@ pub struct Jobs {
     /// token to use for auth
     token: String,
     client: reqwest::Client,
+}
+
+#[cfg(test)]
+impl Jobs {
+    /// The auth string this handler sends with its requests
+    pub(crate) fn auth_token(&self) -> &str {
+        &self.token
+    }
 }
 
 #[cfg_attr(feature = "sync", thorium_derive::blocking_struct)]
@@ -57,6 +65,26 @@ impl Jobs {
             token: token.to_owned(),
             client: client.clone(),
         }
+    }
+
+    /// Gets one [`RawJob`] by its id
+    ///
+    /// Only admins can read a job by its id alone; this is meant for tests.
+    ///
+    /// # Arguments
+    ///
+    /// * `id` - The id of the job to get
+    #[cfg_attr(
+        feature = "trace",
+        instrument(name = "Thorium::Jobs::get", skip(self), err(Debug))
+    )]
+    pub async fn get(&self, id: Uuid) -> Result<RawJob, Error> {
+        // build the url for reading this job
+        let url = format!("{}/api/jobs/{id}", self.host);
+        // build our request
+        let req = self.client.get(&url).header("authorization", &self.token);
+        // send this request and build the job from the response
+        send_build!(self.client, req, RawJob)
     }
 
     /// Claims [`GenericJob`]s from Thorium for a specific stage in a pipeline if any exist

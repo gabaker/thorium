@@ -16,6 +16,9 @@ use thorium::{
 
 use super::render::{field, header, label, render_markdown};
 
+/// The maximum number of groups searched concurrently when looking up a resource's group
+const GROUP_SEARCH_CONCURRENCY: usize = 10;
+
 /// Write a single line to the output, mapping any IO error
 ///
 /// # Arguments
@@ -185,7 +188,8 @@ where
         ))
     }))
     // concurrently search for the pipeline in each group and add matching groups to the list
-    .try_for_each_concurrent(None, |(cursor, group)| {
+    // bounded so a user in many groups doesn't open a request per group all at once
+    .try_for_each_concurrent(Some(GROUP_SEARCH_CONCURRENCY), |(cursor, group)| {
         search_pipeline_cursor(cursor, group, matching_groups.clone())
     })
     .await?;
@@ -211,8 +215,21 @@ where
         .extract_if(|_, groups| groups.len() > 1)
         .collect();
     if !multi_matches.is_empty() {
+        // render each as `'p' (a/p, b/p)`, sorted so the message is stable
+        let mut rendered: Vec<String> = multi_matches
+            .iter()
+            .map(|(pipeline, groups)| {
+                let candidates: Vec<String> = groups
+                    .iter()
+                    .map(|group| super::resource_id(group, pipeline))
+                    .collect();
+                format!("'{pipeline}' ({})", candidates.join(", "))
+            })
+            .collect();
+        rendered.sort();
         return Err(Error::new(format!(
-            "The following pipelines were found in multiple groups! Please specify a group: {multi_matches:?}"
+            "Pipelines exist in multiple groups; specify a group: {}",
+            rendered.join(", ")
         )));
     }
     // find any pipelines found in no groups
@@ -220,9 +237,12 @@ where
         .extract_if(|_, groups| groups.is_empty())
         .collect();
     if !no_matches.is_empty() {
+        // list the missing names quoted and sorted so the message is stable
+        let mut missing: Vec<String> = no_matches.keys().map(|name| format!("'{name}'")).collect();
+        missing.sort();
         return Err(Error::new(format!(
-            "The following pipelines could not be found: '{:?}'",
-            no_matches.keys()
+            "Pipelines not found in any of your groups: {}",
+            missing.join(", ")
         )));
     }
     // return the pipelines mapped to the single group we found
@@ -238,9 +258,10 @@ where
 ///
 /// * `thorium` - The Thorium client
 /// * `pipeline` - The name of the pipeline to search for a group
-pub async fn find_pipeline_group(thorium: &Thorium, pipeline: &String) -> Result<String, Error> {
+pub async fn find_pipeline_group(thorium: &Thorium, pipeline: &str) -> Result<String, Error> {
     // use the above function but just give it a single pipeline
-    find_pipelines_groups(thorium, std::iter::once(pipeline))
+    let pipeline = pipeline.to_owned();
+    find_pipelines_groups(thorium, std::iter::once(&pipeline))
         .await?
         .into_values()
         .next()

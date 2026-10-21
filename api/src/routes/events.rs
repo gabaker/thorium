@@ -9,7 +9,7 @@ use utoipa::OpenApi;
 use super::OpenApiSecurity;
 use crate::models::AuthedUser;
 use crate::models::{
-    Event, EventCacheStatus, EventCacheStatusOpts, EventIds, EventPopOpts, EventType,
+    Event, EventCacheStatus, EventCacheStatusOpts, EventIds, EventPeekOpts, EventPopOpts, EventType,
 };
 use crate::utils::{ApiError, AppState};
 
@@ -45,6 +45,44 @@ async fn pop(
 ) -> Result<Json<Vec<Event>>, ApiError> {
     // pop some events
     let events = Event::pop(&user, kind, params.limit, &state.shared).await?;
+    Ok(Json(events))
+}
+
+/// Peek at the queued events of one kind without moving them in flight
+///
+/// Only admins can peek at events, and this is meant for tests.
+///
+/// # Arguments
+///
+/// * `user` - The user that is peeking at events
+/// * `kind` - The kind of events to peek at
+/// * `params` - The query params to use with this request
+/// * `state` - Shared Thorium objects
+#[instrument(name = "routes::events::peek", skip_all, err(Debug))]
+#[utoipa::path(
+    get,
+    path = "/api/events/peek/{kind}/",
+    params(
+        ("kind" = EventType, Path, description = "The type of events to peek at"),
+        ("params" = EventPeekOpts, description = "Query params for peeking at events")
+    ),
+    responses(
+        (status = 200, description = "The queued events of this kind, oldest first", body = Vec<Event>),
+        (status = 400, description = "The event kind is unknown"),
+        (status = 401, description = "This user is not an admin"),
+    ),
+    security(
+        ("basic" = []),
+    )
+)]
+async fn peek(
+    user: AuthedUser,
+    Path(kind): Path<EventType>,
+    params: EventPeekOpts,
+    State(state): State<AppState>,
+) -> Result<Json<Vec<Event>>, ApiError> {
+    // peek at the queued events
+    let events = Event::peek(&user, kind, params.limit, &state.shared).await?;
     Ok(Json(events))
 }
 
@@ -148,8 +186,8 @@ async fn get_cache_status(
 /// The struct containing our openapi docs
 #[derive(OpenApi)]
 #[openapi(
-    paths(pop, clear, reset_all, get_cache_status),
-    components(schemas(Event, EventCacheStatus, EventCacheStatusOpts, EventType, EventPopOpts)),
+    paths(pop, peek, clear, reset_all, get_cache_status),
+    components(schemas(Event, EventCacheStatus, EventCacheStatusOpts, EventType, EventPeekOpts, EventPopOpts)),
     modifiers(&OpenApiSecurity),
 )]
 pub struct EventApiDocs;
@@ -164,10 +202,11 @@ async fn openapi() -> Json<utoipa::openapi::OpenApi> {
 ///
 /// # Arguments
 ///
-// * `router` - The router to add routes too
+/// * `router` - The router to add routes too
 pub fn mount(router: Router<AppState>) -> Router<AppState> {
     router
         .route("/events/pop/{kind}/", patch(pop))
+        .route("/events/peek/{kind}/", get(peek))
         .route("/events/clear/{kind}/", delete(clear))
         .route("/events/reset/{kind}/", patch(reset_all))
         .route("/events/cache/status/", get(get_cache_status))

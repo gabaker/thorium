@@ -49,6 +49,14 @@ pub struct Repos {
     client: reqwest::Client,
 }
 
+#[cfg(test)]
+impl Repos {
+    /// The auth string this handler sends with its requests
+    pub(crate) fn auth_token(&self) -> &str {
+        &self.token
+    }
+}
+
 #[cfg_attr(feature = "sync", thorium_derive::blocking_struct)]
 impl Repos {
     /// Creates a new repos handler
@@ -421,7 +429,7 @@ impl Repos {
         // get our response as a stream of bytes
         let stream = resp
             .bytes_stream()
-            .map_err(|err| std::io::Error::new(std::io::ErrorKind::Other, err.to_string()));
+            .map_err(|err| std::io::Error::other(err.to_string()));
         // convert our async read to a buf reader
         let reader = StreamReader::new(stream);
         // start uncarting this stream of data
@@ -457,7 +465,7 @@ impl Repos {
                     "Failed to extract repo name from {repo}"
                 )));
             }
-        };
+        }
         // build our untarred repo object
         let untarred = UntarredRepo::new(target)?;
         // set our checkout options

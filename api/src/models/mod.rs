@@ -65,8 +65,9 @@ pub use entities::{
 };
 pub use errors::InvalidEnum;
 pub use events::{
-    Event, EventCacheStatus, EventCacheStatusOpts, EventData, EventIds, EventMarks, EventPopOpts,
-    EventRequest, EventTrigger, EventType, SigmaScannableResultsEvent, TriggerPotential,
+    Event, EventCacheStatus, EventCacheStatusOpts, EventData, EventIds, EventMarks, EventPeekOpts,
+    EventPopOpts, EventRequest, EventTrigger, EventType, SigmaScannableResultsEvent,
+    TriggerPotential,
 };
 pub use files::{
     Attachment, Buffer, CartedFile, CarvedOrigin, CarvedOriginTypes, Comment, CommentRequest,
@@ -122,8 +123,9 @@ pub use oauth::{
     OAuthUserCreate, OAuthUsernameCheck,
 };
 pub use pipelines::{
-    Pipeline, PipelineBan, PipelineBanKind, PipelineBanUpdate, PipelineDetailsList, PipelineList,
-    PipelineListParams, PipelineRequest, PipelineStats, PipelineUpdate, StageStats,
+    DEFAULT_PIPELINE_SLA, Pipeline, PipelineBan, PipelineBanKind, PipelineBanUpdate,
+    PipelineDetailsList, PipelineList, PipelineListParams, PipelineRequest, PipelineStats,
+    PipelineUpdate, StageStats,
 };
 pub use reactions::{
     BulkReactionResponse, HandleReactionResponse, Reaction, ReactionArgs, ReactionCache,

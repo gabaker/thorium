@@ -2,12 +2,13 @@ use futures::stream::{self, StreamExt};
 use http::StatusCode;
 use owo_colors::OwoColorize;
 use regex::RegexSet;
-use std::collections::HashSet;
+use serde::Serialize;
+use std::collections::{BTreeMap, HashSet};
 use std::fmt::Display;
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
 use thorium::client::ResultsClient;
-use thorium::models::{Output, OutputDisplayType, ResultGetParams};
+use thorium::models::{Output, OutputDisplayType, OutputMap, ResultGetParams};
 use thorium::{Error, Thorium};
 use tokio::fs::{File, create_dir_all};
 use tokio::io::AsyncWriteExt;
@@ -17,6 +18,8 @@ use super::update;
 use crate::args::results::{GetResults, Results, ResultsPostProcessing};
 use crate::args::{Args, SearchParameterized};
 use crate::utils;
+use crate::utils::output::{self, OutputFormat, View};
+use crate::utils::watch;
 
 mod upload;
 
@@ -398,7 +401,7 @@ async fn get(thorium: &Thorium, cmd: &GetResults, workers: usize) -> Result<(), 
         return Err(Error::new(format!(
             "Unable to create output directory: {err}"
         )));
-    };
+    }
     // download the target samples results if any were given
     stream::iter(&cmd.files)
         .for_each_concurrent(Some(workers), |sha256| {
@@ -432,7 +435,7 @@ async fn get(thorium: &Thorium, cmd: &GetResults, workers: usize) -> Result<(), 
         let limit = if cmd.no_limit { None } else { Some(cmd.limit) };
         // if a file list path was given, get results for all SHA256's in the file
         let sha256s: HashSet<String> = utils::fs::lines_set_from_file(file_list, limit).await?;
-        stream::iter(sha256s.into_iter())
+        stream::iter(sha256s)
             .for_each_concurrent(Some(workers), |sha256| {
                 let params = &params;
                 let filter = &filter;
@@ -451,7 +454,7 @@ async fn get(thorium: &Thorium, cmd: &GetResults, workers: usize) -> Result<(), 
         let limit = if cmd.no_limit { None } else { Some(cmd.limit) };
         // if a repo list path was given, get results for all repos in the file
         let repos: HashSet<String> = utils::fs::lines_set_from_file(repo_list, limit).await?;
-        stream::iter(repos.into_iter())
+        stream::iter(repos)
             .for_each_concurrent(Some(workers), |repo| {
                 let params = &params;
                 let filter = &filter;
@@ -480,6 +483,156 @@ async fn get(thorium: &Thorium, cmd: &GetResults, workers: usize) -> Result<(), 
     Ok(())
 }
 
+/// The results of each target file or repo, keyed by the target
+#[derive(Serialize)]
+#[serde(transparent)]
+struct ResultsView(BTreeMap<String, OutputMap>);
+
+impl ResultsView {
+    /// Get each target's tools and their most recent result in a stable order
+    fn latest(&self) -> Vec<(&String, &String, &Output)> {
+        // gather the most recent result of each tool for each target
+        let mut latest = Vec::new();
+        for (target, map) in &self.0 {
+            // sort our tools by name since results are stored in a map
+            let mut tools: Vec<(&String, &Vec<Output>)> = map.results.iter().collect();
+            tools.sort_by(|left, right| left.0.cmp(right.0));
+            // keep only the most recent result of each tool
+            for (tool, outputs) in tools {
+                if let Some(recent) = outputs.first() {
+                    latest.push((target, tool, recent));
+                }
+            }
+        }
+        latest
+    }
+}
+
+impl View for ResultsView {
+    /// Render the most recent result of each tool for each target as a table
+    fn table(&self) -> String {
+        // build one row per target and tool
+        let rows = self
+            .latest()
+            .into_iter()
+            .map(|(target, tool, recent)| {
+                vec![
+                    target.clone(),
+                    tool.clone(),
+                    recent.id.to_string(),
+                    recent.uploaded.to_rfc3339(),
+                    format!("{:?}", recent.display_type),
+                    recent.files.len().to_string(),
+                ]
+            })
+            .collect();
+        output::table_from(
+            &["TARGET", "TOOL", "RESULT", "UPLOADED", "DISPLAY", "FILES"],
+            rows,
+        )
+    }
+
+    /// Render the most recent result of each tool for each target as text
+    ///
+    /// # Arguments
+    ///
+    /// * `ansi` - Whether to style the text with ANSI escape codes
+    fn human(&self, ansi: bool) -> String {
+        let mut lines = Vec::new();
+        for target in self.0.keys() {
+            // start each target with its own label
+            lines.push(utils::render::label(target, ansi));
+            // add the most recent result of each of this target's tools
+            for (_, tool, recent) in self.latest().into_iter().filter(|row| row.0 == target) {
+                lines.push(format!(
+                    "  {}",
+                    utils::render::field(
+                        tool,
+                        &format!(
+                            "{} ({:?}, uploaded {}, {} files)",
+                            recent.id,
+                            recent.display_type,
+                            recent.uploaded.to_rfc3339(),
+                            recent.files.len()
+                        ),
+                        ansi
+                    )
+                ));
+            }
+        }
+        lines.join("\n")
+    }
+
+    /// Check a `--wait-for` condition against each target's results
+    fn wait_items(&self) -> Result<Vec<serde_json::Value>, Error> {
+        self.0.values().map(output::to_value).collect()
+    }
+}
+
+/// Retrieve the results of every target file and repo of a get command
+///
+/// # Arguments
+///
+/// * `thorium` - A Thorium client
+/// * `cmd` - The full result get command/args
+/// * `params` - The params to use when getting results
+async fn fetch_results(
+    thorium: &Thorium,
+    cmd: &GetResults,
+    params: &ResultGetParams,
+) -> Result<ResultsView, Error> {
+    // get the limit for list files if we have one
+    let limit = if cmd.no_limit { None } else { Some(cmd.limit) };
+    // gather our target files, adding any in a list file
+    let mut files: Vec<String> = cmd.files.clone();
+    if let Some(file_list) = &cmd.file_list {
+        files.extend(utils::fs::lines_set_from_file(file_list, limit).await?);
+    }
+    // gather our target repos, adding any in a list file
+    let mut repos: Vec<String> = cmd.repos.clone();
+    if let Some(repo_list) = &cmd.repo_list {
+        repos.extend(utils::fs::lines_set_from_file(repo_list, limit).await?);
+    }
+    // get the results of each target
+    let mut view = BTreeMap::new();
+    for sha256 in files {
+        let results = thorium.files.get_results(&sha256, params).await?;
+        view.insert(sha256, results);
+    }
+    for repo in repos {
+        let results = thorium.repos.get_results(&repo, params).await?;
+        view.insert(repo, results);
+    }
+    Ok(ResultsView(view))
+}
+
+/// Print the results of target files and repos in a format, until interrupted, or once a
+/// condition holds
+///
+/// # Arguments
+///
+/// * `thorium` - A Thorium client
+/// * `cmd` - The full result get command/args
+async fn get_view(thorium: &Thorium, cmd: &GetResults) -> Result<(), Error> {
+    // only specific targets can be printed
+    if cmd.has_parameters() || cmd.apply_to_all() || !cmd.has_targets() {
+        return Err(Error::new(
+            "--format, --watch, and --wait-for print the results of specific targets; \
+            use --files, --repos, --file-list, or --repo-list without search parameters",
+        ));
+    }
+    // build the params for getting results
+    let params = ResultGetParams::default()
+        .tools(cmd.tools.clone())
+        .groups(cmd.results_groups.clone());
+    // default to a table of each tool's most recent result
+    let format = cmd.format.format.unwrap_or(OutputFormat::Table);
+    watch::show(format, &cmd.watch, Some(&cmd.wait), || {
+        fetch_results(thorium, cmd, &params)
+    })
+    .await
+}
+
 /// Handle all reults commands
 ///
 /// # Arguments
@@ -499,6 +652,12 @@ pub async fn handle(args: &Args, cmd: &Results) -> Result<(), Error> {
     }
     // call the right results handler
     match cmd {
+        // print results through the shared output helpers if any of their flags were set
+        Results::Get(cmd)
+            if cmd.format.format.is_some() || cmd.watch.watch || cmd.wait.wait_for.is_some() =>
+        {
+            get_view(&thorium, cmd).await
+        }
         Results::Get(cmd) => get(&thorium, cmd, args.workers).await,
         Results::Upload(cmd) => upload::upload(&thorium, cmd).await,
     }

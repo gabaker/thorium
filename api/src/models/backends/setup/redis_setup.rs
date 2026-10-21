@@ -5,6 +5,8 @@ use crate::{Conf, setup};
 
 /// Setup a connection pool to the redis backend
 ///
+/// The pool connects to the Redis database selected by the config's `redis.db`.
+///
 /// # Arguments
 ///
 /// * `config` - The config for the Thorium API
@@ -15,25 +17,25 @@ use crate::{Conf, setup};
 pub async fn redis(config: &Conf) -> Pool<RedisConnectionManager> {
     // get redis config
     let redis = &config.redis;
-    // build url to server using authentication if its configured
+    // build url to the configured database using authentication if its configured
     let url = match (&redis.username, &redis.password) {
         // redis with username/password auth setup
         (Some(user), Some(password)) => format!(
-            "redis://{}:{}@{}:{}/",
-            user, password, redis.host, redis.port
+            "redis://{}:{}@{}:{}/{}",
+            user, password, redis.host, redis.port, redis.db
         ),
         (None, Some(password)) => format!(
-            "redis://default:{}@{}:{}/",
-            password, redis.host, redis.port
+            "redis://default:{}@{}:{}/{}",
+            password, redis.host, redis.port, redis.db
         ),
-        (None, None) => format!("redis://{}:{}/", redis.host, redis.port),
+        (None, None) => format!("redis://{}:{}/{}", redis.host, redis.port, redis.db),
         _ => panic!("Redis Setup Error - Password must be set if username is set"),
     };
     setup!(
         config.thorium.tracing.local.level,
         format!(
-            "Connecting to redis at {}:{}",
-            config.redis.host, config.redis.port
+            "Connecting to redis database {} at {}:{}",
+            config.redis.db, config.redis.host, config.redis.port
         )
     );
     // build manager

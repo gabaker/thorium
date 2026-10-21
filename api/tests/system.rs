@@ -5,7 +5,6 @@ use serde_json::Value;
 use std::collections::{BTreeMap, HashSet};
 use std::path::PathBuf;
 
-use base64::Engine as _;
 use thorium::models::{
     Backup, GroupAllowedUpdate, GroupUpdate, HostPathWhitelistUpdate, ImageBan, ImageBanKind,
     ImageBanUpdate, ImageNetworkPolicyUpdate, ImageScaler, ImageUpdate, NetworkPolicyUpdate,
@@ -1360,10 +1359,9 @@ async fn a_backup_without_the_newer_fields_restores() -> Result<(), Error> {
     is!(fields.remove("network_policy_sets").is_some(), true);
     // restore it as an older thoradm would send it
     let token = client.users.get("thorium").await?.token;
-    let encoded = base64::engine::general_purpose::STANDARD.encode(token.as_bytes());
     let resp = reqwest::Client::new()
         .post(format!("{}/api/system/restore", client.host))
-        .header("authorization", format!("token {encoded}"))
+        .header("authorization", test_utilities::auth_header(&token))
         .json(&older)
         .send()
         .await?;
@@ -1406,12 +1404,10 @@ async fn a_backup_without_the_newer_fields_restores() -> Result<(), Error> {
 async fn get_json(client: &Thorium, path: &str) -> Result<(u16, serde_json::Value), Error> {
     // get the token for this client
     let token = client.users.info().await?.token;
-    // build the auth header the client would send
-    let encoded = base64::engine::general_purpose::STANDARD.encode(token.as_bytes());
     // send our raw request so every query parameter reaches the API unchanged
     let resp = reqwest::Client::new()
         .get(format!("{}{path}", client.host))
-        .header("authorization", format!("token {encoded}"))
+        .header("authorization", test_utilities::auth_header(&token))
         .send()
         .await?;
     // get the status and body of the response

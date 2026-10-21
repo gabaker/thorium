@@ -7,8 +7,8 @@ use uuid::Uuid;
 use super::Error;
 use super::traits::{GenericClient, GrepClient, GrepClientHelper};
 use crate::models::{
-    Cursor, Entity, EntityListOpts, EntityRequest, EntityResponse, EntityUpdate, GrepMatches,
-    GrepOpts, GrepPage,
+    Association, Cursor, Entity, EntityListLine, EntityListOpts, EntityRequest, EntityResponse,
+    EntityUpdate, GrepMatches, GrepOpts, GrepPage,
 };
 use crate::{
     add_date, add_query, add_query_bool, add_query_list, add_query_list_clone, send, send_build,
@@ -32,6 +32,14 @@ pub struct Entities {
     token: String,
     /// A reqwest client for reqwests
     client: reqwest::Client,
+}
+
+#[cfg(test)]
+impl Entities {
+    /// The auth string this handler sends with its requests
+    pub(crate) fn auth_token(&self) -> &str {
+        &self.token
+    }
 }
 
 #[cfg_attr(feature = "sync", thorium_derive::blocking_struct)]
@@ -142,11 +150,31 @@ impl Entities {
     )]
     pub async fn get(&self, id: Uuid) -> Result<Entity, Error> {
         // build url for getting info on a sample
-        let url = format!("{base}/api/entities/{id}", base = self.host,);
+        let url = format!("{base}/api/entities/{id}", base = self.host);
         // build request
         let req = self.client.get(&url).header("authorization", &self.token);
         // send this request and build a sample from the response
         send_build!(self.client, req, Entity)
+    }
+
+    /// Lists every association of an [`Entity`] in both directions
+    ///
+    /// Only admins can list an entity's associations this way; this is meant for tests.
+    ///
+    /// # Arguments
+    ///
+    /// * `id` - The id of the entity to list associations for
+    #[cfg_attr(
+        feature = "trace",
+        instrument(name = "Thorium::Entities::associations", skip(self), err(Debug))
+    )]
+    pub async fn associations(&self, id: Uuid) -> Result<Vec<Association>, Error> {
+        // build the url for listing this entity's associations
+        let url = format!("{base}/api/entities/{id}/associations", base = self.host);
+        // build our request
+        let req = self.client.get(&url).header("authorization", &self.token);
+        // send this request and build the associations from the response
+        send_build!(self.client, req, Vec<Association>)
     }
 
     /// Updates an [`Entity`] in Thorium
@@ -238,6 +266,9 @@ impl Entities {
 
     /// Lists all entities that meet some search criteria
     ///
+    /// Each line holds an entity's id, name, kind, and creation time; use
+    /// [`Entities::list_details`] to get the full entities.
+    ///
     /// # Arguments
     ///
     /// * `opts` - The options for this cursor
@@ -271,7 +302,7 @@ impl Entities {
         feature = "trace",
         instrument(name = "Thorium::entities::list", skip_all, err(Debug))
     )]
-    pub async fn list(&self, opts: &EntityListOpts) -> Result<Cursor<Entity>, Error> {
+    pub async fn list(&self, opts: &EntityListOpts) -> Result<Cursor<EntityListLine>, Error> {
         // build the url for listing entities
         let url = format!("{}/api/entities/", self.host);
         // get the correct page size if our limit is smaller then our page_size

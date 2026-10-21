@@ -4,7 +4,7 @@ use chrono::NaiveDateTime;
 use http::status::StatusCode;
 use owo_colors::OwoColorize;
 use std::collections::{BTreeMap, HashMap};
-use std::io::{IsTerminal, Write};
+use std::io::Write;
 use thorium::client::GrepClient;
 use thorium::models::{
     GrepDocumentMatches, GrepMatch, GrepMatches, GrepOpts, GrepSource, GrepStats, TruncationReason,
@@ -72,16 +72,18 @@ impl TryFrom<&String> for GrepTarget {
 /// Resolve the output format and whether to emit ANSI styling
 ///
 /// The format defaults to heading output on an interactive terminal and flat
-/// output when piped, exactly like ripgrep's heading behavior; ANSI styling is
-/// gated on the terminal independently so a forced format never writes escape
-/// codes into a pipe.
+/// output when piped, like ripgrep's heading behavior. A terminal only counts
+/// as interactive when `NO_COLOR` and `TERM=dumb` don't ask for plain text, the
+/// same check every other thorctl command styles its output by, and ANSI
+/// styling follows it independently of the format so a forced format never
+/// writes escape codes into a pipe.
 ///
 /// # Arguments
 ///
 /// * `requested` - The format explicitly requested on the command line if any
 fn resolve_format(requested: Option<GrepFormat>) -> (GrepFormat, bool) {
-    // only emit ANSI styling for an interactive terminal
-    let ansi = std::io::stdout().is_terminal();
+    // only emit ANSI styling for a terminal that isn't asking for plain text
+    let ansi = utils::output::stdout_ansi();
     // use the requested format or pick one based on the terminal
     let format = requested.unwrap_or(if ansi {
         GrepFormat::Heading

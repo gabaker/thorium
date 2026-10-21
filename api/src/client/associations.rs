@@ -27,6 +27,14 @@ pub struct Associations {
     client: reqwest::Client,
 }
 
+#[cfg(test)]
+impl Associations {
+    /// The auth string this handler sends with its requests
+    pub(crate) fn auth_token(&self) -> &str {
+        &self.token
+    }
+}
+
 #[cfg_attr(feature = "sync", thorium_derive::blocking_struct)]
 impl Associations {
     /// Creates a new associations handler

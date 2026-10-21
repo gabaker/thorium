@@ -20,19 +20,19 @@ use crate::models::entities::network_activity::{NetConState, NetworkConnection};
 use crate::models::schema::queries::EntitiesListCursor;
 use crate::models::schema::{Bucket, CursorLimit, DEFAULT_LIMIT_CAP};
 use crate::models::{
-    ApiCursor, AssociationKind, AssociationListOpts, AssociationRequest, AssociationTarget,
-    AssociationTargetColumn, CollectionEntity, CompiledFunction, Country, CriticalSector,
-    DecompiledFunction, DeviceEntity, Entity, EntityForm, EntityKinds, EntityListLine,
-    EntityListParams, EntityListRow, EntityMetadata, EntityMetadataUpdateForm, EntityResponse,
-    EntityRow, EntityUpdateForm, FileSystemEntity, FileSystemFolderEntity, Flag, Group,
-    GroupAllowAction, ListableAssociation, PeImportEntity, PeSectionEntity, SigmaRule, TagListRow,
-    TagMap, TagType, TreeSupport, User, VendorEntity, WindowsProcessEntity,
+    ApiCursor, Association, AssociationKind, AssociationListOpts, AssociationRequest,
+    AssociationTarget, AssociationTargetColumn, CollectionEntity, CompiledFunction, Country,
+    CriticalSector, DecompiledFunction, DeviceEntity, Entity, EntityForm, EntityKinds,
+    EntityListLine, EntityListParams, EntityListRow, EntityMetadata, EntityMetadataUpdateForm,
+    EntityResponse, EntityRow, EntityUpdateForm, FileSystemEntity, FileSystemFolderEntity, Flag,
+    Group, GroupAllowAction, ListableAssociation, PeImportEntity, PeSectionEntity, SigmaRule,
+    TagListRow, TagMap, TagType, TreeSupport, User, VendorEntity, WindowsProcessEntity,
     WindowsProcessTreeEntity,
 };
 use crate::utils::{ApiError, Shared};
 use crate::{
     bad, bad_internal, deserialize, ensure_empty_segment, ensure_segments_complete, for_groups,
-    internal_err, not_found, opt_tag, opt_tag_to_string, serialize, tag, tag_list_clone,
+    internal_err, is_admin, not_found, opt_tag, opt_tag_to_string, serialize, tag, tag_list_clone,
     unauthorized, update, update_add_rem, update_clear_opt, update_opt,
 };
 
@@ -379,6 +379,47 @@ impl Entity {
             }
             None => Ok(None),
         }
+    }
+
+    /// List every association of an entity in both directions for an admin
+    ///
+    /// Only admins can list an entity's associations this way; this is meant for tests.
+    ///
+    /// # Arguments
+    ///
+    /// * `user` - The user that is listing associations
+    /// * `id` - The id of the entity to list associations for
+    /// * `shared` - Shared Thorium objects
+    #[instrument(name = "Entity::admin_associations", skip(user, shared), err(Debug))]
+    pub async fn admin_associations(
+        user: &User,
+        id: Uuid,
+        shared: &Shared,
+    ) -> Result<Vec<Association>, ApiError> {
+        // only admins can list every association of an entity
+        is_admin!(user);
+        // get the entity, which fails with a 404 if it does not exist
+        let entity = Entity::get(user, id, shared).await?;
+        // list the first page of this entity's associations in all of its groups
+        let Some(mut cursor) = entity.list_associations(user, shared).await? else {
+            return Ok(Vec::default());
+        };
+        // start with the associations on the first page
+        let mut associations = Vec::with_capacity(cursor.data.len());
+        // page through every association of this entity
+        loop {
+            // convert this page's associations
+            for listable in cursor.data.drain(..) {
+                associations.push(Association::try_from(listable)?);
+            }
+            // stop once our cursor is exhausted
+            if cursor.exhausted() {
+                break;
+            }
+            // get the next page of associations
+            cursor.next(shared).await?;
+        }
+        Ok(associations)
     }
 
     /// Update an entity's kind specific metadata with the data in the form

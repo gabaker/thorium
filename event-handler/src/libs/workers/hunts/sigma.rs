@@ -210,7 +210,7 @@ impl MaybeEntity {
 }
 
 impl From<usize> for MaybeEntity {
-    /// Wrap the index to an entity that will be created in a MaybeEntity
+    /// Wrap the index to an entity that will be created in a `MaybeEntity`
     ///
     /// # Arguments
     ///
@@ -366,7 +366,7 @@ impl SigmaActionCache {
                 // track that we are creating one of these entities
                 entity_stats.created = entity_stats.created.saturating_add(1);
                 // set the groups this entity should be created in
-                req.groups = rule.original.groups.clone();
+                req.groups.clone_from(&rule.original.groups);
                 // get the index our next entity will be added at
                 let index = self.entities.len();
                 // add this entity request
@@ -397,7 +397,7 @@ impl SigmaActionCache {
         self.associations.push((
             kind,
             (source.into(), target.into(), rule.original.groups.clone()),
-        ))
+        ));
     }
 
     /// Gather all parent entities
@@ -493,7 +493,7 @@ impl SigmaActionCache {
                 // add the association between our root node and our original data
                 self.add_association(rule, kind, entity, root_index);
             }
-        };
+        }
         Ok(())
     }
 
@@ -543,18 +543,15 @@ impl SigmaActionCache {
                 // get our root nodes if we have any
                 let entities = entity_map.get(root_kind);
                 // for now just assume the first one
-                let root = match entities.first() {
-                    Some(root) => root,
-                    None => {
-                        // we are missing a root for an entity
-                        let msg = format!(
-                            "Missing root {root_kind} from {}:{}",
-                            entity.kind(),
-                            entity.name
-                        );
-                        // return an error for this missing root
-                        return Err(Error::new(msg));
-                    }
+                let Some(root) = entities.first() else {
+                    // we are missing a root for an entity
+                    let msg = format!(
+                        "Missing root {root_kind} from {}:{}",
+                        entity.kind(),
+                        entity.name
+                    );
+                    // return an error for this missing root
+                    return Err(Error::new(msg));
                 };
                 // add our root entity and get its index
                 let root_index = self.add_entity(rule, root.clone(), stats);
@@ -635,15 +632,19 @@ impl SigmaActionCache {
 
     /// Create all of our entities (including flags) and associations
     ///
+    /// Existing entities are looked up as the user, but the creates use the worker's base (admin)
+    /// client so sigma's entities and associations keep being attributed to it.
+    ///
     /// # Arguments
     ///
-    /// * `thorium` A thorium client
-    pub async fn create_all(mut self, thorium: &Thorium) -> Result<(), Error> {
+    /// * `thorium` - The thorium client masquerading as the user whose event this is
+    /// * `creator` - The base (admin) thorium client to create entities and associations with
+    pub async fn create_all(mut self, thorium: &Thorium, creator: &Thorium) -> Result<(), Error> {
         // don't just recreate any already existing entities
         let maybe_creates = self.filter_reqs(thorium).await?;
         // create all of our entities 10 at a time
         let targets = futures::stream::iter(maybe_creates)
-            .map(|maybe_create| maybe_create.apply(thorium))
+            .map(|maybe_create| maybe_create.apply(creator))
             .buffered(10)
             .collect::<Vec<Result<AssociationTarget, _>>>()
             .await;
@@ -668,18 +669,16 @@ impl SigmaActionCache {
         for (kind, (src, target, groups)) in self.associations {
             // get our source and target association targets
             // log an error if either of our targets are missing
-            let (src, target) = match (src.get_target(&resps), target.get_target(&resps)) {
-                (Some(src), Some(target)) => (src, target),
-                _ => {
-                    // log that we failed to create an association
-                    event!(
-                        Level::ERROR,
-                        creating = "Association",
-                        error = "Missing Source/Destination entity"
-                    );
-                    // continue on to the next association to create
-                    continue;
-                }
+            let (Some(src), Some(target)) = (src.get_target(&resps), target.get_target(&resps))
+            else {
+                // log that we failed to create an association
+                event!(
+                    Level::ERROR,
+                    creating = "Association",
+                    error = "Missing Source/Destination entity"
+                );
+                // continue on to the next association to create
+                continue;
             };
             // build this association request
             let req = AssociationRequest::new(kind, src)
@@ -690,7 +689,7 @@ impl SigmaActionCache {
         }
         // create all of our associations 10 at a time
         let resp_results = futures::stream::iter(assoc_reqs)
-            .map(|req| create_association(thorium, req))
+            .map(|req| create_association(creator, req))
             .buffer_unordered(10)
             .collect::<Vec<Result<(), _>>>()
             .await;
@@ -841,7 +840,7 @@ pub struct SigmaRuleWorker {
     pub clients: PapayaMap<String, Thorium>,
     /// The users that are currently disabled and whose events should be skipped
     pub disabled: HashSet<String>,
-    /// A client for Thorium that should only be used to create user clients
+    /// The base (admin) client that builds user clients and creates sigma's entities and associations
     thorium: Arc<Thorium>,
 }
 
@@ -948,30 +947,24 @@ impl SigmaRuleWorker {
         // get a pin to our papaya map
         let pin = self.clients.pin_owned();
         // get this users thorium client
-        let thorium = match pin.get(&event.user) {
-            Some(thorium) => thorium,
-            None => {
-                // we don't have a client for this user so just error for now
-                // well retry this event later
-                return Err(Error::new(format!(
-                    "Missing client for user {}",
-                    event.user
-                )));
-            }
+        let Some(thorium) = pin.get(&event.user) else {
+            // without a client for this user we can't scan this event, so error and let it be
+            // retried later
+            return Err(Error::new(format!(
+                "Missing client for user {}",
+                event.user
+            )));
         };
         // start with an empty stats block then we will lock and add everything all at once later
         let mut local_stats = SigmaRuleStats::default();
         // get our innner event
         // this should never hit the wrong event kind branch but its better to be defensive
-        let event_data = match event.data {
-            EventData::SigmaScannableResults(inner) => inner,
-            _ => {
-                // we got an event that is not meant for this worker somehow
-                // build a helpful error message
-                let msg = format!("SigmaRuleWorker got the wrong kind of event: {}", event.id);
-                // return an error since we can't handle this event
-                return Err(Error::new(msg));
-            }
+        let EventData::SigmaScannableResults(event_data) = event.data else {
+            // we got an event that is not meant for this worker somehow
+            // build a helpful error message
+            let msg = format!("SigmaRuleWorker got the wrong kind of event: {}", event.id);
+            // return an error since we can't handle this event
+            return Err(Error::new(msg));
         };
         // A cache of actions to take
         let mut action_cache = SigmaActionCache::new(event_data.key.clone());
@@ -986,18 +979,14 @@ impl SigmaRuleWorker {
             // scan using these rules
             for index in &self.context.applies_to[entity_kind] {
                 // get this rule
-                let rule = match self.context.combined.get(*index) {
-                    Some(rule) => rule,
-                    // we are somehow missing a rule
-                    None => {
-                        // log this missing rule
-                        event!(
-                            Level::ERROR,
-                            "Missing rule for {entity_kind} at index {index}"
-                        );
-                        // just continue on to the next rule
-                        continue;
-                    }
+                let Some(rule) = self.context.combined.get(*index) else {
+                    // we are somehow missing a rule so log it
+                    event!(
+                        Level::ERROR,
+                        "Missing rule for {entity_kind} at index {index}"
+                    );
+                    // just continue on to the next rule
+                    continue;
                 };
                 // get a reference to this entity kinds events
                 let events = &entity_map.events[entity_kind];
@@ -1033,8 +1022,8 @@ impl SigmaRuleWorker {
                 }
             }
         }
-        // create any entities that any rules hit/flagged on
-        action_cache.create_all(thorium).await?;
+        // create any entities that any rules hit/flagged on with our base (admin) client
+        action_cache.create_all(thorium, &self.thorium).await?;
         Ok(local_stats)
     }
 }
@@ -1166,5 +1155,252 @@ impl EventWorkerSupport for SigmaRuleWorker {
             lock.by_entity[kind] += stats;
         }
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Mutex as StdMutex;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::net::{TcpListener, TcpStream};
+
+    use super::*;
+
+    /// A request the recording server received: (method, path, authorization header)
+    type Recorded = (String, String, String);
+
+    /// The token the base (admin) client authenticates with
+    const ADMIN_TOKEN: &str = "admin-token";
+
+    /// The token the masqueraded user authenticates with
+    const USER_TOKEN: &str = "user-token";
+
+    /// Find where the header block of a raw HTTP request ends
+    ///
+    /// # Arguments
+    ///
+    /// * `buf` - The bytes read so far
+    fn header_end(buf: &[u8]) -> Option<usize> {
+        // the header block ends at the first blank line
+        buf.windows(4)
+            .position(|window| window == b"\r\n\r\n")
+            .map(|pos| pos + 4)
+    }
+
+    /// Read one HTTP request, body included, from a connection and return its header block
+    ///
+    /// # Arguments
+    ///
+    /// * `stream` - The connection to read from
+    async fn read_request(stream: &mut TcpStream) -> String {
+        // read until the whole header block has arrived
+        let mut buf = Vec::new();
+        let mut chunk = [0u8; 4096];
+        let end = loop {
+            let read = stream.read(&mut chunk).await.expect("read request");
+            buf.extend_from_slice(&chunk[..read]);
+            if let Some(end) = header_end(&buf) {
+                break end;
+            }
+            assert!(
+                read > 0,
+                "connection closed before the request headers ended"
+            );
+        };
+        // parse the header block
+        let head = String::from_utf8_lossy(&buf[..end]).to_string();
+        let lower = head.to_lowercase();
+        // find how the body is framed
+        let length = lower
+            .lines()
+            .find_map(|line| line.strip_prefix("content-length:"))
+            .map(|value| value.trim().parse::<usize>().expect("content length"));
+        let chunked = lower.contains("transfer-encoding: chunked");
+        // read the rest of the body so the client never sees a reset
+        loop {
+            let body = &buf[end..];
+            let complete = match (length, chunked) {
+                (Some(length), _) => body.len() >= length,
+                (None, true) => body.ends_with(b"0\r\n\r\n"),
+                (None, false) => true,
+            };
+            if complete {
+                break;
+            }
+            let read = stream.read(&mut chunk).await.expect("read body");
+            assert!(read > 0, "connection closed before the request body ended");
+            buf.extend_from_slice(&chunk[..read]);
+        }
+        head
+    }
+
+    /// Start a server that records every request and answers the sigma create path's calls
+    ///
+    /// Returns the server's host and the requests it has received
+    async fn recording_server() -> (String, Arc<StdMutex<Vec<Recorded>>>) {
+        // bind to any free local port
+        let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+        let host = format!("http://{}", listener.local_addr().expect("addr"));
+        let recorded = Arc::new(StdMutex::new(Vec::new()));
+        let log = recorded.clone();
+        // answer each connection with a canned response for its route
+        tokio::spawn(async move {
+            loop {
+                let (mut stream, _) = listener.accept().await.expect("accept");
+                let log = log.clone();
+                tokio::spawn(async move {
+                    // read and record the request
+                    let head = read_request(&mut stream).await;
+                    let mut parts = head.lines().next().unwrap_or_default().split(' ');
+                    let method = parts.next().unwrap_or_default().to_owned();
+                    let path = parts.next().unwrap_or_default().to_owned();
+                    let auth = head
+                        .lines()
+                        .find_map(|line| {
+                            line.to_lowercase()
+                                .starts_with("authorization:")
+                                .then(|| line["authorization:".len()..].trim().to_owned())
+                        })
+                        .unwrap_or_default();
+                    log.lock().expect("lock").push((method, path.clone(), auth));
+                    // pick the body this route answers with
+                    let body = if path.starts_with("/api/trees/") {
+                        format!(
+                            r#"{{"id":"{}","initial":[],"growable":[],"data_map":{{}},"branches":{{}},"hint_branches":{{}}}}"#,
+                            Uuid::new_v4()
+                        )
+                    } else if path.starts_with("/api/entities/") {
+                        format!(r#"{{"id":"{}","name":"created"}}"#, Uuid::new_v4())
+                    } else {
+                        String::new()
+                    };
+                    // send the response and close the connection
+                    let resp = format!(
+                        "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
+                        body.len()
+                    );
+                    stream.write_all(resp.as_bytes()).await.expect("write");
+                    stream.shutdown().await.ok();
+                });
+            }
+        });
+        (host, recorded)
+    }
+
+    /// Build the auth string the client sends for a token
+    ///
+    /// # Arguments
+    ///
+    /// * `token` - The token to build an auth string for
+    fn auth_for(token: &str) -> String {
+        // the client sends base64 encoded tokens behind a "token" prefix
+        format!("token {}", base64_encode(token.as_bytes()))
+    }
+
+    /// Base64 encode bytes with the standard alphabet
+    ///
+    /// # Arguments
+    ///
+    /// * `bytes` - The bytes to encode
+    fn base64_encode(bytes: &[u8]) -> String {
+        /// The standard base64 alphabet
+        const ALPHABET: &[u8; 64] =
+            b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+        let mut out = String::new();
+        // encode each group of three bytes as four characters
+        for chunk in bytes.chunks(3) {
+            // pad a short final group with zero bytes
+            let b = [
+                chunk[0],
+                *chunk.get(1).unwrap_or(&0),
+                *chunk.get(2).unwrap_or(&0),
+            ];
+            let n = (u32::from(b[0]) << 16) | (u32::from(b[1]) << 8) | u32::from(b[2]);
+            // emit a character per six bits, or padding past the end of the input
+            for i in 0..4 {
+                if i <= chunk.len() {
+                    out.push(ALPHABET[((n >> (18 - 6 * i)) & 63) as usize] as char);
+                } else {
+                    out.push('=');
+                }
+            }
+        }
+        out
+    }
+
+    /// Sigma creates its entities and associations with its base (admin) client
+    #[tokio::test]
+    async fn sigma_creates_entities_and_associations_as_admin() {
+        // start the recording server and build an admin client against it
+        let (host, recorded) = recording_server().await;
+        let admin = Thorium::build(&host)
+            .token(ADMIN_TOKEN)
+            .build()
+            .await
+            .expect("admin client");
+        // masquerade a copy of the admin client as a user, as sigma's user clients do
+        let user = ScrubbedUser {
+            username: "hunter".to_owned(),
+            role: UserRole::User,
+            email: "hunter@example.com".to_owned(),
+            groups: vec!["rules".to_owned()],
+            actual_groups: Vec::default(),
+            token: USER_TOKEN.to_owned(),
+            token_expiration: chrono::Utc::now(),
+            unix: None,
+            settings: thorium::models::UserSettings::default(),
+            local: true,
+            verified: true,
+            has_image: false,
+        };
+        let mut user_client = admin.clone();
+        user_client.masquerade(&user);
+        // queue one new entity and one association from it to an existing rule
+        let mut cache = SigmaActionCache::new(OutputKey::Entity(Uuid::new_v4()));
+        let groups = vec!["rules".to_owned()];
+        cache.entities.push(EntityRequest::new(
+            "flagged",
+            EntityMetadataRequest::Other,
+            groups.clone(),
+        ));
+        cache.associations.push((
+            AssociationKind::CreatedBy,
+            (
+                MaybeEntity::new_existing(Uuid::new_v4(), "rule"),
+                MaybeEntity::New(0),
+                groups,
+            ),
+        ));
+        // create everything the way scan_event does
+        cache
+            .create_all(&user_client, &admin)
+            .await
+            .expect("create all");
+        // check who each request went out as
+        let recorded = recorded.lock().expect("lock").clone();
+        let auth_of = |prefix: &str| {
+            recorded
+                .iter()
+                .filter(|(method, path, _)| method == "POST" && path.starts_with(prefix))
+                .map(|(_, _, auth)| auth.clone())
+                .collect::<Vec<_>>()
+        };
+        // the existing-entity lookup reads as the user
+        assert_eq!(
+            auth_of("/api/trees/"),
+            vec![auth_for(USER_TOKEN)],
+            "tree lookup"
+        );
+        // the entity and association creates go out as admin
+        assert_eq!(
+            auth_of("/api/entities/"),
+            vec![auth_for(ADMIN_TOKEN)],
+            "entity create"
+        );
+        assert_eq!(
+            auth_of("/api/associations/"),
+            vec![auth_for(ADMIN_TOKEN)],
+            "association create"
+        );
     }
 }

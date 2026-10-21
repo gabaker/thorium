@@ -171,6 +171,9 @@ pub async fn get(groups: &[String], id: Uuid, shared: &Shared) -> Result<Entity,
 
 /// List entities in specific groups and with tags
 ///
+/// When the list is filtered by tags, only entities of the requested kinds are kept, because tag
+/// rows aren't partitioned by kind.
+///
 /// # Arguments
 ///
 /// * `user` - The user that is listing entities
@@ -192,6 +195,9 @@ pub async fn list(
     // with names+kinds because tag rows don't have them
     if cursor.retain.tags_retain.is_some() {
         supplement_tag_lines(&mut cursor.data, shared).await?;
+        // tag rows aren't partitioned by kind, so keep only the requested kinds
+        let kinds = &cursor.retain.extra_filter;
+        cursor.data.retain(|line| kinds.contains(&line.kind));
     }
     // save this cursor
     cursor.save(shared).await?;

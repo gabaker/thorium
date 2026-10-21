@@ -25,8 +25,8 @@ use crate::models::{
     NodeRegistration, OriginRequest, OutputCollection, OutputDisplayType, PeImportEntity,
     PeSectionEntity, Pipeline, PipelineRequest, Pools, ReactionCreation, ReactionRequest,
     RepoCheckout, RepoDependencySettings, RepoRequest, Resources, ResourcesRequest,
-    ResultDependencySettings, SampleDependencySettings, SampleRequest, SigmaRule,
-    SigmaRuleAppliesTo, StageLogsAdd, UserCreate, UserRole, VendorEntityRequest, Volume,
+    ResultDependencySettings, SampleDependencySettings, SampleRequest, ScopedTokenRequest,
+    SigmaRule, SigmaRuleAppliesTo, StageLogsAdd, UserCreate, UserRole, VendorEntityRequest, Volume,
     VolumeTypes, WindowsProcessEntity, WorkerDeleteMap, WorkerRegistrationList,
 };
 use crate::test_utilities;
@@ -190,6 +190,28 @@ pub async fn client_in_groups(admin: &Thorium, groups: &[String]) -> Result<Thor
         admin.groups.update(group, &update).await?;
     }
     Ok(new_client)
+}
+
+/// Build a client that authenticates with a new scoped token of another client's user
+///
+/// The scoped token is limited to a new group owned by that user.
+///
+/// # Arguments
+///
+/// * `client` - The client whose user creates the scoped token
+pub async fn scoped_client(client: &Thorium) -> Result<Thorium, Error> {
+    // create a group so the scoped token has a scope
+    let group = groups(1, client).await?.remove(0).name;
+    // build a uniquely named scoped token request
+    let name = format!("scoped{}", gen_string(16));
+    let req = ScopedTokenRequest::new(name).group(&group);
+    // create the scoped token for this client's user
+    let scoped = client.users.create_scoped_token(&req).await?;
+    // build a client that authenticates with the scoped token
+    Thorium::build(&client.host)
+        .token(&scoped.token)
+        .build()
+        .await
 }
 
 /// Generate a random image request

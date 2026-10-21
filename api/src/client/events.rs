@@ -1,7 +1,7 @@
 //! Exposes events routes in Thorium
 
 use crate::models::{
-    Event, EventCacheStatus, EventCacheStatusOpts, EventIds, EventPopOpts, EventType,
+    Event, EventCacheStatus, EventCacheStatusOpts, EventIds, EventPeekOpts, EventPopOpts, EventType,
 };
 use crate::{Error, send, send_build};
 
@@ -16,6 +16,14 @@ pub struct Events {
     /// token to use for auth
     token: String,
     client: reqwest::Client,
+}
+
+#[cfg(test)]
+impl Events {
+    /// The auth string this handler sends with its requests
+    pub(crate) fn auth_token(&self) -> &str {
+        &self.token
+    }
 }
 
 #[cfg_attr(feature = "sync", thorium_derive::blocking_struct)]
@@ -68,6 +76,33 @@ impl Events {
         let req = self
             .client
             .patch(&url)
+            .query(&query)
+            .header("authorization", &self.token);
+        // send this request
+        send_build!(self.client, req, Vec<Event>)
+    }
+
+    /// Peek at the queued events of one kind without moving them in flight
+    ///
+    /// Only admins can peek at events; this is meant for tests.
+    ///
+    /// # Arguments
+    ///
+    /// * `kind` - The kind of events to peek at
+    /// * `opts` - The parameters to use when peeking at events
+    #[cfg_attr(
+        feature = "trace",
+        tracing::instrument(name = "Thorium::events::peek", skip(self, opts), err(Debug))
+    )]
+    pub async fn peek(&self, kind: EventType, opts: &EventPeekOpts) -> Result<Vec<Event>, Error> {
+        // build the url for peeking at events
+        let url = format!("{}/api/events/peek/{}/", self.host, kind);
+        // build our query opts
+        let query = vec![("limit", opts.limit)];
+        // build our request
+        let req = self
+            .client
+            .get(&url)
             .query(&query)
             .header("authorization", &self.token);
         // send this request

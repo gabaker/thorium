@@ -17,6 +17,14 @@ pub struct Streams {
     client: reqwest::Client,
 }
 
+#[cfg(test)]
+impl Streams {
+    /// The auth string this handler sends with its requests
+    pub(crate) fn auth_token(&self) -> &str {
+        &self.token
+    }
+}
+
 #[cfg_attr(feature = "sync", thorium_derive::blocking_struct)]
 impl Streams {
     /// Creates a new streams handler
@@ -90,7 +98,7 @@ impl Streams {
         // build url for claiming a job
         let url = format!(
             "{base}/api/streams/depth/{group}/{namespace}/{stream}/{start}/{end}",
-            base = &self.host,
+            base = self.host,
             group = group,
             namespace = namespace,
             stream = stream,
@@ -148,7 +156,7 @@ impl Streams {
         // build url for claiming a job
         let url = format!(
             "{base}/api/streams/depth/{group}/{namespace}/{stream}/{start}/{end}/{split}",
-            base = &self.host,
+            base = self.host,
             group = group,
             namespace = namespace,
             stream = stream,

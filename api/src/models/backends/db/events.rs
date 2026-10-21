@@ -8,7 +8,7 @@ use uuid::Uuid;
 use super::keys::EventKeys;
 use crate::models::{Event, EventCacheStatus, EventType};
 use crate::utils::{ApiError, Shared};
-use crate::{conn, query, serialize};
+use crate::{conn, deserialize, query, serialize};
 
 pub mod shared;
 
@@ -89,6 +89,38 @@ pub async fn pop(kind: EventType, count: usize, shared: &Shared) -> Result<Vec<E
     }
     // execute this pipeline
     let _: () = pipe.query_async(conn!(shared)).await?;
+    Ok(events)
+}
+
+/// Read the queued events of one kind without moving them in flight
+///
+/// Events are returned oldest first. The queue is scored by whole seconds, so events that share
+/// a second are ordered by their own timestamps after they are read.
+///
+/// # Arguments
+///
+/// * `kind` - The kind of events to peek at
+/// * `limit` - The number of events to return at most
+/// * `shared` - Shared Thorium objects
+#[instrument(name = "db::events::peek", skip(shared), err(Debug))]
+pub async fn peek(kind: EventType, limit: usize, shared: &Shared) -> Result<Vec<Event>, ApiError> {
+    // a zero limit can return nothing, and redis would read a stop index of -1 as the whole queue
+    if limit == 0 {
+        return Ok(Vec::default());
+    }
+    // build the key to the right event queue
+    let key = EventKeys::queue(kind, shared);
+    // read the oldest events in this queue without removing them
+    let serialized: Vec<String> =
+        query!(cmd("zrange").arg(&key).arg(0).arg(limit - 1), shared).await?;
+    // start a list of our deserialized events
+    let mut events: Vec<Event> = Vec::with_capacity(serialized.len());
+    // deserialize each of our queued events
+    for serial in &serialized {
+        events.push(deserialize!(serial));
+    }
+    // order events that share a second by their own timestamps
+    events.sort_by_key(|event| event.timestamp);
     Ok(events)
 }
 

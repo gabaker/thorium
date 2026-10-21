@@ -23,6 +23,14 @@ pub struct System {
     client: reqwest::Client,
 }
 
+#[cfg(test)]
+impl System {
+    /// The auth string this handler sends with its requests
+    pub(crate) fn auth_token(&self) -> &str {
+        &self.token
+    }
+}
+
 #[cfg_attr(feature = "sync", thorium_derive::blocking_struct)]
 impl System {
     /// Creates a new system handler
