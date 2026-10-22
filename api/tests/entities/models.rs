@@ -1842,6 +1842,63 @@ async fn provider_and_reference_checks() -> Result<(), Error> {
     Ok(())
 }
 
+/// Values written on lines of a harness's AWS config file can't hold control characters, whether
+/// they come with a group credential, its rotation, or a user's own credential
+#[tokio::test]
+async fn aws_config_values_refuse_control_characters() -> Result<(), Error> {
+    // a group and a value that would add a credential_process line to the config file
+    let admin = test_utilities::admin_client().await?;
+    let group = group(GroupRoles::default(), &admin).await?;
+    let injected = "x\ncredential_process = /usr/bin/touch /tmp/injected";
+    let access_key = |id: &str| CredentialKind::AwsAccessKey {
+        access_key_id: id.into(),
+    };
+    // an access key whose id or secret holds a line break is refused
+    let resp =
+        generators::model_credential(&[&group], access_key(injected), Some("s"), &admin).await;
+    fail!(resp, 400);
+    let resp =
+        generators::model_credential(&[&group], access_key("AKIA"), Some(injected), &admin).await;
+    fail!(resp, 400);
+    // an assumed role whose session name holds one is refused
+    let access = cred(&admin, &[&group], access_key("AKIA")).await?;
+    let role = CredentialKind::AwsAssumeRole {
+        role_arn: "arn:aws:iam::1:role/r".into(),
+        external_id: None,
+        session_name: Some(injected.into()),
+        duration_seconds: None,
+        source: AwsRoleSource::AccessKey(access),
+    };
+    let resp = generators::model_credential(&[&group], role, None, &admin).await;
+    fail!(resp, 400);
+    // a rotation to a secret or session token holding one is refused
+    for meta in [
+        EntityMetadataUpdate::model_credential().credential_secret(injected),
+        EntityMetadataUpdate::model_credential().credential_session_token(injected),
+    ] {
+        let resp = admin
+            .entities
+            .update(access, EntityUpdate::default().metadata(meta))
+            .await;
+        fail!(resp, 400);
+    }
+    // so is a user's own access key whose secret holds one
+    let endpoint = generators::model_endpoint(
+        &[&group],
+        ModelEndpointEntityRequest::new(bedrock()).credential(access),
+        &admin,
+    )
+    .await?;
+    let mine = UserCredentialRef::new(access_key("AKIA"), Some(ModelSecret::from(injected)));
+    let resp = set_models(
+        &admin,
+        UserModelSettingsUpdate::default().credential(endpoint.id, mine),
+    )
+    .await;
+    fail!(resp, 400);
+    Ok(())
+}
+
 /// Bans are changed by owners and managers of any group, while edits and rotations need every
 /// group, and the refusal names only blocking groups the caller can see
 #[tokio::test]

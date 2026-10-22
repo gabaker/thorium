@@ -1162,6 +1162,9 @@ pub struct ScopedTokenRequest {
     pub groups: Vec<String>,
     /// When this scoped token permanently expires if it is ephemeral
     pub expires: Option<DateTime<Utc>>,
+    /// The run this token is limited to (set only when the API creates a run's reaction)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub run: Option<RunTokenScope>,
 }
 
 impl ScopedTokenRequest {
@@ -1185,6 +1188,7 @@ impl ScopedTokenRequest {
             role: ScopedTokenRole::User,
             groups: Vec::default(),
             expires: None,
+            run: None,
         }
     }
 
@@ -1463,6 +1467,22 @@ pub struct ScopedToken {
     pub token_expiration: DateTime<Utc>,
     /// When this scoped token permanently expires if it is ephemeral
     pub expires: Option<DateTime<Utc>>,
+    /// The run this token is limited to if it is a run-scoped token
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub run: Option<RunTokenScope>,
+}
+
+/// The workflow run or tool run a run-scoped token is limited to
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+#[cfg_attr(feature = "api", derive(utoipa::ToSchema))]
+pub struct RunTokenScope {
+    /// The run's reaction; its workers claim only its jobs, and tool runs made with this token
+    /// are its sub reactions
+    pub reaction: Uuid,
+    /// The tool instances this token may run: for a workflow run, its agentic tool instances
+    /// bound to a non-native mechanism plus the Image tool instance each of their `Container`
+    /// backings pins; for a tool run, that tool instance
+    pub tool_instances: Vec<Uuid>,
 }
 
 /// A user that authenticated with a scoped token
@@ -1476,6 +1496,9 @@ pub struct ScopedUser {
     pub user: User,
     /// The name of the scoped token used to authenticate
     pub name: String,
+    /// The run this user is limited to if it authenticated with a run-scoped token
+    #[serde(default)]
+    pub run: Option<RunTokenScope>,
 }
 
 /// An authenticated user in Thorium
@@ -1510,6 +1533,23 @@ impl AuthedUser {
     pub fn is_scoped(&self) -> bool {
         // check if we are the scoped variant
         matches!(self, AuthedUser::Scoped(_))
+    }
+
+    /// The run this user is limited to if it authenticated with a run-scoped token
+    #[must_use]
+    pub fn run(&self) -> Option<&RunTokenScope> {
+        // only scoped users can carry a run scope
+        match self {
+            AuthedUser::Full(_) => None,
+            AuthedUser::Scoped(scoped) => scoped.run.as_ref(),
+        }
+    }
+
+    /// The reaction of the run this user is limited to if it authenticated with a run-scoped token
+    #[must_use]
+    pub fn run_reaction(&self) -> Option<Uuid> {
+        // get the run's reaction from its scope
+        self.run().map(|run| run.reaction)
     }
 }
 

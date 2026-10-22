@@ -6,7 +6,7 @@ use std::path::PathBuf;
 use rmcp::ErrorData;
 use rmcp::handler::server::tool::Extension as RmcpExtension;
 use rmcp::handler::server::wrapper::Parameters;
-use rmcp::model::{CallToolResult, Content, ErrorCode, ResourceContents};
+use rmcp::model::{CallToolResult, ContentBlock, ResourceContents};
 use rmcp::{tool, tool_router};
 use schemars::JsonSchema;
 use tracing::instrument;
@@ -16,7 +16,7 @@ use crate::client::ResultsClient;
 use crate::models::ResultGetParams;
 use crate::not_found_unwrapped;
 
-use super::ThoriumMCP;
+use super::{ThoriumMCP, json_result};
 
 /// The params needed to descibe a sample
 #[derive(Debug, Serialize, Deserialize, JsonSchema)]
@@ -68,16 +68,8 @@ impl ThoriumMCP {
         let thorium = self.conf.client(&parts).await?;
         // get this sample
         let sample = thorium.files.get(&sha256).await?;
-        // serialize our sample
-        let serialized = serde_json::to_value(&sample).unwrap();
-        // build our result
-        let result = CallToolResult {
-            content: vec![Content::json(&sample)?],
-            structured_content: Some(serialized),
-            is_error: Some(false),
-            meta: None,
-        };
-        Ok(result)
+        // return the sample as structured content and text
+        json_result(&sample)
     }
 
     /// Get tool results for a specific sample/file by sha256.
@@ -107,16 +99,8 @@ impl ThoriumMCP {
         for (name, mut result) in sample_results.results {
             nicer.insert(name, result.remove(0).result);
         }
-        // serialize our results
-        let serialized = serde_json::to_value(&nicer).unwrap();
-        // build our result
-        let result = CallToolResult {
-            content: vec![Content::json(&nicer)?],
-            structured_content: Some(serialized),
-            is_error: Some(false),
-            meta: None,
-        };
-        Ok(result)
+        // return the results as structured content and text
+        json_result(&nicer)
     }
 
     /// Get all available result files for a tool for specific sample/file
@@ -164,21 +148,8 @@ impl ThoriumMCP {
                 ))));
             }
         };
-        // serialize our results
-        let serialized = serde_json::to_value(&paths).unwrap();
-        // build our structured content
-        let content = paths
-            .iter()
-            .map(|path| Content::json(path))
-            .collect::<Result<Vec<_>, _>>()?;
-        // build our result
-        let result = CallToolResult {
-            content,
-            structured_content: Some(serialized),
-            is_error: Some(false),
-            meta: None,
-        };
-        Ok(result)
+        // return the paths as structured content and text
+        json_result(paths)
     }
 
     /// Get a specific results file from a tool for a specific sample/file by sha256.
@@ -239,12 +210,7 @@ impl ThoriumMCP {
         // wrap this result file in a resource
         let resource = ResourceContents::text(text, uri);
         // build our result
-        let result = CallToolResult {
-            content: vec![Content::resource(resource)],
-            structured_content: None,
-            is_error: Some(false),
-            meta: None,
-        };
+        let result = CallToolResult::success(vec![ContentBlock::resource(resource)]);
         Ok(result)
     }
 }

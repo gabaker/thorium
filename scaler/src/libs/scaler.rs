@@ -8,10 +8,14 @@ use std::collections::{BTreeMap, HashSet};
 use std::hash::{Hash, Hasher};
 use std::sync::Arc;
 use thorium::models::system::WorkerRegistrationList;
-use thorium::models::{Deadline, ImageScaler, StageLogsAdd, WorkerDeleteMap, WorkerRegistration};
+use thorium::models::{
+    Deadline, ImageScaler, ReactionStatus, StageLogsAdd, ToolKind, WorkerDeleteMap,
+    WorkerRegistration,
+};
 use thorium::{Conf, Error, Thorium};
 use tokio::task::JoinHandle;
 use tracing::{Level, event, instrument, span};
+use uuid::Uuid;
 
 use super::Cache;
 use super::schedulers::{self, Allocatable, ReqMap, Scheduler, WorkerDeletion};
@@ -19,6 +23,7 @@ use super::tasks::{self, TaskResult, Tasks, ZombieChecker};
 use crate::args::Args;
 use crate::from_now;
 use crate::libs::Spawned;
+use crate::libs::schedulers::RunPodEnv;
 
 /// returns false if this is false
 macro_rules! filter {
@@ -29,16 +34,17 @@ macro_rules! filter {
     };
 }
 
-/// unwraps a cache group map and returns false if the target group doesn't exist
-macro_rules! get_group {
-    ($map:expr, $group:expr) => {
-        if let Some(inner) = $map.get($group) {
-            inner
-        } else {
-            return false;
-        }
-    };
-}
+/// The shortest time between two early cache reloads in seconds
+const EARLY_RELOAD_INTERVAL: i64 = 30;
+
+/// The most per-run env fetches in flight at once
+const RUN_ENV_FETCHES: usize = 10;
+
+/// The stage log line a run whose token was removed mid-run is failed with
+pub const RUN_TOKEN_REVOKED: &str = "run token revoked";
+
+/// The stage log line a run whose models can't be delivered is failed with, before the API's reason
+pub const RUN_MODELS_UNDELIVERABLE: &str = "run models can't be delivered";
 
 /// spawn an async tokio task
 macro_rules! spawn {
@@ -204,8 +210,8 @@ fn registration_batches(reqs: &ReqMap) -> Vec<WorkerRegistrationList> {
                     &spawn.name,
                     &spawn.req.user,
                     &spawn.req.group,
-                    &spawn.req.pipeline,
-                    &spawn.req.stage,
+                    spawn.req.tool_instance,
+                    spawn.req.run,
                     spawn.resources,
                     spawn.pool,
                 );
@@ -224,6 +230,19 @@ fn registration_batches(reqs: &ReqMap) -> Vec<WorkerRegistrationList> {
         batches.push(registrations);
     }
     batches
+}
+
+/// Decide whether the cache should be reloaded early to inspect a new workload's image
+///
+/// # Arguments
+///
+/// * `requested` - Whether the cache requested a reload
+/// * `last` - When the cache was last reloaded early
+/// * `now` - The current timestamp
+fn early_reload_due(requested: bool, last: Option<DateTime<Utc>>, now: DateTime<Utc>) -> bool {
+    // reload only when requested and the last early reload was long enough ago
+    requested
+        && last.is_none_or(|last| now - last >= chrono::Duration::seconds(EARLY_RELOAD_INTERVAL))
 }
 
 /// Get the clusters `Scaler::schedule` asks to delete workers and the scale downs for each
@@ -252,32 +271,249 @@ fn delete_targets(
     scale_down
 }
 
+/// The run env one or more per-run spawns of a tick share
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+struct RunEnvKey {
+    /// The run group the run's reaction is in
+    group: String,
+    /// The run
+    run: Uuid,
+    /// Whether the run's models are needed (only a harness's worker gets them)
+    models: bool,
+}
+
+/// Why a per-run spawn's env couldn't be fetched
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RunEnvRefusal {
+    /// A read failed in a way the next tick may not repeat, so the spawn is tried again
+    Transient,
+    /// The run's token is gone (the run token read returned `404`)
+    Revoked,
+    /// The run's models can't be delivered (the run models read returned `409`), with the API's
+    /// reason
+    Undeliverable(String),
+}
+
+impl RunEnvRefusal {
+    /// Get the stage log lines to fail the run with, if no later tick can fetch its env either
+    #[must_use]
+    pub fn stage_logs(&self) -> Option<Vec<String>> {
+        // a gone token or undeliverable models stay that way, so the run is failed with why
+        match self {
+            RunEnvRefusal::Transient => None,
+            RunEnvRefusal::Revoked => Some(vec![RUN_TOKEN_REVOKED.to_owned()]),
+            RunEnvRefusal::Undeliverable(reason) => {
+                Some(vec![RUN_MODELS_UNDELIVERABLE.to_owned(), reason.clone()])
+            }
+        }
+    }
+}
+
+/// A per-run spawn whose env couldn't be fetched
+#[derive(Debug)]
+pub struct RunEnvFailure {
+    /// The spawn, taken out of the tick's spawns
+    pub spawn: Spawned,
+    /// Why its env couldn't be fetched
+    pub error: Error,
+    /// Whether a later tick could fetch it, and if not, why
+    pub refusal: RunEnvRefusal,
+}
+
+/// Fetch one run env: the run's token, and its models when they're needed
+///
+/// Returns why a read failed and whether a later tick could fetch it when one does.
+///
+/// # Arguments
+///
+/// * `thorium` - The scaler's admin client
+/// * `key` - The run env to fetch
+async fn fetch_run_env(
+    thorium: &Thorium,
+    key: &RunEnvKey,
+) -> Result<RunPodEnv, (String, RunEnvRefusal)> {
+    // read the run's token, which is gone once the run has ended or it was deleted
+    let token = match thorium.reactions.run_token(&key.group, key.run).await {
+        Ok(token) => token.token,
+        Err(error) => {
+            let refusal = if error.status() == Some(reqwest::StatusCode::NOT_FOUND) {
+                RunEnvRefusal::Revoked
+            } else {
+                RunEnvRefusal::Transient
+            };
+            return Err((error.msg().unwrap_or_else(|| error.to_string()), refusal));
+        }
+    };
+    // a harness's worker also gets the run's models, which a `409` says can't be delivered
+    let models = if key.models {
+        match thorium.reactions.run_models(&key.group, key.run).await {
+            Ok(models) => Some(models),
+            Err(error) => {
+                let msg = error.msg().unwrap_or_else(|| error.to_string());
+                let refusal = if error.status() == Some(reqwest::StatusCode::CONFLICT) {
+                    RunEnvRefusal::Undeliverable(msg.clone())
+                } else {
+                    RunEnvRefusal::Transient
+                };
+                return Err((msg, refusal));
+            }
+        }
+    } else {
+        None
+    };
+    Ok(RunPodEnv { token, models })
+}
+
+/// Fetch the env values of every per-run spawn of a tick, at most 10 at once
+///
+/// Each spawn gets its env values, and the spawns whose fetch failed are taken out and returned
+/// so they can be recorded as failed spawns. Spawns of one run and kind of worker share one
+/// fetch, and nothing is kept for the next tick.
+///
+/// # Arguments
+///
+/// * `thorium` - The scaler's admin client
+/// * `cache` - The scaler's cache, to tell a harness's workers apart
+/// * `spawns` - The tick's spawns by cluster and deadline
+pub(crate) async fn fill_run_envs(
+    thorium: &Thorium,
+    cache: &Cache,
+    spawns: &mut HashMap<String, BTreeMap<DateTime<Utc>, Vec<Spawned>>>,
+) -> Vec<RunEnvFailure> {
+    // find the run env each per-run spawn needs
+    let key_of = |spawn: &Spawned| {
+        spawn.req.run.map(|run| RunEnvKey {
+            group: spawn.req.group.clone(),
+            run,
+            models: cache
+                .get_workload(&spawn.req.tool_instance)
+                .is_some_and(|workload| workload.kind == ToolKind::Harness),
+        })
+    };
+    let keys = spawns
+        .values()
+        .flat_map(BTreeMap::values)
+        .flatten()
+        .filter_map(key_of)
+        .collect::<HashSet<RunEnvKey>>();
+    // fetch them all at once, a few at a time
+    let fetched = stream::iter(keys)
+        .map(|key| async move {
+            let result = fetch_run_env(thorium, &key).await;
+            (key, result)
+        })
+        .buffer_unordered(RUN_ENV_FETCHES)
+        .collect::<Vec<_>>()
+        .await
+        .into_iter()
+        .collect::<HashMap<RunEnvKey, Result<RunPodEnv, (String, RunEnvRefusal)>>>();
+    // give each spawn its env, taking out the ones whose fetch failed
+    let mut failures = Vec::new();
+    for by_deadline in spawns.values_mut() {
+        for group in by_deadline.values_mut() {
+            for spawn in std::mem::take(group) {
+                match key_of(&spawn).map(|key| fetched.get(&key)) {
+                    // a shared spawn needs no env
+                    None => group.push(spawn),
+                    Some(Some(Ok(env))) => {
+                        let mut spawn = spawn;
+                        spawn.run_env = Some(env.clone());
+                        group.push(spawn);
+                    }
+                    Some(Some(Err((error, refusal)))) => failures.push(RunEnvFailure {
+                        spawn,
+                        error: Error::new(format!(
+                            "Failed to get the run env of a per-run worker: {error}"
+                        )),
+                        refusal: refusal.clone(),
+                    }),
+                    // every key was fetched, so this never happens
+                    Some(None) => failures.push(RunEnvFailure {
+                        spawn,
+                        error: Error::new("No run env was fetched for a per-run worker"),
+                        refusal: RunEnvRefusal::Transient,
+                    }),
+                }
+            }
+        }
+    }
+    failures
+}
+
+/// Fail a still running run whose workers can never be spawned, with a stage log saying why
+///
+/// A run whose token was removed, or whose models can't be delivered, is failed this way. A run
+/// that already ended, or is gone, is left alone.
+///
+/// # Arguments
+///
+/// * `thorium` - The scaler's admin client
+/// * `group` - The run group
+/// * `run` - The run whose workers can't be spawned
+/// * `reason` - The stage log lines saying why
+#[instrument(name = "scaler::fail_unspawnable_run", skip(thorium), err(Debug))]
+pub(crate) async fn fail_unspawnable_run(
+    thorium: &Thorium,
+    group: &str,
+    run: Uuid,
+    reason: &[String],
+) -> Result<bool, Error> {
+    // a run that's gone has nothing to fail
+    let reaction = match thorium.reactions.get(group, run).await {
+        Ok(reaction) => reaction,
+        Err(error) if error.status() == Some(reqwest::StatusCode::NOT_FOUND) => return Ok(false),
+        Err(error) => return Err(error),
+    };
+    // only a run that's still running is failed
+    if !matches!(
+        reaction.status,
+        ReactionStatus::Created | ReactionStatus::Started
+    ) {
+        return Ok(false);
+    }
+    // say why in its first stage's logs
+    if let Some(stage) = reaction.plan.stages.first().and_then(|step| step.first()) {
+        let mut logs = StageLogsAdd::default();
+        for line in reason {
+            logs.add(line);
+        }
+        thorium
+            .reactions
+            .add_stage_logs(group, &run, &stage.name, &logs)
+            .await?;
+    }
+    // fail it so it doesn't wait on workers that can never be spawned
+    thorium.reactions.fail(group, &run).await?;
+    Ok(true)
+}
+
 /// Banned groups and users due to setup errors
 ///
 /// This will expire and reset every 10 minutes.
 #[derive(Debug)]
 pub struct BanSets {
-    /// The type of scaler these bans are for
-    scaler_type: ImageScaler,
     /// when this banlist should be refreshed
     pub expire: DateTime<Utc>,
     /// The groups to ban spawning resources for
     pub groups: HashSet<String>,
     /// The users to ban spawning resources for
     pub users: HashSet<String>,
-    /// The requisitions to ban from spanwing
-    pub reqs: HashMap<String, HashSet<String>>,
+    /// The tool instances to ban from spawning by group
+    pub reqs: HashMap<String, HashSet<Uuid>>,
+}
+
+impl Default for BanSets {
+    /// Create a new ban set with nothing banned
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl BanSets {
     /// Create a new ban set
-    ///
-    /// # Arguments
-    ///
-    /// * `scaler_type` - The type of scaler currently in use
-    pub fn new(scaler_type: ImageScaler) -> Self {
+    #[must_use]
+    pub fn new() -> Self {
         Self {
-            scaler_type,
             expire: from_now!(600),
             groups: HashSet::default(),
             users: HashSet::default(),
@@ -292,25 +528,23 @@ impl BanSets {
     /// # Arguments
     ///
     /// * `cache` - A cache of info from Thorium we use for scaling
-    /// * `deadlines` - The deadlines to filter
+    /// * `deadline` - The deadline to filter
     pub fn filter_deadlines(&self, cache: &Cache, deadline: &Deadline) -> bool {
         // if we don't know about this deadlines group then filter it
         filter!(cache.groups.contains(&deadline.group));
         // if we don't know about this deadlines users then filter it
         filter!(cache.users.contains_key(&deadline.creator));
-        // only filter on docker image info if we are scheduling on k8s
-        if self.scaler_type == ImageScaler::K8s {
-            // if we don't know about this deadlines docker image then filter it
-            filter!(get_group!(cache.docker, &deadline.group).contains_key(&deadline.stage));
-        }
+        // filter any deadline whose workload isn't cached, isn't ours, or (on k8s) whose image
+        // hasn't been inspected yet
+        filter!(cache.workload_ready(&deadline.tool_instance, &deadline.group));
         // filter any banned groups
         filter!(!self.groups.contains(&deadline.group));
         // filter any banned users
         filter!(!self.users.contains(&deadline.creator));
         // if this group has any banned reqs then filter those out
         if let Some(banned_reqs) = self.reqs.get(&deadline.group) {
-            // filter any banned requisition types
-            filter!(!banned_reqs.contains(&deadline.stage));
+            // filter any banned tool instances
+            filter!(!banned_reqs.contains(&deadline.tool_instance));
         }
         true
     }
@@ -337,9 +571,9 @@ pub struct Scaler {
     /// The type of scheduler in use
     scaler_type: ImageScaler,
     /// The Thorium config
-    conf: Conf,
+    pub(crate) conf: Conf,
     /// A client for Thorium
-    thorium: Arc<Thorium>,
+    pub(crate) thorium: Arc<Thorium>,
     /// A cache of info from Thorium we use for scaling
     pub cache: Arc<Cache>,
     /// The zombie checker
@@ -354,6 +588,11 @@ pub struct Scaler {
     tasks: BTreeMap<DateTime<Utc>, Tasks>,
     /// The currently active background tasks that have been spawned
     active: Vec<JoinHandle<Result<TaskResult, Error>>>,
+    /// When the cache was last reloaded early to inspect a new workload's image
+    last_early_reload: Option<DateTime<Utc>>,
+    /// The runs failed for a removed token or undeliverable models since the last cache reload,
+    /// so each is failed once
+    failed_runs: HashSet<Uuid>,
 }
 
 impl Scaler {
@@ -386,8 +625,9 @@ impl Scaler {
     /// * `conf` - The Thorium config to use
     /// * `auth` - The path to the keys to use with Thorium
     /// * `thorium` - The Thorium client to use
-    /// * `scaler` - The scaler type to set
+    /// * `scaler_type` - The scaler type to set
     /// * `dry_run` - Whether we should use the dry run scheduler
+    /// * `context_name` - The name of the Kubernetes context to schedule against
     pub async fn build(
         conf: Conf,
         auth: String,
@@ -426,6 +666,8 @@ impl Scaler {
             allocatable,
             tasks,
             active: Vec::default(),
+            last_early_reload: None,
+            failed_runs: HashSet::default(),
         };
         Ok(scaler)
     }
@@ -497,10 +739,6 @@ impl Scaler {
     }
 
     /// check if any of our spawned tasks have returned and handle the response
-    ///
-    /// # Arguments
-    ///
-    /// * `span` - The span to log traces under
     #[instrument(name = "Scaler::check_tasks", skip_all, err(Debug))]
     async fn check_tasks(&mut self) -> Result<(), Error> {
         // track any futures that haven't completed yet
@@ -516,7 +754,9 @@ impl Scaler {
                 // check if a join error occured
                 match completed {
                     // An updated cache has been pulled
-                    TaskResult::Cache(cache) => {
+                    TaskResult::Cache(mut cache) => {
+                        // keep any workloads cached while the new cache was being loaded
+                        cache.adopt_workloads(&self.cache);
                         // get our schedulers so they can sync against the new cache
                         let schedulers = &mut self.schedulers;
                         let unready = &self.unready;
@@ -553,6 +793,9 @@ impl Scaler {
                         }
                         // save the cache in the scaler for next update
                         self.cache = Arc::new(cache);
+                        // runs failed for a removed token or undeliverable models are checked
+                        // again after a reload
+                        self.failed_runs.clear();
                         // add a new task for refreshing our cache
                         add_task!(self, Tasks::CacheReload)
                     }
@@ -581,6 +824,15 @@ impl Scaler {
             // set our cache refresh to happen now
             self.tasks.retain(|_, task| *task != Tasks::CacheReload);
             self.tasks.insert(Utc::now(), Tasks::CacheReload);
+        }
+        // reload our cache early to inspect a new workload's image, at most once per interval
+        if early_reload_due(self.cache.reload_requested(), self.last_early_reload, now) {
+            // clear the request now that it is being served
+            self.cache.clear_reload_request();
+            self.last_early_reload = Some(now);
+            // set our cache refresh to happen now
+            self.tasks.retain(|_, task| *task != Tasks::CacheReload);
+            self.tasks.insert(now, Tasks::CacheReload);
         }
         // get any tasks we want to spawn and build a list of completed blocking tasks to rerun again
         let mut completed = Vec::default();
@@ -665,12 +917,7 @@ impl Scaler {
         Ok(())
     }
 
-    /// Schedules resources based on our requisition map
-    ///
-    /// # Arguments
-    ///
-    /// * `reqs` - The requisition map to schedule off of
-    /// * `span` - The span to log traces too
+    /// Schedules workers for our current requisitions and returns the names of the workers deleted
     #[allow(clippy::too_many_lines)]
     #[instrument(name = "Scaler::schedule", skip_all, err(Debug))]
     async fn schedule(&mut self) -> Result<HashSet<String>, Error> {
@@ -735,8 +982,53 @@ impl Scaler {
             let spawn_span = span!(Level::INFO, "Spawning Workers");
             // Register our new workers before spawning them to avoid race conditions
             self.register_workers(&self.allocatable.changes).await?;
+            // take this tick's spawns so their run env can be filled in
+            let mut spawns = std::mem::take(&mut self.allocatable.changes.spawns);
+            // a K8s per-run worker gets its run's token and models as env values, fetched now
+            if self.scaler_type == ImageScaler::K8s {
+                for failure in fill_run_envs(&self.thorium, &self.cache, &mut spawns).await {
+                    // log that this worker couldn't get its env
+                    event!(
+                        parent: &spawn_span,
+                        Level::ERROR,
+                        msg = "Failed to get a per-run worker's env",
+                        req = failure.spawn.req.to_string(),
+                        name = failure.spawn.name,
+                        error = failure.error.msg()
+                    );
+                    // a run whose token was removed mid-run or whose models can't be delivered is
+                    // failed once, since no later tick could spawn its worker either
+                    if let Some(reason) = failure.refusal.stage_logs()
+                        && let Some(run) = failure.spawn.req.run
+                        && self.failed_runs.insert(run)
+                        && let Err(error) = fail_unspawnable_run(
+                            &self.thorium,
+                            &failure.spawn.req.group,
+                            run,
+                            &reason,
+                        )
+                        .await
+                    {
+                        event!(
+                            parent: &spawn_span,
+                            Level::ERROR,
+                            msg = "Failed to fail a run whose workers can't be spawned",
+                            run = run.to_string(),
+                            error = error.msg()
+                        );
+                    }
+                    // the worker is cleared and its deadline tried again next tick
+                    schedulers::record_failed_spawn(
+                        &mut self.allocatable.fairshare_pool,
+                        &mut self.allocatable.workload_counts,
+                        failure.spawn,
+                        &mut deleted,
+                        &mut failed,
+                    );
+                }
+            }
             // crawl over the clusters we have spawns for
-            for (cluster_name, spawn_map) in self.allocatable.changes.spawns.drain() {
+            for (cluster_name, spawn_map) in spawns.drain() {
                 // get a mutable reference to the target cluster
                 if let Some(cluster) = self.schedulers.get_mut(&cluster_name) {
                     // spawn the new resources for this cluster
@@ -762,13 +1054,16 @@ impl Scaler {
                                     // track this failed worker
                                     schedulers::record_failed_spawn(
                                         &mut self.allocatable.fairshare_pool,
-                                        &mut self.allocatable.image_counts,
+                                        &mut self.allocatable.workload_counts,
                                         spawn,
                                         &mut deleted,
                                         &mut failed,
                                     );
                                 }
                                 None => {
+                                    // a spawned worker's pod holds its env, so the scaler keeps none
+                                    let mut spawn = spawn;
+                                    spawn.run_env = None;
                                     // get an entry to this resources current count
                                     let entry = self
                                         .allocatable
@@ -995,6 +1290,923 @@ impl Scaler {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::libs::test_api::{
+        self, GROUP, MockApi, MockCrane, World, bare_metal_spec, deadline, k8s_spec, tool_instance,
+    };
+    use std::time::Instant;
+    use thorium::models::{SpawnLimits, WorkerRegistrationList, WorkloadSpec};
+    use uuid::Uuid;
+
+    /// Build a world of tool instances with deadlines round robin over their requisitions
+    ///
+    /// # Arguments
+    ///
+    /// * `specs` - Each tool instance's workload
+    /// * `users` - The users whose jobs are queued
+    /// * `count` - The number of deadlines
+    /// * `per_run` - Whether every deadline is its own run
+    fn build_world(
+        specs: &[WorkloadSpec],
+        users: &[&str],
+        count: usize,
+        per_run: bool,
+    ) -> (World, Vec<Uuid>) {
+        // serve each tool instance
+        let mut world = World::default();
+        let ids = (0..specs.len())
+            .map(|i| Uuid::from_u128(5000 + i as u128))
+            .collect::<Vec<Uuid>>();
+        for (i, (id, spec)) in ids.iter().zip(specs).enumerate() {
+            let entity = tool_instance(*id, &format!("tool-{i}"), "1.0.0", &[GROUP], spec.clone());
+            world.entities.insert(*id, entity);
+        }
+        world.users = users
+            .iter()
+            .map(|name| test_api::user(name, &[GROUP]))
+            .collect();
+        // queue deadlines round robin over every user and tool instance, oldest first
+        let reqs = ids.len() * users.len();
+        world.deadlines = (0..count)
+            .map(|i| {
+                let user = users[i % users.len()];
+                let id = ids[(i / users.len()) % ids.len()];
+                let run = per_run.then(Uuid::new_v4);
+                deadline(user, GROUP, id, run, i64::try_from(count - i).unwrap())
+            })
+            .collect();
+        // every run's token can be read
+        for run in world.deadlines.iter().filter_map(|deadline| deadline.run) {
+            world.run_tokens.insert(run, Ok(format!("token-{run}")));
+        }
+        // the stats count the shared jobs of each requisition
+        let created = (count / reqs.max(1)) as u64;
+        let jobs = ids
+            .iter()
+            .flat_map(|id| users.iter().map(move |user| (*id, *user, created, 0)))
+            .collect::<Vec<_>>();
+        if !per_run {
+            world.stats = Some(test_api::workload_stats(&jobs));
+        }
+        (world, ids)
+    }
+
+    /// Run one tick of allocation and scheduling
+    ///
+    /// # Arguments
+    ///
+    /// * `scaler` - The scaler to tick
+    async fn tick(scaler: &mut Scaler) -> usize {
+        // allocate and schedule as the scale loop does
+        scaler
+            .allocatable
+            .allocate(&scaler.thorium, &scaler.cache)
+            .await
+            .unwrap();
+        let spawned = scaler
+            .allocatable
+            .changes
+            .spawns
+            .values()
+            .flat_map(|by_deadline| by_deadline.values())
+            .map(Vec::len)
+            .sum();
+        scaler.schedule().await.unwrap();
+        spawned
+    }
+
+    /// Reload a scaler's cache as `check_tasks` does when a reload completes
+    ///
+    /// # Arguments
+    ///
+    /// * `scaler` - The scaler whose cache to reload
+    async fn reload(scaler: &mut Scaler) {
+        // build the new cache and swap it in, keeping workloads added during the reload
+        let result = Cache::refresh(
+            scaler.cache.clone(),
+            scaler.thorium.clone(),
+            scaler.scaler_type,
+        )
+        .await
+        .unwrap();
+        let TaskResult::Cache(mut cache) = result else {
+            panic!("a refresh returns a cache");
+        };
+        cache.adopt_workloads(&scaler.cache);
+        scaler.cache = Arc::new(cache);
+    }
+
+    /// Build models a harness worker gets, with one credential env value
+    ///
+    /// # Arguments
+    ///
+    /// * `secret` - The value of the credential env value
+    fn run_models(secret: &str) -> thorium::models::RunModels {
+        thorium::models::RunModels {
+            models: thorium::models::HarnessModels::default(),
+            env: [(
+                "ANTHROPIC_API_KEY".to_owned(),
+                thorium::models::ModelSecret::from(secret),
+            )]
+            .into_iter()
+            .collect(),
+        }
+    }
+
+    /// Get the runs of the run token reads a mock API answered
+    ///
+    /// # Arguments
+    ///
+    /// * `api` - The mock API
+    /// * `suffix` - The route's last segment
+    fn run_reads(api: &MockApi, suffix: &str) -> Vec<String> {
+        api.matching("GET", "/api/reactions/")
+            .into_iter()
+            .filter(|req| req.path.ends_with(suffix))
+            .map(|req| req.path)
+            .collect()
+    }
+
+    /// Build a reaction of a run in a status, with one planned stage
+    ///
+    /// # Arguments
+    ///
+    /// * `id` - The run's id
+    /// * `status` - The run's status
+    fn run_reaction(id: Uuid, status: &ReactionStatus) -> thorium::models::Reaction {
+        // a workflow run with one harness stage
+        let value = serde_json::json!({
+            "id": id,
+            "group": GROUP,
+            "creator": "io",
+            "pipeline": "workflow:triage",
+            "status": status,
+            "current_stage": 0,
+            "current_stage_progress": 0,
+            "current_stage_length": 1,
+            "args": {},
+            "sla": Utc::now(),
+            "jobs": [],
+            "tags": [],
+            "parent": null,
+            "sub_reactions": 0,
+            "completed_sub_reactions": 0,
+            "generators": [],
+            "samples": [],
+            "ephemeral": [],
+            "parent_ephemeral": {},
+            "repos": [],
+            "trigger_depth": null,
+            "has_cache": false,
+            "source": {"Tool": {"tool_instance": id}},
+            "plan": {"stages": [[{"name": "harness", "tool_instance": id}]]},
+            "run_token": format!("run-{id}"),
+            "run": id,
+        });
+        serde_json::from_value(value).unwrap()
+    }
+
+    /// A K8s scaler fetches each per-run spawn's token, and for a harness its models, right
+    /// before spawning it, 10 at a time; an Image worker of the same run fetches no models, a
+    /// shared spawn fetches nothing, and a spawned worker's env isn't kept
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    #[allow(clippy::too_many_lines)]
+    async fn per_run_spawns_fetch_their_env() {
+        // a harness and an Image tool instance, both K8s
+        let harness = Uuid::from_u128(7001);
+        let image = Uuid::from_u128(7002);
+        let mut world = World::default();
+        world.entities.insert(
+            harness,
+            test_api::harness_instance(
+                harness,
+                "pal-harness",
+                &[GROUP],
+                k8s_spec("registry.example/pal-harness:1", SpawnLimits::Unlimited),
+            ),
+        );
+        world.entities.insert(
+            image,
+            tool_instance(
+                image,
+                "strings",
+                "1.0.0",
+                &[GROUP],
+                k8s_spec("registry.example/strings:1", SpawnLimits::Unlimited),
+            ),
+        );
+        world.users = vec![test_api::user("io", &[GROUP])];
+        // one workflow run calling the Image tool, plus a pipeline job of the Image tool
+        let run = Uuid::new_v4();
+        world.deadlines = vec![
+            deadline("io", GROUP, harness, Some(run), 30),
+            deadline("io", GROUP, image, Some(run), 20),
+            deadline("io", GROUP, image, None, 10),
+        ];
+        world.stats = Some(test_api::workload_stats(&[(image, "io", 1, 0)]));
+        world
+            .run_tokens
+            .insert(run, Ok("run-token-value".to_owned()));
+        world
+            .run_models
+            .insert(run, Ok(run_models("sk-run-model-secret")));
+        let api = MockApi::start(world).await;
+        let crane = MockCrane::new();
+        let mut scaler = Box::pin(test_api::scaler(
+            &api,
+            test_api::conf(&crane),
+            ImageScaler::K8s,
+        ))
+        .await;
+        tick(&mut scaler).await;
+        reload(&mut scaler).await;
+        api.clear();
+        // one tick spawns all three, reading the run's token for both kinds of worker and its
+        // models only for the harness
+        assert_eq!(tick(&mut scaler).await, 3);
+        assert_eq!(run_reads(&api, "/run-token").len(), 2);
+        assert_eq!(run_reads(&api, "/run-models").len(), 1);
+        let mut runs = Vec::new();
+        for req in api.matching("POST", "/api/system/worker/K8s") {
+            let list: WorkerRegistrationList = serde_json::from_slice(&req.body).unwrap();
+            runs.extend(
+                list.workers
+                    .iter()
+                    .map(|worker| (worker.tool_instance, worker.run)),
+            );
+        }
+        runs.sort();
+        assert_eq!(
+            runs,
+            vec![(harness, Some(run)), (image, None), (image, Some(run))]
+        );
+        // the spawned workers keep no env
+        assert!(
+            scaler
+                .allocatable
+                .counts
+                .keys()
+                .all(|req| req.tool_instance == harness || req.tool_instance == image)
+        );
+        // filling the env of a tick's spawns gives each per-run spawn its values
+        let workload = scaler.cache.get_workload(&harness).unwrap();
+        let projected = workload.projection(GROUP).unwrap().clone();
+        let image_workload = scaler.cache.get_workload(&image).unwrap();
+        let image_projected = image_workload.projection(GROUP).unwrap().clone();
+        let spawn = |req: thorium::models::Requisition,
+                     workload: &crate::libs::cache::CachedWorkload,
+                     projected: &thorium::models::Image| {
+            Spawned::new(
+                "cluster0",
+                "node0",
+                req,
+                workload,
+                projected,
+                thorium::models::Pools::Deadline,
+            )
+        };
+        let mut spawns: HashMap<String, BTreeMap<DateTime<Utc>, Vec<Spawned>>> = HashMap::new();
+        spawns.entry("cluster0".to_owned()).or_default().insert(
+            Utc::now(),
+            vec![
+                spawn(
+                    thorium::models::Requisition::new("io", GROUP, harness, Some(run)),
+                    &workload,
+                    &projected,
+                ),
+                spawn(
+                    thorium::models::Requisition::new("io", GROUP, image, Some(run)),
+                    &image_workload,
+                    &image_projected,
+                ),
+                spawn(
+                    thorium::models::Requisition::new("io", GROUP, image, None),
+                    &image_workload,
+                    &image_projected,
+                ),
+            ],
+        );
+        let failures = fill_run_envs(&scaler.thorium, &scaler.cache, &mut spawns).await;
+        assert!(failures.is_empty());
+        let filled = spawns["cluster0"].values().next().unwrap();
+        let harness_env = filled[0].run_env.as_ref().unwrap();
+        assert_eq!(harness_env.token, "run-token-value");
+        assert!(harness_env.models.is_some());
+        let image_env = filled[1].run_env.as_ref().unwrap();
+        assert_eq!(image_env.token, "run-token-value");
+        assert!(image_env.models.is_none());
+        assert!(filled[2].run_env.is_none());
+        // a spawn's debug output names its env vars but holds no value
+        let debug = format!("{:?}", filled[0]);
+        assert!(debug.contains("THORIUM_TOKEN") && debug.contains("ANTHROPIC_API_KEY"));
+        assert!(!debug.contains("run-token-value") && !debug.contains("sk-run-model-secret"));
+    }
+
+    /// A per-run spawn whose token read returns `404`, whose models read returns `409`, or whose
+    /// read fails is recorded as a failed spawn without stopping the tick's other spawns; at most
+    /// 10 reads are in flight, a running run whose token was removed or whose models can't be
+    /// delivered is failed once with a stage log saying why, and only a spawn whose read failed
+    /// some other way is left to the next tick
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    #[allow(clippy::too_many_lines)]
+    async fn failed_run_env_fetches() {
+        // a harness tool instance
+        let harness = Uuid::from_u128(7101);
+        let mut world = World::default();
+        world.entities.insert(
+            harness,
+            test_api::harness_instance(
+                harness,
+                "pal-harness",
+                &[GROUP],
+                k8s_spec("registry.example/pal-harness:2", SpawnLimits::Unlimited),
+            ),
+        );
+        world.users = vec![test_api::user("io", &[GROUP])];
+        // 50 runs: 20 without a token, 20 with a banned credential, and 10 fine
+        let runs = (0..50).map(|_| Uuid::new_v4()).collect::<Vec<Uuid>>();
+        for (i, run) in runs.iter().enumerate() {
+            if i < 20 {
+                world.run_tokens.insert(*run, Err(404));
+            } else {
+                world.run_tokens.insert(*run, Ok(format!("token-{run}")));
+                let models = if i < 40 {
+                    Err(409)
+                } else {
+                    Ok(run_models("sk"))
+                };
+                world.run_models.insert(*run, models);
+            }
+        }
+        world.run_env_delay = std::time::Duration::from_millis(20);
+        let api = MockApi::start(world).await;
+        let crane = MockCrane::new();
+        let scaler = Box::pin(test_api::scaler(
+            &api,
+            test_api::conf(&crane),
+            ImageScaler::K8s,
+        ))
+        .await;
+        let thorium = api.client().await;
+        scaler
+            .cache
+            .prefetch(&thorium, [harness].into_iter().collect())
+            .await;
+        // filling the env of 50 spawns at once keeps at most 10 reads in flight
+        let workload = scaler.cache.get_workload(&harness).unwrap();
+        let projected = workload.projection(GROUP).unwrap().clone();
+        let mut spawns: HashMap<String, BTreeMap<DateTime<Utc>, Vec<Spawned>>> = HashMap::new();
+        spawns.entry("cluster0".to_owned()).or_default().insert(
+            Utc::now(),
+            runs.iter()
+                .map(|run| {
+                    Spawned::new(
+                        "cluster0",
+                        "node0",
+                        thorium::models::Requisition::new("io", GROUP, harness, Some(*run)),
+                        &workload,
+                        &projected,
+                        thorium::models::Pools::Deadline,
+                    )
+                })
+                .collect(),
+        );
+        api.clear();
+        let start = Instant::now();
+        let failures = fill_run_envs(&thorium, &scaler.cache, &mut spawns).await;
+        println!(
+            "filling 50 per-run spawns, 40 failing their reads, took {:?}",
+            start.elapsed()
+        );
+        assert!(
+            api.max_run_env_reads
+                .load(std::sync::atomic::Ordering::SeqCst)
+                <= 10
+        );
+        assert!(
+            api.max_run_env_reads
+                .load(std::sync::atomic::Ordering::SeqCst)
+                > 1
+        );
+        assert_eq!(run_reads(&api, "/run-token").len(), 50);
+        assert_eq!(run_reads(&api, "/run-models").len(), 30);
+        // the 40 failed spawns are taken out, 20 for a removed token and 20 for undeliverable models
+        assert_eq!(failures.len(), 40);
+        assert_eq!(
+            failures
+                .iter()
+                .filter(|failure| failure.refusal == RunEnvRefusal::Revoked)
+                .count(),
+            20
+        );
+        assert_eq!(
+            failures
+                .iter()
+                .filter(|failure| matches!(failure.refusal, RunEnvRefusal::Undeliverable(_)))
+                .count(),
+            20
+        );
+        let kept = spawns["cluster0"].values().next().unwrap();
+        assert_eq!(kept.len(), 10);
+        assert!(kept.iter().all(|spawn| spawn.run_env.is_some()));
+        // in a tick, failed spawns are cleared and a running run without a token or whose models
+        // can't be delivered is failed once
+        let mut world = World::default();
+        world.entities.insert(
+            harness,
+            test_api::harness_instance(
+                harness,
+                "pal-harness",
+                &[GROUP],
+                k8s_spec("registry.example/pal-harness:3", SpawnLimits::Unlimited),
+            ),
+        );
+        world.users = vec![test_api::user("io", &[GROUP])];
+        let (started, completed, banned, flaky, fine) = (
+            Uuid::new_v4(),
+            Uuid::new_v4(),
+            Uuid::new_v4(),
+            Uuid::new_v4(),
+            Uuid::new_v4(),
+        );
+        world.deadlines = [started, completed, banned, flaky, fine]
+            .iter()
+            .enumerate()
+            .map(|(i, run)| {
+                deadline(
+                    "io",
+                    GROUP,
+                    harness,
+                    Some(*run),
+                    100 - i64::try_from(i).unwrap(),
+                )
+            })
+            .collect();
+        world.run_tokens.insert(started, Err(404));
+        world.run_tokens.insert(completed, Err(404));
+        world
+            .run_tokens
+            .insert(banned, Ok("banned-token".to_owned()));
+        world.run_models.insert(banned, Err(409));
+        world.run_tokens.insert(flaky, Err(500));
+        world.run_models.insert(flaky, Ok(run_models("sk")));
+        world.run_tokens.insert(fine, Ok("fine-token".to_owned()));
+        world.run_models.insert(fine, Ok(run_models("sk")));
+        world
+            .reactions
+            .insert(started, run_reaction(started, &ReactionStatus::Started));
+        world
+            .reactions
+            .insert(banned, run_reaction(banned, &ReactionStatus::Created));
+        world.reactions.insert(
+            completed,
+            run_reaction(completed, &ReactionStatus::Completed),
+        );
+        let api = MockApi::start(world).await;
+        let mut scaler = Box::pin(test_api::scaler(
+            &api,
+            test_api::conf(&crane),
+            ImageScaler::K8s,
+        ))
+        .await;
+        tick(&mut scaler).await;
+        reload(&mut scaler).await;
+        api.clear();
+        let start = Instant::now();
+        assert_eq!(tick(&mut scaler).await, 5);
+        println!(
+            "a tick with 5 per-run spawns, 4 failing, took {:?}",
+            start.elapsed()
+        );
+        // the four failed workers are deleted and only the fine one is counted
+        let mut deleted = 0;
+        for req in api.matching("DELETE", "/api/system/worker/K8s") {
+            let map: WorkerDeleteMap = serde_json::from_slice(&req.body).unwrap();
+            deleted += map.workers.len();
+        }
+        assert_eq!(deleted, 4);
+        let live = scaler
+            .allocatable
+            .counts
+            .iter()
+            .filter(|(_, count)| **count > 0)
+            .map(|(req, _)| req.run)
+            .collect::<Vec<_>>();
+        assert_eq!(live, vec![Some(fine)]);
+        // only the running runs without a token or with undeliverable models are failed, each
+        // with its reason logged
+        assert_eq!(api.count("POST", "/api/reactions/handle/"), 2);
+        let mut failed = api
+            .matching("POST", "/api/reactions/handle/")
+            .into_iter()
+            .map(|req| req.path)
+            .collect::<Vec<String>>();
+        failed.sort();
+        let mut expected = vec![
+            format!("/api/reactions/handle/{GROUP}/{started}/fail"),
+            format!("/api/reactions/handle/{GROUP}/{banned}/fail"),
+        ];
+        expected.sort();
+        assert_eq!(failed, expected);
+        let logs = api.matching("POST", &format!("/api/reactions/logs/{GROUP}/{started}"));
+        assert_eq!(logs.len(), 1);
+        assert!(String::from_utf8_lossy(&logs[0].body).contains(RUN_TOKEN_REVOKED));
+        let logs = api.matching("POST", &format!("/api/reactions/logs/{GROUP}/{banned}"));
+        assert_eq!(logs.len(), 1);
+        // the stage log holds exactly the refusal line and the API's error body, and nothing
+        // else the scaler knows (the API's reason names a ban only by its kind, so no ban detail
+        // reaches users who can view the run)
+        let added: StageLogsAdd = serde_json::from_slice(&logs[0].body).unwrap();
+        let lines = added
+            .logs
+            .into_iter()
+            .map(|line| line.line)
+            .collect::<Vec<String>>();
+        assert_eq!(
+            lines,
+            vec![
+                RUN_MODELS_UNDELIVERABLE.to_owned(),
+                r#"{"error":"failed"}"#.to_owned()
+            ]
+        );
+        // the mock keeps the failed runs' deadlines (the API drops a failed run's jobs), so
+        // they're fetched again next tick, and the flaky one now spawns
+        api.world
+            .lock()
+            .unwrap()
+            .run_tokens
+            .insert(flaky, Ok("flaky-token".to_owned()));
+        api.clear();
+        tick(&mut scaler).await;
+        let reads = run_reads(&api, "/run-token");
+        for run in [started, banned, flaky] {
+            assert!(reads.iter().any(|path| path.contains(&run.to_string())));
+        }
+        assert!(
+            scaler
+                .allocatable
+                .counts
+                .iter()
+                .any(|(req, count)| req.run == Some(flaky) && *count > 0)
+        );
+        // neither failed run is failed again
+        assert_eq!(api.count("POST", "/api/reactions/handle/"), 0);
+    }
+
+    /// A Direct scaler registers a per-run worker for a per-run job, with its run set, and reads
+    /// no run token or models, because the reactor reads the token
+    #[tokio::test]
+    async fn direct_registers_per_run_workers() {
+        // a bare metal tool instance with one tool run job
+        let (mut world, ids) = build_world(&[bare_metal_spec()], &["io"], 1, true);
+        let run = world.deadlines[0].run.unwrap();
+        world.run_tokens.clear();
+        let api = MockApi::start(world).await;
+        let crane = MockCrane::new();
+        let mut scaler = Box::pin(test_api::scaler(
+            &api,
+            test_api::conf(&crane),
+            ImageScaler::BareMetal,
+        ))
+        .await;
+        api.clear();
+        // one tick registers one per-run worker
+        assert_eq!(tick(&mut scaler).await, 1);
+        let registered = api.matching("POST", "/api/system/worker/BareMetal");
+        assert_eq!(registered.len(), 1);
+        let list: WorkerRegistrationList = serde_json::from_slice(&registered[0].body).unwrap();
+        assert_eq!(list.workers.len(), 1);
+        assert_eq!(list.workers[0].tool_instance, ids[0]);
+        assert_eq!(list.workers[0].run, Some(run));
+        // nothing about the run was read and no worker was deleted
+        assert_eq!(api.count("GET", "/api/reactions/"), 0);
+        for req in api.matching("DELETE", "/api/system/worker/") {
+            let map: WorkerDeleteMap = serde_json::from_slice(&req.body).unwrap();
+            assert_eq!(map.workers.len(), 0);
+        }
+    }
+
+    /// Per-run requisitions are one per run and tool instance, separate from the shared one of the
+    /// same user and tool instance; a tool instance's spawn limit caps one run's workers, and a
+    /// container tool call queued with its parent run's deadline is served before a pipeline job
+    /// queued after it
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    #[allow(clippy::too_many_lines)]
+    async fn per_run_requisitions_and_limits() {
+        // two Image tool instances, the first limited to two workers
+        let first = Uuid::from_u128(7201);
+        let second = Uuid::from_u128(7202);
+        let mut world = World::default();
+        world.entities.insert(
+            first,
+            tool_instance(
+                first,
+                "strings",
+                "1.0.0",
+                &[GROUP],
+                k8s_spec("registry.example/strings:2", SpawnLimits::Basic(2)),
+            ),
+        );
+        world.entities.insert(
+            second,
+            tool_instance(
+                second,
+                "capa",
+                "1.0.0",
+                &[GROUP],
+                k8s_spec("registry.example/capa:2", SpawnLimits::Unlimited),
+            ),
+        );
+        world.users = vec![test_api::user("io", &[GROUP])];
+        // a workflow run with three calls of the first tool and one of the second
+        let run = Uuid::new_v4();
+        world.deadlines = vec![
+            deadline("io", GROUP, first, Some(run), 50),
+            deadline("io", GROUP, first, Some(run), 40),
+            deadline("io", GROUP, first, Some(run), 30),
+            deadline("io", GROUP, second, Some(run), 20),
+        ];
+        world.run_tokens.insert(run, Ok("token".to_owned()));
+        let api = MockApi::start(world).await;
+        let crane = MockCrane::new();
+        let mut scaler = Box::pin(test_api::scaler(
+            &api,
+            test_api::conf(&crane),
+            ImageScaler::K8s,
+        ))
+        .await;
+        tick(&mut scaler).await;
+        reload(&mut scaler).await;
+        api.clear();
+        // the first tool gets two workers for the run and the second one, all with the run set
+        tick(&mut scaler).await;
+        let mut workers = Vec::new();
+        for req in api.matching("POST", "/api/system/worker/K8s") {
+            let list: WorkerRegistrationList = serde_json::from_slice(&req.body).unwrap();
+            workers.extend(
+                list.workers
+                    .iter()
+                    .map(|worker| (worker.tool_instance, worker.run)),
+            );
+        }
+        workers.sort();
+        assert_eq!(
+            workers,
+            vec![(first, Some(run)), (first, Some(run)), (second, Some(run))]
+        );
+        // with one slot left, the call queued with its parent's deadline beats a later pipeline job
+        let mut world = World::default();
+        world.entities.insert(
+            first,
+            tool_instance(
+                first,
+                "strings",
+                "1.0.0",
+                &[GROUP],
+                k8s_spec("registry.example/strings:3", SpawnLimits::Basic(1)),
+            ),
+        );
+        world.users = vec![test_api::user("io", &[GROUP])];
+        let parent = Uuid::new_v4();
+        world.deadlines = vec![
+            deadline("io", GROUP, first, Some(parent), 120),
+            deadline("io", GROUP, first, None, 10),
+        ];
+        world.stats = Some(test_api::workload_stats(&[(first, "io", 1, 0)]));
+        world.run_tokens.insert(parent, Ok("token".to_owned()));
+        let api = MockApi::start(world).await;
+        let mut scaler = Box::pin(test_api::scaler(
+            &api,
+            test_api::conf(&crane),
+            ImageScaler::K8s,
+        ))
+        .await;
+        tick(&mut scaler).await;
+        reload(&mut scaler).await;
+        api.clear();
+        tick(&mut scaler).await;
+        let mut workers = Vec::new();
+        for req in api.matching("POST", "/api/system/worker/K8s") {
+            let list: WorkerRegistrationList = serde_json::from_slice(&req.body).unwrap();
+            workers.extend(list.workers.iter().map(|worker| worker.run));
+        }
+        assert_eq!(workers, vec![Some(parent)]);
+    }
+
+    /// Shared workload jobs over 10 requisitions make 4 API requests per tick after the first,
+    /// which also fetches each tool instance's spec once, while per-run jobs are filtered before
+    /// allocation and never registered
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn scale_loop_requests_per_tick() {
+        // 2 users and 5 K8s tool instances with shared jobs, inspected by a reload
+        let specs = (0..5)
+            .map(|i| {
+                k8s_spec(
+                    &format!("registry.example/tool-{i}:1"),
+                    SpawnLimits::Unlimited,
+                )
+            })
+            .collect::<Vec<_>>();
+        let (world, _) = build_world(&specs, &["io", "europa"], 100, false);
+        let api = MockApi::start(world).await;
+        let crane = MockCrane::new();
+        let mut scaler = Box::pin(test_api::scaler(
+            &api,
+            test_api::conf(&crane),
+            ImageScaler::K8s,
+        ))
+        .await;
+        api.clear();
+        let start = Instant::now();
+        let first = tick(&mut scaler).await;
+        // the first tick reads each spec once and filters the uninspected images
+        assert_eq!(api.count("GET", "/api/entities/"), 5);
+        assert_eq!(first, 0);
+        reload(&mut scaler).await;
+        api.clear();
+        // later ticks make the base's 4 requests and spawn workers
+        let mut spawned = 0;
+        for _ in 0..9 {
+            spawned += tick(&mut scaler).await;
+        }
+        let elapsed = start.elapsed();
+        assert!(spawned > 0);
+        assert_eq!(api.count("GET", "/api/system/stats"), 9);
+        assert_eq!(api.count("GET", "/api/jobs/deadlines/"), 9);
+        assert!(api.count("POST", "/api/system/worker/K8s") <= 9);
+        assert!(api.count("DELETE", "/api/system/worker/K8s") <= 9);
+        assert_eq!(api.count("GET", "/api/entities/"), 0);
+        assert_eq!(api.count("GET", "/api/images"), 0);
+        assert_eq!(api.count("POST", "/api/images"), 0);
+        // the registered workers name their tool instance and no run
+        for req in api.matching("POST", "/api/system/worker/K8s") {
+            let list: WorkerRegistrationList = serde_json::from_slice(&req.body).unwrap();
+            assert!(list.workers.iter().all(|worker| worker.run.is_none()));
+        }
+        println!("shared ticks took {elapsed:?}");
+        // per-run jobs of the same tool instances get workers registered with their runs, each
+        // fetching its run's token once and no models
+        let (world, _) = build_world(&specs, &["io", "europa"], 100, true);
+        let api = MockApi::start(world).await;
+        let mut scaler = Box::pin(test_api::scaler(
+            &api,
+            test_api::conf(&crane),
+            ImageScaler::K8s,
+        ))
+        .await;
+        tick(&mut scaler).await;
+        reload(&mut scaler).await;
+        api.clear();
+        let mut spawned = 0;
+        for _ in 0..3 {
+            spawned += tick(&mut scaler).await;
+        }
+        assert!(spawned > 0);
+        let mut registered = 0;
+        for req in api.matching("POST", "/api/system/worker/K8s") {
+            let list: WorkerRegistrationList = serde_json::from_slice(&req.body).unwrap();
+            assert!(list.workers.iter().all(|worker| worker.run.is_some()));
+            registered += list.workers.len();
+        }
+        assert_eq!(registered, spawned);
+        assert_eq!(api.count("GET", "/api/reactions/"), spawned);
+        assert_eq!(
+            api.matching("GET", "/api/reactions/")
+                .iter()
+                .filter(|req| req.path.ends_with("/run-models"))
+                .count(),
+            0
+        );
+    }
+
+    /// A bare metal tool instance's pipeline job gets a shared worker registered with its tool
+    /// instance on a node, and External tool instances are scheduled by no scaler while the scale
+    /// loop keeps running
+    #[tokio::test]
+    async fn direct_and_external_workloads() {
+        // a bare metal tool instance and an External one, each with a queued job
+        let external = WorkloadSpec::default();
+        let (world, ids) = build_world(&[bare_metal_spec(), external], &["io"], 2, false);
+        let api = MockApi::start(world).await;
+        let crane = MockCrane::new();
+        let mut scaler = Box::pin(test_api::scaler(
+            &api,
+            test_api::conf(&crane),
+            ImageScaler::BareMetal,
+        ))
+        .await;
+        api.clear();
+        // one tick registers a single bare metal worker for the bare metal tool instance
+        let spawned = tick(&mut scaler).await;
+        assert_eq!(spawned, 1);
+        let registered = api.matching("POST", "/api/system/worker/BareMetal");
+        assert_eq!(registered.len(), 1);
+        let list: WorkerRegistrationList = serde_json::from_slice(&registered[0].body).unwrap();
+        assert_eq!(list.workers.len(), 1);
+        assert_eq!(list.workers[0].tool_instance, ids[0]);
+        assert_eq!(list.workers[0].run, None);
+        let raw = String::from_utf8_lossy(&registered[0].body);
+        assert!(!raw.contains("pipeline") && !raw.contains("stage"), "{raw}");
+        // a K8s scaler with the External job queued allocates nothing and keeps running
+        let mut k8s = Box::pin(test_api::scaler(
+            &api,
+            test_api::conf(&crane),
+            ImageScaler::K8s,
+        ))
+        .await;
+        api.clear();
+        for _ in 0..2 {
+            assert_eq!(tick(&mut k8s).await, 0);
+        }
+        assert_eq!(api.count("POST", "/api/system/worker/"), 0);
+    }
+
+    /// The workload cache in steady state: over 100 ticks with 50 K8s tool instances in demand
+    /// and two reloads, each spec is fetched once, images are only inspected inside reloads, and
+    /// each tick reads the stats and the deadline window once
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn workload_cache_steady_state() {
+        // 50 K8s tool instances with queued jobs
+        let specs = (0..50)
+            .map(|i| {
+                k8s_spec(
+                    &format!("registry.example/steady-{i}:1"),
+                    SpawnLimits::Unlimited,
+                )
+            })
+            .collect::<Vec<_>>();
+        let (world, _) = build_world(&specs, &["io", "europa"], 500, false);
+        let api = MockApi::start(world).await;
+        let crane = MockCrane::new();
+        let mut scaler = Box::pin(test_api::scaler(
+            &api,
+            test_api::conf(&crane),
+            ImageScaler::K8s,
+        ))
+        .await;
+        api.clear();
+        let mut times = Vec::with_capacity(100);
+        for i in 0..100 {
+            // reload twice during the run
+            if i == 30 || i == 70 {
+                let before = crane.inspected().len();
+                reload(&mut scaler).await;
+                assert_eq!(crane.inspected().len() - before, 50);
+            }
+            // ticks never inspect images
+            let before = crane.inspected().len();
+            let start = Instant::now();
+            tick(&mut scaler).await;
+            times.push(start.elapsed());
+            assert_eq!(crane.inspected().len(), before);
+        }
+        assert_eq!(api.count("GET", "/api/entities/"), 50);
+        assert_eq!(crane.inspected().len(), 100);
+        assert_eq!(api.count("GET", "/api/system/stats"), 100);
+        assert_eq!(api.count("GET", "/api/jobs/deadlines/"), 100);
+        let mean = times[1..].iter().sum::<std::time::Duration>() / 99;
+        println!("mean tick after the first: {mean:?}");
+    }
+
+    /// An early cache reload is due only when requested and at most once per 30 seconds
+    #[test]
+    fn early_reloads_are_rate_limited() {
+        let now = Utc::now();
+        // a request with no earlier early reload is due
+        assert!(early_reload_due(true, None, now));
+        // nothing is due without a request
+        assert!(!early_reload_due(false, None, now));
+        // a request within 30 seconds of the last early reload waits
+        assert!(!early_reload_due(
+            true,
+            Some(now - chrono::Duration::seconds(10)),
+            now
+        ));
+        // a request 30 seconds after it is due
+        assert!(early_reload_due(
+            true,
+            Some(now - chrono::Duration::seconds(30)),
+            now
+        ));
+    }
+
+    /// Workers are registered with their requisition's tool instance and run
+    #[test]
+    fn registrations_carry_tool_instance_and_run() {
+        // a spawn for a per-run requisition
+        let mut reqs = spawn_map(&[1]);
+        let tool_instance = Uuid::new_v4();
+        let run = Uuid::new_v4();
+        for spawns in reqs.spawns.values_mut().flat_map(|map| map.values_mut()) {
+            for spawn in spawns {
+                spawn.req =
+                    thorium::models::Requisition::new("io", GROUP, tool_instance, Some(run));
+            }
+        }
+        // its registration names both
+        let batches = registration_batches(&reqs);
+        assert_eq!(batches[0].workers[0].tool_instance, tool_instance);
+        assert_eq!(batches[0].workers[0].run, Some(run));
+    }
 
     /// `BanSets::is_expired` clears a ban set only once its `expire` timestamp has passed: an
     /// expired ban set (expire in the past) is cleared, while a still-valid one (expire in the
@@ -1002,7 +2214,7 @@ mod tests {
     #[test]
     fn is_expired_clears_only_after_expiry() {
         // an expired ban set: expire timestamp is in the past
-        let mut expired = BanSets::new(ImageScaler::K8s);
+        let mut expired = BanSets::new();
         expired.expire = Utc::now() - chrono::Duration::seconds(60);
         // populate it with a banned group so we can observe whether it gets cleared
         expired.groups.insert("corn".to_string());
@@ -1014,7 +2226,7 @@ mod tests {
         );
 
         // a still-valid ban set: expire timestamp is in the future
-        let mut valid = BanSets::new(ImageScaler::K8s);
+        let mut valid = BanSets::new();
         valid.expire = Utc::now() + chrono::Duration::seconds(600);
         // populate it with a banned group
         valid.groups.insert("corn".to_string());
@@ -1031,7 +2243,7 @@ mod tests {
     #[tokio::test]
     async fn resync_keeps_bans_from_new_cache() {
         // a ban set holding a ban derived from the previous cache
-        let mut bans = BanSets::new(ImageScaler::K8s);
+        let mut bans = BanSets::new();
         bans.groups.insert("stale".to_owned());
         // the sync against the new cache bans a group
         resync_bans(&mut bans, async |bans: &mut BanSets| {
@@ -1054,7 +2266,7 @@ mod tests {
     /// * `name` - The unique name of this worker
     fn spawned(name: String) -> Spawned {
         Spawned {
-            req: thorium::models::Requisition::new("user", "group", "pipeline", "stage"),
+            req: thorium::models::Requisition::new("user", "group", Uuid::nil(), None),
             cluster: "cluster".to_owned(),
             node: "node".to_owned(),
             name,
@@ -1063,6 +2275,7 @@ mod tests {
             spawn: true,
             scaled_down: false,
             down_scalable: Utc::now(),
+            run_env: None,
         }
     }
 

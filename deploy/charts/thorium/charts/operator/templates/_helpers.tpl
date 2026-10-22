@@ -198,6 +198,12 @@ set. Secrets are merged in by the operator from configSecrets.
 thorium:
   namespace_blacklist:
     {{- include "operator.namespaceBlacklist" . | nindent 4 }}
+  {{- /* the MCP server only answers requests addressed to hosts it knows, so name the ingress host */}}
+  {{- with .Values.ingress.host }}
+  mcp:
+    allowed_hosts:
+      - {{ . | quote }}
+  {{- end }}
   tracing:
     {{- /* without an endpoint or Quickwit there is no collector, so no external traces are sent */}}
     {{- $tracing := $b.tracing.grpcEndpoint }}

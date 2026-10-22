@@ -43,3 +43,6 @@ hashbrown = "0.15"
 thorium-scaler = { path = ".", features = ["test-utilities"]}
 thorium-api = { workspace = true, features = ["client", "k8s", "trace", "test-utilities"] }
 serial_test = "3"
+# in-process fake of the kube API for tests (both already resolved through kube)
+tower = { version = "0.5", features = ["util"] }
+http = { workspace = true }

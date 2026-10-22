@@ -781,9 +781,8 @@ pub async fn register_workers(
             .cmd("hsetnx").arg(&data).arg("scaler").arg(serialize!(&scaler))
             .cmd("hsetnx").arg(&data).arg("name").arg(&worker.name)
             .cmd("hsetnx").arg(&data).arg("user").arg(&worker.user)
-            .cmd("hsetnx").arg(&data).arg("pipeline").arg(&worker.pipeline)
             .cmd("hsetnx").arg(&data).arg("group").arg(&worker.group)
-            .cmd("hsetnx").arg(&data).arg("stage").arg(&worker.stage)
+            .cmd("hsetnx").arg(&data).arg("tool_instance").arg(worker.tool_instance.to_string())
             .cmd("hsetnx").arg(&data).arg("status").arg(serialize!(&WorkerStatus::Spawning))
             .cmd("hsetnx").arg(&data).arg("spawned").arg(serialize!(&now))
             .cmd("hsetnx").arg(&data).arg("heart_beat").arg(serialize!(&heart_beat))
@@ -894,14 +893,14 @@ pub async fn update_worker_job(
 /// # Arguments
 ///
 /// * `user` - The user that is trying to delete workers
-/// * `scaler` - The scaler to check if we can delete workers form
 /// * `deletes` - The workers we want to delete
+/// * `run` - The reaction of the run the user's token is limited to, if it's a run token
 /// * `shared` - Shared Thorium objects
-/// * `span` - The span to log traces under
 #[instrument(name = "db::system::can_delete_workers", skip_all, err(Debug))]
 pub async fn can_delete_workers(
     user: &User,
     deletes: &WorkerDeleteMap,
+    run: Option<Uuid>,
     shared: &Shared,
 ) -> Result<(), ApiError> {
     // only check if we can delete this if we aren't an admin
@@ -916,13 +915,18 @@ pub async fn can_delete_workers(
             for worker in chunk {
                 // get the key for this workers data
                 let data = keys::system::worker_data(worker, shared);
-                // get this workers owner and group
-                pipe.cmd("hmget").arg(data).arg("user").arg("group");
+                // get this workers owner, group, and run
+                pipe.cmd("hmget")
+                    .arg(data)
+                    .arg("user")
+                    .arg("group")
+                    .arg("run");
             }
-            // get all of these workers users and groups
+            // get all of these workers users, groups, and runs
             let reply: redis::Value = pipe.query_async(conn!(shared)).await?;
-            // make sure we own every one of these workers and they are in our groups
-            check_worker_owners(&user.username, worker_delete_groups(user), &reply)?;
+            // make sure we own every one of these workers, they are in our groups, and a run
+            // token only deletes its own run's workers
+            check_worker_owners(&user.username, worker_delete_groups(user), run, &reply)?;
         }
     }
     Ok(())
@@ -948,32 +952,45 @@ fn worker_delete_groups(user: &User) -> &[String] {
 /// Check that a user owns every worker in a chunk of workers they are trying to delete and that
 /// each of those workers is in one of the user's groups
 ///
-/// The reply holds each worker's owner and group, and a worker that no longer exists has a nil
-/// owner, so deleting an already removed worker is a 404.
+/// The reply holds each worker's owner, group, and run, and a worker that no longer exists has a
+/// nil owner, so deleting an already removed worker is a 404.
 ///
 /// # Arguments
 ///
 /// * `username` - The user trying to delete these workers
 /// * `groups` - The groups this user (or their scoped token) is in
-/// * `reply` - The owner and group of each worker in this chunk
+/// * `run` - The reaction of the run the user's token is limited to, if it's a run token
+/// * `reply` - The owner, group, and run of each worker in this chunk
 fn check_worker_owners(
     username: &str,
     groups: &[String],
+    run: Option<Uuid>,
     reply: &redis::Value,
 ) -> Result<(), ApiError> {
-    // get the owner and group of each worker
-    let workers: Vec<(Option<String>, Option<String>)> = redis::from_redis_value(reply)?;
+    // get the owner, group, and run of each worker
+    let workers: Vec<(Option<String>, Option<String>, Option<String>)> =
+        redis::from_redis_value(reply)?;
     // any worker without an owner doesn't exist
-    if workers.iter().any(|(owner, _)| owner.is_none()) {
+    if workers.iter().any(|(owner, _, _)| owner.is_none()) {
         return not_found!("One or more workers were not found".to_owned());
     }
     // reject this request if any worker isn't ours or isn't in one of our groups
-    let allowed = workers.iter().all(|(owner, group)| {
+    let allowed = workers.iter().all(|(owner, group, _)| {
         owner.as_deref() == Some(username)
             && group.as_ref().is_some_and(|group| groups.contains(group))
     });
     if !allowed {
         return unauthorized!();
+    }
+    // a run token may only delete its own run's workers
+    if let Some(run) = run {
+        let own_run = run.to_string();
+        if !workers
+            .iter()
+            .all(|(_, _, worker_run)| worker_run.as_deref() == Some(own_run.as_str()))
+        {
+            return unauthorized!();
+        }
     }
     Ok(())
 }
@@ -1129,7 +1146,7 @@ mod tests {
     fn missing_worker_owner_is_not_found() {
         // the only worker in this chunk no longer exists
         let reply = redis::Value::Array(vec![worker_reply(None, None)]);
-        let error = check_worker_owners("alice", &groups(&["corn"]), &reply).unwrap_err();
+        let error = check_worker_owners("alice", &groups(&["corn"]), None, &reply).unwrap_err();
         assert_eq!(
             error.status(),
             StatusCode::NOT_FOUND,
@@ -1137,7 +1154,7 @@ mod tests {
         );
     }
 
-    /// Build the `HMGET user group` reply for one worker
+    /// Build the `HMGET user group run` reply for one shared worker
     ///
     /// # Arguments
     ///
@@ -1150,8 +1167,8 @@ mod tests {
                 redis::Value::BulkString(value.as_bytes().to_vec())
             })
         };
-        // build the reply of both fields in the order they were requested
-        redis::Value::Array(vec![field(user), field(group)])
+        // build the reply of every field in the order they were requested
+        redis::Value::Array(vec![field(user), field(group), redis::Value::Nil])
     }
 
     /// Build a list of group names
@@ -1168,15 +1185,47 @@ mod tests {
     fn worker_owner_check_allows_owner_only() {
         // alice owns this worker
         let owned = redis::Value::Array(vec![worker_reply(Some("alice"), Some("corn"))]);
-        assert!(check_worker_owners("alice", &groups(&["corn"]), &owned).is_ok());
+        assert!(check_worker_owners("alice", &groups(&["corn"]), None, &owned).is_ok());
         // bob owns this worker
         let other = redis::Value::Array(vec![worker_reply(Some("bob"), Some("corn"))]);
         assert_eq!(
-            check_worker_owners("alice", &groups(&["corn"]), &other)
+            check_worker_owners("alice", &groups(&["corn"]), None, &other)
                 .unwrap_err()
                 .status(),
             StatusCode::UNAUTHORIZED
         );
+    }
+
+    /// A run token may only delete its own run's workers, never another run's or a shared worker
+    #[test]
+    fn worker_owner_check_requires_own_run() {
+        // alice's worker of her run, of another run, and a shared worker, all in corn
+        let own = Uuid::new_v4();
+        let other = Uuid::new_v4();
+        let run_reply = |run: Option<Uuid>| {
+            let field = |value: &str| redis::Value::BulkString(value.as_bytes().to_vec());
+            let run = run.map_or(redis::Value::Nil, |run| field(&run.to_string()));
+            redis::Value::Array(vec![field("alice"), field("corn"), run])
+        };
+        // the run's own worker may be deleted with its token
+        let reply = redis::Value::Array(vec![run_reply(Some(own))]);
+        assert!(check_worker_owners("alice", &groups(&["corn"]), Some(own), &reply).is_ok());
+        // another run's worker and a shared worker may not, alone or beside the run's own
+        for reply in [
+            redis::Value::Array(vec![run_reply(Some(other))]),
+            redis::Value::Array(vec![run_reply(None)]),
+            redis::Value::Array(vec![run_reply(Some(own)), run_reply(Some(other))]),
+        ] {
+            assert_eq!(
+                check_worker_owners("alice", &groups(&["corn"]), Some(own), &reply)
+                    .unwrap_err()
+                    .status(),
+                StatusCode::UNAUTHORIZED
+            );
+        }
+        // without a run token every worker of the caller may be deleted
+        let reply = redis::Value::Array(vec![run_reply(Some(other)), run_reply(None)]);
+        assert!(check_worker_owners("alice", &groups(&["corn"]), None, &reply).is_ok());
     }
 
     /// A user may only delete their own workers that are in one of their groups
@@ -1187,14 +1236,14 @@ mod tests {
         let wheat = worker_reply(Some("alice"), Some("wheat"));
         // a caller limited to corn may delete the corn worker
         let reply = redis::Value::Array(vec![corn.clone()]);
-        assert!(check_worker_owners("alice", &groups(&["corn"]), &reply).is_ok());
+        assert!(check_worker_owners("alice", &groups(&["corn"]), None, &reply).is_ok());
         // but not the wheat worker, alone or with the corn worker
         for reply in [
             redis::Value::Array(vec![wheat.clone()]),
             redis::Value::Array(vec![corn, wheat]),
         ] {
             assert_eq!(
-                check_worker_owners("alice", &groups(&["corn"]), &reply)
+                check_worker_owners("alice", &groups(&["corn"]), None, &reply)
                     .unwrap_err()
                     .status(),
                 StatusCode::UNAUTHORIZED
@@ -1203,7 +1252,7 @@ mod tests {
         // a worker without a group is rejected
         let reply = redis::Value::Array(vec![worker_reply(Some("alice"), None)]);
         assert_eq!(
-            check_worker_owners("alice", &groups(&["corn"]), &reply)
+            check_worker_owners("alice", &groups(&["corn"]), None, &reply)
                 .unwrap_err()
                 .status(),
             StatusCode::UNAUTHORIZED

@@ -5,7 +5,7 @@ use serde::Serialize;
 use tabled::settings::Style;
 use tabled::{Table, Tabled};
 use thorium::client::conf::ActiveScopedToken;
-use thorium::models::{ScopedToken, ScopedTokenRequest, ScopedTokenUpdate};
+use thorium::models::{RunTokenScope, ScopedToken, ScopedTokenRequest, ScopedTokenUpdate};
 use thorium::utils::helpers::human_duration;
 use thorium::{CtlConf, Error, Thorium};
 
@@ -77,6 +77,20 @@ fn expiration_time(scoped: &ScopedToken) -> String {
     }
 }
 
+/// List the tool instances a run-scoped token may run
+///
+/// # Arguments
+///
+/// * `run` - The run the token is limited to
+fn run_tools(run: &RunTokenScope) -> String {
+    // join the tool instance ids
+    run.tool_instances
+        .iter()
+        .map(ToString::to_string)
+        .collect::<Vec<String>>()
+        .join(", ")
+}
+
 /// Print a scoped tokens info
 ///
 /// The scoped tokens value is only printed when `show_token` is set.
@@ -107,6 +121,11 @@ fn token_text(scoped: &ScopedToken, show_token: bool) -> String {
     lines.push(format!("  refresh: {}", refresh_time(scoped)));
     // add the time until this scoped token permanently expires
     lines.push(format!("  expires: {}", expiration_time(scoped)));
+    // add the run a run-scoped token is limited to
+    if let Some(run) = &scoped.run {
+        lines.push(format!("  run: {}", run.reaction));
+        lines.push(format!("  run tools: {}", run_tools(run)));
+    }
     // only include this scoped token's value if it was requested
     if show_token {
         lines.push(format!("  token: {}", scoped.token));
@@ -254,6 +273,9 @@ struct TokenRow {
     /// The groups this scoped token is limited to
     #[tabled(rename = "GROUPS")]
     groups: String,
+    /// The run a run-scoped token is limited to
+    #[tabled(rename = "RUN")]
+    run: String,
 }
 
 impl From<&ScopedToken> for TokenRow {
@@ -268,6 +290,9 @@ impl From<&ScopedToken> for TokenRow {
             refresh: refresh_time(scoped),
             expiration: expiration_time(scoped),
             groups: scoped.groups.join(", "),
+            run: scoped.run.as_ref().map_or_else(String::new, |run| {
+                format!("{} ({})", run.reaction, run_tools(run))
+            }),
         }
     }
 }
@@ -558,7 +583,8 @@ pub async fn handle(args: &Args, cmd: &Tokens) -> Result<(), Error> {
 #[cfg(test)]
 mod tests {
     use chrono::{Duration, Utc};
-    use thorium::models::{ScopedToken, ScopedTokenRole};
+    use thorium::models::{RunTokenScope, ScopedToken, ScopedTokenRole};
+    use uuid::Uuid;
 
     use super::{TokensView, select_tokens};
     use crate::utils::output::{OutputFormat, REDACTED, render};
@@ -577,7 +603,57 @@ mod tests {
             token: "super-secret-token-value".to_owned(),
             token_expiration: Utc::now() + Duration::days(1),
             expires: None,
+            run: None,
         }
+    }
+
+    /// Every format shows a run token's run and tool instances and its expiry but never its
+    /// value, and an ordinary scoped token shows no run
+    #[test]
+    fn run_tokens_show_their_run() {
+        // a run token next to an ordinary scoped token
+        let reaction = Uuid::new_v4();
+        let tool = Uuid::new_v4();
+        let mut run = scoped(&format!("run-{reaction}"));
+        run.expires = Some(run.token_expiration);
+        run.run = Some(RunTokenScope {
+            reaction,
+            tool_instances: vec![tool],
+        });
+        let view = TokensView::new(vec![run, scoped("plain")]);
+        for format in [
+            OutputFormat::Table,
+            OutputFormat::Human,
+            OutputFormat::Json,
+            OutputFormat::Yaml,
+        ] {
+            // render our view in this format
+            let rendered = render(&view, format, false).unwrap();
+            // the run and its tool show but the token value never does
+            assert!(
+                rendered.contains(&tool.to_string()),
+                "{format:?}: {rendered}"
+            );
+            assert!(
+                rendered.matches(&reaction.to_string()).count() >= 2,
+                "{format:?} showed no run: {rendered}"
+            );
+            assert!(!rendered.contains("super-secret-token-value"));
+        }
+        // the JSON document has a run section only for the run token
+        let json: serde_json::Value =
+            serde_json::from_str(&render(&view, OutputFormat::Json, false).unwrap()).unwrap();
+        assert_eq!(json[0]["run"]["reaction"], reaction.to_string());
+        assert!(json[0]["expires"].is_string());
+        assert!(json[1].get("run").is_none());
+        // the text for the plain token has no run line
+        let plain = render(
+            &TokensView::new(vec![scoped("plain")]),
+            OutputFormat::Human,
+            false,
+        )
+        .unwrap();
+        assert!(!plain.contains("run"), "{plain}");
     }
 
     /// No format of a scoped token view contains a token value

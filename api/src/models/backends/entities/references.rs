@@ -17,7 +17,7 @@ use crate::models::backends::db;
 use crate::models::backends::entities::models as model_entities;
 use crate::models::{
     AgenticToolBacking, AssociationKind, AssociationTargetColumn, Entity, EntityKinds,
-    EntityListParams, EntityMetadata, GroupPolicy, ToolSpec, User,
+    EntityListParams, EntityMetadata, GroupPolicy, HarnessSpec, ToolSpec, User,
 };
 use crate::utils::{ApiError, Shared};
 
@@ -45,7 +45,8 @@ fn blocks_delete(kind: AssociationKind) -> bool {
 
 /// Whether a tool instance's spec explicitly references an entity
 ///
-/// A container backed agentic tool pins an Image tool instance.
+/// A container backed agentic tool pins an Image tool instance, and an Image or Harness
+/// workload's dependency settings name tools whose results, children, or filesystems it reads.
 ///
 /// # Arguments
 ///
@@ -60,8 +61,10 @@ fn spec_references(spec: &ToolSpec, target: Uuid) -> bool {
             // the other backings name no tool in Thorium
             _ => false,
         },
-        // Image and Harness specs name no tool instance
-        ToolSpec::Image(_) | ToolSpec::Harness(_) => false,
+        ToolSpec::Image(workload) | ToolSpec::Harness(HarnessSpec { workload, .. }) => {
+            // dependency settings name tools, never tool instances
+            workload.data.dependencies.tools().contains(&target)
+        }
     }
 }
 
@@ -714,5 +717,17 @@ mod tests {
         // an agentic tool backed by Thorium's MCP server names no tool
         let mcp = ToolSpec::Agentic(crate::models::AgenticTool::default());
         assert!(!spec_references(&mcp, named));
+    }
+
+    /// A spec references the tools its dependency settings name
+    #[test]
+    fn specs_reference_dependency_tools() {
+        let (named, other) = (Uuid::new_v4(), Uuid::new_v4());
+        // an Image spec names a tool in its result dependencies
+        let mut workload = crate::models::WorkloadSpec::default();
+        workload.data.dependencies.results.tools = vec![named];
+        let image = ToolSpec::Image(workload);
+        assert!(spec_references(&image, named));
+        assert!(!spec_references(&image, other));
     }
 }

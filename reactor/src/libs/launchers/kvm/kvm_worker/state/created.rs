@@ -131,8 +131,7 @@ impl Created {
                     "--cluster", &worker.cluster,
                     "--node", &worker.node,
                     "--group", &worker.group,
-                    "--pipeline", &worker.pipeline,
-                    "--stage", &worker.stage,
+                    "--tool-instance", worker.tool_instance.to_string(),
                     "--name", &worker.name,
                     "--keys",
                     keys_guest_path,
@@ -380,7 +379,7 @@ impl Created {
                 .await?;
         }
         // transfer keys to guest
-        let keys_path = keys::path(&worker.user);
+        let keys_path = keys::for_worker(worker);
         self.transfer_file_to_guest(client, domain, &keys_path, keys_guest_path)
             .await?;
         Ok(())

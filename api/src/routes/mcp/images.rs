@@ -3,13 +3,13 @@
 use rmcp::ErrorData;
 use rmcp::handler::server::tool::Extension as RmcpExtension;
 use rmcp::handler::server::wrapper::Parameters;
-use rmcp::model::{CallToolResult, Content};
+use rmcp::model::CallToolResult;
 use rmcp::{tool, tool_router};
 use schemars::JsonSchema;
 use serde_json::json;
 use tracing::instrument;
 
-use super::ThoriumMCP;
+use super::{ThoriumMCP, json_result};
 
 /// The params needed to list images in a group
 #[derive(Debug, Serialize, Deserialize, JsonSchema)]
@@ -38,22 +38,7 @@ impl ThoriumMCP {
         let mut cursor = thorium.images.list(&params.group).details().limit(1000);
         // get this cursors data
         cursor.next().await?;
-        // serialize our list of images
-        let serialized = serde_json::to_value(json!({"data": &cursor.details})).unwrap();
-        // instance a content that is sized for our info
-        let mut content = Vec::with_capacity(cursor.details.len());
-        // add each of our images to our content
-        for image in &cursor.details {
-            // add this image to our content
-            content.push(Content::json(image)?);
-        }
-        // build our result
-        let result = CallToolResult {
-            content,
-            structured_content: Some(serialized),
-            is_error: Some(false),
-            meta: None,
-        };
-        Ok(result)
+        // return the images as structured content and text
+        json_result(&json!({"data": &cursor.details}))
     }
 }

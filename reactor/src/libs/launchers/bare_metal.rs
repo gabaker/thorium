@@ -1,18 +1,19 @@
 //! Launches bare metal jobs
 use http::StatusCode;
 use rustix::process::Signal;
+use serde::Serialize;
 use std::collections::{HashMap, HashSet};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use thorium::Thorium;
 use thorium::models::{
-    ArgStrategy, ImageScaler, Node, SecurityContext, Worker, WorkerDeleteMap, WorkerStatus,
+    ArgStrategy, Image, ImageScaler, Node, SecurityContext, Worker, WorkerDeleteMap, WorkerStatus,
 };
 use tokio::process::{Child, Command};
 use tracing::{Level, event, instrument};
 
 mod cgroups;
 
-use super::Launcher;
+use super::{Launcher, WorkloadSource};
 use crate::Error;
 use crate::libs::keys;
 use cgroups::Cgroup;
@@ -203,6 +204,139 @@ impl BareMetalIsolation {
     }
 }
 
+/// The path of the agent binary the launcher runs
+const AGENT_PATH: &str = "/opt/thorium/thorium-agent";
+
+/// How a bare metal worker's agent is spawned
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct SpawnPlan {
+    /// The program to run
+    pub program: String,
+    /// The args to pass the program
+    pub args: Vec<String>,
+    /// The uid the process is dropped to
+    pub uid: Option<u32>,
+    /// The gid the process is dropped to
+    pub gid: Option<u32>,
+    /// The keys file the agent reads, a copy only the agent's uid can read
+    pub keys: PathBuf,
+    /// The uid and gid that own the agent's copy of the keys
+    pub keys_owner: (u32, u32),
+    /// The cpu shares of the worker's cgroup
+    pub cgroup_cpu: u64,
+    /// The hard memory limit in bytes of the worker's cgroup
+    pub cgroup_memory: i64,
+}
+
+/// Decide how to spawn a bare metal worker's agent
+///
+/// # Arguments
+///
+/// * `worker` - The worker to spawn
+/// * `image` - The image the worker's tool instance runs
+/// * `keys` - The keys file of the worker's user or run
+/// * `default_uid` - The admin-configured default uid to drop the tool process to, if set
+/// * `default_gid` - The admin-configured default gid to drop the tool process to, if set
+#[must_use]
+#[allow(clippy::similar_names)]
+pub fn spawn_plan(
+    worker: &Worker,
+    image: &Image,
+    keys: &Path,
+    default_uid: Option<u32>,
+    default_gid: Option<u32>,
+) -> SpawnPlan {
+    // the image's own security context wins, then the admin-configured reactor default, then
+    // the unprivileged nobody/nogroup fallback
+    let isolation = BareMetalIsolation::for_worker()
+        .with_configured_defaults(default_uid, default_gid)
+        .with_security_context(&image.security_context);
+    // the agent reads a copy of the keys owned by the ids it runs as
+    let owner = (
+        isolation.uid.unwrap_or(DEFAULT_UNPRIVILEGED_UID),
+        isolation.gid.unwrap_or(DEFAULT_UNPRIVILEGED_GID),
+    );
+    let copy = keys::uid_copy(keys, owner.0);
+    // build the args to spawn our agent
+    let args = vec![
+        "--cluster".to_owned(),
+        worker.cluster.clone(),
+        "--group".to_owned(),
+        worker.group.clone(),
+        "--tool-instance".to_owned(),
+        worker.tool_instance.to_string(),
+        "--name".to_owned(),
+        worker.name.clone(),
+        "--keys".to_owned(),
+        copy.to_string_lossy().into_owned(),
+        "bare-metal".to_owned(),
+    ];
+    // the cgroup limits come from the image's resources
+    #[allow(clippy::cast_possible_wrap)]
+    let cgroup_memory = (image.resources.memory * 1_048_576) as i64;
+    SpawnPlan {
+        program: AGENT_PATH.to_owned(),
+        args,
+        uid: isolation.uid,
+        gid: isolation.gid,
+        keys: copy,
+        keys_owner: owner,
+        cgroup_cpu: image.resources.cpu,
+        cgroup_memory,
+    }
+}
+
+/// What the launcher runs and removes when a bare metal worker's job is cancelled
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct CleanupPlan {
+    /// The clean up script and its args, if the image has one
+    pub script: Option<Vec<String>>,
+    /// The job's temporary paths to purge
+    pub purge: Vec<String>,
+}
+
+/// Decide what to run and remove when a bare metal worker's job is cancelled
+///
+/// # Arguments
+///
+/// * `image` - The image the worker's tool instance runs
+/// * `job_id` - The id of the cancelled job
+pub fn cleanup_plan(image: &Image, job_id: &str) -> Result<CleanupPlan, Error> {
+    // build the clean up script's args if one is configured
+    let script = match &image.clean_up {
+        Some(clean_up) => {
+            // start with the script itself
+            let mut cmd = vec![clean_up.script.clone()];
+            // inject our job id if needed
+            inject_arg(&mut cmd, job_id.to_owned(), clean_up.job_id.clone());
+            // isolate our results and result files paths
+            let iso_results = isolate(&image.output_collection.files.results, job_id)?;
+            let iso_result_files = isolate(&image.output_collection.files.result_files, job_id)?;
+            // inject the remaining args
+            inject_arg(&mut cmd, iso_results, clean_up.results.clone());
+            inject_arg(
+                &mut cmd,
+                iso_result_files,
+                clean_up.result_files_dir.clone(),
+            );
+            Some(cmd)
+        }
+        None => None,
+    };
+    // every temporary path the job used is purged
+    let purge = vec![
+        isolate(&image.dependencies.samples.location, job_id)?,
+        isolate(&image.dependencies.ephemeral.location, job_id)?,
+        isolate(&image.dependencies.repos.location, job_id)?,
+        isolate(&image.output_collection.files.results, job_id)?,
+        isolate(&image.output_collection.files.result_files, job_id)?,
+        isolate(&image.dependencies.results.location, job_id)?,
+        isolate(&image.output_collection.files.tags, job_id)?,
+        isolate(&image.output_collection.children, job_id)?,
+    ];
+    Ok(CleanupPlan { script, purge })
+}
+
 /// A currently active bare metal worker
 pub struct ActiveWorker {
     /// The control group this worker is tied too
@@ -227,51 +361,28 @@ impl ActiveWorker {
         default_uid: Option<u32>,
         default_gid: Option<u32>,
     ) -> Result<Self, Error> {
-        // get our image
-        let image = thorium.images.get(&worker.group, &worker.stage).await?;
+        // get the image the worker's tool instance runs
+        let image = thorium
+            .workload_image(worker, ImageScaler::BareMetal)
+            .await?;
         // build the control group for this worker
         let mut cgroup = Cgroup::new(&worker.name, &image)?;
-        // build the path to this users keys
-        let keys = keys::path(&worker.user);
-        // convert our keys path to a str
-        let keys_str = match keys.to_str() {
-            Some(keys_str) => keys_str,
-            None => {
-                // log that our keys path is not valid unicode
-                event!(
-                    Level::ERROR,
-                    error = true,
-                    error_msg = "Keys path is not valid unicode",
-                );
-                return Err(Error::new("Keys path Not Utf-8".to_owned()));
-            }
-        };
-        // build the args to spawn our agent
-        let args = vec![
-            "--cluster",
-            &worker.cluster,
-            "--group",
-            &worker.group,
-            "--pipeline",
-            &worker.pipeline,
-            "--stage",
-            &worker.stage,
-            "--name",
-            &worker.name,
-            "--keys",
-            keys_str,
-            "bare-metal",
-        ];
-        // build the isolation policy applied to this bare-metal tool process: the image's own
-        // security context wins, then the admin-configured reactor default, then the unprivileged
-        // nobody/nogroup fallback
-        let isolation = BareMetalIsolation::for_worker()
-            .with_configured_defaults(default_uid, default_gid)
-            .with_security_context(&image.security_context);
+        // get the keys of this worker's user or run
+        let keys = keys::for_worker(worker);
+        // decide how to spawn our agent
+        let plan = spawn_plan(worker, &image, &keys, default_uid, default_gid);
+        // hand the agent its own copy of the keys, rewritten at every launch so rotated tokens
+        // reach it
+        let (uid, gid) = plan.keys_owner;
+        keys::copy_for_agent(&keys, &plan.keys, uid, gid).await?;
         // build the command to spawn our agent
-        let mut command = Command::new("/opt/thorium/thorium-agent");
-        command.args(args);
-        // apply our isolation policy before spawning the tool process
+        let mut command = Command::new(&plan.program);
+        command.args(&plan.args);
+        // drop the tool process to the planned ids before spawning it
+        let isolation = BareMetalIsolation {
+            uid: plan.uid,
+            gid: plan.gid,
+        };
         isolation.apply(&mut command);
         // spawn our agent
         let child = command.spawn()?;
@@ -578,29 +689,27 @@ impl BareMetal {
     }
 
     /// Execute the cancel script for a killed worker
+    ///
+    /// # Arguments
+    ///
+    /// * `thorium` - A Thorium client
+    /// * `name` - The name of the killed worker to clean up after
     #[instrument(name = "BareMetal::cleanup", skip_all, fields(worker = name), err(Debug))]
     pub async fn cleanup(&mut self, thorium: &Thorium, name: &str) -> Result<(), Error> {
         // get this workers info
         let worker = thorium.system.get_worker(&name).await?;
         // if this worker has an active job then get its image
         if let Some(active) = &worker.active {
-            // get info on this workers image
-            let image = thorium.images.get(&worker.group, &worker.stage).await?;
+            // get the image this worker's tool instance runs
+            let image = thorium
+                .workload_image(&worker, ImageScaler::BareMetal)
+                .await?;
             // get our job id as a string
             let job_id = active.job.to_string();
+            // decide what to run and purge for this job
+            let plan = cleanup_plan(&image, &job_id)?;
             // execute a clean up script if its configured
-            if let Some(clean_up) = image.clean_up {
-                // build the command for the cancel script
-                let mut cmd = vec![clean_up.script];
-                // inject our job id if needed
-                inject_arg(&mut cmd, job_id.to_string(), clean_up.job_id);
-                // isolate our results and result files paths
-                let iso_results = isolate(&image.output_collection.files.results, &job_id)?;
-                let iso_result_files =
-                    isolate(&image.output_collection.files.result_files, &job_id)?;
-                // inject the remaining args
-                inject_arg(&mut cmd, iso_results, clean_up.results);
-                inject_arg(&mut cmd, iso_result_files, clean_up.result_files_dir);
+            if let Some(cmd) = plan.script {
                 // execute our clean up script
                 let output = tokio::process::Command::new(&cmd[0])
                     .args(&cmd[1..])
@@ -627,24 +736,10 @@ impl BareMetal {
                     }
                 }
             }
-            // clean up all temp paths that were in use by this worker
-            let samples_path = isolate(&image.dependencies.samples.location, &job_id)?;
-            let ephemerals_path = isolate(&image.dependencies.ephemeral.location, &job_id)?;
-            let repos_path = isolate(&image.dependencies.repos.location, &job_id)?;
-            let results_dep_path = isolate(&image.dependencies.results.location, &job_id)?;
-            let results_path = isolate(&image.output_collection.files.results, &job_id)?;
-            let result_files_path = isolate(&image.output_collection.files.result_files, &job_id)?;
-            let tags_path = isolate(&image.output_collection.files.tags, &job_id)?;
-            let children_path = isolate(&image.output_collection.children, &job_id)?;
             // purge all of this workers paths if they exist
-            purge_parent!(samples_path);
-            purge_parent!(ephemerals_path);
-            purge_parent!(repos_path);
-            purge_parent!(results_path);
-            purge_parent!(result_files_path);
-            purge_parent!(results_dep_path);
-            purge_parent!(tags_path);
-            purge_parent!(children_path);
+            for path in plan.purge {
+                purge_parent!(path);
+            }
         }
         Ok(())
     }
@@ -667,8 +762,7 @@ impl Launcher for BareMetal {
             name = worker.name,
             user = worker.user,
             group = worker.group,
-            pipeline = worker.pipeline,
-            stage = worker.stage
+            tool_instance = %worker.tool_instance
         ),
         err(Debug)
     )]
@@ -772,9 +866,329 @@ impl BareMetal {
 
 #[cfg(test)]
 mod tests {
-    use super::{BareMetal, BareMetalIsolation};
+    use super::{BareMetal, BareMetalIsolation, cleanup_plan, spawn_plan};
+    use crate::libs::launchers::fake::FakeWorkloadSource;
+    use crate::libs::launchers::{Launcher, WorkloadSource};
     use std::collections::HashMap;
-    use thorium::models::WorkerDeleteMap;
+    use thorium::models::{
+        ArgStrategy, Cleanup, Image, ImageScaler, Resources, SecurityContext, WorkerDeleteMap,
+        WorkloadSpec,
+    };
+    use uuid::Uuid;
+
+    /// Build a bare metal image fixture with every default
+    ///
+    /// # Arguments
+    ///
+    /// * `name` - The image's name
+    fn image(name: &str) -> Image {
+        let value = serde_json::json!({
+            "group": "ceres",
+            "name": name,
+            "creator": "io",
+            "version": null,
+            "scaler": "BareMetal",
+            "image": null,
+            "lifetime": null,
+            "timeout": 300,
+            "resources": Resources::new(1000, 1024, 0, 1),
+            "spawn_limit": "Unlimited",
+            "runtime": 600.0,
+            "volumes": [],
+            "modifiers": null,
+            "description": null,
+            "security_context": SecurityContext::default(),
+            "used_by": [],
+            "collect_logs": true,
+            "generator": false,
+            "clean_up": null,
+            "kvm": null,
+            "bans": {},
+        });
+        serde_json::from_value(value).unwrap()
+    }
+
+    /// Build the bare metal image fixtures the launcher's plans are compared on
+    fn fixtures() -> Vec<Image> {
+        // an image with every default
+        let plain = image("plain");
+        // an image pinning its ids with a clean up script
+        let mut pinned = image("pinned");
+        pinned.security_context.user = Some(1234);
+        pinned.security_context.group = Some(5678);
+        pinned.clean_up = Some(Cleanup {
+            job_id: ArgStrategy::Append,
+            results: ArgStrategy::Kwarg("--results".to_owned()),
+            result_files_dir: ArgStrategy::Append,
+            script: "/opt/tools/clean.sh".to_owned(),
+        });
+        // an image with custom data paths, larger resources, and only a user pinned
+        let mut custom = image("custom");
+        custom.resources = Resources::new(4000, 8192, 0, 1);
+        custom.security_context.user = Some(4321);
+        custom.dependencies.samples.location = "/data/samples".to_owned();
+        custom.dependencies.repos.location = "/data/repos".to_owned();
+        custom.output_collection.files.results = "/data/out/results".to_owned();
+        custom.output_collection.children = "/data/children".to_owned();
+        custom.clean_up = Some(Cleanup {
+            job_id: ArgStrategy::Kwarg("--job".to_owned()),
+            results: ArgStrategy::None,
+            result_files_dir: ArgStrategy::Kwarg("--files".to_owned()),
+            script: "/opt/tools/custom-clean".to_owned(),
+        });
+        vec![plain, pinned, custom]
+    }
+
+    /// The image a bare metal tool instance projects gives the same spawn and cleanup plans as
+    /// the image it was converted from, fetching the worker's tool instance once, and workloads
+    /// in any other environment are refused
+    #[tokio::test]
+    async fn projected_images_plan_like_images() {
+        // track every plan pair
+        let mut pairs = Vec::new();
+        for image in fixtures() {
+            for (default_uid, default_gid) in [(None, None), (Some(1000), Some(2000))] {
+                // serve the bare metal spec converted from the image
+                let id = Uuid::new_v4();
+                let spec = WorkloadSpec::from_image(&image).unwrap().spec;
+                let mut source = FakeWorkloadSource::default();
+                source.serve(id, &image.name, &["ceres"], spec);
+                // a worker of that tool instance gets the projected image
+                let mut worker = test_worker("callisto-worker");
+                worker.tool_instance = id;
+                worker.group = "ceres".to_owned();
+                let projected = source
+                    .workload_image(&worker, ImageScaler::BareMetal)
+                    .await
+                    .unwrap();
+                assert_eq!(source.fetched(), vec![id]);
+                // the spawn plans match
+                let keys = std::path::Path::new("/opt/thorium-keys/io/keys.yml");
+                let expected = spawn_plan(&worker, &image, keys, default_uid, default_gid);
+                let actual = spawn_plan(&worker, &projected, keys, default_uid, default_gid);
+                assert_eq!(actual, expected, "{}", image.name);
+                let position = actual
+                    .args
+                    .iter()
+                    .position(|arg| arg == "--tool-instance")
+                    .unwrap();
+                assert_eq!(actual.args[position + 1], id.to_string());
+                // the cleanup plans match
+                let job = Uuid::new_v4().to_string();
+                let expected_cleanup = cleanup_plan(&image, &job).unwrap();
+                let actual_cleanup = cleanup_plan(&projected, &job).unwrap();
+                assert_eq!(actual_cleanup, expected_cleanup, "{}", image.name);
+                assert_eq!(actual_cleanup.purge.len(), 8);
+                pairs.push(serde_json::json!({
+                    "image": image.name,
+                    "defaults": [default_uid, default_gid],
+                    "image_spawn": expected,
+                    "projected_spawn": actual,
+                    "image_cleanup": expected_cleanup,
+                    "projected_cleanup": actual_cleanup,
+                }));
+            }
+        }
+        // the ids follow the spec, then the reactor default, then nobody
+        assert_eq!(pairs[0]["projected_spawn"]["uid"], 65534);
+        assert_eq!(pairs[1]["projected_spawn"]["uid"], 1000);
+        assert_eq!(pairs[3]["projected_spawn"]["uid"], 1234);
+        assert_eq!(pairs[5]["projected_spawn"]["gid"], 2000);
+        // workloads in any other environment are refused
+        let mut source = FakeWorkloadSource::default();
+        let mut k8s = image("k8s-tool");
+        k8s.scaler = ImageScaler::K8s;
+        k8s.image = Some("registry.example/k8s-tool:1".to_owned());
+        let mut windows = k8s.clone();
+        windows.scaler = ImageScaler::Windows;
+        let mut kvm = image("kvm-tool");
+        kvm.scaler = ImageScaler::Kvm;
+        let others = [
+            WorkloadSpec::from_image(&k8s).unwrap().spec,
+            WorkloadSpec::from_image(&windows).unwrap().spec,
+            WorkloadSpec::from_image(&kvm).unwrap().spec,
+            WorkloadSpec::default(),
+        ];
+        for spec in others {
+            let id = Uuid::new_v4();
+            source.serve(id, "other", &["ceres"], spec);
+            let mut worker = test_worker("callisto-other");
+            worker.tool_instance = id;
+            worker.group = "ceres".to_owned();
+            assert!(
+                source
+                    .workload_image(&worker, ImageScaler::BareMetal)
+                    .await
+                    .is_err()
+            );
+        }
+        // no launcher reads images
+        let needle = ["images", ".get("].concat();
+        let mut stack = vec![std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src")];
+        while let Some(path) = stack.pop() {
+            if path.is_dir() {
+                stack.extend(
+                    std::fs::read_dir(&path)
+                        .unwrap()
+                        .map(|entry| entry.unwrap().path()),
+                );
+            } else if std::fs::read_to_string(&path)
+                .unwrap_or_default()
+                .contains(&needle)
+            {
+                panic!("{} still reads images", path.display());
+            }
+        }
+    }
+
+    /// Build a bare metal image pinning the agent's ids
+    ///
+    /// # Arguments
+    ///
+    /// * `uid` - The uid the agent runs as
+    /// * `gid` - The gid the agent runs as
+    fn pinned(uid: u32, gid: u32) -> Image {
+        let mut image = image("pinned");
+        image.security_context.user = Some(i64::from(uid));
+        image.security_context.group = Some(i64::from(gid));
+        image
+    }
+
+    /// Get the mode bits and owner of a file
+    ///
+    /// # Arguments
+    ///
+    /// * `path` - The file to inspect
+    fn mode_and_owner(path: &std::path::Path) -> (u32, u32, u32) {
+        use std::os::unix::fs::{MetadataExt, PermissionsExt};
+        let meta = std::fs::metadata(path).unwrap();
+        (meta.permissions().mode() & 0o777, meta.uid(), meta.gid())
+    }
+
+    /// Agents read a copy of their user's or run's keys next to it under their uid, owned by the
+    /// ids they run as and only readable by them, rewritten at every launch so a rotated token
+    /// reaches the next agent
+    #[tokio::test]
+    async fn agents_get_uid_copies_of_keys() {
+        // a keys directory with a run's keys and a user's keys
+        let base =
+            std::env::temp_dir().join(format!("bare-metal-keys-{}", Uuid::new_v4().simple()));
+        let run = Uuid::new_v4();
+        let run_keys = crate::libs::keys::run_path_in(&base, &run);
+        crate::libs::keys::write(&run_keys, "http://thorium.test", "run-token")
+            .await
+            .unwrap();
+        crate::libs::keys::ensure_user(&base, "http://thorium.test", "io", "token-a")
+            .await
+            .unwrap();
+        // the ids this test can hand files to
+        let uid = rustix::process::getuid().as_raw();
+        let gid = rustix::process::getgid().as_raw();
+        // a per-run worker reads a copy of its run's keys under its uid
+        let mut per_run = test_worker("europa-run");
+        per_run.run = Some(run);
+        let keys = crate::libs::keys::for_worker_in(&base, &per_run);
+        let plan = spawn_plan(&per_run, &pinned(uid, gid), &keys, None, None);
+        assert_eq!(
+            plan.keys,
+            base.join("_runs")
+                .join(run.to_string())
+                .join(format!("uid-{uid}"))
+                .join("keys.yml")
+        );
+        assert_eq!(plan.keys_owner, (uid, gid));
+        let position = plan.args.iter().position(|arg| arg == "--keys").unwrap();
+        assert_eq!(plan.args[position + 1], plan.keys.display().to_string());
+        // a shared worker reads a copy of its user's keys under its uid with the same owner
+        let shared = test_worker("europa-shared");
+        let user_keys = crate::libs::keys::for_worker_in(&base, &shared);
+        let shared_plan = spawn_plan(&shared, &pinned(uid, gid), &user_keys, None, None);
+        assert_eq!(
+            shared_plan.keys,
+            base.join("user")
+                .join(format!("uid-{uid}"))
+                .join("keys.yml")
+        );
+        assert_eq!(shared_plan.keys_owner, (uid, gid));
+        // two workers of one run resolving different uids get two copies
+        let other = spawn_plan(&per_run, &image("unpinned"), &keys, None, None);
+        assert_eq!(other.keys_owner, (65534, 65534));
+        assert_ne!(other.keys, plan.keys);
+        assert_eq!(
+            other.keys.parent().unwrap().parent(),
+            plan.keys.parent().unwrap().parent()
+        );
+        // the copy holds the run's keys, is only readable by its owner, and is owned by its ids
+        copy_keys(&run_keys, &plan).await;
+        assert_eq!(
+            std::fs::read(&plan.keys).unwrap(),
+            std::fs::read(&run_keys).unwrap()
+        );
+        assert_eq!(mode_and_owner(&plan.keys), (0o600, uid, gid));
+        // a run's keys rewritten since the last launch are copied again at the next launch
+        crate::libs::keys::write(&run_keys, "http://thorium.test", "run-token-2")
+            .await
+            .unwrap();
+        copy_keys(&run_keys, &plan).await;
+        assert!(
+            std::fs::read_to_string(&plan.keys)
+                .unwrap()
+                .contains("run-token-2")
+        );
+        // a user's rotated token reaches the next launch's copy
+        let user_keys = crate::libs::keys::path_in(&base, "io");
+        let mut io = test_worker("io-shared");
+        io.user = "io".to_owned();
+        let io_plan = spawn_plan(&io, &pinned(uid, gid), &user_keys, None, None);
+        copy_keys(&user_keys, &io_plan).await;
+        assert!(
+            std::fs::read_to_string(&io_plan.keys)
+                .unwrap()
+                .contains("token-a")
+        );
+        crate::libs::keys::ensure_user(&base, "http://thorium.test", "io", "token-b")
+            .await
+            .unwrap();
+        copy_keys(&user_keys, &io_plan).await;
+        let rotated = std::fs::read_to_string(&io_plan.keys).unwrap();
+        assert!(rotated.contains("token-b") && !rotated.contains("token-a"));
+        assert_eq!(mode_and_owner(&io_plan.keys), (0o600, uid, gid));
+        // remove our keys directory
+        std::fs::remove_dir_all(&base).unwrap();
+    }
+
+    /// Copy a keys file for an agent as the launcher does at launch
+    ///
+    /// # Arguments
+    ///
+    /// * `src` - The keys file to copy
+    /// * `plan` - The agent's spawn plan
+    async fn copy_keys(src: &std::path::Path, plan: &super::SpawnPlan) {
+        let (uid, gid) = plan.keys_owner;
+        crate::libs::keys::copy_for_agent(src, &plan.keys, uid, gid)
+            .await
+            .unwrap();
+    }
+
+    /// Launching a worker whose tool instance can't be read fails before any process starts,
+    /// with an error naming the worker
+    #[tokio::test]
+    async fn launch_errors_before_spawning() {
+        // a launcher and a client that is never called
+        let thorium = thorium::Thorium::build("http://127.0.0.1:9")
+            .token("t")
+            .build()
+            .await
+            .unwrap();
+        let launcher = BareMetal::new("cluster", "node", None, None);
+        // launching a worker errors with its name and starts nothing
+        let worker = test_worker("ganymede-worker");
+        let Err(err) = launcher.launch(&thorium, worker).await else {
+            panic!("the launch must fail");
+        };
+        assert!(err.msg().contains("ganymede-worker"), "{err}");
+        assert!(launcher.active.is_empty());
+    }
 
     /// Build a bare metal worker registered in the API with the given name
     ///
@@ -789,15 +1203,14 @@ mod tests {
             name: name.to_owned(),
             user: "user".to_owned(),
             group: "group".to_owned(),
-            pipeline: "pipeline".to_owned(),
-            stage: "stage".to_owned(),
+            tool_instance: uuid::Uuid::nil(),
+            run: None,
             status: thorium::models::WorkerStatus::Running,
             spawned: chrono::Utc::now(),
             heart_beat: None,
             resources: thorium::models::Resources::default(),
             pool: thorium::models::Pools::Deadline,
             active: None,
-            run: None,
         }
     }
 

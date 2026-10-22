@@ -1,3 +1,4 @@
+use percent_encoding::{AsciiSet, NON_ALPHANUMERIC, utf8_percent_encode};
 use reqwest::{Certificate, ClientBuilder, NoProxy, Proxy};
 
 use super::{ClientSettings, Error};
@@ -9,6 +10,26 @@ use super::{ClientSettings, Error};
 /// the per-request timeout with this generous value (24 hours) so that a slow-but-healthy
 /// transfer is never aborted by the client's default deadline.
 pub(crate) const LARGE_UPLOAD_TIMEOUT_SECS: u64 = 86_400;
+
+/// The characters to percent-encode in one url path segment: all but the unreserved characters
+const PATH_SEGMENT: &AsciiSet = &NON_ALPHANUMERIC
+    .remove(b'-')
+    .remove(b'.')
+    .remove(b'_')
+    .remove(b'~');
+
+/// Percent-encode a value placed in one url path segment
+///
+/// Names such as workflow instance names (`name#r1`) can hold characters like `#`, `?`, or `/`
+/// that would otherwise end or split the path.
+///
+/// # Arguments
+///
+/// * `segment` - The value to encode
+pub(crate) fn encode_path_segment(segment: &str) -> String {
+    // encode everything but the unreserved characters
+    utf8_percent_encode(segment, PATH_SEGMENT).to_string()
+}
 
 /// Apply our proxy settings to a [`reqwest::ClientBuilder`]
 ///

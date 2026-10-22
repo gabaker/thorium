@@ -10,8 +10,7 @@ use thorium::client::ResultsClient;
 use thorium::test_utilities::{self, generators};
 use thorium::utils::s3::S3;
 use thorium::{
-    contains, fail, has_tag, is, is_desc, is_empty, is_in, is_not, is_not_in, no_tag, starts_with,
-    vec_in_vec,
+    contains, fail, has_tag, is, is_desc, is_empty, is_in, is_not, is_not_in, no_tag, vec_in_vec,
 };
 use uuid::Uuid;
 
@@ -19,7 +18,43 @@ use thorium::models::{
     Buffer, CommentRequest, DeleteCommentParams, FileDeleteOpts, FileDownloadOpts, FileListOpts,
     GroupUpdate, GroupUsersUpdate, OnDiskFile, OriginRequest, OutputDisplayType, OutputRequest,
     ResultGetParams, SampleRequest, SubmissionUpdate, TagDeleteRequest, TagRequest, ToolVersion,
+    WorkflowResultKey,
 };
+
+/// A result's tool version reads back as the version it was created with
+#[tokio::test]
+async fn result_tool_version_round_trips() -> Result<(), thorium::Error> {
+    // get admin client
+    let client = test_utilities::admin_client().await?;
+    // Create a group and a sample in it
+    let group = generators::groups(1, &client).await?.remove(0).name;
+    let sha256 = client
+        .files
+        .create(generators::gen_sample(&group))
+        .await?
+        .sha256;
+    // create results with a semantic version and a custom version label
+    let versions = [
+        ("semver-tool", ToolVersion::from("2.3.4")),
+        ("custom-tool", ToolVersion::from("nightly-7")),
+    ];
+    for (tool, version) in &versions {
+        let req = OutputRequest::new(sha256.clone(), *tool, "{}", OutputDisplayType::Json)
+            .tool_version(version.clone());
+        client.files.create_result(req).await?;
+    }
+    // each result reads back with the version it was created with
+    let results = client
+        .files
+        .get_results(&sha256, &ResultGetParams::default())
+        .await?;
+    for (tool, version) in &versions {
+        let outputs = &results.results[*tool];
+        is!(outputs.len(), 1);
+        is!(outputs[0].tool_version.as_ref(), Some(version));
+    }
+    Ok(())
+}
 
 #[tokio::test]
 async fn create() -> Result<(), thorium::Error> {
@@ -891,15 +926,13 @@ async fn comment_attachment_prune() -> Result<(), thorium::Error> {
     match attachment_resp {
         Ok(_) => return Err(thorium::Error::new("Comment attachment was not deleted")),
         Err(err) => {
-            // internal S3 errors are abstracted to a 500 with no public message
-            is!(err.status(), 500);
-            is!(err.kind(), "S3");
-            is!(err.public_msg().is_none(), true);
-            // the full error info is still available internally for tracing
-            let msg = err
-                .msg()
-                .expect("S3 get_object error message is empty but it shouldn't be");
-            starts_with!(msg, "Failed to get object from s3");
+            // a missing object is a 404 with a public message, not an S3 failure
+            is!(err.status(), 404);
+            is!(err.kind(), "Thorium");
+            is!(
+                err.public_msg().as_deref(),
+                Some("The requested object does not exist")
+            );
         }
     }
     Ok(())
@@ -1479,6 +1512,47 @@ async fn get_result_files() -> Result<(), thorium::Error> {
     Ok(())
 }
 
+/// The result files of a workflow run, stored under a result key that holds `#` and `~`, download
+/// whole: the key reaches the API as one path segment and lists back unchanged
+#[tokio::test]
+async fn result_files_under_a_workflow_result_key() -> Result<(), thorium::Error> {
+    // get admin client
+    let client = test_utilities::admin_client().await?;
+    // create a group and a sample in it
+    let group = generators::groups(1, &client).await?.remove(0).name;
+    let file_req = SampleRequest::new_buffer(Buffer::new("WorkflowResultKeyFiles"), vec![group])
+        .description("test file");
+    let hashes = client.files.create(file_req).await?;
+    // a workflow run's result key, as the run's results are stored under it
+    let key = WorkflowResultKey::build("malware-triage#r3", Uuid::new_v4());
+    // create a result with a result file under that key
+    let output_req = OutputRequest::new(
+        hashes.sha256.clone(),
+        &key,
+        "a workflow result",
+        OutputDisplayType::String,
+    )
+    .buffers(vec![Buffer::new("1234").name("report.txt")]);
+    let result_id = client.files.create_result(output_req).await?;
+    // the result lists back under the whole key
+    let results = client
+        .files
+        .get_results(&hashes.sha256, &ResultGetParams::default())
+        .await?;
+    is!(
+        results.results.contains_key(&key),
+        true,
+        "the key is listed"
+    );
+    // the result file downloads through the encoded key
+    let downloaded = client
+        .files
+        .download_result_file(&hashes.sha256, &key, &result_id.id, "report.txt")
+        .await?;
+    is!(downloaded.data, "1234".as_bytes());
+    Ok(())
+}
+
 #[tokio::test]
 async fn delete() -> Result<(), thorium::Error> {
     // get admin client
@@ -1822,4 +1896,81 @@ async fn sample_authorize_no_fallthrough_with_many_groups() -> Result<(), thoriu
         401,
         "cross-tenant download with >= 100 groups",
     )
+}
+
+/// Get a raw response for a path of the API, authenticated as a test user
+///
+/// # Arguments
+///
+/// * `host` - The host the API listens on
+/// * `user` - The user to authenticate as
+/// * `path` - The path and query to request
+async fn raw_get(
+    host: &str,
+    user: &generators::TestUser,
+    path: &str,
+) -> Result<reqwest::Response, thorium::Error> {
+    // send the request with the user's token the way the client does
+    let resp = reqwest::Client::new()
+        .get(format!("{host}{path}"))
+        .header("authorization", user.auth_header())
+        .send()
+        .await?;
+    Ok(resp)
+}
+
+/// Downloads say what they send, and a result file or entity file that does not exist is a 404
+///
+/// Every byte stream answers with a content type, and a missing object in the store is a missing
+/// resource instead of an internal error.
+#[tokio::test]
+async fn downloads_have_a_content_type_and_missing_files_are_not_found()
+-> Result<(), thorium::Error> {
+    // a user who owns a group and uploads a sample with a result file
+    let admin = test_utilities::admin_client().await?;
+    let suffix = generators::name_suffix();
+    let io = generators::moon_user(&admin, "io", &suffix).await?;
+    let group = generators::god_group(
+        &admin,
+        "juno",
+        &suffix,
+        &generators::GroupRoles::default().owner(&io.username),
+    )
+    .await?;
+    let sample = SampleRequest::new_buffer(Buffer::new("download me"), vec![group.as_str()]);
+    let sha256 = io.client.files.create(sample).await?.sha256;
+    let output = OutputRequest::new(
+        sha256.clone(),
+        "DownloadTool",
+        "{}",
+        OutputDisplayType::Json,
+    )
+    .buffer(Buffer::new("a result file").name("out.txt"));
+    let result_id = io.client.files.create_result(output).await?.id;
+    let host = &admin.host;
+    // the sample, and its result file, are octet streams
+    let resp = raw_get(host, &io, &format!("/api/files/sample/{sha256}/download")).await?;
+    is!(resp.status().as_u16(), 200);
+    is!(
+        resp.headers()
+            .get("content-type")
+            .and_then(|v| v.to_str().ok()),
+        Some("application/octet-stream")
+    );
+    let base = format!("/api/files/result-files/{sha256}/DownloadTool/{result_id}");
+    let resp = raw_get(host, &io, &format!("{base}?result_file=out.txt")).await?;
+    is!(resp.status().as_u16(), 200);
+    is!(
+        resp.headers()
+            .get("content-type")
+            .and_then(|v| v.to_str().ok()),
+        Some("application/octet-stream")
+    );
+    // a result file that was never uploaded is not found
+    let resp = raw_get(host, &io, &format!("{base}?result_file=missing.txt")).await?;
+    is!(resp.status().as_u16(), 404);
+    // so are the entities a result never held
+    let resp = raw_get(host, &io, &format!("{base}/Vendor")).await?;
+    is!(resp.status().as_u16(), 404);
+    Ok(())
 }

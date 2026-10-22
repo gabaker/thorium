@@ -213,8 +213,8 @@ impl TestUser {
                 &worker,
                 &self.username,
                 &self.group,
-                &pipe.name,
-                stage,
+                generators::stage_instance(pipe, stage),
+                None,
                 Resources::default(),
                 Pools::Deadline,
             );

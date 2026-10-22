@@ -1363,6 +1363,73 @@ pub async fn create_or_update(client: &Client) -> Result<(), Error> {
 mod tests {
     use super::*;
 
+    /// The generated CRD carries the MCP server settings, and a cluster config without them
+    /// gets their defaults
+    #[test]
+    fn crd_config_has_mcp() {
+        // find the MCP server settings in the config schema
+        let schema = config_schema();
+        let mcp = &schema["properties"]["thorium"]["properties"]["mcp"];
+        assert!(mcp.is_object(), "no mcp in {schema}");
+        // the allowed hosts and origins are lists of strings
+        for field in ["allowed_hosts", "allowed_origins"] {
+            let list = &mcp["properties"][field];
+            assert_eq!(list["type"], serde_json::json!("array"), "{field}");
+            assert_eq!(
+                list["items"]["type"],
+                serde_json::json!("string"),
+                "{field}"
+            );
+        }
+        // a cluster config without MCP settings gets the defaults
+        let conf = crate::k8s::clusters::tests::sample_conf();
+        assert!(
+            crate::k8s::clusters::tests::sample_config()["thorium"]
+                .get("mcp")
+                .is_none()
+        );
+        assert_eq!(conf.thorium.mcp, thorium::conf::McpServerConf::default());
+    }
+
+    /// The generated CRD carries the tool access settings, and a cluster config without them
+    /// gets their defaults
+    #[test]
+    fn crd_config_has_tool_access() {
+        // find the tool access settings in the config schema
+        let schema = config_schema();
+        let access = &schema["properties"]["thorium"]["properties"]["tool_access"];
+        assert!(access.is_object(), "no tool_access in {schema}");
+        // the CLI command is a list of strings
+        let cli = &access["properties"]["cli"];
+        assert_eq!(cli["type"], serde_json::json!("array"));
+        assert_eq!(cli["items"]["type"], serde_json::json!("string"));
+        // the MCP url is a nullable string
+        let url = &access["properties"]["mcp_url"];
+        let nullable = url["nullable"] == serde_json::json!(true)
+            || url["type"] == serde_json::json!(["string", "null"]);
+        assert!(nullable, "mcp_url isn't nullable: {url}");
+        assert!(
+            url.to_string().contains("string"),
+            "mcp_url isn't a string: {url}"
+        );
+        // a cluster config without tool access gets the defaults
+        let conf = crate::k8s::clusters::tests::sample_conf();
+        assert!(
+            crate::k8s::clusters::tests::sample_config()["thorium"]
+                .get("tool_access")
+                .is_none()
+        );
+        assert_eq!(
+            conf.thorium.tool_access,
+            thorium::conf::ToolAccessConf::default()
+        );
+        assert_eq!(
+            conf.thorium.tool_access.cli,
+            vec!["/opt/thorium/thorium-agent", "tool", "run"]
+        );
+        assert_eq!(conf.thorium.tool_access.mcp_url, None);
+    }
+
     /// Status messages drop the "Error: " prefix of plain errors but keep status codes
     #[test]
     fn error_messages_without_prefix() {

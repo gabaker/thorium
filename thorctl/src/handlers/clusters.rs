@@ -191,29 +191,59 @@ async fn status(thorium: &Thorium, cmd: &ClusterStatus) -> Result<(), Error> {
     Ok(())
 }
 
-macro_rules! worker_print {
-    ($user:expr, $group:expr, $pipeline:expr, $stage:expr, $scaler:expr, $status:expr, $node:expr) => {
-        println!(
-            "{:<16} | {:<16} | {:<25} | {:<16} | {:<8} | {:<8} | {:<16}",
-            $user, $group, $pipeline, $stage, $scaler, $status, $node
-        )
-    };
-}
-
-/// A single line for basic node status
+/// A single line for basic worker status
 struct WorkerLine;
 
 impl WorkerLine {
+    /// Build the header lines for worker status
+    fn header_lines() -> [String; 2] {
+        // name each column and underline them
+        [
+            format!(
+                "{:<16} | {:<16} | {:<36} | {:<36} | {:<8} | {:<8} | {:<16}",
+                "USER", "GROUP", "TOOL INSTANCE", "RUN", "SCALER", "STATUS", "NODE"
+            ),
+            format!(
+                "{:-<17}+{:-<18}+{:-<38}+{:-<38}+{:-<10}+{:-<10}+{:-<18}",
+                "", "", "", "", "", "", ""
+            ),
+        ]
+    }
+
     /// Print this log lines header
     pub fn header() {
-        println!(
-            "{:<16} | {:<16} | {:<25} | {:<16} | {:<8} | {:<8} | {:<16}",
-            "USER", "GROUP", "PIPELINE", "STAGE", "SCALER", "STATUS", "NODE"
-        );
-        println!(
-            "{:-<17}+{:-<18}+{:-<27}+{:-<18}+{:-<10}+{:-<10}+{:-<18}",
-            "", "", "", "", "", "", ""
-        );
+        // print each header line
+        for line in Self::header_lines() {
+            println!("{line}");
+        }
+    }
+
+    /// Build the status line for a worker
+    ///
+    /// # Arguments
+    ///
+    /// * `worker` - The worker to build a status line for
+    fn line(worker: &Worker) -> String {
+        // get our workers status as a colored string
+        let status = match worker.status {
+            WorkerStatus::Spawning => "Spawning".bright_blue(),
+            WorkerStatus::Running => "Running".bright_green(),
+            WorkerStatus::Shutdown => "Shutdown".bright_magenta(),
+        };
+        // shared workers serve no run
+        let run = worker
+            .run
+            .map_or_else(|| "-".to_owned(), |run| run.to_string());
+        format!(
+            "{:<16} | {:<16} | {:<36} | {:<36} | {:<8} | {:<8} | {:<16}",
+            worker.user,
+            worker.group,
+            worker.tool_instance.to_string(),
+            run,
+            worker.scaler.to_string(),
+            status,
+            worker.node
+        )
     }
 
     /// Print this workers status
@@ -222,21 +252,7 @@ impl WorkerLine {
     ///
     /// * `worker` - The worker to print info on
     pub fn print(worker: &Worker) {
-        // get our workers status as a colored string
-        let status = match worker.status {
-            WorkerStatus::Spawning => "Spawning".bright_blue(),
-            WorkerStatus::Running => "Running".bright_green(),
-            WorkerStatus::Shutdown => "Shutdown".bright_magenta(),
-        };
-        worker_print!(
-            &worker.user,
-            &worker.group,
-            &worker.pipeline,
-            &worker.stage,
-            &worker.scaler.to_string(),
-            status,
-            &worker.node
-        );
+        println!("{}", Self::line(worker));
     }
 }
 
@@ -292,5 +308,63 @@ pub async fn handle(args: &Args, cmd: &Clusters) -> Result<(), Error> {
     match cmd {
         Clusters::Status(cmd) => status(&thorium, cmd).await,
         Clusters::Workers(cmd) => workers(&thorium, cmd).await,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use chrono::Utc;
+    use thorium::models::{ImageScaler, Pools, Resources};
+    use uuid::Uuid;
+
+    /// Build a worker of `io` in `ceres` on `node0`
+    ///
+    /// # Arguments
+    ///
+    /// * `tool_instance` - The tool instance the worker claims jobs for
+    /// * `run` - The run the worker is limited to, if any
+    fn worker(tool_instance: Uuid, run: Option<Uuid>) -> Worker {
+        Worker {
+            cluster: "cluster0".to_owned(),
+            node: "node0".to_owned(),
+            scaler: ImageScaler::K8s,
+            name: "io-worker".to_owned(),
+            user: "io".to_owned(),
+            group: "ceres".to_owned(),
+            tool_instance,
+            run,
+            status: WorkerStatus::Running,
+            spawned: Utc::now(),
+            heart_beat: None,
+            resources: Resources::default(),
+            pool: Pools::Deadline,
+            active: None,
+        }
+    }
+
+    /// Worker status lines name each worker's tool instance and the run of a per-run worker in
+    /// place of a pipeline and stage
+    #[test]
+    fn worker_lines_name_tool_instances() {
+        // a shared and a per-run worker of one tool instance
+        let tool_instance = Uuid::new_v4();
+        let run = Uuid::new_v4();
+        let shared = WorkerLine::line(&worker(tool_instance, None));
+        let per_run = WorkerLine::line(&worker(tool_instance, Some(run)));
+        // the header names the tool instance and run columns and no pipeline or stage
+        let header = WorkerLine::header_lines().join("\n");
+        assert!(header.contains("TOOL INSTANCE"), "{header}");
+        assert!(header.contains("RUN"), "{header}");
+        assert!(!header.contains("PIPELINE"), "{header}");
+        assert!(!header.contains("STAGE"), "{header}");
+        // both lines name the tool instance and only the per-run line names a run
+        assert!(shared.contains(&tool_instance.to_string()), "{shared}");
+        assert!(per_run.contains(&tool_instance.to_string()), "{per_run}");
+        assert!(per_run.contains(&run.to_string()), "{per_run}");
+        assert!(!shared.contains(&run.to_string()), "{shared}");
+        // the columns line up with the header
+        let columns = |line: &str| line.matches(" | ").count();
+        assert_eq!(columns(&shared), columns(&WorkerLine::header_lines()[0]));
     }
 }

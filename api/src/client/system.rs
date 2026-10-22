@@ -787,7 +787,7 @@ impl System {
 
     /// Register new workers for a specific scaler
     ///
-    /// #Arguments
+    /// # Arguments
     ///
     /// * `scaler` - The scaler to add workers too
     /// * `workers` - The workers to register
@@ -798,6 +798,7 @@ impl System {
     /// use thorium::Thorium;
     /// use thorium::models::{ImageScaler, WorkerRegistrationList, Resources, Pools};
     /// use std::ops::Add;
+    /// use uuid::Uuid;
     /// # use thorium::Error;
     ///
     /// # async fn exec() -> Result<(), Error> {
@@ -805,9 +806,11 @@ impl System {
     /// let thorium = Thorium::build("http://127.0.0.1").token("<token>").build().await?;
     /// // build the resources this worker needs
     /// let res = Resources::new(4000, 4096, 0, 1);
+    /// // the tool instance whose jobs this worker claims
+    /// let tool_instance = Uuid::new_v4();
     /// // Build our worker registration list
     /// let list = WorkerRegistrationList::default()
-    ///   .add("Corncluster", "Corn1", "Worker1", "user1", "group1", "pipe1", "stage1", res, Pools::Deadline);
+    ///   .add("Corncluster", "Corn1", "Worker1", "user1", "group1", tool_instance, None, res, Pools::Deadline);
     /// // register this worker
     /// thorium.system.register_workers(ImageScaler::K8s, &list).await?;
     /// # // allow test code to be compiled but don't unwrap as no API instance would be up

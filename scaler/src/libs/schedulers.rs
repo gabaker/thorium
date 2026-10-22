@@ -20,7 +20,7 @@ pub use allocatable::{
 };
 pub use direct::Direct;
 pub use k8s::K8s;
-pub use requisitions::{ReqMap, Spawned};
+pub use requisitions::{ReqMap, RunPodEnv, Spawned};
 
 use crate::libs::{BanSets, Cache, Tasks};
 

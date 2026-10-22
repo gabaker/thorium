@@ -2,6 +2,7 @@
 //!
 //! Currently only Redis and Scylla are supported
 
+/// The backend modules that are only built with the `api` feature
 #[cfg(feature = "api")]
 #[path = "backends"]
 mod backends_reexport {
@@ -24,6 +25,7 @@ mod backends_reexport {
     pub mod reactions;
     pub mod repos;
     pub mod results;
+    pub mod run_files;
     pub mod s3;
     pub mod search;
     pub mod setup;

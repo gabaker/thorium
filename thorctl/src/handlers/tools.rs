@@ -2,11 +2,13 @@
 
 use serde::Serialize;
 use std::collections::BTreeSet;
-use std::path::Path;
+use std::path::{Path, PathBuf};
+use thorium::client::tool_runs::{self, NoHooks, ToolRunKind, ToolRunOptions, ToolRunReport};
 use thorium::models::{
-    Entity, EntityKinds, EntityListOpts, EntityMetadata, EntityMetadataRequest,
-    EntityMetadataUpdate, EntityRequest, EntityUpdate, HarnessEnv, HarnessEnvVar,
-    ToolEntityRequest, ToolInstanceSummary, ToolPortabilityReport, ToolSpec,
+    DEFAULT_TOOL_RESULTS_DIR, Entity, EntityKinds, EntityListOpts, EntityMetadata,
+    EntityMetadataRequest, EntityMetadataUpdate, EntityRequest, EntityUpdate, GenericJobArgs,
+    HarnessEnv, HarnessEnvVar, ToolEntityRequest, ToolInstanceSummary, ToolPortabilityReport,
+    ToolRunRequest, ToolSpec,
 };
 use thorium::{Error, Thorium};
 use uuid::Uuid;
@@ -14,8 +16,10 @@ use uuid::Uuid;
 use crate::args::Args;
 use crate::args::tools::{
     CreateTool, DeprecateTool, DescribeTool, GetTools, HarnessEnvCmd, HarnessModels, PublishTool,
-    ToolVersions, Tools,
+    RunTool, ToolRunResults, ToolRunStatus, ToolRuns, ToolVersions, Tools,
 };
+use crate::handlers::instances::find_instance;
+use crate::handlers::runs::run_inputs;
 use crate::utils;
 use crate::utils::output::{self, OutputFormat, View};
 use crate::utils::render;
@@ -708,6 +712,100 @@ async fn harness_models(thorium: &Thorium, cmd: &HarnessModels) -> Result<(), Er
     Ok(())
 }
 
+/// Run a tool instance through the shared tool-run helper
+///
+/// Nothing is checked against a run's `tools.json`: the API's token scope decides which tool
+/// instances a run token may run.
+///
+/// # Arguments
+///
+/// * `thorium` - The Thorium client
+/// * `cmd` - The run command to execute
+pub(crate) async fn run_tool(thorium: &Thorium, cmd: &RunTool) -> ToolRunReport {
+    // read the tool call input, if one was given
+    let input = match &cmd.input {
+        Some(raw) => match serde_json::from_str::<serde_json::Value>(raw) {
+            Ok(serde_json::Value::Object(input)) => input,
+            Ok(_) => return ToolRunReport::usage("--input must be a JSON object"),
+            Err(error) => {
+                return ToolRunReport::usage(format!("--input isn't valid JSON: {error}"));
+            }
+        },
+        None => serde_json::Map::new(),
+    };
+    // find the tool instance and plan its run
+    let entity = match find_instance(thorium, &cmd.tool_instance).await {
+        Ok(entity) => entity,
+        Err(error) => return ToolRunReport::failed(error.to_string()),
+    };
+    let plan = match tool_runs::plan(&entity, &input) {
+        Ok(plan) => plan,
+        Err(error) => return ToolRunReport::usage(error),
+    };
+    // upload local files to the run group, or the instance's groups when none was given
+    let groups = match &cmd.group {
+        Some(group) => vec![group.clone()],
+        None => entity.groups.clone(),
+    };
+    let mut inputs = match run_inputs(thorium, &cmd.inputs, &groups).await {
+        Ok(inputs) => inputs,
+        Err(error) => return ToolRunReport::failed(error.to_string()),
+    };
+    // a container tool's mapped input may name more files and gives the job's args
+    let mut args = match plan.kind {
+        ToolRunKind::Job(mapped) => {
+            for sample in mapped.samples.unwrap_or_default() {
+                inputs = inputs.sample(sample);
+            }
+            mapped.args
+        }
+        ToolRunKind::Mcp { .. } => GenericJobArgs::default(),
+    };
+    args.positionals.extend(cmd.args.iter().cloned());
+    let mut req = ToolRunRequest::new(inputs).args(args);
+    if let Some(group) = &cmd.group {
+        req = req.group(group);
+    }
+    // run it, waiting only when asked
+    let mut opts = ToolRunOptions::new(cmd.output.clone().unwrap_or(plan.output));
+    opts.wait = cmd.wait;
+    opts.max_result_bytes = plan.max_result_bytes;
+    tool_runs::run(thorium, entity.id, &groups, &req, &opts, &mut NoHooks).await
+}
+
+/// Get a tool run's status through the shared tool-run helper
+///
+/// # Arguments
+///
+/// * `thorium` - The Thorium client
+/// * `cmd` - The status command to execute
+async fn run_status(thorium: &Thorium, cmd: &ToolRunStatus) -> ToolRunReport {
+    tool_runs::status(thorium, cmd.reaction, cmd.group.as_deref()).await
+}
+
+/// Download a tool run's results through the shared tool-run helper
+///
+/// # Arguments
+///
+/// * `thorium` - The Thorium client
+/// * `cmd` - The results command to execute
+async fn run_results(thorium: &Thorium, cmd: &ToolRunResults) -> ToolRunReport {
+    // download into the given directory or the run's default one
+    let output = cmd
+        .output
+        .clone()
+        .unwrap_or_else(|| PathBuf::from(format!("{DEFAULT_TOOL_RESULTS_DIR}/{}", cmd.reaction)));
+    let opts = ToolRunOptions::new(output);
+    tool_runs::results(
+        thorium,
+        cmd.reaction,
+        cmd.group.as_deref(),
+        &opts,
+        &mut NoHooks,
+    )
+    .await
+}
+
 /// Handle all tools commands
 ///
 /// # Arguments
@@ -717,6 +815,21 @@ async fn harness_models(thorium: &Thorium, cmd: &HarnessModels) -> Result<(), Er
 pub async fn handle(args: &Args, cmd: &Tools) -> Result<(), Error> {
     // load our config and instance our client
     let (_, thorium) = utils::get_client(args).await?;
+    // tool run commands print one JSON object and exit with its code
+    let report = match cmd {
+        Tools::Run(cmd) => Some(run_tool(&thorium, cmd).await),
+        Tools::Runs(ToolRuns::Status(cmd)) => Some(run_status(&thorium, cmd).await),
+        Tools::Runs(ToolRuns::Results(cmd)) => Some(run_results(&thorium, cmd).await),
+        _ => None,
+    };
+    if let Some(report) = report {
+        println!("{}", report.output.to_line());
+        let code = report.exit.code();
+        if code != 0 {
+            std::process::exit(code);
+        }
+        return Ok(());
+    }
     // call the right tools handler
     let result = match cmd {
         Tools::Get(cmd) => get(&thorium, cmd).await,
@@ -727,10 +840,209 @@ pub async fn handle(args: &Args, cmd: &Tools) -> Result<(), Error> {
         Tools::Deprecate(cmd) => deprecate(&thorium, cmd).await,
         Tools::HarnessEnv(cmd) => harness_env(&thorium, cmd).await,
         Tools::HarnessModels(cmd) => harness_models(&thorium, cmd).await,
+        Tools::Run(_) | Tools::Runs(_) => Ok(()),
     };
     // show the API's status code with any refusal
     result.map_err(|err| match err.status() {
         Some(_) => Error::new(err.to_string()),
         None => err,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use serde_json::json;
+    use std::sync::{Arc, Mutex};
+    use thorium::Thorium;
+    use thorium::models::{
+        AgenticTool, AgenticToolBacking, ContainerToolBacking, Entity, EntityKinds, EntityMetadata,
+        PlannedStage, Reaction, ReactionPlan, ReactionSource, ReactionStatus, ToolInstanceEntity,
+        ToolSpec, ToolVersion,
+    };
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::net::TcpListener;
+    use uuid::Uuid;
+
+    use super::run_tool;
+    use crate::args::tools::RunTool;
+
+    /// The line `thorium-agent tool run` prints for the same fixed run
+    const GOLDEN: &str = r#"{"status":"Completed","reaction":"2f1e7a4c-9b3d-4c55-8e21-6a0f3b9d7c11","result":{"functions":412},"files":[],"error":null,"retry_after_secs":null}"#;
+
+    /// Start a mock API answering each request line with its router
+    ///
+    /// Returns the mock's url and the request lines it received.
+    ///
+    /// # Arguments
+    ///
+    /// * `router` - Picks the status and body of each answer from its request line
+    async fn mock<F>(router: F) -> (String, Arc<Mutex<Vec<String>>>)
+    where
+        F: Fn(&str) -> (u16, String) + Send + Sync + 'static,
+    {
+        // bind to a random local port and answer in the background
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let host = format!("http://{}", listener.local_addr().unwrap());
+        let lines = Arc::new(Mutex::new(Vec::new()));
+        let inner = lines.clone();
+        tokio::spawn(async move {
+            while let Ok((mut stream, _)) = listener.accept().await {
+                // read the request head and its body
+                let mut buf = Vec::new();
+                let mut chunk = [0_u8; 8192];
+                loop {
+                    let read = stream.read(&mut chunk).await.unwrap_or(0);
+                    buf.extend_from_slice(&chunk[..read]);
+                    let text = String::from_utf8_lossy(&buf).to_string();
+                    let done = text.find("\r\n\r\n").is_some_and(|end| {
+                        let length = text[..end]
+                            .lines()
+                            .find_map(|line| {
+                                line.to_lowercase()
+                                    .strip_prefix("content-length:")
+                                    .map(|len| len.trim().parse::<usize>().unwrap_or(0))
+                            })
+                            .unwrap_or(0);
+                        buf.len() >= end + 4 + length
+                    });
+                    if done || read == 0 {
+                        break;
+                    }
+                }
+                let text = String::from_utf8_lossy(&buf).to_string();
+                let line = text.lines().next().unwrap_or_default().to_owned();
+                inner.lock().unwrap().push(line.clone());
+                let (code, body) = router(&line);
+                let resp = format!(
+                    "HTTP/1.1 {code} Mock\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
+                    body.len()
+                );
+                let _ = stream.write_all(resp.as_bytes()).await;
+                let _ = stream.shutdown().await;
+            }
+        });
+        (host, lines)
+    }
+
+    /// `tools run --wait` prints byte for byte what `thorium-agent tool run` prints for the same
+    /// run, through the shared tool-run helper
+    #[tokio::test]
+    #[allow(clippy::too_many_lines)]
+    async fn tools_run_matches_the_wrapper_golden() {
+        // a container tool whose run completes with a small result and no files
+        let tool_instance = Uuid::new_v4();
+        let reaction = Uuid::parse_str("2f1e7a4c-9b3d-4c55-8e21-6a0f3b9d7c11").unwrap();
+        let spec = ToolSpec::Agentic(AgenticTool {
+            function_name: "run_ghidra".to_owned(),
+            title: None,
+            model_description: "Decompile a file".to_owned(),
+            input_schema: serde_json::Map::new(),
+            output_schema: None,
+            capabilities: thorium::models::ToolCapabilities::default(),
+            backing: AgenticToolBacking::Container(ContainerToolBacking::default()),
+            result_format: thorium::models::ToolResultFormat::Json,
+            requires_approval: false,
+            timeout: Some(600),
+            input_examples: Vec::new(),
+            strict: thorium::models::ToolStrictness::Auto,
+            loading: thorium::models::ToolLoading::Eager,
+            icons: Vec::new(),
+        });
+        let entity = Entity {
+            id: tool_instance,
+            name: "harvester@1.2.0".to_owned(),
+            kind: EntityKinds::ToolInstance,
+            metadata: EntityMetadata::ToolInstance(ToolInstanceEntity {
+                tool: Uuid::new_v4(),
+                version: ToolVersion::from("1.2.0"),
+                previous: None,
+                spec_hash: "hash".to_owned(),
+                deprecated: false,
+                spec,
+                portability: None,
+                provides: Vec::new(),
+            }),
+            description: None,
+            submitter: "mcarson".to_owned(),
+            groups: vec!["corn".to_owned()],
+            tags: std::collections::HashMap::default(),
+            image: None,
+            created: chrono::Utc::now(),
+        };
+        let completed = Reaction {
+            id: reaction,
+            group: "corn".to_owned(),
+            creator: "mcarson".to_owned(),
+            pipeline: "harvester".to_owned(),
+            status: ReactionStatus::Completed,
+            current_stage: 0,
+            current_stage_progress: 0,
+            current_stage_length: 1,
+            args: std::collections::HashMap::default(),
+            sla: chrono::Utc::now(),
+            jobs: Vec::new(),
+            tags: Vec::new(),
+            parent: None,
+            sub_reactions: 0,
+            completed_sub_reactions: 0,
+            generators: Vec::new(),
+            samples: vec![
+                "63b9c2cbd4f4f1f6c2a0c2a1d7e0d2e6c2b6a8a3b1c4d5e6f7a8b9c0d1e2f3a4".to_owned(),
+            ],
+            ephemeral: Vec::new(),
+            parent_ephemeral: std::collections::HashMap::default(),
+            repos: Vec::new(),
+            trigger_depth: None,
+            has_cache: false,
+            source: ReactionSource::Tool {
+                tool_instance,
+                provenance: thorium::models::RunProvenance::default(),
+            },
+            plan: ReactionPlan {
+                stages: vec![vec![PlannedStage {
+                    name: "harvester".to_owned(),
+                    tool_instance,
+                }]],
+            },
+            run_token: None,
+            run: None,
+        };
+        let entity_json = serde_json::to_string(&entity).unwrap();
+        let reaction_json = serde_json::to_string(&completed).unwrap();
+        let outputs = json!({"results": {"harvester": [{
+            "id": Uuid::new_v4(), "groups": ["corn"], "cmd": null, "uploaded": chrono::Utc::now(),
+            "result": {"functions": 412}, "entities": {}, "display_type": "Json", "children": {},
+        }]}})
+        .to_string();
+        let (host, _) = mock(move |line| {
+            if line.starts_with("GET /api/entities/") {
+                (200, entity_json.clone())
+            } else if line.starts_with("POST /api/tools/instances/") {
+                (200, json!({"id": reaction}).to_string())
+            } else if line.starts_with("GET /api/reactions/corn/") {
+                (200, reaction_json.clone())
+            } else if line.starts_with("GET /api/files/results/") {
+                (200, outputs.clone())
+            } else {
+                (404, r#"{"error":"not found"}"#.to_owned())
+            }
+        })
+        .await;
+        let thorium = Thorium::build(&host).token("token").build().await.unwrap();
+        // run it with thorctl's command and compare the printed line to the wrapper's
+        let output = std::env::temp_dir().join(format!("thorctl-tools-run-{}", Uuid::new_v4()));
+        let cmd = RunTool {
+            tool_instance: tool_instance.to_string(),
+            group: None,
+            inputs: crate::args::runs::RunInputArgs::default(),
+            input: Some("{}".to_owned()),
+            args: Vec::new(),
+            wait: true,
+            output: Some(output.clone()),
+        };
+        let report = run_tool(&thorium, &cmd).await;
+        assert_eq!(report.output.to_line(), GOLDEN);
+        assert_eq!(report.exit.code(), 0);
+        let _ = std::fs::remove_dir_all(&output);
+    }
 }

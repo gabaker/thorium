@@ -1070,6 +1070,7 @@ async fn build_credential(
     }
     // the secrets must fit the kind
     let secrets = build_secrets(&req.kind, req.secret, req.session_token)?;
+    bad_request(req.kind.validate_secrets(&secrets))?;
     // a credential created with a secret was last rotated now
     let now = Utc::now();
     let rotated = secrets.primary.as_ref().map(|_| now);
@@ -1748,6 +1749,8 @@ fn update_credential(
         }
         meta.secrets.session_token = Some(token);
     }
+    // the new secrets must fit the kind
+    bad_request(meta.kind.validate_secrets(&meta.secrets))?;
     // the expiration is set or cleared
     if form.clear_model_credential_expires == Some(true) {
         meta.expires = None;
@@ -2130,7 +2133,7 @@ async fn describe(id: Uuid, shared: &Shared) -> Result<String, ApiError> {
 /// * `kind` - The kind of entity to list
 /// * `groups` - The groups to list from
 /// * `shared` - Shared Thorium objects
-async fn list_ids(
+pub(crate) async fn list_ids(
     user: &User,
     kind: EntityKinds,
     groups: &[String],

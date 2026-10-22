@@ -1308,3 +1308,101 @@ fn tool_capabilities_default_off() {
         round_trip(&caps);
     }
 }
+
+/// AWS credential values are written one per line into the harness's AWS config file, so a value
+/// with a control character, which could start a new line such as `credential_process`, is refused
+#[test]
+fn aws_credential_values_stay_on_one_config_line() {
+    // build an assumed role with the given fields
+    let role = |role_arn: &str, external_id: Option<&str>, session_name: Option<&str>| {
+        CredentialKind::AwsAssumeRole {
+            role_arn: role_arn.into(),
+            external_id: external_id.map(Into::into),
+            session_name: session_name.map(Into::into),
+            duration_seconds: None,
+            source: AwsRoleSource::AccessKey(Uuid::new_v4()),
+        }
+    };
+    let arn = "arn:aws:iam::000000000000:role/r";
+    // values that would add or corrupt lines of the config file are refused in every field
+    for bad in [
+        "x\ncredential_process = /usr/bin/touch /tmp/injected",
+        "x\r\ncredential_process = y",
+        "x\ry",
+        "x\u{0}y",
+        "x\ty",
+    ] {
+        let access_key = CredentialKind::AwsAccessKey {
+            access_key_id: bad.into(),
+        };
+        assert!(access_key.validate().is_err(), "access_key_id {bad:?}");
+        assert!(
+            role(bad, None, None).validate().is_err(),
+            "role_arn {bad:?}"
+        );
+        assert!(
+            role(arn, Some(bad), None).validate().is_err(),
+            "external_id {bad:?}"
+        );
+        assert!(
+            role(arn, None, Some(bad)).validate().is_err(),
+            "session_name {bad:?}"
+        );
+    }
+    // realistic values are accepted
+    let access_key = CredentialKind::AwsAccessKey {
+        access_key_id: "AKIAIOSFODNN7EXAMPLE".into(),
+    };
+    assert!(access_key.validate().is_ok());
+    assert!(
+        role(arn, Some("ext-id:1/2=3"), Some("thorium-run@team.1"))
+            .validate()
+            .is_ok()
+    );
+    assert!(role(arn, None, None).validate().is_ok());
+}
+
+/// An access key's secret and session token are written on lines of an assumed role's AWS config
+/// file, so control characters are refused in them, while other kinds' secrets may span lines
+#[test]
+fn aws_access_key_secrets_stay_on_one_config_line() {
+    // build secrets from a primary secret and a session token
+    let secrets = |primary: &str, token: Option<&str>| CredentialSecrets {
+        primary: Some(ModelSecret::from(primary)),
+        session_token: token.map(ModelSecret::from),
+        fingerprint: None,
+    };
+    let access_key = CredentialKind::AwsAccessKey {
+        access_key_id: "AKIAIOSFODNN7EXAMPLE".into(),
+    };
+    let injected = "s\n[profile thorium]\ncredential_process = /usr/bin/touch /tmp/injected";
+    // a line break in the secret or the session token is refused
+    assert!(
+        access_key
+            .validate_secrets(&secrets(injected, None))
+            .is_err()
+    );
+    assert!(
+        access_key
+            .validate_secrets(&secrets("s", Some(injected)))
+            .is_err()
+    );
+    assert!(access_key.validate_secrets(&secrets("s\r", None)).is_err());
+    // real looking secrets are accepted
+    assert!(
+        access_key
+            .validate_secrets(&secrets(
+                "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY",
+                Some("IQoJb3JpZ2luX2VjEJr//////////wEaCXVzLWVhc3QtMSJHMEUCIQ+=")
+            ))
+            .is_ok()
+    );
+    // a GCP JSON file or a PEM certificate spans lines and is written to a file of its own
+    let gcp = CredentialKind::GcpCredentialsJson {
+        impersonate_service_account: None,
+    };
+    assert!(
+        gcp.validate_secrets(&secrets("{\n  \"type\": \"service_account\"\n}", None))
+            .is_ok()
+    );
+}

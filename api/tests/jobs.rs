@@ -5,8 +5,9 @@ use base64::engine::general_purpose::STANDARD;
 use chrono::prelude::*;
 use thorium::models::{
     EntityMetadata, EventType, GenericJob, GroupAllowed, ImageScaler, JobResets, JobStatus,
-    Pipeline, PipelineRequest, Pools, ReactionListParams, ReactionRequest, ReactionStatus,
-    Resources, ScopedTokenRequest, StageLogsAdd, UserRole, WorkerDeleteMap, WorkerRegistrationList,
+    MAX_CLAIM_LIMIT, Pipeline, PipelineRequest, Pools, ReactionListParams, ReactionRequest,
+    ReactionStatus, Resources, ScopedTokenRequest, StageLogsAdd, UserRole, WorkerDeleteMap,
+    WorkerRegistrationList,
 };
 use thorium::test_utilities::faults::ReactionRun;
 use thorium::test_utilities::{self, events, generators};
@@ -161,31 +162,30 @@ async fn pipe_for(group: &str, instance: Uuid, client: &Thorium) -> Result<Pipel
 /// * `name` - The name of the worker
 /// * `group` - The group the worker serves
 /// * `scaler` - The scaler the worker is under
+/// * `tool_instance` - The tool instance whose jobs the worker claims
 /// * `run` - The run the worker serves, if any
 /// * `client` - The client of the user the worker runs as
 async fn workload_worker(
     name: &str,
     group: &str,
     scaler: ImageScaler,
+    tool_instance: Uuid,
     run: Option<Uuid>,
     client: &Thorium,
 ) -> Result<(), Error> {
     // the worker runs as the client's user
     let user = client.users.info().await?.username;
-    let mut list = WorkerRegistrationList::default().add(
+    let list = WorkerRegistrationList::default().add(
         "cluster0",
         "node0",
         name,
         user,
         group,
-        "pipe",
-        "stage",
+        tool_instance,
+        run,
         Resources::default(),
         Pools::Deadline,
     );
-    if let Some(run) = run {
-        list.workers[0].run = Some(run);
-    }
     // workers are registered by admins, like the scaler
     let admin = test_utilities::admin_client().await?;
     admin.system.register_workers(scaler, &list).await?;
@@ -265,7 +265,15 @@ async fn run_jobs_use_run_queues() -> Result<(), Error> {
     );
     // a per-run worker claims only its run's jobs of the tool instance
     let run_worker = generators::gen_string(24);
-    workload_worker(&run_worker, &group, ImageScaler::K8s, Some(run), &admin).await?;
+    workload_worker(
+        &run_worker,
+        &group,
+        ImageScaler::K8s,
+        tool,
+        Some(run),
+        &admin,
+    )
+    .await?;
     let claimed = admin
         .jobs
         .claim_workload(&group, tool, "cluster0", "node0", &run_worker, 5)
@@ -297,15 +305,40 @@ async fn run_jobs_use_run_queues() -> Result<(), Error> {
         .await
         .expect("a ttl");
     is!(ttl, -1);
-    // finishing the run expires its run queues
-    let owner_claim = admin
+    // a per-run worker can't claim its run's jobs of another tool instance
+    let resp = admin
         .jobs
         .claim_workload(&group, harness, "cluster0", "node0", &run_worker, 1)
+        .await;
+    fail!(resp, 401);
+    is!(
+        zcard(&run_queue(&group, run, harness, &JobStatus::Created)).await,
+        1
+    );
+    // finishing the run expires its run queues
+    let harness_worker = generators::gen_string(24);
+    workload_worker(
+        &harness_worker,
+        &group,
+        ImageScaler::K8s,
+        harness,
+        Some(run),
+        &admin,
+    )
+    .await?;
+    let owner_claim = admin
+        .jobs
+        .claim_workload(&group, harness, "cluster0", "node0", &harness_worker, 1)
         .await?;
     is!(owner_claim.len(), 1);
     admin
         .jobs
-        .proceed(&owner_claim[0], &generators::stage_logs(), 1, &run_worker)
+        .proceed(
+            &owner_claim[0],
+            &generators::stage_logs(),
+            1,
+            &harness_worker,
+        )
         .await?;
     admin
         .jobs
@@ -318,6 +351,7 @@ async fn run_jobs_use_run_queues() -> Result<(), Error> {
         .expect("a ttl");
     assert!(ttl > 0);
     generators::delete_worker(&run_worker, &admin).await?;
+    generators::delete_worker(&harness_worker, &admin).await?;
     Ok(())
 }
 
@@ -337,7 +371,7 @@ async fn shared_worker_skips_run_jobs() -> Result<(), Error> {
         .id;
     // a shared worker of the same tool instance claims nothing
     let worker = generators::gen_string(24);
-    workload_worker(&worker, &group, ImageScaler::K8s, None, &admin).await?;
+    workload_worker(&worker, &group, ImageScaler::K8s, tool, None, &admin).await?;
     let claimed = admin
         .jobs
         .claim_workload(&group, tool, "cluster0", "node0", &worker, 5)
@@ -389,7 +423,7 @@ async fn dangling_workload_job_pruned() -> Result<(), Error> {
         .expect("delete the job");
     // a claim prunes its status entry and deadline member
     let worker = generators::gen_string(24);
-    workload_worker(&worker, &group, ImageScaler::K8s, None, &admin).await?;
+    workload_worker(&worker, &group, ImageScaler::K8s, tool, None, &admin).await?;
     let claimed = admin
         .jobs
         .claim_workload(&group, tool, "cluster0", "node0", &worker, 1)
@@ -488,7 +522,7 @@ async fn escaped_stage_label_deadline() -> Result<(), Error> {
     is!(parsed["stage"].as_str(), Some(stage));
     // proceeding the job removes the member by exact match
     let worker = generators::gen_string(24);
-    workload_worker(&worker, &group, ImageScaler::K8s, None, &admin).await?;
+    workload_worker(&worker, &group, ImageScaler::K8s, tool, None, &admin).await?;
     let claimed = admin
         .jobs
         .claim_workload(&group, tool, "cluster0", "node0", &worker, 1)
@@ -536,7 +570,7 @@ async fn workload_runtimes() -> Result<(), Error> {
         .create(&ReactionRequest::new(&group, &pipe.name))
         .await?;
     let worker = generators::gen_string(24);
-    workload_worker(&worker, &group, ImageScaler::K8s, None, &admin).await?;
+    workload_worker(&worker, &group, ImageScaler::K8s, first.id, None, &admin).await?;
     let claimed = admin
         .jobs
         .claim_workload(&group, first.id, "cluster0", "node0", &worker, 1)
@@ -653,6 +687,55 @@ async fn second_name(client: &Thorium, tool: Uuid) -> Result<String, Error> {
     Ok(client.entities.get(tool).await?.name)
 }
 
+/// The workload claim refuses a limit of zero or above the max and claims nothing for it
+#[tokio::test]
+async fn workload_claim_limit_bounds() -> Result<(), Error> {
+    // a worker of the admin with three queued jobs
+    let admin = test_utilities::admin_client().await?;
+    generators::node("cluster0", "node0", Resources::default(), &admin).await?;
+    let group = generators::groups(1, &admin).await?.remove(0).name;
+    let (pipe, tool) = one_stage_pipe(&group, ImageScaler::K8s, &admin).await?;
+    let reqs = (0..3)
+        .map(|_| ReactionRequest::new(&group, &pipe.name))
+        .collect::<Vec<ReactionRequest>>();
+    admin.reactions.create_bulk(&reqs).await?;
+    let worker = generators::gen_string(24);
+    workload_worker(&worker, &group, ImageScaler::K8s, tool, None, &admin).await?;
+    let queue = workload_queue(&group, tool, "thorium", &JobStatus::Created);
+    is!(zcard(&queue).await, 3);
+    // a limit of zero is refused and claims nothing
+    let resp = admin
+        .jobs
+        .claim_workload(&group, tool, "cluster0", "node0", &worker, 0)
+        .await;
+    fail!(resp, 400);
+    is!(zcard(&queue).await, 3);
+    // a limit above the max is refused and claims nothing
+    let over = u64::try_from(MAX_CLAIM_LIMIT).expect("a u64 max") + 1;
+    let resp = admin
+        .jobs
+        .claim_workload(&group, tool, "cluster0", "node0", &worker, over)
+        .await;
+    fail!(resp, 400);
+    // a huge limit is refused without allocating for it, so the API stays up
+    let resp = admin
+        .jobs
+        .claim_workload(&group, tool, "cluster0", "node0", &worker, 1 << 50)
+        .await;
+    fail!(resp, 400);
+    is!(zcard(&queue).await, 3);
+    // the max limit claims every queued job
+    let max = u64::try_from(MAX_CLAIM_LIMIT).expect("a u64 max");
+    let claimed = admin
+        .jobs
+        .claim_workload(&group, tool, "cluster0", "node0", &worker, max)
+        .await?;
+    is!(claimed.len(), 3);
+    is!(zcard(&queue).await, 0);
+    generators::delete_worker(&worker, &admin).await?;
+    Ok(())
+}
+
 /// The workload claim takes the job with the earliest deadline first, from shared and run queues
 #[tokio::test]
 async fn workload_claim_earliest_deadline_first() -> Result<(), Error> {
@@ -673,7 +756,7 @@ async fn workload_claim_earliest_deadline_first() -> Result<(), Error> {
     assert!(jobs[1].deadline < jobs[0].deadline);
     // a limit-one claim takes the early job, then the late one
     let worker = generators::gen_string(24);
-    workload_worker(&worker, &group, ImageScaler::K8s, None, &admin).await?;
+    workload_worker(&worker, &group, ImageScaler::K8s, tool, None, &admin).await?;
     for expected in [&jobs[1], &jobs[0]] {
         let claimed = admin
             .jobs
@@ -708,7 +791,15 @@ async fn workload_claim_earliest_deadline_first() -> Result<(), Error> {
     assert!(calls[1].deadline < calls[0].deadline);
     // the run's worker takes the early call, then the late one
     let run_worker = generators::gen_string(24);
-    workload_worker(&run_worker, &group, ImageScaler::K8s, Some(run), &admin).await?;
+    workload_worker(
+        &run_worker,
+        &group,
+        ImageScaler::K8s,
+        call_tool,
+        Some(run),
+        &admin,
+    )
+    .await?;
     for expected in [&calls[1], &calls[0]] {
         let claimed = admin
             .jobs
@@ -745,7 +836,7 @@ async fn workload_claim_checks() -> Result<(), Error> {
     is!(zcard(&queue).await, 5);
     // carme can't claim with io's worker and nothing is popped
     let io_worker = generators::gen_string(24);
-    workload_worker(&io_worker, &group, ImageScaler::K8s, None, &io.client).await?;
+    workload_worker(&io_worker, &group, ImageScaler::K8s, tool, None, &io.client).await?;
     let resp = carme
         .client
         .jobs
@@ -767,7 +858,15 @@ async fn workload_claim_checks() -> Result<(), Error> {
     is!(admins.len(), 1);
     // two workers claiming three each at once claim the last three jobs exactly once
     let second_worker = generators::gen_string(24);
-    workload_worker(&second_worker, &group, ImageScaler::K8s, None, &io.client).await?;
+    workload_worker(
+        &second_worker,
+        &group,
+        ImageScaler::K8s,
+        tool,
+        None,
+        &io.client,
+    )
+    .await?;
     let (left, right) = tokio::join!(
         io.client
             .jobs
@@ -794,6 +893,84 @@ async fn workload_claim_checks() -> Result<(), Error> {
     Ok(())
 }
 
+/// A worker claims only jobs of the group and tool instance it was registered for
+#[tokio::test]
+async fn workload_claim_worker_scope() -> Result<(), Error> {
+    // a user in two groups that share a tool instance, and a second tool instance in one group
+    let admin = test_utilities::admin_client().await?;
+    generators::node("cluster0", "node0", Resources::default(), &admin).await?;
+    let suffix = generators::name_suffix();
+    let callisto = generators::moon_user(&admin, "callisto", &suffix).await?;
+    let roles = generators::GroupRoles::default().user(&callisto.username);
+    let home = generators::god_group(&admin, "janus", &suffix, &roles).await?;
+    let away = generators::god_group(&admin, "vesta", &suffix, &roles).await?;
+    let (_, shared) =
+        test_utilities::runs::image_tool(&[home.as_str(), away.as_str()], ImageScaler::K8s, &admin)
+            .await?;
+    let home_pipe = pipe_for(&home, shared.id, &admin).await?;
+    let away_pipe = pipe_for(&away, shared.id, &admin).await?;
+    let (other_pipe, other) = one_stage_pipe(&home, ImageScaler::K8s, &admin).await?;
+    // the user queues a job of the shared tool instance in each group and one of the other
+    for (group, pipe) in [
+        (&home, &home_pipe.name),
+        (&away, &away_pipe.name),
+        (&home, &other_pipe.name),
+    ] {
+        callisto
+            .client
+            .reactions
+            .create(&ReactionRequest::new(group, pipe))
+            .await?;
+    }
+    // the user's worker serves the shared tool instance in the first group
+    let worker = generators::gen_string(24);
+    workload_worker(
+        &worker,
+        &home,
+        ImageScaler::K8s,
+        shared.id,
+        None,
+        &callisto.client,
+    )
+    .await?;
+    // the worker can't claim the user's job in the other group and nothing is popped
+    let away_queue = workload_queue(&away, shared.id, &callisto.username, &JobStatus::Created);
+    let resp = callisto
+        .client
+        .jobs
+        .claim_workload(&away, shared.id, "cluster0", "node0", &worker, 1)
+        .await;
+    fail!(resp, 401);
+    is!(zcard(&away_queue).await, 1);
+    // the worker can't claim the user's job of another tool instance and nothing is popped
+    let other_queue = workload_queue(&home, other, &callisto.username, &JobStatus::Created);
+    let resp = callisto
+        .client
+        .jobs
+        .claim_workload(&home, other, "cluster0", "node0", &worker, 1)
+        .await;
+    fail!(resp, 401);
+    is!(zcard(&other_queue).await, 1);
+    // an admin is held to the worker's group and tool instance too
+    let resp = admin
+        .jobs
+        .claim_workload(&away, shared.id, "cluster0", "node0", &worker, 1)
+        .await;
+    fail!(resp, 401);
+    is!(zcard(&away_queue).await, 1);
+    // the worker claims the job of its own group and tool instance
+    let claimed = callisto
+        .client
+        .jobs
+        .claim_workload(&home, shared.id, "cluster0", "node0", &worker, 1)
+        .await?;
+    is!(claimed.len(), 1);
+    is!(&claimed[0].group, &home);
+    is!(claimed[0].tool_instance, shared.id);
+    generators::delete_worker(&worker, &admin).await?;
+    Ok(())
+}
+
 /// The workload claim keeps the worker user check for full tokens
 #[tokio::test]
 async fn workload_claim_user_check() -> Result<(), Error> {
@@ -813,7 +990,7 @@ async fn workload_claim_user_check() -> Result<(), Error> {
         .collect::<Vec<ReactionRequest>>();
     a.client.reactions.create_bulk(&reqs).await?;
     let worker = generators::gen_string(24);
-    workload_worker(&worker, &group, ImageScaler::K8s, None, &a.client).await?;
+    workload_worker(&worker, &group, ImageScaler::K8s, tool, None, &a.client).await?;
     let queue = workload_queue(&group, tool, &a.username, &JobStatus::Created);
     // B's full token is refused and nothing is popped
     let resp = b
@@ -892,34 +1069,39 @@ async fn workload_stats_and_prune() -> Result<(), Error> {
     }
     // reading stats removes nothing
     is!(zcard(&set).await, 4);
+    // a worker for each of the first, second, and fourth tool instances
+    let mut workers = Vec::with_capacity(3);
+    for id in [ids[0], ids[1], ids[3]] {
+        let worker = generators::gen_string(24);
+        workload_worker(&worker, &group, ImageScaler::K8s, id, None, &owner.client).await?;
+        workers.push(worker);
+    }
     // the first tool instance only finished and the second is running
-    let worker = generators::gen_string(24);
-    workload_worker(&worker, &group, ImageScaler::K8s, None, &owner.client).await?;
     let done = owner
         .client
         .jobs
-        .claim_workload(&group, ids[0], "cluster0", "node0", &worker, 1)
+        .claim_workload(&group, ids[0], "cluster0", "node0", &workers[0], 1)
         .await?;
     owner
         .client
         .jobs
-        .proceed(&done[0], &generators::stage_logs(), 5, &worker)
+        .proceed(&done[0], &generators::stage_logs(), 5, &workers[0])
         .await?;
     owner
         .client
         .jobs
-        .claim_workload(&group, ids[1], "cluster0", "node0", &worker, 1)
+        .claim_workload(&group, ids[1], "cluster0", "node0", &workers[1], 1)
         .await?;
     // the fourth tool instance only finished too
     let late = owner
         .client
         .jobs
-        .claim_workload(&group, ids[3], "cluster0", "node0", &worker, 1)
+        .claim_workload(&group, ids[3], "cluster0", "node0", &workers[2], 1)
         .await?;
     owner
         .client
         .jobs
-        .proceed(&late[0], &generators::stage_logs(), 5, &worker)
+        .proceed(&late[0], &generators::stage_logs(), 5, &workers[2])
         .await?;
     // an hour later the first, second, and fourth are idle by score and the third was queued
     // half an hour ago
@@ -960,7 +1142,9 @@ async fn workload_stats_and_prune() -> Result<(), Error> {
     let stats = admin.system.stats().await?;
     let group_stats = stats.groups.get(&group).expect("the group's stats");
     is!(group_stats.workloads.contains_key(&ids[0]), false);
-    generators::delete_worker(&worker, &admin).await?;
+    for worker in &workers {
+        generators::delete_worker(worker, &admin).await?;
+    }
     Ok(())
 }
 
@@ -1006,8 +1190,8 @@ async fn external_end_to_end() -> Result<(), Error> {
         &worker,
         &creator.username,
         &group,
-        "pipe",
-        "stage",
+        tool,
+        None,
         Resources::default(),
         Pools::Deadline,
     );
@@ -1127,7 +1311,7 @@ async fn workload_runtime_routes() -> Result<(), Error> {
         .collect::<Vec<ReactionRequest>>();
     admin.reactions.create_bulk(&reqs).await?;
     let worker = generators::gen_string(24);
-    workload_worker(&worker, &group, ImageScaler::K8s, None, &admin).await?;
+    workload_worker(&worker, &group, ImageScaler::K8s, tool, None, &admin).await?;
     let claimed = admin
         .jobs
         .claim_workload(&group, tool, "cluster0", "node0", &worker, 2)
@@ -1897,6 +2081,8 @@ async fn register_worker_for(
     pipeline: &str,
     stage: &str,
 ) -> Result<(), Error> {
+    // get the tool instance this stage runs
+    let tool_instance = generators::stage_tool_instance(group, pipeline, stage, admin).await;
     // build a registration for this worker
     let workers = WorkerRegistrationList::default().add(
         "cluster0",
@@ -1904,8 +2090,8 @@ async fn register_worker_for(
         name,
         user,
         group,
-        pipeline,
-        stage,
+        tool_instance,
+        None,
         Resources::default(),
         Pools::Deadline,
     );

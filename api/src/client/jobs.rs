@@ -19,12 +19,31 @@ use super::RUNTIME;
 #[cfg(feature = "python")]
 use pyo3::{pyclass, pymethods};
 
+/// A handler for the jobs routes in Thorium
+///
+/// Workers claim jobs by tool instance with [`Jobs::claim_workload`]; jobs can't be claimed by
+/// pipeline and stage:
+///
+/// ```compile_fail
+/// use thorium::Thorium;
+/// # use thorium::Error;
+///
+/// # async fn exec() -> Result<(), Error> {
+/// // create Thorium client
+/// let thorium = Thorium::build("http://127.0.0.1").token("<token>").build().await?;
+/// // there is no claim by pipeline and stage
+/// let jobs = thorium.jobs.claim("Corn", "Harvest", "CornHarvester", "prod", "node0", "esoteria", 1).await?;
+/// # Ok(())
+/// # }
+/// ```
 #[cfg_attr(feature = "sync", thorium_derive::blocking_struct(python))]
 #[derive(Clone)]
 pub struct Jobs {
+    /// The host/url that Thorium can be reached at
     host: String,
     /// token to use for auth
     token: String,
+    /// A reqwest client for reqwests
     client: reqwest::Client,
 }
 
@@ -87,64 +106,6 @@ impl Jobs {
         send_build!(self.client, req, RawJob)
     }
 
-    /// Claims [`GenericJob`]s from Thorium for a specific stage in a pipeline if any exist
-    ///
-    /// # Arguments
-    ///
-    /// * `group` - The group this pipeline is from
-    /// * `pipeline` - The pipeline to claim jobs for
-    /// * `stage` - The stage in the the pipeline to claim a job for
-    /// * `worker` - The name of the worker that is claiming jobs
-    /// * `count` - The number of jobs to claim
-    ///
-    /// # Examples
-    ///
-    /// ```
-    /// use thorium::Thorium;
-    /// # use thorium::Error;
-    ///
-    /// # async fn exec() -> Result<(), Error> {
-    /// // create Thorium client
-    /// let thorium = Thorium::build("http://127.0.0.1").token("<token>").build().await?;
-    /// // claim a job from Thorium
-    /// let jobs = thorium.jobs.claim("Corn", "Harvest", "CornHarvester", "prod", "node0", "esoteria", 1).await?;
-    /// # // allow test code to be compiled but don't unwrap as no API instance would be up
-    /// # Ok(())
-    /// # }
-    /// # tokio_test::block_on(async {
-    /// #    exec().await
-    /// # });
-    /// ```
-    #[cfg_attr(
-        feature = "trace",
-        instrument(name = "Thorium::Jobs::claim", skip(self), err(Debug))
-    )]
-    pub async fn claim(
-        &self,
-        group: &str,
-        pipeline: &str,
-        stage: &str,
-        cluster: &str,
-        node: &str,
-        worker: &str,
-        count: u64,
-    ) -> Result<Vec<GenericJob>, Error> {
-        // build url for claiming a job
-        let url = format!(
-            "{base}/api/jobs/claim/{group}/{pipeline}/{stage}/{cluster}/{node}/{worker}/{count}",
-            base = self.host,
-            group = group,
-            pipeline = pipeline,
-            stage = stage,
-            worker = worker,
-            count = count
-        );
-        // build request
-        let req = self.client.patch(&url).header("authorization", &self.token);
-        // send this request and build a generic job from the response
-        send_build!(self.client, req, Vec<GenericJob>)
-    }
-
     /// Claims [`GenericJob`]s of a tool instance for a worker if any exist
     ///
     /// A per-run worker claims only its run's jobs; a shared worker claims the jobs its user
@@ -157,7 +118,7 @@ impl Jobs {
     /// * `cluster` - The cluster the claiming worker is in
     /// * `node` - The node the claiming worker is on
     /// * `worker` - The name of the worker that is claiming jobs
-    /// * `count` - The most jobs to claim
+    /// * `count` - The most jobs to claim, from 1 to 1000 (any other count is a 400)
     ///
     /// # Examples
     ///
@@ -296,7 +257,8 @@ impl Jobs {
     /// // create Thorium client
     /// let thorium = Thorium::build("http://127.0.0.1").token("<token>").build().await?;
     /// // claim a job from Thorium
-    /// let jobs = thorium.jobs.claim("Corn", "Harvest", "CornHarvester", "prod0", "node0", "esoteria", 1).await?;
+    /// let tool_instance = uuid::Uuid::new_v4();
+    /// let jobs = thorium.jobs.claim_workload("Corn", tool_instance, "prod0", "node0", "esoteria", 1).await?;
     /// // execute all claimed jobs
     /// for job in jobs.iter() {
     ///     // do some work for this job and track execution time
@@ -365,7 +327,8 @@ impl Jobs {
     /// // create Thorium client
     /// let thorium = Thorium::build("http://127.0.0.1").token("<token>").build().await?;
     /// // claim a job from Thorium
-    /// let jobs = thorium.jobs.claim("Corn", "Harvest", "CornHarvester", "prod0", "node0", "esoteria", 1).await?;
+    /// let tool_instance = uuid::Uuid::new_v4();
+    /// let jobs = thorium.jobs.claim_workload("Corn", tool_instance, "prod0", "node0", "esoteria", 1).await?;
     /// // execute all claimed jobs
     /// for job in jobs.iter() {
     ///     // do some work for this job
@@ -494,7 +457,8 @@ impl Jobs {
     /// // create Thorium client
     /// let thorium = Thorium::build("http://127.0.0.1").token("<token>").build().await?;
     /// // claim a job from Thorium
-    /// let jobs = thorium.jobs.claim("Corn", "Harvest", "CornHarvester", "prod0", "node0", "esoteria", 1).await?;
+    /// let tool_instance = uuid::Uuid::new_v4();
+    /// let jobs = thorium.jobs.claim_workload("Corn", tool_instance, "prod0", "node0", "esoteria", 1).await?;
     /// // execute all claimed jobs
     /// for job in jobs.iter() {
     ///     // checkpoint this job

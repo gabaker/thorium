@@ -11,7 +11,7 @@ license-file = "../LICENSE"
 name = "thorium"
 
 [features]
-default = ["api", "client", "trace", "ai"]
+default = ["api", "client", "trace"]
 # include api dependencies
 api = [
   "bb8-redis", "redis", "argon2", "crossbeam", "futures", "futures-cpupool", "tokio", "async-recursion", "rand", "colored",
@@ -37,7 +37,7 @@ rkyv-support = ["rkyv", "bytecheck"]
 client = [
   "reqwest", "tokio", "tokio-util", "futures", "git2", "shellexpand", "elasticsearch",
   "tokio-tar", "http", "gix", "gix-date", "async-trait", "data-encoding", "sha2", "walkdir-err",
-  "humantime", "serde_json_canonicalizer", "thorium-derive", "jsonschema"
+  "humantime", "serde_json_canonicalizer", "thorium-derive", "jsonschema", "percent-encoding"
   ]
 
 # include sync client dependencies
@@ -79,12 +79,6 @@ vendored-openssl = ["openssl/vendored"]
 
 # exposes code/implementations used only by the search-streamer
 search-streamer = []
-
-# include ai support
-ai = ["openai", "rmcp-err", "client"]
-
-# include openai support in the client
-openai = ["openai-api-rs"]
 
 # include rmcp error support
 rmcp-err = ["rmcp"]
@@ -217,10 +211,8 @@ async-walkdir = { version = "2", optional = true }
 owo-colors = "4"
 
 # mcp dependencies
-rmcp = { version = "0.8", features = ["server", "macros", "transport-sse-server", "transport-io", "transport-streamable-http-server", "auth", "client", "transport-streamable-http-client", "transport-streamable-http-client-reqwest", "reqwest"], optional = true }
+rmcp = { version = "3.6", features = ["server", "macros", "transport-io", "transport-streamable-http-server", "auth", "client", "transport-streamable-http-client", "transport-streamable-http-client-reqwest", "reqwest"], optional = true }
 
-# openai support
-openai-api-rs = { version = "8", optional = true }
 
 
 # add cgroups for linux systems

@@ -58,6 +58,11 @@ pub use entities::flags::{Confidence, Flag};
 pub use entities::functions::{CompiledFunction, CompiledInstruction, DecompiledFunction};
 pub use entities::incident::{Incident, IncidentRequest};
 pub use entities::models::{
+    AWS_CONFIG_FILE, AWS_PROFILE, AgentModelMismatch, CREDENTIALS_DIR, HarnessCredential,
+    HarnessModelEntry, HarnessModels, MismatchNames, ModelCandidateRejection, ModelRejectReason,
+    ModelResolutionError, RunModels,
+};
+pub use entities::models::{
     AwsRoleSource, AzureApiMode, AzureClientAuth, BedrockEndpointKind, CatalogEntrySource,
     CredentialKind, CredentialSecrets, CredentialType, GeminiApiVersion, LimitsSource, ListedModel,
     MAX_LISTED_MODELS, ModelApi, ModelAuthLevel, ModelAuthSource, ModelBan, ModelBanKind,
@@ -76,16 +81,17 @@ pub use entities::shared::CriticalSector;
 pub use entities::tools::tool_portability_json;
 pub use entities::tools::{
     AgenticTool, AgenticToolBacking, ApprovalMode, ArgTarget, BindingCheck, ContainerToolBacking,
-    HarnessArgs, HarnessCapabilities, HarnessEnv, HarnessEnvVar, HarnessInputs, HarnessInterface,
-    HarnessOutputs, HarnessSpec, HarnessToolAccess, HarnessToolEntry, HarnessToolPolicy,
-    McpConfigFormat, McpConfigTarget, OrphanedRunPolicy, ToolAnnotations, ToolApproval,
-    ToolCapabilities, ToolEffect, ToolEntity, ToolEntityRequest, ToolExposure, ToolIcon,
-    ToolIconTheme, ToolInputMapping, ToolInstanceEntity, ToolInstanceEntityRequest,
-    ToolInstanceSummary, ToolInvocation, ToolKind, ToolLoading, ToolMechanism, ToolOutputDelivery,
+    DEFAULT_TOOL_RESULTS_DIR, HarnessAgentFile, HarnessArgs, HarnessCapabilities, HarnessEnv,
+    HarnessEnvVar, HarnessInputs, HarnessInterface, HarnessOutputs, HarnessRunFile, HarnessSpec,
+    HarnessToolAccess, HarnessToolEntry, HarnessToolPolicy, MappedToolInput, McpConfigFormat,
+    McpConfigTarget, OrphanedRunPolicy, ToolAnnotations, ToolApproval, ToolCapabilities,
+    ToolEffect, ToolEntity, ToolEntityRequest, ToolExposure, ToolIcon, ToolIconTheme,
+    ToolInputMapping, ToolInstanceEntity, ToolInstanceEntityRequest, ToolInstanceSummary,
+    ToolInvocation, ToolKind, ToolLoading, ToolMechanism, ToolOutputDelivery,
     ToolPortabilityReport, ToolResultFormat, ToolServerAuth, ToolServerDescriptor, ToolServerInput,
     ToolServerTimeouts, ToolServerToolOverride, ToolServerTools, ToolServerTransport,
     ToolServerTrust, ToolServerValue, ToolServersFile, ToolSpec, ToolStrictness, ToolUpdateFields,
-    ToolVersion, is_valid_server_id,
+    ToolVersion, effective_max_result_bytes, is_valid_server_id,
 };
 pub use entities::toolsets::{
     SelectorMatches, ToolSetEntity, ToolSetEntityRequest, ToolSetExclusion, ToolSetExclusionReason,
@@ -150,14 +156,15 @@ pub use images::{
 pub use jobs::{
     Checkpoint, GenericJob, GenericJobArgs, GenericJobArgsUpdate, GenericJobKwargs, GenericJobOpts,
     HandleJobResponse, JobDetailsList, JobHandleParams, JobHandleStatus, JobList, JobListOpts,
-    JobResetRequestor, JobResets, JobStatus, RawJob, RunningJob, WorkloadRuntimes,
+    JobResetRequestor, JobResets, JobStatus, MAX_CLAIM_LIMIT, RawJob, RunningJob, WorkloadRuntimes,
 };
 pub use logs::{Actions, JobActions, ReactionActions, StatusRequest, StatusUpdate};
 pub use network_policies::{
-    IpBlock, IpBlockRaw, Ipv4Block, Ipv6Block, NetworkPolicy, NetworkPolicyCustomK8sRule,
-    NetworkPolicyCustomLabel, NetworkPolicyListLine, NetworkPolicyListOpts,
-    NetworkPolicyListParams, NetworkPolicyPort, NetworkPolicyRequest, NetworkPolicyRule,
-    NetworkPolicyRuleRaw, NetworkPolicyUpdate, NetworkProtocol,
+    IpBlock, IpBlockRaw, Ipv4Block, Ipv6Block, K8S_NAME_MAX_CHARS, NO_TOOL_LABEL_VALUE,
+    NetworkPolicy, NetworkPolicyCustomK8sRule, NetworkPolicyCustomLabel, NetworkPolicyListLine,
+    NetworkPolicyListOpts, NetworkPolicyListParams, NetworkPolicyPort, NetworkPolicyRequest,
+    NetworkPolicyRule, NetworkPolicyRuleRaw, NetworkPolicyUpdate, NetworkProtocol, ToolIdsByName,
+    k8s_label, k8s_name,
 };
 pub use oauth::{
     OAuthCallbackParams, OAuthLinkParams, OAuthMaybeAuthed, OAuthRegistrationSessionId,
@@ -169,14 +176,18 @@ pub use pipelines::{
     PipelineUpdate, StageStats,
 };
 pub use reactions::{
-    BulkReactionResponse, HandleReactionResponse, PlannedStage, Reaction, ReactionArgs,
-    ReactionCache, ReactionCacheFileUpdate, ReactionCacheUpdate, ReactionCreation,
+    AgentProvenance, BulkReactionResponse, HandleReactionResponse, PlannedStage, Reaction,
+    ReactionArgs, ReactionCache, ReactionCacheFileUpdate, ReactionCacheUpdate, ReactionCreation,
     ReactionCursorOpts, ReactionCursorParams, ReactionDetailsList, ReactionExpire,
     ReactionIdResponse, ReactionList, ReactionListParams, ReactionModelBinding, ReactionPlan,
     ReactionRequest, ReactionSource, ReactionStatus, ReactionUpdate, ReactionWorkflowRun,
-    RunInputs, StageLogLine, StageLogs, StageLogsAdd, ToolRunRequest, WorkflowRunRequest,
+    RunInputs, RunProvenance, StageLogLine, StageLogs, StageLogsAdd, TOOL_RUN_POLL_MAX_SECS,
+    TOOL_RUN_POLL_START_SECS, ToolProvenance, ToolRunRequest, WorkflowRunRequest,
+    tool_run_retry_after,
 };
-pub use requisitions::{Requisition, ScopedRequisition, SpawnedUpdate};
+pub use requisitions::{
+    RUN_LABEL, Requisition, ScopedRequisition, SpawnedUpdate, TOOL_INSTANCE_LABEL, TOOL_LABEL,
+};
 pub use results::{
     AutoTag, AutoTagLogic, AutoTagUpdate, FilesHandler, FilesHandlerUpdate, OnDiskFile, Output,
     OutputChunk, OutputCollection, OutputCollectionUpdate, OutputDisplayType, OutputHandler,
@@ -184,8 +195,9 @@ pub use results::{
 };
 pub use runtime::{
     BareMetalEnvironment, DroppedImageField, ExecutionSettings, ImageConversion, JobDataSettings,
-    K8sEnvironment, KvmEnvironment, SchedulingSettings, WindowsEnvironment, WorkloadEnvironment,
-    WorkloadSpec,
+    K8sEnvironment, KvmEnvironment, SchedulingSettings, ToolChildrenDependencySettings,
+    ToolDependencies, ToolFileSystemDependencySettings, ToolResultDependencySettings,
+    WindowsEnvironment, WorkloadEnvironment, WorkloadSpec,
 };
 pub use search::events::{
     ResultSearchEvent, SearchEvent, SearchEventPopOpts, SearchEventStatus, SearchEventType,
@@ -209,9 +221,10 @@ pub use trees::{
 };
 pub use users::{
     AiEndpoint, AiEndpointUpdate, AiSettings, AiSettingsUpdate, AuthResponse, AuthedUser, Key,
-    ScopedToken, ScopedTokenRequest, ScopedTokenRole, ScopedTokenUpdate, ScopedUser, ScrubbedUser,
-    Theme, UnixInfo, User, UserCreate, UserCredentialRef, UserModelEndpoint, UserModelSettings,
-    UserModelSettingsUpdate, UserRole, UserSettings, UserSettingsUpdate, UserUpdate,
+    RunTokenScope, ScopedToken, ScopedTokenRequest, ScopedTokenRole, ScopedTokenUpdate, ScopedUser,
+    ScrubbedUser, Theme, UnixInfo, User, UserCreate, UserCredentialRef, UserModelEndpoint,
+    UserModelSettings, UserModelSettingsUpdate, UserRole, UserSettings, UserSettingsUpdate,
+    UserUpdate,
 };
 pub use version::{Arch, Component, Os, Version};
 pub use volumes::{ConfigMap, HostPath, HostPathTypes, NFS, Secret, Volume, VolumeTypes};
@@ -289,7 +302,7 @@ cfg_if::cfg_if! {
             OutputId, OutputIdRow, OutputRow, OutputFormBuilder, OutputForm, ResultIdRow,
             ResultUploadedRow,
         };
-        pub use scylla_utils::system::{WorkerRow, NodeRow, WorkerName};
+        pub use scylla_utils::system::{NodeRow, WorkerName};
         pub use scylla_utils::logs::{LogLineRow, NotificationBackupRow, NotificationRow};
         pub use scylla_utils::tags::{TagRow, FullTagRow, TagListRow, TagBackupRow};
         pub use scylla_utils::s3::S3Objects;

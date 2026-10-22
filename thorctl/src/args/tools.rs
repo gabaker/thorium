@@ -2,8 +2,10 @@
 
 use clap::Parser;
 use std::path::PathBuf;
+use uuid::Uuid;
 
 use super::helpers::{ShortFormatArgs, WaitForArgs, WatchArgs};
+use super::runs::RunInputArgs;
 
 /// The commands to send to the tools task handler
 #[derive(Parser, Debug)]
@@ -32,6 +34,71 @@ pub enum Tools {
     /// Disable or enable model ids for every run of a harness tool, without publishing
     #[clap(version, author)]
     HarnessModels(HarnessModels),
+    /// Run a tool instance on some files or repos, printing the run as one JSON object
+    #[clap(version, author)]
+    Run(RunTool),
+    /// Read the status or results of a tool run
+    #[clap(subcommand)]
+    Runs(ToolRuns),
+}
+
+/// A command to run a tool instance
+#[derive(Parser, Debug)]
+pub struct RunTool {
+    /// The tool instance to run, by ID or `<tool>@<version>`
+    pub tool_instance: String,
+    /// The group to run in (only needed when the tool instance has several groups you can run in)
+    #[clap(short, long)]
+    pub group: Option<String>,
+    /// The files and repos to run on
+    #[clap(flatten)]
+    pub inputs: RunInputArgs,
+    /// A tool call input as a JSON object, mapped onto an agentic container tool's job
+    #[clap(long)]
+    pub input: Option<String>,
+    /// A positional arg to pass to the tool's job
+    #[clap(long = "arg")]
+    pub args: Vec<String>,
+    /// Wait for the run to finish and download its results
+    #[clap(long)]
+    pub wait: bool,
+    /// The directory to download results into (the tool's output path by default)
+    #[clap(long)]
+    pub output: Option<PathBuf>,
+}
+
+/// The commands that read a tool run
+#[derive(Parser, Debug)]
+pub enum ToolRuns {
+    /// Print a tool run's status, with a hint of when to check it again while it runs
+    #[clap(version, author)]
+    Status(ToolRunStatus),
+    /// Download a finished tool run's results and print them
+    #[clap(version, author)]
+    Results(ToolRunResults),
+}
+
+/// A command to print a tool run's status
+#[derive(Parser, Debug)]
+pub struct ToolRunStatus {
+    /// The tool run's reaction id
+    pub reaction: Uuid,
+    /// The group the tool run is in (searched for in all of your groups by default)
+    #[clap(short, long)]
+    pub group: Option<String>,
+}
+
+/// A command to download a tool run's results
+#[derive(Parser, Debug)]
+pub struct ToolRunResults {
+    /// The tool run's reaction id
+    pub reaction: Uuid,
+    /// The group the tool run is in (searched for in all of your groups by default)
+    #[clap(short, long)]
+    pub group: Option<String>,
+    /// The directory to download results into
+    #[clap(long)]
+    pub output: Option<PathBuf>,
 }
 
 /// A command to list tools
