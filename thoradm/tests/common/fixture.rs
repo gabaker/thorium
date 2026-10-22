@@ -5,12 +5,15 @@
 //! scoped tokens, groups and their role sets (one allowing no repos), images with bans and network
 //! policies, a banned pipeline, notifications, samples with tags, comments, and attachments,
 //! results with files and entity blobs, repos, entities and associations, a profile icon and an
-//! entity image, nodes and workers, reactions with stage logs, and changed system settings. The
-//! runtime state of jobs (a sleeping generator, a finished job's time to complete, a reaction's
-//! cache) comes from claiming and handling jobs, and the families only LDAP and OAuth logins write
-//! (metagroups, aliases, login contexts, registration sessions, and link tokens) come from the
-//! API's own writers, since the test cluster has neither.
+//! entity image, nodes and workers, reactions with stage logs, the data Agentic Workflows adds
+//! (tools and their instances, a toolset, models, an agent, a workflow, and a run holding a run
+//! token), and changed system settings. The runtime state of jobs (a sleeping generator, a
+//! finished job's time to complete, a reaction's cache) comes from claiming and handling jobs, and
+//! the families only LDAP and OAuth logins write (metagroups, aliases, login contexts,
+//! registration sessions, and link tokens) come from the API's own writers, since the test cluster
+//! has neither.
 
+use super::agentic;
 use super::harness::Harness;
 use super::names::Names;
 use super::seed;
@@ -41,6 +44,8 @@ pub struct Broad {
     pub sample: String,
     /// The name of the image with bans and network policies
     pub image: String,
+    /// What the data Agentic Workflows adds seeded
+    pub agentic: agentic::Agentic,
 }
 
 /// Seeds one of every kind of resource through the API
@@ -76,6 +81,8 @@ pub async fn broad(harness: &Harness) -> Broad {
     entities(&client, &names, &group, &sample).await;
     graphics(harness, &names, &group).await;
     runtime(&client, &names, &group).await;
+    // the data Agentic Workflows adds, with a run that holds a run token
+    let agentic = Box::pin(agentic::seed(&client, &names, &group, &sample)).await;
     Box::pin(logins(harness, &client, &names, &group)).await;
     // change system settings from their defaults
     let settings_update = SystemSettingsUpdate::default()
@@ -94,6 +101,7 @@ pub async fn broad(harness: &Harness) -> Broad {
         second_group,
         sample,
         image,
+        agentic,
     }
 }
 

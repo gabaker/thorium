@@ -2353,11 +2353,14 @@ fn variant_counts() -> Vec<(&'static str, usize)> {
     // one entry per guarded list
     use std::mem::variant_count;
     use thorium::models::{
-        ArgStrategy, AssociationKind, AutoTagLogic, CommitishKinds, DependencyPassStrategy,
-        Directionality, EntityKinds, EventTrigger, FileNamingStrategy, HostPathTypes, ImageBanKind,
-        ImageScaler, KwargDependency, NodeHealth, NotificationLevel, NotificationType,
-        OutputDisplayType, OutputHandler, PipelineBanKind, PruneAction, PrunedReferent, S3Objects,
-        ScopedTokenRole, SpawnLimits, TagType, Theme, ToolVersion, UserRole, VolumeTypes,
+        ArgStrategy, AssociationKind, AutoTagLogic, AwsRoleSource, AzureApiMode, AzureClientAuth,
+        BedrockEndpointKind, CatalogEntrySource, CommitishKinds, CredentialKind,
+        DependencyPassStrategy, Directionality, EntityKinds, EventTrigger, FileNamingStrategy,
+        GeminiApiVersion, HostPathTypes, ImageBanKind, ImageScaler, KwargDependency, LimitsSource,
+        ModelBanKind, ModelProvider, ModelProviderKind, ModelRefreshState, NodeHealth,
+        NotificationLevel, NotificationType, OutputDisplayType, OutputHandler, PipelineBanKind,
+        PruneAction, PrunedReferent, S3Objects, ScopedTokenRole, SpawnLimits, TagType, Theme,
+        ToolVersion, UserRole, VertexLocation, VertexMultiRegion, VolumeTypes,
     };
     vec![
         ("TagType", variant_count::<TagType>()),
@@ -2392,6 +2395,23 @@ fn variant_counts() -> Vec<(&'static str, usize)> {
         ("AutoTagLogic", variant_count::<AutoTagLogic>()),
         ("SpawnLimits", variant_count::<SpawnLimits>()),
         ("ToolVersion", variant_count::<ToolVersion>()),
+        ("AwsRoleSource", variant_count::<AwsRoleSource>()),
+        ("AzureApiMode", variant_count::<AzureApiMode>()),
+        ("AzureClientAuth", variant_count::<AzureClientAuth>()),
+        (
+            "BedrockEndpointKind",
+            variant_count::<BedrockEndpointKind>(),
+        ),
+        ("CatalogEntrySource", variant_count::<CatalogEntrySource>()),
+        ("CredentialKind", variant_count::<CredentialKind>()),
+        ("GeminiApiVersion", variant_count::<GeminiApiVersion>()),
+        ("LimitsSource", variant_count::<LimitsSource>()),
+        ("ModelBanKind", variant_count::<ModelBanKind>()),
+        ("ModelProvider", variant_count::<ModelProvider>()),
+        ("ModelProviderKind", variant_count::<ModelProviderKind>()),
+        ("ModelRefreshState", variant_count::<ModelRefreshState>()),
+        ("VertexLocation", variant_count::<VertexLocation>()),
+        ("VertexMultiRegion", variant_count::<VertexMultiRegion>()),
     ]
 }
 

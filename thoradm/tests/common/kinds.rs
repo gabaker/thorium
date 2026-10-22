@@ -83,6 +83,7 @@ pub const KINDS: &[(&str, &[&str])] = &[
             "image_used_by:*",
             "pipelines:*",
             "pipeline_data:*",
+            "workload_runtimes",
         ],
     ),
     ("settings", &["system_settings"]),

@@ -9,11 +9,14 @@
 
 use serde_json::json;
 use thorium::models::{
-    ArgStrategy, AssociationKind, AutoTagLogic, CommitishKinds, DependencyPassStrategy,
-    Directionality, EntityKinds, EventTrigger, FileNamingStrategy, HostPathTypes, ImageBanKind,
-    ImageScaler, KwargDependency, NodeHealth, NotificationLevel, NotificationType,
-    OutputDisplayType, OutputHandler, PipelineBanKind, PruneAction, PrunedReferent, S3Objects,
-    ScopedTokenRole, SpawnLimits, TagType, Theme, ToolVersion, UserRole, VolumeTypes,
+    ArgStrategy, AssociationKind, AutoTagLogic, AwsRoleSource, AzureApiMode, AzureClientAuth,
+    BedrockEndpointKind, CatalogEntrySource, CommitishKinds, CredentialKind,
+    DependencyPassStrategy, Directionality, EntityKinds, EventTrigger, FileNamingStrategy,
+    GeminiApiVersion, HostPathTypes, ImageBanKind, ImageScaler, KwargDependency, LimitsSource,
+    ModelBanKind, ModelProvider, ModelProviderKind, ModelRefreshState, NodeHealth,
+    NotificationLevel, NotificationType, OutputDisplayType, OutputHandler, PipelineBanKind,
+    PruneAction, PrunedReferent, S3Objects, ScopedTokenRole, SpawnLimits, TagType, Theme,
+    ToolVersion, UserRole, VertexLocation, VertexMultiRegion, VolumeTypes,
 };
 
 /// Builds a value from its JSON form, for variants that carry data
@@ -959,6 +962,415 @@ fn checked<T>(
     }
 }
 
+/// One value of every `AwsRoleSource` variant, in declaration order
+#[must_use]
+pub fn aws_role_sources() -> Vec<AwsRoleSource> {
+    vec![AwsRoleSource::AccessKey(uuid::Uuid::from_u128(1))]
+}
+
+/// Returns an `AwsRoleSource` variant's position in `aws_role_sources`
+///
+/// # Arguments
+///
+/// * `value` - The variant to place
+#[must_use]
+pub fn aws_role_source_index(value: &AwsRoleSource) -> usize {
+    // a new variant makes this match non-exhaustive, so the list can't silently miss it
+    match value {
+        AwsRoleSource::AccessKey(_) => 0,
+    }
+}
+
+/// One value of every `AzureApiMode` variant, in declaration order
+#[must_use]
+pub fn azure_api_modes() -> Vec<AzureApiMode> {
+    vec![
+        AzureApiMode::V1,
+        AzureApiMode::Legacy {
+            api_version: "2024-10-21".to_owned(),
+        },
+    ]
+}
+
+/// Returns an `AzureApiMode` variant's position in `azure_api_modes`
+///
+/// # Arguments
+///
+/// * `value` - The variant to place
+#[must_use]
+pub fn azure_api_mode_index(value: &AzureApiMode) -> usize {
+    // a new variant makes this match non-exhaustive, so the list can't silently miss it
+    match value {
+        AzureApiMode::V1 => 0,
+        AzureApiMode::Legacy { .. } => 1,
+    }
+}
+
+/// One value of every `AzureClientAuth` variant, in declaration order
+#[must_use]
+pub fn azure_client_auths() -> Vec<AzureClientAuth> {
+    vec![AzureClientAuth::ClientSecret, AzureClientAuth::Certificate]
+}
+
+/// Returns an `AzureClientAuth` variant's position in `azure_client_auths`
+///
+/// # Arguments
+///
+/// * `value` - The variant to place
+#[must_use]
+pub fn azure_client_auth_index(value: &AzureClientAuth) -> usize {
+    // a new variant makes this match non-exhaustive, so the list can't silently miss it
+    match value {
+        AzureClientAuth::ClientSecret => 0,
+        AzureClientAuth::Certificate => 1,
+    }
+}
+
+/// One value of every `BedrockEndpointKind` variant, in declaration order
+#[must_use]
+pub fn bedrock_endpoint_kinds() -> Vec<BedrockEndpointKind> {
+    vec![BedrockEndpointKind::Runtime, BedrockEndpointKind::Mantle]
+}
+
+/// Returns a `BedrockEndpointKind` variant's position in `bedrock_endpoint_kinds`
+///
+/// # Arguments
+///
+/// * `value` - The variant to place
+#[must_use]
+pub fn bedrock_endpoint_kind_index(value: &BedrockEndpointKind) -> usize {
+    // a new variant makes this match non-exhaustive, so the list can't silently miss it
+    match value {
+        BedrockEndpointKind::Runtime => 0,
+        BedrockEndpointKind::Mantle => 1,
+    }
+}
+
+/// One value of every `CatalogEntrySource` variant, in declaration order
+#[must_use]
+pub fn catalog_entry_sources() -> Vec<CatalogEntrySource> {
+    vec![
+        CatalogEntrySource::Manual,
+        CatalogEntrySource::Refreshed {
+            first_seen: chrono::DateTime::UNIX_EPOCH,
+        },
+    ]
+}
+
+/// Returns a `CatalogEntrySource` variant's position in `catalog_entry_sources`
+///
+/// # Arguments
+///
+/// * `value` - The variant to place
+#[must_use]
+pub fn catalog_entry_source_index(value: &CatalogEntrySource) -> usize {
+    // a new variant makes this match non-exhaustive, so the list can't silently miss it
+    match value {
+        CatalogEntrySource::Manual => 0,
+        CatalogEntrySource::Refreshed { .. } => 1,
+    }
+}
+
+/// One value of every `CredentialKind` variant, in declaration order
+#[must_use]
+pub fn credential_kinds() -> Vec<CredentialKind> {
+    vec![
+        CredentialKind::ApiKey,
+        CredentialKind::AwsAccessKey {
+            access_key_id: "AKIAEXAMPLE".to_owned(),
+        },
+        CredentialKind::AwsAssumeRole {
+            role_arn: "arn:aws:iam::123456789012:role/example".to_owned(),
+            external_id: None,
+            session_name: None,
+            duration_seconds: None,
+            source: AwsRoleSource::AccessKey(uuid::Uuid::from_u128(1)),
+        },
+        CredentialKind::AwsBearerToken,
+        CredentialKind::GcpCredentialsJson {
+            impersonate_service_account: None,
+        },
+        CredentialKind::AzureEntraClient {
+            tenant_id: "tenant".to_owned(),
+            client_id: "client".to_owned(),
+            auth: AzureClientAuth::ClientSecret,
+        },
+    ]
+}
+
+/// Returns a `CredentialKind` variant's position in `credential_kinds`
+///
+/// # Arguments
+///
+/// * `value` - The variant to place
+#[must_use]
+pub fn credential_kind_index(value: &CredentialKind) -> usize {
+    // a new variant makes this match non-exhaustive, so the list can't silently miss it
+    match value {
+        CredentialKind::ApiKey => 0,
+        CredentialKind::AwsAccessKey { .. } => 1,
+        CredentialKind::AwsAssumeRole { .. } => 2,
+        CredentialKind::AwsBearerToken => 3,
+        CredentialKind::GcpCredentialsJson { .. } => 4,
+        CredentialKind::AzureEntraClient { .. } => 5,
+    }
+}
+
+/// One value of every `GeminiApiVersion` variant, in declaration order
+#[must_use]
+pub fn gemini_api_versions() -> Vec<GeminiApiVersion> {
+    vec![GeminiApiVersion::V1, GeminiApiVersion::V1Beta]
+}
+
+/// Returns a `GeminiApiVersion` variant's position in `gemini_api_versions`
+///
+/// # Arguments
+///
+/// * `value` - The variant to place
+#[must_use]
+pub fn gemini_api_version_index(value: &GeminiApiVersion) -> usize {
+    // a new variant makes this match non-exhaustive, so the list can't silently miss it
+    match value {
+        GeminiApiVersion::V1 => 0,
+        GeminiApiVersion::V1Beta => 1,
+    }
+}
+
+/// One value of every `LimitsSource` variant, in declaration order
+#[must_use]
+pub fn limits_sources() -> Vec<LimitsSource> {
+    vec![
+        LimitsSource::Manual,
+        LimitsSource::Refreshed {
+            at: chrono::DateTime::UNIX_EPOCH,
+        },
+    ]
+}
+
+/// Returns a `LimitsSource` variant's position in `limits_sources`
+///
+/// # Arguments
+///
+/// * `value` - The variant to place
+#[must_use]
+pub fn limits_source_index(value: &LimitsSource) -> usize {
+    // a new variant makes this match non-exhaustive, so the list can't silently miss it
+    match value {
+        LimitsSource::Manual => 0,
+        LimitsSource::Refreshed { .. } => 1,
+    }
+}
+
+/// One value of every `ModelBanKind` variant, in declaration order
+#[must_use]
+pub fn model_ban_kinds() -> Vec<ModelBanKind> {
+    vec![
+        ModelBanKind::Generic("banned".to_owned()),
+        ModelBanKind::ModelRemoved,
+        ModelBanKind::CredentialRejected {
+            status: 401,
+            message: "rejected".to_owned(),
+        },
+        ModelBanKind::CredentialExpired,
+        ModelBanKind::EndpointUnreachable("unreachable".to_owned()),
+        ModelBanKind::BrokenReference(uuid::Uuid::from_u128(1)),
+        ModelBanKind::NotAllowedByDeployment,
+    ]
+}
+
+/// Returns a `ModelBanKind` variant's position in `model_ban_kinds`
+///
+/// # Arguments
+///
+/// * `value` - The variant to place
+#[must_use]
+pub fn model_ban_kind_index(value: &ModelBanKind) -> usize {
+    // a new variant makes this match non-exhaustive, so the list can't silently miss it
+    match value {
+        ModelBanKind::Generic(_) => 0,
+        ModelBanKind::ModelRemoved => 1,
+        ModelBanKind::CredentialRejected { .. } => 2,
+        ModelBanKind::CredentialExpired => 3,
+        ModelBanKind::EndpointUnreachable(_) => 4,
+        ModelBanKind::BrokenReference(_) => 5,
+        ModelBanKind::NotAllowedByDeployment => 6,
+    }
+}
+
+/// One value of every `ModelProvider` variant, in declaration order
+#[must_use]
+pub fn model_providers() -> Vec<ModelProvider> {
+    vec![
+        ModelProvider::OpenAi {
+            base_url: None,
+            organization: None,
+            project: None,
+        },
+        ModelProvider::Anthropic {
+            base_url: None,
+            version: "2023-06-01".to_owned(),
+            betas: std::collections::BTreeSet::new(),
+            workspace_id: None,
+        },
+        ModelProvider::Bedrock {
+            region: "us-east-1".to_owned(),
+            endpoint_kind: BedrockEndpointKind::Runtime,
+            endpoint_url: None,
+            workspace_id: None,
+        },
+        ModelProvider::Vertex {
+            project_id: None,
+            location: VertexLocation::Global,
+            endpoint_url: None,
+        },
+        ModelProvider::Gemini {
+            base_url: None,
+            api_version: GeminiApiVersion::V1Beta,
+        },
+        ModelProvider::AzureOpenAi {
+            endpoint: "https://example.openai.azure.com".to_owned(),
+            api_mode: AzureApiMode::V1,
+            entra_scope: None,
+        },
+        ModelProvider::LiteLlm {
+            base_url: "https://litellm.example".to_owned(),
+            key_header: None,
+        },
+        ModelProvider::OpenAiCompatible {
+            base_url: "https://models.example".to_owned(),
+            extra_headers: std::collections::BTreeMap::new(),
+            key_header: None,
+        },
+    ]
+}
+
+/// Returns a `ModelProvider` variant's position in `model_providers`
+///
+/// # Arguments
+///
+/// * `value` - The variant to place
+#[must_use]
+pub fn model_provider_index(value: &ModelProvider) -> usize {
+    // a new variant makes this match non-exhaustive, so the list can't silently miss it
+    match value {
+        ModelProvider::OpenAi { .. } => 0,
+        ModelProvider::Anthropic { .. } => 1,
+        ModelProvider::Bedrock { .. } => 2,
+        ModelProvider::Vertex { .. } => 3,
+        ModelProvider::Gemini { .. } => 4,
+        ModelProvider::AzureOpenAi { .. } => 5,
+        ModelProvider::LiteLlm { .. } => 6,
+        ModelProvider::OpenAiCompatible { .. } => 7,
+    }
+}
+
+/// One value of every `ModelProviderKind` variant, in declaration order
+#[must_use]
+pub fn model_provider_kinds() -> Vec<ModelProviderKind> {
+    vec![
+        ModelProviderKind::OpenAi,
+        ModelProviderKind::Anthropic,
+        ModelProviderKind::Bedrock,
+        ModelProviderKind::Vertex,
+        ModelProviderKind::Gemini,
+        ModelProviderKind::AzureOpenAi,
+        ModelProviderKind::LiteLlm,
+        ModelProviderKind::OpenAiCompatible,
+    ]
+}
+
+/// Returns a `ModelProviderKind` variant's position in `model_provider_kinds`
+///
+/// # Arguments
+///
+/// * `value` - The variant to place
+#[must_use]
+pub fn model_provider_kind_index(value: &ModelProviderKind) -> usize {
+    // a new variant makes this match non-exhaustive, so the list can't silently miss it
+    match value {
+        ModelProviderKind::OpenAi => 0,
+        ModelProviderKind::Anthropic => 1,
+        ModelProviderKind::Bedrock => 2,
+        ModelProviderKind::Vertex => 3,
+        ModelProviderKind::Gemini => 4,
+        ModelProviderKind::AzureOpenAi => 5,
+        ModelProviderKind::LiteLlm => 6,
+        ModelProviderKind::OpenAiCompatible => 7,
+    }
+}
+
+/// One value of every `ModelRefreshState` variant, in declaration order
+#[must_use]
+pub fn model_refresh_states() -> Vec<ModelRefreshState> {
+    vec![
+        ModelRefreshState::Never,
+        ModelRefreshState::Pending,
+        ModelRefreshState::Succeeded,
+        ModelRefreshState::Failed,
+    ]
+}
+
+/// Returns a `ModelRefreshState` variant's position in `model_refresh_states`
+///
+/// # Arguments
+///
+/// * `value` - The variant to place
+#[must_use]
+pub fn model_refresh_state_index(value: &ModelRefreshState) -> usize {
+    // a new variant makes this match non-exhaustive, so the list can't silently miss it
+    match value {
+        ModelRefreshState::Never => 0,
+        ModelRefreshState::Pending => 1,
+        ModelRefreshState::Succeeded => 2,
+        ModelRefreshState::Failed => 3,
+    }
+}
+
+/// One value of every `VertexLocation` variant, in declaration order
+#[must_use]
+pub fn vertex_locations() -> Vec<VertexLocation> {
+    vec![
+        VertexLocation::Region("us-east5".to_owned()),
+        VertexLocation::Global,
+        VertexLocation::MultiRegion(VertexMultiRegion::Us),
+    ]
+}
+
+/// Returns a `VertexLocation` variant's position in `vertex_locations`
+///
+/// # Arguments
+///
+/// * `value` - The variant to place
+#[must_use]
+pub fn vertex_location_index(value: &VertexLocation) -> usize {
+    // a new variant makes this match non-exhaustive, so the list can't silently miss it
+    match value {
+        VertexLocation::Region(_) => 0,
+        VertexLocation::Global => 1,
+        VertexLocation::MultiRegion(_) => 2,
+    }
+}
+
+/// One value of every `VertexMultiRegion` variant, in declaration order
+#[must_use]
+pub fn vertex_multi_regions() -> Vec<VertexMultiRegion> {
+    vec![VertexMultiRegion::Us, VertexMultiRegion::Eu]
+}
+
+/// Returns a `VertexMultiRegion` variant's position in `vertex_multi_regions`
+///
+/// # Arguments
+///
+/// * `value` - The variant to place
+#[must_use]
+pub fn vertex_multi_region_index(value: &VertexMultiRegion) -> usize {
+    // a new variant makes this match non-exhaustive, so the list can't silently miss it
+    match value {
+        VertexMultiRegion::Us => 0,
+        VertexMultiRegion::Eu => 1,
+    }
+}
+
 /// Every guarded list, archived enums first
 #[must_use]
 #[allow(clippy::too_many_lines)]
@@ -1187,6 +1599,118 @@ pub fn all() -> Vec<EnumList> {
             true,
             &image_versions(),
             image_version_index,
+            variant_name,
+            None,
+        ),
+        checked(
+            "AwsRoleSource",
+            true,
+            &aws_role_sources(),
+            aws_role_source_index,
+            variant_name,
+            None,
+        ),
+        checked(
+            "AzureApiMode",
+            true,
+            &azure_api_modes(),
+            azure_api_mode_index,
+            variant_name,
+            None,
+        ),
+        checked(
+            "AzureClientAuth",
+            true,
+            &azure_client_auths(),
+            azure_client_auth_index,
+            variant_name,
+            None,
+        ),
+        checked(
+            "BedrockEndpointKind",
+            true,
+            &bedrock_endpoint_kinds(),
+            bedrock_endpoint_kind_index,
+            variant_name,
+            None,
+        ),
+        checked(
+            "CatalogEntrySource",
+            true,
+            &catalog_entry_sources(),
+            catalog_entry_source_index,
+            variant_name,
+            None,
+        ),
+        checked(
+            "CredentialKind",
+            true,
+            &credential_kinds(),
+            credential_kind_index,
+            variant_name,
+            None,
+        ),
+        checked(
+            "GeminiApiVersion",
+            true,
+            &gemini_api_versions(),
+            gemini_api_version_index,
+            variant_name,
+            None,
+        ),
+        checked(
+            "LimitsSource",
+            true,
+            &limits_sources(),
+            limits_source_index,
+            variant_name,
+            None,
+        ),
+        checked(
+            "ModelBanKind",
+            true,
+            &model_ban_kinds(),
+            model_ban_kind_index,
+            variant_name,
+            None,
+        ),
+        checked(
+            "ModelProvider",
+            true,
+            &model_providers(),
+            model_provider_index,
+            variant_name,
+            None,
+        ),
+        checked(
+            "ModelProviderKind",
+            true,
+            &model_provider_kinds(),
+            model_provider_kind_index,
+            variant_name,
+            None,
+        ),
+        checked(
+            "ModelRefreshState",
+            true,
+            &model_refresh_states(),
+            model_refresh_state_index,
+            variant_name,
+            None,
+        ),
+        checked(
+            "VertexLocation",
+            true,
+            &vertex_locations(),
+            vertex_location_index,
+            variant_name,
+            None,
+        ),
+        checked(
+            "VertexMultiRegion",
+            true,
+            &vertex_multi_regions(),
+            vertex_multi_region_index,
             variant_name,
             None,
         ),

@@ -554,3 +554,50 @@ async fn an_older_backup_without_the_newer_fields_verifies_after_restore() {
         describe(&run.output)
     );
 }
+
+/// A cluster whose tool-instance runtimes were lost after the backup fails `verify --cluster`'s
+/// Redis diff, naming the runtimes
+#[tokio::test]
+async fn lost_workload_runtimes_are_a_difference() {
+    // one tool instance's average runtime in an otherwise fresh target, backed up with Redis
+    let harness = Harness::get().await;
+    let _guard = harness.restore_guard().await;
+    empty_target(harness).await;
+    let ns = harness.conf.thorium.namespace.clone();
+    let runtimes = format!("{ns}:workload_runtimes");
+    let pool = redis_pool(&harness.conf).await.unwrap();
+    let mut conn = pool.get().await.unwrap();
+    let () = redis::cmd("HSET")
+        .arg(&runtimes)
+        .arg(uuid::Uuid::new_v4().to_string())
+        .arg(42.5)
+        .query_async(&mut *conn)
+        .await
+        .unwrap();
+    let backup = harness.scratch("lost-runtimes").join("backup");
+    let taken = harness
+        .thoradm()
+        .args(["backup", "new", "redis", "-o"])
+        .arg(&backup)
+        .output()
+        .expect("failed to run thoradm");
+    assert_eq!(taken.status.code(), Some(0), "{}", describe(&taken));
+    // the unchanged cluster matches the backup
+    let run = verify_cluster(harness, &backup);
+    assert_eq!(run.output.status.code(), Some(0), "{}", run.describe());
+    // with the runtimes gone it no longer does, and the record names them
+    let () = redis::cmd("DEL")
+        .arg(&runtimes)
+        .query_async(&mut *conn)
+        .await
+        .unwrap();
+    let run = verify_cluster(harness, &backup);
+    assert_eq!(run.output.status.code(), Some(2), "{}", run.describe());
+    assert!(
+        run.records
+            .iter()
+            .any(|record| record.key.as_deref() == Some("workload_runtimes")),
+        "{}",
+        run.describe()
+    );
+}

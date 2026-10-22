@@ -189,6 +189,10 @@ fn link_tokens_and_sets(doc: &mut Value, usernames: &[Value]) {
     if !usernames.is_empty() {
         for (index, mut token) in tokens.into_iter().enumerate() {
             token["owner"] = usernames[index % usernames.len()].clone();
+            // a backup leaves out run tokens, so a generated token carries no run scope
+            if let Some(object) = token.as_object_mut() {
+                object.remove("run");
+            }
             let flipped = flipped_developer(&token);
             linked_tokens.push(token);
             linked_tokens.extend(flipped);
@@ -369,6 +373,13 @@ async fn write(harness: &Harness, shared: &Shared, doc: &Value, flavor: &Flavor)
             .await
             .unwrap_or_else(|err| panic!("{label} scoped token create: {err:?}"));
     }
+    // workload runtimes: write the whole map into the runtimes hash
+    let runtimes: std::collections::BTreeMap<uuid::Uuid, f64> =
+        serde_json::from_value(doc["workload_runtimes"].clone())
+            .unwrap_or_else(|err| panic!("{label} workload runtimes: {err}"));
+    db::jobs::restore_workload_runtimes(&runtimes, shared)
+        .await
+        .unwrap_or_else(|err| panic!("{label} workload runtimes write: {err:?}"));
     // network-policy sets: add each policy to its group's set
     for set in decode("network_policy_sets") {
         let group = set["group"].as_str().unwrap_or_default();

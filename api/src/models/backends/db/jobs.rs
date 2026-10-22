@@ -1,7 +1,7 @@
 use axum::http::StatusCode;
 use bb8_redis::redis::cmd;
 use chrono::prelude::*;
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use tracing::{Level, event, instrument, span};
 use uuid::Uuid;
 
@@ -688,6 +688,43 @@ pub async fn runtime_cap(
     };
     // a tool instance without a timeout is capped at a week
     Ok(timeout.unwrap_or(UNTIMED_RUNTIME_CAP))
+}
+
+/// Gets the average runtime of every tool instance, for a backup
+///
+/// # Arguments
+///
+/// * `shared` - Shared Thorium objects
+#[instrument(name = "db::jobs::backup_workload_runtimes", skip_all, err(Debug))]
+pub async fn backup_workload_runtimes(shared: &Shared) -> Result<BTreeMap<Uuid, f64>, ApiError> {
+    // read every runtime and keep them in a stable order
+    let runtimes = workload_runtimes(shared).await?.runtimes;
+    Ok(runtimes.into_iter().collect())
+}
+
+/// Restores the average runtime of each tool instance a backup holds
+///
+/// # Arguments
+///
+/// * `runtimes` - The runtimes to restore, keyed by tool instance
+/// * `shared` - Shared Thorium objects
+#[instrument(name = "db::jobs::restore_workload_runtimes", skip_all, err(Debug))]
+pub async fn restore_workload_runtimes(
+    runtimes: &BTreeMap<Uuid, f64>,
+    shared: &Shared,
+) -> Result<(), ApiError> {
+    // nothing to write without runtimes
+    if runtimes.is_empty() {
+        return Ok(());
+    }
+    // write every runtime into the runtimes hash at once
+    let mut hset = cmd("hset");
+    hset.arg(JobKeys::workload_runtimes(shared));
+    for (tool_instance, runtime) in runtimes {
+        hset.arg(tool_instance.to_string()).arg(runtime);
+    }
+    let () = query!(hset, shared).await?;
+    Ok(())
 }
 
 /// Seeds a new tool instance's runtime with its previous instance's runtime or the default
