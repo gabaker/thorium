@@ -367,3 +367,58 @@ impl Versioned for RepoData {
     /// Format 1 archived these rows with the same layout, so they decode as `RepoData` itself
     type V1 = RepoData;
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Pins the layout of the archived [`RepoList`] row, which written backups depend on
+    #[test]
+    fn repo_list_layout_is_pinned() {
+        // the archived row's size and the offset of every field must stay as backups hold them
+        assert_layout!(ArchivedRepoList, 144, {
+            group: 112,
+            year: 120,
+            bucket: 124,
+            uploaded: 100,
+            id: 128,
+            creator: 0,
+            name: 12,
+            provider: 24,
+            scheme: 36,
+            url: 48,
+            user: 60,
+            default_checkout: 72,
+            earliest: 84,
+        });
+    }
+
+    /// Pins the layout of the archived [`RepoData`] row, which written backups depend on
+    #[test]
+    fn repo_data_layout_is_pinned() {
+        // the archived row's size and the offset of every field must stay as backups hold them
+        assert_layout!(ArchivedRepoData, 16, {
+            repo: 0,
+            hash: 8,
+        });
+    }
+
+    /// Pins the layout of the archived [`RepoListV1`] row, which written backups depend on
+    #[test]
+    fn repo_list_v1_layout_is_pinned() {
+        // the archived row's size and the offset of every field must stay as backups hold them
+        assert_layout!(ArchivedRepoListV1, 92, {
+            group: 12,
+            year: 20,
+            bucket: 24,
+            uploaded: 0,
+            id: 28,
+            creator: 44,
+            name: 52,
+            provider: 60,
+            scheme: 68,
+            url: 76,
+            user: 84,
+        });
+    }
+}

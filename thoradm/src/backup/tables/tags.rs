@@ -187,3 +187,24 @@ impl Versioned for Tag {
     /// Format 1 archived these rows with the same layout, so they decode as `Tag` itself
     type V1 = Tag;
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Pins the layout of the archived [`Tag`] row, which written backups depend on
+    #[test]
+    fn tag_layout_is_pinned() {
+        // the archived row's size and the offset of every field must stay as backups hold them
+        assert_layout!(ArchivedTag, 56, {
+            tag_type: 52,
+            group: 12,
+            year: 20,
+            bucket: 24,
+            key: 28,
+            value: 36,
+            uploaded: 0,
+            item: 44,
+        });
+    }
+}

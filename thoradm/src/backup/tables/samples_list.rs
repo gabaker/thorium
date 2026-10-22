@@ -239,3 +239,48 @@ impl Versioned for SamplesList {
     /// Format 1 rows decode as [`SamplesListV1`], which converts into `SamplesList`
     type V1 = SamplesListV1;
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Pins the layout of the archived [`SamplesList`] row, which written backups depend on
+    #[test]
+    fn samples_list_layout_is_pinned() {
+        // the archived row's size and the offset of every field must stay as backups hold them
+        assert_layout!(ArchivedSamplesList, 128, {
+            group: 96,
+            year: 104,
+            bucket: 108,
+            sha256: 0,
+            sha1: 12,
+            md5: 24,
+            id: 112,
+            name: 36,
+            description: 48,
+            submitter: 60,
+            origin: 72,
+            uploaded: 84,
+        });
+    }
+
+    /// Pins the layout of the archived [`SamplesListV1`] row, which written backups depend on
+    #[test]
+    fn samples_list_v1_layout_is_pinned() {
+        // the archived row's size and the offset of every field must stay as backups hold them
+        assert_layout!(ArchivedSamplesListV1, 112, {
+            group: 48,
+            year: 56,
+            bucket: 60,
+            sha256: 64,
+            sha1: 72,
+            md5: 80,
+            id: 88,
+            name: 0,
+            description: 12,
+            submitter: 104,
+            origin: 24,
+            uploaded: 36,
+        });
+    }
+}

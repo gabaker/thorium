@@ -398,3 +398,70 @@ impl Versioned for CommitishList {
     /// Format 1 rows decode as [`CommitishListV1`], which converts into `CommitishList`
     type V1 = CommitishListV1;
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Pins the layout of the archived [`Commitish`] row, which written backups depend on
+    #[test]
+    fn commitish_layout_is_pinned() {
+        // the archived row's size and the offset of every field must stay as backups hold them
+        assert_layout!(ArchivedCommitish, 68, {
+            kind: 64,
+            group: 40,
+            repo: 48,
+            key: 56,
+            data: 0,
+            repo_data: 12,
+            timestamp: 24,
+        });
+    }
+
+    /// Pins the layout of the archived [`CommitishList`] row, which written backups depend on
+    #[test]
+    fn commitish_list_layout_is_pinned() {
+        // the archived row's size and the offset of every field must stay as backups hold them
+        assert_layout!(ArchivedCommitishList, 60, {
+            kind: 56,
+            group: 24,
+            year: 32,
+            bucket: 36,
+            repo: 40,
+            timestamp: 12,
+            key: 48,
+            repo_data: 0,
+        });
+    }
+
+    /// Pins the layout of the archived [`CommitishV1`] row, which written backups depend on
+    #[test]
+    fn commitish_v1_layout_is_pinned() {
+        // the archived row's size and the offset of every field must stay as backups hold them
+        assert_layout!(ArchivedCommitishV1, 56, {
+            kind: 52,
+            group: 12,
+            repo: 20,
+            key: 28,
+            data: 36,
+            repo_data: 44,
+            timestamp: 0,
+        });
+    }
+
+    /// Pins the layout of the archived [`CommitishListV1`] row, which written backups depend on
+    #[test]
+    fn commitish_list_v1_layout_is_pinned() {
+        // the archived row's size and the offset of every field must stay as backups hold them
+        assert_layout!(ArchivedCommitishListV1, 56, {
+            kind: 52,
+            group: 12,
+            year: 20,
+            bucket: 24,
+            repo: 28,
+            timestamp: 0,
+            key: 36,
+            repo_data: 44,
+        });
+    }
+}

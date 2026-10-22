@@ -187,3 +187,34 @@ impl Versioned for Node {
     /// Format 1 rows decode as [`NodeV1`], which converts into `Node`
     type V1 = NodeV1;
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Pins the layout of the archived [`Node`] row, which written backups depend on
+    #[test]
+    fn node_layout_is_pinned() {
+        // the archived row's size and the offset of every field must stay as backups hold them
+        assert_layout!(ArchivedNode, 128, {
+            cluster: 88,
+            node: 96,
+            health: 104,
+            heart_beat: 0,
+            resources: 16,
+        });
+    }
+
+    /// Pins the layout of the archived [`NodeV1`] row, which written backups depend on
+    #[test]
+    fn node_v1_layout_is_pinned() {
+        // the archived row's size and the offset of every field must stay as backups hold them
+        assert_layout!(ArchivedNodeV1, 112, {
+            cluster: 32,
+            node: 40,
+            health: 16,
+            heart_beat: 0,
+            resources: 48,
+        });
+    }
+}
