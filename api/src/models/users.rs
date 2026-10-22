@@ -954,7 +954,7 @@ impl UserSettingsUpdate {
 }
 
 /// A user within Thorium
-#[derive(Debug, Serialize, Deserialize, Clone)]
+#[derive(Serialize, Deserialize, Clone)]
 #[cfg_attr(feature = "api", derive(utoipa::ToSchema))]
 pub struct User {
     /// The username of this user
@@ -989,8 +989,40 @@ pub struct User {
     pub image: Option<String>,
 }
 
+impl fmt::Debug for User {
+    /// Write this user without its password hash, its verification token, or its token, which
+    /// is a scoped token's value when the user authenticated with one
+    ///
+    /// # Arguments
+    ///
+    /// * `f` - The formatter to write to
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        // never print the credentials themselves, only whether the optional ones are set
+        f.debug_struct("User")
+            .field("username", &self.username)
+            .field("password", &self.password.as_ref().map(|_| "<redacted>"))
+            .field("email", &self.email)
+            .field("role", &self.role)
+            .field("groups", &self.groups)
+            .field("actual_groups", &self.actual_groups)
+            .field("token", &"<redacted>")
+            .field("token_expiration", &self.token_expiration)
+            .field("unix", &self.unix)
+            .field("settings", &self.settings)
+            .field("verified", &self.verified)
+            .field(
+                "verification_token",
+                &self.verification_token.as_ref().map(|_| "<redacted>"),
+            )
+            .field("verification_sent", &self.verification_sent)
+            .field("aliases", &self.aliases)
+            .field("image", &self.image)
+            .finish()
+    }
+}
+
 /// A user within Thorium that does not have its password
-#[derive(Debug, Serialize, Deserialize, Clone)]
+#[derive(Serialize, Deserialize, Clone)]
 #[cfg_attr(feature = "api", derive(utoipa::ToSchema))]
 pub struct ScrubbedUser {
     /// The username of this user
@@ -1022,6 +1054,31 @@ pub struct ScrubbedUser {
     /// The icon itself is fetched lazily from `GET /users/user/{username}/image` rather than
     /// embedded here, so cheap/frequent calls like `whoami` don't ship the image bytes.
     pub has_image: bool,
+}
+
+impl fmt::Debug for ScrubbedUser {
+    /// Write this user without its token
+    ///
+    /// # Arguments
+    ///
+    /// * `f` - The formatter to write to
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        // never print the token itself
+        f.debug_struct("ScrubbedUser")
+            .field("username", &self.username)
+            .field("role", &self.role)
+            .field("email", &self.email)
+            .field("groups", &self.groups)
+            .field("actual_groups", &self.actual_groups)
+            .field("token", &"<redacted>")
+            .field("token_expiration", &self.token_expiration)
+            .field("unix", &self.unix)
+            .field("settings", &self.settings)
+            .field("local", &self.local)
+            .field("verified", &self.verified)
+            .field("has_image", &self.has_image)
+            .finish()
+    }
 }
 
 impl PartialEq<ScrubbedUser> for ScrubbedUser {
@@ -1393,7 +1450,7 @@ impl ScopedTokenUpdate {
 }
 
 /// A token tied to a user that is limited to a subset of that users groups
-#[derive(Serialize, Deserialize, Debug, Clone)]
+#[derive(Serialize, Deserialize, Clone)]
 #[cfg_attr(feature = "api", derive(utoipa::ToSchema))]
 pub struct ScopedToken {
     /// The name of this scoped token
@@ -1413,6 +1470,27 @@ pub struct ScopedToken {
     /// The run this token is limited to if it is a run-scoped token
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub run: Option<RunTokenScope>,
+}
+
+impl fmt::Debug for ScopedToken {
+    /// Write this scoped token without its value
+    ///
+    /// # Arguments
+    ///
+    /// * `f` - The formatter to write to
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        // never print the token's value itself
+        f.debug_struct("ScopedToken")
+            .field("name", &self.name)
+            .field("owner", &self.owner)
+            .field("role", &self.role)
+            .field("groups", &self.groups)
+            .field("token", &"<redacted>")
+            .field("token_expiration", &self.token_expiration)
+            .field("expires", &self.expires)
+            .field("run", &self.run)
+            .finish()
+    }
 }
 
 /// The workflow run or tool run a run-scoped token is limited to

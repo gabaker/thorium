@@ -285,6 +285,8 @@ async fn delete_image(
     Path((group, image)): Path<(String, String)>,
     State(state): State<AppState>,
 ) -> Result<StatusCode, ApiError> {
+    // a run token can't delete an image that other runs could use
+    user.refuse_run_token("delete an image")?;
     // get image
     let (group, image) = Image::get(&user, &group, &image, &state.shared).await?;
     // delete image from backend

@@ -2402,6 +2402,23 @@ impl AuthedUser {
             }
         }
     }
+
+    /// Refuse a user authenticated with a run token a write that changes a definition
+    ///
+    /// A run token is handed to every worker of a run, so it can't change the tools and
+    /// pipelines that other runs follow.
+    ///
+    /// # Arguments
+    ///
+    /// * `action` - What the request would do, used in the refusal message
+    #[instrument(name = "AuthedUser::refuse_run_token", skip(self), err(Debug))]
+    pub fn refuse_run_token(&self, action: &str) -> Result<(), ApiError> {
+        // only run tokens are refused
+        if self.run().is_some() {
+            return unauthorized!(format!("A run token can't {action}"));
+        }
+        Ok(())
+    }
 }
 
 /// Check if a user has the permisisons to gived a scoped token powers to deploy tools
@@ -3312,5 +3329,97 @@ mod tests {
         let peak = peak.load(Ordering::SeqCst);
         assert!(peak <= 3, "{peak} tasks ran at once with 3 permits");
         assert!(peak >= 1, "no task ran");
+    }
+
+    /// Scoped tokens, users, scrubbed users, and the scoped and authed users wrapping them keep
+    /// their token values, password hashes, and verification tokens out of their debug output
+    /// while printing their other fields
+    #[test]
+    fn token_values_stay_out_of_debug() {
+        // a scoped token with a recognizable value
+        let value = "tok-callisto-4f1d9e";
+        let scoped = crate::models::ScopedToken {
+            name: "harvester".to_owned(),
+            owner: "europa".to_owned(),
+            role: ScopedTokenRole::User,
+            groups: vec!["jupiter".to_owned()],
+            token: value.to_owned(),
+            token_expiration: chrono::Utc::now(),
+            expires: None,
+            run: None,
+        };
+        let printed = format!("{scoped:?}");
+        assert!(
+            !printed.contains(value),
+            "scoped token value printed: {}",
+            printed.len()
+        );
+        assert!(printed.contains("harvester") && printed.contains("jupiter"));
+        // a user authenticated with that token carries its value, a password hash, and a
+        // verification token
+        let hash = "argon2-hash-io-7b3c55";
+        let verification = "verify-amalthea-2e6d04";
+        let user = crate::models::User {
+            username: "europa".to_owned(),
+            password: Some(hash.to_owned()),
+            email: "europa@example.com".to_owned(),
+            role: UserRole::User,
+            groups: vec!["jupiter".to_owned()],
+            actual_groups: Vec::new(),
+            token: value.to_owned(),
+            token_expiration: chrono::Utc::now(),
+            unix: None,
+            settings: crate::models::UserSettings::default(),
+            verified: true,
+            verification_token: Some(verification.to_owned()),
+            verification_sent: None,
+            aliases: std::collections::HashMap::new(),
+            image: None,
+        };
+        let authed = crate::models::AuthedUser::Scoped(crate::models::ScopedUser {
+            user: user.clone(),
+            name: "harvester".to_owned(),
+            run: None,
+        });
+        for printed in [format!("{user:?}"), format!("{authed:?}")] {
+            assert!(
+                !printed.contains(value),
+                "user token value printed: {}",
+                printed.len()
+            );
+            assert!(
+                !printed.contains(hash),
+                "user password hash printed: {}",
+                printed.len()
+            );
+            assert!(
+                !printed.contains(verification),
+                "user verification token printed: {}",
+                printed.len()
+            );
+            assert!(printed.contains("europa@example.com"));
+        }
+        // the scrubbed user returned to clients carries it too
+        let scrubbed = crate::models::ScrubbedUser {
+            username: "europa".to_owned(),
+            role: UserRole::User,
+            email: "europa@example.com".to_owned(),
+            groups: vec!["jupiter".to_owned()],
+            actual_groups: Vec::new(),
+            token: value.to_owned(),
+            token_expiration: chrono::Utc::now(),
+            unix: None,
+            settings: crate::models::UserSettings::default(),
+            local: true,
+            verified: true,
+            has_image: false,
+        };
+        let printed = format!("{scrubbed:?}");
+        assert!(
+            !printed.contains(value),
+            "scrubbed token value printed: {}",
+            printed.len()
+        );
+        assert!(printed.contains("europa@example.com"));
     }
 }

@@ -3,7 +3,7 @@
 use std::path::{Path, PathBuf};
 
 /// Auth keys for Thorium
-#[derive(Serialize, Deserialize, Debug, Clone)]
+#[derive(Serialize, Deserialize, Clone)]
 pub struct Keys {
     /// The ip to access the api at (must begin with http:// or https://)
     pub api: String,
@@ -16,6 +16,23 @@ pub struct Keys {
     /// The token to use in place of basic auth
     #[serde(skip_serializing_if = "Option::is_none")]
     pub token: Option<String>,
+}
+
+impl std::fmt::Debug for Keys {
+    /// Write these keys without their password or token, which may be a scoped token's value
+    ///
+    /// # Arguments
+    ///
+    /// * `f` - The formatter to write to
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // never print the password or token themselves, only whether each is set
+        f.debug_struct("Keys")
+            .field("api", &self.api)
+            .field("username", &self.username)
+            .field("password", &self.password.as_ref().map(|_| "<redacted>"))
+            .field("token", &self.token.as_ref().map(|_| "<redacted>"))
+            .finish()
+    }
 }
 
 impl Keys {
