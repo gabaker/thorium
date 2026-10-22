@@ -1,13 +1,21 @@
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::fmt;
+use uuid::Uuid;
 
 use super::{Deadline, Pools, Resources, Worker};
 #[cfg(feature = "client")]
 use crate::Error;
 use crate::same;
 
+/// The pod label holding the tool instance a worker claims jobs for
+pub const TOOL_INSTANCE_LABEL: &str = "thorium-tool-instance";
+
+/// The pod label holding the run a per-run worker is limited to
+pub const RUN_LABEL: &str = "thorium-run";
+
 /// Extract a label or return an error
+#[cfg(feature = "client")]
 macro_rules! extract_label {
     ($obj:expr, $label:expr) => {
         match $obj.get($label) {
@@ -17,6 +25,18 @@ macro_rules! extract_label {
     };
 }
 
+/// Parse a tool instance or run id from a requisition part
+///
+/// # Arguments
+///
+/// * `raw` - The raw id to parse
+/// * `kind` - What the id names, for the error message
+#[cfg(feature = "client")]
+fn parse_id(raw: &str, kind: &str) -> Result<Uuid, Error> {
+    // the id must be a valid UUID
+    Uuid::parse_str(raw).map_err(|_| Error::new(format!("{kind} '{raw}' is not a valid UUID")))
+}
+
 /// A requisition for a pod to be deployed
 #[derive(Debug, Hash, Eq, PartialEq, Clone, Serialize, Deserialize)]
 pub struct Requisition {
@@ -24,20 +44,29 @@ pub struct Requisition {
     pub user: String,
     /// The group the requisition is for
     pub group: String,
-    /// The pipeline the requisition is for
-    pub pipeline: String,
-    /// The stage the pipeline is for
-    pub stage: String,
+    /// The tool instance whose jobs the requested workers claim
+    pub tool_instance: Uuid,
+    /// The run (reaction) the requested workers are limited to, for jobs of workflow runs and tool
+    /// runs (for a harness's tool calls, the parent workflow run)
+    #[serde(default)]
+    pub run: Option<Uuid>,
 }
 
 impl Requisition {
     /// Create a new requisition object
-    pub fn new<T: Into<String>>(user: T, group: T, pipeline: T, stage: T) -> Self {
+    ///
+    /// # Arguments
+    ///
+    /// * `user` - The user the requisition is for
+    /// * `group` - The group the requisition is for
+    /// * `tool_instance` - The tool instance whose jobs the requested workers claim
+    /// * `run` - The run the requested workers are limited to, if any
+    pub fn new<T: Into<String>>(user: T, group: T, tool_instance: Uuid, run: Option<Uuid>) -> Self {
         Requisition {
             user: user.into(),
             group: group.into(),
-            pipeline: pipeline.into(),
-            stage: stage.into(),
+            tool_instance,
+            run,
         }
     }
 
@@ -49,11 +78,28 @@ impl Requisition {
     pub fn to_scoped<T: Into<String>>(self, node: T) -> ScopedRequisition {
         ScopedRequisition {
             node: node.into(),
-            user: self.user,
-            group: self.group,
-            pipeline: self.pipeline,
-            stage: self.stage,
+            req: self,
         }
+    }
+
+    /// Build the pod labels that identify this requisition
+    ///
+    /// The run label is only set for per-run requisitions.
+    #[must_use]
+    pub fn labels(&self) -> BTreeMap<String, String> {
+        // every requisition is labeled with its user, group, and tool instance
+        let mut labels = BTreeMap::default();
+        labels.insert("user".to_owned(), self.user.clone());
+        labels.insert("group".to_owned(), self.group.clone());
+        labels.insert(
+            TOOL_INSTANCE_LABEL.to_owned(),
+            self.tool_instance.to_string(),
+        );
+        // only per-run requisitions carry their run
+        if let Some(run) = &self.run {
+            labels.insert(RUN_LABEL.to_owned(), run.to_string());
+        }
+        labels
     }
 
     /// Create a requisiton from labels on a pod
@@ -68,14 +114,49 @@ impl Requisition {
         // extract labels
         let user = extract_label!(labels, "user");
         let group = extract_label!(labels, "group");
-        let pipeline = extract_label!(labels, "pipeline");
-        let stage = extract_label!(labels, "stage");
+        let tool_instance = extract_label!(labels, TOOL_INSTANCE_LABEL);
+        // parse the tool instance and the optional run
+        let tool_instance = parse_id(&tool_instance, "tool instance")?;
+        let run = labels
+            .get(RUN_LABEL)
+            .map(|run| parse_id(run, "run"))
+            .transpose()?;
         // cast to a requisition
         let req = Requisition {
             user,
             group,
-            pipeline,
-            stage,
+            tool_instance,
+            run,
+        };
+        Ok(req)
+    }
+
+    /// Parse the colon joined parts of a requisition
+    ///
+    /// The parts are `user:group:tool_instance` with an optional trailing `:run:<run>`.
+    ///
+    /// # Arguments
+    ///
+    /// * `parts` - The parts to parse
+    /// * `raw` - The full string being parsed, for error messages
+    #[cfg(feature = "client")]
+    fn from_parts(parts: &[&str], raw: &str) -> Result<Self, Error> {
+        // get the run if this is a per-run requisition
+        let run = match parts.len() {
+            3 => None,
+            5 if parts[3] == "run" => Some(parse_id(parts[4], "run")?),
+            _ => {
+                return Err(Error::new(format!(
+                    "{raw} can not be cast to a requisition!"
+                )));
+            }
+        };
+        // build our requisition
+        let req = Requisition {
+            user: parts[0].to_owned(),
+            group: parts[1].to_owned(),
+            tool_instance: parse_id(parts[2], "tool instance")?,
+            run,
         };
         Ok(req)
     }
@@ -83,56 +164,88 @@ impl Requisition {
 
 impl fmt::Display for Requisition {
     /// Cleanly print a requisition
+    ///
+    /// # Arguments
+    ///
+    /// * `f` - The formatter to write to
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        write!(
-            f,
-            "{}:{}:{}:{}",
-            self.user, self.group, self.pipeline, self.stage
-        )
+        // write the user, group, and tool instance
+        write!(f, "{}:{}:{}", self.user, self.group, self.tool_instance)?;
+        // write the run for per-run requisitions
+        if let Some(run) = &self.run {
+            write!(f, ":run:{run}")?;
+        }
+        Ok(())
+    }
+}
+
+#[cfg(feature = "client")]
+impl TryFrom<&String> for Requisition {
+    type Error = Error;
+
+    /// Try to convert a colon joined string to a requisition
+    ///
+    /// # Arguments
+    ///
+    /// * `raw` - The raw string to convert from
+    fn try_from(raw: &String) -> Result<Self, Error> {
+        // split this string by ':' into its seperate parts
+        let parts = raw.split(':').collect::<Vec<_>>();
+        Self::from_parts(&parts, raw)
     }
 }
 
 impl From<Deadline> for Requisition {
+    /// Build the requisition a deadline needs a worker for
+    ///
+    /// # Arguments
+    ///
+    /// * `deadline` - The deadline to build a requisition for
     fn from(deadline: Deadline) -> Self {
         Requisition {
             user: deadline.creator,
             group: deadline.group,
-            pipeline: deadline.pipeline,
-            stage: deadline.stage,
+            tool_instance: deadline.tool_instance,
+            run: deadline.run,
         }
     }
 }
 
 impl From<&Deadline> for Requisition {
+    /// Build the requisition a deadline needs a worker for
+    ///
+    /// # Arguments
+    ///
+    /// * `deadline` - The deadline to build a requisition for
     fn from(deadline: &Deadline) -> Self {
         Requisition {
             user: deadline.creator.clone(),
             group: deadline.group.clone(),
-            pipeline: deadline.pipeline.clone(),
-            stage: deadline.stage.clone(),
+            tool_instance: deadline.tool_instance,
+            run: deadline.run,
         }
     }
 }
 
 impl From<ScopedRequisition> for Requisition {
+    /// Drop the node from a scoped requisition
+    ///
+    /// # Arguments
+    ///
+    /// * `scoped` - The scoped requisition to convert
     fn from(scoped: ScopedRequisition) -> Self {
-        Requisition {
-            user: scoped.user,
-            group: scoped.group,
-            pipeline: scoped.pipeline,
-            stage: scoped.stage,
-        }
+        scoped.req
     }
 }
 
 impl From<&ScopedRequisition> for Requisition {
+    /// Drop the node from a scoped requisition
+    ///
+    /// # Arguments
+    ///
+    /// * `scoped` - The scoped requisition to convert
     fn from(scoped: &ScopedRequisition) -> Self {
-        Requisition {
-            user: scoped.user.clone(),
-            group: scoped.group.clone(),
-            pipeline: scoped.pipeline.clone(),
-            stage: scoped.stage.clone(),
-        }
+        scoped.req.clone()
     }
 }
 
@@ -151,19 +264,30 @@ macro_rules! extract_generic {
 impl TryFrom<BTreeMap<String, String>> for Requisition {
     type Error = Error;
 
+    /// Try to cast a label map into a requisition
+    ///
+    /// # Arguments
+    ///
+    /// * `map` - The label map to cast
     fn try_from(mut map: BTreeMap<String, String>) -> Result<Self, Self::Error> {
+        // get the tool instance and the optional run
+        let tool_instance = parse_id(&extract_generic!(map, TOOL_INSTANCE_LABEL), "tool instance")?;
+        let run = map
+            .remove(RUN_LABEL)
+            .map(|run| parse_id(&run, "run"))
+            .transpose()?;
         let req = Requisition {
             user: extract_generic!(map, "user"),
             group: extract_generic!(map, "group"),
-            pipeline: extract_generic!(map, "pipeline"),
-            stage: extract_generic!(map, "stage"),
+            tool_instance,
+            run,
         };
         Ok(req)
     }
 }
 
 impl PartialEq<BTreeMap<String, String>> for Requisition {
-    /// Check if a [`Group`] contains all the updates from a [`GroupUpdate`]
+    /// Check if a pod's labels belong to this requisition
     ///
     /// # Arguments
     ///
@@ -171,8 +295,16 @@ impl PartialEq<BTreeMap<String, String>> for Requisition {
     fn eq(&self, labels: &BTreeMap<String, String>) -> bool {
         // if any of the values don't match then return false
         same!(Some(&self.user), labels.get("user"));
-        same!(Some(&self.pipeline), labels.get("pipeline"));
-        same!(Some(&self.stage), labels.get("stage"));
+        same!(Some(&self.group), labels.get("group"));
+        same!(
+            Some(self.tool_instance.to_string()),
+            labels.get(TOOL_INSTANCE_LABEL).cloned()
+        );
+        // the run label must match exactly, including being absent for shared requisitions
+        same!(
+            self.run.map(|run| run.to_string()),
+            labels.get(RUN_LABEL).cloned()
+        );
         true
     }
 }
@@ -180,45 +312,35 @@ impl PartialEq<BTreeMap<String, String>> for Requisition {
 /// A requisition for a pod to be deployed to a specific node
 #[derive(Debug, Hash, Eq, PartialEq, Clone, Serialize, Deserialize)]
 pub struct ScopedRequisition {
-    /// The node this cluster is being handled by
+    /// The node this requisition is being handled by
     pub node: String,
-    /// The user the requisition is for
-    pub user: String,
-    /// The group the requisition is for
-    pub group: String,
-    /// The pipeline the requisition is for
-    pub pipeline: String,
-    /// The stage the pipeline is for
-    pub stage: String,
+    /// The requisition being spawned on this node
+    pub req: Requisition,
 }
 
 impl ScopedRequisition {
     /// Create a new scoped requisition object
-    pub fn new<T: Into<String>, V: Into<String>>(
-        node: T,
-        user: V,
-        group: V,
-        pipeline: V,
-        stage: V,
-    ) -> Self {
+    ///
+    /// # Arguments
+    ///
+    /// * `node` - The node this requisition is being handled by
+    /// * `req` - The requisition being spawned on this node
+    pub fn new<T: Into<String>>(node: T, req: Requisition) -> Self {
         ScopedRequisition {
             node: node.into(),
-            user: user.into(),
-            group: group.into(),
-            pipeline: pipeline.into(),
-            stage: stage.into(),
+            req,
         }
     }
 }
 
 impl fmt::Display for ScopedRequisition {
     /// Cleanly print a requisition
+    ///
+    /// # Arguments
+    ///
+    /// * `f` - The formatter to write to
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        write!(
-            f,
-            "{}:{}:{}:{}:{}",
-            self.node, self.user, self.group, self.pipeline, self.stage
-        )
+        write!(f, "{}:{}", self.node, self.req)
     }
 }
 
@@ -234,22 +356,18 @@ impl TryFrom<&String> for ScopedRequisition {
     fn try_from(raw: &String) -> Result<Self, Error> {
         // split this string by ':' into its seperate parts
         let chunks = raw.split(':').collect::<Vec<_>>();
-        // if we didn't find 5 chunks then throw an error
-        if chunks.len() == 5 {
-            // build our scoped requisition
-            let scoped_req = ScopedRequisition {
-                node: chunks[0].to_owned(),
-                user: chunks[1].to_owned(),
-                group: chunks[2].to_owned(),
-                pipeline: chunks[3].to_owned(),
-                stage: chunks[4].to_owned(),
-            };
-            Ok(scoped_req)
-        } else {
-            Err(Error::new(format!(
+        // a scoped requisition needs a node in front of its requisition
+        if chunks.len() < 2 {
+            return Err(Error::new(format!(
                 "{raw} can not be cast to a scoped requisition!",
-            )))
+            )));
         }
+        // parse the requisition after the node
+        let req = Requisition::from_parts(&chunks[1..], raw)?;
+        Ok(ScopedRequisition {
+            node: chunks[0].to_owned(),
+            req,
+        })
     }
 }
 
@@ -278,7 +396,7 @@ impl From<Worker> for SpawnedUpdate {
     /// * `worker` - The worker to build a spawned update for
     fn from(worker: Worker) -> Self {
         // build the req that spawned this worker
-        let req = Requisition::new(worker.user, worker.group, worker.pipeline, worker.stage);
+        let req = Requisition::new(worker.user, worker.group, worker.tool_instance, worker.run);
         SpawnedUpdate {
             req,
             node: worker.node,
@@ -289,3 +407,6 @@ impl From<Worker> for SpawnedUpdate {
         }
     }
 }
+
+#[cfg(test)]
+mod tests;

@@ -1164,7 +1164,7 @@ mod tests {
     /// * `name` - The unique name of the worker
     fn scaled_down(namespace: &str, name: &str) -> Spawned {
         Spawned {
-            req: thorium::models::Requisition::new("user", namespace, "pipeline", "stage"),
+            req: thorium::models::Requisition::new("user", namespace, uuid::Uuid::nil(), None),
             cluster: "cluster".to_owned(),
             node: "node".to_owned(),
             name: name.to_owned(),
@@ -1173,6 +1173,7 @@ mod tests {
             spawn: false,
             scaled_down: true,
             down_scalable: chrono::Utc::now(),
+            run_env: None,
         }
     }
 

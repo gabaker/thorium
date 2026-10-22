@@ -27,7 +27,9 @@ use crate::models::{
 };
 use crate::models::{
     BareMetalEnvironment, ExecutionSettings, JobDataSettings, K8sEnvironment, KvmEnvironment,
-    SchedulingSettings, WindowsEnvironment, WorkloadEnvironment, WorkloadSpec,
+    SchedulingSettings, ToolChildrenDependencySettings, ToolDependencies,
+    ToolFileSystemDependencySettings, ToolResultDependencySettings, WindowsEnvironment,
+    WorkloadEnvironment, WorkloadSpec,
 };
 
 /// The serde default for [`WithDefaultPath::level`]
@@ -569,6 +571,10 @@ fn defaults_prune() {
     assert_default_prunes::<KvmEnvironment>("KvmEnvironment");
     assert_default_prunes::<ExecutionSettings>("ExecutionSettings");
     assert_default_prunes::<JobDataSettings>("JobDataSettings");
+    assert_default_prunes::<ToolDependencies>("ToolDependencies");
+    assert_default_prunes::<ToolResultDependencySettings>("ToolResultDependencySettings");
+    assert_default_prunes::<ToolChildrenDependencySettings>("ToolChildrenDependencySettings");
+    assert_default_prunes::<ToolFileSystemDependencySettings>("ToolFileSystemDependencySettings");
     // tool types
     assert_default_prunes::<AgenticTool>("AgenticTool");
     assert_default_prunes::<ToolCapabilities>("ToolCapabilities");
@@ -856,6 +862,8 @@ fn serde_defaults_prune() {
     assert_absent_prunes::<EphemeralDependencySettings>("EphemeralDependencySettings");
     assert_absent_prunes::<ResultDependencySettings>("ResultDependencySettings");
     assert_absent_prunes::<CacheDependencySettings>("CacheDependencySettings");
+    assert_absent_prunes::<ToolDependencies>("ToolDependencies");
+    assert_absent_prunes::<ToolResultDependencySettings>("ToolResultDependencySettings");
     assert_absent_prunes::<OutputCollection>("OutputCollection");
     assert_absent_prunes::<FilesHandler>("FilesHandler");
     // test structs
@@ -1217,6 +1225,22 @@ fn insert_workload_defaults(all: &mut Map<String, Value>) {
     all.insert(
         "JobDataSettings".into(),
         frozen::<JobDataSettings>(Some(json!({}))),
+    );
+    all.insert(
+        "ToolDependencies".into(),
+        frozen::<ToolDependencies>(Some(json!({}))),
+    );
+    all.insert(
+        "ToolResultDependencySettings".into(),
+        frozen::<ToolResultDependencySettings>(Some(json!({}))),
+    );
+    all.insert(
+        "ToolChildrenDependencySettings".into(),
+        frozen::<ToolChildrenDependencySettings>(Some(json!({"enabled": false}))),
+    );
+    all.insert(
+        "ToolFileSystemDependencySettings".into(),
+        frozen::<ToolFileSystemDependencySettings>(Some(json!({"enabled": false}))),
     );
 }
 

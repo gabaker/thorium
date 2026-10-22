@@ -2587,6 +2587,105 @@ pub struct Thorium {
     // sorted so a serialized config is identical every time it is rendered
     #[serde(default = "default_namespace_blacklist")]
     pub namespace_blacklist: BTreeSet<String>,
+    /// Where harnesses reach the tools behind Thorium unless a harness overrides it
+    #[serde(default)]
+    pub tool_access: ToolAccessConf,
+    /// The settings for Thorium's MCP server
+    #[serde(default)]
+    pub mcp: McpServerConf,
+}
+
+impl Thorium {
+    /// Get the hosts Thorium's MCP server accepts in a request's `Host` header
+    ///
+    /// These are loopback, every name of the in-cluster API and MCP services, the hosts of the
+    /// API urls in this config (the MCP url given to harnesses, the OAuth redirect base, the
+    /// email verification base url, and each K8s cluster's API url), and the configured hosts.
+    /// The list is never empty, because an empty list would accept every host.
+    #[must_use]
+    pub fn mcp_allowed_hosts(&self) -> Vec<String> {
+        // always accept loopback requests
+        let mut hosts = ["localhost", "127.0.0.1", "::1"]
+            .into_iter()
+            .map(str::to_owned)
+            .collect::<BTreeSet<String>>();
+        // accept every name the in-cluster API and MCP services resolve by
+        let namespace = &self.namespace;
+        for service in ["thorium-api", "thorium-mcp"] {
+            hosts.insert(service.to_owned());
+            hosts.insert(format!("{service}.{namespace}"));
+            hosts.insert(format!("{service}.{namespace}.svc"));
+            hosts.insert(format!("{service}.{namespace}.svc.cluster.local"));
+            hosts.insert(format!("{service}.{namespace}.svc.cluster.local."));
+        }
+        // accept the hosts of the API urls in this config
+        let urls = self
+            .tool_access
+            .mcp_url
+            .iter()
+            .chain(self.auth.oauth.as_ref().map(|oauth| &oauth.redirect_base))
+            .chain(self.auth.email.as_ref().map(|email| &email.base_url))
+            .chain(
+                self.scaler
+                    .k8s
+                    .clusters
+                    .values()
+                    .filter_map(|cluster| cluster.api_url.as_ref()),
+            );
+        hosts.extend(
+            urls.filter_map(|raw| url::Url::parse(raw).ok())
+                .filter_map(|parsed| parsed.host_str().map(str::to_owned)),
+        );
+        // accept the configured hosts as they're written
+        hosts.extend(self.mcp.allowed_hosts.iter().cloned());
+        hosts.into_iter().collect()
+    }
+}
+
+/// The default CLI wrapper command harnesses run tools behind Thorium with
+fn default_tool_access_cli() -> Vec<String> {
+    vec![
+        "/opt/thorium/thorium-agent".to_owned(),
+        "tool".to_owned(),
+        "run".to_owned(),
+    ]
+}
+
+/// Where harnesses reach the tools behind Thorium unless a harness overrides it
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, JsonSchema)]
+pub struct ToolAccessConf {
+    /// The CLI wrapper's base command including its subcommand
+    /// (default `["/opt/thorium/thorium-agent", "tool", "run"]`)
+    #[serde(default = "default_tool_access_cli")]
+    pub cli: Vec<String>,
+    /// The url of Thorium's MCP server as seen from worker pods (unset = the API url given to
+    /// workers plus `/api/mcp`)
+    #[serde(default)]
+    pub mcp_url: Option<String>,
+}
+
+impl Default for ToolAccessConf {
+    /// Build the default tool access settings, matching the serde defaults
+    fn default() -> Self {
+        ToolAccessConf {
+            cli: default_tool_access_cli(),
+            mcp_url: None,
+        }
+    }
+}
+
+/// The settings for Thorium's MCP server
+#[derive(Serialize, Deserialize, Debug, Clone, Default, PartialEq, JsonSchema)]
+pub struct McpServerConf {
+    /// More host names (or `host:port` authorities) the MCP server accepts in the `Host` header,
+    /// beyond loopback, the in-cluster API and MCP service names, and the hosts of the API urls
+    /// in this config
+    #[serde(default)]
+    pub allowed_hosts: Vec<String>,
+    /// The browser origins (`scheme://host[:port]`) allowed to call the MCP server (empty = a
+    /// request's `Origin` header isn't checked)
+    #[serde(default)]
+    pub allowed_origins: Vec<String>,
 }
 
 /// Cross origin request settings
@@ -3048,18 +3147,161 @@ mod tests {
     };
     use std::path::Path;
 
-    /// An events config without the workflow graph delay waits 10 seconds, like the default
-    /// events config, and a set delay is kept
+    /// The tool access settings default to the thorium-agent CLI wrapper and no MCP url, a
+    /// config file without them loads with those defaults, and the MCP url is overridden by
+    /// its environment variable
     #[test]
-    fn events_workflow_graph_delay_default() {
-        // parse events settings that don't set the delay
+    fn tool_access_defaults() {
+        // the defaults name the CLI wrapper and leave the MCP url to the worker API url
+        let defaults = super::ToolAccessConf::default();
+        assert_eq!(
+            defaults.cli,
+            vec!["/opt/thorium/thorium-agent", "tool", "run"]
+        );
+        assert_eq!(defaults.mcp_url, None);
+        // an empty tool access section gets the same defaults
+        let parsed: super::ToolAccessConf = serde_norway::from_str("{}").expect("parses");
+        assert_eq!(parsed, defaults);
+        // the config template sets no tool access and still loads with the defaults
+        let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("thorium-template.yml");
+        let raw = std::fs::read_to_string(&path).expect("config file reads");
+        assert!(!raw.contains("tool_access"));
+        let conf: Conf = serde_norway::from_str(&raw).expect("the template parses");
+        assert_eq!(conf.thorium.tool_access, defaults);
+        // the MCP url is overridden by its variable the way `Conf::new` reads the environment
+        let vars = std::iter::once((
+            "THORIUM__THORIUM__TOOL_ACCESS__MCP_URL".to_owned(),
+            "http://thorium-mcp/api/mcp".to_owned(),
+        ))
+        .collect::<config::Map<String, String>>();
+        let access: super::ToolAccessConf = config::Config::builder()
+            .add_source(
+                config::Environment::with_prefix("thorium")
+                    .prefix_separator("__")
+                    .separator("__")
+                    .source(Some(vars)),
+            )
+            .build()
+            .expect("build config")
+            .get("thorium.tool_access")
+            .expect("tool access settings");
+        assert_eq!(
+            access.mcp_url.as_deref(),
+            Some("http://thorium-mcp/api/mcp")
+        );
+        assert_eq!(access.cli, defaults.cli);
+    }
+
+    /// The MCP server accepts loopback, the in-cluster service names, the hosts of the API urls
+    /// in the config, and the configured hosts, and never accepts every host
+    #[test]
+    fn mcp_allowed_hosts() {
+        // load the config template in a namespace named after a moon
+        let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("thorium-template.yml");
+        let raw = std::fs::read_to_string(&path).expect("config file reads");
+        let mut conf: Conf = serde_norway::from_str(&raw).expect("the template parses");
+        conf.thorium.namespace = "io".to_owned();
+        // the template sets no MCP settings, so the defaults apply
+        assert_eq!(conf.thorium.mcp, super::McpServerConf::default());
+        let defaults = conf.thorium.mcp_allowed_hosts();
+        // loopback and every name of the in-cluster API and MCP services are accepted
+        for host in [
+            "localhost",
+            "127.0.0.1",
+            "::1",
+            "thorium-api",
+            "thorium-api.io",
+            "thorium-api.io.svc",
+            "thorium-api.io.svc.cluster.local",
+            "thorium-api.io.svc.cluster.local.",
+            "thorium-mcp",
+            "thorium-mcp.io",
+            "thorium-mcp.io.svc",
+            "thorium-mcp.io.svc.cluster.local",
+            "thorium-mcp.io.svc.cluster.local.",
+        ] {
+            assert!(
+                defaults.contains(&host.to_owned()),
+                "{host} not in {defaults:?}"
+            );
+        }
+        // other hosts aren't accepted by default
+        assert!(!defaults.contains(&"thorium.example.com".to_owned()));
+        // the hosts of the API urls in the config are accepted
+        conf.thorium.tool_access.mcp_url = Some("http://mcp.example.com:9000/api/mcp".to_owned());
+        conf.thorium.auth.oauth = Some(
+            serde_norway::from_str("redirect_base: https://thorium.example.com\nproviders: {}\n")
+                .expect("oauth settings parse"),
+        );
+        conf.thorium.auth.email = Some(
+            serde_norway::from_str(
+                "base_url: https://mail.example.com/api\nsmtp_server: smtp.example.com\naddr: \
+                 thorium@example.com\npassword: secret\napproved_emails: []\n",
+            )
+            .expect("email settings parse"),
+        );
+        let cluster = super::K8sCluster {
+            api_url: Some("https://api.ganymede.example.com".to_owned()),
+            ..super::K8sCluster::default()
+        };
+        conf.thorium
+            .scaler
+            .k8s
+            .clusters
+            .insert("ganymede".to_owned(), cluster);
+        // and so are the configured hosts, as they're written
+        conf.thorium.mcp.allowed_hosts = vec!["callisto.example.com:8443".to_owned()];
+        let hosts = conf.thorium.mcp_allowed_hosts();
+        for host in [
+            "localhost",
+            "mcp.example.com",
+            "thorium.example.com",
+            "mail.example.com",
+            "api.ganymede.example.com",
+            "callisto.example.com:8443",
+        ] {
+            assert!(hosts.contains(&host.to_owned()), "{host} not in {hosts:?}");
+        }
+        // each host is listed once
+        let unique = hosts.iter().collect::<std::collections::BTreeSet<_>>();
+        assert_eq!(unique.len(), hosts.len());
+    }
+
+    /// An events config that sets none of the limits and the delay gets the defaults, which match
+    /// the default events config and the resolvers' default limits, and set values are kept
+    #[test]
+    fn events_defaults_and_set_values() {
+        // parse events settings that set none of the delay or the limits
         let events: super::Events = serde_norway::from_str("max_depth: 5\n").expect("events parse");
         assert_eq!(events.workflow_graph_delay, 10);
-        assert_eq!(super::Events::default().workflow_graph_delay, 10);
-        // a set delay is kept
-        let events: super::Events =
-            serde_norway::from_str("workflow_graph_delay: 2\n").expect("events parse");
+        assert_eq!(events.max_agents_per_workflow, 32);
+        assert_eq!(events.max_tools_per_agent, 128);
+        assert_eq!(events.max_crawl_depth, 8);
+        assert_eq!(events.max_tools_per_toolset, 64);
+        // they match the default events config and the resolvers' default limits
+        assert_eq!(events, super::Events::default());
+        assert_eq!(
+            crate::models::CrawlLimits::from(&events),
+            crate::models::CrawlLimits::default()
+        );
+        assert_eq!(
+            crate::models::ToolSetLimits::from(&events),
+            crate::models::ToolSetLimits::default()
+        );
+        // set values are kept
+        let events: super::Events = serde_norway::from_str(
+            "workflow_graph_delay: 2\nmax_agents_per_workflow: 4\nmax_tools_per_agent: 3\nmax_crawl_depth: 2\nmax_tools_per_toolset: 7\n",
+        )
+        .expect("events parse");
         assert_eq!(events.workflow_graph_delay, 2);
+        let limits = crate::models::CrawlLimits::from(&events);
+        assert_eq!(limits.max_agents_per_workflow, 4);
+        assert_eq!(limits.max_tools_per_agent, 3);
+        assert_eq!(limits.max_crawl_depth, 2);
+        assert_eq!(
+            crate::models::ToolSetLimits::from(&events).max_tools_per_toolset,
+            7
+        );
     }
 
     /// The events settings are overridden by their `THORIUM__THORIUM__EVENTS__` variables the
@@ -3094,51 +3336,6 @@ mod tests {
         assert_eq!(events.max_tools_per_agent, 5);
         assert_eq!(events.max_crawl_depth, 6);
         assert_eq!(events.max_tools_per_toolset, 7);
-    }
-
-    /// An events config without the crawl limits gets their defaults, which match the default
-    /// events config and the resolver's default limits
-    #[test]
-    fn events_crawl_limits_default() {
-        // parse events settings that don't set the crawl limits
-        let events: super::Events = serde_norway::from_str("max_depth: 5\n").expect("events parse");
-        assert_eq!(events.max_agents_per_workflow, 32);
-        assert_eq!(events.max_tools_per_agent, 64);
-        assert_eq!(events.max_crawl_depth, 8);
-        assert_eq!(events, super::Events::default());
-        assert_eq!(
-            crate::models::CrawlLimits::from(&events),
-            crate::models::CrawlLimits::default()
-        );
-        // set limits are kept
-        let events: super::Events = serde_norway::from_str(
-            "max_agents_per_workflow: 4\nmax_tools_per_agent: 3\nmax_crawl_depth: 2\n",
-        )
-        .expect("events parse");
-        let limits = crate::models::CrawlLimits::from(&events);
-        assert_eq!(limits.max_agents_per_workflow, 4);
-        assert_eq!(limits.max_tools_per_agent, 3);
-        assert_eq!(limits.max_crawl_depth, 2);
-    }
-
-    /// An events config without the toolset member limit gets its default, which matches the
-    /// resolver's default limits, and a set limit is kept
-    #[test]
-    fn events_toolset_limit_default() {
-        // parse events settings that don't set the member limit
-        let events: super::Events = serde_norway::from_str("max_depth: 5\n").expect("events parse");
-        assert_eq!(events.max_tools_per_toolset, 64);
-        assert_eq!(
-            crate::models::ToolSetLimits::from(&events),
-            crate::models::ToolSetLimits::default()
-        );
-        // a set limit is kept
-        let events: super::Events =
-            serde_norway::from_str("max_tools_per_toolset: 7\n").expect("events parse");
-        assert_eq!(
-            crate::models::ToolSetLimits::from(&events).max_tools_per_toolset,
-            7
-        );
     }
 
     /// A Redis config without a database selects database 0

@@ -1767,17 +1767,26 @@ impl Worker {
     ///
     /// * `user` - The user that is getting this workers info
     /// * `name` - The name of the worker to get
+    /// * `run` - The reaction of the run the user's token is limited to, if it's a run token
     /// * `shared` - Shared Thorium objects
-    #[instrument(name = "Worker::get", skip(user, shared), err(Debug))]
-    pub async fn get(user: &User, name: &str, shared: &Shared) -> Result<Worker, ApiError> {
+    #[instrument(name = "Worker::get", skip(user, run, shared), err(Debug))]
+    pub async fn get(
+        user: &User,
+        name: &str,
+        run: Option<Uuid>,
+        shared: &Shared,
+    ) -> Result<Worker, ApiError> {
         // get this worker
         let worker = db::system::get_worker(name, shared).await?;
         // make sure this user can see this worker
         if !user.is_admin() && !user.groups.contains(&worker.group) {
-            not_found!(format!("Worker {} does not exist", name))
-        } else {
-            Ok(worker)
+            return not_found!(format!("Worker {} does not exist", name));
         }
+        // a run token may only reach its own run's workers
+        if run.is_some() && worker.run != run {
+            return unauthorized!();
+        }
+        Ok(worker)
     }
 
     /// Updates a worker's status in Scylla
@@ -1812,6 +1821,14 @@ impl TryFrom<HashMap<String, String>> for Worker {
     ///
     /// * `raw` - The `HashMap` to cast into a worker
     fn try_from(mut map: HashMap<String, String>) -> Result<Self, Self::Error> {
+        // get the tool instance this worker claims jobs for, which every worker has
+        let Some(Ok(tool_instance)) = map.get("tool_instance").map(|raw| Uuid::parse_str(raw))
+        else {
+            return bad!(format!(
+                "Worker {} has no valid tool instance",
+                map.get("name").map_or("<unnamed>", String::as_str)
+            ));
+        };
         // build a worker from our map of data
         let worker = Worker {
             cluster: extract!(map, "cluster"),
@@ -1820,8 +1837,7 @@ impl TryFrom<HashMap<String, String>> for Worker {
             name: extract!(map, "name"),
             user: extract!(map, "user"),
             group: extract!(map, "group"),
-            pipeline: extract!(map, "pipeline"),
-            stage: extract!(map, "stage"),
+            tool_instance,
             status: deserialize_ext!(map, "status"),
             spawned: deserialize_ext!(map, "spawned"),
             heart_beat: deserialize_ext!(map, "heart_beat", None),
@@ -1861,16 +1877,18 @@ impl WorkerDeleteMap {
     ///
     /// * `user` - The user that is deleteing workers
     /// * `scaler` - The scaler that we are deleting workers from
+    /// * `run` - The reaction of the run the user's token is limited to, if it's a run token
     /// * `shared` - Shared Thorium objects
-    #[instrument(name = "WorkerDeleteMap::delete", skip(self, user, shared), fields(user = user.username, count = self.workers.len()), err(Debug))]
+    #[instrument(name = "WorkerDeleteMap::delete", skip(self, user, run, shared), fields(user = user.username, count = self.workers.len()), err(Debug))]
     pub async fn delete(
         self,
         user: &User,
         scaler: ImageScaler,
+        run: Option<Uuid>,
         shared: &Shared,
     ) -> Result<(), ApiError> {
         // if this user isn't an admin then make sure they are only deleting their own workers
-        db::system::can_delete_workers(user, &self, shared).await?;
+        db::system::can_delete_workers(user, &self, run, shared).await?;
         // delete the specified worekrs
         db::system::delete_workers(scaler, self, shared).await?;
         Ok(())
@@ -1901,6 +1919,69 @@ mod tests {
     };
     use clap::ValueEnum;
     use std::collections::{HashMap, HashSet};
+
+    /// Build the `worker_data` hash of a registered worker
+    ///
+    /// # Arguments
+    ///
+    /// * `run` - The run the worker serves, if any
+    fn worker_hash(run: Option<Uuid>) -> HashMap<String, String> {
+        // build the fields every worker hash has
+        let mut map = HashMap::new();
+        map.insert("cluster".to_owned(), "cluster0".to_owned());
+        map.insert("node".to_owned(), "node0".to_owned());
+        map.insert(
+            "scaler".to_owned(),
+            serde_json::to_string(&ImageScaler::K8s).unwrap(),
+        );
+        map.insert("name".to_owned(), "europa-worker".to_owned());
+        map.insert("user".to_owned(), "europa".to_owned());
+        map.insert("group".to_owned(), "ceres".to_owned());
+        map.insert("tool_instance".to_owned(), Uuid::from_u128(7).to_string());
+        map.insert(
+            "status".to_owned(),
+            serde_json::to_string(&crate::models::WorkerStatus::Spawning).unwrap(),
+        );
+        map.insert(
+            "spawned".to_owned(),
+            serde_json::to_string(&chrono::Utc::now()).unwrap(),
+        );
+        map.insert("heart_beat".to_owned(), "null".to_owned());
+        map.insert(
+            "resources".to_owned(),
+            serde_json::to_string(&crate::models::Resources::default()).unwrap(),
+        );
+        map.insert(
+            "pool".to_owned(),
+            serde_json::to_string(&crate::models::Pools::Deadline).unwrap(),
+        );
+        // per-run workers also store their run
+        if let Some(run) = run {
+            map.insert("run".to_owned(), run.to_string());
+        }
+        map
+    }
+
+    /// A worker hash reads back its tool instance and run, and a hash without a tool instance is
+    /// rejected with an error naming the worker
+    #[test]
+    fn worker_hash_tool_instance() {
+        // shared and per-run workers read their tool instance and run
+        let shared = Worker::try_from(worker_hash(None)).unwrap();
+        assert_eq!(shared.tool_instance, Uuid::from_u128(7));
+        assert_eq!(shared.run, None);
+        let run = Uuid::from_u128(9);
+        let per_run = Worker::try_from(worker_hash(Some(run))).unwrap();
+        assert_eq!(per_run.run, Some(run));
+        // a hash without a tool instance is an error naming the worker
+        let mut map = worker_hash(None);
+        map.remove("tool_instance");
+        let err = Worker::try_from(map).unwrap_err();
+        assert!(
+            err.msg().is_some_and(|msg| msg.contains("europa-worker")),
+            "the error must name the worker: {err:?}"
+        );
+    }
 
     /// The backend `default_scalers` expansions for node list and get params expand an empty
     /// scaler list to every scaler, including `ImageScaler::Kvm`, so a node listing or node get

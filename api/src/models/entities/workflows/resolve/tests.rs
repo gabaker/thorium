@@ -1617,6 +1617,29 @@ async fn effective_tools() {
     );
 }
 
+/// A pin to a ready toolset instance that a newer ready instance superseded still resolves to the
+/// pinned instance and its members
+#[tokio::test]
+async fn toolset_pin_to_superseded_instance() {
+    // a toolset whose first ready instance was superseded by a second
+    let mut g = Graph::default();
+    let (scan, scan_v1) = g.tool("scan", &[MINERVA], agentic("scan"));
+    let scan_v2 = g.publish(scan, agentic("scan"), "2.0.0");
+    let ts = g.tool_set("kit", &[MINERVA], false, None);
+    let r1 = g.tool_set_instance(ts, &[(scan_v1, ToolSetInclusion::ExplicitPinned)], true);
+    let r2 = g.tool_set_instance(ts, &[(scan_v2, ToolSetInclusion::ExplicitPinned)], true);
+    // a lead that pins the superseded instance gets it, not the newer one
+    let (wf, lead) = calling(&mut g, &[r1]);
+    let resolved = resolve(&g, wf).await;
+    assert_ready(&resolved);
+    assert_eq!(resolved.instance.agent(lead).unwrap().tool_sets, vec![r1]);
+    assert_eq!(tools_of(&resolved, lead), vec![scan_v1]);
+    // a lead that follows the toolset gets the newer instance
+    let (wf, lead) = calling(&mut g, &[ts]);
+    let resolved = resolve(&g, wf).await;
+    assert_eq!(resolved.instance.agent(lead).unwrap().tool_sets, vec![r2]);
+}
+
 /// A toolset edge needs a ready toolset instance: a latest edge to a toolset with none, or a
 /// pin to one that isn't ready or doesn't exist, makes the instance invalid
 #[tokio::test]

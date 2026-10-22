@@ -660,5 +660,12 @@ pub async fn handle(args: &Args, cmd: &Results) -> Result<(), Error> {
         }
         Results::Get(cmd) => get(&thorium, cmd, args.workers).await,
         Results::Upload(cmd) => upload::upload(&thorium, cmd).await,
+        // show a run's results, with the API's status code on any refusal
+        Results::Show(cmd) => crate::handlers::runs::show_results(&thorium, cmd)
+            .await
+            .map_err(|err| match err.status() {
+                Some(_) => Error::new(err.to_string()),
+                None => err,
+            }),
     }
 }

@@ -6,14 +6,14 @@ use tracing::{Level, event, instrument, span};
 use uuid::Uuid;
 
 use super::images::UNTIMED_RUNTIME_CAP;
-use super::keys::{images::ImageKeys, jobs::JobKeys, reactions::ReactionKeys, streams::StreamKeys};
+use super::keys::{jobs::JobKeys, reactions::ReactionKeys, streams::StreamKeys};
 use super::{helpers, logs, reactions, streams, system};
 use crate::models::runtime::DEFAULT_PROJECTED_RUNTIME;
 use crate::models::{
     Checkpoint, EntityMetadata, GenericJobArgs, ImageScaler, JobActions, JobDetailsList,
-    JobHandleStatus, JobList, JobReactionIds, JobResets, JobStatus, Pipeline, RawJob, Reaction,
-    ReactionStatus, RunningJob, StageLogsAdd, StageStats, StatusRequest, StatusUpdate, StreamObj,
-    ToolSpec, User, Worker, WorkerName, WorkloadRuntimes,
+    JobHandleStatus, JobList, JobReactionIds, JobResets, JobStatus, MAX_CLAIM_LIMIT, RawJob,
+    Reaction, ReactionStatus, RunningJob, StageLogsAdd, StageStats, StatusRequest, StatusUpdate,
+    StreamObj, ToolSpec, User, Worker, WorkerName, WorkloadRuntimes,
 };
 use crate::utils::{ApiError, Shared};
 use crate::{
@@ -478,50 +478,6 @@ async fn requeue_claimed(
     Ok(())
 }
 
-/// Claims a job from the redis backend
-///
-/// # Arguments
-///
-/// * `user` - The user that is claiming jobs
-/// * `pipeline` - The pipeline to retrieve a job from
-/// * `stage` - The name of the stage to retrieve a job for within the pipeline
-/// * `limit` - The max number of jobs to claim
-/// * `worker` - The worker that is claiming jobs
-/// * `external` - Whether this job is external or not
-/// * `shared` - Shared Thorium objects
-#[rustfmt::skip]
-#[instrument(name = "db::jobs::claim", skip_all, err(Debug))]
-pub async fn claim(
-    user: &User,
-    pipeline: &Pipeline,
-    stage: &str,
-    limit: usize,
-    worker: &WorkerName,
-    shared: &Shared,
-) -> Result<Vec<RawJob>, ApiError> {
-    // build keys to data/queues
-    let image_key = ImageKeys::data(&pipeline.group, stage, shared);
-    // get if the scaler for this image
-    let scaler: Option<String> = query!(cmd("hget").arg(&image_key).arg("scaler"), shared).await?;
-    // a stage that isn't an image has no stage queue jobs to claim
-    let Some(scaler) = scaler else {
-        return Ok(Vec::new());
-    };
-    // if a scaler was defined then get it otherwise
-    let scaler = deserialize!(&scaler);
-    // get our current workers info
-    let worker = super::system::get_worker(&worker.name, shared).await?;
-    // non-admins may only claim jobs for their own workers
-    if !user.is_admin() && worker.user != user.username {
-        return unauthorized!();
-    }
-    // build the status queues
-    let src = JobKeys::stage_queue(&pipeline.group, &pipeline.name, stage, &user.username, &JobStatus::Created, shared);
-    let dest = JobKeys::stage_queue(&pipeline.group, &pipeline.name, stage, &user.username, &JobStatus::Running, shared);
-    // claim jobs from this stage's queue
-    claim_from(scaler, &worker, &src, &dest, limit, shared).await
-}
-
 /// Claims jobs from a created queue into its running queue for a worker
 ///
 /// # Arguments
@@ -542,8 +498,8 @@ async fn claim_from(
     limit: usize,
     shared: &Shared,
 ) -> Result<Vec<RawJob>, ApiError> {
-    // build alist of jobs we have claimed
-    let mut claimed = Vec::with_capacity(limit);
+    // build a list of the jobs we have claimed, never preallocating past the claim limit
+    let mut claimed = Vec::with_capacity(limit.min(MAX_CLAIM_LIMIT));
     // claim up to the requested number of jobs
     'claim_loop: loop {
         // keep trying to claim a job until we get a valid one or there are no jobs to claim
@@ -612,8 +568,9 @@ async fn claim_from(
 /// Claims jobs of a tool instance for a worker
 ///
 /// A per-run worker pops its run's queue for the tool instance and a shared worker pops its
-/// user's shared queue for the tool instance. The scaler comes from the worker, so no image or
-/// tool instance is read.
+/// user's shared queue for the tool instance. A worker only claims jobs of the group and tool
+/// instance it was registered for. The scaler comes from the worker, so no image or tool
+/// instance is read.
 ///
 /// # Arguments
 ///
@@ -622,21 +579,31 @@ async fn claim_from(
 /// * `tool_instance` - The tool instance whose jobs to claim
 /// * `limit` - The max number of jobs to claim
 /// * `worker` - The worker that is claiming jobs
+/// * `run` - The reaction of the run the user's token is limited to, if it's a run token
 /// * `shared` - Shared Thorium objects
 #[rustfmt::skip]
-#[instrument(name = "db::jobs::claim_workload", skip(user, worker, shared), err(Debug))]
+#[instrument(name = "db::jobs::claim_workload", skip(user, worker, run, shared), err(Debug))]
 pub async fn claim_workload(
     user: &User,
     group: &str,
     tool_instance: Uuid,
     limit: usize,
     worker: &WorkerName,
+    run: Option<Uuid>,
     shared: &Shared,
 ) -> Result<Vec<RawJob>, ApiError> {
     // get our current workers info
     let worker = super::system::get_worker(&worker.name, shared).await?;
     // non-admins may only claim jobs for their own workers
     if !user.is_admin() && worker.user != user.username {
+        return unauthorized!();
+    }
+    // a run token may only claim for its own run's workers
+    if run.is_some() && worker.run != run {
+        return unauthorized!();
+    }
+    // a worker only claims jobs of the group and tool instance it was registered for
+    if worker.group != group || worker.tool_instance != tool_instance {
         return unauthorized!();
     }
     // a per-run worker claims its run's jobs and a shared worker its user's shared jobs
@@ -1430,7 +1397,45 @@ where
     Ok(found)
 }
 
+/// Find the jobs whose reaction already completed or failed
+///
+/// # Arguments
+///
+/// * `jobs` - The jobs to check
+/// * `shared` - Shared Thorium objects
+async fn ended_reaction_jobs(jobs: &[RawJob], shared: &Shared) -> Result<HashSet<Uuid>, ApiError> {
+    // an empty list of jobs has no ended reactions to read
+    if jobs.is_empty() {
+        return Ok(HashSet::default());
+    }
+    // read the status of each job's reaction
+    let mut pipe = redis::pipe();
+    for job in jobs {
+        pipe.cmd("hget")
+            .arg(ReactionKeys::data(&job.group, &job.reaction, shared))
+            .arg("status");
+    }
+    let statuses: Vec<Option<String>> = pipe.query_async(conn!(shared)).await?;
+    // keep the jobs whose reaction's status is completed or failed
+    let completed = serialize!(&ReactionStatus::Completed);
+    let failed = serialize!(&ReactionStatus::Failed);
+    let ended = jobs
+        .iter()
+        .zip(statuses)
+        .filter(|(_, status)| {
+            status
+                .as_ref()
+                .is_some_and(|status| *status == completed || *status == failed)
+        })
+        .map(|(job, _)| job.id)
+        .collect();
+    Ok(ended)
+}
+
 /// Resets jobs to be rerun in bulk
+///
+/// Jobs that already completed or failed, or whose reaction already completed or failed, are
+/// not reset.
 ///
 /// # Arguments
 ///
@@ -1454,8 +1459,24 @@ pub async fn bulk_reset(
     let missing: HashSet<&Uuid> = resets.jobs.iter().filter(|id| !found.contains(id)).collect();
     // drop any details that have a terminal status
     jobs.details.retain(|job| job.status != JobStatus::Completed && job.status != JobStatus::Failed);
+    // find the jobs whose reaction already completed or failed
+    let ended = ended_reaction_jobs(&jobs.details, shared).await?;
     // build a redis pipeline to reset jobs
     let mut pipe = redis::pipe();
+    // a job of an ended reaction is never claimed again, so instead of being reset it leaves its
+    // status queue, the running stream, and the deadline stream, and no worker is spawned for it
+    jobs.details.retain(|job| {
+        if !ended.contains(&job.id) {
+            return true;
+        }
+        pipe.cmd("zrem").arg(JobKeys::status_queue(job, &job.status, shared))
+                .arg(force_serialize!(&JobReactionIds::new(job)))
+            .cmd("zrem").arg(StreamKeys::system_scaler(job.scaler, "running", shared))
+                .arg(force_serialize!(&serde_json::json!({"job_id": job.id, "worker": job.worker})))
+            .cmd("zrem").arg(StreamKeys::system_scaler(job.scaler, "deadlines", shared))
+                .arg(job.stream_data());
+        false
+    });
     // crawl over jobs and build their reset commands
     for job in &jobs.details {
         // cast the id for this job to a string

@@ -17,10 +17,10 @@ use super::shared::{self, graphics};
 use crate::models::backends::GraphicSupport;
 use crate::models::{
     AiEndpoint, AiEndpointUpdate, AiSettings, AiSettingsUpdate, AuthResponse, AuthedUser, Key,
-    Notification, NotificationParams, NotificationRequest, ScopedToken, ScopedTokenRequest,
-    ScopedTokenUpdate, ScrubbedUser, Theme, UnixInfo, User, UserCreate, UserCredentialRef,
-    UserModelEndpoint, UserModelSettings, UserModelSettingsUpdate, UserRole, UserSettings,
-    UserSettingsUpdate, UserUpdate,
+    Notification, NotificationParams, NotificationRequest, RunTokenScope, ScopedToken,
+    ScopedTokenRequest, ScopedTokenUpdate, ScrubbedUser, Theme, UnixInfo, User, UserCreate,
+    UserCredentialRef, UserModelEndpoint, UserModelSettings, UserModelSettingsUpdate, UserRole,
+    UserSettings, UserSettingsUpdate, UserUpdate,
 };
 use crate::utils::{ApiError, AppState};
 use crate::{bad, conflict, is_admin, not_found, unauthorized, unavailable};
@@ -578,6 +578,7 @@ async fn sync_ldap(
     ),
     responses(
         (status = 200, description = "New scoped token created", body=ScopedToken),
+        (status = 400, description = "The request is invalid or sets a run scope"),
         (status = 401, description = "This user is not authorized to access this route"),
     ),
     security(
@@ -592,6 +593,10 @@ async fn create_scoped_token(
 ) -> Result<Json<ScopedToken>, ApiError> {
     // require a fully authed user since scoped tokens cannot manage scoped tokens
     let user = user.require_full()?;
+    // only the API mints run-scoped tokens, when it creates a run's reaction
+    if req.run.is_some() {
+        return bad!("Run-scoped tokens are only created with their run".to_owned());
+    }
     // create this scoped token
     let scoped = ScopedToken::create(&user, req, &state.shared).await?;
     Ok(Json(scoped))
@@ -1021,7 +1026,7 @@ async fn user_model_credential(
 #[derive(OpenApi)]
 #[openapi(
     paths(list, create, update, resend_email_verification, verify_email, list_details, auth, get_user, update_user, info, logout, logout_user, delete_user, sync_ldap, create_scoped_token, list_scoped_tokens, get_scoped_token, update_scoped_token, delete_scoped_token, upload_image, delete_image, get_image, create_notification, get_notifications, delete_notification, user_model_credential),
-    components(schemas(AuthResponse, ScrubbedUser, Theme, UnixInfo, User, UserCreate, UserRole, UserSettings, UserSettingsUpdate, UserUpdate, AiSettings, AiSettingsUpdate, AiEndpoint, AiEndpointUpdate, ScopedToken, ScopedTokenRequest, ScopedTokenUpdate, UserModelSettings, UserModelEndpoint, UserCredentialRef, UserModelSettingsUpdate)),
+    components(schemas(AuthResponse, ScrubbedUser, Theme, UnixInfo, User, UserCreate, UserRole, UserSettings, UserSettingsUpdate, UserUpdate, AiSettings, AiSettingsUpdate, AiEndpoint, AiEndpointUpdate, RunTokenScope, ScopedToken, ScopedTokenRequest, ScopedTokenUpdate, UserModelSettings, UserModelEndpoint, UserCredentialRef, UserModelSettingsUpdate)),
     modifiers(&OpenApiSecurity),
 )]
 pub struct UserApiDocs;

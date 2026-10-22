@@ -15,8 +15,9 @@ use tokio::{fs::File, io::AsyncReadExt};
 use pyo3::pyclass;
 
 use super::{
-    Buffer, GenericJobArgs, GenericJobArgsUpdate, JobHandleStatus, ModelApi, ModelAuthLevel,
-    ModelConfigRef, OnDiskFile, RepoDependency, RepoDependencyRequest,
+    Buffer, Entity, EntityMetadata, GenericJobArgs, GenericJobArgsUpdate, JobHandleStatus,
+    ModelApi, ModelAuthLevel, ModelConfigRef, OnDiskFile, RepoDependency, RepoDependencyRequest,
+    ToolKind, ToolSpec, WorkloadEnvironment, WorkloadSpec,
 };
 use crate::{matches_adds, matches_removes, matches_vec, same};
 
@@ -187,7 +188,7 @@ impl BulkReactionResponse {
 }
 
 /// A response for handling the reaction command
-#[derive(Serialize)]
+#[derive(Debug, Serialize, Deserialize)]
 #[cfg_attr(feature = "api", derive(utoipa::ToSchema))]
 pub struct HandleReactionResponse {
     /// The status of the executed command
@@ -993,11 +994,17 @@ pub enum ReactionSource {
     Pipeline {
         /// The name of the pipeline
         name: String,
+        /// The exact versions of the stage tools this reaction was created with
+        #[serde(default)]
+        provenance: RunProvenance,
     },
     /// A single tool instance run directly (a container tool call from a harness, or a user tool run)
     Tool {
         /// The tool instance to run
         tool_instance: Uuid,
+        /// The exact versions this run was created with
+        #[serde(default)]
+        provenance: RunProvenance,
     },
     /// A workflow instance run by its entry agent's harness
     WorkflowRun(ReactionWorkflowRun),
@@ -1020,6 +1027,188 @@ pub struct ReactionWorkflowRun {
     /// The model each agent of the run resolved to when the run was created, sorted by agent id
     #[serde(default)]
     pub models: Vec<ReactionModelBinding>,
+    /// The exact versions of the agents and tools this run was created with
+    #[serde(default)]
+    pub provenance: RunProvenance,
+}
+
+/// The exact versions a reaction was created with, set once by the API
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+#[cfg_attr(feature = "api", derive(utoipa::ToSchema))]
+pub struct RunProvenance {
+    /// Every agent of a workflow run, sorted by agent id (empty for a tool run)
+    #[serde(default, serialize_with = "serialize_agents_sorted")]
+    pub agents: Vec<AgentProvenance>,
+    /// Every tool instance the run runs or may call, sorted by tool instance id
+    #[serde(default, serialize_with = "serialize_tools_sorted")]
+    pub tools: Vec<ToolProvenance>,
+}
+
+/// Serialize the agents of a provenance in agent id order
+///
+/// # Arguments
+///
+/// * `agents` - The agents to serialize
+/// * `serializer` - The serializer to write them with
+fn serialize_agents_sorted<S: serde::Serializer>(
+    agents: &[AgentProvenance],
+    serializer: S,
+) -> Result<S::Ok, S::Error> {
+    // order references to the agents by id so nothing is cloned
+    let mut sorted = agents.iter().collect::<Vec<&AgentProvenance>>();
+    sorted.sort_by_key(|agent| agent.agent);
+    serializer.collect_seq(sorted)
+}
+
+/// Serialize the tools of a provenance in tool instance id order
+///
+/// # Arguments
+///
+/// * `tools` - The tools to serialize
+/// * `serializer` - The serializer to write them with
+fn serialize_tools_sorted<S: serde::Serializer>(
+    tools: &[ToolProvenance],
+    serializer: S,
+) -> Result<S::Ok, S::Error> {
+    // order references to the tools by tool instance id so nothing is cloned
+    let mut sorted = tools.iter().collect::<Vec<&ToolProvenance>>();
+    sorted.sort_by_key(|tool| tool.tool_instance);
+    serializer.collect_seq(sorted)
+}
+
+impl RunProvenance {
+    /// Build a provenance from its agents and tools, sorted by id with each tool listed once
+    ///
+    /// # Arguments
+    ///
+    /// * `agents` - The agents of a workflow run
+    /// * `tools` - The tool instances the run runs or may call
+    #[must_use]
+    pub fn new(mut agents: Vec<AgentProvenance>, mut tools: Vec<ToolProvenance>) -> Self {
+        // sort the agents and tools by id and drop repeated tools
+        agents.sort_by_key(|agent| agent.agent);
+        agents.dedup_by_key(|agent| agent.agent);
+        tools.sort_by_key(|tool| tool.tool_instance);
+        tools.dedup_by_key(|tool| tool.tool_instance);
+        RunProvenance { agents, tools }
+    }
+
+    /// Build the provenance of the tool instances among some entities, skipping anything else
+    ///
+    /// # Arguments
+    ///
+    /// * `entities` - The entities the run read
+    #[must_use]
+    pub fn from_tools<'a, I: IntoIterator<Item = &'a Entity>>(entities: I) -> Self {
+        // describe each tool instance
+        let tools = entities
+            .into_iter()
+            .filter_map(ToolProvenance::from_entity)
+            .collect();
+        RunProvenance::new(Vec::new(), tools)
+    }
+
+    /// Whether this provenance records nothing, as for a reaction created before it was recorded
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        // nothing was recorded if both lists are empty
+        self.agents.is_empty() && self.tools.is_empty()
+    }
+
+    /// Get the provenance of one tool instance, if it's recorded
+    ///
+    /// # Arguments
+    ///
+    /// * `tool_instance` - The id of the tool instance
+    #[must_use]
+    pub fn tool(&self, tool_instance: Uuid) -> Option<&ToolProvenance> {
+        // find the tool by its instance id
+        self.tools
+            .iter()
+            .find(|tool| tool.tool_instance == tool_instance)
+    }
+}
+
+/// One agent of a workflow run and the hashes of its configuration and tool surface
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[cfg_attr(feature = "api", derive(utoipa::ToSchema))]
+pub struct AgentProvenance {
+    /// The agent's id
+    pub agent: Uuid,
+    /// The agent's name at instancing time
+    pub name: String,
+    /// The hash of the agent's configuration (`InstancedAgent.config_hash`)
+    pub config_hash: String,
+    /// The digest of the agent's effective tools (`InstancedAgent.toolset_digest`)
+    pub toolset_digest: String,
+}
+
+/// One tool instance a run runs or may call
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[cfg_attr(feature = "api", derive(utoipa::ToSchema))]
+pub struct ToolProvenance {
+    /// The id of the tool (root) this is an instance of
+    pub tool: Uuid,
+    /// The id of the tool instance
+    pub tool_instance: Uuid,
+    /// The name of the tool
+    pub name: String,
+    /// The kind of tool this is
+    pub kind: ToolKind,
+    /// The version label of the tool instance
+    pub version: String,
+    /// The content hash of the tool instance
+    pub spec_hash: String,
+    /// The container image as written in the spec (pinned when it carries `@sha256:`), for tools
+    /// whose workload runs a container image
+    pub image: Option<String>,
+}
+
+impl ToolProvenance {
+    /// Describe a tool instance entity, or `None` if the entity isn't a tool instance
+    ///
+    /// # Arguments
+    ///
+    /// * `entity` - The tool instance entity
+    #[must_use]
+    pub fn from_entity(entity: &Entity) -> Option<Self> {
+        // only tool instances have a provenance
+        let EntityMetadata::ToolInstance(instance) = &entity.metadata else {
+            return None;
+        };
+        // only Image and Harness tool instances run a workload that may have an image
+        let image = match &instance.spec {
+            ToolSpec::Image(workload) => Self::workload_image(workload),
+            ToolSpec::Harness(harness) => Self::workload_image(&harness.workload),
+            ToolSpec::Agentic(_) => None,
+        };
+        Some(ToolProvenance {
+            tool: instance.tool,
+            tool_instance: entity.id,
+            name: entity.name.clone(),
+            kind: instance.spec.kind(),
+            version: instance.version.to_string(),
+            spec_hash: instance.spec_hash.clone(),
+            image,
+        })
+    }
+
+    /// Get the container image a workload runs as its spec writes it, if it runs one
+    ///
+    /// # Arguments
+    ///
+    /// * `workload` - The workload to read
+    #[must_use]
+    pub fn workload_image(workload: &WorkloadSpec) -> Option<String> {
+        // only K8s and Windows workloads run a container image
+        match &workload.environment {
+            WorkloadEnvironment::K8s(k8s) => Some(k8s.image.clone()),
+            WorkloadEnvironment::Windows(windows) => Some(windows.image.clone()),
+            WorkloadEnvironment::BareMetal(_)
+            | WorkloadEnvironment::Kvm(_)
+            | WorkloadEnvironment::External => None,
+        }
+    }
 }
 
 /// The model, endpoint, and credential one agent of a workflow run resolved to
@@ -1156,6 +1345,196 @@ pub struct WorkflowRunRequest {
     pub sla: Option<u64>,
 }
 
+impl RunInputs {
+    /// Add a file to run on by its SHA256
+    ///
+    /// # Arguments
+    ///
+    /// * `sample` - The SHA256 of the file
+    #[must_use]
+    pub fn sample<T: Into<String>>(mut self, sample: T) -> Self {
+        // add this file to our inputs
+        self.samples.push(sample.into());
+        self
+    }
+
+    /// Add a repo to run on
+    ///
+    /// # Arguments
+    ///
+    /// * `repo` - The repo and optional commitish
+    #[must_use]
+    pub fn repo(mut self, repo: RepoDependencyRequest) -> Self {
+        // add this repo to our inputs
+        self.repos.push(repo);
+        self
+    }
+
+    /// Make sure a run has at least one file or repo to run on
+    pub fn validate(&self) -> Result<(), String> {
+        // a run needs something to run on
+        if self.samples.is_empty() && self.repos.is_empty() {
+            return Err("a run needs at least one sample or repo".to_owned());
+        }
+        Ok(())
+    }
+}
+
+impl ToolRunRequest {
+    /// Build a request to run a tool instance on some inputs
+    ///
+    /// # Arguments
+    ///
+    /// * `inputs` - The files and repos to run the tool on
+    #[must_use]
+    pub fn new(inputs: RunInputs) -> Self {
+        ToolRunRequest {
+            inputs,
+            group: None,
+            args: GenericJobArgs::default(),
+            parent: None,
+            tags: Vec::new(),
+            sla: None,
+        }
+    }
+
+    /// Set the group to run in
+    ///
+    /// # Arguments
+    ///
+    /// * `group` - One of the tool instance's groups
+    #[must_use]
+    pub fn group<T: Into<String>>(mut self, group: T) -> Self {
+        // set the run group
+        self.group = Some(group.into());
+        self
+    }
+
+    /// Set the args for the tool's job
+    ///
+    /// # Arguments
+    ///
+    /// * `args` - The args to pass to the tool
+    #[must_use]
+    pub fn args(mut self, args: GenericJobArgs) -> Self {
+        // set the job's args
+        self.args = args;
+        self
+    }
+
+    /// Set the reaction this run is a sub reaction of
+    ///
+    /// # Arguments
+    ///
+    /// * `parent` - The parent reaction
+    #[must_use]
+    pub fn parent(mut self, parent: Uuid) -> Self {
+        // set the parent reaction
+        self.parent = Some(parent);
+        self
+    }
+
+    /// Add a tag to the run's reaction
+    ///
+    /// # Arguments
+    ///
+    /// * `tag` - The tag to add
+    #[must_use]
+    pub fn tag<T: Into<String>>(mut self, tag: T) -> Self {
+        // add this tag
+        self.tags.push(tag.into());
+        self
+    }
+
+    /// Set the SLA for this run in seconds
+    ///
+    /// # Arguments
+    ///
+    /// * `sla` - The SLA in seconds
+    #[must_use]
+    pub fn sla(mut self, sla: u64) -> Self {
+        // set the SLA
+        self.sla = Some(sla);
+        self
+    }
+}
+
+impl WorkflowRunRequest {
+    /// Build a request to run a workflow instance on some inputs
+    ///
+    /// # Arguments
+    ///
+    /// * `inputs` - The files and repos to run the workflow on
+    #[must_use]
+    pub fn new(inputs: RunInputs) -> Self {
+        WorkflowRunRequest {
+            inputs,
+            group: None,
+            tags: Vec::new(),
+            sla: None,
+        }
+    }
+
+    /// Set the group to run in
+    ///
+    /// # Arguments
+    ///
+    /// * `group` - One of the workflow instance's groups
+    #[must_use]
+    pub fn group<T: Into<String>>(mut self, group: T) -> Self {
+        // set the run group
+        self.group = Some(group.into());
+        self
+    }
+
+    /// Add a tag to the run's reaction
+    ///
+    /// # Arguments
+    ///
+    /// * `tag` - The tag to add
+    #[must_use]
+    pub fn tag<T: Into<String>>(mut self, tag: T) -> Self {
+        // add this tag
+        self.tags.push(tag.into());
+        self
+    }
+
+    /// Set the SLA for this run in seconds
+    ///
+    /// # Arguments
+    ///
+    /// * `sla` - The SLA in seconds
+    #[must_use]
+    pub fn sla(mut self, sla: u64) -> Self {
+        // set the SLA
+        self.sla = Some(sla);
+        self
+    }
+}
+
+impl ReactionSource {
+    /// Get the exact versions this reaction was created with
+    #[must_use]
+    pub fn provenance(&self) -> &RunProvenance {
+        // every source carries its provenance
+        match self {
+            ReactionSource::Pipeline { provenance, .. }
+            | ReactionSource::Tool { provenance, .. } => provenance,
+            ReactionSource::WorkflowRun(run) => &run.provenance,
+        }
+    }
+
+    /// Get the key a workflow run stores its results under, if this is a workflow run
+    #[must_use]
+    pub fn result_key(&self) -> Option<&str> {
+        // only workflow runs have a result key
+        match self {
+            ReactionSource::WorkflowRun(run) => Some(&run.result_key),
+            ReactionSource::Pipeline { .. } | ReactionSource::Tool { .. } => None,
+        }
+    }
+}
+
 /// A reaction built around a pipeline
 ///
 /// This is used to track jobs across a single run of a pipeline
@@ -1219,6 +1598,66 @@ pub struct Reaction {
     /// workflow run or direct tool run, the parent workflow run for a harness's tool call
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub run: Option<Uuid>,
+}
+
+impl Reaction {
+    /// Get the tool name a tool run or workflow run stores its results under
+    ///
+    /// A workflow run stores them under its result key and a tool run under the tool of its one
+    /// stage; a pipeline reaction has no single key.
+    #[must_use]
+    pub fn result_key(&self) -> Option<&str> {
+        // a workflow run records its key and a tool run stores results under its stage's tool
+        match &self.source {
+            ReactionSource::WorkflowRun(run) => Some(&run.result_key),
+            ReactionSource::Tool { .. } => self
+                .plan
+                .stages
+                .first()
+                .and_then(|step| step.first())
+                .map(|stage| stage.name.as_str()),
+            ReactionSource::Pipeline { .. } => None,
+        }
+    }
+}
+
+/// The first wait of the tool run polling backoff in seconds
+pub const TOOL_RUN_POLL_START_SECS: u64 = 1;
+
+/// The longest wait of the tool run polling backoff in seconds
+pub const TOOL_RUN_POLL_MAX_SECS: u64 = 60;
+
+/// Get how long to wait before polling a tool run again
+///
+/// The hint follows the CLI wrapper's polling backoff from the run's start: polls 1 second
+/// apart at first, doubling up to 1 minute apart, so the hint is the time left until the
+/// backoff's next poll. A finished run has no hint.
+///
+/// # Arguments
+///
+/// * `status` - The tool run's current status
+/// * `elapsed` - The seconds since the tool run started
+#[must_use]
+pub fn tool_run_retry_after(status: &ReactionStatus, elapsed: u64) -> Option<u64> {
+    // a finished run is never polled again
+    if matches!(status, ReactionStatus::Completed | ReactionStatus::Failed) {
+        return None;
+    }
+    // walk the backoff's polls until the first one after now
+    let mut wait = TOOL_RUN_POLL_START_SECS;
+    let mut next = wait;
+    while next <= elapsed {
+        // double the wait up to its cap
+        wait = (wait * 2).min(TOOL_RUN_POLL_MAX_SECS);
+        // once the wait is capped the remaining polls are evenly spaced
+        if wait == TOOL_RUN_POLL_MAX_SECS {
+            let behind = elapsed - next;
+            next += (behind / wait + 1) * wait;
+            break;
+        }
+        next += wait;
+    }
+    Some(next - elapsed)
 }
 
 impl PartialEq<ReactionRequest> for Reaction {
@@ -1569,12 +2008,17 @@ mod tests {
     use std::collections::HashMap;
     use uuid::Uuid;
 
+    use super::{AgentProvenance, ToolProvenance};
     use super::{
         PlannedStage, Reaction, ReactionModelBinding, ReactionPlan, ReactionSource, ReactionStatus,
-        ReactionWorkflowRun, RunInputs, ToolRunRequest, WorkflowRunRequest,
+        ReactionWorkflowRun, RunInputs, RunProvenance, ToolRunRequest, WorkflowRunRequest,
+        tool_run_retry_after,
     };
     use crate::models::{
-        GenericJobArgs, ModelApi, ModelAuthLevel, ModelConfigRef, RepoDependencyRequest,
+        AgenticTool, BareMetalEnvironment, Entity, EntityKinds, EntityMetadata, GenericJobArgs,
+        HarnessSpec, K8sEnvironment, KvmEnvironment, ModelApi, ModelAuthLevel, ModelConfigRef,
+        RepoDependencyRequest, ToolInstanceEntity, ToolKind, ToolSpec, ToolVersion,
+        WindowsEnvironment, WorkloadEnvironment, WorkloadSpec,
     };
 
     /// Build a plan with two stages in its first step and one in its second
@@ -1614,6 +2058,7 @@ mod tests {
             harness: Uuid::new_v4(),
             result_key: "triage".to_owned(),
             models: vec![binding()],
+            provenance: RunProvenance::default(),
         }
     }
 
@@ -1665,6 +2110,348 @@ mod tests {
         serde_json::from_str(&raw).expect("deserialize")
     }
 
+    /// Build a tool instance entity with a spec
+    ///
+    /// # Arguments
+    ///
+    /// * `spec` - The tool instance's spec
+    fn instance(spec: ToolSpec) -> Entity {
+        // an instance named after its tool and version
+        Entity {
+            id: Uuid::new_v4(),
+            name: "sundial@2.1.0".to_owned(),
+            kind: EntityKinds::ToolInstance,
+            metadata: EntityMetadata::ToolInstance(ToolInstanceEntity {
+                tool: Uuid::new_v4(),
+                version: ToolVersion::from("2.1.0"),
+                previous: None,
+                spec_hash: "sha256:spec".to_owned(),
+                deprecated: false,
+                spec,
+                portability: None,
+                provides: Vec::new(),
+            }),
+            description: None,
+            submitter: "europa".to_owned(),
+            groups: vec!["jupiter".to_owned()],
+            tags: HashMap::default(),
+            image: None,
+            created: Utc::now(),
+        }
+    }
+
+    /// Build an Image tool spec whose workload runs in an environment
+    ///
+    /// # Arguments
+    ///
+    /// * `environment` - Where the workload runs
+    fn image_spec(environment: WorkloadEnvironment) -> ToolSpec {
+        // a workload with default execution and data settings
+        ToolSpec::Image(WorkloadSpec {
+            environment,
+            ..WorkloadSpec::default()
+        })
+    }
+
+    /// Build a K8s environment running an image
+    ///
+    /// # Arguments
+    ///
+    /// * `image` - The image the environment runs
+    fn k8s(image: &str) -> WorkloadEnvironment {
+        // a K8s environment with default scheduling
+        WorkloadEnvironment::K8s(K8sEnvironment {
+            image: image.to_owned(),
+            ..K8sEnvironment::default()
+        })
+    }
+
+    /// Build a tool provenance entry with an id
+    ///
+    /// # Arguments
+    ///
+    /// * `tool_instance` - The id of the tool instance
+    fn tool_provenance(tool_instance: Uuid) -> ToolProvenance {
+        // an Image tool instance running a pinned image
+        ToolProvenance {
+            tool: Uuid::new_v4(),
+            tool_instance,
+            name: "sundial@2.1.0".to_owned(),
+            kind: ToolKind::Image,
+            version: "2.1.0".to_owned(),
+            spec_hash: "sha256:spec".to_owned(),
+            image: Some("registry.local/sundial@sha256:abc".to_owned()),
+        }
+    }
+
+    /// Build an agent provenance entry with an id
+    ///
+    /// # Arguments
+    ///
+    /// * `agent` - The id of the agent
+    fn agent_provenance(agent: Uuid) -> AgentProvenance {
+        // an agent with its hashes
+        AgentProvenance {
+            agent,
+            name: "lead".to_owned(),
+            config_hash: "sha256:config".to_owned(),
+            toolset_digest: "sha256:tools".to_owned(),
+        }
+    }
+
+    /// Run provenance round trips, every source without one reads with an empty one, and its
+    /// agents and tools serialize sorted by id
+    #[test]
+    fn run_provenance_round_trips() {
+        // three ids in a known order
+        let mut ids = [Uuid::new_v4(), Uuid::new_v4(), Uuid::new_v4()];
+        ids.sort();
+        // a provenance built out of order round trips
+        let provenance = RunProvenance {
+            agents: vec![agent_provenance(ids[2]), agent_provenance(ids[0])],
+            tools: vec![
+                tool_provenance(ids[1]),
+                tool_provenance(ids[2]),
+                tool_provenance(ids[0]),
+            ],
+        };
+        let read = round_trip(&provenance);
+        assert_eq!(read.agents.len(), 2);
+        assert_eq!(read.tools.len(), 3);
+        assert_eq!(round_trip(&provenance.tools[0]), provenance.tools[0]);
+        assert_eq!(round_trip(&provenance.agents[0]), provenance.agents[0]);
+        // its agents and tools serialize sorted by id
+        let raw = serde_json::to_value(&provenance).expect("serialize");
+        let agents = raw["agents"]
+            .as_array()
+            .expect("agents")
+            .iter()
+            .map(|agent| agent["agent"].as_str().unwrap_or_default().to_owned())
+            .collect::<Vec<String>>();
+        assert_eq!(agents, vec![ids[0].to_string(), ids[2].to_string()]);
+        let tools = raw["tools"]
+            .as_array()
+            .expect("tools")
+            .iter()
+            .map(|tool| {
+                tool["tool_instance"]
+                    .as_str()
+                    .unwrap_or_default()
+                    .to_owned()
+            })
+            .collect::<Vec<String>>();
+        let sorted = ids.iter().map(ToString::to_string).collect::<Vec<String>>();
+        assert_eq!(tools, sorted);
+        // building one sorts it and lists each tool once
+        let built = RunProvenance::new(
+            vec![agent_provenance(ids[1]), agent_provenance(ids[0])],
+            vec![
+                tool_provenance(ids[2]),
+                tool_provenance(ids[0]),
+                tool_provenance(ids[2]),
+            ],
+        );
+        assert_eq!(
+            built
+                .agents
+                .iter()
+                .map(|agent| agent.agent)
+                .collect::<Vec<Uuid>>(),
+            vec![ids[0], ids[1]]
+        );
+        assert_eq!(
+            built
+                .tools
+                .iter()
+                .map(|tool| tool.tool_instance)
+                .collect::<Vec<Uuid>>(),
+            vec![ids[0], ids[2]]
+        );
+        // every source carries its provenance through a round trip
+        let mut run = workflow_run();
+        run.provenance = provenance.clone();
+        let sources = [
+            ReactionSource::Pipeline {
+                name: "orbit".to_owned(),
+                provenance: provenance.clone(),
+            },
+            ReactionSource::Tool {
+                tool_instance: ids[0],
+                provenance: provenance.clone(),
+            },
+            ReactionSource::WorkflowRun(run),
+        ];
+        for source in &sources {
+            let read = round_trip(source);
+            assert_eq!(read.provenance().tools.len(), 3);
+            assert_eq!(read.provenance().agents.len(), 2);
+        }
+        // sources stored without a provenance read with an empty one
+        let mut stored = serde_json::to_value(workflow_run()).expect("serialize");
+        stored
+            .as_object_mut()
+            .expect("an object")
+            .remove("provenance");
+        let old = [
+            json!({"Pipeline": {"name": "orbit"}}),
+            json!({"Tool": {"tool_instance": ids[0]}}),
+            json!({ "WorkflowRun": stored }),
+        ];
+        for raw in old {
+            let read: ReactionSource = serde_json::from_value(raw).expect("an older source");
+            assert!(read.provenance().is_empty());
+            assert_eq!(read.provenance(), &RunProvenance::default());
+        }
+    }
+
+    /// A tool instance's provenance carries its image as its spec writes it for K8s and Windows
+    /// Image tools and a harness's K8s workload, and no image for other environments or for
+    /// agentic tools
+    #[test]
+    fn tool_provenance_images() {
+        // a tagged K8s image stays a tag and a pinned one stays pinned
+        for image in [
+            "registry.local/sundial:3",
+            "registry.local/sundial@sha256:0123456789abcdef",
+        ] {
+            let entity = instance(image_spec(k8s(image)));
+            let found = ToolProvenance::from_entity(&entity).expect("a tool instance");
+            assert_eq!(found.image.as_deref(), Some(image));
+            assert_eq!(found.tool_instance, entity.id);
+            assert_eq!(found.kind, ToolKind::Image);
+            assert_eq!(found.version, "2.1.0");
+            assert_eq!(found.spec_hash, "sha256:spec");
+            assert_eq!(found.name, "sundial@2.1.0");
+            let EntityMetadata::ToolInstance(meta) = &entity.metadata else {
+                unreachable!("a tool instance entity")
+            };
+            assert_eq!(found.tool, meta.tool);
+        }
+        // a Windows image is recorded as written
+        let windows = WorkloadEnvironment::Windows(WindowsEnvironment {
+            image: "registry.local/sundial-win:1".to_owned(),
+            ..WindowsEnvironment::default()
+        });
+        let found = ToolProvenance::from_entity(&instance(image_spec(windows))).expect("windows");
+        assert_eq!(found.image.as_deref(), Some("registry.local/sundial-win:1"));
+        // a harness records its K8s workload's image
+        let harness = ToolSpec::Harness(HarnessSpec {
+            workload: WorkloadSpec {
+                environment: k8s("registry.local/harness@sha256:fedcba"),
+                ..WorkloadSpec::default()
+            },
+            ..HarnessSpec::default()
+        });
+        let found = ToolProvenance::from_entity(&instance(harness)).expect("harness");
+        assert_eq!(found.kind, ToolKind::Harness);
+        assert_eq!(
+            found.image.as_deref(),
+            Some("registry.local/harness@sha256:fedcba")
+        );
+        // BareMetal, Kvm, and External workloads and agentic tools have no image
+        for environment in [
+            WorkloadEnvironment::BareMetal(BareMetalEnvironment::default()),
+            WorkloadEnvironment::Kvm(KvmEnvironment::default()),
+            WorkloadEnvironment::External,
+        ] {
+            let found =
+                ToolProvenance::from_entity(&instance(image_spec(environment))).expect("image");
+            assert_eq!(found.image, None);
+        }
+        let agentic =
+            ToolProvenance::from_entity(&instance(ToolSpec::Agentic(AgenticTool::default())))
+                .expect("agentic");
+        assert_eq!(agentic.kind, ToolKind::Agentic);
+        assert_eq!(agentic.image, None);
+        // an entity that isn't a tool instance has no tool provenance
+        let mut tool = instance(image_spec(k8s("registry.local/sundial:3")));
+        tool.metadata = EntityMetadata::Other;
+        assert!(ToolProvenance::from_entity(&tool).is_none());
+    }
+
+    /// The polling hint follows the 1 second doubling backoff capped at 1 minute from the tool
+    /// run's start while it runs, and is unset once it has finished
+    #[test]
+    fn tool_run_retry_after_follows_backoff() {
+        // the backoff polls at 1, 3, 7, 15, 31, and 63 seconds, then every minute
+        let expected = [
+            (0, 1),
+            (1, 2),
+            (2, 1),
+            (3, 4),
+            (6, 1),
+            (7, 8),
+            (15, 16),
+            (31, 32),
+            (62, 1),
+            (63, 60),
+            (64, 59),
+            (123, 60),
+            (1000, 23),
+        ];
+        for status in [ReactionStatus::Created, ReactionStatus::Started] {
+            for (elapsed, hint) in expected {
+                assert_eq!(
+                    tool_run_retry_after(&status, elapsed),
+                    Some(hint),
+                    "{status:?} after {elapsed} seconds"
+                );
+            }
+        }
+        // a finished run has no hint
+        for status in [ReactionStatus::Completed, ReactionStatus::Failed] {
+            for elapsed in [0, 5, 1000] {
+                assert_eq!(tool_run_retry_after(&status, elapsed), None);
+            }
+        }
+    }
+
+    /// A tool run stores its results under its one stage's tool, a workflow run under its
+    /// result key, and a pipeline reaction has no single result key
+    #[test]
+    fn reaction_result_keys() {
+        // a tool run uses its stage's tool name
+        let mut tool_run = reaction(ReactionSource::Tool {
+            tool_instance: Uuid::new_v4(),
+            provenance: RunProvenance::default(),
+        });
+        tool_run.plan = ReactionPlan {
+            stages: vec![vec![PlannedStage {
+                name: "sundial".to_owned(),
+                tool_instance: Uuid::new_v4(),
+            }]],
+        };
+        assert_eq!(tool_run.result_key(), Some("sundial"));
+        // a workflow run uses its result key
+        let run = reaction(ReactionSource::WorkflowRun(workflow_run()));
+        assert_eq!(run.result_key(), Some("triage"));
+        // a pipeline reaction has none
+        let pipeline = reaction(ReactionSource::Pipeline {
+            name: "orbit".to_owned(),
+            provenance: RunProvenance::default(),
+        });
+        assert_eq!(pipeline.result_key(), None);
+    }
+
+    /// A run needs at least one sample or repo, and samples only, repos only, or both pass
+    #[test]
+    fn run_inputs_validate() {
+        // no samples and no repos is refused
+        let error = RunInputs::default().validate().unwrap_err();
+        assert_eq!(error, "a run needs at least one sample or repo");
+        // samples only, repos only, and both are accepted
+        let repo = RepoDependencyRequest::new("github.com/moons/io");
+        let samples = RunInputs::default().sample("a".repeat(64));
+        let repos = RunInputs::default().repo(repo.clone());
+        let both = RunInputs::default().sample("b".repeat(64)).repo(repo);
+        for inputs in [samples, repos, both] {
+            assert_eq!(inputs.validate(), Ok(()));
+        }
+        // unknown fields such as planned input queries are refused
+        let queries = serde_json::from_value::<RunInputs>(json!({"samples": ["a"], "queries": []}));
+        assert!(queries.is_err());
+    }
+
     /// Reaction sources, plans, model bindings, run inputs, and run requests round trip
     #[test]
     fn run_types_round_trip() {
@@ -1672,9 +2459,11 @@ mod tests {
         let sources = [
             ReactionSource::Pipeline {
                 name: "orbit".to_owned(),
+                provenance: RunProvenance::default(),
             },
             ReactionSource::Tool {
                 tool_instance: Uuid::new_v4(),
+                provenance: RunProvenance::default(),
             },
             ReactionSource::WorkflowRun(workflow_run()),
         ];
@@ -1763,6 +2552,7 @@ mod tests {
         // a pipeline reaction writes no run fields
         let pipeline = reaction(ReactionSource::Pipeline {
             name: "orbit".to_owned(),
+            provenance: RunProvenance::default(),
         });
         let raw = serde_json::to_value(&pipeline).expect("serialize");
         let map = raw.as_object().expect("an object");

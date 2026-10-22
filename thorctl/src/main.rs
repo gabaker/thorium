@@ -46,7 +46,7 @@ async fn main() {
         SubCommands::ToolSets(tool_sets) => handlers::toolsets::handle(&args, tool_sets).await,
         SubCommands::Workflows(workflows) => handlers::workflows::handle(&args, workflows).await,
         SubCommands::Instances(instances) => handlers::instances::handle(&args, instances).await,
-        SubCommands::AI(ai) => handlers::ai::handle(&args, ai).await,
+        SubCommands::Runs(runs) => handlers::runs::handle(&args, runs).await,
         SubCommands::Cart(cart) => handlers::cart::handle(&args, cart).await,
         SubCommands::Uncart(uncart) => handlers::uncart::handle(&args, uncart).await,
         SubCommands::Run(run) => handlers::run::handle(&args, run).await,

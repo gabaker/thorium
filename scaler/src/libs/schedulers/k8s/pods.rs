@@ -6,7 +6,7 @@ use reqwest::StatusCode;
 use serde_json::json;
 use std::collections::{BTreeMap, HashSet};
 use thorium::conf::K8sHostAliases;
-use thorium::models::Image;
+use thorium::models::{Image, TOOL_INSTANCE_LABEL, k8s_label};
 use thorium::{Conf, Error};
 use tracing::{Level, event, instrument};
 
@@ -128,7 +128,7 @@ impl Pods {
         };
 
         // all of these labels must exist for this to be a valid Thorium pod
-        let required = ["user", "group", "pipeline", "stage", "thorium"];
+        let required = ["user", "group", TOOL_INSTANCE_LABEL, "thorium"];
         // check each label exists and return false if one doesn't
         for require in required.iter() {
             if !labels.contains_key(require.to_owned()) {
@@ -532,6 +532,27 @@ impl Pods {
                 return Err(Error::new(msg));
             }
         };
+        // grab our workload info
+        let workload = cache
+            .get_workload(&spawn.req.tool_instance)
+            .ok_or(Error::new(format!(
+                "Unable to retrieve tool instance '{}' from cache",
+                spawn.req.tool_instance
+            )))?;
+        // get the workload's image in this spawn's group
+        let image = workload
+            .projection(&spawn.req.group)
+            .ok_or(Error::new(format!(
+                "Tool instance '{}' is not in group '{}'",
+                spawn.req.tool_instance, spawn.req.group
+            )))?;
+        // label this pod with its requisition, and its tool's name so network policies can
+        // select it by tool
+        let mut labels = spawn.req.labels();
+        labels.insert("stage".to_owned(), k8s_label(&workload.name));
+        labels.insert("pool".to_owned(), spawn.pool.as_str().to_owned());
+        labels.insert("thorium".to_owned(), "true".to_owned());
+        labels.insert("name".to_owned(), spawn.name.clone());
         // build base pod spec without a name
         let raw = json!({
             "apiVersion": "v1",
@@ -539,15 +560,7 @@ impl Pods {
             "metadata": {
                 "namespace": &spawn.req.group,
                 "name": &spawn.name,
-                "labels": {
-                    "user": &spawn.req.user,
-                    "group": &spawn.req.group,
-                    "pipeline": &spawn.req.pipeline,
-                    "stage": &spawn.req.stage,
-                    "pool": spawn.pool.as_str(),
-                    "thorium": "true",
-                    "name": &spawn.name
-                }
+                "labels": labels,
             },
             "spec": {
                 "containers": self.containers.generate(cache, spawn, user)?,
@@ -556,19 +569,6 @@ impl Pods {
                 "hostAliases": &self.host_aliases,
             }
         });
-        // grab our image info
-        let image = cache
-            .images
-            .get(&spawn.req.group)
-            .ok_or(Error::new(format!(
-                "Unable to retrieve group '{}' from cache",
-                spawn.req.group
-            )))?
-            .get(&spawn.req.stage)
-            .ok_or(Error::new(format!(
-                "Unable to retrieve stage '{}/{}' from cache. Is the image banned?",
-                spawn.req.group, spawn.req.stage
-            )))?;
         // cast this json into a barebones pod
         let mut pod: Pod = serde_json::from_value(raw)?;
         // get this pod's labels (should never provide default because we always provide labels in raw)
@@ -593,7 +593,11 @@ impl Pods {
         // get this pods specs or build defaults
         let pod_spec = pod.spec.get_or_insert(PodSpec::default());
         // insert our image specs into this pod
-        pod_spec.volumes = Some(self.volumes.generate(image, user).await?);
+        pod_spec.volumes = Some(
+            self.volumes
+                .generate(image, user, spawn.req.run.is_none())
+                .await?,
+        );
         pod_spec.image_pull_secrets = Some(self.secrets.registry_token());
         pod_spec.termination_grace_period_seconds = Some(1);
         pod_spec.restart_policy = Some("Never".to_owned());
@@ -740,9 +744,467 @@ impl Pods {
 #[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
+    use crate::libs::DockerInfo;
+    use crate::libs::schedulers::requisitions::worker_name;
+    use crate::libs::test_api::{self, GROUP, MockApi, MockCrane, World, k8s_spec, tool_instance};
     use k8s_openapi::api::core::v1::{
         ContainerState, ContainerStateWaiting, ContainerStatus, PodStatus,
     };
+    use k8s_openapi::api::networking::v1::NetworkPolicyIngressRule;
+    use thorium::models::{
+        ImageScaler, NetworkPolicy, NetworkPolicyRule, Pools, RUN_LABEL, Requisition,
+        SecurityContext, SpawnLimits, WorkloadEnvironment, k8s_name,
+    };
+    use uuid::Uuid;
+
+    /// The tool instance the pods in these tests run
+    const GHIDRA: Uuid = Uuid::from_u128(0x6768_6964_7261);
+
+    /// Build a pods wrapper whose kube client is never called
+    ///
+    /// # Arguments
+    ///
+    /// * `conf` - The Thorium config
+    fn pods(conf: &Conf) -> Pods {
+        // kube's client needs a crypto provider like the scaler installs at startup
+        let _ = rustls::crypto::ring::default_provider().install_default();
+        // a client for a cluster that is never contacted
+        let config = kube::Config::new("http://127.0.0.1:9".parse().unwrap());
+        let client = kube::Client::try_from(config).unwrap();
+        Pods::new(&client, conf, "cluster0", "ctx")
+    }
+
+    /// Build a cache holding an inspected `ghidra-cli` tool instance and a user with unix info
+    ///
+    /// # Arguments
+    ///
+    /// * `security_context` - The workload's security context
+    /// * `network_policies` - The network policies the workload names
+    async fn ghidra_cache(
+        security_context: SecurityContext,
+        network_policies: &[&str],
+    ) -> (crate::libs::Cache, MockApi) {
+        // serve a K8s ghidra-cli tool instance
+        let mut spec = k8s_spec("registry.example/ghidra-cli:11.1", SpawnLimits::Unlimited);
+        if let WorkloadEnvironment::K8s(k8s) = &mut spec.environment {
+            k8s.security_context = security_context;
+            k8s.network_policies = network_policies
+                .iter()
+                .map(|name| (*name).to_owned())
+                .collect();
+        }
+        let mut world = World::default();
+        world.entities.insert(
+            GHIDRA,
+            tool_instance(GHIDRA, "ghidra-cli", "11.1", &[GROUP], spec),
+        );
+        let api = MockApi::start(world).await;
+        let crane = MockCrane::new();
+        let mut cache = test_api::cache(&api, test_api::conf(&crane), ImageScaler::K8s, &[]).await;
+        // cache a user with unix info
+        let mut user = test_api::user("io", &[GROUP]);
+        user.unix = Some(thorium::models::UnixInfo {
+            user: 1001,
+            group: 1002,
+        });
+        cache.users.insert("io".to_owned(), user);
+        // cache and inspect the tool instance
+        let thorium = api.client().await;
+        cache
+            .prefetch(&thorium, [GHIDRA].into_iter().collect())
+            .await;
+        cache.docker.insert(
+            "registry.example/ghidra-cli:11.1".to_owned(),
+            DockerInfo::deserialize(
+                r#"{"architecture":"amd64","os":"linux","config":{"Entrypoint":["/run"]}}"#,
+            )
+            .unwrap(),
+        );
+        (cache, api)
+    }
+
+    /// Build a spawn of the `ghidra-cli` tool instance
+    ///
+    /// # Arguments
+    ///
+    /// * `cache` - The cache holding the tool instance
+    /// * `run` - The run the spawn is limited to, if any
+    fn ghidra_spawn(cache: &crate::libs::Cache, run: Option<Uuid>) -> Spawned {
+        let workload = cache.get_workload(&GHIDRA).unwrap();
+        let image = workload.projection(GROUP).unwrap();
+        Spawned::new(
+            "cluster0",
+            "node0",
+            Requisition::new("io", GROUP, GHIDRA, run),
+            &workload,
+            image,
+            Pools::Deadline,
+        )
+    }
+
+    /// Get the string labels of a pod
+    ///
+    /// # Arguments
+    ///
+    /// * `pod` - The pod to get the labels of
+    fn labels(pod: &Pod) -> BTreeMap<String, String> {
+        pod.metadata.labels.clone().unwrap()
+    }
+
+    /// Get the value of a container env var, if it's set
+    ///
+    /// # Arguments
+    ///
+    /// * `container` - The container
+    /// * `name` - The env var's name
+    fn env_value(container: &k8s_openapi::api::core::v1::Container, name: &str) -> Option<String> {
+        container
+            .env
+            .as_ref()
+            .and_then(|env| env.iter().find(|var| var.name == name))
+            .and_then(|var| var.value.clone())
+    }
+
+    /// A per-run pod gets its run's token, and a harness's its models, as literal env values,
+    /// has no keys secret volume or keys argument but an empty dir at the keys path, and carries
+    /// its run label; a shared pod keeps the user's keys and gets none of those values, and a
+    /// per-run spawn whose env wasn't fetched isn't built
+    #[tokio::test]
+    #[allow(clippy::too_many_lines)]
+    async fn per_run_pod_env_and_keys_dir() {
+        // a per-run spawn of ghidra-cli with a harness's env, whose image sets its own token var
+        let (cache, _api) = ghidra_cache(SecurityContext::default(), &[]).await;
+        let run = Uuid::new_v4();
+        let mut spawn = ghidra_spawn(&cache, Some(run));
+        let models = thorium::models::RunModels {
+            models: thorium::models::HarnessModels::default(),
+            env: [(
+                "ANTHROPIC_API_KEY".to_owned(),
+                thorium::models::ModelSecret::from("sk-pod-model-secret"),
+            )]
+            .into_iter()
+            .collect(),
+        };
+        spawn.run_env = Some(crate::libs::schedulers::RunPodEnv {
+            token: "pod-run-token".to_owned(),
+            models: Some(models.clone()),
+        });
+        {
+            let mut workloads = cache.workloads.write().unwrap();
+            let entry = workloads.get_mut(&GHIDRA).unwrap();
+            let mut workload = (*entry.workload).clone();
+            if let Some(image) = workload.projections.get_mut(GROUP) {
+                image
+                    .env
+                    .insert("THORIUM_TOKEN".to_owned(), Some("image-token".to_owned()));
+            }
+            entry.workload = std::sync::Arc::new(workload);
+        }
+        let pod = pods(&cache.conf).generate(&cache, &spawn).await.unwrap();
+        let spec = pod.spec.clone().unwrap();
+        let container = &spec.containers[0];
+        // the url is the one the user keys secrets name, and the token is the run's
+        let url = cache
+            .conf
+            .thorium
+            .scaler
+            .k8s
+            .resolved_api_url("ctx", &cache.conf.thorium.namespace);
+        assert_eq!(env_value(container, "THORIUM_URL"), Some(url));
+        assert_eq!(
+            env_value(container, "THORIUM_TOKEN"),
+            Some("pod-run-token".to_owned())
+        );
+        let tokens = container
+            .env
+            .as_ref()
+            .unwrap()
+            .iter()
+            .filter(|var| var.name == "THORIUM_TOKEN")
+            .count();
+        assert_eq!(tokens, 1);
+        assert_eq!(
+            env_value(container, "THORIUM_MODELS"),
+            Some(serde_json::to_string(&models.models).unwrap())
+        );
+        assert_eq!(
+            env_value(container, "ANTHROPIC_API_KEY"),
+            Some("sk-pod-model-secret".to_owned())
+        );
+        // the agent gets its tool instance and no keys file
+        let args = container.args.clone().unwrap();
+        assert!(!args.contains(&"--keys".to_owned()));
+        let position = args
+            .iter()
+            .position(|arg| arg == "--tool-instance")
+            .unwrap();
+        assert_eq!(args[position + 1], GHIDRA.to_string());
+        // no keys secret is mounted, only an empty dir at the keys path
+        let volumes = spec.volumes.clone().unwrap();
+        assert!(volumes.iter().all(|vol| vol.secret.is_none()));
+        let keys_dir = volumes
+            .iter()
+            .find(|vol| vol.name == "thorium-run-keys")
+            .unwrap();
+        assert!(keys_dir.empty_dir.is_some());
+        let mounts = container.volume_mounts.clone().unwrap();
+        let keys_mount = mounts
+            .iter()
+            .find(|mount| mount.mount_path == "/opt/thorium-keys")
+            .unwrap();
+        assert_eq!(keys_mount.name, "thorium-run-keys");
+        assert_ne!(keys_mount.read_only, Some(true));
+        assert!(!mounts.iter().any(|mount| mount.name == "thorium-io-keys"));
+        // the pod carries its run's label and runs as the user's unix ids
+        assert_eq!(labels(&pod)[RUN_LABEL], run.to_string());
+        let ctx = spec.security_context.unwrap();
+        assert_eq!(
+            (ctx.run_as_user, ctx.run_as_group),
+            (Some(1001), Some(1002))
+        );
+        // an Image worker of the run gets the url and token and no models
+        spawn.run_env = Some(crate::libs::schedulers::RunPodEnv {
+            token: "pod-run-token".to_owned(),
+            models: None,
+        });
+        let pod = pods(&cache.conf).generate(&cache, &spawn).await.unwrap();
+        let container = &pod.spec.unwrap().containers[0];
+        assert!(env_value(container, "THORIUM_TOKEN").is_some());
+        assert!(env_value(container, "THORIUM_MODELS").is_none());
+        assert!(env_value(container, "ANTHROPIC_API_KEY").is_none());
+        // a per-run spawn whose env wasn't fetched is refused
+        spawn.run_env = None;
+        assert!(pods(&cache.conf).generate(&cache, &spawn).await.is_err());
+        // a shared pod keeps the user's keys and gets no run values
+        let shared = ghidra_spawn(&cache, None);
+        let pod = pods(&cache.conf).generate(&cache, &shared).await.unwrap();
+        let spec = pod.spec.unwrap();
+        let container = &spec.containers[0];
+        for name in ["THORIUM_URL", "THORIUM_MODELS", "ANTHROPIC_API_KEY"] {
+            assert!(env_value(container, name).is_none(), "{name}");
+        }
+        assert_eq!(
+            env_value(container, "THORIUM_TOKEN"),
+            Some("image-token".to_owned())
+        );
+        assert!(
+            container
+                .args
+                .clone()
+                .unwrap()
+                .contains(&"--keys".to_owned())
+        );
+        assert!(spec.volumes.unwrap().iter().any(|vol| {
+            vol.secret
+                .as_ref()
+                .is_some_and(|secret| secret.secret_name.as_deref() == Some("thorium-io-keys"))
+        }));
+    }
+
+    /// A shared workload pod is named after its tool and version, labeled with its tool instance
+    /// and its tool's name, runs the agent for its tool instance with the user's keys, and runs as
+    /// the user's unix ids unless the workload's security context sets its own
+    #[tokio::test]
+    async fn shared_workload_pod_shape() {
+        // a shared spawn of ghidra-cli 11.1
+        let (cache, _api) = ghidra_cache(SecurityContext::default(), &[]).await;
+        let spawn = ghidra_spawn(&cache, None);
+        let pod = pods(&cache.conf).generate(&cache, &spawn).await.unwrap();
+        // the pod is named after the tool and version with a random suffix
+        let name = pod.metadata.name.clone().unwrap();
+        let suffix = name.strip_prefix("ghidra-cli-11-1-").unwrap();
+        assert_eq!(suffix.len(), 8);
+        // the labels name the tool instance and tool and no pipeline or run
+        let labels = labels(&pod);
+        assert_eq!(labels["user"], "io");
+        assert_eq!(labels["group"], GROUP);
+        assert_eq!(labels["pool"], "Deadline");
+        assert_eq!(labels["thorium"], "true");
+        assert_eq!(labels["name"], name);
+        assert_eq!(labels[TOOL_INSTANCE_LABEL], GHIDRA.to_string());
+        assert_eq!(labels["stage"], "ghidra-cli");
+        assert!(!labels.contains_key("pipeline"));
+        assert!(!labels.contains_key(RUN_LABEL));
+        // the container is named after the tool and runs the agent for the tool instance
+        let spec = pod.spec.clone().unwrap();
+        let container = &spec.containers[0];
+        assert_eq!(container.name, "ghidra-cli");
+        let args = container.args.clone().unwrap();
+        let position = args
+            .iter()
+            .position(|arg| arg == "--tool-instance")
+            .unwrap();
+        assert_eq!(args[position + 1], GHIDRA.to_string());
+        assert!(args.contains(&"--keys".to_owned()));
+        assert!(!args.contains(&"--pipeline".to_owned()));
+        assert!(!args.contains(&"--stage".to_owned()));
+        // resources come from the workload's scheduling settings
+        let requests = container.resources.clone().unwrap().requests.unwrap();
+        assert_eq!(requests["cpu"].0, "1000m");
+        // the user's keys secret is mounted at the keys path
+        let volumes = spec.volumes.clone().unwrap();
+        assert!(volumes.iter().any(|vol| {
+            vol.secret
+                .as_ref()
+                .is_some_and(|secret| secret.secret_name.as_deref() == Some("thorium-io-keys"))
+        }));
+        let mounts = container.volume_mounts.clone().unwrap();
+        assert!(mounts.iter().any(
+            |mount| mount.name == "thorium-io-keys" && mount.mount_path == "/opt/thorium-keys"
+        ));
+        // the pod runs as the user's unix ids
+        let ctx = spec.security_context.unwrap();
+        assert_eq!(
+            (ctx.run_as_user, ctx.run_as_group),
+            (Some(1001), Some(1002))
+        );
+        // a workload security context that sets its own ids wins
+        let custom = SecurityContext {
+            user: Some(7),
+            group: Some(8),
+            ..SecurityContext::default()
+        };
+        let (cache, _api) = ghidra_cache(custom, &[]).await;
+        let pod = pods(&cache.conf)
+            .generate(&cache, &ghidra_spawn(&cache, None))
+            .await
+            .unwrap();
+        let ctx = pod.spec.unwrap().security_context.unwrap();
+        assert_eq!((ctx.run_as_user, ctx.run_as_group), (Some(7), Some(8)));
+    }
+
+    /// A pod's labels give back its requisition with its tool instance and run, and only pods
+    /// with a tool instance label are owned by Thorium
+    #[tokio::test]
+    async fn pod_labels_round_trip() {
+        // a shared and a per-run pod
+        let (cache, _api) = ghidra_cache(SecurityContext::default(), &[]).await;
+        let run = Uuid::new_v4();
+        for run in [None, Some(run)] {
+            let mut spawn = ghidra_spawn(&cache, run);
+            // a per-run spawn has its env values when it's built
+            if run.is_some() {
+                spawn.run_env = Some(crate::libs::schedulers::RunPodEnv {
+                    token: "token".to_owned(),
+                    models: None,
+                });
+            }
+            let pod = pods(&cache.conf).generate(&cache, &spawn).await.unwrap();
+            // the labels rebuild the spawn's requisition
+            assert_eq!(Requisition::from_labels(&labels(&pod)).unwrap(), spawn.req);
+            assert!(Pods::thorium_owned(&pod));
+            // a pod without a tool instance label isn't ours
+            let mut unowned = pod.clone();
+            unowned
+                .metadata
+                .labels
+                .as_mut()
+                .unwrap()
+                .remove(TOOL_INSTANCE_LABEL);
+            assert!(!Pods::thorium_owned(&unowned));
+        }
+    }
+
+    /// A workload pod carries the labels of the network policies it names and the stage label
+    /// holding its tool's name; a policy peer naming a tool instance selects that tool
+    /// instance's pods and a peer naming a tool selects its stage label
+    #[tokio::test]
+    async fn workload_pod_network_policies() {
+        // a workload naming a policy in its group
+        let (mut cache, _api) = ghidra_cache(SecurityContext::default(), &["models"]).await;
+        let policy: NetworkPolicy = serde_json::from_value(serde_json::json!({
+            "name": "models",
+            "id": Uuid::new_v4(),
+            "k8s_name": "models-1234",
+            "groups": [GROUP],
+            "created": chrono::Utc::now(),
+            "forced_policy": false,
+            "default_policy": false,
+            "used_by": {},
+        }))
+        .unwrap();
+        cache.network_policies.insert(policy);
+        let pod = pods(&cache.conf)
+            .generate(&cache, &ghidra_spawn(&cache, None))
+            .await
+            .unwrap();
+        let labels = labels(&pod);
+        assert_eq!(labels["models-1234"], "true");
+        assert_eq!(labels["stage"], "ghidra-cli");
+        // allowed tools build peers by tool instance or by the tool's stage label
+        let rule: NetworkPolicyRule = serde_json::from_value(serde_json::json!({
+            "id": Uuid::new_v4(),
+            "allowed_tools": [GHIDRA.to_string(), "Ghidra CLI", "migrated1"],
+        }))
+        .unwrap();
+        let k8s_rule = NetworkPolicyIngressRule::from(rule);
+        let selectors = k8s_rule
+            .from
+            .unwrap()
+            .into_iter()
+            .filter_map(|peer| peer.pod_selector.and_then(|selector| selector.match_labels))
+            .collect::<Vec<_>>();
+        assert_eq!(selectors[0][TOOL_INSTANCE_LABEL], GHIDRA.to_string());
+        assert_eq!(selectors[1]["stage"], k8s_label("Ghidra CLI"));
+        assert_eq!(selectors[1]["stage"], "ghidra-cli");
+        // a migrated image's name selects itself unchanged
+        assert_eq!(selectors[2]["stage"], "migrated1");
+    }
+
+    /// Worker names, container names, and stage labels are valid K8s names for any tool name
+    /// and version
+    #[tokio::test]
+    async fn k8s_names_for_any_tool() {
+        // the pattern every K8s name must match
+        let valid = |name: &str| {
+            name.len() <= 63
+                && !name.is_empty()
+                && name
+                    .chars()
+                    .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-')
+                && !name.starts_with('-')
+                && !name.ends_with('-')
+        };
+        // names with uppercase letters, spaces, underscores, and odd version labels
+        for (tool, version) in [
+            ("Ghidra CLI", "11.1"),
+            ("my_tool", "1.0.0+build.5"),
+            ("_lead", "v2"),
+            ("emoji😄tool", "beta"),
+        ] {
+            let name = worker_name(tool, version, "abcd1234");
+            assert!(valid(&name), "{name} is not a valid K8s name");
+            assert!(name.ends_with("-abcd1234"));
+            assert!(valid(&k8s_label(tool)), "{tool}");
+        }
+        assert_eq!(
+            worker_name("my_tool", "1.0.0+build.5", "abcd1234"),
+            "my-tool-1-0-0-build-5-abcd1234"
+        );
+        // a migrated image's name is unchanged
+        assert_eq!(
+            worker_name("husker", "1.0.0", "abcd1234"),
+            "husker-1-0-0-abcd1234"
+        );
+        assert_eq!(k8s_label("husker"), "husker");
+        // an 80 character tool name is trimmed so the whole version and suffix fit
+        let long = "t".repeat(80);
+        let name = worker_name(&long, "2.5.1", "abcd1234");
+        assert_eq!(name.len(), 63);
+        assert!(name.ends_with("-2-5-1-abcd1234"));
+        assert!(valid(&name));
+        assert_eq!(k8s_name("A_B", 63), "a-b");
+        // the container name and the stage label use the same helper
+        let (cache, _api) = ghidra_cache(SecurityContext::default(), &[]).await;
+        let pod = pods(&cache.conf)
+            .generate(&cache, &ghidra_spawn(&cache, None))
+            .await
+            .unwrap();
+        assert_eq!(
+            pod.spec.clone().unwrap().containers[0].name,
+            labels(&pod)["stage"]
+        );
+    }
 
     /// Build a Pending pod whose single container is waiting with the given reason
     ///
@@ -809,7 +1271,7 @@ mod tests {
     fn pending_delete(name: &str) -> Spawned {
         // build a spawned record with only the fields classification reads set
         Spawned {
-            req: thorium::models::Requisition::new("user", "group", "pipeline", "stage"),
+            req: thorium::models::Requisition::new("user", "group", uuid::Uuid::nil(), None),
             cluster: "cluster".to_owned(),
             node: "node".to_owned(),
             name: name.to_owned(),
@@ -818,6 +1280,7 @@ mod tests {
             spawn: false,
             scaled_down: true,
             down_scalable: chrono::Utc::now(),
+            run_env: None,
         }
     }
 

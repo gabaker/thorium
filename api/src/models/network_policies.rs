@@ -1309,6 +1309,47 @@ pub struct NetworkPolicy {
     pub used_by: HashMap<String, Vec<String>>,
 }
 
+/// The max length of a K8s object name or label value
+pub const K8S_NAME_MAX_CHARS: usize = 63;
+
+/// Convert a value to the characters K8s allows in names and label values
+///
+/// The value is lowercased, every character outside `[a-z0-9-]` is replaced with `-`, and at
+/// most `max` characters are kept.
+///
+/// # Arguments
+///
+/// * `value` - The value to convert
+/// * `max` - The max number of characters to keep
+#[must_use]
+pub fn k8s_name(value: &str, max: usize) -> String {
+    // lowercase the value and replace every character K8s doesn't allow
+    value
+        .to_lowercase()
+        .replace(
+            |c: char| !c.is_ascii() || (!c.is_alphanumeric() && c != '-'),
+            "-",
+        )
+        .chars()
+        .take(max)
+        .collect()
+}
+
+/// Convert a tool's name to the value its workers' container name and `stage` label hold
+///
+/// The value fits in a K8s name and starts and ends with a letter or digit.
+///
+/// # Arguments
+///
+/// * `value` - The tool's name
+#[must_use]
+pub fn k8s_label(value: &str) -> String {
+    // keep only allowed characters and trim the dashes K8s doesn't allow at either end
+    k8s_name(value, K8S_NAME_MAX_CHARS)
+        .trim_matches('-')
+        .to_owned()
+}
+
 // add K8's api support for the scaler
 cfg_if::cfg_if! {
     if #[cfg(feature = "k8s")] {
@@ -1531,18 +1572,19 @@ cfg_if::cfg_if! {
                             }
                             // add tools as pod label selectors
                             for tool in thorium_rule.allowed_tools.drain(..) {
+                                // a tool instance id selects that instance's workers and a name selects
+                                // the "stage" label every worker of a tool with that name carries
+                                let label = match Uuid::parse_str(&tool) {
+                                    Ok(_) => (super::requisitions::TOOL_INSTANCE_LABEL.to_string(), tool),
+                                    Err(_) => ("stage".to_string(), k8s_label(&tool)),
+                                };
                                 peers.push(
                                     k8s_net::NetworkPolicyPeer {
                                         ip_block: None,
                                         namespace_selector: None,
                                         pod_selector: Some(LabelSelector {
                                             match_expressions: None,
-                                            // use the "stage" label to select the tool
-                                            match_labels: Some(
-                                                [("stage".to_string(), tool)]
-                                                    .into_iter()
-                                                    .collect()
-                                                )
+                                            match_labels: Some([label].into_iter().collect())
                                         })
                                     }
                                 );

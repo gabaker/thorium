@@ -15,8 +15,15 @@ use uuid::Uuid;
 
 use super::super::bans::Ban;
 
+mod resolution;
 #[cfg(test)]
 mod tests;
+
+pub use resolution::{
+    AWS_CONFIG_FILE, AWS_PROFILE, AgentModelMismatch, CREDENTIALS_DIR, HarnessCredential,
+    HarnessModelEntry, HarnessModels, MismatchNames, ModelCandidateRejection, ModelRejectReason,
+    ModelResolutionError, RunModels,
+};
 
 /// The headers that carry a key for some provider and may never be set as extra headers
 const AUTH_HEADERS: &[&str] = &["authorization", "x-api-key", "api-key", "x-goog-api-key"];

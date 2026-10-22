@@ -2129,7 +2129,7 @@ async fn describe(id: Uuid, shared: &Shared) -> Result<String, ApiError> {
 /// * `kind` - The kind of entity to list
 /// * `groups` - The groups to list from
 /// * `shared` - Shared Thorium objects
-async fn list_ids(
+pub(crate) async fn list_ids(
     user: &User,
     kind: EntityKinds,
     groups: &[String],

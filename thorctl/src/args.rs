@@ -7,7 +7,6 @@ use uuid::Uuid;
 
 use self::{
     agents::Agents,
-    ai::Ai,
     associations::Associations,
     cart::Cart,
     clusters::{Clusters, Login},
@@ -23,6 +22,7 @@ use self::{
     repos::Repos,
     results::Results,
     run::Run,
+    runs::Runs,
     tags::Tags,
     tokens::{ActivateScopedToken, Tokens},
     tools::Tools,
@@ -34,7 +34,6 @@ use self::{
 use crate::{args::toolbox::Toolbox, utils::repos::validate_repo_url};
 
 pub mod agents;
-pub mod ai;
 pub mod associations;
 pub mod cart;
 pub mod clusters;
@@ -51,6 +50,7 @@ pub mod reactions;
 pub mod repos;
 pub mod results;
 pub mod run;
+pub mod runs;
 pub mod tags;
 pub mod tokens;
 pub mod toolbox;
@@ -190,9 +190,9 @@ pub enum SubCommands {
     /// List, describe, and compare tool, toolset, and workflow instances
     #[clap(version, author, subcommand, alias = "instance")]
     Instances(Instances),
-    /// Use AI to perform tasks in Thorium
+    /// List, describe, and retry tool and workflow runs
     #[clap(version, author, subcommand)]
-    AI(Ai),
+    Runs(Runs),
     /// Cart files locally
     #[clap(version, author)]
     Cart(Cart),

@@ -211,10 +211,11 @@ async fn scoped_token_auth(
     // replace this users primary token info with this scoped tokens info
     user.token = scoped.token;
     user.token_expiration = scoped.token_expiration;
-    // build our scoped user
+    // build our scoped user carrying any run this token is limited to
     let scoped_user = ScopedUser {
         user,
         name: scoped.name,
+        run: scoped.run,
     };
     Ok(AuthedUser::Scoped(scoped_user))
 }
@@ -2333,6 +2334,20 @@ impl User {
 }
 
 impl AuthedUser {
+    /// Authenticate a user with a raw token, as MCP clients send it
+    ///
+    /// # Arguments
+    ///
+    /// * `token` - The raw token, not base64 encoded
+    /// * `shared` - Shared objects in Thorium
+    #[instrument(name = "AuthedUser::from_raw_token", skip_all, err(Debug))]
+    pub async fn from_raw_token(token: &str, shared: &Shared) -> Result<Self, ApiError> {
+        // authenticate the token and require a verified email like every route
+        AuthMethods::Token(token.to_owned())
+            .authenticate(true, shared)
+            .await
+    }
+
     /// Authenticate a user with the correct authentication method
     ///
     /// This gets the authorization data from the authorization header.
@@ -2602,6 +2617,14 @@ impl ScopedToken {
         }
         // validate that this user can create a scoped token with this role
         req.role.validate(user)?;
+        // a run-scoped token is never rotated, so its value lives exactly as long as the token
+        let token_expiration = match (&req.run, req.expires) {
+            (Some(_), Some(expires)) => expires,
+            (Some(_), None) => {
+                return bad!("Run-scoped tokens must expire".to_owned());
+            }
+            (None, _) => token_expire!(shared),
+        };
         // build our new scoped token
         let scoped = ScopedToken {
             name: req.name,
@@ -2609,8 +2632,9 @@ impl ScopedToken {
             role: req.role,
             groups: req.groups,
             token: token!(),
-            token_expiration: token_expire!(shared),
+            token_expiration,
             expires: req.expires,
+            run: req.run,
         };
         // save this scoped token to the backend
         db::users::create_scoped_token(&scoped, shared).await?;
@@ -2639,8 +2663,9 @@ impl ScopedToken {
             db::users::delete_scoped_token(&scoped, shared).await?;
             return not_found!(format!("Scoped token {name} not found"));
         }
-        // rotate this scoped tokens value if it has expired
-        if scoped.token_expiration < Utc::now() {
+        // rotate this scoped tokens value if it has expired, except for a run-scoped token
+        // whose value was handed to its run's workers and must never change
+        if scoped.run.is_none() && scoped.token_expiration < Utc::now() {
             scoped.rotate(shared).await?;
         }
         Ok(scoped)
@@ -2664,6 +2689,22 @@ impl ScopedToken {
         update: ScopedTokenUpdate,
         shared: &Shared,
     ) -> Result<Self, ApiError> {
+        // get this scoped tokens data
+        let mut scoped = db::users::get_scoped_token(&user.username, name, shared).await?;
+        // if this scoped token is ephemeral then check if it has permanently expired
+        if let Some(expires) = scoped.expires
+            && expires < Utc::now()
+        {
+            // this scoped token has permanently expired so remove it from redis
+            db::users::delete_scoped_token(&scoped, shared).await?;
+            return not_found!(format!("Scoped token {name} not found"));
+        }
+        // run-scoped tokens can't be changed by anyone so nobody can widen what a run can reach
+        if scoped.run.is_some() {
+            return bad!(format!(
+                "Scoped token {name} is run-scoped and can't be changed"
+            ));
+        }
         // make sure this update isn't empty
         if update.is_empty() {
             return bad!("Scoped token updates cannot be empty".to_owned());
@@ -2683,16 +2724,6 @@ impl ScopedToken {
             && expires < Utc::now()
         {
             return bad!("Scoped tokens cannot expire in the past".to_owned());
-        }
-        // get this scoped tokens data
-        let mut scoped = db::users::get_scoped_token(&user.username, name, shared).await?;
-        // if this scoped token is ephemeral then check if it has permanently expired
-        if let Some(expires) = scoped.expires
-            && expires < Utc::now()
-        {
-            // this scoped token has permanently expired so remove it from redis
-            db::users::delete_scoped_token(&scoped, shared).await?;
-            return not_found!(format!("Scoped token {name} not found"));
         }
         // if a new role was set then validate and update that
         if let Some(role) = update.role {
@@ -3073,6 +3104,38 @@ mod tests {
             external: false,
             kvm: false,
         }
+    }
+
+    /// A scoped token stored before run scopes existed loads with no run, and one with a run
+    /// round trips it
+    #[test]
+    fn scoped_token_run_scope_serde() {
+        // a token stored before run scopes existed
+        let legacy = serde_json::json!({
+            "name": "harvester",
+            "owner": "europa",
+            "role": "User",
+            "groups": ["jupiter"],
+            "token": "value",
+            "token_expiration": "2026-10-19T00:00:00Z",
+            "expires": null,
+        });
+        let loaded: crate::models::ScopedToken =
+            serde_json::from_value(legacy.clone()).expect("a legacy token");
+        assert!(loaded.run.is_none());
+        // it serializes without a run field
+        let written = serde_json::to_value(&loaded).expect("a serialized token");
+        assert!(written.get("run").is_none());
+        // a token with a run round trips it
+        let scope = crate::models::RunTokenScope {
+            reaction: uuid::Uuid::new_v4(),
+            tool_instances: vec![uuid::Uuid::new_v4()],
+        };
+        let mut with_run = legacy;
+        with_run["run"] = serde_json::to_value(&scope).expect("a serialized scope");
+        let loaded: crate::models::ScopedToken =
+            serde_json::from_value(with_run).expect("a run token");
+        assert_eq!(loaded.run, Some(scope));
     }
 
     /// A developer token only keeps the flags both it and its developer owner have

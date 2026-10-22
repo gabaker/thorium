@@ -140,14 +140,31 @@ impl SystemStats {
         unique
     }
 
-    /// Gets this users image requests sorted from small to large
+    /// Gets each users shared workload requisitions ranked by their running jobs
     ///
-    /// Requisitions name a pipeline stage, which workload jobs don't have, so no requisition is
-    /// built for the workload stats.
+    /// Each requisition is paired with its number of created jobs. Jobs of runs are never in the
+    /// workload stats, so no requisition names a run.
     #[must_use]
     pub fn users_jobs(&self) -> SpawnMap<'_> {
-        // workload jobs have no pipeline stage to build a requisition for
-        HashMap::default()
+        // build a map of all users jobs
+        let mut map: SpawnMap = HashMap::default();
+        // crawl over each group
+        for (group, stats) in &self.groups {
+            // crawl over each tool instance and its users
+            for (tool_instance, user_map) in &stats.workloads {
+                // add each user's jobs for this tool instance to our map
+                for (user, stage_stats) in user_map {
+                    // get an entry to this users map
+                    let user_entry = map.entry(user).or_default();
+                    // build a shared requisition for this tool instance
+                    let req = Requisition::new(user, group, *tool_instance, None);
+                    // add it to the rank group of its running jobs
+                    let entry = user_entry.entry(stage_stats.running).or_default();
+                    entry.push((req, stage_stats.created));
+                }
+            }
+        }
+        map
     }
 }
 
@@ -1412,17 +1429,16 @@ pub struct WorkerRegistration {
     pub user: String,
     /// The group this worker is executing a job in
     pub group: String,
-    /// The pipeline this worker is executing a job in
-    pub pipeline: String,
-    /// The stage this worker is executing a job for
-    pub stage: String,
+    /// The tool instance whose jobs this worker claims
+    pub tool_instance: Uuid,
+    /// The run (reaction) this worker is limited to if it is a per-run worker (for a harness's
+    /// tool calls, the parent workflow run)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub run: Option<Uuid>,
     /// The resources used to spawn this worker
     pub resources: Resources,
     /// The pool this worker was spawned in
     pub pool: Pools,
-    /// The run this worker serves, for a per-run worker
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub run: Option<Uuid>,
 }
 
 impl WorkerRegistration {
@@ -1433,22 +1449,27 @@ impl WorkerRegistration {
     /// * `cluster` - The cluster this worker is assigned to
     /// * `node` - The node this worker is on
     /// * `name` - The unique name for this worker
+    /// * `user` - The user this worker is executing jobs for
+    /// * `group` - The group this worker is executing jobs in
+    /// * `tool_instance` - The tool instance whose jobs this worker claims
+    /// * `run` - The run this worker is limited to if it is a per-run worker
+    /// * `resources` - The resources used to spawn this worker
+    /// * `pool` - The pool this worker was spawned in
+    #[allow(clippy::too_many_arguments)]
     pub fn new<
         C: Into<String>,
         N: Into<String>,
         T: Into<String>,
         U: Into<String>,
         G: Into<String>,
-        P: Into<String>,
-        S: Into<String>,
     >(
         cluster: C,
         node: N,
         name: T,
         user: U,
         group: G,
-        pipeline: P,
-        stage: S,
+        tool_instance: Uuid,
+        run: Option<Uuid>,
         resources: Resources,
         pool: Pools,
     ) -> Self {
@@ -1458,11 +1479,10 @@ impl WorkerRegistration {
             name: name.into(),
             user: user.into(),
             group: group.into(),
-            pipeline: pipeline.into(),
-            stage: stage.into(),
+            tool_instance,
+            run,
             resources,
             pool,
-            run: None,
         }
     }
 
@@ -1492,11 +1512,10 @@ impl From<Worker> for WorkerRegistration {
             name: worker.name,
             user: worker.user,
             group: worker.group,
-            pipeline: worker.pipeline,
-            stage: worker.stage,
+            tool_instance: worker.tool_instance,
+            run: worker.run,
             resources: worker.resources,
             pool: worker.pool,
-            run: worker.run,
         }
     }
 }
@@ -1577,10 +1596,12 @@ pub struct Worker {
     pub user: String,
     /// The group this worker is executing a job in
     pub group: String,
-    /// The pipeline this worker is executing a job in
-    pub pipeline: String,
-    /// The stage this worker is executing a job for
-    pub stage: String,
+    /// The tool instance whose jobs this worker claims
+    pub tool_instance: Uuid,
+    /// The run (reaction) this worker is limited to if it is a per-run worker (for a harness's
+    /// tool calls, the parent workflow run)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub run: Option<Uuid>,
     /// The current status of this worker
     pub status: WorkerStatus,
     /// When this worker was spawned
@@ -1593,9 +1614,6 @@ pub struct Worker {
     pub pool: Pools,
     /// The current active job info for this worker if it has one
     pub active: Option<ActiveJob>,
-    /// The run this worker serves, for a per-run worker
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub run: Option<Uuid>,
 }
 
 /// A list of all active workers in Thorium
@@ -1621,15 +1639,20 @@ impl WorkerRegistrationList {
     /// * `cluster` - The cluster this worker is assigned to
     /// * `node` - The node this worker is on
     /// * `name` - The unique name for this worker
+    /// * `user` - The user this worker is executing jobs for
+    /// * `group` - The group this worker is executing jobs in
+    /// * `tool_instance` - The tool instance whose jobs this worker claims
+    /// * `run` - The run this worker is limited to if it is a per-run worker
+    /// * `resources` - The resources used to spawn this worker
+    /// * `pool` - The pool this worker was spawned in
     #[must_use]
+    #[allow(clippy::too_many_arguments)]
     pub fn add<
         C: Into<String>,
         N: Into<String>,
         T: Into<String>,
         U: Into<String>,
         G: Into<String>,
-        P: Into<String>,
-        S: Into<String>,
     >(
         mut self,
         cluster: C,
@@ -1637,24 +1660,23 @@ impl WorkerRegistrationList {
         name: T,
         user: U,
         group: G,
-        pipeline: P,
-        stage: S,
+        tool_instance: Uuid,
+        run: Option<Uuid>,
         resources: Resources,
         pool: Pools,
     ) -> Self {
         // build our worker
-        let worker = WorkerRegistration {
-            cluster: cluster.into(),
-            node: node.into(),
-            name: name.into(),
-            user: user.into(),
-            group: group.into(),
-            pipeline: pipeline.into(),
-            stage: stage.into(),
+        let worker = WorkerRegistration::new(
+            cluster,
+            node,
+            name,
+            user,
+            group,
+            tool_instance,
+            run,
             resources,
             pool,
-            run: None,
-        };
+        );
         // add this worker
         self.workers.push(worker);
         self

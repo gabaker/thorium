@@ -35,14 +35,14 @@ const PCAP_METADATA_FILE_NAME: &str = "thorium_pcap_metadata.json";
 
 /// Get the tool instance a job's filesystems record as the tool that found them
 ///
-/// Jobs don't carry the tool instance they run, so their filesystems record no tool instance.
+/// A filesystem records the tool instance its job ran and never a legacy tool name.
 ///
 /// # Arguments
 ///
-/// * `_job` - The job that found the filesystem
-fn filesystem_tool(_job: &GenericJob) -> Option<Uuid> {
-    // no tool instance is known for a job
-    None
+/// * `job` - The job that found the filesystem
+fn filesystem_tool(job: &GenericJob) -> Uuid {
+    // the job's tool instance is the tool that found the filesystem
+    job.tool_instance
 }
 
 /// Create all directories to look for children in
@@ -506,7 +506,12 @@ pub struct Children {
 }
 
 impl Children {
-    fn new<P: AsRef<Path>>(path: P) -> Self {
+    /// Create an empty set of children rooted at a path
+    ///
+    /// # Arguments
+    ///
+    /// * `path` - The root path children files are collected from
+    pub(crate) fn new<P: AsRef<Path>>(path: P) -> Self {
         Self {
             root: path.as_ref().to_path_buf(),
             tags: HashMap::default(),
@@ -793,7 +798,7 @@ impl Children {
                     for sample in &job.samples {
                         // create this filesystem in thorium
                         builder
-                            .create(filesystem_tool(job), sample, groups, thorium)
+                            .create(Some(filesystem_tool(job)), sample, groups, thorium)
                             .await?;
                     }
                 }
@@ -872,7 +877,7 @@ impl Children {
                     for sample in &job.samples {
                         // create this filesystem in thorium
                         builder
-                            .create(filesystem_tool(job), sample, groups, thorium)
+                            .create(Some(filesystem_tool(job)), sample, groups, thorium)
                             .await?;
                     }
                 }
@@ -1088,7 +1093,7 @@ impl Children {
                     for sample in &job.samples {
                         // create this filesystem in thorium
                         builder
-                            .create(filesystem_tool(job), sample, groups, thorium)
+                            .create(Some(filesystem_tool(job)), sample, groups, thorium)
                             .await?;
                     }
                 }
@@ -1136,7 +1141,7 @@ impl Children {
                     for sample in &job.samples {
                         // create this filesystem in thorium
                         builder
-                            .create(filesystem_tool(job), sample, groups, thorium)
+                            .create(Some(filesystem_tool(job)), sample, groups, thorium)
                             .await?;
                     }
                 }
@@ -1418,9 +1423,9 @@ mod tests {
         (format!("http://{addr}"), recorded)
     }
 
-    /// A filesystem a job carves is created with no tool instance and no legacy tool names
+    /// A filesystem a job carves records the job's tool instance and no legacy tool names
     #[tokio::test]
-    async fn carved_filesystem_sends_no_tool_provenance() {
+    async fn carved_filesystem_records_the_job_tool_instance() {
         // start a mock server and a client for it
         let (host, recorded) = entity_server().await;
         let thorium = Thorium::build(&host).token("token").build().await.unwrap();
@@ -1445,15 +1450,15 @@ mod tests {
             tool_instance: Uuid::new_v4(),
             run: None,
         };
-        // the job records no tool instance for its filesystems
+        // the job records its own tool instance for its filesystems
         let tool = filesystem_tool(&job);
-        assert_eq!(tool, None);
+        assert_eq!(tool, job.tool_instance);
         // build an empty carved filesystem and create it for the job's sample
         let root = std::env::temp_dir().join(format!("thorium-carved-{}", Uuid::new_v4()));
         tokio::fs::create_dir_all(&root).await.unwrap();
         let builder = get_filesystem_children(&root).await.unwrap();
         builder
-            .create(tool, &job.samples[0], &["corn".to_owned()], &thorium)
+            .create(Some(tool), &job.samples[0], &["corn".to_owned()], &thorium)
             .await
             .unwrap();
         tokio::fs::remove_dir_all(&root).await.unwrap();
@@ -1463,10 +1468,10 @@ mod tests {
             .iter()
             .find(|req| req.contains("name=\"kind\"") && req.contains("FileSystem\r\n"))
             .expect("no filesystem create request");
-        // it sends the filesystem's hash but no tool instances or tool names
+        // it sends the filesystem's hash and the job's tool instance but no tool names
         assert!(create.contains("name=\"metadata[sha256]\""), "{create}");
-        assert!(!create.contains("tool_ids"), "{create}");
-        assert!(!create.contains("metadata[tools]"), "{create}");
+        assert!(create.contains(&job.tool_instance.to_string()), "{create}");
+        assert!(!create.contains(&job.stage), "{create}");
         assert!(!create.contains("legacy_tools"), "{create}");
     }
 }

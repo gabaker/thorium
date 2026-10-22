@@ -1,5 +1,4 @@
 pub mod agents;
-pub mod ai;
 pub mod associations;
 pub mod cart;
 pub mod clusters;
@@ -22,6 +21,7 @@ pub mod reactions;
 pub mod repos;
 pub mod results;
 pub mod run;
+pub mod runs;
 pub mod tags;
 pub mod tokens;
 pub mod toolbox;

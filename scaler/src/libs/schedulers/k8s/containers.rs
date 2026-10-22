@@ -2,7 +2,7 @@ use k8s_openapi::api::core::v1::{Container, EnvVar, SecurityContext};
 use k8s_openapi::apimachinery::pkg::api::resource::Quantity;
 use serde_json::json;
 use std::collections::BTreeMap;
-use thorium::models::{Image, Resources, ScrubbedUser};
+use thorium::models::{Image, Resources, ScrubbedUser, k8s_label};
 use thorium::{Conf, Error};
 
 use super::MountGen;
@@ -253,10 +253,30 @@ impl Containers {
         spawn: &Spawned,
         user: &ScrubbedUser,
     ) -> Result<Vec<Container>, Error> {
-        // grab our docker info
-        let docker = &cache.docker[&spawn.req.group][&spawn.req.stage];
-        // grab our image info
-        let image = &cache.images[&spawn.req.group][&spawn.req.stage];
+        // grab our workload info
+        let workload = cache
+            .get_workload(&spawn.req.tool_instance)
+            .ok_or(Error::new(format!(
+                "Unable to retrieve tool instance '{}' from cache",
+                spawn.req.tool_instance
+            )))?;
+        // get the workload's image in this spawn's group
+        let image = workload
+            .projection(&spawn.req.group)
+            .ok_or(Error::new(format!(
+                "Tool instance '{}' is not in group '{}'",
+                spawn.req.tool_instance, spawn.req.group
+            )))?;
+        // grab the docker info of the workload's image
+        let docker = workload
+            .image_ref()
+            .and_then(|image_ref| cache.docker.get(image_ref))
+            .ok_or(Error::new(format!(
+                "The image of tool instance '{}' has not been inspected",
+                spawn.req.tool_instance
+            )))?;
+        // get the tool instance as a string to pass to the agent
+        let tool_instance = spawn.req.tool_instance.to_string();
         // serialize our docker cmd/entrypoint
         let entrypoint = match &image.args.entrypoint {
             Some(entrypoint) => serialize!(entrypoint),
@@ -289,39 +309,47 @@ impl Containers {
             &self.context_name,
             docker.config.env.as_deref(),
         );
+        // a per-run worker gets its run's token, and a harness its models, as literal env values
+        let per_run = spawn.req.run.is_some();
+        if per_run {
+            Self::add_run_env(&mut env, &cache.conf, &self.context_name, spawn)?;
+        }
         // get our limbo as a string
         let limbo = cache.conf.thorium.scaler.k8s.limbo.to_string();
+        // a shared worker reads the user's mounted keys, while a per-run worker reads its env
+        let mut args: Vec<&str> = vec![
+            "--cluster",
+            self.cluster_name.as_str(),
+            "--group",
+            spawn.req.group.as_str(),
+            "--tool-instance",
+            tool_instance.as_str(),
+            "--node",
+            spawn.node.as_str(),
+            "--name",
+            spawn.name.as_str(),
+        ];
+        if !per_run {
+            args.extend(["--keys", "/opt/thorium-keys/keys.yml"]);
+        }
+        args.extend([
+            "--limbo",
+            limbo.as_str(),
+            "k8s",
+            "--entrypoint",
+            entrypoint.as_str(),
+            "--cmd",
+            cmd.as_str(),
+        ]);
         // build container json
         let mut raw = json!({
-            "name": &spawn.req.stage,
+            "name": k8s_label(&workload.name),
             "image": &image.image,
             "command": ["/opt/thorium/thorium-agent"],
             // force pulling this image if there any new layers
             "imagePullPolicy": "Always",
             "env": env,
-            "args": [
-                "--cluster",
-                &self.cluster_name,
-                "--group",
-                &spawn.req.group,
-                "--pipeline",
-                &spawn.req.pipeline,
-                "--stage",
-                &spawn.req.stage,
-                "--node",
-                &spawn.node,
-                "--name",
-                &spawn.name,
-                "--keys",
-                "/opt/thorium-keys/keys.yml",
-                "--limbo",
-                limbo,
-                "k8s",
-                "--entrypoint",
-                entrypoint,
-                "--cmd",
-                cmd,
-            ],
+            "args": args,
             "resources": {
                 "requests": Self::request_conv(&image.resources)?,
                 "limits": Self::limit_conv(&image.resources)?
@@ -332,9 +360,50 @@ impl Containers {
         Self::inject_security_context(&mut raw, &Self::build_security_context(image));
         // cast to container strcut
         let mut container: Container = serde_json::from_value(raw)?;
-        // inject volume mounts
-        container.volume_mounts = Some(MountGen::generate(&image, &user)?);
+        // inject volume mounts, with the user's keys only for a shared worker
+        container.volume_mounts = Some(MountGen::generate(image, user, !per_run)?);
         Ok(vec![container])
+    }
+
+    /// Add a per-run worker's literal env values: the API url and its run's token, and for a
+    /// harness every agent's model and the entry agent's values
+    ///
+    /// Any value the image sets under one of these names is replaced. A per-run spawn without
+    /// fetched env values is refused, so it never falls back to the user's keys.
+    ///
+    /// # Arguments
+    ///
+    /// * `env` - The container's env vars
+    /// * `conf` - The Thorium config holding the API url workers use
+    /// * `context` - The context name of the cluster the worker is spawned in
+    /// * `spawn` - The per-run spawn
+    fn add_run_env(
+        env: &mut Vec<EnvVar>,
+        conf: &Conf,
+        context: &str,
+        spawn: &Spawned,
+    ) -> Result<(), Error> {
+        // a per-run spawn must have had its env values fetched
+        let Some(run_env) = &spawn.run_env else {
+            return Err(Error::new(format!(
+                "Per-run worker '{}' has no run env values",
+                spawn.name
+            )));
+        };
+        // workers reach the API at the same url the user keys secrets name
+        let url = conf
+            .thorium
+            .scaler
+            .k8s
+            .resolved_api_url(context, &conf.thorium.namespace);
+        let vars = run_env.vars(&url)?;
+        // the run's values replace any the image sets under the same names
+        env.retain(|var| !vars.iter().any(|(name, _)| *name == var.name));
+        env.extend(
+            vars.into_iter()
+                .map(|(name, value)| Self::build_env_var(name, &Some(value))),
+        );
+        Ok(())
     }
 }
 

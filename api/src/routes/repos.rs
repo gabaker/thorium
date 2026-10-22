@@ -2,7 +2,7 @@
 
 use axum::Router;
 use axum::extract::{Json, Multipart, Path, State};
-use axum::http::StatusCode;
+use axum::http::{StatusCode, header};
 use axum::response::IntoResponse;
 use axum::routing::{get, post};
 use axum_extra::body::AsyncReadBody;
@@ -420,7 +420,8 @@ async fn download(
         .await?;
     // convert our byte stream to a streamable body
     let body = AsyncReadBody::new(stream.into_async_read());
-    Ok(body)
+    // say what the bytes are, since a browser or proxy otherwise guesses
+    Ok(([(header::CONTENT_TYPE, "application/octet-stream")], body))
 }
 
 /// Lists repos by submission date
@@ -627,7 +628,8 @@ async fn download_result_file(
             .await?;
             // convert our byte stream to a streamable body
             let body = AsyncReadBody::new(stream.into_async_read());
-            return Ok(body);
+            // say what the bytes are, since a browser or proxy otherwise guesses
+            return Ok(([(header::CONTENT_TYPE, "application/octet-stream")], body).into_response());
         }
     }
     Err(ApiError::new(StatusCode::NOT_FOUND, None))

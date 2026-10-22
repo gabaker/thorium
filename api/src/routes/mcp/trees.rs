@@ -3,7 +3,7 @@
 use rmcp::ErrorData;
 use rmcp::handler::server::tool::Extension as RmcpExtension;
 use rmcp::handler::server::wrapper::Parameters;
-use rmcp::model::{CallToolResult, Content};
+use rmcp::model::CallToolResult;
 use rmcp::{tool, tool_router};
 use schemars::JsonSchema;
 use serde_with::OneOrMany;
@@ -14,7 +14,7 @@ use uuid::Uuid;
 
 use crate::models::{TreeBounds, TreeOpts, TreeQuery, TreeRelatedQuery};
 
-use super::ThoriumMCP;
+use super::{ThoriumMCP, json_result};
 
 /// The params needed to start a new tree
 #[serde_with::serde_as]
@@ -79,15 +79,7 @@ impl ThoriumMCP {
         let thorium = self.conf.client(&parts).await?;
         // grow a tree based on our initial query
         let tree = thorium.trees.start(&opts, &query).await?;
-        // serialize our tree
-        let serialized = serde_json::to_value(&tree).unwrap();
-        // build our result
-        let result = CallToolResult {
-            content: vec![Content::json(&tree)?],
-            structured_content: Some(serialized),
-            is_error: Some(false),
-            meta: None,
-        };
-        Ok(result)
+        // return the tree as structured content and text
+        json_result(&tree)
     }
 }

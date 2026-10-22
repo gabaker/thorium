@@ -3,14 +3,16 @@
 use crossbeam::channel::Sender;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use thorium::models::{Dependencies, GenericJob, Image};
+use thorium::models::{ArgStrategy, Dependencies, GenericJob, HarnessInterface, Image};
 use thorium::{Error, Thorium};
 use tokio::process::Command;
 use tracing::{Level, event, instrument};
+use uuid::Uuid;
 
 use super::cmd::CmdBuilder;
 use super::{AgentExecutor, InFlight, setup};
 use crate::libs::children::{self, Children};
+use crate::libs::harness_files::{self, HarnessPaths, RunEnv};
 use crate::libs::{DownloadedCache, RawResults, TagBundle, Target, results, tags};
 use crate::{args, log_string};
 use crate::{deserialize, log, purge};
@@ -41,6 +43,79 @@ pub struct K8s {
     filesystems: Vec<PathBuf>,
     /// The paths to any downloaded cache info
     cache: DownloadedCache,
+    /// How to launch the harness, when this worker runs a Harness tool instance
+    harness: Option<HarnessInterface>,
+    /// The run's url, token, and models, when this is a per-run worker built from its pod env
+    run_env: Option<RunEnv>,
+}
+
+/// The pod env value holding every agent's resolved model and credential, which a harness reads
+/// from the models file instead
+pub use crate::libs::harness_files::MODELS_ENV;
+
+/// The directory a harness writes its result files to
+const HARNESS_RESULT_FILES: &str = "/tmp/thorium/result-files";
+
+/// Get the values the thorium-agent passes on a harness's command line, in order
+///
+/// Each value whose `ArgStrategy` is `Append` is added as a positional, each `Kwarg` adds its
+/// key then the value, and `None` values are left out.
+///
+/// # Arguments
+///
+/// * `interface` - The harness's interface
+/// * `reaction` - The workflow run's reaction
+#[must_use]
+pub fn harness_args(interface: &HarnessInterface, reaction: Uuid) -> Vec<String> {
+    // each value the agent can pass, in the order the harness's args list them
+    let reaction = reaction.to_string();
+    let values = [
+        (&interface.args.run, interface.inputs.run_request.as_str()),
+        (&interface.args.agent, interface.inputs.agent.as_str()),
+        (&interface.args.tools, interface.inputs.tools.as_str()),
+        (&interface.args.models, interface.inputs.models.as_str()),
+        (
+            &interface.args.thorium_keys,
+            interface.inputs.thorium_keys.as_str(),
+        ),
+        (&interface.args.results, interface.outputs.answer.as_str()),
+        (&interface.args.result_files, HARNESS_RESULT_FILES),
+        (&interface.args.reaction, reaction.as_str()),
+    ];
+    // pass each value the way its strategy says
+    let mut args = Vec::new();
+    for (strategy, value) in values {
+        match strategy {
+            ArgStrategy::None => (),
+            ArgStrategy::Append => args.push(value.to_owned()),
+            ArgStrategy::Kwarg(key) => {
+                args.push(key.clone());
+                args.push(value.to_owned());
+            }
+        }
+    }
+    args
+}
+
+/// Build the command that launches a job
+///
+/// The child inherits the agent's env and runs with the agent's own uid; a harness's child
+/// doesn't get the models env value, because it reads the models file instead.
+///
+/// # Arguments
+///
+/// * `cmd` - The job's command line
+/// * `harness` - Whether the job runs a harness
+#[must_use]
+pub fn job_command(cmd: &[String], harness: bool) -> Command {
+    // run the command line as given, inheriting the agent's env and uid
+    let mut command = Command::new(&cmd[0]);
+    command.args(&cmd[1..]);
+    // a harness reads its models from the models file, not the pod env
+    if harness {
+        command.env_remove(MODELS_ENV);
+    }
+    command
 }
 
 impl K8s {
@@ -76,7 +151,13 @@ impl K8s {
     /// * `args` - The args to build this agent with
     /// * `target` - The target this agent will be executing
     /// * `logs` - Where to send logs
-    pub fn new(args: &args::K8s, target: &Target, logs: Sender<String>) -> Result<Self, Error> {
+    /// * `run_env` - The run's url, token, and models, for a per-run worker built from its env
+    pub fn new(
+        args: &args::K8s,
+        target: &Target,
+        logs: Sender<String>,
+        run_env: Option<RunEnv>,
+    ) -> Result<Self, Error> {
         // deserialize entrypoint and cmd
         let entrypoint = deserialize!(&args.entrypoint);
         let cmd = deserialize!(&args.cmd);
@@ -93,6 +174,12 @@ impl K8s {
             children: Vec::default(),
             filesystems: Vec::default(),
             cache: DownloadedCache::default(),
+            harness: target
+                .workload
+                .harness
+                .as_ref()
+                .map(|harness| harness.interface.clone()),
+            run_env,
         };
         Ok(k8s)
     }
@@ -127,6 +214,10 @@ impl K8s {
             children: Vec::default(),
             filesystems: Vec::default(),
             cache: DownloadedCache::default(),
+            // harnesses only run in K8s
+            harness: None,
+            // workers outside K8s read their run's keys file
+            run_env: None,
         };
         Ok(k8s)
     }
@@ -162,6 +253,10 @@ impl K8s {
             children: Vec::default(),
             filesystems: Vec::default(),
             cache: DownloadedCache::default(),
+            // harnesses only run in K8s
+            harness: None,
+            // workers outside K8s read their run's keys file
+            run_env: None,
         };
         Ok(k8s)
     }
@@ -323,6 +418,9 @@ impl AgentExecutor for K8s {
             )
             .await?;
         }
+        // a per-run worker writes its run's keys, and a harness's its models and credentials
+        let paths = HarnessPaths::standard(self.harness.as_ref());
+        harness_files::write_for_job(self.run_env.as_ref(), self.harness.as_ref(), &paths)?;
         Ok(())
     }
 
@@ -363,6 +461,11 @@ impl AgentExecutor for K8s {
             .add_filesystems(&self.filesystems, &dep_conf.filesystems)
             .add_cache(&self.cache, &dep_conf.cache)
             .build(image, None, None)?;
+        // a harness gets the paths of its inputs and outputs after the workload's command
+        let mut cmd = cmd;
+        if let Some(interface) = &self.harness {
+            cmd.extend(harness_args(interface, job.reaction));
+        }
         // cast our command to a str
         let built_str = cmd.join(" ");
         // log our built command
@@ -370,13 +473,8 @@ impl AgentExecutor for K8s {
         event!(Level::INFO, cmd = built_str);
         // create a file to buffer our logs in
         let log_file = std::fs::File::create(log_path)?;
-        // build the comamnd to execute
-        let mut cmd_builder = Command::new(cmd[0].clone());
-        // if we have more then just one arg then add those
-        if cmd.len() > 1 {
-            // add any remaining args
-            cmd_builder.args(&cmd[1..]);
-        }
+        // build the command to execute, launching a harness with its args and env
+        let mut cmd_builder = job_command(&cmd, self.harness.is_some());
         // setup our stdout/stderr
         cmd_builder.stdout(log_file.try_clone()?);
         cmd_builder.stderr(log_file);
@@ -492,6 +590,63 @@ impl AgentExecutor for K8s {
 mod tests {
     use super::*;
 
+    /// A harness gets each of its arg values per its strategy after the workload's command, and
+    /// its child inherits the agent's env and uid without the models env value
+    #[tokio::test]
+    async fn harness_launch_args_env_and_uid() {
+        // a harness passing most of its values, each one its own way
+        let mut interface = HarnessInterface::default();
+        interface.args.run = ArgStrategy::Append;
+        interface.args.agent = ArgStrategy::Kwarg("--agent".to_owned());
+        interface.args.models = ArgStrategy::Kwarg("--models".to_owned());
+        interface.args.thorium_keys = ArgStrategy::Append;
+        interface.args.results = ArgStrategy::Kwarg("--answer".to_owned());
+        interface.args.result_files = ArgStrategy::Append;
+        interface.args.reaction = ArgStrategy::Kwarg("--reaction".to_owned());
+        let reaction = Uuid::new_v4();
+        // values are passed in order and the tools path, left at None, is skipped
+        let inputs = &interface.inputs;
+        assert_eq!(
+            harness_args(&interface, reaction),
+            vec![
+                inputs.run_request.clone(),
+                "--agent".to_owned(),
+                inputs.agent.clone(),
+                "--models".to_owned(),
+                inputs.models.clone(),
+                inputs.thorium_keys.clone(),
+                "--answer".to_owned(),
+                interface.outputs.answer.clone(),
+                "/tmp/thorium/result-files".to_owned(),
+                "--reaction".to_owned(),
+                reaction.to_string(),
+            ]
+        );
+        // a harness passing nothing gets no args
+        assert_eq!(
+            harness_args(&HarnessInterface::default(), reaction),
+            Vec::<String>::new()
+        );
+        // a harness's child drops only the models env value; other jobs change no env
+        let harness = job_command(&["sh".to_owned()], true);
+        let envs: Vec<_> = harness.as_std().get_envs().collect();
+        assert_eq!(envs, vec![(std::ffi::OsStr::new(MODELS_ENV), None)]);
+        let tool = job_command(&["sh".to_owned()], false);
+        assert!(tool.as_std().get_envs().next().is_none());
+        // the child runs with the agent's uid and sees the agent's env
+        let script = "id -u; echo \"$PATH\"".to_owned();
+        let output = job_command(&["sh".to_owned(), "-c".to_owned(), script], true)
+            .output()
+            .await
+            .unwrap();
+        let printed = String::from_utf8_lossy(&output.stdout).to_string();
+        let own_uid = std::process::Command::new("id").arg("-u").output().unwrap();
+        let own_uid = String::from_utf8_lossy(&own_uid.stdout).trim().to_owned();
+        let mut lines = printed.lines();
+        assert_eq!(lines.next(), Some(own_uid.as_str()));
+        assert_eq!(lines.next(), std::env::var("PATH").ok().as_deref());
+    }
+
     /// A K8s worker pod runs many jobs back to back in the same filesystem, so `clean_up` purges
     /// every dependency staging location between jobs, including the children dependency
     /// location (where `download_children` stages a prior tool's children). This keeps the next
@@ -549,6 +704,8 @@ mod tests {
             children: Vec::new(),
             filesystems: Vec::new(),
             cache: DownloadedCache::default(),
+            harness: None,
+            run_env: None,
         };
         // note whether an AI settings file already exists
         let path = std::path::Path::new("/tmp/thorium/ai.yaml");

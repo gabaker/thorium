@@ -605,6 +605,7 @@ pub async fn handle(args: &Args, cmd: &Workflows) -> Result<(), Error> {
         Workflows::RemoveAgent(cmd) => remove_agent(&thorium, cmd).await,
         Workflows::Entry(cmd) => set_entry(&thorium, cmd).await,
         Workflows::Toolset(cmd) => toolset(&thorium, cmd).await,
+        Workflows::Run(cmd) => crate::handlers::runs::run_workflow(&thorium, cmd).await,
     };
     // show the API's status code with any refusal
     result.map_err(|err| match err.status() {

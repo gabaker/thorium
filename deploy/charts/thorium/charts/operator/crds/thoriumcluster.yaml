@@ -1525,6 +1525,30 @@ spec:
                         default: 0.0.0.0
                         description: The interface to bind onto
                         type: string
+                      mcp:
+                        default:
+                          allowed_hosts: []
+                          allowed_origins: []
+                        description: The settings for Thorium's MCP server
+                        properties:
+                          allowed_hosts:
+                            default: []
+                            description: |-
+                              More host names (or `host:port` authorities) the MCP server accepts in the `Host` header,
+                              beyond loopback, the in-cluster API and MCP service names, and the hosts of the API urls
+                              in this config
+                            items:
+                              type: string
+                            type: array
+                          allowed_origins:
+                            default: []
+                            description: |-
+                              The browser origins (`scheme://host[:port]`) allowed to call the MCP server (empty = a
+                              request's `Origin` header isn't checked)
+                            items:
+                              type: string
+                            type: array
+                        type: object
                       namespace:
                         default: thorium
                         description: |-
@@ -2397,6 +2421,33 @@ spec:
                                 minimum: 1.0
                                 type: integer
                             type: object
+                        type: object
+                      tool_access:
+                        default:
+                          cli:
+                          - /opt/thorium/thorium-agent
+                          - tool
+                          - run
+                          mcp_url: null
+                        description: Where harnesses reach the tools behind Thorium unless a harness overrides it
+                        properties:
+                          cli:
+                            default:
+                            - /opt/thorium/thorium-agent
+                            - tool
+                            - run
+                            description: |-
+                              The CLI wrapper's base command including its subcommand
+                              (default `["/opt/thorium/thorium-agent", "tool", "run"]`)
+                            items:
+                              type: string
+                            type: array
+                          mcp_url:
+                            description: |-
+                              The url of Thorium's MCP server as seen from worker pods (unset = the API url given to
+                              workers plus `/api/mcp`)
+                            nullable: true
+                            type: string
                         type: object
                       tracing:
                         default:

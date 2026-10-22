@@ -2,7 +2,7 @@
 
 use axum::Router;
 use axum::extract::{Json, Multipart, Path, State};
-use axum::http::StatusCode;
+use axum::http::{StatusCode, header};
 use axum::response::IntoResponse;
 use axum::routing::{delete, get, patch, post};
 use axum_extra::body::AsyncReadBody;
@@ -168,7 +168,8 @@ async fn download(
     let stream = Sample::download(&user, sha256, &state.shared).await?;
     // convert our byte stream to a streamable body
     let body = AsyncReadBody::new(stream.into_async_read());
-    Ok(body)
+    // say what the bytes are, since a browser or proxy otherwise guesses
+    Ok(([(header::CONTENT_TYPE, "application/octet-stream")], body))
 }
 
 /// Download a file by sha2566 as an encrypted zip
@@ -473,7 +474,8 @@ async fn download_attachment(
         .await?;
     // convert our byte stream to a streamable body
     let body = AsyncReadBody::new(stream.into_async_read());
-    Ok(body)
+    // say what the bytes are, since a browser or proxy otherwise guesses
+    Ok(([(header::CONTENT_TYPE, "application/octet-stream")], body))
 }
 
 /// Lists sha256's by submission date
@@ -734,7 +736,8 @@ async fn download_result_file(
     .await?;
     // convert our byte stream to a streamable body
     let body = AsyncReadBody::new(stream.into_async_read());
-    Ok(body)
+    // say what the bytes are, since a browser or proxy otherwise guesses
+    Ok(([(header::CONTENT_TYPE, "application/octet-stream")], body))
 }
 
 /// Downloads a files results file from s3
@@ -774,7 +777,8 @@ async fn download_result_entities(
     .await?;
     // convert our byte stream to a streamable body
     let body = AsyncReadBody::new(stream.into_async_read());
-    Ok(body)
+    // say what the bytes are, since a browser or proxy otherwise guesses
+    Ok(([(header::CONTENT_TYPE, "application/json")], body))
 }
 
 /// The struct containing our openapi docs

@@ -14,7 +14,7 @@ use tokio::task::JoinSet;
 use tracing::{Level, event, instrument};
 use virt::domain::Domain;
 
-use super::Launcher;
+use super::{Launcher, WorkloadSource};
 use crate::Error;
 
 mod kvm_worker;
@@ -365,8 +365,8 @@ impl Launcher for Kvm {
         // get refs to our args and libvirt client
         let args = &self.args;
         let client = &self.libvirt_client;
-        // get the image info for this worker
-        let image = thorium.images.get(&worker.group, &worker.stage).await?;
+        // get the image this worker's tool instance runs
+        let image = thorium.workload_image(&worker, ImageScaler::Kvm).await?;
         // initiate a KVM worker
         let kvm_worker = KvmWorker::init(worker.name.clone());
         // overlay the worker

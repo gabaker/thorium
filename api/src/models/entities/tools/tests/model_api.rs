@@ -483,6 +483,49 @@ fn portability_from_json() {
     assert!(tool_portability_json("{not json").is_err());
 }
 
+/// An MCP result is checked against the tool's output schema: matching structured content is
+/// kept, structured content missing a required property becomes an error naming it, and a tool
+/// without an output schema or an error result is left alone
+#[cfg(feature = "api")]
+#[test]
+fn mcp_results_follow_the_output_schema() {
+    use rmcp::model::{CallToolResult, ContentBlock};
+    // a tool whose results must hold an integer count
+    let mut output_schema = schema(&json!({"count": {"type": "integer"}}));
+    output_schema.insert("required".into(), json!(["count"]));
+    let tool = AgenticTool {
+        output_schema: Some(output_schema),
+        result_format: ToolResultFormat::Json,
+        ..mcp_tool()
+    };
+    // a result that matches is kept as it is
+    let matching = CallToolResult::structured(json!({"count": 3}));
+    let checked = tool.check_mcp_result(matching.clone());
+    assert_eq!(checked, matching);
+    // a result missing the required property is an error naming it
+    let missing = tool.check_mcp_result(CallToolResult::structured(json!({"total": 3})));
+    assert_eq!(missing.is_error, Some(true));
+    assert_eq!(missing.structured_content, None);
+    let text = missing.content[0]
+        .as_text()
+        .expect("a text block")
+        .text
+        .clone();
+    assert!(text.contains("count"), "{text}");
+    assert!(text.contains("output_schema"), "{text}");
+    // a result without structured content can't match the schema either
+    let unstructured = tool.check_mcp_result(CallToolResult::success(vec![ContentBlock::text(
+        "3 matches",
+    )]));
+    assert_eq!(unstructured.is_error, Some(true));
+    // an error result is passed on unchanged
+    let failed = CallToolResult::error(vec![ContentBlock::text("sample not found")]);
+    assert_eq!(tool.check_mcp_result(failed.clone()), failed);
+    // a tool without an output schema keeps any result
+    let other = CallToolResult::structured(json!({"total": 3}));
+    assert_eq!(mcp_tool().check_mcp_result(other.clone()), other);
+}
+
 /// MCP annotations follow effects and `open_world`, and the definition carries title and icons
 #[cfg(feature = "api")]
 #[test]
@@ -531,6 +574,7 @@ fn mcp_annotation_mapping() {
     assert_eq!(icons[0].src, "https://example.com/icon.png");
     assert_eq!(icons[0].mime_type.as_deref(), Some("image/png"));
     assert_eq!(icons[0].sizes, Some(vec!["48x48".to_owned()]));
+    assert_eq!(icons[0].theme, Some(rmcp::model::IconTheme::Light));
     // a tool without icons has none
     assert!(mcp_tool().to_mcp_tool().icons.is_none());
 }

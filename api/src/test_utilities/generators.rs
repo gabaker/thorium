@@ -1467,7 +1467,23 @@ pub async fn node(
     Ok(())
 }
 
-/// Register a worker for a node
+/// Get the tool instance a pipeline's stage runs, or the nil id if the stage has no tool
+///
+/// # Arguments
+///
+/// * `group` - The group the pipeline is in
+/// * `pipe` - The name of the pipeline
+/// * `stage` - The name of the stage
+/// * `client` - The client to read the pipeline with
+pub async fn stage_tool_instance(group: &str, pipe: &str, stage: &str, client: &Thorium) -> Uuid {
+    // read the pipeline and get the tool backing this stage
+    match client.pipelines.get(group, pipe).await {
+        Ok(pipeline) => pipeline.stage_tools.get(stage).copied().unwrap_or_default(),
+        Err(_) => Uuid::nil(),
+    }
+}
+
+/// Register a worker for a node that claims the jobs of the tool instance a pipeline stage runs
 ///
 /// # Arguments
 ///
@@ -1475,8 +1491,8 @@ pub async fn node(
 /// * `node` - The node this worker will be on
 /// * `name` - The name of this worker
 /// * `group` - The group this worker is executing a job in
-/// * `pipe` - The pipeline this worker is executing a job for
-/// * `stage` - The stage this worker is executing a job for
+/// * `pipe` - The pipeline whose stage this worker runs
+/// * `stage` - The stage whose tool instance this worker claims jobs for
 /// * `client` - The client to register this worker with
 pub async fn worker(
     cluster: &str,
@@ -1489,6 +1505,8 @@ pub async fn worker(
 ) -> Result<(), Error> {
     // get our username
     let user = client.users.info().await?.username;
+    // get the tool instance this stage runs
+    let tool_instance = stage_tool_instance(group, pipe, stage, client).await;
     // register this worker
     client
         .system
@@ -1500,8 +1518,8 @@ pub async fn worker(
                 name,
                 user,
                 group,
-                pipe,
-                stage,
+                tool_instance,
+                None,
                 Resources::default(),
                 Pools::Deadline,
             ),
@@ -1510,7 +1528,8 @@ pub async fn worker(
     Ok(())
 }
 
-/// Register an external worker for a node
+/// Register an external worker for a node that claims the jobs of the tool instance a pipeline
+/// stage runs
 ///
 /// # Arguments
 ///
@@ -1518,8 +1537,8 @@ pub async fn worker(
 /// * `node` - The node this worker will be on
 /// * `name` - The name of this worker
 /// * `group` - The group this worker is executing a job in
-/// * `pipe` - The pipeline this worker is executing a job for
-/// * `stage` - The stage this worker is executing a job for
+/// * `pipe` - The pipeline whose stage this worker runs
+/// * `stage` - The stage whose tool instance this worker claims jobs for
 /// * `client` - The client to register this worker with
 pub async fn worker_ext(
     cluster: &str,
@@ -1532,6 +1551,8 @@ pub async fn worker_ext(
 ) -> Result<(), Error> {
     // get our username
     let user = client.users.info().await?.username;
+    // get the tool instance this stage runs
+    let tool_instance = stage_tool_instance(group, pipe, stage, client).await;
     // register this worker
     client
         .system
@@ -1543,8 +1564,8 @@ pub async fn worker_ext(
                 name,
                 user,
                 group,
-                pipe,
-                stage,
+                tool_instance,
+                None,
                 Resources::default(),
                 Pools::Deadline,
             ),

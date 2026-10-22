@@ -4,6 +4,7 @@ use clap::{Parser, ValueEnum};
 use thorium::models::ModelAuthLevel;
 
 use super::helpers::{ShortFormatArgs, WaitForArgs, WatchArgs};
+use super::runs::RunInputArgs;
 
 /// The commands to send to the workflows task handler
 #[derive(Parser, Debug)]
@@ -29,6 +30,39 @@ pub enum Workflows {
     /// Show one AI agent of a workflow instance and the full spec of each of its tools
     #[clap(version, author)]
     Toolset(ShowToolset),
+    /// Run a workflow instance on files or repos
+    #[clap(version, author)]
+    Run(RunWorkflow),
+}
+
+/// A command to run a workflow instance
+#[derive(Parser, Debug)]
+pub struct RunWorkflow {
+    /// The workflow instance to run, by ID or name (`<workflow>#r<revision>`)
+    pub instance: String,
+    /// The group to run in (needed when you can run the instance in several of its groups)
+    #[clap(short, long)]
+    pub group: Option<String>,
+    /// The files and repos to run on
+    #[clap(flatten)]
+    pub inputs: RunInputArgs,
+    /// A tag to add to the run's reaction
+    #[clap(long)]
+    pub tag: Vec<String>,
+    /// The run's SLA in seconds
+    #[clap(long)]
+    pub sla: Option<u64>,
+    /// The format to print the run in once a `--wait-for` condition holds (human readable by
+    /// default)
+    #[clap(flatten)]
+    pub format: ShortFormatArgs,
+    /// Re-read and re-print the run until interrupted
+    #[clap(flatten)]
+    pub watch: WatchArgs,
+    /// Wait until the run matches a condition (e.g. status=Completed); without it the run's
+    /// reaction ID is printed
+    #[clap(flatten)]
+    pub wait: WaitForArgs,
 }
 
 /// A command to list workflows

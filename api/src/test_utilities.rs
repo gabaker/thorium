@@ -10,6 +10,7 @@ mod harness_tests;
 mod helpers;
 mod impls;
 pub mod mock_provider;
+pub mod runs;
 #[cfg(feature = "upgrades-runtime")]
 pub mod upgrade_harness;
 

@@ -23,6 +23,7 @@ mod backends_reexport {
     pub mod reactions;
     pub mod repos;
     pub mod results;
+    pub mod run_files;
     pub mod s3;
     pub mod search;
     pub mod setup;

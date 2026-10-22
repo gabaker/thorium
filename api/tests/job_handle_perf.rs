@@ -136,8 +136,8 @@ impl PerfSetup {
                 name,
                 user,
                 &group,
-                &pipe.name,
-                &stage,
+                tool_instance,
+                None,
                 Resources::default(),
                 Pools::Deadline,
             );
@@ -292,6 +292,14 @@ async fn job_handle_binding_adds_no_redis_calls() -> Result<(), Error> {
     let mut stats = Stats::connect().await?;
     // open enough pooled connections up front that no counted call pays for opening one
     setup.warm_pool().await?;
+    // run every counted call once uncounted so Redis has loaded the Lua scripts they use, since
+    // the first call to run a script also sends `SCRIPT LOAD` and a retried `EVALSHA`
+    setup
+        .handle_counts(&mut stats, &setup.owner.client, &setup.owner_worker)
+        .await?;
+    setup
+        .handle_counts(&mut stats, &setup.admin, &setup.admin_worker)
+        .await?;
     // count the job handle calls for the user, whose calls are checked
     let owner_counts = setup
         .handle_counts(&mut stats, &setup.owner.client, &setup.owner_worker)
@@ -316,8 +324,14 @@ async fn job_handle_binding_adds_no_redis_calls() -> Result<(), Error> {
             name,
             &setup.owner.username,
             &setup.group,
-            &setup.pipeline,
-            &setup.stage,
+            generators::stage_tool_instance(
+                &setup.group,
+                &setup.pipeline,
+                &setup.stage,
+                &setup.admin,
+            )
+            .await,
+            None,
             Resources::default(),
             Pools::Deadline,
         );

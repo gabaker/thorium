@@ -168,8 +168,8 @@ impl Setup {
             &self.worker,
             user,
             &self.group,
-            &self.pipe,
-            STAGE,
+            self.instance,
+            None,
             Resources::default(),
             Pools::Deadline,
         );
@@ -542,8 +542,8 @@ async fn agent_runtimes_are_bounded_by_the_tool_instance() -> Result<(), Error> 
         &worker,
         &adrastea.username,
         &group,
-        &pipe,
-        STAGE,
+        instance.id,
+        None,
         Resources::default(),
         Pools::Deadline,
     );
@@ -610,8 +610,8 @@ async fn agent_runtimes_are_bounded_by_the_tool_instance() -> Result<(), Error> 
         &next,
         &adrastea.username,
         &group,
-        &pipe,
-        STAGE,
+        instance.id,
+        None,
         Resources::default(),
         Pools::Deadline,
     );

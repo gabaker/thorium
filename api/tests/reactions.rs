@@ -8,8 +8,8 @@ use thorium::models::{
     GroupUpdate, GroupUsersUpdate, ImageBan, ImageBanKind, ImageBanUpdate, ImageScaler,
     ImageUpdate, Pipeline, PipelineBan, PipelineBanKind, PipelineBanUpdate, PipelineRequest,
     PipelineUpdate, PlannedStage, ReactionCursorOpts, ReactionListParams, ReactionPlan,
-    ReactionRequest, ReactionSource, ReactionStatus, ReactionUpdate, Resources, ScopedTokenRequest,
-    StageLogLine, StageLogsAdd, UserCreate, UserRole, UserUpdate,
+    ReactionRequest, ReactionSource, ReactionStatus, ReactionUpdate, Resources, RunProvenance,
+    ScopedTokenRequest, StageLogLine, StageLogsAdd, UserCreate, UserRole, UserUpdate,
 };
 use thorium::test_utilities::{self, CONF, generators};
 use thorium::{
@@ -103,10 +103,11 @@ async fn reaction_source_and_plan_in_redis() -> Result<(), Error> {
     // the reaction reads back its pipeline source and plan with no run fields
     let reaction = admin.reactions.get(&group, created.id).await?;
     is!(
-        &reaction.source,
-        &ReactionSource::Pipeline {
-            name: pipe.name.clone()
-        }
+        matches!(
+            &reaction.source,
+            ReactionSource::Pipeline { name, .. } if *name == pipe.name
+        ),
+        true
     );
     let expected = pipe
         .order
@@ -144,7 +145,8 @@ async fn reaction_source_and_plan_in_redis() -> Result<(), Error> {
     is!(
         &read.source,
         &ReactionSource::Pipeline {
-            name: pipe.name.clone()
+            name: pipe.name.clone(),
+            provenance: RunProvenance::default(),
         }
     );
     is!(&read.plan, &ReactionPlan::default());
@@ -168,6 +170,23 @@ async fn reaction_runs_plan_without_pipeline() -> Result<(), Error> {
         .await?;
     let first = &pipe.order[0][0];
     let second = &pipe.order[1][0];
+    // a worker for each planned stage's tool instance
+    let worker = generators::gen_string(24);
+    generators::worker(
+        "cluster0", "node0", &worker, &group, &pipe.name, first, &admin,
+    )
+    .await?;
+    let second_worker = generators::gen_string(24);
+    generators::worker(
+        "cluster0",
+        "node0",
+        &second_worker,
+        &group,
+        &pipe.name,
+        second,
+        &admin,
+    )
+    .await?;
     // the pipeline's stages are replaced after the reaction is created
     let replacement = generators::tool_instance(&[&group], &admin).await?;
     let update = PipelineUpdate::default()
@@ -177,11 +196,6 @@ async fn reaction_runs_plan_without_pipeline() -> Result<(), Error> {
         .remove_stage_tool(second.as_str());
     admin.pipelines.update(&group, &pipe.name, &update).await?;
     // the first stage's job runs its planned tool instance
-    let worker = generators::gen_string(24);
-    generators::worker(
-        "cluster0", "node0", &worker, &group, &pipe.name, first, &admin,
-    )
-    .await?;
     let jobs = admin
         .jobs
         .claim_workload(
@@ -205,14 +219,21 @@ async fn reaction_runs_plan_without_pipeline() -> Result<(), Error> {
     let second_instance = generators::stage_instance(&pipe, second);
     let jobs = admin
         .jobs
-        .claim_workload(&group, second_instance, "cluster0", "node0", &worker, 1)
+        .claim_workload(
+            &group,
+            second_instance,
+            "cluster0",
+            "node0",
+            &second_worker,
+            1,
+        )
         .await?;
     is!(jobs.len(), 1);
     is!(&jobs[0].stage, second);
     is!(jobs[0].tool_instance, second_instance);
     admin
         .jobs
-        .proceed(&jobs[0], &generators::stage_logs(), 1, &worker)
+        .proceed(&jobs[0], &generators::stage_logs(), 1, &second_worker)
         .await?;
     let reaction = admin.reactions.get(&group, created.id).await?;
     is!(reaction.status, ReactionStatus::Completed);
@@ -240,6 +261,7 @@ async fn reaction_runs_plan_without_pipeline() -> Result<(), Error> {
     admin.reactions.delete(&group, &created.id).await?;
     fail!(admin.reactions.get(&group, created.id).await, 404);
     generators::delete_worker(&worker, &admin).await?;
+    generators::delete_worker(&second_worker, &admin).await?;
     Ok(())
 }
 
@@ -457,7 +479,8 @@ async fn bulk_create_reads_each_tool_instance_once() -> Result<(), Error> {
     Ok(())
 }
 
-/// Only admins with their full token read a run's token, and reactions without one are not found
+/// Only admins with their full token read a run's token, and reactions without a token scoped to
+/// their run are not found
 #[tokio::test]
 async fn run_token_route() -> Result<(), Error> {
     // a user's pipeline reaction
@@ -474,10 +497,9 @@ async fn run_token_route() -> Result<(), Error> {
         .await?;
     // a pipeline reaction has no run token
     fail!(admin.reactions.run_token(&group, created.id).await, 404);
-    // a run token the user owns is named on the reaction
+    // a plain token the user owns is named on the reaction
     let token_name = format!("run-{}", created.id);
-    let token = user
-        .client
+    user.client
         .users
         .create_scoped_token(&ScopedTokenRequest::new(&token_name).group(&group))
         .await?;
@@ -488,11 +510,8 @@ async fn run_token_route() -> Result<(), Error> {
         .query_async(&mut redis_conn().await)
         .await
         .expect("name the run token");
-    // an admin reads the token with its value
-    let read = admin.reactions.run_token(&group, created.id).await?;
-    is!(&read.name, &token_name);
-    is!(&read.owner, &user.username);
-    is!(&read.token, &token.token);
+    // a token without the reaction's run scope isn't served
+    fail!(admin.reactions.run_token(&group, created.id).await, 404);
     // the owner and an admin's scoped token are refused
     fail!(
         user.client.reactions.run_token(&group, created.id).await,
@@ -557,7 +576,7 @@ async fn job_fields_from_tool_instance() -> Result<(), Error> {
         &worker,
         &group,
         &generator.name,
-        "s",
+        &job.stage,
         &admin,
     )
     .await?;
@@ -1690,6 +1709,17 @@ async fn claim_generator() -> Result<(), Error> {
     let id = client.reactions.create(&req).await?;
     // get a flattened list of stages
     let stages: Vec<String> = pipe.order.clone().into_iter().flatten().collect();
+    // register a worker for the second stage's tool instance
+    generators::worker(
+        "cluster0",
+        "node0",
+        "claim_generator_next",
+        &group,
+        &pipe.name,
+        &stages[1],
+        &client,
+    )
+    .await?;
     // attempt to claim and proceed with a generator 3 times
     for _ in 0..3 {
         // register our test worker
@@ -1736,7 +1766,7 @@ async fn claim_generator() -> Result<(), Error> {
                 generators::stage_instance(&pipe, &stages[1]),
                 "cluster0",
                 "node0",
-                "claim_generator",
+                "claim_generator_next",
                 1,
             )
             .await?;
@@ -1787,7 +1817,7 @@ async fn claim_generator() -> Result<(), Error> {
             generators::stage_instance(&pipe, &stages[1]),
             "cluster0",
             "node0",
-            "claim_generator",
+            "claim_generator_next",
             1,
         )
         .await?;
@@ -1800,10 +1830,11 @@ async fn claim_generator() -> Result<(), Error> {
     // complete this job
     client
         .jobs
-        .proceed(&jobs[0], &logs, 2, "claim_generator")
+        .proceed(&jobs[0], &logs, 2, "claim_generator_next")
         .await?;
-    // delete our worker
+    // delete our workers
     generators::delete_worker("claim_generator", &client).await?;
+    generators::delete_worker("claim_generator_next", &client).await?;
     // list the reactions for our pipeline that now has a status of completed
     let mut reactions =
         client
@@ -1910,6 +1941,16 @@ async fn claim_generator_fail() -> Result<(), Error> {
         .error(&jobs[0].id, &logs, "claim_generator_fail")
         .await?;
     // try claim the final stage of this reaction and make sure it doesn't exist
+    generators::worker(
+        "cluster0",
+        "node0",
+        "claim_generator_fail_next",
+        &group,
+        &pipe.name,
+        &stages[1],
+        &client,
+    )
+    .await?;
     let jobs = client
         .jobs
         .claim_workload(
@@ -1917,12 +1958,13 @@ async fn claim_generator_fail() -> Result<(), Error> {
             generators::stage_instance(&pipe, &stages[1]),
             "cluster0",
             "node0",
-            "claim_generator_fail",
+            "claim_generator_fail_next",
             1,
         )
         .await?;
-    // delete our worker
+    // delete our workers
     generators::delete_worker("claim_generator_fail", &client).await?;
+    generators::delete_worker("claim_generator_fail_next", &client).await?;
     // make sure we failed to claim a job due to the previous stage failing
     is!(jobs.len(), 0);
     Ok(())
@@ -1965,7 +2007,7 @@ async fn claim_sub_reacts_status() -> Result<(), Error> {
             "node0",
             "claim_sub_reacts_status",
             &group,
-            &pipe.name,
+            &sub_pipe.name,
             stage,
             &client,
         )
@@ -2432,7 +2474,7 @@ async fn claim_sub_reacts_race_fail() -> Result<(), Error> {
                     "node0",
                     "claim_sub_reacts_race_fail_sub",
                     &group,
-                    &pipe.name,
+                    &sub_pipe.name,
                     stage,
                     &client,
                 )
@@ -3388,8 +3430,8 @@ async fn creator_worker(
         name,
         username,
         &pipe.group,
-        &pipe.name,
-        stage,
+        generators::stage_instance(pipe, stage),
+        None,
         Resources::default(),
         thorium::models::Pools::Deadline,
     );

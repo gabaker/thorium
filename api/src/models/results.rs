@@ -354,9 +354,10 @@ impl<O: OutputSupport> OutputRequest<O> {
             .text("display_type", self.display_type);
         // add the groups to share this result with
         let form = multipart_list!(form, "groups", self.groups);
-        // add the version of the tool that created this result if it was set and serialize it
+        // add the version label of the tool that created this result if it was set, which the
+        // API parses back into a semantic or custom version
         let form = match self.tool_version.take() {
-            Some(tool_version) => form.text("tool_version", serde_json::to_string(&tool_version)?),
+            Some(tool_version) => form.text("tool_version", tool_version.to_string()),
             None => form,
         };
         // add the command that created this result if it was set

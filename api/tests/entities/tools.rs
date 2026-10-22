@@ -1087,7 +1087,71 @@ async fn names_in(client: &Thorium, group: &str) -> Result<Vec<String>, Error> {
     Ok(names)
 }
 
-/// Spec env values are shared and permanent, and image names in dependencies aren't looked up
+/// Dependency settings name tools: a tool instance, a missing id, and a tool the publisher
+/// can't see each get the same `400`, and a visible tool publishes
+#[tokio::test]
+async fn dependency_settings_name_visible_tools() -> Result<(), Error> {
+    // a user in one group, a tool in that group, and a tool in a group hidden from the user
+    let admin = test_utilities::admin_client().await?;
+    let user = plain_user(&admin).await?;
+    let group = group_for(&user.username, &admin).await?;
+    let hidden = generators::groups(1, &admin).await?.remove(0).name;
+    let (visible, visible_instance) =
+        generators::tool(&[&group], "1.0.0", &generators::gen_image_spec(), &admin).await?;
+    let (hidden_tool, _) =
+        generators::tool(&[&hidden], "1.0.0", &generators::gen_image_spec(), &admin).await?;
+    // build an Image spec naming a tool in one of its dependency lists
+    let naming = |kind: usize, id: Uuid| {
+        let mut spec = generators::gen_image_spec();
+        if let ToolSpec::Image(workload) = &mut spec {
+            let deps = &mut workload.data.dependencies;
+            match kind {
+                0 => deps.results.tools = vec![id],
+                1 => deps.children.tools = vec![id],
+                _ => deps.filesystems.tools = vec![id],
+            }
+        }
+        spec
+    };
+    // a tool instance, a missing id, and a hidden tool are refused alike in every list
+    let refused = [visible_instance.id, Uuid::new_v4(), hidden_tool.id];
+    for (kind, id) in refused.iter().enumerate() {
+        let resp = user
+            .client
+            .entities
+            .create(generators::gen_tool(&[&group], "1.0.0", &naming(kind, *id)))
+            .await;
+        fail!(resp, 400);
+        let Err(err) = resp else { unreachable!() };
+        let msg = err.msg().unwrap_or_default();
+        assert!(
+            msg.contains(&id.to_string()) && msg.contains("you can't see it"),
+            "{msg}"
+        );
+    }
+    // publishing a new version is checked the same way
+    let resp = user
+        .client
+        .entities
+        .update(
+            visible.id,
+            generators::gen_tool_publish("2.0.0", &naming(0, hidden_tool.id)),
+        )
+        .await;
+    fail!(resp, 400);
+    // a visible tool publishes in every list
+    for kind in 0..3 {
+        let (_, instance) =
+            generators::tool(&[&group], "1.0.0", &naming(kind, visible.id), &user.client).await?;
+        let ToolSpec::Image(workload) = &instance_meta(&instance).spec else {
+            unreachable!()
+        };
+        is!(workload.data.dependencies.tools(), vec![visible.id]);
+    }
+    Ok(())
+}
+
+/// Spec env values are shared and permanent, and the tools dependencies name are hashed
 #[tokio::test]
 async fn spec_env_and_image_names() -> Result<(), Error> {
     // an Image tool with a secret in its K8s env publishes without a warning
@@ -1124,15 +1188,15 @@ async fn spec_env_and_image_names() -> Result<(), Error> {
     admin.entities.delete(v1.id).await?;
     let resp = admin.entities.get(v1.id).await;
     fail!(resp, 404);
-    // image names in result dependencies publish without a lookup and are hashed
+    // tools named in result dependencies are hashed
     let mut deps = generators::gen_image_spec();
     if let ToolSpec::Image(workload) = &mut deps {
-        workload.data.dependencies.results.images = vec!["not-a-tool".into()];
+        workload.data.dependencies.results.tools = vec![tool.id];
     }
-    let (_, deps_instance) = generators::tool(&[&group], "1.0.0", &deps, &admin).await?;
+    let (other, deps_instance) = generators::tool(&[&group], "1.0.0", &deps, &admin).await?;
     let mut changed = deps.clone();
     if let ToolSpec::Image(workload) = &mut changed {
-        workload.data.dependencies.results.images = vec!["another".into()];
+        workload.data.dependencies.results.tools = vec![other.id];
     }
     assert_ne!(
         instance_meta(&deps_instance).spec_hash,

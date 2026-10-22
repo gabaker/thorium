@@ -5,6 +5,7 @@
 //! the entity being written, so tests running at the same time never trip each other's failures.
 
 use std::collections::{HashMap, HashSet};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{LazyLock, Mutex};
 use std::time::Duration;
 
@@ -819,6 +820,25 @@ pub fn reaction_run(pipeline: &str, id: Uuid) -> Option<Uuid> {
     }
 }
 
+/// The number of queries sent to the entity id view in Scylla
+static ENTITY_QUERIES: AtomicU64 = AtomicU64::new(0);
+
+/// Count one query sent to the entity id view in Scylla
+pub fn count_entity_query() {
+    // add one to the query count
+    ENTITY_QUERIES.fetch_add(1, Ordering::Relaxed);
+}
+
+/// Get the number of queries sent to the entity id view in Scylla
+///
+/// The count covers every request the test API served in this process, so a test that reads a
+/// difference of two counts must not run next to other tests that call the API.
+#[must_use]
+pub fn entity_queries() -> u64 {
+    // get the query count
+    ENTITY_QUERIES.load(Ordering::Relaxed)
+}
+
 /// The number of times each entity was read from Scylla
 static ENTITY_READS: LazyLock<Mutex<HashMap<Uuid, u64>>> =
     LazyLock::new(|| Mutex::new(HashMap::new()));
@@ -921,4 +941,43 @@ pub fn release_workload_prune(group: &str) {
 pub async fn wait_if_workload_prune_paused(group: &str) {
     // wait at the pause before the removal if one is armed
     wait_at(&PRUNE_PAUSES, group).await;
+}
+
+/// The creators whose next run reaction write fails after its run token is minted
+static FAIL_REACTION_WRITE: LazyLock<Mutex<HashSet<String>>> =
+    LazyLock::new(|| Mutex::new(HashSet::new()));
+
+/// Make the next tool run or workflow run reaction a user creates fail to be written
+///
+/// # Arguments
+///
+/// * `creator` - The user whose next run reaction write should fail
+///
+/// # Panics
+///
+/// Panics if another thread panicked while holding the failure list
+pub fn fail_reaction_write(creator: &str) {
+    // add this creator to the failures to inject
+    FAIL_REACTION_WRITE
+        .lock()
+        .expect("fault list poisoned")
+        .insert(creator.to_owned());
+}
+
+/// Check whether a run reaction write should fail, clearing the failure
+///
+/// # Arguments
+///
+/// * `creator` - The user creating the reaction
+///
+/// # Panics
+///
+/// Panics if another thread panicked while holding the failure list
+#[must_use]
+pub fn take_reaction_write_failure(creator: &str) -> bool {
+    // remove this creator's failure so a retried run succeeds
+    FAIL_REACTION_WRITE
+        .lock()
+        .expect("fault list poisoned")
+        .remove(creator)
 }

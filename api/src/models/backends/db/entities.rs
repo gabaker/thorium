@@ -354,6 +354,9 @@ pub async fn get_untagged(
     let mut entity: Option<Entity> = None;
     // break our groups into chunks of 100
     for groups_chunk in groups.chunks(100) {
+        // count this query so tests can check how many queries a request sends
+        #[cfg(feature = "test-utilities")]
+        crate::test_utilities::faults::count_entity_query();
         let rows = shared
             .scylla
             .queries
@@ -459,6 +462,58 @@ pub async fn get_many(
     ids: &[Uuid],
     shared: &Shared,
 ) -> Result<Vec<Entity>, ApiError> {
+    // count these reads so tests can check how often a request reads an entity
+    #[cfg(feature = "test-utilities")]
+    for id in ids {
+        crate::test_utilities::faults::count_entity_read(*id);
+    }
+    // read the entities' rows
+    let mut details = read_many(groups, ids, shared).await?;
+    // get tags for all of the entities concurrently
+    stream::iter(details.iter_mut())
+        .map(Ok::<_, ApiError>)
+        .try_for_each_concurrent(10, |entity| async {
+            entity.get_tags(groups, shared).await?;
+            Ok(())
+        })
+        .await?;
+    Ok(details)
+}
+
+/// Get many entities without their tags, newest first
+///
+/// # Arguments
+///
+/// * `groups` - The groups to get from
+/// * `ids` - The ids of the entities to get
+/// * `shared` - Shared Thorium objects
+#[instrument(name = "db::entities::get_many_untagged", skip(shared), err(Debug))]
+pub async fn get_many_untagged(
+    groups: &[String],
+    ids: &[Uuid],
+    shared: &Shared,
+) -> Result<Vec<Entity>, ApiError> {
+    // count these reads so tests can check how often a request reads an entity
+    #[cfg(feature = "test-utilities")]
+    for id in ids {
+        crate::test_utilities::faults::count_entity_read(*id);
+    }
+    // read the entities' rows
+    read_many(groups, ids, shared).await
+}
+
+/// Read the rows of many entities without their tags, newest first
+///
+/// # Arguments
+///
+/// * `groups` - The groups to get from
+/// * `ids` - The ids of the entities to get
+/// * `shared` - Shared Thorium objects
+async fn read_many(
+    groups: &[String],
+    ids: &[Uuid],
+    shared: &Shared,
+) -> Result<Vec<Entity>, ApiError> {
     // Create a btreemap to keep the entities sorted by creation timestamp.
     // Make the value a list of entity ids in case they were uploaded at the exact same time.
     // We're okay to have a list with possibly repeated ids because we'll take from a the data
@@ -467,6 +522,9 @@ pub async fn get_many(
     // make a map of the entity's id to its actual data
     let mut data_map: HashMap<Uuid, Entity> = HashMap::new();
     for (ids_chunk, groups_chunk) in ids.chunks(50).cartesian_product(groups.chunks(50)) {
+        // count this query so tests can check how many queries a request sends
+        #[cfg(feature = "test-utilities")]
+        crate::test_utilities::faults::count_entity_query();
         // query for this chunk combo's data
         let rows = shared
             .scylla
@@ -495,14 +553,6 @@ pub async fn get_many(
             }
         }
     }
-    // get tags for all of the entities concurrently
-    stream::iter(data_map.values_mut())
-        .map(Ok::<_, ApiError>)
-        .try_for_each_concurrent(10, |entity| async {
-            entity.get_tags(groups, shared).await?;
-            Ok(())
-        })
-        .await?;
     // compile our details into a final list
     let mut details = Vec::with_capacity(data_map.len());
     // keep creation order by using the sorted map
@@ -588,6 +638,9 @@ pub async fn groups_and_kinds(
     let mut rows = Vec::new();
     // read the entities 100 at a time
     for ids_chunk in ids.chunks(100) {
+        // count this query so tests can check how many queries a request sends
+        #[cfg(feature = "test-utilities")]
+        crate::test_utilities::faults::count_entity_query();
         // read the group and kind of each row of these entities
         let found = shared
             .scylla

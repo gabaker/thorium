@@ -400,6 +400,31 @@ async fn tool_pinned_by_container_backing() -> Result<(), Error> {
     Ok(())
 }
 
+/// A tool named in another tool instance's dependency settings can't be deleted until that
+/// instance is
+#[tokio::test]
+async fn tool_named_by_dependency_settings() -> Result<(), Error> {
+    // an Image tool and a second Image tool whose results depend on the first
+    let admin = test_utilities::admin_client().await?;
+    let suffix = generators::name_suffix();
+    let a = god_group(&admin, "minerva", &suffix, &GroupRoles::default()).await?;
+    let (base_root, base) =
+        generators::tool(&[&a], "1.0.0", &generators::gen_image_spec(), &admin).await?;
+    let mut spec = generators::gen_image_spec();
+    if let ToolSpec::Image(workload) = &mut spec {
+        workload.data.dependencies.results.tools = vec![base_root.id];
+    }
+    let (dependent_root, dependent) = generators::tool(&[&a], "1.0.0", &spec, &admin).await?;
+    // the root is refused once its instance goes, because the dependent's spec names it
+    admin.entities.delete(base.id).await?;
+    refused_naming(&admin, base_root.id, &[&dependent.name]).await?;
+    // after the dependent instance goes everything deletes
+    admin.entities.delete(dependent.id).await?;
+    admin.entities.delete(base_root.id).await?;
+    admin.entities.delete(dependent_root.id).await?;
+    Ok(())
+}
+
 /// The refusal names a bounded list of referrers and counts the rest
 #[tokio::test]
 async fn refusal_is_bounded() -> Result<(), Error> {

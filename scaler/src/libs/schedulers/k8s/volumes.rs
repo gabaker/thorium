@@ -8,6 +8,12 @@ use thorium::{Conf, Error};
 
 use super::{ConfigMaps, Secrets};
 
+/// The path every worker pod reads its Thorium keys from
+const KEYS_PATH: &str = "/opt/thorium-keys";
+
+/// The name of the empty dir a per-run pod's agent writes its run's keys into
+const RUN_KEYS_VOLUME: &str = "thorium-run-keys";
+
 /// extract settings for a volume type or return an error
 macro_rules! extract {
     ($field:expr, $name:expr) => {
@@ -70,13 +76,25 @@ impl Volumes {
     ///
     /// * `image` - The image to generate volumes for
     /// * `user` - The user whose volumes we are binding in
-    pub async fn generate(&self, image: &Image, user: &ScrubbedUser) -> Result<Vec<Volume>, Error> {
+    /// * `keys` - Whether to bind in the user's keys secret (a per-run pod gets an empty dir
+    ///   its agent writes its run's keys into instead)
+    pub async fn generate(
+        &self,
+        image: &Image,
+        user: &ScrubbedUser,
+        keys: bool,
+    ) -> Result<Vec<Volume>, Error> {
         // start with default Thorium volumes
         let mut volumes = Vec::default();
         volumes.push(Self::thorium()?);
         volumes.push(Self::home());
         volumes.push(Self::scratch());
-        volumes.push(Self::keys(&user.username)?);
+        // a shared pod gets the user's keys and a per-run pod an empty keys dir
+        if keys {
+            volumes.push(Self::keys(&user.username)?);
+        } else {
+            volumes.push(Self::run_keys());
+        }
         // if this user has unix info then bind in a valid etc/passwd file
         if user.unix.is_some() {
             volumes.push(Self::passwd(&user.username)?);
@@ -127,6 +145,15 @@ impl Volumes {
         // build base volume
         let mut vol = Self::base("thorium-scratch");
         // inject host path in
+        vol.empty_dir = Some(EmptyDirVolumeSource::default());
+        vol
+    }
+
+    /// Setup the empty keys dir a per-run pod's agent writes its run's keys into
+    fn run_keys() -> Volume {
+        // build base volume
+        let mut vol = Self::base(RUN_KEYS_VOLUME);
+        // an empty dir that lives as long as the pod
         vol.empty_dir = Some(EmptyDirVolumeSource::default());
         vol
     }
@@ -361,16 +388,24 @@ impl MountGen {
     ///
     /// * `image` - The image we are creating mounts for
     /// * `user` - The username of the user whose keys we are binding in
+    /// * `keys` - Whether to mount the user's keys secret (a per-run pod mounts an empty dir
+    ///   at the keys path instead)
     pub fn generate(
         image: &Image,
         user: &ScrubbedUser,
+        keys: bool,
     ) -> Result<Vec<VolumeMount>, serde_json::Error> {
         // start with default thorium_volume
         let mut mounts = Vec::default();
         mounts.push(Self::thorium()?);
         mounts.push(Self::home(&user.username)?);
         mounts.push(Self::scratch()?);
-        mounts.push(Self::keys(&user.username)?);
+        // a shared pod mounts the user's keys and a per-run pod its empty keys dir
+        if keys {
+            mounts.push(Self::keys(&user.username)?);
+        } else {
+            mounts.push(Self::run_keys()?);
+        }
         // if this user has unix info then bind in a valid etc/passwd file
         if user.unix.is_some() {
             mounts.push(Self::passwd(&user.username)?);
@@ -422,6 +457,14 @@ impl MountGen {
         serde_json::from_value(json!({
             "name": "thorium-scratch",
             "mountPath": "/tmp",
+        }))
+    }
+
+    /// Setup the writable bind of a per-run pod's empty keys dir at the keys path
+    fn run_keys() -> Result<VolumeMount, serde_json::Error> {
+        serde_json::from_value(json!({
+            "name": RUN_KEYS_VOLUME,
+            "mountPath": KEYS_PATH,
         }))
     }
 

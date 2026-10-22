@@ -5,7 +5,7 @@ use uuid::Uuid;
 use super::GenericClient;
 use crate::{
     add_query_bool, add_query_list,
-    client::Error,
+    client::{Error, helpers},
     models::{
         Attachment, EntityKinds, EntityRequest, KeySupport, OutputMap, OutputRequest,
         OutputResponse, ResultGetParams, backends::OutputSupport,
@@ -101,11 +101,12 @@ pub trait ResultsClientHelper: GenericClient {
         T: AsRef<str>,
         P: AsRef<Path>,
     {
-        // build url for downloading results files
+        // build url for downloading results files with the tool name encoded as one path segment
         let url = format!(
             "{base}/result-files/{key}/{tool}/{result_id}",
             base = self.base_url(),
-            key = key.as_ref()
+            key = key.as_ref(),
+            tool = helpers::encode_path_segment(tool),
         );
         // build our query containing the path to the result file
         let query = vec![("result_file", path.as_ref())];
@@ -139,11 +140,12 @@ pub trait ResultsClientHelper: GenericClient {
     where
         T: AsRef<str>,
     {
-        // build url for downloading results entities
+        // build url for downloading results entities with the tool name encoded as one path segment
         let url = format!(
             "{base}/result-files/{key}/{tool}/{result_id}/{entity_kind}",
             base = self.base_url(),
-            key = key.as_ref()
+            key = key.as_ref(),
+            tool = helpers::encode_path_segment(tool),
         );
         // build request
         let req = self

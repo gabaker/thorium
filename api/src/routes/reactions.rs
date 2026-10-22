@@ -2,7 +2,7 @@ use std::collections::HashMap;
 
 use axum::Router;
 use axum::extract::{Json, Multipart, Path, Query, State};
-use axum::http::StatusCode;
+use axum::http::{StatusCode, header};
 use axum::response::IntoResponse;
 use axum::response::Response;
 use axum::routing::{get, patch, post};
@@ -12,18 +12,36 @@ use utoipa::OpenApi;
 use uuid::Uuid;
 
 use super::OpenApiSecurity;
-use crate::bad;
 use crate::models::AuthedUser;
 use crate::models::backends::reactions::ReactionCursorParam;
 use crate::models::{
     Actions, ApiCursor, BulkReactionResponse, CommitishKinds, Group, HandleReactionResponse,
-    ImageScaler, JobResetRequestor, Pipeline, Reaction, ReactionCache, ReactionCacheUpdate,
-    ReactionCursorParams, ReactionDetailsList, ReactionIdResponse, ReactionList,
-    ReactionListParams, ReactionRequest, ReactionStatus, ReactionUpdate, RepoDependency,
-    RepoDependencyRequest, ScopedToken, StageLogLine, StageLogs, StageLogsAdd, StatusUpdate,
-    SystemComponents,
+    ImageScaler, JobResetRequestor, ModelResolutionError, Pipeline, Reaction, ReactionCache,
+    ReactionCacheUpdate, ReactionCursorParams, ReactionDetailsList, ReactionIdResponse,
+    ReactionList, ReactionListParams, ReactionRequest, ReactionStatus, ReactionUpdate,
+    RepoDependency, RepoDependencyRequest, RunInputs, RunModels, ScopedToken, StageLogLine,
+    StageLogs, StageLogsAdd, StatusUpdate, SystemComponents, ToolRunRequest, WorkflowRunRequest,
 };
 use crate::utils::{ApiError, AppState};
+use crate::{bad, unauthorized};
+
+/// Refuse a user authenticated with a run token
+///
+/// A run token may only run its own run's tool instances, so it can't start pipeline reactions
+/// or workflow runs.
+///
+/// # Arguments
+///
+/// * `user` - The user making the request
+fn refuse_run_token(user: &AuthedUser) -> Result<(), ApiError> {
+    // run tokens are refused here
+    if user.run().is_some() {
+        return unauthorized!(
+            "Run tokens can only start tool runs of their run's tools".to_owned()
+        );
+    }
+    Ok(())
+}
 
 /// Creates a new reaction
 ///
@@ -52,6 +70,8 @@ async fn create(
     State(state): State<AppState>,
     Json(req): Json<ReactionRequest>,
 ) -> Result<Json<ReactionIdResponse>, ApiError> {
+    // a run token runs only its run's own tools, never a pipeline
+    refuse_run_token(&user)?;
     // get pipeline
     let (group, pipeline) = Pipeline::get(&user, &req.group, &req.pipeline, &state.shared).await?;
     // refrain from running the reaction if the pipeline has a ban
@@ -94,6 +114,8 @@ async fn create_bulk(
     State(state): State<AppState>,
     Json(reqs): Json<Vec<ReactionRequest>>,
 ) -> Result<Json<BulkReactionResponse>, ApiError> {
+    // a run token runs only its run's own tools, never a pipeline
+    refuse_run_token(&user)?;
     // create reactions in bulk
     let response = Reaction::create_bulk(&user, reqs, &state.shared).await?;
     Ok(Json(response))
@@ -190,6 +212,171 @@ async fn run_token(
     Ok(Json(token))
 }
 
+/// Gets the models a run's harness uses, with their credentials' secrets
+///
+/// Only admins authenticated with their full token can read a run's models.
+///
+/// # Arguments
+///
+/// * `user` - The user that is reading the run's models
+/// * `group` - The group the run's reaction is in
+/// * `id` - The id of the run's reaction
+/// * `state` - Shared Thorium objects
+#[utoipa::path(
+    get,
+    path = "/api/reactions/:group/:id/run-models",
+    params(
+        ("group" = String, Path, description = "The group the run's reaction is in"),
+        ("id" = Uuid, Path, description = "The id of the run's reaction"),
+    ),
+    responses(
+        (status = 200, description = "The run's models with their credentials' secrets", body = RunModels),
+        (status = 401, description = "This user is not an admin authenticated with their full token"),
+        (status = 404, description = "The reaction has no live run token or no model bindings"),
+        (status = 409, description = "A credential the run is bound to was deleted or is banned"),
+    ),
+    security(
+        ("basic" = []),
+    )
+)]
+#[instrument(name = "routes::reactions::run_models", skip_all, err(Debug))]
+async fn run_models(
+    user: AuthedUser,
+    Path((group, id)): Path<(String, Uuid)>,
+    State(state): State<AppState>,
+) -> Result<Json<RunModels>, ApiError> {
+    // read the run's models as an admin
+    let models = Reaction::run_models(&user, &group, &id, &state.shared).await?;
+    Ok(Json(models))
+}
+
+/// Runs a single tool instance on some files or repos
+///
+/// # Arguments
+///
+/// * `user` - The user starting the run
+/// * `id` - The id of the tool instance to run
+/// * `state` - Shared Thorium objects
+/// * `req` - The inputs, run group, and args of the run
+#[utoipa::path(
+    post,
+    path = "/api/tools/instances/:id/runs",
+    params(
+        ("id" = Uuid, Path, description = "The id of the tool instance to run"),
+        ("req" = ToolRunRequest, description = "The inputs, run group, and args of the run"),
+    ),
+    responses(
+        (status = 200, description = "The run's reaction was created", body = ReactionIdResponse),
+        (status = 400, description = "The run has no inputs, the tool instance can't be run directly, or several run groups are possible"),
+        (status = 401, description = "This user can't run the tool instance in any of its groups, or a run token names a tool instance outside its run or overrides its args"),
+        (status = 404, description = "The tool instance or an input doesn't exist or isn't visible"),
+    ),
+    security(
+        ("basic" = []),
+    )
+)]
+#[instrument(name = "routes::reactions::run_tool", skip_all, err(Debug))]
+async fn run_tool(
+    user: AuthedUser,
+    Path(id): Path<Uuid>,
+    State(state): State<AppState>,
+    Json(req): Json<ToolRunRequest>,
+) -> Result<Json<ReactionIdResponse>, ApiError> {
+    // create the tool run's reaction within the run of a run token, boxing its large future
+    let reaction = Box::pin(Reaction::run_tool(
+        &user,
+        user.run(),
+        id,
+        req,
+        &state.shared,
+    ))
+    .await?;
+    Ok(Json(ReactionIdResponse { id: reaction.id }))
+}
+
+/// Runs a workflow instance on some files or repos
+///
+/// # Arguments
+///
+/// * `user` - The user starting the run
+/// * `id` - The id of the workflow instance to run
+/// * `state` - Shared Thorium objects
+/// * `req` - The inputs and run group of the run
+#[utoipa::path(
+    post,
+    path = "/api/workflows/instances/:id/runs",
+    params(
+        ("id" = Uuid, Path, description = "The id of the workflow instance to run"),
+        ("req" = WorkflowRunRequest, description = "The inputs and run group of the run"),
+    ),
+    responses(
+        (status = 200, description = "The run's reaction was created", body = ReactionIdResponse),
+        (status = 400, description = "The instance isn't Ready, the run has no inputs, or several run groups are possible"),
+        (status = 401, description = "This user can't run the workflow instance in any of its groups, or the request used a run token"),
+        (status = 404, description = "The workflow instance or an input doesn't exist or isn't visible"),
+    ),
+    security(
+        ("basic" = []),
+    )
+)]
+#[instrument(name = "routes::reactions::run_workflow", skip_all, err(Debug))]
+async fn run_workflow(
+    user: AuthedUser,
+    Path(id): Path<Uuid>,
+    State(state): State<AppState>,
+    Json(req): Json<WorkflowRunRequest>,
+) -> Result<Json<ReactionIdResponse>, ApiError> {
+    // a run token runs only its run's own tools, never another workflow
+    refuse_run_token(&user)?;
+    // create the workflow run's reaction
+    let reaction = Box::pin(Reaction::run_workflow(&user, id, req, &state.shared)).await?;
+    Ok(Json(ReactionIdResponse { id: reaction.id }))
+}
+
+/// Retries a failed workflow run as a new run linked to it
+///
+/// # Arguments
+///
+/// * `user` - The user retrying the run
+/// * `id` - The id of the workflow instance the failed run ran
+/// * `reaction` - The id of the failed run's reaction
+/// * `state` - Shared Thorium objects
+#[utoipa::path(
+    post,
+    path = "/api/workflows/instances/:id/runs/:reaction/retry",
+    params(
+        ("id" = Uuid, Path, description = "The id of the workflow instance the failed run ran"),
+        ("reaction" = Uuid, Path, description = "The id of the failed run's reaction"),
+    ),
+    responses(
+        (status = 200, description = "The retry's reaction was created", body = ReactionIdResponse),
+        (status = 400, description = "The reaction isn't a failed run of this instance, or the instance isn't Ready"),
+        (status = 401, description = "This user can't run the workflow instance in the failed run's group, or the request used a run token"),
+        (status = 404, description = "The workflow instance or the reaction doesn't exist or isn't visible"),
+    ),
+    security(
+        ("basic" = []),
+    )
+)]
+#[instrument(name = "routes::reactions::retry_workflow_run", skip_all, err(Debug))]
+async fn retry_workflow_run(
+    user: AuthedUser,
+    Path((id, reaction)): Path<(Uuid, Uuid)>,
+    State(state): State<AppState>,
+) -> Result<Json<ReactionIdResponse>, ApiError> {
+    // a run token runs only its run's own tools, never another workflow run
+    refuse_run_token(&user)?;
+    // create the retry's reaction
+    let reaction = Box::pin(Reaction::retry_workflow_run(
+        &user,
+        id,
+        reaction,
+        &state.shared,
+    ))
+    .await?;
+    Ok(Json(ReactionIdResponse { id: reaction.id }))
+}
+
 /// Update a reactions cache
 ///
 /// # Arguments
@@ -226,7 +413,13 @@ async fn update_cache(
     let (group, reaction) = Reaction::get(&user, &group, &id, &state.shared).await?;
     // update this reactions cache
     reaction
-        .update_cache(&user, &group, &cache_update, &state.shared)
+        .update_cache(
+            &user,
+            &group,
+            &cache_update,
+            user.run_reaction(),
+            &state.shared,
+        )
         .await?;
     Ok(StatusCode::NO_CONTENT)
 }
@@ -267,7 +460,7 @@ async fn update_cache_files(
     let (group, reaction) = Reaction::get(&user, &group, &id, &state.shared).await?;
     // update this reactions cache files
     reaction
-        .add_cache_files(&user, &group, multipart, &state.shared)
+        .add_cache_files(&user, &group, multipart, user.run_reaction(), &state.shared)
         .await?;
     Ok(StatusCode::NO_CONTENT)
 }
@@ -340,7 +533,8 @@ async fn download_cache_file(
         .await?;
     // convert our byte stream to a streamable body
     let body = AsyncReadBody::new(stream.into_async_read());
-    Ok(body)
+    // say what the bytes are, since a browser or proxy otherwise guesses
+    Ok(([(header::CONTENT_TYPE, "application/octet-stream")], body))
 }
 
 /// Handle a command for a reaction
@@ -380,8 +574,16 @@ async fn handle(
     let (group, reaction) = Reaction::get(&user, &group, &id, &state.shared).await?;
     // call correct handler
     let status = match cmd.as_ref() {
-        "proceed" => reaction.proceed(&user, &group, &state.shared).await?,
-        "fail" => reaction.fail(&user, &group, &state.shared).await?,
+        "proceed" => {
+            reaction
+                .proceed(&user, &group, user.run_reaction(), &state.shared)
+                .await?
+        }
+        "fail" => {
+            reaction
+                .fail(&user, &group, user.run_reaction(), &state.shared)
+                .await?
+        }
         _ => return bad!(format!("{} is not a known handler", cmd)),
     };
     // return response
@@ -469,7 +671,9 @@ async fn add_stage_logs(
     // get reaction object
     let (_, reaction) = Reaction::get(&user, &group, &id, &state.shared).await?;
     // append stage logs
-    reaction.add_stage_logs(&stage, logs, &state.shared).await?;
+    reaction
+        .add_stage_logs(&stage, logs, user.run_reaction(), &state.shared)
+        .await?;
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -1286,7 +1490,7 @@ async fn update(
     let (group, reaction) = Reaction::get(&user, &group, &reaction, &state.shared).await?;
     // update our reaction
     let reaction = reaction
-        .update(&user, &group, update, &state.shared)
+        .update(&user, &group, update, user.run_reaction(), &state.shared)
         .await?;
     Ok(Json(reaction))
 }
@@ -1326,7 +1530,9 @@ async fn delete_reaction(
     // cast to to uuid then get reaction using id
     let (group, reaction) = Reaction::get(&user, &group, &reaction, &state.shared).await?;
     // delete reaction from backend
-    reaction.delete(&user, &group, &state.shared).await?;
+    reaction
+        .delete(&user, &group, user.run_reaction(), &state.shared)
+        .await?;
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -1367,17 +1573,18 @@ async fn download_ephemeral(
     let stream = reaction.download_ephemeral(&name, &state.shared).await?;
     // convert our byte stream to a streamable body
     let body = AsyncReadBody::new(stream.into_async_read());
-    Ok(body)
+    // say what the bytes are, since a browser or proxy otherwise guesses
+    Ok(([(header::CONTENT_TYPE, "application/octet-stream")], body))
 }
 
 /// The struct containing our openapi docs
 #[derive(OpenApi)]
 #[openapi(
-    paths(create, create_bulk, get_reaction, run_token, update, delete_reaction, handle, logs, stage_logs, add_stage_logs,
+    paths(create, create_bulk, get_reaction, run_token, run_models, run_tool, run_workflow, retry_workflow_run, update, delete_reaction, handle, logs, stage_logs, add_stage_logs,
           list, list_new, list_details, list_status, list_status_new, list_status_details, list_tag, list_tag_new,
           list_tag_details, list_group_set, list_group_set_details, list_sub, list_sub_new, list_sub_details,
           list_sub_status_details, list_sub_status, list_sub_status_new, download_ephemeral),
-    components(schemas(Actions, ApiCursor<String>, BulkReactionResponse, CommitishKinds, HandleReactionResponse, ImageScaler, JobResetRequestor, Reaction, ReactionIdResponse, ReactionList, ReactionDetailsList, ReactionCursorParams, ReactionListParams, ReactionRequest, ReactionStatus, ReactionUpdate, RepoDependency, RepoDependencyRequest, StageLogs, StageLogsAdd, StageLogLine, StatusUpdate, SystemComponents, ReactionCache, ReactionCacheUpdate)),
+    components(schemas(Actions, ApiCursor<String>, BulkReactionResponse, CommitishKinds, HandleReactionResponse, ImageScaler, JobResetRequestor, Reaction, ReactionIdResponse, ReactionList, ReactionDetailsList, ReactionCursorParams, ReactionListParams, ReactionRequest, ReactionStatus, ReactionUpdate, RepoDependency, RepoDependencyRequest, RunInputs, StageLogs, StageLogsAdd, StageLogLine, StatusUpdate, SystemComponents, ReactionCache, ReactionCacheUpdate, ToolRunRequest, WorkflowRunRequest, RunModels, ModelResolutionError)),
     modifiers(&OpenApiSecurity),
 )]
 pub struct ReactionApiDocs;
@@ -1403,6 +1610,13 @@ pub fn mount(router: Router<AppState>) -> Router<AppState> {
             get(get_reaction).patch(update).delete(delete_reaction),
         )
         .route("/reactions/{group}/{id}/run-token", get(run_token))
+        .route("/reactions/{group}/{id}/run-models", get(run_models))
+        .route("/tools/instances/{id}/runs", post(run_tool))
+        .route("/workflows/instances/{id}/runs", post(run_workflow))
+        .route(
+            "/workflows/instances/{id}/runs/{reaction}/retry",
+            post(retry_workflow_run),
+        )
         .route(
             "/reactions/{group}/{id}/cache",
             get(get_cache).patch(update_cache),
@@ -1472,4 +1686,23 @@ pub fn mount(router: Router<AppState>) -> Router<AppState> {
             "/reactions/ephemeral/{group}/{id}/{name}",
             get(download_ephemeral),
         )
+}
+
+#[cfg(test)]
+mod tests {
+    use utoipa::OpenApi;
+
+    use super::ReactionApiDocs;
+
+    /// The admin run-token read is documented with the reaction routes
+    #[test]
+    fn run_token_route_documented() {
+        // the generated docs list the route
+        let docs = ReactionApiDocs::openapi();
+        assert!(
+            docs.paths
+                .paths
+                .contains_key("/api/reactions/:group/:id/run-token")
+        );
+    }
 }
