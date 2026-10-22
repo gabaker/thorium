@@ -7,8 +7,31 @@ use axum::routing::post;
 use tracing::instrument;
 
 use crate::models::AuthedUser;
-use crate::models::{AssociationDeleteRequest, AssociationRequest};
+use crate::models::{AssociationDeleteRequest, AssociationKind, AssociationRequest};
 use crate::utils::{ApiError, AppState};
+
+/// Refuse a run token a write to the edges that make up the agentic graph
+///
+/// The edges between agents, tools, and toolsets decide what the workflows other runs follow are
+/// built from, so a run token can't write them. Every other kind of association stays open,
+/// because harnesses write those about their inputs.
+///
+/// # Arguments
+///
+/// * `user` - The user making the request
+/// * `kind` - The kind of association the request writes
+/// * `action` - What the request would do to it, used in the refusal message
+fn refuse_run_token_on_graph_edges(
+    user: &AuthedUser,
+    kind: AssociationKind,
+    action: &str,
+) -> Result<(), ApiError> {
+    // only writes to graph edges are refused
+    if kind.is_graph_edge() {
+        user.refuse_run_token(&format!("{action} a {kind:?} association"))?;
+    }
+    Ok(())
+}
 
 /// Associate an entity or object with another entity/object
 ///
@@ -23,6 +46,8 @@ async fn create(
     State(state): State<AppState>,
     Json(req): Json<AssociationRequest>,
 ) -> Result<StatusCode, ApiError> {
+    // a run token can't change the graph that workflows are built from
+    refuse_run_token_on_graph_edges(&user, req.kind, "create")?;
     // apply this association request to the requested data
     req.apply(&user, &state.shared).await?;
     // if this request was successful then always return a 204
@@ -56,6 +81,8 @@ async fn delete(
     State(state): State<AppState>,
     Json(req): Json<AssociationDeleteRequest>,
 ) -> Result<StatusCode, ApiError> {
+    // a run token can't change the graph that workflows are built from
+    refuse_run_token_on_graph_edges(&user, req.kind, "delete")?;
     // delete the associations matching this request
     req.apply(&user, &state.shared).await?;
     // if this request was successful then always return a 204

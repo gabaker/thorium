@@ -106,3 +106,89 @@ pub fn mount(router: Router<AppState>, conf: &Conf) -> Router<AppState> {
                 .url("/oauth/openapi.json", OAuthApiDocs::openapi()),
         )
 }
+
+#[cfg(test)]
+mod tests {
+    use std::collections::BTreeSet;
+
+    use regex::Regex;
+
+    /// The handlers a routes file mounts and the handlers its `OpenAPI` docs list
+    ///
+    /// # Arguments
+    ///
+    /// * `source` - The source of a routes file
+    fn mounted_and_documented(source: &str) -> (BTreeSet<String>, BTreeSet<String>) {
+        // only the code before the file's tests counts
+        let code = source.split("#[cfg(test)]").next().unwrap_or(source);
+        // the handlers the file's mount function registers on its routes
+        let mount = code
+            .split("pub fn mount(")
+            .nth(1)
+            .expect("a mount function");
+        let routed = Regex::new(r"\b(?:get|post|patch|put|delete)\(\s*([a-z_][a-z0-9_]*)\s*\)")
+            .expect("a handler pattern")
+            .captures_iter(mount)
+            .map(|found| found[1].to_owned())
+            .collect();
+        // the handlers the file's OpenAPI docs list
+        let listed = Regex::new(r"(?s)#\[openapi\(\s*paths\(([^)]*)\)")
+            .expect("a paths pattern")
+            .captures(code)
+            .map_or_else(BTreeSet::new, |found| {
+                found[1]
+                    .split(',')
+                    .map(|name| name.trim().to_owned())
+                    .filter(|name| !name.is_empty())
+                    .collect()
+            });
+        (routed, listed)
+    }
+
+    /// Reaction routes that are mounted without `OpenAPI` docs
+    ///
+    /// Every other route in the files checked must be documented, and a route leaves this list
+    /// when it gains docs.
+    const UNDOCUMENTED: [&str; 5] = [
+        "create_bulk_by_user",
+        "get_cache",
+        "update_cache",
+        "update_cache_files",
+        "download_cache_file",
+    ];
+
+    /// Every handler the jobs, reactions, events, and users routes mount is in its `OpenAPI` docs,
+    /// except the routes that never were
+    #[test]
+    fn mounted_handlers_are_documented() {
+        // check each routes file in turn
+        for (name, source) in [
+            ("jobs", include_str!("jobs.rs")),
+            ("reactions", include_str!("reactions.rs")),
+            ("events", include_str!("events.rs")),
+            ("users", include_str!("users.rs")),
+        ] {
+            // a handler mounted without being listed is missing from the docs
+            let (routed, listed) = mounted_and_documented(source);
+            assert!(!routed.is_empty(), "no handlers were found in {name}");
+            assert!(!listed.is_empty(), "no documented paths in {name}");
+            let missing = routed
+                .difference(&listed)
+                .filter(|handler| !UNDOCUMENTED.contains(&handler.as_str()))
+                .collect::<Vec<_>>();
+            assert!(
+                missing.is_empty(),
+                "{name} mounts handlers its docs don't list: {missing:?}"
+            );
+            // a route that gained docs leaves the list of routes without them
+            let stale = UNDOCUMENTED
+                .iter()
+                .filter(|handler| listed.contains(**handler))
+                .collect::<Vec<_>>();
+            assert!(
+                stale.is_empty(),
+                "{name} documents routes that are still exempt: {stale:?}"
+            );
+        }
+    }
+}

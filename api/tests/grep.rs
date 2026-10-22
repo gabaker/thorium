@@ -822,6 +822,100 @@ async fn grep_files_unknown_cursor() -> Result<(), Error> {
     Ok(())
 }
 
+/// A grep cursor continued with a scoped token searches only the cursor's groups in the
+/// token's scope, and is not found when the scope holds none of them
+#[tokio::test]
+async fn grep_cursor_continues_narrowed_by_scoped_token() -> Result<(), Error> {
+    // get admin client
+    let client = test_utilities::admin_client().await?;
+    // create a group in the token's scope, a group outside it, and the group the scope is
+    // built from when it holds none of the cursor's groups
+    let mut groups = generators::groups(3, &client).await?;
+    let other = groups.remove(2).name;
+    let out_scope = groups.remove(1).name;
+    let in_scope = groups.remove(0).name;
+    // build a user in all three groups
+    let user = generators::client_in_groups(
+        &client,
+        &[in_scope.clone(), out_scope.clone(), other.clone()],
+    )
+    .await?;
+    // seed two samples in the group in scope and two in the group outside it
+    let in_samples = [
+        seed_sample(&client, &in_scope).await?,
+        seed_sample(&client, &in_scope).await?,
+    ];
+    let out_samples = [
+        seed_sample(&client, &out_scope).await?,
+        seed_sample(&client, &out_scope).await?,
+    ];
+    // start a corpus grep over both groups with the user's own token
+    let opts = GrepOpts::new(PATTERN)
+        .group(&in_scope)
+        .group(&out_scope)
+        .source(GrepSource::Submissions)
+        .limit(1);
+    let page = user.files.grep(opts).await?;
+    let mut keys: Vec<String> = page
+        .data
+        .iter()
+        .map(|matches| matches.key.clone())
+        .collect();
+    let Some(cursor) = page.cursor else {
+        return Err(Error::new("the corpus grep did not return a cursor"));
+    };
+    // start a corpus grep over only the group outside the scope
+    let opts = GrepOpts::new(PATTERN)
+        .group(&out_scope)
+        .source(GrepSource::Submissions)
+        .limit(1);
+    let Some(outside) = user.files.grep(opts).await?.cursor else {
+        return Err(Error::new("the corpus grep did not return a cursor"));
+    };
+    // build clients for scoped tokens of this user limited to the group in scope and to the
+    // group holding none of the cursors' groups
+    let mut scoped = Vec::new();
+    for group in [&in_scope, &other] {
+        // create a uniquely named scoped token limited to this group
+        let name = format!("grepscoped{}", uuid::Uuid::new_v4().simple());
+        let req = thorium::models::ScopedTokenRequest::new(name).group(group);
+        let token = user.users.create_scoped_token(&req).await?.token;
+        // build a client that authenticates with this scoped token
+        scoped.push(
+            Thorium::build(user.host.clone())
+                .token(&token)
+                .build()
+                .await?,
+        );
+    }
+    // the cursor over both groups continues with the token in scope, finding nothing outside it
+    let continued = continue_grep(&scoped[0], cursor).await?;
+    is!(continued.iter().any(|key| out_samples.contains(key)), false);
+    // every sample in scope is found across the cursor
+    keys.extend(continued);
+    for sample in &in_samples {
+        is!(keys.contains(sample), true);
+    }
+    // the cursor over only the group outside the scope is answered as an unknown cursor for
+    // both scoped tokens
+    for client in &scoped {
+        // continue the cursor without naming any groups
+        let opts = GrepOpts::new(PATTERN)
+            .source(GrepSource::Submissions)
+            .limit(1)
+            .cursor(outside);
+        let check = client.files.grep(opts).await;
+        fail!(check, 404);
+    }
+    // the user's own token still continues that cursor
+    let opts = GrepOpts::new(PATTERN)
+        .source(GrepSource::Submissions)
+        .limit(1)
+        .cursor(outside);
+    user.files.grep(opts).await?;
+    Ok(())
+}
+
 /// A grep cursor can only be continued by the user that created it
 #[tokio::test]
 async fn grep_files_cursor_rejects_other_user() -> Result<(), Error> {

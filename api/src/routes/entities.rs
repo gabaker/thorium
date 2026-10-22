@@ -11,7 +11,7 @@ use uuid::Uuid;
 
 use super::shared::{self, graphics};
 use crate::models::AuthedUser;
-use crate::models::backends::entities::{models, toolsets, workflows};
+use crate::models::backends::entities::{is_definition_kind, models, toolsets, workflows};
 use crate::models::backends::{self, GraphicSupport, TagSupport};
 use crate::models::{
     ApiCursor, Association, AssociationListParams, AssociationTargetColumn, Entity, EntityListLine,
@@ -21,6 +21,29 @@ use crate::models::{
 };
 use crate::utils::{ApiError, AppState};
 use crate::{bad, not_found};
+
+/// Refuse a run token a write to a definition
+///
+/// A run token is handed to every worker of a run, so it can't change the tools, toolsets, agents,
+/// workflows, or model settings that other runs follow. Entities that hold data, tags, and
+/// associations are not checked here, because harnesses write those about their inputs.
+///
+/// # Arguments
+///
+/// * `user` - The user making the request
+/// * `entity` - The entity the request would write to
+/// * `action` - What the request would do to it, used in the refusal message
+fn refuse_run_token_on_definitions(
+    user: &AuthedUser,
+    entity: &Entity,
+    action: &str,
+) -> Result<(), ApiError> {
+    // only writes to definitions are refused
+    if is_definition_kind(&entity.kind) {
+        user.refuse_run_token(&format!("{action} a {}", entity.kind))?;
+    }
+    Ok(())
+}
 
 /// Creates a new entity
 ///
@@ -49,7 +72,14 @@ async fn create(
     form: Multipart,
 ) -> Result<Json<EntityResponse>, ApiError> {
     // create the entity
-    let resp = Box::pin(Entity::create(&user, form, &state.shared)).await?;
+    let resp = Box::pin(Entity::create(
+        &user,
+        user.run().is_some(),
+        user.is_scoped(),
+        form,
+        &state.shared,
+    ))
+    .await?;
     Ok(Json(resp))
 }
 
@@ -203,8 +233,13 @@ async fn update(
 ) -> Result<StatusCode, ApiError> {
     // get the entity from the backend
     let entity = Entity::get(&user, id, &state.shared).await?;
+    // a run token can't change a definition that other runs could follow
+    refuse_run_token_on_definitions(&user, &entity, "change")?;
     // update the entity
-    crate::utils::helpers::heap_future(|| entity.update(&user, form, &state.shared)).await?;
+    crate::utils::helpers::heap_future(|| {
+        entity.update(&user, user.is_scoped(), form, &state.shared)
+    })
+    .await?;
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -238,8 +273,12 @@ async fn delete(
 ) -> Result<StatusCode, ApiError> {
     // get the entity from the backend
     let entity = Entity::get(&user, id, &state.shared).await?;
+    // a run token can't delete a tool or an instance that other runs could follow
+    refuse_run_token_on_definitions(&user, &entity, "delete")?;
     // update the entity
-    entity.delete(&user, &state.shared).await?;
+    entity
+        .delete(&user, user.is_scoped(), &state.shared)
+        .await?;
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -277,6 +316,8 @@ async fn tag(
 ) -> Result<StatusCode, ApiError> {
     // get the entity we are adding tags too
     let entity = Entity::get(&user, id, &state.shared).await?;
+    // a run token can't tag a definition, which could change the tools a toolset selects
+    refuse_run_token_on_definitions(&user, &entity, "tag")?;
     // users can't set the tags Thorium sets on instances
     Entity::refuse_intrinsic_tag_keys(entity.kind, tags.tags.keys())?;
     // try to add the new tags for this entity
@@ -318,6 +359,8 @@ async fn delete_tags(
 ) -> Result<StatusCode, ApiError> {
     // get the entity we are deleting tags from
     let entity = Entity::get(&user, id, &state.shared).await?;
+    // a run token can't untag a definition, which could change the tools a toolset selects
+    refuse_run_token_on_definitions(&user, &entity, "untag")?;
     // tags Thorium sets on shared definitions can't be removed by users
     entity.protect_intrinsic_tags(&tags_del)?;
     // try to delete the tags for this entity
@@ -671,6 +714,8 @@ async fn request_instance(
     Path(id): Path<Uuid>,
     State(state): State<AppState>,
 ) -> Result<StatusCode, ApiError> {
+    // a run token can't make the workflow instance that later runs follow
+    user.refuse_run_token("request a workflow instance")?;
     // queue the request for an instance
     workflows::request_instance(&user, id, &state.shared).await?;
     Ok(StatusCode::ACCEPTED)
@@ -708,6 +753,8 @@ async fn request_tool_set_instance(
     Path(id): Path<Uuid>,
     State(state): State<AppState>,
 ) -> Result<StatusCode, ApiError> {
+    // a run token can't make the toolset instance that later runs follow
+    user.refuse_run_token("request a toolset instance")?;
     // queue the request for an instance
     toolsets::request_instance(&user, id, &state.shared).await?;
     Ok(StatusCode::ACCEPTED)
@@ -746,6 +793,8 @@ async fn refresh_model_endpoint(
     Path(id): Path<Uuid>,
     State(state): State<AppState>,
 ) -> Result<StatusCode, ApiError> {
+    // a run token can't make the event handler call a provider
+    user.refuse_run_token("refresh a model endpoint")?;
     // mark the endpoint pending and queue its refresh
     models::request_refresh(&user, id, &state.shared).await?;
     Ok(StatusCode::ACCEPTED)

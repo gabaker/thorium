@@ -450,6 +450,11 @@ async fn logout(user: AuthedUser, State(state): State<AppState>) -> Result<Statu
     match user {
         // this user authenticated with their primary token so rotate that
         AuthedUser::Full(mut user) => user.regen_token(&state.shared).await?,
+        // a run token is shared by every worker of its run and removed when the run ends, so
+        // rotating it would lock out the rest of the run
+        AuthedUser::Scoped(scoped) if scoped.run.is_some() => {
+            return unauthorized!("A run token can't be logged out".to_owned());
+        }
         // this user authenticated with a scoped token so only rotate that token
         AuthedUser::Scoped(scoped) => scoped.logout(&state.shared).await?,
     }

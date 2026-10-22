@@ -276,6 +276,56 @@ pub(super) struct GroupChangePlan {
     policy_adds: Vec<(NetworkPolicy, Vec<String>)>,
 }
 
+/// Whether an entity kind is a definition that runs and other runs follow, as opposed to data
+/// that harnesses and tools write about files and repos
+///
+/// A run token is handed to every worker of a run, so it can't write these kinds.
+///
+/// # Arguments
+///
+/// * `kind` - The kind of entity to check
+#[must_use]
+pub fn is_definition_kind(kind: &EntityKinds) -> bool {
+    // the kinds that describe tools, agents, workflows, and models
+    matches!(
+        kind,
+        EntityKinds::Tool
+            | EntityKinds::ToolInstance
+            | EntityKinds::ToolSet
+            | EntityKinds::ToolSetInstance
+            | EntityKinds::Agent
+            | EntityKinds::WorkflowCatalog
+            | EntityKinds::WorkflowInstance
+            | EntityKinds::ModelEndpoint
+            | EntityKinds::ModelProfile
+            | EntityKinds::ModelCredential
+    )
+}
+
+/// Refuse a scoped token a write to a model credential
+///
+/// A credential holds a secret a group's runs authenticate with, so only a full token of an owner
+/// or manager rotates, creates, or deletes one. A run token is a scoped token and is refused too.
+///
+/// # Arguments
+///
+/// * `kind` - The kind of entity the request would write
+/// * `scoped` - Whether the user authenticated with a scoped token
+/// * `action` - What the request would do to it, used in the refusal message
+fn refuse_scoped_credential_write(
+    kind: EntityKinds,
+    scoped: bool,
+    action: &str,
+) -> Result<(), ApiError> {
+    // only a scoped token writing a credential is refused
+    if scoped && kind == EntityKinds::ModelCredential {
+        return unauthorized!(format!(
+            "A scoped token can't {action} a model credential, use your full token"
+        ));
+    }
+    Ok(())
+}
+
 impl Entity {
     /// A helper function for creating an entity by taking a form, validating it, and submitting it
     /// to the database
@@ -290,12 +340,16 @@ impl Entity {
     /// * `form` - The multipart form that was submitted
     /// * `s3_path` - The s3 path to set if an image is uploaded
     /// * `user` - The user creating the entity
+    /// * `run` - Whether the user authenticated with a run token
+    /// * `scoped` - Whether the user authenticated with a scoped token
     /// * `shared` - Shared Thorium objects
     #[instrument(name = "Entity::create_helper", skip_all, err(Debug))]
     async fn create_helper(
         mut form: Multipart,
         s3_path: &mut Option<String>,
         user: &User,
+        run: bool,
+        scoped: bool,
         shared: &Shared,
     ) -> Result<EntityResponse, ApiError> {
         // generate a UUID for this entity
@@ -315,6 +369,14 @@ impl Entity {
                 // mark that this entity has an image
                 entity_form.image = Some(path);
             }
+        }
+        // a run token can't create a definition that other runs could follow
+        if run && entity_form.kind.as_ref().is_some_and(is_definition_kind) {
+            return unauthorized!("A run token can't create a definition".to_owned());
+        }
+        // only a full token creates a model credential
+        if let Some(kind) = entity_form.kind {
+            refuse_scoped_credential_write(kind, scoped, "create")?;
         }
         // give the entity the id a test chose for it, so the test can order ids
         #[cfg(feature = "test-utilities")]
@@ -416,19 +478,32 @@ impl Entity {
     ///
     /// # Arguments
     ///
-    /// * `form` - The multipart form that was uploaded
     /// * `user` - The user creating the entity
+    /// * `run` - Whether the user authenticated with a run token
+    /// * `scoped` - Whether the user authenticated with a scoped token
+    /// * `form` - The multipart form that was uploaded
     /// * `shared` - Shared Thorium objects
     #[instrument(name = "Entity::create", skip_all, err(Debug))]
     pub async fn create(
         user: &User,
+        run: bool,
+        scoped: bool,
         form: Multipart,
         shared: &Shared,
     ) -> Result<EntityResponse, ApiError> {
         // make a mutable option for the S3 path that's set if an image is uploaded to S3
         let mut s3_path: Option<String> = None;
         // try creating the entity
-        match Box::pin(Self::create_helper(form, &mut s3_path, user, shared)).await {
+        match Box::pin(Self::create_helper(
+            form,
+            &mut s3_path,
+            user,
+            run,
+            scoped,
+            shared,
+        ))
+        .await
+        {
             // entity was successfully created, so return a response
             Ok(resp) => Ok(resp),
             // we got an error creating the entity, so delete the image from S3 in case
@@ -1146,12 +1221,14 @@ impl Entity {
     /// # Arguments
     ///
     /// * `user` - The user updating the entity
+    /// * `scoped` - Whether the user authenticated with a scoped token
     /// * `form` - The multipart form that was submitted
     /// * `shared` - Shared Thorium objects
     #[instrument(name = "Entity::parse_update", skip_all, err(Debug))]
     async fn parse_update(
         &self,
         user: &User,
+        scoped: bool,
         mut form: Multipart,
         shared: &Shared,
     ) -> Result<ParsedUpdate, ApiError> {
@@ -1164,6 +1241,21 @@ impl Entity {
             .read_update_form(user, &mut form, &mut update_form, &mut images, shared)
             .await
         {
+            // a scoped token can't repoint a model endpoint, so discard what it uploaded
+            Ok(())
+                if scoped
+                    && self.kind == EntityKinds::ModelEndpoint
+                    && update_form.metadata.model_endpoint_provider.is_some() =>
+            {
+                let error = ApiError::new(
+                    StatusCode::UNAUTHORIZED,
+                    Some(
+                        "A scoped token can't change a model endpoint's provider, use your full token"
+                            .to_owned(),
+                    ),
+                );
+                Err(Self::discard_uploads(&images, self.image.as_ref(), error, shared).await)
+            }
             Ok(()) => Ok(ParsedUpdate {
                 form: update_form,
                 images,
@@ -1554,23 +1646,27 @@ impl Entity {
     /// # Arguments
     ///
     /// * `user` - The user updating the entity
+    /// * `scoped` - Whether the user authenticated with a scoped token
     /// * `form` - The update to apply
     /// * `shared` - Shared Thorium objects
     #[instrument(name = "Entity::update", skip_all, err(Debug))]
     pub async fn update(
         mut self,
         user: &User,
+        scoped: bool,
         form: Multipart,
         shared: &Shared,
     ) -> Result<(), ApiError> {
+        // only a full token rotates a model credential
+        refuse_scoped_credential_write(self.kind, scoped, "change")?;
         // only writes to tools and their instances take a lock
         let Some(root) = tools::lock_root(&self) else {
-            return helpers::heap_future(|| self.update_unlocked(user, form, shared)).await;
+            return helpers::heap_future(|| self.update_unlocked(user, scoped, form, shared)).await;
         };
         // refuse a user who can't edit the entity before waiting on its lock
         helpers::heap_future(|| self.authorize_update(user, shared)).await?;
         // read the form before taking the lock, so it's never held while a body arrives
-        let parsed = helpers::heap_future(|| self.parse_update(user, form, shared)).await?;
+        let parsed = helpers::heap_future(|| self.parse_update(user, scoped, form, shared)).await?;
         // wait for any other write to the tool
         let token = match tools::lock(root, &self.name, shared).await {
             Ok(token) => token,
@@ -1653,18 +1749,20 @@ impl Entity {
     /// # Arguments
     ///
     /// * `user` - The user updating the entity
+    /// * `scoped` - Whether the user authenticated with a scoped token
     /// * `form` - The update to apply
     /// * `shared` - Shared Thorium objects
     async fn update_unlocked(
         mut self,
         user: &User,
+        scoped: bool,
         form: Multipart,
         shared: &Shared,
     ) -> Result<(), ApiError> {
         // check the user's rights the way this kind's groups are kept
         helpers::heap_future(|| self.authorize_update(user, shared)).await?;
         // read the form, uploading any image it sends
-        let parsed = helpers::heap_future(|| self.parse_update(user, form, shared)).await?;
+        let parsed = helpers::heap_future(|| self.parse_update(user, scoped, form, shared)).await?;
         // apply the update
         helpers::heap_future(|| self.apply_update(user, parsed, false, shared)).await
     }
@@ -1714,19 +1812,27 @@ impl Entity {
     /// # Arguments
     ///
     /// * `user` - The user deleting an entity
+    /// * `scoped` - Whether the user used a scoped token, which acts only in its own groups
     /// * `shared` - Shared Thorium objects
-    pub async fn delete(mut self, user: &User, shared: &Shared) -> Result<(), ApiError> {
+    pub async fn delete(
+        mut self,
+        user: &User,
+        scoped: bool,
+        shared: &Shared,
+    ) -> Result<(), ApiError> {
+        // only a full token deletes a model credential
+        refuse_scoped_credential_write(self.kind, scoped, "delete")?;
         // only writes to tools and their instances take a lock
         let Some(root) = tools::lock_root(&self) else {
-            return Box::pin(self.delete_unlocked(user, shared)).await;
+            return Box::pin(self.delete_unlocked(user, scoped, shared)).await;
         };
         // refuse a user who can't delete the entity before waiting on its lock
-        self.authorize_delete(user, shared).await?;
+        self.authorize_delete(user, scoped, shared).await?;
         // wait for any other write to the tool
         let token = tools::lock(root, &self.name, shared).await?;
         // reread the entity now that no other write to its tool can run, then delete it
         let result = match Self::get(user, self.id, shared).await {
-            Ok(fresh) => Box::pin(fresh.delete_unlocked(user, shared)).await,
+            Ok(fresh) => Box::pin(fresh.delete_unlocked(user, scoped, shared)).await,
             Err(err) => Err(err),
         };
         // release the lock whether or not the delete worked
@@ -1741,13 +1847,27 @@ impl Entity {
     /// # Arguments
     ///
     /// * `user` - The user deleting the entity
+    /// * `scoped` - Whether the user used a scoped token, which acts only in its own groups
     /// * `shared` - Shared Thorium objects
-    async fn authorize_delete(&mut self, user: &User, shared: &Shared) -> Result<(), ApiError> {
+    async fn authorize_delete(
+        &mut self,
+        user: &User,
+        scoped: bool,
+        shared: &Shared,
+    ) -> Result<(), ApiError> {
         // check the user's rights the way this kind's groups are kept
         match self.kind.group_policy() {
             GroupPolicy::Contained => {
                 // a shared definition is deleted from every one of its groups
                 self.load_all_groups(shared).await?;
+                // a scoped token acts only in its own groups, so it can't delete a definition that
+                // is also in a group outside them, even one it submitted
+                if scoped && self.groups.iter().any(|group| !user.groups.contains(group)) {
+                    return unauthorized!(format!(
+                        "Cannot delete {} with a token limited to fewer groups than it is in",
+                        self.name
+                    ));
+                }
                 // admins can always delete it, the submitter can unless it's a model endpoint or
                 // credential, and anyone else must manage or own every one of its groups
                 let submitter_may = !models::needs_manager(self.kind);
@@ -1784,10 +1904,16 @@ impl Entity {
     /// # Arguments
     ///
     /// * `user` - The user deleting an entity
+    /// * `scoped` - Whether the user used a scoped token, which acts only in its own groups
     /// * `shared` - Shared Thorium objects
-    async fn delete_unlocked(mut self, user: &User, shared: &Shared) -> Result<(), ApiError> {
+    async fn delete_unlocked(
+        mut self,
+        user: &User,
+        scoped: bool,
+        shared: &Shared,
+    ) -> Result<(), ApiError> {
         // check the user's rights the way this kind's groups are kept
-        self.authorize_delete(user, shared).await?;
+        self.authorize_delete(user, scoped, shared).await?;
         // a shared definition in use can't be deleted
         if self.kind.group_policy() == GroupPolicy::Contained {
             // a tool's instances are deleted before it

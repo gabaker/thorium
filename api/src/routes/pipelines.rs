@@ -46,6 +46,8 @@ async fn create(
     State(state): State<AppState>,
     Json(request): Json<PipelineRequest>,
 ) -> Result<StatusCode, ApiError> {
+    // a run token can't create a pipeline other runs could follow
+    user.refuse_run_token("create a pipeline")?;
     // create pipeline object
     Pipeline::create(&user, request, &state.shared).await?;
     Ok(StatusCode::NO_CONTENT)
@@ -199,6 +201,8 @@ async fn update(
     State(state): State<AppState>,
     Json(update): Json<PipelineUpdate>,
 ) -> Result<StatusCode, ApiError> {
+    // a run token can't change a pipeline other runs could follow
+    user.refuse_run_token("update a pipeline")?;
     // get pipeline and group
     let (group, pipeline) = Pipeline::get(&user, &group, &pipeline, &state.shared).await?;
     // update pipelines
@@ -243,6 +247,8 @@ async fn delete_pipeline(
     Path((group, pipeline)): Path<(String, String)>,
     State(state): State<AppState>,
 ) -> Result<StatusCode, ApiError> {
+    // a run token can't delete a pipeline or the reactions of other users that go with it
+    user.refuse_run_token("delete a pipeline")?;
     // get pipeline
     let (group, pipeline) = Pipeline::get(&user, &group, &pipeline, &state.shared).await?;
     // delete pipeline from backend
