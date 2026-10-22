@@ -184,7 +184,12 @@ impl ReactionTriggerWorker {
                             }
                         }
                     }
-                    EventData::SigmaScannableResults { .. } => continue,
+                    // these events never confirm a trigger, so they never get here
+                    EventData::SigmaScannableResults { .. }
+                    | EventData::WorkflowGraph(_)
+                    | EventData::ModelRefresh(_) => {
+                        continue;
+                    }
                 };
                 // get an entry to this users reaction requests
                 let entry: &mut Vec<ReactionRequest> = reqs.entry(event.user.clone()).or_default();
@@ -289,10 +294,10 @@ impl EventWorkerSupportCore for ReactionTriggerWorker {
         }
     }
 
-    /// The type of events this worker can handle
+    /// The types of events this worker handles
     #[inline]
-    fn event_kind() -> EventType {
-        EventType::ReactionTrigger
+    fn event_kinds() -> Vec<EventType> {
+        vec![EventType::ReactionTrigger]
     }
 
     /// The types of cache updates this worker subscribes too

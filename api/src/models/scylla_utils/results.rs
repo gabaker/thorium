@@ -7,7 +7,7 @@ use uuid::Uuid;
 use crate::models::backends::OutputSupport;
 use crate::models::schema::ScyllaProjection;
 use crate::models::schema::scylla::{ResultsAuthView, ResultsIdsView, ResultsTable};
-use crate::models::{EntityKinds, ImageVersion, OutputDisplayType};
+use crate::models::{EntityKinds, OutputDisplayType, ToolVersion};
 
 /// A request to store the output or result of a tool in scylla
 #[derive(Debug)]
@@ -19,7 +19,7 @@ pub struct OutputForm<O: OutputSupport> {
     /// The tool (image) this result comes from
     pub tool: String,
     /// The version of the tool (image) this result comes from
-    pub tool_version: Option<ImageVersion>,
+    pub tool_version: Option<ToolVersion>,
     /// The command used to generate this result
     pub cmd: Option<String>,
     /// The result to save
@@ -44,7 +44,7 @@ pub struct OutputFormBuilder<O: OutputSupport> {
     /// The tool (image) this result comes from
     pub tool: Option<String>,
     /// The version of the tool (image) this result comes from
-    pub tool_version: Option<ImageVersion>,
+    pub tool_version: Option<ToolVersion>,
     /// The command used to generate this result
     pub cmd: Option<String>,
     /// The result to save
@@ -119,7 +119,7 @@ pub struct OutputRow {
     /// The tool or pipeline this result comes from
     pub tool: String,
     /// The version of the tool or image this result came from
-    pub tool_version: Option<ImageVersion>,
+    pub tool_version: Option<ToolVersion>,
     /// The command used to generate this result
     pub cmd: Option<String>,
     /// When this result was uploaded

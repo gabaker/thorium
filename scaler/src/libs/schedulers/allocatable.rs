@@ -1921,6 +1921,7 @@ mod tests {
             resources: Resources::default(),
             pool: Pools::Deadline,
             active: None,
+            run: None,
         }
     }
 

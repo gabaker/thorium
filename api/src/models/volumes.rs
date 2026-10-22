@@ -3,9 +3,14 @@
 use std::fmt;
 
 /// Different types of [`HostPath`] volumes in k8s
-#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+#[derive(Serialize, Deserialize, Debug, Clone, Default, PartialEq)]
+#[cfg_attr(
+    any(feature = "api", feature = "client"),
+    derive(thorium_derive::DigestValue)
+)]
 #[cfg_attr(feature = "api", derive(utoipa::ToSchema))]
 pub enum HostPathTypes {
+    #[default]
     DirectoryOrCreate,
     Directory,
     FileOrCreate,
@@ -30,7 +35,11 @@ impl fmt::Display for HostPathTypes {
 }
 
 /// Specific arguments for a host path volume in k8s
-#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+#[derive(Serialize, Deserialize, Debug, Clone, Default, PartialEq)]
+#[cfg_attr(
+    any(feature = "api", feature = "client"),
+    derive(thorium_derive::DigestValue)
+)]
 #[cfg_attr(feature = "api", derive(utoipa::ToSchema))]
 pub struct HostPath {
     pub path: String,
@@ -39,7 +48,11 @@ pub struct HostPath {
 }
 
 /// Specific Arguments for a config map in k8s
-#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+#[derive(Serialize, Deserialize, Debug, Clone, Default, PartialEq)]
+#[cfg_attr(
+    any(feature = "api", feature = "client"),
+    derive(thorium_derive::DigestValue)
+)]
 #[cfg_attr(feature = "api", derive(utoipa::ToSchema))]
 pub struct ConfigMap {
     /// The mode bits to set on files in this volume
@@ -50,7 +63,11 @@ pub struct ConfigMap {
 }
 
 /// Specific Arguments for a secret in k8s
-#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+#[derive(Serialize, Deserialize, Debug, Clone, Default, PartialEq)]
+#[cfg_attr(
+    any(feature = "api", feature = "client"),
+    derive(thorium_derive::DigestValue)
+)]
 #[cfg_attr(feature = "api", derive(utoipa::ToSchema))]
 pub struct Secret {
     /// The mode bits to set on files in this volume
@@ -61,7 +78,11 @@ pub struct Secret {
 }
 
 /// Specific Arguments for a NFS mount in k8s
-#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+#[derive(Serialize, Deserialize, Debug, Clone, Default, PartialEq)]
+#[cfg_attr(
+    any(feature = "api", feature = "client"),
+    derive(thorium_derive::DigestValue)
+)]
 #[cfg_attr(feature = "api", derive(utoipa::ToSchema))]
 pub struct NFS {
     /// The path that is exported by the NFS server
@@ -77,12 +98,17 @@ fn default_as_false() -> bool {
 }
 
 /// Different types of volumes supported by Thorium
-#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+#[derive(Serialize, Deserialize, Debug, Clone, Default, PartialEq)]
+#[cfg_attr(
+    any(feature = "api", feature = "client"),
+    derive(thorium_derive::DigestValue)
+)]
 #[cfg_attr(feature = "api", derive(utoipa::ToSchema))]
 pub enum VolumeTypes {
-    /// HostPath volumes
+    /// `HostPath` volumes
+    #[default]
     HostPath,
-    /// ConfigMap volumes
+    /// `ConfigMap` volumes
     ConfigMap,
     /// Secret volumes
     Secret,
@@ -102,7 +128,11 @@ impl fmt::Display for VolumeTypes {
 }
 
 /// A volume to bind in of arbitrary type
-#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+#[derive(Serialize, Deserialize, Debug, Clone, Default, PartialEq)]
+#[cfg_attr(
+    any(feature = "api", feature = "client"),
+    derive(thorium_derive::DigestValue)
+)]
 #[cfg_attr(feature = "api", derive(utoipa::ToSchema))]
 pub struct Volume {
     /// The name of the volume in k8s

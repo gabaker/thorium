@@ -11,7 +11,7 @@ use std::str::FromStr;
 use uuid::Uuid;
 
 use super::backends::OutputSupport;
-use super::{Buffer, ImageVersion, InvalidEnum};
+use super::{Buffer, InvalidEnum, ToolVersion};
 use crate::models::EntityKinds;
 use crate::{
     matches_adds, matches_clear, matches_removes, matches_update, matches_update_opt, same,
@@ -76,7 +76,7 @@ pub struct OutputRequest<O: OutputSupport> {
     pub tool: String,
     /// The version of the tool this result is from
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub tool_version: Option<ImageVersion>,
+    pub tool_version: Option<ToolVersion>,
     /// The result
     pub result: String,
     /// Any files tied to this result
@@ -201,16 +201,16 @@ impl<O: OutputSupport> OutputRequest<O> {
     /// # Examples
     ///
     /// ```
-    /// use thorium::models::{ImageVersion, OutputRequest, OutputDisplayType, Sample};
+    /// use thorium::models::{ToolVersion, OutputRequest, OutputDisplayType, Sample};
     /// use semver::Version;
     ///
-    /// let image_version = ImageVersion::SemVer(Version::parse("1.0.0").unwrap());
+    /// let image_version = ToolVersion::SemVer(Version::parse("1.0.0").unwrap());
     /// let sha256 = "63b0490d4736e740f26ea9483d55c254abe032845b70ba84ea463ca6582d106f".to_owned();
     /// let req = OutputRequest::<Sample>::new(sha256, "CornHarvester", "Lots of Corn", OutputDisplayType::String)
     ///     .tool_version(image_version);
     /// ```
     #[must_use]
-    pub fn tool_version(mut self, tool_version: ImageVersion) -> Self {
+    pub fn tool_version(mut self, tool_version: ToolVersion) -> Self {
         self.tool_version = Some(tool_version);
         self
     }
@@ -552,7 +552,7 @@ pub struct Output {
     pub groups: Vec<String>,
     /// The version of the tool that generated this result
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub tool_version: Option<ImageVersion>,
+    pub tool_version: Option<ToolVersion>,
     /// The command used to generate this result
     pub cmd: Option<String>,
     /// When this result was uploaded
@@ -644,7 +644,7 @@ pub struct OutputChunk {
     pub cmd: Option<String>,
     /// The version of the tool used to generate this result
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub tool_version: Option<ImageVersion>,
+    pub tool_version: Option<ToolVersion>,
     /// When this result was uploaded
     pub uploaded: DateTime<Utc>,
     /// Set to true if a deserialization failure occured
@@ -666,6 +666,10 @@ pub struct OutputChunk {
 /// append-only: never reorder, remove, or insert one; a new variant goes at the end. The
 /// golden-bytes test of archived enums in thoradm's offline suite fails if the order changes.
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Copy, clap::ValueEnum)]
+#[cfg_attr(
+    any(feature = "api", feature = "client"),
+    derive(thorium_derive::DigestValue)
+)]
 #[cfg_attr(
     feature = "rkyv-support",
     derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)
@@ -729,6 +733,7 @@ impl OutputDisplayType {
     }
 
     /// Whether this display type requires a results file or not
+    #[must_use]
     pub fn requires_results(&self) -> bool {
         match self {
             OutputDisplayType::Json => true,
@@ -806,6 +811,10 @@ impl FromStr for OutputDisplayType {
 
 /// The different type of handlers for collecting results
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+#[cfg_attr(
+    any(feature = "api", feature = "client"),
+    derive(thorium_derive::DigestValue)
+)]
 #[cfg_attr(feature = "api", derive(utoipa::ToSchema))]
 pub enum OutputHandler {
     /// Collect output from a location on disk
@@ -841,6 +850,10 @@ fn default_tags_path() -> String {
 
 /// The settings for collecting results from a specific location on disk
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+#[cfg_attr(
+    any(feature = "api", feature = "client"),
+    derive(thorium_derive::DigestValue)
+)]
 #[cfg_attr(feature = "api", derive(utoipa::ToSchema))]
 pub struct FilesHandler {
     /// The location to look for small renderable results at on disk
@@ -989,6 +1002,10 @@ impl PartialEq<FilesHandlerUpdate> for FilesHandler {
 
 /// The logic to use to determine whether to create this tag or not
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+#[cfg_attr(
+    any(feature = "api", feature = "client"),
+    derive(thorium_derive::DigestValue)
+)]
 #[cfg_attr(feature = "api", derive(utoipa::ToSchema))]
 pub enum AutoTagLogic {
     Exists,
@@ -1011,6 +1028,10 @@ impl Default for AutoTagLogic {
 
 /// Settings for extracting a single tag from a result
 #[derive(Serialize, Deserialize, Debug, Clone, Default, PartialEq)]
+#[cfg_attr(
+    any(feature = "api", feature = "client"),
+    derive(thorium_derive::DigestValue)
+)]
 #[cfg_attr(feature = "api", derive(utoipa::ToSchema))]
 pub struct AutoTag {
     /// The logic to use when deciding whether to apply this tag
@@ -1065,6 +1086,10 @@ fn default_children() -> String {
 
 /// The settings for collecting output
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+#[cfg_attr(
+    any(feature = "api", feature = "client"),
+    derive(thorium_derive::DigestValue)
+)]
 #[cfg_attr(feature = "api", derive(utoipa::ToSchema))]
 pub struct OutputCollection {
     /// The handler used to collect output
@@ -1548,6 +1573,7 @@ pub enum OutputKey {
 
 impl OutputKey {
     /// Get the key to this kind of output as a single string
+    #[must_use]
     pub fn key_string(self) -> String {
         // convert this output key to a single string
         match self {

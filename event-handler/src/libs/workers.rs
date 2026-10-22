@@ -15,9 +15,11 @@ use tokio::task::JoinHandle;
 use tracing::{Level, event, instrument};
 use uuid::Uuid;
 
+pub mod ai;
 pub mod hunts;
 pub mod reaction_triggers;
 
+pub use ai::AiWorker;
 pub use hunts::sigma::{SigmaRuleContext, SigmaRuleWorker};
 pub use reaction_triggers::ReactionTriggerWorker;
 
@@ -61,6 +63,8 @@ pub enum WorkerMsg {
 }
 
 /// The core trait that the different kind of event works need to support
+// workers are only ever spawned as concrete types, whose futures the compiler checks for Send
+#[allow(async_fn_in_trait)]
 pub trait EventWorkerSupportCore {
     /// The stats for all workers of this kind
     type Stats: Default + AddAssign + Eq + PartialEq + Clone;
@@ -73,8 +77,8 @@ pub trait EventWorkerSupportCore {
     /// * `thorium` - A Thorium client
     async fn new(cache: &EventWorkerCache, thorium: &Arc<Thorium>) -> Self;
 
-    /// The type of events this worker can handle
-    fn event_kind() -> EventType;
+    /// The types of events this worker handles, in the order they're popped on each pass
+    fn event_kinds() -> Vec<EventType>;
 
     /// The types of cache updates this worker subscribes too
     fn cache_subscriptions() -> Vec<WorkerCacheUpdateKinds>;
@@ -91,6 +95,8 @@ pub trait EventWorkerSupportCore {
 }
 
 /// The trait that the different kind of event workers need to handle
+// workers are only ever spawned as concrete types, whose futures the compiler checks for Send
+#[allow(async_fn_in_trait)]
 pub trait EventWorkerSupport: EventWorkerSupportCore {
     /// The method to call to handle or process a single event
     async fn process(&self, event: Event, stats: &Arc<Mutex<Self::Stats>>) -> Result<(), Error>;
@@ -103,6 +109,8 @@ pub enum EventWorkerKinds {
     ReactionTriggers,
     /// A sigma scanner worker,
     SigmaScanner,
+    /// The AI worker that builds workflow instances
+    Ai,
 }
 
 impl EventWorkerKinds {
@@ -116,6 +124,7 @@ impl EventWorkerKinds {
         let subscribed = match self {
             Self::ReactionTriggers => ReactionTriggerWorker::cache_subscriptions(),
             Self::SigmaScanner => SigmaRuleWorker::cache_subscriptions(),
+            Self::Ai => AiWorker::cache_subscriptions(),
         };
         // check if this is something we are subscribed too
         subscribed.contains(&update_kind)
@@ -156,6 +165,15 @@ impl EventWorkerKinds {
                 let worker =
                     EventWorker::<SigmaRuleWorker>::new(cache, thorium, &msg_rx, stats_tx).await;
                 // spawn this sigma worker
+                tokio::task::spawn(worker.start())
+            }
+            EventWorkerKinds::Ai => {
+                // get the send side of our states channel
+                let stats_tx = &stats_channels.ai.0;
+                // build the AI worker, which handles each batch as a whole
+                let worker =
+                    EventWorkerMutable::<AiWorker>::new(cache, thorium, &msg_rx, stats_tx).await;
+                // spawn the AI worker
                 tokio::task::spawn(worker.start())
             }
         };
@@ -256,14 +274,31 @@ impl<W: EventWorkerSupport> EventWorker<W> {
             if Utc::now() > retry_ts {
                 // log that we are resetting events
                 event!(Level::INFO, msg = "Resetting in flight events");
-                // reset any still in flight events
-                self.thorium.events.reset_all(W::event_kind()).await?;
+                // reset any still in flight events of each kind
+                for kind in W::event_kinds() {
+                    self.thorium.events.reset_all(kind).await?;
+                }
                 // reset our retry timestamp
                 self.retry_ts = None;
             }
         }
+        // pop and handle each kind of event in order
+        let mut got_events = false;
+        for kind in W::event_kinds() {
+            got_events |= self.process_kind(kind, opts).await?;
+        }
+        Ok(got_events)
+    }
+
+    /// Pop one kind of event and handle what was popped
+    ///
+    /// # Arguments
+    ///
+    /// * `kind` - The kind of event to pop
+    /// * `opts` - The options for getting events
+    async fn process_kind(&mut self, kind: EventType, opts: &EventPopOpts) -> Result<bool, Error> {
         // Try to get some events to handle
-        let events = self.thorium.events.pop(W::event_kind(), opts).await?;
+        let events = self.thorium.events.pop(kind, opts).await?;
         // evaluate these events if we got any
         if events.is_empty() {
             // we got no events so return false
@@ -303,7 +338,7 @@ impl<W: EventWorkerSupport> EventWorker<W> {
             if !clears.is_empty() {
                 self.thorium
                     .events
-                    .clear(W::event_kind(), &EventIds::from(clears))
+                    .clear(kind, &EventIds::from(clears))
                     .await?;
             }
             Ok(true)
@@ -315,7 +350,9 @@ impl<W: EventWorkerSupport> EventWorker<W> {
         // Get at most 1000 events at a time
         let opts = EventPopOpts::default().limit(1000);
         // resest any tasks from a previous worker
-        self.thorium.events.reset_all(W::event_kind()).await?;
+        for kind in W::event_kinds() {
+            self.thorium.events.reset_all(kind).await?;
+        }
         // keep looping and handling results
         loop {
             // check if we have any messages from our controller
@@ -342,6 +379,8 @@ impl<W: EventWorkerSupport> EventWorker<W> {
 }
 
 /// The trait that the different kind of event workers need to handle
+// workers are only ever spawned as concrete types, whose futures the compiler checks for Send
+#[allow(async_fn_in_trait)]
 pub trait EventWorkerMutableSupport: EventWorkerSupportCore {
     /// The method to call to handle or process a single event
     ///
@@ -437,19 +476,24 @@ impl<W: EventWorkerMutableSupport> EventWorkerMutable<W> {
             if Utc::now() > retry_ts {
                 // log that we are resetting events
                 event!(Level::INFO, msg = "Resetting in flight events");
-                // reset any still in flight events
-                self.thorium.events.reset_all(W::event_kind()).await?;
+                // reset any still in flight events of each kind
+                for kind in W::event_kinds() {
+                    self.thorium.events.reset_all(kind).await?;
+                }
                 // reset our retry timestamp
                 self.retry_ts = None;
             }
         }
-        // Try to get some events to handle
-        let events = self.thorium.events.pop(W::event_kind(), opts).await?;
-        // evaluate these events if we got any
-        if events.is_empty() {
-            // we got no events so return false
-            Ok(false)
-        } else {
+        // pop each kind in order so one kind's batch never waits behind another's
+        let mut got_events = false;
+        for kind in W::event_kinds() {
+            // Try to get some events to handle
+            let events = self.thorium.events.pop(kind, opts).await?;
+            // skip a kind with nothing to do
+            if events.is_empty() {
+                continue;
+            }
+            got_events = true;
             // process all of the events on this page
             self.internal.process(events, &mut self.stats).await?;
             // check if our worker left any events in flight that need to be retried
@@ -459,8 +503,8 @@ impl<W: EventWorkerMutableSupport> EventWorkerMutable<W> {
                     self.retry_ts = Some(retry_ts);
                 }
             }
-            Ok(true)
         }
+        Ok(got_events)
     }
 
     /// Start scanning and handling events
@@ -468,7 +512,9 @@ impl<W: EventWorkerMutableSupport> EventWorkerMutable<W> {
         // Get at most 1000 events at a time
         let opts = EventPopOpts::default().limit(1000);
         // resest any tasks from a previous worker
-        self.thorium.events.reset_all(W::event_kind()).await?;
+        for kind in W::event_kinds() {
+            self.thorium.events.reset_all(kind).await?;
+        }
         // keep looping and handling results
         loop {
             // check if we have any messages from our controller

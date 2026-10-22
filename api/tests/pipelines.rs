@@ -2,13 +2,372 @@
 
 use rand::{rng, seq::SliceRandom};
 use thorium::models::{
-    ImageBan, ImageBanKind, ImageBanUpdate, ImageUpdate, NotificationLevel, NotificationParams,
+    AgentEntityRequest, EntityUpdate, ImageBan, ImageBanKind, ImageBanUpdate, ImageScaler,
+    ImageUpdate, ModelEndpointEntityRequest, NotificationLevel, NotificationParams,
     NotificationRequest, PipelineBan, PipelineBanKind, PipelineBanUpdate, PipelineRequest,
-    PipelineUpdate,
+    PipelineUpdate, ReactionRequest, ToolSetEntityRequest, UserRole,
 };
 use thorium::test_utilities::{self, generators};
 use thorium::{Error, contains, fail, is, is_in, unwrap_variant, vec_in_vec};
 use uuid::Uuid;
+
+/// Create a pipeline request whose one stage is backed by a tool id
+///
+/// # Arguments
+///
+/// * `group` - The group of the pipeline
+/// * `stage` - The name of the pipeline's only stage
+/// * `tool` - The Tool or Tool Instance id backing the stage
+fn one_stage(group: &str, stage: &str, tool: Uuid) -> PipelineRequest {
+    // a single stage pipeline with a random name
+    PipelineRequest::new(
+        group,
+        generators::gen_string(20).to_lowercase(),
+        serde_json::json!([[stage]]),
+    )
+    .stage_tool(stage, tool)
+}
+
+/// Pipeline stages are backed by tools in the pipeline's group, and the wrong kind of entity,
+/// one outside the group, an invisible one, or a missing one is refused naming the stage
+#[tokio::test]
+#[allow(clippy::too_many_lines)]
+async fn stage_tool_validation() -> Result<(), Error> {
+    // a group with an owner who develops for K8s only
+    let admin = test_utilities::admin_client().await?;
+    let suffix = generators::name_suffix();
+    let owner = generators::named_user_with_role(
+        &admin,
+        &generators::readable_name("callisto", &suffix),
+        UserRole::Developer {
+            k8s: true,
+            bare_metal: false,
+            windows: false,
+            kvm: false,
+            external: false,
+        },
+    )
+    .await?;
+    let roles = generators::GroupRoles::default().owner(&owner.username);
+    let group = generators::god_group(&admin, "mars", &suffix, &roles).await?;
+    let other =
+        generators::god_group(&admin, "venus", &suffix, &generators::GroupRoles::default()).await?;
+    // a Tool, an Image Tool Instance, and a Harness Tool Instance in the group are each accepted
+    let (image_tool, image_instance) =
+        generators::tool(&[&group], "1.0.0", &generators::gen_image_spec(), &admin).await?;
+    let (_, harness_instance) =
+        generators::tool(&[&group], "1.0.0", &generators::gen_harness_spec(), &admin).await?;
+    for (stage, id) in [
+        ("tool-root", image_tool.id),
+        ("image-instance", image_instance.id),
+        ("harness-instance", harness_instance.id),
+    ] {
+        let req = one_stage(&group, stage, id);
+        owner.client.pipelines.create(&req).await?;
+        // the stage name names no image and the stage tool is stored
+        let read = owner.client.pipelines.get(&group, &req.name).await?;
+        is!(read.stage_tools.get(stage), Some(&id));
+        fail!(admin.images.get(&group, stage).await, 404);
+    }
+    // a toolset, an agent, and a model entity in the group are the wrong kind
+    let toolset = admin
+        .entities
+        .create(generators::gen_toolset(
+            "hoard",
+            &[&group],
+            ToolSetEntityRequest::default(),
+        ))
+        .await?
+        .id;
+    let agent = admin
+        .entities
+        .create(generators::gen_agent(
+            "scout",
+            &[&group],
+            AgentEntityRequest::new(generators::gen_agent_config("scout")),
+        ))
+        .await?
+        .id;
+    let endpoint = generators::model_endpoint(
+        &[&group],
+        ModelEndpointEntityRequest::new(generators::gen_anthropic_provider()),
+        &admin,
+    )
+    .await?
+    .id;
+    // a tool instance in another group the owner can't see and one the owner can see
+    let (_, hidden) =
+        generators::tool(&[&other], "1.0.0", &generators::gen_image_spec(), &admin).await?;
+    let visible_group = generators::god_group(
+        &admin,
+        "ceres",
+        &suffix,
+        &generators::GroupRoles::default().user(&owner.username),
+    )
+    .await?;
+    let (_, outside) = generators::tool(
+        &[&visible_group],
+        "1.0.0",
+        &generators::gen_image_spec(),
+        &admin,
+    )
+    .await?;
+    // wrong kinds and tools outside the group are bad requests, missing or hidden ids not found
+    for (stage, id, code) in [
+        ("toolset-stage", toolset, 400_u16),
+        ("agent-stage", agent, 400),
+        ("model-stage", endpoint, 400),
+        ("outside-stage", outside.id, 400),
+        ("hidden-stage", hidden.id, 404),
+        ("missing-stage", Uuid::new_v4(), 404),
+    ] {
+        let req = one_stage(&group, stage, id);
+        let resp = owner.client.pipelines.create(&req).await;
+        fail!(resp, code, stage);
+        // nothing was stored
+        fail!(owner.client.pipelines.get(&group, &req.name).await, 404);
+    }
+    // a stage tool whose workload scaler the owner doesn't develop for is unauthorized
+    let (_, bare_metal) = generators::tool(
+        &[&group],
+        "1.0.0",
+        &generators::gen_image_spec_for(ImageScaler::BareMetal),
+        &admin,
+    )
+    .await?;
+    let resp = owner
+        .client
+        .pipelines
+        .create(&one_stage(&group, "bare-stage", bare_metal.id))
+        .await;
+    fail!(resp, 401);
+    // removing the tool of a stage that stays in the order is refused
+    let kept = one_stage(&group, "kept", image_instance.id);
+    owner.client.pipelines.create(&kept).await?;
+    let update = PipelineUpdate::default().remove_stage_tool("kept");
+    let resp = owner
+        .client
+        .pipelines
+        .update(&group, &kept.name, &update)
+        .await;
+    fail!(resp, 400, "kept");
+    // removing the pipeline's group from a tool a stage names is a conflict naming the pipeline
+    let (tool_b, instance_b) = generators::tool(
+        &[&group, &visible_group],
+        "1.0.0",
+        &generators::gen_image_spec(),
+        &admin,
+    )
+    .await?;
+    let referrer = one_stage(&group, "named", tool_b.id);
+    owner.client.pipelines.create(&referrer).await?;
+    let removal = admin
+        .entities
+        .update(tool_b.id, EntityUpdate::default().remove_group(&group))
+        .await;
+    fail!(removal, 409, referrer.name.as_str());
+    // once the stage names another tool the removal succeeds
+    let update = PipelineUpdate::default().add_stage_tool("named", image_instance.id);
+    owner
+        .client
+        .pipelines
+        .update(&group, &referrer.name, &update)
+        .await?;
+    admin
+        .entities
+        .update(tool_b.id, EntityUpdate::default().remove_group(&group))
+        .await?;
+    let read = admin.entities.get(instance_b.id).await?;
+    is!(read.groups.contains(&group), false);
+    Ok(())
+}
+
+/// Stage tools are checked on create and update, and a reaction runs each stage's tool instance
+#[tokio::test]
+async fn pipeline_stage_tools_create_update() -> Result<(), Error> {
+    // a group and a developer who owns it
+    let admin = test_utilities::admin_client().await?;
+    let group = generators::groups(1, &admin).await?.remove(0).name;
+    let other = generators::groups(1, &admin).await?.remove(0).name;
+    // a Tool followed to its latest instance and a pinned Tool Instance
+    let (latest_tool, latest_instance) =
+        generators::tool(&[&group], "1.0.0", &generators::gen_image_spec(), &admin).await?;
+    let (_, pinned) =
+        generators::tool(&[&group], "1.0.0", &generators::gen_image_spec(), &admin).await?;
+    let (outside_tool, _) =
+        generators::tool(&[&other], "1.0.0", &generators::gen_image_spec(), &admin).await?;
+    // stage names that aren't images are accepted when every stage has a tool
+    let name = generators::gen_string(20).to_lowercase();
+    let req = PipelineRequest::new(&group, &name, serde_json::json!([["follow"], ["pinned"]]))
+        .stage_tool("follow", latest_tool.id)
+        .stage_tool("pinned", pinned.id);
+    admin.pipelines.create(&req).await?;
+    // a tool outside the pipeline's group and an unknown id are refused naming the stage
+    let outside = PipelineRequest::new(&group, "outside", serde_json::json!([["far"]]))
+        .stage_tool("far", outside_tool.id);
+    fail!(admin.pipelines.create(&outside).await, 400, "far");
+    let unknown = PipelineRequest::new(&group, "unknown", serde_json::json!([["gone"]]))
+        .stage_tool("gone", Uuid::new_v4());
+    fail!(admin.pipelines.create(&unknown).await, 404, "gone");
+    // the same checks apply when an update adds stages
+    let update = PipelineUpdate::default()
+        .order(vec![vec!["follow".to_owned()], vec!["far".to_owned()]])
+        .add_stage_tool("far", outside_tool.id);
+    fail!(
+        admin.pipelines.update(&group, &name, &update).await,
+        400,
+        "far"
+    );
+    let update = PipelineUpdate::default()
+        .order(vec![vec!["follow".to_owned()], vec!["new".to_owned()]])
+        .remove_stage_tool("pinned");
+    fail!(
+        admin.pipelines.update(&group, &name, &update).await,
+        400,
+        "new"
+    );
+    // a reaction runs the tool's latest instance and the pinned instance
+    let pipe = admin.pipelines.get(&group, &name).await?;
+    let created = admin
+        .reactions
+        .create(&ReactionRequest::new(&group, &name))
+        .await?;
+    let reaction = admin.reactions.get(&group, created.id).await?;
+    is!(
+        reaction.plan.tool_instance("follow"),
+        Some(latest_instance.id)
+    );
+    is!(reaction.plan.tool_instance("pinned"), Some(pinned.id));
+    is!(pipe.stage_tools.len(), 2);
+    Ok(())
+}
+
+/// Pipelines that name a tool or its instances block removing their group from the tool
+#[tokio::test]
+async fn tool_group_removal_blocked_by_pipelines() -> Result<(), Error> {
+    // a tool in two groups and a user who can only see one of them
+    let admin = test_utilities::admin_client().await?;
+    let suffix = generators::name_suffix();
+    let viewer = generators::moon_user(&admin, "io", &suffix).await?;
+    let a =
+        generators::god_group(&admin, "juno", &suffix, &generators::GroupRoles::default()).await?;
+    let roles = generators::GroupRoles::default().owner(&viewer.username);
+    let b = generators::god_group(&admin, "minerva", &suffix, &roles).await?;
+    let (tool, instance) =
+        generators::tool(&[&a, &b], "1.0.0", &generators::gen_image_spec(), &admin).await?;
+    // a pipeline in b naming the tool blocks removing b
+    let by_tool = one_stage(&b, "root", tool.id);
+    admin.pipelines.create(&by_tool).await?;
+    let removal = admin
+        .entities
+        .update(tool.id, EntityUpdate::default().remove_group(&b))
+        .await;
+    fail!(removal, 409, by_tool.name.as_str());
+    // a pipeline in b naming one of the tool's instances blocks it the same way
+    let by_instance = one_stage(&b, "pinned", instance.id);
+    admin.pipelines.create(&by_instance).await?;
+    let removal = admin
+        .entities
+        .update(tool.id, EntityUpdate::default().remove_group(&b))
+        .await;
+    fail!(removal, 409, by_instance.name.as_str());
+    // a pipeline in a doesn't block removing b
+    let in_a = one_stage(&a, "elsewhere", tool.id);
+    admin.pipelines.create(&in_a).await?;
+    // a hidden referrer in b is neither named nor counted for a caller who can't see it
+    let hidden_group = generators::god_group(
+        &admin,
+        "vulcan",
+        &suffix,
+        &generators::GroupRoles::default(),
+    )
+    .await?;
+    admin
+        .entities
+        .update(tool.id, EntityUpdate::default().group(&hidden_group))
+        .await?;
+    let hidden = one_stage(&hidden_group, "hidden", tool.id);
+    admin.pipelines.create(&hidden).await?;
+    let removal = admin
+        .entities
+        .update(
+            tool.id,
+            EntityUpdate::default()
+                .remove_group(&b)
+                .remove_group(&hidden_group),
+        )
+        .await;
+    let err = removal.expect_err("the removal is blocked");
+    let msg = err.msg().unwrap_or_default();
+    is!(msg.contains(&by_tool.name), true);
+    is!(msg.contains(&in_a.name), false);
+    // once the blocking pipelines are deleted the removal succeeds
+    admin.pipelines.delete(&b, &by_tool.name).await?;
+    admin.pipelines.delete(&b, &by_instance.name).await?;
+    admin
+        .entities
+        .update(tool.id, EntityUpdate::default().remove_group(&b))
+        .await?;
+    // every tool instance lost b
+    let read = admin.entities.get(instance.id).await?;
+    is!(read.groups.contains(&b), false);
+    Ok(())
+}
+
+/// Every stage needs a stage tool on create and keeps it on update, and a pipeline written by
+/// an earlier version can gain its stage tools
+#[tokio::test]
+async fn stage_tools_required() -> Result<(), Error> {
+    // a group and an Image tool instance in it
+    let admin = test_utilities::admin_client().await?;
+    let group = generators::groups(1, &admin).await?.remove(0).name;
+    let instance = generators::tool_instance(&[&group], &admin).await?;
+    // a create with a stage that has no stage tool is refused naming it
+    let name = generators::gen_string(20).to_lowercase();
+    let req = PipelineRequest::new(&group, &name, serde_json::json!([["plant"], ["harvest"]]))
+        .stage_tool("plant", instance);
+    fail!(admin.pipelines.create(&req).await, 400, "harvest");
+    // an update that drops a kept stage's tool is refused naming it
+    let req = req.stage_tool("harvest", instance);
+    admin.pipelines.create(&req).await?;
+    let update = PipelineUpdate::default().remove_stage_tool("harvest");
+    fail!(
+        admin.pipelines.update(&group, &name, &update).await,
+        400,
+        "harvest"
+    );
+    // a pipeline stored without stage tools gains them through an update
+    let pool = test_utilities::get_redis_client(&test_utilities::CONF).await;
+    let mut conn = pool.get().await.expect("a redis connection");
+    let key = format!(
+        "{}:pipeline_data:{group}:{name}",
+        test_utilities::CONF.thorium.namespace
+    );
+    let _: () = redis::cmd("hdel")
+        .arg(&key)
+        .arg("stage_tools")
+        .query_async(&mut *conn)
+        .await
+        .expect("drop the stage tools");
+    let read = admin.pipelines.get(&group, &name).await?;
+    is!(read.stage_tools.is_empty(), true);
+    // a reaction on it is refused naming its unconverted stages
+    let resp = admin
+        .reactions
+        .create(&ReactionRequest::new(&group, &name))
+        .await;
+    fail!(resp, 400, "plant");
+    // adding the stage tools converts it
+    let update = PipelineUpdate::default()
+        .add_stage_tool("plant", instance)
+        .add_stage_tool("harvest", instance);
+    admin.pipelines.update(&group, &name, &update).await?;
+    admin
+        .reactions
+        .create(&ReactionRequest::new(&group, &name))
+        .await?;
+    Ok(())
+}
 
 #[tokio::test]
 async fn create() -> Result<(), Error> {
@@ -30,16 +389,16 @@ async fn create_image_no_exist() -> Result<(), Error> {
     let client = test_utilities::admin_client().await?;
     // Create the pipeline tests groups
     let group = generators::groups(1, &client).await?.remove(0).name;
-    // create a pipeline with an image that doesn't exist
+    // create a pipeline with a stage that no tool backs
     let pipeline_name = "pipeline-no-exist-image";
     let pipe_req = PipelineRequest::new(
         &group,
         pipeline_name,
         serde_json::json!(vec![vec!["image-no-exist"]]),
     );
-    // create it successfully
+    // the stage without a tool is refused
     let resp = client.pipelines.create(&pipe_req).await;
-    fail!(resp, 404);
+    fail!(resp, 400, "image-no-exist");
     Ok(())
 }
 
@@ -68,12 +427,15 @@ async fn create_conflict() -> Result<(), Error> {
     Ok(())
 }
 
+/// Verifies a pipeline can be created with a stage named after a banned image when the stage has a
+/// tool
 #[tokio::test]
 async fn create_banned_image() -> Result<(), Error> {
     // get admin client
     let client = test_utilities::admin_client().await?;
-    // Create the pipeline tests groups
+    // Create the pipeline tests groups and seed a stored image in it
     let group = generators::groups(1, &client).await?.remove(0).name;
+    test_utilities::faults::allow_image_writes(&group);
     // create an image
     let image_req = generators::gen_image(&group);
     client.images.create(&image_req).await?;
@@ -88,16 +450,17 @@ async fn create_banned_image() -> Result<(), Error> {
         .images
         .update(&group, &image_req.name, &update)
         .await?;
-    // create a pipeline with an image that is banned
+    // a stage named after the banned image runs its tool, not the image
     let pipeline_name = "pipeline-ban-new";
+    let instance = generators::tool_instance(&[&group], &client).await?;
     let pipe_req = PipelineRequest::new(
         &group,
         pipeline_name,
-        serde_json::json!(vec![vec![image_req.name]]),
-    );
-    // expect a 400
-    let resp = client.pipelines.create(&pipe_req).await;
-    fail!(resp, 400);
+        serde_json::json!(vec![vec![&image_req.name]]),
+    )
+    .stage_tool(&image_req.name, instance);
+    // the image's bans don't apply to the stage
+    client.pipelines.create(&pipe_req).await?;
     Ok(())
 }
 
@@ -181,12 +544,14 @@ async fn delete() -> Result<(), Error> {
     Ok(())
 }
 
+/// Verifies a banned image's name can be added as a stage only when the stage is given a tool
 #[tokio::test]
 async fn add_banned_image() -> Result<(), Error> {
     // get admin client
     let client = test_utilities::admin_client().await?;
-    // Create the pipeline tests groups
+    // Create the pipeline tests groups and seed a stored image in it
     let group = generators::groups(1, &client).await?.remove(0).name;
+    test_utilities::faults::allow_image_writes(&group);
     // create an image
     let image_req = generators::gen_image(&group);
     client.images.create(&image_req).await?;
@@ -205,31 +570,34 @@ async fn add_banned_image() -> Result<(), Error> {
     let pipe_req = generators::gen_pipe(&group, 20, false, &client).await?;
     // Create a test pipeline
     client.pipelines.create(&pipe_req).await?;
-    // add the banned image to the pipeline's order
+    // add a stage named after the banned image to the pipeline's order without a tool
     let order: Vec<Vec<String>> = serde_json::from_value(pipe_req.order.clone())?;
     let mut new_order = order.clone();
     new_order[0].push(image_req.name.clone());
-    // create an update request with the banned image added
-    let pipe_update = PipelineUpdate::default().order(new_order);
-    // attempt to update the pipeline
+    let pipe_update = PipelineUpdate::default().order(new_order.clone());
+    // a new stage without a tool is refused
     let resp = client
         .pipelines
         .update(&group, &pipe_req.name, &pipe_update)
         .await;
-    // check that we got a 400 error
-    fail!(resp, 400);
-    // try again but as a sub stage
+    fail!(resp, 400, image_req.name.as_str());
+    // with a tool the stage runs the tool, so the image's bans don't apply
+    let instance = generators::tool_instance(&[&group], &client).await?;
+    let pipe_update = PipelineUpdate::default()
+        .order(new_order)
+        .add_stage_tool(&image_req.name, instance);
+    client
+        .pipelines
+        .update(&group, &pipe_req.name, &pipe_update)
+        .await?;
+    // the same holds for a stage in its own step
     let mut new_order = order.clone();
     new_order.push(vec![image_req.name.clone()]);
-    // create an update request with the banned image added as a sub stage
     let pipe_update = PipelineUpdate::default().order(new_order);
-    // attempt to update the pipeline
-    let resp = client
+    client
         .pipelines
         .update(&group, &pipe_req.name, &pipe_update)
-        .await;
-    // check that we got a 400 error
-    fail!(resp, 400);
+        .await?;
     Ok(())
 }
 
@@ -375,24 +743,28 @@ async fn update_bans_bad() -> Result<(), Error> {
     Ok(())
 }
 
+/// Verifies an image's bans add and clear the matching ban on a pipeline stage named after it
 #[tokio::test]
 async fn ban_from_image() -> Result<(), Error> {
     // get admin client
     let client = test_utilities::admin_client().await?;
     // get a user client
     let user_client = generators::client(&client).await?;
-    // Create a group
+    // Create a group and seed a stored image in it
     let group = generators::groups(1, &user_client).await?.remove(0).name;
+    test_utilities::faults::allow_image_writes(&group);
     // create an image
     let image_req = generators::gen_image(&group);
     client.images.create(&image_req).await?;
-    // create a pipeline with that image
+    // create a pipeline with a stage named after that image
     let pipeline_name = "pipeline-with-ban";
+    let instance = generators::tool_instance(&[&group], &client).await?;
     let pipe_req = PipelineRequest::new(
         &group,
         pipeline_name,
         serde_json::json!(vec![vec![&image_req.name]]),
-    );
+    )
+    .stage_tool(&image_req.name, instance);
     client.pipelines.create(&pipe_req).await?;
     // add bans to the underlying image
     let mut image_bans = vec![
@@ -437,24 +809,29 @@ async fn ban_from_image() -> Result<(), Error> {
     Ok(())
 }
 
+/// Verifies banning an image notifies a pipeline with a stage named after it, and removing the ban
+/// clears the notification
 #[tokio::test]
 async fn notifications_bans() -> Result<(), Error> {
     // get admin client
     let client = test_utilities::admin_client().await?;
     // get user client
     let user_client = generators::client(&client).await?;
-    // Create a group
+    // Create a group and seed a stored image in it
     let group = generators::groups(1, &user_client).await?.remove(0).name;
+    test_utilities::faults::allow_image_writes(&group);
     // create an image
     let image_req = generators::gen_image(&group);
     client.images.create(&image_req).await?;
-    // create a pipeline with that image
+    // create a pipeline with a stage named after that image
     let pipeline_name = "pipeline-with-ban2";
+    let instance = generators::tool_instance(&[&group], &client).await?;
     let pipe_req = PipelineRequest::new(
         &group,
         pipeline_name,
         serde_json::json!(vec![vec![&image_req.name]]),
-    );
+    )
+    .stage_tool(&image_req.name, instance);
     client.pipelines.create(&pipe_req).await?;
     // update the pipeline with bans
     let generic_ban_msg = "Test ban 1!";

@@ -126,6 +126,7 @@ impl JobResets {
     /// # Arguments
     ///
     /// * `component` - The component that is requesting this reset
+    #[must_use]
     pub fn as_component(mut self, component: SystemComponents) -> Self {
         // set our updated requestor
         self.requestor = JobResetRequestor::Component(component);
@@ -137,6 +138,7 @@ impl JobResets {
     /// # Arguments
     ///
     /// * `job` - The job to be reset
+    #[must_use]
     pub fn add(mut self, job: Uuid) -> Self {
         self.jobs.push(job);
         self
@@ -175,6 +177,7 @@ impl fmt::Display for JobStatus {
 
 impl JobStatus {
     /// Get our job status as a str
+    #[must_use]
     pub fn as_str(&self) -> &'static str {
         match self {
             Self::Created => "Created",
@@ -205,6 +208,15 @@ pub enum JobHandleStatus {
     Checkpointed,
 }
 
+/// The query params for finishing or failing a claimed job
+#[derive(Serialize, Deserialize, Debug, Default, Clone)]
+#[cfg_attr(feature = "api", derive(utoipa::ToSchema))]
+pub struct JobHandleParams {
+    /// The name of the worker that claimed this job (required for non-admins)
+    #[serde(default)]
+    pub worker: Option<String>,
+}
+
 /// response for handling Job command
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
 #[cfg_attr(feature = "python", pyclass(from_py_object))]
@@ -223,7 +235,7 @@ pub struct Checkpoint {
 
 /// A raw job that Thorium will execute
 ///
-/// This should be cast to either a GenericJob or another known job
+/// This should be cast to either a `GenericJob` or another known job
 /// before being handed to the user.
 #[derive(Serialize, Deserialize, Debug, Clone)]
 #[cfg_attr(feature = "api", derive(utoipa::ToSchema))]
@@ -264,6 +276,20 @@ pub struct RawJob {
     pub repos: Vec<RepoDependency>,
     /// The trigger depth for this job if one was set
     pub trigger_depth: Option<u8>,
+    /// The tool instance this job runs
+    pub tool_instance: Uuid,
+    /// The run (reaction) whose per-run workers claim this job, for jobs of workflow runs and tool runs
+    #[serde(default)]
+    pub run: Option<Uuid>,
+}
+
+/// The average runtimes of tool instances in seconds
+#[derive(Serialize, Deserialize, Debug, Clone, Default)]
+#[cfg_attr(feature = "api", derive(utoipa::ToSchema))]
+pub struct WorkloadRuntimes {
+    /// The runtime of each tool instance (its average over recorded runs, or the runtime it was
+    /// seeded with at publish)
+    pub runtimes: HashMap<Uuid, f64>,
 }
 
 /// Keyword args for generic jobs
@@ -291,7 +317,7 @@ pub struct GenericJobOpts {
 }
 
 impl Default for GenericJobOpts {
-    /// Create a GenericJobOpts object with default values
+    /// Create a `GenericJobOpts` object with default values
     fn default() -> Self {
         GenericJobOpts {
             override_positionals: false,
@@ -321,6 +347,7 @@ impl GenericJobOpts {
     /// // create options to override the original docker command
     /// let opts = GenericJobOpts::new(false, false, Some(vec!("./harvest".into(), "corn".into())));
     /// ```
+    #[must_use]
     pub fn new(positionals: bool, kwargs: bool, cmd: Option<Vec<String>>) -> Self {
         GenericJobOpts {
             override_positionals: positionals,
@@ -365,49 +392,59 @@ pub struct GenericJobArgs {
 }
 
 impl GenericJobArgs {
-    /// Sets the positional args for a GenericJob
+    /// Sets the positional args for a `GenericJob`
+    #[must_use]
     pub fn positionals<T: Into<String>>(mut self, positionals: Vec<T>) -> Self {
         // cast these values to strings
-        let positionals = positionals.into_iter().map(|val| val.into()).collect();
+        let positionals = positionals
+            .into_iter()
+            .map(std::convert::Into::into)
+            .collect();
         self.positionals = positionals;
         self
     }
 
     /// Adds a keyword arg to this job
+    #[must_use]
     pub fn kwarg<K: Into<String>, V: Into<String>>(mut self, key: K, values: Vec<V>) -> Self {
         // convert our kwargs to strings
-        let converted = values.into_iter().map(|value| value.into()).collect();
+        let converted = values.into_iter().map(std::convert::Into::into).collect();
         self.kwargs.insert(key.into(), converted);
         self
     }
 
     /// Overwrites all kwargs with a new [`HashMap`]
+    #[must_use]
     pub fn set_kwargs(mut self, kwargs: GenericJobKwargs) -> Self {
         self.kwargs = kwargs;
         self
     }
 
     /// Adds a switch to this job
+    #[must_use]
     pub fn switch<T: Into<String>>(mut self, switch: T) -> Self {
         self.switches.push(switch.into());
         self
     }
 
-    /// Sets the switches for a GenericJob
+    /// Sets the switches for a `GenericJob`
+    #[must_use]
     pub fn switches<T: Into<String>>(mut self, switches: Vec<T>) -> Self {
         // cast these values to strings
-        let switches = switches.into_iter().map(|val| val.into()).collect();
+        let switches = switches.into_iter().map(std::convert::Into::into).collect();
         self.switches = switches;
         self
     }
 
-    /// sets the options for GenericJobArgs
+    /// Sets the options for `GenericJobArgs`
+    #[must_use]
     pub fn opts(mut self, opts: GenericJobOpts) -> Self {
         self.opts = opts;
         self
     }
 
     /// Cast all of the args to a Vector
+    #[must_use]
     pub fn to_vec(&self) -> Vec<String> {
         // figure out how large our vec should be
         let size = self.positionals.len() + self.kwargs.len() + self.switches.len();
@@ -416,9 +453,9 @@ impl GenericJobArgs {
         casts.extend_from_slice(&self.positionals);
         casts.extend_from_slice(&self.switches);
         // crawl over our kwarg keys
-        for (key, values) in self.kwargs.iter() {
+        for (key, values) in &self.kwargs {
             // combine and cast our kwargs
-            casts.extend(values.iter().map(|val| format!("{}={}", key, val)));
+            casts.extend(values.iter().map(|val| format!("{key}={val}")));
         }
         casts
     }
@@ -485,7 +522,7 @@ pub struct GenericJobArgsUpdate {
 }
 
 impl GenericJobArgsUpdate {
-    /// Sets the positional args for a GenericJob
+    /// Sets the positional args for a `GenericJob`
     ///
     /// # Arguments
     ///
@@ -499,9 +536,13 @@ impl GenericJobArgsUpdate {
     /// let args = GenericJobArgsUpdate::default()
     ///     .positionals(vec!("soy"));
     /// ```
+    #[must_use]
     pub fn positionals<T: Into<String>>(mut self, positionals: Vec<T>) -> Self {
         // cast these values to strings
-        let positionals = positionals.into_iter().map(|val| val.into()).collect();
+        let positionals = positionals
+            .into_iter()
+            .map(std::convert::Into::into)
+            .collect();
         self.positionals = positionals;
         self
     }
@@ -521,9 +562,10 @@ impl GenericJobArgsUpdate {
     /// let args = GenericJobArgsUpdate::default()
     ///     .kwarg("--field", vec!("west-4", "west-5"));
     /// ```
+    #[must_use]
     pub fn kwarg<T: Into<String>>(mut self, key: T, values: Vec<T>) -> Self {
         // convert our kwargs to strings
-        let converted = values.into_iter().map(|value| value.into()).collect();
+        let converted = values.into_iter().map(std::convert::Into::into).collect();
         self.kwargs.insert(key.into(), converted);
         self
     }
@@ -542,6 +584,7 @@ impl GenericJobArgsUpdate {
     /// let args = GenericJobArgsUpdate::default()
     ///     .remove_kwarg("--tractor");
     /// ```
+    #[must_use]
     pub fn remove_kwarg<T: Into<String>>(mut self, remove: T) -> Self {
         self.remove_kwargs.push(remove.into());
         self
@@ -561,12 +604,13 @@ impl GenericJobArgsUpdate {
     /// let args = GenericJobArgsUpdate::default()
     ///     .switch("--combine");
     /// ```
+    #[must_use]
     pub fn switch<T: Into<String>>(mut self, switch: T) -> Self {
         self.add_switches.push(switch.into());
         self
     }
 
-    /// Adds new switches for a GenericJob
+    /// Adds new switches for a `GenericJob`
     ///
     /// # Arguments
     ///
@@ -578,14 +622,15 @@ impl GenericJobArgsUpdate {
     /// let args = GenericJobArgsUpdate::default()
     ///     .add_switches(vec!("--combine"));
     /// ```
+    #[must_use]
     pub fn add_switches<T: Into<String>>(mut self, adds: Vec<T>) -> Self {
         // cast these values to strings
-        let adds = adds.into_iter().map(|val| val.into()).collect();
+        let adds = adds.into_iter().map(std::convert::Into::into).collect();
         self.add_switches = adds;
         self
     }
 
-    /// Removes switches from a GenericJob's args
+    /// Removes switches from a `GenericJob`'s args
     ///
     /// # Arguments
     ///
@@ -597,14 +642,15 @@ impl GenericJobArgsUpdate {
     /// let args = GenericJobArgsUpdate::default()
     ///     .remove_switches(vec!("--plow"));
     /// ```
+    #[must_use]
     pub fn remove_switches<T: Into<String>>(mut self, removes: Vec<T>) -> Self {
         // cast these values to strings
-        let removes = removes.into_iter().map(|val| val.into()).collect();
+        let removes = removes.into_iter().map(std::convert::Into::into).collect();
         self.remove_switches = removes;
         self
     }
 
-    /// Sets the options for GenericJobArgs completely overwritting the original options
+    /// Sets the options for `GenericJobArgs` completely overwritting the original options
     ///
     /// # Arguments
     ///
@@ -620,6 +666,7 @@ impl GenericJobArgsUpdate {
     /// let args = GenericJobArgsUpdate::default()
     ///     .opts(GenericJobOpts::new(true, false, None));
     /// ```
+    #[must_use]
     pub fn opts(mut self, opts: GenericJobOpts) -> Self {
         self.opts = Some(opts);
         self
@@ -667,6 +714,11 @@ pub struct GenericJob {
     pub repos: Vec<RepoDependency>,
     /// The trigger depth for this job if one was set
     pub trigger_depth: Option<u8>,
+    /// The tool instance this job runs
+    pub tool_instance: Uuid,
+    /// The run (reaction) whose per-run workers claim this job, for jobs of workflow runs and tool runs
+    #[serde(default)]
+    pub run: Option<Uuid>,
 }
 
 /// checks that a vector of jobs matches a reaction request
@@ -714,17 +766,26 @@ pub struct JobReactionIds {
     pub job: Uuid,
     /// The id of the reaction containing this job
     pub reaction: Uuid,
+    /// The job's exact deadline member, so a dangling job's deadline can always be removed
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub deadline: Option<String>,
 }
 
 #[cfg(feature = "api")]
 impl JobReactionIds {
-    /// Create a new job claim object
+    /// Create the status queue entry of a job
     ///
     /// # Arguments
     ///
-    /// * `job` - This jobs id
-    /// * `reaction` - The reaction containing this jobs id
-    pub fn new(job: Uuid, reaction: Uuid) -> Self {
-        JobReactionIds { job, reaction }
+    /// * `job` - The job to build a status queue entry for
+    #[must_use]
+    pub fn new(job: &RawJob) -> Self {
+        // carry the job's exact deadline member
+        let deadline = super::StreamObj::from(job).data;
+        JobReactionIds {
+            job: job.id,
+            reaction: job.reaction,
+            deadline: Some(deadline),
+        }
     }
 }

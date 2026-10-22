@@ -88,7 +88,6 @@ pub struct FormatArgs {
 
 /// The output format flag, with `-o` as its short name, for commands without an output path
 #[derive(clap::Args, Debug, Clone, Default)]
-#[allow(dead_code)]
 pub struct ShortFormatArgs {
     /// The format to print in: table, human, json (the API's response), or yaml
     #[clap(short = 'o', long, value_enum, ignore_case = true)]

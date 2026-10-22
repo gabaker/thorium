@@ -67,7 +67,7 @@ async fn create() -> Result<(), thorium::Error> {
     // get admin client
     let client = test_utilities::admin_client().await?;
     // generate groups
-    let groups = generators::groups(5, &client)
+    let groups = generators::image_groups(5, &client)
         .await?
         .into_iter()
         .map(|req| req.name)
@@ -87,7 +87,7 @@ async fn create_bad() -> Result<(), thorium::Error> {
     // get user client
     let user_client = test_utilities::generators::client(&client).await?;
     // generate groups
-    let groups = generators::groups(5, &client)
+    let groups = generators::image_groups(5, &client)
         .await?
         .into_iter()
         .map(|req| req.name)
@@ -148,7 +148,7 @@ async fn get() -> Result<(), thorium::Error> {
     // get admin client
     let client = test_utilities::admin_client().await?;
     // create groups
-    let groups = generators::groups(2, &client)
+    let groups = generators::image_groups(2, &client)
         .await?
         .into_iter()
         .map(|g| g.name)
@@ -156,7 +156,10 @@ async fn get() -> Result<(), thorium::Error> {
     // get user client
     let user_client = test_utilities::generators::client(&client).await?;
     // create a group for the user
-    let user_group = generators::groups(1, &user_client).await?.remove(0).name;
+    let user_group = generators::image_groups(1, &user_client)
+        .await?
+        .remove(0)
+        .name;
     // create a network policy request
     let req = gen_policy(&groups);
     // create the network policy
@@ -211,7 +214,7 @@ async fn get_bad() -> Result<(), thorium::Error> {
     // get admin client
     let client = test_utilities::admin_client().await?;
     // create groups
-    let groups = generators::groups(2, &client)
+    let groups = generators::image_groups(2, &client)
         .await?
         .into_iter()
         .map(|g| g.name)
@@ -234,7 +237,7 @@ async fn update() -> Result<(), thorium::Error> {
     // get admin client
     let client = test_utilities::admin_client().await?;
     // create groups
-    let mut groups = generators::groups(2, &client)
+    let mut groups = generators::image_groups(2, &client)
         .await?
         .into_iter()
         .map(|g| g.name)
@@ -253,7 +256,7 @@ async fn update() -> Result<(), thorium::Error> {
     let network_policy = client.network_policies.get(&req.name, None).await?;
     // update the network policy
     let remove_group = groups.pop().unwrap();
-    let new_group = generators::groups(2, &client).await?.remove(0).name;
+    let new_group = generators::image_groups(2, &client).await?.remove(0).name;
     let new_name = "cool-new-name";
     let update = NetworkPolicyUpdate::default()
         .new_name(new_name)
@@ -342,7 +345,7 @@ async fn update_bad() -> Result<(), thorium::Error> {
     // get admin client
     let client = test_utilities::admin_client().await?;
     // create groups
-    let mut groups = generators::groups(2, &client)
+    let mut groups = generators::image_groups(2, &client)
         .await?
         .into_iter()
         .map(|g| g.name)
@@ -350,7 +353,10 @@ async fn update_bad() -> Result<(), thorium::Error> {
     // get user client
     let user_client = test_utilities::generators::client(&client).await?;
     // create a group for the user and add it to our list
-    let user_group = generators::groups(1, &user_client).await?.remove(0).name;
+    let user_group = generators::image_groups(1, &user_client)
+        .await?
+        .remove(0)
+        .name;
     groups.push(user_group);
     // create a network policy request
     let req = gen_policy(&groups);
@@ -448,7 +454,7 @@ async fn delete() -> Result<(), thorium::Error> {
     // get admin client
     let client = test_utilities::admin_client().await?;
     // create groups
-    let groups = generators::groups(2, &client)
+    let groups = generators::image_groups(2, &client)
         .await?
         .into_iter()
         .map(|g| g.name)
@@ -493,7 +499,7 @@ async fn delete_bad() -> Result<(), thorium::Error> {
     // get admin client
     let client = test_utilities::admin_client().await?;
     // create groups
-    let mut groups = generators::groups(2, &client)
+    let mut groups = generators::image_groups(2, &client)
         .await?
         .into_iter()
         .map(|g| g.name)
@@ -501,7 +507,10 @@ async fn delete_bad() -> Result<(), thorium::Error> {
     // get user client
     let user_client = test_utilities::generators::client(&client).await?;
     // create a group for the user and add it to our list
-    let user_group = generators::groups(1, &user_client).await?.remove(0).name;
+    let user_group = generators::image_groups(1, &user_client)
+        .await?
+        .remove(0)
+        .name;
     groups.push(user_group);
     // create a network policy request
     let req = gen_policy(&groups);
@@ -517,7 +526,7 @@ async fn delete_bad() -> Result<(), thorium::Error> {
 async fn get_all_default() -> Result<(), thorium::Error> {
     // get admin client
     let client = test_utilities::admin_client().await?;
-    let group = generators::groups(1, &client).await?.remove(0).name;
+    let group = generators::image_groups(1, &client).await?.remove(0).name;
     let num_default_policies = 50;
     let num_non_default_policies = 100;
     let default_policy_reqs: Vec<NetworkPolicyRequest> = (0..num_default_policies)
@@ -580,7 +589,7 @@ async fn get_all_default() -> Result<(), thorium::Error> {
 async fn list_names() -> Result<(), thorium::Error> {
     // get admin client
     let client = test_utilities::admin_client().await?;
-    let groups = generators::groups(10, &client)
+    let groups = generators::image_groups(10, &client)
         .await?
         .into_iter()
         .map(|g| g.name)
@@ -622,7 +631,7 @@ async fn list_names() -> Result<(), thorium::Error> {
 async fn list_details() -> Result<(), thorium::Error> {
     // get admin client
     let client = test_utilities::admin_client().await?;
-    let groups = generators::groups(10, &client)
+    let groups = generators::image_groups(10, &client)
         .await?
         .into_iter()
         .map(|g| g.name)
@@ -658,7 +667,7 @@ async fn list_details() -> Result<(), thorium::Error> {
     policies_sorted.sort_unstable_by(|a, b| a.name.cmp(&b.name));
     is!(policies, policies_sorted, "policies details sorted by name");
     // make sure that if we get a partial list, we get ALL of the policies' data (groups)
-    let groups = generators::groups(10, &client)
+    let groups = generators::image_groups(10, &client)
         .await?
         .into_iter()
         .map(|g| g.name)
@@ -695,7 +704,7 @@ async fn list_details() -> Result<(), thorium::Error> {
 async fn list_details_from_partial_group() -> Result<(), thorium::Error> {
     // get admin client
     let client = test_utilities::admin_client().await?;
-    let groups = generators::groups(10, &client)
+    let groups = generators::image_groups(10, &client)
         .await?
         .into_iter()
         .map(|g| g.name)
@@ -729,7 +738,7 @@ async fn list_details_from_partial_group() -> Result<(), thorium::Error> {
 async fn list_details_user() -> Result<(), thorium::Error> {
     // get admin client
     let client = test_utilities::admin_client().await?;
-    let mut groups = generators::groups(10, &client)
+    let mut groups = generators::image_groups(10, &client)
         .await?
         .into_iter()
         .map(|g| g.name)
@@ -737,7 +746,10 @@ async fn list_details_user() -> Result<(), thorium::Error> {
     // get user client
     let user_client = generators::client(&client).await?;
     // create a group for the user and add it to the list
-    let user_group = generators::groups(1, &user_client).await?.remove(0).name;
+    let user_group = generators::image_groups(1, &user_client)
+        .await?
+        .remove(0)
+        .name;
     groups.push(user_group.clone());
     // generate policies
     let num_policies = 10;
@@ -794,11 +806,14 @@ async fn used_by() -> Result<(), thorium::Error> {
     // get admin client
     let client = test_utilities::admin_client().await?;
     // create groups
-    let group = generators::groups(1, &client).await?.remove(0).name;
+    let group = generators::image_groups(1, &client).await?.remove(0).name;
     // get user client
     let user_client = test_utilities::generators::client(&client).await?;
     // create a group for the user
-    let user_group = generators::groups(1, &user_client).await?.remove(0).name;
+    let user_group = generators::image_groups(1, &user_client)
+        .await?
+        .remove(0)
+        .name;
     // create a network policy request in both groups
     let groups = &[group.clone(), user_group.clone()];
     let req = gen_policy(groups);

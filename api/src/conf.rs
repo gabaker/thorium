@@ -2158,15 +2158,61 @@ pub struct Events {
     /// The max depth to trigger new triggers at
     #[serde(default = "default_events_max_depth")]
     pub max_depth: u8,
+    /// How many seconds workflow graph events wait before they can be popped, so a burst of
+    /// changes is handled together
+    #[serde(default = "default_workflow_graph_delay")]
+    pub workflow_graph_delay: u64,
+    /// The most agents one workflow may reach
+    #[serde(default = "default_max_agents_per_workflow")]
+    pub max_agents_per_workflow: usize,
+    /// The most effective tools one agent of a workflow may be given
+    #[serde(default = "default_max_tools_per_agent")]
+    pub max_tools_per_agent: usize,
+    /// The most `DelegatesTo` hops between a workflow's agents and any agent it reaches
+    #[serde(default = "default_max_crawl_depth")]
+    pub max_crawl_depth: u8,
+    /// The most members one toolset instance may have
+    #[serde(default = "default_max_tools_per_toolset")]
+    pub max_tools_per_toolset: usize,
+}
+
+/// Helps serde default how long workflow graph events wait before they can be popped to 10 seconds
+fn default_workflow_graph_delay() -> u64 {
+    10
+}
+
+/// Helps serde default the most agents one workflow may reach to 32
+fn default_max_agents_per_workflow() -> usize {
+    crate::models::entities::workflows::DEFAULT_MAX_AGENTS_PER_WORKFLOW
+}
+
+/// Helps serde default the most effective tools one agent may be given to 128
+fn default_max_tools_per_agent() -> usize {
+    crate::models::entities::workflows::DEFAULT_MAX_TOOLS_PER_AGENT
+}
+
+/// Helps serde default the deepest delegation chain a workflow may reach to 8 hops
+fn default_max_crawl_depth() -> u8 {
+    crate::models::entities::workflows::DEFAULT_MAX_CRAWL_DEPTH
+}
+
+/// Helps serde default the most members one toolset instance may have to 64
+fn default_max_tools_per_toolset() -> usize {
+    crate::models::entities::toolsets::DEFAULT_MAX_TOOLS_PER_TOOLSET
 }
 
 impl Default for Events {
-    // Build a default instance of the events config
+    /// Build a default instance of the events config
     fn default() -> Self {
         Events {
             retention: default_retention(),
             partition_size: default_events_partition_size(),
             max_depth: default_events_max_depth(),
+            workflow_graph_delay: default_workflow_graph_delay(),
+            max_agents_per_workflow: default_max_agents_per_workflow(),
+            max_tools_per_agent: default_max_tools_per_agent(),
+            max_crawl_depth: default_max_crawl_depth(),
+            max_tools_per_toolset: default_max_tools_per_toolset(),
         }
     }
 }
@@ -2191,13 +2237,23 @@ pub struct Entities {
     /// The earliest we'll see an entity as a Unix timestamp
     #[serde(default = "default_entities_earliest")]
     pub earliest: i64,
+    /// The most bytes an agentic tool's serialized input or output schema may take up
+    #[serde(default = "default_max_tool_schema_bytes")]
+    pub max_tool_schema_bytes: usize,
+}
+
+/// Helps serde default the largest agentic tool schema to 64 KiB
+fn default_max_tool_schema_bytes() -> usize {
+    crate::models::entities::tools::DEFAULT_MAX_TOOL_SCHEMA_BYTES
 }
 
 impl Default for Entities {
+    /// Build a default instance of the entities config
     fn default() -> Self {
         Self {
             partition_size: default_entities_partition_size(),
             earliest: default_entities_earliest(),
+            max_tool_schema_bytes: default_max_tool_schema_bytes(),
         }
     }
 }
@@ -3151,6 +3207,99 @@ mod tests {
         parse_namespace, validate_namespace,
     };
     use std::path::Path;
+
+    /// An events config without the workflow graph delay waits 10 seconds, like the default
+    /// events config, and a set delay is kept
+    #[test]
+    fn events_workflow_graph_delay_default() {
+        // parse events settings that don't set the delay
+        let events: super::Events = serde_norway::from_str("max_depth: 5\n").expect("events parse");
+        assert_eq!(events.workflow_graph_delay, 10);
+        assert_eq!(super::Events::default().workflow_graph_delay, 10);
+        // a set delay is kept
+        let events: super::Events =
+            serde_norway::from_str("workflow_graph_delay: 2\n").expect("events parse");
+        assert_eq!(events.workflow_graph_delay, 2);
+    }
+
+    /// The events settings are overridden by their `THORIUM__THORIUM__EVENTS__` variables the
+    /// way `Conf::new` reads the environment
+    #[test]
+    fn events_env_overrides() {
+        // the variables a deployment would set
+        let vars = [
+            ("THORIUM__THORIUM__EVENTS__WORKFLOW_GRAPH_DELAY", "2"),
+            ("THORIUM__THORIUM__EVENTS__MAX_AGENTS_PER_WORKFLOW", "4"),
+            ("THORIUM__THORIUM__EVENTS__MAX_TOOLS_PER_AGENT", "5"),
+            ("THORIUM__THORIUM__EVENTS__MAX_CRAWL_DEPTH", "6"),
+            ("THORIUM__THORIUM__EVENTS__MAX_TOOLS_PER_TOOLSET", "7"),
+        ]
+        .into_iter()
+        .map(|(key, value)| (key.to_owned(), value.to_owned()))
+        .collect::<config::Map<String, String>>();
+        // overlay them on an empty events section the way the config loader does
+        let events: super::Events = config::Config::builder()
+            .add_source(
+                config::Environment::with_prefix("thorium")
+                    .prefix_separator("__")
+                    .separator("__")
+                    .source(Some(vars)),
+            )
+            .build()
+            .expect("build config")
+            .get("thorium.events")
+            .expect("events settings");
+        assert_eq!(events.workflow_graph_delay, 2);
+        assert_eq!(events.max_agents_per_workflow, 4);
+        assert_eq!(events.max_tools_per_agent, 5);
+        assert_eq!(events.max_crawl_depth, 6);
+        assert_eq!(events.max_tools_per_toolset, 7);
+    }
+
+    /// An events config without the crawl limits gets their defaults, which match the default
+    /// events config and the resolver's default limits
+    #[test]
+    fn events_crawl_limits_default() {
+        // parse events settings that don't set the crawl limits
+        let events: super::Events = serde_norway::from_str("max_depth: 5\n").expect("events parse");
+        assert_eq!(events.max_agents_per_workflow, 32);
+        assert_eq!(events.max_tools_per_agent, 64);
+        assert_eq!(events.max_crawl_depth, 8);
+        assert_eq!(events, super::Events::default());
+        assert_eq!(
+            crate::models::CrawlLimits::from(&events),
+            crate::models::CrawlLimits::default()
+        );
+        // set limits are kept
+        let events: super::Events = serde_norway::from_str(
+            "max_agents_per_workflow: 4\nmax_tools_per_agent: 3\nmax_crawl_depth: 2\n",
+        )
+        .expect("events parse");
+        let limits = crate::models::CrawlLimits::from(&events);
+        assert_eq!(limits.max_agents_per_workflow, 4);
+        assert_eq!(limits.max_tools_per_agent, 3);
+        assert_eq!(limits.max_crawl_depth, 2);
+    }
+
+    /// An events config without the toolset member limit gets its default, which matches the
+    /// resolver's default limits, and a set limit is kept
+    #[test]
+    fn events_toolset_limit_default() {
+        // parse events settings that don't set the member limit
+        let events: super::Events = serde_norway::from_str("max_depth: 5\n").expect("events parse");
+        assert_eq!(events.max_tools_per_toolset, 64);
+        assert_eq!(
+            crate::models::ToolSetLimits::from(&events),
+            crate::models::ToolSetLimits::default()
+        );
+        // a set limit is kept
+        let events: super::Events =
+            serde_norway::from_str("max_tools_per_toolset: 7\n").expect("events parse");
+        assert_eq!(
+            crate::models::ToolSetLimits::from(&events).max_tools_per_toolset,
+            7
+        );
+    }
 
     /// A Redis config without a database selects database 0
     #[test]

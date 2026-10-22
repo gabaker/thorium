@@ -11,9 +11,9 @@ use serde_json::json;
 use thorium::models::{
     ArgStrategy, AssociationKind, AutoTagLogic, CommitishKinds, DependencyPassStrategy,
     Directionality, EntityKinds, EventTrigger, FileNamingStrategy, HostPathTypes, ImageBanKind,
-    ImageScaler, ImageVersion, KwargDependency, NodeHealth, NotificationLevel, NotificationType,
+    ImageScaler, KwargDependency, NodeHealth, NotificationLevel, NotificationType,
     OutputDisplayType, OutputHandler, PipelineBanKind, PruneAction, PrunedReferent, S3Objects,
-    ScopedTokenRole, SpawnLimits, TagType, Theme, UserRole, VolumeTypes,
+    ScopedTokenRole, SpawnLimits, TagType, Theme, ToolVersion, UserRole, VolumeTypes,
 };
 
 /// Builds a value from its JSON form, for variants that carry data
@@ -94,6 +94,16 @@ pub fn entity_kinds() -> Vec<EntityKinds> {
         EntityKinds::PeSection,
         EntityKinds::PeImport,
         EntityKinds::Other,
+        EntityKinds::Tool,
+        EntityKinds::ToolInstance,
+        EntityKinds::Agent,
+        EntityKinds::ToolSet,
+        EntityKinds::ToolSetInstance,
+        EntityKinds::WorkflowCatalog,
+        EntityKinds::WorkflowInstance,
+        EntityKinds::ModelEndpoint,
+        EntityKinds::ModelProfile,
+        EntityKinds::ModelCredential,
     ]
 }
 
@@ -122,6 +132,16 @@ pub fn entity_kind_index(value: &EntityKinds) -> usize {
         EntityKinds::PeSection => 13,
         EntityKinds::PeImport => 14,
         EntityKinds::Other => 15,
+        EntityKinds::Tool => 16,
+        EntityKinds::ToolInstance => 17,
+        EntityKinds::Agent => 18,
+        EntityKinds::ToolSet => 19,
+        EntityKinds::ToolSetInstance => 20,
+        EntityKinds::WorkflowCatalog => 21,
+        EntityKinds::WorkflowInstance => 22,
+        EntityKinds::ModelEndpoint => 23,
+        EntityKinds::ModelProfile => 24,
+        EntityKinds::ModelCredential => 25,
     }
 }
 
@@ -171,7 +191,14 @@ pub fn output_display_type_index(value: &OutputDisplayType) -> usize {
 /// One value of every `NotificationType` variant, in declaration order
 #[must_use]
 pub fn notification_types() -> Vec<NotificationType> {
-    vec![NotificationType::Images, NotificationType::Pipelines]
+    vec![
+        NotificationType::Images,
+        NotificationType::Pipelines,
+        NotificationType::ModelEndpoints,
+        NotificationType::ModelProfiles,
+        NotificationType::ModelCredentials,
+        NotificationType::Users,
+    ]
 }
 
 /// Returns a `NotificationType` variant's position in `notification_types`
@@ -185,6 +212,10 @@ pub fn notification_type_index(value: &NotificationType) -> usize {
     match value {
         NotificationType::Images => 0,
         NotificationType::Pipelines => 1,
+        NotificationType::ModelEndpoints => 2,
+        NotificationType::ModelProfiles => 3,
+        NotificationType::ModelCredentials => 4,
+        NotificationType::Users => 5,
     }
 }
 
@@ -262,6 +293,16 @@ pub fn association_kinds() -> Vec<AssociationKind> {
         AssociationKind::CreatedBy,
         AssociationKind::SigmaRuleHit,
         AssociationKind::InvolvedIn,
+        AssociationKind::PublishedFrom,
+        AssociationKind::AuthenticatesWith,
+        AssociationKind::Serves,
+        AssociationKind::Orchestrates,
+        AssociationKind::DelegatesTo,
+        AssociationKind::Calls,
+        AssociationKind::RunsIn,
+        AssociationKind::BuiltFrom,
+        AssociationKind::Includes,
+        AssociationKind::Provides,
     ]
 }
 
@@ -299,6 +340,16 @@ pub fn association_kind_index(value: &AssociationKind) -> usize {
         AssociationKind::CreatedBy => 22,
         AssociationKind::SigmaRuleHit => 23,
         AssociationKind::InvolvedIn => 24,
+        AssociationKind::PublishedFrom => 25,
+        AssociationKind::AuthenticatesWith => 26,
+        AssociationKind::Serves => 27,
+        AssociationKind::Orchestrates => 28,
+        AssociationKind::DelegatesTo => 29,
+        AssociationKind::Calls => 30,
+        AssociationKind::RunsIn => 31,
+        AssociationKind::BuiltFrom => 32,
+        AssociationKind::Includes => 33,
+        AssociationKind::Provides => 34,
     }
 }
 
@@ -827,26 +878,26 @@ pub fn spawn_limit_index(value: &SpawnLimits) -> usize {
     }
 }
 
-/// One value of every `ImageVersion` variant, in declaration order
+/// One value of every `ToolVersion` variant, in declaration order
 #[must_use]
-pub fn image_versions() -> Vec<ImageVersion> {
+pub fn image_versions() -> Vec<ToolVersion> {
     vec![
-        ImageVersion::SemVer(semver::Version::new(1, 2, 3)),
-        ImageVersion::Custom("nightly".to_owned()),
+        ToolVersion::SemVer(semver::Version::new(1, 2, 3)),
+        ToolVersion::Custom("nightly".to_owned()),
     ]
 }
 
-/// Returns an `ImageVersion` variant's position in `image_versions`
+/// Returns an `ToolVersion` variant's position in `image_versions`
 ///
 /// # Arguments
 ///
 /// * `value` - The variant to place
 #[must_use]
-pub fn image_version_index(value: &ImageVersion) -> usize {
+pub fn image_version_index(value: &ToolVersion) -> usize {
     // a new variant makes this match non-exhaustive, so the list can't silently miss it
     match value {
-        ImageVersion::SemVer(_) => 0,
-        ImageVersion::Custom(_) => 1,
+        ToolVersion::SemVer(_) => 0,
+        ToolVersion::Custom(_) => 1,
     }
 }
 
@@ -1132,7 +1183,7 @@ pub fn all() -> Vec<EnumList> {
             None,
         ),
         checked(
-            "ImageVersion",
+            "ToolVersion",
             true,
             &image_versions(),
             image_version_index,

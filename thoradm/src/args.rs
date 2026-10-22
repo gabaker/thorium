@@ -3,7 +3,7 @@
 use clap::Parser;
 use std::path::PathBuf;
 use thorium::models::{
-    HostPathWhitelistUpdate, SystemSettingsResetParams, SystemSettingsUpdate,
+    HostPathWhitelistUpdate, ModelsConfUpdate, SystemSettingsResetParams, SystemSettingsUpdate,
     SystemSettingsUpdateParams,
 };
 
@@ -202,6 +202,7 @@ impl UpdateSettings {
             host_path_whitelist: host_path_whitelist_update,
             clear_host_path_whitelist: self.settings_opts.clear_host_path_whitelist,
             allow_unrestricted_host_paths: self.settings_opts.allow_unrestricted_host_paths,
+            models: ModelsConfUpdate::default(),
         }
     }
 

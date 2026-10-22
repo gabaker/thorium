@@ -8,8 +8,9 @@ use uuid::Uuid;
 use super::db::{self};
 use crate::models::backends::TagSupport;
 use crate::models::{
-    EventCacheStatus, EventPeekOpts, EventPopOpts, OutputKey, SigmaRuleAppliesTo,
-    SigmaScannableResultsEvent,
+    EventCacheStatus, EventPeekOpts, EventPopOpts, ModelRefreshEvent, ModelRefreshReason,
+    ModelRefreshTarget, OutputKey, SigmaRuleAppliesTo, SigmaScannableResultsEvent,
+    WorkflowGraphChange, WorkflowGraphEvent,
 };
 use crate::{
     is_admin,
@@ -77,6 +78,133 @@ impl Event {
             data,
             depth,
         }
+    }
+
+    /// Create a workflow graph event for a change that may require new workflow or toolset
+    /// instances
+    ///
+    /// # Arguments
+    ///
+    /// * `user` - The user that made the change
+    /// * `groups` - Every group of the changed entity
+    /// * `change` - What changed
+    #[must_use]
+    pub fn workflow_graph(user: &User, groups: &[String], change: WorkflowGraphChange) -> Self {
+        // list each group once, in a stable order
+        let mut groups = groups.to_vec();
+        groups.sort_unstable();
+        groups.dedup();
+        // build our event data
+        let data = EventData::WorkflowGraph(WorkflowGraphEvent { groups, change });
+        // build our workflow graph event
+        Event {
+            id: Uuid::new_v4(),
+            timestamp: Utc::now(),
+            parent: None,
+            user: user.username.clone(),
+            data,
+            // depth has no meaning for workflow graph changes
+            depth: 0,
+        }
+    }
+
+    /// Queue the workflow graph events for several changes in one round trip
+    ///
+    /// # Arguments
+    ///
+    /// * `user` - The user that made the changes
+    /// * `changes` - Each change with every group of its changed entity
+    /// * `shared` - Shared Thorium objects
+    #[instrument(
+        name = "Event::queue_workflow_graphs",
+        skip_all,
+        fields(changes = changes.len()),
+        err(Debug)
+    )]
+    pub(crate) async fn queue_workflow_graphs(
+        user: &User,
+        changes: Vec<(Vec<String>, WorkflowGraphChange)>,
+        shared: &Shared,
+    ) -> Result<(), ApiError> {
+        // build every event and add them all to the workflow graph queue together
+        let events = changes
+            .into_iter()
+            .map(|(groups, change)| Self::workflow_graph(user, &groups, change))
+            .collect::<Vec<Event>>();
+        db::events::create_many(&events, shared).await
+    }
+
+    /// Queue a workflow graph event for a change that may require new workflow or toolset
+    /// instances
+    ///
+    /// # Arguments
+    ///
+    /// * `user` - The user that made the change
+    /// * `groups` - Every group of the changed entity
+    /// * `change` - What changed
+    /// * `shared` - Shared Thorium objects
+    #[instrument(
+        name = "Event::queue_workflow_graph",
+        skip(user, groups, shared),
+        err(Debug)
+    )]
+    pub(crate) async fn queue_workflow_graph(
+        user: &User,
+        groups: &[String],
+        change: WorkflowGraphChange,
+        shared: &Shared,
+    ) -> Result<(), ApiError> {
+        // build the event and add it to the workflow graph queue
+        db::events::create(&Self::workflow_graph(user, groups, change), shared).await
+    }
+
+    /// Create a model refresh event
+    ///
+    /// # Arguments
+    ///
+    /// * `user` - The user that caused the refresh
+    /// * `target` - What to list and check
+    /// * `reason` - Why the refresh was requested
+    #[must_use]
+    pub fn model_refresh(
+        user: &User,
+        mut target: ModelRefreshTarget,
+        reason: ModelRefreshReason,
+    ) -> Self {
+        // list an endpoint's groups once each, in a stable order
+        if let ModelRefreshTarget::GroupEndpoint { groups, .. } = &mut target {
+            groups.sort_unstable();
+            groups.dedup();
+        }
+        // build our model refresh event
+        Event {
+            id: Uuid::new_v4(),
+            timestamp: Utc::now(),
+            parent: None,
+            user: user.username.clone(),
+            data: EventData::ModelRefresh(ModelRefreshEvent { target, reason }),
+            // depth has no meaning for model refreshes
+            depth: 0,
+        }
+    }
+
+    /// Queue a model refresh event
+    ///
+    /// # Arguments
+    ///
+    /// * `user` - The user that caused the refresh
+    /// * `target` - What to list and check
+    /// * `reason` - Why the refresh was requested
+    /// * `shared` - Shared Thorium objects
+    #[instrument(name = "Event::queue_model_refresh", skip(user, shared), err(Debug))]
+    pub(crate) async fn queue_model_refresh(
+        user: &User,
+        target: ModelRefreshTarget,
+        reason: ModelRefreshReason,
+        shared: &Shared,
+    ) -> Result<(), ApiError> {
+        // build the event and add it to the model refresh queue
+        db::events::create(&Self::model_refresh(user, target, reason), shared).await
     }
 
     /// Create a new scannable by sigma event

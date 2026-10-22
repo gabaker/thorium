@@ -33,6 +33,18 @@ pub enum NotificationType {
     /// This operation is working on pipeline notifications
     #[strum(serialize = "Pipelines")]
     Pipelines,
+    /// This operation is working on model endpoint notifications
+    #[strum(serialize = "ModelEndpoints")]
+    ModelEndpoints,
+    /// This operation is working on model profile notifications
+    #[strum(serialize = "ModelProfiles")]
+    ModelProfiles,
+    /// This operation is working on model credential notifications
+    #[strum(serialize = "ModelCredentials")]
+    ModelCredentials,
+    /// This operation is working on a user's own notifications
+    #[strum(serialize = "Users")]
+    Users,
 }
 
 impl NotificationType {
@@ -41,6 +53,10 @@ impl NotificationType {
         match self {
             Self::Images => "Images",
             Self::Pipelines => "Pipelines",
+            Self::ModelEndpoints => "ModelEndpoints",
+            Self::ModelProfiles => "ModelProfiles",
+            Self::ModelCredentials => "ModelCredentials",
+            Self::Users => "Users",
         }
     }
 }
@@ -235,5 +251,66 @@ impl<N: NotificationSupport> NotificationRequest<N> {
             level,
             phantom: PhantomData,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::HashSet;
+    use std::str::FromStr;
+
+    use super::NotificationType;
+
+    /// Every notification type, the model kinds and users included
+    const ALL: [NotificationType; 6] = [
+        NotificationType::Images,
+        NotificationType::Pipelines,
+        NotificationType::ModelEndpoints,
+        NotificationType::ModelProfiles,
+        NotificationType::ModelCredentials,
+        NotificationType::Users,
+    ];
+
+    /// Notification types round-trip through serde and each has its own key, and the types
+    /// stored before the model kinds existed still load
+    #[test]
+    fn notification_types_round_trip() {
+        // every type round-trips through JSON
+        for kind in ALL {
+            let raw = serde_json::to_string(&kind).unwrap();
+            let back: NotificationType = serde_json::from_str(&raw).unwrap();
+            assert_eq!(back, kind);
+        }
+        // every type has a distinct key
+        let keys = ALL
+            .iter()
+            .map(NotificationType::as_str)
+            .collect::<HashSet<_>>();
+        assert_eq!(keys.len(), ALL.len());
+        // the stored names of the older types still load
+        for (raw, kind) in [
+            ("\"Images\"", NotificationType::Images),
+            ("\"Pipelines\"", NotificationType::Pipelines),
+        ] {
+            assert_eq!(serde_json::from_str::<NotificationType>(raw).unwrap(), kind);
+        }
+    }
+
+    /// The stored string of each type parses back into the same type
+    #[test]
+    fn notification_type_strings() {
+        // each type's stored key parses back to it
+        for kind in ALL {
+            assert_eq!(NotificationType::from_str(kind.as_str()).unwrap(), kind);
+            assert_eq!(kind.as_ref(), kind.as_str());
+        }
+        // the model and user types use their names as keys
+        assert_eq!(NotificationType::ModelEndpoints.as_str(), "ModelEndpoints");
+        assert_eq!(NotificationType::ModelProfiles.as_str(), "ModelProfiles");
+        assert_eq!(
+            NotificationType::ModelCredentials.as_str(),
+            "ModelCredentials"
+        );
+        assert_eq!(NotificationType::Users.as_str(), "Users");
     }
 }

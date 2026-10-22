@@ -107,6 +107,13 @@ pub async fn create(cast: User, shared: &Shared) -> Result<User, ApiError> {
         .query_async(conn!(shared)).await?;
     // if this username wasn't yet taken then proceed otherwise abort
     if is_new {
+        // clear notifications left under this username by a deleted user so the new user never
+        // sees them; only the create that reserved the username may clear them
+        if let Err(error) = super::notifications::delete_all::<User>(&cast.username, shared).await {
+            // release the username reservation so the create can be retried
+            redis::cmd("hdel").arg(&keys.data).arg("username").exec_async(conn!(shared)).await?;
+            return Err(error);
+        }
         // build pipeline to save a user into redis
         let mut pipe = redis::pipe();
         // add the commands to create the rest of our user
@@ -437,6 +444,96 @@ pub async fn exists(username: &str, shared: &Shared) -> Result<bool, ApiError> {
         .query_async(conn!(shared))
         .await?;
     Ok(check)
+}
+
+/// Read a user's settings from the raw `settings` field alone
+///
+/// The field holds the whole settings, the theme and the AI settings. Callers that only act on
+/// the AI settings use this instead of loading the whole user.
+///
+/// # Arguments
+///
+/// * `raw` - The raw JSON of the user's `settings` field
+pub fn parse_stored_settings(raw: &str) -> Result<UserSettings, ApiError> {
+    // the field holds the user's settings as the API writes them
+    let settings: UserSettings = deserialize!(raw, "settings");
+    Ok(settings)
+}
+
+/// Replaces a user's settings only if they're still stored as the caller read them
+static SWAP_SETTINGS_SCRIPT: std::sync::LazyLock<redis::Script> = std::sync::LazyLock::new(|| {
+    redis::Script::new(
+        r"
+        if redis.call('hget', KEYS[1], 'settings') == ARGV[1] then
+            redis.call('hset', KEYS[1], 'settings', ARGV[2])
+            return 1
+        end
+        return 0
+        ",
+    )
+});
+
+/// Get a user's settings as they're stored, or `None` if the user doesn't exist
+///
+/// # Arguments
+///
+/// * `username` - The user whose settings to get
+/// * `shared` - Shared Thorium objects
+#[instrument(name = "db::users::get_raw_settings", skip(shared), err(Debug))]
+pub async fn get_raw_settings(username: &str, shared: &Shared) -> Result<Option<String>, ApiError> {
+    // build the key to the user's data
+    let data_key = UserKeys::data(username, shared);
+    // read only the settings field
+    let raw: Option<String> = query!(cmd("hget").arg(&data_key).arg("settings"), shared).await?;
+    Ok(raw)
+}
+
+/// Replace the AI settings in a user's `settings` field if it's still stored as it was read
+///
+/// Only the `settings` field is written and only its AI settings change, so changes to the rest
+/// of the user are never undone, a theme or other field stored in `settings` is kept, and a user
+/// deleted since the read is never written back. Returns whether the settings were replaced.
+///
+/// # Arguments
+///
+/// * `username` - The user whose settings to replace
+/// * `expected` - The settings as they were read
+/// * `settings` - The new settings
+/// * `shared` - Shared Thorium objects
+#[instrument(
+    name = "db::users::swap_settings",
+    skip(expected, settings, shared),
+    err(Debug)
+)]
+pub async fn swap_settings(
+    username: &str,
+    expected: &str,
+    settings: &UserSettings,
+    shared: &Shared,
+) -> Result<bool, ApiError> {
+    // build the key to the user's data
+    let data_key = UserKeys::data(username, shared);
+    // start from the field as it was read so everything but the AI settings is kept
+    let mut stored: serde_json::Value = deserialize!(expected, "settings");
+    // render the new AI settings as JSON
+    let ai = match serde_json::to_value(&settings.ai) {
+        Ok(ai) => ai,
+        Err(error) => {
+            return bad!(format!("Failed to serialize data with error {error}"));
+        }
+    };
+    // put the new AI settings into the field
+    if let Some(fields) = stored.as_object_mut() {
+        fields.insert("ai".to_owned(), ai);
+    }
+    // replace the settings only if nothing changed them since they were read
+    let swapped: i64 = SWAP_SETTINGS_SCRIPT
+        .key(&data_key)
+        .arg(expected)
+        .arg(serialize!(&stored))
+        .invoke_async(conn!(shared))
+        .await?;
+    Ok(swapped == 1)
 }
 
 /// Gets a list of all valid users

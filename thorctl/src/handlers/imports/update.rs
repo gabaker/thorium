@@ -209,6 +209,8 @@ fn pipeline_update_from_view(
         description: set_modified_opt!(current.description, resolved.description),
         // bans are managed via the dedicated pipeline bans subcommands, not imports
         bans: PipelineBanUpdate::default(),
+        // stage tools are set with the pipelines stage-tool command, not imports
+        ..PipelineUpdate::default()
     };
     // an update that changes nothing is not a change
     (!is_noop(&update)).then_some(update)
@@ -362,6 +364,7 @@ mod tests {
             triggers: HashMap::new(),
             description: None,
             bans: HashMap::new(),
+            stage_tools: std::collections::BTreeMap::new(),
         }
     }
 

@@ -53,8 +53,14 @@ pub(crate) async fn pop<S: SearchEventBackend>(
     let serialized: Vec<(String, f64)> =
         query!(redis::cmd("zpopmin").arg(&key).arg(count), shared).await?;
     // filter out and reset any events that are not yet mature
-    let (events, filtered) =
-        events::shared::filter_immature::<S>(&key, now, serialized, shared).await?;
+    let (events, filtered) = events::shared::filter_immature::<S>(
+        &key,
+        now,
+        events::shared::CONSISTENCY_DELAY,
+        serialized,
+        shared,
+    )
+    .await?;
     // build the key to the in flight map and the in flight queue
     let map_key = SearchEventKeys::<S>::in_flight_map(shared);
     let queue_key = SearchEventKeys::<S>::in_flight_queue(shared);

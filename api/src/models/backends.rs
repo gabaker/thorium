@@ -27,6 +27,7 @@ mod backends_reexport {
     pub mod s3;
     pub mod search;
     pub mod setup;
+    pub mod stage_tools;
     pub mod streams;
     pub mod system;
     pub mod trees;

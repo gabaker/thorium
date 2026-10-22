@@ -14,11 +14,13 @@ use uuid::Uuid;
 use super::db;
 use crate::models::ApiCursor;
 use crate::models::ReactionCursorParams;
+use crate::models::backends::stage_tools::{self, ToolInstanceMemo};
+use crate::models::{AuthedUser, PlannedStage, ReactionPlan, ReactionSource, ScopedToken};
 use crate::models::{
-    BulkReactionResponse, GenericJobOpts, Group, GroupAllowAction, JobList, Pipeline, Reaction,
-    ReactionCache, ReactionCacheUpdate, ReactionDetailsList, ReactionExpire, ReactionList,
-    ReactionRequest, ReactionStatus, ReactionUpdate, Repo, RepoDependency, Sample, StageLogs,
-    StageLogsAdd, StatusUpdate, User, UserRole,
+    BulkReactionResponse, GenericJobOpts, Group, GroupAllowAction, ImageScaler, JobList, Pipeline,
+    Reaction, ReactionCache, ReactionCacheUpdate, ReactionDetailsList, ReactionExpire,
+    ReactionList, ReactionRequest, ReactionStatus, ReactionUpdate, Repo, RepoDependency, Sample,
+    StageLogs, StageLogsAdd, StatusUpdate, User, UserRole,
 };
 use crate::utils::{ApiError, Shared, bounder};
 use crate::{
@@ -49,26 +51,30 @@ impl InternalReactionCacheFileUpdates {
     }
 }
 
-/// Validate a user may override the args of every image whose options override them
+/// Validate a user may override the args of every stage whose options override them
+///
+/// The developer role is checked against the scaler of each overridden stage's tool instance.
 ///
 /// # Arguments
 ///
 /// * `user` - The user trying to override args
-/// * `group` - The group the images are in
-/// * `group_name` - The name of the group the images are in
-/// * `opts` - The images and the options set for each of them
+/// * `group` - The group the reaction is in
+/// * `opts` - The stages and the options set for each of them
+/// * `plan` - The reaction's resolved plan
+/// * `memo` - The tool instances already read for this request
 /// * `shared` - Shared Thorium objects
 async fn can_override_opts<'a, I>(
     user: &User,
     group: &Group,
-    group_name: &str,
     opts: I,
+    plan: &ReactionPlan,
+    memo: &mut ToolInstanceMemo,
     shared: &Shared,
 ) -> Result<(), ApiError>
 where
     I: IntoIterator<Item = (&'a String, &'a GenericJobOpts)>,
 {
-    // get the images we are overriding
+    // get the stages we are overriding
     let overrides = opts
         .into_iter()
         .filter(|(_, opts)| {
@@ -78,8 +84,8 @@ where
         .collect::<Vec<&String>>();
     // only validate reactions if we found some overrides
     if !overrides.is_empty() {
-        // get these images scalers
-        let scalers = db::images::get_scalers(group_name, &overrides, shared).await?;
+        // get the scalers of the overridden stages' tool instances
+        let scalers = override_scalers(&group.name, &overrides, plan, memo, shared).await?;
         // make sure we have the right developer roles
         if group.developer_many(user, &scalers).is_err() {
             return unauthorized!();
@@ -89,32 +95,38 @@ where
 }
 
 impl ReactionRequest {
-    /// Validate we are allowed to overwrite args for any images we try to
+    /// Validate we are allowed to overwrite args for any stages we try to
+    ///
+    /// The developer role is checked against the scaler of each overridden stage's tool instance.
     ///
     /// # Arguments
     ///
     /// * `user` - The user trying to override args
     /// * `group` - The group this reaction is in
+    /// * `plan` - The reaction's resolved plan
+    /// * `memo` - The tool instances already read for this request
     /// * `shared` - Shared Thorium objects
     #[instrument(name = "ReactionRequest::can_override", skip_all, err(Debug))]
     pub async fn can_override(
         &self,
         user: &User,
         group: &Group,
+        plan: &ReactionPlan,
+        memo: &mut ToolInstanceMemo,
         shared: &Shared,
     ) -> Result<(), ApiError> {
-        // get the options this request sets for each image
+        // get the options this request sets for each stage
         let opts = self.args.iter().map(|(name, args)| (name, &args.opts));
-        // make sure we may override args for any image whose options override them
-        can_override_opts(user, group, &self.group, opts, shared).await
+        // make sure we may override args for every stage whose options override them
+        can_override_opts(user, group, opts, plan, memo, shared).await
     }
 
-    /// Uploads any ephemeral files required for this sample to execute
+    /// Uploads any ephemeral files required for this reaction to execute
     ///
     /// # Arguments
     ///
-    /// * `reactions` - The reaction to upload ephemeral files for
-    /// * `files` - The files to save to s3
+    /// * `reaction` - The reaction to upload ephemeral files for
+    /// * `files` - The base64 encoded files to save to s3, keyed by file name
     /// * `shared` - Shared Thorium objects
     #[instrument(name = "ReactionRequest::upload_files", skip_all, err(Debug))]
     pub async fn upload_files(
@@ -123,15 +135,15 @@ impl ReactionRequest {
         shared: &Shared,
     ) -> Result<Vec<String>, ApiError> {
         // validate all file names are safe
-        for (name, _) in files.iter() {
+        for name in files.keys() {
             bounder::file_name(name, "ephemeral file names", 1, 32)?;
         }
         // build the list of file paths
         let mut s3_paths = Vec::with_capacity(files.len());
         // try saving these files to s3
-        for (name, encoded) in files.into_iter() {
+        for (name, encoded) in files {
             // build the path to save this file to in s3
-            let path = format!("{}/{}", reaction, name);
+            let path = format!("{reaction}/{name}");
             // write this file to s3
             shared.s3.ephemeral.upload_base64(&path, &encoded).await?;
             s3_paths.push(name);
@@ -145,6 +157,7 @@ impl ReactionRequest {
     ///
     /// * `user` - The user casting this reaction request
     /// * `pipeline` - The pipeline this reaction is for
+    /// * `plan` - The stages resolved for this reaction
     /// * `parent_ephemeral` - Any ephemeral files from any parent reactions
     /// * `shared` - Shared Thorium objects
     #[instrument(name = "ReactionRequest::cast", skip_all, err(Debug))]
@@ -152,6 +165,7 @@ impl ReactionRequest {
         mut self,
         user: &User,
         pipeline: &'a Pipeline,
+        plan: ReactionPlan,
         parent_ephemeral: HashMap<String, Uuid>,
         shared: &Shared,
     ) -> Result<(Reaction, ReactionCache, &'a Pipeline), ApiError> {
@@ -202,7 +216,7 @@ impl ReactionRequest {
             status: ReactionStatus::Created,
             current_stage: 0,
             current_stage_progress: 0,
-            current_stage_length: pipeline.stage_length(0)? as u64,
+            current_stage_length: plan.step(0).map_or(0, <[PlannedStage]>::len) as u64,
             args: self.args,
             sla: Utc::now() + chrono::Duration::seconds(sla_seconds as i64),
             jobs: Vec::default(),
@@ -217,6 +231,18 @@ impl ReactionRequest {
             repos,
             trigger_depth: self.trigger_depth,
             has_cache: !self.cache.is_empty(),
+            source: ReactionSource::Pipeline {
+                name: pipeline.name.clone(),
+            },
+            plan,
+            run_token: None,
+            run: None,
+        };
+        // let tests make a pipeline's reactions belong to a run
+        #[cfg(feature = "test-utilities")]
+        let cast = Reaction {
+            run: crate::test_utilities::faults::reaction_run(&pipeline.name, cast.id),
+            ..cast
         };
         Ok((cast, self.cache, pipeline))
     }
@@ -272,7 +298,7 @@ impl Reaction {
     /// * `user` - The user that is creating this reaction
     /// * `group` - The group this reaction is in
     /// * `pipeline` - The pipeline this reaction is apart of
-    /// * `request` - The ReactionRequest to build a reaction on
+    /// * `request` - The `ReactionRequest` to build a reaction on
     /// * `shared` - Shared objects in Thorium
     #[instrument(name = "Reactions::create", skip_all, fields(group = &group.name, pipeline = &pipeline.name), err(Debug))]
     pub async fn create(
@@ -297,10 +323,15 @@ impl Reaction {
             // authorize this user has access to all the samples to pass in to this reaction
             Sample::authorize(user, &request.samples, shared).await?;
         }
+        // resolve the tool instance each stage runs
+        let mut memo = ToolInstanceMemo::default();
+        let plan = stage_tools::resolve_plan(pipeline, &mut memo, shared).await?;
         // make sure we are allowed to override any args we try too
-        request.can_override(user, group, shared).await?;
+        request
+            .can_override(user, group, &plan, &mut memo, shared)
+            .await?;
         // add reaction to backend
-        db::reactions::create(user, request, pipeline, shared).await
+        db::reactions::create(user, request, pipeline, plan, &mut memo, shared).await
     }
 
     /// Creates a new reactions in bulk
@@ -313,7 +344,7 @@ impl Reaction {
     /// # Arguments
     ///
     /// * `user` - The user that is creating this reaction
-    /// * `requests` - The ReactionRequests to build reactions on
+    /// * `requests` - The `ReactionRequests` to build reactions on
     /// * `shared` - Shared objects in Thorium
     #[instrument(name = "Reactions::create_bulk", skip_all, err(Debug))]
     pub async fn create_bulk(
@@ -321,25 +352,30 @@ impl Reaction {
         requests: Vec<ReactionRequest>,
         shared: &Shared,
     ) -> Result<BulkReactionResponse, ApiError> {
-        // build cache of all different pipelines and groups we are creating reactions for
-        let mut pipe_cache = HashMap::with_capacity(1);
+        // build cache of all different pipelines, their plans, and groups we are creating
+        // reactions for
+        let mut pipe_cache: HashMap<String, (Pipeline, ReactionPlan)> = HashMap::with_capacity(1);
         let mut group_cache = HashMap::with_capacity(1);
-        // build the map of images we are overriding args for
-        let mut override_cache: HashMap<&String, HashSet<&String>> = HashMap::default();
+        // read each tool instance at most once for this request
+        let mut memo = ToolInstanceMemo::default();
+        // build the map of stages we are overriding args for by pipeline
+        let mut override_cache: HashMap<String, HashSet<&String>> = HashMap::default();
         for req in &requests {
             // build combined group + pipeline key
-            let key = format!("{}:{}", &req.group, &req.pipeline);
+            let key = format!("{}:{}", req.group, req.pipeline);
             // get pipeline if we don't have it in the cache
-            if let std::collections::hash_map::Entry::Vacant(e) = pipe_cache.entry(key) {
+            if let std::collections::hash_map::Entry::Vacant(e) = pipe_cache.entry(key.clone()) {
                 // get this group and pipeline
                 let (group, pipeline) =
                     Pipeline::get(user, &req.group, &req.pipeline, shared).await?;
+                // resolve the tool instance each stage runs once per pipeline
+                let plan = stage_tools::resolve_plan(&pipeline, &mut memo, shared).await?;
                 // insert into cache and set
-                e.insert(pipeline);
+                e.insert((pipeline, plan));
                 // check if this group is also not in the cache
                 group_cache.entry(&req.group).or_insert(group);
             }
-            // get the images this request overrides args for, including requests for a
+            // get the stages this request overrides args for, including requests for a
             // pipeline that is already cached
             let overrides = req
                 .args
@@ -353,18 +389,18 @@ impl Reaction {
                 .collect::<Vec<&String>>();
             // if we are overriding args then add them to our map
             if !overrides.is_empty() {
-                // get an entry to this group's override set
+                // get an entry to this pipeline's override set
                 let entry = override_cache
-                    .entry(&req.group)
+                    .entry(key)
                     .or_insert_with(|| HashSet::with_capacity(overrides.len()));
-                // add our images
+                // add our stages
                 entry.extend(overrides.into_iter());
             }
         }
         // make sure none of these pipelines are banned
         let banned_pipelines = pipe_cache
             .iter()
-            .filter_map(|(key, pipe)| (!pipe.bans.is_empty()).then_some(key))
+            .filter_map(|(key, (pipe, _))| (!pipe.bans.is_empty()).then_some(key))
             .collect::<Vec<&String>>();
         if !banned_pipelines.is_empty() {
             return bad!(format!(
@@ -391,24 +427,28 @@ impl Reaction {
             // authorize this user has access to all the samples to pass in to these reactions
             Sample::authorize(user, &samples, shared).await?;
         }
-        // make sure we can override args in each of the images we try too
-        for (group, images) in override_cache {
-            // get our group info from the group cache
-            let group = match group_cache.get(group) {
-                Some(group) => group,
-                None => return unauthorized!(),
+        // make sure we can override args in each of the stages we try too
+        for (key, stages) in override_cache {
+            // get our pipeline, its plan, and its group from our caches
+            let Some((pipeline, plan)) = pipe_cache.get(&key) else {
+                return unauthorized!();
             };
-            // cast our set of images to a vec
-            let overrides = images.into_iter().collect::<Vec<&String>>();
-            // get these images scalers
-            let scalers = db::images::get_scalers(&group.name, &overrides, shared).await?;
+            let Some(group) = group_cache.get(&pipeline.group) else {
+                return unauthorized!();
+            };
+            // get the scalers of the overridden stages' tool instances
+            let stages = stages.into_iter().collect::<Vec<&String>>();
+            let scalers = override_scalers(&group.name, &stages, plan, &mut memo, shared).await?;
             // make sure we have the right developer roles
             if group.developer_many(user, &scalers).is_err() {
                 return unauthorized!();
             }
         }
+        // every request passed its checks, so create all of them
+        let response = BulkReactionResponse::with_capacity(requests.len());
+        let allowed = requests.into_iter().enumerate().collect();
         // add reaction to backend
-        db::reactions::create_bulk(user, requests, &pipe_cache, shared).await
+        db::reactions::create_bulk(user, allowed, &pipe_cache, &mut memo, response, shared).await
     }
 
     /// Creates a new reactions in bulk for different users
@@ -423,7 +463,7 @@ impl Reaction {
     /// # Arguments
     ///
     /// * `user` - The user that is creating these reactions for others
-    /// * `requests` - The ReactionRequests to build reactions on
+    /// * `requests` - The `ReactionRequests` to build reactions on
     /// * `shared` - Shared objects in Thorium
     #[instrument(name = "Reactions::create_bulk_by_user", skip_all, err(Debug))]
     pub async fn create_bulk_by_user(
@@ -482,6 +522,37 @@ impl Reaction {
             resp.insert(username, user_resp);
         }
         Ok(resp)
+    }
+
+    /// Get the run-scoped token of a run's reaction
+    ///
+    /// # Arguments
+    ///
+    /// * `user` - The user that is reading the run's token
+    /// * `group` - The group the run's reaction is in
+    /// * `id` - The id of the run's reaction
+    /// * `shared` - Shared objects in Thorium
+    #[instrument(name = "Reaction::run_token", skip_all, fields(reaction = id.to_string()), err(Debug))]
+    pub async fn run_token(
+        user: &AuthedUser,
+        group: &str,
+        id: &Uuid,
+        shared: &Shared,
+    ) -> Result<ScopedToken, ApiError> {
+        // only admins authenticated with their full token may read run tokens
+        if user.is_scoped() {
+            return unauthorized!();
+        }
+        is_admin!(user);
+        // get the run's reaction
+        let reaction = db::reactions::get(group, id, shared).await?;
+        // a reaction without a run token has none to read
+        let Some(name) = &reaction.run_token else {
+            return not_found!(format!("reaction {id} has no run token"));
+        };
+        // read the token from the user that owns it
+        let owner = User::force_get(&reaction.creator, shared).await?;
+        ScopedToken::get(&owner, name, shared).await
     }
 
     /// Gets a reaction object from the backend
@@ -758,7 +829,7 @@ impl Reaction {
         Ok(ReactionStatus::from(status))
     }
 
-    /// ApiErrors a reaction out
+    /// Errors a reaction out
     ///
     /// # Arguments
     ///
@@ -844,8 +915,8 @@ impl Reaction {
 
     /// Updates the arguments for later stages of this [`Reaction`]
     ///
-    /// The user must be allowed to override args for every stage whose options this update
-    /// changes.
+    /// Replacing an ephemeral file the reaction already lists needs the Developer role for the
+    /// scaler of every stage whose options override its command, positionals, or kwargs.
     ///
     /// # Arguments
     ///
@@ -872,7 +943,8 @@ impl Reaction {
             .filter_map(|(stage, args)| args.opts.as_ref().map(|opts| (stage, opts)))
             .filter(|(stage, opts)| self.args.get(*stage).map(|args| &args.opts) != Some(*opts));
         // make sure we may override args for any stage whose options this update changes
-        can_override_opts(user, group, &self.group, changed, shared).await?;
+        let mut memo = ToolInstanceMemo::default();
+        can_override_opts(user, group, changed, &self.plan, &mut memo, shared).await?;
         // apply all updates to the args in this reaction
         for (stage, mut args) in update.args.drain() {
             // get args entry or insert a default one
@@ -880,7 +952,7 @@ impl Reaction {
             // apply our updates
             // if any positionals were set overwrite the original ones
             if !args.positionals.is_empty() {
-                entry.positionals = args.positionals.drain(..).collect();
+                entry.positionals = std::mem::take(&mut args.positionals);
             }
             // remove any kwargs requested to be removed
             entry
@@ -905,6 +977,19 @@ impl Reaction {
         self.tags.retain(|tag| !update.remove_tags.contains(tag));
         // add new tags
         self.tags.extend(update.add_tags.clone());
+        // a file this update replaces is one the reaction already lists
+        let replaces = update
+            .ephemeral
+            .keys()
+            .any(|name| self.ephemeral.contains(name));
+        // replacing a file may swap the script a stage's override command runs, so it needs the
+        // Developer role that setting those overrides needs
+        if replaces {
+            // get the options of every stage after this update's changes
+            let stored = self.args.iter().map(|(stage, args)| (stage, &args.opts));
+            // make sure we may override args for every stage whose options override them
+            can_override_opts(user, group, stored, &self.plan, &mut memo, shared).await?;
+        }
         // upload any new ephemeral files and add them to our reaction
         let paths = ReactionRequest::upload_files(&self.id, update.ephemeral, shared).await?;
         // files that replace an existing file are already listed so only add new names
@@ -1177,7 +1262,7 @@ where
     }
 }
 
-/// This should probably a TryFrom but I am unsure how to enforce that ApiError implements Deserialize
+/// This isn't a `TryFrom` because the error type would have to implement `Deserialize`
 impl ReactionExpire {
     pub(super) fn cast(raw: &str) -> Result<Self, ApiError> {
         // Ok wrap this to get around error not be deserializable
@@ -1189,11 +1274,11 @@ impl ReactionExpire {
 impl TryFrom<(HashMap<String, String>, Vec<String>, Vec<String>)> for Reaction {
     type Error = ApiError;
 
-    /// Try to cast a HashMap of strings and a vector of strings into a Reaction
+    /// Try to cast a `HashMap` of strings and a vector of strings into a Reaction
     ///
     /// # Arguments
     ///
-    /// * `raw` - The HashMap and strings to cast into a Reaction
+    /// * `raw` - The `HashMap` and strings to cast into a Reaction
     fn try_from(
         raw: (HashMap<String, String>, Vec<String>, Vec<String>),
     ) -> Result<Self, Self::Error> {
@@ -1218,11 +1303,21 @@ impl TryFrom<(HashMap<String, String>, Vec<String>, Vec<String>)> for Reaction {
             .filter_map(Result::ok)
             .collect();
 
+        // get the pipeline or run label of this reaction
+        let pipeline: String = extract!(map, "pipeline");
+        // reactions stored before sources existed are pipeline reactions
+        let source = deserialize_ext!(
+            map,
+            "source",
+            ReactionSource::Pipeline {
+                name: pipeline.clone()
+            }
+        );
         // cast to a Reaction
         let reaction = Reaction {
             id: Uuid::parse_str(&extract!(map, "id"))?,
             group: extract!(map, "group"),
-            pipeline: extract!(map, "pipeline"),
+            pipeline,
             creator: extract!(map, "creator"),
             status: deserialize_ext!(map, "status"),
             current_stage: extract!(map, "current_stage").parse::<u64>()?,
@@ -1242,7 +1337,314 @@ impl TryFrom<(HashMap<String, String>, Vec<String>, Vec<String>)> for Reaction {
             repos: deserialize_ext!(map, "repos", Vec::default()),
             trigger_depth: deserialize_opt!(map, "trigger_depth"),
             has_cache: deserialize_ext!(map, "has_cache", false),
+            source,
+            plan: deserialize_ext!(map, "plan", ReactionPlan::default()),
+            run_token: map.remove("run_token"),
+            run: deserialize_opt!(map, "run"),
         };
         Ok(reaction)
+    }
+}
+
+/// Get the scalers of the tool instances of the stages a reaction overrides args for
+///
+/// # Arguments
+///
+/// * `group` - The group of the reaction
+/// * `stages` - The stages whose args are overridden
+/// * `plan` - The reaction's resolved plan
+/// * `memo` - The tool instances already read for this request
+/// * `shared` - Shared Thorium objects
+async fn override_scalers(
+    group: &str,
+    stages: &[&String],
+    plan: &ReactionPlan,
+    memo: &mut ToolInstanceMemo,
+    shared: &Shared,
+) -> Result<Vec<ImageScaler>, ApiError> {
+    // get the scaler of each overridden stage's tool instance
+    let mut scalers = Vec::with_capacity(stages.len());
+    for stage in stages {
+        // every overridden stage must be in the plan
+        let Some(instance) = plan.tool_instance(stage) else {
+            return bad!(format!("image {stage} is not in this pipeline"));
+        };
+        let info = memo.job_info(group, stage, instance, shared).await?;
+        scalers.push(info.scaler);
+    }
+    Ok(scalers)
+}
+
+/// Explain why a user can't run in a group, if they can't
+///
+/// # Arguments
+///
+/// * `user` - The user starting the run
+/// * `group` - The group to check
+/// * `scalers` - The scalers of every workload the run may spawn
+fn run_group_refusal(user: &User, group: &Group, scalers: &[ImageScaler]) -> Option<String> {
+    // a non-admin must hold this group in their (possibly scoped) groups and be able to edit in it
+    if !(user.is_admin() || user.groups.contains(&group.name)) || group.editable(user).is_err() {
+        return Some("you can't edit in it".to_owned());
+    }
+    // the group must allow reactions
+    if !group.allowed.is_allowed(GroupAllowAction::Reactions) {
+        return Some("it doesn't allow reactions".to_owned());
+    }
+    // the user must be a developer for every scaler
+    let missing = scalers
+        .iter()
+        .filter(|scaler| !user.is_developer(**scaler))
+        .map(ToString::to_string)
+        .collect::<Vec<String>>();
+    if !missing.is_empty() {
+        return Some(format!("you aren't a developer for {}", missing.join(", ")));
+    }
+    None
+}
+
+/// Choose the group a tool or workflow run happens in
+///
+/// A requested group must be one of the instance's groups where the user can edit, reactions are
+/// allowed, and the user is a developer for every scaler. Requesting a group the user isn't in is
+/// a plain `401`, whether or not the instance is in it. Without a request the single such group
+/// is used; none is a `401` with a reason per group the user can see, and several is a `400`
+/// listing them.
+///
+/// # Arguments
+///
+/// * `user` - The user starting the run
+/// * `groups` - The details of every group of the Tool Instance or Workflow Instance
+/// * `requested` - The run group the user asked for, if any
+/// * `scalers` - The scalers of every workload the run may spawn
+pub fn choose_run_group(
+    user: &User,
+    groups: &[Group],
+    requested: Option<&str>,
+    scalers: &[ImageScaler],
+) -> Result<String, ApiError> {
+    // check a requested group directly
+    if let Some(requested) = requested {
+        // a runner outside the requested group gets one plain answer whether or not the
+        // instance is in it, so the answer never reveals the instance's hidden groups
+        if !(user.is_admin() || user.groups.iter().any(|group| group == requested)) {
+            return unauthorized!(format!("you can't run in `{requested}`"));
+        }
+        // the requested group must be one of the instance's
+        let Some(group) = groups.iter().find(|group| group.name == requested) else {
+            return bad!(format!("`{requested}` isn't one of this instance's groups"));
+        };
+        // the user must be able to run in it
+        return match run_group_refusal(user, group, scalers) {
+            Some(reason) => unauthorized!(format!("you can't run in `{requested}`: {reason}")),
+            None => Ok(requested.to_owned()),
+        };
+    }
+    // split the instance's groups into candidates and refusals
+    let mut candidates = Vec::new();
+    let mut refusals = Vec::new();
+    for group in groups {
+        match run_group_refusal(user, group, scalers) {
+            // this group can be used
+            None => candidates.push(group.name.clone()),
+            // only explain refusals in groups this user can see
+            Some(reason) => {
+                if (user.is_admin() || user.groups.contains(&group.name))
+                    && group.viewable(user).is_ok()
+                {
+                    refusals.push(format!("`{}`: {reason}", group.name));
+                }
+            }
+        }
+    }
+    // pick the single candidate or explain why none or several match
+    match candidates.len() {
+        1 => Ok(candidates.remove(0)),
+        0 if refusals.is_empty() => {
+            unauthorized!("you can't run in any of this instance's groups".to_owned())
+        }
+        0 => unauthorized!(format!(
+            "you can't run in any of this instance's groups: {}",
+            refusals.join("; ")
+        )),
+        _ => {
+            // quote each candidate for the message
+            let quoted = candidates
+                .iter()
+                .map(|name| format!("`{name}`"))
+                .collect::<Vec<String>>();
+            bad!(format!(
+                "several run groups are possible, pick one of: {}",
+                quoted.join(", ")
+            ))
+        }
+    }
+}
+
+/// Load an instance's groups and choose the group a run happens in
+///
+/// # Arguments
+///
+/// * `user` - The user starting the run
+/// * `instance_groups` - The groups of the Tool Instance or Workflow Instance
+/// * `requested` - The run group the user asked for, if any
+/// * `scalers` - The scalers of every workload the run may spawn
+/// * `shared` - Shared Thorium objects
+#[instrument(name = "reactions::select_run_group", skip(user, shared), err(Debug))]
+pub async fn select_run_group(
+    user: &User,
+    instance_groups: &[String],
+    requested: Option<&str>,
+    scalers: &[ImageScaler],
+    shared: &Shared,
+) -> Result<String, ApiError> {
+    // get the details of every instance group
+    let groups = db::groups::list_details(instance_groups.iter(), shared).await?;
+    // choose the run group from them
+    choose_run_group(user, &groups, requested, scalers)
+}
+
+#[cfg(test)]
+mod tests {
+    use axum::http::StatusCode;
+
+    use super::choose_run_group;
+    use crate::models::backends::groups::tests::{group, user};
+    use crate::models::{Group, ImageScaler, UserRole};
+
+    /// A K8s-only developer role
+    const K8S_DEV: UserRole = UserRole::Developer {
+        k8s: true,
+        bare_metal: false,
+        windows: false,
+        external: false,
+        kvm: false,
+    };
+
+    /// Build the run groups `a` and `b` where bob is a user
+    fn both() -> Vec<Group> {
+        vec![
+            group("a", &[], &["bob"], &[]),
+            group("b", &[], &["bob"], &[]),
+        ]
+    }
+
+    /// A single candidate group is picked when none is requested
+    #[test]
+    fn run_group_single_candidate() {
+        // bob can only edit group a
+        let bob = user("bob", K8S_DEV, &["a", "b"]);
+        let groups = vec![
+            group("a", &[], &["bob"], &[]),
+            group("b", &[], &[], &["bob"]),
+        ];
+        // a is the only candidate
+        let picked = choose_run_group(&bob, &groups, None, &[ImageScaler::K8s]).unwrap();
+        assert_eq!(picked, "a");
+    }
+
+    /// Several candidates without a request is a 400 listing them
+    #[test]
+    fn run_group_several_candidates() {
+        // bob can run in both groups
+        let bob = user("bob", K8S_DEV, &["a", "b"]);
+        // nothing is requested
+        let err = choose_run_group(&bob, &both(), None, &[ImageScaler::K8s]).unwrap_err();
+        assert_eq!(err.status(), StatusCode::BAD_REQUEST);
+        assert_eq!(
+            err.msg().unwrap_or_default(),
+            "several run groups are possible, pick one of: `a`, `b`"
+        );
+        // requesting one picks it
+        let picked = choose_run_group(&bob, &both(), Some("b"), &[ImageScaler::K8s]).unwrap();
+        assert_eq!(picked, "b");
+    }
+
+    /// No candidates is a 401 with a reason per visible group
+    #[test]
+    fn run_group_no_candidates() {
+        // bob monitors a, b disallows reactions, and he isn't in secret
+        let bob = user("bob", K8S_DEV, &["a", "b"]);
+        let mut closed = group("b", &[], &["bob"], &[]);
+        closed.allowed.reactions = false;
+        let groups = vec![
+            group("a", &[], &[], &["bob"]),
+            closed,
+            group("secret", &["alice"], &[], &[]),
+        ];
+        // nothing can be picked
+        let err = choose_run_group(&bob, &groups, None, &[ImageScaler::K8s]).unwrap_err();
+        assert_eq!(err.status(), StatusCode::UNAUTHORIZED);
+        assert_eq!(
+            err.msg().unwrap_or_default(),
+            "you can't run in any of this instance's groups: `a`: you can't edit in it; `b`: it doesn't allow reactions"
+        );
+    }
+
+    /// A runner missing a scaler's developer role can't run there
+    #[test]
+    fn run_group_needs_developer() {
+        // bob develops only for K8s and a plain user develops for nothing
+        let bob = user("bob", K8S_DEV, &["a", "b"]);
+        let plain = user("bob", UserRole::User, &["a", "b"]);
+        // a BareMetal workload is refused for bob
+        let err =
+            choose_run_group(&bob, &both(), Some("a"), &[ImageScaler::BareMetal]).unwrap_err();
+        assert_eq!(err.status(), StatusCode::UNAUTHORIZED);
+        assert_eq!(
+            err.msg().unwrap_or_default(),
+            "you can't run in `a`: you aren't a developer for BareMetal"
+        );
+        // a plain user is refused for K8s
+        let err = choose_run_group(&plain, &both(), Some("a"), &[ImageScaler::K8s]).unwrap_err();
+        assert_eq!(err.status(), StatusCode::UNAUTHORIZED);
+        // an analyst who isn't a group user can still run
+        let mut groups = both();
+        groups[0].analysts.insert("ann".to_owned());
+        let ann = user("ann", UserRole::Analyst, &["a"]);
+        let picked = choose_run_group(&ann, &groups, None, &[ImageScaler::BareMetal]).unwrap();
+        assert_eq!(picked, "a");
+    }
+
+    /// A requested group the runner can see that isn't one of the instance's is a 400
+    #[test]
+    fn run_group_requested_outside_instance() {
+        // bob is in a, b, and c
+        let bob = user("bob", K8S_DEV, &["a", "b", "c"]);
+        // request a group the instance isn't in
+        let err = choose_run_group(&bob, &both(), Some("c"), &[ImageScaler::K8s]).unwrap_err();
+        assert_eq!(err.status(), StatusCode::BAD_REQUEST);
+        assert_eq!(
+            err.msg().unwrap_or_default(),
+            "`c` isn't one of this instance's groups"
+        );
+    }
+
+    /// Requesting a group the runner isn't in gets the same answer whether or not the instance
+    /// is in it, so the answer never reveals the instance's hidden groups
+    #[test]
+    fn run_group_requested_hidden() {
+        // bob is only in a, and the instance is also in the hidden group secret
+        let bob = user("bob", K8S_DEV, &["a"]);
+        let groups = vec![
+            group("a", &[], &["bob"], &[]),
+            group("secret", &["alice"], &[], &[]),
+        ];
+        // request the hidden group the instance is in and one it isn't in
+        let inside =
+            choose_run_group(&bob, &groups, Some("secret"), &[ImageScaler::K8s]).unwrap_err();
+        let outside =
+            choose_run_group(&bob, &groups, Some("other"), &[ImageScaler::K8s]).unwrap_err();
+        // both get the same plain refusal
+        assert_eq!(inside.status(), StatusCode::UNAUTHORIZED);
+        assert_eq!(inside.status(), outside.status());
+        assert_eq!(
+            inside.msg().unwrap_or_default(),
+            "you can't run in `secret`"
+        );
+        assert_eq!(
+            outside.msg().unwrap_or_default(),
+            "you can't run in `other`"
+        );
     }
 }

@@ -7,7 +7,7 @@ use futures::{TryStreamExt, stream};
 use owo_colors::OwoColorize;
 use thorium::{
     Cursor, Error, Thorium,
-    models::{Image, ImageBanKind, ImageVersion, SpawnLimits},
+    models::{Image, ImageBanKind, SpawnLimits, ToolVersion},
 };
 
 use super::render::{field, header, label, render_markdown};
@@ -38,8 +38,8 @@ pub fn print_image_details(image: &Image, out: &mut dyn Write, ansi: bool) -> Re
     write_line(out, &field("Creator", &image.creator, ansi))?;
     if let Some(version) = &image.version {
         let version = match version {
-            ImageVersion::SemVer(version) => version.to_string(),
-            ImageVersion::Custom(version) => version.clone(),
+            ToolVersion::SemVer(version) => version.to_string(),
+            ToolVersion::Custom(version) => version.clone(),
         };
         write_line(out, &field("Version", &version, ansi))?;
     }

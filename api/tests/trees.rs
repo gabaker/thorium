@@ -3,14 +3,15 @@
 use rand::RngCore;
 use std::collections::HashMap;
 use thorium::test_utilities::{self, generators};
-use thorium::{Thorium, contains, contains_key, is};
+use thorium::{Thorium, contains, contains_key, fail, is};
 use uuid::Uuid;
 
 use thorium::models::{
     AssociationKind, AssociationRequest, AssociationTarget, Buffer, Confidence, Entity,
-    EntityKinds, EntityListOpts, EntityMetadataRequest, EntityRequest, FileSystemEntityBuilder,
-    Flag, OriginRequest, Sample, SampleRequest, Tree, TreeGrowQuery, TreeOpts, TreeQuery,
-    TreeRelationships, TreeSupport, WindowsProcessEntity, WindowsProcessTreeEntity,
+    EntityKinds, EntityListOpts, EntityMetadata, EntityMetadataRequest, EntityRequest,
+    FileSystemEntityBuilder, Flag, OriginRequest, Sample, SampleRequest, Tree, TreeGrowQuery,
+    TreeOpts, TreeQuery, TreeRelationships, TreeSupport, WindowsProcessEntity,
+    WindowsProcessTreeEntity,
 };
 
 /// Generate a buffer of random bytes so every test run uploads unique samples
@@ -514,9 +515,10 @@ async fn process_tree() -> Result<(), thorium::Error> {
     let group = generators::groups(1, &client).await?.remove(0).name;
     // upload a memory dump sample to hang our process tree on
     let dump = client.files.create(gen_root(&group)).await?.sha256;
+    // create the tool instance that dumped our process tree
+    let tool = generators::tool_instance(&[&group], &client).await?;
     // build a realistic windows process tree
-    let mut builder =
-        WindowsProcessTreeEntity::builder("tree-tests-process-tree").tool("volatility");
+    let mut builder = WindowsProcessTreeEntity::builder("tree-tests-process-tree").tool(tool);
     builder.add_mut(
         WindowsProcessEntity::new(4)
             .name("System")
@@ -564,6 +566,15 @@ async fn process_tree() -> Result<(), thorium::Error> {
     let groups = vec![group.clone()];
     // create our process tree entities
     let tree_id = builder.create_all(&groups, &client).await?;
+    // make sure our process tree records the tool instance that dumped it
+    let root = client.entities.get(tree_id).await?;
+    let EntityMetadata::WindowsProcessTree(root_meta) = &root.metadata else {
+        return Err(thorium::Error::new(format!(
+            "{tree_id} is not a process tree"
+        )));
+    };
+    is!(root_meta.tools, vec![tool]);
+    is!(root_meta.legacy_tools.is_empty(), true);
     // our memory dump is the source of the process tree association
     let source = AssociationTarget::File(dump.clone());
     // our process tree entity is the target of the process tree association
@@ -673,9 +684,11 @@ async fn filesystem() -> Result<(), thorium::Error> {
     // add our files to this filesystem
     fs_builder.file(&passwd)?;
     fs_builder.file(&busybox)?;
+    // create the tool instance that carved our filesystem
+    let tool = generators::tool_instance(&[&group], &client).await?;
     // ingest this filesystem into Thorium
     fs_builder
-        .create(&"tree-tests".to_owned(), &firmware, &groups, &client)
+        .create(Some(tool), &firmware, &groups, &client)
         .await?;
     // clean up our on disk filesystem
     tokio::fs::remove_dir_all(&root_dir).await?;
@@ -734,6 +747,109 @@ async fn filesystem() -> Result<(), thorium::Error> {
         true,
         "bin <-> busybox branch"
     );
+    Ok(())
+}
+
+/// A process tree whose tool instance is refused is never created, so no root is left behind
+#[tokio::test]
+async fn process_tree_refused_tool_leaves_no_root() -> Result<(), thorium::Error> {
+    // get admin client
+    let client = test_utilities::admin_client().await?;
+    // Create a group
+    let group = generators::groups(1, &client).await?.remove(0).name;
+    // build a process tree that names a tool instance that doesn't exist
+    let mut builder =
+        WindowsProcessTreeEntity::builder("tree-tests-refused-tool").tool(Uuid::new_v4());
+    builder.add_mut(WindowsProcessEntity::new(4).name("System"));
+    // creating it is refused
+    let groups = vec![group.clone()];
+    let resp = builder.create_all(&groups, &client).await;
+    fail!(resp, 400);
+    // no process tree root was created in the group
+    let trees = entity_map(&client, &group, EntityKinds::WindowsProcessTree).await?;
+    is!(trees.len(), 0);
+    Ok(())
+}
+
+/// Get the tool instances recorded on a filesystem entity
+///
+/// # Arguments
+///
+/// * `client` - The client to get the filesystem with
+/// * `id` - The id of the filesystem
+async fn filesystem_tools(client: &Thorium, id: Uuid) -> Result<Vec<Uuid>, thorium::Error> {
+    // get the filesystem entity
+    let entity = client.entities.get(id).await?;
+    // get its tool instances
+    match entity.metadata {
+        EntityMetadata::FileSystem(fs) => Ok(fs.tools),
+        other => Err(thorium::Error::new(format!(
+            "{id} is not a filesystem: {other:?}"
+        ))),
+    }
+}
+
+/// A filesystem found again by the same tool instance records it once, and one found by
+/// another version of the same tool records both versions
+#[tokio::test]
+async fn filesystem_tool_dedupe() -> Result<(), thorium::Error> {
+    // get admin client
+    let client = test_utilities::admin_client().await?;
+    // Create a group
+    let group = generators::groups(1, &client).await?.remove(0).name;
+    // upload a firmware sample to carve a filesystem from
+    let firmware = client.files.create(gen_root(&group)).await?.sha256;
+    // build an on disk filesystem with one file
+    let root_dir = std::env::temp_dir().join(format!("thorium-tree-tests-{}", Uuid::new_v4()));
+    tokio::fs::create_dir_all(root_dir.join("etc")).await?;
+    let passwd = root_dir.join("etc/passwd");
+    tokio::fs::write(&passwd, random_buffer()).await?;
+    // upload the file as a sample so the filesystem can link it
+    let groups = vec![group.clone()];
+    client
+        .files
+        .create(SampleRequest::new(&passwd, groups.clone()))
+        .await?;
+    // create a tool and publish a second version of it
+    let (tool, first) =
+        generators::tool(&[&group], "1.0.0", &generators::gen_image_spec(), &client).await?;
+    let publish = generators::gen_tool_publish("2.0.0", &generators::gen_image_spec());
+    client.entities.update(tool.id, publish).await?;
+    // get the id of the second version's tool instance
+    let second = client
+        .entities
+        .tool_instances(tool.id)
+        .await?
+        .into_iter()
+        .map(|instance| instance.id)
+        .find(|id| *id != first.id)
+        .ok_or_else(|| thorium::Error::new("no second tool instance".to_owned()))?;
+    // build our filesystem entity
+    let mut fs_builder = FileSystemEntityBuilder::new("tree-tests-fs-dedupe", &root_dir)?;
+    fs_builder.file(&passwd)?;
+    // carve the filesystem twice with the first version
+    fs_builder
+        .create(Some(first.id), &firmware, &groups, &client)
+        .await?;
+    fs_builder
+        .create(Some(first.id), &firmware, &groups, &client)
+        .await?;
+    // there is one filesystem and it records the first version once
+    let filesystems = entity_map(&client, &group, EntityKinds::FileSystem).await?;
+    let fs_id = get_entity(&filesystems, "tree-tests-fs-dedupe")?;
+    let tools = filesystem_tools(&client, fs_id).await?;
+    is!(tools, vec![first.id]);
+    // carve it again with the second version
+    fs_builder
+        .create(Some(second), &firmware, &groups, &client)
+        .await?;
+    // clean up our on disk filesystem
+    tokio::fs::remove_dir_all(&root_dir).await?;
+    // both versions are recorded on the same filesystem
+    let filesystems = entity_map(&client, &group, EntityKinds::FileSystem).await?;
+    is!(filesystems.len(), 1);
+    let tools = filesystem_tools(&client, fs_id).await?;
+    is!(tools, vec![first.id, second]);
     Ok(())
 }
 
@@ -810,9 +926,11 @@ async fn filesystem_submissions() -> Result<(), thorium::Error> {
     // tie each file to the submission it was uploaded under
     fs_builder.add_submission(passwd.clone(), passwd_resp.id);
     fs_builder.add_submission(busybox.clone(), busybox_resp.id);
+    // create the tool instance that carved our filesystem
+    let tool = generators::tool_instance(&[&group], &client).await?;
     // ingest this filesystem into Thorium
     fs_builder
-        .create(&"tree-tests".to_owned(), &firmware, &groups, &client)
+        .create(Some(tool), &firmware, &groups, &client)
         .await?;
     // clean up our on disk filesystem
     tokio::fs::remove_dir_all(&root_dir).await?;
@@ -853,9 +971,10 @@ async fn flags() -> Result<(), thorium::Error> {
     let root = client.files.create(gen_root(&group)).await?.sha256;
     // upload a single child unpacked from our root
     let child = upload_children(&client, &group, &root, 1).await?.remove(0);
+    // create the tool instance that dumped our process tree
+    let tool = generators::tool_instance(&[&group], &client).await?;
     // build a tiny process tree to flag a process entity in
-    let mut builder =
-        WindowsProcessTreeEntity::builder("tree-tests-flagged-tree").tool("volatility");
+    let mut builder = WindowsProcessTreeEntity::builder("tree-tests-flagged-tree").tool(tool);
     builder.add_mut(
         WindowsProcessEntity::new(1234)
             .name("evil.exe")
@@ -1044,8 +1163,10 @@ async fn grow_entities() -> Result<(), thorium::Error> {
     let group = generators::groups(1, &client).await?.remove(0).name;
     // upload a memory dump sample to hang our process tree on
     let dump = client.files.create(gen_root(&group)).await?.sha256;
+    // create the tool instance that dumped our process tree
+    let tool = generators::tool_instance(&[&group], &client).await?;
     // build a small windows process tree to grow into
-    let mut builder = WindowsProcessTreeEntity::builder("tree-tests-grow-tree").tool("volatility");
+    let mut builder = WindowsProcessTreeEntity::builder("tree-tests-grow-tree").tool(tool);
     builder.add_mut(
         WindowsProcessEntity::new(4)
             .name("System")

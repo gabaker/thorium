@@ -10,9 +10,10 @@ use serde_json::Value;
 use tracing::instrument;
 use uuid::Uuid;
 
-use super::{ApiError, Shared};
+use super::ApiError;
 use crate::bad;
-use crate::models::{EventTrigger, Group, Image, User};
+use crate::models::EventTrigger;
+use crate::utils::protected_names;
 
 /// Bounds check a string
 ///
@@ -70,6 +71,22 @@ pub fn string_lower(
         ));
     }
     Ok(())
+}
+
+/// Refuse the name of a new tool, toolset, workflow, or pipeline when it is a protected name
+///
+/// Only the whole name is compared, without regard to case. This runs after the length and
+/// character checks so those keep their own errors.
+///
+/// # Arguments
+///
+/// * `input` - The new name to check
+pub fn entity_name(input: &str) -> Result<(), ApiError> {
+    // refuse the name with the one line that names it and the protected list
+    match protected_names::check(input) {
+        Ok(()) => Ok(()),
+        Err(refusal) => bad!(refusal),
+    }
 }
 
 /// Bounds check a metagroup to make sure its valid for ldap
@@ -327,84 +344,40 @@ pub fn unsigned(input: u64, name: &'static str, min: u64, max: u64) -> Result<u6
 
 /// Bounds check a pipeline order
 ///
-/// This enforces that a pipeline orders stages are defined.
+/// This enforces that a pipeline order is a non empty list of stages with valid names, where a
+/// stage is either one name or a non empty list of names that run in parallel. Each stage is
+/// backed by a tool, so stage names don't need to name images.
 ///
 /// # Arguments
 ///
 /// * `raw` - The raw pipeline order to bounds check
-/// * `user` - The user that is creating/updating this pipeline
-/// * `group` - The group this pipeline is in
-/// * `shared` - Shared Thorium objects
 #[instrument(name = "utils::bounder::pipeline_order", skip_all, err(Debug))]
-pub async fn pipeline_order(
-    raw: &Value,
-    user: &User,
-    group: &Group,
-    shared: &Shared,
-) -> Result<Vec<Vec<String>>, ApiError> {
+pub fn pipeline_order(raw: &Value) -> Result<Vec<Vec<String>>, ApiError> {
     // make sure order is an array
-    if !raw.is_array() {
+    let Some(stages) = raw.as_array() else {
         return bad!("order must be an array".to_string());
-    }
+    };
     // cast raw order to Vec<Vec<String>>
-    let mut cast = Vec::new();
+    let mut cast = Vec::with_capacity(stages.len());
     // iterate over stages in order
-    for stage in raw.as_array().unwrap() {
+    for stage in stages {
         // handle stages with sub stages
-        // cast to a vector if order is an array
-        if stage.is_array() {
-            // get sub stages
-            let sub_stages = stage.as_array().unwrap();
+        if let Some(sub_stages) = stage.as_array() {
             // make sure that we have some sub stages defined
             if sub_stages.is_empty() {
                 return bad!("order cannot have an empty stage".to_owned());
             }
-            // iterate over sub stages and bounds check them
-            let mut inner_cast = Vec::new();
-            for item in stage.as_array().unwrap() {
-                // cast image name to string
-                let item = string_json_value(item, "stage", 1, 255)?;
-                // make sure image exists
-                Image::exists_authenticated(&item, group, shared).await?;
-                // get the scaler for this image
-                let scaler = Image::get_scaler(group, &item, shared).await?;
-                // make sure the image doesn't have any bans
-                let bans = Image::get_bans(group, &item, shared).await?;
-                if !bans.is_empty() {
-                    return bad!(format!(
-                        "Image '{item}' has one or more bans! See image details for more info."
-                    ));
-                }
-                // make sure we can develop this image
-                group.developer(user, scaler)?;
-                // push into vec
-                inner_cast.push(item);
-            }
+            // bounds check each sub stage's name
+            let inner_cast = sub_stages
+                .iter()
+                .map(|item| string_json_value(item, "stage", 1, 255))
+                .collect::<Result<Vec<String>, ApiError>>()?;
             cast.push(inner_cast);
-
-        // handle stages with no sub stages
         } else {
-            let mut inner_cast = Vec::new();
-            // cast image name to string
-            let stage = string_json_value(stage, "stage", 1, 255)?;
-            // make sure image exists
-            Image::exists_authenticated(&stage, group, shared).await?;
-            // get the scaler for this image
-            let scaler = Image::get_scaler(group, &stage, shared).await?;
-            // make sure the image doesn't have any bans
-            let bans = Image::get_bans(group, &stage, shared).await?;
-            if !bans.is_empty() {
-                return bad!(format!(
-                    "Image '{stage}' has one or more bans! See image details for more info."
-                ));
-            }
-            // make sure we can develop this image
-            group.developer(user, scaler)?;
-            inner_cast.push(stage);
-            cast.push(inner_cast);
+            // a single stage runs alone in its step
+            cast.push(vec![string_json_value(stage, "stage", 1, 255)?]);
         }
     }
-
     // make sure order is not empty
     if cast.is_empty() {
         return bad!("order must not be empty".to_string());

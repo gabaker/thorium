@@ -98,36 +98,9 @@ pub async fn create(user: &User, request: ImageRequest, shared: &Shared) -> Resu
     }
 }
 
-/// The longest a job may run, and the most an image's average runtime may be, when its image
-/// has no timeout (one week in seconds)
+/// The longest a job may run, and the most an image's or tool instance's average runtime may be,
+/// when its image or tool instance has no timeout (one week in seconds)
 pub const UNTIMED_RUNTIME_CAP: u64 = 7 * 24 * 60 * 60;
-
-/// Gets the longest a job of an image may run in seconds
-///
-/// This is the image's timeout, or [`UNTIMED_RUNTIME_CAP`] when it has none.
-///
-/// # Arguments
-///
-/// * `group` - The group the image is in
-/// * `name` - The name of the image
-/// * `shared` - Shared objects in Thorium
-#[instrument(name = "db::images::runtime_cap", skip(shared), err(Debug))]
-pub async fn runtime_cap(group: &str, name: &str, shared: &Shared) -> Result<u64, ApiError> {
-    // get this image's timeout if it has one
-    let raw: Option<String> = query!(
-        cmd("hget")
-            .arg(ImageKeys::data(group, name, shared))
-            .arg("timeout"),
-        shared
-    )
-    .await?;
-    // an image without a timeout is capped at a week
-    let timeout: Option<u64> = match raw {
-        Some(raw) => deserialize!(&raw),
-        None => None,
-    };
-    Ok(timeout.unwrap_or(UNTIMED_RUNTIME_CAP))
-}
 
 /// Gets an images data from the backend
 ///

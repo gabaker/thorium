@@ -1,5 +1,7 @@
 //! Databse keys for entities
 
+use uuid::Uuid;
+
 use crate::models::CensusKeys;
 use crate::utils::Shared;
 
@@ -38,4 +40,18 @@ pub fn census_keys(
         // add our key
         keys.push(key);
     }
+}
+
+/// Build the key of the lock held while a root entity or one of its instances is written
+///
+/// # Arguments
+///
+/// * `root` - The id of the root entity being written
+/// * `shared` - Shared Thorium objects
+pub fn instance_lock(root: &Uuid, shared: &Shared) -> String {
+    // the lock is one key per root
+    format!(
+        "{namespace}:entities:instance_lock:{root}",
+        namespace = shared.config.thorium.namespace,
+    )
 }

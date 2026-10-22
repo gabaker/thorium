@@ -8,6 +8,7 @@
 use chrono::prelude::*;
 use futures::{StreamExt, stream};
 use std::collections::HashMap;
+use uuid::Uuid;
 
 #[cfg(feature = "client")]
 use crate::models::{
@@ -15,11 +16,43 @@ use crate::models::{
 };
 
 /// The root entity for a tree of processes in windows
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize, Hash)]
+#[serde(from = "WindowsProcessTreeEntityCompat")]
 #[cfg_attr(feature = "api", derive(utoipa::ToSchema))]
 pub struct WindowsProcessTreeEntity {
-    /// The tools that dropped this process tree
-    pub tools: Vec<String>,
+    /// The tool instances that dropped this process tree
+    pub tools: Vec<Uuid>,
+    /// The names of tools that dropped this process tree that are not linked to a tool instance
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub legacy_tools: Vec<String>,
+}
+
+/// The stored shape of a process tree, accepting tool names written before tool instances
+#[derive(Debug, Clone, Default, Deserialize)]
+struct WindowsProcessTreeEntityCompat {
+    /// The tools that dropped this process tree as tool instance IDs or legacy tool names
+    #[serde(default)]
+    tools: Vec<String>,
+    /// The names of tools that are not linked to a tool instance
+    #[serde(default)]
+    legacy_tools: Vec<String>,
+}
+
+impl From<WindowsProcessTreeEntityCompat> for WindowsProcessTreeEntity {
+    /// Convert a stored process tree into a process tree entity
+    ///
+    /// # Arguments
+    ///
+    /// * `compat` - The stored process tree
+    fn from(compat: WindowsProcessTreeEntityCompat) -> Self {
+        // split the stored tools into tool instances and legacy names
+        let (tools, legacy_tools) =
+            super::shared::split_tool_refs(compat.tools, compat.legacy_tools);
+        WindowsProcessTreeEntity {
+            tools,
+            legacy_tools,
+        }
+    }
 }
 
 impl WindowsProcessTreeEntity {
@@ -43,8 +76,34 @@ impl WindowsProcessTreeEntity {
     /// * `form` -  The update form
     #[cfg(feature = "api")]
     pub fn from_form(form: super::EntityMetadataForm) -> Result<Self, crate::utils::ApiError> {
-        // build our [`WindowsProcessTreeEntity`] entity
-        Ok(WindowsProcessTreeEntity { tools: form.tools })
+        // record each tool instance once in the order it was sent
+        let mut tools = Vec::with_capacity(form.tool_ids.len());
+        super::shared::add_tool_ids(&mut tools, form.tool_ids);
+        // build our [`WindowsProcessTreeEntity`] entity; legacy tool names are never written by
+        // a form
+        Ok(WindowsProcessTreeEntity {
+            tools,
+            legacy_tools: Vec::new(),
+        })
+    }
+
+    /// Get the form fields this process tree sends, by name
+    ///
+    /// Legacy tool names are never sent, since no form writes them.
+    #[must_use]
+    pub fn form_fields(&self) -> Vec<(&'static str, String)> {
+        // the kind of this entity
+        let mut fields = vec![(
+            "kind",
+            super::EntityKinds::WindowsProcessTree.as_str().to_owned(),
+        )];
+        // the tool instances that dropped this process tree
+        fields.extend(
+            self.tools
+                .iter()
+                .map(|tool| ("metadata[tool_ids][]", tool.to_string())),
+        );
+        fields
     }
 
     /// Add this windows process tree entity metadata to a form
@@ -57,12 +116,11 @@ impl WindowsProcessTreeEntity {
         self,
         form: reqwest::multipart::Form,
     ) -> Result<reqwest::multipart::Form, crate::Error> {
-        // always set our entity kind
-        let mut form = form.text("kind", super::EntityKinds::WindowsProcessTree.as_str());
-        // add our device metadata
-        for tool in self.tools {
-            form = form.text("metadata[tools][]", tool);
-        }
+        // add each of our fields to the form
+        let form = self
+            .form_fields()
+            .into_iter()
+            .fold(form, |form, (name, value)| form.text(name, value));
         Ok(form)
     }
 }
@@ -441,23 +499,35 @@ struct WindowsProcTreeContext {
 pub struct WindowsProcessTreeBuilder {
     /// The name for this windows process tree to build
     pub name: String,
-    /// The tool(s) that are generating this process tree
-    pub tools: Vec<String>,
+    /// The tool instances that are generating this process tree
+    pub tools: Vec<Uuid>,
     /// A map of processes by their PID
     pub processes: HashMap<u64, WindowsProcessEntity>,
 }
 
 #[cfg(feature = "client")]
 impl WindowsProcessTreeBuilder {
-    /// Add a tool that dumped this windows process tree
+    /// Add a tool instance that dumped this windows process tree
     ///
     /// # Arguments
     ///
-    /// * `tool` - The tool to add
-    pub fn tool(mut self, tool: impl Into<String>) -> Self {
-        // covert this tool to a string and add it
-        self.tools.push(tool.into());
+    /// * `tool` - The tool instance to add
+    #[must_use]
+    pub fn tool(mut self, tool: Uuid) -> Self {
+        // add this tool instance
+        self.tools.push(tool);
         self
+    }
+
+    /// Build the metadata of this process tree's root entity, which records the tool instances
+    /// that dumped it
+    #[must_use]
+    pub fn root_metadata(&self) -> EntityMetadataRequest {
+        // the root records every tool instance that dumped this process tree
+        EntityMetadataRequest::WindowsProcessTree(WindowsProcessTreeEntity {
+            tools: self.tools.clone(),
+            legacy_tools: Vec::new(),
+        })
     }
 
     /// Add a new process to this process tree
@@ -483,10 +553,8 @@ impl WindowsProcessTreeBuilder {
         groups: &[String],
         thorium: &crate::Thorium,
     ) -> Result<WindowsProcTreeContext, crate::Error> {
-        // build the metadata for building
-        let metadata = EntityMetadataRequest::WindowsProcessTree;
-        // build the entity request for our root
-        let req = EntityRequest::new(&self.name, metadata, groups);
+        // build the entity request for our root with the tool instances that dumped it
+        let req = EntityRequest::new(&self.name, self.root_metadata(), groups);
         // create our root process entity
         let resp = thorium.entities.create(req).await?;
         // instance a pid map of the correct size
@@ -616,17 +684,136 @@ impl WindowsProcessTreeBuilder {
     pub fn to_requests(self) -> Vec<EntityRequest> {
         // correctly size our list of entity requests (one extra with our root entity)
         let mut reqs = Vec::with_capacity(self.processes.len() + 1);
-        // build the metadata for building
-        let metadata = EntityMetadataRequest::WindowsProcessTree;
         // don't specify groups in our stored entity requests
         let groups = Vec::<String>::default();
-        // build the entity request for our root
-        reqs.push(EntityRequest::new(&self.name, metadata, groups));
+        // build the entity request for our root with the tool instances that dumped it
+        reqs.push(EntityRequest::new(&self.name, self.root_metadata(), groups));
         // add all of the processes we find to our list
         for (pid, process) in self.processes {
             // convert this process to a request
             reqs.push(create_windows_process_req_empty_groups(pid, process));
         }
         reqs
+    }
+}
+
+/// Tests for reading, writing, and sending process tree entities
+#[cfg(test)]
+mod tests {
+    use uuid::Uuid;
+
+    use super::WindowsProcessTreeEntity;
+
+    /// A stored process tree without tools reads with no tool references at all
+    #[test]
+    fn compat_reads_missing_and_empty_tools() {
+        // read a row without a tools key and a row with empty tools
+        for raw in ["{}", r#"{"tools":[]}"#] {
+            // read this row
+            let tree: WindowsProcessTreeEntity = serde_json::from_str(raw).unwrap();
+            // neither list has anything in it
+            assert!(tree.tools.is_empty(), "{raw}");
+            assert!(tree.legacy_tools.is_empty(), "{raw}");
+        }
+    }
+
+    /// A process tree stored with tool instances and legacy names reads back unchanged
+    #[test]
+    fn compat_reads_new_shape_unchanged() {
+        // build a row in the current shape
+        let id = Uuid::new_v4();
+        let raw = format!(r#"{{"tools":["{id}"],"legacy_tools":["rekall"]}}"#);
+        // read the row
+        let tree: WindowsProcessTreeEntity = serde_json::from_str(&raw).unwrap();
+        // both lists are what was stored
+        assert_eq!(tree.tools, vec![id]);
+        assert_eq!(tree.legacy_tools, vec!["rekall".to_owned()]);
+    }
+
+    /// A process tree serializes and deserializes unchanged, and an empty `legacy_tools` is left
+    /// out
+    #[test]
+    fn new_shape_round_trips() {
+        // build a tree with legacy names and one without
+        let with_legacy = WindowsProcessTreeEntity {
+            tools: vec![Uuid::new_v4()],
+            legacy_tools: vec!["rekall".to_owned()],
+        };
+        let without_legacy = WindowsProcessTreeEntity {
+            legacy_tools: Vec::new(),
+            ..with_legacy.clone()
+        };
+        // round trip each of them through JSON
+        for tree in [with_legacy, without_legacy] {
+            // serialize this tree
+            let value = serde_json::to_value(&tree).unwrap();
+            // an empty legacy list isn't written
+            assert_eq!(
+                value.get("legacy_tools").is_some(),
+                !tree.legacy_tools.is_empty()
+            );
+            // the tool instances are written as uuid strings
+            assert_eq!(
+                value["tools"],
+                serde_json::json!([tree.tools[0].to_string()])
+            );
+            // reading it back gives the same tree
+            let read: WindowsProcessTreeEntity = serde_json::from_value(value.clone()).unwrap();
+            assert_eq!(serde_json::to_value(&read).unwrap(), value);
+        }
+    }
+
+    /// A process tree request sends its tool instances as `tool_ids` and never sends tool names
+    #[test]
+    fn form_fields_send_tool_ids() {
+        // build a tree with a tool instance and a legacy name
+        let id = Uuid::new_v4();
+        let tree = WindowsProcessTreeEntity {
+            tools: vec![id],
+            legacy_tools: vec!["rekall".to_owned()],
+        };
+        // the kind and tool instance are sent and nothing else
+        assert_eq!(
+            tree.form_fields(),
+            vec![
+                ("kind", "WindowsProcessTree".to_owned()),
+                ("metadata[tool_ids][]", id.to_string()),
+            ]
+        );
+    }
+
+    /// The process tree builder records tool instances on the root's create request, which
+    /// sends them as tool instance ids
+    #[cfg(feature = "client")]
+    #[test]
+    fn builder_records_tool_instances() {
+        use crate::models::EntityMetadataRequest;
+        // build a process tree found by two tool instances
+        let first = Uuid::new_v4();
+        let second = Uuid::new_v4();
+        let builder = WindowsProcessTreeEntity::builder("tree")
+            .tool(first)
+            .tool(second);
+        // the builder keeps both tool instances in order
+        assert_eq!(builder.tools, vec![first, second]);
+        // the root's create request carries both tool instances
+        let EntityMetadataRequest::WindowsProcessTree(root) = builder.root_metadata() else {
+            panic!("not a process tree request");
+        };
+        assert_eq!(root.tools, vec![first, second]);
+        assert_eq!(root.legacy_tools, Vec::<String>::new());
+        // the stored requests carry them on the root too
+        let reqs = builder.to_requests();
+        let EntityMetadataRequest::WindowsProcessTree(stored) = &reqs[0].metadata else {
+            panic!("the first stored request is not the root");
+        };
+        assert_eq!(stored.tools, vec![first, second]);
+        // a tree without tool instances has a root without any
+        let EntityMetadataRequest::WindowsProcessTree(empty) =
+            WindowsProcessTreeEntity::builder("tree").root_metadata()
+        else {
+            panic!("not a process tree request");
+        };
+        assert_eq!(empty.tools, Vec::<Uuid>::new());
     }
 }

@@ -7,6 +7,8 @@ mod store;
 #[cfg(feature = "schema")]
 mod schema;
 
+mod digest;
+
 #[cfg(feature = "sync")]
 mod sync;
 
@@ -141,6 +143,26 @@ pub fn view_queries(args: TokenStream, input: TokenStream) -> TokenStream {
 #[proc_macro_attribute]
 pub fn keyspace(args: TokenStream, input: TokenStream) -> TokenStream {
     schema::keyspace::expand(args.into(), input.into()).into()
+}
+
+/// Derives `DigestValue`, the default-pruned value Thorium hashes for content digests
+///
+/// Struct fields whose digest value equals their serde default are left out, and field and
+/// variant names follow serde's `rename` and `rename_all` attributes. Serde attributes that
+/// change the stored value in ways the digest doesn't model are compile errors.
+///
+/// # Arguments
+///
+/// * `stream` - The struct or enum to derive for
+#[proc_macro_derive(DigestValue, attributes(serde))]
+pub fn derive_digest_value(stream: TokenStream) -> TokenStream {
+    // parse our input item
+    let ast = syn::parse_macro_input!(stream as syn::DeriveInput);
+    // build the impl or report why we can't
+    match digest::derive(&ast) {
+        Ok(output) => output.into(),
+        Err(error) => error.to_compile_error().into(),
+    }
 }
 
 /// Creates a blocking client by wrapping the async client and calling its

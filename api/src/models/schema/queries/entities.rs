@@ -6,9 +6,9 @@ use crate::models::schema::scylla::{
     NetworkPoliciesDefaultView, NetworkPoliciesTable, NodesTable, NotificationsTable,
 };
 use crate::models::{
-    AssociationListRow, EntityListRow, EntityListSupplementRow, EntityRow, LogLineRow,
-    NetworkPolicyGroupRow, NetworkPolicyListRow, NetworkPolicyRow, NodeListLine, NodeRow,
-    NotificationBackupRow, NotificationRow,
+    AssociationListRow, EntityGroupKindRow, EntityGroupRow, EntityListRow, EntityListSupplementRow,
+    EntityRow, LogLineRow, NetworkPolicyGroupRow, NetworkPolicyListRow, NetworkPolicyRow,
+    NodeListLine, NodeRow, NotificationBackupRow, NotificationRow,
 };
 
 /// Statements on the entities table
@@ -40,6 +40,13 @@ pub struct EntitiesByIdQueries {
     /// The rows of a set of entities in a set of groups
     #[select(project = EntityRow, r#in(id, group), chunk = 50)]
     get_many: Select,
+    /// Every group an entity is in, one row per group row of the entity
+    #[select(project = EntityGroupRow, eq(id))]
+    all_groups: Select,
+    /// The groups and kinds of a set of entities' rows, in every group, to check that referenced
+    /// entities exist, are the right kind, and are visible
+    #[select(project = EntityGroupKindRow, r#in(id))]
+    get_groups_kinds_by_ids: Select,
     /// The names and kinds of a set of entities, in every group
     #[select(project = EntityListSupplementRow, r#in(id))]
     get_names_kinds_by_ids: Select,

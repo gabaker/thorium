@@ -189,8 +189,8 @@ pub fn render<V: View + ?Sized>(
         }
         // print the view's document as JSON
         OutputFormat::Json => to_json(view),
-        // print the view's document as YAML
-        OutputFormat::Yaml => to_yaml(view),
+        // print the view's JSON document as YAML, so enums print as maps like they do in JSON
+        OutputFormat::Yaml => to_yaml(&to_value(view)?),
     }
 }
 

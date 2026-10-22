@@ -171,23 +171,29 @@ impl Restore for Notification {
 }
 
 /// A notifications row as format 1 archives it, without its TTL
+///
+/// Without `repr(C)`, rustc orders an archived struct's fields by their niches, and an enum's
+/// niche shrinks as it gains variants, so a new notification kind would move this row's fields
+/// and strand every backup already written. The archived struct is `repr(C)` and its fields are
+/// declared in the order existing backups hold them, which is also the order their out-of-line
+/// data was written in, so its layout depends on neither the compiler nor the number of kinds
 #[derive(Debug, Clone, Archive, Serialize, Deserialize)]
-#[archive_attr(derive(Debug, CheckBytes))]
+#[archive_attr(repr(C), derive(Debug, CheckBytes))]
 pub struct NotificationV1 {
-    /// The kind of notification this is
-    pub kind: NotificationType,
-    /// The key to the item this notification relates to
-    pub key: String,
-    /// The time this notification was created
-    pub created: DateTime<Utc>,
     /// The notification's unique ID
     pub id: Uuid,
+    /// The key to the item this notification relates to
+    pub key: String,
     /// The notification's message
     pub msg: String,
+    /// The time this notification was created
+    pub created: DateTime<Utc>,
     /// The notification's level
     pub level: NotificationLevel,
     /// The id of a ban this notification is referencing if there is one
     pub ban_id: Option<Uuid>,
+    /// The kind of notification this is
+    pub kind: NotificationType,
 }
 
 impl From<NotificationV1> for Notification {

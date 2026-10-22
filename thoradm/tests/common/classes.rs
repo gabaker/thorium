@@ -937,7 +937,7 @@ pub const FIELD_DOMAINS: &[(&str, FieldDomain, &str)] = &[
         "a group whose set holds no policy has no set, and the backup leaves it out",
     ),
     (
-        ".images[].version<ImageVersion><SemVer>.SemVer",
+        ".images[].version<ToolVersion><SemVer>.SemVer",
         FieldDomain::SemVer,
         "a semantic version",
     ),

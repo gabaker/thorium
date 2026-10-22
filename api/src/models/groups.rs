@@ -1,6 +1,8 @@
 use std::collections::{HashMap, HashSet};
 
-use super::PipelineStats;
+use uuid::Uuid;
+
+use super::StageStats;
 use crate::{
     matches_adds, matches_clear, matches_clear_opt, matches_removes, matches_set,
     matches_update_opt, same,
@@ -20,6 +22,7 @@ pub struct GroupUsersRequest {
 
 impl GroupUsersRequest {
     /// Adds a direct user to this group
+    #[must_use]
     pub fn direct<T: Into<String>>(mut self, user: T) -> Self {
         // cast and add this user
         self.direct.insert(user.into());
@@ -27,6 +30,7 @@ impl GroupUsersRequest {
     }
 
     /// Adds a direct user to this group
+    #[must_use]
     pub fn metagroup<T: Into<String>>(mut self, metagroup: T) -> Self {
         // cast and add this metagroup
         self.metagroups.insert(metagroup.into());
@@ -143,126 +147,147 @@ impl Default for GroupAllowed {
 
 impl GroupAllowed {
     /// Disable files being added to a group
+    #[must_use]
     pub fn disable_files(mut self) -> Self {
         self.files = false;
         self
     }
 
     /// Enable files being added to a group
+    #[must_use]
     pub fn enable_files(mut self) -> Self {
         self.files = true;
         self
     }
 
     /// Disable repos being added to a group
+    #[must_use]
     pub fn disable_repos(mut self) -> Self {
         self.repos = false;
         self
     }
 
     /// Enable repos being added to a group
+    #[must_use]
     pub fn enable_repos(mut self) -> Self {
         self.repos = true;
         self
     }
 
     /// Disable tags being added to a group
+    #[must_use]
     pub fn disable_tags(mut self) -> Self {
         self.tags = false;
         self
     }
 
     /// Enable tags being added to a group
+    #[must_use]
     pub fn enable_tags(mut self) -> Self {
         self.tags = true;
         self
     }
 
     /// Disable images being added to a group
+    #[must_use]
     pub fn disable_images(mut self) -> Self {
         self.images = false;
         self
     }
 
     /// Enable images being added to a group
+    #[must_use]
     pub fn enable_images(mut self) -> Self {
         self.images = true;
         self
     }
 
     /// Disable pipelines being added to a group
+    #[must_use]
     pub fn disable_pipelines(mut self) -> Self {
         self.pipelines = false;
         self
     }
 
     /// Enable pipelines being added to a group
+    #[must_use]
     pub fn enable_pipelines(mut self) -> Self {
         self.pipelines = true;
         self
     }
 
     /// Disable reactions being created in a group
+    #[must_use]
     pub fn disable_reactions(mut self) -> Self {
         self.reactions = false;
         self
     }
 
     /// Enable reactions being created in a group
+    #[must_use]
     pub fn enable_reactions(mut self) -> Self {
         self.reactions = true;
         self
     }
 
     /// Disable results being added to a group
+    #[must_use]
     pub fn disable_results(mut self) -> Self {
         self.results = false;
         self
     }
 
     /// Enable results being added to a group
+    #[must_use]
     pub fn enable_results(mut self) -> Self {
         self.results = true;
         self
     }
 
     /// Disable comments being added to a group
+    #[must_use]
     pub fn disable_comments(mut self) -> Self {
         self.comments = false;
         self
     }
 
     /// Enable comments being added to a group
+    #[must_use]
     pub fn enable_comments(mut self) -> Self {
         self.comments = true;
         self
     }
 
     /// Disable entities being added to a group
+    #[must_use]
     pub fn disable_entities(mut self) -> Self {
         self.entities = false;
         self
     }
 
     /// Enable entities being added to a group
+    #[must_use]
     pub fn enable_entities(mut self) -> Self {
         self.entities = true;
         self
     }
 
     /// Disable associations being added to a group
+    #[must_use]
     pub fn disable_associations(mut self) -> Self {
         self.associations = false;
         self
     }
 
     /// Enable associations being added to a group
+    #[must_use]
     pub fn enable_associations(mut self) -> Self {
         self.associations = true;
         self
     }
 
     /// Determine if this action is allowed
+    #[must_use]
     pub fn is_allowed(&self, action: GroupAllowAction) -> bool {
         match action {
             GroupAllowAction::Files => self.files,
@@ -376,6 +401,7 @@ impl GroupRequest {
     ///                .direct("mcarson")
     ///                .metagroup("owners"));
     /// ```
+    #[must_use]
     pub fn owners(mut self, users: GroupUsersRequest) -> Self {
         // inject owners
         self.owners = users;
@@ -400,6 +426,7 @@ impl GroupRequest {
     ///                .direct("bob")
     ///                .metagroup("managers"));
     /// ```
+    #[must_use]
     pub fn managers(mut self, users: GroupUsersRequest) -> Self {
         // inject managers
         self.managers = users;
@@ -424,6 +451,7 @@ impl GroupRequest {
     ///                .direct("sally")
     ///                .metagroup("users"));
     /// ```
+    #[must_use]
     pub fn users(mut self, users: GroupUsersRequest) -> Self {
         // inject users
         self.users = users;
@@ -448,6 +476,7 @@ impl GroupRequest {
     ///                .direct("sally")
     ///                .metagroup("users"));
     /// ```
+    #[must_use]
     pub fn monitors(mut self, users: GroupUsersRequest) -> Self {
         // inject reporters
         self.monitors = users;
@@ -468,6 +497,7 @@ impl GroupRequest {
     /// let request = GroupRequest::new("CornGroup")
     ///     .description("A corn group for corn things");
     /// ```
+    #[must_use]
     pub fn description<T: Into<String>>(mut self, description: T) -> Self {
         self.description = Some(description.into());
         self
@@ -558,6 +588,7 @@ pub struct GroupUsersUpdate {
 
 impl GroupUsersUpdate {
     /// Adds a direct user to this group role
+    #[must_use]
     pub fn direct_add<T: Into<String>>(mut self, user: T) -> Self {
         // cast and add this user
         self.direct_add.insert(user.into());
@@ -565,6 +596,7 @@ impl GroupUsersUpdate {
     }
 
     /// Removes a direct user from this group role
+    #[must_use]
     pub fn direct_remove<T: Into<String>>(mut self, user: T) -> Self {
         // cast and add this user to remove
         self.direct_remove.insert(user.into());
@@ -572,6 +604,7 @@ impl GroupUsersUpdate {
     }
 
     /// Adds a metagroup to this group role
+    #[must_use]
     pub fn metagroup_add<T: Into<String>>(mut self, metagroup: T) -> Self {
         // cast and add this metagroup
         self.metagroups_add.insert(metagroup.into());
@@ -579,6 +612,7 @@ impl GroupUsersUpdate {
     }
 
     /// Removes a metagroup from this group role
+    #[must_use]
     pub fn metagroup_remove<T: Into<String>>(mut self, metagroup: T) -> Self {
         // cast and add this metagroup to remove
         self.metagroups_remove.insert(metagroup.into());
@@ -586,6 +620,7 @@ impl GroupUsersUpdate {
     }
 
     /// Get the total number of changes this role update contains
+    #[must_use]
     pub fn change_count(&self) -> usize {
         self.direct_add.len()
             + self.direct_remove.len()
@@ -594,11 +629,13 @@ impl GroupUsersUpdate {
     }
 
     /// Checks whether this update changes this roles metagroup info
+    #[must_use]
     pub fn updates_metagroups(&self) -> bool {
         !self.metagroups_add.is_empty() || !self.metagroups_remove.is_empty()
     }
 
     /// Whether this update is empty or not
+    #[must_use]
     pub fn is_empty(&self) -> bool {
         // check if any changes are in this update
         self.direct_add.is_empty()
@@ -609,7 +646,9 @@ impl GroupUsersUpdate {
 }
 
 /// Helps default a serde value to false
-/// TODO remove this when https://github.com/serde-rs/serde/issues/368 is resolved
+///
+/// Serde can't take a literal as a field default
+/// (<https://github.com/serde-rs/serde/issues/368>), so the default needs a function.
 fn default_as_false() -> bool {
     false
 }
@@ -638,118 +677,153 @@ pub struct GroupAllowedUpdate {
     pub comments: Option<bool>,
     /// Whether entities are allowed to be added to this group
     pub entities: Option<bool>,
+    /// Whether associations are allowed to be added to this group
+    pub associations: Option<bool>,
 }
 
 impl GroupAllowedUpdate {
     /// Disable files being added to a group
+    #[must_use]
     pub fn disable_files(mut self) -> Self {
         self.files = Some(false);
         self
     }
 
     /// Enable files being added to a group
+    #[must_use]
     pub fn enable_files(mut self) -> Self {
         self.files = Some(true);
         self
     }
 
     /// Disable repos being added to a group
+    #[must_use]
     pub fn disable_repos(mut self) -> Self {
         self.repos = Some(false);
         self
     }
 
     /// Enable repos being added to a group
+    #[must_use]
     pub fn enable_repos(mut self) -> Self {
         self.repos = Some(true);
         self
     }
 
     /// Disable tags being added to a group
+    #[must_use]
     pub fn disable_tags(mut self) -> Self {
         self.tags = Some(false);
         self
     }
 
     /// Enable tags being added to a group
+    #[must_use]
     pub fn enable_tags(mut self) -> Self {
         self.tags = Some(true);
         self
     }
 
     /// Disable images being added to a group
+    #[must_use]
     pub fn disable_images(mut self) -> Self {
         self.images = Some(false);
         self
     }
 
     /// Enable images being added to a group
+    #[must_use]
     pub fn enable_images(mut self) -> Self {
         self.images = Some(true);
         self
     }
 
     /// Disable pipelines being added to a group
+    #[must_use]
     pub fn disable_pipelines(mut self) -> Self {
         self.pipelines = Some(false);
         self
     }
 
     /// Enable pipelines being added to a group
+    #[must_use]
     pub fn enable_pipelines(mut self) -> Self {
         self.pipelines = Some(true);
         self
     }
 
     /// Disable reactions being added to a group
+    #[must_use]
     pub fn disable_reactions(mut self) -> Self {
         self.reactions = Some(false);
         self
     }
 
     /// Enable reactions being added to a group
+    #[must_use]
     pub fn enable_reactions(mut self) -> Self {
         self.reactions = Some(true);
         self
     }
 
     /// Disable results being added to a group
+    #[must_use]
     pub fn disable_results(mut self) -> Self {
         self.results = Some(false);
         self
     }
 
     /// Enable results being added to a group
+    #[must_use]
     pub fn enable_results(mut self) -> Self {
         self.results = Some(true);
         self
     }
 
     /// Disable comments being added to a group
+    #[must_use]
     pub fn disable_comments(mut self) -> Self {
         self.comments = Some(false);
         self
     }
 
     /// Enable comments being added to a group
+    #[must_use]
     pub fn enable_comments(mut self) -> Self {
         self.comments = Some(true);
         self
     }
 
     /// Disable entities being added to a group
+    #[must_use]
     pub fn disable_entities(mut self) -> Self {
         self.entities = Some(false);
         self
     }
 
     /// Enable entities being added to a group
+    #[must_use]
     pub fn enable_entities(mut self) -> Self {
         self.entities = Some(true);
         self
     }
 
+    /// Disable associations being added to a group
+    #[must_use]
+    pub fn disable_associations(mut self) -> Self {
+        self.associations = Some(false);
+        self
+    }
+
+    /// Enable associations being added to a group
+    #[must_use]
+    pub fn enable_associations(mut self) -> Self {
+        self.associations = Some(true);
+        self
+    }
+
     /// Check if this update contains any changes
+    #[must_use]
     pub fn is_empty(&self) -> bool {
         self.files.is_none()
             && self.repos.is_none()
@@ -760,6 +834,7 @@ impl GroupAllowedUpdate {
             && self.results.is_none()
             && self.comments.is_none()
             && self.entities.is_none()
+            && self.associations.is_none()
     }
 }
 
@@ -810,6 +885,7 @@ impl GroupUpdate {
     ///         .metagroup_add("new_metagroup")
     ///         .metagroup_remove("old_metagroup"));
     /// ```
+    #[must_use]
     pub fn owners(mut self, update: GroupUsersUpdate) -> Self {
         // add the owners update
         self.owners = update;
@@ -834,6 +910,7 @@ impl GroupUpdate {
     ///         .metagroup_add("new_metagroup")
     ///         .metagroup_remove("old_metagroup"));
     /// ```
+    #[must_use]
     pub fn managers(mut self, update: GroupUsersUpdate) -> Self {
         // add the managers update
         self.managers = update;
@@ -858,6 +935,7 @@ impl GroupUpdate {
     ///         .metagroup_add("new_metagroup")
     ///         .metagroup_remove("old_metagroup"));
     /// ```
+    #[must_use]
     pub fn users(mut self, update: GroupUsersUpdate) -> Self {
         // add the users update
         self.users = update;
@@ -882,6 +960,7 @@ impl GroupUpdate {
     ///         .metagroup_add("new_metagroup")
     ///         .metagroup_remove("old_metagroup"));
     /// ```
+    #[must_use]
     pub fn monitors(mut self, update: GroupUsersUpdate) -> Self {
         // add the monitors update
         self.monitors = update;
@@ -902,6 +981,7 @@ impl GroupUpdate {
     /// GroupUpdate::default()
     ///     .description("This is my new description");
     /// ```
+    #[must_use]
     pub fn description<T: Into<String>>(mut self, description: T) -> Self {
         // add the monitors update
         self.description = Some(description.into());
@@ -917,12 +997,14 @@ impl GroupUpdate {
     ///
     /// GroupUpdate::default().clear_description();
     /// ```
+    #[must_use]
     pub fn clear_description(mut self) -> Self {
         self.clear_description = true;
         self
     }
 
     /// Check if this is update is empty
+    #[must_use]
     pub fn is_empty(&self) -> bool {
         self.owners.is_empty()
             && self.managers.is_empty()
@@ -938,6 +1020,7 @@ impl GroupUpdate {
     /// # Arguments
     ///
     /// * `user` - The user to check
+    #[must_use]
     pub fn removes_only_user(&self, user: &str) -> bool {
         // crawl each of the roles and check them
         for role in &[&self.owners, &self.managers, &self.users, &self.monitors] {
@@ -958,6 +1041,7 @@ impl GroupUpdate {
     }
 
     /// Check if this update contains an update to any roles metagroup info
+    #[must_use]
     pub fn will_update_metagroups(&self) -> bool {
         self.owners.updates_metagroups()
             || self.managers.updates_metagroups()
@@ -1013,7 +1097,7 @@ impl PartialEq<GroupUsersRequest> for GroupUsers {
     ///
     /// # Arguments
     ///
-    /// * `request` - The GroupUsersRequest to compare against
+    /// * `request` - The `GroupUsersRequest` to compare against
     fn eq(&self, request: &GroupUsersRequest) -> bool {
         // make sure our direct users match
         matches_set!(self.direct, request.direct);
@@ -1028,7 +1112,7 @@ impl PartialEq<GroupUsersUpdate> for GroupUsers {
     ///
     /// # Arguments
     ///
-    /// * `update` - The GroupUsersUpdate to compare against
+    /// * `update` - The `GroupUsersUpdate` to compare against
     fn eq(&self, update: &GroupUsersUpdate) -> bool {
         // make sure we added all of our requested direct users
         matches_adds!(self.direct, update.direct_add);
@@ -1080,6 +1164,7 @@ pub struct Group {
 
 impl Group {
     /// Count the total number of members in this group
+    #[must_use]
     pub fn member_count(&self) -> usize {
         self.owners.combined.len()
             + self.managers.combined.len()
@@ -1093,6 +1178,7 @@ impl Group {
     /// # Arguments
     ///
     /// * `user` - The whose role we are trying to get
+    #[must_use]
     pub fn role(&self, user: &String) -> Roles {
         if self.owners.combined.contains(user) {
             Roles::Owner
@@ -1110,6 +1196,7 @@ impl Group {
     }
 
     /// Get the current role of this ldap metagroup
+    #[must_use]
     pub fn ldap_role(&self, user: &String) -> Roles {
         if self.owners.metagroups.contains(user) {
             Roles::Owner
@@ -1125,6 +1212,7 @@ impl Group {
     }
 
     /// Build a vector of all members of this group
+    #[must_use]
     pub fn members(&self) -> Vec<&String> {
         self.owners
             .combined
@@ -1137,6 +1225,7 @@ impl Group {
     }
 
     /// Check if this group has any metagroups based roles set
+    #[must_use]
     pub fn metagroup_enabled(&self) -> bool {
         !self.owners.metagroups.is_empty()
             || !self.managers.metagroups.is_empty()
@@ -1149,6 +1238,7 @@ impl Group {
     /// # Arguments
     ///
     /// * `username` - Ther username to check
+    #[must_use]
     pub fn is_manager_or_owner(&self, username: &str) -> bool {
         self.owners.combined.contains(username) || self.managers.combined.contains(username)
     }
@@ -1159,7 +1249,7 @@ impl PartialEq<GroupRequest> for Group {
     ///
     /// # Arguments
     ///
-    /// * `request` - The GroupRequest to compare against
+    /// * `request` - The `GroupRequest` to compare against
     fn eq(&self, request: &GroupRequest) -> bool {
         // make sure the name is the same
         same!(self.name, request.name);
@@ -1178,7 +1268,7 @@ impl PartialEq<GroupUpdate> for Group {
     ///
     /// # Arguments
     ///
-    /// * `update` - The GroupUpdate to compare against
+    /// * `update` - The `GroupUpdate` to compare against
     #[rustfmt::skip]
     fn eq(&self, update: &GroupUpdate) -> bool {
         // make sure all of our roles were updated
@@ -1195,14 +1285,49 @@ impl PartialEq<GroupUpdate> for Group {
 #[derive(Serialize, Deserialize, Debug, Clone)]
 #[cfg_attr(feature = "api", derive(utoipa::ToSchema))]
 pub struct GroupStats {
-    /// A map of status summaries for each pipeline in this group
-    pub pipelines: HashMap<String, PipelineStats>,
+    /// A map of status summaries for each tool instance with jobs on a shared workload queue in
+    /// this group, by user
+    #[serde(default)]
+    pub workloads: HashMap<Uuid, HashMap<String, StageStats>>,
 }
 
 impl GroupStats {
-    /// gets a total count for the number of stages in use by all pipelines and users
+    /// gets a total count for the number of tool instances in use by all users
+    #[must_use]
     pub fn total(&self) -> usize {
-        // add all the number of stage up for each user and pipeline
-        self.pipelines.values().map(|map| map.total()).sum()
+        // add up the users with jobs for each tool instance
+        self.workloads.values().map(HashMap::len).sum()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::GroupAllowedUpdate;
+
+    /// An update that only changes the associations flag isn't empty
+    #[test]
+    fn allowed_update_associations_is_not_empty() {
+        // an update with no flags set is empty
+        assert!(GroupAllowedUpdate::default().is_empty());
+        // an update with only the associations flag set isn't empty
+        let update = GroupAllowedUpdate {
+            associations: Some(false),
+            ..GroupAllowedUpdate::default()
+        };
+        assert!(!update.is_empty());
+    }
+
+    /// The associations builders set the associations flag
+    #[test]
+    fn allowed_update_associations_builders() {
+        // enabling associations sets the flag to true
+        let enabled = GroupAllowedUpdate::default().enable_associations();
+        assert_eq!(enabled.associations, Some(true));
+        // disabling associations sets the flag to false
+        let disabled = GroupAllowedUpdate::default().disable_associations();
+        assert_eq!(disabled.associations, Some(false));
+        // no other flag is touched by either builder
+        assert!(enabled.entities.is_none() && disabled.entities.is_none());
+        assert!(enabled.files.is_none() && disabled.files.is_none());
     }
 }

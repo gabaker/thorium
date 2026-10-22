@@ -7,7 +7,7 @@ use itertools::Itertools;
 use regex::Regex;
 use reqwest::StatusCode;
 use serde::Deserialize;
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeSet, HashMap, HashSet};
 use std::ffi::OsStr;
 use std::net::IpAddr;
 use std::path::{Path, PathBuf};
@@ -32,6 +32,18 @@ static CHILD_FILTERS_CACHE: LazyLock<Mutex<HashMap<String, Regex>>> =
 
 /// The name of the metadata file tools write for children carved from pcaps
 const PCAP_METADATA_FILE_NAME: &str = "thorium_pcap_metadata.json";
+
+/// Get the tool instance a job's filesystems record as the tool that found them
+///
+/// Jobs don't carry the tool instance they run, so their filesystems record no tool instance.
+///
+/// # Arguments
+///
+/// * `_job` - The job that found the filesystem
+fn filesystem_tool(_job: &GenericJob) -> Option<Uuid> {
+    // no tool instance is known for a job
+    None
+}
 
 /// Create all directories to look for children in
 ///
@@ -126,18 +138,9 @@ pub async fn get_filesystem_children(path: &PathBuf) -> Result<FileSystemEntityB
 ///
 /// * `child` - The path to the child file to check
 fn is_supporting(child: &Path) -> bool {
-    if let Some(ext) = child.extension().and_then(|ext| ext.to_str()) {
-        match ext {
-            // this extension is .so, so it is a supporting build file
-            "so" => true,
-            // this extension doesn't match any of our supporting build file
-            // extensions, so it is not a support build file
-            _ => false,
-        }
-    } else {
-        // this file has no extension or is not UTF-8, so it is not a supporting build file
-        false
-    }
+    // only a UTF-8 `.so` extension marks a supporting build file; any other extension, no
+    // extension, or a non-UTF-8 one doesn't
+    matches!(child.extension().and_then(|ext| ext.to_str()), Some("so"))
 }
 
 /// Check if the haystack matches any of the given filters
@@ -156,7 +159,7 @@ fn is_supporting(child: &Path) -> bool {
 )]
 fn matches_any_filter(
     haystack: &str,
-    filters: &HashSet<String>,
+    filters: &BTreeSet<String>,
     filters_cache: &mut HashMap<String, Regex>,
 ) -> Result<bool, Error> {
     for raw_filter in filters {
@@ -226,26 +229,26 @@ fn child_matches_any(
         }
     };
     // get file name and convert to UTF-8, otherwise we can't match
-    if let Some(file_name) = child.file_name().and_then(|name| name.to_str()) {
-        if matches_any_filter(file_name, &filters.file_name, filters_cache)? {
-            log!(
-                logs,
-                "Child '{}' has file name that matches a filter!",
-                child.to_string_lossy()
-            );
-            return Ok(true);
-        }
+    if let Some(file_name) = child.file_name().and_then(|name| name.to_str())
+        && matches_any_filter(file_name, &filters.file_name, filters_cache)?
+    {
+        log!(
+            logs,
+            "Child '{}' has file name that matches a filter!",
+            child.to_string_lossy()
+        );
+        return Ok(true);
     }
     // get file extension and convert to UTF-8, otherwise we can't match
-    if let Some(file_extension) = child.extension().and_then(|ext| ext.to_str()) {
-        if matches_any_filter(file_extension, &filters.file_extension, filters_cache)? {
-            log!(
-                logs,
-                "Child '{}' has file extension that matches a filter!",
-                child.to_string_lossy()
-            );
-            return Ok(true);
-        }
+    if let Some(file_extension) = child.extension().and_then(|ext| ext.to_str())
+        && matches_any_filter(file_extension, &filters.file_extension, filters_cache)?
+    {
+        log!(
+            logs,
+            "Child '{}' has file extension that matches a filter!",
+            child.to_string_lossy()
+        );
+        return Ok(true);
     }
     // none of the filters matched
     if let Some(mime) = mime {
@@ -274,14 +277,23 @@ async fn get_parent_groups(thorium: &Thorium, job: &GenericJob) -> Result<Vec<St
         // get info on this sample
         let sample = thorium.files.get(sha256).await?;
         // add this samples goups to our hashset
-        groups.extend(sample.groups().into_iter().map(|name| name.to_owned()));
+        groups.extend(
+            sample
+                .groups()
+                .into_iter()
+                .map(std::borrow::ToOwned::to_owned),
+        );
     }
     // get the info on all the repos we depend on
     for repo_target in &job.repos {
         // get info on this repo
         let repo = thorium.repos.get(&repo_target.url).await?;
         // add this repos goups to our hashset
-        groups.extend(repo.groups().into_iter().map(|name| name.to_owned()));
+        groups.extend(
+            repo.groups()
+                .into_iter()
+                .map(std::borrow::ToOwned::to_owned),
+        );
     }
     // convert our hash set to a vec
     let group_vec = groups.into_iter().collect();
@@ -686,6 +698,7 @@ impl Children {
     /// * `depth` - The depth for this child source sample
     /// * `commits` - The commit that each repo is checked out too
     /// * `logs` - The logs to send to the API
+    /// * `groups` - The groups to submit the children to
     #[expect(clippy::too_many_arguments)]
     #[instrument(name = "Children::submit_source", skip_all, err(Debug))]
     pub async fn submit_source(
@@ -698,8 +711,6 @@ impl Children {
         groups: &[String],
         logs: &mut Sender<String>,
     ) -> Result<(), Error> {
-        // get the name of the tool that source this sample
-        let tool = &job.stage;
         // submit either our loose files or our filesystem
         let (paths, is_direct) = match &mut self.source {
             // theres no source children and nothing to do
@@ -730,17 +741,14 @@ impl Children {
         // submit for each repo that was bound in
         for repo in &job.repos {
             // get the current commit for this repo
-            let commit = match commits.get(&repo.url) {
-                Some(commit) => commit,
-                None => {
-                    event!(Level::ERROR, repo = repo.url, msg = "Missing commit");
-                    log!(
-                        logs,
-                        "Repo {} missing commit info - skipping children upload",
-                        repo.url
-                    );
-                    continue;
-                }
+            let Some(commit) = commits.get(&repo.url) else {
+                event!(Level::ERROR, repo = repo.url, msg = "Missing commit");
+                log!(
+                    logs,
+                    "Repo {} missing commit info - skipping children upload",
+                    repo.url
+                );
+                continue;
             };
             let resps = submit!(
                 repo,
@@ -785,7 +793,9 @@ impl Children {
                     // create this filesystem for each sample
                     for sample in &job.samples {
                         // create this filesystem in thorium
-                        builder.create(tool, sample, groups, thorium).await?;
+                        builder
+                            .create(filesystem_tool(job), sample, groups, thorium)
+                            .await?;
                     }
                 }
             }
@@ -801,6 +811,8 @@ impl Children {
     /// * `job` - The job we are collecting results from
     /// * `results` - The result ids from the job that uploaded these children
     /// * `logs` - The logs to send to the API
+    /// * `depth` - The depth to submit the children at
+    /// * `groups` - The groups to submit the children to
     #[instrument(name = "Children::submit_unpacked", skip_all, err(Debug))]
     pub async fn submit_unpacked(
         &mut self,
@@ -862,7 +874,9 @@ impl Children {
                     // create this filesystem for each sample
                     for sample in &job.samples {
                         // create this filesystem in thorium
-                        builder.create(tool, sample, groups, thorium).await?;
+                        builder
+                            .create(filesystem_tool(job), sample, groups, thorium)
+                            .await?;
                     }
                 }
             }
@@ -983,6 +997,7 @@ impl Children {
     /// * `results` - The result ids from the job that uploaded these children
     /// * `groups` - The groups to submit to
     /// * `logs` - The logs to send to the API
+    /// * `depth` - The depth to submit the carved children at
     #[instrument(name = "Children::submit_carved", skip_all, err(Debug))]
     pub async fn submit_carved(
         &mut self,
@@ -1076,7 +1091,9 @@ impl Children {
                     // create this filesystem for each sample
                     for sample in &job.samples {
                         // create this filesystem in thorium
-                        builder.create(tool, sample, groups, thorium).await?;
+                        builder
+                            .create(filesystem_tool(job), sample, groups, thorium)
+                            .await?;
                     }
                 }
             }
@@ -1122,7 +1139,9 @@ impl Children {
                     // create this filesystem for each sample
                     for sample in &job.samples {
                         // create this filesystem in thorium
-                        builder.create(tool, sample, groups, thorium).await?;
+                        builder
+                            .create(filesystem_tool(job), sample, groups, thorium)
+                            .await?;
                     }
                 }
             }
@@ -1282,7 +1301,7 @@ mod tests {
     ///
     /// The carved-unknown paths are taken once before `submit_carved` loops over the job's parent
     /// samples, mirroring the pcap handling, so every parent sample is submitted with the full set
-    /// of unknown children and a CarvedUnknown origin rather than parents 2..N getting an empty
+    /// of unknown children and a `CarvedUnknown` origin rather than parents 2..N getting an empty
     /// set.
     #[test]
     fn unknown_carved_children_associated_with_every_parent_sample() {
@@ -1320,5 +1339,138 @@ mod tests {
         let plan = Children::carved_unknown_plan(&samples, &mut unknown).unwrap();
         // the single parent gets every child as direct loose files
         assert_eq!(plan, vec![(children, true)]);
+    }
+
+    /// `is_supporting` marks only a file with a `.so` extension as a supporting build file
+    #[test]
+    fn only_so_files_are_supporting() {
+        // a shared object is a supporting build file
+        assert!(is_supporting(Path::new("/build/libfoo.so")));
+        // other extensions, a versioned shared object, and no extension aren't
+        assert!(!is_supporting(Path::new("/build/foo.o")));
+        assert!(!is_supporting(Path::new("/build/libfoo.so.1")));
+        assert!(!is_supporting(Path::new("/build/foo")));
+    }
+
+    /// Start a mock Thorium server that records each whole request and answers the requests a
+    /// filesystem builder makes: an empty entity listing, entity creates, and association creates
+    async fn entity_server() -> (String, std::sync::Arc<Mutex<Vec<String>>>) {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        // bind to a random local port
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        // track the requests we receive
+        let recorded = std::sync::Arc::new(Mutex::new(Vec::new()));
+        let inner = recorded.clone();
+        // answer requests in the background
+        tokio::spawn(async move {
+            loop {
+                // accept the next connection
+                let (mut stream, _) = listener.accept().await.unwrap();
+                // read until the request head and its whole body have arrived
+                let mut buf = Vec::new();
+                let mut chunk = [0_u8; 4096];
+                loop {
+                    // read the next chunk of this request
+                    let read = stream.read(&mut chunk).await.unwrap();
+                    buf.extend_from_slice(&chunk[..read]);
+                    // check whether the head is complete and the body has arrived
+                    let text = String::from_utf8_lossy(&buf).to_string();
+                    let done = text.find("\r\n\r\n").is_some_and(|end| {
+                        // get the headers of this request
+                        let head = text[..end].to_lowercase();
+                        // a chunked body ends with an empty chunk
+                        if head.contains("transfer-encoding: chunked") {
+                            return text.ends_with("\r\n0\r\n\r\n");
+                        }
+                        // otherwise the body is as long as its content length
+                        let length = head
+                            .lines()
+                            .find_map(|line| {
+                                line.strip_prefix("content-length:")
+                                    .map(|len| len.trim().parse::<usize>().unwrap())
+                            })
+                            .unwrap_or(0);
+                        buf.len() >= end + 4 + length
+                    });
+                    // stop once the request is complete or the client closed the connection
+                    if done || read == 0 {
+                        break;
+                    }
+                }
+                // record this request
+                let text = String::from_utf8_lossy(&buf).to_string();
+                let line = text.lines().next().unwrap_or_default().to_owned();
+                inner.lock().unwrap().push(text);
+                // answer listings with no entities and creates with a new id
+                let body = if line.starts_with("GET /api/entities/details/") {
+                    r#"{"data":[]}"#.to_owned()
+                } else if line.starts_with("POST /api/entities/") {
+                    format!(r#"{{"id":"{}","name":"entity"}}"#, Uuid::new_v4())
+                } else {
+                    "{}".to_owned()
+                };
+                let resp = format!(
+                    "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
+                    body.len()
+                );
+                stream.write_all(resp.as_bytes()).await.unwrap();
+                stream.shutdown().await.unwrap();
+            }
+        });
+        // return the server's address and the requests it records
+        (format!("http://{addr}"), recorded)
+    }
+
+    /// A filesystem a job carves is created with no tool instance and no legacy tool names
+    #[tokio::test]
+    async fn carved_filesystem_sends_no_tool_provenance() {
+        // start a mock server and a client for it
+        let (host, recorded) = entity_server().await;
+        let thorium = Thorium::build(&host).token("token").build().await.unwrap();
+        // build a job that carved a filesystem
+        let job = GenericJob {
+            reaction: Uuid::new_v4(),
+            id: Uuid::new_v4(),
+            group: "corn".into(),
+            pipeline: "harvest".into(),
+            stage: "carver".into(),
+            creator: "mcarson".into(),
+            args: thorium::models::GenericJobArgs::default(),
+            status: thorium::models::JobStatus::Running,
+            deadline: chrono::Utc::now(),
+            parent: None,
+            generator: false,
+            samples: vec!["sample1".into()],
+            ephemeral: Vec::default(),
+            parent_ephemeral: HashMap::default(),
+            repos: Vec::default(),
+            trigger_depth: None,
+            tool_instance: Uuid::new_v4(),
+            run: None,
+        };
+        // the job records no tool instance for its filesystems
+        let tool = filesystem_tool(&job);
+        assert_eq!(tool, None);
+        // build an empty carved filesystem and create it for the job's sample
+        let root = std::env::temp_dir().join(format!("thorium-carved-{}", Uuid::new_v4()));
+        tokio::fs::create_dir_all(&root).await.unwrap();
+        let builder = get_filesystem_children(&root).await.unwrap();
+        builder
+            .create(tool, &job.samples[0], &["corn".to_owned()], &thorium)
+            .await
+            .unwrap();
+        tokio::fs::remove_dir_all(&root).await.unwrap();
+        // find the request that created the filesystem
+        let requests = recorded.lock().unwrap().clone();
+        let create = requests
+            .iter()
+            .find(|req| req.contains("name=\"kind\"") && req.contains("FileSystem\r\n"))
+            .expect("no filesystem create request");
+        // it sends the filesystem's hash but no tool instances or tool names
+        assert!(create.contains("name=\"metadata[sha256]\""), "{create}");
+        assert!(!create.contains("tool_ids"), "{create}");
+        assert!(!create.contains("metadata[tools]"), "{create}");
+        assert!(!create.contains("legacy_tools"), "{create}");
     }
 }

@@ -130,6 +130,22 @@ impl ThoriumMCP {
     }
 }
 
+impl ThoriumMCP {
+    /// Get the names of every tool Thorium's MCP server exposes
+    #[must_use]
+    pub fn tool_names() -> Vec<String> {
+        // list every tool in the same routers the server is built from
+        (Self::sample_router()
+            + Self::images_router()
+            + Self::pipelines_router()
+            + Self::tree_router())
+        .list_all()
+        .into_iter()
+        .map(|tool| tool.name.to_string())
+        .collect()
+    }
+}
+
 /// Mount the mcp service to our api
 ///
 /// # Arguments
@@ -153,7 +169,7 @@ pub fn mount(router: Router<AppState>, conf: &Conf) -> Router<AppState> {
 
 #[cfg(test)]
 mod tests {
-    use super::McpConfig;
+    use super::{McpConfig, ThoriumMCP};
     use axum::http::request::Parts;
     use axum::http::{HeaderValue, Request};
 
@@ -191,5 +207,26 @@ mod tests {
         let parts = parts_with_auth(b"Bearer deadbeefcafe");
         let token = McpConfig::grab_token(&parts).expect("failed to grab a valid token");
         assert_eq!(token, "deadbeefcafe");
+    }
+
+    /// The MCP server's tool names are the tools its routers expose
+    #[test]
+    fn tool_names() {
+        // list every tool the server exposes
+        let mut names = ThoriumMCP::tool_names();
+        names.sort();
+        // the server exposes the sample, image, pipeline, and tree tools
+        assert_eq!(
+            names,
+            vec![
+                "get_sample",
+                "get_sample_result_file",
+                "get_sample_results",
+                "list_images",
+                "list_pipelines",
+                "list_sample_result_file_paths",
+                "start_tree",
+            ]
+        );
     }
 }

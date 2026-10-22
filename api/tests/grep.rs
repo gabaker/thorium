@@ -5,10 +5,11 @@ use std::collections::HashMap;
 use chrono::{Duration, Utc};
 use thorium::client::{GrepClient, ResultsClient};
 use thorium::models::{
-    Buffer, CommentRequest, EntityMetadataRequest, EntityRequest, FileDeleteOpts, Flag,
-    GrepDocumentMatches, GrepMatches, GrepOpts, GrepSource, GrepStats, GroupUpdate,
-    GroupUsersUpdate, ImageVersion, OriginRequest, OutputDisplayType, OutputRequest, RepoCheckout,
-    RepoRequest, Sample, SampleRequest, TagRequest, TruncationReason,
+    Buffer, CommentRequest, CredentialKind, EntityMetadataRequest, EntityRequest, FileDeleteOpts,
+    Flag, GrepDocumentMatches, GrepMatches, GrepOpts, GrepSource, GrepStats, GroupUpdate,
+    GroupUsersUpdate, ModelCredentialEntityRequest, ModelSecret, OriginRequest, OutputDisplayType,
+    OutputRequest, RepoCheckout, RepoRequest, Sample, SampleRequest, TagRequest, ToolVersion,
+    TruncationReason,
 };
 use thorium::test_utilities::{self, generators};
 use thorium::{Error, Thorium, contains_key, fail, is, is_empty, is_not};
@@ -209,7 +210,7 @@ async fn seed_sample(client: &Thorium, group: &str) -> Result<String, Error> {
         OutputDisplayType::String,
     )
     .buffer(Buffer::new(format!("line one\nline two {NEEDLE}\n")).name("grep.txt"))
-    .tool_version(ImageVersion::SemVer(
+    .tool_version(ToolVersion::SemVer(
         semver::Version::parse("1.0.0").unwrap(),
     ));
     client.files.create_result(output_req).await?;
@@ -287,7 +288,7 @@ async fn seed_truncated_sample(client: &Thorium, group: &str) -> Result<String, 
         OutputDisplayType::String,
     )
     .buffer(Buffer::new(truncated_body("no needle here\n")).name("truncated.bin"))
-    .tool_version(ImageVersion::SemVer(
+    .tool_version(ToolVersion::SemVer(
         semver::Version::parse("1.0.0").unwrap(),
     ));
     client.files.create_result(output_req).await?;
@@ -400,7 +401,7 @@ async fn grep_sample_restricts_tools() -> Result<(), Error> {
         format!("another tools result with {NEEDLE} in it"),
         OutputDisplayType::String,
     )
-    .tool_version(ImageVersion::SemVer(
+    .tool_version(ToolVersion::SemVer(
         semver::Version::parse("1.0.0").unwrap(),
     ));
     client.files.create_result(output_req).await?;
@@ -461,7 +462,7 @@ async fn grep_sample_multi_line() -> Result<(), Error> {
         OutputDisplayType::String,
     )
     .buffer(Buffer::new(format!("{NEEDLE} alpha\n{NEEDLE} omega\n")).name("multiline.txt"))
-    .tool_version(ImageVersion::SemVer(
+    .tool_version(ToolVersion::SemVer(
         semver::Version::parse("1.0.0").unwrap(),
     ));
     client.files.create_result(output_req).await?;
@@ -553,7 +554,7 @@ async fn grep_sample_oversized_result_file() -> Result<(), Error> {
         OutputDisplayType::String,
     )
     .buffer(Buffer::new(body).name("oversized.txt"))
-    .tool_version(ImageVersion::SemVer(
+    .tool_version(ToolVersion::SemVer(
         semver::Version::parse("1.0.0").unwrap(),
     ));
     client.files.create_result(output_req).await?;
@@ -613,7 +614,7 @@ async fn grep_sample_binary_result_file_is_pruned() -> Result<(), Error> {
         OutputDisplayType::String,
     )
     .buffer(Buffer::new(body).name("binary.png"))
-    .tool_version(ImageVersion::SemVer(
+    .tool_version(ToolVersion::SemVer(
         semver::Version::parse("1.0.0").unwrap(),
     ));
     client.files.create_result(output_req).await?;
@@ -1663,7 +1664,7 @@ async fn grep_files_metadata_counts() -> Result<(), Error> {
         OutputDisplayType::String,
     )
     .buffer(Buffer::new(truncated_body(&format!("{NEEDLE} early\n"))).name("overlap.bin"))
-    .tool_version(ImageVersion::SemVer(
+    .tool_version(ToolVersion::SemVer(
         semver::Version::parse("1.0.0").unwrap(),
     ));
     client.files.create_result(output_req).await?;
@@ -1727,7 +1728,7 @@ async fn grep_repo_all_sources() -> Result<(), Error> {
         OutputDisplayType::String,
     )
     .buffer(Buffer::new(format!("repo result file {NEEDLE}\n")).name("grep.txt"))
-    .tool_version(ImageVersion::SemVer(
+    .tool_version(ToolVersion::SemVer(
         semver::Version::parse("1.0.0").unwrap(),
     ));
     client.repos.create_result(output_req).await?;
@@ -1775,7 +1776,7 @@ async fn grep_repo_only_tags() -> Result<(), Error> {
         format!("a repo result with {NEEDLE} in it"),
         OutputDisplayType::String,
     )
-    .tool_version(ImageVersion::SemVer(
+    .tool_version(ToolVersion::SemVer(
         semver::Version::parse("1.0.0").unwrap(),
     ));
     client.repos.create_result(output_req).await?;
@@ -2234,6 +2235,76 @@ async fn grep_entity_respects_groups() -> Result<(), Error> {
     let page = other.entities.grep(GrepOpts::new(PATTERN)).await?;
     is!(page.data.iter().any(|matches| matches.key == visible), true);
     is!(page.data.iter().any(|matches| matches.key == hidden), false);
+    Ok(())
+}
+
+/// Grep never searches or returns a model credential's secrets, while its name stays searchable
+#[tokio::test]
+async fn grep_entities_never_match_model_credential_secrets() -> Result<(), Error> {
+    // get admin client
+    let client = test_utilities::admin_client().await?;
+    // Create a group
+    let group = generators::groups(1, &client).await?.remove(0).name;
+    // every secret value holds our needle followed by a marker no other field holds
+    let secret = format!("{NEEDLE}SecretMarker");
+    // build an AWS access key credential whose secret and session token both hold our needle
+    let mut meta = ModelCredentialEntityRequest::new(
+        CredentialKind::AwsAccessKey {
+            access_key_id: "AKIAGREPTEST".to_owned(),
+        },
+        Some(ModelSecret::from(secret.as_str())),
+    );
+    meta.session_token = Some(ModelSecret::from(secret.as_str()));
+    // create a credential whose only needle is in its secrets
+    let req = generators::gen_model_entity(
+        &[group.as_str()],
+        EntityMetadataRequest::ModelCredential(meta.clone()),
+    );
+    let hidden = client.entities.create(req).await?.id.to_string();
+    // create a credential with the same secrets and our needle in its name too
+    let mut req = generators::gen_model_entity(
+        &[group.as_str()],
+        EntityMetadataRequest::ModelCredential(meta),
+    );
+    req.name = format!("credential {NEEDLE}");
+    let named = client.entities.create(req).await?.id.to_string();
+    // a single entity grep of the secret only credential finds nothing at all
+    let matches = client
+        .entities
+        .grep_key(&hidden, GrepOpts::new(PATTERN))
+        .await?;
+    is!(total_matches(&matches), 0);
+    is_empty!(matches.metadata);
+    // a single entity grep of the named credential finds only its name
+    let matches = client
+        .entities
+        .grep_key(&named, GrepOpts::new(PATTERN))
+        .await?;
+    is!(matches.metadata.keys().collect::<Vec<_>>(), vec!["name"]);
+    is!(has_needle(matches.metadata.values()), true);
+    is!(
+        snippets(all_docs(&matches))
+            .iter()
+            .any(|snip| snip.contains("SecretMarker")),
+        false
+    );
+    // a corpus grep of our group never returns the secret only credential
+    let opts = GrepOpts::new(PATTERN).group(&group);
+    let page = client.entities.grep(opts).await?;
+    is!(page.data.iter().any(|matches| matches.key == hidden), false);
+    // the corpus grep returns the named credential with only its name matched
+    let corpus = page
+        .data
+        .iter()
+        .find(|matches| matches.key == named)
+        .ok_or_else(|| Error::new("the corpus grep did not return the named credential"))?;
+    is!(corpus.metadata.keys().collect::<Vec<_>>(), vec!["name"]);
+    is!(
+        snippets(all_docs(corpus))
+            .iter()
+            .any(|snip| snip.contains("SecretMarker")),
+        false
+    );
     Ok(())
 }
 

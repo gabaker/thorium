@@ -29,6 +29,11 @@ pub enum Pipelines {
     /// Group, name, and bans are not editable here
     #[clap(version, author, verbatim_doc_comment)]
     Edit(EditPipeline),
+    /// Set the tool that runs a pipeline stage
+    ///
+    /// The stage follows the tool's latest version, or the version given with `--pin`
+    #[clap(version, author, verbatim_doc_comment)]
+    StageTool(StageTool),
     /// Manage/list pipeline notifications
     #[clap(subcommand)]
     Notifications(PipelineNotifications),
@@ -286,6 +291,23 @@ pub struct EditPipeline {
     pub editor: Option<String>,
 }
 
+/// A command to set the tool that runs a pipeline stage
+#[derive(Parser, Debug, Clone)]
+pub struct StageTool {
+    /// The name of the pipeline
+    pub pipeline: String,
+    /// The name of the stage
+    pub stage: String,
+    /// The tool to run the stage with, by ID or name
+    pub tool: String,
+    /// Pin the stage to this version of the tool (a tool instance ID) instead of its latest
+    #[clap(long)]
+    pub pin: Option<Uuid>,
+    /// The group the pipeline is in; required if other pipelines have the same name
+    #[clap(short, long)]
+    pub group: Option<String>,
+}
+
 /// The pipeline ban specific subcommands
 #[derive(Parser, Debug, Clone)]
 pub enum PipelineBans {
@@ -467,4 +489,66 @@ pub struct ImportPipelines {
     /// Override the default editor for reviewing merge conflicts
     #[clap(long, value_name = "EDITOR")]
     pub editor: Option<String>,
+}
+
+#[cfg(test)]
+mod tests {
+    use clap::Parser;
+    use uuid::Uuid;
+
+    use super::Pipelines;
+    use crate::args::{Args, SubCommands};
+
+    /// Parse thorctl arguments into a pipelines command
+    ///
+    /// # Arguments
+    ///
+    /// * `args` - The arguments after `thorctl pipelines`
+    fn parse(args: &[&str]) -> Result<Pipelines, clap::Error> {
+        // prepend the binary and subcommand names
+        let mut full = vec!["thorctl", "pipelines"];
+        full.extend_from_slice(args);
+        // parse them into a pipelines command
+        let SubCommands::Pipelines(pipelines) = Args::try_parse_from(full)?.cmd else {
+            panic!("expected a pipelines command");
+        };
+        Ok(pipelines)
+    }
+
+    /// `pipelines stage-tool` takes a pipeline, a stage, and a tool, plus a pinned version and
+    /// group
+    #[test]
+    fn stage_tool_args() {
+        // the tool follows its latest version by default
+        let Pipelines::StageTool(cmd) =
+            parse(&["stage-tool", "orbit", "plant", "scanner"]).unwrap()
+        else {
+            panic!("expected pipelines stage-tool");
+        };
+        assert_eq!(cmd.pipeline, "orbit");
+        assert_eq!(cmd.stage, "plant");
+        assert_eq!(cmd.tool, "scanner");
+        assert_eq!(cmd.pin, None);
+        assert_eq!(cmd.group, None);
+        // a pinned version and group are taken
+        let pinned = "69ff8820-f688-4968-bd6f-45a4cb0f78a9";
+        let Pipelines::StageTool(cmd) = parse(&[
+            "stage-tool",
+            "orbit",
+            "plant",
+            "scanner",
+            "--pin",
+            pinned,
+            "-g",
+            "jupiter",
+        ])
+        .unwrap() else {
+            panic!("expected pipelines stage-tool");
+        };
+        assert_eq!(cmd.pin, Some(Uuid::parse_str(pinned).unwrap()));
+        assert_eq!(cmd.group.as_deref(), Some("jupiter"));
+        // the tool is required and the pin must be an id
+        assert!(parse(&["stage-tool", "orbit", "plant"]).is_err());
+        assert!(parse(&["stage-tool", "orbit", "plant", "scanner", "--pin", "latest"]).is_err());
+    }
 }

@@ -14,9 +14,9 @@ use uuid::Uuid;
 use super::db::{self};
 use crate::models::backends::OutputSupport;
 use crate::models::{
-    AutoTag, AutoTagUpdate, EntityKinds, ImageVersion, Output, OutputChunk, OutputCollection,
+    AutoTag, AutoTagUpdate, EntityKinds, Output, OutputChunk, OutputCollection,
     OutputCollectionUpdate, OutputDisplayType, OutputForm, OutputFormBuilder, OutputKind,
-    OutputMap, OutputRow, Repo, ResultGetParams, Sample, User,
+    OutputMap, OutputRow, Repo, ResultGetParams, Sample, ToolVersion, User,
 };
 use crate::utils::{ApiError, Shared, bounder};
 use crate::{bad, bad_internal, deserialize, update, update_clear, update_opt};
@@ -42,10 +42,10 @@ impl<O: OutputSupport> OutputFormBuilder<O> {
     /// * `shared` - Shared Thorium objects
     #[rustfmt::skip]
     #[instrument(name = "OutputForm::upload_entities_file", skip(self, field, shared), fields(kind = kind.to_string()), err(Debug))]
-    async fn upload_entities_file<'a>(
+    async fn upload_entities_file(
         &mut self,
         kind: EntityKinds,
-        field: Field<'a>,
+        field: Field<'_>,
         shared: &Shared,
     ) -> Result<(), ApiError> {
         // throw an error if the correct content type is not used
@@ -73,9 +73,9 @@ impl<O: OutputSupport> OutputFormBuilder<O> {
     /// * `field` - The field to upload a result file from
     /// * `shared` - Shared Thorium objects
     #[instrument(name = "OutputForm::upload_result_file", skip_all, err(Debug))]
-    async fn upload_result_file<'a>(
+    async fn upload_result_file(
         &mut self,
-        field: Field<'a>,
+        field: Field<'_>,
         shared: &Shared,
     ) -> Result<(), ApiError> {
         // throw an error if the correct content type is not used
@@ -133,7 +133,7 @@ impl<O: OutputSupport> OutputFormBuilder<O> {
                 "groups" => self.groups.push(field.text().await?),
                 "tool" => self.tool = Some(field.text().await?),
                 "tool_version" => {
-                    self.tool_version = Some(ImageVersion::from(&field.text().await?));
+                    self.tool_version = Some(ToolVersion::from(&field.text().await?));
                 }
                 "cmd" => self.cmd = Some(field.text().await?),
                 "result" => self.result = Some(field.text().await?),
@@ -184,7 +184,7 @@ impl<O: OutputSupport> OutputFormBuilder<O> {
             // we found and consumed a valid form entry
             return Ok(None);
         }
-        bad!(format!("All form entries must have a name!"))
+        bad!("All form entries must have a name!".to_string())
     }
 
     ///  Validate and convert this [`OutputFormBuilder`] to an [`OutputForm`]

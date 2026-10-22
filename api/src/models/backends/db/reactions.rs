@@ -7,19 +7,20 @@ use std::collections::{BTreeMap, HashMap};
 use tracing::{Level, event, instrument};
 use uuid::Uuid;
 
-use super::keys::{
-    ImageKeys, JobKeys, ReactionCacheKind, ReactionKeys, StreamKeys, SubReactionLists, logs,
-};
-use super::{RedisCursor, helpers, images, jobs, pipelines, streams};
+use super::keys::{JobKeys, ReactionCacheKind, ReactionKeys, StreamKeys, SubReactionLists, logs};
+use super::{RedisCursor, helpers, jobs, streams};
 use crate::models::backends::db::{RedisCursorSupport, RedisGroupCursor};
 use crate::models::backends::reactions::{InternalReactionCacheFileUpdates, ReactionCursorParam};
+use crate::models::backends::stage_tools::ToolInstanceMemo;
+use crate::models::runtime::DEFAULT_PROJECTED_RUNTIME;
 use crate::models::schema::scylla::LogsTableRef;
 use crate::models::schema::{CursorLimit, STAGE_LOG_LIMIT_CAP};
 use crate::models::{
-    ApiCursor, BulkReactionResponse, Group, JobHandleStatus, JobList, JobResetRequestor, JobResets,
-    Pipeline, RawJob, Reaction, ReactionActions, ReactionCache, ReactionCacheUpdate,
-    ReactionExpire, ReactionList, ReactionRequest, ReactionStatus, StageLogs, StageLogsAdd,
-    StatusRequest, StatusUpdate, SystemComponents, User,
+    ApiCursor, BulkReactionResponse, Group, JobHandleStatus, JobList, JobReactionIds,
+    JobResetRequestor, JobResets, JobStatus, Pipeline, PlannedStage, RawJob, Reaction,
+    ReactionActions, ReactionCache, ReactionCacheUpdate, ReactionExpire, ReactionList,
+    ReactionPlan, ReactionRequest, ReactionStatus, StageLogs, StageLogsAdd, StatusRequest,
+    StatusUpdate, SystemComponents, User,
 };
 use crate::utils::{ApiError, Shared};
 use crate::{
@@ -59,11 +60,12 @@ macro_rules! pipe_key {
 ///
 /// * `pipe` - The Redis [`redis::Pipeline`] to build ontop of
 /// * `cast` - The [`Reaction`] to create in Redis
-/// * `pipeline` - The [`Pipeline`] this [`Reaction`] is based on
+/// * `cache` - The initial cache of this [`Reaction`]
+/// * `memo` - The tool instances already read for this request
 /// * `shared` - Shared Thorium objects
 #[rustfmt::skip]
 #[instrument(
-    name = "db::reactions::get_parent_ephemeral",
+    name = "db::reactions::build",
     skip_all,
     err(Debug)
 )]
@@ -71,7 +73,7 @@ pub async fn build(
     pipe: &mut redis::Pipeline,
     cast: Reaction,
     cache: ReactionCache,
-    pipeline: &Pipeline,
+    memo: &mut ToolInstanceMemo,
     shared: &Shared,
 ) -> Result<(Reaction, JobHandleStatus), ApiError> {
     // build reaction data keys
@@ -103,6 +105,8 @@ pub async fn build(
         .cmd("hsetnx").arg(&keys.data).arg("ephemeral").arg(serialize!(&cast.ephemeral))
         .cmd("hsetnx").arg(&keys.data).arg("parent_ephemeral").arg(serialize!(&cast.parent_ephemeral))
         .cmd("hsetnx").arg(&keys.data).arg("repos").arg(serialize!(&cast.repos))
+        .cmd("hsetnx").arg(&keys.data).arg("source").arg(serialize!(&cast.source))
+        .cmd("hsetnx").arg(&keys.data).arg("plan").arg(serialize!(&cast.plan))
         // add to specific status set
         .cmd("sadd").arg(ReactionKeys::status(&cast.group, &cast.pipeline, &cast.status, shared))
             .arg(&reaction_id)
@@ -144,13 +148,21 @@ pub async fn build(
         // set our trigger depth
         pipe.cmd("hsetnx").arg(&keys.data).arg("trigger_depth").arg(trigger_depth);
     }
+    // name the run token this reaction's workers use if it has one
+    if let Some(run_token) = &cast.run_token {
+        pipe.cmd("hsetnx").arg(&keys.data).arg("run_token").arg(run_token);
+    }
+    // set the run this reaction belongs to if it belongs to one
+    if let Some(run) = &cast.run {
+        pipe.cmd("hsetnx").arg(&keys.data).arg("run").arg(serialize!(run));
+    }
     // add to any required tag lists
     let pipe = cast.tags.iter()
         .fold(pipe, |pipe, tag|
             pipe.cmd("sadd").arg(ReactionKeys::tag(&cast.group, tag, shared))
                 .arg(&reaction_id));
     // create initial jobs
-    react(pipe, pipeline, cast, shared).await
+    react(pipe, cast, memo, shared).await
 }
 
 /// Recursively crawl parent reactions and build a list of their ephemeral files
@@ -197,22 +209,28 @@ pub async fn get_parent_ephemeral(
 /// * `user` - The [`User`] creating this [`Reaction`]
 /// * `request` - The [`ReactionRequest`] to add to the backend
 /// * `pipeline` - The [`Pipeline`] this [`Reaction`] is based on
+/// * `plan` - The stages resolved for this [`Reaction`]
+/// * `memo` - The tool instances already read for this request
 /// * `shared` - Shared Thorium objects
 #[instrument(name = "db::reactions::create", skip_all, err(Debug))]
 pub async fn create(
     user: &User,
     request: ReactionRequest,
     pipeline: &Pipeline,
+    plan: ReactionPlan,
+    memo: &mut ToolInstanceMemo,
     shared: &Shared,
 ) -> Result<Reaction, ApiError> {
     // get any ephemeral files from any parent reactions
     let map = HashMap::default();
     let ephemeral = get_parent_ephemeral(&request.group, &request.parent, map, shared).await?;
     // cast to a reaction
-    let (cast, cache, _) = request.cast(user, pipeline, ephemeral, shared).await?;
+    let (cast, cache, _) = request
+        .cast(user, pipeline, plan, ephemeral, shared)
+        .await?;
     // build reaction creation pipeline
     let mut pipe = redis::pipe();
-    let (reaction, _) = build(&mut pipe, cast.clone(), cache, pipeline, shared).await?;
+    let (reaction, _) = build(&mut pipe, cast.clone(), cache, memo, shared).await?;
     // create reaction along with its jobs in redis
     let _: () = pipe.atomic().query_async(conn!(shared)).await?;
     Ok(reaction)
@@ -223,29 +241,35 @@ pub async fn create(
 /// # Arguments
 ///
 /// * `user` - The [`User`] creating these [`Reaction`]s
-/// * `requests` - The [`Reaction`] requests to add to the backend
-/// * `pipe_cache` - The pipeline cache these [`Reaction`]s are based on
+/// * `requests` - The [`Reaction`] requests to add to the backend, with their index in the
+///   original request
+/// * `pipe_cache` - The pipelines and resolved plans these [`Reaction`]s are based on
+/// * `memo` - The tool instances already read for this request
+/// * `response` - The response holding the errors of requests that were already refused
 /// * `shared` - Shared Thorium objects
 #[instrument(name = "db::reactions::create_bulk", skip_all, err(Debug))]
-pub async fn create_bulk(
+pub async fn create_bulk<S: std::hash::BuildHasher>(
     user: &User,
-    requests: Vec<ReactionRequest>,
-    pipe_cache: &HashMap<String, Pipeline>,
+    requests: Vec<(usize, ReactionRequest)>,
+    pipe_cache: &HashMap<String, (Pipeline, ReactionPlan), S>,
+    memo: &mut ToolInstanceMemo,
+    mut response: BulkReactionResponse,
     shared: &Shared,
 ) -> Result<BulkReactionResponse, ApiError> {
     // build a vector to store all of our casted reactions
     let mut casts: Vec<(Reaction, ReactionCache, &Pipeline)> = Vec::with_capacity(requests.len());
-    // build a response object allocated to the right size
-    let mut response = BulkReactionResponse::with_capacity(requests.len());
     // try to cast all of our requests to a reaction
-    for (index, req) in requests.into_iter().enumerate() {
+    for (index, req) in requests {
         // get any ephemeral files from any parent reactions
         let map = HashMap::default();
         let ephemeral = get_parent_ephemeral(&req.group, &req.parent, map, shared).await?;
-        // get a reference to pipeline data and request as a tuple
-        if let Some(pipeline) = pipe_cache.get(&pipe_key!(req)) {
+        // get a reference to pipeline data and its plan
+        if let Some((pipeline, plan)) = pipe_cache.get(&pipe_key!(req)) {
             // cast this request to a full reaction
-            match req.cast(user, pipeline, ephemeral, shared).await {
+            match req
+                .cast(user, pipeline, plan.clone(), ephemeral, shared)
+                .await
+            {
                 // we don't continue to track the index because any errors past this point
                 // can lead to malformed redis command pipelines and so are fatal. These
                 // errors should never occur though and when they are it likely means that
@@ -263,9 +287,9 @@ pub async fn create_bulk(
     // build all reactions
     let mut pipe = redis::pipe();
     // add the commands to create all of these reactions to our redis pipeline
-    for (cast, cache, pipeline) in casts {
+    for (cast, cache, _) in casts {
         // add this reaction to our redis pipeline
-        let (reaction, _) = build(&mut pipe, cast, cache, pipeline, shared).await?;
+        let (reaction, _) = build(&mut pipe, cast, cache, memo, shared).await?;
         // add this newly created reactions id to our response object
         response.created.push(reaction.id)
     }
@@ -691,40 +715,32 @@ pub async fn list_details(
     Ok(reactions)
 }
 
-/// Finds the cost of executing the current stages and the stages after it
+/// Gets the runtime of the next step's stages and the total runtime of the steps after it
 ///
-/// The cost will be retuned as a tuple containing the costs of the next
-/// stages to execute and the total cost of all stages after that.
+/// Each stage costs its tool instance's runtime, or the default runtime when it has none.
 ///
 /// # Arguments
 ///
-/// * `group` - The group this reaction is in
-/// * `stages` - The images left to execute
+/// * `steps` - The steps left to execute, starting with the next one
 /// * `shared` - Shared Thorium objects
 #[rustfmt::skip]
 async fn cost(
-    group: &str,
-    stages: &[Vec<String>],
+    steps: &[Vec<PlannedStage>],
     shared: &Shared
 ) -> Result<(Vec<f64>, f64), ApiError> {
-    // get the cost of the stages to execute   
-    let mut costs: Vec<f64> = stages.iter()
-        .flatten()
-        .fold(redis::pipe().atomic(), |pipe, stage|
-            pipe.cmd("hget").arg(ImageKeys::data(group, stage, shared)).arg("runtime"))
-        .query_async(conn!(shared)).await?;
-
-    // short circuit if there are no stages after this
-    if costs.len() == stages[0].len() {
-        Ok((costs, 0.0))
+    // get the runtime of every stage left to execute in one read
+    let instances = steps.iter().flatten().map(|stage| stage.tool_instance.to_string()).collect::<Vec<String>>();
+    let mut costs: Vec<Option<f64>> = if instances.is_empty() {
+        Vec::new()
     } else {
-        // get the cost of each of the stages to execute next
-        let next = costs.drain(..stages[0].len()).collect();
-        // get cost of all the other stages left to execute
-        let rest = costs.iter()
-            .fold(0.0, |accum, cost| accum + cost);
-        Ok((next, rest))
-    }
+        query!(cmd("hmget").arg(JobKeys::workload_runtimes(shared)).arg(&instances), shared).await?
+    };
+    // get the cost of each of the stages to execute next
+    let next_len = steps.first().map_or(0, Vec::len).min(costs.len());
+    let next = costs.drain(..next_len).map(|cost| cost.unwrap_or(DEFAULT_PROJECTED_RUNTIME)).collect();
+    // get cost of all the other stages left to execute
+    let rest = costs.iter().map(|cost| cost.unwrap_or(DEFAULT_PROJECTED_RUNTIME)).sum();
+    Ok((next, rest))
 }
 
 /// Adds command to increment a parent reaction sub reaction counter
@@ -833,6 +849,15 @@ async fn build_expire<'a>(
         .cmd("expire").arg(&sub_reacts.started).arg(shared.config.thorium.retention.data)
         .cmd("expire").arg(&sub_reacts.completed).arg(shared.config.thorium.retention.data)
         .cmd("expire").arg(&sub_reacts.failed).arg(shared.config.thorium.retention.data);
+    // a run's own reaction expires the run's queues, since the run ends after its sub reactions
+    if reaction.run == Some(reaction.id) {
+        for tool_instance in reaction.plan.tool_instances() {
+            for status in [JobStatus::Created, JobStatus::Running, JobStatus::Completed, JobStatus::Failed, JobStatus::Sleeping] {
+                let key = JobKeys::run_queue(&reaction.group, &reaction.id, &tool_instance, &status, shared);
+                pipe.cmd("expire").arg(key).arg(shared.config.thorium.retention.data);
+            }
+        }
+    }
     // crawl over the jobs for this reaction and expire all of their data
     let mut cursor = 0;
     loop {
@@ -927,49 +952,49 @@ fn sla_deadline(sla: DateTime<Utc>, remaining: f64) -> DateTime<Utc> {
 
 /// Handles the creation of jobs for the current stage of the reaction
 ///
-/// If this is the last stage in a reaction it will complete it. Each job's deadline is the
-/// reaction's SLA minus the runtime left in the reaction, saturating at the earliest timestamp
-/// when that runtime is too large to subtract.
+/// The stages come from the reaction's plan, so no pipeline is read. If this is the last stage in
+/// a reaction it will complete it.
 ///
 /// # Arguments
 ///
 /// * `pipe` - The redis [`redis::Pipeline`] to build commands ontop of
-/// * `pipeline` - The [`Pipeline`] this [`Reaction`] is built around
 /// * `reaction` - The [`Reaction`] to create jobs for
+/// * `memo` - The tool instances already read for this request
 /// * `shared` - Shared Thorium objects
 #[rustfmt::skip]
 #[instrument(name = "db::reactions::react", skip_all, err(Debug))]
 pub async fn react(
     pipe: &mut redis::Pipeline,
-    pipeline: &Pipeline,
     mut reaction: Reaction,
+    memo: &mut ToolInstanceMemo,
     shared: &Shared,
 ) -> Result<(Reaction, JobHandleStatus), ApiError> {
     // set status to complete if reaction has completed its final stage
-    if reaction.current_stage as usize > pipeline.order.len() - 1 {
+    let current = usize::try_from(reaction.current_stage).unwrap_or(usize::MAX);
+    if current >= reaction.plan.stages.len() {
         // complete reaction and set the expire time on its data
         let reaction = complete(pipe, reaction, shared).await?;
         return Ok((reaction, JobHandleStatus::Completed));
     }
     // get stages to launch
-    let stages = &pipeline.order[reaction.current_stage as usize];
+    let stages = reaction.plan.stages[current].clone();
     reaction.current_stage_length = stages.len() as u64;
     reaction.current_stage_progress = 0;
     // get cost of stages to left to execute and the next stages to execute
-    let (next, rest) = cost(&pipeline.group, &pipeline.order[reaction.current_stage as usize..], shared).await?;
-    // get the image info on all required images
-    let info = images::job_info(&pipeline.group, stages, shared).await?;
+    let (next, rest) = cost(&reaction.plan.stages[current..], shared).await?;
+    // get the job settings of each stage's tool instance
+    let info = memo.step_info(&reaction.group, &stages, shared).await?;
     // launch all sub stages
     for (index, sub) in stages.iter().enumerate() {
         // calculate cost to execute this job
-        let cost = *next.get(index).unwrap_or(&600.0);
+        let cost = *next.get(index).unwrap_or(&DEFAULT_PROJECTED_RUNTIME);
         // get the timestamp we need to start this job by in order to meet the SLA, saturating
         // at the earliest timestamp when the runtimes are too large to subtract
         let deadline = sla_deadline(reaction.sla, cost + rest);
         // build a raw job object for this stage
-        let cast: RawJob = RawJob::build(&reaction, sub, deadline, &info).await?;
+        let job: RawJob = RawJob::build(&reaction, &sub.name, deadline, &info)?;
         // add job build command onto our redis pipeline
-        jobs::build(pipe, &cast, shared).await?;
+        jobs::build(pipe, &job, shared).await?;
     }
     // update reaction data
     let key = ReactionKeys::data(&reaction.group, &reaction.id, shared);
@@ -1078,11 +1103,10 @@ pub async fn proceed(mut reaction: Reaction, shared: &Shared) -> Result<JobHandl
         // either all generatos completed or we never had any
         // so increment current stage
         reaction.current_stage += 1;
-        // get pipeline data
-        let pipeline = pipelines::get(&reaction.group, &reaction.pipeline, shared).await?;
-        // create the current stages jobs
+        // create the current stages jobs from the reaction's plan
         let mut pipe = redis::pipe();
-        let (reaction, status) = react(&mut pipe, &pipeline, reaction, shared).await?;
+        let mut memo = ToolInstanceMemo::default();
+        let (reaction, status) = react(&mut pipe, reaction, &mut memo, shared).await?;
         // only advance this reaction if it is still on the stage we proceeded from and hasn't
         // been completed or failed, so concurrent proceeds can't both launch the next stage
         let data_key = ReactionKeys::data(&reaction.group, &reaction.id, shared);
@@ -1482,9 +1506,8 @@ pub async fn delete(reaction: &Reaction, shared: &Shared) -> Result<(), ApiError
         jobs.details.iter()
             .fold(&mut pipe, |pipe, job|
                 pipe.cmd("del").arg(JobKeys::data(&job.id, shared))
-                    .cmd("zrem").arg(JobKeys::status_queue(&reaction.group, 
-                            &reaction.pipeline, &job.stage, &reaction.creator, &job.status, shared))
-                         .arg(job.id.to_string())
+                    .cmd("zrem").arg(JobKeys::status_queue(job, &job.status, shared))
+                         .arg(force_serialize!(&JobReactionIds::new(job)))
                     .cmd("zrem").arg(StreamKeys::system_scaler(job.scaler, "deadlines", shared))
                          .arg(job.stream_data())
                     .cmd("del").arg(ReactionKeys::stage_logs(&reaction.id, &job.stage, shared)));

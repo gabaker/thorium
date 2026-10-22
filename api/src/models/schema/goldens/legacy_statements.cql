@@ -94,6 +94,10 @@ DELETE FROM {ns}.entities WHERE kind = ? AND group in ? AND year = ? AND bucket 
 SELECT id, group, kind, created, name, submitter, kind_data, description, image FROM {ns}.entities_by_id WHERE id = ? AND group in ?
 -- entities_by_id.get_many
 SELECT id, group, kind, created, name, submitter, kind_data, description, image FROM {ns}.entities_by_id WHERE id in ? AND group in ?
+-- entities_by_id.all_groups
+SELECT group FROM {ns}.entities_by_id WHERE id = ?
+-- entities_by_id.get_groups_kinds_by_ids
+SELECT id, group, kind FROM {ns}.entities_by_id WHERE id in ?
 -- entities_by_id.get_names_kinds_by_ids
 SELECT id, name, kind FROM {ns}.entities_by_id WHERE id in ?
 -- associations.insert

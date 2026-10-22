@@ -38,6 +38,7 @@ pub fn build(
         .cmd("hsetnx").arg(&keys.data).arg("order").arg(serialize!(&cast.order))
         .cmd("hsetnx").arg(&keys.data).arg("sla").arg(cast.sla)
         .cmd("hsetnx").arg(&keys.data).arg("triggers").arg(serialize!(&cast.triggers))
+        .cmd("hsetnx").arg(&keys.data).arg("stage_tools").arg(serialize!(&cast.stage_tools))
         .cmd("hset").arg(cache_status).arg("status").arg(true)
         .cmd("sadd").arg(&keys.set).arg(&cast.name);
     // add option value if set
@@ -130,6 +131,24 @@ pub async fn list_details(
     // cast to pipeline structs
     let pipelines = cast!(raw, Pipeline::try_from);
     Ok(pipelines)
+}
+
+/// Lists every pipeline in a group with its details
+///
+/// # Arguments
+///
+/// * `group` - The group to list pipelines for
+/// * `shared` - Shared Thorium objects
+#[instrument(name = "db::pipelines::list_all", skip(shared), err(Debug))]
+pub async fn list_all(group: &str, shared: &Shared) -> Result<Vec<Pipeline>, ApiError> {
+    // get the names of every pipeline in this group
+    let names: Vec<String> = query!(
+        cmd("smembers").arg(PipelineKeys::set(group, shared)),
+        shared
+    )
+    .await?;
+    // get their details
+    list_details(group, &names, shared).await
 }
 
 /// Lists all pipelines in redis for a backup, and a problem for each pipeline that doesn't parse
@@ -236,7 +255,8 @@ pub async fn update(pipeline: &Pipeline, add: &[String], remove: &[String], shar
     let mut pipe = redis::pipe();
     pipe.cmd("hset").arg(&keys.data).arg("order").arg(serialize!(&pipeline.order))
         .cmd("hset").arg(&keys.data).arg("sla").arg(pipeline.sla)
-        .cmd("hset").arg(&keys.data).arg("bans").arg(serialize!(&pipeline.bans));
+        .cmd("hset").arg(&keys.data).arg("bans").arg(serialize!(&pipeline.bans))
+        .cmd("hset").arg(&keys.data).arg("stage_tools").arg(serialize!(&pipeline.stage_tools));
     // add this pipeline to our images used_by lists
     add.iter()
         .fold(&mut pipe, |pipe, image| {
@@ -393,7 +413,7 @@ pub async fn exists_authenticated(
 /// builds a key to a status queue for a specific pipeline
 macro_rules! status {
     ($pipeline:expr, $stage:expr, $user:expr, $status:expr, $shared:expr) => {
-        JobKeys::status_queue(
+        JobKeys::stage_queue(
             &$pipeline.group,
             &$pipeline.name,
             $stage,

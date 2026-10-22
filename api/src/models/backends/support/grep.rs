@@ -107,8 +107,8 @@ cfg_if::cfg_if! {
 
         use crate::models::backends::db;
         use crate::models::{
-            Entity, EntityKinds, EntityListParams, EntityMetadata, FileListParams, Repo,
-            RepoListParams, Sample, TagMap,
+            Entity, EntityKinds, EntityListParams, EntityMetadata, FileListParams, RedactSecrets,
+            Repo, RepoListParams, Sample, TagMap,
         };
         use crate::serialize;
 
@@ -448,6 +448,8 @@ cfg_if::cfg_if! {
         impl GrepSupport for Entity {
             /// Get a single entity to grep, authorizing that this user can see it
             ///
+            /// Any model credential secrets are cleared before the entity is returned.
+            ///
             /// # Arguments
             ///
             /// * `user` - The user that is grepping this entity
@@ -460,7 +462,10 @@ cfg_if::cfg_if! {
                     return crate::bad!(format!("{key} is not a valid entity id"));
                 };
                 // get this entity, which authorizes that this user can see it
-                Entity::get(user, id, shared).await
+                let mut entity = Entity::get(user, id, shared).await?;
+                // clear any credential secrets so no grep source can ever search or return them
+                entity.redact_secrets();
+                Ok(entity)
             }
 
             /// List the next page of entity ids for this user to grep
@@ -543,7 +548,7 @@ cfg_if::cfg_if! {
             /// Queue this entities metadata and tags to be searched
             ///
             /// Entities have no submissions or comments in Thorium today so those sources
-            /// are always empty for them.
+            /// are always empty for them. Model credential secrets are never queued.
             ///
             /// # Arguments
             ///
@@ -584,8 +589,36 @@ cfg_if::cfg_if! {
                                 incident.cover_term.as_ref(),
                             );
                         }
-                        // all other entity kinds have no greppable free form text
-                        _ => (),
+                        // every other kind has no kind specific metadata searched; listing
+                        // each one keeps a new kind from being searched without a decision
+                        //
+                        // model credentials hold secrets and model endpoints configure how
+                        // they are used, so neither is searched beyond its name, description,
+                        // and tags
+                        EntityMetadata::ModelCredential(_)
+                        | EntityMetadata::ModelEndpoint(_)
+                        // tools, agents, toolsets, workflows, and model profiles are searched
+                        // by their name, description, and tags only
+                        | EntityMetadata::Tool(_)
+                        | EntityMetadata::ToolInstance(_)
+                        | EntityMetadata::Agent(_)
+                        | EntityMetadata::ToolSet(_)
+                        | EntityMetadata::ToolSetInstance(_)
+                        | EntityMetadata::WorkflowCatalog(_)
+                        | EntityMetadata::WorkflowInstance(_)
+                        | EntityMetadata::ModelProfile(_)
+                        // these kinds have no greppable free form text
+                        | EntityMetadata::Device(_)
+                        | EntityMetadata::Vendor(_)
+                        | EntityMetadata::Collection(_)
+                        | EntityMetadata::FileSystem(_)
+                        | EntityMetadata::Folder(_)
+                        | EntityMetadata::WindowsProcessTree(_)
+                        | EntityMetadata::NetworkConnection(_)
+                        | EntityMetadata::CompiledFunction(_)
+                        | EntityMetadata::PeSection(_)
+                        | EntityMetadata::PeImport(_)
+                        | EntityMetadata::Other => (),
                     }
                 }
                 // queue our tags if we are searching them

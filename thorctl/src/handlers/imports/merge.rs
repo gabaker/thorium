@@ -18,9 +18,9 @@ use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 use thorium::models::{
     ChildFilters, Cleanup, Dependencies, EventTrigger, Image, ImageArgs, ImageBan, ImageLifetime,
-    ImageRequest, ImageScaler, ImageUpdate, ImageVersion, Kvm, OutputCollection, OutputDisplayType,
-    Pipeline, PipelineRequest, PipelineUpdate, Resources, ResourcesRequest, SecurityContext,
-    SpawnLimits, Volume,
+    ImageRequest, ImageScaler, ImageUpdate, Kvm, OutputCollection, OutputDisplayType, Pipeline,
+    PipelineRequest, PipelineUpdate, Resources, ResourcesRequest, SecurityContext, SpawnLimits,
+    ToolVersion, Volume,
 };
 use thorium::{CtlConf, Error, Thorium};
 use uuid::Uuid;
@@ -121,7 +121,7 @@ pub struct MergeableImage {
     #[serde(rename = "*creator*", skip_serializing_if = "Option::is_none", default)]
     pub creator: Option<String>,
     /// The image's version, or `None` for a versionless image
-    pub version: Option<ImageVersion>,
+    pub version: Option<ToolVersion>,
     /// The scaler that schedules this image
     pub scaler: ImageScaler,
     /// The container image URL (trimmed), or `None` when not set
@@ -922,7 +922,7 @@ mod tests {
         assert_eq!(MergeEdit::<i32>::from_update(None), MergeEdit::NoChanges);
     }
 
-    /// Build a MergeableImage with the non-editable fields populated
+    /// Build a `MergeableImage` with the non-editable fields populated
     fn populated_mergeable_image() -> MergeableImage {
         let mut image = MergeableImage::from(ImageRequest::new("g", "n"));
         image.group = Some("g".to_string());
@@ -946,8 +946,8 @@ mod tests {
         }
     }
 
-    /// Every serialized top-level field of a MergeableImage is listed in
-    /// IMAGE_FIELD_ORDER, so the curated order stays complete as fields are added
+    /// Every serialized top-level field of a `MergeableImage` is listed in
+    /// `IMAGE_FIELD_ORDER`, so the curated order stays complete as fields are added
     /// (the `curated_yaml` fallback still emits unlisted keys, but they'd lose their
     /// curated position — this guards against that drift)
     #[test]

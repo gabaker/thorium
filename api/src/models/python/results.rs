@@ -2,7 +2,7 @@
 
 use pyo3::pymethods;
 
-use crate::models::{ImageVersion, Output, ResultGetParams};
+use crate::models::{Output, ResultGetParams, ToolVersion};
 
 #[pymethods]
 impl ResultGetParams {
@@ -31,12 +31,13 @@ impl Output {
         self.result.to_string()
     }
 
+    /// Get the version of the tool that created this output as a string
     #[pyo3(name = "tool_version")]
     #[getter]
     fn tool_version_py(&self) -> Option<String> {
         self.tool_version.as_ref().map(|v| match v {
-            ImageVersion::SemVer(version) => version.to_string(),
-            ImageVersion::Custom(version_raw) => version_raw.clone(),
+            ToolVersion::SemVer(version) => version.to_string(),
+            ToolVersion::Custom(version_raw) => version_raw.clone(),
         })
     }
 }

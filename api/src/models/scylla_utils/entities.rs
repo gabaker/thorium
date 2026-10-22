@@ -48,6 +48,14 @@ pub struct EntityListRow {
     pub name: String,
 }
 
+/// One group an entity is in, read from one of its rows
+#[derive(Debug, ScyllaProjection)]
+#[thorium_projection(of = EntitiesByIdView)]
+pub struct EntityGroupRow {
+    /// The group this row of the entity is visible to
+    pub group: String,
+}
+
 /// A single row from Scylla used to supplement tag rows missing name
 /// and kind
 #[derive(Debug, ScyllaProjection)]
@@ -57,6 +65,18 @@ pub struct EntityListSupplementRow {
     pub id: Uuid,
     /// The name of this entity
     pub name: String,
+    /// The kind of entity this is
+    pub kind: EntityKinds,
+}
+
+/// A single row from Scylla with an entity's group and kind
+#[derive(Debug, ScyllaProjection)]
+#[thorium_projection(of = EntitiesByIdView)]
+pub struct EntityGroupKindRow {
+    /// The entity's unique ID
+    pub id: Uuid,
+    /// The group this row of the entity is visible to
+    pub group: String,
     /// The kind of entity this is
     pub kind: EntityKinds,
 }
