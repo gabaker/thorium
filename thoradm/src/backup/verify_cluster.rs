@@ -549,6 +549,19 @@ impl<'a> ClusterVerifier<'a> {
             let record = problem(&component, error).key("settings");
             self.checks.fail("redis-diff", record).await?;
         }
+        // the tool instances' average runtimes; a backup taken before they were backed up holds
+        // none, as does a cluster with none yet
+        let empty = Value::Object(serde_json::Map::new());
+        let expected = backed_up.get("workload_runtimes").unwrap_or(&empty);
+        let found = live.get("workload_runtimes").unwrap_or(&empty);
+        if expected == found {
+            self.checks.pass(&component, "redis-diff");
+        } else {
+            // say only that they differ, not which tool instances, as the settings diff does
+            let error = "the workload runtimes differ from the backup".to_owned();
+            let record = problem(&component, error).key("workload_runtimes");
+            self.checks.fail("redis-diff", record).await?;
+        }
         Ok(())
     }
 

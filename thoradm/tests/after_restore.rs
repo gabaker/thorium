@@ -384,6 +384,96 @@ async fn listings_work_right_after_a_restore() {
     );
 }
 
+/// The data Agentic Workflows adds comes back after a restore with what it held: tools and their
+/// instances, models with the credential's secret, the workflow and its instance, and the average
+/// runtimes, while the run token of a run that was never backed up stays gone
+#[tokio::test]
+async fn agentic_data_survives_a_restore() {
+    // one of every resource, with a run that holds a run token
+    let harness = Harness::get().await;
+    let _guard = harness.restore_guard().await;
+    empty_target(harness).await;
+    let seeded = fixture::broad(harness).await;
+    let agentic = &seeded.agentic;
+    // the run token authenticates before the backup
+    let admin = harness.client().await;
+    let with_token = |token: &str| {
+        let host = harness.api_url.clone();
+        let token = token.to_owned();
+        async move {
+            thorium::Thorium::build(host)
+                .token(&token)
+                .build()
+                .await
+                .expect("failed to build a client with a token")
+        }
+    };
+    let runtimes = admin.jobs.workload_runtimes().await.unwrap().runtimes;
+    assert!(!runtimes.is_empty(), "no runtime was averaged");
+    assert!(
+        with_token(&agentic.run_token)
+            .await
+            .users
+            .info()
+            .await
+            .is_ok()
+    );
+    // back up everything, restore it into an emptied target
+    let out = backup(harness, "agentic", "all");
+    empty_target(harness).await;
+    let (restored, _) = restore(harness, &out);
+    assert_eq!(restored.status.code(), Some(0), "{}", describe(&restored));
+    // every entity the seed created reads back
+    let admin = harness.client().await;
+    for (what, id) in [
+        ("the tool instance", agentic.tool_instance),
+        ("the harness instance", agentic.harness_instance),
+        ("the credential", agentic.credential),
+        ("the endpoint", agentic.endpoint),
+        ("the profile", agentic.profile),
+        ("the workflow instance", agentic.workflow_instance),
+    ] {
+        admin
+            .entities
+            .get(id)
+            .await
+            .unwrap_or_else(|err| panic!("{what} didn't come back: {err}"));
+    }
+    // the credential's secret is the one that was stored
+    let read = admin
+        .entities
+        .model_credential_secret(agentic.credential)
+        .await
+        .expect("the credential's secret didn't come back");
+    assert_eq!(
+        read.secrets
+            .primary
+            .as_ref()
+            .map(|secret| secret.expose().to_owned()),
+        Some(common::agentic::CREDENTIAL_SECRET.to_owned()),
+        "the credential's secret changed"
+    );
+    // the average runtimes are the same numbers
+    let restored_runtimes = admin.jobs.workload_runtimes().await.unwrap().runtimes;
+    assert_eq!(restored_runtimes.len(), runtimes.len());
+    for (instance, runtime) in &runtimes {
+        let restored = restored_runtimes
+            .get(instance)
+            .unwrap_or_else(|| panic!("the runtime of {instance} didn't come back"));
+        assert!((runtime - restored).abs() < 1e-9, "{runtime} != {restored}");
+    }
+    // the run token was never backed up, so it no longer authenticates
+    assert!(
+        with_token(&agentic.run_token)
+            .await
+            .users
+            .info()
+            .await
+            .is_err(),
+        "the run token came back"
+    );
+}
+
 /// A restore's summary, on stderr and in its report directory, lists each component's counts,
 /// the failures file, and the step restore leaves to the admin: reindexing Elastic
 #[tokio::test]

@@ -728,6 +728,10 @@ pub struct Backup {
     /// backed up
     #[serde(default)]
     pub network_policy_sets: Vec<NetworkPolicySet>,
+    /// The average runtime of each tool instance, in seconds, keyed by the tool instance's id;
+    /// empty in backups taken before these were backed up
+    #[serde(default)]
+    pub workload_runtimes: BTreeMap<Uuid, f64>,
     /// The dangling references a backup taken with `prune_dangling` dropped, and the owners it
     /// added; left out when nothing was pruned, which is always the case without the param
     #[serde(default, skip_serializing_if = "Vec::is_empty")]

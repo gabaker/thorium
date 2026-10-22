@@ -14,7 +14,7 @@ use thorium::models::{
     ModelEndpointEntity, ModelEndpointEntityRequest, ModelProvider, ModelProviderKind, ModelSecret,
     ModelsConf, ModelsConfUpdate, NetworkPolicyUpdate, PipelineBan, PipelineBanKind,
     PipelineBanUpdate, PipelineRequest, PipelineUpdate, Pools, RepoRequest, Resources,
-    ScopedTokenRequest, SystemInfo, SystemSettings, SystemSettingsResetParams,
+    RunTokenScope, ScopedTokenRequest, SystemInfo, SystemSettings, SystemSettingsResetParams,
     SystemSettingsUpdate, SystemSettingsUpdateParams, UserCreate, UserCredentialRef,
     UserModelEndpoint, UserModelSettingsUpdate, UserRole, UserSettingsUpdate, UserUpdate, Volume,
     VolumeTypes, WorkerDeleteMap, WorkerRegistrationList,
@@ -1523,9 +1523,10 @@ async fn restore_brings_back_the_whole_redis_state() -> Result<(), Error> {
     Ok(())
 }
 
-/// A backup taken before scoped tokens and network-policy sets were backed up, which has
-/// neither field, restores with no scoped tokens, and with each group's network-policy set
-/// holding only the policies its restored images use, as rebuilt from the images
+/// A backup taken before scoped tokens, network-policy sets, and workload runtimes were backed
+/// up, which has none of those fields, restores with no scoped tokens or runtimes, and with each
+/// group's network-policy set holding only the policies its restored images use, as rebuilt from
+/// the images
 #[serial_test::serial]
 #[tokio::test]
 async fn a_backup_without_the_newer_fields_restores() -> Result<(), Error> {
@@ -1539,6 +1540,7 @@ async fn a_backup_without_the_newer_fields_restores() -> Result<(), Error> {
         .ok_or_else(|| Error::new("the backup isn't an object"))?;
     is!(fields.remove("scoped_tokens").is_some(), true);
     is!(fields.remove("network_policy_sets").is_some(), true);
+    is!(fields.remove("workload_runtimes").is_some(), true);
     // restore it as an older thoradm would send it
     let token = client.users.get("thorium").await?.token;
     let resp = reqwest::Client::new()
@@ -1548,9 +1550,11 @@ async fn a_backup_without_the_newer_fields_restores() -> Result<(), Error> {
         .send()
         .await?;
     is!(resp.status(), StatusCode::NO_CONTENT);
-    // no scoped token is left, and each network-policy set is rebuilt from the images
+    // no scoped token or workload runtime is left, and each network-policy set is rebuilt from
+    // the images
     let restored = client.system.backup().await?;
     is!(restored.scoped_tokens.len(), 0);
+    is!(client.jobs.workload_runtimes().await?.runtimes.len(), 0);
     for set in &restored.network_policy_sets {
         let used: HashSet<&String> = restored
             .images
@@ -1574,6 +1578,166 @@ async fn a_backup_without_the_newer_fields_restores() -> Result<(), Error> {
         restored.users.len(),
         older["users"].as_array().map_or(0, Vec::len)
     );
+    Ok(())
+}
+
+/// A run-scoped token is left out of a backup, and a restore of a backup that holds one, as an
+/// older API wrote it, writes none back, while ordinary scoped tokens are backed up and restored
+#[serial_test::serial]
+#[tokio::test]
+async fn run_tokens_are_not_backed_up_or_restored() -> Result<(), Error> {
+    // get admin client
+    let client = test_utilities::admin_client().await?;
+    let ns = test_utilities::CONF.thorium.namespace.clone();
+    // an ordinary scoped token and one that becomes a run token, both limited to a group
+    let (groups, _, _) = generators::gen_all(1, &client).await?;
+    let group = &groups[0].name;
+    let ordinary = client
+        .users
+        .create_scoped_token(
+            &ScopedTokenRequest::new(generators::gen_string(12).to_lowercase()).group(group),
+        )
+        .await?;
+    let run = client
+        .users
+        .create_scoped_token(
+            &ScopedTokenRequest::new(generators::gen_string(12).to_lowercase()).group(group),
+        )
+        .await?;
+    // store the second token's record with a run scope, as the API stores a run's token
+    let key = format!("{ns}:scoped_tokens:thorium");
+    let stored = swap_field(&key, &run.name, "null").await?;
+    let mut record: Value = serde_json::from_str(&stored)?;
+    record["run"] = serde_json::json!({"reaction": Uuid::new_v4(), "tool_instances": []});
+    swap_field(&key, &run.name, &record.to_string()).await?;
+    // the backup holds the ordinary token and not the run token
+    let backup = client.system.backup().await?;
+    is!(
+        backup.scoped_tokens.iter().any(|t| t.name == ordinary.name),
+        true
+    );
+    is!(
+        backup.scoped_tokens.iter().any(|t| t.name == run.name),
+        false
+    );
+    // a backup an older API wrote, which also holds the run token
+    let mut older: Backup = serde_json::from_value(serde_json::to_value(&backup)?)?;
+    let mut held = older
+        .scoped_tokens
+        .iter()
+        .find(|t| t.name == ordinary.name)
+        .cloned()
+        .ok_or_else(|| Error::new("the backup holds no ordinary scoped token"))?;
+    held.name.clone_from(&run.name);
+    held.token.clone_from(&run.token);
+    held.run = Some(RunTokenScope {
+        reaction: Uuid::new_v4(),
+        tool_instances: Vec::new(),
+    });
+    older.scoped_tokens.push(held);
+    // restoring it brings back the ordinary token and not the run token
+    client.system.restore(&older).await?;
+    let restored = client.system.backup().await?;
+    is!(
+        restored
+            .scoped_tokens
+            .iter()
+            .any(|t| t.name == ordinary.name),
+        true
+    );
+    is!(
+        restored.scoped_tokens.iter().any(|t| t.name == run.name),
+        false
+    );
+    // the ordinary token still authenticates and the run token no longer does
+    let again = Thorium::build(client.host.clone())
+        .token(&ordinary.token)
+        .build()
+        .await?;
+    again.users.info().await?;
+    let gone = match Thorium::build(client.host.clone())
+        .token(&run.token)
+        .build()
+        .await
+    {
+        Ok(scoped) => scoped.users.info().await.is_err(),
+        Err(_) => true,
+    };
+    is!(gone, true);
+    // remove the ordinary token
+    client.users.delete_scoped_token(&ordinary.name).await?;
+    Ok(())
+}
+
+/// Sets a tool instance's average runtime directly in Redis
+///
+/// # Arguments
+///
+/// * `instance` - The tool instance
+/// * `seconds` - The average runtime to store
+async fn set_workload_runtime(instance: Uuid, seconds: f64) -> Result<(), Error> {
+    // connect to the API's Redis
+    let pool = test_utilities::get_redis_client(&test_utilities::CONF).await;
+    let mut conn = pool
+        .get()
+        .await
+        .map_err(|err| Error::new(format!("failed to get a Redis connection: {err}")))?;
+    // store the runtime in the runtimes hash
+    let key = format!(
+        "{}:workload_runtimes",
+        test_utilities::CONF.thorium.namespace
+    );
+    let () = redis::cmd("HSET")
+        .arg(key)
+        .arg(instance.to_string())
+        .arg(seconds)
+        .query_async(&mut *conn)
+        .await
+        .map_err(|err| Error::new(format!("failed to set a runtime: {err}")))?;
+    Ok(())
+}
+
+/// The average runtimes of tool instances, including one whose tool instance is gone, survive a
+/// backup and restore; the workloads they were measured on don't, and nothing a restore leaves
+/// behind refers to a workload that isn't there
+#[serial_test::serial]
+#[tokio::test]
+async fn restore_brings_back_workload_runtimes_only() -> Result<(), Error> {
+    // get admin client
+    let client = test_utilities::admin_client().await?;
+    // store a runtime for a tool instance that exists and for one that doesn't
+    let group = generators::groups(1, &client).await?.remove(0).name;
+    let (_, instance) = generators::tool(
+        &[group.as_str()],
+        "1.0.0",
+        &generators::gen_image_spec(),
+        &client,
+    )
+    .await?;
+    let gone = Uuid::new_v4();
+    set_workload_runtime(instance.id, 42.5).await?;
+    set_workload_runtime(gone, 7.0).await?;
+    // the backup holds both
+    let backup = serde_json::to_value(client.system.backup().await?)?;
+    is!(backup["workload_runtimes"][instance.id.to_string()], 42.5);
+    is!(backup["workload_runtimes"][gone.to_string()], 7.0);
+    // restore it
+    let typed: Backup = serde_json::from_value(backup)?;
+    client.system.restore(&typed).await?;
+    // the runtimes are back, and the tool instance still resolves to its own runtime
+    let runtimes = client.jobs.workload_runtimes().await?;
+    is!(runtimes.runtimes.get(&instance.id).copied(), Some(42.5));
+    is!(runtimes.runtimes.get(&gone).copied(), Some(7.0));
+    // no workload list, queue, or completion time came back with them
+    let ns = &test_utilities::CONF.thorium.namespace;
+    for family in ["workloads", "workload_queue", "workload_ttc", "run_queue"] {
+        let found = redis_snapshot(&format!("{ns}:{family}:")).await?;
+        is!(found.len(), 0);
+    }
+    // averaging runtimes still works with a runtime nothing measures
+    client.jobs.update_workload_runtimes().await?;
+    let after = client.jobs.workload_runtimes().await?;
+    is!(after.runtimes.get(&gone).copied(), Some(7.0));
     Ok(())
 }
 

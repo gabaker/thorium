@@ -56,6 +56,10 @@ pub struct OracleRule {
 /// The location naming every Redis family the registry marks EPHEMERAL
 pub const EPHEMERAL_FAMILIES: &str = "EPHEMERAL Redis families";
 
+/// The location naming the scoped tokens that carry a run scope, in a user's scoped tokens and in
+/// the scoped token map
+pub const RUN_TOKENS: &str = "scoped_tokens:* field run tokens";
+
 /// The location naming every Redis hash field and string that holds JSON
 pub const JSON_VALUES: &str = "Redis JSON values";
 
@@ -153,6 +157,16 @@ pub const ORACLE_RULES: &[OracleRule] = &[
         location: "event-handler:*",
         kind: OracleRuleKind::Ignore,
         reason: "the API raises the event handler's cache-refresh flag when it restores; runtime state",
+    },
+    OracleRule {
+        location: "workload_runtimes",
+        kind: OracleRuleKind::Equivalent,
+        reason: "the scheduler's script stores an average as 2 and a restore writes it as 2.0, which read as the same number",
+    },
+    OracleRule {
+        location: RUN_TOKENS,
+        kind: OracleRuleKind::Absent,
+        reason: "a run token belongs to a run whose reaction and jobs are never backed up, so a restore must not bring it back",
     },
     OracleRule {
         location: EPHEMERAL_FAMILIES,
@@ -959,6 +973,12 @@ impl Oracle {
         found: &Snapshot,
         differences: &mut Vec<Difference>,
     ) {
+        // the fields of run tokens, which a restore must leave out
+        let run_tokens = if self.rule(RUN_TOKENS) == Some(&OracleRuleKind::Absent) {
+            run_token_fields(expected)
+        } else {
+            BTreeMap::new()
+        };
         // every key either snapshot holds
         let keys: BTreeSet<&String> = expected.redis.keys().chain(found.redis.keys()).collect();
         for key in keys {
@@ -1008,6 +1028,8 @@ impl Oracle {
                 record: (self.rule(ABSENT_KEYS) == Some(&OracleRuleKind::Equivalent))
                     .then(|| record_node(&entry))
                     .flatten(),
+                numbers: self.rule(&entry) == Some(&OracleRuleKind::Equivalent),
+                absent: run_tokens.get(key.as_str()).cloned().unwrap_or_default(),
             };
             compare_redis_value(&entry, key, want.as_ref(), new, &settings, differences);
         }
@@ -1079,6 +1101,60 @@ impl Oracle {
     }
 }
 
+/// Returns whether a hash holds only fields a restore must leave out
+///
+/// # Arguments
+///
+/// * `value` - The key's expected value
+/// * `settings` - How values compare
+fn only_absent(value: &RedisValueRepr, settings: &Comparison<'_>) -> bool {
+    // only a hash with fields, every one of them left out
+    match value {
+        RedisValueRepr::Hash(fields) => {
+            !fields.is_empty() && fields.keys().all(|field| settings.absent.contains(field))
+        }
+        _ => false,
+    }
+}
+
+/// Returns the hash fields of the run-scoped tokens a snapshot holds, by the key that holds them
+///
+/// A user's scoped tokens hold a run token under its name, and the scoped token map holds it under
+/// its value.
+///
+/// # Arguments
+///
+/// * `snapshot` - The snapshot to read
+fn run_token_fields(snapshot: &Snapshot) -> BTreeMap<String, BTreeSet<String>> {
+    // every user's scoped tokens whose record carries a run scope
+    let mut fields: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
+    for (key, entry) in &snapshot.redis {
+        let RedisValueRepr::Hash(tokens) = &entry.value else {
+            continue;
+        };
+        if !key.starts_with("scoped_tokens:") {
+            continue;
+        }
+        for (name, text) in tokens {
+            // a record without a run scope is an ordinary token
+            let Ok(token) = serde_json::from_str::<Value>(text) else {
+                continue;
+            };
+            if matches!(token.get("run"), None | Some(Value::Null)) {
+                continue;
+            }
+            fields.entry(key.clone()).or_default().insert(name.clone());
+            if let Some(value) = token.get("token").and_then(Value::as_str) {
+                fields
+                    .entry("scoped_token_map".to_owned())
+                    .or_default()
+                    .insert(value.to_owned());
+            }
+        }
+    }
+    fields
+}
+
 /// Returns whether a hash holds only fields a record may leave out, each at its default
 ///
 /// # Arguments
@@ -1130,6 +1206,8 @@ fn compare_redis_value(
         // a record the source holds no field of reads every field as its default, so a restore
         // that writes the defaults out loses nothing
         (None, Some(new)) if only_defaults(&new.value, settings) => return,
+        // a key holding only fields a restore must leave out is gone afterwards
+        (Some(old), None) if only_absent(&old.value, settings) => return,
         (old, new) => {
             push(
                 format!("redis {key}"),
@@ -1160,11 +1238,23 @@ fn compare_redis_value(
             } else {
                 (before.clone(), after.clone())
             };
-            let fields: BTreeSet<&String> = before.keys().chain(after.keys()).collect();
-            for field in fields
-                .into_iter()
-                .filter(|field| !settings.ignored.contains(field.as_str()))
+            // a field a restore must leave out is a difference only if it came back
+            for field in settings
+                .absent
+                .iter()
+                .filter(|field| after.contains_key(*field))
             {
+                push(
+                    format!("redis {key} field {field}"),
+                    None,
+                    after.get(field).cloned(),
+                    differences,
+                );
+            }
+            let fields: BTreeSet<&String> = before.keys().chain(after.keys()).collect();
+            for field in fields.into_iter().filter(|field| {
+                !settings.ignored.contains(field.as_str()) && !settings.absent.contains(*field)
+            }) {
                 if !settings.same_field(field, before.get(field), after.get(field)) {
                     push(
                         format!("redis {key} field {field}"),
@@ -1219,6 +1309,10 @@ struct Comparison<'a> {
     /// The record's path in `Backup` and its schema node, when missing optional keys read as
     /// their defaults
     record: Option<(&'static str, &'static Node)>,
+    /// Whether hash fields that read as numbers compare as numbers, so 2 and 2.0 match
+    numbers: bool,
+    /// The hash fields a restore must leave out
+    absent: BTreeSet<String>,
 }
 
 impl Comparison<'_> {
@@ -1230,6 +1324,13 @@ impl Comparison<'_> {
     /// * `before` - The expected text
     /// * `after` - The found text
     fn same_field(&self, field: &str, before: Option<&String>, after: Option<&String>) -> bool {
+        // numbers written in another form are the same number
+        if self.numbers
+            && let (Some(before), Some(after)) = (before, after)
+            && let (Ok(before), Ok(after)) = (before.parse::<f64>(), after.parse::<f64>())
+        {
+            return (before - after).abs() < f64::EPSILON;
+        }
         // a missing map field reads as an empty map
         if self.empty_maps.contains(field) {
             let empty = "{}".to_owned();
@@ -1377,6 +1478,10 @@ fn steps(path: &str) -> Vec<Step> {
     steps
 }
 
+/// The key every generated map entry gets, which parses as a UUID so the maps keyed by one read
+/// as well as the maps keyed by a string
+const MAP_KEY: &str = "00000000-0000-0000-0000-000000000000";
+
 /// Returns the smallest value a schema node accepts: its required keys only, empty
 /// collections, the first name or alternative, and zero, false, or placeholder text
 ///
@@ -1453,7 +1558,7 @@ fn without_key(node: &Node, steps: &[Step]) -> Option<Value> {
             Some(Value::Array(vec![without_key(item, rest)?]))
         }
         (Node::Map(item), [Step::Entry, rest @ ..]) if !rest.is_empty() => {
-            Some(serde_json::json!({ "k": without_key(item, rest)? }))
+            Some(serde_json::json!({ MAP_KEY: without_key(item, rest)? }))
         }
         _ => None,
     }
@@ -1470,7 +1575,7 @@ fn read_at<'a>(value: &'a Value, steps: &[Step]) -> Option<&'a Value> {
     steps.iter().try_fold(value, |value, step| match step {
         Step::Key(name) => value.get(name),
         Step::Item => value.get(0),
-        Step::Entry => value.get("k"),
+        Step::Entry => value.get(MAP_KEY),
         Step::Variant(_) => Some(value),
     })
 }

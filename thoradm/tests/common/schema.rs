@@ -8,8 +8,8 @@
 
 use super::classes::{
     CoverageMatrix, DERIVED_FIELDS, FIELD_DOMAINS, FieldDomain, LARGE_FIELD, Location, MANY_FIELD,
-    Need, PASSWORD_HASH, USER_ICON_KEY, UUID_KEYED_MAPS, ValueClass, WRITTEN_WHOLE, is_odd_key,
-    is_unicode, json_classes, large, nested_json, odd_key, unicode,
+    Need, PASSWORD_HASH, UNBACKED_FIELDS, USER_ICON_KEY, UUID_KEYED_MAPS, ValueClass,
+    WRITTEN_WHOLE, is_odd_key, is_unicode, json_classes, large, nested_json, odd_key, unicode,
 };
 use serde_json::{Map, Value, json};
 use std::collections::BTreeMap;
@@ -337,6 +337,25 @@ pub fn is_identifier(path: &str) -> bool {
     field_domain(path) == Some(FieldDomain::Identifier)
 }
 
+/// Returns the maximum of an unsigned field the schema types as `int32` with a minimum of zero
+/// but whose Rust type is narrower, or `None` when the field really is a `u32`
+///
+/// The schema carries no maximum for `u8` and `u16`, so a generator that filled such a field
+/// with `u32::MAX` would write a value its type refuses to read.
+///
+/// # Arguments
+///
+/// * `path` - The field path
+fn narrow_maximum(path: &str) -> Option<u32> {
+    // a ban's provider status is a `u16`
+    (path.contains("CredentialRejected") && path.ends_with(".status"))
+        .then_some(u32::from(u16::MAX))
+}
+
+/// How long a Large-class username is: large enough to stress Redis keys, and well under the
+/// 65,535-byte limit Scylla puts on a partition key
+const LARGE_USERNAME: usize = 30_000;
+
 /// The largest version number with every part at its maximum
 const MAX_SEMVER: &str = "18446744073709551615.18446744073709551615.18446744073709551615";
 
@@ -351,7 +370,8 @@ pub fn is_uuid_keyed(path: &str) -> bool {
     UUID_KEYED_MAPS.iter().any(|(listed, _)| *listed == path)
 }
 
-/// Returns whether a field is a key, at any depth, of a record the API always writes whole
+/// Returns whether a field is a key, at any depth, of a record the API always writes whole, or is
+/// itself a part every backup holds
 ///
 /// # Arguments
 ///
@@ -360,8 +380,10 @@ pub fn is_uuid_keyed(path: &str) -> bool {
 pub fn is_written_whole(path: &str) -> bool {
     // records written whole are listed with their reason
     WRITTEN_WHOLE.iter().any(|(record, _)| {
-        path.strip_prefix(record)
-            .is_some_and(|rest| !rest.is_empty())
+        path == *record
+            || path
+                .strip_prefix(record)
+                .is_some_and(|rest| !rest.is_empty())
     })
 }
 
@@ -374,6 +396,17 @@ pub fn is_written_whole(path: &str) -> bool {
 pub fn is_derived(path: &str) -> bool {
     // derived fields are listed with their source
     DERIVED_FIELDS.iter().any(|(listed, _)| *listed == path)
+}
+
+/// Returns whether a field is one a backup never holds
+///
+/// # Arguments
+///
+/// * `path` - The field path
+#[must_use]
+pub fn is_unbacked(path: &str) -> bool {
+    // unbacked fields are listed with their reason
+    UNBACKED_FIELDS.iter().any(|(listed, _)| *listed == path)
 }
 
 /// Returns whether a path is one of `Backup`'s top-level properties
@@ -450,7 +483,7 @@ pub fn require(node: &Node, path: &str, matrix: &mut CoverageMatrix, opaque: &mu
             for (name, required, prop) in props {
                 let child = format!("{path}.{name}");
                 // derived fields hold what their source holds, so they need nothing of their own
-                if is_derived(&child) {
+                if is_derived(&child) || is_unbacked(&child) {
                     continue;
                 }
                 // a key of a record the API always writes whole is never missing from it
@@ -491,8 +524,15 @@ pub fn require(node: &Node, path: &str, matrix: &mut CoverageMatrix, opaque: &mu
             require(item, &format!("{path}[]"), matrix, opaque);
         }
         Node::Map(value) => {
-            for class in [ValueClass::Empty, ValueClass::One, ValueClass::Many] {
-                matrix.require(location(), class, Need::Required);
+            // a top-level map holds every entry of a namespace, so like a top-level list only its
+            // Many case is a fixture case
+            let sizes: &[ValueClass] = if is_top_level(path) {
+                &[ValueClass::Many]
+            } else {
+                &[ValueClass::Empty, ValueClass::One, ValueClass::Many]
+            };
+            for class in sizes {
+                matrix.require(location(), class.clone(), Need::Required);
             }
             if !is_uuid_keyed(path) {
                 matrix.require(location(), ValueClass::OddKey, Need::Required);
@@ -553,6 +593,10 @@ pub struct Flavor {
     pub odd_keys: bool,
     /// Which variant every enum and alternative takes, modulo its variant count
     pub variant: usize,
+    /// Which value the enums and alternatives under a data-carrying alternative take, read one
+    /// digit per level in the radix of that level's variant count; `None` follows `variant`, so
+    /// each provider's nested choices otherwise take one fixed value
+    pub nested: Option<usize>,
     /// The object depth whose optional keys are removed from the stored records, as data written
     /// before those keys existed would look; depth zero is the records' own hash fields
     pub absent: Option<usize>,
@@ -577,6 +621,7 @@ impl Flavor {
             size_depth: 0,
             odd_keys: false,
             variant: 0,
+            nested: None,
             absent: None,
             null: false,
         }
@@ -594,6 +639,8 @@ pub struct Shape {
     pub collection_depth: usize,
     /// The deepest object nesting
     pub object_depth: usize,
+    /// How many nested choice combinations cover every value under a data-carrying alternative
+    pub nested: usize,
 }
 
 impl Shape {
@@ -610,6 +657,7 @@ impl Shape {
             data_variants: data_variants(tree).max(1),
             collection_depth: collection_depth(tree),
             object_depth: object_depth(tree),
+            nested: nested_combinations(tree),
         }
     }
 }
@@ -690,6 +738,15 @@ pub fn flavors(shape: Shape) -> Vec<Flavor> {
         let mut flavor = Flavor::plain(label);
         flavor.size = size;
         flavors.push(flavor);
+    }
+    // each data-carrying variant again for every other combination of the choices nested under it
+    for variant in 0..shape.data_variants {
+        for nested in 1..shape.nested {
+            let mut flavor = Flavor::plain(&format!("nested-v{variant}-n{nested}"));
+            flavor.variant = variant;
+            flavor.nested = Some(nested);
+            flavors.push(flavor);
+        }
     }
     // every variant of every enum and alternative
     for variant in 0..shape.variants {
@@ -833,12 +890,75 @@ pub fn max_variants(node: &Node) -> usize {
     }
 }
 
+/// Returns how many nested choice combinations cover every value under a data-carrying alternative
+///
+/// The first alternative on a path is picked by the flavor's variant, so only the enums and
+/// alternatives under it need the combinations.
+///
+/// # Arguments
+///
+/// * `node` - The node to search
+#[must_use]
+pub fn nested_combinations(node: &Node) -> usize {
+    // look for the alternatives, and count what is under each
+    match node {
+        Node::Object(props) => props
+            .iter()
+            .map(|(_, _, prop)| nested_combinations(prop))
+            .max()
+            .unwrap_or(1),
+        Node::Array(item) | Node::Set(item) | Node::Map(item) => nested_combinations(item),
+        Node::OneOf(alternatives) => alternatives
+            .iter()
+            .map(|(_, alternative)| choice_combinations(alternative))
+            .max()
+            .unwrap_or(1),
+        _ => 1,
+    }
+}
+
+/// Returns how many combinations of the choices inside a node take every value of each
+///
+/// # Arguments
+///
+/// * `node` - The node to count
+fn choice_combinations(node: &Node) -> usize {
+    // sibling fields share a digit, and each level of alternatives multiplies the count
+    match node {
+        Node::Object(props) => props
+            .iter()
+            .map(|(_, _, prop)| choice_combinations(prop))
+            .max()
+            .unwrap_or(1),
+        Node::Array(item) | Node::Set(item) | Node::Map(item) => choice_combinations(item),
+        Node::OneOf(alternatives) => {
+            let choices = alternatives
+                .iter()
+                .filter(|(_, alternative)| !matches!(alternative, Node::Null))
+                .count();
+            let inner = alternatives
+                .iter()
+                .map(|(_, alternative)| choice_combinations(alternative))
+                .max()
+                .unwrap_or(1);
+            choices.max(1) * inner
+        }
+        Node::Enum(values) => values.len().max(1),
+        _ => 1,
+    }
+}
+
 /// Generates JSON documents for a schema node under a flavor
 pub struct Generator<'a> {
     /// The flavor of the document
     pub flavor: &'a Flavor,
     /// A counter that keeps generated text unique
     counter: usize,
+    /// Whether the node sits under an alternative, where nested choices follow the flavor's
+    /// `nested` digits
+    inside: bool,
+    /// How many nested combinations the choices above the node already spread over
+    stride: usize,
 }
 
 impl<'a> Generator<'a> {
@@ -849,8 +969,13 @@ impl<'a> Generator<'a> {
     /// * `flavor` - The flavor of the document
     #[must_use]
     pub fn new(flavor: &'a Flavor) -> Self {
-        // start the counter at zero
-        Generator { flavor, counter: 0 }
+        // start the counter at zero, outside every alternative
+        Generator {
+            flavor,
+            counter: 0,
+            inside: false,
+            stride: 1,
+        }
     }
 
     /// Returns unique ordinary text
@@ -924,10 +1049,19 @@ impl<'a> Generator<'a> {
                 if choices.is_empty() {
                     return Value::Null;
                 }
-                let (label, alternative) = choices[self.flavor.variant % choices.len()];
-                self.value(alternative, &format!("{path}<{label}>"), depth)
+                // take the flavor's alternative, and spread what is under it over the next digit
+                let (label, alternative) = choices[self.pick(choices.len())];
+                let (inside, stride) = (self.inside, self.stride);
+                if inside {
+                    self.stride *= choices.len();
+                }
+                self.inside = true;
+                let value = self.value(alternative, &format!("{path}<{label}>"), depth);
+                self.inside = inside;
+                self.stride = stride;
+                value
             }
-            Node::Enum(values) => Value::String(values[self.flavor.variant % values.len()].clone()),
+            Node::Enum(values) => Value::String(values[self.pick(values.len())].clone()),
             Node::Scalar(scalar, _) => self.scalar(scalar, path),
             Node::Any => match self.flavor.scalar {
                 Some(ValueClass::JsonEmpty) => json!({}),
@@ -935,6 +1069,19 @@ impl<'a> Generator<'a> {
                 _ => json!("fixture"),
             },
             Node::Null | Node::Opaque => Value::Null,
+        }
+    }
+
+    /// Picks which of a node's choices it takes
+    ///
+    /// # Arguments
+    ///
+    /// * `count` - How many choices the node has
+    fn pick(&self, count: usize) -> usize {
+        // under an alternative the nested digits decide, and everything else follows the variant
+        match self.flavor.nested {
+            Some(nested) if self.inside => (nested / self.stride) % count,
+            _ => self.flavor.variant % count,
         }
     }
 
@@ -989,6 +1136,11 @@ impl<'a> Generator<'a> {
             Scalar::String(_) => match class {
                 Some(ValueClass::Empty) if !is_identifier(path) => json!(""),
                 Some(ValueClass::Unicode) => json!(unicode(&tag)),
+                // a username is also a Scylla partition key (the API clears the user's
+                // notifications when it creates the user), and a key can't pass 64 KiB
+                Some(ValueClass::Large) if path == ".users[].username" => {
+                    json!(large(&tag, LARGE_USERNAME))
+                }
                 Some(ValueClass::Large) => json!(large(&tag, LARGE_FIELD)),
                 _ => json!(tag),
             },
@@ -1000,7 +1152,9 @@ impl<'a> Generator<'a> {
                     (Some(ValueClass::Min), false, false) => json!(i32::MIN),
                     (Some(ValueClass::Max), true, true) => json!(u64::MAX),
                     (Some(ValueClass::Max), false, true) => json!(i64::MAX),
-                    (Some(ValueClass::Max), true, false) => json!(u32::MAX),
+                    (Some(ValueClass::Max), true, false) => {
+                        json!(narrow_maximum(path).unwrap_or(u32::MAX))
+                    }
                     (Some(ValueClass::Max), false, false) => json!(i32::MAX),
                     (Some(ValueClass::ConversionEdge), true, true) => json!(self.flavor.conversion),
                     _ => json!(1),
@@ -1075,7 +1229,7 @@ pub fn observe(node: &Node, value: &Value, path: &str, matrix: &mut CoverageMatr
             matrix.observe(here, ValueClass::Variant(name.clone()));
         }
         (Node::Scalar(scalar, _), value) => {
-            for class in scalar_value_classes(scalar, value) {
+            for class in scalar_value_classes(scalar, value, path) {
                 matrix.observe(here.clone(), class);
             }
         }
@@ -1131,7 +1285,8 @@ pub fn matches_variant(label: &str, alternative: &Node, value: &Value) -> bool {
 ///
 /// * `scalar` - The scalar's schema
 /// * `value` - The value
-fn scalar_value_classes(scalar: &Scalar, value: &Value) -> Vec<ValueClass> {
+/// * `path` - The value's field path
+fn scalar_value_classes(scalar: &Scalar, value: &Value, path: &str) -> Vec<ValueClass> {
     // classify by the scalar's type and format
     match (scalar, value) {
         (Scalar::String(Some(format)), Value::String(text)) if format == "date-time" => {
@@ -1166,7 +1321,8 @@ fn scalar_value_classes(scalar: &Scalar, value: &Value) -> Vec<ValueClass> {
             if is_unicode(text) {
                 classes.push(ValueClass::Unicode);
             }
-            if text.len() >= LARGE_FIELD {
+            // a username is the largest string the generator writes, and member names carry it
+            if text.len() >= LARGE_USERNAME {
                 classes.push(ValueClass::Large);
             }
             classes
@@ -1182,7 +1338,7 @@ fn scalar_value_classes(scalar: &Scalar, value: &Value) -> Vec<ValueClass> {
             };
             let (min, max) = match (*unsigned, wide) {
                 (true, true) => (0, i128::from(u64::MAX)),
-                (true, false) => (0, i128::from(u32::MAX)),
+                (true, false) => (0, i128::from(narrow_maximum(path).unwrap_or(u32::MAX))),
                 (false, true) => (i128::from(i64::MIN), i128::from(i64::MAX)),
                 (false, false) => (i128::from(i32::MIN), i128::from(i32::MAX)),
             };

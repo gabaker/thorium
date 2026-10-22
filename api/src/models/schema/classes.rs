@@ -524,6 +524,7 @@ pub const CLASSES: &[ClassEntry] = &[
     backed_up(Store::Redis, "scoped_token_map", None),
     backed_up(Store::Redis, "scoped_tokens:*", None),
     backed_up(Store::Redis, "netpols:*", None),
+    backed_up(Store::Redis, "workload_runtimes", None),
     // Redis state rebuilt from other data
     excluded(
         Store::Redis,
@@ -679,6 +680,41 @@ pub const CLASSES: &[ClassEntry] = &[
     excluded(
         Store::Redis,
         "image_ttc:*",
+        DataClass::Runtime,
+        RUNTIME,
+        None,
+    ),
+    excluded(
+        Store::Redis,
+        "run_queue:*",
+        DataClass::Runtime,
+        RUNTIME,
+        None,
+    ),
+    excluded(
+        Store::Redis,
+        "workload_queue:*",
+        DataClass::Runtime,
+        RUNTIME,
+        None,
+    ),
+    excluded(
+        Store::Redis,
+        "workload_ttc:*",
+        DataClass::Runtime,
+        RUNTIME,
+        None,
+    ),
+    excluded(
+        Store::Redis,
+        "workloads:*",
+        DataClass::Runtime,
+        RUNTIME,
+        None,
+    ),
+    excluded(
+        Store::Redis,
+        "entities:instance_lock:*",
         DataClass::Runtime,
         RUNTIME,
         None,

@@ -473,6 +473,7 @@ lists what today's backup or restore doesn't carry yet. The Thoradm guide's
 | Redis | `scoped_token_map` | Backed up | `redis` | CORE |  |
 | Redis | `scoped_tokens:*` | Backed up | `redis` | CORE |  |
 | Redis | `netpols:*` | Backed up | `redis` | CORE |  |
+| Redis | `workload_runtimes` | Backed up | `redis` | CORE |  |
 | Redis | `netpol_used_by:*` | Excluded | rebuilt by the Redis restore from the restored images' network policies | DERIVED |  |
 | Redis | `census:*` | Excluded | counts rebuilt from the Scylla tables by thoradm census, which restore runs | DERIVED |  |
 | Redis | `system_info` | Excluded | re-initialized by restore | DERIVED |  |
@@ -498,6 +499,11 @@ lists what today's backup or restore doesn't carry yet. The Thoradm guide's
 | Redis | `schema-writer` | Excluded | the namespace's writer lease, held only while a writing thoradm command runs | EPHEMERAL |  |
 | Redis | `rebucket:*` | Excluded | the progress of a census rebuild, valid only for the run that wrote it | EPHEMERAL |  |
 | Redis | `image_ttc:*` | Excluded | runtime state of reactions, jobs, workers, or services, invalid after a restore | EPHEMERAL |  |
+| Redis | `run_queue:*` | Excluded | runtime state of reactions, jobs, workers, or services, invalid after a restore | EPHEMERAL |  |
+| Redis | `workload_queue:*` | Excluded | runtime state of reactions, jobs, workers, or services, invalid after a restore | EPHEMERAL |  |
+| Redis | `workload_ttc:*` | Excluded | runtime state of reactions, jobs, workers, or services, invalid after a restore | EPHEMERAL |  |
+| Redis | `workloads:*` | Excluded | runtime state of reactions, jobs, workers, or services, invalid after a restore | EPHEMERAL |  |
+| Redis | `entities:instance_lock:*` | Excluded | runtime state of reactions, jobs, workers, or services, invalid after a restore | EPHEMERAL |  |
 | Redis | `oauth:context:*` | Excluded | OAuth login contexts, which expire | EPHEMERAL |  |
 | Redis | `oauth:registration_sessions:*` | Excluded | OAuth registration sessions, which expire | EPHEMERAL |  |
 | Redis | `oauth:link_token:*` | Excluded | OAuth account-link tokens, which expire | EPHEMERAL |  |
@@ -618,7 +624,7 @@ The paths below start at the backup directory, `<backup>`. Placeholders:
 | `<backup>/backup-in-progress.json` | file | 0600 | `backup new`, at its start | Marks a backup that hasn't finished: `thoradm_version`, `started`, the `components` the run backs up, and `accept_broken_links`, whether the run accepts broken links (a run that resumes the backup keeps accepting them). Removed when the manifest is written |
 | `<backup>/manifest.json` | file | 0600 | `backup new`, at its end | What a finished backup holds (see [The manifest](#the-manifest)). Its presence is what makes a backup finished |
 | `<backup>/failures.jsonl` | file | 0600 | `backup new` | Every object the backup couldn't back up, one JSON line each (see [Reading `failures.jsonl`](#reading-failuresjsonl)); empty when nothing failed |
-| `<backup>/redis.json` | file | 0600 | `backup new`, component `redis` | The Redis data the API serves to admins, as JSON: `settings`, `users`, `groups`, `images`, `pipelines`, `scoped_tokens`, and `network_policy_sets` (and `pruned`, with `--prune-dangling`) |
+| `<backup>/redis.json` | file | 0600 | `backup new`, component `redis` | The Redis data the API serves to admins, as JSON: `settings`, `users`, `groups`, `images`, `pipelines`, `scoped_tokens`, `network_policy_sets`, and `workload_runtimes` (and `pruned`, with `--prune-dangling`) |
 | `<backup>/schema.json` | file | 0600 | `backup new` | The deployment's schema record, every row of `schema_migrations` and `schema_migration_issues` but the Job results, as JSON with a `format` version (see [The Schema Record](./thoradm.md#the-schema-record)); absent when the keyspace holds no `schema_migrations` table |
 | `<backup>/pruned.jsonl` | file | 0600 | `backup new --prune-dangling`, component `redis` | Only when references were pruned: one JSON line per change made to the Redis state (see [Pruning dangling references](#pruning-dangling-references)) |
 | `<backup>/<table>` | directory | 0700 | `backup new`, the table's component | One table's archives, and for `s3_ids`, `comments`, and `results`, its component's objects |
