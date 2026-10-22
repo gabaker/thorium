@@ -1,5 +1,34 @@
 //! The different tables we can backup and restore
 
+/// Asserts the size of an archived row and the offset of each of its fields
+///
+/// A row's archived layout is what a written backup holds, so a change to a field, its type, or a
+/// type it contains (for example a variant added to an enum, which changes its niche) shows up
+/// here before it makes written backups undecodable.
+///
+/// # Arguments
+///
+/// * `$ty` - The archived type to check
+/// * `$size` - The size in bytes the archived type must have
+/// * `$field: $offset` - Each field of the type and the byte offset it must be at
+#[cfg(test)]
+macro_rules! assert_layout {
+    ($ty:ty, $size:expr, { $($field:ident : $offset:expr),+ $(,)? }) => {
+        // the whole archived row must keep its size
+        assert_eq!(std::mem::size_of::<$ty>(), $size, "size of {}", stringify!($ty));
+        // every field must stay at its offset
+        $(
+            assert_eq!(
+                std::mem::offset_of!($ty, $field),
+                $offset,
+                "offset of {}.{}",
+                stringify!($ty),
+                stringify!($field),
+            );
+        )+
+    };
+}
+
 mod associations;
 mod comments;
 mod commits;

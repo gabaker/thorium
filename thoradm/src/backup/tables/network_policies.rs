@@ -211,3 +211,42 @@ impl From<NetworkPolicyV1> for NetworkPolicy {
 impl Versioned for NetworkPolicy {
     type V1 = NetworkPolicyV1;
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Pins the layout of the archived [`NetworkPolicy`] row, which written backups depend on
+    #[test]
+    fn network_policy_layout_is_pinned() {
+        // the archived row's size and the offset of every field must stay as backups hold them
+        assert_layout!(ArchivedNetworkPolicy, 92, {
+            group: 52,
+            name: 60,
+            id: 72,
+            k8s_name: 0,
+            created: 12,
+            ingress: 28,
+            egress: 40,
+            forced_policy: 68,
+            default_policy: 70,
+        });
+    }
+
+    /// Pins the layout of the archived [`NetworkPolicyV1`] row, which written backups depend on
+    #[test]
+    fn network_policy_v1_layout_is_pinned() {
+        // the archived row's size and the offset of every field must stay as backups hold them
+        assert_layout!(ArchivedNetworkPolicyV1, 72, {
+            group: 16,
+            name: 24,
+            id: 0,
+            k8s_name: 32,
+            created: 56,
+            ingress: 40,
+            egress: 48,
+            forced_policy: 68,
+            default_policy: 69,
+        });
+    }
+}

@@ -288,3 +288,38 @@ impl S3Restore for Comment {
         Ok((conf.thorium.attachments.bucket.clone(), key))
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Pins the layout of the archived [`Comment`] row, which written backups depend on
+    #[test]
+    fn comment_layout_is_pinned() {
+        // the archived row's size and the offset of every field must stay as backups hold them
+        assert_layout!(ArchivedComment, 80, {
+            group: 48,
+            sha256: 56,
+            uploaded: 36,
+            id: 64,
+            author: 0,
+            comment: 12,
+            files: 24,
+        });
+    }
+
+    /// Pins the layout of the archived [`CommentV1`] row, which written backups depend on
+    #[test]
+    fn comment_v1_layout_is_pinned() {
+        // the archived row's size and the offset of every field must stay as backups hold them
+        assert_layout!(ArchivedCommentV1, 68, {
+            group: 12,
+            sha256: 20,
+            uploaded: 0,
+            id: 28,
+            author: 44,
+            comment: 52,
+            files: 60,
+        });
+    }
+}

@@ -232,3 +232,19 @@ impl S3Restore for S3Id {
         Ok((bucket, key))
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Pins the layout of the archived [`S3Id`] row, which written backups depend on
+    #[test]
+    fn s3_id_layout_is_pinned() {
+        // the archived row's size and the offset of every field must stay as backups hold them
+        assert_layout!(ArchivedS3Id, 28, {
+            object_type: 24,
+            id: 0,
+            sha256: 16,
+        });
+    }
+}
