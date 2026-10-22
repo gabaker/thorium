@@ -333,6 +333,9 @@ pub async fn restore(users: &[User], shared: &Shared) -> Result<(), ApiError> {
 /// Gets every scoped token of the given users for a backup, and a problem for each scoped token
 /// that doesn't parse
 ///
+/// Run-scoped tokens are left out: a run's reaction and jobs are never backed up, so a restored
+/// run token would stay valid for a run that no longer exists.
+///
 /// # Arguments
 ///
 /// * `usernames` - The users whose scoped tokens to get
@@ -357,6 +360,8 @@ pub async fn backup_scoped_tokens(
         let entries: std::collections::BTreeMap<String, String> = entries.into_iter().collect();
         for (name, entry) in entries {
             match serde_json::from_str::<ScopedToken>(&entry) {
+                // run tokens belong to a run that isn't backed up
+                Ok(token) if token.run.is_some() => (),
                 Ok(token) => tokens.push(token),
                 Err(_) => problems.push(BackupProblem::new(
                     UserKeys::scoped_data(username, shared),
@@ -370,6 +375,8 @@ pub async fn backup_scoped_tokens(
 
 /// Restores scoped tokens and the map from their values to them
 ///
+/// Run-scoped tokens are skipped, as a backup taken before they were left out may hold them.
+///
 /// # Arguments
 ///
 /// * `tokens` - The scoped tokens to restore
@@ -379,6 +386,8 @@ pub async fn restore_scoped_tokens(
     tokens: &[ScopedToken],
     shared: &Shared,
 ) -> Result<(), ApiError> {
+    // run tokens belong to a run that isn't restored, so only the others are written
+    let tokens: Vec<&ScopedToken> = tokens.iter().filter(|token| token.run.is_none()).collect();
     // nothing to write without tokens
     if tokens.is_empty() {
         return Ok(());

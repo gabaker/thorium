@@ -4,6 +4,7 @@
 //! doesn't use are expected.
 #![allow(dead_code)]
 
+pub mod agentic;
 pub mod archives;
 pub mod base_namespace;
 pub mod classes;

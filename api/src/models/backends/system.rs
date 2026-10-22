@@ -756,6 +756,8 @@ impl Backup {
         let mut group_names: Vec<String> = groups.iter().map(|group| group.name.clone()).collect();
         group_names.sort_unstable();
         let network_policy_sets = db::network_policies::backup_sets(&group_names, shared).await?;
+        // get the average runtime of every tool instance
+        let workload_runtimes = db::jobs::backup_workload_runtimes(shared).await?;
         // a record that doesn't parse fails the backup instead of going missing from it
         problems.extend(group_problems);
         problems.extend(image_problems);
@@ -782,6 +784,7 @@ impl Backup {
             pipelines,
             scoped_tokens,
             network_policy_sets,
+            workload_runtimes,
             pruned: Vec::new(),
         };
         Ok(backup)
@@ -1399,6 +1402,11 @@ impl Backup {
         db::network_policies::restore_sets(&self.network_policy_sets, shared)
             .await
             .map_err(|error| step_failed("network-policy sets", &written, &error))?;
+        written.push(("network-policy sets", self.network_policy_sets.len()));
+        // restore the tool instances' average runtimes, but none of the workloads they measured
+        db::jobs::restore_workload_runtimes(&self.workload_runtimes, shared)
+            .await
+            .map_err(|error| step_failed("workload runtimes", &written, &error))?;
         Ok(())
     }
 }
@@ -1918,7 +1926,7 @@ mod tests {
         SystemSettings, User, UserRole, UserSettings,
     };
     use clap::ValueEnum;
-    use std::collections::{HashMap, HashSet};
+    use std::collections::{BTreeMap, HashMap, HashSet};
 
     /// Build the `worker_data` hash of a registered worker
     ///
@@ -2095,6 +2103,7 @@ mod tests {
             pipelines: Vec::new(),
             scoped_tokens: Vec::new(),
             network_policy_sets: Vec::new(),
+            workload_runtimes: BTreeMap::new(),
             pruned: Vec::new(),
         }
     }

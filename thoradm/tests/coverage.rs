@@ -43,6 +43,23 @@ const UNREACHABLE: &[(&str, &str)] = &[
         "rebucket:*",
         "only a running census rebuild keeps it, and none runs while the fixture is loaded",
     ),
+    (
+        "job_queue:*",
+        "jobs are queued on workload and run queues, so the stage queues stay empty",
+    ),
+    (
+        "image_ttc:*",
+        "completion times are kept per tool instance; only the legacy image runtime average \
+         still reads this key",
+    ),
+    (
+        "run_queue:*",
+        "only a workflow run's queued tool calls write it, and the fixture holds no run yet",
+    ),
+    (
+        "entities:instance_lock:*",
+        "held only while an entity instance is being written",
+    ),
 ];
 
 /// Key templates that no code writes, so they need no registry entry, with the reason
@@ -84,7 +101,8 @@ fn key_templates() -> Vec<(String, String)> {
 /// A template is a string literal whose first segment is a single placeholder, the namespace
 /// however it is named or positioned, and whose second segment starts with a lowercase
 /// letter: `{ns}:users`, `{namespace}:jobs:{id}`, `{}:logs:{}`, or `{prefix}:census:{year}`.
-/// Literals like `{}:{}` or `{group}:{name} not found` aren't keys.
+/// Literals like `{}:{}` or `{group}:{name} not found` aren't keys, and neither are the globs
+/// a service scans keys with (`{}:entities:*{id}*`).
 ///
 /// # Arguments
 ///
@@ -98,6 +116,10 @@ fn templates_in(text: &str) -> Vec<String> {
             continue;
         };
         let literal = &rest[..end];
+        // a glob a service scans keys with isn't a key it writes
+        if literal.contains('*') {
+            continue;
+        }
         // one placeholder, a colon, then a family name
         let Some(close) = literal.find('}') else {
             continue;

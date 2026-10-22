@@ -953,20 +953,58 @@ pub const FIELD_DOMAINS: &[(&str, FieldDomain, &str)] = &[
     ),
 ];
 
-/// `Backup` records the API always stores whole, as one JSON value written from its type, with the
-/// reason; no stored record lacks one of their keys, so their keys need no Absent case
-pub const WRITTEN_WHOLE: &[(&str, &str)] = &[(
-    ".scoped_tokens[]",
-    "every write serializes the whole scoped token, whose type has had every key since scoped \
-     tokens were added",
-)];
+/// `Backup` records the API always stores whole, as one JSON value written from its type, and the
+/// parts every backup holds, with the reason; no stored record lacks one of their keys and no
+/// backup lacks the parts, so they need no Absent case
+pub const WRITTEN_WHOLE: &[(&str, &str)] = &[
+    (
+        ".scoped_tokens[]",
+        "every write serializes the whole scoped token, whose type has had every key since scoped \
+         tokens were added",
+    ),
+    (
+        ".workload_runtimes",
+        "every backup serializes the whole map, empty when no average was recorded",
+    ),
+];
 
 /// `Backup` maps whose keys must be UUIDs, which the schema can't say, with the reason; they need
 /// no odd-key case
 pub const UUID_KEYED_MAPS: &[(&str, &str)] = &[
     (".images[].bans", "bans are keyed by their id"),
     (".pipelines[].bans", "bans are keyed by their id"),
+    (
+        ".workload_runtimes",
+        "runtimes are keyed by their tool instance's id",
+    ),
+    (
+        ".users[].settings.ai<AiSettings>.models.credentials",
+        "a user's model credentials are keyed by their id",
+    ),
+    (
+        ".users[].settings.ai<AiSettings>.models.credentials{}.bans",
+        "bans are keyed by their id",
+    ),
+    (
+        ".users[].settings.ai<AiSettings>.models.endpoints",
+        "a user's model endpoints are keyed by their id",
+    ),
+    (
+        ".users[].settings.ai<AiSettings>.models.endpoints{}.bans",
+        "bans are keyed by their id",
+    ),
+    (
+        ".users[].settings.ai<AiSettings>.models.endpoints{}.catalog[].bans",
+        "bans are keyed by their id",
+    ),
 ];
+
+/// `Backup` fields a backup never holds, with the reason; they need no classes of their own
+pub const UNBACKED_FIELDS: &[(&str, &str)] = &[(
+    ".scoped_tokens[].run",
+    "a run token belongs to a run whose reaction and jobs are never backed up, so a backup leaves \
+     out every scoped token that carries a run scope",
+)];
 
 /// `Backup` fields computed from other state when a record is read, with their source; they need
 /// no classes of their own and must agree with their source
