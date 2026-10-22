@@ -568,6 +568,54 @@ async fn scoped_token_restricted_routes() -> Result<(), Error> {
     Ok(())
 }
 
+/// An ordinary scoped token whose value has expired is refused once and rotated, so its owner
+/// reads a new value that authenticates while the old one never works again
+#[tokio::test]
+async fn expired_scoped_token_rotates_on_use() -> Result<(), Error> {
+    // a user with a scoped token that works
+    let admin = test_utilities::admin_client().await?;
+    let user = generators::user_with_role(&admin, UserRole::User).await?;
+    let group = create_group(&user.client).await?;
+    let name = token_name();
+    let req = ScopedTokenRequest::new(&name).group(&group);
+    let scoped = user.client.users.create_scoped_token(&req).await?;
+    let scoped_thorium = scoped_client(&user.client, &scoped.token).await?;
+    scoped_thorium.users.info().await?;
+    // the token's value expires an hour ago, written straight into Redis
+    let mut conn = users_redis().await;
+    let key = format!(
+        "{}:scoped_tokens:{}",
+        test_utilities::CONF.thorium.namespace,
+        user.username
+    );
+    let raw: String = redis::cmd("hget")
+        .arg(&key)
+        .arg(&name)
+        .query_async(&mut conn)
+        .await
+        .expect("the stored scoped token");
+    let mut stored: serde_json::Value = serde_json::from_str(&raw)?;
+    stored["token_expiration"] = serde_json::json!((Utc::now() - Duration::hours(1)).to_rfc3339());
+    let _: () = redis::cmd("hset")
+        .arg(&key)
+        .arg(&name)
+        .arg(stored.to_string())
+        .query_async(&mut conn)
+        .await
+        .expect("the expired scoped token is stored");
+    // the first use of the expired value is refused
+    fail!(scoped_thorium.users.info().await, 401);
+    // the owner reads a rotated value that expires in the future
+    let rotated = user.client.users.get_scoped_token(&name).await?;
+    is_not!(rotated.token, scoped.token);
+    assert!(rotated.token_expiration > Utc::now());
+    // the expired value is refused again and the rotated value authenticates
+    fail!(scoped_thorium.users.info().await, 401);
+    let rotated_thorium = scoped_client(&user.client, &rotated.token).await?;
+    rotated_thorium.users.info().await?;
+    Ok(())
+}
+
 #[tokio::test]
 async fn scoped_token_logout() -> Result<(), Error> {
     // get admin client
@@ -595,6 +643,21 @@ async fn scoped_token_logout() -> Result<(), Error> {
     // make sure the rotated value works
     let rotated_thorium = scoped_client(&client, &rotated.token).await?;
     rotated_thorium.users.info().await?;
+    Ok(())
+}
+
+/// Logging out with a full token rotates it, so its old value is refused afterwards
+#[tokio::test]
+async fn full_token_logout_rotates_the_token() -> Result<(), Error> {
+    // get admin client
+    let admin = test_utilities::admin_client().await?;
+    // get a user client that authenticates with the user's primary token
+    let client = generators::client(&admin).await?;
+    client.users.info().await?;
+    // log out with the primary token
+    client.users.logout().await?;
+    // the old primary token value no longer works
+    fail!(client.users.info().await, 401);
     Ok(())
 }
 
@@ -2193,6 +2256,82 @@ async fn scoped_whoami_holds_no_model_secrets() -> Result<(), Error> {
         ai.models.credentials[&endpoint].secrets.primary.clone(),
         None::<ModelSecret>
     );
+    Ok(())
+}
+
+/// A run token's whoami returns only fingerprints and empty legacy keys, and no scoped token
+/// can read a user's record
+#[tokio::test]
+async fn run_token_whoami_holds_no_model_secrets() -> Result<(), Error> {
+    // a runner with a live run, who holds a credential and a legacy key
+    let (_, runner, token) = run_token_fixture().await?;
+    let secret = gen_model_secret();
+    let legacy = gen_model_secret();
+    let endpoint = Uuid::new_v4();
+    set_models(
+        &runner.client,
+        UserModelSettingsUpdate::default()
+            .endpoint(endpoint, own_endpoint("e", "m").await?)
+            .credential(
+                endpoint,
+                UserCredentialRef::new(CredentialKind::ApiKey, Some(secret.as_str().into())),
+            ),
+    )
+    .await?;
+    let ai = AiSettingsUpdate::default()
+        .endpoint(
+            "main",
+            AiEndpointUpdate::default()
+                .url("https://llm.local")
+                .api_key(&legacy)
+                .model("m"),
+        )
+        .default_endpoint("main");
+    runner
+        .client
+        .users
+        .update_self(UserUpdate::default().settings(UserSettingsUpdate::default().ai(ai)))
+        .await?;
+    // the run token's whoami holds only the fingerprint and an empty legacy key
+    let body = raw_body(&token_header(&token.token), "/api/users/whoami").await?;
+    assert_no_secret(&body, &[&secret, &legacy], "a run token's whoami");
+    assert!(
+        body.contains(&ModelSecret::from(secret.as_str()).fingerprint()),
+        "the run token's whoami lost the fingerprint"
+    );
+    let info: ScrubbedUser = serde_json::from_str(&body)?;
+    let ai = info.settings.ai.expect("no ai settings");
+    assert!(
+        ai.endpoints["main"].api_key.is_empty(),
+        "a run token's whoami returned a legacy key"
+    );
+    is!(
+        ai.models.credentials[&endpoint].secrets.primary.clone(),
+        None::<ModelSecret>
+    );
+    // neither the run token nor an ordinary scoped token can read the user's record
+    let group = create_group(&runner.client).await?;
+    let plain = runner
+        .client
+        .users
+        .create_scoped_token(
+            &ScopedTokenRequest::new(token_name())
+                .role(ScopedTokenRole::User)
+                .group(&group),
+        )
+        .await?;
+    for (what, value) in [("run", &token.token), ("ordinary", &plain.token)] {
+        let resp = reqwest::Client::new()
+            .get(format!(
+                "{}/api/users/user/{}",
+                runner.client.host, runner.username
+            ))
+            .header("authorization", token_header(value))
+            .send()
+            .await?;
+        is!(resp.status().as_u16(), 401, what);
+        assert_no_secret(&resp.text().await?, &[&secret, &legacy], what);
+    }
     Ok(())
 }
 

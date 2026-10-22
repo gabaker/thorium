@@ -1,6 +1,7 @@
 //! Tests the tool run and workflow run routes
 
 use std::collections::{BTreeMap, HashMap};
+use std::time::{Duration, Instant};
 use thorium::client::ResultsClient;
 use thorium::models::{
     AgentEntityRequest, AgentProvenance, AiSettingsUpdate, AllowedEndpoint, Buffer, CredentialKind,
@@ -10,8 +11,9 @@ use thorium::models::{
     GroupUpdate, GroupUsersUpdate, HarnessAgentFile, HarnessEnv, HarnessEnvVar, HarnessRunFile,
     HarnessToolEntry, ImageScaler, JobResets, JobStatus, ModelApi, ModelAuthLevel, ModelAuthSource,
     ModelBan, ModelBanKind, ModelBanUpdate, ModelCatalogEntryRequest, ModelConfigRef,
-    ModelEndpointEntity, ModelEndpointEntityRequest, ModelProvider, ModelProviderKind,
-    ModelRejectReason, ModelResolutionError, ModelsConfUpdate, OutputDisplayType, OutputRequest,
+    ModelCredentialEntityRequest, ModelEndpointEntity, ModelEndpointEntityRequest,
+    ModelProfileEntityRequest, ModelProvider, ModelProviderKind, ModelRejectReason,
+    ModelResolutionError, ModelSecret, ModelsConfUpdate, OutputDisplayType, OutputRequest,
     PipelineRequest, PipelineUpdate, Pools, Reaction, ReactionCacheFileUpdate, ReactionCacheUpdate,
     ReactionCursorOpts, ReactionModelBinding, ReactionRequest, ReactionSource, ReactionStatus,
     ReactionUpdate, Repo, RepoDependencyRequest, Resources, ResultGetParams, RunInputs,
@@ -21,6 +23,10 @@ use thorium::models::{
     UserModelSettingsUpdate, UserRole, UserSettingsUpdate, UserUpdate, WorkerDeleteMap,
     WorkerRegistrationList, WorkerStatus, WorkerUpdate, WorkflowResultKey, WorkflowRunRequest,
     WorkloadEnvironment,
+};
+use thorium::models::{
+    Association, AssociationDeleteRequest, AssociationKind, AssociationRequest, AssociationTarget,
+    Directionality, ToolSetSelector,
 };
 use thorium::test_utilities::generators::{self, GroupRoles, TestUser};
 use thorium::test_utilities::runs::{self, RunWorkflow};
@@ -4938,6 +4944,100 @@ async fn run_token_full_token_routes() -> Result<(), Error> {
     Ok(())
 }
 
+/// Send a profile image request as a runner
+///
+/// Returns the response status and body.
+///
+/// # Arguments
+///
+/// * `runner` - The runner whose image is read, uploaded, or deleted
+/// * `method` - The method of the request
+/// * `auth` - The authorization header to send
+/// * `image` - The image to upload, if the request uploads one
+async fn profile_image(
+    runner: &Runner,
+    method: reqwest::Method,
+    auth: &str,
+    image: Option<&'static [u8]>,
+) -> Result<(u16, Vec<u8>), Error> {
+    // reads name the runner, and uploads and deletes act on the caller's own image
+    let url = if method == reqwest::Method::GET {
+        format!(
+            "{}/api/users/user/{}/image",
+            runner.admin.host, runner.user.username
+        )
+    } else {
+        format!("{}/api/users/image", runner.admin.host)
+    };
+    let mut req = reqwest::Client::new()
+        .request(method, url)
+        .header("authorization", auth);
+    // an upload sends the image as a PNG form field
+    if let Some(image) = image {
+        let part = reqwest::multipart::Part::bytes(image)
+            .file_name("icon.png")
+            .mime_str("image/png")?;
+        req = req.multipart(reqwest::multipart::Form::new().part("image", part));
+    }
+    let resp = req.send().await?;
+    let status = resp.status().as_u16();
+    Ok((status, resp.bytes().await?.to_vec()))
+}
+
+/// A runner's full token uploads and deletes their profile image, and the token of their run
+/// can neither replace nor delete it
+#[tokio::test]
+async fn run_token_cannot_change_the_profile_image() -> Result<(), Error> {
+    // a runner with a live tool run, and its run token
+    let runner = runner("elara", "luna").await?;
+    let groups = [runner.group.as_str()];
+    let (_, image) = runs::image_tool(&groups, ImageScaler::K8s, &runner.admin).await?;
+    let sha256 = sample(&runner.group, &runner.user.client).await?;
+    let created = runner
+        .user
+        .client
+        .reactions
+        .run_tool(
+            image.id,
+            &ToolRunRequest::new(RunInputs::default().sample(&sha256)),
+        )
+        .await?;
+    let run = runner
+        .user
+        .client
+        .reactions
+        .get(&runner.group, created.id)
+        .await?;
+    let token = run_token_of(&runner.admin, &run).await?;
+    let run_auth = test_utilities::auth_header(&token.token);
+    let full_auth = runner.user.auth_header();
+    // the runner has no image, and their full token uploads one
+    let (status, _) = profile_image(&runner, reqwest::Method::GET, &full_auth, None).await?;
+    is!(status, 404);
+    let ours: &'static [u8] = b"THE-RUNNERS-IMAGE";
+    let (status, _) = profile_image(&runner, reqwest::Method::POST, &full_auth, Some(ours)).await?;
+    is!(status, 204);
+    let (status, body) = profile_image(&runner, reqwest::Method::GET, &full_auth, None).await?;
+    is!(status, 200);
+    is!(body, ours.to_vec());
+    // the run token can't replace or delete it, and the image is unchanged
+    let theirs: &'static [u8] = b"A-RUN-TOKENS-IMAGE";
+    let (status, _) =
+        profile_image(&runner, reqwest::Method::POST, &run_auth, Some(theirs)).await?;
+    is!(status, 401);
+    let (status, _) = profile_image(&runner, reqwest::Method::DELETE, &run_auth, None).await?;
+    is!(status, 401);
+    let (status, body) = profile_image(&runner, reqwest::Method::GET, &full_auth, None).await?;
+    is!(status, 200);
+    is!(body, ours.to_vec());
+    // the full token deletes it
+    let (status, _) = profile_image(&runner, reqwest::Method::DELETE, &full_auth, None).await?;
+    is!(status, 204);
+    let (status, _) = profile_image(&runner, reqwest::Method::GET, &full_auth, None).await?;
+    is!(status, 404);
+    Ok(())
+}
+
 /// Build a group update that turns off file uploads
 fn disable_files() -> GroupUpdate {
     // flip only the files flag
@@ -4947,9 +5047,9 @@ fn disable_files() -> GroupUpdate {
     }
 }
 
-/// With a run token the runner can still publish tools and write definitions in the token's
-/// groups (a known gap a scope-or-full guard closes later), but can't create or change
-/// pipelines, run them, or write entities outside the token's groups
+/// With a run token the runner can't write tools, their instances, toolsets, agents, workflows,
+/// model credentials, endpoints, profiles, legacy images, or pipelines, or run a pipeline; the
+/// runner's full token still writes them, and entities holding data are not guarded
 #[tokio::test]
 #[allow(clippy::too_many_lines)]
 async fn run_token_definition_writes() -> Result<(), Error> {
@@ -5021,8 +5121,77 @@ async fn run_token_definition_writes() -> Result<(), Error> {
     let token = run_token_of(&runner.admin, &run).await?;
     is!(token.groups, sorted_strings(vec![a.clone(), g.clone()]));
     let scoped = token_client(&runner.admin, &token.token).await?;
-    // a new tool version becomes latest, and a pipeline reaction then runs it
-    scoped
+    // a run token can't publish a tool version, create a tool or a direct tool instance,
+    // deprecate an instance, or delete one, and nothing is written
+    assert_status(
+        scoped
+            .entities
+            .update(
+                tool.id,
+                generators::gen_tool_publish("2.0.0", &generators::gen_image_spec()),
+            )
+            .await,
+        401,
+        "a tool publish with a run token",
+    )?;
+    let unchanged = runner.admin.entities.get(tool.id).await?;
+    let latest_before = match &unchanged.metadata {
+        thorium::models::EntityMetadata::Tool(meta) => meta.latest,
+        _ => None,
+    };
+    is!(latest_before, Some(image.id));
+    assert_status(
+        scoped
+            .entities
+            .create(generators::gen_tool(
+                &groups,
+                "1.0.0",
+                &generators::gen_image_spec(),
+            ))
+            .await,
+        401,
+        "a tool create with a run token",
+    )?;
+    let direct = thorium::models::EntityRequest::new(
+        "ignored",
+        EntityMetadataRequest::ToolInstance(thorium::models::ToolInstanceEntityRequest::new(
+            tool.id,
+            "3.0.0",
+            &generators::gen_image_spec(),
+        )?),
+        groups.to_vec(),
+    );
+    assert_status(
+        scoped.entities.create(direct).await,
+        401,
+        "a direct tool instance create with a run token",
+    )?;
+    assert_status(
+        scoped
+            .entities
+            .update(image.id, generators::gen_tool_deprecate(true))
+            .await,
+        401,
+        "a tool instance deprecation with a run token",
+    )?;
+    assert_status(
+        scoped.entities.delete(image.id).await,
+        401,
+        "a tool instance delete with a run token",
+    )?;
+    let kept = runner.admin.entities.get(image.id).await?;
+    is!(
+        matches!(
+            &kept.metadata,
+            thorium::models::EntityMetadata::ToolInstance(meta) if !meta.deprecated
+        ),
+        true
+    );
+    // the runner's full token publishes a new tool version, which becomes latest, and a
+    // pipeline reaction then runs it
+    runner
+        .user
+        .client
         .entities
         .update(
             tool.id,
@@ -5043,8 +5212,7 @@ async fn run_token_definition_writes() -> Result<(), Error> {
         .await?;
     let reaction = runner.user.client.reactions.get(&g, created.id).await?;
     is!(Some(reaction.plan.stages[0][0].tool_instance), latest);
-    // a pipeline update re-checks the developer role for every stage tool, so the run token
-    // can't change the pipeline's triggers or SLA, but it can delete the pipeline
+    // the run token can't change the pipeline's triggers or SLA or delete the pipeline
     let triggers = HashMap::from([("fresh".to_owned(), EventTrigger::NewSample)]);
     let refused = scoped
         .pipelines
@@ -5060,7 +5228,14 @@ async fn run_token_definition_writes() -> Result<(), Error> {
         .update(&g, &pipe.name, &PipelineUpdate::default().sla(1200))
         .await;
     assert_status(refused, 401, "an SLA change with a run token")?;
-    scoped.pipelines.delete(&g, &pipe.name).await?;
+    assert_status(
+        scoped.pipelines.delete(&g, &pipe.name).await,
+        401,
+        "a pipeline delete with a run token",
+    )?;
+    // the pipeline and its reaction are still there
+    runner.user.client.pipelines.get(&g, &pipe.name).await?;
+    runner.user.client.reactions.get(&g, created.id).await?;
     // a pipeline create, a stage change, and a pipeline reaction are refused
     let second = PipelineRequest::new(
         &g,
@@ -5091,8 +5266,17 @@ async fn run_token_definition_writes() -> Result<(), Error> {
         401,
         "a pipeline reaction with a run token",
     )?;
-    // a toolset, the workflow's catalog, and a credential rotation are written
-    let selector = EntityMetadataUpdate::ToolSet {
+    // a snapshot of an entity as the admin reads it, to show a refused write changed nothing
+    let snapshot = |id: Uuid| {
+        let admin = &runner.admin;
+        async move {
+            let entity = admin.entities.get(id).await?;
+            Ok::<_, Error>(serde_json::to_value(&entity).expect("entities serialize"))
+        }
+    };
+    // a toolset, the workflow's catalog, and a credential rotation are refused and change nothing
+    let toolset_before = snapshot(toolset.id).await?;
+    let selector = || EntityMetadataUpdate::ToolSet {
         read_only: None,
         selector: Some(thorium::models::ToolSetSelector::new("suite", "radare")),
         clear_selector: None,
@@ -5101,11 +5285,17 @@ async fn run_token_definition_writes() -> Result<(), Error> {
         remove_tools: Vec::new(),
         extend_target_groups: false,
     };
-    scoped
-        .entities
-        .update(toolset.id, EntityUpdate::default().metadata(selector))
-        .await?;
-    let entry = EntityMetadataUpdate::WorkflowCatalog {
+    assert_status(
+        scoped
+            .entities
+            .update(toolset.id, EntityUpdate::default().metadata(selector()))
+            .await,
+        401,
+        "a toolset change with a run token",
+    )?;
+    is!(snapshot(toolset.id).await?, toolset_before);
+    let catalog_before = snapshot(triage.workflow.id).await?;
+    let entry = || EntityMetadataUpdate::WorkflowCatalog {
         entry_agent: Some(triage.agent.id),
         clear_entry_agent: None,
         auto_instance: None,
@@ -5116,35 +5306,187 @@ async fn run_token_definition_writes() -> Result<(), Error> {
         remove_agents: Vec::new(),
         extend_target_groups: false,
     };
-    scoped
-        .entities
-        .update(triage.workflow.id, EntityUpdate::default().metadata(entry))
-        .await?;
+    assert_status(
+        scoped
+            .entities
+            .update(
+                triage.workflow.id,
+                EntityUpdate::default().metadata(entry()),
+            )
+            .await,
+        401,
+        "a workflow catalog change with a run token",
+    )?;
+    is!(snapshot(triage.workflow.id).await?, catalog_before);
+    let credential_before = snapshot(credential.id).await?;
     let rotated = format!("sk-{}", generators::gen_string(24).to_lowercase());
-    scoped
-        .entities
-        .update(
-            credential.id,
-            EntityUpdate::default()
-                .metadata(EntityMetadataUpdate::model_credential().credential_secret(rotated)),
-        )
-        .await?;
-    // an agent create in C, outside the token, is refused and writes nothing; in G it's created
+    let rotation = |secret: String| {
+        EntityUpdate::default()
+            .metadata(EntityMetadataUpdate::model_credential().credential_secret(secret))
+    };
+    assert_status(
+        scoped
+            .entities
+            .update(credential.id, rotation(rotated.clone()))
+            .await,
+        401,
+        "a credential rotation with a run token",
+    )?;
+    is!(snapshot(credential.id).await?, credential_before);
+    // a toolset, an agent, a credential, an endpoint, and a profile can't be created, in the
+    // token's groups or outside them, and a toolset or workflow can't be asked for an instance
+    let kit = format!("kit2-{}", runner.suffix);
+    assert_status(
+        scoped
+            .entities
+            .create(generators::gen_toolset(
+                &kit,
+                &groups,
+                ToolSetEntityRequest::default(),
+            ))
+            .await,
+        401,
+        "a toolset create with a run token",
+    )?;
     let name = format!("lead-{}", generators::gen_string(8).to_lowercase());
     let req = AgentEntityRequest::new(generators::gen_agent_config("lead"));
-    let refused = scoped
-        .entities
-        .create(generators::gen_agent(&name, &[c.as_str()], req.clone()))
-        .await;
-    assert_status(refused, 401, "an agent create outside the token's groups")?;
-    let created = scoped
+    for target in [groups.as_slice(), &[c.as_str()][..]] {
+        assert_status(
+            scoped
+                .entities
+                .create(generators::gen_agent(&name, target, req.clone()))
+                .await,
+            401,
+            "an agent create with a run token",
+        )?;
+    }
+    let secret = ModelSecret::from(format!("sk-{}", generators::gen_string(24).to_lowercase()));
+    let meta = ModelCredentialEntityRequest::new(CredentialKind::ApiKey, Some(secret));
+    assert_status(
+        scoped
+            .entities
+            .create(generators::gen_model_entity(
+                &groups,
+                EntityMetadataRequest::ModelCredential(meta),
+            ))
+            .await,
+        401,
+        "a credential create with a run token",
+    )?;
+    let endpoint = ModelEndpointEntityRequest::new(generators::gen_anthropic_provider());
+    assert_status(
+        scoped
+            .entities
+            .create(generators::gen_model_entity(
+                &groups,
+                EntityMetadataRequest::ModelEndpoint(endpoint),
+            ))
+            .await,
+        401,
+        "an endpoint create with a run token",
+    )?;
+    let profile =
+        ModelProfileEntityRequest::new(Uuid::new_v4(), "a-model", ModelApi::AnthropicMessages);
+    assert_status(
+        scoped
+            .entities
+            .create(generators::gen_model_entity(
+                &groups,
+                EntityMetadataRequest::ModelProfile(profile),
+            ))
+            .await,
+        401,
+        "a profile create with a run token",
+    )?;
+    assert_status(
+        scoped.entities.request_tool_set_instance(toolset.id).await,
+        401,
+        "a toolset instance request with a run token",
+    )?;
+    assert_status(
+        scoped.entities.request_instance(triage.workflow.id).await,
+        401,
+        "a workflow instance request with a run token",
+    )?;
+    // an agent made with the full token can't be deleted with the run token
+    let lead = runner
+        .user
+        .client
         .entities
         .create(generators::gen_agent(&name, &groups, req))
         .await?;
-    is!(
-        runner.admin.entities.get(created.id).await?.groups,
-        vec![g.clone()]
-    );
+    assert_status(
+        scoped.entities.delete(lead.id).await,
+        401,
+        "an agent delete with a run token",
+    )?;
+    runner.admin.entities.get(lead.id).await?;
+    // a workflow instance can't be deleted with the run token either
+    assert_status(
+        scoped.entities.delete(triage.id()).await,
+        401,
+        "a workflow instance delete with a run token",
+    )?;
+    runner.admin.entities.get(triage.id()).await?;
+    // nor a toolset instance, which an admin submits for the toolset
+    let toolset_entity = runner.admin.entities.get(toolset.id).await?;
+    let first = generators::gen_toolset_instance(&toolset_entity, 1, None, &[]);
+    let made = runner
+        .admin
+        .entities
+        .create(generators::gen_toolset_instance_req(&first))
+        .await?;
+    assert_status(
+        scoped.entities.delete(made.id).await,
+        401,
+        "a toolset instance delete with a run token",
+    )?;
+    runner.admin.entities.get(made.id).await?;
+    // an image delete is refused before the image is even looked up
+    assert_status(
+        scoped.images.delete(&g, "missing").await,
+        401,
+        "an image delete with a run token",
+    )?;
+    assert_status(
+        runner.user.client.images.delete(&g, "missing").await,
+        404,
+        "an image delete with the full token",
+    )?;
+    // the runner's full token writes all of these: a toolset change, the catalog's entry
+    // agent, a credential rotation, and a toolset
+    runner
+        .user
+        .client
+        .entities
+        .update(toolset.id, EntityUpdate::default().metadata(selector()))
+        .await?;
+    runner
+        .user
+        .client
+        .entities
+        .update(
+            triage.workflow.id,
+            EntityUpdate::default().metadata(entry()),
+        )
+        .await?;
+    runner
+        .user
+        .client
+        .entities
+        .update(credential.id, rotation(rotated))
+        .await?;
+    let created = runner
+        .user
+        .client
+        .entities
+        .create(generators::gen_toolset(
+            &kit,
+            &groups,
+            ToolSetEntityRequest::default(),
+        ))
+        .await?;
+    runner.admin.entities.get(created.id).await?;
     Ok(())
 }
 
@@ -6471,6 +6813,191 @@ async fn run_developer_checks() -> Result<(), Error> {
     Ok(())
 }
 
+/// The environment variable that marks the child process running the logging scenario
+///
+/// Its value is the directory the child writes the secrets it used to.
+const TRACE_CHILD_DIR: &str = "THORIUM_TRACE_CHILD_DIR";
+
+/// The longest the logging scenario may take, in seconds
+const TRACE_CHILD_SECONDS: u64 = 900;
+
+/// A child process that is killed when the test that started it ends, however it ends
+struct KillOnDrop(std::process::Child);
+
+impl Drop for KillOnDrop {
+    /// Kill and reap the child
+    fn drop(&mut self) {
+        // stop the child and wait for it so none is left running
+        let _ = self.0.kill();
+        let _ = self.0.wait();
+    }
+}
+
+/// Run the scenario whose logs [`secrets_stay_out_of_logs`] checks
+///
+/// This only runs as a child of that test, which gives it a namespace, port, and log level of
+/// its own so the API it starts logs everything to stdout.
+#[tokio::test]
+#[ignore = "run by secrets_stay_out_of_logs in a child process"]
+async fn trace_scenario_child() -> Result<(), Error> {
+    // only run when the parent test started this process
+    let Ok(dir) = std::env::var(TRACE_CHILD_DIR) else {
+        return Ok(());
+    };
+    // a runner with a group credential and endpoint, an own key for it, and a model workflow
+    let runner = runner("themisto", "sol").await?;
+    let groups = [runner.group.as_str()];
+    let credential = generators::model_credential(
+        &groups,
+        CredentialKind::ApiKey,
+        Some(GROUP_SECRET),
+        &runner.admin,
+    )
+    .await?;
+    let endpoint = model_endpoint(
+        &runner,
+        "logged-openai",
+        openai_at_random(),
+        Some(credential.id),
+        &["gpt-5"],
+    )
+    .await?;
+    let own = UserCredentialRef::new(CredentialKind::ApiKey, Some(USER_SECRET.into()));
+    set_models(
+        &runner.user.client,
+        UserModelSettingsUpdate::default().credential(endpoint.id, own),
+    )
+    .await?;
+    // the group credential is rotated, read back, and read with its secret
+    let rotate = EntityMetadataUpdate::model_credential().credential_secret(ROTATED_SECRET);
+    runner
+        .admin
+        .entities
+        .update(credential.id, EntityUpdate::default().metadata(rotate))
+        .await?;
+    runner.admin.entities.get(credential.id).await?;
+    runner
+        .admin
+        .entities
+        .model_credential_secret(credential.id)
+        .await?;
+    // a run binds the models, and the admin reads its token and its models with their secrets
+    let env = HarnessEnv {
+        export: [HarnessEnvVar::OpenAiApiKey, HarnessEnvVar::ModelId]
+            .into_iter()
+            .collect(),
+        names: BTreeMap::new(),
+    };
+    let flow = runs::model_workflow(
+        "Triage",
+        &groups,
+        vec![runs::ModelAgent::new(&["gpt-5"])],
+        None,
+        (&runs::gen_model_harness_spec(), Some(&env)),
+        &runner.admin,
+    )
+    .await?;
+    let sha256 = sample(&runner.group, &runner.user.client).await?;
+    let run = run_instance(&runner, flow.id(), &RunInputs::default().sample(&sha256)).await?;
+    let token = run_token_of(&runner.admin, &run).await?;
+    runner
+        .admin
+        .reactions
+        .run_models(&run.group, run.id)
+        .await?;
+    // the runner reads their own user record
+    runner.user.client.users.info().await?;
+    // report the secrets that must not have been logged
+    let secrets = [GROUP_SECRET, USER_SECRET, ROTATED_SECRET, &token.token];
+    std::fs::write(
+        std::path::Path::new(&dir).join("secrets.txt"),
+        secrets.join("\n"),
+    )?;
+    Ok(())
+}
+
+/// Neither the API nor its client logs a credential's secret, a rotated secret, or a run token
+/// while credentials are created and read, user settings are written, and an admin reads a
+/// run's token and its models
+#[tokio::test]
+async fn secrets_stay_out_of_logs() -> Result<(), Error> {
+    // a directory for the child's logs and the secrets it reports
+    let dir = std::env::temp_dir().join(format!("thorium-trace-{}", Uuid::new_v4().simple()));
+    std::fs::create_dir_all(&dir)?;
+    // run the scenario in a child with its own namespace and port, logging at the debug level
+    let port = std::net::TcpListener::bind("127.0.0.1:0")?
+        .local_addr()?
+        .port();
+    let mut child = KillOnDrop(
+        std::process::Command::new(std::env::current_exe()?)
+            .args([
+                "--exact",
+                "trace_scenario_child",
+                "--ignored",
+                "--nocapture",
+            ])
+            .env(TRACE_CHILD_DIR, &dir)
+            .env("THORIUM__THORIUM__NAMESPACE", format!("{}_trace", ns()))
+            .env("THORIUM__THORIUM__PORT", port.to_string())
+            .env("THORIUM__THORIUM__TRACING__LOCAL__LEVEL", "Debug")
+            .stdout(std::fs::File::create(dir.join("stdout.log"))?)
+            .stderr(std::fs::File::create(dir.join("stderr.log"))?)
+            .spawn()?,
+    );
+    // wait for the scenario to finish
+    let started = Instant::now();
+    let status = loop {
+        if let Some(status) = child.0.try_wait()? {
+            break status;
+        }
+        assert!(
+            started.elapsed() < Duration::from_secs(TRACE_CHILD_SECONDS),
+            "the logging scenario timed out"
+        );
+        tokio::time::sleep(Duration::from_millis(500)).await;
+    };
+    // read everything the child logged and the secrets it used
+    let mut logs = String::new();
+    for name in ["stdout.log", "stderr.log"] {
+        logs.push_str(&String::from_utf8_lossy(&std::fs::read(dir.join(name))?));
+    }
+    let secrets = std::fs::read_to_string(dir.join("secrets.txt")).unwrap_or_default();
+    let secrets = secrets.lines().collect::<Vec<&str>>();
+    // the scenario passed, without echoing any line that holds a secret
+    let tail = logs
+        .lines()
+        .filter(|line| !secrets.iter().any(|secret| line.contains(secret)))
+        .rev()
+        .take(30)
+        .collect::<Vec<&str>>();
+    assert!(
+        status.success(),
+        "the logging scenario failed; the last lines of its log were {tail:#?}"
+    );
+    // the log shows the requests that carry secrets, so the check below looks at real output
+    for seen in [
+        "Starting Request",
+        "/run-models",
+        "/run-token",
+        "/api/entities/models/credentials/",
+        "/api/users/",
+    ] {
+        assert!(logs.contains(seen), "the log never mentions {seen}");
+    }
+    // the log holds none of the four secrets
+    is!(secrets.len(), 4);
+    for (index, secret) in secrets.iter().enumerate() {
+        assert!(
+            secret.len() >= 16,
+            "secret #{index} is too short to search for"
+        );
+        assert!(!logs.contains(secret), "the log holds secret #{index}");
+    }
+    // nothing is left behind
+    std::fs::remove_dir_all(&dir)?;
+    Ok(())
+}
+
 /// The blocking client starts tool runs and workflow runs too
 #[cfg(feature = "sync")]
 #[test]
@@ -6541,5 +7068,436 @@ async fn retry_of_unreadable_run_is_not_missing() -> Result<(), Error> {
     };
     let status = err.status().map(|status| status.as_u16());
     assert_ne!(status, Some(404), "{err:?}");
+    Ok(())
+}
+
+/// Make a group the runner is only a plain user of, owned by the admin
+///
+/// # Arguments
+///
+/// * `runner` - The runner
+async fn user_only_group(runner: &Runner) -> Result<String, Error> {
+    // the admin owns the group and the runner is a user of it
+    generators::god_group(
+        &runner.admin,
+        "juno",
+        &runner.suffix,
+        &GroupRoles::default().user(&runner.user.username),
+    )
+    .await
+}
+
+/// Make a tool in the runner's group and another group and return its first instance
+///
+/// # Arguments
+///
+/// * `runner` - The runner, who submits the tool
+/// * `other` - The other group to put the tool and its instance in
+async fn two_group_instance(runner: &Runner, other: &str) -> Result<Entity, Error> {
+    // the runner submits a tool and its instance into both groups
+    let groups = [runner.group.as_str(), other];
+    let (_, instance) = generators::tool(
+        &groups,
+        "1.0.0",
+        &generators::gen_image_spec(),
+        &runner.user.client,
+    )
+    .await?;
+    Ok(instance)
+}
+
+/// A scoped token can't delete what it submitted from groups outside its scope
+#[tokio::test]
+async fn scoped_token_delete_stays_within_its_groups() -> Result<(), Error> {
+    // a runner who submitted an instance into two groups
+    let runner = runner("callisto", "ceres").await?;
+    let other = user_only_group(&runner).await?;
+    let instance = two_group_instance(&runner, &other).await?;
+    // a scoped token limited to the first group is refused and nothing is deleted
+    let name = format!("scoped-{}", runner.suffix);
+    let req = ScopedTokenRequest::new(&name).group(&runner.group);
+    let limited = runner.user.client.users.create_scoped_token(&req).await?;
+    let limited = token_client(&runner.admin, &limited.token).await?;
+    assert_status(
+        limited.entities.delete(instance.id).await,
+        401,
+        "a token limited to one group deleted a two group instance",
+    )?;
+    is!(
+        runner.admin.entities.get(instance.id).await?.groups.len(),
+        2
+    );
+    // a scoped token covering both groups can delete it
+    let name = format!("both-{}", runner.suffix);
+    let req = ScopedTokenRequest::new(&name)
+        .group(&runner.group)
+        .group(&other);
+    let both = runner.user.client.users.create_scoped_token(&req).await?;
+    let both = token_client(&runner.admin, &both.token).await?;
+    both.entities.delete(instance.id).await?;
+    assert_status(
+        runner.admin.entities.get(instance.id).await,
+        404,
+        "the instance survived a delete by a token covering both groups",
+    )
+}
+
+/// A run token can't delete what the runner submitted from groups outside its scope
+#[tokio::test]
+async fn run_token_delete_stays_within_its_groups() -> Result<(), Error> {
+    // a runner who submitted an instance into two groups
+    let runner = runner("thebe", "ceres").await?;
+    let other = user_only_group(&runner).await?;
+    let instance = two_group_instance(&runner, &other).await?;
+    // start a run in the first group and take its token
+    let triage = Box::pin(workflow(&runner, "Triage")).await?;
+    let sha256 = sample(&runner.group, &runner.user.client).await?;
+    let (_, scoped) = start_run(&runner, &triage, &RunInputs::default().sample(&sha256)).await?;
+    // the run token is refused and the instance stays in both groups
+    assert_status(
+        scoped.entities.delete(instance.id).await,
+        401,
+        "a run token deleted a two group instance",
+    )?;
+    is!(
+        runner.admin.entities.get(instance.id).await?.groups.len(),
+        2
+    );
+    // the runner's full token can still delete it
+    runner.user.client.entities.delete(instance.id).await?;
+    assert_status(
+        runner.admin.entities.get(instance.id).await,
+        404,
+        "the runner couldn't delete its own instance",
+    )
+}
+
+/// A run token can't log out, which would rotate its value and lock out the run's other workers
+#[tokio::test]
+async fn run_token_logout_is_refused() -> Result<(), Error> {
+    // start a run and read its token
+    let runner = runner("pasiphae", "ceres").await?;
+    let triage = Box::pin(workflow(&runner, "Triage")).await?;
+    let sha256 = sample(&runner.group, &runner.user.client).await?;
+    let (run, scoped) = start_run(&runner, &triage, &RunInputs::default().sample(&sha256)).await?;
+    let before = run_token_of(&runner.admin, &run).await?;
+    // logging out with the run token is refused
+    let refused = scoped
+        .users
+        .logout()
+        .await
+        .err()
+        .and_then(|error| error.status());
+    is!(refused, Some(reqwest::StatusCode::UNAUTHORIZED));
+    // the token's value is unchanged and still authenticates
+    let after = run_token_of(&runner.admin, &run).await?;
+    is!(after.token, before.token);
+    token_client(&runner.admin, &before.token).await?;
+    Ok(())
+}
+
+/// A workflow run's runner, and clients holding the run's token
+struct EdgeFixture {
+    /// The runner and the group they own
+    runner: Runner,
+    /// A client with the run token
+    scoped: Thorium,
+    /// The run token's authorization header value
+    run_auth: String,
+}
+
+/// Start a workflow run in a group the runner owns and keep its run token
+///
+/// # Arguments
+///
+/// * `moon` - The moon the runner is named after
+/// * `god` - The god the group is named after
+async fn edge_fixture(moon: &str, god: &str) -> Result<EdgeFixture, Error> {
+    // a K8s developer who owns G with an Image tool and a ready workflow
+    let runner = runner(moon, god).await?;
+    let g = runner.group.clone();
+    let groups = [g.as_str()];
+    let (_, image) = runs::image_tool(&groups, ImageScaler::K8s, &runner.user.client).await?;
+    let (_, cli) = runs::container_tool(&groups, image.id, &runner.admin).await?;
+    let triage = runs::ready_workflow(
+        "Triage",
+        &groups,
+        &[(&cli, ToolMechanism::Cli)],
+        &runner.admin,
+    )
+    .await?;
+    // a workflow run on a file in G
+    let content = generators::gen_string(2048);
+    let input = sample_in(&content, &[&g], &runner.admin).await?;
+    let created = runner
+        .user
+        .client
+        .reactions
+        .run_workflow(
+            triage.id(),
+            &WorkflowRunRequest::new(RunInputs::default().sample(&input)),
+        )
+        .await?;
+    // read the run's token and build a client that holds it
+    let run = runner.user.client.reactions.get(&g, created.id).await?;
+    let token = run_token_of(&runner.admin, &run).await?;
+    let scoped = token_client(&runner.admin, &token.token).await?;
+    let run_auth = test_utilities::auth_header(&token.token);
+    Ok(EdgeFixture {
+        runner,
+        scoped,
+        run_auth,
+    })
+}
+
+/// The status a request ended with: 200 for any success, the error's status otherwise
+///
+/// # Arguments
+///
+/// * `result` - The result of the request
+fn code<T>(result: Result<T, Error>) -> u16 {
+    // successes are all reported as 200
+    match result {
+        Ok(_) => 200,
+        Err(error) => error.status().map_or(0, |status| status.as_u16()),
+    }
+}
+
+/// Whether an entity has an edge of a kind to another entity, read with the admin route
+///
+/// # Arguments
+///
+/// * `admin` - An admin client to read the associations with
+/// * `id` - The entity the edge starts at
+/// * `kind` - The kind of edge to look for
+/// * `other` - The entity the edge points to
+async fn has_edge(
+    admin: &Thorium,
+    id: Uuid,
+    kind: AssociationKind,
+    other: Uuid,
+) -> Result<bool, Error> {
+    // list every association of the entity and look for the edge
+    let found: Vec<Association> = admin.entities.associations(id).await?;
+    Ok(found.iter().any(|assoc| {
+        assoc.kind == kind
+            && assoc.direction == Directionality::To
+            && matches!(&assoc.other, AssociationTarget::Entity { id, .. } if *id == other)
+    }))
+}
+
+/// Run tokens can't create or delete the edges that make up the agentic graph, and the runner's
+/// full token still can
+///
+/// The edges decide which agents, tools, and toolsets a workflow is built from, so a run that could
+/// write them would change the workflows other runs follow.
+#[tokio::test]
+async fn run_token_cannot_write_graph_edges() -> Result<(), Error> {
+    let f = Box::pin(edge_fixture("amalthea", "ceres")).await?;
+    let g = f.runner.group.clone();
+    let groups = [g.as_str()];
+    let full = &f.runner.user.client;
+    let admin = &f.runner.admin;
+    let suffix = &f.runner.suffix;
+    // two agents, an agentic tool, and a toolset in G
+    let lead_name = format!("lead-{suffix}");
+    let helper_name = format!("helper-{suffix}");
+    let kit_name = format!("kit-{suffix}");
+    let lead = full
+        .entities
+        .create(generators::gen_agent(
+            &lead_name,
+            &groups,
+            AgentEntityRequest::new(generators::gen_agent_config("lead")),
+        ))
+        .await?
+        .id;
+    let helper = full
+        .entities
+        .create(generators::gen_agent(
+            &helper_name,
+            &groups,
+            AgentEntityRequest::new(generators::gen_agent_config("helper")),
+        ))
+        .await?
+        .id;
+    let (tool, _) =
+        generators::tool(&groups, "1.0.0", &generators::gen_agentic_spec(), full).await?;
+    let kit = full
+        .entities
+        .create(generators::gen_toolset(
+            &kit_name,
+            &groups,
+            ToolSetEntityRequest::default(),
+        ))
+        .await?
+        .id;
+    // build the target of an edge
+    let entity = |id: Uuid, name: &str| AssociationTarget::Entity {
+        id,
+        name: name.to_owned(),
+    };
+    // the graph edges: the lead calls the tool, the toolset includes it, the lead delegates
+    let edges = [
+        (
+            AssociationKind::Calls,
+            lead,
+            lead_name.clone(),
+            tool.id,
+            tool.name.clone(),
+        ),
+        (
+            AssociationKind::Includes,
+            kit,
+            kit_name.clone(),
+            tool.id,
+            tool.name.clone(),
+        ),
+        (
+            AssociationKind::DelegatesTo,
+            lead,
+            lead_name.clone(),
+            helper,
+            helper_name.clone(),
+        ),
+    ];
+    for (kind, src, src_name, dst, dst_name) in &edges {
+        // the run token's create is refused and no edge appears
+        let create =
+            AssociationRequest::new(*kind, entity(*src, src_name)).target(entity(*dst, dst_name));
+        let status = code(f.scoped.associations.create(&create).await);
+        assert_eq!(status, 401, "run token {kind:?} create");
+        assert!(
+            !has_edge(admin, *src, *kind, *dst).await?,
+            "run token created a {kind:?} edge"
+        );
+        // the runner's full token creates it
+        let status = code(full.associations.create(&create).await);
+        assert_eq!(status, 200, "full token {kind:?} create");
+        assert!(
+            has_edge(admin, *src, *kind, *dst).await?,
+            "full token {kind:?} edge is missing"
+        );
+        // the run token's delete is refused and the edge stays
+        let delete = AssociationDeleteRequest::new(*kind, entity(*src, src_name))
+            .target(entity(*dst, dst_name));
+        let status = code(f.scoped.associations.delete(&delete).await);
+        assert_eq!(status, 401, "run token {kind:?} delete");
+        assert!(
+            has_edge(admin, *src, *kind, *dst).await?,
+            "run token removed a {kind:?} edge"
+        );
+        // the runner's full token deletes it
+        let status = code(full.associations.delete(&delete).await);
+        assert_eq!(status, 200, "full token {kind:?} delete");
+        assert!(
+            !has_edge(admin, *src, *kind, *dst).await?,
+            "full token {kind:?} edge is still there"
+        );
+    }
+    Ok(())
+}
+
+/// Send an entity tag request with an authorization header
+///
+/// # Arguments
+///
+/// * `host` - The API to send the request to
+/// * `auth` - The authorization header value to send
+/// * `id` - The entity to tag
+/// * `delete` - Whether to delete the tags instead of adding them
+/// * `body` - The tag request body
+async fn raw_entity_tags(
+    host: &str,
+    auth: &str,
+    id: Uuid,
+    delete: bool,
+    body: &serde_json::Value,
+) -> Result<u16, Error> {
+    // build the tag request for this entity
+    let url = format!("{host}/api/entities/tags/{id}");
+    let client = reqwest::Client::new();
+    let req = if delete {
+        client.delete(url)
+    } else {
+        client.post(url)
+    };
+    // send it with the given authorization
+    let resp = req.header("authorization", auth).json(body).send().await?;
+    Ok(resp.status().as_u16())
+}
+
+/// Run tokens can't tag or untag a definition, which could change the tools a toolset selects,
+/// but still tag the data entities a harness writes about
+#[tokio::test]
+async fn run_token_cannot_tag_definitions() -> Result<(), Error> {
+    let f = Box::pin(edge_fixture("callirrhoe", "vesta")).await?;
+    let g = f.runner.group.clone();
+    let groups = [g.as_str()];
+    let full = &f.runner.user.client;
+    let admin = &f.runner.admin;
+    let host = admin.host.clone();
+    // a toolset in G that selects tools tagged kit=<value>, and an agentic tool in G
+    let value = format!("red-{}", f.runner.suffix);
+    full.entities
+        .create(generators::gen_toolset(
+            &format!("kit-{}", f.runner.suffix),
+            &groups,
+            ToolSetEntityRequest::default().selector(ToolSetSelector::new("kit", &value)),
+        ))
+        .await?;
+    let (tool, _) =
+        generators::tool(&groups, "1.0.0", &generators::gen_agentic_spec(), full).await?;
+    let body = serde_json::json!({"groups": [g.clone()], "tags": {"kit": [value.clone()]}});
+    // count the toolset rebuilds queued for the tool
+    let queued = || async {
+        Ok::<_, Error>(
+            test_utilities::events::graph_changes(admin, tool.id)
+                .await?
+                .len(),
+        )
+    };
+    let before = queued().await?;
+    // the run token's tag is refused and queues no rebuild
+    let status = raw_entity_tags(&host, &f.run_auth, tool.id, false, &body).await?;
+    assert_eq!(status, 401, "run token tool tag add");
+    assert_eq!(queued().await?, before, "run token tag queued a rebuild");
+    // the runner's full token tags the tool, which queues a rebuild
+    let status =
+        raw_entity_tags(&host, &f.runner.user.auth_header(), tool.id, false, &body).await?;
+    assert_eq!(status, 204, "full token tool tag add");
+    let tagged = queued().await?;
+    assert!(tagged > before, "full token tag queued no rebuild");
+    // the run token's untag is refused and queues no rebuild
+    let status = raw_entity_tags(&host, &f.run_auth, tool.id, true, &body).await?;
+    assert_eq!(status, 401, "run token tool tag delete");
+    assert_eq!(queued().await?, tagged, "run token untag queued a rebuild");
+    // the runner's full token untags the tool
+    let status = raw_entity_tags(&host, &f.runner.user.auth_header(), tool.id, true, &body).await?;
+    assert_eq!(status, 204, "full token tool tag delete");
+    // a data entity is not a definition, so the run token still tags it
+    let data = full
+        .entities
+        .create(generators::gen_entity(&g, generators::gen_other_meta()))
+        .await?
+        .id;
+    let status = raw_entity_tags(&host, &f.run_auth, data, false, &body).await?;
+    assert_eq!(status, 204, "run token data entity tag add");
+    Ok(())
+}
+
+/// Run tokens can't ask for a model endpoint refresh, and the runner's full token still can
+#[tokio::test]
+async fn run_token_cannot_refresh_endpoints() -> Result<(), Error> {
+    let f = Box::pin(edge_fixture("elara", "juno")).await?;
+    // an allowed endpoint in G, whose group the runner owns
+    let created = model_endpoint(&f.runner, "refresh", gateway_at_random(), None, &["m"]).await?;
+    // the run token's refresh is refused
+    let status = code(f.scoped.entities.refresh_model_endpoint(created.id).await);
+    assert_eq!(status, 401, "run token endpoint refresh");
+    // the runner's full token refreshes it
+    let full = &f.runner.user.client;
+    let status = code(full.entities.refresh_model_endpoint(created.id).await);
+    assert_eq!(status, 200, "full token endpoint refresh");
     Ok(())
 }

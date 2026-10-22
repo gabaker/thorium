@@ -17,8 +17,9 @@ use thorium::models::{
     ModelEndpointEntityRequest, ModelLimits, ModelParameters, ModelProfileEntity,
     ModelProfileEntityRequest, ModelProvider, ModelRefreshReason, ModelRefreshReport,
     ModelRefreshState, ModelRefreshTarget, ModelSecret, ModelsConfUpdate, NotificationType,
-    TreeOpts, TreeQuery, UserCredentialRef, UserModelEndpoint, UserModelSettings,
-    UserModelSettingsUpdate, UserRole, UserSettingsUpdate, UserUpdate, VertexLocation,
+    ScopedTokenRequest, TreeOpts, TreeQuery, UserCredentialRef, UserModelEndpoint,
+    UserModelSettings, UserModelSettingsUpdate, UserRole, UserSettingsUpdate, UserUpdate,
+    VertexLocation,
 };
 use thorium::test_utilities::generators::{GroupRoles, TestUser};
 use thorium::test_utilities::{self, events, generators};
@@ -1621,6 +1622,119 @@ async fn manager_only_writes() -> Result<(), Error> {
         let resp = writer.client.entities.get(spare_cred.id).await;
         fail!(resp, 404);
     }
+    Ok(())
+}
+
+/// A user-created scoped token of an owner reads shared model configuration, edits an endpoint
+/// that keeps its provider, and edits a profile, but can't create, rotate, or delete a credential
+/// or change an endpoint's provider; the owner's full token does all of them
+#[tokio::test]
+// one scenario builds the fixtures every refusal and success of it checks
+#[allow(clippy::too_many_lines)]
+async fn scoped_tokens_cannot_write_secrets_or_providers() -> Result<(), Error> {
+    // an owner of a group and a scoped token of the owner limited to that group
+    let admin = test_utilities::admin_client().await?;
+    let owner = plain(&admin).await?;
+    let g = group(GroupRoles::default().owner(&owner.username), &admin).await?;
+    let request = ScopedTokenRequest::new(generators::gen_string(12).to_lowercase()).group(&g);
+    let token = owner.client.users.create_scoped_token(&request).await?;
+    let scoped = Thorium::build(admin.host.clone())
+        .token(&token.token)
+        .build()
+        .await?;
+    // the owner's credential and an endpoint that uses it
+    let secret = gen_secret();
+    let cred =
+        generators::model_credential(&[&g], CredentialKind::ApiKey, Some(&secret), &owner.client)
+            .await?;
+    let endpoint =
+        generators::model_endpoint(&[&g], anthropic(Some(cred.id), "claude-a"), &owner.client)
+            .await?;
+    let before = credential_meta(&owner.client.entities.get(cred.id).await?)
+        .secrets
+        .fingerprint
+        .clone();
+    // the scoped token can't create a credential
+    let resp =
+        generators::model_credential(&[&g], CredentialKind::ApiKey, Some(&gen_secret()), &scoped)
+            .await;
+    fail!(resp, 401);
+    // or rotate one, which leaves its secret unchanged
+    let resp = update(
+        &scoped,
+        cred.id,
+        EntityMetadataUpdate::model_credential().credential_secret(gen_secret()),
+    )
+    .await;
+    fail!(resp, 401);
+    let after = credential_meta(&owner.client.entities.get(cred.id).await?)
+        .secrets
+        .fingerprint
+        .clone();
+    is!(after, before);
+    // or delete one that nothing references, and it stays
+    let spare = generators::model_credential(
+        &[&g],
+        CredentialKind::ApiKey,
+        Some(&gen_secret()),
+        &owner.client,
+    )
+    .await?;
+    fail!(scoped.entities.delete(spare.id).await, 401);
+    owner.client.entities.get(spare.id).await?;
+    // or change an endpoint's provider, which leaves its provider unchanged
+    let moved = allowed_anthropic("scoped").await?;
+    let resp = update(
+        &scoped,
+        endpoint.id,
+        endpoint_update().endpoint_provider(moved.clone()),
+    )
+    .await;
+    fail!(resp, 401);
+    let unchanged = endpoint_meta(&owner.client.entities.get(endpoint.id).await?)
+        .provider
+        .clone()
+        == moved;
+    is!(unchanged, false);
+    // the scoped token still reads the credential, and edits an endpoint that keeps its provider
+    scoped.entities.get(cred.id).await?;
+    scoped
+        .entities
+        .update(endpoint.id, EntityUpdate::default().description("scoped"))
+        .await?;
+    update(
+        &scoped,
+        endpoint.id,
+        endpoint_update().add_catalog_model(ModelCatalogEntryRequest::new("claude-c")),
+    )
+    .await?;
+    // the owner's full token creates, rotates, repoints, and deletes
+    let rotated = gen_secret();
+    update(
+        &owner.client,
+        cred.id,
+        EntityMetadataUpdate::model_credential().credential_secret(rotated.clone()),
+    )
+    .await?;
+    let read = owner.client.entities.get(cred.id).await?;
+    is!(
+        credential_meta(&read).secrets.fingerprint.clone(),
+        Some(ModelSecret::from(rotated.as_str()).fingerprint())
+    );
+    update(
+        &owner.client,
+        endpoint.id,
+        endpoint_update().endpoint_provider(moved.clone()),
+    )
+    .await?;
+    is!(
+        endpoint_meta(&owner.client.entities.get(endpoint.id).await?)
+            .provider
+            .clone(),
+        moved
+    );
+    owner.client.entities.delete(spare.id).await?;
+    fail!(owner.client.entities.get(spare.id).await, 404);
     Ok(())
 }
 

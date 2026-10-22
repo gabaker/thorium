@@ -1450,7 +1450,7 @@ impl ScopedTokenUpdate {
 }
 
 /// A token tied to a user that is limited to a subset of that users groups
-#[derive(Serialize, Deserialize, Debug, Clone)]
+#[derive(Serialize, Deserialize, Clone)]
 #[cfg_attr(feature = "api", derive(utoipa::ToSchema))]
 pub struct ScopedToken {
     /// The name of this scoped token
@@ -1470,6 +1470,27 @@ pub struct ScopedToken {
     /// The run this token is limited to if it is a run-scoped token
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub run: Option<RunTokenScope>,
+}
+
+impl fmt::Debug for ScopedToken {
+    /// Write this scoped token without its value
+    ///
+    /// # Arguments
+    ///
+    /// * `f` - The formatter to write to
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        // never print the token's value itself
+        f.debug_struct("ScopedToken")
+            .field("name", &self.name)
+            .field("owner", &self.owner)
+            .field("role", &self.role)
+            .field("groups", &self.groups)
+            .field("token", &"<redacted>")
+            .field("token_expiration", &self.token_expiration)
+            .field("expires", &self.expires)
+            .field("run", &self.run)
+            .finish()
+    }
 }
 
 /// The workflow run or tool run a run-scoped token is limited to

@@ -162,12 +162,27 @@ impl std::fmt::Display for ContainerRuntime {
 }
 
 /// An activated scoped token for Thorctl to authenticate with
-#[derive(Serialize, Deserialize, Debug, Clone)]
+#[derive(Serialize, Deserialize, Clone)]
 pub struct ActiveScopedToken {
     /// The name of the activated scoped token
     pub name: String,
     /// The value of the activated scoped token
     pub token: String,
+}
+
+impl std::fmt::Debug for ActiveScopedToken {
+    /// Write this activated scoped token without its value
+    ///
+    /// # Arguments
+    ///
+    /// * `f` - The formatter to write to
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // never print the token's value itself
+        f.debug_struct("ActiveScopedToken")
+            .field("name", &self.name)
+            .field("token", &"<redacted>")
+            .finish()
+    }
 }
 
 /// A config for running Thorctl in user mode
@@ -367,5 +382,48 @@ mod conf_tests {
             !conf.skip_insecure_warning.unwrap_or(false),
             "THORCTL_SKIP_INSECURE_WARNING suppressed the warning via the environment"
         );
+    }
+
+    /// An activated scoped token and auth keys keep their token values and passwords out of their
+    /// debug output while printing their other fields
+    #[test]
+    fn token_values_stay_out_of_debug() {
+        // an activated scoped token with a recognizable value
+        let value = "tok-ganymede-8c2a71";
+        let active = super::ActiveScopedToken {
+            name: "harvester".to_owned(),
+            token: value.to_owned(),
+        };
+        let printed = format!("{active:?}");
+        assert!(
+            !printed.contains(value),
+            "active token value printed: {}",
+            printed.len()
+        );
+        assert!(printed.contains("harvester"));
+        // keys holding a token, as a run's keys file does
+        let keys = crate::client::Keys::new_token("https://thorium.example", value);
+        let printed = format!("{keys:?}");
+        assert!(
+            !printed.contains(value),
+            "keys token value printed: {}",
+            printed.len()
+        );
+        assert!(printed.contains("https://thorium.example"));
+        // keys holding a username and password for basic auth
+        let password = "pw-himalia-91f0c3";
+        let keys = crate::client::Keys {
+            api: "https://thorium.example".to_owned(),
+            username: Some("himalia".to_owned()),
+            password: Some(password.to_owned()),
+            token: None,
+        };
+        let printed = format!("{keys:?}");
+        assert!(
+            !printed.contains(password),
+            "keys password printed: {}",
+            printed.len()
+        );
+        assert!(printed.contains("himalia"));
     }
 }
