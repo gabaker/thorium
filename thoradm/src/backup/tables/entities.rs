@@ -231,3 +231,46 @@ impl From<EntityV1> for Entity {
 impl Versioned for Entity {
     type V1 = EntityV1;
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Pins the layout of the archived [`Entity`] row, which written backups depend on
+    #[test]
+    fn entity_layout_is_pinned() {
+        // the archived row's size and the offset of every field must stay as backups hold them
+        assert_layout!(ArchivedEntity, 108, {
+            kind: 104,
+            group: 72,
+            year: 80,
+            bucket: 84,
+            created: 60,
+            id: 88,
+            name: 0,
+            submitter: 12,
+            kind_data: 24,
+            description: 36,
+            image: 48,
+        });
+    }
+
+    /// Pins the layout of the archived [`EntityV1`] row, which written backups depend on
+    #[test]
+    fn entity_v1_layout_is_pinned() {
+        // the archived row's size and the offset of every field must stay as backups hold them
+        assert_layout!(ArchivedEntityV1, 96, {
+            kind: 92,
+            group: 36,
+            year: 44,
+            bucket: 48,
+            created: 24,
+            id: 52,
+            name: 68,
+            submitter: 76,
+            kind_data: 84,
+            description: 0,
+            image: 12,
+        });
+    }
+}

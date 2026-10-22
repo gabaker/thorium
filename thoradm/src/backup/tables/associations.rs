@@ -249,3 +249,48 @@ impl From<AssociationV1> for Association {
 impl Versioned for Association {
     type V1 = AssociationV1;
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Pins the layout of the archived [`Association`] row, which written backups depend on
+    #[test]
+    fn association_layout_is_pinned() {
+        // the archived row's size and the offset of every field must stay as backups hold them
+        assert_layout!(ArchivedAssociation, 120, {
+            group: 48,
+            year: 56,
+            bucket: 60,
+            created: 36,
+            direction: 116,
+            kind: 80,
+            source: 64,
+            other: 72,
+            submitter: 0,
+            extra_source: 12,
+            extra_other: 24,
+            submissions_source: 82,
+            submissions_other: 99,
+        });
+    }
+
+    /// Pins the layout of the archived [`AssociationV1`] row, which written backups depend on
+    #[test]
+    fn association_v1_layout_is_pinned() {
+        // the archived row's size and the offset of every field must stay as backups hold them
+        assert_layout!(ArchivedAssociationV1, 80, {
+            group: 36,
+            year: 44,
+            bucket: 48,
+            created: 24,
+            direction: 76,
+            kind: 77,
+            source: 52,
+            other: 60,
+            submitter: 68,
+            extra_source: 0,
+            extra_other: 12,
+        });
+    }
+}

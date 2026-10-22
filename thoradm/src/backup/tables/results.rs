@@ -527,3 +527,79 @@ impl From<OutputStreamV1> for OutputStream {
 impl Versioned for OutputStream {
     type V1 = OutputStreamV1;
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Pins the layout of the archived [`Output`] row, which written backups depend on
+    #[test]
+    fn output_layout_is_pinned() {
+        // the archived row's size and the offset of every field must stay as backups hold them
+        assert_layout!(ArchivedOutput, 124, {
+            id: 104,
+            tool: 0,
+            tool_version: 12,
+            cmd: 24,
+            uploaded: 92,
+            result: 36,
+            files: 48,
+            display_type: 120,
+            children: 60,
+            entities: 76,
+        });
+    }
+
+    /// Pins the layout of the archived [`OutputStream`] row, which written backups depend on
+    #[test]
+    fn output_stream_layout_is_pinned() {
+        // the archived row's size and the offset of every field must stay as backups hold them
+        assert_layout!(ArchivedOutputStream, 100, {
+            kind: 48,
+            group: 56,
+            year: 64,
+            bucket: 68,
+            key: 72,
+            tool: 0,
+            tool_version: 12,
+            display_type: 96,
+            uploaded: 36,
+            cmd: 24,
+            id: 80,
+        });
+    }
+
+    /// Pins the layout of the archived [`OutputV1`] row, which written backups depend on
+    #[test]
+    fn output_v1_layout_is_pinned() {
+        // the archived row's size and the offset of every field must stay as backups hold them
+        assert_layout!(ArchivedOutputV1, 88, {
+            id: 52,
+            tool: 68,
+            cmd: 0,
+            uploaded: 40,
+            result: 76,
+            files: 12,
+            display_type: 84,
+            children: 24,
+        });
+    }
+
+    /// Pins the layout of the archived [`OutputStreamV1`] row, which written backups depend on
+    #[test]
+    fn output_stream_v1_layout_is_pinned() {
+        // the archived row's size and the offset of every field must stay as backups hold them
+        assert_layout!(ArchivedOutputStreamV1, 84, {
+            kind: 24,
+            group: 32,
+            year: 40,
+            bucket: 44,
+            key: 48,
+            tool: 56,
+            display_type: 80,
+            uploaded: 12,
+            cmd: 0,
+            id: 64,
+        });
+    }
+}
