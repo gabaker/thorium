@@ -7,7 +7,7 @@ use std::collections::{BTreeSet, HashMap, HashSet};
 use std::io::IsTerminal;
 use std::path::{Path, PathBuf};
 use thorium::models::{
-    Image, ImageRequest, ImageVersion, NetworkPolicyRequest, Pipeline, PipelineRequest,
+    Image, ImageRequest, NetworkPolicyRequest, Pipeline, PipelineRequest, ToolVersion,
 };
 use thorium::{CtlConf, Error, Thorium};
 use url::Url;
@@ -33,10 +33,10 @@ use crate::utils::pipelines::list_all_pipelines;
 /// # Arguments
 ///
 /// * `version` - The image version to render, or `None` for the default label
-fn version_label(version: Option<&ImageVersion>) -> String {
+fn version_label(version: Option<&ToolVersion>) -> String {
     match version {
-        Some(ImageVersion::SemVer(v)) => v.to_string(),
-        Some(ImageVersion::Custom(s)) => s.clone(),
+        Some(ToolVersion::SemVer(v)) => v.to_string(),
+        Some(ToolVersion::Custom(s)) => s.clone(),
         None => "latest".to_string(),
     }
 }
@@ -3483,7 +3483,7 @@ mod tests {
         );
     }
 
-    /// An existing tool whose config differs is an Update with `--overwrite`, else SkipDiffers — both
+    /// An existing tool whose config differs is an Update with `--overwrite`, else `SkipDiffers` — both
     /// targeting the tool's existing directory
     #[test]
     fn plan_placement_differs_overwrite_vs_skip() {
@@ -3516,7 +3516,7 @@ mod tests {
         );
     }
 
-    /// An explicit `=dest` pointing somewhere other than where the tool already lives is a SkipMove
+    /// An explicit `=dest` pointing somewhere other than where the tool already lives is a `SkipMove`
     /// (relocating would leave a duplicate); the same dir falls through to the normal update path
     #[test]
     fn plan_placement_explicit_move_is_rejected() {

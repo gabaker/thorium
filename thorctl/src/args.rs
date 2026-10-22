@@ -6,6 +6,7 @@ use thorium::models::NotificationLevel;
 use uuid::Uuid;
 
 use self::{
+    agents::Agents,
     ai::Ai,
     associations::Associations,
     cart::Cart,
@@ -14,6 +15,8 @@ use self::{
     files::Files,
     groups::Groups,
     images::Images,
+    instances::Instances,
+    models::Models,
     network_policies::NetworkPolicies,
     pipelines::Pipelines,
     reactions::Reactions,
@@ -22,11 +25,15 @@ use self::{
     run::Run,
     tags::Tags,
     tokens::{ActivateScopedToken, Tokens},
+    tools::Tools,
+    toolsets::ToolSets,
     trees::Trees,
     uncart::Uncart,
+    workflows::Workflows,
 };
 use crate::{args::toolbox::Toolbox, utils::repos::validate_repo_url};
 
+pub mod agents;
 pub mod ai;
 pub mod associations;
 pub mod cart;
@@ -36,6 +43,8 @@ pub mod files;
 pub mod groups;
 pub mod helpers;
 pub mod images;
+pub mod instances;
+pub mod models;
 pub mod network_policies;
 pub mod pipelines;
 pub mod reactions;
@@ -45,9 +54,12 @@ pub mod run;
 pub mod tags;
 pub mod tokens;
 pub mod toolbox;
+pub mod tools;
+pub mod toolsets;
 mod traits;
 pub mod trees;
 pub mod uncart;
+pub mod workflows;
 
 pub use traits::describe::DescribeCommand;
 pub use traits::search::SearchParameterized;
@@ -160,6 +172,24 @@ pub enum SubCommands {
     /// Perform network policy related tasks
     #[clap(version, author, subcommand, visible_alias = "netpols")]
     NetworkPolicies(NetworkPolicies),
+    /// Create, publish, and inspect tools and their versions
+    #[clap(version, author, subcommand, alias = "tool")]
+    Tools(Tools),
+    /// Manage model endpoints, catalogs, profiles, credentials, and their bans
+    #[clap(version, author, subcommand, alias = "model")]
+    Models(Models),
+    /// Create, link, and inspect AI agents (not the thorium-agent job runner)
+    #[clap(version, author, subcommand, alias = "agent")]
+    Agents(Agents),
+    /// Create, edit, and inspect toolsets of agentic tools that AI agents attach as one unit
+    #[clap(version, author, subcommand, name = "toolsets", alias = "toolset")]
+    ToolSets(ToolSets),
+    /// Create, edit, and inspect workflows that wire AI agents together
+    #[clap(version, author, subcommand, alias = "workflow")]
+    Workflows(Workflows),
+    /// List, describe, and compare tool, toolset, and workflow instances
+    #[clap(version, author, subcommand, alias = "instance")]
+    Instances(Instances),
     /// Use AI to perform tasks in Thorium
     #[clap(version, author, subcommand)]
     AI(Ai),

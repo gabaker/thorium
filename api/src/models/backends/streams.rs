@@ -15,28 +15,45 @@ use crate::{at_least, bad};
 impl From<Deadline> for StreamObj {
     /// Cast a deadline to a StreamObj
     ///
+    /// The member is written in a fixed field order without the timestamp, so it can be rebuilt
+    /// byte for byte from its job and removed by exact match. The pipeline and stage labels are
+    /// JSON escaped, and `run` is only written when it's set.
+    ///
     /// # Arguments
     ///
     /// * `deadline` - The deadline to convert
     fn from(deadline: Deadline) -> Self {
-        // cast deadline data to stream data without timestamp
-        // were using a format macro so we get a consistent order
+        // write the run only for jobs of runs
+        let run = deadline
+            .run
+            .map_or_else(String::new, |run| format!(",\"run\":\"{run}\""));
+        // cast deadline data to stream data without timestamp in a consistent order
         let data = format!(
-            "{{\"group\":\"{}\",\"pipeline\":\"{}\",\"stage\":\"{}\",\"creator\":\"{}\",\"job_id\":\"{}\",\"reaction\":\"{}\"}}",
+            "{{\"group\":\"{}\",\"pipeline\":{},\"stage\":{},\"creator\":\"{}\",\"job_id\":\"{}\",\"reaction\":\"{}\",\"tool_instance\":\"{}\"{run}}}",
             deadline.group,
-            deadline.pipeline,
-            deadline.stage,
+            json_string(&deadline.pipeline),
+            json_string(&deadline.stage),
             deadline.creator,
             deadline.job_id,
-            deadline.reaction
+            deadline.reaction,
+            deadline.tool_instance,
         );
-
         // cast to stream object
         StreamObj {
             timestamp: deadline.as_seconds(),
             data,
         }
     }
+}
+
+/// Encode a label as a JSON string, escaping quotes, backslashes, and control characters
+///
+/// # Arguments
+///
+/// * `label` - The label to encode
+fn json_string(label: &str) -> String {
+    // serializing a str never fails
+    serde_json::to_string(label).unwrap_or_else(|_| format!("\"{label}\""))
 }
 
 impl From<RawJob> for StreamObj {
@@ -435,7 +452,108 @@ impl Stream {
 
 #[cfg(test)]
 mod tests {
+    use chrono::{TimeZone, Utc};
+    use std::collections::HashMap;
+    use uuid::Uuid;
+
     use super::{Stream, StreamDepth};
+    use crate::models::{Deadline, ImageScaler, JobStatus, RawJob, StreamObj};
+
+    /// Build a job of a pipeline stage
+    ///
+    /// # Arguments
+    ///
+    /// * `pipeline` - The pipeline label of the job
+    /// * `stage` - The stage of the job
+    /// * `run` - The run the job belongs to, if any
+    fn job(pipeline: &str, stage: &str, run: Option<Uuid>) -> RawJob {
+        // a created job with fixed ids so members can be compared
+        RawJob {
+            group: "jupiter".to_owned(),
+            pipeline: pipeline.to_owned(),
+            reaction: Uuid::from_u128(1),
+            stage: stage.to_owned(),
+            creator: "europa".to_owned(),
+            id: Uuid::from_u128(2),
+            args: "{}".to_owned(),
+            status: JobStatus::Created,
+            deadline: Utc.timestamp_opt(1_700_000_000, 0).unwrap(),
+            worker: None,
+            parent: None,
+            generator: false,
+            scaler: ImageScaler::K8s,
+            samples: Vec::new(),
+            ephemeral: Vec::new(),
+            parent_ephemeral: HashMap::new(),
+            repos: Vec::new(),
+            trigger_depth: None,
+            tool_instance: Uuid::from_u128(3),
+            run,
+        }
+    }
+
+    /// Deadline members hold their fields in a fixed order and round trip with their tool
+    /// instance and run
+    #[test]
+    fn deadline_member_order_and_round_trip() {
+        // a pipeline job's member has its tool instance and no run
+        let pipeline_job = job("orbit", "plant", None);
+        let member = StreamObj::from(&pipeline_job);
+        assert_eq!(
+            member.data,
+            format!(
+                "{{\"group\":\"jupiter\",\"pipeline\":\"orbit\",\"stage\":\"plant\",\"creator\":\"europa\",\"job_id\":\"{}\",\"reaction\":\"{}\",\"tool_instance\":\"{}\"}}",
+                Uuid::from_u128(2),
+                Uuid::from_u128(1),
+                Uuid::from_u128(3)
+            )
+        );
+        assert_eq!(member.timestamp, 1_700_000_000);
+        // a run job's member ends with its run
+        let run = Uuid::from_u128(4);
+        let run_job = job("orbit", "plant", Some(run));
+        let run_member = StreamObj::from(&run_job);
+        assert!(run_member.data.ends_with(&format!(",\"run\":\"{run}\"}}")));
+        // both members read back into deadlines with their tool instance and run
+        for (raw_job, obj) in [(&pipeline_job, member), (&run_job, run_member)] {
+            let data = obj.data.clone();
+            let deadline = Deadline::try_from(obj).expect("a deadline");
+            assert_eq!(deadline.tool_instance, raw_job.tool_instance);
+            assert_eq!(deadline.run, raw_job.run);
+            assert_eq!(deadline, Deadline::from(raw_job));
+            // the member rebuilt from the deadline matches the stored one byte for byte
+            assert_eq!(StreamObj::from(deadline).data, data);
+        }
+        // a pipeline job's deadline serializes without a run key and a run job's with one
+        let pipeline_json = serde_json::to_value(Deadline::from(&pipeline_job)).expect("json");
+        assert!(pipeline_json.get("run").is_none());
+        let run_json = serde_json::to_value(Deadline::from(&run_job)).expect("json");
+        assert_eq!(run_json["run"], serde_json::json!(run));
+    }
+
+    /// Labels with quotes and backslashes are escaped so the member stays valid JSON
+    #[test]
+    fn deadline_member_escapes_labels() {
+        // a run label built from a tool name holding a quote and a backslash
+        let escaped = job("tool:a\"b\\c v1", "a\"b\\c", Some(Uuid::from_u128(4)));
+        let member = StreamObj::from(&escaped);
+        // the member is valid JSON that reads back the label exactly
+        let parsed: serde_json::Value = serde_json::from_str(&member.data).expect("valid json");
+        assert_eq!(parsed["pipeline"], "tool:a\"b\\c v1");
+        assert_eq!(parsed["stage"], "a\"b\\c");
+        let data = member.data.clone();
+        let deadline = Deadline::try_from(member).expect("a deadline");
+        assert_eq!(deadline.pipeline, "tool:a\"b\\c v1");
+        // the member rebuilt from the job is the same exact string, so it can be removed by match
+        assert_eq!(StreamObj::from(&escaped).data, data);
+        // a label without special characters is written as a bare quoted string
+        let plain = StreamObj::from(&job("orbit", "plant", None));
+        assert!(
+            plain
+                .data
+                .contains("\"pipeline\":\"orbit\",\"stage\":\"plant\"")
+        );
+    }
 
     /// `Stream::map` folds each day-window's depths onto its accumulator, so a day-window whose
     /// depths sum past `min` reports that the bound was exceeded and the "stop once we have

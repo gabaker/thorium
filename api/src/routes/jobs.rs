@@ -12,10 +12,10 @@ use super::OpenApiSecurity;
 
 use crate::models::AuthedUser;
 use crate::models::{
-    Checkpoint, CommitishKinds, Deadline, GenericJob, GenericJobArgs, GenericJobOpts,
-    HandleJobResponse, ImageScaler, JobHandleStatus, JobListOpts, JobResetRequestor, JobResets,
-    JobStatus, Pipeline, RawJob, RepoDependency, RunningJob, StageLogLine, StageLogsAdd,
-    SystemComponents, WorkerName,
+    Checkpoint, CommitishKinds, Deadline, GenericJob, GenericJobArgs, GenericJobOpts, Group,
+    HandleJobResponse, ImageScaler, JobHandleParams, JobHandleStatus, JobListOpts,
+    JobResetRequestor, JobResets, JobStatus, Pipeline, RawJob, RepoDependency, RunningJob,
+    StageLogLine, StageLogsAdd, SystemComponents, WorkerName, WorkloadRuntimes,
 };
 use crate::utils::{ApiError, AppState};
 
@@ -83,6 +83,120 @@ async fn claim(
     Ok(Json(claims))
 }
 
+/// Claims jobs of a tool instance for a worker
+///
+/// A per-run worker claims only its run's jobs of the tool instance; a shared worker claims the
+/// jobs its user queued for the tool instance in the group.
+///
+/// # Arguments
+///
+/// * `user` - The user that is claiming jobs
+/// * `group` - The group the jobs are in
+/// * `tool_instance` - The tool instance whose jobs to claim
+/// * `cluster` - The cluster of the worker that is claiming jobs
+/// * `node` - The node of the worker that is claiming jobs
+/// * `worker` - The name of the worker that is claiming jobs
+/// * `limit` - The max number of jobs to claim
+/// * `state` - Shared Thorium objects
+#[utoipa::path(
+    patch,
+    path = "/api/jobs/workloads/claim/:group/:tool_instance/:cluster/:node/:worker/:limit",
+    params(
+        ("group" = String, Path, description = "The group the jobs are in"),
+        ("tool_instance" = Uuid, Path, description = "The tool instance whose jobs to claim"),
+        ("cluster" = String, Path, description = "The name of the cluster of the worker that is claiming jobs"),
+        ("node" = String, Path, description = "The name of the node of the worker that is claiming jobs"),
+        ("worker" = String, Path, description = "The name of the worker that is claiming jobs"),
+        ("limit" = usize, Path, description = "The max number of jobs to claim"),
+    ),
+    responses(
+        (status = 200, description = "The claimed jobs", body = Vec<GenericJob>),
+        (status = 401, description = "This user is not authorized to claim jobs for this worker"),
+    ),
+    security(
+        ("basic" = []),
+    )
+)]
+#[instrument(name = "routes::jobs::claim_workload", skip_all, err(Debug))]
+async fn claim_workload(
+    user: AuthedUser,
+    Path((group, tool_instance, cluster, node, worker, limit)): Path<(
+        String,
+        Uuid,
+        String,
+        String,
+        String,
+        usize,
+    )>,
+    State(state): State<AppState>,
+) -> Result<Json<Vec<GenericJob>>, ApiError> {
+    // make sure we are a member of this group and it exists
+    let group = Group::authorize(&user, &group, &state.shared).await?;
+    // build the primary keys to the worker that is claiming jobs
+    let worker = WorkerName::new(cluster, node, worker);
+    // claim jobs if any exist
+    let claims =
+        GenericJob::claim_workload(&user, &group, tool_instance, limit, &worker, &state.shared)
+            .await?;
+    Ok(Json(claims))
+}
+
+/// Recompute the average runtime of every active tool instance
+///
+/// # Arguments
+///
+/// * `user` - The user that is updating runtimes
+/// * `state` - Shared Thorium objects
+#[utoipa::path(
+    post,
+    path = "/api/jobs/workloads/runtimes/update",
+    params(),
+    responses(
+        (status = 204, description = "Tool instance runtimes updated"),
+        (status = 401, description = "This user is not an admin"),
+    ),
+    security(
+        ("basic" = []),
+    )
+)]
+#[instrument(name = "routes::jobs::update_workload_runtimes", skip_all, err(Debug))]
+async fn update_workload_runtimes(
+    user: AuthedUser,
+    State(state): State<AppState>,
+) -> Result<StatusCode, ApiError> {
+    // update the tool instance runtimes
+    RawJob::update_workload_runtimes(&user, &state.shared).await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+/// Get the average runtime of every tool instance that has one
+///
+/// # Arguments
+///
+/// * `user` - The user that is reading runtimes
+/// * `state` - Shared Thorium objects
+#[utoipa::path(
+    get,
+    path = "/api/jobs/workloads/runtimes",
+    params(),
+    responses(
+        (status = 200, description = "The tool instance runtimes", body = WorkloadRuntimes),
+        (status = 401, description = "This user is not an admin"),
+    ),
+    security(
+        ("basic" = []),
+    )
+)]
+#[instrument(name = "routes::jobs::workload_runtimes", skip_all, err(Debug))]
+async fn workload_runtimes(
+    user: AuthedUser,
+    State(state): State<AppState>,
+) -> Result<Json<WorkloadRuntimes>, ApiError> {
+    // read the tool instance runtimes
+    let runtimes = RawJob::workload_runtimes(&user, &state.shared).await?;
+    Ok(Json(runtimes))
+}
+
 /// Proceed with this job a worker has just completed
 ///
 /// # Arguments
@@ -90,6 +204,7 @@ async fn claim(
 /// * `user` - The user that is proceeding with this job
 /// * `id` - The uuid of the job that was completed
 /// * `runtime` - The amount of time in seconds this job took to complete
+/// * `params` - The name of the worker that claimed this job
 /// * `state` - Shared Thorium objects
 /// * `logs` - Any logs to append to this jobs stage logs
 #[utoipa::path(
@@ -98,10 +213,12 @@ async fn claim(
     params(
         ("id" = Uuid, Path, description = "The uuid of the job that was completed"),
         ("runtime" = u64, Path, description = "The amount of time in seconds this job took to complete"),
+        ("worker" = Option<String>, Query, description = "The name of the worker that claimed this job (required for non-admins)"),
         ("logs" = StageLogsAdd, description = "Any logs to append to this jobs stage logs"),
     ),
     responses(
         (status = 202, description = "Proceeding with specified job", body = HandleJobResponse),
+        (status = 400, description = "The worker that claimed this job was not set"),
         (status = 401, description = "This user is not authorized to access this route"),
     ),
     security(
@@ -112,26 +229,30 @@ async fn claim(
 async fn proceed(
     user: AuthedUser,
     Path((id, runtime)): Path<(Uuid, u64)>,
+    Query(params): Query<JobHandleParams>,
     State(state): State<AppState>,
     Json(logs): Json<StageLogsAdd>,
 ) -> Result<Response, ApiError> {
     // get job object
     let (group, job) = RawJob::get(&user, &id, &state.shared).await?;
+    // get the name of the worker that claimed this job
+    let worker = params.worker.as_deref();
     // proceed with job
     let status = job
-        .proceed(&user, &group, runtime, logs, &state.shared)
+        .proceed(&user, &group, runtime, logs, worker, &state.shared)
         .await?;
     // build response
     let response = Json(HandleJobResponse { status });
     Ok((StatusCode::ACCEPTED, response).into_response())
 }
 
-/// ApiError out this job that has just failed
+/// Error out this job that has just failed
 ///
 /// # Arguments
 ///
 /// * `user` - The user that is erroring out this job
 /// * `id` - The uuid of the job that was failed
+/// * `params` - The name of the worker that claimed this job
 /// * `state` - Shared Thorium objects
 /// * `logs` - Any logs to append to this jobs stage logs
 #[utoipa::path(
@@ -139,10 +260,12 @@ async fn proceed(
     path = "/api/jobs/handle/:id/error",
     params(
         ("id" = Uuid, Path, description = "The uuid of the job that was completed"),
+        ("worker" = Option<String>, Query, description = "The name of the worker that claimed this job (required for non-admins)"),
         ("logs" = StageLogsAdd, description = "Any logs to append to this jobs stage logs"),
     ),
     responses(
         (status = 202, description = "Handle specified failed job", body = HandleJobResponse),
+        (status = 400, description = "The worker that claimed this job was not set"),
         (status = 401, description = "This user is not authorized to access this route"),
     ),
     security(
@@ -153,13 +276,18 @@ async fn proceed(
 async fn error(
     user: AuthedUser,
     Path(id): Path<Uuid>,
+    Query(params): Query<JobHandleParams>,
     State(state): State<AppState>,
     Json(logs): Json<StageLogsAdd>,
 ) -> Result<Response, ApiError> {
     // get job object
     let (group, job) = RawJob::get(&user, &id, &state.shared).await?;
+    // get the name of the worker that claimed this job
+    let worker = params.worker.as_deref();
     // error out this job
-    let status = job.error(&user, &group, logs, &state.shared).await?;
+    let status = job
+        .error(&user, &group, logs, worker, &state.shared)
+        .await?;
     // build response
     let response = Json(HandleJobResponse { status });
     Ok((StatusCode::ACCEPTED, response).into_response())
@@ -417,8 +545,8 @@ async fn get_job(
 /// The struct containing our openapi docs
 #[derive(OpenApi)]
 #[openapi(
-    paths(claim, proceed, error, sleep, checkpoint, bulk_reset, read_deadlines, bulk_running, get_job),
-    components(schemas(Checkpoint, CommitishKinds, Deadline, GenericJob, GenericJobArgs, GenericJobOpts, HandleJobResponse, ImageScaler, JobHandleStatus, JobListOpts, JobResetRequestor, JobResets, JobHandleStatus, JobStatus, RawJob, RepoDependency, RunningJob, StageLogLine, StageLogsAdd, SystemComponents)),
+    paths(claim, claim_workload, update_workload_runtimes, workload_runtimes, proceed, error, sleep, checkpoint, bulk_reset, read_deadlines, bulk_running, get_job),
+    components(schemas(Checkpoint, CommitishKinds, Deadline, GenericJob, GenericJobArgs, GenericJobOpts, HandleJobResponse, ImageScaler, JobHandleParams, JobHandleStatus, JobListOpts, JobResetRequestor, JobResets, JobHandleStatus, JobStatus, RawJob, RepoDependency, RunningJob, StageLogLine, StageLogsAdd, SystemComponents, WorkloadRuntimes)),
     modifiers(&OpenApiSecurity),
 )]
 pub struct JobApiDocs;
@@ -441,6 +569,15 @@ pub fn mount(router: Router<AppState>) -> Router<AppState> {
             "/jobs/claim/{group}/{pipeline}/{stage}/{cluster}/{node}/{worker}/{limit}",
             patch(claim),
         )
+        .route(
+            "/jobs/workloads/claim/{group}/{tool_instance}/{cluster}/{node}/{worker}/{limit}",
+            patch(claim_workload),
+        )
+        .route(
+            "/jobs/workloads/runtimes/update",
+            post(update_workload_runtimes),
+        )
+        .route("/jobs/workloads/runtimes", get(workload_runtimes))
         .route("/jobs/handle/{id}/proceed/{runtime}", post(proceed))
         .route("/jobs/handle/{id}/error", post(error))
         .route("/jobs/handle/{id}/sleep", post(sleep))

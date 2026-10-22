@@ -2,8 +2,15 @@
 
 use chrono::prelude::*;
 use schemars::JsonSchema;
-use std::collections::HashMap;
+use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::fmt;
+use uuid::Uuid;
 
+use super::{
+    CredentialKind, CredentialSecrets, ModelBan, ModelBanUpdate, ModelCatalogEntry,
+    ModelCatalogEntryRequest, ModelProvider, ModelRefreshReport, ModelRefreshStatus, ModelSecret,
+    RedactSecrets, ScopedModelBan,
+};
 use crate::{matches_vec, same};
 
 /// The key used to bootstrap cluster when no admins are loaded
@@ -189,7 +196,7 @@ impl UserCreate {
 }
 
 /// An update for this user
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Default, Serialize, Deserialize)]
 #[cfg_attr(feature = "api", derive(utoipa::ToSchema))]
 pub struct UserUpdate {
     /// The updated password for a user
@@ -200,6 +207,19 @@ pub struct UserUpdate {
     pub role: Option<UserRole>,
     /// The settings to set for this user
     pub settings: Option<UserSettingsUpdate>,
+}
+
+impl UserUpdate {
+    /// Set the settings update for this user
+    ///
+    /// # Arguments
+    ///
+    /// * `settings` - The settings update to apply
+    #[must_use]
+    pub fn settings(mut self, settings: UserSettingsUpdate) -> Self {
+        self.settings = Some(settings);
+        self
+    }
 }
 
 /// The info to inject about this user on a Unix/Linx system
@@ -213,15 +233,31 @@ pub struct UnixInfo {
 }
 
 /// An AI endpoint configuration
-#[derive(Debug, Serialize, Deserialize, Clone, PartialEq)]
+#[derive(Serialize, Deserialize, Clone, PartialEq)]
 #[cfg_attr(feature = "api", derive(utoipa::ToSchema))]
 pub struct AiEndpoint {
     /// The URL endpoint for the AI service
     pub url: String,
-    /// The API key for the AI service
+    /// The API key for the AI service (stored only; every API response returns it empty)
     pub api_key: String,
     /// The model to use from this AI service
     pub model: String,
+}
+
+impl fmt::Debug for AiEndpoint {
+    /// Write this endpoint without its API key
+    ///
+    /// # Arguments
+    ///
+    /// * `f` - The formatter to write to
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        // never print the key itself
+        f.debug_struct("AiEndpoint")
+            .field("url", &self.url)
+            .field("api_key", &"<redacted>")
+            .field("model", &self.model)
+            .finish()
+    }
 }
 
 /// AI settings for a user
@@ -234,6 +270,400 @@ pub struct AiSettings {
     /// The default endpoint name
     #[serde(default)]
     pub default_endpoint: String,
+    /// This user's own model endpoints, credentials, and default profiles
+    #[serde(default)]
+    pub models: UserModelSettings,
+}
+
+/// A user's own model configuration
+#[derive(Debug, Serialize, Deserialize, Clone, Default, PartialEq)]
+#[cfg_attr(feature = "api", derive(utoipa::ToSchema))]
+pub struct UserModelSettings {
+    /// This user's own endpoints, by id
+    #[serde(default)]
+    pub endpoints: BTreeMap<Uuid, UserModelEndpoint>,
+    /// This user's credentials, by the id of the endpoint they authenticate with (a group
+    /// endpoint entity or one of `endpoints`)
+    #[serde(default)]
+    pub credentials: BTreeMap<Uuid, UserCredentialRef>,
+    /// The model profile entities to try in order when an agent accepts any model
+    #[serde(default)]
+    pub default_profiles: Vec<Uuid>,
+}
+
+impl UserModelSettings {
+    /// Whether these settings hold nothing
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.endpoints.is_empty() && self.credentials.is_empty() && self.default_profiles.is_empty()
+    }
+
+    /// Get every ban in these settings by id, with the item each one is on
+    #[must_use]
+    pub fn ban_index(&self) -> HashMap<Uuid, ScopedModelBan> {
+        let mut index = HashMap::new();
+        // the bans on each own endpoint and its catalog models
+        for (id, endpoint) in &self.endpoints {
+            let scope = format!("your model endpoint `{}` ({id})", endpoint.name);
+            for ban in endpoint.bans.values() {
+                index.insert(ban.id, ScopedModelBan::scoped(scope.clone(), ban.clone()));
+            }
+            for entry in &endpoint.catalog {
+                let scope = format!(
+                    "model `{}` on your model endpoint `{}`",
+                    entry.model_id, endpoint.name
+                );
+                for ban in entry.bans.values() {
+                    index.insert(ban.id, ScopedModelBan::scoped(scope.clone(), ban.clone()));
+                }
+            }
+        }
+        // the bans on each credential, named by its endpoint
+        for (endpoint, credential) in &self.credentials {
+            let scope = match self.endpoints.get(endpoint) {
+                Some(own) => format!("your credential for model endpoint `{}`", own.name),
+                None => format!("your credential for model endpoint {endpoint}"),
+            };
+            for ban in credential.bans.values() {
+                index.insert(ban.id, ScopedModelBan::scoped(scope.clone(), ban.clone()));
+            }
+        }
+        index
+    }
+}
+
+/// One of a user's own model endpoints
+#[derive(Debug, Serialize, Deserialize, Clone, PartialEq)]
+#[cfg_attr(feature = "api", derive(utoipa::ToSchema))]
+pub struct UserModelEndpoint {
+    /// The name of this endpoint
+    pub name: String,
+    /// The provider and how to connect to it (must be on the deployment's allowed endpoint list)
+    pub provider: ModelProvider,
+    /// The models this endpoint serves, sorted by `model_id`
+    #[serde(default)]
+    pub catalog: Vec<ModelCatalogEntry>,
+    /// The reasons this endpoint can't be used, by ban id
+    #[serde(default)]
+    pub bans: HashMap<Uuid, ModelBan>,
+    /// The state of this endpoint's most recent refresh
+    #[serde(default)]
+    pub refresh: ModelRefreshStatus,
+    /// Exact model ids this endpoint never resolves to, even when its catalog lists them
+    #[serde(default)]
+    pub disabled_models: BTreeSet<String>,
+}
+
+impl UserModelEndpoint {
+    /// Create an endpoint with an empty catalog
+    ///
+    /// # Arguments
+    ///
+    /// * `name` - The name of the endpoint
+    /// * `provider` - The provider and how to connect to it
+    #[must_use]
+    pub fn new(name: impl Into<String>, provider: ModelProvider) -> Self {
+        UserModelEndpoint {
+            name: name.into(),
+            provider,
+            catalog: Vec::new(),
+            bans: HashMap::new(),
+            refresh: ModelRefreshStatus::default(),
+            disabled_models: BTreeSet::new(),
+        }
+    }
+
+    /// Add a model to this endpoint's catalog by hand, replacing one with the same id
+    ///
+    /// # Arguments
+    ///
+    /// * `model` - The model to add
+    #[must_use]
+    pub fn model(mut self, model: ModelCatalogEntryRequest) -> Self {
+        // keep the catalog sorted by model id
+        let entry = model.into_entry();
+        match self
+            .catalog
+            .binary_search_by(|existing| existing.model_id.cmp(&entry.model_id))
+        {
+            Ok(index) => self.catalog[index] = entry,
+            Err(index) => self.catalog.insert(index, entry),
+        }
+        self
+    }
+
+    /// Never resolve this endpoint to a model id
+    ///
+    /// # Arguments
+    ///
+    /// * `model_id` - The model id to disable
+    #[must_use]
+    pub fn disable(mut self, model_id: impl Into<String>) -> Self {
+        self.disabled_models.insert(model_id.into());
+        self
+    }
+
+    /// Mark every catalog entry as added by hand, as entries a user submits are
+    #[cfg(feature = "api")]
+    pub(crate) fn mark_manual(&mut self) {
+        // entries a user submits are manual with manual limits
+        for entry in &mut self.catalog {
+            entry.source = super::CatalogEntrySource::Manual;
+            entry.limits.source = super::LimitsSource::Manual;
+        }
+    }
+}
+
+/// A user's own credential for one endpoint (its secrets are cleared from every response)
+#[derive(Debug, Serialize, Deserialize, Clone, PartialEq)]
+#[cfg_attr(feature = "api", derive(utoipa::ToSchema))]
+pub struct UserCredentialRef {
+    /// The id of this credential (what an `AwsRoleSource::AccessKey` of the same user names)
+    pub id: Uuid,
+    /// What kind of credential this is and its non-secret metadata
+    pub kind: CredentialKind,
+    /// The secret values
+    #[serde(default)]
+    pub secrets: CredentialSecrets,
+    /// When this credential stops working, if known
+    pub expires: Option<DateTime<Utc>>,
+    /// When the secret was last replaced
+    pub rotated: Option<DateTime<Utc>>,
+    /// The reasons this credential can't be used, by ban id
+    #[serde(default)]
+    pub bans: HashMap<Uuid, ModelBan>,
+}
+
+impl UserCredentialRef {
+    /// Create a credential with a new id
+    ///
+    /// # Arguments
+    ///
+    /// * `kind` - The kind of credential and its metadata
+    /// * `secret` - The primary secret, if the kind has one
+    #[must_use]
+    pub fn new(kind: CredentialKind, secret: Option<ModelSecret>) -> Self {
+        UserCredentialRef {
+            id: Uuid::new_v4(),
+            kind,
+            secrets: CredentialSecrets {
+                primary: secret,
+                session_token: None,
+                fingerprint: None,
+            },
+            expires: None,
+            rotated: None,
+            bans: HashMap::new(),
+        }
+    }
+
+    /// Set the AWS session token of this credential
+    ///
+    /// # Arguments
+    ///
+    /// * `token` - The session token
+    #[must_use]
+    pub fn session_token(mut self, token: ModelSecret) -> Self {
+        self.secrets.session_token = Some(token);
+        self
+    }
+
+    /// Set when this credential stops working
+    ///
+    /// # Arguments
+    ///
+    /// * `expires` - When the credential stops working
+    #[must_use]
+    pub fn expires(mut self, expires: DateTime<Utc>) -> Self {
+        self.expires = Some(expires);
+        self
+    }
+}
+
+/// An update to a user's own model configuration
+#[derive(Debug, Serialize, Deserialize, Clone, Default, PartialEq)]
+#[cfg_attr(feature = "api", derive(utoipa::ToSchema))]
+pub struct UserModelSettingsUpdate {
+    /// Endpoints to add or replace, by id
+    #[serde(default)]
+    pub endpoints: BTreeMap<Uuid, UserModelEndpoint>,
+    /// Endpoints to remove by id, with their credentials
+    #[serde(default)]
+    pub remove_endpoints: Vec<Uuid>,
+    /// Credentials to add or rotate, by endpoint id (an omitted secret keeps the stored one)
+    #[serde(default)]
+    pub credentials: BTreeMap<Uuid, UserCredentialRef>,
+    /// Credentials to remove by endpoint id
+    #[serde(default)]
+    pub remove_credentials: Vec<Uuid>,
+    /// The new ordered default profiles
+    pub default_profiles: Option<Vec<Uuid>>,
+    /// Bans to add to an own endpoint (or to the credential for a group endpoint), and ban ids
+    /// to remove from the endpoint, its catalog models, or its credential, by endpoint id
+    #[serde(default)]
+    pub bans: BTreeMap<Uuid, ModelBanUpdate>,
+    /// Bans to add or remove on the catalog models of own endpoints, by endpoint id and model id
+    #[serde(default)]
+    pub model_bans: BTreeMap<Uuid, BTreeMap<String, ModelBanUpdate>>,
+    /// Bans to add or remove on credentials, by the id of the endpoint they authenticate with
+    #[serde(default)]
+    pub credential_bans: BTreeMap<Uuid, ModelBanUpdate>,
+    /// Listing results to merge into this user's endpoint catalogs and credentials, by endpoint
+    /// id (sent by the AI worker as the user)
+    #[serde(default)]
+    pub refresh_reports: BTreeMap<Uuid, ModelRefreshReport>,
+    /// Model ids to add to the `disabled_models` of this user's own endpoints, by endpoint id
+    #[serde(default)]
+    pub disable_models: BTreeMap<Uuid, BTreeSet<String>>,
+    /// Model ids to remove from the `disabled_models` of this user's own endpoints, by endpoint id
+    #[serde(default)]
+    pub enable_models: BTreeMap<Uuid, BTreeSet<String>>,
+}
+
+impl UserModelSettingsUpdate {
+    /// Add or replace one of the user's own endpoints
+    ///
+    /// # Arguments
+    ///
+    /// * `id` - The endpoint's id
+    /// * `endpoint` - The endpoint
+    #[must_use]
+    pub fn endpoint(mut self, id: Uuid, endpoint: UserModelEndpoint) -> Self {
+        self.endpoints.insert(id, endpoint);
+        self
+    }
+
+    /// Remove one of the user's own endpoints and its credential
+    ///
+    /// # Arguments
+    ///
+    /// * `id` - The endpoint's id
+    #[must_use]
+    pub fn remove_endpoint(mut self, id: Uuid) -> Self {
+        self.remove_endpoints.push(id);
+        self
+    }
+
+    /// Add or rotate the user's credential for an endpoint
+    ///
+    /// # Arguments
+    ///
+    /// * `endpoint` - The id of the endpoint the credential authenticates with
+    /// * `credential` - The credential
+    #[must_use]
+    pub fn credential(mut self, endpoint: Uuid, credential: UserCredentialRef) -> Self {
+        self.credentials.insert(endpoint, credential);
+        self
+    }
+
+    /// Remove the user's credential for an endpoint
+    ///
+    /// # Arguments
+    ///
+    /// * `endpoint` - The id of the endpoint the credential authenticates with
+    #[must_use]
+    pub fn remove_credential(mut self, endpoint: Uuid) -> Self {
+        self.remove_credentials.push(endpoint);
+        self
+    }
+
+    /// Replace the ordered default profiles
+    ///
+    /// # Arguments
+    ///
+    /// * `profiles` - The model profile entities to try in order
+    #[must_use]
+    pub fn default_profiles(mut self, profiles: Vec<Uuid>) -> Self {
+        self.default_profiles = Some(profiles);
+        self
+    }
+
+    /// Set the ban changes keyed by an endpoint
+    ///
+    /// # Arguments
+    ///
+    /// * `endpoint` - The endpoint's id
+    /// * `update` - The ban changes
+    #[must_use]
+    pub fn bans(mut self, endpoint: Uuid, update: ModelBanUpdate) -> Self {
+        self.bans.insert(endpoint, update);
+        self
+    }
+
+    /// Set the ban changes of a catalog model on one of the user's own endpoints
+    ///
+    /// # Arguments
+    ///
+    /// * `endpoint` - The endpoint's id
+    /// * `model_id` - The catalog model's id
+    /// * `update` - The ban changes
+    #[must_use]
+    pub fn model_bans(
+        mut self,
+        endpoint: Uuid,
+        model_id: impl Into<String>,
+        update: ModelBanUpdate,
+    ) -> Self {
+        self.model_bans
+            .entry(endpoint)
+            .or_default()
+            .insert(model_id.into(), update);
+        self
+    }
+
+    /// Set the ban changes of the user's credential for an endpoint
+    ///
+    /// # Arguments
+    ///
+    /// * `endpoint` - The id of the endpoint the credential authenticates with
+    /// * `update` - The ban changes
+    #[must_use]
+    pub fn credential_bans(mut self, endpoint: Uuid, update: ModelBanUpdate) -> Self {
+        self.credential_bans.insert(endpoint, update);
+        self
+    }
+
+    /// Set the listing result to merge for one of the user's endpoints or credentials
+    ///
+    /// # Arguments
+    ///
+    /// * `endpoint` - The id of the endpoint the listing was for
+    /// * `report` - The listing result
+    #[must_use]
+    pub fn refresh_report(mut self, endpoint: Uuid, report: ModelRefreshReport) -> Self {
+        self.refresh_reports.insert(endpoint, report);
+        self
+    }
+
+    /// Disable a model id on one of the user's own endpoints
+    ///
+    /// # Arguments
+    ///
+    /// * `endpoint` - The endpoint's id
+    /// * `model_id` - The model id to disable
+    #[must_use]
+    pub fn disable_model(mut self, endpoint: Uuid, model_id: impl Into<String>) -> Self {
+        self.disable_models
+            .entry(endpoint)
+            .or_default()
+            .insert(model_id.into());
+        self
+    }
+
+    /// Enable a disabled model id on one of the user's own endpoints
+    ///
+    /// # Arguments
+    ///
+    /// * `endpoint` - The endpoint's id
+    /// * `model_id` - The model id to enable
+    #[must_use]
+    pub fn enable_model(mut self, endpoint: Uuid, model_id: impl Into<String>) -> Self {
+        self.enable_models
+            .entry(endpoint)
+            .or_default()
+            .insert(model_id.into());
+        self
+    }
 }
 
 /// The different themes supported in the webUI
@@ -270,6 +700,23 @@ pub struct UserSettings {
     pub ai: Option<AiSettings>,
 }
 
+impl RedactSecrets for UserSettings {
+    /// Clear every model credential secret and legacy AI key, keeping fingerprints
+    fn redact_secrets(&mut self) {
+        // only AI settings hold secrets
+        if let Some(ai) = &mut self.ai {
+            // legacy keys are returned empty
+            for endpoint in ai.endpoints.values_mut() {
+                endpoint.api_key.clear();
+            }
+            // credential secrets are cleared
+            for credential in ai.models.credentials.values_mut() {
+                credential.secrets.redact_secrets();
+            }
+        }
+    }
+}
+
 impl UserSettings {
     /// Set the theme
     ///
@@ -283,7 +730,7 @@ impl UserSettings {
 }
 
 /// An update to an AI endpoint configuration
-#[derive(Debug, Serialize, Deserialize, Clone, Default, PartialEq)]
+#[derive(Serialize, Deserialize, Clone, Default, PartialEq)]
 #[cfg_attr(feature = "api", derive(utoipa::ToSchema))]
 pub struct AiEndpointUpdate {
     /// The URL endpoint for the AI service
@@ -292,6 +739,22 @@ pub struct AiEndpointUpdate {
     pub api_key: Option<String>,
     /// The model to use from this AI service
     pub model: Option<String>,
+}
+
+impl fmt::Debug for AiEndpointUpdate {
+    /// Write this update without its API key
+    ///
+    /// # Arguments
+    ///
+    /// * `f` - The formatter to write to
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        // only say whether a key is set
+        f.debug_struct("AiEndpointUpdate")
+            .field("url", &self.url)
+            .field("api_key", &self.api_key.as_ref().map(|_| "<redacted>"))
+            .field("model", &self.model)
+            .finish()
+    }
 }
 
 impl AiEndpointUpdate {
@@ -372,6 +835,8 @@ pub struct AiSettingsUpdate {
     /// Set the default endpoint
     #[serde(default)]
     pub default_endpoint: Option<String>,
+    /// An update to this user's own model configuration
+    pub models: Option<UserModelSettingsUpdate>,
 }
 
 impl AiSettingsUpdate {
@@ -431,6 +896,17 @@ impl AiSettingsUpdate {
     #[must_use]
     pub fn default_endpoint(mut self, name: impl Into<String>) -> Self {
         self.default_endpoint = Some(name.into());
+        self
+    }
+
+    /// Set the update to this user's own model configuration
+    ///
+    /// # Arguments
+    ///
+    /// * `models` - The model settings update to apply
+    #[must_use]
+    pub fn models(mut self, models: UserModelSettingsUpdate) -> Self {
+        self.models = Some(models);
         self
     }
 }
@@ -989,6 +1465,48 @@ impl std::ops::Deref for AuthedUser {
         match self {
             AuthedUser::Full(user) => user,
             AuthedUser::Scoped(scoped) => &scoped.user,
+        }
+    }
+}
+
+cfg_if::cfg_if! {
+    if #[cfg(any(feature = "api", feature = "client"))] {
+        use crate::models::backends::NotificationSupport;
+        use crate::models::{KeySupport, NotificationType};
+
+        impl NotificationSupport for User {
+            /// Provide the user notification type
+            fn notification_type() -> NotificationType {
+                NotificationType::Users
+            }
+        }
+
+        impl KeySupport for User {
+            /// The user's username
+            type Key = String;
+
+            /// Users have no extra components for their keys
+            type ExtraKey = ();
+
+            /// Build the key for this user
+            ///
+            /// # Arguments
+            ///
+            /// * `key` - The username
+            /// * `_extra` - Unused; these keys have no extra components
+            fn build_key(key: Self::Key, _extra: &Self::ExtraKey) -> String {
+                key
+            }
+
+            /// Build a URL component for this user
+            ///
+            /// # Arguments
+            ///
+            /// * `key` - The username
+            /// * `_extra` - Unused; these keys have no extra components
+            fn key_url(key: &Self::Key, _extra: Option<&Self::ExtraKey>) -> String {
+                key.clone()
+            }
         }
     }
 }

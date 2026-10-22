@@ -22,11 +22,11 @@ use thorium::models::backends::oauth::OAuthRegistrationSession;
 use thorium::models::{
     AssociationKind, AssociationRequest, AssociationTarget, Buffer, CommentRequest, EntityKinds,
     EntityRequest, GroupAllowedUpdate, GroupUpdate, HostPathWhitelistUpdate, ImageBan,
-    ImageBanKind, ImageBanUpdate, ImageNetworkPolicyUpdate, ImageUpdate, ImageVersion,
-    NotificationLevel, NotificationParams, NotificationRequest, OnDiskFile, OriginRequest,
-    OutputDisplayType, OutputRequest, PipelineBan, PipelineBanKind, PipelineBanUpdate,
-    PipelineUpdate, ReactionCache, Resources, SampleRequest, ScopedTokenRequest,
-    SystemSettingsUpdate, SystemSettingsUpdateParams, User, UserCreate, UserRole,
+    ImageBanKind, ImageBanUpdate, ImageNetworkPolicyUpdate, ImageUpdate, NotificationLevel,
+    NotificationParams, NotificationRequest, OnDiskFile, OriginRequest, OutputDisplayType,
+    OutputRequest, PipelineBan, PipelineBanKind, PipelineBanUpdate, PipelineUpdate, ReactionCache,
+    Resources, SampleRequest, ScopedTokenRequest, SystemSettingsUpdate, SystemSettingsUpdateParams,
+    ToolVersion, User, UserCreate, UserRole,
 };
 use thorium::test_utilities::generators;
 
@@ -283,16 +283,17 @@ async fn runtime(client: &Thorium, names: &Names, group: &str) {
     )
     .await
     .unwrap();
+    let tool = generators::stage_instance(&pipeline, &stage);
     let jobs = client
         .jobs
-        .claim(group, &pipeline.name, &stage, &cluster, "gate", &worker, 2)
+        .claim_workload(group, tool, &cluster, "gate", &worker, 2)
         .await
         .unwrap();
     assert_eq!(jobs.len(), 2, "claimed {jobs:?}");
     // one finishes its stage, which records how long it took, and one sleeps as a generator
     client
         .jobs
-        .proceed(&jobs[0], &generators::stage_logs(), 2)
+        .proceed(&jobs[0], &generators::stage_logs(), 2, &worker)
         .await
         .unwrap();
     client
@@ -414,7 +415,7 @@ async fn files(
         1,
         Buffer::new(r#"[{"name":"fixture device"}]"#),
     )
-    .tool_version(ImageVersion::SemVer(semver::Version::new(1, 2, 3)));
+    .tool_version(ToolVersion::SemVer(semver::Version::new(1, 2, 3)));
     client.files.create_result(result).await.unwrap();
     // create a repo
     generators::repos(group, 1, client).await.unwrap();

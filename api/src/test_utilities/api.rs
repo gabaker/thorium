@@ -680,8 +680,417 @@ async fn init_s3_buckets(s3_conf: &S3, conf: &Conf) -> Result<(), Error> {
     Ok(())
 }
 
+/// Get every stored row of an entity as its group and its serialized kind data
+///
+/// Tests use this to inspect what an entity write stored, including groups and fields the API
+/// never returns.
+///
+/// # Arguments
+///
+/// * `id` - The id of the entity to read
+pub async fn entity_rows(id: uuid::Uuid) -> Result<Vec<(String, String)>, Error> {
+    // connect to Scylla on this test's runtime, since a session dies with the runtime it was
+    // built on and every test has its own
+    let session = get_scylla_client(&CONF).await?;
+    // read every row of this entity from its id partition
+    let query = format!(
+        "SELECT group, kind_data FROM {}.entities_by_id WHERE id = ?",
+        CONF.thorium.namespace
+    );
+    let result = session
+        .query_unpaged(query, (id,))
+        .await
+        .map_err(|err| Error::new(format!("Failed to read entity rows: {err}")))?;
+    // collect each row's group and kind data
+    let rows = result
+        .into_rows_result()
+        .map_err(|err| Error::new(format!("Failed to read entity rows: {err}")))?;
+    let mut entity_rows = Vec::new();
+    for row in rows
+        .rows::<(String, String)>()
+        .map_err(|err| Error::new(format!("Failed to read entity rows: {err}")))?
+    {
+        // add this row's group and kind data
+        entity_rows
+            .push(row.map_err(|err| Error::new(format!("Failed to read entity row: {err}")))?);
+    }
+    Ok(entity_rows)
+}
+
+/// Delete every stored row of an entity straight from Scylla, bypassing the API's checks
+///
+/// Tests use this to leave a dangling reference behind, as a partial write would.
+///
+/// # Arguments
+///
+/// * `id` - The id of the entity to delete
+pub async fn delete_entity_rows(id: uuid::Uuid) -> Result<(), Error> {
+    // connect to Scylla on this test's runtime
+    let session = get_scylla_client(&CONF).await?;
+    // find the partition of each of the entity's rows
+    let query = format!(
+        "SELECT kind, group, year, bucket, created FROM {}.entities_by_id WHERE id = ?",
+        CONF.thorium.namespace
+    );
+    let result = session
+        .query_unpaged(query, (id,))
+        .await
+        .map_err(|err| Error::new(format!("Failed to read entity rows: {err}")))?;
+    let rows = result
+        .into_rows_result()
+        .map_err(|err| Error::new(format!("Failed to read entity rows: {err}")))?;
+    let mut keys = Vec::new();
+    for row in rows
+        .rows::<(String, String, i32, i32, chrono::DateTime<chrono::Utc>)>()
+        .map_err(|err| Error::new(format!("Failed to read entity rows: {err}")))?
+    {
+        // keep this row's primary key
+        keys.push(row.map_err(|err| Error::new(format!("Failed to read entity row: {err}")))?);
+    }
+    // delete each row from the base table, which also drops it from the views
+    let delete = format!(
+        "DELETE FROM {}.entities WHERE kind = ? AND group = ? AND year = ? AND bucket = ? AND created = ? AND id = ?",
+        CONF.thorium.namespace
+    );
+    for (kind, group, year, bucket, created) in keys {
+        session
+            .query_unpaged(delete.clone(), (kind, group, year, bucket, created, id))
+            .await
+            .map_err(|err| Error::new(format!("Failed to delete entity row: {err}")))?;
+    }
+    Ok(())
+}
+
+/// Overwrite one text column of every stored row of an entity straight in Scylla
+///
+/// # Arguments
+///
+/// * `id` - The id of the entity to change
+/// * `column` - The column to overwrite
+/// * `value` - The value to store, or `None` to clear the column
+async fn set_entity_text(id: uuid::Uuid, column: &str, value: Option<&str>) -> Result<(), Error> {
+    // connect to Scylla on this test's runtime
+    let session = get_scylla_client(&CONF).await?;
+    // find the partition of each of the entity's rows
+    let query = format!(
+        "SELECT kind, group, year, bucket, created FROM {}.entities_by_id WHERE id = ?",
+        CONF.thorium.namespace
+    );
+    // read the entity's rows from its id partition
+    let result = session
+        .query_unpaged(query, (id,))
+        .await
+        .map_err(|err| Error::new(format!("Failed to read entity rows: {err}")))?;
+    // enable rows on the response
+    let rows = result
+        .into_rows_result()
+        .map_err(|err| Error::new(format!("Failed to read entity rows: {err}")))?;
+    // collect the primary key of each row
+    let mut keys = Vec::new();
+    for row in rows
+        .rows::<(String, String, i32, i32, chrono::DateTime<chrono::Utc>)>()
+        .map_err(|err| Error::new(format!("Failed to read entity rows: {err}")))?
+    {
+        // keep this row's primary key
+        keys.push(row.map_err(|err| Error::new(format!("Failed to read entity row: {err}")))?);
+    }
+    // write the value to each row of the base table, which also updates the views
+    let update = format!(
+        "UPDATE {}.entities SET {column} = ? WHERE kind = ? AND group = ? AND year = ? AND bucket = ? AND created = ? AND id = ?",
+        CONF.thorium.namespace
+    );
+    for (kind, group, year, bucket, created) in keys {
+        session
+            .query_unpaged(
+                update.clone(),
+                (value, kind, group, year, bucket, created, id),
+            )
+            .await
+            .map_err(|err| Error::new(format!("Failed to write entity row: {err}")))?;
+    }
+    Ok(())
+}
+
+/// Overwrite the serialized kind data of every stored row of an entity straight in Scylla
+///
+/// Tests use this to change an entity behind the API's back, as another request's write would.
+///
+/// # Arguments
+///
+/// * `id` - The id of the entity to change
+/// * `kind_data` - The serialized kind data to store
+pub async fn set_entity_kind_data(id: uuid::Uuid, kind_data: &str) -> Result<(), Error> {
+    // overwrite the kind data column
+    set_entity_text(id, "kind_data", Some(kind_data)).await
+}
+
+/// Overwrite the image key of every stored row of an entity straight in Scylla
+///
+/// Tests use this to give an entity an image behind the API's back, as another request's write
+/// would.
+///
+/// # Arguments
+///
+/// * `id` - The id of the entity to change
+/// * `image` - The image key to store, or `None` to clear it
+pub async fn set_entity_image(id: uuid::Uuid, image: Option<&str>) -> Result<(), Error> {
+    // overwrite the image column
+    set_entity_text(id, "image", image).await
+}
+
+/// Check whether a graphic is stored in S3, bypassing the API
+///
+/// Tests use this to make sure a refused write cleaned up the graphics it uploaded.
+///
+/// # Arguments
+///
+/// * `key` - The graphic's key in the graphics bucket
+pub async fn graphic_exists(key: &str) -> Result<bool, Error> {
+    // build an S3 client on this test's runtime
+    let client = s3_client(&CONF.thorium.s3);
+    // look the graphic up without downloading it
+    let result = client
+        .head_object()
+        .bucket(&CONF.thorium.graphics.bucket)
+        .key(key)
+        .send()
+        .await;
+    // a missing graphic is a not found error
+    match result {
+        Ok(_) => Ok(true),
+        Err(err) => match err.as_service_error() {
+            Some(service) if service.is_not_found() => Ok(false),
+            _ => Err(Error::new(format!(
+                "Failed to check graphic {key}: {}",
+                DisplayErrorContext(&err)
+            ))),
+        },
+    }
+}
+
+/// Count the stored notifications of one type for one key straight from Scylla
+///
+/// # Arguments
+///
+/// * `kind` - The notification type
+/// * `key` - The key the notifications are stored under
+pub async fn notification_rows(
+    kind: crate::models::NotificationType,
+    key: &str,
+) -> Result<usize, Error> {
+    // connect to Scylla on this test's runtime
+    let session = get_scylla_client(&CONF).await?;
+    // count the rows in the notification's partition
+    let query = format!(
+        "SELECT id FROM {}.notifications WHERE kind = ? AND key = ?",
+        CONF.thorium.namespace
+    );
+    let result = session
+        .query_unpaged(query, (kind.as_str(), key))
+        .await
+        .map_err(|err| Error::new(format!("Failed to read notifications: {err}")))?;
+    let rows = result
+        .into_rows_result()
+        .map_err(|err| Error::new(format!("Failed to read notifications: {err}")))?;
+    Ok(rows.rows_num())
+}
+
+/// Build the key of the lock a root entity's writes hold
+///
+/// # Arguments
+///
+/// * `root` - The id of the root entity
+fn instance_lock_key(root: uuid::Uuid) -> String {
+    // the lock is one key per root in the test namespace
+    format!("{}:entities:instance_lock:{root}", CONF.thorium.namespace)
+}
+
+/// Check whether any entity census entry exists for a group in the current year
+///
+/// An entity write adds its group's census entry, so a group that no entity was written to has
+/// none.
+///
+/// # Arguments
+///
+/// * `group` - The group to check
+pub async fn entity_census_exists(group: &str) -> Result<bool, Error> {
+    // connect to Redis on this test's runtime
+    let redis = get_redis_client(&CONF).await;
+    let mut conn = redis
+        .get()
+        .await
+        .map_err(|err| Error::new(format!("Failed to connect to Redis: {err}")))?;
+    // build the group's census key for this year
+    let key = format!(
+        "{}:census:entities:stream:{group}:{}",
+        CONF.thorium.namespace,
+        chrono::Datelike::year(&chrono::Utc::now())
+    );
+    // the key exists once an entity was written to the group
+    let exists: i64 = redis::cmd("exists")
+        .arg(key)
+        .query_async(&mut *conn)
+        .await
+        .map_err(|err| Error::new(format!("Failed to read the census: {err}")))?;
+    Ok(exists > 0)
+}
+
+/// Take the lock a root entity's writes hold, as another request holding it would
+///
+/// The lock expires after a minute if the test never releases it.
+///
+/// # Arguments
+///
+/// * `root` - The id of the root entity to lock
+pub async fn hold_instance_lock(root: uuid::Uuid) -> Result<(), Error> {
+    // connect to Redis on this test's runtime
+    let redis = get_redis_client(&CONF).await;
+    let mut conn = redis
+        .get()
+        .await
+        .map_err(|err| Error::new(format!("Failed to connect to Redis: {err}")))?;
+    // take the lock only if nobody holds it
+    let taken: Option<String> = redis::cmd("set")
+        .arg(instance_lock_key(root))
+        .arg("held-by-test")
+        .arg("NX")
+        .arg("PX")
+        .arg(60_000)
+        .query_async(&mut *conn)
+        .await
+        .map_err(|err| Error::new(format!("Failed to take the lock: {err}")))?;
+    match taken {
+        Some(_) => Ok(()),
+        None => Err(Error::new(format!("the lock of {root} is already held"))),
+    }
+}
+
+/// Take the lock a root entity's writes hold with another value and a short expiry, as a
+/// request that crashed while holding it would leave it
+///
+/// # Arguments
+///
+/// * `root` - The id of the root entity to lock
+/// * `value` - The value the crashed holder left in the lock
+/// * `expire_ms` - How long until the lock expires, in milliseconds
+pub async fn hold_instance_lock_for(
+    root: uuid::Uuid,
+    value: &str,
+    expire_ms: u64,
+) -> Result<(), Error> {
+    // connect to Redis on this test's runtime
+    let redis = get_redis_client(&CONF).await;
+    let mut conn = redis
+        .get()
+        .await
+        .map_err(|err| Error::new(format!("Failed to connect to Redis: {err}")))?;
+    // set the lock with its value and expiry
+    let _: Option<String> = redis::cmd("set")
+        .arg(instance_lock_key(root))
+        .arg(value)
+        .arg("PX")
+        .arg(expire_ms)
+        .query_async(&mut *conn)
+        .await
+        .map_err(|err| Error::new(format!("Failed to set the lock: {err}")))?;
+    Ok(())
+}
+
+/// Check whether the lock a root entity's writes hold exists
+///
+/// # Arguments
+///
+/// * `root` - The id of the root entity
+pub async fn instance_lock_exists(root: uuid::Uuid) -> Result<bool, Error> {
+    // connect to Redis on this test's runtime
+    let redis = get_redis_client(&CONF).await;
+    let mut conn = redis
+        .get()
+        .await
+        .map_err(|err| Error::new(format!("Failed to connect to Redis: {err}")))?;
+    // the lock exists while its key does
+    let exists: i64 = redis::cmd("exists")
+        .arg(instance_lock_key(root))
+        .query_async(&mut *conn)
+        .await
+        .map_err(|err| Error::new(format!("Failed to read the lock: {err}")))?;
+    Ok(exists > 0)
+}
+
+/// Delete every Redis key under the entities prefix that names an entity, as restoring a backup
+/// without Redis's state would leave it
+///
+/// Census keys live under their own prefix and name groups rather than entities, so none are
+/// deleted. Returns how many keys were deleted.
+///
+/// # Arguments
+///
+/// * `id` - The id of the entity
+pub async fn drop_entity_redis_keys(id: uuid::Uuid) -> Result<usize, Error> {
+    // connect to Redis on this test's runtime
+    let redis = get_redis_client(&CONF).await;
+    let mut conn = redis
+        .get()
+        .await
+        .map_err(|err| Error::new(format!("Failed to connect to Redis: {err}")))?;
+    // find every key under the entities prefix that names the entity
+    let keys: Vec<String> = redis::cmd("keys")
+        .arg(format!("{}:entities:*{id}*", CONF.thorium.namespace))
+        .query_async(&mut *conn)
+        .await
+        .map_err(|err| Error::new(format!("Failed to list keys: {err}")))?;
+    // delete them all at once
+    if !keys.is_empty() {
+        let _: i64 = redis::cmd("del")
+            .arg(&keys)
+            .query_async(&mut *conn)
+            .await
+            .map_err(|err| Error::new(format!("Failed to delete keys: {err}")))?;
+    }
+    Ok(keys.len())
+}
+
+/// Release a lock taken with [`hold_instance_lock`]
+///
+/// # Arguments
+///
+/// * `root` - The id of the root entity to unlock
+pub async fn release_instance_lock(root: uuid::Uuid) -> Result<(), Error> {
+    // connect to Redis on this test's runtime
+    let redis = get_redis_client(&CONF).await;
+    let mut conn = redis
+        .get()
+        .await
+        .map_err(|err| Error::new(format!("Failed to connect to Redis: {err}")))?;
+    // delete the lock
+    let _: i64 = redis::cmd("del")
+        .arg(instance_lock_key(root))
+        .query_async(&mut *conn)
+        .await
+        .map_err(|err| Error::new(format!("Failed to release the lock: {err}")))?;
+    Ok(())
+}
+
 /// A write-once cell for the admin token, written to when the API is stood up for the first time
 static ADMIN_TOKEN: OnceCell<String> = OnceCell::const_new();
+
+/// The stack size of the test API's worker threads, fixed when the API is stood up
+static API_STACK_SIZE: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
+
+/// Run this test binary's API with a chosen worker thread stack size
+///
+/// The test API's workers get 8 MiB stacks unless a test asks for another size before the API is
+/// first stood up; a binary that wants the API's real default of 2 MiB asks for it here. Returns
+/// the stack size the API's workers run with, which is another size when the API was already
+/// started or another size was asked for first.
+///
+/// # Arguments
+///
+/// * `bytes` - The stack size of each worker thread, in bytes
+pub fn use_api_stack_size(bytes: usize) -> usize {
+    // only the first size set before the API starts is used
+    *API_STACK_SIZE.get_or_init(|| bytes)
+}
 
 /// The address a config's API listens on, as a client dials it
 ///
@@ -738,7 +1147,7 @@ async fn start_api_on(
         // create a tokio runtime
         let rt = tokio::runtime::Builder::new_multi_thread()
             .enable_all()
-            .thread_stack_size(8 << 20)
+            .thread_stack_size(*API_STACK_SIZE.get_or_init(|| 8 << 20))
             .build()
             .expect("Failed to spawn tokio runtime for the test API");
         // run our api, returning the startup refusal if there is one

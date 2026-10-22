@@ -64,6 +64,13 @@ More functionality will be added over time!
 - create
 - create_bulk
 
+### Tools
+
+- `tool_portability(spec)`: takes a JSON encoded agentic tool spec (a full `{"Agentic": {...}}` spec
+  or a bare agentic tool) and returns its portability report as JSON: whether its input schema can
+  be sent in strict mode and which lossy rewrites a Gemini schema needs. A spec that isn't an agentic
+  tool raises `ValueError`.
+
 ## Caveats
 
 ### Type Info/Stubs

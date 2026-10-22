@@ -15,8 +15,8 @@ use crate::models::Cursor as SearchCursor;
 use crate::models::{
     BulkReactionResponse, CartedFile, DownloadedFile, FileDownloadOpts, Reaction, ReactionCache,
     ReactionCacheFileUpdate, ReactionCacheUpdate, ReactionCreation, ReactionCursorOpts,
-    ReactionListParams, ReactionRequest, ReactionStatus, ReactionUpdate, StageLogs, StageLogsAdd,
-    StatusUpdate, UncartedFile,
+    ReactionListParams, ReactionRequest, ReactionStatus, ReactionUpdate, ScopedToken, StageLogs,
+    StageLogsAdd, StatusUpdate, UncartedFile,
 };
 use crate::{add_query, add_query_list, send, send_build, send_bytes};
 
@@ -185,6 +185,50 @@ impl Reactions {
 
 #[cfg_attr(feature = "sync", thorium_derive::blocking_struct)]
 impl Reactions {
+    /// Get the run-scoped token a run's workers use (admins only)
+    ///
+    /// # Arguments
+    ///
+    /// * `group` - The group the run's reaction is in
+    /// * `id` - The id of the run's reaction
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use thorium::Thorium;
+    /// use uuid::Uuid;
+    /// # use thorium::Error;
+    ///
+    /// # async fn exec() -> Result<(), Error> {
+    /// // create Thorium client
+    /// let thorium = Thorium::build("http://127.0.0.1").token("<token>").build().await?;
+    /// // have the id of a run
+    /// let id = Uuid::parse_str("d86ce41a-4a5b-43b5-aef9-bf90ff5d09ba")?;
+    /// // get the run's token
+    /// let token = thorium.reactions.run_token("Corn", id).await?;
+    /// # // allow test code to be compiled but don't unwrap as no API instance would be up
+    /// # Ok(())
+    /// # }
+    /// # tokio_test::block_on(async {
+    /// #    exec().await
+    /// # });
+    /// ```
+    #[cfg_attr(
+        feature = "trace",
+        tracing::instrument(name = "Thorium::Reactions::run_token", skip(self), fields(id = id.to_string()), err(Debug))
+    )]
+    pub async fn run_token(&self, group: &str, id: Uuid) -> Result<ScopedToken, Error> {
+        // build url
+        let url = format!(
+            "{host}/api/reactions/{group}/{id}/run-token",
+            host = self.host
+        );
+        // build request
+        let req = self.client.get(&url).header("authorization", &self.token);
+        // send request and build the run's token
+        send_build!(self.client, req, ScopedToken)
+    }
+
     /// Create [`Reaction`]s in bulk
     ///
     /// # Arguments

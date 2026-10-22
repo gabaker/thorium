@@ -10,21 +10,22 @@ use tracing::{Level, Span, event, instrument, span};
 use uuid::Uuid;
 
 use super::db::{self, SimpleCursorExt};
+use super::{entities, users};
 use crate::models::backends::NotificationSupport;
 use crate::models::schema::queries::{NodesListCursor, NodesListDetailsCursor};
 use crate::models::{
-    ApiCursor, Backup, BackupParams, BackupProblem, BackupProblems, Group, GroupRequest,
-    GroupUsers, GroupUsersRequest, HostPath, HostPathWhitelistUpdate, Image, ImageBan,
-    ImageBanKind, ImageBanUpdate, ImageKey, ImageScaler, Node, NodeGetParams, NodeListLine,
-    NodeListParams, NodeRegistration, NodeRow, NodeUpdate, Pipeline, PipelineBan, PipelineBanKind,
-    PipelineBanUpdate, PipelineKey, PruneAction, PrunedReference, PrunedReferent, RestoreParams,
-    SystemInfo, SystemSettings, SystemSettingsUpdate, SystemStats, User, VolumeTypes, Worker,
-    WorkerDeleteMap, WorkerRegistrationList, WorkerUpdate, conversions,
+    AllowedEndpoint, ApiCursor, Backup, BackupParams, BackupProblem, BackupProblems, Group,
+    GroupRequest, GroupUsers, GroupUsersRequest, HostPath, HostPathWhitelistUpdate, Image,
+    ImageBan, ImageBanKind, ImageBanUpdate, ImageKey, ImageScaler, ModelsConfUpdate, Node,
+    NodeGetParams, NodeListLine, NodeListParams, NodeRegistration, NodeRow, NodeUpdate, Pipeline,
+    PipelineBan, PipelineBanKind, PipelineBanUpdate, PipelineKey, PruneAction, PrunedReference,
+    PrunedReferent, RestoreParams, SystemInfo, SystemSettings, SystemSettingsUpdate, SystemStats,
+    User, VolumeTypes, Worker, WorkerDeleteMap, WorkerRegistrationList, WorkerUpdate, conversions,
 };
 use crate::utils::{ApiError, Shared};
 use crate::{
-    bad, deserialize, deserialize_ext, extract, is_admin, log_scylla_err, not_found, unauthorized,
-    update,
+    bad, deserialize, deserialize_ext, deserialize_opt, extract, is_admin, log_scylla_err,
+    not_found, unauthorized, update,
 };
 
 /// Check if Thorium is healthy
@@ -121,7 +122,7 @@ impl SystemStats {
         // TODO we need to make this a cursor instead of a hardcoded max limit
         for group in Group::list_details(user, 0, 5000, shared).await?.details {
             // get the status of this group
-            let status = group.stats(0, 5000, shared).await?;
+            let status = group.stats(shared).await?;
             // add it to our map of statuses
             group_status.insert(group.name, status);
         }
@@ -189,6 +190,35 @@ impl HostPathWhitelistUpdate {
     }
 }
 
+impl ModelsConfUpdate {
+    /// Apply this update to the allowed model endpoints in the [`SystemSettings`]
+    ///
+    /// The list is cleared first if requested, then endpoints are added, then removed. Adding
+    /// an allowed endpoint or removing one that isn't allowed changes nothing.
+    ///
+    /// # Arguments
+    ///
+    /// * `settings` - The settings to update
+    pub fn update(self, settings: &mut SystemSettings) {
+        // clear the list first if requested
+        if self.clear_endpoints {
+            settings.models.allowed_endpoints.clear();
+        }
+        // add then remove the requested endpoints, each with its url normalized
+        settings.models.allowed_endpoints.extend(
+            self.add_endpoints
+                .into_iter()
+                .map(AllowedEndpoint::normalized),
+        );
+        for endpoint in self.remove_endpoints {
+            settings
+                .models
+                .allowed_endpoints
+                .remove(&endpoint.normalized());
+        }
+    }
+}
+
 impl SystemSettings {
     /// Reset dynamic Thorium settings to their defaults
     ///
@@ -250,6 +280,8 @@ impl SystemSettings {
         if update.clear_host_path_whitelist {
             self.host_path_whitelist.clear();
         }
+        // update the allowed model endpoints
+        update.models.update(&mut self);
         // update the system settings in the backend
         db::system::update_settings(&self, shared).await?;
         Ok(self)
@@ -438,8 +470,9 @@ impl SystemSettings {
     /// Performs a scan of Thorium data, checking that all data is compliant with the settings in `self`
     /// and cleaning/marking/modifying data that isn't
     ///
-    /// Currently this only applies to images with host path mounts that may not be on the configured
-    /// whitelist after a settings update, as well as to pipelines those images may be a part of
+    /// This applies to images with host path mounts that may not be on the configured whitelist
+    /// after a settings update, to pipelines those images may be a part of, and to group and user
+    /// model endpoints that may not be on the allowed model endpoint list
     ///
     /// # Arguments
     ///
@@ -460,7 +493,25 @@ impl SystemSettings {
                 self.scan_helper_pipelines(pipeline, user, shared)
             })
             .await?;
-        Ok(())
+        // check every model endpoint against the allowed endpoint list
+        self.scan_models(user, shared).await
+    }
+
+    /// Ban every group and user model endpoint outside the allowed endpoint list and clear that
+    /// ban from every one inside it
+    ///
+    /// # Arguments
+    ///
+    /// * `user` - The user that is telling Thorium to scan
+    /// * `shared` - Shared Thorium objects
+    #[instrument(name = "SystemSettings::scan_models", skip_all, err(Debug))]
+    pub async fn scan_models(&self, user: &User, shared: &Shared) -> Result<(), ApiError> {
+        // only admins can perform a scan
+        is_admin!(user);
+        // ban or unban every group model endpoint against the allowed endpoint list
+        Box::pin(entities::models::scan_whitelist(&self.models, user, shared)).await?;
+        // ban or unban every user's own model endpoints against it too
+        users::scan_whitelist(&self.models, shared).await
     }
 
     /// Checks if the given path or any of its parents are in the whitelist
@@ -739,11 +790,12 @@ impl Backup {
     /// Lists every reason this backup can't be restored as it is
     ///
     /// Every name must be a valid Redis key segment and appear once; every group member and owner
-    /// must be a user in the backup, and every group a user is in a group in the backup; every image and pipeline must name a group in the backup;
-    /// every image a pipeline runs must be an image of the pipeline's group in the backup; every
-    /// user must hold a primary token no other user holds; every scoped token must belong to a
-    /// user in the backup and hold a value no primary or other scoped token holds; and every
-    /// network-policy set must name a group in the backup.
+    /// must be a user in the backup, and every group a user is in a group in the backup; every
+    /// image and pipeline must name a group in the backup; every stage of a pipeline that no tool
+    /// backs must be an image of the pipeline's group in the backup; every user must hold a
+    /// primary token no other user holds; every scoped token must belong to a user in the backup
+    /// and hold a value no primary or other scoped token holds; and every network-policy set must
+    /// name a group in the backup.
     #[must_use]
     pub fn problems(&self) -> Vec<BackupProblem> {
         let mut problems = Vec::new();
@@ -1132,7 +1184,7 @@ impl Backup {
             }
         }
         // each pipeline appears once under valid names, in a group in the backup, and runs
-        // only images of that group in the backup
+        // only images of that group in the backup, except for the stages a tool backs
         let mut pipelines = HashSet::with_capacity(self.pipelines.len());
         for pipeline in &self.pipelines {
             let key = format!("pipelines/{}/{}", pipeline.group, pipeline.name);
@@ -1150,7 +1202,8 @@ impl Backup {
                     "the backup holds this pipeline more than once",
                 ));
             }
-            let order: BTreeSet<&String> = pipeline.order.iter().flatten().collect();
+            // a stage a tool backs names no image, so only the other stages must be images
+            let order: BTreeSet<&String> = pipeline.unconverted_stages().into_iter().collect();
             for image in order {
                 if !images.contains(&(pipeline.group.as_str(), image.as_str())) {
                     problems.push(BackupProblem::new(
@@ -1775,6 +1828,7 @@ impl TryFrom<HashMap<String, String>> for Worker {
             resources: deserialize_ext!(map, "resources"),
             pool: deserialize_ext!(map, "pool"),
             active: deserialize_ext!(map, "active", None),
+            run: deserialize_opt!(map, "run", Uuid::parse_str),
         };
         Ok(worker)
     }
@@ -2134,6 +2188,36 @@ mod tests {
         ));
     }
 
+    /// A pipeline stage a tool backs names no image, so only the stages no tool backs must be
+    /// images of the pipeline's group in the backup
+    #[test]
+    fn tool_backed_stages_need_no_backed_up_image() {
+        // a pipeline with a tool-backed stage and a stage no tool backs, in a group with no images
+        let mut held = backup(
+            vec![user(BOOTSTRAP_ADMIN, &["vesta"])],
+            vec![group("vesta", &[BOOTSTRAP_ADMIN], &[])],
+        );
+        let pipeline: Pipeline = serde_json::from_value(serde_json::json!({
+            "group": "vesta", "name": "flow", "creator": BOOTSTRAP_ADMIN,
+            "order": [["harvest"], ["legacy"]], "sla": 1, "triggers": {}, "description": null,
+            "bans": {}, "stage_tools": {"harvest": "6a0b7a62-0f3c-4f4e-9a55-5f1d6ce7d001"},
+        }))
+        .unwrap();
+        held.pipelines.push(pipeline);
+        // the tool-backed stage is no problem
+        assert!(
+            !has_problem(&held, "pipelines/vesta/flow", "harvest"),
+            "{:?}",
+            held.problems()
+        );
+        // the stage no tool backs still must be an image in the backup
+        assert!(
+            has_problem(&held, "pipelines/vesta/flow", "legacy"),
+            "{:?}",
+            held.problems()
+        );
+    }
+
     /// A key segment may hold any character but the separator, and may not be empty
     #[test]
     fn key_segments_allow_any_character_but_the_separator() {
@@ -2147,5 +2231,150 @@ mod tests {
         check_segment(&mut problems, "users/x", "username", "a:b");
         check_segment(&mut problems, "users/x", "username", "");
         assert_eq!(problems.len(), 2, "{problems:?}");
+    }
+
+    /// Build an allowed gateway entry
+    ///
+    /// # Arguments
+    ///
+    /// * `url` - The allowed base url
+    fn entry(url: &str) -> crate::models::AllowedEndpoint {
+        crate::models::AllowedEndpoint::new(
+            crate::models::ModelProviderKind::OpenAiCompatible,
+            Some(url.to_owned()),
+        )
+    }
+
+    /// A whitelist update clears first, then adds, then removes, and the settings compare equal
+    /// to an update once it's applied
+    #[test]
+    fn models_conf_update_order() {
+        use crate::models::{ModelsConfUpdate, SystemSettingsUpdate};
+        // settings allowing e1
+        let (e1, e2, e3) = (
+            entry("https://e1/v1"),
+            entry("https://e2/v1"),
+            entry("https://e3/v1"),
+        );
+        let mut settings = SystemSettings::default();
+        settings.models.allowed_endpoints.insert(e1.clone());
+        // clearing and adding e2 leaves only e2
+        let update = ModelsConfUpdate::default().clear().add_endpoint(e2.clone());
+        update.clone().update(&mut settings);
+        assert_eq!(
+            settings.models.allowed_endpoints.iter().collect::<Vec<_>>(),
+            vec![&e2]
+        );
+        // the applied update matches the settings
+        let settings_update = SystemSettingsUpdate::default().models(update);
+        assert_eq!(settings, settings_update);
+        // adding and removing e3 leaves it absent
+        ModelsConfUpdate::default()
+            .add_endpoint(e3.clone())
+            .remove_endpoint(e3.clone())
+            .update(&mut settings);
+        assert!(!settings.models.allowed_endpoints.contains(&e3));
+        // an update whose added endpoint is missing doesn't match
+        let missing = SystemSettingsUpdate::default()
+            .models(ModelsConfUpdate::default().add_endpoint(e1.clone()));
+        assert_ne!(settings, missing);
+    }
+
+    /// Adding an existing entry and removing an absent one change nothing, and clearing empties
+    /// the list, which stays sorted
+    #[test]
+    fn models_conf_update_adds_and_removes() {
+        use crate::models::ModelsConfUpdate;
+        // add two entries out of order
+        let (a, b) = (entry("https://a/v1"), entry("https://b/v1"));
+        let mut settings = SystemSettings::default();
+        ModelsConfUpdate::default()
+            .add_endpoint(b.clone())
+            .add_endpoint(a.clone())
+            .update(&mut settings);
+        assert_eq!(
+            settings.models.allowed_endpoints.iter().collect::<Vec<_>>(),
+            vec![&a, &b]
+        );
+        // adding an existing entry and removing an absent one change nothing
+        let before = settings.models.clone();
+        ModelsConfUpdate::default()
+            .add_endpoint(a.clone())
+            .remove_endpoint(entry("https://c/v1"))
+            .update(&mut settings);
+        assert_eq!(settings.models, before);
+        // clearing empties the list
+        ModelsConfUpdate::default().clear().update(&mut settings);
+        assert!(settings.models.allowed_endpoints.is_empty());
+    }
+
+    /// An entry's url is kept with at most one trailing slash removed, so one spelling of a url
+    /// removes the other
+    #[test]
+    fn models_conf_normalizes_urls() {
+        use crate::models::{AllowedEndpoint, ModelsConfUpdate};
+        // allow a url with a trailing slash, built and deserialized
+        let deserialized: AllowedEndpoint = serde_json::from_value(serde_json::json!({
+            "provider": "OpenAiCompatible",
+            "base_url": "https://e2/v1/"
+        }))
+        .unwrap();
+        let mut settings = SystemSettings::default();
+        ModelsConfUpdate::default()
+            .add_endpoint(entry("https://e1/v1/"))
+            .add_endpoint(deserialized)
+            .update(&mut settings);
+        // the url without the slash is the same entry
+        assert!(
+            settings
+                .models
+                .allowed_endpoints
+                .contains(&entry("https://e1/v1"))
+        );
+        // removing either spelling removes the entry
+        ModelsConfUpdate::default()
+            .remove_endpoint(entry("https://e1/v1"))
+            .remove_endpoint(entry("https://e2/v1/"))
+            .update(&mut settings);
+        assert!(settings.models.allowed_endpoints.is_empty());
+        let provider = crate::models::ModelProvider::OpenAiCompatible {
+            base_url: "https://e1/v1".to_owned(),
+            extra_headers: std::collections::BTreeMap::new(),
+            key_header: None,
+        };
+        assert!(!settings.models.allows(&provider));
+    }
+
+    /// The entry built for a provider allows it whatever trailing slashes its url ends in, and
+    /// normalizing an entry again leaves it unchanged
+    #[test]
+    fn provider_entries_allow_their_provider() {
+        use crate::models::{AllowedEndpoint, ModelProvider, ModelsConfUpdate};
+        for url in [
+            "https://e/v1",
+            "https://e/v1/",
+            "https://e/v1//",
+            "https://e/v1///",
+        ] {
+            // the provider's own entry matches it
+            let provider = ModelProvider::OpenAiCompatible {
+                base_url: url.to_owned(),
+                extra_headers: std::collections::BTreeMap::new(),
+                key_header: None,
+            };
+            let own = AllowedEndpoint::for_provider(&provider);
+            assert!(own.matches(&provider), "{url} doesn't match its own entry");
+            // normalizing the entry again keeps its url
+            assert_eq!(own.clone().normalized(), own, "{url}");
+            // the list allows the provider once its entry is added
+            let mut settings = SystemSettings::default();
+            ModelsConfUpdate::default()
+                .add_endpoint(own)
+                .update(&mut settings);
+            assert!(
+                settings.models.allows(&provider),
+                "{url} isn't allowed once its entry is added"
+            );
+        }
     }
 }

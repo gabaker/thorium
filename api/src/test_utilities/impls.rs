@@ -328,11 +328,8 @@ impl PartialEq<EntityRequest> for Entity {
         }
         // compare the kind-specific metadata
         match (&self.metadata, &req.metadata) {
-            // these kinds carry no comparable metadata beyond their kind
-            (EntityMetadata::Other, EntityMetadataRequest::Other)
-            | (EntityMetadata::WindowsProcessTree(_), EntityMetadataRequest::WindowsProcessTree) => {
-                true
-            }
+            // this kind carries no comparable metadata beyond its kind
+            (EntityMetadata::Other, EntityMetadataRequest::Other) => true,
             // these kinds have distinct request/response types so compare them explicitly
             (EntityMetadata::Vendor(resp), EntityMetadataRequest::Vendor(req)) => {
                 vendor_matches(resp, req)
@@ -350,6 +347,10 @@ impl PartialEq<EntityRequest> for Entity {
             (EntityMetadata::Folder(resp), EntityMetadataRequest::Folder(req)) => {
                 json_eq(resp, req)
             }
+            (
+                EntityMetadata::WindowsProcessTree(resp),
+                EntityMetadataRequest::WindowsProcessTree(req),
+            ) => json_eq(resp, req),
             (EntityMetadata::WindowsProcess(resp), EntityMetadataRequest::WindowsProcess(req)) => {
                 json_eq(resp, req)
             }
@@ -378,6 +379,18 @@ impl PartialEq<EntityRequest> for Entity {
                 EntityMetadata::DecompiledFunction(resp),
                 EntityMetadataRequest::DecompiledFunction(req),
             ) => json_eq(resp, req),
+            // a tool keeps its requested kind and its latest is the requested first version
+            (EntityMetadata::Tool(resp), EntityMetadataRequest::Tool(req)) => {
+                resp.kind == req.kind
+                    && resp.latest_version == Some(crate::models::ToolVersion::from(&req.version))
+            }
+            // a tool instance keeps its requested tool, version, and spec
+            (EntityMetadata::ToolInstance(resp), EntityMetadataRequest::ToolInstance(req)) => {
+                resp.tool == req.tool
+                    && resp.version == crate::models::ToolVersion::from(&req.version)
+                    && crate::models::ToolSpec::parse_request(&req.spec)
+                        .is_ok_and(|spec| spec == resp.spec)
+            }
             // any mismatched pairing of kinds means they aren't equal
             _ => false,
         }
@@ -583,6 +596,7 @@ impl PartialEq<EntityUpdate> for Entity {
                     EntityMetadataUpdate::FileSystem {
                         add_tools,
                         remove_tools,
+                        remove_legacy_tools,
                     },
                     EntityMetadata::FileSystem(fs),
                 ) => {
@@ -592,11 +606,18 @@ impl PartialEq<EntityUpdate> for Entity {
                     if remove_tools.iter().any(|tool| fs.tools.contains(tool)) {
                         return false;
                     }
+                    if remove_legacy_tools
+                        .iter()
+                        .any(|tool| fs.legacy_tools.contains(tool))
+                    {
+                        return false;
+                    }
                 }
                 (
                     EntityMetadataUpdate::WindowsProcessTree {
                         add_tools,
                         remove_tools,
+                        remove_legacy_tools,
                     },
                     EntityMetadata::WindowsProcessTree(tree),
                 ) => {
@@ -604,6 +625,12 @@ impl PartialEq<EntityUpdate> for Entity {
                         return false;
                     }
                     if remove_tools.iter().any(|tool| tree.tools.contains(tool)) {
+                        return false;
+                    }
+                    if remove_legacy_tools
+                        .iter()
+                        .any(|tool| tree.legacy_tools.contains(tool))
+                    {
                         return false;
                     }
                 }
@@ -883,6 +910,7 @@ impl PartialEq<EntityUpdate> for Entity {
                         decompilation_content,
                         add_tools,
                         remove_tools,
+                        remove_legacy_tools,
                     },
                     EntityMetadata::DecompiledFunction(decomp),
                 ) => {
@@ -900,6 +928,12 @@ impl PartialEq<EntityUpdate> for Entity {
                         return false;
                     }
                     if remove_tools.iter().any(|tool| decomp.tools.contains(tool)) {
+                        return false;
+                    }
+                    if remove_legacy_tools
+                        .iter()
+                        .any(|tool| decomp.legacy_tools.contains(tool))
+                    {
                         return false;
                     }
                 }
@@ -939,6 +973,23 @@ impl PartialEq<EntityUpdate> for Entity {
                 ) => {
                     // imported functions are fully replaced
                     if !functions.is_empty() && &import.functions != functions {
+                        return false;
+                    }
+                }
+                (EntityMetadataUpdate::Tool { version, .. }, EntityMetadata::Tool(tool)) => {
+                    // a published version becomes the tool's latest
+                    if let Some(version) = version
+                        && tool.latest_version != Some(crate::models::ToolVersion::from(version))
+                    {
+                        return false;
+                    }
+                }
+                (
+                    EntityMetadataUpdate::ToolInstance { deprecated },
+                    EntityMetadata::ToolInstance(instance),
+                ) => {
+                    // the deprecated flag is set as requested
+                    if deprecated.is_some_and(|deprecated| instance.deprecated != deprecated) {
                         return false;
                     }
                 }

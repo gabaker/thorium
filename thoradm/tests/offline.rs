@@ -1776,7 +1776,7 @@ const GOLDEN_ENUM_BYTES: &[(&str, &[&str])] = &[
         "EntityKinds",
         &[
             "00", "01", "02", "03", "04", "05", "06", "07", "08", "09", "0a", "0b", "0c", "0d",
-            "0e", "0f",
+            "0e", "0f", "10", "11", "12", "13", "14", "15", "16", "17", "18", "19",
         ],
     ),
     (
@@ -1785,14 +1785,15 @@ const GOLDEN_ENUM_BYTES: &[(&str, &[&str])] = &[
             "00", "01", "02", "03", "04", "05", "06", "07", "08", "09", "0a", "0b",
         ],
     ),
-    ("NotificationType", &["00", "01"]),
+    ("NotificationType", &["00", "01", "02", "03", "04", "05"]),
     ("NotificationLevel", &["00", "01", "02"]),
     ("S3Objects", &["00", "01"]),
     (
         "AssociationKind",
         &[
             "00", "01", "02", "03", "04", "05", "06", "07", "08", "09", "0a", "0b", "0c", "0d",
-            "0e", "0f", "10", "11", "12", "13", "14", "15", "16", "17", "18",
+            "0e", "0f", "10", "11", "12", "13", "14", "15", "16", "17", "18", "19", "1a", "1b",
+            "1c", "1d", "1e", "1f", "20", "21", "22",
         ],
     ),
     ("Directionality", &["00", "01", "02"]),
@@ -2354,10 +2355,9 @@ fn variant_counts() -> Vec<(&'static str, usize)> {
     use thorium::models::{
         ArgStrategy, AssociationKind, AutoTagLogic, CommitishKinds, DependencyPassStrategy,
         Directionality, EntityKinds, EventTrigger, FileNamingStrategy, HostPathTypes, ImageBanKind,
-        ImageScaler, ImageVersion, KwargDependency, NodeHealth, NotificationLevel,
-        NotificationType, OutputDisplayType, OutputHandler, PipelineBanKind, PruneAction,
-        PrunedReferent, S3Objects, ScopedTokenRole, SpawnLimits, TagType, Theme, UserRole,
-        VolumeTypes,
+        ImageScaler, KwargDependency, NodeHealth, NotificationLevel, NotificationType,
+        OutputDisplayType, OutputHandler, PipelineBanKind, PruneAction, PrunedReferent, S3Objects,
+        ScopedTokenRole, SpawnLimits, TagType, Theme, ToolVersion, UserRole, VolumeTypes,
     };
     vec![
         ("TagType", variant_count::<TagType>()),
@@ -2391,7 +2391,7 @@ fn variant_counts() -> Vec<(&'static str, usize)> {
         ("OutputHandler", variant_count::<OutputHandler>()),
         ("AutoTagLogic", variant_count::<AutoTagLogic>()),
         ("SpawnLimits", variant_count::<SpawnLimits>()),
-        ("ImageVersion", variant_count::<ImageVersion>()),
+        ("ToolVersion", variant_count::<ToolVersion>()),
     ]
 }
 

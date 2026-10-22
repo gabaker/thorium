@@ -14,22 +14,32 @@ use chrono::prelude::*;
 use headers::{Header, HeaderName, HeaderValue};
 use ldap3::{Scope, SearchEntry};
 use rand::prelude::*;
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::num::NonZeroUsize;
 use std::path::PathBuf;
 use std::str;
 use std::sync::{Arc, LazyLock};
 use tokio::sync::Semaphore;
 use tracing::{Level, Span, event, instrument};
+use uuid::Uuid;
 
 use super::db;
 use crate::conf::Ldap;
 use crate::models::backends::GraphicSupport;
+use crate::models::backends::NotificationSupport;
+use crate::models::backends::entities::models::{
+    RefreshedEndpoint, apply_credential_effect, check_report, credential_effect,
+    merge_refresh_report, refresh_allowed, refreshable_endpoint, sync_broken_reference,
+    sync_whitelist_ban,
+};
 use crate::models::{
-    AiEndpoint, AiEndpointUpdate, AiSettings, AiSettingsUpdate, AuthResponse, AuthedUser, Group,
-    ImageScaler, Key, ScopedToken, ScopedTokenRequest, ScopedTokenRole, ScopedTokenUpdate,
-    ScopedUser, ScrubbedUser, UnixInfo, User, UserCreate, UserRole, UserSettings,
-    UserSettingsUpdate, UserUpdate,
+    AiEndpoint, AiEndpointUpdate, AiSettings, AiSettingsUpdate, AuthResponse, AuthedUser,
+    CredentialType, Entity, EntityKinds, EntityMetadata, Event, Group, ImageScaler, Key, ModelBan,
+    ModelBanKind, ModelBanUpdate, ModelConfigRef, ModelProvider, ModelRefreshReason,
+    ModelRefreshStatus, ModelRefreshTarget, ModelsConf, RedactSecrets, ScopedModelBan, ScopedToken,
+    ScopedTokenRequest, ScopedTokenRole, ScopedTokenUpdate, ScopedUser, ScrubbedUser, UnixInfo,
+    User, UserCreate, UserCredentialRef, UserModelSettings, UserModelSettingsUpdate, UserRole,
+    UserSettings, UserSettingsUpdate, UserUpdate,
 };
 use crate::utils::shared::EmailClient;
 use crate::utils::{ApiError, AppState, Shared, bounder};
@@ -110,7 +120,7 @@ macro_rules! token {
 macro_rules! token_expire {
     ($shared:expr) => {
         // update token expiration
-        Utc::now() + chrono::Duration::days($shared.config.thorium.auth.token_expire as i64)
+        Utc::now() + chrono::Duration::days(i64::from($shared.config.thorium.auth.token_expire))
     };
 }
 
@@ -154,8 +164,8 @@ async fn token_auth(token: &str, shared: &Shared) -> Result<AuthedUser, ApiError
 ///
 /// The returned user has its groups limited to this scoped tokens scope and
 /// carries the scoped tokens value/expiration instead of the users primary
-/// token. Admins are demoted to the user role so scoped tokens cannot bypass
-/// group checks.
+/// token. The user acts with the scoped token's role capped at the owner's
+/// current role (see [`ScopedTokenRole::effective_role`]).
 ///
 /// # Arguments
 ///
@@ -195,10 +205,9 @@ async fn scoped_token_auth(
     let mut user = db::users::get(&scoped.owner, shared).await?;
     // limit this users groups to this scoped tokens scope
     user.groups.retain(|group| scoped.groups.contains(group));
-    // demote admins to the user role so scoped tokens cannot bypass group checks
-    if user.role == UserRole::Admin {
-        user.role = UserRole::User;
-    }
+    // act with this scoped token's role capped at the owner's current role so scoped
+    // tokens never act as admins or analysts or with more developer rights than either has
+    user.role = scoped.role.effective_role(&user.role);
     // replace this users primary token info with this scoped tokens info
     user.token = scoped.token;
     user.token_expiration = scoped.token_expiration;
@@ -546,7 +555,7 @@ async fn get_unix_info(
             return Ok(UnixInfo { user, group });
         }
         // we didn't get the attrs we expected so log what we got to jaeger
-        let ldap_str = format!("{:#?}", entry);
+        let ldap_str = format!("{entry:#?}");
         event!(Level::ERROR, ldap_entry = ldap_str);
     }
     unavailable!(format!("Ldap did not return UNIX info for {}", username))
@@ -671,7 +680,7 @@ impl AiEndpointUpdate {
                 api_key,
                 model,
             }),
-            _ => bad!(format!("Missing required fields for new endpoint")),
+            _ => bad!("Missing required fields for new endpoint".to_string()),
         }
     }
 
@@ -680,6 +689,7 @@ impl AiEndpointUpdate {
     /// # Arguments
     ///
     /// * `endpoint` - The endpoint to apply this update too
+    #[must_use]
     pub fn apply(mut self, mut endpoint: AiEndpoint) -> AiEndpoint {
         // update this endpoints settings
         update!(endpoint.url, self.url);
@@ -689,27 +699,769 @@ impl AiEndpointUpdate {
     }
 }
 
+/// What checking a user's model settings update needs from outside the user
+#[derive(Debug, Default)]
+pub(crate) struct UserModelFacts {
+    /// The deployment's allowed model endpoints
+    pub(crate) allowed: ModelsConf,
+    /// The providers of the group endpoints the update names that the user can see
+    pub(crate) group_endpoints: HashMap<Uuid, ModelProvider>,
+    /// The model profiles the update names that the user can see
+    pub(crate) profiles: HashSet<Uuid>,
+}
+
+/// Map a model validation message to a `400`
+///
+/// # Arguments
+///
+/// * `result` - The result of a model validation
+fn bad_request<T>(result: Result<T, String>) -> Result<T, ApiError> {
+    // turn any validation message into a bad request
+    match result {
+        Ok(value) => Ok(value),
+        Err(msg) => bad!(msg),
+    }
+}
+
+/// Get a visible entity, or nothing if it doesn't exist or the user can't see it
+///
+/// # Arguments
+///
+/// * `owner` - The user who must see the entity
+/// * `id` - The entity's id
+/// * `shared` - Shared Thorium objects
+async fn visible_entity(
+    owner: &User,
+    id: Uuid,
+    shared: &Shared,
+) -> Result<Option<Entity>, ApiError> {
+    // a missing or hidden entity is nothing
+    match Entity::get(owner, id, shared).await {
+        Ok(entity) => Ok(Some(entity)),
+        Err(err) if err.status() == StatusCode::NOT_FOUND => Ok(None),
+        Err(err) => Err(err),
+    }
+}
+
+/// Build the stored form of a user credential from a submitted one
+///
+/// An omitted or empty secret keeps the stored one of the same kind; a new secret rotates the
+/// credential and clears the bans a rejected or expired secret earned.
+///
+/// # Arguments
+///
+/// * `submitted` - The submitted credential
+/// * `existing` - The stored credential for the same endpoint, if there is one
+fn build_user_credential(
+    submitted: UserCredentialRef,
+    existing: Option<UserCredentialRef>,
+) -> Result<UserCredentialRef, ApiError> {
+    // the kind's metadata must be valid
+    bad_request(submitted.kind.validate())?;
+    // empty secrets are treated as missing
+    let secret = submitted
+        .secrets
+        .primary
+        .filter(|secret| !secret.is_empty());
+    let session_token = submitted
+        .secrets
+        .session_token
+        .filter(|token| !token.is_empty());
+    // an assumed role holds no secret of its own
+    let cred_type = submitted.kind.cred_type();
+    if !submitted.kind.needs_secret() && secret.is_some() {
+        return bad!(
+            "an AwsAssumeRole credential holds no secret; its source credential does".to_owned()
+        );
+    }
+    // only access keys have session tokens
+    if session_token.is_some() && cred_type != CredentialType::AwsAccessKey {
+        return bad!("only an AwsAccessKey credential takes a session token".to_owned());
+    }
+    // a stored credential of the same type keeps its id, secrets, and bans
+    let kept = existing.filter(|existing| existing.kind.cred_type() == cred_type);
+    let mut stored = match (secret, kept) {
+        // a new secret rotates the credential
+        (Some(secret), kept) => {
+            let (id, mut bans) = match kept {
+                Some(kept) => (kept.id, kept.bans),
+                None => (submitted.id, HashMap::new()),
+            };
+            bans.retain(|_, ban| {
+                !matches!(
+                    ban.ban_kind,
+                    ModelBanKind::CredentialRejected { .. } | ModelBanKind::CredentialExpired
+                )
+            });
+            let secrets = crate::models::CredentialSecrets {
+                fingerprint: Some(secret.fingerprint()),
+                primary: Some(secret),
+                session_token: None,
+            };
+            UserCredentialRef {
+                id,
+                kind: submitted.kind.clone(),
+                secrets,
+                expires: submitted.expires,
+                rotated: Some(Utc::now()),
+                bans,
+            }
+        }
+        // no new secret keeps the stored one
+        (None, Some(kept)) => UserCredentialRef {
+            kind: submitted.kind.clone(),
+            expires: submitted.expires,
+            ..kept
+        },
+        // a new credential without a secret is only an assumed role
+        (None, None) => UserCredentialRef {
+            id: submitted.id,
+            kind: submitted.kind.clone(),
+            secrets: crate::models::CredentialSecrets::default(),
+            expires: submitted.expires,
+            rotated: None,
+            bans: HashMap::new(),
+        },
+    };
+    // a kind that needs a secret must end up with one
+    if submitted.kind.needs_secret() && stored.secrets.primary.is_none() {
+        return bad!(format!("a {cred_type} credential needs a secret"));
+    }
+    // a submitted session token replaces the stored one
+    if let Some(token) = session_token {
+        stored.secrets.session_token = Some(token);
+    }
+    Ok(stored)
+}
+
+/// Check the bans a user adds to their own settings
+///
+/// Users may add only `Generic` bans, and each ban id must be new across all of the user's bans,
+/// since bans and their notifications are found by id alone.
+///
+/// # Arguments
+///
+/// * `settings` - The user's model settings
+/// * `added` - The bans to add
+fn check_user_bans(settings: &UserModelSettings, added: &[ModelBan]) -> Result<(), ApiError> {
+    // the ids already used anywhere in the user's settings
+    let mut used = settings.ban_index().into_keys().collect::<HashSet<Uuid>>();
+    for ban in added {
+        // only Generic bans can be set by hand on user settings
+        if !matches!(ban.ban_kind, ModelBanKind::Generic(_)) {
+            return bad!(format!(
+                "only Generic bans can be added to your own model settings, not {}",
+                ban.ban_kind.name()
+            ));
+        }
+        // ban ids are unique across every endpoint, catalog, and credential
+        if !used.insert(ban.id) {
+            return bad!(format!(
+                "A ban with id '{}' already exists. Bans cannot be updated, only added or removed.",
+                ban.id
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// Add some checked bans to a ban list
+///
+/// # Arguments
+///
+/// * `bans` - The ban list to add to
+/// * `added` - The bans to add
+fn add_bans(bans: &mut HashMap<Uuid, ModelBan>, added: Vec<ModelBan>) {
+    // insert each ban by its id
+    for ban in added {
+        bans.insert(ban.id, ban);
+    }
+}
+
+/// Check that a model id list holds no empty ids
+///
+/// # Arguments
+///
+/// * `field` - The name of the field, for errors
+/// * `ids` - The model ids to check
+fn check_model_ids(field: &str, ids: &BTreeSet<String>) -> Result<(), ApiError> {
+    // a model id can't be empty
+    if ids.iter().any(|id| id.trim().is_empty()) {
+        return bad!(format!("{field} can't hold an empty model id"));
+    }
+    Ok(())
+}
+
+impl UserModelSettingsUpdate {
+    /// Look up what checking this update needs from outside the user
+    ///
+    /// # Arguments
+    ///
+    /// * `owner` - The user whose settings are updated
+    /// * `current` - The user's current model settings
+    /// * `shared` - Shared Thorium objects
+    pub(crate) async fn facts(
+        &self,
+        owner: &User,
+        current: &UserModelSettings,
+        shared: &Shared,
+    ) -> Result<UserModelFacts, ApiError> {
+        let mut facts = UserModelFacts::default();
+        // endpoints are checked against the deployment's allowed list
+        if !self.endpoints.is_empty() {
+            facts.allowed = db::system::get_settings(shared).await?.models;
+        }
+        // credentials for endpoints that aren't the user's own name visible group endpoints
+        for id in self.credentials.keys() {
+            if current.endpoints.contains_key(id) || self.endpoints.contains_key(id) {
+                continue;
+            }
+            if let Some(entity) = visible_entity(owner, *id, shared).await?
+                && let EntityMetadata::ModelEndpoint(meta) = entity.metadata
+            {
+                facts.group_endpoints.insert(*id, meta.provider);
+            }
+        }
+        // default profiles must be visible profiles
+        for id in self.default_profiles.iter().flatten() {
+            if let Some(entity) = visible_entity(owner, *id, shared).await?
+                && entity.kind == EntityKinds::ModelProfile
+            {
+                facts.profiles.insert(*id);
+            }
+        }
+        Ok(facts)
+    }
+
+    /// Apply this update to a user's model settings, changing nothing unless every check passes
+    ///
+    /// # Arguments
+    ///
+    /// * `settings` - The user's model settings
+    /// * `facts` - What the checks need from outside the user
+    #[allow(clippy::too_many_lines)]
+    pub(crate) fn apply(
+        self,
+        settings: &mut UserModelSettings,
+        facts: &UserModelFacts,
+    ) -> Result<(), ApiError> {
+        // change a copy so nothing is applied unless every check passes
+        let mut next = settings.clone();
+        // removed endpoints take their credentials with them
+        for id in &self.remove_endpoints {
+            if next.endpoints.remove(id).is_none() {
+                return not_found!(format!("{id} isn't one of your model endpoints"));
+            }
+            next.credentials.remove(id);
+        }
+        // keep which endpoints are replaced, since their kept credentials are checked later
+        let replaced = self.endpoints.keys().copied().collect::<Vec<Uuid>>();
+        // added or replaced endpoints must be valid and allowed
+        for (id, mut endpoint) in self.endpoints {
+            // an endpoint needs a name
+            if endpoint.name.trim().is_empty() {
+                return bad!(format!("model endpoint {id} needs a name"));
+            }
+            // its provider must be valid and on the deployment's allowed list
+            bad_request(endpoint.provider.validate())?;
+            bad_request(facts.allowed.check(&endpoint.name, &endpoint.provider))?;
+            // its catalog can't repeat a model id
+            let mut seen = HashSet::new();
+            for entry in &endpoint.catalog {
+                if entry.model_id.trim().is_empty() {
+                    return bad!("a catalog entry's model_id can't be empty".to_owned());
+                }
+                if !seen.insert(entry.model_id.clone()) {
+                    return bad!(format!(
+                        "model_id `{}` is listed more than once",
+                        entry.model_id
+                    ));
+                }
+            }
+            endpoint
+                .catalog
+                .sort_by(|left, right| left.model_id.cmp(&right.model_id));
+            endpoint.mark_manual();
+            check_model_ids("disabled_models", &endpoint.disabled_models)?;
+            // bans and refresh state are kept by Thorium, never submitted
+            match next.endpoints.get(&id) {
+                Some(existing) => {
+                    // an endpoint that passed the whitelist loses its whitelist ban
+                    endpoint.bans.clone_from(&existing.bans);
+                    sync_whitelist_ban(&mut endpoint.bans, true);
+                    endpoint.refresh = existing.refresh.clone();
+                    for entry in &mut endpoint.catalog {
+                        entry.bans = existing
+                            .catalog
+                            .iter()
+                            .find(|old| old.model_id == entry.model_id)
+                            .map_or_default(|old| old.bans.clone());
+                    }
+                }
+                None => {
+                    endpoint.bans.clear();
+                    endpoint.refresh = ModelRefreshStatus::default();
+                    for entry in &mut endpoint.catalog {
+                        entry.bans.clear();
+                    }
+                }
+            }
+            next.endpoints.insert(id, endpoint);
+        }
+        // removed credentials must exist
+        for id in &self.remove_credentials {
+            if next.credentials.remove(id).is_none() {
+                return not_found!(format!("you have no credential for model endpoint {id}"));
+            }
+        }
+        // added or rotated credentials must fit their endpoint's provider
+        let touched = self.credentials.keys().copied().collect::<HashSet<Uuid>>();
+        for (endpoint, credential) in self.credentials {
+            let provider = match next.endpoints.get(&endpoint) {
+                Some(own) => &own.provider,
+                None => match facts.group_endpoints.get(&endpoint) {
+                    Some(provider) => provider,
+                    None => {
+                        return bad!(format!(
+                            "{endpoint} isn't one of your model endpoints or a model endpoint you can see"
+                        ));
+                    }
+                },
+            };
+            bad_request(provider.check_credential(&credential.kind))?;
+            let existing = next.credentials.get(&endpoint).cloned();
+            let stored = build_user_credential(credential, existing)?;
+            next.credentials.insert(endpoint, stored);
+        }
+        // a replaced endpoint's kept credential must fit its provider
+        for id in replaced.iter().filter(|id| !touched.contains(id)) {
+            if let (Some(own), Some(credential)) =
+                (next.endpoints.get(id), next.credentials.get(id))
+            {
+                bad_request(own.provider.check_credential(&credential.kind))?;
+            }
+        }
+        // credential ids are unique
+        let mut types = HashMap::new();
+        for credential in next.credentials.values() {
+            if types
+                .insert(credential.id, credential.kind.cred_type())
+                .is_some()
+            {
+                return bad!(format!(
+                    "credential id {} is used more than once",
+                    credential.id
+                ));
+            }
+        }
+        // assumed roles must name another of the user's access keys
+        for (endpoint, credential) in &mut next.credentials {
+            let Some(source) = credential.kind.role_source() else {
+                continue;
+            };
+            let resolves = source != credential.id
+                && types.get(&source) == Some(&CredentialType::AwsAccessKey);
+            if touched.contains(endpoint) && !resolves {
+                return bad!(format!(
+                    "AwsAssumeRole.source {source} must name another of your AwsAccessKey credentials"
+                ));
+            }
+            // a role whose source went away is banned until it's repaired
+            sync_broken_reference(&mut credential.bans, Some(source), !resolves);
+        }
+        // default profiles must be visible profiles named once
+        if let Some(profiles) = self.default_profiles {
+            let mut seen = HashSet::new();
+            for id in &profiles {
+                if !facts.profiles.contains(id) {
+                    return bad!(format!("{id} isn't a model profile you can see"));
+                }
+                if !seen.insert(*id) {
+                    return bad!(format!("model profile {id} is listed more than once"));
+                }
+            }
+            next.default_profiles = profiles;
+        }
+        // ban changes keyed by an endpoint id
+        for (endpoint, update) in self.bans {
+            apply_keyed_bans(&mut next, endpoint, update)?;
+        }
+        // ban changes on catalog models of own endpoints
+        for (endpoint, models) in self.model_bans {
+            for (model_id, update) in models {
+                check_user_bans(&next, &update.bans_added)?;
+                let Some(own) = next.endpoints.get_mut(&endpoint) else {
+                    return bad!(format!("{endpoint} isn't one of your model endpoints"));
+                };
+                let Some(entry) = own
+                    .catalog
+                    .iter_mut()
+                    .find(|entry| entry.model_id == model_id)
+                else {
+                    return not_found!(format!(
+                        "model_id `{model_id}` isn't in the catalog of your model endpoint `{}`",
+                        own.name
+                    ));
+                };
+                remove_bans(&mut entry.bans, &update.bans_removed)?;
+                add_bans(&mut entry.bans, update.bans_added);
+            }
+        }
+        // ban changes on credentials
+        for (endpoint, update) in self.credential_bans {
+            check_user_bans(&next, &update.bans_added)?;
+            let Some(credential) = next.credentials.get_mut(&endpoint) else {
+                return not_found!(format!(
+                    "you have no credential for model endpoint {endpoint}"
+                ));
+            };
+            remove_bans(&mut credential.bans, &update.bans_removed)?;
+            add_bans(&mut credential.bans, update.bans_added);
+        }
+        // disabled model ids change on own endpoints only
+        let ids = self
+            .disable_models
+            .keys()
+            .chain(self.enable_models.keys())
+            .copied()
+            .collect::<BTreeSet<Uuid>>();
+        for endpoint in ids {
+            let disable = self
+                .disable_models
+                .get(&endpoint)
+                .cloned()
+                .unwrap_or_default();
+            let enable = self
+                .enable_models
+                .get(&endpoint)
+                .cloned()
+                .unwrap_or_default();
+            check_model_ids("disable_models", &disable)?;
+            check_model_ids("enable_models", &enable)?;
+            if let Some(both) = disable.intersection(&enable).next() {
+                return bad!(format!(
+                    "model id `{both}` can't be disabled and enabled at once"
+                ));
+            }
+            let Some(own) = next.endpoints.get_mut(&endpoint) else {
+                return bad!(format!(
+                    "{endpoint} isn't one of your model endpoints; only your own endpoints disable models here"
+                ));
+            };
+            own.disabled_models.extend(disable);
+            own.disabled_models.retain(|id| !enable.contains(id));
+        }
+        // refresh reports merge into own endpoints and the credentials the refreshes used
+        let UserModelSettings {
+            endpoints,
+            credentials,
+            ..
+        } = &mut next;
+        for (endpoint, report) in &self.refresh_reports {
+            check_report(report)?;
+            let own = endpoints.get_mut(endpoint);
+            let credential = credentials.get_mut(endpoint);
+            // a report for an endpoint the user has nothing for is refused
+            if own.is_none() && credential.is_none() {
+                return not_found!(format!(
+                    "{endpoint} isn't one of your model endpoints and you have no credential for it"
+                ));
+            }
+            if let Some(own) = own {
+                merge_refresh_report(
+                    &mut RefreshedEndpoint {
+                        catalog: &mut own.catalog,
+                        bans: &mut own.bans,
+                        refresh: &mut own.refresh,
+                    },
+                    report,
+                );
+            }
+            // only a report naming this credential bans or clears it
+            if let Some(credential) = credential
+                && report.credential == Some(ModelConfigRef::User(credential.id))
+            {
+                apply_credential_effect(&mut credential.bans, &credential_effect(report));
+            }
+        }
+        // every check passed
+        *settings = next;
+        Ok(())
+    }
+
+    /// Get the endpoints this update sets a user's own endpoint or credential for, each once
+    ///
+    /// Each one needs a refresh once the update is saved; removals and reports need none.
+    #[must_use]
+    pub(crate) fn refreshed_endpoints(&self) -> BTreeMap<Uuid, bool> {
+        // note each endpoint, and whether its credential was set
+        let mut refreshed = BTreeMap::new();
+        for id in self.endpoints.keys() {
+            refreshed.insert(*id, false);
+        }
+        for id in self.credentials.keys() {
+            refreshed.insert(*id, true);
+        }
+        refreshed
+    }
+}
+
+/// Remove bans by id from a ban list, refusing ids it doesn't hold
+///
+/// # Arguments
+///
+/// * `bans` - The ban list
+/// * `removed` - The ids of the bans to remove
+fn remove_bans(bans: &mut HashMap<Uuid, ModelBan>, removed: &[Uuid]) -> Result<(), ApiError> {
+    // every ban to remove must exist
+    for id in removed {
+        if bans.remove(id).is_none() {
+            return not_found!(format!("The ban with id '{id}' doesn't exist"));
+        }
+    }
+    Ok(())
+}
+
+/// Apply ban changes keyed by an endpoint id
+///
+/// Added bans go to the own endpoint, or to the credential when the id names a group endpoint;
+/// removed ids are looked up on the endpoint, its catalog, and the credential.
+///
+/// # Arguments
+///
+/// * `settings` - The user's model settings
+/// * `endpoint` - The endpoint id
+/// * `update` - The ban changes
+fn apply_keyed_bans(
+    settings: &mut UserModelSettings,
+    endpoint: Uuid,
+    update: ModelBanUpdate,
+) -> Result<(), ApiError> {
+    // check the added bans first
+    check_user_bans(settings, &update.bans_added)?;
+    // remove each ban from whichever item holds it
+    for id in &update.bans_removed {
+        let mut removed = false;
+        if let Some(own) = settings.endpoints.get_mut(&endpoint) {
+            removed = own.bans.remove(id).is_some()
+                || own
+                    .catalog
+                    .iter_mut()
+                    .any(|entry| entry.bans.remove(id).is_some());
+        }
+        if !removed && let Some(credential) = settings.credentials.get_mut(&endpoint) {
+            removed = credential.bans.remove(id).is_some();
+        }
+        if !removed {
+            return not_found!(format!("The ban with id '{id}' doesn't exist"));
+        }
+    }
+    // add the bans to the own endpoint or the credential
+    if update.bans_added.is_empty() {
+        return Ok(());
+    }
+    if let Some(own) = settings.endpoints.get_mut(&endpoint) {
+        add_bans(&mut own.bans, update.bans_added);
+    } else if let Some(credential) = settings.credentials.get_mut(&endpoint) {
+        add_bans(&mut credential.bans, update.bans_added);
+    } else {
+        return bad!(format!(
+            "{endpoint} isn't one of your model endpoints and you have no credential for it"
+        ));
+    }
+    Ok(())
+}
+
+/// Get every ban in a user's model settings by id
+///
+/// # Arguments
+///
+/// * `settings` - The user's settings
+fn model_ban_index(settings: &UserSettings) -> HashMap<Uuid, ScopedModelBan> {
+    // users without AI settings have no bans
+    settings
+        .ai
+        .as_ref()
+        .map_or_default(|ai| ai.models.ban_index())
+}
+
+/// Write a notification for each added user ban and delete the one of each removed ban
+///
+/// # Arguments
+///
+/// * `user` - The user the bans belong to
+/// * `before` - The user's bans before the change
+/// * `shared` - Shared Thorium objects
+async fn notify_model_bans(
+    user: &User,
+    before: &HashMap<Uuid, ScopedModelBan>,
+    shared: &Shared,
+) -> Result<(), ApiError> {
+    // find the bans that appeared and the ones that disappeared
+    let after = model_ban_index(&user.settings);
+    let added = after
+        .iter()
+        .filter(|(id, _)| !before.contains_key(id))
+        .map(|(_, ban)| ban.clone())
+        .collect::<Vec<ScopedModelBan>>();
+    let removed = before
+        .keys()
+        .filter(|id| !after.contains_key(id))
+        .copied()
+        .collect::<Vec<Uuid>>();
+    // write the user's notifications under their username
+    if !added.is_empty() || !removed.is_empty() {
+        user.update_ban_notifications(&user.username, &added, &removed, shared)
+            .await?;
+    }
+    Ok(())
+}
+
+/// Delete the ban notifications just written for a user whose stored settings no longer hold
+/// those bans
+///
+/// The user can be deleted, or deleted and registered again under the same username, between
+/// the scan's re-read and its notification write, and a notification left behind would be shown
+/// to the next account with that username.
+///
+/// # Arguments
+///
+/// * `user` - The user the notifications were written for, with the settings the scan wrote
+/// * `before` - The user's bans before the scan changed them
+/// * `shared` - Shared Thorium objects
+async fn clear_orphaned_ban_notifications(
+    user: &User,
+    before: &HashMap<Uuid, ScopedModelBan>,
+    shared: &Shared,
+) -> Result<(), ApiError> {
+    // find the bans the scan added, which are the ones it wrote notifications for
+    let added = model_ban_index(&user.settings)
+        .into_keys()
+        .filter(|id| !before.contains_key(id))
+        .collect::<Vec<Uuid>>();
+    // there is nothing to check without new notifications
+    if added.is_empty() {
+        return Ok(());
+    }
+    // read the bans stored under this username now; a deleted user has none
+    let stored = match db::users::get_raw_settings(&user.username, shared).await? {
+        Some(raw) => model_ban_index(&db::users::parse_stored_settings(&raw)?),
+        None => HashMap::new(),
+    };
+    // delete the notification of every added ban the stored user doesn't have
+    let orphaned = added
+        .into_iter()
+        .filter(|id| !stored.contains_key(id))
+        .collect::<Vec<Uuid>>();
+    if !orphaned.is_empty() {
+        user.update_ban_notifications::<ScopedModelBan>(&user.username, &[], &orphaned, shared)
+            .await?;
+    }
+    Ok(())
+}
+
+/// Ban every user's own model endpoints outside the allowed endpoint list and unban those inside
+///
+/// # Arguments
+///
+/// * `conf` - The allowed endpoint list
+/// * `shared` - Shared Thorium objects
+#[instrument(name = "users::scan_whitelist", skip_all, err(Debug))]
+pub(crate) async fn scan_whitelist(conf: &ModelsConf, shared: &Shared) -> Result<(), ApiError> {
+    // check every user's own endpoints
+    for username in db::users::list(shared).await? {
+        // read and write each user until no other change lands between the two
+        loop {
+            // read the user's settings as stored, skipping users deleted since the list
+            let Some(raw) = db::users::get_raw_settings(&username, shared).await? else {
+                break;
+            };
+            // a user whose settings don't parse can't be loaded or use its endpoints, so it is
+            // skipped rather than failing the scan, and the API's startup, for every other user
+            let mut settings = match db::users::parse_stored_settings(&raw) {
+                Ok(settings) => settings,
+                Err(error) => {
+                    event!(
+                        Level::ERROR,
+                        user = username,
+                        error = ?error,
+                        msg = "Skipping a user whose settings don't parse in the model whitelist scan"
+                    );
+                    break;
+                }
+            };
+            // sync the whitelist ban of each of the user's own endpoints
+            let before = model_ban_index(&settings);
+            let mut changed = false;
+            if let Some(ai) = &mut settings.ai {
+                for endpoint in ai.models.endpoints.values_mut() {
+                    changed |=
+                        sync_whitelist_ban(&mut endpoint.bans, conf.allows(&endpoint.provider));
+                }
+            }
+            // only users whose bans changed are written and notified
+            if !changed {
+                break;
+            }
+            // let a test change the user between the read and the write
+            #[cfg(feature = "test-utilities")]
+            crate::test_utilities::faults::wait_if_scan_paused(&username).await;
+            // write only the settings, and only if nothing changed them since the read
+            if !db::users::swap_settings(&username, &raw, &settings, shared).await? {
+                continue;
+            }
+            // notify the user about the bans that changed, unless they were just deleted
+            match db::users::get(&username, shared).await {
+                Ok(mut user) => {
+                    // let a test delete the user between the re-read and the notification write
+                    #[cfg(feature = "test-utilities")]
+                    crate::test_utilities::faults::wait_if_scan_notify_paused(&username).await;
+                    user.settings = settings;
+                    notify_model_bans(&user, &before, shared).await?;
+                    // drop the notifications just written if the user was deleted or replaced
+                    // since the re-read
+                    clear_orphaned_ban_notifications(&user, &before, shared).await?;
+                }
+                Err(err) if err.status() == StatusCode::NOT_FOUND => (),
+                Err(err) => return Err(err),
+            }
+            break;
+        }
+    }
+    Ok(())
+}
+
 impl AiSettingsUpdate {
     /// Apply any updated AI settings
     ///
     /// # Arguments
     ///
     /// * `existing` - Any existing settings to update
-    pub fn apply(mut self, existing: &mut Option<AiSettings>) -> Result<(), ApiError> {
+    /// * `facts` - What checking a model settings update needs from outside the user
+    pub(crate) fn apply(
+        mut self,
+        existing: &mut Option<AiSettings>,
+        facts: &UserModelFacts,
+    ) -> Result<(), ApiError> {
+        // the model settings update is applied after the legacy endpoints
+        let models = self.models.take();
+        // an update of only model settings needs no legacy default endpoint
+        let models_only = models.is_some()
+            && self.default_endpoint.is_none()
+            && self.endpoints.is_empty()
+            && self.remove_endpoints.is_empty();
         // check if we have existing existing to update
         let mut settings = match existing.take() {
             Some(settings) => settings,
+            None if models_only => AiSettings::default(),
             None => {
                 // we don't have any existing settings so well need to make new ones
                 // We have to make sure that users provide us enough info to build our new settings
-                let default_endpoint = match self.default_endpoint.take() {
-                    Some(default) => default,
-                    None => {
-                        return bad!(
+                let Some(default_endpoint) = self.default_endpoint.take() else {
+                    return bad!(
                         "A default endpoint must be provided if no previous AI settings were set"
                             .to_owned()
                     );
-                    }
                 };
                 // make sure they provided us settings for our default endpoint
                 let endpoint = match self.endpoints.remove(&default_endpoint) {
@@ -729,6 +1481,7 @@ impl AiSettingsUpdate {
                 AiSettings {
                     endpoints,
                     default_endpoint,
+                    models: UserModelSettings::default(),
                 }
             }
         };
@@ -749,10 +1502,18 @@ impl AiSettingsUpdate {
         settings
             .endpoints
             .retain(|name, _| !self.remove_endpoints.contains(name));
-        // if we have no more ai endpoints then clear our ai settings
+        // apply the model settings update
+        if let Some(models) = models {
+            models.apply(&mut settings.models, facts)?;
+        }
+        // if we have no more ai endpoints then keep only model settings, if any
         if settings.endpoints.is_empty() {
-            // clear any existing ai settings
-            *existing = None;
+            // clear our ai settings when there are no model settings either
+            *existing = if settings.models.is_empty() {
+                None
+            } else {
+                Some(settings)
+            };
         } else {
             // make sure we still have a default endpoint
             if !settings.endpoints.contains_key(&settings.default_endpoint) {
@@ -769,17 +1530,133 @@ impl AiSettingsUpdate {
 }
 
 impl UserSettingsUpdate {
+    /// Look up what checking this update's model settings needs from outside the user
+    ///
+    /// # Arguments
+    ///
+    /// * `owner` - The user whose settings are updated
+    /// * `shared` - Shared Thorium objects
+    pub(crate) async fn model_facts(
+        &self,
+        owner: &User,
+        shared: &Shared,
+    ) -> Result<UserModelFacts, ApiError> {
+        // only model settings updates need outside facts
+        match self.ai.as_ref().and_then(|ai| ai.models.as_ref()) {
+            Some(models) => {
+                let current = owner
+                    .settings
+                    .ai
+                    .as_ref()
+                    .map_or_default(|ai| ai.models.clone());
+                models.facts(owner, &current, shared).await
+            }
+            None => Ok(UserModelFacts::default()),
+        }
+    }
+
     /// Apply any updated settings to this user
     ///
     /// # Arguments
     ///
     /// * `settings` - The user settings to update
-    pub fn apply(mut self, settings: &mut UserSettings) -> Result<(), ApiError> {
+    /// * `facts` - What checking a model settings update needs from outside the user
+    pub(crate) fn apply(
+        mut self,
+        settings: &mut UserSettings,
+        facts: &UserModelFacts,
+    ) -> Result<(), ApiError> {
         // update our theme if an update was set
         update!(settings.theme, self.theme);
         // apply any AI settings updates
         if let Some(ai_update) = self.ai {
-            ai_update.apply(&mut settings.ai)?;
+            ai_update.apply(&mut settings.ai, facts)?;
+        }
+        Ok(())
+    }
+}
+
+/// What applying a settings update to a user needs done once the user is saved
+pub(crate) struct AppliedSettings {
+    /// The user's model bans before the update
+    before: HashMap<Uuid, ScopedModelBan>,
+    /// The endpoints to refresh, and whether each one's credential was set
+    refreshed: BTreeMap<Uuid, bool>,
+}
+
+impl User {
+    /// Apply a settings update to this user and get what's needed once it's saved
+    ///
+    /// # Arguments
+    ///
+    /// * `update` - The settings update to apply
+    /// * `shared` - Shared Thorium objects
+    async fn apply_settings(
+        &mut self,
+        update: UserSettingsUpdate,
+        shared: &Shared,
+    ) -> Result<AppliedSettings, ApiError> {
+        // look up what the model checks need, then apply the update
+        let facts = update.model_facts(self, shared).await?;
+        let before = model_ban_index(&self.settings);
+        let refreshed = update
+            .ai
+            .as_ref()
+            .and_then(|ai| ai.models.as_ref())
+            .map_or_default(UserModelSettingsUpdate::refreshed_endpoints);
+        update.apply(&mut self.settings, &facts)?;
+        Ok(AppliedSettings { before, refreshed })
+    }
+
+    /// Notify a saved user of their changed model bans and queue the refreshes their update needs
+    ///
+    /// # Arguments
+    ///
+    /// * `caller` - The user who sent the update
+    /// * `applied` - What applying the update needs done
+    /// * `shared` - Shared Thorium objects
+    async fn finish_settings(
+        &self,
+        caller: &User,
+        applied: AppliedSettings,
+        shared: &Shared,
+    ) -> Result<(), ApiError> {
+        // write the notifications of any model bans the update changed
+        notify_model_bans(self, &applied.before, shared).await?;
+        // refresh each endpoint whose own endpoint or credential was set
+        let models = self.settings.ai.as_ref().map(|ai| &ai.models);
+        let credentials = models.map(|models| &models.credentials);
+        let conf = if applied.refreshed.is_empty() {
+            None
+        } else {
+            Some(db::system::get_settings(shared).await?.models)
+        };
+        for (endpoint, credential_set) in applied.refreshed {
+            // skip an endpoint the deployment no longer allows
+            let allowed = match (
+                conf.as_ref(),
+                models.and_then(|models| models.endpoints.get(&endpoint)),
+            ) {
+                (Some(conf), Some(own)) => refresh_allowed(conf, &own.provider, &own.bans),
+                (Some(conf), None) => refreshable_endpoint(endpoint, conf, shared)
+                    .await?
+                    .is_some(),
+                (None, _) => false,
+            };
+            if !allowed {
+                continue;
+            }
+            let reason = match credentials.and_then(|creds| creds.get(&endpoint)) {
+                Some(credential) if credential_set => ModelRefreshReason::CredentialChanged {
+                    credential: ModelConfigRef::User(credential.id),
+                },
+                _ => ModelRefreshReason::EndpointChanged,
+            };
+            let target = ModelRefreshTarget::UserEndpoint {
+                user: self.username.clone(),
+                endpoint,
+            };
+            Event::queue_model_refresh(caller, target, reason, shared).await?;
         }
         Ok(())
     }
@@ -889,7 +1766,10 @@ impl User {
                 // send our verification email
                 cast.send_verification_email(client, shared).await?;
             }
-        };
+        }
+        // let a test hold this create between its existing-user check and the user write
+        #[cfg(feature = "test-utilities")]
+        crate::test_utilities::faults::wait_if_user_create_paused(&cast.username).await;
         // inject user into the backend
         let user = db::users::create(cast, shared).await?;
         // sync all groups in ldap if ldap is enabled
@@ -911,11 +1791,11 @@ impl User {
         shared: &Shared,
     ) -> Result<(), ApiError> {
         // check if this user has an approved email
-        if let Some(approved) = &client.approved {
-            if !approved.is_match(&self.email) {
-                // reject any emails that are not approved
-                return unauthorized!(format!("{} is not an approved email", self.email));
-            }
+        if let Some(approved) = &client.approved
+            && !approved.is_match(&self.email)
+        {
+            // reject any emails that are not approved
+            return unauthorized!(format!("{} is not an approved email", self.email));
         }
         // if they are not yet verified then send the verification email
         if self.verified {
@@ -926,9 +1806,8 @@ impl User {
             ));
         }
         // make sure we have email verification settings
-        let email_conf = match &shared.config.thorium.auth.email {
-            Some(email_conf) => email_conf,
-            None => return unavailable!("Email verification is not enabled".to_owned()),
+        let Some(email_conf) = &shared.config.thorium.auth.email else {
+            return unavailable!("Email verification is not enabled".to_owned());
         };
         // make sure this user has not recently sent a verification email
         // this helps prevent using Thorium to spam unverified users
@@ -1065,8 +1944,16 @@ impl User {
         };
         // grab any profile icon path so we can clean it out of S3 after the user is gone
         let image = target.image.clone();
+        // clear the user's notifications while the username is still theirs, so a new user of
+        // the same name created once it's free never loses notifications to this delete
+        target
+            .delete_all_notifications(&target.username, shared)
+            .await?;
         // delete user in the background
         db::users::delete(&target, shared).await?;
+        // let a test hold this delete once the user is removed
+        #[cfg(feature = "test-utilities")]
+        crate::test_utilities::faults::wait_if_user_delete_paused(&target.username).await;
         // remove this user's profile icon from S3 if they had one
         if let Some(image_path) = image {
             Self::delete_graphic(&image_path, shared).await?;
@@ -1094,10 +1981,10 @@ impl User {
         // persist the new icon path on the user
         db::users::save(self, shared).await?;
         // delete the previous icon only if it lived at a different path (e.g. a different extension)
-        if let Some(old_path) = old {
-            if old_path != new_path {
-                Self::delete_graphic(&old_path, shared).await?;
-            }
+        if let Some(old_path) = old
+            && old_path != new_path
+        {
+            Self::delete_graphic(&old_path, shared).await?;
         }
         Ok(())
     }
@@ -1289,11 +2176,16 @@ impl User {
             }
         }
         // apply any settings updates
-        if let Some(settings) = update.settings {
-            settings.apply(&mut self.settings)?;
-        }
+        let applied = match update.settings {
+            Some(settings) => Some(self.apply_settings(settings, shared).await?),
+            None => None,
+        };
         // save update user to the backend
         db::users::save(&self, shared).await?;
+        // notify about changed model bans and queue the refreshes the update needs
+        if let Some(applied) = applied {
+            self.finish_settings(&self, applied, shared).await?;
+        }
         Ok(self)
     }
 
@@ -1343,11 +2235,16 @@ impl User {
         // update our role
         crate::update!(target.role, update.role);
         // apply any settings updates
-        if let Some(settings) = update.settings {
-            settings.apply(&mut target.settings)?;
-        }
+        let applied = match update.settings {
+            Some(settings) => Some(target.apply_settings(settings, shared).await?),
+            None => None,
+        };
         // save update user to the backend
         db::users::save(&target, shared).await?;
+        // notify about changed model bans and queue the refreshes the update needs
+        if let Some(applied) = applied {
+            target.finish_settings(self, applied, shared).await?;
+        }
         Ok(())
     }
 
@@ -1563,6 +2460,97 @@ impl ScopedTokenRole {
             }
         }
     }
+
+    /// Get the role a scoped token acts with given its owner's current role
+    ///
+    /// The token's role is capped at the owner's role: a scoped token never acts as an
+    /// admin or analyst, a developer token keeps only the scaler flags both it and its
+    /// owner have (admins and analysts count as every scaler) and acts as a user when no
+    /// flag is left, and a disabled owner stays disabled so authentication still rejects
+    /// them.
+    ///
+    /// # Arguments
+    ///
+    /// * `owner` - The current role of the user that owns this scoped token
+    #[must_use]
+    pub fn effective_role(&self, owner: &UserRole) -> UserRole {
+        match (self, owner) {
+            // disabled users stay disabled no matter the token's role
+            (_, UserRole::Disabled) => UserRole::Disabled,
+            // user tokens and developer tokens of users lowered to the user role act as users
+            (ScopedTokenRole::User, _) | (ScopedTokenRole::Developer { .. }, UserRole::User) => {
+                UserRole::User
+            }
+            // admins and analysts count as every scaler so the token's flags are kept
+            (
+                ScopedTokenRole::Developer {
+                    k8s,
+                    bare_metal,
+                    windows,
+                    external,
+                    kvm,
+                },
+                UserRole::Admin | UserRole::Analyst,
+            ) => Self::developer_or_user(*k8s, *bare_metal, *windows, *external, *kvm),
+            // developers keep only the flags both the token and the owner have
+            (
+                ScopedTokenRole::Developer {
+                    k8s: scoped_k8s,
+                    bare_metal: scoped_bare_metal,
+                    windows: scoped_windows,
+                    external: scoped_external,
+                    kvm: scoped_kvm,
+                },
+                UserRole::Developer {
+                    k8s: user_k8s,
+                    bare_metal: user_bare_metal,
+                    windows: user_windows,
+                    external: user_external,
+                    kvm: user_kvm,
+                },
+            ) => Self::developer_or_user(
+                *scoped_k8s && *user_k8s,
+                *scoped_bare_metal && *user_bare_metal,
+                *scoped_windows && *user_windows,
+                *scoped_external && *user_external,
+                *scoped_kvm && *user_kvm,
+            ),
+        }
+    }
+
+    /// Build a developer role with the given scaler flags, or a user role if no flag is set
+    ///
+    /// A developer role with every flag false can't develop for any scaler, so it is
+    /// reported as the user role it acts as.
+    ///
+    /// # Arguments
+    ///
+    /// * `k8s` - Whether this role can develop for K8s
+    /// * `bare_metal` - Whether this role can develop for bare metal
+    /// * `windows` - Whether this role can develop for Windows
+    /// * `external` - Whether this role can develop for external jobs
+    /// * `kvm` - Whether this role can develop for Kvm
+    #[allow(clippy::fn_params_excessive_bools)]
+    fn developer_or_user(
+        k8s: bool,
+        bare_metal: bool,
+        windows: bool,
+        external: bool,
+        kvm: bool,
+    ) -> UserRole {
+        // a role with no scaler flag left acts as a user
+        if !(k8s || bare_metal || windows || external || kvm) {
+            return UserRole::User;
+        }
+        // otherwise keep the developer role with the flags that are left
+        UserRole::Developer {
+            k8s,
+            bare_metal,
+            windows,
+            external,
+            kvm,
+        }
+    }
 }
 
 impl ScopedToken {
@@ -1601,10 +2589,9 @@ impl ScopedToken {
                     return unauthorized!(format!(
                         "Admins must actually be in groups to scope a token to that group. You are not in {group}."
                     ));
-                } else {
-                    // we are not an admin so just use the standard unauthorized message
-                    return unauthorized!(format!("{} is not one of your groups", group));
                 }
+                // we are not an admin so just use the standard unauthorized message
+                return unauthorized!(format!("{} is not one of your groups", group));
             }
         }
         // if an expiration was set then make sure it is in the future
@@ -1915,7 +2902,14 @@ where
 }
 
 impl From<User> for ScrubbedUser {
-    fn from(user: User) -> Self {
+    /// Drop a user's password and clear every secret in their settings
+    ///
+    /// # Arguments
+    ///
+    /// * `user` - The user to scrub
+    fn from(mut user: User) -> Self {
+        // no model secret or legacy AI key is ever returned
+        user.settings.redact_secrets();
         ScrubbedUser {
             username: user.username,
             email: user.email,
@@ -2035,13 +3029,107 @@ where
 }
 
 #[cfg(test)]
+mod model_tests;
+
+#[cfg(test)]
 mod tests {
     use super::{Key, build_ldap_user_filter, reject_empty_ldap_password, secret_key_matches};
+    use crate::models::{ScopedTokenRole, UserRole};
     use headers::{Header, HeaderValue};
     use std::sync::Arc;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::time::Duration;
     use tokio::sync::Semaphore;
+
+    /// Build a developer user role with the given scaler flags
+    ///
+    /// # Arguments
+    ///
+    /// * `k8s` - Whether this role can develop for K8s
+    /// * `bare_metal` - Whether this role can develop for bare metal
+    /// * `windows` - Whether this role can develop for Windows
+    fn dev_user(k8s: bool, bare_metal: bool, windows: bool) -> UserRole {
+        UserRole::Developer {
+            k8s,
+            bare_metal,
+            windows,
+            external: false,
+            kvm: false,
+        }
+    }
+
+    /// Build a developer scoped token role with the given scaler flags
+    ///
+    /// # Arguments
+    ///
+    /// * `k8s` - Whether this token can develop for K8s
+    /// * `bare_metal` - Whether this token can develop for bare metal
+    /// * `windows` - Whether this token can develop for Windows
+    fn dev_token(k8s: bool, bare_metal: bool, windows: bool) -> ScopedTokenRole {
+        ScopedTokenRole::Developer {
+            k8s,
+            bare_metal,
+            windows,
+            external: false,
+            kvm: false,
+        }
+    }
+
+    /// A developer token only keeps the flags both it and its developer owner have
+    #[test]
+    fn effective_role_table() {
+        // a developer token only keeps the flags both it and its developer owner have
+        assert_eq!(
+            dev_token(true, false, true).effective_role(&dev_user(true, true, false)),
+            dev_user(true, false, false)
+        );
+        // admins and analysts count as every scaler so a developer token keeps its own flags
+        assert_eq!(
+            dev_token(true, false, false).effective_role(&UserRole::Admin),
+            dev_user(true, false, false)
+        );
+        assert_eq!(
+            dev_token(true, false, false).effective_role(&UserRole::Analyst),
+            dev_user(true, false, false)
+        );
+        // a developer token that shares no flag with its developer owner acts as a user
+        assert_eq!(
+            dev_token(true, false, true).effective_role(&dev_user(false, true, false)),
+            UserRole::User
+        );
+        // a developer token with no flag acts as a user for admin and analyst owners too
+        assert_eq!(
+            dev_token(false, false, false).effective_role(&UserRole::Admin),
+            UserRole::User
+        );
+        assert_eq!(
+            dev_token(false, false, false).effective_role(&UserRole::Analyst),
+            UserRole::User
+        );
+        // a developer token of an owner lowered to the user role acts as a user
+        assert_eq!(
+            dev_token(true, true, true).effective_role(&UserRole::User),
+            UserRole::User
+        );
+        // a user token always acts as a user for every enabled owner role
+        for owner in [
+            UserRole::Admin,
+            UserRole::Analyst,
+            dev_user(true, true, true),
+            UserRole::User,
+        ] {
+            assert_eq!(ScopedTokenRole::User.effective_role(&owner), UserRole::User);
+        }
+        // a disabled owner keeps every token disabled
+        assert_eq!(
+            ScopedTokenRole::User.effective_role(&UserRole::Disabled),
+            UserRole::Disabled
+        );
+        assert_eq!(
+            dev_token(true, true, true).effective_role(&UserRole::Disabled),
+            UserRole::Disabled
+        );
+    }
 
     #[test]
     fn secret_key_matches_is_correct() {

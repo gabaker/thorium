@@ -2,10 +2,8 @@
 
 use clap::Parser;
 
-mod args;
-mod libs;
-
-use libs::{EventWorkerCache, EventWorkerController};
+use thorium_event_handler::args;
+use thorium_event_handler::libs::EventWorkerController;
 
 #[tokio::main]
 async fn main() {

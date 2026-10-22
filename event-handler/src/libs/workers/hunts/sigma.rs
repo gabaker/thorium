@@ -21,7 +21,7 @@ use thorium::{Error, Thorium};
 use tracing::{Level, event, instrument};
 use uuid::Uuid;
 
-use crate::EventWorkerCache;
+use crate::libs::EventWorkerCache;
 use crate::libs::workers::{
     EventWorkerSupport, EventWorkerSupportCore, WorkerCacheUpdateKinds, WorkerCacheUpdates,
 };
@@ -1051,10 +1051,10 @@ impl EventWorkerSupportCore for SigmaRuleWorker {
         worker
     }
 
-    /// The type of events this worker can handle
+    /// The types of events this worker handles
     #[inline]
-    fn event_kind() -> EventType {
-        EventType::SigmaScannableResults
+    fn event_kinds() -> Vec<EventType> {
+        vec![EventType::SigmaScannableResults]
     }
 
     /// The types of cache updates this worker subscribes too

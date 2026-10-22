@@ -1,3 +1,4 @@
+use base64::Engine;
 use cidr::{Ipv4Cidr, Ipv6Cidr};
 use futures::{StreamExt, TryStreamExt, stream};
 use rand::seq::IndexedRandom;
@@ -13,21 +14,35 @@ use crate::models::entities::network_activity::{
 };
 use crate::models::entities::rules::{SigmaActionToTake, SigmaAutoFlag};
 use crate::models::{
+    AgentConfig, AgentEntityRequest, AgenticTool, AgenticToolBacking, AllowedEndpoint,
+    CredentialKind, EntityUpdate, HarnessCapabilities, HarnessSpec, K8sEnvironment,
+    ModelCatalogEntryRequest, ModelCredentialEntityRequest, ModelEndpointEntityRequest,
+    ModelProfileEntityRequest, ModelProvider, ModelSecret, ModelsConfUpdate, SchedulingSettings,
+    SystemSettingsUpdate, SystemSettingsUpdateParams, ToolMechanism, ToolSetEntityRequest,
+    ToolSetInclusion, ToolSetInstanceEntity, ToolSetInstanceEntityRequest, ToolSetInstanceStatus,
+    ToolSetInstanceTrigger, ToolSetMember, WorkloadEnvironment, WorkloadSpec,
+};
+use crate::models::{
     ArgStrategy, Buffer, BulkReactionResponse, ChildFilters, Cleanup, CollectionEntityRequest,
     CollectionKind, CompiledFunction, CompiledInstruction, Confidence, CriticalSector,
     DecompiledFunction, Dependencies, DependencyPassStrategy, DeviceEntityRequest, Entity,
     EntityMetadata, EntityMetadataRequest, EntityMetadataUpdate, EntityRequest,
     EphemeralDependencySettings, FileSystemEntity, FileSystemFolderEntity, FilesHandler, Flag,
-    GenericJobArgs, GroupRequest, GroupUsersRequest, ImageLifetime, ImageRequest, ImageScaler,
-    ImageVersion, IncidentRequest, IpBlock, IpBlockRaw, Ipv4Block, Ipv6Block, KwargDependency,
+    GenericJobArgs, GroupAllowed, GroupRequest, GroupUsersRequest, ImageLifetime, ImageRequest,
+    ImageScaler, IncidentRequest, IpBlock, IpBlockRaw, Ipv4Block, Ipv6Block, KwargDependency,
     NetworkPolicyCustomK8sRule, NetworkPolicyCustomLabel, NetworkPolicyPort, NetworkPolicyRequest,
     NetworkPolicyRuleRaw, NetworkProtocol, NodeRegistration, OriginRequest, OutputCollection,
     OutputDisplayType, PeImportEntity, PeSectionEntity, Pipeline, PipelineRequest, Pools,
     ReactionCreation, ReactionRequest, RepoCheckout, RepoDependencySettings, RepoRequest,
     Resources, ResourcesRequest, ResultDependencySettings, SampleDependencySettings, SampleRequest,
-    ScopedTokenRequest, SigmaRule, SigmaRuleAppliesTo, StageLogsAdd, UserCreate, UserRole,
-    VendorEntityRequest, Volume, VolumeTypes, WindowsProcessEntity, WorkerDeleteMap,
-    WorkerRegistrationList,
+    ScopedTokenRequest, SigmaRule, SigmaRuleAppliesTo, StageLogsAdd, ToolEntityRequest, ToolSpec,
+    ToolVersion, UserCreate, UserRole, VendorEntityRequest, Volume, VolumeTypes,
+    WindowsProcessEntity, WindowsProcessTreeEntity, WorkerDeleteMap, WorkerRegistrationList,
+};
+use crate::models::{
+    BareMetalEnvironment, InstancedAgent, InstancedTool, InstancedToolBinding, KvmEnvironment,
+    ToolKind, WindowsEnvironment, WorkflowCatalogEntityRequest, WorkflowInstanceEntity,
+    WorkflowInstanceEntityRequest, WorkflowInstanceStatus, WorkflowInstanceTrigger,
 };
 use crate::test_utilities;
 use crate::{Error, Thorium};
@@ -64,6 +79,7 @@ macro_rules! gen_opt {
 }
 
 /// generate a random string
+#[must_use]
 pub fn gen_string(len: usize) -> String {
     // build the possible values we can generate
     const CHARSET: &[u8] = b"abcdefghijklmnopqrstuvwxyz0123456789-";
@@ -93,7 +109,7 @@ pub fn gen_group() -> GroupRequest {
     let name = gen_string(50);
     GroupRequest::new(name.clone())
         .owners(GroupUsersRequest::default().direct("thorium"))
-        .description(format!("{} description", &name))
+        .description(format!("{name} description"))
 }
 
 /// Create a number of random groups in Thorium
@@ -192,6 +208,578 @@ pub async fn scoped_client(client: &Thorium) -> Result<Thorium, Error> {
         .await
 }
 
+/// A test user along with the token and client it authenticates with
+#[allow(dead_code)]
+pub struct TestUser {
+    /// The name of this user
+    pub username: String,
+    /// The raw token this user authenticates with
+    pub token: String,
+    /// A client authenticated as this user
+    pub client: Thorium,
+}
+
+impl TestUser {
+    /// Get the value of the authorization header this user sends
+    #[must_use]
+    pub fn auth_header(&self) -> String {
+        // base64 encode our token like the client does
+        let encoded = base64::engine::general_purpose::STANDARD.encode(self.token.as_bytes());
+        format!("token {encoded}")
+    }
+}
+
+/// Generate a short suffix that keeps one test's readable names unique across runs
+#[must_use]
+pub fn name_suffix() -> String {
+    // the first characters of a random UUID are unique enough for one test run
+    Uuid::new_v4().simple().to_string()[..6].to_owned()
+}
+
+/// Build a readable test name, such as a Jupiter moon for a user or a Roman god for a group,
+/// made unique with a per-test suffix
+///
+/// # Arguments
+///
+/// * `base` - The readable part of the name
+/// * `suffix` - The suffix shared by every name in one test
+#[must_use]
+pub fn readable_name(base: &str, suffix: &str) -> String {
+    format!("{base}-{suffix}")
+}
+
+/// Create a plain test user named after a moon of Jupiter
+///
+/// # Arguments
+///
+/// * `admin` - The admin client to create the user with
+/// * `moon` - The moon the user is named after
+/// * `suffix` - The test's name suffix
+pub async fn moon_user(admin: &Thorium, moon: &str, suffix: &str) -> Result<TestUser, Error> {
+    // a plain user with a readable name
+    let name = readable_name(moon, suffix);
+    named_user_with_role(admin, &name, UserRole::User).await
+}
+
+/// Create a test group named after a Roman god that allows everything
+///
+/// Returns the name of the new group.
+///
+/// # Arguments
+///
+/// * `admin` - The admin client to create the group with
+/// * `god` - The god the group is named after
+/// * `suffix` - The test's name suffix
+/// * `roles` - The users holding each role in the group
+pub async fn god_group(
+    admin: &Thorium,
+    god: &str,
+    suffix: &str,
+    roles: &GroupRoles,
+) -> Result<String, Error> {
+    // a group that allows everything, with a readable name
+    let name = readable_name(god, suffix);
+    named_group_with_roles(&name, roles, GroupAllowed::default(), admin).await
+}
+
+/// Create a user with a specific role and get a client authenticated as them
+///
+/// # Arguments
+///
+/// * `client` - The client to get a host string from when creating this user
+/// * `role` - The role to give this user
+#[allow(dead_code)]
+pub async fn user_with_role(client: &Thorium, role: UserRole) -> Result<TestUser, Error> {
+    // create the user under a random name
+    named_user_with_role(client, &gen_string(24), role).await
+}
+
+/// Create a user with a specific name and role and get a client authenticated as them
+///
+/// # Arguments
+///
+/// * `client` - The client to get a host string from when creating this user
+/// * `username` - The name to give this user
+/// * `role` - The role to give this user
+pub async fn named_user_with_role(
+    client: &Thorium,
+    username: &str,
+    role: UserRole,
+) -> Result<TestUser, Error> {
+    // own the name and generate a password
+    let username = username.to_owned();
+    let password = gen_string(64);
+    // build user create blueprint
+    let bp = UserCreate::new(&username, &password, "fake@fake.gov")
+        .skip_verification()
+        .role(role);
+    // use default client settings
+    let settings = ClientSettings::default();
+    // get our secret key
+    let secret_key = Some(&test_utilities::CONF.thorium.secret_key);
+    // create user in Thorium
+    Users::create(&client.host, bp, secret_key, &settings).await?;
+    // get a token for this user
+    let (token, _) =
+        Thorium::auth(&client.host, &username, &password, &reqwest::Client::new()).await?;
+    // build a client for this user with its token
+    let user_client = Thorium::build(&client.host).token(&token).build().await?;
+    Ok(TestUser {
+        username,
+        token,
+        client: user_client,
+    })
+}
+
+/// The users holding each role in a test group
+#[derive(Debug, Default, Clone)]
+#[allow(dead_code)]
+pub struct GroupRoles {
+    /// The owners of this group (the admin `thorium` is always an owner)
+    pub owners: Vec<String>,
+    /// The managers of this group
+    pub managers: Vec<String>,
+    /// The users of this group
+    pub users: Vec<String>,
+    /// The monitors of this group
+    pub monitors: Vec<String>,
+}
+
+impl GroupRoles {
+    /// Add an owner to this group
+    ///
+    /// # Arguments
+    ///
+    /// * `user` - The user to add as an owner
+    #[must_use]
+    pub fn owner(mut self, user: &str) -> Self {
+        self.owners.push(user.to_owned());
+        self
+    }
+
+    /// Add a manager to this group
+    ///
+    /// # Arguments
+    ///
+    /// * `user` - The user to add as a manager
+    #[must_use]
+    pub fn manager(mut self, user: &str) -> Self {
+        self.managers.push(user.to_owned());
+        self
+    }
+
+    /// Add a user to this group
+    ///
+    /// # Arguments
+    ///
+    /// * `user` - The user to add as a user
+    #[must_use]
+    pub fn user(mut self, user: &str) -> Self {
+        self.users.push(user.to_owned());
+        self
+    }
+
+    /// Add a monitor to this group
+    ///
+    /// # Arguments
+    ///
+    /// * `user` - The user to add as a monitor
+    #[must_use]
+    pub fn monitor(mut self, user: &str) -> Self {
+        self.monitors.push(user.to_owned());
+        self
+    }
+}
+
+/// Create a group with chosen role holders and allow flags
+///
+/// Returns the name of the new group.
+///
+/// # Arguments
+///
+/// * `roles` - The users holding each role in this group
+/// * `allowed` - What this group allows
+/// * `client` - The admin client to create the group with
+#[allow(dead_code)]
+pub async fn group_with_roles(
+    roles: &GroupRoles,
+    allowed: GroupAllowed,
+    client: &Thorium,
+) -> Result<String, Error> {
+    // build the members of a role from a list of usernames
+    let members = |names: &[String]| {
+        names
+            .iter()
+            .fold(GroupUsersRequest::default(), GroupUsersRequest::direct)
+    };
+    // start from a random group owned by the admin
+    let mut req = gen_group();
+    // add the extra owners
+    for owner in &roles.owners {
+        req.owners = req.owners.direct(owner);
+    }
+    // set the other roles and allow flags
+    req = req
+        .managers(members(&roles.managers))
+        .users(members(&roles.users))
+        .monitors(members(&roles.monitors));
+    req.allowed = allowed;
+    // create this group
+    client.groups.create(&req).await?;
+    Ok(req.name)
+}
+
+/// Create a group with a chosen name, role holders, and allow flags
+///
+/// Returns the name of the new group.
+///
+/// # Arguments
+///
+/// * `name` - The name of the group, such as a Roman god with a per-test suffix
+/// * `roles` - The users holding each role in this group
+/// * `allowed` - What this group allows
+/// * `client` - The admin client to create the group with
+#[allow(dead_code)]
+pub async fn named_group_with_roles(
+    name: &str,
+    roles: &GroupRoles,
+    allowed: GroupAllowed,
+    client: &Thorium,
+) -> Result<String, Error> {
+    // build the members of a role from a list of usernames
+    let members = |names: &[String]| {
+        names
+            .iter()
+            .fold(GroupUsersRequest::default(), GroupUsersRequest::direct)
+    };
+    // start from a group owned by the admin
+    let mut owners = GroupUsersRequest::default().direct("thorium");
+    for owner in &roles.owners {
+        owners = owners.direct(owner);
+    }
+    let mut req = GroupRequest::new(name.to_owned())
+        .owners(owners)
+        .managers(members(&roles.managers))
+        .users(members(&roles.users))
+        .monitors(members(&roles.monitors))
+        .description(format!("{name} description"));
+    req.allowed = allowed;
+    // create this group
+    client.groups.create(&req).await?;
+    Ok(req.name)
+}
+
+/// Generate an agent config that another agent can delegate to
+///
+/// # Arguments
+///
+/// * `function_name` - The function name other agents delegate to it with
+#[allow(dead_code)]
+#[must_use]
+pub fn gen_agent_config(function_name: &str) -> AgentConfig {
+    // a random prompt with a delegation name and description
+    AgentConfig {
+        system_prompt: Some(format!("You are {function_name}")),
+        prompt: Some(gen_string(24)),
+        max_turns: Some(10),
+        function_name: Some(function_name.to_owned()),
+        model_description: Some(format!("Delegate to {function_name}")),
+        ..AgentConfig::default()
+    }
+}
+
+/// Build a request to create an agent
+///
+/// # Arguments
+///
+/// * `name` - The name of the agent
+/// * `groups` - The groups to create the agent in
+/// * `req` - The agent's config and edges
+#[allow(dead_code)]
+#[must_use]
+pub fn gen_agent(name: &str, groups: &[&str], req: AgentEntityRequest) -> EntityRequest {
+    // wrap the agent request in an entity request
+    EntityRequest::new(name, EntityMetadataRequest::Agent(req), groups.to_vec())
+}
+
+/// Build a request to create a toolset
+///
+/// # Arguments
+///
+/// * `name` - The name of the toolset
+/// * `groups` - The groups to create the toolset in
+/// * `req` - The toolset's settings and included tools
+#[allow(dead_code)]
+#[must_use]
+pub fn gen_toolset(name: &str, groups: &[&str], req: ToolSetEntityRequest) -> EntityRequest {
+    // wrap the toolset request in an entity request
+    EntityRequest::new(name, EntityMetadataRequest::ToolSet(req), groups.to_vec())
+}
+
+/// Build a ready toolset instance of a toolset from its member tool instances, with its digest
+///
+/// Each member records the tool instance's current groups and is included at latest.
+///
+/// # Arguments
+///
+/// * `tool_set` - The toolset, in all of its groups
+/// * `revision` - The instance's revision
+/// * `previous` - The instance this one supersedes
+/// * `members` - The member tool instances, in all of their groups
+///
+/// # Panics
+///
+/// Panics if a member isn't a tool instance or the digest can't be computed
+#[allow(dead_code)]
+#[must_use]
+pub fn gen_toolset_instance(
+    tool_set: &Entity,
+    revision: u64,
+    previous: Option<Uuid>,
+    members: &[&Entity],
+) -> ToolSetInstanceEntity {
+    // describe each member as it's stored now
+    let members = members
+        .iter()
+        .map(|entity| {
+            let EntityMetadata::ToolInstance(instance) = &entity.metadata else {
+                panic!("{} is not a tool instance", entity.id);
+            };
+            ToolSetMember {
+                tool: instance.tool,
+                tool_instance: entity.id,
+                name: entity.name.clone(),
+                groups: entity.groups.clone(),
+                version: instance.version.to_string(),
+                spec_hash: instance.spec_hash.clone(),
+                function_name: instance.spec.function_name().unwrap_or_default().to_owned(),
+                inclusion: ToolSetInclusion::ExplicitLatest,
+            }
+        })
+        .collect();
+    // take the settings from the toolset
+    let (read_only, selector) = match &tool_set.metadata {
+        EntityMetadata::ToolSet(meta) => (meta.read_only, meta.selector.clone()),
+        _ => (false, None),
+    };
+    let mut instance = ToolSetInstanceEntity {
+        tool_set: tool_set.id,
+        tool_set_groups: tool_set.groups.clone(),
+        revision,
+        previous,
+        status: ToolSetInstanceStatus::Ready,
+        warnings: Vec::new(),
+        trigger: ToolSetInstanceTrigger::Manual,
+        triggered_by: String::new(),
+        read_only,
+        selector,
+        members,
+        excluded: Vec::new(),
+        digest: String::new(),
+    };
+    instance.digest = instance
+        .compute_digest()
+        .expect("failed to compute a toolset instance digest");
+    instance
+}
+
+/// Build a request to submit a toolset instance in its toolset's groups
+///
+/// # Arguments
+///
+/// * `instance` - The toolset instance to submit
+///
+/// # Panics
+///
+/// Panics if the instance can't be serialized
+#[allow(dead_code)]
+#[must_use]
+pub fn gen_toolset_instance_req(instance: &ToolSetInstanceEntity) -> EntityRequest {
+    // the instance is named by the API, so any name is sent
+    let req = ToolSetInstanceEntityRequest::new(instance)
+        .expect("failed to serialize a toolset instance");
+    EntityRequest::new(
+        "toolset-instance",
+        EntityMetadataRequest::ToolSetInstance(req),
+        instance.tool_set_groups.clone(),
+    )
+}
+
+/// Build a request to create a workflow catalog
+///
+/// # Arguments
+///
+/// * `name` - The name of the workflow
+/// * `groups` - The groups to create the workflow in
+/// * `req` - The workflow's agents and settings
+#[allow(dead_code)]
+#[must_use]
+pub fn gen_workflow(
+    name: &str,
+    groups: &[&str],
+    req: WorkflowCatalogEntityRequest,
+) -> EntityRequest {
+    // wrap the workflow request in an entity request
+    EntityRequest::new(
+        name,
+        EntityMetadataRequest::WorkflowCatalog(req),
+        groups.to_vec(),
+    )
+}
+
+/// Describe a tool instance as a workflow instance snapshots it, followed at latest
+///
+/// # Arguments
+///
+/// * `entity` - The tool instance, in all of its groups
+///
+/// # Panics
+///
+/// Panics if the entity isn't a tool instance
+#[allow(dead_code)]
+#[must_use]
+pub fn gen_instanced_tool(entity: &Entity) -> InstancedTool {
+    // copy what the snapshot records from the stored instance
+    let EntityMetadata::ToolInstance(instance) = &entity.metadata else {
+        panic!("{} is not a tool instance", entity.id);
+    };
+    InstancedTool {
+        tool: instance.tool,
+        tool_instance: entity.id,
+        name: entity.name.clone(),
+        groups: entity.groups.clone(),
+        kind: instance.spec.kind(),
+        version: instance.version.to_string(),
+        spec_hash: instance.spec_hash.clone(),
+        function_name: instance.spec.function_name().map(ToOwned::to_owned),
+        pinned: false,
+        dependency: false,
+    }
+}
+
+/// Build a ready workflow instance of a workflow from its agents and their tool instances, with
+/// its digests
+///
+/// Each agent and tool records its current groups, every tool is followed at latest, and the
+/// first agent is the entry agent. A Harness instance among an agent's tool instances is the
+/// harness it runs in, and the agent's other tool instances are each bound with the Thorium API.
+///
+/// # Arguments
+///
+/// * `workflow` - The workflow catalog, in all of its groups
+/// * `revision` - The instance's revision
+/// * `previous` - The instance this one supersedes
+/// * `agents` - Each agent, in all of its groups, with the tool and harness instances it was given
+///
+/// # Panics
+///
+/// Panics if an agent isn't an agent, a tool isn't a tool instance, or a digest can't be
+/// computed
+#[allow(dead_code)]
+#[must_use]
+pub fn gen_workflow_instance(
+    workflow: &Entity,
+    revision: u64,
+    previous: Option<Uuid>,
+    agents: &[(&Entity, &[&Entity])],
+) -> WorkflowInstanceEntity {
+    // describe every tool once
+    let mut tools: Vec<InstancedTool> = Vec::new();
+    for (_, agent_tools) in agents {
+        for entity in *agent_tools {
+            if !tools.iter().any(|tool| tool.tool_instance == entity.id) {
+                tools.push(gen_instanced_tool(entity));
+            }
+        }
+    }
+    // describe each agent as it's stored now
+    let instanced = agents
+        .iter()
+        .map(|(entity, agent_tools)| {
+            let EntityMetadata::Agent(agent) = &entity.metadata else {
+                panic!("{} is not an agent", entity.id);
+            };
+            // split the harness instance from the tool instances the agent calls
+            let (harnesses, called): (Vec<&&Entity>, Vec<&&Entity>) =
+                agent_tools.iter().partition(|tool| {
+                    tools.iter().any(|described| {
+                        described.tool_instance == tool.id && described.kind == ToolKind::Harness
+                    })
+                });
+            let mut instanced = InstancedAgent {
+                agent: entity.id,
+                name: entity.name.clone(),
+                groups: entity.groups.clone(),
+                config: agent.config.clone(),
+                config_hash: agent.config_hash.clone(),
+                harness: harnesses.first().map(|harness| harness.id),
+                tools: called.iter().map(|tool| tool.id).collect(),
+                tool_sets: Vec::new(),
+                bindings: called
+                    .iter()
+                    .map(|tool| InstancedToolBinding {
+                        tool_instance: tool.id,
+                        mechanism: ToolMechanism::ThoriumApi,
+                    })
+                    .collect(),
+                sub_agents: Vec::new(),
+                toolset_digest: String::new(),
+            };
+            instanced.toolset_digest = instanced
+                .compute_toolset_digest(&tools)
+                .expect("failed to compute a toolset digest");
+            instanced
+        })
+        .collect::<Vec<InstancedAgent>>();
+    // take the settings from the workflow
+    let (limits, default_models) = match &workflow.metadata {
+        EntityMetadata::WorkflowCatalog(meta) => (meta.limits.clone(), meta.default_models.clone()),
+        _ => (crate::models::WorkflowLimits::default(), Vec::new()),
+    };
+    let mut instance = WorkflowInstanceEntity {
+        workflow: workflow.id,
+        workflow_groups: workflow.groups.clone(),
+        revision,
+        previous,
+        status: WorkflowInstanceStatus::Ready,
+        warnings: Vec::new(),
+        trigger: WorkflowInstanceTrigger::Manual,
+        triggered_by: String::new(),
+        entry_agent: instanced.first().map(|agent| agent.agent),
+        limits,
+        default_models,
+        agents: instanced,
+        tools,
+        digest: String::new(),
+    };
+    instance.digest = instance
+        .compute_digest(&BTreeMap::new())
+        .expect("failed to compute a workflow instance digest");
+    instance
+}
+
+/// Build a request to submit a workflow instance in its workflow's groups
+///
+/// # Arguments
+///
+/// * `instance` - The workflow instance to submit
+///
+/// # Panics
+///
+/// Panics if the instance can't be serialized
+#[allow(dead_code)]
+#[must_use]
+pub fn gen_workflow_instance_req(instance: &WorkflowInstanceEntity) -> EntityRequest {
+    // the instance is named by the API, so any name is sent
+    let req = WorkflowInstanceEntityRequest::new(instance)
+        .expect("failed to serialize a workflow instance");
+    EntityRequest::new(
+        "workflow-instance",
+        EntityMetadataRequest::WorkflowInstance(req),
+        instance.workflow_groups.clone(),
+    )
+}
+
 /// Generate a random image request
 ///
 /// # Arguments
@@ -207,7 +795,7 @@ pub async fn scoped_client(client: &Thorium) -> Result<Thorium, Error> {
 pub fn gen_image(group: &str) -> ImageRequest {
     let name = gen_string(25);
     ImageRequest::new(group, &name)
-        .version(ImageVersion::SemVer(
+        .version(ToolVersion::SemVer(
             semver::Version::parse("1.0.0").unwrap(),
         ))
         .image(gen_string(90))
@@ -303,6 +891,8 @@ pub async fn images(
     external: bool,
     client: &Thorium,
 ) -> Result<Vec<ImageRequest>, Error> {
+    // these images are seeded through the image routes, which refuse writes elsewhere
+    test_utilities::faults::allow_image_writes(group);
     // create a 20 random images then
     let images: Vec<ImageRequest> = if external {
         (0..cnt).map(|_| gen_ext_image(group)).collect()
@@ -328,14 +918,16 @@ pub fn gen_host_path<T: Into<String>>(group: &str, path: T) -> ImageRequest {
     gen_image(group).volume(Volume::new(gen_string(20), path, VolumeTypes::HostPath))
 }
 
-/// Generate a random pipeline request
+/// Generate a random pipeline request whose stages each run a new Image tool
+///
+/// Each stage is named after its tool and pinned to the tool's first instance.
 ///
 /// # Arguments
 ///
 /// * `group` - The group this pipeline should be in
-/// * `image_cnt` - The number of images in this pipeline
-/// * `external` - Whether this pipeline should be built of external images or not
-/// * `client` - The client to use when creating the images for this pipeline
+/// * `image_cnt` - The number of stages in this pipeline
+/// * `external` - Whether the stages' tools run outside of Thorium
+/// * `client` - The client to use when creating the tools for this pipeline
 #[allow(dead_code)]
 pub async fn gen_pipe(
     group: &str,
@@ -344,44 +936,60 @@ pub async fn gen_pipe(
     client: &Thorium,
 ) -> Result<PipelineRequest, Error> {
     let pipe_name = gen_string(25);
-    // setup random images and get their names
-    let images: Vec<String> = images(group, image_cnt, external, client)
-        .await?
-        .into_iter()
-        .map(|image| image.name)
-        .collect();
-    let order = serde_json::json!(vec![images]);
-    let pipe = PipelineRequest::new(group, &pipe_name, order)
-        .sla(gen_int!(1, 86400))
-        .description(pipe_name + " pipeline description");
+    // pick the environment the stages' tools run in
+    let scaler = if external {
+        ImageScaler::External
+    } else {
+        ImageScaler::K8s
+    };
+    // create a tool for each stage
+    let mut stages = Vec::with_capacity(image_cnt);
+    for _ in 0..image_cnt {
+        stages.push(stage_tool(group, &gen_image_spec_for(scaler), client).await?);
+    }
+    // run every stage in parallel in one step
+    let names = stages
+        .iter()
+        .map(|(name, _)| name.clone())
+        .collect::<Vec<String>>();
+    let order = serde_json::json!(vec![names]);
+    // back each stage with its tool's first instance
+    let pipe = stages.into_iter().fold(
+        PipelineRequest::new(group, &pipe_name, order)
+            .sla(gen_int!(1, 86400))
+            .description(pipe_name + " pipeline description"),
+        |pipe, (stage, instance)| pipe.stage_tool(stage, instance),
+    );
     Ok(pipe)
 }
 
 /// Generate a random generator pipeline
 ///
+/// The first stage's tool is a generator and the second stage's tool isn't.
+///
 /// # Arguments
 ///
 /// * `group` - The group this pipeline should be in
-/// * `image_cnt` - The number of images in this pipeline
-/// * `client` - The client to use when creating the images for this pipeline
+/// * `client` - The client to use when creating the tools for this pipeline
 #[allow(dead_code)]
 pub async fn gen_generator_pipe(group: &str, client: &Thorium) -> Result<PipelineRequest, Error> {
     let pipe_name = gen_string(25);
-    // build our generator image
-    let mut images = vec![gen_image(group).generator()];
-    // build our final image
-    images.push(gen_image(group));
-    // create images
-    for image in &images {
-        client.images.create(image).await?;
+    // build our generator tool
+    let mut generator = gen_image_spec_for(ImageScaler::K8s);
+    if let ToolSpec::Image(workload) = &mut generator {
+        workload.execution.generator = true;
     }
-    // get the order of the images to spawn
-    let images: Vec<String> = images.into_iter().map(|image| image.name).collect();
-    let order = serde_json::json!(images);
+    let first = stage_tool(group, &generator, client).await?;
+    // build our final tool
+    let last = stage_tool(group, &gen_image_spec_for(ImageScaler::K8s), client).await?;
+    // run the generator stage before the final stage
+    let order = serde_json::json!(vec![first.0.clone(), last.0.clone()]);
     // build a pipeline request
     let pipe = PipelineRequest::new(group, &pipe_name, order)
         .sla(gen_int!(1, 86400))
-        .description(pipe_name + " generator pipe description");
+        .description(pipe_name + " generator pipe description")
+        .stage_tool(first.0, first.1)
+        .stage_tool(last.0, last.1);
     // create this pipeline in Thorium
     client.pipelines.create(&pipe).await?;
     Ok(pipe)
@@ -438,6 +1046,8 @@ pub async fn gen_jobs(
         // assume the error is because this group doesn't exist yet
         client.groups.create(&GroupRequest::new(group)).await?;
     }
+    // these images are seeded through the image routes, which refuse writes elsewhere
+    test_utilities::faults::allow_image_writes(group);
     // crawl the images in this pipeline
     for image in images {
         // check if this image exists already
@@ -493,9 +1103,19 @@ pub async fn gen_all(
         // get cnt internal and external images
         group_images.extend((0..cnt).map(|_| gen_image(&group.name)));
         group_images.extend((0..cnt).map(|_| gen_ext_image(&group.name)));
+        // these images are seeded through the image routes, which refuse writes elsewhere
+        test_utilities::faults::allow_image_writes(&group.name);
         // create these images
         for image in &group_images {
             client.images.create(image).await?;
+        }
+        // create a tool backing each image's stage, in the image's environment
+        let mut stage_tools = BTreeMap::new();
+        for image in &group_images {
+            let scaler = image.scaler;
+            let (_, instance) =
+                stage_tool(&group.name, &gen_image_spec_for(scaler), client).await?;
+            stage_tools.insert(image.name.clone(), instance);
         }
         // create pipelines using these random iamges
         for _ in 0..cnt {
@@ -506,10 +1126,13 @@ pub async fn gen_all(
             let names: Vec<&String> = reqs.iter().map(|item| &item.name).collect();
             // cast the names to a json list
             let order = serde_json::json!(names);
-            // create our pipeline request
-            let pipe = PipelineRequest::new(&group.name, &pipe_name, order)
-                .sla(gen_int!(1, 86400))
-                .description(pipe_name + " pipeline description");
+            // create our pipeline request with a tool backing each stage
+            let pipe = names.iter().fold(
+                PipelineRequest::new(&group.name, &pipe_name, order)
+                    .sla(gen_int!(1, 86400))
+                    .description(pipe_name + " pipeline description"),
+                |pipe, name| pipe.stage_tool(*name, stage_tools[*name]),
+            );
             // send our request to the API
             client.pipelines.create(&pipe).await?;
             pipes.push(pipe);
@@ -1169,7 +1792,7 @@ pub async fn network_policies(
 // Entity generators
 
 /// A minimal, valid sigma rule used to generate sigma rule entities in tests
-const TEST_SIGMA_RULE: &str = r#"title: A rule with keywords
+const TEST_SIGMA_RULE: &str = r"title: A rule with keywords
 logsource:
     service: test
 detection:
@@ -1177,7 +1800,7 @@ detection:
         - '* hello world?'
         - 'evil'
     condition: keywords
-"#;
+";
 
 /// Generate metadata for an entity with no unique kind (an `Other` entity)
 #[allow(dead_code)]
@@ -1239,6 +1862,10 @@ pub fn gen_flag_meta() -> EntityMetadataRequest {
 }
 
 /// Generate metadata for a sigma rule entity
+///
+/// # Panics
+///
+/// Panics if the built-in test sigma rule fails to validate
 #[allow(dead_code)]
 #[must_use]
 pub fn gen_sigma_meta() -> EntityMetadataRequest {
@@ -1288,13 +1915,18 @@ pub fn gen_collection_meta() -> EntityMetadataRequest {
 }
 
 /// Generate metadata for a random filesystem entity
+///
+/// # Arguments
+///
+/// * `tools` - The tool instances that found this filesystem
 #[allow(dead_code)]
 #[must_use]
-pub fn gen_filesystem_meta() -> EntityMetadataRequest {
+pub fn gen_filesystem_meta(tools: Vec<Uuid>) -> EntityMetadataRequest {
     // build our filesystem metadata request
     EntityMetadataRequest::FileSystem(FileSystemEntity {
         sha256: gen_string(64),
-        tools: vec![gen_string(gen_int!(4, 16))],
+        tools,
+        legacy_tools: Vec::new(),
     })
 }
 
@@ -1319,8 +1951,8 @@ pub fn gen_folder_meta(filesystem_id: Uuid) -> EntityMetadataRequest {
 #[allow(dead_code)]
 #[must_use]
 pub fn gen_windows_process_tree_meta() -> EntityMetadataRequest {
-    // windows process tree entities have no metadata
-    EntityMetadataRequest::WindowsProcessTree
+    // a windows process tree recorded without any tool instances
+    EntityMetadataRequest::WindowsProcessTree(WindowsProcessTreeEntity::default())
 }
 
 /// Generate metadata for a random windows process entity
@@ -1401,13 +2033,18 @@ pub fn gen_compiled_function_meta() -> EntityMetadataRequest {
 }
 
 /// Generate metadata for a random decompiled function entity
+///
+/// # Arguments
+///
+/// * `tools` - The tool instances that decompiled this function
 #[allow(dead_code)]
 #[must_use]
-pub fn gen_decompiled_function_meta() -> EntityMetadataRequest {
+pub fn gen_decompiled_function_meta(tools: Vec<Uuid>) -> EntityMetadataRequest {
     // build our decompiled function metadata request
     EntityMetadataRequest::DecompiledFunction(DecompiledFunction {
         address: gen_int!(1, 100_000),
-        tools: vec![gen_string(gen_int!(4, 16))],
+        tools,
+        legacy_tools: Vec::new(),
         content: gen_string(gen_int!(16, 128)),
     })
 }
@@ -1485,16 +2122,16 @@ pub fn gen_vendor_update(_existing: &Entity) -> EntityMetadataUpdate {
 pub fn gen_collection_update(existing: &Entity) -> EntityMetadataUpdate {
     // pull an existing tag to delete
     let delete_collection_tags = match &existing.metadata {
-        EntityMetadata::Collection(col) => col
-            .collection_tags
-            .iter()
-            .next()
-            .map(|(key, values)| {
-                let mut map = std::collections::HashMap::new();
-                map.insert(key.clone(), values.iter().cloned().collect());
-                map
-            })
-            .unwrap_or_default(),
+        EntityMetadata::Collection(col) => {
+            col.collection_tags
+                .iter()
+                .next()
+                .map_or_default(|(key, values)| {
+                    let mut map = std::collections::HashMap::new();
+                    map.insert(key.clone(), values.iter().cloned().collect());
+                    map
+                })
+        }
         _ => std::collections::HashMap::new(),
     };
     // add a new random tag
@@ -1521,31 +2158,42 @@ pub fn gen_collection_update(existing: &Entity) -> EntityMetadataUpdate {
 /// # Arguments
 ///
 /// * `existing` - The created entity to pull removal targets from
+/// * `add_tools` - The tool instances to add
 #[allow(dead_code)]
 #[must_use]
-pub fn gen_filesystem_update(existing: &Entity) -> EntityMetadataUpdate {
+pub fn gen_filesystem_update(existing: &Entity, add_tools: Vec<Uuid>) -> EntityMetadataUpdate {
     // pull an existing tool to remove
     let remove_tools = match &existing.metadata {
-        EntityMetadata::FileSystem(fs) => fs.tools.first().cloned().into_iter().collect(),
+        EntityMetadata::FileSystem(fs) => fs.tools.first().copied().into_iter().collect(),
         _ => Vec::new(),
     };
     // build a filesystem update that adds and removes a tool
     EntityMetadataUpdate::FileSystem {
-        add_tools: vec![gen_string(gen_int!(4, 16))],
+        add_tools,
         remove_tools,
+        remove_legacy_tools: Vec::new(),
     }
 }
 
 /// Generate a windows process tree metadata update
 ///
 /// Process trees start with no tools, so this only exercises adding a tool.
+///
+/// # Arguments
+///
+/// * `_existing` - The created entity, which has no tools to remove
+/// * `add_tools` - The tool instances to add
 #[allow(dead_code)]
 #[must_use]
-pub fn gen_windows_process_tree_update(_existing: &Entity) -> EntityMetadataUpdate {
+pub fn gen_windows_process_tree_update(
+    _existing: &Entity,
+    add_tools: Vec<Uuid>,
+) -> EntityMetadataUpdate {
     // build a process tree update that adds a tool
     EntityMetadataUpdate::WindowsProcessTree {
-        add_tools: vec![gen_string(gen_int!(4, 16))],
+        add_tools,
         remove_tools: Vec::new(),
+        remove_legacy_tools: Vec::new(),
     }
 }
 
@@ -1675,13 +2323,17 @@ pub fn gen_compiled_function_update(_existing: &Entity) -> EntityMetadataUpdate 
 /// # Arguments
 ///
 /// * `existing` - The created entity to pull removal targets from
+/// * `add_tools` - The tool instances to add
 #[allow(dead_code)]
 #[must_use]
-pub fn gen_decompiled_function_update(existing: &Entity) -> EntityMetadataUpdate {
+pub fn gen_decompiled_function_update(
+    existing: &Entity,
+    add_tools: Vec<Uuid>,
+) -> EntityMetadataUpdate {
     // pull an existing tool to remove
     let remove_tools = match &existing.metadata {
         EntityMetadata::DecompiledFunction(decomp) => {
-            decomp.tools.first().cloned().into_iter().collect()
+            decomp.tools.first().copied().into_iter().collect()
         }
         _ => Vec::new(),
     };
@@ -1689,8 +2341,9 @@ pub fn gen_decompiled_function_update(existing: &Entity) -> EntityMetadataUpdate
     EntityMetadataUpdate::DecompiledFunction {
         function_address: Some(gen_int!(1, 100_000)),
         decompilation_content: Some(gen_string(gen_int!(16, 128))),
-        add_tools: vec![gen_string(gen_int!(4, 16))],
+        add_tools,
         remove_tools,
+        remove_legacy_tools: Vec::new(),
     }
 }
 
@@ -1783,8 +2436,488 @@ pub async fn vendor_entity(group: &str, client: &Thorium) -> Result<Entity, Erro
 #[allow(dead_code)]
 pub async fn filesystem_entity(group: &str, client: &Thorium) -> Result<Entity, Error> {
     // build and create a filesystem entity
-    let (_, entity) = entity(gen_entity(group, gen_filesystem_meta()), client).await?;
+    let (_, entity) = entity(gen_entity(group, gen_filesystem_meta(Vec::new())), client).await?;
     Ok(entity)
+}
+
+/// Generate a random agentic tool spec backed by one of Thorium's MCP tools
+#[allow(dead_code)]
+#[must_use]
+pub fn gen_agentic_spec() -> ToolSpec {
+    // build an object input schema with a random property
+    let mut input_schema = serde_json::Map::new();
+    input_schema.insert("type".into(), "object".into());
+    input_schema.insert(
+        "properties".into(),
+        serde_json::json!({ "sha256": {"type": "string", "description": gen_string(16)} }),
+    );
+    // build a random agentic tool behind the MCP get_sample tool
+    ToolSpec::Agentic(AgenticTool {
+        function_name: format!("tool_{}", gen_string(12).to_lowercase()),
+        title: Some(gen_string(12)),
+        model_description: gen_string(32),
+        input_schema,
+        backing: AgenticToolBacking::ThoriumMcp {
+            tool: "get_sample".into(),
+        },
+        timeout: Some(gen_int!(30, 600)),
+        ..AgenticTool::default()
+    })
+}
+
+/// Generate a random Image tool spec that runs in K8s
+#[allow(dead_code)]
+#[must_use]
+pub fn gen_image_spec() -> ToolSpec {
+    // build a K8s workload with a random image and resources
+    ToolSpec::Image(WorkloadSpec {
+        environment: WorkloadEnvironment::K8s(K8sEnvironment {
+            image: format!(
+                "registry.local/{}:{}",
+                gen_string(12).to_lowercase(),
+                gen_int!(1, 99)
+            ),
+            scheduling: SchedulingSettings {
+                resources: Resources {
+                    cpu: 1000,
+                    memory: 512,
+                    ..Resources::default()
+                },
+                ..SchedulingSettings::default()
+            },
+            ..K8sEnvironment::default()
+        }),
+        ..WorkloadSpec::default()
+    })
+}
+
+/// Generate a random Harness tool spec that runs in K8s with the standard file layout, can call
+/// tools behind Thorium every way, and can hand files to them
+#[allow(dead_code)]
+#[must_use]
+pub fn gen_harness_spec() -> ToolSpec {
+    // a K8s workload with a random image and every interface path at its default
+    let ToolSpec::Image(workload) = gen_image_spec() else {
+        unreachable!("an image spec is always an Image tool spec")
+    };
+    // support every mechanism for tools behind Thorium, with file I/O
+    let capabilities = HarnessCapabilities {
+        mechanisms: [
+            ToolMechanism::ThoriumApi,
+            ToolMechanism::Cli,
+            ToolMechanism::Mcp,
+        ]
+        .into_iter()
+        .collect(),
+        file_io: true,
+        ..HarnessCapabilities::default()
+    };
+    ToolSpec::Harness(HarnessSpec {
+        workload,
+        capabilities,
+        ..HarnessSpec::default()
+    })
+}
+
+/// Generate a random agentic tool spec built into a harness
+#[allow(dead_code)]
+#[must_use]
+pub fn gen_native_spec() -> ToolSpec {
+    // a native tool with a random function and harness tool name
+    let name = format!("native_{}", gen_string(10).to_lowercase());
+    ToolSpec::Agentic(AgenticTool {
+        function_name: name.clone(),
+        model_description: format!("Runs the harness's built in {name}"),
+        input_schema: [
+            ("type".to_owned(), serde_json::json!("object")),
+            ("properties".to_owned(), serde_json::json!({})),
+        ]
+        .into_iter()
+        .collect(),
+        backing: AgenticToolBacking::HarnessNative {
+            tool: name,
+            config: None,
+        },
+        ..AgenticTool::default()
+    })
+}
+
+/// Build a request to create a tool and its first instance in some groups
+///
+/// # Arguments
+///
+/// * `groups` - The groups the tool should be in
+/// * `version` - The version label of the first instance
+/// * `spec` - The spec of the first instance
+///
+/// # Panics
+///
+/// Panics if the spec can't be serialized, which never happens for a typed spec
+#[allow(dead_code)]
+#[must_use]
+pub fn gen_tool(groups: &[&str], version: &str, spec: &ToolSpec) -> EntityRequest {
+    // encode the spec into a tool request
+    let meta = ToolEntityRequest::new(version, spec).expect("failed to encode a tool spec");
+    // build the entity request with a random name
+    let mut req = EntityRequest::new(
+        format!("tool{}", gen_string(12).to_lowercase()),
+        EntityMetadataRequest::Tool(meta),
+        groups.to_vec(),
+    );
+    req.description = Some(gen_string(24));
+    req
+}
+
+/// Create a tool and its first instance, returning the tool and the instance
+///
+/// # Arguments
+///
+/// * `groups` - The groups the tool should be in
+/// * `version` - The version label of the first instance
+/// * `spec` - The spec of the first instance
+/// * `client` - The client to create the tool with
+#[allow(dead_code)]
+pub async fn tool(
+    groups: &[&str],
+    version: &str,
+    spec: &ToolSpec,
+    client: &Thorium,
+) -> Result<(Entity, Entity), Error> {
+    // create the tool
+    let resp = client
+        .entities
+        .create(gen_tool(groups, version, spec))
+        .await?;
+    // get the tool and its first instance back
+    let tool = client.entities.get(resp.id).await?;
+    let instance_id = resp
+        .tool_instance
+        .ok_or_else(|| Error::new("A tool create returned no tool instance".to_owned()))?;
+    let instance = client.entities.get(instance_id).await?;
+    Ok((tool, instance))
+}
+
+/// Create an Image tool in some groups and return the id of its first tool instance
+///
+/// # Arguments
+///
+/// * `groups` - The groups the tool should be in
+/// * `client` - The client to create the tool with
+#[allow(dead_code)]
+pub async fn tool_instance(groups: &[&str], client: &Thorium) -> Result<Uuid, Error> {
+    // create an Image tool and its first instance
+    let (_, instance) = tool(groups, "1.0.0", &gen_image_spec(), client).await?;
+    Ok(instance.id)
+}
+
+/// Build an update that publishes a new version of a tool
+///
+/// # Arguments
+///
+/// * `version` - The version label of the new instance
+/// * `spec` - The spec of the new instance
+///
+/// # Panics
+///
+/// Panics if the spec can't be serialized, which never happens for a typed spec
+#[allow(dead_code)]
+#[must_use]
+pub fn gen_tool_publish(version: &str, spec: &ToolSpec) -> EntityUpdate {
+    // encode the spec into a tool update
+    EntityUpdate::default().metadata(EntityMetadataUpdate::Tool {
+        version: Some(version.to_owned()),
+        spec: Some(serde_json::to_string(spec).expect("failed to encode a tool spec")),
+        provides: Vec::new(),
+        harness_env: None,
+        clear_harness_env: None,
+        disable_models: BTreeSet::new(),
+        enable_models: BTreeSet::new(),
+    })
+}
+
+/// Build an update that deprecates or un-deprecates a tool instance
+///
+/// # Arguments
+///
+/// * `deprecated` - Whether the instance should be deprecated
+#[allow(dead_code)]
+#[must_use]
+pub fn gen_tool_deprecate(deprecated: bool) -> EntityUpdate {
+    // set the instance's deprecated flag
+    EntityUpdate::default().metadata(EntityMetadataUpdate::ToolInstance {
+        deprecated: Some(deprecated),
+    })
+}
+
+/// Generate an Anthropic provider that uses the default url
+#[allow(dead_code)]
+#[must_use]
+pub fn gen_anthropic_provider() -> ModelProvider {
+    // the default url and version with no betas
+    ModelProvider::Anthropic {
+        base_url: None,
+        version: "2023-06-01".to_owned(),
+        betas: BTreeSet::new(),
+        workspace_id: None,
+    }
+}
+
+/// Generate a `LiteLLM` provider with a random gateway url
+#[allow(dead_code)]
+#[must_use]
+pub fn gen_litellm_provider() -> ModelProvider {
+    // a random gateway that takes the key in the default header
+    ModelProvider::LiteLlm {
+        base_url: format!("https://{}.gateway.local/v1", gen_string(10).to_lowercase()),
+        key_header: None,
+    }
+}
+
+/// Generate a catalog entry for a random model id
+#[allow(dead_code)]
+#[must_use]
+pub fn gen_catalog_entry() -> ModelCatalogEntryRequest {
+    // a random model with known limits
+    let mut entry =
+        ModelCatalogEntryRequest::new(format!("model-{}", gen_string(10).to_lowercase()));
+    entry.context_window = Some(200_000);
+    entry.max_output_tokens = Some(8_192);
+    entry
+}
+
+/// Build a request to create a model entity with a random name in some groups
+///
+/// # Arguments
+///
+/// * `groups` - The groups the entity should be in
+/// * `metadata` - The model entity's metadata
+#[allow(dead_code)]
+#[must_use]
+pub fn gen_model_entity(groups: &[&str], metadata: EntityMetadataRequest) -> EntityRequest {
+    // pick a prefix from the kind
+    let prefix = match &metadata {
+        EntityMetadataRequest::ModelEndpoint(_) => "endpoint",
+        EntityMetadataRequest::ModelProfile(_) => "profile",
+        _ => "credential",
+    };
+    EntityRequest::new(
+        format!("{prefix}{}", gen_string(12).to_lowercase()),
+        metadata,
+        groups.to_vec(),
+    )
+}
+
+/// Create a model credential and read it back
+///
+/// # Arguments
+///
+/// * `groups` - The groups the credential should be in
+/// * `kind` - The kind of credential
+/// * `secret` - The credential's primary secret, if it has one
+/// * `client` - The client to create the credential with
+#[allow(dead_code)]
+pub async fn model_credential(
+    groups: &[&str],
+    kind: CredentialKind,
+    secret: Option<&str>,
+    client: &Thorium,
+) -> Result<Entity, Error> {
+    // build and create the credential
+    let meta = ModelCredentialEntityRequest::new(kind, secret.map(ModelSecret::from));
+    let req = gen_model_entity(groups, EntityMetadataRequest::ModelCredential(meta));
+    let resp = client.entities.create(req).await?;
+    client.entities.get(resp.id).await
+}
+
+/// Serializes the whitelist changes tests make so concurrent changes are never lost
+static WHITELIST_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
+/// Change the deployment's allowed model endpoints as the admin
+///
+/// Changes from tests in one process are made one at a time, so none is lost.
+///
+/// # Arguments
+///
+/// * `update` - The change to make
+/// * `scan` - Whether to run the consistency scan afterwards
+#[allow(dead_code)]
+pub async fn update_model_whitelist(update: ModelsConfUpdate, scan: bool) -> Result<(), Error> {
+    // only one change at a time
+    let _guard = WHITELIST_LOCK.lock().await;
+    let admin = test_utilities::admin_client().await?;
+    // pick whether the scan runs
+    let params = if scan {
+        SystemSettingsUpdateParams::default()
+    } else {
+        SystemSettingsUpdateParams::default().no_scan()
+    };
+    admin
+        .system
+        .update_settings(&SystemSettingsUpdate::default().models(update), &params)
+        .await?;
+    Ok(())
+}
+
+/// Allow a provider's endpoint on the deployment's whitelist if it's valid and not yet allowed
+///
+/// # Arguments
+///
+/// * `provider` - The provider to allow
+#[allow(dead_code)]
+pub async fn allow_model_endpoint(provider: &ModelProvider) -> Result<(), Error> {
+    // providers with invalid settings are refused before the whitelist matters
+    if provider.validate().is_err() {
+        return Ok(());
+    }
+    // only one change at a time
+    let _guard = WHITELIST_LOCK.lock().await;
+    let admin = test_utilities::admin_client().await?;
+    // skip providers that are already allowed
+    let settings = admin.system.get_settings().await?;
+    if settings.models.allows(provider) {
+        return Ok(());
+    }
+    // allow it without scanning
+    let update = ModelsConfUpdate::default().add_endpoint(AllowedEndpoint::for_provider(provider));
+    admin
+        .system
+        .update_settings(
+            &SystemSettingsUpdate::default().models(update),
+            &SystemSettingsUpdateParams::default().no_scan(),
+        )
+        .await?;
+    Ok(())
+}
+
+/// Create a model endpoint and read it back
+///
+/// # Arguments
+///
+/// * `groups` - The groups the endpoint should be in
+/// * `req` - The endpoint request
+/// * `client` - The client to create the endpoint with
+#[allow(dead_code)]
+pub async fn model_endpoint(
+    groups: &[&str],
+    req: ModelEndpointEntityRequest,
+    client: &Thorium,
+) -> Result<Entity, Error> {
+    // allow the endpoint, then create it
+    allow_model_endpoint(&req.provider).await?;
+    let req = gen_model_entity(groups, EntityMetadataRequest::ModelEndpoint(req));
+    let resp = client.entities.create(req).await?;
+    client.entities.get(resp.id).await
+}
+
+/// Create a model profile and read it back
+///
+/// # Arguments
+///
+/// * `groups` - The groups the profile should be in
+/// * `req` - The profile request
+/// * `client` - The client to create the profile with
+#[allow(dead_code)]
+pub async fn model_profile(
+    groups: &[&str],
+    req: ModelProfileEntityRequest,
+    client: &Thorium,
+) -> Result<Entity, Error> {
+    // create the profile
+    let req = gen_model_entity(groups, EntityMetadataRequest::ModelProfile(req));
+    let resp = client.entities.create(req).await?;
+    client.entities.get(resp.id).await
+}
+
+/// Generate a random Image tool spec that runs in an environment
+///
+/// # Arguments
+///
+/// * `scaler` - The scaler whose environment the tool runs in
+#[allow(dead_code)]
+#[must_use]
+pub fn gen_image_spec_for(scaler: ImageScaler) -> ToolSpec {
+    // start from a K8s spec and take its scheduling settings
+    let ToolSpec::Image(mut workload) = gen_image_spec() else {
+        unreachable!("an image spec is always an Image tool spec")
+    };
+    let scheduling = workload
+        .environment
+        .scheduling()
+        .cloned()
+        .unwrap_or_default();
+    // build the environment for this scaler
+    workload.environment = match scaler {
+        ImageScaler::K8s => workload.environment,
+        ImageScaler::BareMetal => WorkloadEnvironment::BareMetal(BareMetalEnvironment {
+            scheduling,
+            ..BareMetalEnvironment::default()
+        }),
+        ImageScaler::Windows => WorkloadEnvironment::Windows(WindowsEnvironment {
+            image: format!("registry.local/{}:1", gen_string(12).to_lowercase()),
+            scheduling,
+        }),
+        ImageScaler::Kvm => WorkloadEnvironment::Kvm(KvmEnvironment {
+            scheduling,
+            kvm: None,
+        }),
+        ImageScaler::External => WorkloadEnvironment::External,
+    };
+    ToolSpec::Image(workload)
+}
+
+/// Create a tool to back a pipeline stage, returning its name and its first instance's id
+///
+/// # Arguments
+///
+/// * `group` - The group the tool should be in
+/// * `spec` - The spec of the tool's first instance
+/// * `client` - The client to create the tool with
+#[allow(dead_code)]
+pub async fn stage_tool(
+    group: &str,
+    spec: &ToolSpec,
+    client: &Thorium,
+) -> Result<(String, Uuid), Error> {
+    // create the tool and its first instance
+    let (tool, instance) = tool(&[group], "1.0.0", spec, client).await?;
+    Ok((tool.name, instance.id))
+}
+
+/// Create groups the image routes may still write images in
+///
+/// # Arguments
+///
+/// * `cnt` - The number of groups to create
+/// * `client` - The client to create the groups with
+#[allow(dead_code)]
+pub async fn image_groups(cnt: usize, client: &Thorium) -> Result<Vec<GroupRequest>, Error> {
+    // create the groups
+    let groups = groups(cnt, client).await?;
+    // let tests seed images in each of them
+    for group in &groups {
+        test_utilities::faults::allow_image_writes(&group.name);
+    }
+    Ok(groups)
+}
+
+/// Get the tool instance a pipeline stage is pinned to
+///
+/// # Arguments
+///
+/// * `pipe` - The pipeline
+/// * `stage` - The name of the stage
+///
+/// # Panics
+///
+/// Panics if the stage has no tool, which never happens for a generated pipeline
+#[allow(dead_code)]
+#[must_use]
+pub fn stage_instance(pipe: &Pipeline, stage: &str) -> Uuid {
+    // generated pipelines pin each stage to a tool instance
+    *pipe
+        .stage_tools
+        .get(stage)
+        .unwrap_or_else(|| panic!("stage {stage} has no tool"))
 }
 
 // Generators for sync tests
@@ -1825,6 +2958,8 @@ pub fn images_blocking(
     external: bool,
     client: &ThoriumBlocking,
 ) -> Result<Vec<ImageRequest>, Error> {
+    // these images are seeded through the image routes, which refuse writes elsewhere
+    test_utilities::faults::allow_image_writes(group);
     // create a 20 random images then
     let images: Vec<ImageRequest> = if external {
         (0..cnt).map(|_| gen_ext_image(group)).collect()

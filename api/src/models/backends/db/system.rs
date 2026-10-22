@@ -2,7 +2,7 @@ use bb8_redis::redis::cmd;
 use chrono::prelude::*;
 use clap::ValueEnum;
 use futures::stream::{self, StreamExt};
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use tracing::{Level, event, instrument};
 use uuid::Uuid;
 
@@ -15,14 +15,15 @@ use crate::models::system::{
     WINDOWS_CACHE_KEY, WorkerStatus,
 };
 use crate::models::{
-    ActiveJob, ApiCursor, GroupStats, ImageScaler, Node, NodeGetParams, NodeHealth, NodeListLine,
-    NodeListParams, NodeRegistration, NodeRow, NodeUpdate, ScalerStats, SystemInfo, SystemSettings,
-    SystemStats, User, Worker, WorkerDeleteMap, WorkerRegistrationList, WorkerUpdate,
+    ActiveJob, ApiCursor, GroupStats, ImageScaler, ModelsConf, Node, NodeGetParams, NodeHealth,
+    NodeListLine, NodeListParams, NodeRegistration, NodeRow, NodeUpdate, ScalerStats, SystemInfo,
+    SystemSettings, SystemStats, User, UserRole, Worker, WorkerDeleteMap, WorkerRegistrationList,
+    WorkerUpdate,
 };
 use crate::utils::{ApiError, Shared};
 use crate::{
-    conn, deserialize, exec_query, internal_err, log_scylla_err, not_found, query, serialize,
-    unauthorized,
+    conn, deserialize, deserialize_ext, exec_query, internal_err, log_scylla_err, not_found, query,
+    serialize, unauthorized,
 };
 
 /// Check if Thorium is healthy
@@ -81,6 +82,7 @@ pub async fn init(shared: &Shared) -> Result<(), ApiError> {
         .cmd("hsetnx").arg(&keys.settings).arg("fairshare_storage").arg(default_settings.fairshare_storage)
         .cmd("hsetnx").arg(&keys.settings).arg("host_path_whitelist").arg(serialize!(&default_settings.host_path_whitelist))
         .cmd("hsetnx").arg(&keys.settings).arg("allow_unrestricted_host_paths").arg(serialize!(&default_settings.allow_unrestricted_host_paths))
+        .cmd("hsetnx").arg(&keys.settings).arg("models").arg(serialize!(&default_settings.models))
         .cmd("hsetnx").arg(&keys.data).arg("iff").arg(DEFAULT_IFF)
         .query_async(conn!(shared))
         .await?;
@@ -245,6 +247,7 @@ pub async fn reset_settings(shared: &Shared) -> Result<(), ApiError> {
         .cmd("hset").arg(&keys.settings).arg("fairshare_storage").arg(default.fairshare_storage)
         .cmd("hset").arg(&keys.settings).arg("host_path_whitelist").arg(serialize!(&default.host_path_whitelist))
         .cmd("hset").arg(&keys.settings).arg("allow_unrestricted_host_paths").arg(serialize!(&default.allow_unrestricted_host_paths))
+        .cmd("hset").arg(&keys.settings).arg("models").arg(serialize!(&default.models))
         .query_async(conn!(shared))
         .await?;
     Ok(())
@@ -271,6 +274,8 @@ fn cast_settings(mut raw: HashMap<String, String>) -> Result<SystemSettings, Api
         fairshare_storage: deserialize!(&helpers::extract(&mut raw, "fairshare_storage")?),
         host_path_whitelist: deserialize!(&helpers::extract(&mut raw, "host_path_whitelist")?),
         allow_unrestricted_host_paths: deserialize!(&helpers::extract(&mut raw, "allow_unrestricted_host_paths")?),
+        // settings written before the model whitelist existed allow no endpoints
+        models: deserialize_ext!(raw, "models", ModelsConf::default()),
     };
     Ok(settings)
 }
@@ -302,16 +307,18 @@ pub async fn update_settings(settings: &SystemSettings, shared: &Shared) -> Resu
     // reset system settings
     () = redis::pipe().atomic()
         // update reserved settings
-        .cmd("hset").arg(&keys.settings).arg("reserved_cpu").arg(&settings.reserved_cpu)
-        .cmd("hset").arg(&keys.settings).arg("reserved_memory").arg(&settings.reserved_memory)
-        .cmd("hset").arg(&keys.settings).arg("reserved_storage").arg(&settings.reserved_storage)
+        .cmd("hset").arg(&keys.settings).arg("reserved_cpu").arg(settings.reserved_cpu)
+        .cmd("hset").arg(&keys.settings).arg("reserved_memory").arg(settings.reserved_memory)
+        .cmd("hset").arg(&keys.settings).arg("reserved_storage").arg(settings.reserved_storage)
         // update fairshare settings
-        .cmd("hset").arg(&keys.settings).arg("fairshare_cpu").arg(&settings.fairshare_cpu)
-        .cmd("hset").arg(&keys.settings).arg("fairshare_memory").arg(&settings.fairshare_memory)
-        .cmd("hset").arg(&keys.settings).arg("fairshare_storage").arg(&settings.fairshare_storage)
+        .cmd("hset").arg(&keys.settings).arg("fairshare_cpu").arg(settings.fairshare_cpu)
+        .cmd("hset").arg(&keys.settings).arg("fairshare_memory").arg(settings.fairshare_memory)
+        .cmd("hset").arg(&keys.settings).arg("fairshare_storage").arg(settings.fairshare_storage)
         // update host path settings
         .cmd("hset").arg(&keys.settings).arg("host_path_whitelist").arg(serialize!(&settings.host_path_whitelist))
         .cmd("hset").arg(&keys.settings).arg("allow_unrestricted_host_paths").arg(serialize!(&settings.allow_unrestricted_host_paths))
+        // update the allowed model endpoints
+        .cmd("hset").arg(&keys.settings).arg("models").arg(serialize!(&settings.models))
         .query_async(conn!(shared))
         .await?;
     Ok(())
@@ -338,6 +345,7 @@ pub async fn restore_settings(settings: &SystemSettings, shared: &Shared) -> Res
         .cmd("hset").arg(&keys.settings).arg("fairshare_storage").arg(settings.fairshare_storage)
         .cmd("hset").arg(&keys.settings).arg("host_path_whitelist").arg(serialize!(&settings.host_path_whitelist))
         .cmd("hset").arg(&keys.settings).arg("allow_unrestricted_host_paths").arg(serialize!(&settings.allow_unrestricted_host_paths))
+        .cmd("hset").arg(&keys.settings).arg("models").arg(serialize!(&settings.models))
         .query_async(conn!(shared)).await?;
     Ok(())
 }
@@ -779,6 +787,10 @@ pub async fn register_workers(
             .cmd("hsetnx").arg(&data).arg("pool").arg(serialize!(&worker.pool))
             // add this workers to its set
             .cmd("sadd").arg(&set).arg(&worker.name);
+        // a per-run worker also records the run it serves
+        if let Some(run) = worker.run {
+            pipe.cmd("hsetnx").arg(&data).arg("run").arg(run.to_string());
+        }
     }
     // execute the redis pipeline we built
     let _: () = pipe.query_async(conn!(shared)).await?;
@@ -891,7 +903,7 @@ pub async fn can_delete_workers(
     // only check if we can delete this if we aren't an admin
     if !user.is_admin() {
         // get the owners for all workers we are going to delete 100 at a time
-        let chunked = deletes.workers.as_slice().chunks(100);
+        let chunked = deletes.workers.chunks(100);
         // check the workers in each chunk
         for chunk in chunked {
             // build the redis pipe for checking this chunk
@@ -900,38 +912,63 @@ pub async fn can_delete_workers(
             for worker in chunk {
                 // get the key for this workers data
                 let data = keys::system::worker_data(worker, shared);
-                // get this workers owner
-                pipe.cmd("hget").arg(data).arg("user");
+                // get this workers owner and group
+                pipe.cmd("hmget").arg(data).arg("user").arg("group");
             }
-            // get all of these workers users
+            // get all of these workers users and groups
             let reply: redis::Value = pipe.query_async(conn!(shared)).await?;
-            // make sure we own every one of these workers
-            check_worker_owners(&user.username, &reply)?;
+            // make sure we own every one of these workers and they are in our groups
+            check_worker_owners(&user.username, worker_delete_groups(user), &reply)?;
         }
     }
     Ok(())
 }
 
-/// Check that a user owns every worker in a chunk of workers they are trying to delete
+/// Get the groups a user may delete their own workers in
 ///
-/// The reply holds each worker's owner, and a worker that no longer exists has a nil owner, so
-/// deleting an already removed worker is a 404.
+/// An Analyst's full token lists every group in Thorium, so an Analyst deletes workers only in the
+/// groups they are actually a member of. Every other user, and every scoped token, uses its groups.
+///
+/// # Arguments
+///
+/// * `user` - The user trying to delete workers
+fn worker_delete_groups(user: &User) -> &[String] {
+    // analysts can view every group but delete workers only in the groups they belong to
+    if user.role == UserRole::Analyst {
+        &user.actual_groups
+    } else {
+        &user.groups
+    }
+}
+
+/// Check that a user owns every worker in a chunk of workers they are trying to delete and that
+/// each of those workers is in one of the user's groups
+///
+/// The reply holds each worker's owner and group, and a worker that no longer exists has a nil
+/// owner, so deleting an already removed worker is a 404.
 ///
 /// # Arguments
 ///
 /// * `username` - The user trying to delete these workers
-/// * `reply` - The owner of each worker in this chunk
-fn check_worker_owners(username: &str, reply: &redis::Value) -> Result<(), ApiError> {
-    // get the owner of each worker
-    let owners: Vec<Option<String>> = redis::from_redis_value(reply)?;
+/// * `groups` - The groups this user (or their scoped token) is in
+/// * `reply` - The owner and group of each worker in this chunk
+fn check_worker_owners(
+    username: &str,
+    groups: &[String],
+    reply: &redis::Value,
+) -> Result<(), ApiError> {
+    // get the owner and group of each worker
+    let workers: Vec<(Option<String>, Option<String>)> = redis::from_redis_value(reply)?;
     // any worker without an owner doesn't exist
-    if owners.iter().any(Option::is_none) {
+    if workers.iter().any(|(owner, _)| owner.is_none()) {
         return not_found!("One or more workers were not found".to_owned());
     }
-    // get the unique owners of these workers
-    let users_set: HashSet<String> = owners.into_iter().flatten().collect();
-    // if we have multilple users or one user that isn't us then reject this request
-    if users_set.len() != 1 || !users_set.contains(username) {
+    // reject this request if any worker isn't ours or isn't in one of our groups
+    let allowed = workers.iter().all(|(owner, group)| {
+        owner.as_deref() == Some(username)
+            && group.as_ref().is_some_and(|group| groups.contains(group))
+    });
+    if !allowed {
         return unauthorized!();
     }
     Ok(())
@@ -956,7 +993,7 @@ pub async fn delete_workers(
     // every worker exists so a missing worker can't leave a partially applied delete
     let mut delete_pipe = redis::pipe();
     // get these workers info 25 at a time
-    let chunked = deletes.workers.as_slice().chunks(25);
+    let chunked = deletes.workers.chunks(25);
     // get the info for this chunk of workers
     for chunk in chunked {
         // build the redis pipe for checking this chunk
@@ -964,7 +1001,7 @@ pub async fn delete_workers(
         // crawl over the workers in this chunk
         for worker in chunk {
             // get the key for this workers data
-            let data = keys::system::worker_data(&worker, shared);
+            let data = keys::system::worker_data(worker, shared);
             // get this workers cluster and node
             pipe.cmd("hget").arg(&data).arg("cluster")
                 .cmd("hget").arg(&data).arg("node");
@@ -990,7 +1027,7 @@ pub async fn delete_workers(
             let set_key = keys::system::worker_set(cluster, node, scaler, shared);
             // delete this worker from its cluster/node worker set and delete its data
             delete_pipe.cmd("srem").arg(set_key).arg(worker)
-                .cmd("del").arg(keys::system::worker_data(&worker, shared));
+                .cmd("del").arg(keys::system::worker_data(worker, shared));
         }
     }
     // delete all of our workers at once
@@ -1087,8 +1124,8 @@ mod tests {
     #[test]
     fn missing_worker_owner_is_not_found() {
         // the only worker in this chunk no longer exists
-        let reply = redis::Value::Array(vec![redis::Value::Nil]);
-        let error = check_worker_owners("alice", &reply).unwrap_err();
+        let reply = redis::Value::Array(vec![worker_reply(None, None)]);
+        let error = check_worker_owners("alice", &groups(&["corn"]), &reply).unwrap_err();
         assert_eq!(
             error.status(),
             StatusCode::NOT_FOUND,
@@ -1096,16 +1133,75 @@ mod tests {
         );
     }
 
+    /// Build the `HMGET user group` reply for one worker
+    ///
+    /// # Arguments
+    ///
+    /// * `user` - The worker's owner if it exists
+    /// * `group` - The worker's group if it exists
+    fn worker_reply(user: Option<&str>, group: Option<&str>) -> redis::Value {
+        // cast a field to a redis value
+        let field = |value: Option<&str>| {
+            value.map_or(redis::Value::Nil, |value| {
+                redis::Value::BulkString(value.as_bytes().to_vec())
+            })
+        };
+        // build the reply of both fields in the order they were requested
+        redis::Value::Array(vec![field(user), field(group)])
+    }
+
+    /// Build a list of group names
+    ///
+    /// # Arguments
+    ///
+    /// * `names` - The group names
+    fn groups(names: &[&str]) -> Vec<String> {
+        names.iter().map(|name| (*name).to_owned()).collect()
+    }
+
     /// A user may delete their own workers but not someone else's.
     #[test]
     fn worker_owner_check_allows_owner_only() {
         // alice owns this worker
-        let owned = redis::Value::Array(vec![redis::Value::BulkString(b"alice".to_vec())]);
-        assert!(check_worker_owners("alice", &owned).is_ok());
+        let owned = redis::Value::Array(vec![worker_reply(Some("alice"), Some("corn"))]);
+        assert!(check_worker_owners("alice", &groups(&["corn"]), &owned).is_ok());
         // bob owns this worker
-        let other = redis::Value::Array(vec![redis::Value::BulkString(b"bob".to_vec())]);
+        let other = redis::Value::Array(vec![worker_reply(Some("bob"), Some("corn"))]);
         assert_eq!(
-            check_worker_owners("alice", &other).unwrap_err().status(),
+            check_worker_owners("alice", &groups(&["corn"]), &other)
+                .unwrap_err()
+                .status(),
+            StatusCode::UNAUTHORIZED
+        );
+    }
+
+    /// A user may only delete their own workers that are in one of their groups
+    #[test]
+    fn worker_owner_check_requires_group() {
+        // alice's worker in corn and her worker in wheat
+        let corn = worker_reply(Some("alice"), Some("corn"));
+        let wheat = worker_reply(Some("alice"), Some("wheat"));
+        // a caller limited to corn may delete the corn worker
+        let reply = redis::Value::Array(vec![corn.clone()]);
+        assert!(check_worker_owners("alice", &groups(&["corn"]), &reply).is_ok());
+        // but not the wheat worker, alone or with the corn worker
+        for reply in [
+            redis::Value::Array(vec![wheat.clone()]),
+            redis::Value::Array(vec![corn, wheat]),
+        ] {
+            assert_eq!(
+                check_worker_owners("alice", &groups(&["corn"]), &reply)
+                    .unwrap_err()
+                    .status(),
+                StatusCode::UNAUTHORIZED
+            );
+        }
+        // a worker without a group is rejected
+        let reply = redis::Value::Array(vec![worker_reply(Some("alice"), None)]);
+        assert_eq!(
+            check_worker_owners("alice", &groups(&["corn"]), &reply)
+                .unwrap_err()
+                .status(),
             StatusCode::UNAUTHORIZED
         );
     }
@@ -1117,5 +1213,41 @@ mod tests {
         assert_eq!(escape_glob("testing_thorium"), "testing_thorium");
         // each glob character gets a backslash
         assert_eq!(escape_glob("th*r?u[m]\\"), "th\\*r\\?u\\[m\\]\\\\");
+    }
+
+    /// A settings hash written before the model whitelist existed loads with an empty list, and
+    /// one with the list loads it
+    #[test]
+    fn settings_without_models_load_empty() {
+        // a settings hash with every field but the model whitelist
+        let mut raw = HashMap::new();
+        for field in [
+            "reserved_cpu",
+            "reserved_memory",
+            "reserved_storage",
+            "fairshare_cpu",
+            "fairshare_memory",
+            "fairshare_storage",
+        ] {
+            raw.insert(field.to_owned(), "1".to_owned());
+        }
+        raw.insert("host_path_whitelist".to_owned(), "[]".to_owned());
+        raw.insert(
+            "allow_unrestricted_host_paths".to_owned(),
+            "false".to_owned(),
+        );
+        let settings = cast_settings(raw.clone()).unwrap();
+        assert_eq!(settings.models, crate::models::ModelsConf::default());
+        // a hash with the list loads it
+        let models = crate::models::ModelsConf {
+            allowed_endpoints: std::collections::BTreeSet::from([
+                crate::models::AllowedEndpoint::new(
+                    crate::models::ModelProviderKind::Anthropic,
+                    None,
+                ),
+            ]),
+        };
+        raw.insert("models".to_owned(), serde_json::to_string(&models).unwrap());
+        assert_eq!(cast_settings(raw).unwrap().models, models);
     }
 }

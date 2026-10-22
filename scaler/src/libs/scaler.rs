@@ -50,7 +50,7 @@ macro_rules! spawn {
 macro_rules! add_task {
     ($scaler:expr, $task:expr) => {{
         // get the datetime to start this task at
-        let mut start = crate::from_now!($task.delay(&$scaler.conf) as i64);
+        let mut start = crate::from_now!(i64::from($task.delay(&$scaler.conf)));
         // increase by 1 until we have found an open slot to start this job
         loop {
             // determine if a task already exists for this date
@@ -632,7 +632,7 @@ impl Scaler {
                     // decrease our users fair share ranks
                     self.allocatable.decrease_fair_share_ranks(&self.conf);
                 }
-            };
+            }
         }
         // add any blocking completed tasks back to our task list
         for task in completed {
@@ -846,7 +846,12 @@ impl Scaler {
                     // get this workers job if it has one
                     if let Some(active) = &worker.active {
                         // try to fail out this job
-                        if let Err(error) = self.thorium.jobs.error(&active.job, &add).await {
+                        if let Err(error) = self
+                            .thorium
+                            .jobs
+                            .error(&active.job, &add, &worker.name)
+                            .await
+                        {
                             // we failed to error out this job
                             event!(
                                 Level::ERROR,

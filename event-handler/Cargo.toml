@@ -23,3 +23,13 @@ papaya = "0.2"
 strum = { version = "0.28", features = ["derive"] }
 gxhash = { version = "3.5", features = ["deterministic"] }
 async-recursion = "1.1.1"
+aws-sigv4 = "1.6.0"
+aws-credential-types = "1.3.0"
+aws-smithy-runtime-api = { version = "1.19.0", features = ["client"] }
+ring = "0.17.14"
+pem = "3.0.6"
+serde = { workspace = true }
+serde_json = { workspace = true }
+
+[dev-dependencies]
+thorium-api = { workspace = true, features = ["client", "trace", "kanal-err", "test-utilities"] }

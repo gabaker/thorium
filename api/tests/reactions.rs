@@ -4,15 +4,573 @@ use data_encoding::BASE64;
 use std::collections::{HashMap, HashSet};
 use thorium::client::{ClientSettings, Users};
 use thorium::models::{
-    GenericJob, GenericJobArgs, GenericJobArgsUpdate, GenericJobOpts, GroupUpdate,
-    GroupUsersUpdate, ImageBan, ImageBanKind, ImageBanUpdate, ImageUpdate, Pipeline, PipelineBan,
-    PipelineBanKind, PipelineBanUpdate, PipelineRequest, PipelineUpdate, ReactionCursorOpts,
-    ReactionListParams, ReactionRequest, ReactionStatus, ReactionUpdate, Resources, StageLogLine,
-    StageLogsAdd, UserCreate, UserRole, UserUpdate,
+    EntityMetadata, GenericJob, GenericJobArgs, GenericJobArgsUpdate, GenericJobOpts, GroupAllowed,
+    GroupUpdate, GroupUsersUpdate, ImageBan, ImageBanKind, ImageBanUpdate, ImageScaler,
+    ImageUpdate, Pipeline, PipelineBan, PipelineBanKind, PipelineBanUpdate, PipelineRequest,
+    PipelineUpdate, PlannedStage, ReactionCursorOpts, ReactionListParams, ReactionPlan,
+    ReactionRequest, ReactionSource, ReactionStatus, ReactionUpdate, Resources, ScopedTokenRequest,
+    StageLogLine, StageLogsAdd, UserCreate, UserRole, UserUpdate,
 };
 use thorium::test_utilities::{self, CONF, generators};
-use thorium::{Error, Thorium, contains_key, fail, is, is_empty, is_in, is_not_in, vec_in_vec};
+use thorium::{
+    Error, Thorium, contains, contains_key, fail, is, is_empty, is_in, is_not_in, vec_in_vec,
+};
 use uuid::Uuid;
+
+/// Get a connection to the test API's Redis database
+async fn redis_conn() -> redis::aio::MultiplexedConnection {
+    // reuse the harness's pool so the connection selects the configured database
+    let pool = test_utilities::get_redis_client(&test_utilities::CONF).await;
+    let pooled = pool.get().await.expect("a Redis connection");
+    pooled.clone()
+}
+
+/// Build the key to a reaction's data hash
+///
+/// # Arguments
+///
+/// * `group` - The group of the reaction
+/// * `id` - The id of the reaction
+fn reaction_key(group: &str, id: Uuid) -> String {
+    // reactions live in one hash per reaction
+    format!(
+        "{}:reaction_data:{group}:{id}",
+        test_utilities::CONF.thorium.namespace
+    )
+}
+
+/// Read every field of a Redis hash
+///
+/// # Arguments
+///
+/// * `key` - The key of the hash
+async fn hash(key: &str) -> HashMap<String, String> {
+    // read the whole hash
+    redis::cmd("hgetall")
+        .arg(key)
+        .query_async(&mut redis_conn().await)
+        .await
+        .expect("a hash")
+}
+
+/// Create a pipeline whose stages each run a new Image tool in an environment
+///
+/// # Arguments
+///
+/// * `group` - The group of the pipeline
+/// * `steps` - The number of stages, each in its own step
+/// * `scaler` - The scaler whose environment the stages' tools run in
+/// * `client` - The client to create the pipeline with
+async fn steps_pipe(
+    group: &str,
+    steps: usize,
+    scaler: ImageScaler,
+    client: &Thorium,
+) -> Result<Pipeline, Error> {
+    // create a tool for each stage
+    let mut stages = Vec::with_capacity(steps);
+    for _ in 0..steps {
+        stages.push(
+            generators::stage_tool(group, &generators::gen_image_spec_for(scaler), client).await?,
+        );
+    }
+    // put each stage in its own step
+    let order = stages
+        .iter()
+        .map(|(name, _)| vec![name.clone()])
+        .collect::<Vec<Vec<String>>>();
+    let name = generators::gen_string(20).to_lowercase();
+    let req = stages.into_iter().fold(
+        PipelineRequest::new(group, &name, serde_json::json!(order)),
+        |req, (stage, instance)| req.stage_tool(stage, instance),
+    );
+    client.pipelines.create(&req).await?;
+    client.pipelines.get(group, &name).await
+}
+
+/// A reaction stores its source and plan, and a finished reaction stored without them reads with
+/// a pipeline source and an empty plan
+#[tokio::test]
+async fn reaction_source_and_plan_in_redis() -> Result<(), Error> {
+    // a two step pipeline and a reaction on it
+    let admin = test_utilities::admin_client().await?;
+    let group = generators::groups(1, &admin).await?.remove(0).name;
+    let pipe = steps_pipe(&group, 2, ImageScaler::K8s, &admin).await?;
+    let created = admin
+        .reactions
+        .create(&ReactionRequest::new(&group, &pipe.name))
+        .await?;
+    // the reaction reads back its pipeline source and plan with no run fields
+    let reaction = admin.reactions.get(&group, created.id).await?;
+    is!(
+        &reaction.source,
+        &ReactionSource::Pipeline {
+            name: pipe.name.clone()
+        }
+    );
+    let expected = pipe
+        .order
+        .iter()
+        .map(|step| {
+            step.iter()
+                .map(|stage| PlannedStage {
+                    name: stage.clone(),
+                    tool_instance: generators::stage_instance(&pipe, stage),
+                })
+                .collect::<Vec<PlannedStage>>()
+        })
+        .collect::<Vec<Vec<PlannedStage>>>();
+    let expected = ReactionPlan { stages: expected };
+    is!(&reaction.plan, &expected);
+    is!(reaction.run_token, None::<String>);
+    is!(reaction.run, None::<Uuid>);
+    // the hash holds the source and plan and no run fields
+    let key = reaction_key(&group, created.id);
+    let raw = hash(&key).await;
+    is!(raw.contains_key("source"), true);
+    is!(raw.contains_key("plan"), true);
+    is!(raw.contains_key("run_token"), false);
+    is!(raw.contains_key("run"), false);
+    // a finished hash without the new fields reads with defaults and is left unchanged
+    let _: () = redis::cmd("hdel")
+        .arg(&key)
+        .arg("source")
+        .arg("plan")
+        .query_async(&mut redis_conn().await)
+        .await
+        .expect("drop the new fields");
+    let before = hash(&key).await;
+    let read = admin.reactions.get(&group, created.id).await?;
+    is!(
+        &read.source,
+        &ReactionSource::Pipeline {
+            name: pipe.name.clone()
+        }
+    );
+    is!(&read.plan, &ReactionPlan::default());
+    is!(read.run_token, None::<String>);
+    is!(hash(&key).await, before);
+    Ok(())
+}
+
+/// A reaction proceeds through its plan without reading its pipeline, and a reaction stored
+/// without a plan still reads, lists, and deletes
+#[tokio::test]
+async fn reaction_runs_plan_without_pipeline() -> Result<(), Error> {
+    // a two step pipeline and a reaction on it
+    let admin = test_utilities::admin_client().await?;
+    generators::node("cluster0", "node0", Resources::default(), &admin).await?;
+    let group = generators::groups(1, &admin).await?.remove(0).name;
+    let pipe = steps_pipe(&group, 2, ImageScaler::K8s, &admin).await?;
+    let created = admin
+        .reactions
+        .create(&ReactionRequest::new(&group, &pipe.name))
+        .await?;
+    let first = &pipe.order[0][0];
+    let second = &pipe.order[1][0];
+    // the pipeline's stages are replaced after the reaction is created
+    let replacement = generators::tool_instance(&[&group], &admin).await?;
+    let update = PipelineUpdate::default()
+        .order(vec![vec!["swapped".to_owned()]])
+        .add_stage_tool("swapped", replacement)
+        .remove_stage_tool(first.as_str())
+        .remove_stage_tool(second.as_str());
+    admin.pipelines.update(&group, &pipe.name, &update).await?;
+    // the first stage's job runs its planned tool instance
+    let worker = generators::gen_string(24);
+    generators::worker(
+        "cluster0", "node0", &worker, &group, &pipe.name, first, &admin,
+    )
+    .await?;
+    let jobs = admin
+        .jobs
+        .claim_workload(
+            &group,
+            generators::stage_instance(&pipe, first),
+            "cluster0",
+            "node0",
+            &worker,
+            1,
+        )
+        .await?;
+    is!(jobs.len(), 1);
+    is!(&jobs[0].stage, first);
+    admin
+        .jobs
+        .proceed(&jobs[0], &generators::stage_logs(), 1, &worker)
+        .await?;
+    // the second step's job runs the second planned stage, not the pipeline's new stage
+    let reaction = admin.reactions.get(&group, created.id).await?;
+    is!(reaction.current_stage, 1);
+    let second_instance = generators::stage_instance(&pipe, second);
+    let jobs = admin
+        .jobs
+        .claim_workload(&group, second_instance, "cluster0", "node0", &worker, 1)
+        .await?;
+    is!(jobs.len(), 1);
+    is!(&jobs[0].stage, second);
+    is!(jobs[0].tool_instance, second_instance);
+    admin
+        .jobs
+        .proceed(&jobs[0], &generators::stage_logs(), 1, &worker)
+        .await?;
+    let reaction = admin.reactions.get(&group, created.id).await?;
+    is!(reaction.status, ReactionStatus::Completed);
+    // a finished reaction stored without a plan reads, lists, and deletes
+    let key = reaction_key(&group, created.id);
+    let _: () = redis::cmd("hdel")
+        .arg(&key)
+        .arg("source")
+        .arg("plan")
+        .query_async(&mut redis_conn().await)
+        .await
+        .expect("drop the plan");
+    let read = admin.reactions.get(&group, created.id).await?;
+    is!(read.plan.stages.is_empty(), true);
+    let listed = admin
+        .reactions
+        .list(&group, &pipe.name)
+        .details()
+        .exec()
+        .await?;
+    is!(
+        listed.details.iter().any(|item| item.id == created.id),
+        true
+    );
+    admin.reactions.delete(&group, &created.id).await?;
+    fail!(admin.reactions.get(&group, created.id).await, 404);
+    generators::delete_worker(&worker, &admin).await?;
+    Ok(())
+}
+
+/// A stage that follows a tool's latest instance is pinned in each reaction's plan
+#[tokio::test]
+async fn latest_tool_stage_pins_instance() -> Result<(), Error> {
+    // a pipeline whose one stage follows a tool's latest instance
+    let admin = test_utilities::admin_client().await?;
+    let group = generators::groups(1, &admin).await?.remove(0).name;
+    let (tool, first) =
+        generators::tool(&[&group], "1.0.0", &generators::gen_image_spec(), &admin).await?;
+    let name = generators::gen_string(20).to_lowercase();
+    let req = PipelineRequest::new(&group, &name, serde_json::json!([["scan"]]))
+        .stage_tool("scan", tool.id);
+    admin.pipelines.create(&req).await?;
+    // a reaction pins the current instance
+    let early = admin
+        .reactions
+        .create(&ReactionRequest::new(&group, &name))
+        .await?;
+    // publishing a new version doesn't change that reaction or its job
+    admin
+        .entities
+        .update(
+            tool.id,
+            generators::gen_tool_publish("2.0.0", &generators::gen_image_spec()),
+        )
+        .await?;
+    let read = admin.reactions.get(&group, early.id).await?;
+    is!(read.plan.tool_instance("scan"), Some(first.id));
+    let job = admin.jobs.get(read.jobs[0]).await?;
+    is!(job.tool_instance, first.id);
+    // a later reaction pins the new instance
+    let latest = admin.entities.get(tool.id).await?;
+    let EntityMetadata::Tool(meta) = &latest.metadata else {
+        return Err(Error::new("not a tool".to_owned()));
+    };
+    let late = admin
+        .reactions
+        .create(&ReactionRequest::new(&group, &name))
+        .await?;
+    let read = admin.reactions.get(&group, late.id).await?;
+    is!(read.plan.tool_instance("scan"), meta.latest);
+    assert_ne!(meta.latest, Some(first.id));
+    Ok(())
+}
+
+/// Pipeline reactions keep the group and developer checks for argument overrides
+#[tokio::test]
+async fn pipeline_reaction_checks() -> Result<(), Error> {
+    // a non-developer editor, a K8s developer, and a monitor of one group
+    let admin = test_utilities::admin_client().await?;
+    let suffix = generators::name_suffix();
+    let editor = generators::moon_user(&admin, "europa", &suffix).await?;
+    let developer = generators::named_user_with_role(
+        &admin,
+        &generators::readable_name("amalthea", &suffix),
+        UserRole::Developer {
+            k8s: true,
+            bare_metal: false,
+            windows: false,
+            kvm: false,
+            external: false,
+        },
+    )
+    .await?;
+    let monitor = generators::moon_user(&admin, "thebe", &suffix).await?;
+    let roles = generators::GroupRoles::default()
+        .user(&editor.username)
+        .user(&developer.username)
+        .monitor(&monitor.username);
+    let group = generators::god_group(&admin, "saturn", &suffix, &roles).await?;
+    // a pipeline whose stage names aren't images and whose stages run K8s tools
+    let pipe = steps_pipe(&group, 1, ImageScaler::K8s, &admin).await?;
+    let stage = pipe.order[0][0].clone();
+    let plain = ReactionRequest::new(&group, &pipe.name);
+    let overridden = ReactionRequest::new(&group, &pipe.name).args(
+        &stage,
+        GenericJobArgs::default().opts(GenericJobOpts::new(false, true, None)),
+    );
+    // the editor creates a plain reaction but can't override args
+    editor.client.reactions.create(&plain).await?;
+    fail!(editor.client.reactions.create(&overridden).await, 401);
+    // the K8s developer can override args on the stage's K8s tool
+    developer.client.reactions.create(&overridden).await?;
+    // a monitor can't create reactions
+    fail!(monitor.client.reactions.create(&plain).await, 401);
+    // a group that disallows reactions refuses them
+    let closed = generators::named_group_with_roles(
+        &generators::readable_name("janus", &suffix),
+        &generators::GroupRoles::default().user(&editor.username),
+        GroupAllowed::default().disable_reactions(),
+        &admin,
+    )
+    .await?;
+    let closed_pipe = steps_pipe(&closed, 1, ImageScaler::K8s, &admin).await?;
+    let resp = editor
+        .client
+        .reactions
+        .create(&ReactionRequest::new(&closed, &closed_pipe.name))
+        .await;
+    fail!(resp, 401);
+    Ok(())
+}
+
+/// A bulk create checks each pipeline's tool instances in that pipeline's group, even when an
+/// earlier pipeline in another group already read the same tool instance
+#[tokio::test]
+async fn bulk_create_checks_tool_instances_per_group() -> Result<(), Error> {
+    // two groups with a one stage pipeline each, on a tool instance of its own group
+    let admin = test_utilities::admin_client().await?;
+    let mut groups = generators::groups(2, &admin).await?;
+    let (first, second) = (groups.remove(0).name, groups.remove(0).name);
+    let mut pipes = Vec::with_capacity(2);
+    for group in [&first, &second] {
+        let (_, instance) =
+            generators::stage_tool(group, &generators::gen_image_spec(), &admin).await?;
+        let name = generators::gen_string(20).to_lowercase();
+        let req = PipelineRequest::new(group, &name, serde_json::json!([["stage"]]))
+            .stage_tool("stage", instance);
+        admin.pipelines.create(&req).await?;
+        pipes.push((name, instance));
+    }
+    let (first_pipe, first_instance) = pipes.remove(0);
+    let (second_pipe, _) = pipes.remove(0);
+    // the second pipeline's stage is pointed at the first group's tool instance in Redis,
+    // a state the pipeline routes refuse to write
+    let key = format!(
+        "{}:pipeline_data:{second}:{second_pipe}",
+        test_utilities::CONF.thorium.namespace
+    );
+    let stage_tools = serde_json::json!({ "stage": first_instance }).to_string();
+    let _: () = redis::cmd("hset")
+        .arg(&key)
+        .arg("stage_tools")
+        .arg(&stage_tools)
+        .query_async(&mut redis_conn().await)
+        .await
+        .expect("point the stage at the other group's tool instance");
+    // a single create of the second pipeline can't see that tool instance
+    let resp = admin
+        .reactions
+        .create(&ReactionRequest::new(&second, &second_pipe))
+        .await;
+    fail!(resp, 404);
+    // a bulk create that reads the tool instance for the first group first is refused too
+    for reqs in [
+        vec![
+            ReactionRequest::new(&first, &first_pipe),
+            ReactionRequest::new(&second, &second_pipe),
+        ],
+        vec![
+            ReactionRequest::new(&second, &second_pipe),
+            ReactionRequest::new(&first, &first_pipe),
+        ],
+    ] {
+        let resp = admin.reactions.create_bulk(&reqs).await;
+        fail!(resp, 404);
+    }
+    // no reaction of the second pipeline was created
+    let listed = admin
+        .reactions
+        .list(&second, &second_pipe)
+        .details()
+        .exec()
+        .await?;
+    is!(listed.details.is_empty(), true);
+    Ok(())
+}
+
+/// A bulk create reads each stage's tool instance once however many reactions it creates
+#[tokio::test]
+async fn bulk_create_reads_each_tool_instance_once() -> Result<(), Error> {
+    // a three stage pipeline
+    let admin = test_utilities::admin_client().await?;
+    let group = generators::groups(1, &admin).await?.remove(0).name;
+    let pipe = steps_pipe(&group, 3, ImageScaler::K8s, &admin).await?;
+    let instances = pipe
+        .order
+        .iter()
+        .flatten()
+        .map(|stage| generators::stage_instance(&pipe, stage))
+        .collect::<Vec<Uuid>>();
+    // count the tool instance reads of a bulk create of 10 and of 100 reactions
+    let mut deltas = Vec::new();
+    for count in [10, 100] {
+        let before = instances
+            .iter()
+            .map(|id| test_utilities::faults::entity_reads(*id))
+            .collect::<Vec<u64>>();
+        let reqs = (0..count)
+            .map(|_| ReactionRequest::new(&group, &pipe.name))
+            .collect::<Vec<ReactionRequest>>();
+        let resp = admin.reactions.create_bulk(&reqs).await?;
+        is!(resp.created.len(), count);
+        let delta = instances
+            .iter()
+            .zip(before)
+            .map(|(id, before)| test_utilities::faults::entity_reads(*id) - before)
+            .collect::<Vec<u64>>();
+        // each stage's tool instance is read at most once per request
+        assert!(delta.iter().all(|reads| *reads <= 1));
+        deltas.push(delta);
+        // every created reaction plans the same three tool instances
+        for id in resp.created {
+            let reaction = admin.reactions.get(&group, id).await?;
+            is!(reaction.plan.tool_instances().len(), 3);
+            for instance in &instances {
+                is!(reaction.plan.tool_instances().contains(instance), true);
+            }
+        }
+    }
+    // both sizes read the same tool instances the same number of times
+    is!(&deltas[0], &deltas[1]);
+    Ok(())
+}
+
+/// Only admins with their full token read a run's token, and reactions without one are not found
+#[tokio::test]
+async fn run_token_route() -> Result<(), Error> {
+    // a user's pipeline reaction
+    let admin = test_utilities::admin_client().await?;
+    let suffix = generators::name_suffix();
+    let user = generators::moon_user(&admin, "leda", &suffix).await?;
+    let roles = generators::GroupRoles::default().owner(&user.username);
+    let group = generators::god_group(&admin, "uranus", &suffix, &roles).await?;
+    let pipe = steps_pipe(&group, 1, ImageScaler::K8s, &admin).await?;
+    let created = user
+        .client
+        .reactions
+        .create(&ReactionRequest::new(&group, &pipe.name))
+        .await?;
+    // a pipeline reaction has no run token
+    fail!(admin.reactions.run_token(&group, created.id).await, 404);
+    // a run token the user owns is named on the reaction
+    let token_name = format!("run-{}", created.id);
+    let token = user
+        .client
+        .users
+        .create_scoped_token(&ScopedTokenRequest::new(&token_name).group(&group))
+        .await?;
+    let _: () = redis::cmd("hset")
+        .arg(reaction_key(&group, created.id))
+        .arg("run_token")
+        .arg(&token_name)
+        .query_async(&mut redis_conn().await)
+        .await
+        .expect("name the run token");
+    // an admin reads the token with its value
+    let read = admin.reactions.run_token(&group, created.id).await?;
+    is!(&read.name, &token_name);
+    is!(&read.owner, &user.username);
+    is!(&read.token, &token.token);
+    // the owner and an admin's scoped token are refused
+    fail!(
+        user.client.reactions.run_token(&group, created.id).await,
+        401
+    );
+    let scoped_admin = generators::scoped_client(&admin).await?;
+    fail!(
+        scoped_admin.reactions.run_token(&group, created.id).await,
+        401
+    );
+    // once the token is deleted the reaction has no run token
+    user.client.users.delete_scoped_token(&token_name).await?;
+    fail!(admin.reactions.run_token(&group, created.id).await, 404);
+    Ok(())
+}
+
+/// A job takes its scaler and generator flag from its tool instance and carries it to the claim
+#[tokio::test]
+async fn job_fields_from_tool_instance() -> Result<(), Error> {
+    // a group and a node to register workers on
+    let admin = test_utilities::admin_client().await?;
+    generators::node("cluster0", "node0", Resources::default(), &admin).await?;
+    let group = generators::groups(1, &admin).await?.remove(0).name;
+    let start = chrono::Utc::now() - chrono::Duration::days(1);
+    let end = start + chrono::Duration::days(365 * 100);
+    // a reaction on a K8s, a BareMetal, and an External tool each gets that scaler
+    for scaler in [
+        ImageScaler::K8s,
+        ImageScaler::BareMetal,
+        ImageScaler::External,
+    ] {
+        let pipe = steps_pipe(&group, 1, scaler, &admin).await?;
+        let created = admin
+            .reactions
+            .create(&ReactionRequest::new(&group, &pipe.name))
+            .await?;
+        let reaction = admin.reactions.get(&group, created.id).await?;
+        let job = admin.jobs.get(reaction.jobs[0]).await?;
+        is!(job.scaler, scaler);
+        is!(job.generator, false);
+        // its deadline is in that scaler's deadline stream
+        let deadlines = admin.jobs.deadlines(scaler, &start, &end, 100_000).await?;
+        is!(
+            deadlines.iter().any(|deadline| deadline.job_id == job.id),
+            true
+        );
+    }
+    // a generator tool's job is a generator
+    let generator = generators::gen_generator_pipe(&group, &admin).await?;
+    let created = admin
+        .reactions
+        .create(&ReactionRequest::new(&group, &generator.name))
+        .await?;
+    let reaction = admin.reactions.get(&group, created.id).await?;
+    let job = admin.jobs.get(reaction.jobs[0]).await?;
+    is!(job.generator, true);
+    // the claimed job carries its tool instance and no run
+    let worker = generators::gen_string(24);
+    generators::worker(
+        "cluster0",
+        "node0",
+        &worker,
+        &group,
+        &generator.name,
+        "s",
+        &admin,
+    )
+    .await?;
+    let claimed = admin
+        .jobs
+        .claim_workload(&group, job.tool_instance, "cluster0", "node0", &worker, 1)
+        .await?;
+    is!(claimed.len(), 1);
+    is!(claimed[0].tool_instance, job.tool_instance);
+    is!(claimed[0].run, None::<Uuid>);
+    generators::delete_worker(&worker, &admin).await?;
+    Ok(())
+}
 
 #[tokio::test]
 async fn create() -> Result<(), Error> {
@@ -458,15 +1016,18 @@ async fn create_banned() -> Result<(), Error> {
     let resp = client.reactions.create(&react_req).await;
     // make sure the reaction fails to spawn because of the ban
     fail!(resp, 400, "ban");
-    // create a new pipeline whose image gets banned
+    // create a new pipeline whose stage is named after a stored image that gets banned
+    test_utilities::faults::allow_image_writes(&group);
     let image_req = generators::gen_image(&group);
     client.images.create(&image_req).await?;
     let pipeline_name = "pipeline-with-ban-react";
+    let instance = generators::tool_instance(&[&group], &client).await?;
     let pipe_req = PipelineRequest::new(
         &group,
         pipeline_name,
         serde_json::json!(vec![vec![&image_req.name]]),
-    );
+    )
+    .stage_tool(&image_req.name, instance);
     client.pipelines.create(&pipe_req).await?;
     let image_bans = vec![
         ImageBan::new(ImageBanKind::generic("Test ban 1!")),
@@ -779,15 +1340,17 @@ async fn list_new_multi_group() -> Result<(), Error> {
     let mut created = Vec::with_capacity(20);
     // create the same pipeline and 10 reactions in each group
     for group in &groups {
-        // create a random image for this groups pipeline
-        let image_req = generators::gen_image(group);
-        client.images.create(&image_req).await?;
-        // create a pipeline with the shared name in this group
-        let pipe_req = PipelineRequest::new(
+        // create a random tool for this groups pipeline
+        let (stage, instance) = generators::stage_tool(
             group,
-            pipeline_name,
-            serde_json::json!(vec![vec![&image_req.name]]),
-        );
+            &generators::gen_image_spec_for(ImageScaler::K8s),
+            &client,
+        )
+        .await?;
+        // create a pipeline with the shared name in this group
+        let pipe_req =
+            PipelineRequest::new(group, pipeline_name, serde_json::json!(vec![vec![&stage]]))
+                .stage_tool(&stage, instance);
         client.pipelines.create(&pipe_req).await?;
         // get the pipeline we just created
         let pipe = client.pipelines.get(group, pipeline_name).await?;
@@ -996,8 +1559,13 @@ async fn claim() -> Result<(), Error> {
         // try to claim a job
         let jobs = client
             .jobs
-            .claim(
-                &req.group, &pipe.name, stage, "cluster0", "node0", "claim", 1,
+            .claim_workload(
+                &req.group,
+                generators::stage_instance(&pipe, stage),
+                "cluster0",
+                "node0",
+                "claim",
+                1,
             )
             .await?;
         // get our reactions data
@@ -1007,7 +1575,7 @@ async fn claim() -> Result<(), Error> {
         // build random stage logs
         let logs = generators::stage_logs();
         // complete this job
-        client.jobs.proceed(&jobs[0], &logs, 2).await?;
+        client.jobs.proceed(&jobs[0], &logs, 2, "claim").await?;
         // delete our worker
         generators::delete_worker("claim", &client).await?;
     }
@@ -1050,8 +1618,13 @@ async fn expires() -> Result<(), Error> {
         // try to claim a job
         let jobs = client
             .jobs
-            .claim(
-                &req.group, &pipe.name, stage, "cluster0", "node0", "expires", 1,
+            .claim_workload(
+                &req.group,
+                generators::stage_instance(&pipe, stage),
+                "cluster0",
+                "node0",
+                "expires",
+                1,
             )
             .await?;
         // get our reactions data
@@ -1061,7 +1634,7 @@ async fn expires() -> Result<(), Error> {
         // build random stage logs
         let logs = generators::stage_logs();
         // complete this job
-        client.jobs.proceed(&jobs[0], &logs, 2).await?;
+        client.jobs.proceed(&jobs[0], &logs, 2, "expires").await?;
         // delete our worker
         generators::delete_worker("expires", &client).await?;
     }
@@ -1133,10 +1706,9 @@ async fn claim_generator() -> Result<(), Error> {
         // try to claim a job
         let jobs = client
             .jobs
-            .claim(
+            .claim_workload(
                 &req.group,
-                &pipe.name,
-                &stages[0],
+                generators::stage_instance(&pipe, &stages[0]),
                 "cluster0",
                 "node0",
                 "claim_generator",
@@ -1152,14 +1724,16 @@ async fn claim_generator() -> Result<(), Error> {
         // sleep this generator
         client.jobs.sleep(&jobs[0].id, "checkpoint-1").await?;
         // complete this job
-        client.jobs.proceed(&jobs[0], &logs, 2).await?;
+        client
+            .jobs
+            .proceed(&jobs[0], &logs, 2, "claim_generator")
+            .await?;
         // try to claim the next stage of the reaction and make sure we don't get a job
         let next_stage = client
             .jobs
-            .claim(
+            .claim_workload(
                 &req.group,
-                &pipe.name,
-                &stages[1],
+                generators::stage_instance(&pipe, &stages[1]),
                 "cluster0",
                 "node0",
                 "claim_generator",
@@ -1185,10 +1759,9 @@ async fn claim_generator() -> Result<(), Error> {
     // try to claim a generator job for the last time
     let jobs = client
         .jobs
-        .claim(
+        .claim_workload(
             &req.group,
-            &pipe.name,
-            &stages[0],
+            generators::stage_instance(&pipe, &stages[0]),
             "cluster0",
             "node0",
             "claim_generator",
@@ -1202,14 +1775,16 @@ async fn claim_generator() -> Result<(), Error> {
     // build random stage logs
     let logs = generators::stage_logs();
     // complete this job
-    client.jobs.proceed(&jobs[0], &logs, 2).await?;
+    client
+        .jobs
+        .proceed(&jobs[0], &logs, 2, "claim_generator")
+        .await?;
     // claim the final stage of this reaction and complete it
     let jobs = client
         .jobs
-        .claim(
+        .claim_workload(
             &req.group,
-            &pipe.name,
-            &stages[1],
+            generators::stage_instance(&pipe, &stages[1]),
             "cluster0",
             "node0",
             "claim_generator",
@@ -1223,7 +1798,10 @@ async fn claim_generator() -> Result<(), Error> {
     // build random stage logs
     let logs = generators::stage_logs();
     // complete this job
-    client.jobs.proceed(&jobs[0], &logs, 2).await?;
+    client
+        .jobs
+        .proceed(&jobs[0], &logs, 2, "claim_generator")
+        .await?;
     // delete our worker
     generators::delete_worker("claim_generator", &client).await?;
     // list the reactions for our pipeline that now has a status of completed
@@ -1272,10 +1850,9 @@ async fn claim_generator_fail() -> Result<(), Error> {
         // try to claim a job
         let jobs = client
             .jobs
-            .claim(
+            .claim_workload(
                 &req.group,
-                &pipe.name,
-                &stages[0],
+                generators::stage_instance(&pipe, &stages[0]),
                 "cluster0",
                 "node0",
                 "claim_generator_fail",
@@ -1291,7 +1868,10 @@ async fn claim_generator_fail() -> Result<(), Error> {
         // sleep this generator
         client.jobs.sleep(&jobs[0].id, "checkpoint-1").await?;
         // complete this job
-        client.jobs.proceed(&jobs[0], &logs, 2).await?;
+        client
+            .jobs
+            .proceed(&jobs[0], &logs, 2, "claim_generator_fail")
+            .await?;
         // delete our worker
         generators::delete_worker("claim_generator_fail", &client).await?;
     }
@@ -1309,10 +1889,9 @@ async fn claim_generator_fail() -> Result<(), Error> {
     // try to claim a generator job for the last time
     let jobs = client
         .jobs
-        .claim(
+        .claim_workload(
             &req.group,
-            &pipe.name,
-            &stages[0],
+            generators::stage_instance(&pipe, &stages[0]),
             "cluster0",
             "node0",
             "claim_generator_fail",
@@ -1326,14 +1905,16 @@ async fn claim_generator_fail() -> Result<(), Error> {
     // build random stage logs
     let logs = generators::stage_logs();
     // fail this job
-    client.jobs.error(&jobs[0].id, &logs).await?;
+    client
+        .jobs
+        .error(&jobs[0].id, &logs, "claim_generator_fail")
+        .await?;
     // try claim the final stage of this reaction and make sure it doesn't exist
     let jobs = client
         .jobs
-        .claim(
+        .claim_workload(
             &req.group,
-            &pipe.name,
-            &stages[1],
+            generators::stage_instance(&pipe, &stages[1]),
             "cluster0",
             "node0",
             "claim_generator_fail",
@@ -1392,10 +1973,9 @@ async fn claim_sub_reacts_status() -> Result<(), Error> {
         // try to claim a job for this sub reaction
         let jobs = client
             .jobs
-            .claim(
+            .claim_workload(
                 &req.group,
-                &sub_pipe.name,
-                stage,
+                generators::stage_instance(&sub_pipe, stage),
                 "cluster0",
                 "node0",
                 "claim_sub_reacts_status",
@@ -1405,7 +1985,10 @@ async fn claim_sub_reacts_status() -> Result<(), Error> {
         // build random stage logs
         let logs = generators::stage_logs();
         // complete this sub reactions job
-        let status_resp = client.jobs.proceed(&jobs[0], &logs, 2).await?;
+        let status_resp = client
+            .jobs
+            .proceed(&jobs[0], &logs, 2, "claim_sub_reacts_status")
+            .await?;
         // delete our worker
         generators::delete_worker("claim_sub_reacts_status", &client).await?;
         // make sure our sub reactions status is in the correct list
@@ -1451,10 +2034,9 @@ async fn claim_sub_reacts() -> Result<(), Error> {
         // try to claim a job
         let jobs = client
             .jobs
-            .claim(
+            .claim_workload(
                 &req.group,
-                &pipe.name,
-                stage,
+                generators::stage_instance(&pipe, stage),
                 "cluster0",
                 "node0",
                 "claim_sub_reacts",
@@ -1471,14 +2053,16 @@ async fn claim_sub_reacts() -> Result<(), Error> {
         // build random stage logs
         let logs = generators::stage_logs();
         // complete this job
-        client.jobs.proceed(&jobs[0], &logs, 2).await?;
+        client
+            .jobs
+            .proceed(&jobs[0], &logs, 2, "claim_sub_reacts")
+            .await?;
         // try to claim a job that shouldn't exist
         let jobs = client
             .jobs
-            .claim(
+            .claim_workload(
                 &req.group,
-                &pipe.name,
-                stage,
+                generators::stage_instance(&pipe, stage),
                 "cluster0",
                 "node0",
                 "claim_sub_reacts",
@@ -1507,10 +2091,9 @@ async fn claim_sub_reacts() -> Result<(), Error> {
                 // try to claim a job for this sub reaction
                 let jobs = client
                     .jobs
-                    .claim(
+                    .claim_workload(
                         &req.group,
-                        &sub_pipe.name,
-                        stage,
+                        generators::stage_instance(&sub_pipe, stage),
                         "cluster0",
                         "node0",
                         "claim_sub_reacts_sub",
@@ -1520,7 +2103,10 @@ async fn claim_sub_reacts() -> Result<(), Error> {
                 // build random stage logs
                 let logs = generators::stage_logs();
                 // complete this sub reactions job
-                client.jobs.proceed(&jobs[0], &logs, 2).await?;
+                client
+                    .jobs
+                    .proceed(&jobs[0], &logs, 2, "claim_sub_reacts_sub")
+                    .await?;
                 // delete our worker
                 generators::delete_worker("claim_sub_reacts_sub", &client).await?;
             }
@@ -1571,10 +2157,9 @@ async fn claim_sub_reacts_fail() -> Result<(), Error> {
         // try to claim a job
         let jobs = client
             .jobs
-            .claim(
+            .claim_workload(
                 &req.group,
-                &pipe.name,
-                stage,
+                generators::stage_instance(&pipe, stage),
                 "cluster0",
                 "node0",
                 "claim_sub_reacts_fail",
@@ -1591,14 +2176,16 @@ async fn claim_sub_reacts_fail() -> Result<(), Error> {
         // build random stage logs
         let logs = generators::stage_logs();
         // complete this job
-        client.jobs.proceed(&jobs[0], &logs, 2).await?;
+        client
+            .jobs
+            .proceed(&jobs[0], &logs, 2, "claim_sub_reacts_fail")
+            .await?;
         // try to claim a job that shouldn't exist yet
         let jobs = client
             .jobs
-            .claim(
+            .claim_workload(
                 &req.group,
-                &pipe.name,
-                stage,
+                generators::stage_instance(&pipe, stage),
                 "cluster0",
                 "node0",
                 "claim_sub_reacts_fail",
@@ -1627,10 +2214,9 @@ async fn claim_sub_reacts_fail() -> Result<(), Error> {
                 // try to claim a job for this sub reaction
                 let jobs = client
                     .jobs
-                    .claim(
+                    .claim_workload(
                         &req.group,
-                        &sub_pipe.name,
-                        stage,
+                        generators::stage_instance(&sub_pipe, stage),
                         "cluster0",
                         "node0",
                         "claim_sub_reacts_fail_sub",
@@ -1640,7 +2226,10 @@ async fn claim_sub_reacts_fail() -> Result<(), Error> {
                 // build random stage logs
                 let logs = generators::stage_logs();
                 // complete this sub reactions job
-                client.jobs.error(&jobs[0].id, &logs).await?;
+                client
+                    .jobs
+                    .error(&jobs[0].id, &logs, "claim_sub_reacts_fail_sub")
+                    .await?;
                 // delete our worker
                 generators::delete_worker("claim_sub_reacts_fail_sub", &client).await?;
             }
@@ -1691,10 +2280,9 @@ async fn claim_sub_reacts_race() -> Result<(), Error> {
         // try to claim a job
         let jobs = client
             .jobs
-            .claim(
+            .claim_workload(
                 &req.group,
-                &pipe.name,
-                stage,
+                generators::stage_instance(&pipe, stage),
                 "cluster0",
                 "node0",
                 "claim_sub_reacts_race",
@@ -1728,10 +2316,9 @@ async fn claim_sub_reacts_race() -> Result<(), Error> {
                 // try to claim a job for this sub reaction
                 let jobs = client
                     .jobs
-                    .claim(
+                    .claim_workload(
                         &req.group,
-                        &sub_pipe.name,
-                        stage,
+                        generators::stage_instance(&sub_pipe, stage),
                         "cluster0",
                         "node0",
                         "claim_sub_reacts_race_sub",
@@ -1741,7 +2328,10 @@ async fn claim_sub_reacts_race() -> Result<(), Error> {
                 // build random stage logs
                 let logs = generators::stage_logs();
                 // complete this sub reactions job
-                client.jobs.proceed(&jobs[0], &logs, 2).await?;
+                client
+                    .jobs
+                    .proceed(&jobs[0], &logs, 2, "claim_sub_reacts_race_sub")
+                    .await?;
                 // delete our worker
                 generators::delete_worker("claim_sub_reacts_race_sub", &client).await?;
             }
@@ -1749,10 +2339,9 @@ async fn claim_sub_reacts_race() -> Result<(), Error> {
         // try to claim a job that shouldn't exist yet
         let check_jobs = client
             .jobs
-            .claim(
+            .claim_workload(
                 &req.group,
-                &pipe.name,
-                stage,
+                generators::stage_instance(&pipe, stage),
                 "cluster0",
                 "node0",
                 "claim_sub_reacts_race",
@@ -1762,7 +2351,10 @@ async fn claim_sub_reacts_race() -> Result<(), Error> {
         // make sure we failed to claim a job due to the sub reactions not being complete yet
         is!(check_jobs.len(), 0);
         // complete this job
-        client.jobs.proceed(&jobs[0], &logs, 2).await?;
+        client
+            .jobs
+            .proceed(&jobs[0], &logs, 2, "claim_sub_reacts_race")
+            .await?;
         // delete our worker
         generators::delete_worker("claim_sub_reacts_race", &client).await?;
     }
@@ -1812,10 +2404,9 @@ async fn claim_sub_reacts_race_fail() -> Result<(), Error> {
         // try to claim a job
         let jobs = client
             .jobs
-            .claim(
+            .claim_workload(
                 &req.group,
-                &pipe.name,
-                stage,
+                generators::stage_instance(&pipe, stage),
                 "cluster0",
                 "node0",
                 "claim_sub_reacts_race_fail",
@@ -1849,10 +2440,9 @@ async fn claim_sub_reacts_race_fail() -> Result<(), Error> {
                 // try to claim a job for this sub reaction
                 let jobs = client
                     .jobs
-                    .claim(
+                    .claim_workload(
                         &req.group,
-                        &sub_pipe.name,
-                        stage,
+                        generators::stage_instance(&sub_pipe, stage),
                         "cluster0",
                         "node0",
                         "claim_sub_reacts_race_fail_sub",
@@ -1862,7 +2452,10 @@ async fn claim_sub_reacts_race_fail() -> Result<(), Error> {
                 // build random stage logs
                 let logs = generators::stage_logs();
                 // complete this sub reactions job
-                client.jobs.error(&jobs[0].id, &logs).await?;
+                client
+                    .jobs
+                    .error(&jobs[0].id, &logs, "claim_sub_reacts_race_fail_sub")
+                    .await?;
                 // delete our worker
                 generators::delete_worker("claim_sub_reacts_race_fail_sub", &client).await?;
             }
@@ -1881,10 +2474,9 @@ async fn claim_sub_reacts_race_fail() -> Result<(), Error> {
         // try to claim a job that shouldn't exist yet
         let check_jobs = client
             .jobs
-            .claim(
+            .claim_workload(
                 &req.group,
-                &pipe.name,
-                stage,
+                generators::stage_instance(&pipe, stage),
                 "cluster0",
                 "node0",
                 "claim_sub_reacts_race_fail_empty",
@@ -1896,7 +2488,10 @@ async fn claim_sub_reacts_race_fail() -> Result<(), Error> {
         // make sure we failed to claim a job due to the sub reactions not being complete yet
         is!(check_jobs.len(), 0);
         // complete this job
-        client.jobs.proceed(&jobs[0], &logs, 2).await?;
+        client
+            .jobs
+            .proceed(&jobs[0], &logs, 2, "claim_sub_reacts_race_fail_empty")
+            .await?;
         // delete our worker
         generators::delete_worker("claim_sub_reacts_race_fail", &client).await?;
     }
@@ -2053,10 +2648,9 @@ async fn ephemeral() -> Result<(), Error> {
         // try to claim a job
         let jobs = client
             .jobs
-            .claim(
+            .claim_workload(
                 &group,
-                &pipe.name,
-                stage,
+                generators::stage_instance(&pipe, stage),
                 "cluster0",
                 "node0",
                 "ephemeral",
@@ -2070,7 +2664,7 @@ async fn ephemeral() -> Result<(), Error> {
         // build random stage logs
         let logs = generators::stage_logs();
         // complete this job
-        client.jobs.proceed(&jobs[0], &logs, 2).await?;
+        client.jobs.proceed(&jobs[0], &logs, 2, "ephemeral").await?;
         // delete our worker
         generators::delete_worker("ephemeral", &client).await?;
     }
@@ -2115,10 +2709,9 @@ async fn ephemeral_fail() -> Result<(), Error> {
     // try to claim a job for this sub reaction
     let jobs = client
         .jobs
-        .claim(
+        .claim_workload(
             &group,
-            &pipe.name,
-            stage,
+            generators::stage_instance(&pipe, stage),
             "cluster0",
             "node0",
             "ephemeral_fail",
@@ -2128,7 +2721,10 @@ async fn ephemeral_fail() -> Result<(), Error> {
     // build random stage logs
     let logs = generators::stage_logs();
     // complete this sub reactions job
-    client.jobs.error(&jobs[0].id, &logs).await?;
+    client
+        .jobs
+        .error(&jobs[0].id, &logs, "ephemeral_fail")
+        .await?;
     // delete our worker
     generators::delete_worker("ephemeral_fail", &client).await?;
     Ok(())
@@ -2335,7 +2931,14 @@ async fn claim_stage(
         // claim this images job
         let mut claimed = client
             .jobs
-            .claim(group, &pipe.name, image, "cluster0", "node0", &worker, 1)
+            .claim_workload(
+                group,
+                generators::stage_instance(pipe, image),
+                "cluster0",
+                "node0",
+                &worker,
+                1,
+            )
             .await?;
         jobs.push(claimed.remove(0));
     }
@@ -2388,8 +2991,11 @@ async fn failed_reaction_not_resurrected_by_job_completion() -> Result<(), Error
     );
     // the running jobs then finish; ignore their results since they may be rejected
     let logs = generators::stage_logs();
-    for job in &jobs {
-        let _ = client.jobs.proceed(job, &logs, 1).await;
+    for (i, job) in jobs.iter().enumerate() {
+        let _ = client
+            .jobs
+            .proceed(job, &logs, 1, &format!("c5_01_{i}"))
+            .await;
     }
     // the canceled reaction must still be failed
     let react = client.reactions.get(&group, resp.id).await?;
@@ -2428,8 +3034,11 @@ async fn failed_sub_reaction_counts_once_in_parent() -> Result<(), Error> {
     handle_reaction(&client, &group, &subs[0].id, "fail").await?;
     // the running jobs then finish; ignore their results since they may be rejected
     let logs = generators::stage_logs();
-    for job in &jobs {
-        let _ = client.jobs.proceed(job, &logs, 1).await;
+    for (i, job) in jobs.iter().enumerate() {
+        let _ = client
+            .jobs
+            .proceed(job, &logs, 1, &format!("c5_01_sub_{i}"))
+            .await;
     }
     // the parent must count its single sub reaction exactly once
     let parent = client.reactions.get(&group, parent).await?;
@@ -2606,8 +3215,13 @@ async fn concurrent_user_proceed_does_not_duplicate_stage_jobs() -> Result<(), E
     .await?;
     let jobs = client
         .jobs
-        .claim(
-            &group, &pipe.name, &images[1], "cluster0", "node0", "c5_04", 100,
+        .claim_workload(
+            &group,
+            generators::stage_instance(&pipe, &images[1]),
+            "cluster0",
+            "node0",
+            "c5_04",
+            100,
         )
         .await?;
     // no reaction may have more than one stage 1 job
@@ -2737,25 +3351,53 @@ fn k8s_developer() -> UserRole {
     }
 }
 
-/// Creates a two stage pipeline in a group with one image per stage
+/// Creates a two stage pipeline in a group whose stages each run a new K8s Image tool
 ///
 /// # Arguments
 ///
-/// * `admin` - The admin client to create the images and pipeline with
+/// * `admin` - The admin client to create the tools and pipeline with
 /// * `group` - The group to create the pipeline in
 async fn two_stage_pipeline(admin: &Thorium, group: &str) -> Result<Pipeline, Error> {
-    // create one image per stage
-    let images = generators::images(group, 2, false, admin).await?;
-    // build a pipeline whose stages run one image each
-    let order = serde_json::json!([images[0].name, images[1].name]);
-    let name = format!("override-pipe-{}", generators::gen_string(8));
-    // create the pipeline
+    // each stage runs its own K8s Image tool instance in its own step
+    steps_pipe(group, 2, ImageScaler::K8s, admin).await
+}
+
+/// Register a worker that claims a user's jobs of the tool instance a pipeline stage runs
+///
+/// # Arguments
+///
+/// * `admin` - The admin client to register the worker with
+/// * `user` - The client of the user whose jobs the worker claims
+/// * `node` - The node the worker is on
+/// * `name` - The name of the worker
+/// * `pipe` - The pipeline whose stage the worker runs
+/// * `stage` - The stage whose tool instance the worker claims jobs for
+async fn creator_worker(
+    admin: &Thorium,
+    user: &Thorium,
+    node: &str,
+    name: &str,
+    pipe: &Pipeline,
+    stage: &str,
+) -> Result<(), Error> {
+    // jobs are queued per creator, so the worker runs as the user whose jobs it claims
+    let username = user.users.info().await?.username;
+    let list = thorium::models::WorkerRegistrationList::default().add(
+        "cluster0",
+        node,
+        name,
+        username,
+        &pipe.group,
+        &pipe.name,
+        stage,
+        Resources::default(),
+        thorium::models::Pools::Deadline,
+    );
     admin
-        .pipelines
-        .create(&PipelineRequest::new(group, &name, order))
+        .system
+        .register_workers(ImageScaler::K8s, &list)
         .await?;
-    // get the created pipeline
-    admin.pipelines.get(group, &name).await
+    Ok(())
 }
 
 /// Builds options that replace an image's command, positionals, and kwargs
@@ -2781,6 +3423,99 @@ fn override_opts(marker: &str) -> GenericJobOpts {
 /// * `opts` - The options to set
 fn opts_update(stage: &str, opts: GenericJobOpts) -> ReactionUpdate {
     ReactionUpdate::default().arg(stage, GenericJobArgsUpdate::default().opts(opts))
+}
+
+/// Overriding a stage's command needs the Developer role for the scaler of the tool instance the
+/// stage runs, on a create, a bulk create, a bulk create for another user, and an update
+#[tokio::test]
+#[allow(clippy::too_many_lines)]
+async fn overrides_need_the_stage_tool_instance_scaler() -> Result<(), Error> {
+    // a plain user, a K8s developer, and a BareMetal developer in one group
+    let admin = test_utilities::admin_client().await?;
+    let suffix = generators::name_suffix();
+    let plain = generators::moon_user(&admin, "carme", &suffix).await?;
+    let k8s = generators::named_user_with_role(
+        &admin,
+        &generators::readable_name("ananke", &suffix),
+        k8s_developer(),
+    )
+    .await?;
+    let bare_metal = generators::named_user_with_role(
+        &admin,
+        &generators::readable_name("sinope", &suffix),
+        UserRole::Developer {
+            k8s: false,
+            bare_metal: true,
+            windows: false,
+            kvm: false,
+            external: false,
+        },
+    )
+    .await?;
+    let roles = generators::GroupRoles::default()
+        .user(&plain.username)
+        .user(&k8s.username)
+        .user(&bare_metal.username);
+    let group = generators::god_group(&admin, "vulcan", &suffix, &roles).await?;
+    // a pipeline whose one stage runs a BareMetal tool instance
+    let pipe = steps_pipe(&group, 1, ImageScaler::BareMetal, &admin).await?;
+    let stage = pipe.order[0][0].clone();
+    let opts = override_opts("BARE-METAL");
+    let overridden = ReactionRequest::new(&group, &pipe.name)
+        .args(&stage, GenericJobArgs::default().opts(opts.clone()));
+    // the K8s developer's create and bulk create with the override are refused
+    fail!(k8s.client.reactions.create(&overridden).await, 401);
+    let resp = k8s
+        .client
+        .reactions
+        .create_bulk(std::slice::from_ref(&overridden))
+        .await;
+    fail!(resp, 401);
+    // an admin's bulk create for the K8s developer reports their request as refused
+    let reqs = HashMap::from([(k8s.username.clone(), vec![overridden.clone()])]);
+    let by_user = admin.reactions.create_bulk_by_user(&reqs).await?;
+    is_empty!(by_user[&k8s.username].created);
+    contains_key!(by_user[&k8s.username].errors, &0);
+    // the K8s developer can't add the override to the plain user's reaction
+    let id = plain
+        .client
+        .reactions
+        .create(&ReactionRequest::new(&group, &pipe.name))
+        .await?
+        .id;
+    let update = opts_update(&stage, opts.clone());
+    fail!(k8s.client.reactions.update(&group, &id, &update).await, 401);
+    // nothing the K8s developer tried was created or stored
+    let mut cursor = admin.reactions.list(&group, &pipe.name);
+    cursor.next().await?;
+    is!(cursor.names, vec![id.to_string()]);
+    let stored = admin.reactions.get(&group, id).await?;
+    is!(
+        stored.args.get(&stage).map(|args| args.opts.clone()),
+        None::<GenericJobOpts>
+    );
+    // the BareMetal developer overrides on a create, a bulk create, and an update
+    let created = bare_metal.client.reactions.create(&overridden).await?;
+    let stored = admin.reactions.get(&group, created.id).await?;
+    is!(stored.args[&stage].opts, opts);
+    let resp = bare_metal
+        .client
+        .reactions
+        .create_bulk(std::slice::from_ref(&overridden))
+        .await?;
+    is!(resp.created.len(), 1);
+    let updated = bare_metal
+        .client
+        .reactions
+        .update(&group, &id, &update)
+        .await?;
+    is!(updated.args[&stage].opts, opts);
+    // an admin's bulk create for the BareMetal developer creates their request
+    let reqs = HashMap::from([(bare_metal.username.clone(), vec![overridden])]);
+    let by_user = admin.reactions.create_bulk_by_user(&reqs).await?;
+    is_empty!(by_user[&bare_metal.username].errors);
+    is!(by_user[&bare_metal.username].created.len(), 1);
+    Ok(())
 }
 
 /// A group member without the Developer role can't override another member's reaction's
@@ -2821,59 +3556,36 @@ async fn update_overrides_refused_for_member() -> Result<(), Error> {
         stored.args.get(&stage_two).map(|args| args.opts.clone()),
         None::<GenericJobOpts>
     );
-    // run the first stage as an agent would so the second stage's job is created
+    // run the first stage as an agent would so the second stage's job is created, with a
+    // worker that claims the creator's jobs
     let worker_one = format!("override-w1-{}", generators::gen_string(6));
-    generators::worker(
-        "cluster0",
+    creator_worker(
+        &admin,
+        &creator,
         &node,
         &worker_one,
-        &group,
-        &pipe.name,
+        &pipe,
         &pipe.order[0][0],
-        &admin,
     )
     .await?;
     // jobs are queued per creator, so claim them with the creator's credentials
+    let tool_one = generators::stage_instance(&pipe, &pipe.order[0][0]);
     let jobs = creator
         .jobs
-        .claim(
-            &group,
-            &pipe.name,
-            &pipe.order[0][0],
-            "cluster0",
-            &node,
-            &worker_one,
-            1,
-        )
+        .claim_workload(&group, tool_one, "cluster0", &node, &worker_one, 1)
         .await?;
     creator
         .jobs
-        .proceed(&jobs[0], &generators::stage_logs(), 2)
+        .proceed(&jobs[0], &generators::stage_logs(), 2, &worker_one)
         .await?;
     generators::delete_worker(&worker_one, &admin).await?;
-    // claim the second stage's job
+    // claim the second stage's job with another worker for the creator's jobs
     let worker_two = format!("override-w2-{}", generators::gen_string(6));
-    generators::worker(
-        "cluster0",
-        &node,
-        &worker_two,
-        &group,
-        &pipe.name,
-        &stage_two,
-        &admin,
-    )
-    .await?;
+    creator_worker(&admin, &creator, &node, &worker_two, &pipe, &stage_two).await?;
+    let tool_two = generators::stage_instance(&pipe, &stage_two);
     let jobs = creator
         .jobs
-        .claim(
-            &group,
-            &pipe.name,
-            &stage_two,
-            "cluster0",
-            &node,
-            &worker_two,
-            1,
-        )
+        .claim_workload(&group, tool_two, "cluster0", &node, &worker_two, 1)
         .await?;
     generators::delete_worker(&worker_two, &admin).await?;
     // make sure the second stage's job runs the image's own command
@@ -2901,10 +3613,17 @@ async fn update_overrides_refused_for_creator() -> Result<(), Error> {
         .create(&ReactionRequest::new(&group, &pipe.name))
         .await?
         .id;
-    // the creator's update overriding only the command is refused
+    // the creator's update overriding only the command, only the positionals, or only the
+    // kwargs is refused
     let cmd_only = GenericJobOpts::new(false, false, Some(vec!["/bin/true".to_owned()]));
-    let update = opts_update(&stage_two, cmd_only);
-    fail!(creator.reactions.update(&group, &id, &update).await, 401);
+    for opts in [
+        cmd_only,
+        GenericJobOpts::new(true, false, None),
+        GenericJobOpts::new(false, true, None),
+    ] {
+        let update = opts_update(&stage_two, opts);
+        fail!(creator.reactions.update(&group, &id, &update).await, 401);
+    }
     // the creator's update overriding the command, positionals, and kwargs is refused
     let update = opts_update(&stage_two, override_opts("INJECTED"));
     fail!(creator.reactions.update(&group, &id, &update).await, 401);
@@ -2976,6 +3695,103 @@ async fn update_overrides_allowed_for_developer_and_admin() -> Result<(), Error>
     Ok(())
 }
 
+/// Builds an update that replaces or adds one ephemeral file
+///
+/// # Arguments
+///
+/// * `name` - The name of the ephemeral file
+/// * `content` - The bytes to write to the file
+fn ephemeral_update(name: &str, content: &str) -> ReactionUpdate {
+    // ReactionUpdate has no ephemeral builder so populate its map directly with base64 bytes
+    let mut update = ReactionUpdate::default();
+    update
+        .ephemeral
+        .insert(name.to_owned(), BASE64.encode(content.as_bytes()));
+    update
+}
+
+/// Replacing an existing ephemeral file of a reaction with an override stage needs the Developer
+/// role for that stage's scaler, so an editor can't swap the script an override runs, while adding
+/// a new file and replacing a file of a reaction with no override stay open to editors
+#[tokio::test]
+#[allow(clippy::too_many_lines)]
+async fn update_ephemeral_replacement_needs_developer_with_override() -> Result<(), Error> {
+    // the script a developer's override runs, and the script an editor tries to swap in
+    const ORIGINAL: &str = "echo original";
+    const INJECTED: &str = "echo injected";
+    // get admin client (the group owner)
+    let admin = test_utilities::admin_client().await?;
+    // create the group
+    let group = generators::groups(1, &admin).await?.remove(0).name;
+    // add a plain editor and two k8s developers
+    let editor = group_member(&admin, &group, UserRole::User).await?;
+    let developer = group_member(&admin, &group, k8s_developer()).await?;
+    let other_developer = group_member(&admin, &group, k8s_developer()).await?;
+    // create a two stage pipeline
+    let pipe = two_stage_pipeline(&admin, &group).await?;
+    let stage_two = pipe.order[1][0].clone();
+    // the developer creates a reaction whose second stage runs the ephemeral script
+    let opts = GenericJobOpts::new(
+        true,
+        true,
+        Some(vec![
+            "/bin/sh".to_owned(),
+            "/tmp/thorium/ephemeral/s.sh".to_owned(),
+        ]),
+    );
+    let req = ReactionRequest::new(&group, &pipe.name)
+        .args(&stage_two, GenericJobArgs::default().opts(opts))
+        .buffer("s.sh", ORIGINAL);
+    let id = developer.reactions.create(&req).await?.id;
+    // the editor can't replace the script and the stored script is unchanged
+    let swap = ephemeral_update("s.sh", INJECTED);
+    fail!(editor.reactions.update(&group, &id, &swap).await, 401);
+    let stored = admin
+        .reactions
+        .download_ephemeral(&group, &id, "s.sh")
+        .await?;
+    is!(stored, ORIGINAL);
+    // the editor can still add a new file to the reaction
+    let added = editor
+        .reactions
+        .update(&group, &id, &ephemeral_update("extra.txt", "extra"))
+        .await?;
+    contains!(added.ephemeral, &"extra.txt".to_owned());
+    // another developer can replace the script
+    other_developer
+        .reactions
+        .update(&group, &id, &ephemeral_update("s.sh", "echo second"))
+        .await?;
+    let stored = admin
+        .reactions
+        .download_ephemeral(&group, &id, "s.sh")
+        .await?;
+    is!(stored, "echo second");
+    // the admin can replace the script
+    admin
+        .reactions
+        .update(&group, &id, &ephemeral_update("s.sh", "echo admin"))
+        .await?;
+    let stored = admin
+        .reactions
+        .download_ephemeral(&group, &id, "s.sh")
+        .await?;
+    is!(stored, "echo admin");
+    // a reaction with no override stage keeps its files open to any editor
+    let plain = ReactionRequest::new(&group, &pipe.name).buffer("data.txt", "one");
+    let plain_id = developer.reactions.create(&plain).await?.id;
+    editor
+        .reactions
+        .update(&group, &plain_id, &ephemeral_update("data.txt", "two"))
+        .await?;
+    let stored = admin
+        .reactions
+        .download_ephemeral(&group, &plain_id, "data.txt")
+        .await?;
+    is!(stored, "two");
+    Ok(())
+}
+
 /// A group member without the Developer role can still update another member's reaction
 /// when the update doesn't change any stage's options
 #[tokio::test]
@@ -2995,12 +3811,13 @@ async fn update_without_opts_change_by_editor() -> Result<(), Error> {
     let req = ReactionRequest::new(&group, &pipe.name)
         .args(&stage_two, GenericJobArgs::default().opts(opts.clone()));
     let id = developer.reactions.create(&req).await?.id;
-    // the editor updates tags, positionals, and kwargs without setting options
+    // the editor updates tags, positionals, kwargs, and switches without setting options
     let update = ReactionUpdate::default().tag("edited").arg(
         &stage_two,
         GenericJobArgsUpdate::default()
             .positionals(vec!["1", "2"])
-            .kwarg("--new", vec!["arg"]),
+            .kwarg("--new", vec!["arg"])
+            .switch("--fast"),
     );
     let updated = editor.reactions.update(&group, &id, &update).await?;
     is!(updated, update);

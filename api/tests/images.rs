@@ -9,23 +9,59 @@ use thorium::models::{
     DependenciesUpdate, DependencyPassStrategy, EphemeralDependencySettingsUpdate,
     FileSystemDependencySettingsUpdate, FilesHandlerUpdate, GroupUpdate, GroupUsersUpdate,
     HostPathWhitelistUpdate, ImageBan, ImageBanKind, ImageBanUpdate, ImageLifetime,
-    ImageNetworkPolicyUpdate, ImageScaler, ImageUpdate, ImageVersion, NetworkPolicyRequest,
-    NotificationLevel, NotificationParams, NotificationRequest, OutputCollectionUpdate,
-    OutputDisplayType, OutputHandler, PipelineRequest, RepoDependencySettingsUpdate,
-    ResourcesUpdate, ResultDependencySettingsUpdate, SampleDependencySettingsUpdate,
-    SystemSettingsResetParams, SystemSettingsUpdate, SystemSettingsUpdateParams, Volume,
-    VolumeTypes,
+    ImageNetworkPolicyUpdate, ImageScaler, ImageUpdate, NetworkPolicyRequest, NotificationLevel,
+    NotificationParams, NotificationRequest, OutputCollectionUpdate, OutputDisplayType,
+    OutputHandler, PipelineRequest, RepoDependencySettingsUpdate, ResourcesUpdate,
+    ResultDependencySettingsUpdate, SampleDependencySettingsUpdate, SystemSettingsResetParams,
+    SystemSettingsUpdate, SystemSettingsUpdateParams, ToolVersion, Volume, VolumeTypes,
 };
 use thorium::test_utilities::{self, generators};
 use thorium::{Error, contains, fail, is, is_in, unwrap_variant, vec_in_vec};
 use uuid::Uuid;
+
+/// Image creates and updates are gone while image reads, lists, and deletes still work
+#[tokio::test]
+async fn image_writes_gone() -> Result<(), Error> {
+    // seed an image in a group, then refuse image writes there as everywhere else
+    let admin = test_utilities::admin_client().await?;
+    let group = generators::image_groups(1, &admin).await?.remove(0).name;
+    let seeded = generators::images(&group, 2, false, &admin).await?;
+    test_utilities::faults::forbid_image_writes(&group);
+    let before = admin.images.get(&group, &seeded[0].name).await?;
+    // a create is gone and names the tool routes
+    let resp = admin.images.create(&generators::gen_image(&group)).await;
+    fail!(resp, 410, "/api/entities/");
+    let resp = admin.images.create(&generators::gen_image(&group)).await;
+    fail!(resp, 410, "thorctl tools");
+    // an update is gone, including one that only changes bans
+    let update = ImageUpdate::default().description("changed");
+    let resp = admin.images.update(&group, &seeded[0].name, &update).await;
+    fail!(resp, 410, "/api/entities/");
+    let ban = ImageBan::new(ImageBanKind::generic("banned"));
+    let update = ImageUpdate::default().bans(ImageBanUpdate::default().add_ban(ban));
+    let resp = admin.images.update(&group, &seeded[0].name, &update).await;
+    fail!(resp, 410, "thorctl tools");
+    // the image is unchanged
+    let after = admin.images.get(&group, &seeded[0].name).await?;
+    is!(
+        serde_json::to_value(&after)?,
+        serde_json::to_value(&before)?
+    );
+    // reads, lists, and deletes still work
+    let listed = admin.images.list(&group).details().exec().await?;
+    is!(listed.details.len(), 2);
+    let resp = admin.images.delete(&group, &seeded[1].name).await?;
+    is!(resp.status().as_u16(), 204);
+    fail!(admin.images.get(&group, &seeded[1].name).await, 404);
+    Ok(())
+}
 
 #[tokio::test]
 async fn create() -> Result<(), Error> {
     // get admin client
     let client = test_utilities::admin_client().await?;
     // Create a group
-    let group = generators::groups(1, &client).await?.remove(0).name;
+    let group = generators::image_groups(1, &client).await?.remove(0).name;
     // Create a test image
     let image_req = generators::gen_image(&group);
     let resp = client.images.create(&image_req).await?;
@@ -38,7 +74,7 @@ async fn create_bad_volume_name() -> Result<(), Error> {
     // get admin client
     let client = test_utilities::admin_client().await?;
     // Create a group
-    let group = generators::groups(1, &client).await?.remove(0).name;
+    let group = generators::image_groups(1, &client).await?.remove(0).name;
     // attempt to create an image with an invalid name
     let image_req = generators::gen_image(&group).volume(Volume::new(
         "InvalidImageName!@#$",
@@ -65,7 +101,7 @@ async fn create_conflict() -> Result<(), Error> {
     // get admin client
     let client = test_utilities::admin_client().await?;
     // create a group
-    let group = generators::groups(1, &client).await?.remove(0).name;
+    let group = generators::image_groups(1, &client).await?.remove(0).name;
     // create a test image
     let mut image_req = generators::gen_image(&group);
     // set the description as blank
@@ -88,7 +124,7 @@ async fn create_bad_child_filter() -> Result<(), Error> {
     // get admin client
     let client = test_utilities::admin_client().await?;
     // create a group
-    let group = generators::groups(1, &client).await?.remove(0).name;
+    let group = generators::image_groups(1, &client).await?.remove(0).name;
     // attempt to create an image with a bad child filter regular expression
     let image_req = generators::gen_image(&group)
         .child_filters(ChildFilters::default().mime(r"incomplete-escape\"));
@@ -110,7 +146,10 @@ async fn create_host_path() -> Result<(), Error> {
     // get user client
     let user_client = generators::client(&client).await?;
     // create a group
-    let group = generators::groups(1, &user_client).await?.remove(0).name;
+    let group = generators::image_groups(1, &user_client)
+        .await?
+        .remove(0)
+        .name;
     // attempt to create an image with an un-whitelisted host path
     let image_req = generators::gen_host_path(&group, "/disallowed/mount");
     let resp = user_client.images.create(&image_req).await;
@@ -184,7 +223,7 @@ async fn create_network_policy() -> Result<(), Error> {
     // get admin client
     let client = test_utilities::admin_client().await?;
     // create groups
-    let groups = generators::groups(2, &client)
+    let groups = generators::image_groups(2, &client)
         .await?
         .into_iter()
         .map(|g| g.name)
@@ -204,17 +243,18 @@ async fn create_bad_network_policy() -> Result<(), Error> {
     // get admin client
     let client = test_utilities::admin_client().await?;
     // Create a group
-    let image_group = generators::groups(1, &client).await?.remove(0).name;
+    let image_group = generators::image_groups(1, &client).await?.remove(0).name;
     // create an image with a network policy that doesn't exist
     let mut image_req = generators::gen_image(&image_group);
     image_req = image_req.network_policy("network-policy-no-exist");
     let resp = client.images.create(&image_req).await;
     fail!(resp, 404);
     // create an image with a network policy that's not in the image's group
-    let policy_group = generators::groups(1, &client).await?.remove(0).name;
-    let network_policy = generators::network_policies(&[policy_group.clone()], 1, &client)
-        .await?
-        .remove(0);
+    let policy_group = generators::image_groups(1, &client).await?.remove(0).name;
+    let network_policy =
+        generators::network_policies(std::slice::from_ref(&policy_group), 1, &client)
+            .await?
+            .remove(0);
     image_req = image_req.network_policy(&network_policy.name);
     let resp = client.images.create(&image_req).await;
     fail!(resp, 404);
@@ -230,7 +270,7 @@ async fn create_default_network_policies() -> Result<(), Error> {
     // get admin client
     let client = test_utilities::admin_client().await?;
     // create group
-    let group = generators::groups(1, &client).await?.remove(0).name;
+    let group = generators::image_groups(1, &client).await?.remove(0).name;
     let group_array = [group.clone()];
     // create default network policies in that group
     let default_policy_reqs: Vec<NetworkPolicyRequest> = (0..10)
@@ -267,7 +307,7 @@ async fn get() -> Result<(), Error> {
     // get admin client
     let client = test_utilities::admin_client().await?;
     // Create a group
-    let group = generators::groups(1, &client).await?.remove(0).name;
+    let group = generators::image_groups(1, &client).await?.remove(0).name;
     // create an image and then get it
     let image = generators::gen_image(&group);
     let resp = client.images.create(&image).await?;
@@ -283,7 +323,7 @@ async fn list() -> Result<(), Error> {
     // get admin client
     let client = test_utilities::admin_client().await?;
     // Create a group
-    let group = generators::groups(1, &client).await?.remove(0).name;
+    let group = generators::image_groups(1, &client).await?.remove(0).name;
     // setup 20 random images
     let images = generators::images(&group, 20, false, &client).await?;
     // get the names of all the images we have created
@@ -303,7 +343,7 @@ async fn list_details() -> Result<(), Error> {
     // get admin client
     let client = test_utilities::admin_client().await?;
     // Create a group
-    let group = generators::groups(1, &client).await?.remove(0).name;
+    let group = generators::image_groups(1, &client).await?.remove(0).name;
     // setup 20 random images
     let images = generators::images(&group, 20, false, &client).await?;
     // list theimages we just created
@@ -319,7 +359,7 @@ async fn delete() -> Result<(), Error> {
     // get admin client
     let client = test_utilities::admin_client().await?;
     // Create a group
-    let group = generators::groups(1, &client).await?.remove(0).name;
+    let group = generators::image_groups(1, &client).await?.remove(0).name;
     // setup a random image
     let image = generators::images(&group, 1, false, &client)
         .await?
@@ -340,15 +380,17 @@ async fn delete_conflict() -> Result<(), Error> {
     // get admin client
     let client = test_utilities::admin_client().await?;
     // Create a group
-    let group = generators::groups(1, &client).await?.remove(0).name;
+    let group = generators::image_groups(1, &client).await?.remove(0).name;
     // setup a random image
     let image = generators::images(&group, 1, false, &client)
         .await?
         .remove(0);
-    // build our pipeline request
+    // build our pipeline request with a stage named after the image
     let order = serde_json::json!(vec![&image.name]);
-    let pipe_req = PipelineRequest::new(&group, "testpipe", order);
-    // create a pipeline that uses this image
+    let instance = generators::tool_instance(&[&group], &client).await?;
+    let pipe_req =
+        PipelineRequest::new(&group, "testpipe", order).stage_tool(&image.name, instance);
+    // create a pipeline whose stage is named after this image
     client.pipelines.create(&pipe_req).await?;
     // delete that image
     let status = client.images.delete(&group, &image.name).await;
@@ -362,10 +404,12 @@ async fn update() -> Result<(), Error> {
     // get admin client
     let client = test_utilities::admin_client().await?;
     // Create a group
-    let group = generators::groups(1, &client).await?.remove(0).name;
+    let group = generators::image_groups(1, &client).await?.remove(0).name;
     // create network policies
-    let network_policies = generators::network_policies(&[group.clone()], 2, &client).await?;
-    let default_policy = generators::gen_network_policy(&[group.clone()]).default_policy();
+    let network_policies =
+        generators::network_policies(std::slice::from_ref(&group), 2, &client).await?;
+    let default_policy =
+        generators::gen_network_policy(std::slice::from_ref(&group)).default_policy();
     client
         .network_policies
         .create(default_policy.clone())
@@ -376,7 +420,7 @@ async fn update() -> Result<(), Error> {
         .remove(0);
     // build and update for that image
     let update = ImageUpdate::default()
-        .version(ImageVersion::SemVer(semver::Version::parse("1.1.0-RC")?))
+        .version(ToolVersion::SemVer(semver::Version::parse("1.1.0-RC")?))
         .image("rust:1.48.0")
         .lifetime(ImageLifetime::jobs(12))
         .timeout(123_452)
@@ -490,7 +534,7 @@ async fn update_bad_name() -> Result<(), Error> {
     // get admin client
     let client = test_utilities::admin_client().await?;
     // Create a group
-    let group = generators::groups(1, &client).await?.remove(0).name;
+    let group = generators::image_groups(1, &client).await?.remove(0).name;
     // setup a random image
     let image = generators::images(&group, 1, false, &client)
         .await?
@@ -523,7 +567,10 @@ async fn update_user() -> Result<(), Error> {
     // get a user client
     let user_client = generators::client(&client).await?;
     // Create a group
-    let group = generators::groups(1, &user_client).await?.remove(0).name;
+    let group = generators::image_groups(1, &user_client)
+        .await?
+        .remove(0)
+        .name;
     // setup a random image
     let image = generators::images(&group, 1, false, &user_client)
         .await?
@@ -562,7 +609,7 @@ async fn update_clear_description() -> Result<(), Error> {
     // get admin client
     let client = test_utilities::admin_client().await?;
     // Create a group
-    let group = generators::groups(1, &client).await?.remove(0).name;
+    let group = generators::image_groups(1, &client).await?.remove(0).name;
     // setup a random image
     let image = generators::images(&group, 1, false, &client)
         .await?
@@ -581,18 +628,78 @@ async fn update_clear_description() -> Result<(), Error> {
     Ok(())
 }
 
+/// An image whose Redis hash holds externally tagged version JSON, as stored images hold it,
+/// loads through the API, and an unrelated update leaves those bytes unchanged
+#[tokio::test]
+async fn pre_rename_version_loads() -> Result<(), Error> {
+    // get admin client
+    let client = test_utilities::admin_client().await?;
+    // create a group and an image without a version
+    let group = generators::image_groups(1, &client).await?.remove(0).name;
+    let image_req = generators::gen_image(&group);
+    client.images.create(&image_req).await?;
+    // connect to the Redis instance the test API uses
+    let redis = test_utilities::get_redis_client(&test_utilities::CONF).await;
+    let mut conn = redis
+        .get()
+        .await
+        .map_err(|err| Error::new(format!("Failed to get a Redis connection: {err}")))?;
+    // build the key of the image's data hash
+    let key = format!(
+        "{}:image_data:{group}:{}",
+        test_utilities::CONF.thorium.namespace,
+        image_req.name
+    );
+    // check each shape a version is stored in
+    let stored = [
+        (
+            r#"{"SemVer":"1.2.3"}"#,
+            ToolVersion::SemVer(semver::Version::parse("1.2.3")?),
+        ),
+        (r#"{"Custom":"x"}"#, ToolVersion::Custom("x".to_owned())),
+    ];
+    for (raw, expected) in stored {
+        // write the version field straight into the image's hash
+        redis::cmd("hset")
+            .arg(&key)
+            .arg("version")
+            .arg(raw)
+            .exec_async(&mut *conn)
+            .await
+            .map_err(|err| Error::new(format!("Failed to write an image version: {err}")))?;
+        // read the image back through the API
+        let image = client.images.get(&group, &image_req.name).await?;
+        is!(image.version.as_ref(), Some(&expected));
+        // update an unrelated field through the API
+        let update = ImageUpdate::default().description(format!("stored as {raw}"));
+        client
+            .images
+            .update(&group, &image_req.name, &update)
+            .await?;
+        // the stored version is still the same bytes
+        let after: String = redis::cmd("hget")
+            .arg(&key)
+            .arg("version")
+            .query_async(&mut *conn)
+            .await
+            .map_err(|err| Error::new(format!("Failed to read an image version: {err}")))?;
+        is!(after, raw);
+    }
+    Ok(())
+}
+
 #[tokio::test]
 async fn update_clear_version() -> Result<(), Error> {
     // get admin client
     let client = test_utilities::admin_client().await?;
     // Create a group
-    let group = generators::groups(1, &client).await?.remove(0).name;
+    let group = generators::image_groups(1, &client).await?.remove(0).name;
     // setup a random image
     let image = generators::images(&group, 1, false, &client)
         .await?
         .remove(0);
     // update the image with some version
-    let update = ImageUpdate::default().version(ImageVersion::Custom("custom_v1".to_string()));
+    let update = ImageUpdate::default().version(ToolVersion::Custom("custom_v1".to_string()));
     client.images.update(&group, &image.name, &update).await?;
     let updated = client.images.get(&group, &image.name).await?;
     is!(updated, update);
@@ -603,7 +710,7 @@ async fn update_clear_version() -> Result<(), Error> {
     let updated = client.images.get(&group, &image.name).await?;
     // ensure that version is empty
     is!(updated, update);
-    is!(updated.version, Option::<ImageVersion>::None);
+    is!(updated.version, Option::<ToolVersion>::None);
     Ok(())
 }
 
@@ -612,7 +719,7 @@ async fn update_child_filters() -> Result<(), Error> {
     // get admin client
     let client = test_utilities::admin_client().await?;
     // Create a group
-    let group = generators::groups(1, &client).await?.remove(0).name;
+    let group = generators::image_groups(1, &client).await?.remove(0).name;
     // create the image with a child filter
     let child_filter = r"remove-me";
     let image_req =
@@ -640,7 +747,7 @@ async fn update_bad_child_filters() -> Result<(), Error> {
     // get admin client
     let client = test_utilities::admin_client().await?;
     // Create a group
-    let group = generators::groups(1, &client).await?.remove(0).name;
+    let group = generators::image_groups(1, &client).await?.remove(0).name;
     // setup a random image
     let image = generators::images(&group, 1, false, &client)
         .await?
@@ -663,7 +770,7 @@ async fn update_bans() -> Result<(), Error> {
     // get admin client
     let client = test_utilities::admin_client().await?;
     // Create a group
-    let group = generators::groups(1, &client).await?.remove(0).name;
+    let group = generators::image_groups(1, &client).await?.remove(0).name;
     // setup a random image
     let image = generators::images(&group, 1, false, &client)
         .await?
@@ -728,7 +835,10 @@ async fn update_fix_ban() -> Result<(), Error> {
     // get a user client
     let user_client = generators::client(&client).await?;
     // Create a group
-    let group = generators::groups(1, &user_client).await?.remove(0).name;
+    let group = generators::image_groups(1, &user_client)
+        .await?
+        .remove(0)
+        .name;
     // reset settings
     client
         .system
@@ -796,7 +906,7 @@ async fn update_network_policy() -> Result<(), Error> {
     // get admin client
     let client = test_utilities::admin_client().await?;
     // create groups
-    let groups = generators::groups(2, &client)
+    let groups = generators::image_groups(2, &client)
         .await?
         .into_iter()
         .map(|g| g.name)
@@ -855,19 +965,20 @@ async fn update_bad_network_policy() -> Result<(), Error> {
     // get admin client
     let client = test_utilities::admin_client().await?;
     // create groups
-    let image_group = generators::groups(1, &client).await?.remove(0).name;
-    let policy_group = generators::groups(1, &client).await?.remove(0).name;
+    let image_group = generators::image_groups(1, &client).await?.remove(0).name;
+    let policy_group = generators::image_groups(1, &client).await?.remove(0).name;
     // create image with a policy
-    let image_policy = generators::network_policies(&[image_group.clone()], 1, &client)
+    let image_policy = generators::network_policies(std::slice::from_ref(&image_group), 1, &client)
         .await?
         .remove(0);
     let mut image_req = generators::gen_image(&image_group);
     image_req = image_req.network_policy(&image_policy.name);
     client.images.create(&image_req).await?;
     // create network policy
-    let not_image_policy = generators::network_policies(&[policy_group.clone()], 1, &client)
-        .await?
-        .remove(0);
+    let not_image_policy =
+        generators::network_policies(std::slice::from_ref(&policy_group), 1, &client)
+            .await?
+            .remove(0);
     // attempt to add a network policy that is not in the image's group
     let update = ImageUpdate::default()
         .network_policies(ImageNetworkPolicyUpdate::default().add_policy(&not_image_policy.name));
@@ -928,7 +1039,10 @@ async fn notifications_bans() -> Result<(), Error> {
     // get user client
     let user_client = generators::client(&client).await?;
     // Create a group
-    let group = generators::groups(1, &user_client).await?.remove(0).name;
+    let group = generators::image_groups(1, &user_client)
+        .await?
+        .remove(0)
+        .name;
     // setup a random image
     let image = generators::images(&group, 1, false, &user_client)
         .await?
@@ -978,7 +1092,7 @@ async fn create_notification() -> Result<(), Error> {
     // get admin client
     let client = test_utilities::admin_client().await?;
     // Create a group
-    let group = generators::groups(1, &client).await?.remove(0).name;
+    let group = generators::image_groups(1, &client).await?.remove(0).name;
     // setup a random image
     let image = generators::images(&group, 1, false, &client)
         .await?
@@ -1005,7 +1119,10 @@ async fn create_notification_bad() -> Result<(), Error> {
     // get user client
     let user_client = generators::client(&client).await?;
     // Create a group
-    let group = generators::groups(1, &user_client).await?.remove(0).name;
+    let group = generators::image_groups(1, &user_client)
+        .await?
+        .remove(0)
+        .name;
     // setup a random image
     let image = generators::images(&group, 1, false, &user_client)
         .await?
@@ -1036,7 +1153,7 @@ async fn delete_notification() -> Result<(), Error> {
     // get admin client
     let client = test_utilities::admin_client().await?;
     // Create a group
-    let group = generators::groups(1, &client).await?.remove(0).name;
+    let group = generators::image_groups(1, &client).await?.remove(0).name;
     // setup a random image
     let image = generators::images(&group, 1, false, &client)
         .await?
@@ -1071,7 +1188,10 @@ async fn delete_notification_bad() -> Result<(), Error> {
     // get user client
     let user_client = generators::client(&client).await?;
     // Create a group
-    let group = generators::groups(1, &user_client).await?.remove(0).name;
+    let group = generators::image_groups(1, &user_client)
+        .await?
+        .remove(0)
+        .name;
     // setup a random image
     let image = generators::images(&group, 1, false, &user_client)
         .await?

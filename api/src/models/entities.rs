@@ -15,30 +15,48 @@ use crate::models::{
     TagMap, TreeSupport, VendorEntity, VendorEntityRequest,
 };
 
+pub mod agents;
 pub mod collections;
 pub mod countries;
 pub mod devices;
+#[cfg(any(feature = "api", feature = "client"))]
+pub mod digests;
 pub mod filesystem;
 pub mod flags;
 pub mod functions;
 pub mod incident;
+pub mod models;
 pub mod network_activity;
 pub mod pe;
 pub mod processes;
 pub mod rules;
 pub mod shared;
+pub mod tools;
+pub mod toolsets;
 pub mod vendors;
+pub mod workflows;
 
+use agents::{AgentEntity, AgentEntityRequest};
 use devices::DeviceEntity;
 use filesystem::{FileSystemEntity, FileSystemFolderEntity};
 use flags::Confidence;
 use flags::Flag;
 use functions::{CompiledFunction, CompiledInstruction, DecompiledFunction};
 use incident::{Incident, IncidentRequest};
+use models::{
+    ModelCredentialEntity, ModelCredentialEntityRequest, ModelEndpointEntity,
+    ModelEndpointEntityRequest, ModelProfileEntity, ModelProfileEntityRequest,
+};
 use network_activity::NetworkConnection;
 use pe::{PeImportEntity, PeSectionEntity};
 use processes::{WindowsProcessEntity, WindowsProcessTreeEntity};
 use rules::{SigmaRule, SigmaRuleAppliesTo};
+use tools::{ToolEntity, ToolEntityRequest, ToolInstanceEntity, ToolInstanceEntityRequest};
+use toolsets::{ToolSetEntity, ToolSetEntityRequest, ToolSetInstanceEntityRequest};
+use workflows::{
+    WorkflowCatalogEntity, WorkflowCatalogEntityRequest, WorkflowInstanceEntity,
+    WorkflowInstanceEntityRequest,
+};
 
 // api/client imports
 cfg_if::cfg_if! {
@@ -85,7 +103,8 @@ cfg_if::cfg_if! {
             pub names_sha256: Option<String>,
             pub data_sha256: Option<String>,
             pub all_sha256: Option<String>,
-            pub tools: Vec<String>,
+            /// The tool instances that produced a filesystem, process tree, or decompiled function
+            pub tool_ids: Vec<Uuid>,
             pub pid: Option<u64>,
             pub parent_pid: Option<u64>,
             pub name: Option<String>,
@@ -147,6 +166,88 @@ cfg_if::cfg_if! {
             pub entropy: Option<f64>,
             /// The functions imported from a PE import's library
             pub functions: Vec<String>,
+            /// The kind of tool to create
+            pub tool_kind: Option<tools::ToolKind>,
+            /// The version label of a new tool instance
+            pub tool_version: Option<String>,
+            /// The JSON encoded spec of a new tool instance
+            pub tool_spec: Option<String>,
+            /// The tool a directly created tool instance belongs to
+            pub tool_instance_tool: Option<Uuid>,
+            /// The native agentic tool instances a new harness instance provides
+            pub tool_provides: Vec<Uuid>,
+            /// The JSON encoded env values of a new harness tool
+            pub tool_harness_env: Option<String>,
+            /// The model ids no run of a new harness tool may resolve to
+            pub tool_disabled_models: BTreeSet<String>,
+            /// The JSON encoded provider of a new model endpoint
+            pub model_endpoint_provider: Option<String>,
+            /// The group credential a new model endpoint authenticates with
+            pub model_endpoint_credential: Option<Uuid>,
+            /// The JSON encoded catalog entries of a new model endpoint
+            pub model_endpoint_models: Option<String>,
+            /// The model ids a new model endpoint never resolves to
+            pub model_endpoint_disabled_models: BTreeSet<String>,
+            /// The endpoint a new model profile calls
+            pub model_profile_endpoint: Option<Uuid>,
+            /// The model id a new model profile calls
+            pub model_profile_model_id: Option<String>,
+            /// The protocol a new model profile calls its model with
+            pub model_profile_api: Option<models::ModelApi>,
+            /// The JSON encoded parameters of a new model profile
+            pub model_profile_parameters: Option<String>,
+            /// The JSON encoded limits of a new model profile
+            pub model_profile_limits: Option<String>,
+            /// The JSON encoded capabilities of a new model profile
+            pub model_profile_capabilities: Option<String>,
+            /// The JSON encoded kind of a new model credential
+            pub model_credential_kind: Option<String>,
+            /// The primary secret of a new model credential
+            pub model_credential_secret: Option<models::ModelSecret>,
+            /// The session token of a new model credential
+            pub model_credential_session_token: Option<models::ModelSecret>,
+            /// When a new model credential stops working
+            pub model_credential_expires: Option<DateTime<Utc>>,
+            /// The JSON encoded config of a new agent
+            pub agent_config: Option<String>,
+            /// The JSON encoded model auth levels of a new agent
+            pub agent_model_auth: Option<String>,
+            /// The harness a new agent runs in
+            pub agent_harness: Option<Uuid>,
+            /// The tools and tool instances a new agent calls
+            pub agent_tools: Vec<Uuid>,
+            /// The toolsets and toolset instances a new agent calls
+            pub agent_tool_sets: Vec<Uuid>,
+            /// The agents a new agent delegates to
+            pub agent_sub_agents: Vec<Uuid>,
+            /// Whether to widen edge targets that miss some of the entity's groups
+            pub extend_target_groups: Option<bool>,
+            /// The tools and tool instances a new toolset includes
+            pub toolset_tools: Vec<Uuid>,
+            /// Whether a new toolset only includes read-only tools
+            pub toolset_read_only: Option<bool>,
+            /// The tag key of a new toolset's selector
+            pub toolset_selector_key: Option<String>,
+            /// The tag value of a new toolset's selector
+            pub toolset_selector_value: Option<String>,
+            /// Whether new instances of a new toolset are built automatically
+            pub toolset_auto_instance: Option<bool>,
+            /// The JSON encoded toolset instance being submitted
+            pub toolset_instance: Option<String>,
+            /// The agents a new workflow orchestrates
+            pub workflow_agents: Vec<Uuid>,
+            /// The agent that receives a new workflow's inputs first
+            pub workflow_entry_agent: Option<Uuid>,
+            /// Whether new instances of a new workflow are built automatically
+            pub workflow_auto_instance: Option<bool>,
+            /// The JSON encoded run-wide limits of a new workflow
+            pub workflow_limits: Option<String>,
+            /// The JSON encoded default models of a new workflow
+            pub workflow_default_models: Option<String>,
+            /// The JSON encoded model auth levels of a new workflow
+            pub workflow_model_auth: Option<String>,
+            /// The JSON encoded workflow instance being submitted
+            pub workflow_instance: Option<String>,
         }
 
         impl EntityMetadataForm {
@@ -232,8 +333,13 @@ cfg_if::cfg_if! {
             pub collection_end: Option<DateTime<Utc>>,
             pub clear_collection_start: Option<bool>,
             pub clear_collection_end: Option<bool>,
-            pub add_tools: Vec<String>,
-            pub remove_tools: Vec<String>,
+            /// The tool instances to add to a filesystem, process tree, or decompiled function
+            pub add_tool_ids: Vec<Uuid>,
+            /// The tool instances to remove from a filesystem, process tree, or decompiled function
+            pub remove_tool_ids: Vec<Uuid>,
+            /// The legacy tool names to remove from a filesystem, process tree, or decompiled
+            /// function
+            pub remove_legacy_tools: Vec<String>,
             pub name: Option<String>,
             pub image_path: Option<String>,
             pub command: Option<String>,
@@ -306,6 +412,126 @@ cfg_if::cfg_if! {
             pub entropy: Option<f64>,
             /// The functions to set for a PE import's library
             pub functions: Vec<String>,
+            /// The version label of a tool instance to publish
+            pub tool_version: Option<String>,
+            /// The JSON encoded spec of a tool instance to publish
+            pub tool_spec: Option<String>,
+            /// Whether a tool instance is deprecated
+            pub tool_instance_deprecated: Option<bool>,
+            /// The native agentic tool instances a new harness instance provides
+            pub tool_provides: Vec<Uuid>,
+            /// The JSON encoded new env values of a harness tool
+            pub tool_harness_env: Option<String>,
+            /// Clear a harness tool's env values
+            pub clear_tool_harness_env: Option<bool>,
+            /// The model ids to add to a harness tool's disabled models
+            pub disable_tool_models: BTreeSet<String>,
+            /// The model ids to remove from a harness tool's disabled models
+            pub enable_tool_models: BTreeSet<String>,
+            /// The JSON encoded new provider of a model endpoint
+            pub model_endpoint_provider: Option<String>,
+            /// The new group credential of a model endpoint
+            pub model_endpoint_credential: Option<Uuid>,
+            /// Clear a model endpoint's group credential
+            pub clear_model_endpoint_credential: Option<bool>,
+            /// The JSON encoded catalog entries to add to a model endpoint
+            pub add_model_endpoint_models: Option<String>,
+            /// The model ids to remove from a model endpoint's catalog
+            pub remove_model_endpoint_models: Vec<String>,
+            /// The model ids to add to a model endpoint's disabled models
+            pub disable_model_endpoint_models: BTreeSet<String>,
+            /// The model ids to remove from a model endpoint's disabled models
+            pub enable_model_endpoint_models: BTreeSet<String>,
+            /// The JSON encoded ban update for a model endpoint
+            pub model_endpoint_bans: Option<String>,
+            /// The JSON encoded ban updates for a model endpoint's catalog entries
+            pub model_endpoint_model_bans: Option<String>,
+            /// The JSON encoded listing result to merge into a model endpoint's catalog
+            pub model_endpoint_refresh_report: Option<String>,
+            /// The new endpoint of a model profile
+            pub model_profile_endpoint: Option<Uuid>,
+            /// The new model id of a model profile
+            pub model_profile_model_id: Option<String>,
+            /// The new protocol of a model profile
+            pub model_profile_api: Option<models::ModelApi>,
+            /// The JSON encoded new parameters of a model profile
+            pub model_profile_parameters: Option<String>,
+            /// The JSON encoded new limits of a model profile
+            pub model_profile_limits: Option<String>,
+            /// Clear a model profile's limits
+            pub clear_model_profile_limits: Option<bool>,
+            /// The JSON encoded new capabilities of a model profile
+            pub model_profile_capabilities: Option<String>,
+            /// Clear a model profile's capabilities
+            pub clear_model_profile_capabilities: Option<bool>,
+            /// The JSON encoded ban update for a model profile
+            pub model_profile_bans: Option<String>,
+            /// The new primary secret of a model credential
+            pub model_credential_secret: Option<models::ModelSecret>,
+            /// The new session token of a model credential
+            pub model_credential_session_token: Option<models::ModelSecret>,
+            /// Clear a model credential's session token
+            pub clear_model_credential_session_token: Option<bool>,
+            /// When a model credential stops working
+            pub model_credential_expires: Option<DateTime<Utc>>,
+            /// Clear a model credential's expiration
+            pub clear_model_credential_expires: Option<bool>,
+            /// The JSON encoded ban update for a model credential
+            pub model_credential_bans: Option<String>,
+            /// The JSON encoded new config of an agent
+            pub agent_config: Option<String>,
+            /// The JSON encoded new model auth levels of an agent
+            pub agent_model_auth: Option<String>,
+            /// The harness to set for an agent
+            pub agent_harness: Option<Uuid>,
+            /// Clear an agent's harness
+            pub clear_agent_harness: Option<bool>,
+            /// The tools and tool instances to add to an agent
+            pub add_agent_tools: Vec<Uuid>,
+            /// The tools and tool instances to remove from an agent
+            pub remove_agent_tools: Vec<Uuid>,
+            /// The toolsets and toolset instances to add to an agent
+            pub add_agent_tool_sets: Vec<Uuid>,
+            /// The toolsets and toolset instances to remove from an agent
+            pub remove_agent_tool_sets: Vec<Uuid>,
+            /// The agents to add as an agent's sub-agents
+            pub add_agent_sub_agents: Vec<Uuid>,
+            /// The agents to remove from an agent's sub-agents
+            pub remove_agent_sub_agents: Vec<Uuid>,
+            /// Whether to widen the targets of added edges that miss some of the entity's groups
+            pub extend_target_groups: Option<bool>,
+            /// Whether a toolset only includes read-only tools
+            pub toolset_read_only: Option<bool>,
+            /// The new tag key of a toolset's selector
+            pub toolset_selector_key: Option<String>,
+            /// The new tag value of a toolset's selector
+            pub toolset_selector_value: Option<String>,
+            /// Clear a toolset's selector
+            pub clear_toolset_selector: Option<bool>,
+            /// Whether new instances of a toolset are built automatically
+            pub toolset_auto_instance: Option<bool>,
+            /// The tools and tool instances to add to a toolset
+            pub add_toolset_tools: Vec<Uuid>,
+            /// The tools and tool instances to remove from a toolset
+            pub remove_toolset_tools: Vec<Uuid>,
+            /// The new entry agent of a workflow
+            pub workflow_entry_agent: Option<Uuid>,
+            /// Clear a workflow's entry agent
+            pub clear_workflow_entry_agent: Option<bool>,
+            /// Whether new instances of a workflow are built automatically
+            pub workflow_auto_instance: Option<bool>,
+            /// The JSON encoded new run-wide limits of a workflow
+            pub workflow_limits: Option<String>,
+            /// The JSON encoded new default models of a workflow, replacing the whole list
+            pub workflow_default_models: Option<String>,
+            /// The JSON encoded new model auth levels of a workflow
+            pub workflow_model_auth: Option<String>,
+            /// The agents to add to a workflow
+            pub add_workflow_agents: Vec<Uuid>,
+            /// The agents to remove from a workflow
+            pub remove_workflow_agents: Vec<Uuid>,
+            /// The names of the metadata fields the update set, in the order they were sent
+            pub sent: Vec<String>,
         }
     }
 }
@@ -338,6 +564,7 @@ pub struct Entity {
 
 impl Entity {
     /// Hash the identifying info for this entity
+    #[must_use]
     pub fn hash_identifying(&self) -> u64 {
         // Create a hasher with a static seed
         let mut hasher = GxHasher::with_seed(1234);
@@ -375,7 +602,7 @@ impl TreeSupport for Entity {
     #[cfg(feature = "api")]
     #[tracing::instrument(name = "TreeSupport::<Entities>::gather_initial", skip_all, err(Debug))]
     async fn gather_initial(
-        _user: &User,
+        user: &User,
         query: &crate::models::TreeQuery,
         shared: &crate::utils::Shared,
     ) -> Result<Vec<super::TreeNode>, crate::utils::ApiError> {
@@ -386,7 +613,10 @@ impl TreeSupport for Entity {
         // build a list of initial data
         let mut initial = Vec::with_capacity(query.entities.len());
         // step over the entities we retrieved and add them to our tree
-        for entity in entities {
+        for mut entity in entities {
+            // trees never return a secret or name a group this user can't see
+            models::RedactSecrets::redact_secrets(&mut entity);
+            entity.hide_snapshot_groups(user);
             // wrap this entity in a tree node
             let node_data = super::TreeNode::Entity(entity);
             // add this tree node to our initial list
@@ -564,8 +794,26 @@ impl TagSupport for Entity {
         // get the earliest for each group (just the time the entity was created)
         let earliest = self.earliest();
         let key = Self::build_key(self.id.to_string(), &());
+        // keep the pairs a tool's toolsets may select and the checked groups they're added in
+        // before the request is consumed
+        let pairs = (self.kind == EntityKinds::Tool).then(|| {
+            let pairs = req
+                .tags
+                .iter()
+                .map(|(key, values)| (key.clone(), values.iter().cloned().collect()))
+                .collect();
+            (pairs, req.groups.clone())
+        });
         // save the tags to scylla
-        super::backends::db::tags::create(user, key, req, &earliest, shared).await
+        super::backends::db::tags::create(user, key, req, &earliest, shared).await?;
+        // a tool's tag change can change which toolsets select it in the tagged groups
+        if let Some((pairs, groups)) = pairs {
+            super::backends::entities::tools::queue_tag_change(
+                user, self.id, pairs, &groups, shared,
+            )
+            .await?;
+        }
+        Ok(())
     }
 
     /// Delete some tags from this entity
@@ -603,7 +851,40 @@ impl TagSupport for Entity {
         // build our key
         let key = Self::build_key(self.id.to_string(), &());
         // delete the requested tags if they exist
-        super::backends::db::tags::delete(&key, &req, shared).await
+        super::backends::db::tags::delete(&key, &req, shared).await?;
+        // a tool's tag change can change which toolsets select it in the checked groups, so the
+        // pairs it carried in one of them are queued
+        if self.kind == EntityKinds::Tool {
+            let pairs = req
+                .tags
+                .iter()
+                .map(|(key, values)| {
+                    let removed = values
+                        .iter()
+                        .filter(|value| {
+                            self.tags
+                                .get(key)
+                                .and_then(|carried| carried.get(*value))
+                                .is_some_and(|groups| {
+                                    req.groups.iter().any(|group| groups.contains(group))
+                                })
+                        })
+                        .cloned()
+                        .collect::<std::collections::BTreeSet<String>>();
+                    (key.clone(), removed)
+                })
+                .filter(|(_, removed)| !removed.is_empty())
+                .collect();
+            super::backends::entities::tools::queue_tag_change(
+                user,
+                self.id,
+                pairs,
+                &req.groups,
+                shared,
+            )
+            .await?;
+        }
+        Ok(())
     }
 
     /// Gets tags for a specific entity
@@ -665,6 +946,7 @@ impl TagSupport for Entity {
 #[cfg_attr(feature = "api", strum_discriminants(derive(utoipa::ToSchema)))]
 #[cfg_attr(feature = "api", derive(utoipa::ToSchema))]
 #[cfg_attr(feature = "scylla-utils", derive(thorium_derive::ScyllaStoreJson))]
+#[allow(clippy::large_enum_variant)]
 pub enum EntityMetadata {
     /// A device entity
     Device(DeviceEntity),
@@ -700,8 +982,31 @@ pub enum EntityMetadata {
     /// A library imported by a PE/binary and its functions
     PeImport(PeImportEntity),
     /// An entity that can't be described by any of the other variants
+    ///
+    /// Backups archive each kind by its position in this enum, so kinds keep their place and
+    /// new kinds go at the end
     #[strum_discriminants(default)]
     Other,
+    /// An editable tool whose versions are tool instances
+    Tool(ToolEntity),
+    /// A single immutable version of a tool
+    ToolInstance(ToolInstanceEntity),
+    /// A configured AI agent
+    Agent(AgentEntity),
+    /// A named group of agentic tools that agents attach as one unit
+    ToolSet(ToolSetEntity),
+    /// A constant snapshot of a toolset's resolved members
+    ToolSetInstance(toolsets::ToolSetInstanceEntity),
+    /// The editable root that wires agents into a workflow
+    WorkflowCatalog(WorkflowCatalogEntity),
+    /// A constant, fully resolved snapshot of a workflow catalog's graph
+    WorkflowInstance(WorkflowInstanceEntity),
+    /// A connection to a model provider and the models it serves
+    ModelEndpoint(ModelEndpointEntity),
+    /// A named way to call one model on one endpoint
+    ModelProfile(ModelProfileEntity),
+    /// A credential model endpoints authenticate with
+    ModelCredential(ModelCredentialEntity),
 }
 
 impl EntityMetadata {
@@ -719,7 +1024,11 @@ impl EntityMetadata {
 }
 
 /// The specific kind an entity is, including any data unique to its kind
+///
+/// The derived serde code is generated as inherent functions and wrapped by the trait impls
+/// below, so requests that name a process tree without data still read.
 #[derive(Debug, Clone, Serialize, Deserialize, Hash)]
+#[serde(remote = "Self")]
 #[cfg_attr(feature = "api", derive(utoipa::ToSchema))]
 pub enum EntityMetadataRequest {
     /// A device entity
@@ -732,8 +1041,8 @@ pub enum EntityMetadataRequest {
     FileSystem(FileSystemEntity),
     /// A filesystem folder entity
     Folder(FileSystemFolderEntity),
-    /// A windows process tree that has no data
-    WindowsProcessTree,
+    /// A windows process tree and the tool instances that dumped it
+    WindowsProcessTree(WindowsProcessTreeEntity),
     /// A windows process
     WindowsProcess(WindowsProcessEntity),
     /// A network connection
@@ -752,8 +1061,95 @@ pub enum EntityMetadataRequest {
     PeSection(PeSectionEntity),
     /// A library imported by a PE/binary and its functions
     PeImport(PeImportEntity),
+    /// A tool and its first tool instance
+    Tool(ToolEntityRequest),
+    /// A tool instance published directly for an existing tool
+    ToolInstance(ToolInstanceEntityRequest),
+    /// A configured AI agent and its graph edges
+    Agent(AgentEntityRequest),
+    /// A toolset and its `Includes` edges
+    ToolSet(ToolSetEntityRequest),
+    /// A submitted toolset instance
+    ToolSetInstance(ToolSetInstanceEntityRequest),
+    /// A workflow catalog and its `Orchestrates` edges
+    WorkflowCatalog(WorkflowCatalogEntityRequest),
+    /// A submitted workflow instance
+    WorkflowInstance(WorkflowInstanceEntityRequest),
+    /// A connection to a model provider and the models it serves
+    ModelEndpoint(ModelEndpointEntityRequest),
+    /// A named way to call one model on one endpoint
+    ModelProfile(ModelProfileEntityRequest),
+    /// A credential model endpoints authenticate with
+    ModelCredential(ModelCredentialEntityRequest),
     /// An entity that can't be described by any of the other variants
     Other,
+}
+
+impl serde::Serialize for EntityMetadataRequest {
+    /// Serialize this request in its derived shape
+    ///
+    /// # Arguments
+    ///
+    /// * `serializer` - The serializer to write to
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        // write the request with the derived serializer
+        EntityMetadataRequest::serialize(self, serializer)
+    }
+}
+
+impl<'de> serde::Deserialize<'de> for EntityMetadataRequest {
+    /// Deserialize a request, reading a bare process tree name as a process tree with no tools
+    ///
+    /// # Arguments
+    ///
+    /// * `deserializer` - The deserializer to read from
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        // read either a bare variant name or a variant with data
+        deserializer.deserialize_any(EntityMetadataRequestVisitor)
+    }
+}
+
+/// Reads entity metadata requests, accepting the bare process tree name tools and stored
+/// results wrote before process trees listed tool instances
+struct EntityMetadataRequestVisitor;
+
+impl<'de> serde::de::Visitor<'de> for EntityMetadataRequestVisitor {
+    type Value = EntityMetadataRequest;
+
+    /// Describe what this visitor reads
+    ///
+    /// # Arguments
+    ///
+    /// * `formatter` - The formatter to write the description to
+    fn expecting(&self, formatter: &mut std::fmt::Formatter) -> std::fmt::Result {
+        formatter.write_str("an entity metadata request")
+    }
+
+    /// Read a bare variant name
+    ///
+    /// # Arguments
+    ///
+    /// * `name` - The variant name
+    fn visit_str<E: serde::de::Error>(self, name: &str) -> Result<Self::Value, E> {
+        // a bare process tree name is a process tree with no tools
+        if name == "WindowsProcessTree" {
+            return Ok(EntityMetadataRequest::WindowsProcessTree(
+                WindowsProcessTreeEntity::default(),
+            ));
+        }
+        // read any other name as the derived unit variant it names
+        EntityMetadataRequest::deserialize(serde::de::value::StrDeserializer::<E>::new(name))
+    }
+
+    /// Read a variant with data
+    ///
+    /// # Arguments
+    ///
+    /// * `map` - The map holding the variant name and its data
+    fn visit_map<A: serde::de::MapAccess<'de>>(self, map: A) -> Result<Self::Value, A::Error> {
+        // read the variant with the derived deserializer
+        EntityMetadataRequest::deserialize(serde::de::value::MapAccessDeserializer::new(map))
+    }
 }
 
 impl EntityMetadataRequest {
@@ -770,10 +1166,7 @@ impl EntityMetadataRequest {
             EntityMetadataRequest::Collection(collection) => collection.add_to_form(form),
             EntityMetadataRequest::FileSystem(fs) => fs.add_to_form(form),
             EntityMetadataRequest::Folder(folder) => folder.add_to_form(form),
-            // windows process tree entities don't really have any metadata
-            EntityMetadataRequest::WindowsProcessTree => {
-                Ok(form.text("kind", EntityKinds::WindowsProcessTree.as_str()))
-            }
+            EntityMetadataRequest::WindowsProcessTree(tree) => tree.add_to_form(form),
             EntityMetadataRequest::WindowsProcess(process) => process.add_to_form(form),
             EntityMetadataRequest::NetworkConnection(conn) => conn.add_to_form(form),
             EntityMetadataRequest::SigmaRule(rule) => rule.add_to_form(form),
@@ -783,12 +1176,23 @@ impl EntityMetadataRequest {
             EntityMetadataRequest::DecompiledFunction(decomp) => decomp.add_to_form(form),
             EntityMetadataRequest::PeSection(section) => section.add_to_form(form),
             EntityMetadataRequest::PeImport(import) => import.add_to_form(form),
+            EntityMetadataRequest::Tool(tool) => tool.add_to_form(form),
+            EntityMetadataRequest::ToolInstance(instance) => instance.add_to_form(form),
+            EntityMetadataRequest::Agent(agent) => agent.add_to_form(form),
+            EntityMetadataRequest::ToolSet(tool_set) => Ok(tool_set.add_to_form(form)),
+            EntityMetadataRequest::ToolSetInstance(instance) => Ok(instance.add_to_form(form)),
+            EntityMetadataRequest::WorkflowCatalog(workflow) => workflow.add_to_form(form),
+            EntityMetadataRequest::WorkflowInstance(instance) => Ok(instance.add_to_form(form)),
+            EntityMetadataRequest::ModelEndpoint(endpoint) => endpoint.add_to_form(form),
+            EntityMetadataRequest::ModelProfile(profile) => profile.add_to_form(form),
+            EntityMetadataRequest::ModelCredential(credential) => credential.add_to_form(form),
             // just set our kind to other
             EntityMetadataRequest::Other => Ok(form.text("kind", EntityKinds::Other.as_str())),
         }
     }
 
     /// Get our entity kind
+    #[must_use]
     pub fn kind(&self) -> EntityKinds {
         match self {
             EntityMetadataRequest::Device(_) => EntityKinds::Device,
@@ -796,7 +1200,7 @@ impl EntityMetadataRequest {
             EntityMetadataRequest::Collection(_) => EntityKinds::Collection,
             EntityMetadataRequest::FileSystem(_) => EntityKinds::FileSystem,
             EntityMetadataRequest::Folder(_) => EntityKinds::Folder,
-            EntityMetadataRequest::WindowsProcessTree => EntityKinds::WindowsProcessTree,
+            EntityMetadataRequest::WindowsProcessTree(_) => EntityKinds::WindowsProcessTree,
             EntityMetadataRequest::WindowsProcess(_) => EntityKinds::WindowsProcess,
             EntityMetadataRequest::NetworkConnection(_) => EntityKinds::NetworkConnection,
             EntityMetadataRequest::SigmaRule(_) => EntityKinds::SigmaRule,
@@ -806,6 +1210,16 @@ impl EntityMetadataRequest {
             EntityMetadataRequest::DecompiledFunction(_) => EntityKinds::DecompiledFunction,
             EntityMetadataRequest::PeSection(_) => EntityKinds::PeSection,
             EntityMetadataRequest::PeImport(_) => EntityKinds::PeImport,
+            EntityMetadataRequest::Tool(_) => EntityKinds::Tool,
+            EntityMetadataRequest::ToolInstance(_) => EntityKinds::ToolInstance,
+            EntityMetadataRequest::Agent(_) => EntityKinds::Agent,
+            EntityMetadataRequest::ToolSet(_) => EntityKinds::ToolSet,
+            EntityMetadataRequest::ToolSetInstance(_) => EntityKinds::ToolSetInstance,
+            EntityMetadataRequest::WorkflowCatalog(_) => EntityKinds::WorkflowCatalog,
+            EntityMetadataRequest::WorkflowInstance(_) => EntityKinds::WorkflowInstance,
+            EntityMetadataRequest::ModelEndpoint(_) => EntityKinds::ModelEndpoint,
+            EntityMetadataRequest::ModelProfile(_) => EntityKinds::ModelProfile,
+            EntityMetadataRequest::ModelCredential(_) => EntityKinds::ModelCredential,
             EntityMetadataRequest::Other => EntityKinds::Other,
         }
     }
@@ -843,11 +1257,22 @@ impl EntityMetadataRequest {
             Self::Incident(incident) => Ok(Some(serde_json::to_string(incident)?)),
             Self::CompiledFunction(func) => Ok(Some(serde_json::to_string(func)?)),
             Self::DecompiledFunction(decomp) => Ok(Some(serde_json::to_string(decomp)?)),
-            // PE sections/imports are storage/display only and not scanned with sigma rules
-            Self::WindowsProcessTree
+            // PE sections/imports, tools, and model configuration are storage/display only and not
+            // scanned with sigma rules
+            Self::WindowsProcessTree(_)
             | Self::PeSection(_)
             | Self::PeImport(_)
             | Self::SigmaRule(_)
+            | Self::Tool(_)
+            | Self::ToolInstance(_)
+            | Self::Agent(_)
+            | Self::ToolSet(_)
+            | Self::ToolSetInstance(_)
+            | Self::WorkflowCatalog(_)
+            | Self::WorkflowInstance(_)
+            | Self::ModelEndpoint(_)
+            | Self::ModelProfile(_)
+            | Self::ModelCredential(_)
             | Self::Other => Ok(None),
         }
     }
@@ -911,6 +1336,13 @@ pub enum IdentifyingEntityInfo<'a> {
     },
     /// A decompiled function
     DecompiledFunction { address: u64, content: &'a String },
+    /// A tool instance, which is identified by its tool and the content hash of its spec
+    ToolInstance {
+        /// The tool this is an instance of
+        tool: &'a Uuid,
+        /// The content hash of this instance's spec
+        spec_hash: &'a String,
+    },
     /// An entity that cannot be accurately/usefully identified to prevent duplicates
     Unidentifiable,
 }
@@ -945,6 +1377,10 @@ impl<'a> From<&'a EntityMetadata> for IdentifyingEntityInfo<'a> {
                 address: decomp.address,
                 content: &decomp.content,
             },
+            EntityMetadata::ToolInstance(instance) => Self::ToolInstance {
+                tool: &instance.tool,
+                spec_hash: &instance.spec_hash,
+            },
             // These entities have no useful identifying info
             EntityMetadata::Device(_)
             | EntityMetadata::Vendor(_)
@@ -952,6 +1388,15 @@ impl<'a> From<&'a EntityMetadata> for IdentifyingEntityInfo<'a> {
             | EntityMetadata::Incident(_)
             | EntityMetadata::PeSection(_)
             | EntityMetadata::PeImport(_)
+            | EntityMetadata::Tool(_)
+            | EntityMetadata::Agent(_)
+            | EntityMetadata::ToolSet(_)
+            | EntityMetadata::ToolSetInstance(_)
+            | EntityMetadata::WorkflowCatalog(_)
+            | EntityMetadata::WorkflowInstance(_)
+            | EntityMetadata::ModelEndpoint(_)
+            | EntityMetadata::ModelProfile(_)
+            | EntityMetadata::ModelCredential(_)
             | EntityMetadata::Other => Self::Unidentifiable,
         }
     }
@@ -987,13 +1432,24 @@ impl<'a> From<&'a EntityMetadataRequest> for IdentifyingEntityInfo<'a> {
                 address: decomp.address,
                 content: &decomp.content,
             },
-            // These entities have no useful identifying info
+            // These entities have no useful identifying info; a tool instance request has no
+            // spec hash until the API computes it
             EntityMetadataRequest::Device(_)
             | EntityMetadataRequest::Vendor(_)
-            | EntityMetadataRequest::WindowsProcessTree
+            | EntityMetadataRequest::WindowsProcessTree(_)
             | EntityMetadataRequest::Incident(_)
             | EntityMetadataRequest::PeSection(_)
             | EntityMetadataRequest::PeImport(_)
+            | EntityMetadataRequest::Tool(_)
+            | EntityMetadataRequest::ToolInstance(_)
+            | EntityMetadataRequest::Agent(_)
+            | EntityMetadataRequest::ToolSet(_)
+            | EntityMetadataRequest::ToolSetInstance(_)
+            | EntityMetadataRequest::WorkflowCatalog(_)
+            | EntityMetadataRequest::WorkflowInstance(_)
+            | EntityMetadataRequest::ModelEndpoint(_)
+            | EntityMetadataRequest::ModelProfile(_)
+            | EntityMetadataRequest::ModelCredential(_)
             | EntityMetadataRequest::Other => Self::Unidentifiable,
         }
     }
@@ -1009,6 +1465,7 @@ impl EntityKinds {
     /// Convert this entity kind to a [`SigmaRuleAppliesTo`] if possible
     ///
     /// Not all entity kinds can be converted and any that can't will return [`None`]
+    #[must_use]
     pub fn to_sigma_applies_to(&self) -> Option<SigmaRuleAppliesTo> {
         match self {
             Self::WindowsProcess => Some(SigmaRuleAppliesTo::WindowsProcesses),
@@ -1027,14 +1484,64 @@ impl EntityKinds {
             | Self::SigmaRule
             | Self::Flag
             | Self::Incident
+            | Self::Tool
+            | Self::ToolInstance
+            | Self::Agent
+            | Self::ToolSet
+            | Self::ToolSetInstance
+            | Self::WorkflowCatalog
+            | Self::WorkflowInstance
+            | Self::ModelEndpoint
+            | Self::ModelProfile
+            | Self::ModelCredential
             | Self::Other => None,
+        }
+    }
+
+    /// Get how this kind's copies in several groups are kept and checked
+    ///
+    /// A kind that keeps one shared definition across its groups is `Contained`; every other kind
+    /// keeps independent copies and is `Overlap`.
+    #[must_use]
+    pub fn group_policy(&self) -> GroupPolicy {
+        match self {
+            // tools, agents, toolsets, workflows, and model configuration keep one shared
+            // definition across their groups
+            Self::Tool
+            | Self::ToolInstance
+            | Self::Agent
+            | Self::ToolSet
+            | Self::ToolSetInstance
+            | Self::WorkflowCatalog
+            | Self::WorkflowInstance
+            | Self::ModelEndpoint
+            | Self::ModelProfile
+            | Self::ModelCredential => GroupPolicy::Contained,
+            // these kinds keep independent copies per group
+            Self::Device
+            | Self::Vendor
+            | Self::Collection
+            | Self::FileSystem
+            | Self::Folder
+            | Self::WindowsProcessTree
+            | Self::WindowsProcess
+            | Self::NetworkConnection
+            | Self::SigmaRule
+            | Self::Flag
+            | Self::Incident
+            | Self::CompiledFunction
+            | Self::DecompiledFunction
+            | Self::PeSection
+            | Self::PeImport
+            | Self::Other => GroupPolicy::Overlap,
         }
     }
 
     /// Get any root entity kinds if any exist
     ///
     /// Root kinds or root nodes are for entities with a tree like structure that require
-    /// a root. For instance a filesystem starts from a root FileSystem entity.
+    /// a root. For instance a filesystem starts from a root `FileSystem` entity.
+    #[must_use]
     pub fn root_kinds(&self) -> &[EntityKinds] {
         match self {
             Self::WindowsProcess => &[Self::WindowsProcessTree],
@@ -1053,9 +1560,31 @@ impl EntityKinds {
             | Self::Incident
             | Self::CompiledFunction
             | Self::DecompiledFunction
+            | Self::Tool
+            | Self::ToolInstance
+            | Self::Agent
+            | Self::ToolSet
+            | Self::ToolSetInstance
+            | Self::WorkflowCatalog
+            | Self::WorkflowInstance
+            | Self::ModelEndpoint
+            | Self::ModelProfile
+            | Self::ModelCredential
             | Self::Other => &[],
         }
     }
+}
+
+/// How an entity kind's copies in several groups are kept and checked
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GroupPolicy {
+    /// One definition shared by every group it's in: edits and deletes need access to all of its
+    /// groups and rewrite every copy, graph edges need the target to cover the source's groups,
+    /// and instances carry their root's groups
+    Contained,
+    /// Independent copies per group: reads, writes, and deletes touch only the caller's visible
+    /// groups, and copies may diverge
+    Overlap,
 }
 
 impl From<SigmaRuleAppliesTo> for EntityKinds {
@@ -1116,6 +1645,7 @@ impl EntityRequest {
     ///
     /// * `key` - The key of the tag to add
     /// * `value` - The value for the tag to add
+    #[must_use]
     pub fn tag(mut self, key: impl Into<String>, value: impl Into<String>) -> Self {
         // get an entry into this tags key list
         let entry = self.tags.entry(key.into()).or_default();
@@ -1149,6 +1679,7 @@ impl EntityRequest {
     }
 
     /// Get our entity kind
+    #[must_use]
     pub fn kind(&self) -> EntityKinds {
         // get our entity kind based on our metadata
         self.metadata.kind()
@@ -1167,6 +1698,7 @@ impl EntityRequest {
     }
 
     /// Get this entities root node kind
+    #[must_use]
     pub fn root_kind(&self) -> Option<EntityKinds> {
         // only certain kinds of entities use a root node
         match &self.metadata {
@@ -1177,7 +1709,7 @@ impl EntityRequest {
             | EntityMetadataRequest::Vendor(_)
             | EntityMetadataRequest::Collection(_)
             | EntityMetadataRequest::FileSystem(_)
-            | EntityMetadataRequest::WindowsProcessTree
+            | EntityMetadataRequest::WindowsProcessTree(_)
             | EntityMetadataRequest::NetworkConnection(_)
             | EntityMetadataRequest::PeSection(_)
             | EntityMetadataRequest::PeImport(_)
@@ -1186,6 +1718,16 @@ impl EntityRequest {
             | EntityMetadataRequest::Incident(_)
             | EntityMetadataRequest::CompiledFunction(_)
             | EntityMetadataRequest::DecompiledFunction(_)
+            | EntityMetadataRequest::Tool(_)
+            | EntityMetadataRequest::ToolInstance(_)
+            | EntityMetadataRequest::Agent(_)
+            | EntityMetadataRequest::ToolSet(_)
+            | EntityMetadataRequest::ToolSetInstance(_)
+            | EntityMetadataRequest::WorkflowCatalog(_)
+            | EntityMetadataRequest::WorkflowInstance(_)
+            | EntityMetadataRequest::ModelEndpoint(_)
+            | EntityMetadataRequest::ModelProfile(_)
+            | EntityMetadataRequest::ModelCredential(_)
             | EntityMetadataRequest::Other => None,
         }
     }
@@ -1198,6 +1740,7 @@ impl EntityRequest {
     ///  group A would be considered different then an entity in group B. This is
     /// primarily used to prevent endless recreating the same entities when rescanning
     /// entities with rules.
+    #[must_use]
     pub fn hash_identifying(&self) -> u64 {
         // Create a hasher with a static seed
         let mut hasher = GxHasher::with_seed(1234);
@@ -1219,6 +1762,12 @@ pub struct EntityResponse {
     pub id: Uuid,
     /// The name of this entity
     pub name: String,
+    /// The ID of the first tool instance created with a tool
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tool_instance: Option<Uuid>,
+    /// How portable a created agentic tool instance's spec is across model APIs
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub portability: Option<tools::ToolPortabilityReport>,
 }
 
 impl EntityResponse {
@@ -1232,6 +1781,8 @@ impl EntityResponse {
         Self {
             id,
             name: name.into(),
+            tool_instance: None,
+            portability: None,
         }
     }
 }
@@ -1357,7 +1908,7 @@ impl EntityListOpts {
     pub fn groups<T: Into<String>>(mut self, groups: Vec<T>) -> Self {
         // add the groups to restrict returned data too
         self.groups
-            .extend(groups.into_iter().map(|group| group.into()));
+            .extend(groups.into_iter().map(std::convert::Into::into));
         self
     }
 
@@ -1519,6 +2070,7 @@ impl EntityUpdate {
     /// # Arguments
     ///
     /// * `name` - The name to change too
+    #[must_use]
     pub fn name(mut self, name: impl Into<String>) -> Self {
         // update our name
         self.name = Some(name.into());
@@ -1530,6 +2082,7 @@ impl EntityUpdate {
     /// # Arguments
     ///
     /// * `group` - The group to add
+    #[must_use]
     pub fn group(mut self, group: impl Into<String>) -> Self {
         // add this group
         self.add_groups.push(group.into());
@@ -1541,6 +2094,7 @@ impl EntityUpdate {
     /// # Arguments
     ///
     /// * `group` - The group to remove
+    #[must_use]
     pub fn remove_group(mut self, group: impl Into<String>) -> Self {
         // add this group to our remove list
         self.remove_groups.push(group.into());
@@ -1552,6 +2106,7 @@ impl EntityUpdate {
     /// # Arguments
     ///
     /// * `description` - The description to change too
+    #[must_use]
     pub fn description(mut self, description: impl Into<String>) -> Self {
         // update our description
         self.description = Some(description.into());
@@ -1559,6 +2114,7 @@ impl EntityUpdate {
     }
 
     /// Clear this entities description
+    #[must_use]
     pub fn clear_description(mut self) -> Self {
         self.clear_description = true;
         self
@@ -1660,17 +2216,23 @@ pub enum EntityMetadataUpdate {
     },
     /// Updates for a filesystem entity
     FileSystem {
-        /// The tools to add to this filesystem
-        add_tools: Vec<String>,
-        /// The tools to remove from this filesystem
-        remove_tools: Vec<String>,
+        /// The tool instances to add to this filesystem
+        add_tools: Vec<Uuid>,
+        /// The tool instances to remove from this filesystem
+        remove_tools: Vec<Uuid>,
+        /// The legacy tool names to remove from this filesystem
+        #[serde(default)]
+        remove_legacy_tools: Vec<String>,
     },
     /// Updates for a windows process tree entity
     WindowsProcessTree {
-        /// The tools to add to this process tree
-        add_tools: Vec<String>,
-        /// The tools to remove from this process tree
-        remove_tools: Vec<String>,
+        /// The tool instances to add to this process tree
+        add_tools: Vec<Uuid>,
+        /// The tool instances to remove from this process tree
+        remove_tools: Vec<Uuid>,
+        /// The legacy tool names to remove from this process tree
+        #[serde(default)]
+        remove_legacy_tools: Vec<String>,
     },
     /// Updates for a windows process entity
     WindowsProcess {
@@ -1778,10 +2340,13 @@ pub enum EntityMetadataUpdate {
         function_address: Option<u64>,
         /// The decompilation content to set
         decompilation_content: Option<String>,
-        /// The tools to add to this function
-        add_tools: Vec<String>,
-        /// The tools to remove from this function
-        remove_tools: Vec<String>,
+        /// The tool instances to add to this function
+        add_tools: Vec<Uuid>,
+        /// The tool instances to remove from this function
+        remove_tools: Vec<Uuid>,
+        /// The legacy tool names to remove from this function
+        #[serde(default)]
+        remove_legacy_tools: Vec<String>,
     },
     /// Updates for a PE section entity
     PeSection {
@@ -1798,6 +2363,174 @@ pub enum EntityMetadataUpdate {
     PeImport {
         /// The imported functions to replace this librarys functions with
         functions: Vec<String>,
+    },
+    /// Updates for a tool entity (setting a spec publishes a new tool instance)
+    Tool {
+        /// The version label for the new tool instance (required when `spec` is set)
+        version: Option<String>,
+        /// The JSON encoded `ToolSpec` for the new tool instance
+        spec: Option<String>,
+        /// The native agentic tool instances the new instance provides (Harness tools only, with
+        /// `spec`)
+        #[serde(default)]
+        provides: Vec<Uuid>,
+        /// The new JSON encoded `HarnessEnv` for this tool (Harness tools only)
+        #[serde(default)]
+        harness_env: Option<String>,
+        /// Clear this tool's `harness_env`
+        #[serde(default)]
+        clear_harness_env: Option<bool>,
+        /// Model ids to add to this harness's `disabled_models`
+        #[serde(default)]
+        disable_models: std::collections::BTreeSet<String>,
+        /// Model ids to remove from this harness's `disabled_models`
+        #[serde(default)]
+        enable_models: std::collections::BTreeSet<String>,
+    },
+    /// Updates for a tool instance entity
+    ToolInstance {
+        /// Whether this tool instance is deprecated
+        deprecated: Option<bool>,
+    },
+    /// Updates for an agent entity
+    Agent {
+        /// The new configuration for this agent, replacing the whole config
+        config: Option<agents::AgentConfig>,
+        /// Which levels may supply model auth for this agent (does not change `config_hash`)
+        model_auth: Option<models::ModelAuthSource>,
+        /// The harness to set for this agent (Tool ID = latest, `ToolInstance` ID = pinned)
+        harness: Option<Uuid>,
+        /// Clear this agent's harness
+        clear_harness: Option<bool>,
+        /// The tools to add to this agent (Tool IDs = latest, `ToolInstance` IDs = pinned)
+        #[serde(default)]
+        add_tools: Vec<Uuid>,
+        /// The tools to remove from this agent
+        #[serde(default)]
+        remove_tools: Vec<Uuid>,
+        /// The toolsets to add to this agent (`ToolSet` IDs = latest, `ToolSetInstance` IDs =
+        /// pinned)
+        #[serde(default)]
+        add_tool_sets: Vec<Uuid>,
+        /// The toolsets to remove from this agent
+        #[serde(default)]
+        remove_tool_sets: Vec<Uuid>,
+        /// The sub agents to add to this agent
+        #[serde(default)]
+        add_sub_agents: Vec<Uuid>,
+        /// The sub agents to remove from this agent
+        #[serde(default)]
+        remove_sub_agents: Vec<Uuid>,
+        /// Whether to add the agent's groups that an added edge's target is missing to that
+        /// target instead of rejecting the edge
+        #[serde(default)]
+        extend_target_groups: bool,
+    },
+    /// Updates for a toolset entity
+    ToolSet {
+        /// Whether only read-only tools (whose instance declares no effects) are included
+        read_only: Option<bool>,
+        /// The new tag selector for this toolset
+        selector: Option<toolsets::ToolSetSelector>,
+        /// Clear this toolset's tag selector
+        clear_selector: Option<bool>,
+        /// Whether the event handler should create new instances automatically
+        auto_instance: Option<bool>,
+        /// The tools to include (Tool IDs = latest, `ToolInstance` IDs = pinned)
+        #[serde(default)]
+        add_tools: Vec<Uuid>,
+        /// The tools to stop including
+        #[serde(default)]
+        remove_tools: Vec<Uuid>,
+        /// Whether to add the toolset's groups that an added tool is missing to that tool
+        /// instead of rejecting the edge
+        #[serde(default)]
+        extend_target_groups: bool,
+    },
+    /// Updates for a workflow catalog entity
+    WorkflowCatalog {
+        /// The new entry agent for this workflow
+        entry_agent: Option<Uuid>,
+        /// Clear this workflow's entry agent
+        clear_entry_agent: Option<bool>,
+        /// Whether the event handler should create new instances automatically
+        auto_instance: Option<bool>,
+        /// The new run-wide limits for this workflow
+        limits: Option<workflows::WorkflowLimits>,
+        /// The new default models for agents whose own list is empty (replaces the whole list)
+        default_models: Option<Vec<models::ModelMatcher>>,
+        /// Which levels may supply model auth for this workflow's runs (does not change the
+        /// digest)
+        model_auth: Option<models::ModelAuthSource>,
+        /// The agents to add to this workflow
+        #[serde(default)]
+        add_agents: Vec<Uuid>,
+        /// The agents to remove from this workflow
+        #[serde(default)]
+        remove_agents: Vec<Uuid>,
+        /// Whether to add the workflow's groups that an added agent is missing to that agent
+        /// instead of rejecting the edge
+        #[serde(default)]
+        extend_target_groups: bool,
+    },
+    /// Updates for a model endpoint entity
+    ModelEndpoint {
+        /// The new provider connection
+        provider: Option<models::ModelProvider>,
+        /// The group credential to authenticate with (moves the `AuthenticatesWith` association)
+        credential: Option<Uuid>,
+        /// Clear this endpoint's group credential
+        clear_credential: Option<bool>,
+        /// Catalog entries to add, or to replace by `model_id` (stored as `Manual`)
+        add_models: Vec<models::ModelCatalogEntryRequest>,
+        /// Catalog entries to remove by `model_id`
+        remove_models: Vec<String>,
+        /// Bans to add to or remove from this endpoint
+        bans: models::ModelBanUpdate,
+        /// Bans to add to or remove from catalog entries, by `model_id`
+        model_bans: std::collections::BTreeMap<String, models::ModelBanUpdate>,
+        /// Model ids to add to `disabled_models`
+        disable_models: std::collections::BTreeSet<String>,
+        /// Model ids to remove from `disabled_models`
+        enable_models: std::collections::BTreeSet<String>,
+        /// A listing result to merge into the catalog (admins only)
+        refresh_report: Option<models::ModelRefreshReport>,
+    },
+    /// Updates for a model profile entity
+    ModelProfile {
+        /// The endpoint to call (moves the `Serves` association)
+        endpoint: Option<Uuid>,
+        /// The exact model id to call
+        model_id: Option<String>,
+        /// The protocol to call the model with
+        api: Option<models::ModelApi>,
+        /// The new parameters
+        parameters: Option<models::ModelParameters>,
+        /// Limits that replace the catalog entry's
+        limits: Option<models::ModelLimits>,
+        /// Clear this profile's limits
+        clear_limits: Option<bool>,
+        /// Capabilities that replace the catalog entry's
+        capabilities: Option<models::ModelCapabilities>,
+        /// Clear this profile's capabilities
+        clear_capabilities: Option<bool>,
+        /// Bans to add to or remove from this profile
+        bans: models::ModelBanUpdate,
+    },
+    /// Updates for a model credential entity (setting `secret` rotates it)
+    ModelCredential {
+        /// The new primary secret
+        secret: Option<models::ModelSecret>,
+        /// The new AWS session token
+        session_token: Option<models::ModelSecret>,
+        /// Clear the AWS session token
+        clear_session_token: Option<bool>,
+        /// When this credential stops working
+        expires: Option<DateTime<Utc>>,
+        /// Clear this credential's expiration
+        clear_expires: Option<bool>,
+        /// Bans to add to or remove from this credential
+        bans: models::ModelBanUpdate,
     },
 }
 
@@ -1934,16 +2667,19 @@ impl EntityMetadataUpdate {
                 );
             }
             EntityMetadataUpdate::FileSystem {
-                mut add_tools,
-                mut remove_tools,
+                add_tools,
+                remove_tools,
+                remove_legacy_tools,
             }
             | EntityMetadataUpdate::WindowsProcessTree {
-                mut add_tools,
-                mut remove_tools,
+                add_tools,
+                remove_tools,
+                remove_legacy_tools,
             } => {
-                // add/remove the tools that dumped this entity
-                form = crate::multipart_list!(form, "metadata[add_tools][]", add_tools);
-                form = crate::multipart_list!(form, "metadata[remove_tools][]", remove_tools);
+                // add/remove the tool instances that dumped this entity
+                form = provenance_update_fields(&add_tools, &remove_tools, &remove_legacy_tools)
+                    .into_iter()
+                    .fold(form, |form, (name, value)| form.text(name, value));
             }
             EntityMetadataUpdate::WindowsProcess {
                 mut name,
@@ -2096,8 +2832,9 @@ impl EntityMetadataUpdate {
             EntityMetadataUpdate::DecompiledFunction {
                 function_address,
                 mut decompilation_content,
-                mut add_tools,
-                mut remove_tools,
+                add_tools,
+                remove_tools,
+                remove_legacy_tools,
             } => {
                 // set this function's address and decompilation content
                 form = crate::multipart_text_to_string!(
@@ -2110,9 +2847,10 @@ impl EntityMetadataUpdate {
                     "metadata[decompilation_content]",
                     decompilation_content
                 );
-                // add/remove the tools that decompiled this function
-                form = crate::multipart_list!(form, "metadata[add_tools][]", add_tools);
-                form = crate::multipart_list!(form, "metadata[remove_tools][]", remove_tools);
+                // add/remove the tool instances that decompiled this function
+                form = provenance_update_fields(&add_tools, &remove_tools, &remove_legacy_tools)
+                    .into_iter()
+                    .fold(form, |form, (name, value)| form.text(name, value));
             }
             EntityMetadataUpdate::PeSection {
                 mut md5,
@@ -2132,6 +2870,127 @@ impl EntityMetadataUpdate {
                 // replace this library's imported functions
                 form = crate::multipart_list!(form, "metadata[functions][]", functions);
             }
+            EntityMetadataUpdate::Tool {
+                version,
+                spec,
+                provides,
+                harness_env,
+                clear_harness_env,
+                disable_models,
+                enable_models,
+            } => {
+                // add the instance to publish and the harness settings that are set
+                let fields = tools::ToolUpdateFields {
+                    version: version.as_ref(),
+                    spec: spec.as_ref(),
+                    provides: &provides,
+                    harness_env: harness_env.as_ref(),
+                    clear_harness_env,
+                    disable_models: Some(&disable_models),
+                    enable_models: Some(&enable_models),
+                };
+                form = tools::tool_update_form_fields(fields)
+                    .into_iter()
+                    .fold(form, |form, (name, value)| form.text(name, value));
+            }
+            EntityMetadataUpdate::ToolInstance { deprecated } => {
+                // set whether this instance is deprecated
+                form = tools::tool_instance_update_form_fields(deprecated)
+                    .into_iter()
+                    .fold(form, |form, (name, value)| form.text(name, value));
+            }
+            EntityMetadataUpdate::Agent {
+                config,
+                model_auth,
+                harness,
+                clear_harness,
+                add_tools,
+                remove_tools,
+                add_tool_sets,
+                remove_tool_sets,
+                add_sub_agents,
+                remove_sub_agents,
+                extend_target_groups,
+            } => {
+                // add the agent fields that are set
+                let fields = agents::AgentUpdateFields {
+                    config: config.as_ref(),
+                    model_auth: model_auth.as_ref(),
+                    harness: harness.as_ref(),
+                    clear_harness: clear_harness.as_ref(),
+                    add_tools: &add_tools,
+                    remove_tools: &remove_tools,
+                    add_tool_sets: &add_tool_sets,
+                    remove_tool_sets: &remove_tool_sets,
+                    add_sub_agents: &add_sub_agents,
+                    remove_sub_agents: &remove_sub_agents,
+                    extend_target_groups,
+                };
+                form = fields
+                    .form_fields()?
+                    .into_iter()
+                    .fold(form, |form, (name, value)| form.text(name, value));
+            }
+            EntityMetadataUpdate::ToolSet {
+                read_only,
+                selector,
+                clear_selector,
+                auto_instance,
+                add_tools,
+                remove_tools,
+                extend_target_groups,
+            } => {
+                // add the toolset fields that are set
+                let fields = toolsets::ToolSetUpdateFields {
+                    read_only: read_only.as_ref(),
+                    selector: selector.as_ref(),
+                    clear_selector: clear_selector.as_ref(),
+                    auto_instance: auto_instance.as_ref(),
+                    add_tools: &add_tools,
+                    remove_tools: &remove_tools,
+                    extend_target_groups,
+                };
+                form = fields
+                    .form_fields()
+                    .into_iter()
+                    .fold(form, |form, (name, value)| form.text(name, value));
+            }
+            EntityMetadataUpdate::WorkflowCatalog {
+                entry_agent,
+                clear_entry_agent,
+                auto_instance,
+                limits,
+                default_models,
+                model_auth,
+                add_agents,
+                remove_agents,
+                extend_target_groups,
+            } => {
+                // add the workflow fields that are set
+                let fields = workflows::WorkflowCatalogUpdateFields {
+                    entry_agent: entry_agent.as_ref(),
+                    clear_entry_agent: clear_entry_agent.as_ref(),
+                    auto_instance: auto_instance.as_ref(),
+                    limits: limits.as_ref(),
+                    default_models: default_models.as_deref(),
+                    model_auth: model_auth.as_ref(),
+                    add_agents: &add_agents,
+                    remove_agents: &remove_agents,
+                    extend_target_groups,
+                };
+                form = fields
+                    .form_fields()?
+                    .into_iter()
+                    .fold(form, |form, (name, value)| form.text(name, value));
+            }
+            update @ (EntityMetadataUpdate::ModelEndpoint { .. }
+            | EntityMetadataUpdate::ModelProfile { .. }
+            | EntityMetadataUpdate::ModelCredential { .. }) => {
+                // add the model fields that are set
+                form = models::update_form_fields(&update)?
+                    .into_iter()
+                    .fold(form, |form, (name, value)| form.text(name, value));
+            }
         }
         Ok(form)
     }
@@ -2145,6 +3004,7 @@ pub enum EntityParentInfo {
 
 impl EntityParentInfo {
     /// Get the type of sigma applies to  this parent info points to
+    #[must_use]
     pub fn sigma_applies_to(&self) -> SigmaRuleAppliesTo {
         match self {
             Self::WindowsParentProcess(_) => SigmaRuleAppliesTo::WindowsProcesses,
@@ -2152,6 +3012,7 @@ impl EntityParentInfo {
     }
 
     /// Get the kind of entity this parent info is for
+    #[must_use]
     pub fn entity_kind(&self) -> EntityKinds {
         match self {
             Self::WindowsParentProcess(_) => EntityKinds::WindowsProcess,
@@ -2163,6 +3024,7 @@ impl EntityParentInfo {
     /// # Arguments
     ///
     /// * `child` - The potential child entity request to check against
+    #[must_use]
     pub fn is_parent(&self, child: &EntityRequest) -> bool {
         match (self, &child.metadata) {
             (Self::WindowsParentProcess(ppid), EntityMetadataRequest::WindowsProcess(proc)) => {
@@ -2244,5 +3106,284 @@ impl super::CensusSupport for Entity {
             group = row.group,
             year = row.year,
         )
+    }
+}
+
+/// Get the form fields of a provenance update, by name
+///
+/// No field adds a legacy tool name; legacy names can only be removed.
+///
+/// # Arguments
+///
+/// * `add_tools` - The tool instances to add
+/// * `remove_tools` - The tool instances to remove
+/// * `remove_legacy_tools` - The legacy tool names to remove
+#[must_use]
+pub(crate) fn provenance_update_fields(
+    add_tools: &[Uuid],
+    remove_tools: &[Uuid],
+    remove_legacy_tools: &[String],
+) -> Vec<(&'static str, String)> {
+    // the tool instances to add, then those to remove
+    let adds = add_tools
+        .iter()
+        .map(|tool| ("metadata[add_tool_ids][]", tool.to_string()));
+    let removes = remove_tools
+        .iter()
+        .map(|tool| ("metadata[remove_tool_ids][]", tool.to_string()));
+    // the legacy tool names to remove
+    let legacy = remove_legacy_tools
+        .iter()
+        .map(|tool| ("metadata[remove_legacy_tools][]", tool.clone()));
+    adds.chain(removes).chain(legacy).collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use strum::IntoEnumIterator;
+
+    use super::{EntityKinds, EntityMetadata, EntityMetadataRequest, EntityRequest, GroupPolicy};
+
+    /// The kinds whose entities are `Contained`
+    const CONTAINED: &[EntityKinds] = &[
+        EntityKinds::Tool,
+        EntityKinds::ToolInstance,
+        EntityKinds::Agent,
+        EntityKinds::ToolSet,
+        EntityKinds::ToolSetInstance,
+        EntityKinds::WorkflowCatalog,
+        EntityKinds::WorkflowInstance,
+        EntityKinds::ModelEndpoint,
+        EntityKinds::ModelProfile,
+        EntityKinds::ModelCredential,
+    ];
+
+    /// `EntityKinds::group_policy` is `Contained` for the listed kinds and `Overlap` for every
+    /// other kind
+    #[test]
+    fn entity_kind_group_policies() {
+        // check every kind's policy
+        for kind in EntityKinds::iter() {
+            // get the policy this kind should have
+            let expected = if CONTAINED.contains(&kind) {
+                GroupPolicy::Contained
+            } else {
+                GroupPolicy::Overlap
+            };
+            // make sure the kind has that policy
+            assert_eq!(kind.group_policy(), expected, "{kind}");
+        }
+    }
+
+    /// Stored kind data for every entity kind that existed before tool instances, as the API
+    /// wrote it, with one field of each and the JSON value it must read as
+    const OLD_ROWS: &[(EntityKinds, &str, &str, &str)] = &[
+        (
+            EntityKinds::Device,
+            r#"{"Device":{"urls":["https://corn.farm"],"vendors":[],"critical_system":true,"sensitive_location":null,"critical_sectors":["Energy"]}}"#,
+            "critical_sectors",
+            r#"["Energy"]"#,
+        ),
+        (
+            EntityKinds::Vendor,
+            r#"{"Vendor":{"countries":[],"critical_sectors":["Dams"]}}"#,
+            "critical_sectors",
+            r#"["Dams"]"#,
+        ),
+        (
+            EntityKinds::Collection,
+            r#"{"Collection":{"collection_kind":"Files","collection_tags":{"Corn":["Yellow"]},"tags_case_insensitive":false,"ignore_groups":false,"start":null,"end":null}}"#,
+            "collection_tags",
+            r#"{"Corn":["Yellow"]}"#,
+        ),
+        (
+            EntityKinds::FileSystem,
+            r#"{"FileSystem":{"sha256":"abc","tools":["binwalk"]}}"#,
+            "legacy_tools",
+            r#"["binwalk"]"#,
+        ),
+        (
+            EntityKinds::Folder,
+            r#"{"Folder":{"filesystem_id":"5f0c3c64-3c8b-4c1d-9a35-58f7c5a8e9b1","names_sha256":"a","data_sha256":"b","all_sha256":"c"}}"#,
+            "all_sha256",
+            r#""c""#,
+        ),
+        (
+            EntityKinds::WindowsProcessTree,
+            r#"{"WindowsProcessTree":{"tools":["volatility"]}}"#,
+            "legacy_tools",
+            r#"["volatility"]"#,
+        ),
+        (
+            EntityKinds::WindowsProcess,
+            r#"{"WindowsProcess":{"pid":4,"parent_pid":null,"name":"System","image_path":null,"command":null,"offset":null,"threads":12,"handles":null,"is_wow64":false,"session_id":null,"create_time":null,"exit_time":null}}"#,
+            "threads",
+            "12",
+        ),
+        (
+            EntityKinds::NetworkConnection,
+            r#"{"NetworkConnection":{"protocol":null,"source":"10.0.0.1","source_port":443,"destination":"10.0.0.2","destination_port":8080,"state":null,"pid":null,"process":null,"create_time":null}}"#,
+            "destination_port",
+            "8080",
+        ),
+        (
+            EntityKinds::SigmaRule,
+            r#"{"SigmaRule":{"rule":"title: corn","applies_to":[],"score":5,"actions":[]}}"#,
+            "rule",
+            r#""title: corn""#,
+        ),
+        (
+            EntityKinds::Flag,
+            r#"{"Flag":{"suspicion":3,"confidence":"Likely","content":null,"reasoning":"odd"}}"#,
+            "reasoning",
+            r#""odd""#,
+        ),
+        (
+            EntityKinds::Incident,
+            r#"{"Incident":{"cover_term":"husk","mission_teams":["a"],"networks":[],"machines":[],"locations":[]}}"#,
+            "mission_teams",
+            r#"["a"]"#,
+        ),
+        (
+            EntityKinds::CompiledFunction,
+            r#"{"CompiledFunction":{"address":16,"disassembly":[{"address":16,"instruction":"ret"}]}}"#,
+            "disassembly",
+            r#"[{"address":16,"instruction":"ret"}]"#,
+        ),
+        (
+            EntityKinds::DecompiledFunction,
+            r#"{"DecompiledFunction":{"address":16,"tools":["ghidra"],"content":"x"}}"#,
+            "legacy_tools",
+            r#"["ghidra"]"#,
+        ),
+        (
+            EntityKinds::PeSection,
+            r#"{"PeSection":{"md5":"d41d8cd98f00b204e9800998ecf8427e","raw_size":512,"virtual_size":null,"entropy":7.5}}"#,
+            "raw_size",
+            "512",
+        ),
+        (
+            EntityKinds::PeImport,
+            r#"{"PeImport":{"functions":["CreateFileW"]}}"#,
+            "functions",
+            r#"["CreateFileW"]"#,
+        ),
+        (EntityKinds::Other, r#""Other""#, "", ""),
+    ];
+
+    /// Kind data stored for every entity kind that existed before tool instances still reads as
+    /// that kind and keeps its values
+    #[test]
+    fn old_entity_rows_deserialize() {
+        // read every stored row
+        for (kind, raw, field, expected) in OLD_ROWS {
+            // read this row's kind data
+            let metadata: EntityMetadata = serde_json::from_str(raw)
+                .unwrap_or_else(|err| panic!("{kind} row failed to read: {err}"));
+            // it keeps its kind
+            assert_eq!(EntityKinds::from(&metadata), *kind);
+            // kinds without data have no field to check
+            if field.is_empty() {
+                continue;
+            }
+            // the checked field reads with the stored value
+            let read = serde_json::to_value(&metadata).unwrap();
+            let expected: serde_json::Value = serde_json::from_str(expected).unwrap();
+            assert_eq!(read[kind.as_str()][*field], expected, "{kind}.{field}");
+        }
+    }
+
+    /// Stored provenance kinds read their tool names into `legacy_tools` through the entity
+    /// metadata they're stored in, and tool instance ids into `tools`
+    #[test]
+    fn old_provenance_rows_split_tools() {
+        // build stored rows that mix a tool name with a tool instance id
+        let id = uuid::Uuid::new_v4();
+        let rows = [
+            format!(r#"{{"FileSystem":{{"sha256":"abc","tools":["binwalk","{id}"]}}}}"#),
+            format!(r#"{{"WindowsProcessTree":{{"tools":["binwalk","{id}"]}}}}"#),
+            format!(
+                r#"{{"DecompiledFunction":{{"address":1,"tools":["binwalk","{id}"],"content":"x"}}}}"#
+            ),
+        ];
+        // read each row
+        for raw in &rows {
+            // read this row's kind data and get its tool references
+            let (tools, legacy_tools) = match serde_json::from_str(raw).unwrap() {
+                EntityMetadata::FileSystem(fs) => (fs.tools, fs.legacy_tools),
+                EntityMetadata::WindowsProcessTree(tree) => (tree.tools, tree.legacy_tools),
+                EntityMetadata::DecompiledFunction(func) => (func.tools, func.legacy_tools),
+                other => panic!("unexpected kind read from {raw}: {other:?}"),
+            };
+            // the id is a tool instance and the name is a legacy tool
+            assert_eq!(tools, vec![id], "{raw}");
+            assert_eq!(legacy_tools, vec!["binwalk".to_owned()], "{raw}");
+        }
+    }
+
+    /// Entity requests that name a process tree without data, as tools and stored results wrote
+    /// them before process trees listed tool instances, read as an empty process tree, while
+    /// every other request shape reads and writes unchanged
+    #[test]
+    fn bare_process_tree_requests_deserialize() {
+        // read a request whose kind is the bare process tree variant name
+        let raw = r#"{"name":"t","metadata":"WindowsProcessTree","groups":[],"tags":{},"description":null}"#;
+        let req: EntityRequest = serde_json::from_str(raw).unwrap();
+        // it reads as a process tree with no tools
+        match &req.metadata {
+            EntityMetadataRequest::WindowsProcessTree(tree) => {
+                assert_eq!(tree.tools, Vec::<uuid::Uuid>::new());
+                assert_eq!(tree.legacy_tools, Vec::<String>::new());
+            }
+            other => panic!("unexpected kind: {other:?}"),
+        }
+        // it writes in the process tree's data shape
+        let written = serde_json::to_value(&req.metadata).unwrap();
+        assert_eq!(
+            written,
+            serde_json::json!({"WindowsProcessTree": {"tools": []}})
+        );
+        // the other kind without data still reads from and writes to its bare name
+        let other: EntityMetadataRequest = serde_json::from_str(r#""Other""#).unwrap();
+        assert!(matches!(other, EntityMetadataRequest::Other));
+        assert_eq!(serde_json::to_string(&other).unwrap(), r#""Other""#);
+        // process trees with data still read their tool instances
+        let id = uuid::Uuid::new_v4();
+        let tree = format!(r#"{{"WindowsProcessTree":{{"tools":["{id}"]}}}}"#);
+        match serde_json::from_str(&tree).unwrap() {
+            EntityMetadataRequest::WindowsProcessTree(tree) => assert_eq!(tree.tools, vec![id]),
+            other => panic!("unexpected kind: {other:?}"),
+        }
+        // other kinds with data still read
+        let fs: EntityMetadataRequest =
+            serde_json::from_str(r#"{"FileSystem":{"sha256":"abc","tools":[]}}"#).unwrap();
+        assert!(matches!(fs, EntityMetadataRequest::FileSystem(_)));
+        // unknown bare names and unknown kinds are still refused
+        assert!(serde_json::from_str::<EntityMetadataRequest>(r#""Corn""#).is_err());
+        assert!(serde_json::from_str::<EntityMetadataRequest>(r#"{"Corn":{}}"#).is_err());
+        // a malformed process tree is refused with the field's own error
+        let err =
+            serde_json::from_str::<EntityMetadataRequest>(r#"{"WindowsProcessTree":{"tools":5}}"#)
+                .unwrap_err();
+        assert!(err.to_string().contains("invalid type"), "{err}");
+    }
+
+    /// Provenance updates send tool instance ids and legacy name removals, and never send a
+    /// field that adds a tool name
+    #[test]
+    fn provenance_update_fields() {
+        // build the fields of an update that touches every provenance list
+        let add = uuid::Uuid::new_v4();
+        let remove = uuid::Uuid::new_v4();
+        let fields = super::provenance_update_fields(&[add], &[remove], &["binwalk".to_owned()]);
+        // each list is sent under its tool instance or legacy name field
+        assert_eq!(
+            fields,
+            vec![
+                ("metadata[add_tool_ids][]", add.to_string()),
+                ("metadata[remove_tool_ids][]", remove.to_string()),
+                ("metadata[remove_legacy_tools][]", "binwalk".to_owned()),
+            ]
+        );
     }
 }

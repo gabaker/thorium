@@ -6,6 +6,7 @@ use tracing::{Level, event, instrument};
 use uuid::Uuid;
 
 use super::keys::EventKeys;
+use crate::conf::Events;
 use crate::models::{Event, EventCacheStatus, EventType};
 use crate::utils::{ApiError, Shared};
 use crate::{conn, deserialize, query, serialize};
@@ -37,6 +38,31 @@ pub async fn create(event: &Event, shared: &Shared) -> Result<(), ApiError> {
     Ok(())
 }
 
+/// Add some events to their queues in one pipeline
+///
+/// # Arguments
+///
+/// * `events` - The events to add
+/// * `shared` - Shared Thorium objects
+#[instrument(name = "db::events::create_many", skip_all, fields(events = events.len()), err(Debug))]
+pub async fn create_many(events: &[Event], shared: &Shared) -> Result<(), ApiError> {
+    // nothing to add needs no round trip
+    if events.is_empty() {
+        return Ok(());
+    }
+    // every event is queued at the current time
+    let now = Utc::now().timestamp();
+    // add each event to its kind's queue in one pipeline
+    let mut pipe = redis::pipe();
+    for event in events {
+        let key = EventKeys::queue(EventType::from(&event.data), shared);
+        let serialized = serialize!(event);
+        pipe.cmd("zadd").arg(key).arg(now).arg(serialized);
+    }
+    let _: () = pipe.query_async(conn!(shared)).await?;
+    Ok(())
+}
+
 /// Clear some events from the in flight event queue
 #[instrument(name = "db::events::clear", skip_all, fields(clears = ids.len()), err(Debug))]
 pub async fn clear(kind: EventType, ids: &[Uuid], shared: &Shared) -> Result<(), ApiError> {
@@ -57,6 +83,26 @@ pub async fn clear(kind: EventType, ids: &[Uuid], shared: &Shared) -> Result<(),
     Ok(())
 }
 
+/// Get how many seconds events of one kind wait before they can be popped
+///
+/// Workflow graph events wait for the configured delay so a burst of changes is handled
+/// together, model refresh events wait for nothing so a refresh runs on the worker's next pass,
+/// and every other kind waits just long enough for the database to reach consistency.
+///
+/// # Arguments
+///
+/// * `kind` - The kind of events
+/// * `conf` - The events settings
+#[must_use]
+pub fn maturity_delay(kind: EventType, conf: &Events) -> u64 {
+    // workflow graph events wait longer than the consistency delay and refreshes don't wait
+    match kind {
+        EventType::WorkflowGraph => conf.workflow_graph_delay,
+        EventType::ModelRefresh => 0,
+        EventType::ReactionTrigger | EventType::SigmaScannableResults => shared::CONSISTENCY_DELAY,
+    }
+}
+
 /// Get some number of events to evaluate
 ///
 /// # Arguments
@@ -73,8 +119,9 @@ pub async fn pop(kind: EventType, count: usize, shared: &Shared) -> Result<Vec<E
     let now = Utc::now();
     // try to pop some events from the right event queue
     let serialized: Vec<(String, f64)> = query!(cmd("zpopmin").arg(&key).arg(count), shared).await?;
-    // filter out and reset any events that are not yet mature
-    let (events, filtered) = shared::filter_immature::<Event>(&key, now, serialized, shared).await?;
+    // filter out and reset any events that are not yet mature for this kind
+    let delay = maturity_delay(kind, &shared.config.thorium.events);
+    let (events, filtered) = shared::filter_immature::<Event>(&key, now, delay, serialized, shared).await?;
     // build the key to the in flight map and the in flight queue
     let map_key = EventKeys::in_flight_map(kind, shared);
     let queue_key = EventKeys::in_flight_queue(kind, shared);
@@ -212,4 +259,43 @@ pub async fn get_cache_status(clear: bool, shared: &Shared) -> Result<EventCache
     // build our event cache status object
     let cache_status = EventCacheStatus { triggers };
     Ok(cache_status)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Model refresh events wait for nothing, whatever delay is configured for workflow graph
+    /// events
+    #[test]
+    fn model_refresh_has_no_delay() {
+        // the default and a configured workflow graph delay
+        let defaults = Events::default();
+        let configured = Events {
+            workflow_graph_delay: 2,
+            ..Events::default()
+        };
+        // a refresh is popped on the worker's next pass either way
+        assert_eq!(maturity_delay(EventType::ModelRefresh, &defaults), 0);
+        assert_eq!(maturity_delay(EventType::ModelRefresh, &configured), 0);
+    }
+
+    /// Workflow graph events wait for the configured delay and every other kind waits 3 seconds
+    #[test]
+    fn delay_per_queue() {
+        // the default config waits 10 seconds for workflow graph events
+        let defaults = Events::default();
+        assert_eq!(maturity_delay(EventType::WorkflowGraph, &defaults), 10);
+        // a configured delay is used instead
+        let configured = Events {
+            workflow_graph_delay: 2,
+            ..Events::default()
+        };
+        assert_eq!(maturity_delay(EventType::WorkflowGraph, &configured), 2);
+        // the other kinds keep their 3 second delay whatever is configured
+        for kind in [EventType::ReactionTrigger, EventType::SigmaScannableResults] {
+            assert_eq!(maturity_delay(kind, &defaults), 3);
+            assert_eq!(maturity_delay(kind, &configured), 3);
+        }
+    }
 }

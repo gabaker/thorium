@@ -242,8 +242,10 @@ async fn association_ties_page_through() -> Result<(), Error> {
         .await?
         .sha256;
     // associate the file with 60 repos in one request, so every row shares one timestamp
-    let targets: Vec<String> = (0..60)
-        .map(|i| format!("provider.tld/ties/repo{i:02}"))
+    let targets: Vec<String> = generators::repos(&group, 60, &client)
+        .await?
+        .into_iter()
+        .map(|repo| repo.url)
         .collect();
     let mut req = AssociationRequest::new(
         AssociationKind::AssociatedWith,
@@ -280,9 +282,13 @@ async fn association_ties_across_groups() -> Result<(), Error> {
     sample.groups.push(groups[1].clone());
     let sha256 = client.files.create(sample).await?.sha256;
     // associate the file with 9 repos in both groups in one request
-    let targets: Vec<String> = (0..9)
-        .map(|i| format!("provider.tld/groups/repo{i}"))
-        .collect();
+    let mut targets: Vec<String> = Vec::with_capacity(9);
+    for _ in 0..9 {
+        let mut repo = generators::gen_repo(&groups[0]);
+        repo.groups.push(groups[1].clone());
+        client.repos.create(&repo).await?;
+        targets.push(repo.url);
+    }
     let mut req = AssociationRequest::new(
         AssociationKind::AssociatedWith,
         AssociationTarget::File(sha256.clone()),
@@ -1013,8 +1019,8 @@ async fn build_listing(client: &Thorium, family: Family, count: usize) -> Result
                 .create(generators::gen_sample(&group))
                 .await?
                 .sha256;
-            for index in 0..count {
-                let target = format!("provider.tld/shapes/repo{index:02}");
+            for _ in 0..count {
+                let target = generators::repos(&group, 1, client).await?.remove(0).url;
                 let source = AssociationTarget::File(sha256.clone());
                 let req = AssociationRequest::new(AssociationKind::AssociatedWith, source)
                     .groups(vec![group.clone()])
@@ -1164,8 +1170,10 @@ async fn cursors_saved_in_the_old_format_are_not_found() -> Result<(), Error> {
         .create(generators::gen_sample(&group))
         .await?
         .sha256;
-    let targets: Vec<String> = (0..6)
-        .map(|i| format!("provider.tld/saved/repo{i}"))
+    let targets: Vec<String> = generators::repos(&group, 6, &client)
+        .await?
+        .into_iter()
+        .map(|repo| repo.url)
         .collect();
     let mut req = AssociationRequest::new(
         AssociationKind::AssociatedWith,
@@ -1660,9 +1668,8 @@ async fn tag_association_repo_and_reaction_cursors_resume_only_for_their_owner()
         AssociationTarget::File(sha256.clone()),
     )
     .groups(vec![group.clone()]);
-    for index in 0..3 {
-        let target = format!("provider.tld/owned/{key}{index}");
-        req = req.target(AssociationTarget::Repo(target));
+    for repo in generators::repos(&group, 3, &owner).await? {
+        req = req.target(AssociationTarget::Repo(repo.url));
     }
     owner.associations.create(&req).await?;
     // the other user resumes the association cursor on a file of their own
@@ -2321,14 +2328,13 @@ async fn associations_listing_refuses_a_non_member() -> Result<(), Error> {
     let mut req = generators::gen_sample(&case.group);
     req.groups.push(case.other_group.clone());
     let sha256 = owner.files.create(req).await?.sha256;
+    let repo = generators::repos(&case.group, 1, &owner).await?.remove(0);
     let assoc = AssociationRequest::new(
         AssociationKind::AssociatedWith,
         AssociationTarget::File(sha256.clone()),
     )
     .groups(vec![case.group.clone()])
-    .target(AssociationTarget::Repo(
-        "provider.tld/refused/repo".to_owned(),
-    ));
+    .target(AssociationTarget::Repo(repo.url));
     owner.associations.create(&assoc).await?;
     // listing the file's associations in that group is refused
     let path = format!("/api/files/associations/{sha256}?groups[]={}", case.group);

@@ -7,6 +7,8 @@ mod build_images;
 mod collisions;
 mod diff;
 mod export;
+// the image import flow stays in place for when toolbox imports learn to create tools
+#[allow(dead_code)]
 mod import;
 pub(crate) mod init;
 mod manifest;
@@ -44,6 +46,12 @@ async fn connect(args: &Args) -> Result<(CtlConf, Thorium), Error> {
     Ok((conf, thorium))
 }
 
+/// Why toolbox imports are refused
+const TOOLBOX_IMPORT_GONE: &str = "Toolbox imports are not supported: Thorium runs Tools \
+    instead of images, and images can no longer be created. Create each tool with \
+    `thorctl tools create --spec <spec>` and set each pipeline stage's tool with \
+    `thorctl pipelines stage-tool <pipeline> <stage> <tool>`.";
+
 /// Dispatches a toolbox subcommand to its handler
 ///
 /// # Arguments
@@ -76,15 +84,8 @@ pub async fn handle(args: &Args, toolbox: &Toolbox) -> Result<(), Error> {
             super::container::init_runtime(args.container_runtime, configured_runtime);
             build_images::build_images(cmd).await
         }
-        Toolbox::Import(cmd) => {
-            // build a client and run the connection checks
-            let (conf, thorium) = connect(args).await?;
-            // resolve the runtime up front so pushing any bundled image tarballs has a
-            // CLI ready; non-bundled imports simply never invoke it
-            super::container::init_runtime(args.container_runtime, conf.container_runtime);
-            // the import future is large, so box it rather than keeping it on the stack
-            Box::pin(import::import(thorium, conf, cmd, args.workers)).await
-        }
+        // images can't be created, so importing a toolbox fails before any API call
+        Toolbox::Import(_) => Err(Error::new(TOOLBOX_IMPORT_GONE.to_owned())),
         Toolbox::Export(cmd) => {
             // build a client and run the connection checks
             let (conf, thorium) = connect(args).await?;

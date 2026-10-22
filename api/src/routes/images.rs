@@ -20,32 +20,56 @@ use crate::models::{
     FileSystemDependencySettingsUpdate, FilesHandler, FilesHandlerUpdate, Group, HostPath,
     HostPathTypes, Image, ImageArgs, ImageArgsUpdate, ImageBan, ImageBanKind, ImageBanUpdate,
     ImageDetailsList, ImageKey, ImageLifetime, ImageList, ImageListParams,
-    ImageNetworkPolicyUpdate, ImageRequest, ImageScaler, ImageUpdate, ImageVersion, Kvm, KvmUpdate,
+    ImageNetworkPolicyUpdate, ImageRequest, ImageScaler, ImageUpdate, Kvm, KvmUpdate,
     KwargDependency, NFS, Notification, NotificationLevel, NotificationParams, NotificationRequest,
     OutputCollection, OutputCollectionUpdate, OutputDisplayType, OutputHandler,
     RepoDependencySettings, RepoDependencySettingsUpdate, Resources, ResourcesRequest,
     ResourcesUpdate, ResultDependencySettings, ResultDependencySettingsUpdate,
     SampleDependencySettings, SampleDependencySettingsUpdate, Secret, SecurityContext,
-    SecurityContextUpdate, SpawnLimits, TagDependencySettings, TagDependencySettingsUpdate, Volume,
-    VolumeTypes,
+    SecurityContextUpdate, SpawnLimits, TagDependencySettings, TagDependencySettingsUpdate,
+    ToolVersion, Volume, VolumeTypes,
 };
 use crate::utils::{ApiError, AppState};
 
-/// Creates a new image in a group
+/// Why image creates and updates are refused
+const IMAGE_WRITES_GONE: &str = "Images can no longer be created or updated; Thorium runs Tools \
+    instead. Create and update tools with the Tool routes (/api/entities/) or with \
+    `thorctl tools`, and set pipeline stages with `thorctl pipelines stage-tool`.";
+
+/// Refuse an image create or update with `410 Gone`
+///
+/// Tests that seed stored images opt their groups back in to image writes.
+///
+/// # Arguments
+///
+/// * `group` - The group the image would be written in
+#[cfg_attr(not(feature = "test-utilities"), allow(unused_variables))]
+fn image_writes_gone(group: &str) -> Result<(), ApiError> {
+    // let tests seed images in the groups they opted in
+    #[cfg(feature = "test-utilities")]
+    if crate::test_utilities::faults::image_writes_allowed(group) {
+        return Ok(());
+    }
+    // every other image write is gone
+    Err(ApiError::new(
+        StatusCode::GONE,
+        Some(IMAGE_WRITES_GONE.to_owned()),
+    ))
+}
+
+/// Refuses to create a new image, since images are replaced by Tools
 ///
 /// # Arguments
 ///
 /// * `user` - The user that is creating this image
 /// * `state` - Shared Thorium objects
-/// * `image_request` - The image to create
+/// * `body` - The image that would have been created
 #[utoipa::path(
     post,
     path = "/api/images/",
-    params(
-        ("image_request" = ImageRequest, description = "The image to create")
-    ),
+    request_body = ImageRequest,
     responses(
-        (status = 204, description = "Image created"),
+        (status = 410, description = "Images can no longer be created; create a Tool instead"),
         (status = 401, description = "This user is not authorized to access this route"),
     ),
     security(
@@ -56,9 +80,22 @@ use crate::utils::{ApiError, AppState};
 async fn create(
     user: AuthedUser,
     State(state): State<AppState>,
-    Json(image_request): Json<ImageRequest>,
+    body: axum::body::Bytes,
 ) -> Result<StatusCode, ApiError> {
-    // create Image
+    // find the group the image would be created in, if the body names one
+    let image_request = serde_json::from_slice::<ImageRequest>(&body).ok();
+    let group = image_request
+        .as_ref()
+        .map_or_else(String::new, |req| req.group.clone());
+    // image creates are gone
+    image_writes_gone(&group)?;
+    // create the image for tests that seed stored images
+    let Some(image_request) = image_request else {
+        return Err(ApiError::new(
+            StatusCode::BAD_REQUEST,
+            Some("invalid image request".to_owned()),
+        ));
+    };
     Image::create(&user, image_request, &state.shared).await?;
     Ok(StatusCode::NO_CONTENT)
 }
@@ -174,7 +211,7 @@ async fn list_details(
     Ok(Json(details))
 }
 
-/// Updates an image
+/// Refuses to update an image, since images are replaced by Tools
 ///
 /// # Arguments
 ///
@@ -182,17 +219,17 @@ async fn list_details(
 /// * `group` - The group to update an image from
 /// * `image` - The name of the image to update
 /// * `state` - Shared Thorium objects
-/// * `update` - The update to apply
+/// * `body` - The update that would have been applied
 #[utoipa::path(
     patch,
     path = "/api/images/:group/:image",
     params(
         ("group" = String, Path, description = "The group to update an image from"),
         ("image" = String, Path, description = "The name of the image to update"),
-        ("update" = ImageUpdate, description = "The update to apply")
     ),
+    request_body = ImageUpdate,
     responses(
-        (status = 204, description = "Image updated"),
+        (status = 410, description = "Images can no longer be updated; update a Tool instead"),
         (status = 401, description = "This user is not authorized to access this route"),
     ),
     security(
@@ -204,8 +241,12 @@ async fn update(
     user: AuthedUser,
     Path((group, image)): Path<(String, String)>,
     State(state): State<AppState>,
-    Json(update): Json<ImageUpdate>,
+    body: axum::body::Bytes,
 ) -> Result<StatusCode, ApiError> {
+    // image updates are gone, including ones that only change bans
+    image_writes_gone(&group)?;
+    // parse the update for tests that seed stored images
+    let update = serde_json::from_slice::<ImageUpdate>(&body)?;
     // get image
     let (group, image) = Image::get(&user, &group, &image, &state.shared).await?;
     // update the image in the backend
@@ -407,7 +448,7 @@ async fn delete_notification(
 #[derive(OpenApi)]
 #[openapi(
     paths(create, get_image, list, list_details, update, delete_image, runtimes_update, get_notifications, create_notification, delete_notification),
-    components(schemas(ArgStrategy, AutoTag, AutoTagLogic, AutoTagUpdate, ChildFilters, ChildFiltersUpdate, ChildrenDependencySettings, ChildrenDependencySettingsUpdate, Cleanup, CleanupUpdate, ConfigMap, Dependencies, DependenciesUpdate, DependencyPassStrategy, SampleDependencySettingsUpdate, RepoDependencySettingsUpdate, EphemeralDependencySettings, EphemeralDependencySettingsUpdate, FileSystemDependencySettings, FileSystemDependencySettingsUpdate, FilesHandler, FilesHandlerUpdate, GenericBan, HostPath, HostPathTypes, Image, ImageArgs, ImageArgsUpdate, ImageBan, ImageBanKind, ImageBanUpdate, ImageDetailsList, ImageLifetime, ImageList, ImageListParams, ImageNetworkPolicyUpdate, ImageRequest, ImageScaler, ImageUpdate, ImageVersion, InvalidHostPathBan, InvalidUrlBan, Kvm, KvmUpdate, KwargDependency, NFS, Notification<Image>, NotificationLevel, NotificationParams, NotificationRequest<Image>, OutputCollection, OutputCollectionUpdate, OutputDisplayType, OutputHandler, RepoDependencySettings, Resources, ResourcesRequest, ResourcesUpdate, ResultDependencySettings, ResultDependencySettingsUpdate, SampleDependencySettings, Secret, SecurityContext, SecurityContextUpdate, SpawnLimits, TagDependencySettings, TagDependencySettingsUpdate, Volume, VolumeTypes)),
+    components(schemas(ArgStrategy, AutoTag, AutoTagLogic, AutoTagUpdate, ChildFilters, ChildFiltersUpdate, ChildrenDependencySettings, ChildrenDependencySettingsUpdate, Cleanup, CleanupUpdate, ConfigMap, Dependencies, DependenciesUpdate, DependencyPassStrategy, SampleDependencySettingsUpdate, RepoDependencySettingsUpdate, EphemeralDependencySettings, EphemeralDependencySettingsUpdate, FileSystemDependencySettings, FileSystemDependencySettingsUpdate, FilesHandler, FilesHandlerUpdate, GenericBan, HostPath, HostPathTypes, Image, ImageArgs, ImageArgsUpdate, ImageBan, ImageBanKind, ImageBanUpdate, ImageDetailsList, ImageLifetime, ImageList, ImageListParams, ImageNetworkPolicyUpdate, ImageRequest, ImageScaler, ImageUpdate, ToolVersion, InvalidHostPathBan, InvalidUrlBan, Kvm, KvmUpdate, KwargDependency, NFS, Notification<Image>, NotificationLevel, NotificationParams, NotificationRequest<Image>, OutputCollection, OutputCollectionUpdate, OutputDisplayType, OutputHandler, RepoDependencySettings, Resources, ResourcesRequest, ResourcesUpdate, ResultDependencySettings, ResultDependencySettingsUpdate, SampleDependencySettings, Secret, SecurityContext, SecurityContextUpdate, SpawnLimits, TagDependencySettings, TagDependencySettingsUpdate, Volume, VolumeTypes)),
     modifiers(&OpenApiSecurity),
 )]
 pub struct ImageApiDocs;

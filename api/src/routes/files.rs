@@ -16,11 +16,11 @@ use crate::models::backends::{CommentSupport, TagSupport};
 use crate::models::{
     ApiCursor, Association, AssociationListParams, AssociationTargetColumn, CarvedOrigin, Comment,
     CommentResponse, DeleteCommentParams, DeleteSampleParams, EntityKinds, EntityRequest,
-    FileListParams, ImageVersion, Origin, OriginRequest, Output, OutputDisplayType,
-    OutputFormBuilder, OutputHandler, OutputKind, OutputMap, OutputResponse, PcapNetworkProtocol,
+    FileListParams, Origin, OriginRequest, Output, OutputDisplayType, OutputFormBuilder,
+    OutputHandler, OutputKind, OutputMap, OutputResponse, PcapNetworkProtocol,
     ResultFileDownloadParams, ResultGetParams, Sample, SampleCheck, SampleCheckResponse,
     SampleListLine, SampleSubmissionResponse, SubmissionChunk, SubmissionUpdate, TagCounts,
-    TagDeleteRequest, TagRequest, ZipDownloadParams,
+    TagDeleteRequest, TagRequest, ToolVersion, ZipDownloadParams,
 };
 use crate::utils::{ApiError, AppState};
 
@@ -781,7 +781,7 @@ async fn download_result_entities(
 #[derive(OpenApi)]
 #[openapi(
     paths(list, upload, list_details, get_sample, delete_sample, exists, download, download_as_zip, download_result_file, download_result_entities, update, tag, delete_tags, create_comment, delete_comment, download_attachment, get_results, upload_results),
-    components(schemas(ApiCursor<Sample>, ApiCursor<SampleListLine>, CarvedOrigin, Comment, CommentResponse, DeleteCommentParams, DeleteSampleParams,FileListParams, ImageVersion, Origin, OriginRequest, Output, OutputDisplayType, OutputHandler, OutputMap, OutputResponse, PcapNetworkProtocol, ResultGetParams, Sample, SampleCheck, SampleCheckResponse, SampleListLine, SampleSubmissionResponse, SubmissionChunk, SubmissionUpdate, TagDeleteRequest<Sample>, TagRequest<Sample>, ZipDownloadParams, TagCounts, EntityKinds, EntityRequest)),
+    components(schemas(ApiCursor<Sample>, ApiCursor<SampleListLine>, CarvedOrigin, Comment, CommentResponse, DeleteCommentParams, DeleteSampleParams,FileListParams, ToolVersion, Origin, OriginRequest, Output, OutputDisplayType, OutputHandler, OutputMap, OutputResponse, PcapNetworkProtocol, ResultGetParams, Sample, SampleCheck, SampleCheckResponse, SampleListLine, SampleSubmissionResponse, SubmissionChunk, SubmissionUpdate, TagDeleteRequest<Sample>, TagRequest<Sample>, ZipDownloadParams, TagCounts, EntityKinds, EntityRequest)),
     modifiers(&OpenApiSecurity),
 )]
 pub struct FileApiDocs;

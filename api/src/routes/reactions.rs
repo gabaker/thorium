@@ -20,7 +20,8 @@ use crate::models::{
     ImageScaler, JobResetRequestor, Pipeline, Reaction, ReactionCache, ReactionCacheUpdate,
     ReactionCursorParams, ReactionDetailsList, ReactionIdResponse, ReactionList,
     ReactionListParams, ReactionRequest, ReactionStatus, ReactionUpdate, RepoDependency,
-    RepoDependencyRequest, StageLogLine, StageLogs, StageLogsAdd, StatusUpdate, SystemComponents,
+    RepoDependencyRequest, ScopedToken, StageLogLine, StageLogs, StageLogsAdd, StatusUpdate,
+    SystemComponents,
 };
 use crate::utils::{ApiError, AppState};
 
@@ -111,6 +112,8 @@ async fn create_bulk_by_user(
     State(state): State<AppState>,
     Json(reqs): Json<HashMap<String, Vec<ReactionRequest>>>,
 ) -> Result<Json<HashMap<String, BulkReactionResponse>>, ApiError> {
+    // require a fully authed user since scoped tokens cannot create reactions as other users
+    let user = user.require_full()?;
     // create reactions in bulk
     let response = Reaction::create_bulk_by_user(&user, reqs, &state.shared).await?;
     Ok(Json(response))
@@ -148,6 +151,43 @@ async fn get_reaction(
     // get reaction from backend
     let (_, reaction) = Reaction::get(&user, &group, &id, &state.shared).await?;
     Ok(Json(reaction))
+}
+
+/// Gets the run-scoped token a run's workers use
+///
+/// Only admins authenticated with their full token can read a run's token.
+///
+/// # Arguments
+///
+/// * `user` - The user that is reading the run's token
+/// * `group` - The group the run's reaction is in
+/// * `id` - The id of the run's reaction
+/// * `state` - Shared Thorium objects
+#[utoipa::path(
+    get,
+    path = "/api/reactions/:group/:id/run-token",
+    params(
+        ("group" = String, Path, description = "The group the run's reaction is in"),
+        ("id" = Uuid, Path, description = "The id of the run's reaction"),
+    ),
+    responses(
+        (status = 200, description = "The run's token", body = ScopedToken),
+        (status = 401, description = "This user is not an admin authenticated with their full token"),
+        (status = 404, description = "The reaction has no run token"),
+    ),
+    security(
+        ("basic" = []),
+    )
+)]
+#[instrument(name = "routes::reactions::run_token", skip_all, err(Debug))]
+async fn run_token(
+    user: AuthedUser,
+    Path((group, id)): Path<(String, Uuid)>,
+    State(state): State<AppState>,
+) -> Result<Json<ScopedToken>, ApiError> {
+    // read the run's token as an admin
+    let token = Reaction::run_token(&user, &group, &id, &state.shared).await?;
+    Ok(Json(token))
 }
 
 /// Update a reactions cache
@@ -1333,7 +1373,7 @@ async fn download_ephemeral(
 /// The struct containing our openapi docs
 #[derive(OpenApi)]
 #[openapi(
-    paths(create, create_bulk, get_reaction, update, delete_reaction, handle, logs, stage_logs, add_stage_logs,
+    paths(create, create_bulk, get_reaction, run_token, update, delete_reaction, handle, logs, stage_logs, add_stage_logs,
           list, list_new, list_details, list_status, list_status_new, list_status_details, list_tag, list_tag_new,
           list_tag_details, list_group_set, list_group_set_details, list_sub, list_sub_new, list_sub_details,
           list_sub_status_details, list_sub_status, list_sub_status_new, download_ephemeral),
@@ -1362,6 +1402,7 @@ pub fn mount(router: Router<AppState>) -> Router<AppState> {
             "/reactions/{group}/{id}",
             get(get_reaction).patch(update).delete(delete_reaction),
         )
+        .route("/reactions/{group}/{id}/run-token", get(run_token))
         .route(
             "/reactions/{group}/{id}/cache",
             get(get_cache).patch(update_cache),

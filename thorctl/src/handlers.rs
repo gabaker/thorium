@@ -1,3 +1,4 @@
+pub mod agents;
 pub mod ai;
 pub mod associations;
 pub mod cart;
@@ -11,6 +12,8 @@ pub mod files;
 pub mod groups;
 pub mod images;
 pub(crate) mod imports;
+pub mod instances;
+pub mod models;
 mod monitor;
 pub mod network_policies;
 pub mod pipelines;
@@ -22,10 +25,13 @@ pub mod run;
 pub mod tags;
 pub mod tokens;
 pub mod toolbox;
+pub mod tools;
+pub mod toolsets;
 pub mod trees;
 pub mod uncart;
 pub mod update;
 mod worker;
+pub mod workflows;
 
 pub(crate) use controllers::Controller;
 pub(crate) use monitor::{Monitor, MonitorHandler, MonitorMsg, SimpleMonitor, SimpleRateMonitor};

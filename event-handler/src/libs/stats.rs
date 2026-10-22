@@ -8,7 +8,7 @@ use tokio::task::JoinHandle;
 
 use crate::libs::workers::EventWorkerKinds;
 
-use super::workers::{EventWorkerSupportCore, ReactionTriggerWorker, SigmaRuleWorker};
+use super::workers::{AiWorker, EventWorkerSupportCore, ReactionTriggerWorker, SigmaRuleWorker};
 
 /// The different channels for for each event worker
 pub struct EventWorkerStatChannels {
@@ -21,6 +21,11 @@ pub struct EventWorkerStatChannels {
     pub sigma_rules: (
         AsyncSender<<SigmaRuleWorker as EventWorkerSupportCore>::Stats>,
         AsyncReceiver<<SigmaRuleWorker as EventWorkerSupportCore>::Stats>,
+    ),
+    /// The channel for the AI worker
+    pub ai: (
+        AsyncSender<<AiWorker as EventWorkerSupportCore>::Stats>,
+        AsyncReceiver<<AiWorker as EventWorkerSupportCore>::Stats>,
     ),
 }
 
@@ -42,6 +47,12 @@ impl EventWorkerStatChannels {
                 // spawn this stats worker
                 tokio::task::spawn(stats_worker.start())
             }
+            EventWorkerKinds::Ai => {
+                // build the AI worker's stats reporter
+                let stats_worker = EventWorkerStats::<AiWorker>::new(&self.ai.1);
+                // spawn this stats worker
+                tokio::task::spawn(stats_worker.start())
+            }
         }
     }
 }
@@ -51,6 +62,7 @@ impl Default for EventWorkerStatChannels {
         EventWorkerStatChannels {
             reaction_trigger: kanal::unbounded_async(),
             sigma_rules: kanal::unbounded_async(),
+            ai: kanal::unbounded_async(),
         }
     }
 }

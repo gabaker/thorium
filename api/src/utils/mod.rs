@@ -26,3 +26,4 @@ mod trace_reexport {
 pub use trace_reexport::*;
 
 pub mod helpers;
+pub mod protected_names;

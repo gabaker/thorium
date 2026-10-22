@@ -280,6 +280,10 @@ SELECT kind, group, year, bucket, count(*) AS count FROM {ns}.entities WHERE tok
 SELECT id, group, kind, created, name, submitter, kind_data, description, image FROM {ns}.entities_by_id WHERE id = ? AND group IN ?
 -- entities_by_id.get_many
 SELECT id, group, kind, created, name, submitter, kind_data, description, image FROM {ns}.entities_by_id WHERE id IN ? AND group IN ?
+-- entities_by_id.all_groups
+SELECT group FROM {ns}.entities_by_id WHERE id = ?
+-- entities_by_id.get_groups_kinds_by_ids
+SELECT id, group, kind FROM {ns}.entities_by_id WHERE id IN ?
 -- entities_by_id.get_names_kinds_by_ids
 SELECT id, name, kind FROM {ns}.entities_by_id WHERE id IN ?
 -- associations.insert

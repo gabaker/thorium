@@ -3,7 +3,7 @@
 use thorium::client::{ClientSettings, Users};
 use thorium::models::{
     AssociationKind, AssociationRequest, AssociationTarget, ElasticSearchOpts, EntityRequest,
-    GroupUpdate, GroupUsersUpdate, UserCreate, UserRole,
+    EntityUpdate, GroupUpdate, GroupUsersUpdate, UserCreate, UserRole,
 };
 use thorium::test_utilities::{self, generators};
 use thorium::{Error, Thorium};
@@ -139,6 +139,9 @@ async fn masquerade_limits_entities_associations_and_search() -> Result<(), Erro
             "admin search of B after revert was refused: {error}"
         );
     }
+    // associations need a group holding both ends, so the admin adds group B to the A entity
+    let update = EntityUpdate::default().group(&group_b);
+    masked.entities.update(a_id, update).await?;
     masked.associations.create(&association(a_id, b_id)).await?;
     Ok(())
 }

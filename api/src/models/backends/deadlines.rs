@@ -105,6 +105,8 @@ impl TryFrom<StreamObj> for Deadline {
             job_id: frag.job_id,
             reaction: frag.reaction,
             deadline: datetime,
+            tool_instance: frag.tool_instance,
+            run: frag.run,
         };
         Ok(deadline)
     }

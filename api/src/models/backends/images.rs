@@ -422,8 +422,11 @@ impl ChildFiltersUpdate {
                 .chain(self.add_file_extension.iter()),
         )?;
         // make sure all the mime filters we want to add are already in the image
-        let missing_filters: Vec<&String> =
-            self.remove_mime.difference(&child_filters.mime).collect();
+        let missing_filters: Vec<&String> = self
+            .remove_mime
+            .iter()
+            .filter(|f| !child_filters.mime.contains(*f))
+            .collect();
         if !missing_filters.is_empty() {
             return bad!(format!(
                 "Image is missing one or more mime child filters to be removed: {missing_filters:?}"
@@ -432,7 +435,8 @@ impl ChildFiltersUpdate {
         // make sure all the file name filters we want to add are already in the image
         let missing_filters: Vec<&String> = self
             .remove_file_name
-            .difference(&child_filters.file_name)
+            .iter()
+            .filter(|f| !child_filters.file_name.contains(*f))
             .collect();
         if !missing_filters.is_empty() {
             return bad!(format!(
@@ -442,7 +446,8 @@ impl ChildFiltersUpdate {
         // make sure all the file extension filters we want to add are already in the image
         let missing_filters: Vec<&String> = self
             .remove_file_extension
-            .difference(&child_filters.file_extension)
+            .iter()
+            .filter(|f| !child_filters.file_extension.contains(*f))
             .collect();
         if !missing_filters.is_empty() {
             return bad!(format!(
@@ -688,7 +693,7 @@ impl Image {
             ));
         }
         // build the message to trace after we create this image
-        let msg = format!("Created image {}:{}", &request.group, &request.name);
+        let msg = format!("Created image {}:{}", request.group, request.name);
         // strip our docker image path if it exists
         if let Some(image) = request.image.as_mut() {
             // strip our image to ensure there is no extra whitespace
@@ -745,8 +750,8 @@ impl Image {
         // create the image in the backend
         let image = db::images::create(user, request, shared).await?;
         // add this image to the used by sets for image's network policies if it has any
-        if !image.network_policies.is_empty() {
-            if let Err(err) = NetworkPolicy::set_used_by(
+        if !image.network_policies.is_empty()
+            && let Err(err) = NetworkPolicy::set_used_by(
                 &image.group,
                 image.network_policies.iter(),
                 std::iter::empty::<&str>(),
@@ -754,11 +759,10 @@ impl Image {
                 shared,
             )
             .await
-            {
-                return internal_err!(format!(
-                    "Unable to update 'used_by' sets for one or more network policies: {err}"
-                ));
-            }
+        {
+            return internal_err!(format!(
+                "Unable to update 'used_by' sets for one or more network policies: {err}"
+            ));
         }
         // log that we created this image
         event!(Level::INFO, msg = &msg);
@@ -1258,6 +1262,8 @@ impl ImageScaler {
 #[cfg(test)]
 mod tests {
     use super::Image;
+    use crate::models::{ChildFilters, ChildFiltersUpdate};
+    use axum::http::StatusCode;
     use std::collections::HashMap;
 
     /// An image stored without its environment reads it as empty, as its type's default says
@@ -1277,5 +1283,71 @@ mod tests {
         // it reads with an empty environment
         let image = Image::try_from((raw, Vec::new())).expect("an image without env didn't parse");
         assert!(image.env.is_empty());
+    }
+
+    /// `ChildFiltersUpdate::update` adds and removes filters of every kind
+    #[test]
+    fn child_filters_update_adds_and_removes() {
+        // start from filters of every kind
+        let mut filters = ChildFilters::default()
+            .mimes(["old-mime", "keep-mime"])
+            .file_names(["old-name", "keep-name"])
+            .file_extensions(["old-ext", "keep-ext"]);
+        // add one filter of each kind and remove one of each kind
+        let update = ChildFiltersUpdate::default()
+            .add_mime("new-mime")
+            .remove_mime("old-mime")
+            .add_file_name("new-name")
+            .remove_file_name("old-name")
+            .add_file_extension("new-ext")
+            .remove_file_extension("old-ext")
+            .submit_non_matches(true);
+        // apply the update to the filters
+        update.clone().update(&mut filters).unwrap();
+        // the update applied to every kind
+        assert_eq!(update, filters);
+        assert_eq!(
+            filters,
+            ChildFilters::default()
+                .mimes(["keep-mime", "new-mime"])
+                .file_names(["keep-name", "new-name"])
+                .file_extensions(["keep-ext", "new-ext"])
+                .submit_non_matches()
+        );
+    }
+
+    /// Removing a filter the image doesn't have returns a 400 with the existing message for every
+    /// kind of filter and leaves the filters unchanged
+    #[test]
+    fn child_filters_update_missing_filter_is_rejected() {
+        // the update removing a missing filter of each kind and the message it must return
+        let cases = [
+            (
+                ChildFiltersUpdate::default().remove_mime("not-found"),
+                "Image is missing one or more mime child filters to be removed: [\"not-found\"]",
+            ),
+            (
+                ChildFiltersUpdate::default().remove_file_name("not-found"),
+                "Image is missing one or more file name child filters to be removed: [\"not-found\"]",
+            ),
+            (
+                ChildFiltersUpdate::default().remove_file_extension("not-found"),
+                "Image is missing one or more file extension child filters to be removed: [\"not-found\"]",
+            ),
+        ];
+        for (update, msg) in cases {
+            // start from filters that have one filter of each kind but not the one to remove
+            let original = ChildFilters::default()
+                .mime("present")
+                .file_name("present")
+                .file_extension("present");
+            let mut filters = original.clone();
+            // the update is rejected as a bad request with the existing message
+            let err = update.update(&mut filters).unwrap_err();
+            assert_eq!(err.status(), StatusCode::BAD_REQUEST);
+            assert_eq!(err.to_string(), msg);
+            // the filters are unchanged
+            assert_eq!(filters, original);
+        }
     }
 }

@@ -8,16 +8,19 @@ use axum_extra::body::AsyncReadBody;
 use chrono::Utc;
 use tracing::{Level, event, instrument};
 use utoipa::OpenApi;
+use uuid::Uuid;
 
 use super::OpenApiSecurity;
-use super::shared::graphics;
+use super::shared::{self, graphics};
 
 // our imports
 use crate::models::backends::GraphicSupport;
 use crate::models::{
     AiEndpoint, AiEndpointUpdate, AiSettings, AiSettingsUpdate, AuthResponse, AuthedUser, Key,
-    ScopedToken, ScopedTokenRequest, ScopedTokenUpdate, ScrubbedUser, Theme, UnixInfo, User,
-    UserCreate, UserRole, UserSettings, UserSettingsUpdate, UserUpdate,
+    Notification, NotificationParams, NotificationRequest, ScopedToken, ScopedTokenRequest,
+    ScopedTokenUpdate, ScrubbedUser, Theme, UnixInfo, User, UserCreate, UserCredentialRef,
+    UserModelEndpoint, UserModelSettings, UserModelSettingsUpdate, UserRole, UserSettings,
+    UserSettingsUpdate, UserUpdate,
 };
 use crate::utils::{ApiError, AppState};
 use crate::{bad, conflict, is_admin, not_found, unauthorized, unavailable};
@@ -248,13 +251,15 @@ async fn get_user(
     Path(username): Path<String>,
     State(state): State<AppState>,
 ) -> Result<Json<ScrubbedUser>, ApiError> {
+    // require a fully authed user since scoped tokens cannot read user profiles
+    let user = user.require_full()?;
     // if user is an admin then allow them to get any user
     if user.is_admin() && user.username != username {
         let requested = User::force_get(&username, &state.shared).await?;
         Ok(Json(ScrubbedUser::from(requested)))
     // were requesting info on ourselves so just return it
     } else if user.username == username {
-        Ok(Json(ScrubbedUser::from(user.into_user())))
+        Ok(Json(ScrubbedUser::from(user)))
     // were not an admin and not asking about ourselves reject it
     } else {
         unauthorized!()
@@ -316,6 +321,8 @@ async fn list_details(
     user: AuthedUser,
     State(state): State<AppState>,
 ) -> Result<Json<Vec<ScrubbedUser>>, ApiError> {
+    // require a fully authed user since scoped tokens cannot list every user's details
+    let user = user.require_full()?;
     // list all users with details
     let details = user.list_details(&state.shared).await?;
     Ok(Json(details))
@@ -845,9 +852,8 @@ async fn get_image(
         Some(image_path) => {
             // download the icon from S3 with its metadata; if the referenced object is missing (a dangling
             // reference) treat it as "no icon" (404) instead of surfacing a 400 with raw S3 internals
-            let get_object = match target.download_graphic(image_path, &state.shared).await {
-                Ok(get_object) => get_object,
-                Err(_) => return not_found!(format!("User '{username}' has no image")),
+            let Ok(get_object) = target.download_graphic(image_path, &state.shared).await else {
+                return not_found!(format!("User '{username}' has no image"));
             };
             // build response headers (content-type, disposition, length) from the object
             let headers = graphics::get_headers(&get_object, image_path);
@@ -859,11 +865,163 @@ async fn get_image(
     }
 }
 
+/// Create a notification for a user, which only admins may do
+///
+/// # Arguments
+///
+/// * `user` - The user sending the request
+/// * `username` - The user to notify
+/// * `state` - Shared Thorium objects
+/// * `params` - Whether the notification expires
+/// * `req` - The notification to create
+#[utoipa::path(
+    post,
+    path = "/api/users/notifications/{username}",
+    params(
+        ("username" = String, Path, description = "The user to notify"),
+        ("params" = NotificationParams, description = "Whether the notification expires"),
+        ("req" = NotificationRequest<User>, description = "The notification to create")
+    ),
+    responses(
+        (status = 204, description = "Notification created"),
+        (status = 401, description = "This user is not authorized to access this route"),
+        (status = 404, description = "The user doesn't exist"),
+    ),
+    security(
+        ("basic" = []),
+    )
+)]
+#[instrument(name = "routes::users::create_notification", skip_all, err(Debug))]
+async fn create_notification(
+    user: AuthedUser,
+    Path(username): Path<String>,
+    State(state): State<AppState>,
+    params: NotificationParams,
+    Json(req): Json<NotificationRequest<User>>,
+) -> Result<StatusCode, ApiError> {
+    // only a fully authed admin can notify users
+    let user = user.require_full()?;
+    is_admin!(user);
+    // the user must exist, so nothing is written under an unknown name
+    let target = User::force_get(&username, &state.shared).await?;
+    let key = target.username.clone();
+    shared::notifications::create_notification(target, key, req, params, &state.shared).await
+}
+
+/// Get the caller's own notifications
+///
+/// # Arguments
+///
+/// * `user` - The user whose notifications are read
+/// * `state` - Shared Thorium objects
+#[utoipa::path(
+    get,
+    path = "/api/users/notifications/",
+    params(),
+    responses(
+        (status = 200, description = "The caller's own notifications"),
+        (status = 401, description = "This user is not authorized to access this route"),
+    ),
+    security(
+        ("basic" = []),
+    )
+)]
+#[instrument(name = "routes::users::get_notifications", skip_all, err(Debug))]
+async fn get_notifications(
+    user: AuthedUser,
+    State(state): State<AppState>,
+) -> Result<Json<Vec<Notification<User>>>, ApiError> {
+    // a user only ever reads their own notifications
+    let user = user.into_user();
+    let key = user.username.clone();
+    shared::notifications::get_notifications(user, key, &state.shared).await
+}
+
+/// Dismiss one of the caller's own notifications
+///
+/// # Arguments
+///
+/// * `user` - The user whose notification is dismissed
+/// * `id` - The id of the notification
+/// * `state` - Shared Thorium objects
+#[utoipa::path(
+    delete,
+    path = "/api/users/notifications/{id}",
+    params(
+        ("id" = Uuid, Path, description = "The id of the notification to dismiss"),
+    ),
+    responses(
+        (status = 204, description = "Notification dismissed"),
+        (status = 401, description = "This user is not authorized to access this route"),
+        (status = 404, description = "The caller has no notification with this id"),
+    ),
+    security(
+        ("basic" = []),
+    )
+)]
+#[instrument(name = "routes::users::delete_notification", skip_all, err(Debug))]
+async fn delete_notification(
+    user: AuthedUser,
+    Path(id): Path<Uuid>,
+    State(state): State<AppState>,
+) -> Result<StatusCode, ApiError> {
+    // dismissing needs a full token, and a user only ever dismisses their own
+    let user = user.require_full()?;
+    let key = user.username.clone();
+    shared::notifications::delete_notification(user, key, None, id, &state.shared).await
+}
+
+/// Read a user's own credential for a model endpoint with its secrets, which only admins may do
+///
+/// # Arguments
+///
+/// * `user` - The user sending the request
+/// * `params` - The user whose credential to read and the endpoint it's for
+/// * `state` - Shared Thorium objects
+#[utoipa::path(
+    get,
+    path = "/api/users/user/{username}/model-credentials/{endpoint}",
+    params(
+        ("username" = String, Path, description = "The user whose credential to read"),
+        ("endpoint" = Uuid, Path, description = "The endpoint the credential is for"),
+    ),
+    responses(
+        (status = 200, description = "The credential with its secrets", body = UserCredentialRef),
+        (status = 401, description = "This user is not an admin"),
+        (status = 404, description = "The user doesn't exist or has no credential for the endpoint"),
+    ),
+    security(
+        ("basic" = []),
+    )
+)]
+#[instrument(name = "routes::users::user_model_credential", skip_all, err(Debug))]
+async fn user_model_credential(
+    user: AuthedUser,
+    Path((username, endpoint)): Path<(String, Uuid)>,
+    State(state): State<AppState>,
+) -> Result<Json<UserCredentialRef>, ApiError> {
+    // only a fully authed admin reads secrets
+    let user = user.require_full()?;
+    is_admin!(user);
+    // the user must exist and have a credential for this endpoint
+    let target = User::force_get(&username, &state.shared).await?;
+    match target
+        .settings
+        .ai
+        .and_then(|ai| ai.models.credentials.get(&endpoint).cloned())
+    {
+        Some(credential) => Ok(Json(credential)),
+        None => not_found!(format!(
+            "{username} has no credential for model endpoint {endpoint}"
+        )),
+    }
+}
+
 /// The struct containing our openapi docs
 #[derive(OpenApi)]
 #[openapi(
-    paths(list, create, update, resend_email_verification, verify_email, list_details, auth, get_user, update_user, info, logout, logout_user, delete_user, sync_ldap, create_scoped_token, list_scoped_tokens, get_scoped_token, update_scoped_token, delete_scoped_token, upload_image, delete_image, get_image),
-    components(schemas(AuthResponse, ScrubbedUser, Theme, UnixInfo, User, UserCreate, UserRole, UserSettings, UserSettingsUpdate, UserUpdate, AiSettings, AiSettingsUpdate, AiEndpoint, AiEndpointUpdate, ScopedToken, ScopedTokenRequest, ScopedTokenUpdate)),
+    paths(list, create, update, resend_email_verification, verify_email, list_details, auth, get_user, update_user, info, logout, logout_user, delete_user, sync_ldap, create_scoped_token, list_scoped_tokens, get_scoped_token, update_scoped_token, delete_scoped_token, upload_image, delete_image, get_image, create_notification, get_notifications, delete_notification, user_model_credential),
+    components(schemas(AuthResponse, ScrubbedUser, Theme, UnixInfo, User, UserCreate, UserRole, UserSettings, UserSettingsUpdate, UserUpdate, AiSettings, AiSettingsUpdate, AiEndpoint, AiEndpointUpdate, ScopedToken, ScopedTokenRequest, ScopedTokenUpdate, UserModelSettings, UserModelEndpoint, UserCredentialRef, UserModelSettingsUpdate)),
     modifiers(&OpenApiSecurity),
 )]
 pub struct UserApiDocs;
@@ -904,6 +1062,12 @@ pub fn mount(router: Router<AppState>) -> Router<AppState> {
         )
         .route("/users/user/{username}", get(get_user).patch(update_user))
         .route("/users/whoami", get(info))
+        .route("/users/notifications/", get(get_notifications))
+        // a user is notified by name and dismisses a notification by id on the same path
+        .route(
+            "/users/notifications/{id}",
+            post(create_notification).delete(delete_notification),
+        )
         // cap the icon upload body only (the global limit is disabled for large file uploads); delete carries
         // no body so it's left unwrapped
         .route(
@@ -913,6 +1077,10 @@ pub fn mount(router: Router<AppState>) -> Router<AppState> {
                 .delete(delete_image),
         )
         .route("/users/user/{username}/image", get(get_image))
+        .route(
+            "/users/user/{username}/model-credentials/{endpoint}",
+            get(user_model_credential),
+        )
         .route("/users/logout", post(logout))
         .route("/users/logout/{target}", get(logout_user))
         .route("/users/delete/{target}", delete(delete_user))

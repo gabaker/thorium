@@ -44,6 +44,8 @@ async fn create(
     State(state): State<AppState>,
     Json(group): Json<GroupRequest>,
 ) -> Result<StatusCode, ApiError> {
+    // require a fully authed user since scoped tokens cannot create groups
+    let user = user.require_full()?;
     // create group
     Group::create(&user, group, &state.shared).await?;
     Ok(StatusCode::NO_CONTENT)
@@ -177,6 +179,8 @@ async fn update(
     State(state): State<AppState>,
     Json(update): Json<GroupUpdate>,
 ) -> Result<StatusCode, ApiError> {
+    // require a fully authed user since scoped tokens cannot change group membership or settings
+    let user = user.require_full()?;
     // get group
     let group = Group::get(&user, &group, &state.shared).await?;
     // update group
@@ -211,6 +215,8 @@ async fn delete_group(
     Path(group): Path<String>,
     State(state): State<AppState>,
 ) -> Result<StatusCode, ApiError> {
+    // require a fully authed user since scoped tokens cannot delete groups
+    let user = user.require_full()?;
     // get group
     let group = Group::get(&user, &group, &state.shared).await?;
     // delete group
@@ -273,16 +279,14 @@ async fn sync_ldap(
 #[instrument(name = "routes::groups::get_stats", skip_all, err(Debug))]
 async fn get_stats(
     user: AuthedUser,
-    Query(params): Query<GroupListParams>,
+    Query(_params): Query<GroupListParams>,
     Path(group): Path<String>,
     State(state): State<AppState>,
 ) -> Result<Json<GroupStats>, ApiError> {
-    // get the grou we are getting pipeline statuses for
+    // get the group we are getting workload statuses for
     let group = Group::get(&user, &group, &state.shared).await?;
     // get the status object for this group
-    let status = group
-        .stats(params.cursor, params.limit, &state.shared)
-        .await?;
+    let status = group.stats(&state.shared).await?;
     Ok(Json(status))
 }
 

@@ -24,6 +24,11 @@ pub struct Deadline {
     pub reaction: Uuid,
     /// The timestamp the job must be started by
     pub deadline: chrono::DateTime<Utc>,
+    /// The tool instance this job runs
+    pub tool_instance: Uuid,
+    /// The run (reaction) whose per-run workers claim this job (omitted for pipeline jobs)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub run: Option<Uuid>,
 }
 
 impl Deadline {
@@ -53,6 +58,8 @@ impl From<&RawJob> for Deadline {
             job_id: job.id.to_owned(),
             reaction: job.reaction.to_owned(),
             deadline: job.deadline,
+            tool_instance: job.tool_instance,
+            run: job.run,
         }
     }
 }
@@ -72,6 +79,8 @@ impl From<RawJob> for Deadline {
             job_id: job.id,
             reaction: job.reaction,
             deadline: job.deadline,
+            tool_instance: job.tool_instance,
+            run: job.run,
         }
     }
 }
@@ -92,4 +101,9 @@ pub(super) struct DeadlineFragment {
     pub job_id: Uuid,
     /// The reaction this job is apart of
     pub reaction: Uuid,
+    /// The tool instance this job runs
+    pub tool_instance: Uuid,
+    /// The run whose per-run workers claim this job
+    #[serde(default)]
+    pub run: Option<Uuid>,
 }

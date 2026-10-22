@@ -51,10 +51,22 @@ impl TestUser {
     ///
     /// * `claim` - The evidence claim this test's transcripts are recorded under
     pub async fn new(claim: &str) -> Result<Self, Error> {
+        // create the user and group under random names
+        Self::named(claim, &unique("ctl"), &unique("ctlgroup")).await
+    }
+
+    /// Create a developer and a group it owns under readable names, and a keys file for it
+    ///
+    /// # Arguments
+    ///
+    /// * `claim` - The evidence claim this test's transcripts are recorded under
+    /// * `username` - The name of the developer
+    /// * `group` - The name of the group the developer owns
+    pub async fn named(claim: &str, username: &str, group: &str) -> Result<Self, Error> {
         // start the test API if needed and get an admin client
         let admin = test_utilities::admin_client().await?;
         // create a developer with a known password
-        let username = unique("ctl");
+        let username = username.to_owned();
         let password = unique("pw");
         let create = UserCreate::new(&username, &password, "fake@fake.gov")
             .skip_verification()
@@ -73,7 +85,7 @@ impl TestUser {
             .build()
             .await?;
         // create a group owned by the admin and our user
-        let group = unique("ctlgroup");
+        let group = group.to_owned();
         let owners = GroupUsersRequest::default()
             .direct("thorium")
             .direct(&username);
@@ -243,14 +255,18 @@ impl TestUser {
                 .register_workers(ImageScaler::K8s, &workers)
                 .await?;
             // claim this stage's job as our user
+            let tool_instance = generators::stage_instance(pipe, stage);
             let jobs = self
                 .client
                 .jobs
-                .claim(&self.group, &pipe.name, stage, &cluster, &node, &worker, 1)
+                .claim_workload(&self.group, tool_instance, &cluster, &node, &worker, 1)
                 .await?;
-            // finish it with random logs
+            // finish it with random logs as the worker that claimed it
             let logs = generators::stage_logs();
-            self.client.jobs.proceed(&jobs[0], &logs, 2).await?;
+            self.client
+                .jobs
+                .proceed(&jobs[0], &logs, 2, &worker)
+                .await?;
             // remove our worker
             generators::delete_worker(&worker, &self.admin).await?;
         }
@@ -279,4 +295,13 @@ pub fn assert_success(output: &Output) {
         output.status.code(),
         String::from_utf8_lossy(&output.stderr)
     );
+}
+
+/// Parse a command's stdout as JSON
+///
+/// # Arguments
+///
+/// * `output` - The command's output
+pub fn json(output: &Output) -> serde_json::Value {
+    serde_json::from_str(&stdout(output)).expect("stdout was not JSON")
 }

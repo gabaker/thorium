@@ -2,10 +2,11 @@ use base64::Engine as _;
 
 use super::{ClientSettings, Error, helpers};
 use crate::models::{
-    AuthResponse, ScopedToken, ScopedTokenRequest, ScopedTokenUpdate, ScrubbedUser, UserCreate,
+    AuthResponse, Notification, NotificationParams, NotificationRequest, ScopedToken,
+    ScopedTokenRequest, ScopedTokenUpdate, ScrubbedUser, User, UserCreate, UserCredentialRef,
     UserUpdate,
 };
-use crate::{send, send_build};
+use crate::{add_query, send, send_build};
 
 // import our static runtime if we need a blocking client
 #[cfg(feature = "sync")]
@@ -623,6 +624,103 @@ impl Users {
     pub async fn delete_scoped_token(&self, name: &str) -> Result<reqwest::Response, Error> {
         // build url for deleting a scoped token
         let url = format!("{}/api/users/tokens/{}", self.host, name);
+        // build request
+        let req = self
+            .client
+            .delete(&url)
+            .header("authorization", &self.token);
+        // send request
+        send!(self.client, req)
+    }
+
+    /// Updates the current [`User`], including their own settings
+    ///
+    /// # Arguments
+    ///
+    /// * `update` - The update to apply to the current user
+    pub async fn update_self(&self, update: UserUpdate) -> Result<reqwest::Response, Error> {
+        // build url for updating the current user
+        let url = format!("{}/api/users/", self.host);
+        // build request
+        let req = self
+            .client
+            .patch(&url)
+            .json(&update)
+            .header("authorization", &self.token);
+        // send request
+        send!(self.client, req)
+    }
+
+    /// Reads a user's own credential for a model endpoint with its secrets, which only admins
+    /// may do
+    ///
+    /// # Arguments
+    ///
+    /// * `username` - The user whose credential to read
+    /// * `endpoint` - The id of the endpoint the credential is for
+    pub async fn user_model_credential(
+        &self,
+        username: &str,
+        endpoint: uuid::Uuid,
+    ) -> Result<UserCredentialRef, Error> {
+        // build url for reading this user's credential
+        let url = format!(
+            "{}/api/users/user/{username}/model-credentials/{endpoint}",
+            self.host
+        );
+        // build request
+        let req = self.client.get(&url).header("authorization", &self.token);
+        // send request and build the credential
+        send_build!(self.client, req, UserCredentialRef)
+    }
+
+    /// Creates a notification for a user, which only admins may do
+    ///
+    /// # Arguments
+    ///
+    /// * `username` - The user to notify
+    /// * `req` - The notification to create
+    /// * `params` - Whether the notification expires
+    pub async fn create_notification(
+        &self,
+        username: &str,
+        req: &NotificationRequest<User>,
+        params: &NotificationParams,
+    ) -> Result<reqwest::Response, Error> {
+        // build url for creating a notification for this user
+        let url = format!("{}/api/users/notifications/{username}", self.host);
+        // build our query params
+        let mut query = vec![];
+        add_query!(query, "expire", params.expire);
+        // build request
+        let req = self
+            .client
+            .post(&url)
+            .json(req)
+            .header("authorization", &self.token)
+            .query(&query);
+        // send request
+        send!(self.client, req)
+    }
+
+    /// Lists the current [`User`]'s own notifications
+    pub async fn notifications(&self) -> Result<Vec<Notification<User>>, Error> {
+        // build url for listing our own notifications
+        let url = format!("{}/api/users/notifications/", self.host);
+        // build request
+        let req = self.client.get(&url).header("authorization", &self.token);
+        // send request and build the notifications
+        send_build!(self.client, req, Vec<Notification<User>>)
+    }
+
+    /// Dismisses one of the current [`User`]'s own notifications
+    ///
+    /// # Arguments
+    ///
+    /// * `id` - The id of the notification to dismiss
+    pub async fn delete_notification(&self, id: uuid::Uuid) -> Result<reqwest::Response, Error> {
+        // build url for dismissing one of our own notifications
+        let url = format!("{}/api/users/notifications/{id}", self.host);
         // build request
         let req = self
             .client

@@ -5,7 +5,7 @@ use std::collections::{HashMap, HashSet};
 use uuid::Uuid;
 
 use crate::models::schema::{ScyllaTable, ScyllaView};
-use crate::models::{EntityKinds, ImageVersion, OutputDisplayType, OutputKind};
+use crate::models::{EntityKinds, OutputDisplayType, OutputKind, ToolVersion};
 
 /// The stored output of one tool run, keyed by result id
 #[derive(ScyllaTable)]
@@ -20,7 +20,7 @@ pub struct ResultsTable {
     /// The tool (image or pipeline) that produced this result
     pub tool: Option<String>,
     /// The version of the tool that produced this result
-    pub tool_version: Option<ImageVersion>,
+    pub tool_version: Option<ToolVersion>,
     /// The command used to produce this result
     pub cmd: Option<String>,
     /// The result body: opaque tool output, parsed as JSON on a best-effort basis when read
@@ -63,7 +63,7 @@ pub struct ResultsStreamTable {
     /// The tool that produced this result
     pub tool: Option<String>,
     /// The version of the tool that produced this result
-    pub tool_version: Option<ImageVersion>,
+    pub tool_version: Option<ToolVersion>,
     /// How the UI renders this result
     pub display_type: Option<OutputDisplayType>,
     /// The command used to produce this result
@@ -98,7 +98,7 @@ pub struct ResultsAuthView {
     #[thorium(cluster = "asc")]
     pub uploaded: DateTime<Utc>,
     /// The version of the tool that produced this result
-    pub tool_version: Option<ImageVersion>,
+    pub tool_version: Option<ToolVersion>,
     /// How the UI renders this result
     pub display_type: Option<OutputDisplayType>,
     /// The command used to produce this result

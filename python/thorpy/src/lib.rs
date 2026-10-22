@@ -24,6 +24,9 @@ pub mod thorium {
     };
     #[pymodule_export]
     pub use thorium::models::python::{SampleCursor, SampleListLineCursor, TagCountsCursor};
+    // export the functions that take JSON tool specs
+    #[pymodule_export]
+    pub use thorium::models::python::tool_portability;
     #[pymodule_export]
     pub use thorium::models::{
         Attachment, BulkReactionResponse, CarvedOriginPy, Comment, CommitishKinds, EntityKinds,
