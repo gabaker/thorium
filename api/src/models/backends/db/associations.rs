@@ -2,14 +2,16 @@
 
 use chrono::prelude::*;
 use futures::stream::{self, StreamExt};
+use std::collections::BTreeMap;
 use tracing::instrument;
+use uuid::Uuid;
 
 use super::{ScyllaCursor, keys};
 use crate::models::schema::QueryError;
 use crate::models::schema::scylla::AssociationsTableRef;
 use crate::models::{
-    AssociatedSubmissions, AssociationKind, AssociationListParams, AssociationTarget,
-    AssociationTargetColumn, Directionality, ListableAssociation, User,
+    AssociatedSubmissions, AssociationKind, AssociationListOpts, AssociationListParams,
+    AssociationTarget, AssociationTargetColumn, Directionality, ListableAssociation, User,
 };
 use crate::serialize;
 use crate::utils::{ApiError, Shared, helpers};
@@ -171,6 +173,98 @@ pub async fn create(
     Ok(())
 }
 
+/// Copy one of a source's listed associations into more groups
+///
+/// The copied rows keep the association's kind, direction, extra info, and submissions, but are
+/// created at the time of the group change and submitted by the user who made it, since that user
+/// is the one who put the association in these groups.
+///
+/// # Arguments
+///
+/// * `submitter` - The user adding the groups, who submits the copied rows
+/// * `now` - The time the groups were added, used as the copied rows' creation time
+/// * `source` - The association target column the association was listed from
+/// * `source_extra` - Any extra info tied to the source (an entity's name)
+/// * `association` - The listed association to copy
+/// * `groups` - The groups to copy the association into
+/// * `shared` - Shared Thorium objects
+#[instrument(
+    name = "db::associations::copy_to_groups",
+    skip(association, shared),
+    err(Debug)
+)]
+pub async fn copy_to_groups(
+    submitter: &str,
+    now: DateTime<Utc>,
+    source: &AssociationTargetColumn,
+    source_extra: Option<String>,
+    association: &ListableAssociation,
+    groups: &Vec<String>,
+    shared: &Shared,
+) -> Result<(), ApiError> {
+    // serialize our source
+    let source_str = serialize!(source);
+    // get the year and bucket of the group change the copied rows are created at
+    let year = now.year();
+    let chunk = shared.config.thorium.associations.partition_size;
+    let bucket = helpers::partition(now, year, chunk);
+    // the reverse rows borrow the opposite direction, so it must outlive them
+    let opposite = association.direction.opposite();
+    // build a future to write both rows of this association in each group
+    let mut futs = Vec::with_capacity(groups.len());
+    for group in groups {
+        // the source -> other row
+        let forward = AssociationsTableRef {
+            group,
+            year,
+            bucket,
+            source: &source_str,
+            created: now,
+            target: &association.other,
+            direction: &association.direction,
+            kind: &association.kind,
+            submitter,
+            extra_source: source_extra.as_deref(),
+            extra_target: association.extra_other.as_deref(),
+            submissions_source: association.submissions_source,
+            submissions_other: association.submissions_other,
+        };
+        // the other -> source row: the same borrows with each pair swapped
+        let reverse = AssociationsTableRef {
+            source: &association.other,
+            target: &source_str,
+            direction: &opposite,
+            extra_source: association.extra_other.as_deref(),
+            extra_target: source_extra.as_deref(),
+            submissions_source: association.submissions_other,
+            submissions_other: association.submissions_source,
+            ..forward
+        };
+        // add the future writing both rows to our list
+        futs.push(create_helper(forward, reverse, shared));
+    }
+    // write the rows 25 at a time
+    stream::iter(futs)
+        .buffer_unordered(25)
+        .collect::<Vec<Result<(), QueryError>>>()
+        .await
+        .into_iter()
+        .collect::<Result<Vec<()>, QueryError>>()?;
+    // add the copied rows to the census cache of each group
+    let mut keys = Vec::with_capacity(groups.len() * 2);
+    keys::associations::census_keys(
+        &mut keys,
+        groups,
+        year,
+        bucket,
+        &source_str,
+        &association.other,
+        shared,
+    );
+    super::census::incr_cache(keys, shared).await?;
+    Ok(())
+}
+
 /// Help delete both the regular and inverted rows for this association
 ///
 /// # Arguments
@@ -295,4 +389,90 @@ pub async fn list<P: Into<AssociationListParams> + std::fmt::Debug>(
     // save this cursor
     cursor.save(shared).await?;
     Ok(cursor)
+}
+
+/// An edge whose source references an entity, found in one group
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GroupReferrer {
+    /// The kind of the referencing edge
+    pub kind: AssociationKind,
+    /// The referencing data at the edge's source
+    pub source: AssociationTargetColumn,
+    /// The referenced entity at the edge's target
+    pub target: Uuid,
+}
+
+/// List the edges in some groups that reference any of the given entities
+///
+/// An edge references an entity when the entity is its target; bidirectional edges reference both
+/// ends. Every referrer in the given groups is returned, keyed by group, including referrers the
+/// caller can't see, so a caller listing them must name only the visible ones.
+///
+/// # Arguments
+///
+/// * `user` - The user checking for referrers
+/// * `targets` - The entities to find referrers for (e.g. a root and its instances)
+/// * `groups` - The groups to look for referrers in
+/// * `shared` - Shared Thorium objects
+#[instrument(
+    name = "db::associations::referrers_in_groups",
+    skip(user, shared),
+    err(Debug)
+)]
+pub async fn referrers_in_groups(
+    user: &User,
+    targets: &[Uuid],
+    groups: &[String],
+    shared: &Shared,
+) -> Result<BTreeMap<String, Vec<GroupReferrer>>, ApiError> {
+    // keep the referrers found in each group
+    let mut referrers: BTreeMap<String, Vec<GroupReferrer>> = BTreeMap::new();
+    // there are no referrers without groups to look in
+    if groups.is_empty() {
+        return Ok(referrers);
+    }
+    // list the associations of each target
+    for target in targets {
+        // the target's own rows hold every edge it's part of
+        let column = AssociationTargetColumn::Entity(*target);
+        // list this target's associations in the requested groups
+        let opts = AssociationListOpts::default()
+            .groups(groups.to_vec())
+            .limit(500);
+        let mut cursor = list(user, opts, &column, shared).await?;
+        // step over every page of associations
+        loop {
+            // keep the rows whose other end is the edge's source
+            for assoc in &cursor.data {
+                // rows pointing at this target come from the edge's source
+                if !matches!(
+                    assoc.direction,
+                    Directionality::From | Directionality::Bidirectional
+                ) {
+                    continue;
+                }
+                // get the referencing source
+                let source = assoc.deserialize_other()?;
+                // add this referrer to each requested group it's in
+                for group in assoc.groups.iter().filter(|group| groups.contains(group)) {
+                    referrers
+                        .entry(group.clone())
+                        .or_default()
+                        .push(GroupReferrer {
+                            kind: assoc.kind,
+                            source: source.clone(),
+                            target: *target,
+                        });
+                }
+            }
+            // stop once this cursor has been exhausted
+            if cursor.exhausted() {
+                break;
+            }
+            // clear our current page and get the next one
+            cursor.data.clear();
+            cursor.next(shared).await?;
+        }
+    }
+    Ok(referrers)
 }

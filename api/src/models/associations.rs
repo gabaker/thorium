@@ -34,6 +34,7 @@ pub enum AssociationTarget {
     PartialEq,
     Hash,
     strum::EnumString,
+    strum::EnumIter,
     clap::ValueEnum,
 )]
 #[value(rename_all = "verbatim")]
@@ -98,6 +99,27 @@ pub enum AssociationKind {
     SigmaRuleHit,
     /// This was involved in something
     InvolvedIn,
+    /// This tool instance was published from this tool
+    PublishedFrom,
+    /// This model endpoint authenticates with this model credential
+    AuthenticatesWith,
+    /// This model profile calls a model on this model endpoint
+    Serves,
+    /// This workflow catalog orchestrates this agent
+    Orchestrates,
+    /// This agent can delegate to this other agent
+    DelegatesTo,
+    /// This agent calls this tool or toolset (Tool or `ToolSet` target = latest, `ToolInstance` or
+    /// `ToolSetInstance` target = pinned)
+    Calls,
+    /// This agent runs in this harness (Tool target = latest, `ToolInstance` target = pinned)
+    RunsIn,
+    /// This workflow instance or toolset instance was built from this workflow catalog or toolset
+    BuiltFrom,
+    /// This toolset includes this tool (Tool target = latest, `ToolInstance` target = pinned)
+    Includes,
+    /// This harness tool instance provides this native agentic tool instance
+    Provides,
 }
 
 impl std::fmt::Display for AssociationKind {
@@ -111,7 +133,84 @@ impl std::fmt::Display for AssociationKind {
 }
 
 impl AssociationKind {
-    /// Cast our AssocationKind to a str
+    /// Check that an edge of this kind keeps its target's groups a superset of its source's
+    ///
+    /// Returns the source groups the target is missing, in the source's order, for kinds whose
+    /// edges must be contained; every other kind accepts any groups.
+    ///
+    /// # Arguments
+    ///
+    /// * `source_groups` - The groups of the edge's source
+    /// * `target_groups` - The groups of the edge's target
+    pub fn group_policy(
+        &self,
+        source_groups: &[String],
+        target_groups: &[String],
+    ) -> Result<(), Vec<String>> {
+        // only kinds whose edges must be contained check the groups
+        if !self.is_contained() {
+            return Ok(());
+        }
+        // get the source groups the target is missing
+        let missing = crate::utils::helpers::missing_groups(source_groups, target_groups);
+        // a target missing no groups covers the source
+        if missing.is_empty() {
+            Ok(())
+        } else {
+            Err(missing)
+        }
+    }
+
+    /// Whether edges of this kind must be contained
+    ///
+    /// An edge must be contained when its source depends on a target that keeps one shared
+    /// definition across its groups, so the source can use the target in every one of its groups.
+    fn is_contained(self) -> bool {
+        match self {
+            // model configuration references and graph edges must be usable in every group of
+            // their source
+            Self::AuthenticatesWith
+            | Self::Serves
+            | Self::Orchestrates
+            | Self::DelegatesTo
+            | Self::Calls
+            | Self::RunsIn
+            | Self::Includes
+            | Self::Provides => true,
+            // these kinds link data that keeps independent copies per group, or an instance to
+            // the root whose groups it carries
+            Self::PublishedFrom
+            | Self::BuiltFrom
+            | Self::FileFor
+            | Self::DocumentationFor
+            | Self::FirmwareFor
+            | Self::AssociatedWith
+            | Self::DevelopedBy
+            | Self::ContainsCVE
+            | Self::ContainsCWE
+            | Self::BasedIn
+            | Self::EmployedBy
+            | Self::ParentCompanyOf
+            | Self::UsedBy
+            | Self::UsedIn
+            | Self::PerformedBy
+            | Self::FileSystemIn
+            | Self::FolderIn
+            | Self::FileIn
+            | Self::ProcessTreeIn
+            | Self::ChildProcess
+            | Self::HasNetworkConnection
+            | Self::SectionIn
+            | Self::ImportIn
+            | Self::FlagFor
+            | Self::CreatedBy
+            | Self::SigmaRuleHit
+            | Self::InvolvedIn => false,
+        }
+    }
+
+    /// Cast our `AssociationKind` to a str
+    #[must_use]
     pub fn as_str(&self) -> &str {
         match self {
             AssociationKind::FileFor => "FileFor",
@@ -139,12 +238,113 @@ impl AssociationKind {
             AssociationKind::CreatedBy => "CreatedBy",
             AssociationKind::SigmaRuleHit => "SigmaRuleHit",
             AssociationKind::InvolvedIn => "InvolvedIn",
+            AssociationKind::PublishedFrom => "PublishedFrom",
+            AssociationKind::AuthenticatesWith => "AuthenticatesWith",
+            AssociationKind::Serves => "Serves",
+            AssociationKind::Orchestrates => "Orchestrates",
+            AssociationKind::DelegatesTo => "DelegatesTo",
+            AssociationKind::Calls => "Calls",
+            AssociationKind::RunsIn => "RunsIn",
+            AssociationKind::BuiltFrom => "BuiltFrom",
+            AssociationKind::Includes => "Includes",
+            AssociationKind::Provides => "Provides",
+        }
+    }
+
+    /// Whether edges of this kind make up the agentic graph that workflow instances are built from
+    #[must_use]
+    pub fn is_graph_edge(self) -> bool {
+        // only the edges a workflow crawl follows are graph edges
+        matches!(
+            self,
+            Self::Orchestrates | Self::DelegatesTo | Self::Calls | Self::RunsIn | Self::Includes
+        )
+    }
+
+    /// Whether an edge of this kind may link a source of one entity kind to a target of another
+    ///
+    /// The agentic kinds only link the entity kinds they're defined for; every general-purpose
+    /// kind accepts any pair.
+    ///
+    /// # Arguments
+    ///
+    /// * `source` - The kind of the edge's source
+    /// * `target` - The kind of the edge's target
+    #[must_use]
+    pub fn allows_pair(self, source: EntityKinds, target: EntityKinds) -> bool {
+        match self {
+            // agents call tools and toolsets at latest or pinned to an instance
+            Self::Calls => {
+                source == EntityKinds::Agent
+                    && matches!(
+                        target,
+                        EntityKinds::Tool
+                            | EntityKinds::ToolInstance
+                            | EntityKinds::ToolSet
+                            | EntityKinds::ToolSetInstance
+                    )
+            }
+            // agents delegate to agents
+            Self::DelegatesTo => source == EntityKinds::Agent && target == EntityKinds::Agent,
+            // agents run in a harness tool at latest or pinned to an instance
+            Self::RunsIn => {
+                source == EntityKinds::Agent
+                    && matches!(target, EntityKinds::Tool | EntityKinds::ToolInstance)
+            }
+            // toolsets include tools at latest or pinned to an instance, never other toolsets
+            Self::Includes => {
+                source == EntityKinds::ToolSet
+                    && matches!(target, EntityKinds::Tool | EntityKinds::ToolInstance)
+            }
+            // workflows orchestrate agents
+            Self::Orchestrates => {
+                source == EntityKinds::WorkflowCatalog && target == EntityKinds::Agent
+            }
+            // the other agentic kinds are written only by their owners, so no pair is allowed
+            Self::BuiltFrom | Self::Provides => false,
+            // model references and instance roots are written only by their owners, and the
+            // general-purpose kinds accept any pair
+            Self::PublishedFrom
+            | Self::AuthenticatesWith
+            | Self::Serves
+            | Self::FileFor
+            | Self::DocumentationFor
+            | Self::FirmwareFor
+            | Self::AssociatedWith
+            | Self::DevelopedBy
+            | Self::ContainsCVE
+            | Self::ContainsCWE
+            | Self::BasedIn
+            | Self::EmployedBy
+            | Self::ParentCompanyOf
+            | Self::UsedBy
+            | Self::UsedIn
+            | Self::PerformedBy
+            | Self::FileSystemIn
+            | Self::FolderIn
+            | Self::FileIn
+            | Self::ProcessTreeIn
+            | Self::ChildProcess
+            | Self::HasNetworkConnection
+            | Self::SectionIn
+            | Self::ImportIn
+            | Self::FlagFor
+            | Self::CreatedBy
+            | Self::SigmaRuleHit
+            | Self::InvolvedIn => true,
         }
     }
 
     /// The association kind for for an entity back to a sample/repo (not an entity)
     ///
     /// This is not exhaustive and is best effort
+    ///
+    /// # Arguments
+    ///
+    /// * `kind` - The kind of entity to pick the association kind for
+    #[must_use]
+    // tools have their own arm so it's clear they never get a more specific kind
+    #[allow(clippy::match_same_arms)]
     pub fn to_parent_nonentity(kind: EntityKinds) -> Self {
         match kind {
             EntityKinds::WindowsProcessTree => Self::ProcessTreeIn,
@@ -155,21 +355,71 @@ impl AssociationKind {
             EntityKinds::NetworkConnection => Self::HasNetworkConnection,
             EntityKinds::PeSection => Self::SectionIn,
             EntityKinds::PeImport => Self::ImportIn,
+            // tools, agents, toolsets, workflows, and model configuration are never children of
+            // samples or repos
+            EntityKinds::Tool
+            | EntityKinds::ToolInstance
+            | EntityKinds::Agent
+            | EntityKinds::ToolSet
+            | EntityKinds::ToolSetInstance
+            | EntityKinds::WorkflowCatalog
+            | EntityKinds::WorkflowInstance
+            | EntityKinds::ModelEndpoint
+            | EntityKinds::ModelProfile
+            | EntityKinds::ModelCredential => Self::AssociatedWith,
             _ => Self::AssociatedWith,
         }
     }
 }
 
 impl From<(EntityKinds, EntityKinds)> for AssociationKind {
+    /// Pick the association kind for an edge from the kinds of its two ends
+    ///
+    /// Edges that touch tools, agents, toolsets, workflows, or model configuration are always
+    /// created with an explicit kind, so they fall back to a generic association here.
+    ///
+    /// # Arguments
+    ///
+    /// * `kinds` - The kinds of the source and target entities
     fn from(kinds: (EntityKinds, EntityKinds)) -> Self {
         match kinds {
-            (EntityKinds::WindowsProcessTree, EntityKinds::WindowsProcess)
-            | (EntityKinds::WindowsProcess, EntityKinds::WindowsProcess) => Self::ChildProcess,
+            // edges to or from tools, agents, toolsets, workflows, and model configuration are
+            // always created with an explicit kind
+            (
+                EntityKinds::Tool
+                | EntityKinds::ToolInstance
+                | EntityKinds::Agent
+                | EntityKinds::ToolSet
+                | EntityKinds::ToolSetInstance
+                | EntityKinds::WorkflowCatalog
+                | EntityKinds::WorkflowInstance
+                | EntityKinds::ModelEndpoint
+                | EntityKinds::ModelProfile
+                | EntityKinds::ModelCredential,
+                _,
+            )
+            | (
+                _,
+                EntityKinds::Tool
+                | EntityKinds::ToolInstance
+                | EntityKinds::Agent
+                | EntityKinds::ToolSet
+                | EntityKinds::ToolSetInstance
+                | EntityKinds::WorkflowCatalog
+                | EntityKinds::WorkflowInstance
+                | EntityKinds::ModelEndpoint
+                | EntityKinds::ModelProfile
+                | EntityKinds::ModelCredential,
+            ) => Self::AssociatedWith,
+            (
+                EntityKinds::WindowsProcessTree | EntityKinds::WindowsProcess,
+                EntityKinds::WindowsProcess,
+            ) => Self::ChildProcess,
             (EntityKinds::FileSystem, EntityKinds::Folder) => Self::FolderIn,
             (EntityKinds::SigmaRule, EntityKinds::Flag) => Self::CreatedBy,
             (EntityKinds::Flag, _) => Self::FlagFor,
             (EntityKinds::Vendor, EntityKinds::Device) => Self::DevelopedBy,
-            (EntityKinds::Incident, _) | (EntityKinds::Other, _) | (_, EntityKinds::Other) => {
+            (EntityKinds::Incident | EntityKinds::Other, _) | (_, EntityKinds::Other) => {
                 Self::AssociatedWith
             }
             _ => Self::AssociatedWith,
@@ -252,6 +502,10 @@ pub struct AssociationRequest {
     /// meaningful for single target requests (the common case for filesystem links).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub submissions: Option<AssociatedSubmissions>,
+    /// Whether to add the source's groups that a target is missing to that target instead of
+    /// rejecting the association (graph edges only)
+    #[serde(default)]
+    pub extend_target_groups: bool,
 }
 
 impl AssociationRequest {
@@ -261,6 +515,7 @@ impl AssociationRequest {
     ///
     /// * `kind` - The kind of association request to create
     /// * `source` - Where this assocation comes from
+    #[must_use]
     pub fn new(kind: AssociationKind, source: AssociationTarget) -> Self {
         // build this association request
         AssociationRequest {
@@ -270,6 +525,7 @@ impl AssociationRequest {
             groups: Vec::default(),
             is_bidirectional: false,
             submissions: None,
+            extend_target_groups: false,
         }
     }
 
@@ -280,6 +536,7 @@ impl AssociationRequest {
     /// * `kind` - The kind of association request to create
     /// * `source` - Where this assocation comes from
     /// * `capacity` - The capacity to set
+    #[must_use]
     pub fn with_capacity(
         kind: AssociationKind,
         source: AssociationTarget,
@@ -293,6 +550,7 @@ impl AssociationRequest {
             groups: Vec::with_capacity(capacity),
             is_bidirectional: false,
             submissions: None,
+            extend_target_groups: false,
         }
     }
 
@@ -301,6 +559,7 @@ impl AssociationRequest {
     /// # Arguments
     ///
     /// * `target` - The target for this association
+    #[must_use]
     pub fn target(mut self, target: AssociationTarget) -> Self {
         // add our new target
         self.targets.push(target);
@@ -312,6 +571,7 @@ impl AssociationRequest {
     /// # Arguments
     ///
     /// * `groups` - The groups to add to this request
+    #[must_use]
     pub fn groups<I>(mut self, groups: I) -> Self
     where
         I: IntoIterator,
@@ -319,11 +579,20 @@ impl AssociationRequest {
     {
         // extend our groups with our new groups
         self.groups
-            .extend(groups.into_iter().map(|group| group.into()));
+            .extend(groups.into_iter().map(std::convert::Into::into));
+        self
+    }
+
+    /// Add the source's groups that a target is missing to that target instead of rejecting the
+    /// association
+    #[must_use]
+    pub fn extend_target_groups(mut self) -> Self {
+        self.extend_target_groups = true;
         self
     }
 
     /// Set this association to be bidirectional
+    #[must_use]
     pub fn biderectional(mut self) -> Self {
         self.is_bidirectional = true;
         self
@@ -588,7 +857,7 @@ impl AssociationListOpts {
     pub fn groups<T: Into<String>>(mut self, groups: Vec<T>) -> Self {
         // set the date to end listing associations at
         self.groups
-            .extend(groups.into_iter().map(|group| group.into()));
+            .extend(groups.into_iter().map(std::convert::Into::into));
         self
     }
 }
@@ -736,5 +1005,330 @@ impl super::CensusSupport for Association {
             source = row.source,
             year = row.year,
         )
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::str::FromStr;
+    use strum::IntoEnumIterator;
+
+    use super::{AssociationKind, AssociationRequest, AssociationTarget};
+    use crate::models::EntityKinds;
+
+    /// The kinds whose edges must be contained
+    const CONTAINED: &[AssociationKind] = &[
+        AssociationKind::Orchestrates,
+        AssociationKind::DelegatesTo,
+        AssociationKind::Calls,
+        AssociationKind::RunsIn,
+        AssociationKind::Includes,
+        AssociationKind::Provides,
+        AssociationKind::AuthenticatesWith,
+        AssociationKind::Serves,
+    ];
+
+    /// The association kinds of the agentic graph and model configuration
+    const AGENTIC_KINDS: [(AssociationKind, &str); 10] = [
+        (AssociationKind::Orchestrates, "Orchestrates"),
+        (AssociationKind::DelegatesTo, "DelegatesTo"),
+        (AssociationKind::Calls, "Calls"),
+        (AssociationKind::RunsIn, "RunsIn"),
+        (AssociationKind::PublishedFrom, "PublishedFrom"),
+        (AssociationKind::BuiltFrom, "BuiltFrom"),
+        (AssociationKind::Includes, "Includes"),
+        (AssociationKind::Provides, "Provides"),
+        (AssociationKind::AuthenticatesWith, "AuthenticatesWith"),
+        (AssociationKind::Serves, "Serves"),
+    ];
+
+    /// Build a list of owned group names from string slices
+    ///
+    /// # Arguments
+    ///
+    /// * `groups` - The group names to own
+    fn groups(groups: &[&str]) -> Vec<String> {
+        groups.iter().map(|group| (*group).to_string()).collect()
+    }
+
+    /// `AssociationKind::group_policy` returns the source groups a contained edge's target lacks
+    #[test]
+    fn association_kind_group_policies() {
+        // check every kind's policy
+        for kind in AssociationKind::iter() {
+            // a target that covers the source is accepted by every kind
+            assert_eq!(
+                kind.group_policy(&groups(&["a"]), &groups(&["a", "b"])),
+                Ok(())
+            );
+            // an empty source is accepted by every kind
+            assert_eq!(kind.group_policy(&[], &groups(&["a"])), Ok(()));
+            // a target missing one of the source's groups
+            let result = kind.group_policy(&groups(&["a", "b"]), &groups(&["a"]));
+            // a target missing several of the source's groups
+            let many = kind.group_policy(&groups(&["c", "a", "b"]), &[]);
+            // contained kinds return the missing groups in order and every other kind accepts them
+            if CONTAINED.contains(&kind) {
+                assert_eq!(result, Err(groups(&["b"])), "{kind}");
+                assert_eq!(many, Err(groups(&["c", "a", "b"])), "{kind}");
+            } else {
+                assert_eq!(result, Ok(()), "{kind}");
+                assert_eq!(many, Ok(()), "{kind}");
+            }
+        }
+    }
+
+    /// The agentic and model configuration association kinds round trip through their strings
+    /// and serde
+    #[test]
+    fn agentic_kinds_round_trip() {
+        // each kind's string is its name and parses back
+        for (kind, name) in AGENTIC_KINDS {
+            assert_eq!(kind.as_str(), name);
+            assert_eq!(AssociationKind::from_str(name).unwrap(), kind);
+            let json = serde_json::to_string(&kind).unwrap();
+            assert_eq!(json, format!("\"{name}\""));
+            assert_eq!(
+                serde_json::from_str::<AssociationKind>(&json).unwrap(),
+                kind
+            );
+        }
+        // every kind iterates
+        let all = AssociationKind::iter().collect::<Vec<AssociationKind>>();
+        assert!(AGENTIC_KINDS.iter().all(|(kind, _)| all.contains(kind)));
+    }
+
+    /// Graph edge kinds only link the kinds they're defined for
+    #[test]
+    fn graph_kind_pairs() {
+        // agents call agentic tools and tool instances, run in harnesses, and delegate to agents
+        let allowed = [
+            (
+                AssociationKind::RunsIn,
+                EntityKinds::Agent,
+                EntityKinds::Tool,
+            ),
+            (
+                AssociationKind::RunsIn,
+                EntityKinds::Agent,
+                EntityKinds::ToolInstance,
+            ),
+            (
+                AssociationKind::Calls,
+                EntityKinds::Agent,
+                EntityKinds::Tool,
+            ),
+            (
+                AssociationKind::Calls,
+                EntityKinds::Agent,
+                EntityKinds::ToolInstance,
+            ),
+            (
+                AssociationKind::DelegatesTo,
+                EntityKinds::Agent,
+                EntityKinds::Agent,
+            ),
+        ];
+        for (kind, source, target) in allowed {
+            assert!(kind.allows_pair(source, target), "{kind} {source} {target}");
+        }
+        // every other pair of a graph kind is refused
+        let refused = [
+            (
+                AssociationKind::RunsIn,
+                EntityKinds::Agent,
+                EntityKinds::ToolSet,
+            ),
+            (
+                AssociationKind::RunsIn,
+                EntityKinds::Tool,
+                EntityKinds::Tool,
+            ),
+            (
+                AssociationKind::Calls,
+                EntityKinds::Agent,
+                EntityKinds::Agent,
+            ),
+            (AssociationKind::Calls, EntityKinds::Tool, EntityKinds::Tool),
+            (
+                AssociationKind::DelegatesTo,
+                EntityKinds::Agent,
+                EntityKinds::Tool,
+            ),
+            (
+                AssociationKind::Orchestrates,
+                EntityKinds::Agent,
+                EntityKinds::Agent,
+            ),
+            (
+                AssociationKind::RunsIn,
+                EntityKinds::Agent,
+                EntityKinds::Agent,
+            ),
+            (
+                AssociationKind::Includes,
+                EntityKinds::Agent,
+                EntityKinds::Tool,
+            ),
+            (
+                AssociationKind::BuiltFrom,
+                EntityKinds::ToolInstance,
+                EntityKinds::Tool,
+            ),
+        ];
+        for (kind, source, target) in refused {
+            assert!(
+                !kind.allows_pair(source, target),
+                "{kind} {source} {target}"
+            );
+        }
+        // the graph kinds are exactly the ones that queue edge changes
+        for kind in AssociationKind::iter() {
+            let graph = matches!(
+                kind,
+                AssociationKind::Orchestrates
+                    | AssociationKind::DelegatesTo
+                    | AssociationKind::Calls
+                    | AssociationKind::RunsIn
+                    | AssociationKind::Includes
+            );
+            assert_eq!(kind.is_graph_edge(), graph, "{kind}");
+        }
+        // general-purpose kinds accept any pair
+        assert!(AssociationKind::DevelopedBy.allows_pair(EntityKinds::Device, EntityKinds::Agent));
+    }
+
+    /// Agents call toolsets, and toolsets include only tools and tool instances
+    #[test]
+    fn toolset_kind_pairs() {
+        // the toolset pairs that are allowed
+        let allowed = [
+            (
+                AssociationKind::Calls,
+                EntityKinds::Agent,
+                EntityKinds::ToolSet,
+            ),
+            (
+                AssociationKind::Calls,
+                EntityKinds::Agent,
+                EntityKinds::ToolSetInstance,
+            ),
+            (
+                AssociationKind::Includes,
+                EntityKinds::ToolSet,
+                EntityKinds::Tool,
+            ),
+            (
+                AssociationKind::Includes,
+                EntityKinds::ToolSet,
+                EntityKinds::ToolInstance,
+            ),
+        ];
+        for (kind, source, target) in allowed {
+            assert!(kind.allows_pair(source, target), "{kind} {source} {target}");
+        }
+        // toolsets never nest or include agents, and only agents call toolsets
+        let refused = [
+            (
+                AssociationKind::Includes,
+                EntityKinds::ToolSet,
+                EntityKinds::ToolSet,
+            ),
+            (
+                AssociationKind::Includes,
+                EntityKinds::ToolSet,
+                EntityKinds::ToolSetInstance,
+            ),
+            (
+                AssociationKind::Includes,
+                EntityKinds::ToolSet,
+                EntityKinds::Agent,
+            ),
+            (
+                AssociationKind::Includes,
+                EntityKinds::ToolSetInstance,
+                EntityKinds::Tool,
+            ),
+            (
+                AssociationKind::Calls,
+                EntityKinds::ToolSet,
+                EntityKinds::Tool,
+            ),
+            (
+                AssociationKind::BuiltFrom,
+                EntityKinds::ToolSetInstance,
+                EntityKinds::ToolSet,
+            ),
+        ];
+        for (kind, source, target) in refused {
+            assert!(
+                !kind.allows_pair(source, target),
+                "{kind} {source} {target}"
+            );
+        }
+    }
+
+    /// Workflows orchestrate only agents, and no instance is linked to a workflow by hand
+    #[test]
+    fn workflow_kind_pairs() {
+        // a workflow orchestrates an agent
+        assert!(
+            AssociationKind::Orchestrates
+                .allows_pair(EntityKinds::WorkflowCatalog, EntityKinds::Agent)
+        );
+        // a workflow never orchestrates anything else, and only workflows orchestrate
+        let refused = [
+            (EntityKinds::WorkflowCatalog, EntityKinds::Tool),
+            (EntityKinds::WorkflowCatalog, EntityKinds::ToolInstance),
+            (EntityKinds::WorkflowCatalog, EntityKinds::ToolSet),
+            (EntityKinds::WorkflowCatalog, EntityKinds::WorkflowCatalog),
+            (EntityKinds::WorkflowCatalog, EntityKinds::WorkflowInstance),
+            (EntityKinds::WorkflowInstance, EntityKinds::Agent),
+            (EntityKinds::Agent, EntityKinds::Agent),
+        ];
+        for (source, target) in refused {
+            assert!(
+                !AssociationKind::Orchestrates.allows_pair(source, target),
+                "{source} {target}"
+            );
+        }
+        // an instance's link to its workflow is written only when it's submitted
+        assert!(
+            !AssociationKind::BuiltFrom
+                .allows_pair(EntityKinds::WorkflowInstance, EntityKinds::WorkflowCatalog)
+        );
+        // agents never call workflows
+        assert!(
+            !AssociationKind::Calls.allows_pair(EntityKinds::Agent, EntityKinds::WorkflowCatalog)
+        );
+    }
+
+    /// `extend_target_groups` defaults to off, is set by its builder, and round trips
+    #[test]
+    fn extend_target_groups_field() {
+        // a request without the field reads as off
+        let source = serde_json::json!({"Entity": {"id": uuid::Uuid::nil(), "name": "a"}});
+        let raw = serde_json::json!({
+            "kind": "Calls",
+            "source": source,
+            "targets": [],
+            "is_bidirectional": false
+        });
+        let req: AssociationRequest = serde_json::from_value(raw).unwrap();
+        assert!(!req.extend_target_groups);
+        // new leaves it off and the builder turns it on
+        let target = AssociationTarget::Entity {
+            id: uuid::Uuid::nil(),
+            name: "a".into(),
+        };
+        let req = AssociationRequest::new(AssociationKind::Calls, target);
+        assert!(!req.extend_target_groups);
+        let req = req.extend_target_groups();
+        assert!(req.extend_target_groups);
+        // it serializes and round trips
+        let value = serde_json::to_value(&req).unwrap();
+        assert_eq!(value["extend_target_groups"], serde_json::json!(true));
+        let back: AssociationRequest = serde_json::from_value(value).unwrap();
+        assert!(back.extend_target_groups);
     }
 }

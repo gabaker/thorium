@@ -797,6 +797,7 @@ mod tests {
             resources: thorium::models::Resources::default(),
             pool: thorium::models::Pools::Deadline,
             active: None,
+            run: None,
         }
     }
 

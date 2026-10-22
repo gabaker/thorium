@@ -17,8 +17,8 @@ use tokio::{fs::File, io::AsyncReadExt};
 use pyo3::pyclass;
 
 use super::{
-    Buffer, GenericJobArgs, GenericJobArgsUpdate, JobHandleStatus, OnDiskFile, RepoDependency,
-    RepoDependencyRequest,
+    Buffer, GenericJobArgs, GenericJobArgsUpdate, JobHandleStatus, ModelApi, ModelAuthLevel,
+    ModelConfigRef, OnDiskFile, RepoDependency, RepoDependencyRequest,
 };
 use crate::{matches_adds, matches_removes, matches_vec, same};
 
@@ -987,12 +987,183 @@ impl From<JobHandleStatus> for ReactionStatus {
     }
 }
 
+/// What a reaction runs
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[cfg_attr(feature = "api", derive(utoipa::ToSchema))]
+pub enum ReactionSource {
+    /// The stages of a pipeline, each backed by a tool
+    Pipeline {
+        /// The name of the pipeline
+        name: String,
+    },
+    /// A single tool instance run directly (a container tool call from a harness, or a user tool run)
+    Tool {
+        /// The tool instance to run
+        tool_instance: Uuid,
+    },
+    /// A workflow instance run by its entry agent's harness
+    WorkflowRun(ReactionWorkflowRun),
+}
+
+/// The workflow instance a reaction is running
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[cfg_attr(feature = "api", derive(utoipa::ToSchema))]
+pub struct ReactionWorkflowRun {
+    /// The workflow instance being run
+    pub workflow_instance: Uuid,
+    /// The workflow instance's digest at run time
+    pub digest: String,
+    /// The entry agent that receives the run's inputs
+    pub agent: Uuid,
+    /// The harness tool instance running the agent
+    pub harness: Uuid,
+    /// The result tool name the run's results are stored under on each input sample and repo
+    pub result_key: String,
+    /// The model each agent of the run resolved to when the run was created, sorted by agent id
+    #[serde(default)]
+    pub models: Vec<ReactionModelBinding>,
+}
+
+/// The model, endpoint, and credential one agent of a workflow run resolved to
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[cfg_attr(feature = "api", derive(utoipa::ToSchema))]
+pub struct ReactionModelBinding {
+    /// The agent this binding is for
+    pub agent: Uuid,
+    /// The position in the agent's effective model list of the matcher that won (unset when the
+    /// list was empty)
+    pub priority: Option<u32>,
+    /// The level whose auth was used
+    pub level: ModelAuthLevel,
+    /// The endpoint the model is called on
+    pub endpoint: ModelConfigRef,
+    /// The provider's exact model id
+    pub model_id: String,
+    /// The protocol the model is called with
+    pub api: ModelApi,
+    /// The profile whose parameters and limits apply, if one was used
+    pub profile: Option<Uuid>,
+    /// The credential used (unset for a keyless gateway)
+    pub credential: Option<ModelConfigRef>,
+}
+
+/// A reaction's stages resolved when it was created
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+#[cfg_attr(feature = "api", derive(utoipa::ToSchema))]
+pub struct ReactionPlan {
+    /// The stages to run in order; the stages in each inner list run in parallel
+    pub stages: Vec<Vec<PlannedStage>>,
+}
+
+impl ReactionPlan {
+    /// Get the stages of one step of this plan, if the plan has that step
+    ///
+    /// # Arguments
+    ///
+    /// * `step` - The index of the step whose stages to get
+    #[must_use]
+    pub fn step(&self, step: usize) -> Option<&[PlannedStage]> {
+        // each step is one inner list of parallel stages
+        self.stages.get(step).map(Vec::as_slice)
+    }
+
+    /// Get the tool instance a stage of this plan runs
+    ///
+    /// # Arguments
+    ///
+    /// * `name` - The name of the stage
+    #[must_use]
+    pub fn tool_instance(&self, name: &str) -> Option<Uuid> {
+        // find the planned stage with this name
+        self.stages
+            .iter()
+            .flatten()
+            .find(|stage| stage.name == name)
+            .map(|stage| stage.tool_instance)
+    }
+
+    /// Get every distinct tool instance this plan runs, sorted
+    #[must_use]
+    pub fn tool_instances(&self) -> Vec<Uuid> {
+        // collect each tool instance once in sorted order
+        let unique = self
+            .stages
+            .iter()
+            .flatten()
+            .map(|stage| stage.tool_instance)
+            .collect::<std::collections::BTreeSet<Uuid>>();
+        unique.into_iter().collect()
+    }
+}
+
+/// A single stage of a reaction's plan
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[cfg_attr(feature = "api", derive(utoipa::ToSchema))]
+pub struct PlannedStage {
+    /// The stage name that args, logs, and progress are keyed by
+    pub name: String,
+    /// The tool instance this stage's jobs run, queued and scheduled natively
+    pub tool_instance: Uuid,
+}
+
+/// The inputs to a workflow or tool run (at least one file or repo)
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[cfg_attr(feature = "api", derive(utoipa::ToSchema))]
+#[serde(deny_unknown_fields)]
+pub struct RunInputs {
+    /// Specific files to run on, by SHA256
+    #[serde(default)]
+    pub samples: Vec<String>,
+    /// Specific repos (and optional commitish) to run on
+    #[serde(default)]
+    pub repos: Vec<RepoDependencyRequest>,
+}
+
+/// A request to run a single tool instance on one or more inputs
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "api", derive(utoipa::ToSchema))]
+pub struct ToolRunRequest {
+    /// The files and repos to run the tool on
+    pub inputs: RunInputs,
+    /// The group to run in, one of the tool instance's groups (picked automatically when it has one
+    /// candidate; ignored for sub runs, which use their parent's group)
+    #[serde(default)]
+    pub group: Option<String>,
+    /// The args for the tool's job
+    #[serde(default)]
+    pub args: GenericJobArgs,
+    /// The reaction this run is a sub reaction of (set by harnesses for container tool calls)
+    pub parent: Option<Uuid>,
+    /// The tags to add to the run's reaction
+    #[serde(default)]
+    pub tags: Vec<String>,
+    /// The SLA for this run in seconds
+    pub sla: Option<u64>,
+}
+
+/// A request to run a workflow instance on one or more inputs
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "api", derive(utoipa::ToSchema))]
+pub struct WorkflowRunRequest {
+    /// The files and repos to run the workflow on
+    pub inputs: RunInputs,
+    /// The group to run in, one of the workflow instance's groups (picked automatically when it has
+    /// one candidate)
+    #[serde(default)]
+    pub group: Option<String>,
+    /// The tags to add to the run's reaction
+    #[serde(default)]
+    pub tags: Vec<String>,
+    /// The SLA for this run in seconds
+    pub sla: Option<u64>,
+}
+
 /// A reaction built around a pipeline
 ///
 /// This is used to track jobs across a single run of a pipeline
 #[derive(Serialize, Deserialize, Debug, Clone)]
 #[cfg_attr(feature = "api", derive(utoipa::ToSchema))]
-#[cfg_attr(feature = "python", thorium_derive::pyclass(get_all))]
+#[cfg_attr(feature = "python", thorium_derive::pyclass(get_except(source, plan)))]
 pub struct Reaction {
     /// The uuidv4 that identifies this reaction
     pub id: Uuid,
@@ -1000,7 +1171,7 @@ pub struct Reaction {
     pub group: String,
     /// The creator of this reaction
     pub creator: String,
-    /// The pipeline this reaction is built around
+    /// The pipeline this reaction is built around (a display label for tool and workflow runs)
     pub pipeline: String,
     /// The current status of this reaction
     pub status: ReactionStatus,
@@ -1038,6 +1209,18 @@ pub struct Reaction {
     pub trigger_depth: Option<u8>,
     /// Whether this reaction has any cache data set
     pub has_cache: bool,
+    /// What this reaction runs
+    pub source: ReactionSource,
+    /// The stages resolved when this reaction was created, each running a tool instance
+    pub plan: ReactionPlan,
+    /// The name of the run-scoped token this reaction's workers use, owned by `creator` (set on
+    /// workflow runs and tool runs only; a harness's tool call names its parent run's token)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub run_token: Option<String>,
+    /// The run whose token and per-run workers this reaction's jobs use: this reaction for a
+    /// workflow run or direct tool run, the parent workflow run for a harness's tool call
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub run: Option<Uuid>,
 }
 
 impl PartialEq<ReactionRequest> for Reaction {
@@ -1378,5 +1561,232 @@ impl ReactionCacheFileUpdate {
             form = form.part("files", buff.to_part()?);
         }
         Ok(form)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use chrono::Utc;
+    use serde_json::{Value, json};
+    use std::collections::HashMap;
+    use uuid::Uuid;
+
+    use super::{
+        PlannedStage, Reaction, ReactionModelBinding, ReactionPlan, ReactionSource, ReactionStatus,
+        ReactionWorkflowRun, RunInputs, ToolRunRequest, WorkflowRunRequest,
+    };
+    use crate::models::{
+        GenericJobArgs, ModelApi, ModelAuthLevel, ModelConfigRef, RepoDependencyRequest,
+    };
+
+    /// Build a plan with two stages in its first step and one in its second
+    fn plan() -> ReactionPlan {
+        // build three stages that each run their own tool instance
+        let stage = |name: &str| PlannedStage {
+            name: name.to_owned(),
+            tool_instance: Uuid::new_v4(),
+        };
+        ReactionPlan {
+            stages: vec![vec![stage("plant"), stage("water")], vec![stage("harvest")]],
+        }
+    }
+
+    /// Build a model binding for an agent
+    fn binding() -> ReactionModelBinding {
+        // bind an agent to a group endpoint and credential
+        ReactionModelBinding {
+            agent: Uuid::new_v4(),
+            priority: Some(1),
+            level: ModelAuthLevel::Group,
+            endpoint: ModelConfigRef::Group(Uuid::new_v4()),
+            model_id: "claude-haiku".to_owned(),
+            api: ModelApi::AnthropicMessages,
+            profile: None,
+            credential: Some(ModelConfigRef::User(Uuid::new_v4())),
+        }
+    }
+
+    /// Build a workflow run source
+    fn workflow_run() -> ReactionWorkflowRun {
+        // a workflow run with one model binding
+        ReactionWorkflowRun {
+            workflow_instance: Uuid::new_v4(),
+            digest: "sha256:abc".to_owned(),
+            agent: Uuid::new_v4(),
+            harness: Uuid::new_v4(),
+            result_key: "triage".to_owned(),
+            models: vec![binding()],
+        }
+    }
+
+    /// Build a pipeline reaction with a plan
+    ///
+    /// # Arguments
+    ///
+    /// * `source` - What the reaction runs
+    fn reaction(source: ReactionSource) -> Reaction {
+        // a reaction on its first stage with no jobs yet
+        Reaction {
+            id: Uuid::new_v4(),
+            group: "jupiter".to_owned(),
+            creator: "europa".to_owned(),
+            pipeline: "orbit".to_owned(),
+            status: ReactionStatus::Created,
+            current_stage: 0,
+            current_stage_progress: 0,
+            current_stage_length: 2,
+            args: HashMap::default(),
+            sla: Utc::now(),
+            jobs: Vec::new(),
+            tags: Vec::new(),
+            parent: None,
+            sub_reactions: 0,
+            completed_sub_reactions: 0,
+            generators: Vec::new(),
+            samples: Vec::new(),
+            ephemeral: Vec::new(),
+            parent_ephemeral: HashMap::default(),
+            repos: Vec::new(),
+            trigger_depth: None,
+            has_cache: false,
+            source,
+            plan: plan(),
+            run_token: None,
+            run: None,
+        }
+    }
+
+    /// Serialize a value to JSON and read it back
+    ///
+    /// # Arguments
+    ///
+    /// * `value` - The value to round trip
+    fn round_trip<T: serde::Serialize + serde::de::DeserializeOwned>(value: &T) -> T {
+        // serialize and deserialize the value
+        let raw = serde_json::to_string(value).expect("serialize");
+        serde_json::from_str(&raw).expect("deserialize")
+    }
+
+    /// Reaction sources, plans, model bindings, run inputs, and run requests round trip
+    #[test]
+    fn run_types_round_trip() {
+        // each source round trips
+        let sources = [
+            ReactionSource::Pipeline {
+                name: "orbit".to_owned(),
+            },
+            ReactionSource::Tool {
+                tool_instance: Uuid::new_v4(),
+            },
+            ReactionSource::WorkflowRun(workflow_run()),
+        ];
+        for source in &sources {
+            assert_eq!(&round_trip(source), source);
+        }
+        // a workflow run, binding, plan, and stage round trip
+        let run = workflow_run();
+        assert_eq!(round_trip(&run), run);
+        let bound = binding();
+        assert_eq!(round_trip(&bound), bound);
+        let planned = plan();
+        assert_eq!(round_trip(&planned), planned);
+        assert_eq!(round_trip(&planned.stages[1][0]), planned.stages[1][0]);
+        // run inputs carry samples and repos
+        let inputs = RunInputs {
+            samples: vec!["a".repeat(64)],
+            repos: vec![RepoDependencyRequest::new("github.com/moons/io").commitish("main")],
+        };
+        let read = round_trip(&inputs);
+        assert_eq!(read.samples, inputs.samples);
+        assert_eq!(read.repos[0].url, "github.com/moons/io");
+        assert_eq!(read.repos[0].commitish.as_deref(), Some("main"));
+        // a tool run request round trips with its fields
+        let tool_run = ToolRunRequest {
+            inputs: inputs.clone(),
+            group: Some("jupiter".to_owned()),
+            args: GenericJobArgs::default().positionals(vec!["--fast"]),
+            parent: Some(Uuid::new_v4()),
+            tags: vec!["moon".to_owned()],
+            sla: Some(600),
+        };
+        let read = round_trip(&tool_run);
+        assert_eq!(read.group, tool_run.group);
+        assert_eq!(read.args, tool_run.args);
+        assert_eq!(read.parent, tool_run.parent);
+        assert_eq!(read.tags, tool_run.tags);
+        assert_eq!(read.sla, Some(600));
+        // a workflow run request round trips with its fields
+        let workflow = WorkflowRunRequest {
+            inputs,
+            group: Some("jupiter".to_owned()),
+            tags: vec!["moon".to_owned()],
+            sla: None,
+        };
+        let read = round_trip(&workflow);
+        assert_eq!(read.group, workflow.group);
+        assert_eq!(read.tags, workflow.tags);
+        // run requests without a group deserialize with none
+        let tool_run: ToolRunRequest = serde_json::from_value(
+            json!({"inputs": {"samples": ["a"]}, "parent": null, "sla": null}),
+        )
+        .expect("tool run without a group");
+        assert_eq!(tool_run.group, None);
+        let workflow: WorkflowRunRequest =
+            serde_json::from_value(json!({"inputs": {"repos": []}, "sla": null}))
+                .expect("workflow run without a group");
+        assert_eq!(workflow.group, None);
+    }
+
+    /// A reaction round trips with its source, plan, run token, and run
+    #[test]
+    fn reaction_round_trips_run_fields() {
+        // a workflow run reaction carries every run field
+        let mut workflow = reaction(ReactionSource::WorkflowRun(workflow_run()));
+        workflow.run_token = Some(format!("run-{}", workflow.id));
+        workflow.run = Some(workflow.id);
+        let read = round_trip(&workflow);
+        assert_eq!(read.source, workflow.source);
+        assert_eq!(read.plan, workflow.plan);
+        assert_eq!(read.run_token, workflow.run_token);
+        assert_eq!(read.run, workflow.run);
+        // a reaction without a run token or run reads with neither
+        let mut raw = serde_json::to_value(&workflow).expect("serialize");
+        let map = raw.as_object_mut().expect("an object");
+        map.remove("run_token");
+        map.remove("run");
+        let read: Reaction = serde_json::from_value(raw).expect("deserialize");
+        assert_eq!(read.run_token, None);
+        assert_eq!(read.run, None);
+    }
+
+    /// A reaction always writes its source and plan and writes its run fields only when set
+    #[test]
+    fn reaction_json_run_fields() {
+        // a pipeline reaction writes no run fields
+        let pipeline = reaction(ReactionSource::Pipeline {
+            name: "orbit".to_owned(),
+        });
+        let raw = serde_json::to_value(&pipeline).expect("serialize");
+        let map = raw.as_object().expect("an object");
+        assert!(!map.contains_key("run_token"));
+        assert!(!map.contains_key("run"));
+        assert!(map.contains_key("source"));
+        assert!(map.contains_key("plan"));
+        // a workflow run reaction writes both run fields
+        let mut workflow = reaction(ReactionSource::WorkflowRun(workflow_run()));
+        workflow.run_token = Some("run-token".to_owned());
+        workflow.run = Some(workflow.id);
+        let raw = serde_json::to_value(&workflow).expect("serialize");
+        assert!(raw.get("run_token").is_some());
+        assert!(raw.get("run").is_some());
+        // a reaction missing its source or plan doesn't deserialize
+        for field in ["source", "plan"] {
+            let mut raw: Value = serde_json::to_value(&pipeline).expect("serialize");
+            raw.as_object_mut().expect("an object").remove(field);
+            assert!(
+                serde_json::from_value::<Reaction>(raw).is_err(),
+                "a reaction without {field} deserialized"
+            );
+        }
     }
 }

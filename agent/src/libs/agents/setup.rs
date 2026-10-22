@@ -11,8 +11,8 @@ use thorium::client::ResultsClient;
 use thorium::models::{
     Association, AssociationKind, AssociationTarget, DependencyPassStrategy, Directionality,
     EntityKinds, EntityListOpts, EntityMetadata, FileDownloadOpts, FileNamingStrategy,
-    FileSystemDependencySettings, GenericJob, Image, ReactionCache, RepoDownloadOpts,
-    ResultGetParams, TreeNode, TreeOpts, TreeQuery, TreeRelationships,
+    FileSystemDependencySettings, FileSystemEntity, GenericJob, Image, ReactionCache,
+    RepoDownloadOpts, ResultGetParams, TreeNode, TreeOpts, TreeQuery, TreeRelationships,
 };
 use tokio::fs::File;
 use tokio::io::AsyncWriteExt;
@@ -1078,6 +1078,24 @@ pub async fn download_filesystems<P: Into<PathBuf>>(
     Ok(downloaded)
 }
 
+/// Check whether a filesystem was dumped by one of the images a filesystem dependency allows
+///
+/// Images are named, so only the legacy tool names a filesystem records can match them. Every
+/// filesystem is allowed when no images are named.
+///
+/// # Arguments
+///
+/// * `images` - The names of the images whose filesystems are allowed
+/// * `filesystem` - The filesystem to check
+fn dumped_by_allowed_image(images: &[String], filesystem: &FileSystemEntity) -> bool {
+    // allow every filesystem without image restrictions, or one a named image dumped
+    images.is_empty()
+        || filesystem
+            .legacy_tools
+            .iter()
+            .any(|tool| images.contains(tool))
+}
+
 /// Find and reconstruct all filesystems that were dumped for a single sample
 ///
 /// # Arguments
@@ -1114,12 +1132,7 @@ async fn reconstruct_sample_filesystems(
             // only handle filesystem entities
             if let EntityMetadata::FileSystem(filesystem) = &entity.metadata {
                 // skip filesystems that weren't dumped by one of our restricted images if we have any
-                if !settings.images.is_empty()
-                    && !filesystem
-                        .tools
-                        .iter()
-                        .any(|tool| settings.images.contains(tool))
-                {
+                if !dumped_by_allowed_image(&settings.images, filesystem) {
                     continue;
                 }
                 // log that we are reconstructing this filesystem
@@ -1357,7 +1370,7 @@ fn resolve_file_name(
 
 #[cfg(test)]
 mod tests {
-    use super::{most_recent_target, repo_results_query_key, safe_join};
+    use super::{dumped_by_allowed_image, most_recent_target, repo_results_query_key, safe_join};
     use std::path::Path;
 
     /// The trusted base directory every join must stay inside of
@@ -1495,5 +1508,31 @@ mod tests {
         let target = most_recent_target(base, None, "aaaaaaaaaaaaaaaa", &mut logs).unwrap();
         // the sha256 is used as the file name
         assert_eq!(target, base.join("aaaaaaaaaaaaaaaa"));
+    }
+
+    /// A filesystem dependency restricted to images matches the image names against a
+    /// filesystem's legacy tool names only, so a filesystem that records only tool instances
+    /// isn't taken; an unrestricted one takes every filesystem
+    #[test]
+    fn filesystem_image_restrictions_match_legacy_tool_names() {
+        // a filesystem stored with a tool name and one that records only a tool instance
+        let named: thorium::models::FileSystemEntity =
+            serde_json::from_str(r#"{"sha256":"a","tools":["binwalk"]}"#).unwrap();
+        let unnamed = thorium::models::FileSystemEntity {
+            sha256: "b".to_owned(),
+            tools: vec![uuid::Uuid::new_v4()],
+            legacy_tools: Vec::new(),
+        };
+        // a restriction to the named image takes the filesystem with that legacy name and not
+        // the one that records only a tool instance
+        let images = vec!["binwalk".to_owned()];
+        assert!(dumped_by_allowed_image(&images, &named));
+        assert!(!dumped_by_allowed_image(&images, &unnamed));
+        // a restriction to another image takes neither
+        let other = vec!["unblob".to_owned()];
+        assert!(!dumped_by_allowed_image(&other, &named));
+        // no restriction takes both
+        assert!(dumped_by_allowed_image(&[], &named));
+        assert!(dumped_by_allowed_image(&[], &unnamed));
     }
 }

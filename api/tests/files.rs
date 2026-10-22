@@ -17,8 +17,8 @@ use uuid::Uuid;
 
 use thorium::models::{
     Buffer, CommentRequest, DeleteCommentParams, FileDeleteOpts, FileDownloadOpts, FileListOpts,
-    GroupUpdate, GroupUsersUpdate, ImageVersion, OnDiskFile, OriginRequest, OutputDisplayType,
-    OutputRequest, ResultGetParams, SampleRequest, SubmissionUpdate, TagDeleteRequest, TagRequest,
+    GroupUpdate, GroupUsersUpdate, OnDiskFile, OriginRequest, OutputDisplayType, OutputRequest,
+    ResultGetParams, SampleRequest, SubmissionUpdate, TagDeleteRequest, TagRequest, ToolVersion,
 };
 
 #[tokio::test]
@@ -289,7 +289,7 @@ async fn update_add_groups() -> Result<(), thorium::Error> {
     // build the update for this file
     let mut update = SubmissionUpdate::new(resp.id);
     // add groups to be removed to update request
-    let added_group1 = group_names.get(0).unwrap();
+    let added_group1 = group_names.first().unwrap();
     let added_group2 = group_names.get(1).unwrap();
     update.add_groups.push(added_group1.clone());
     update.add_groups.push(added_group2.clone());
@@ -303,9 +303,7 @@ async fn update_add_groups() -> Result<(), thorium::Error> {
 
     // Try to add already added group
     let mut update = SubmissionUpdate::new(resp.id);
-    update
-        .add_groups
-        .push(group_names.get(2).unwrap().to_string());
+    update.add_groups.push(group_names.get(2).unwrap().clone());
     // update file and attempt to add group
     let result = client.files.update(&resp.sha256, &update).await;
     // Make sure there is an error
@@ -339,7 +337,7 @@ async fn update_remove_groups() -> Result<(), thorium::Error> {
     let mut update = SubmissionUpdate::new(resp.id);
 
     // add groups to be removed to update request
-    let removed_group1 = group_names.get(0).unwrap();
+    let removed_group1 = group_names.first().unwrap();
     let removed_group2 = group_names.get(1).unwrap();
     update.remove_groups.push(removed_group1.clone());
     update.remove_groups.push(removed_group2.clone());
@@ -355,7 +353,7 @@ async fn update_remove_groups() -> Result<(), thorium::Error> {
     let mut update = SubmissionUpdate::new(resp.id);
     update
         .remove_groups
-        .push(group_names.get(2).unwrap().to_string());
+        .push(group_names.get(2).unwrap().clone());
     // Update file and attempt to remove last group
     let result = client.files.update(&resp.sha256, &update).await;
     // Make sure there is an error
@@ -886,7 +884,7 @@ async fn comment_attachment_prune() -> Result<(), thorium::Error> {
     }))
     .await?;
     // try to retrieve the attachment
-    let attachment_path = format!("{}/{}/{}", &hashes.sha256, &comment_id, attachment_id);
+    let attachment_path = format!("{}/{}/{}", hashes.sha256, comment_id, attachment_id);
     let s3 = S3::new(&test_utilities::CONF)?;
     let attachment_resp = s3.attachments.download(&attachment_path).await;
     // ensure the attachment has been deleted
@@ -930,7 +928,7 @@ async fn create_result() -> Result<(), thorium::Error> {
         "I am a test result",
         OutputDisplayType::String,
     )
-    .tool_version(ImageVersion::Custom("TestVersion1.0".to_string()));
+    .tool_version(ToolVersion::Custom("TestVersion1.0".to_string()));
     // send this result to the API
     client.files.create_result(output_req).await?;
     Ok(())
@@ -961,7 +959,7 @@ async fn create_result_files() -> Result<(), thorium::Error> {
     )
     .buffer(Buffer::new("TestBuff").name("buff.txt"))
     .buffer(Buffer::new("TestNest").name("nested/buff.txt"))
-    .tool_version(ImageVersion::SemVer(
+    .tool_version(ToolVersion::SemVer(
         semver::Version::parse("1.0.0").unwrap(),
     ));
     // send this result to the API
@@ -1003,7 +1001,7 @@ async fn create_large_result_file() -> Result<(), thorium::Error> {
         OutputDisplayType::String,
     )
     .buffer(Buffer::new(data.clone()).name(file_name))
-    .tool_version(ImageVersion::SemVer(
+    .tool_version(ToolVersion::SemVer(
         semver::Version::parse("1.0.0").unwrap(),
     ));
     // send this result to the API (streams the result file to s3 as a multipart upload)
@@ -1164,13 +1162,12 @@ async fn create_nested_result_files_on_disk() -> Result<(), thorium::Error> {
     // make sure the API listed this result file under that same trimmed name
     let params = ResultGetParams::default();
     let output = client.files.get_results(&hashes.sha256, &params).await?;
-    let result = match output
+    let Some(result) = output
         .results
         .get("TestTool")
         .and_then(|results| results.first())
-    {
-        Some(result) => result,
-        None => return Err(thorium::Error::new("No results were returned for TestTool")),
+    else {
+        return Err(thorium::Error::new("No results were returned for TestTool"));
     };
     let nested_owned = nested_name.to_owned();
     contains!(result.files, &nested_owned);
@@ -1202,7 +1199,7 @@ async fn get_result() -> Result<(), thorium::Error> {
         "I am a test result",
         OutputDisplayType::String,
     )
-    .tool_version(ImageVersion::SemVer(
+    .tool_version(ToolVersion::SemVer(
         semver::Version::parse("1.2.0").unwrap(),
     ));
     // send this result to the API
@@ -1238,7 +1235,7 @@ async fn create_hidden_result() -> Result<(), thorium::Error> {
         "I am a test result",
         OutputDisplayType::Hidden,
     )
-    .tool_version(ImageVersion::SemVer(
+    .tool_version(ToolVersion::SemVer(
         semver::Version::parse("1.3.0-rc").unwrap(),
     ));
     // send this result to the API
@@ -1269,7 +1266,7 @@ async fn get_hidden_result() -> Result<(), thorium::Error> {
         "I am a test result",
         OutputDisplayType::Hidden,
     )
-    .tool_version(ImageVersion::SemVer(
+    .tool_version(ToolVersion::SemVer(
         semver::Version::parse("1.4.0-alpha").unwrap(),
     ));
     // send this result to the API
@@ -1305,7 +1302,7 @@ async fn get_filter_hidden_result() -> Result<(), thorium::Error> {
         "I am a test result",
         OutputDisplayType::Hidden,
     )
-    .tool_version(ImageVersion::SemVer(
+    .tool_version(ToolVersion::SemVer(
         semver::Version::parse("1.5.0").unwrap(),
     ));
     // send this result to the API
@@ -1727,7 +1724,7 @@ fn get_result_blocking() -> Result<(), thorium::Error> {
         "I am a test result",
         OutputDisplayType::String,
     )
-    .tool_version(ImageVersion::SemVer(
+    .tool_version(ToolVersion::SemVer(
         semver::Version::parse("1.2.0").unwrap(),
     ));
     // send this result to the API

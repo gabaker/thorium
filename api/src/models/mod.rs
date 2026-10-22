@@ -25,6 +25,7 @@ pub mod pipelines;
 pub mod reactions;
 pub mod requisitions;
 pub mod results;
+pub mod runtime;
 #[cfg(feature = "scylla-utils")]
 pub mod schema;
 mod scylla_utils;
@@ -46,6 +47,9 @@ pub use associations::{
 };
 pub use deadlines::Deadline;
 pub use elastic::{ElasticDoc, ElasticIndex, ElasticSearchOpts, ElasticSearchParams};
+pub use entities::agents::{
+    AgentConfig, AgentEntity, AgentEntityRequest, AgentUpdateFields, ToolChoice,
+};
 pub use entities::collections::{CollectionEntity, CollectionEntityRequest, CollectionKind};
 pub use entities::countries::Country;
 pub use entities::devices::{DeviceEntity, DeviceEntityRequest};
@@ -53,21 +57,59 @@ pub use entities::filesystem::{FileSystemEntity, FileSystemEntityBuilder, FileSy
 pub use entities::flags::{Confidence, Flag};
 pub use entities::functions::{CompiledFunction, CompiledInstruction, DecompiledFunction};
 pub use entities::incident::{Incident, IncidentRequest};
+pub use entities::models::{
+    AwsRoleSource, AzureApiMode, AzureClientAuth, BedrockEndpointKind, CatalogEntrySource,
+    CredentialKind, CredentialSecrets, CredentialType, GeminiApiVersion, LimitsSource, ListedModel,
+    MAX_LISTED_MODELS, ModelApi, ModelAuthLevel, ModelAuthSource, ModelBan, ModelBanKind,
+    ModelBanUpdate, ModelCapabilities, ModelCatalogEntry, ModelCatalogEntryRequest, ModelConfigRef,
+    ModelCredentialEntity, ModelCredentialEntityRequest, ModelEndpointEntity,
+    ModelEndpointEntityRequest, ModelLimits, ModelMatcher, ModelParameters, ModelProfileEntity,
+    ModelProfileEntityRequest, ModelProvider, ModelProviderKind, ModelRefreshReport,
+    ModelRefreshState, ModelRefreshStatus, ModelRequirements, ModelSecret, RedactSecrets,
+    ScopedModelBan, VertexLocation, VertexMultiRegion,
+};
 pub use entities::pe::{PeImportEntity, PeSectionEntity};
 pub use entities::processes::{WindowsProcessEntity, WindowsProcessTreeEntity};
 pub use entities::rules::{SigmaRule, SigmaRuleAppliesTo};
 pub use entities::shared::CriticalSector;
+#[cfg(any(feature = "api", feature = "client"))]
+pub use entities::tools::tool_portability_json;
+pub use entities::tools::{
+    AgenticTool, AgenticToolBacking, ApprovalMode, ArgTarget, BindingCheck, ContainerToolBacking,
+    HarnessArgs, HarnessCapabilities, HarnessEnv, HarnessEnvVar, HarnessInputs, HarnessInterface,
+    HarnessOutputs, HarnessSpec, HarnessToolAccess, HarnessToolEntry, HarnessToolPolicy,
+    McpConfigFormat, McpConfigTarget, OrphanedRunPolicy, ToolAnnotations, ToolApproval,
+    ToolCapabilities, ToolEffect, ToolEntity, ToolEntityRequest, ToolExposure, ToolIcon,
+    ToolIconTheme, ToolInputMapping, ToolInstanceEntity, ToolInstanceEntityRequest,
+    ToolInstanceSummary, ToolInvocation, ToolKind, ToolLoading, ToolMechanism, ToolOutputDelivery,
+    ToolPortabilityReport, ToolResultFormat, ToolServerAuth, ToolServerDescriptor, ToolServerInput,
+    ToolServerTimeouts, ToolServerToolOverride, ToolServerTools, ToolServerTransport,
+    ToolServerTrust, ToolServerValue, ToolServersFile, ToolSpec, ToolStrictness, ToolUpdateFields,
+    ToolVersion, is_valid_server_id,
+};
+pub use entities::toolsets::{
+    SelectorMatches, ToolSetEntity, ToolSetEntityRequest, ToolSetExclusion, ToolSetExclusionReason,
+    ToolSetInclusion, ToolSetInstanceEntity, ToolSetInstanceEntityRequest, ToolSetInstanceStatus,
+    ToolSetInstanceTrigger, ToolSetLimits, ToolSetMember, ToolSetSelector, ToolSetUpdateFields,
+};
 pub use entities::vendors::{VendorEntity, VendorEntityRequest};
+pub use entities::workflows::{
+    CrawlLimits, InstancedAgent, InstancedAgentToolset, InstancedTool, InstancedToolBinding,
+    InstancedToolSpec, WorkflowCatalogEntity, WorkflowCatalogEntityRequest,
+    WorkflowCatalogUpdateFields, WorkflowInstanceEntity, WorkflowInstanceEntityRequest,
+    WorkflowInstanceStatus, WorkflowInstanceTrigger, WorkflowLimits, WorkflowResultKey,
+};
 pub use entities::{
     Entity, EntityKinds, EntityListLine, EntityListOpts, EntityListParams, EntityMetadata,
     EntityMetadataRequest, EntityMetadataUpdate, EntityParentInfo, EntityRequest, EntityResponse,
-    EntityUpdate,
+    EntityUpdate, GroupPolicy,
 };
 pub use errors::InvalidEnum;
 pub use events::{
     Event, EventCacheStatus, EventCacheStatusOpts, EventData, EventIds, EventMarks, EventPeekOpts,
-    EventPopOpts, EventRequest, EventTrigger, EventType, SigmaScannableResultsEvent,
-    TriggerPotential,
+    EventPopOpts, EventRequest, EventTrigger, EventType, ModelRefreshEvent, ModelRefreshReason,
+    ModelRefreshTarget, SigmaScannableResultsEvent, TriggerPotential, WorkflowGraphChange,
+    WorkflowGraphEvent,
 };
 pub use files::{
     Attachment, Buffer, CartedFile, CarvedOrigin, CarvedOriginTypes, Comment, CommentRequest,
@@ -99,17 +141,16 @@ pub use images::{
     FileSystemDependencySettingsUpdate, GenericCacheDependencySettings,
     GenericCacheDependencySettingsUpdate, Image, ImageArgs, ImageArgsUpdate, ImageBan,
     ImageBanKind, ImageBanUpdate, ImageDetailsList, ImageJobInfo, ImageLifetime, ImageList,
-    ImageListParams, ImageNetworkPolicyUpdate, ImageRequest, ImageScaler, ImageUpdate,
-    ImageVersion, Kvm, KvmUpdate, KwargDependency, RepoDependencySettings,
-    RepoDependencySettingsUpdate, Resources, ResourcesRequest, ResourcesUpdate,
-    ResultDependencySettings, ResultDependencySettingsUpdate, SampleDependencySettings,
-    SampleDependencySettingsUpdate, SecurityContext, SecurityContextUpdate, SpawnLimits,
-    TagDependencySettings, TagDependencySettingsUpdate,
+    ImageListParams, ImageNetworkPolicyUpdate, ImageRequest, ImageScaler, ImageUpdate, Kvm,
+    KvmUpdate, KwargDependency, RepoDependencySettings, RepoDependencySettingsUpdate, Resources,
+    ResourcesRequest, ResourcesUpdate, ResultDependencySettings, ResultDependencySettingsUpdate,
+    SampleDependencySettings, SampleDependencySettingsUpdate, SecurityContext,
+    SecurityContextUpdate, SpawnLimits, TagDependencySettings, TagDependencySettingsUpdate,
 };
 pub use jobs::{
     Checkpoint, GenericJob, GenericJobArgs, GenericJobArgsUpdate, GenericJobKwargs, GenericJobOpts,
-    HandleJobResponse, JobDetailsList, JobHandleStatus, JobList, JobListOpts, JobResetRequestor,
-    JobResets, JobStatus, RawJob, RunningJob,
+    HandleJobResponse, JobDetailsList, JobHandleParams, JobHandleStatus, JobList, JobListOpts,
+    JobResetRequestor, JobResets, JobStatus, RawJob, RunningJob, WorkloadRuntimes,
 };
 pub use logs::{Actions, JobActions, ReactionActions, StatusRequest, StatusUpdate};
 pub use network_policies::{
@@ -128,11 +169,12 @@ pub use pipelines::{
     PipelineUpdate, StageStats,
 };
 pub use reactions::{
-    BulkReactionResponse, HandleReactionResponse, Reaction, ReactionArgs, ReactionCache,
-    ReactionCacheFileUpdate, ReactionCacheUpdate, ReactionCreation, ReactionCursorOpts,
-    ReactionCursorParams, ReactionDetailsList, ReactionExpire, ReactionIdResponse, ReactionList,
-    ReactionListParams, ReactionRequest, ReactionStatus, ReactionUpdate, StageLogLine, StageLogs,
-    StageLogsAdd,
+    BulkReactionResponse, HandleReactionResponse, PlannedStage, Reaction, ReactionArgs,
+    ReactionCache, ReactionCacheFileUpdate, ReactionCacheUpdate, ReactionCreation,
+    ReactionCursorOpts, ReactionCursorParams, ReactionDetailsList, ReactionExpire,
+    ReactionIdResponse, ReactionList, ReactionListParams, ReactionModelBinding, ReactionPlan,
+    ReactionRequest, ReactionSource, ReactionStatus, ReactionUpdate, ReactionWorkflowRun,
+    RunInputs, StageLogLine, StageLogs, StageLogsAdd, ToolRunRequest, WorkflowRunRequest,
 };
 pub use requisitions::{Requisition, ScopedRequisition, SpawnedUpdate};
 pub use results::{
@@ -140,19 +182,25 @@ pub use results::{
     OutputChunk, OutputCollection, OutputCollectionUpdate, OutputDisplayType, OutputHandler,
     OutputKey, OutputResponse, ResultGetParams,
 };
+pub use runtime::{
+    BareMetalEnvironment, DroppedImageField, ExecutionSettings, ImageConversion, JobDataSettings,
+    K8sEnvironment, KvmEnvironment, SchedulingSettings, WindowsEnvironment, WorkloadEnvironment,
+    WorkloadSpec,
+};
 pub use search::events::{
     ResultSearchEvent, SearchEvent, SearchEventPopOpts, SearchEventStatus, SearchEventType,
     TagSearchEvent,
 };
 pub use streams::{Stream, StreamDepth, StreamObj};
 pub use system::{
-    ActiveJob, Backup, BackupParams, BackupProblem, BackupProblems, HostPathWhitelistUpdate,
-    NetworkPolicySet, Node, NodeGetParams, NodeHealth, NodeListLine, NodeListParams,
-    NodeRegistration, NodeUpdate, Pools, PruneAction, PrunedReference, PrunedReferent,
-    RestoreParams, ScalerStats, SpawnMap, StreamerInfoUpdate, SystemComponents, SystemInfo,
-    SystemInfoParams, SystemSettings, SystemSettingsResetParams, SystemSettingsUpdate,
-    SystemSettingsUpdateParams, SystemStats, Worker, WorkerDelete, WorkerDeleteMap, WorkerList,
-    WorkerRegistration, WorkerRegistrationList, WorkerStatus, WorkerUpdate,
+    ActiveJob, AllowedEndpoint, Backup, BackupParams, BackupProblem, BackupProblems,
+    HostPathWhitelistUpdate, ModelsConf, ModelsConfUpdate, NetworkPolicySet, Node, NodeGetParams,
+    NodeHealth, NodeListLine, NodeListParams, NodeRegistration, NodeUpdate, Pools, PruneAction,
+    PrunedReference, PrunedReferent, RestoreParams, ScalerStats, SpawnMap, StreamerInfoUpdate,
+    SystemComponents, SystemInfo, SystemInfoParams, SystemSettings, SystemSettingsResetParams,
+    SystemSettingsUpdate, SystemSettingsUpdateParams, SystemStats, Worker, WorkerDelete,
+    WorkerDeleteMap, WorkerList, WorkerRegistration, WorkerRegistrationList, WorkerStatus,
+    WorkerUpdate,
 };
 pub use tags::{TagCounts, TagKeyCounts};
 pub use trees::{
@@ -162,7 +210,8 @@ pub use trees::{
 pub use users::{
     AiEndpoint, AiEndpointUpdate, AiSettings, AiSettingsUpdate, AuthResponse, AuthedUser, Key,
     ScopedToken, ScopedTokenRequest, ScopedTokenRole, ScopedTokenUpdate, ScopedUser, ScrubbedUser,
-    Theme, UnixInfo, User, UserCreate, UserRole, UserSettings, UserSettingsUpdate, UserUpdate,
+    Theme, UnixInfo, User, UserCreate, UserCredentialRef, UserModelEndpoint, UserModelSettings,
+    UserModelSettingsUpdate, UserRole, UserSettings, UserSettingsUpdate, UserUpdate,
 };
 pub use version::{Arch, Component, Os, Version};
 pub use volumes::{ConfigMap, HostPath, HostPathTypes, NFS, Secret, Volume, VolumeTypes};
@@ -214,6 +263,7 @@ cfg_if::cfg_if! {
             GrepDocumentMatches, GrepMatch, GrepMatches, GrepParams, GrepQueryParams, GrepRequest,
             GrepSource, GrepStats, TruncationReason,
         };
+        pub use entities::digests::{DigestTag, DigestValue, ThorDigest};
     }
 }
 
@@ -228,7 +278,9 @@ cfg_if::cfg_if! {
             RepoListRow, CommitData, BranchData, GitTagData, RepoAuthRow, RepoDataHashRow,
             CommitishDataRow, CommitishRepoDataRow,
         };
-        pub use scylla_utils::entities::{EntityListRow, EntityListSupplementRow, EntityRow};
+        pub use scylla_utils::entities::{
+            EntityGroupKindRow, EntityGroupRow, EntityListRow, EntityListSupplementRow, EntityRow,
+        };
         pub use scylla_utils::files::{
             BasicSubmissionRow, CommentIdRow, CommentRow, S3IdRow, Sha256Row, SubmissionListRow,
             SubmissionRow,

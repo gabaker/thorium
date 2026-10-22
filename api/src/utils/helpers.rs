@@ -82,8 +82,7 @@ where
         hasher.update(s.as_ref().as_bytes());
     }
     // get this filesystems hash
-    let sha256 = HEXLOWER.encode(&hasher.finalize());
-    sha256
+    HEXLOWER.encode(&hasher.finalize())
 }
 
 /// Convert a duration to a human readable string
@@ -130,15 +129,93 @@ pub fn human_duration(duration: std::time::Duration) -> String {
     human
 }
 
+/// Get the groups in `source` that `target` lacks, in `source`'s order and without duplicates
+///
+/// # Arguments
+///
+/// * `source` - The groups that must be covered
+/// * `target` - The groups that should cover them
+#[must_use]
+pub fn missing_groups(source: &[String], target: &[String]) -> Vec<String> {
+    // keep the source groups the target lacks
+    let mut missing: Vec<String> = Vec::new();
+    for group in source {
+        // skip groups the target has or that were already found missing
+        if !target.contains(group) && !missing.contains(group) {
+            missing.push(group.clone());
+        }
+    }
+    missing
+}
+
+/// Check whether `superset` holds every group in `subset`
+///
+/// # Arguments
+///
+/// * `superset` - The groups that should cover the subset
+/// * `subset` - The groups that must be covered
+#[must_use]
+pub fn is_superset(superset: &[String], subset: &[String]) -> bool {
+    // every group in the subset must be in the superset
+    subset.iter().all(|group| superset.contains(group))
+}
+
+/// Get the groups in both `first` and `second`, in `first`'s order and without duplicates
+///
+/// # Arguments
+///
+/// * `first` - The groups whose order is kept
+/// * `second` - The groups to intersect with
+#[must_use]
+pub fn intersection(first: &[String], second: &[String]) -> Vec<String> {
+    // keep the groups of first that second also has
+    let mut shared: Vec<String> = Vec::new();
+    for group in first {
+        // skip groups second lacks or that were already added
+        if second.contains(group) && !shared.contains(group) {
+            shared.push(group.clone());
+        }
+    }
+    shared
+}
+
+/// Build a future inside this function and pin it on the heap
+///
+/// Calling an async function writes its whole future into the caller's stack frame, even when
+/// the caller boxes it right away, and an unoptimized build keeps that space in the caller's
+/// frame for its every poll. A request path through many large futures then outgrows a worker
+/// thread's 2 MiB stack in a debug build. A future built here leaves only its box in the
+/// caller's frame.
+///
+/// # Arguments
+///
+/// * `build` - Builds the future
+#[inline(never)]
+pub fn heap_future<F, Fut>(build: F) -> std::pin::Pin<Box<Fut>>
+where
+    F: FnOnce() -> Fut,
+    Fut: std::future::Future,
+{
+    // build the future in this frame and move it to the heap
+    Box::pin(build())
+}
+
 /// Get the sha256 of a file on disk
+///
+/// The file is read through a 4 MiB buffer.
+///
+/// # Arguments
+///
+/// * `path` - The path to the file to hash
 #[cfg(feature = "client")]
 pub async fn sha256_file(
     path: impl AsRef<std::path::Path>,
 ) -> Result<String, crate::client::Error> {
+    // use a larger 4 MiB buffer size to optimize for nvme storage
+    /// The size of the buffers used to read a file while hashing it
+    const BUF_SIZE: usize = 4 * 1024 * 1024;
     // get a handle to the file to hash
     let file = tokio::fs::File::open(path).await?;
-    // use a larger buffer size to optimize for nvme storage
-    const BUF_SIZE: usize = 4 * 1024 * 1024; // 4 MiB
     // wrap our file handle in a reader
     let mut reader = tokio::io::BufReader::with_capacity(BUF_SIZE, file);
     // instance a buffer large enough to
@@ -254,6 +331,7 @@ pub fn redact_url(url: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::redact_url;
+    use super::{intersection, is_superset, missing_groups};
 
     /// User info is stripped from https, ssh, and git URLs, with or without a password, and from
     /// malformed URLs that still carry it
@@ -345,5 +423,71 @@ mod tests {
         ] {
             assert_eq!(redact_url(url), "<unparseable url>", "redacting {url}");
         }
+    }
+
+    /// Build a list of owned group names from string slices
+    ///
+    /// # Arguments
+    ///
+    /// * `groups` - The group names to own
+    fn groups(groups: &[&str]) -> Vec<String> {
+        groups.iter().map(|group| (*group).to_string()).collect()
+    }
+
+    /// The source groups a target lacks are returned in the source's order
+    #[test]
+    fn missing_groups_in_source_order() {
+        // a target that misses one of the source's groups
+        assert_eq!(
+            missing_groups(&groups(&["a", "b"]), &groups(&["a"])),
+            groups(&["b"])
+        );
+        // a target that misses several groups keeps the source's order
+        assert_eq!(
+            missing_groups(&groups(&["c", "a", "b"]), &groups(&["a"])),
+            groups(&["c", "b"])
+        );
+        // a covering target misses nothing
+        assert_eq!(
+            missing_groups(&groups(&["a"]), &groups(&["a", "b"])),
+            Vec::<String>::new()
+        );
+        // an empty source misses nothing
+        assert_eq!(missing_groups(&[], &groups(&["a"])), Vec::<String>::new());
+        // duplicate source groups are only reported once
+        assert_eq!(missing_groups(&groups(&["b", "b"]), &[]), groups(&["b"]));
+    }
+
+    /// A superset holds every group of the subset
+    #[test]
+    fn superset_checks() {
+        // a target that covers the source is a superset
+        assert!(is_superset(&groups(&["a", "b"]), &groups(&["b"])));
+        // equal sets in any order are supersets of each other
+        assert!(is_superset(&groups(&["b", "a"]), &groups(&["a", "b"])));
+        // anything is a superset of an empty list
+        assert!(is_superset(&[], &[]));
+        // a target missing a group is not a superset
+        assert!(!is_superset(&groups(&["a"]), &groups(&["a", "b"])));
+    }
+
+    /// The intersection keeps the first list's order and drops duplicates
+    #[test]
+    fn intersection_in_first_order() {
+        // shared groups are returned in the first list's order
+        assert_eq!(
+            intersection(&groups(&["c", "a", "b"]), &groups(&["b", "c"])),
+            groups(&["c", "b"])
+        );
+        // disjoint lists share nothing
+        assert_eq!(
+            intersection(&groups(&["a"]), &groups(&["b"])),
+            Vec::<String>::new()
+        );
+        // duplicates are only returned once
+        assert_eq!(
+            intersection(&groups(&["a", "a"]), &groups(&["a"])),
+            groups(&["a"])
+        );
     }
 }

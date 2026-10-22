@@ -10,8 +10,7 @@ use super::db::groups::{MembersLists, RawGroupData};
 use crate::models::groups::GroupUsers;
 use crate::models::{
     Group, GroupAllowAction, GroupAllowed, GroupAllowedUpdate, GroupDetailsList, GroupList,
-    GroupRequest, GroupStats, GroupUpdate, GroupUsersRequest, GroupUsersUpdate, ImageScaler,
-    Pipeline, User,
+    GroupRequest, GroupStats, GroupUpdate, GroupUsersRequest, GroupUsersUpdate, ImageScaler, User,
 };
 use crate::utils::{ApiError, Shared, bounder};
 use crate::{
@@ -34,7 +33,7 @@ impl GroupRequest {
         Ok(())
     }
 
-    /// Cast a GroupRequest to a Group
+    /// Cast a `GroupRequest` to a Group
     ///
     /// # Arguments
     ///
@@ -127,7 +126,7 @@ impl GroupUsersUpdate {
         role.combined.retain(|user| !removed.contains(user));
         // add these names to our combined set
         role.combined
-            .extend(role.direct.iter().map(|name| name.to_owned()));
+            .extend(role.direct.iter().map(std::borrow::ToOwned::to_owned));
         Ok(())
     }
 
@@ -168,6 +167,7 @@ impl GroupAllowedUpdate {
         update!(group.allowed.results, self.results);
         update!(group.allowed.comments, self.comments);
         update!(group.allowed.entities, self.entities);
+        update!(group.allowed.associations, self.associations);
     }
 }
 
@@ -257,7 +257,7 @@ impl Group {
             ));
         }
         // check if this group already exists
-        if db::groups::exists(&[req.name.clone()], shared).await? {
+        if db::groups::exists(std::slice::from_ref(&req.name), shared).await? {
             return unauthorized!();
         }
         // add group to backend
@@ -305,7 +305,7 @@ impl Group {
                 .iter()
                 .skip(cursor)
                 .take(limit)
-                .map(|group| group.to_owned())
+                .map(std::borrow::ToOwned::to_owned)
                 .collect();
 
             // calculate new cursor
@@ -705,6 +705,115 @@ impl Group {
         Ok(groups)
     }
 
+    /// Check that a user passes a role check in every group of a shared entity and that every
+    /// group allows an action
+    ///
+    /// Unlike [`Group::authorize_check_allow_all`], this checks every group before failing so the
+    /// `401` can name the groups that block the user. Only groups the user can see are named;
+    /// groups the user can't see are never named or counted.
+    ///
+    /// # Arguments
+    ///
+    /// * `user` - The user to check
+    /// * `groups` - Every group the entity is in
+    /// * `role_check` - The role check to run on each group
+    /// * `action` - The action every group must allow if one is given
+    /// * `action_name` - The action named in the error (e.g. 'edit' or 'delete')
+    /// * `entity` - The name of the entity named in the error
+    pub fn check_graph<F>(
+        user: &User,
+        groups: &[Group],
+        role_check: F,
+        action: Option<GroupAllowAction>,
+        action_name: &str,
+        entity: &str,
+    ) -> Result<(), ApiError>
+    where
+        F: Fn(&Group, &User) -> Result<(), ApiError>,
+    {
+        // track whether any group blocks this user
+        let mut blocked = false;
+        // track the blocking groups this user can see
+        let mut visible = Vec::new();
+        // check every group without stopping at the first failure
+        for group in groups {
+            // a non-admin must hold this group in their (possibly scoped) groups
+            let member = user.is_admin() || user.groups.contains(&group.name);
+            // run the role check and the allow check for this group
+            let passed = member
+                && role_check(group, user).is_ok()
+                && action.is_none_or(|action| group.allowed.is_allowed(action));
+            // record a failing group, naming it only if this user can see it
+            if !passed {
+                // any failing group blocks this user
+                blocked = true;
+                // only a group this user can see may be named
+                if member && group.viewable(user).is_ok() {
+                    visible.push(format!("`{}`", group.name));
+                }
+            }
+        }
+        // build the error if any group blocks this user
+        if blocked {
+            // build the message without any group this user can't see
+            let msg = if visible.is_empty() {
+                format!("you don't have permission to {action_name} `{entity}`")
+            } else {
+                format!(
+                    "you don't have permission to {action_name} `{entity}` in {}",
+                    visible.join(", ")
+                )
+            };
+            // log and return the refusal
+            event!(Level::ERROR, msg = &msg, user = user.username);
+            return unauthorized!(msg);
+        }
+        Ok(())
+    }
+
+    /// Authorize a user in every group of a shared entity with the required role and allowed
+    /// action, returning the groups
+    ///
+    /// Used for `Contained` entities, whose edits and deletes need rights in all of their groups.
+    /// A refusal is a `401` naming only the blocking groups the user can see.
+    ///
+    /// # Arguments
+    ///
+    /// * `user` - The user to authorize
+    /// * `names` - The names of every group the entity is in
+    /// * `role_check` - The role check to run on each group
+    /// * `action` - The action every group must allow if one is given
+    /// * `action_name` - The action named in the error (e.g. 'edit' or 'delete')
+    /// * `entity` - The name of the entity named in the error
+    /// * `shared` - Shared objects in Thorium
+    #[instrument(
+        name = "Group::authorize_graph",
+        skip(user, role_check, shared),
+        err(Debug)
+    )]
+    pub async fn authorize_graph<F>(
+        user: &User,
+        names: &[String],
+        role_check: F,
+        action: Option<GroupAllowAction>,
+        action_name: &str,
+        entity: &str,
+        shared: &Shared,
+    ) -> Result<Vec<Group>, ApiError>
+    where
+        F: Fn(&Group, &User) -> Result<(), ApiError>,
+    {
+        // get the details for every group
+        let groups = db::groups::list_details(names.iter(), shared).await?;
+        // admins pass every role check, so make sure these groups actually exist
+        if user.is_admin() && !db::groups::exists(names, shared).await? {
+            return not_found!(format!("all of {names:?} groups must exist"));
+        }
+        // check every group and name only the visible ones that block this user
+        Self::check_graph(user, &groups, role_check, action, action_name, entity)?;
+        Ok(groups)
+    }
+
     /// Get a group object if that group exists
     ///
     /// # Arguments
@@ -778,22 +887,7 @@ impl Group {
         let valid = HashSet::from_iter(db::users::list(shared).await?);
         // make sure we can modify this group with our role
         // if we are adding/removing owners we need to also be an owner
-        if !update.owners.is_empty() {
-            // make sure we are an owner
-            self.is_owner(user)?;
-            // error if we try to remove ourselves as owner
-            if update.owners.direct_remove.contains(&user.username) {
-                return conflict!("You cannot remove yourself as an owner".to_owned());
-            }
-            // update our owner roles
-            update
-                .owners
-                .update_direct(&mut self.owners, &mut added, &mut removed, &valid)?;
-            // error if the owner list will be empty after this
-            if self.owners.direct.is_empty() && self.owners.metagroups.is_empty() {
-                return conflict!("You cannot update a group to have no owners".to_owned());
-            }
-        } else {
+        if update.owners.is_empty() {
             // changing group-wide settings (the description or the `allowed` flags) is an
             // owner/manager action, so treat a settings-only update as privileged too. Otherwise the
             // `modifiable` check below is skipped whenever the update touches no role membership, and
@@ -808,6 +902,21 @@ impl Group {
                 // we are doing more than removing ourselves (or changing settings) so require
                 // owner/manager perms
                 self.modifiable(user)?;
+            }
+        } else {
+            // make sure we are an owner
+            self.is_owner(user)?;
+            // error if we try to remove ourselves as owner
+            if update.owners.direct_remove.contains(&user.username) {
+                return conflict!("You cannot remove yourself as an owner".to_owned());
+            }
+            // update our owner roles
+            update
+                .owners
+                .update_direct(&mut self.owners, &mut added, &mut removed, &valid)?;
+            // error if the owner list will be empty after this
+            if self.owners.direct.is_empty() && self.owners.metagroups.is_empty() {
+                return conflict!("You cannot update a group to have no owners".to_owned());
             }
         }
         // start with empty direct + metagroup user lists
@@ -894,39 +1003,18 @@ impl Group {
         Ok(())
     }
 
-    /// Get stats on a group including its pipelines
+    /// Get stats on a group's shared workload jobs by tool instance and user
     ///
     /// # Arguments
     ///
-    /// * `cursor` - The cursor to use when listing groups by status
-    /// * `limit` - The max number of groups to return (soft limit)
     /// * `shared` - Shared objects in Thorium
     #[instrument(name = "Group::stats", skip(shared), fields(group = &self.name), err(Debug))]
-    pub async fn stats(
-        &self,
-        cursor: usize,
-        limit: usize,
-        shared: &Shared,
-    ) -> Result<GroupStats, ApiError> {
+    pub async fn stats(&self, shared: &Shared) -> Result<GroupStats, ApiError> {
         // get a list of the members of this group
         let members = self.members();
-        // get a list of pipelines
-        let pipelines = Pipeline::list(self, cursor, limit, shared)
-            .await?
-            .details(self, shared)
-            .await?;
-        // build an empty group status object
-        let mut status = GroupStats {
-            pipelines: HashMap::default(),
-        };
-        // crawl through the pipelines of this group and get their status
-        for pipeline in pipelines.details.into_iter() {
-            // get the status info for this pipeline
-            let pipe_status = pipeline.status(&members, shared).await?;
-            // add this pipeline status to our status map
-            status.pipelines.insert(pipeline.name, pipe_status);
-        }
-        Ok(status)
+        // count each tool instance's shared jobs for each member
+        let workloads = db::jobs::workload_stats(&self.name, &members, shared).await?;
+        Ok(GroupStats { workloads })
     }
 }
 
@@ -937,8 +1025,8 @@ impl TryFrom<RawGroupData> for Group {
     ///
     /// # Arguments
     ///
-    /// * `raw` - The raw data returned from the db including name, MembersLists,
-    ///           and the data map and analysts
+    /// * `raw` - The raw data returned from the db including name, `MembersLists`,
+    ///   and the data map and analysts
     fn try_from(raw: RawGroupData) -> Result<Self, Self::Error> {
         let (name, members, data, analysts) = raw;
         // build our owners object
@@ -996,8 +1084,8 @@ impl
     ///
     /// # Arguments
     ///
-    /// * `raw` - The raw data returned from the db including name, MembersLists,
-    ///           and the data map, and analysts
+    /// * `raw` - The raw data returned from the db including name, `MembersLists`,
+    ///   and the data map, and analysts
     fn try_from(
         raw: (
             String,
@@ -1085,7 +1173,7 @@ impl LdapUserMap {
             // crawl over all groups and build a list of filters
             let mut group_filters = HashSet::new();
             // build a set of all ldap based groups to sync
-            for group in groups.iter() {
+            for group in groups {
                 build_filter!(&group.owners.metagroups, "cn", group_filters);
                 build_filter!(&group.managers.metagroups, "cn", group_filters);
                 build_filter!(&group.users.metagroups, "cn", group_filters);
@@ -1099,7 +1187,7 @@ impl LdapUserMap {
             }
             // build the specific group filters
             let group_filters = itertools::join(&group_filters, "");
-            let filter = format!("(&(|{})(objectClass=*))", group_filters);
+            let filter = format!("(&(|{group_filters})(objectClass=*))");
             //  build an ldap connection
             //  we do this on demand instead of having it in shared because it needs to be mutable
             let (conn, mut ldap) = ldap!(conf).await?;
@@ -1149,38 +1237,41 @@ impl LdapUserMap {
             // set the start to just past the cn=
             let mut start = 3;
             loop {
-                // get the index the first ','
-                if let Some(end) = raw[start..].find(',') {
-                    // check to see if this comma was escaped
-                    if &raw[end - 1..end - 1] == "\\" {
-                        // this comma was escaped skip it and keep looking
-                        start = end;
-                    } else {
-                        // we found the end index of our group name return it
-                        // add start to our end value since end is a relative index
-                        return Some(&raw[3..start + end]);
-                    }
+                // get the index the first ',' or stop if there isn't one
+                let end = raw[start..].find(',')?;
+                // check to see if this comma was escaped
+                if &raw[end - 1..end - 1] == "\\" {
+                    // this comma was escaped skip it and keep looking
+                    start = end;
                 } else {
-                    return None;
+                    // we found the end index of our group name return it
+                    // add start to our end value since end is a relative index
+                    return Some(&raw[3..start + end]);
                 }
             }
-        } else {
-            // this ldap entry does not start with cn= so ignore it
-            None
         }
+        // this ldap entry does not start with cn= so ignore it
+        None
     }
 
-    /// Extract a username from a group membership row
+    /// Extract the usernames from a list of group membership rows
+    ///
+    /// If no group member field is configured the rows are returned unchanged.
+    ///
+    /// # Arguments
+    ///
+    /// * `raw` - The raw group membership rows
+    /// * `conf` - The LDAP config that names the field to extract usernames from
     #[instrument(name = "LdapUserMap::group_member_extract", skip_all)]
-    fn group_member_extract<'a>(raw: Vec<String>, conf: &crate::conf::Ldap) -> Vec<String> {
+    fn group_member_extract(raw: Vec<String>, conf: &crate::conf::Ldap) -> Vec<String> {
         // get the field to extract our group members usernames from
         if let Some(key_name) = &conf.group_member_field {
             // build a list to store our extracted usernames
             let mut extracted = Vec::with_capacity(raw.len());
             // add the = to our field
-            let key = format!("{}=", key_name);
+            let key = format!("{key_name}=");
             // crawl over our group member rows
-            for row in raw.iter() {
+            for row in &raw {
                 // try to extract the username field from this row
                 if let Some(field) = row.split(',').find(|field| field.starts_with(&key)) {
                     // remove the field key form our username field
@@ -1206,13 +1297,242 @@ impl LdapUserMap {
     /// Apply this update to a target roles groups
     pub fn apply_to_role(&self, role: &mut GroupUsers) {
         // crawl the metagroups that have this role and add them
-        for metagroup in role.metagroups.iter() {
+        for metagroup in &role.metagroups {
             // get the users in this metagroup
             if let Some(users) = self.users.get(metagroup) {
                 // extend our combined users with the users in this metagroup
                 role.combined
-                    .extend(users.iter().map(|name| name.to_owned()));
+                    .extend(users.iter().map(std::borrow::ToOwned::to_owned));
             }
         }
+    }
+}
+
+#[cfg(test)]
+pub(crate) mod tests {
+    use axum::http::StatusCode;
+    use chrono::Utc;
+    use std::collections::{HashMap, HashSet};
+
+    use crate::models::groups::GroupUsers;
+    use crate::models::{
+        Group, GroupAllowAction, GroupAllowed, GroupAllowedUpdate, User, UserRole, UserSettings,
+    };
+
+    /// Build a role's members from usernames
+    ///
+    /// # Arguments
+    ///
+    /// * `names` - The usernames that hold this role
+    fn members(names: &[&str]) -> GroupUsers {
+        // build the set of members
+        let combined: HashSet<String> = names.iter().map(|name| (*name).to_string()).collect();
+        // add them all as direct members
+        GroupUsers {
+            combined: combined.clone(),
+            direct: combined,
+            metagroups: HashSet::default(),
+        }
+    }
+
+    /// Build a group for tests
+    ///
+    /// # Arguments
+    ///
+    /// * `name` - The name of the group
+    /// * `owners` - The owners of the group
+    /// * `users` - The users of the group
+    /// * `monitors` - The monitors of the group
+    pub(crate) fn group(name: &str, owners: &[&str], users: &[&str], monitors: &[&str]) -> Group {
+        // build a group with no managers or analysts that allows everything
+        Group {
+            name: name.to_owned(),
+            owners: members(owners),
+            managers: members(&[]),
+            analysts: HashSet::default(),
+            users: members(users),
+            monitors: members(monitors),
+            description: None,
+            allowed: GroupAllowed::default(),
+        }
+    }
+
+    /// Build a user for tests
+    ///
+    /// # Arguments
+    ///
+    /// * `username` - The name of the user
+    /// * `role` - The user's role
+    /// * `groups` - The groups the user is in
+    pub(crate) fn user(username: &str, role: UserRole, groups: &[&str]) -> User {
+        // build a verified user with default settings
+        User {
+            username: username.to_owned(),
+            password: None,
+            email: format!("{username}@example.com"),
+            role,
+            groups: groups.iter().map(|group| (*group).to_string()).collect(),
+            actual_groups: Vec::default(),
+            token: String::default(),
+            token_expiration: Utc::now(),
+            unix: None,
+            settings: UserSettings::default(),
+            verified: true,
+            verification_token: None,
+            verification_sent: None,
+            aliases: HashMap::default(),
+            image: None,
+        }
+    }
+
+    /// Get the message of a failed graph check
+    ///
+    /// # Arguments
+    ///
+    /// * `user` - The user to check
+    /// * `groups` - The groups to check
+    fn denied(user: &User, groups: &[Group]) -> String {
+        // run the check and expect a 401
+        let err = Group::check_graph(
+            user,
+            groups,
+            Group::editable,
+            Some(GroupAllowAction::Entities),
+            "edit",
+            "tool",
+        )
+        .unwrap_err();
+        assert_eq!(err.status(), StatusCode::UNAUTHORIZED);
+        err.msg().unwrap_or_default()
+    }
+
+    /// A user who can edit every group passes the graph check
+    #[test]
+    fn graph_check_passes_in_every_group() {
+        // a user in both groups
+        let bob = user("bob", UserRole::User, &["a", "b"]);
+        // both groups grant edit rights
+        let groups = vec![
+            group("a", &[], &["bob"], &[]),
+            group("b", &["bob"], &[], &[]),
+        ];
+        // the check passes
+        assert!(
+            Group::check_graph(
+                &bob,
+                &groups,
+                Group::editable,
+                Some(GroupAllowAction::Entities),
+                "edit",
+                "tool"
+            )
+            .is_ok()
+        );
+    }
+
+    /// A visible group that blocks the edit is named in the message
+    #[test]
+    fn graph_check_names_visible_blockers() {
+        // a user who only monitors group b
+        let bob = user("bob", UserRole::User, &["a", "b"]);
+        // group a grants edit rights and group b doesn't
+        let groups = vec![
+            group("a", &[], &["bob"], &[]),
+            group("b", &[], &[], &["bob"]),
+        ];
+        // the message names b only
+        let msg = denied(&bob, &groups);
+        assert_eq!(msg, "you don't have permission to edit `tool` in `b`");
+    }
+
+    /// A group the caller can't see is never named or counted
+    #[test]
+    fn graph_check_hides_invisible_blockers() {
+        // a user who isn't in group secret
+        let bob = user("bob", UserRole::User, &["a"]);
+        // group a grants edit rights and secret holds other users only
+        let groups = vec![
+            group("a", &[], &["bob"], &[]),
+            group("secret", &["alice"], &[], &[]),
+        ];
+        // the message doesn't name or count the hidden group
+        let msg = denied(&bob, &groups);
+        assert_eq!(msg, "you don't have permission to edit `tool`");
+    }
+
+    /// A group listed in the membership lists but outside a scoped user's groups is hidden too
+    #[test]
+    fn graph_check_respects_scoped_groups() {
+        // a user whose token only covers group a
+        let bob = user("bob", UserRole::User, &["a"]);
+        // bob holds roles in both groups
+        let groups = vec![
+            group("a", &[], &["bob"], &[]),
+            group("b", &[], &["bob"], &[]),
+        ];
+        // b blocks the edit but is outside bob's token so it isn't named
+        let msg = denied(&bob, &groups);
+        assert_eq!(msg, "you don't have permission to edit `tool`");
+    }
+
+    /// A visible group that disallows the action is named, even for admins
+    #[test]
+    fn graph_check_names_disallowed_groups() {
+        // a group that disallows entities
+        let mut closed = group("b", &["bob"], &[], &[]);
+        closed.allowed.entities = false;
+        // the other group allows them
+        let groups = vec![group("a", &["bob"], &[], &[]), closed];
+        // a member is told which group blocks it
+        let bob = user("bob", UserRole::User, &["a", "b"]);
+        assert_eq!(
+            denied(&bob, &groups),
+            "you don't have permission to edit `tool` in `b`"
+        );
+        // an admin is blocked by the allow flag too
+        let admin = user("admin", UserRole::Admin, &[]);
+        assert_eq!(
+            denied(&admin, &groups),
+            "you don't have permission to edit `tool` in `b`"
+        );
+        // without an action to check the admin passes
+        assert!(Group::check_graph(&admin, &groups, Group::editable, None, "edit", "tool").is_ok());
+    }
+
+    /// Applying an associations update flips only the associations flag
+    #[test]
+    fn allowed_update_applies_associations() {
+        // a group that allows everything
+        let mut target = group("a", &["bob"], &[], &[]);
+        // disallow associations in this group
+        GroupAllowedUpdate::default()
+            .disable_associations()
+            .update(&mut target);
+        // only the associations flag changed
+        assert!(!target.allowed.associations);
+        assert!(target.allowed.entities && target.allowed.files && target.allowed.tags);
+        // allow associations again
+        GroupAllowedUpdate::default()
+            .enable_associations()
+            .update(&mut target);
+        assert!(target.allowed.associations);
+    }
+
+    /// `group_name_extract` returns the `cn` value up to the first comma and ignores entries
+    /// that don't start with `cn=` or have no comma
+    #[test]
+    fn group_name_extract_reads_the_cn() {
+        // a group entry returns its cn value
+        assert_eq!(
+            super::LdapUserMap::group_name_extract("cn=analysts,ou=groups,dc=example"),
+            Some("analysts")
+        );
+        // an entry with no comma after the cn has no group name
+        assert_eq!(super::LdapUserMap::group_name_extract("cn=analysts"), None);
+        // an entry that isn't a cn is ignored
+        assert_eq!(
+            super::LdapUserMap::group_name_extract("uid=bob,ou=people"),
+            None
+        );
     }
 }

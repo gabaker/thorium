@@ -3,7 +3,7 @@
 
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Deserializer};
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeSet, HashMap, HashSet};
 use std::fmt;
 use std::ops::{Add, AddAssign, SubAssign};
 use std::path::PathBuf;
@@ -12,7 +12,9 @@ use uuid::Uuid;
 
 use super::bans::Ban;
 use super::conversions::{self, ConversionError};
-use super::{GenericJob, OutputCollection, OutputCollectionUpdate, OutputDisplayType, Volume};
+use super::{
+    GenericJob, OutputCollection, OutputCollectionUpdate, OutputDisplayType, ToolVersion, Volume,
+};
 use crate::conf::BurstableNodeResources;
 use crate::{
     matches_adds, matches_adds_iter, matches_adds_map, matches_clear, matches_clear_opt,
@@ -21,6 +23,10 @@ use crate::{
 
 /// The amount of resources to allow this image to burst with
 #[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, Eq, PartialEq)]
+#[cfg_attr(
+    any(feature = "api", feature = "client"),
+    derive(thorium_derive::DigestValue)
+)]
 #[cfg_attr(
     feature = "rkyv-support",
     derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)
@@ -109,7 +115,7 @@ impl Add for BurstableResources {
 impl fmt::Display for BurstableResources {
     /// Implement display for ``BurstableResources``
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        write!(f, "cpu: {}m, memory: {}Mi", self.cpu, self.memory,)
+        write!(f, "cpu: {}m, memory: {}Mi", self.cpu, self.memory)
     }
 }
 
@@ -361,6 +367,10 @@ fn default_worker_slots() -> u64 {
 
 /// The resources available on a node or required for an image
 #[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, Eq, PartialEq)]
+#[cfg_attr(
+    any(feature = "api", feature = "client"),
+    derive(thorium_derive::DigestValue)
+)]
 #[cfg_attr(
     feature = "rkyv-support",
     derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)
@@ -1000,6 +1010,10 @@ impl From<Resources> for ResourcesUpdate {
 
 /// Limit the number of workers for this image can spawned across all clusters controlled by a single scaler
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+#[cfg_attr(
+    any(feature = "api", feature = "client"),
+    derive(thorium_derive::DigestValue)
+)]
 #[cfg_attr(feature = "api", derive(utoipa::ToSchema))]
 pub enum SpawnLimits {
     /// Limit the amount of spawned workers for this image using a basic limit
@@ -1017,6 +1031,10 @@ impl Default for SpawnLimits {
 
 /// The possible ways to pass these args in
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+#[cfg_attr(
+    any(feature = "api", feature = "client"),
+    derive(thorium_derive::DigestValue)
+)]
 #[cfg_attr(feature = "api", derive(utoipa::ToSchema))]
 pub enum ArgStrategy {
     /// Do not pass this arg in
@@ -1057,6 +1075,10 @@ where
 ///
 /// The args will be appended in order if they are all set to be appended
 #[derive(Serialize, Deserialize, Debug, Default, Clone, PartialEq)]
+#[cfg_attr(
+    any(feature = "api", feature = "client"),
+    derive(thorium_derive::DigestValue)
+)]
 #[cfg_attr(feature = "api", derive(utoipa::ToSchema))]
 pub struct ImageArgs {
     /// The entrypoint to force all jobs to use
@@ -1216,7 +1238,7 @@ impl ImageArgsUpdate {
         self
     }
 
-    /// Set the kwarg for the output_files path
+    /// Set the kwarg for the `output_files` path
     #[must_use]
     pub fn output_files_files(mut self, output: ArgStrategy) -> Self {
         self.output_files = Some(output);
@@ -1249,7 +1271,11 @@ pub struct ImageDetailsList {
 /// This allows users to specify the lifetime of their pods
 /// Allowing a user to have a pod terminate after n jobs or n time
 /// Time will only be checked in between jobs and so is not strongly enforced
-#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+#[derive(Serialize, Deserialize, Debug, Clone, Default, PartialEq)]
+#[cfg_attr(
+    any(feature = "api", feature = "client"),
+    derive(thorium_derive::DigestValue)
+)]
 #[cfg_attr(feature = "api", derive(utoipa::ToSchema))]
 pub struct ImageLifetime {
     /// The counter used to determine lifetime (jobs || time are valid)
@@ -1316,6 +1342,10 @@ fn default_as_true() -> bool {
 
 /// The security context to enforce when running this image
 #[derive(Serialize, Deserialize, Debug, Clone, Default, PartialEq)]
+#[cfg_attr(
+    any(feature = "api", feature = "client"),
+    derive(thorium_derive::DigestValue)
+)]
 #[cfg_attr(feature = "api", derive(utoipa::ToSchema))]
 pub struct SecurityContext {
     /// The user to run as
@@ -1477,6 +1507,10 @@ impl PartialEq<SecurityContext> for SecurityContextUpdate {
 ///
 /// The default strategy will be by path.
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Default)]
+#[cfg_attr(
+    any(feature = "api", feature = "client"),
+    derive(thorium_derive::DigestValue)
+)]
 #[cfg_attr(feature = "api", derive(utoipa::ToSchema))]
 pub enum DependencyPassStrategy {
     /// Tell the agent to pass all dependencies as paths
@@ -1492,6 +1526,10 @@ pub enum DependencyPassStrategy {
 
 /// The File name strategy to use when downloading files
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Default)]
+#[cfg_attr(
+    any(feature = "api", feature = "client"),
+    derive(thorium_derive::DigestValue)
+)]
 #[cfg_attr(feature = "api", derive(utoipa::ToSchema))]
 pub enum FileNamingStrategy {
     /// Use the sha256 of this file
@@ -1508,6 +1546,10 @@ fn default_samples_location() -> String {
 
 /// The settings for the agent downloading samples for jobs
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+#[cfg_attr(
+    any(feature = "api", feature = "client"),
+    derive(thorium_derive::DigestValue)
+)]
 #[cfg_attr(feature = "api", derive(utoipa::ToSchema))]
 pub struct SampleDependencySettings {
     /// Where the agent should store downloaded files
@@ -1648,6 +1690,10 @@ fn default_repos_location() -> String {
 
 /// The settings for the agent downloading repos for jobs
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+#[cfg_attr(
+    any(feature = "api", feature = "client"),
+    derive(thorium_derive::DigestValue)
+)]
 #[cfg_attr(feature = "api", derive(utoipa::ToSchema))]
 pub struct RepoDependencySettings {
     /// Where the agent should store downloaded repos
@@ -1768,6 +1814,10 @@ fn default_tags_strategy() -> DependencyPassStrategy {
 
 /// The settings the agent should use when passing tags to tools
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+#[cfg_attr(
+    any(feature = "api", feature = "client"),
+    derive(thorium_derive::DigestValue)
+)]
 #[cfg_attr(feature = "api", derive(utoipa::ToSchema))]
 pub struct TagDependencySettings {
     /// Whether this job wants tags to be downloaded or not
@@ -2077,6 +2127,10 @@ fn default_children_strategy() -> DependencyPassStrategy {
 
 /// The settings the agent should use when passing childrens to tools
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+#[cfg_attr(
+    any(feature = "api", feature = "client"),
+    derive(thorium_derive::DigestValue)
+)]
 #[cfg_attr(feature = "api", derive(utoipa::ToSchema))]
 pub struct ChildrenDependencySettings {
     //// Whether children dependencies should be enabled or not
@@ -2529,6 +2583,10 @@ fn default_filesystems_strategy() -> DependencyPassStrategy {
 /// Unlike [`ChildrenDependencySettings`], which downloads loose children flat, this reconstructs the
 /// directory structure of filesystems dumped by earlier tools before passing them to the tool.
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+#[cfg_attr(
+    any(feature = "api", feature = "client"),
+    derive(thorium_derive::DigestValue)
+)]
 #[cfg_attr(feature = "api", derive(utoipa::ToSchema))]
 pub struct FileSystemDependencySettings {
     /// Whether filesystem dependencies should be enabled or not
@@ -3140,6 +3198,10 @@ fn default_ephemeral_location() -> String {
 
 /// The settings for the agent downloading dependencies for jobs
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+#[cfg_attr(
+    any(feature = "api", feature = "client"),
+    derive(thorium_derive::DigestValue)
+)]
 #[cfg_attr(feature = "api", derive(utoipa::ToSchema))]
 pub struct EphemeralDependencySettings {
     /// Where the agent should store downloaded ephemeral files
@@ -3454,6 +3516,10 @@ impl EphemeralDependencySettingsUpdate {
 
 /// How prior result dependencies should be be passed in by kwargs
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+#[cfg_attr(
+    any(feature = "api", feature = "client"),
+    derive(thorium_derive::DigestValue)
+)]
 #[cfg_attr(feature = "api", derive(utoipa::ToSchema))]
 pub enum KwargDependency {
     /// Pass in all results with a single kwarg key
@@ -3478,6 +3544,10 @@ fn default_prior_results() -> String {
 
 /// The settings for the agent downloading prior results for jobs
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+#[cfg_attr(
+    any(feature = "api", feature = "client"),
+    derive(thorium_derive::DigestValue)
+)]
 #[cfg_attr(feature = "api", derive(utoipa::ToSchema))]
 pub struct ResultDependencySettings {
     /// The prior images to collect results from
@@ -3953,6 +4023,10 @@ impl PartialEq<ResultDependencySettingsUpdate> for ResultDependencySettings {
 
 /// The settings to use when getting generic cache info for a reaction
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+#[cfg_attr(
+    any(feature = "api", feature = "client"),
+    derive(thorium_derive::DigestValue)
+)]
 #[cfg_attr(feature = "api", derive(utoipa::ToSchema))]
 pub struct GenericCacheDependencySettings {
     /// The kwarg to pass this cache in with if one is set (otherwise use positional args)
@@ -3996,6 +4070,10 @@ fn default_cache_enabled() -> bool {
 
 /// The settings to use when getting cache info for a reaction
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+#[cfg_attr(
+    any(feature = "api", feature = "client"),
+    derive(thorium_derive::DigestValue)
+)]
 #[cfg_attr(feature = "api", derive(utoipa::ToSchema))]
 pub struct CacheDependencySettings {
     /// The location to write our generic cache too
@@ -4056,6 +4134,10 @@ pub struct CacheDependencySettingsUpdate {
 
 /// How this image should handle dependencies it needs for jobs
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Default)]
+#[cfg_attr(
+    any(feature = "api", feature = "client"),
+    derive(thorium_derive::DigestValue)
+)]
 #[cfg_attr(feature = "api", derive(utoipa::ToSchema))]
 pub struct Dependencies {
     /// The settings  the agent should use when passing donwloaded samples to tools
@@ -4379,15 +4461,19 @@ impl DependenciesUpdate {
 /// do *not* match *any* of the given filters will be submitted. If
 /// no filters are given, all children will be submitted.
 #[derive(Debug, Default, Clone, Serialize, Deserialize, PartialEq)]
+#[cfg_attr(
+    any(feature = "api", feature = "client"),
+    derive(thorium_derive::DigestValue)
+)]
 #[cfg_attr(feature = "api", derive(utoipa::ToSchema))]
 pub struct ChildFilters {
     /// Any filters to apply to the MIME type
-    pub mime: HashSet<String>,
+    pub mime: BTreeSet<String>,
     /// Any filters to apply to the file name (including the extension)
-    pub file_name: HashSet<String>,
+    pub file_name: BTreeSet<String>,
     /// Any filters to apply to the file extension, not including the dot
     /// (e.g. "txt", "so", "exe", etc.)
-    pub file_extension: HashSet<String>,
+    pub file_extension: BTreeSet<String>,
     /// Submit children that do *not* match any of the given filters rather
     /// than ones that do match
     pub submit_non_matches: bool,
@@ -4831,7 +4917,11 @@ macro_rules! add_arg {
 }
 
 /// The settings for cleaning up an images cancelled jobs
-#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+#[derive(Serialize, Deserialize, Debug, Clone, Default, PartialEq)]
+#[cfg_attr(
+    any(feature = "api", feature = "client"),
+    derive(thorium_derive::DigestValue)
+)]
 #[cfg_attr(feature = "api", derive(utoipa::ToSchema))]
 pub struct Cleanup {
     /// How to pass in the id of the cancelled job
@@ -5062,34 +5152,6 @@ impl CleanupUpdate {
     }
 }
 
-/// A version of an image, formatted according to various standards
-#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
-#[cfg_attr(feature = "api", derive(utoipa::ToSchema))]
-#[cfg_attr(feature = "scylla-utils", derive(thorium_derive::ScyllaStoreJson))]
-pub enum ImageVersion {
-    #[cfg_attr(feature = "api", schema(value_type = String))]
-    SemVer(semver::Version),
-    Custom(String),
-}
-
-impl From<&str> for ImageVersion {
-    fn from(s: &str) -> Self {
-        // check if the string can be parsed to semver
-        if let Ok(semver) = semver::Version::parse(s) {
-            ImageVersion::SemVer(semver)
-        // otherwise convert to a custom version
-        } else {
-            ImageVersion::Custom(s.to_string())
-        }
-    }
-}
-
-impl From<&String> for ImageVersion {
-    fn from(s: &String) -> Self {
-        ImageVersion::from(s.as_str())
-    }
-}
-
 /// This is a request for an image to be added to Thorium
 ///
 /// None of the values in this have been bounds checked in any way yet
@@ -5102,7 +5164,7 @@ pub struct ImageRequest {
     pub name: String,
     /// The version of this image
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub version: Option<ImageVersion>,
+    pub version: Option<ToolVersion>,
     /// What scaler is responsible for scaling this image
     #[serde(default)]
     pub scaler: ImageScaler,
@@ -5255,7 +5317,7 @@ impl ImageRequest {
     ///
     /// * `version` - The semver image version
     #[must_use]
-    pub fn version(mut self, version: ImageVersion) -> Self {
+    pub fn version(mut self, version: ToolVersion) -> Self {
         self.version = Some(version);
         self
     }
@@ -5712,9 +5774,10 @@ impl ImageNetworkPolicyUpdate {
 /// An update for an image in Thorium
 #[derive(Serialize, Deserialize, Debug, Clone, Default)]
 #[cfg_attr(feature = "api", derive(utoipa::ToSchema))]
+#[allow(clippy::struct_excessive_bools)]
 pub struct ImageUpdate {
     /// The image version to update
-    pub version: Option<ImageVersion>,
+    pub version: Option<ToolVersion>,
     /// Whether the scaler should spawn containers for this image
     pub external: Option<bool>,
     /// The image to use (url or tag)
@@ -5834,14 +5897,14 @@ impl ImageUpdate {
     /// # Examples
     ///
     /// ```
-    /// use thorium::models::{ImageUpdate, ImageVersion};
+    /// use thorium::models::{ImageUpdate, ToolVersion};
     /// use semver::Version;
     ///
-    /// let version = ImageVersion::SemVer(Version::parse("1.1.0").unwrap());
+    /// let version = ToolVersion::SemVer(Version::parse("1.1.0").unwrap());
     /// ImageUpdate::default().version(version);
     /// ```
     #[must_use]
-    pub fn version(mut self, version: ImageVersion) -> Self {
+    pub fn version(mut self, version: ToolVersion) -> Self {
         self.version = Some(version);
         self
     }
@@ -6204,7 +6267,11 @@ impl ImageUpdate {
 }
 
 /// The settings for kvm jobs
-#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+#[derive(Serialize, Deserialize, Debug, Clone, Default, PartialEq)]
+#[cfg_attr(
+    any(feature = "api", feature = "client"),
+    derive(thorium_derive::DigestValue)
+)]
 #[cfg_attr(feature = "api", derive(utoipa::ToSchema))]
 pub struct Kvm {
     /// The path to the golden XML file to use
@@ -6356,7 +6423,7 @@ pub struct Image {
     /// The creator of this image
     pub creator: String,
     /// The version of this image
-    pub version: Option<ImageVersion>,
+    pub version: Option<ToolVersion>,
     /// What scaler is responsible for scaling this image
     #[serde(default)]
     pub scaler: ImageScaler,
@@ -6587,7 +6654,76 @@ impl Default for ImageListParams {
 
 #[cfg(test)]
 mod tests {
-    use super::{BurstableResources, Resources};
+    use super::{BurstableResources, ChildFilters, Resources};
+    use crate::models::DigestValue;
+    use std::collections::{BTreeSet, HashSet};
+
+    /// `ChildFilters` reads filter arrays in any order, as stored images and requests may hold
+    /// them, and writes them back as sorted JSON arrays
+    #[test]
+    fn child_filters_btreeset_json_compat() {
+        // build unordered sets of filters
+        let mime: HashSet<String> = ["z/z", "a/a", "m/m"]
+            .iter()
+            .map(|f| (*f).to_string())
+            .collect();
+        let file_name: HashSet<String> = ["b.txt", "a.exe"]
+            .iter()
+            .map(|f| (*f).to_string())
+            .collect();
+        let file_extension: HashSet<String> = ["so", "exe", "txt"]
+            .iter()
+            .map(|f| (*f).to_string())
+            .collect();
+        // serialize them as JSON arrays in hash order
+        let old = serde_json::json!({
+            "mime": mime,
+            "file_name": file_name,
+            "file_extension": file_extension,
+            "submit_non_matches": true,
+        });
+        // the unordered arrays deserialize into `ChildFilters`
+        let filters: ChildFilters = serde_json::from_value(old).unwrap();
+        // the filters are held in ordered sets
+        let held: [&BTreeSet<String>; 3] =
+            [&filters.mime, &filters.file_name, &filters.file_extension];
+        assert_eq!(held[0].len(), 3);
+        assert_eq!(held[1].len(), 2);
+        assert_eq!(held[2].len(), 3);
+        assert!(filters.submit_non_matches);
+        // the filters serialize back to the same JSON arrays, sorted
+        assert_eq!(
+            serde_json::to_value(&filters).unwrap(),
+            serde_json::json!({
+                "mime": ["a/a", "m/m", "z/z"],
+                "file_name": ["a.exe", "b.txt"],
+                "file_extension": ["exe", "so", "txt"],
+                "submit_non_matches": true,
+            })
+        );
+    }
+
+    /// `ChildFilters` serializes and digests the same however its filters were inserted
+    #[test]
+    fn child_filters_serialize_independent_of_insert_order() {
+        // build the same filters in two different orders
+        let first = ChildFilters::default()
+            .mimes(["b", "a", "c"])
+            .file_extensions(["so", "exe"]);
+        let second = ChildFilters::default()
+            .mime("c")
+            .mime("a")
+            .mime("b")
+            .file_extension("exe")
+            .file_extension("so");
+        // both serialize to the same string
+        assert_eq!(
+            serde_json::to_string(&first).unwrap(),
+            serde_json::to_string(&second).unwrap()
+        );
+        // both have the same digest value
+        assert_eq!(first.digest_value(), second.digest_value());
+    }
 
     /// Burstable resource requirements on an image are optional, not required: an image that
     /// declares a burstable cpu allowance is still spawnable on a cluster that offers 0 burstable
@@ -6700,5 +6836,91 @@ mod tests {
             fn_body("pub fn enough(&self, resources: &Resources) -> bool {")
                 .contains("resources.cpu")
         );
+    }
+
+    /// The JSON field names of a stored image
+    const IMAGE_FIELDS: &[&str] = &[
+        "args",
+        "bans",
+        "child_filters",
+        "clean_up",
+        "collect_logs",
+        "creator",
+        "dependencies",
+        "description",
+        "display_type",
+        "env",
+        "generator",
+        "group",
+        "image",
+        "kvm",
+        "lifetime",
+        "modifiers",
+        "name",
+        "network_policies",
+        "output_collection",
+        "resources",
+        "runtime",
+        "scaler",
+        "security_context",
+        "spawn_limit",
+        "timeout",
+        "used_by",
+        "version",
+        "volumes",
+    ];
+
+    /// An image's JSON keeps its field names and its version encoding, and reads back unchanged
+    #[test]
+    fn image_json_is_wire_identical() {
+        // build an image with a semantic and a custom version
+        for version in [r#"{"SemVer":"1.2.3"}"#, r#"{"Custom":"husk"}"#] {
+            // build the stored JSON of an image with this version
+            let image = super::Image {
+                group: "corn".to_owned(),
+                name: "harvester".to_owned(),
+                creator: "mcarson".to_owned(),
+                version: Some(serde_json::from_str(version).unwrap()),
+                scaler: super::ImageScaler::default(),
+                image: Some("registry.local/harvester:1".to_owned()),
+                lifetime: None,
+                timeout: Some(60),
+                resources: Resources::default(),
+                spawn_limit: super::SpawnLimits::default(),
+                env: std::collections::HashMap::default(),
+                runtime: 600.0,
+                volumes: Vec::new(),
+                args: super::ImageArgs::default(),
+                modifiers: None,
+                description: None,
+                security_context: super::SecurityContext::default(),
+                used_by: Vec::new(),
+                collect_logs: true,
+                generator: false,
+                dependencies: super::Dependencies::default(),
+                display_type: crate::models::OutputDisplayType::default(),
+                output_collection: crate::models::OutputCollection::default(),
+                child_filters: ChildFilters::default(),
+                clean_up: None,
+                kvm: None,
+                bans: std::collections::HashMap::default(),
+                network_policies: HashSet::default(),
+            };
+            let value = serde_json::to_value(&image).unwrap();
+            // the image has exactly the stored field names
+            let mut fields = value
+                .as_object()
+                .unwrap()
+                .keys()
+                .map(String::as_str)
+                .collect::<Vec<_>>();
+            fields.sort_unstable();
+            assert_eq!(fields, IMAGE_FIELDS);
+            // the version keeps its stored encoding
+            assert_eq!(value["version"].to_string(), version);
+            // reading the JSON back gives the same JSON
+            let read: super::Image = serde_json::from_value(value.clone()).unwrap();
+            assert_eq!(serde_json::to_value(&read).unwrap(), value);
+        }
     }
 }

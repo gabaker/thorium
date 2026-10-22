@@ -20,12 +20,47 @@ use crate::utils::helpers;
 
 /// A filesystem entity
 #[derive(Debug, Clone, Default, Serialize, Deserialize, Hash)]
+#[serde(from = "FileSystemEntityCompat")]
 #[cfg_attr(feature = "api", derive(utoipa::ToSchema))]
 pub struct FileSystemEntity {
     /// The sha256 for this filesystem
     pub sha256: String,
-    /// The tool(s) that dropped this filesystem
-    pub tools: Vec<String>,
+    /// The tool instances that dropped this filesystem
+    pub tools: Vec<Uuid>,
+    /// The names of tools that dropped this filesystem that are not linked to a tool instance
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub legacy_tools: Vec<String>,
+}
+
+/// The stored shape of a filesystem entity, accepting tool names written before tool instances
+#[derive(Debug, Clone, Default, Deserialize)]
+struct FileSystemEntityCompat {
+    /// The sha256 for this filesystem
+    sha256: String,
+    /// The tools that dropped this filesystem as tool instance IDs or legacy tool names
+    #[serde(default)]
+    tools: Vec<String>,
+    /// The names of tools that are not linked to a tool instance
+    #[serde(default)]
+    legacy_tools: Vec<String>,
+}
+
+impl From<FileSystemEntityCompat> for FileSystemEntity {
+    /// Convert a stored filesystem into a filesystem entity
+    ///
+    /// # Arguments
+    ///
+    /// * `compat` - The stored filesystem
+    fn from(compat: FileSystemEntityCompat) -> Self {
+        // split the stored tools into tool instances and legacy names
+        let (tools, legacy_tools) =
+            super::shared::split_tool_refs(compat.tools, compat.legacy_tools);
+        FileSystemEntity {
+            sha256: compat.sha256,
+            tools,
+            legacy_tools,
+        }
+    }
 }
 
 impl FileSystemEntity {
@@ -45,11 +80,34 @@ impl FileSystemEntity {
             Some(sha256) => sha256,
             None => return crate::bad!("File system entities must have a sha256!".to_owned()),
         };
-        // build our file system entity
+        // record each tool instance once in the order it was sent
+        let mut tools = Vec::with_capacity(form.tool_ids.len());
+        super::shared::add_tool_ids(&mut tools, form.tool_ids);
+        // build our file system entity; legacy tool names are never written by a form
         Ok(FileSystemEntity {
             sha256,
-            tools: form.tools,
+            tools,
+            legacy_tools: Vec::new(),
         })
+    }
+
+    /// Get the form fields this filesystem sends, by name
+    ///
+    /// Legacy tool names are never sent, since no form writes them.
+    #[must_use]
+    pub fn form_fields(&self) -> Vec<(&'static str, String)> {
+        // the kind and the sha256 of this filesystem
+        let mut fields = vec![
+            ("kind", super::EntityKinds::FileSystem.as_str().to_owned()),
+            ("metadata[sha256]", self.sha256.clone()),
+        ];
+        // the tool instances that created or found this filesystem
+        fields.extend(
+            self.tools
+                .iter()
+                .map(|tool| ("metadata[tool_ids][]", tool.to_string())),
+        );
+        fields
     }
 
     /// Add this filesystem entity metadata to a form
@@ -62,14 +120,11 @@ impl FileSystemEntity {
         self,
         form: reqwest::multipart::Form,
     ) -> Result<reqwest::multipart::Form, crate::Error> {
-        // always set our entity kind
-        let form = form.text("kind", super::EntityKinds::FileSystem.as_str());
-        // set the sha256 for this entity
-        let mut form = form.text("metadata[sha256]", self.sha256);
-        // add the tools that created/found this file system
-        for tool in self.tools {
-            form = form.text("metadata[tools][]", tool);
-        }
+        // add each of our fields to the form
+        let form = self
+            .form_fields()
+            .into_iter()
+            .fold(form, |form, (name, value)| form.text(name, value));
         Ok(form)
     }
 }
@@ -500,18 +555,53 @@ impl FileSystemEntityBuilder {
         Ok(HEXLOWER.encode(&hasher.finalize()))
     }
 
+    /// Build the request that creates the root filesystem entity
+    ///
+    /// # Arguments
+    ///
+    /// * `tool` - The tool instance that dumped/carved/created this filesystem, if known
+    /// * `sha256` - The hash of this filesystem
+    /// * `parent_sha256` - The sha256 of this file this filesystem came from
+    /// * `groups` - The groups to add this filesystem too
+    #[cfg(feature = "client")]
+    fn root_request(
+        &self,
+        tool: Option<Uuid>,
+        sha256: String,
+        parent_sha256: &str,
+        groups: &[String],
+    ) -> EntityRequest {
+        // create our root filesystem entity metadata found by this tool instance
+        let metadata = EntityMetadataRequest::FileSystem(FileSystemEntity {
+            sha256,
+            tools: tool.into_iter().collect(),
+            legacy_tools: Vec::new(),
+        });
+        // create an entity request for this filesystem
+        let mut fs_req =
+            EntityRequest::new(&self.name, metadata, groups).tag("Parent", parent_sha256);
+        // add the rest of our builders tags
+        for (key, values) in &self.tags {
+            // get an entry to this tag keys values
+            let entry = fs_req.tags.entry(key.clone()).or_default();
+            // add this keys values
+            entry.extend(values.iter().map(ToOwned::to_owned));
+        }
+        fs_req
+    }
+
     /// Create the root filesystem entity
     ///
     /// # Arguments
     ///
-    /// * `tool` - The tool that dumped/carved/created this filesystem
+    /// * `tool` - The tool instance that dumped/carved/created this filesystem, if known
     /// * `parent_sha256` - The sha256 of this file this filesystem came from
     /// * `groups` - The groups to add this filesystem too
     /// * `thorium` - A Thorium client
     #[cfg(feature = "client")]
     async fn create_root(
         &self,
-        tool: &String,
+        tool: Option<Uuid>,
         parent_sha256: &str,
         groups: &[String],
         thorium: &crate::Thorium,
@@ -530,17 +620,13 @@ impl FileSystemEntityBuilder {
                 if let EntityMetadata::FileSystem(meta) = &entity.metadata {
                     // if our sha256 matches then just use that filesystem
                     if meta.sha256 == sha256 {
-                        // add our tool if this filesystem doesn't contain our tool name
-                        if !meta.tools.contains(tool) {
-                            // build an update to add this tool to this entity
-                            let update = crate::models::EntityUpdate::default().metadata(
-                                crate::models::EntityMetadataUpdate::FileSystem {
-                                    add_tools: vec![tool.clone()],
-                                    remove_tools: Vec::new(),
-                                },
-                            );
-                            // update this entity
-                            thorium.entities.update(entity.id, update).await?;
+                        // add our tool instance if this filesystem doesn't record it yet
+                        if let Some(tool) = tool.filter(|tool| !meta.tools.contains(tool)) {
+                            // add this tool instance to this entity
+                            thorium
+                                .entities
+                                .update(entity.id, tool_update(tool))
+                                .await?;
                         }
                         //build a context for this new filesystem
                         let context = FileSystemEntityBuilderContext {
@@ -562,21 +648,8 @@ impl FileSystemEntityBuilder {
             // get the next page of data
             cursor.refill().await?;
         }
-        // create our root filesystem entity metadata
-        let metadata = EntityMetadataRequest::FileSystem(FileSystemEntity {
-            sha256: sha256.clone(),
-            tools: Vec::default(),
-        });
-        // create an entity request for this filesystem
-        let mut fs_req =
-            EntityRequest::new(&self.name, metadata, groups).tag("Parent", parent_sha256);
-        // add the rest of our builders tags
-        for (key, values) in &self.tags {
-            // get an entry to this tag keys values
-            let entry = fs_req.tags.entry(key.clone()).or_default();
-            // add this keys values
-            entry.extend(values.iter().map(ToOwned::to_owned));
-        }
+        // build the request for a new filesystem found by this tool instance
+        let fs_req = self.root_request(tool, sha256, parent_sha256, groups);
         // create a filesystem entity
         let resp = thorium.entities.create(fs_req).await?;
         // build the source of this association
@@ -699,13 +772,20 @@ impl FileSystemEntityBuilder {
 
     /// Create this filesystem structure through entities in Thorium
     ///
+    /// # Arguments
+    ///
+    /// * `tool` - The tool instance that dumped/carved/created this filesystem, if known
+    /// * `parent_sha256` - The sha256 of this file this filesystem came from
+    /// * `groups` - The groups to add this filesystem too
+    /// * `thorium` - A Thorium client
+    ///
     /// # Panics
     ///
     /// idk man
     #[cfg(feature = "client")]
     pub async fn create(
         &self,
-        tool: &String,
+        tool: Option<Uuid>,
         parent_sha256: &str,
         groups: &[String],
         thorium: &crate::Thorium,
@@ -735,5 +815,160 @@ impl FileSystemEntityBuilder {
             .await;
         }
         Ok(())
+    }
+}
+
+/// Build the update that adds a tool instance to an existing filesystem
+///
+/// # Arguments
+///
+/// * `tool` - The tool instance that found the filesystem
+#[cfg(feature = "client")]
+fn tool_update(tool: Uuid) -> crate::models::EntityUpdate {
+    // add only this tool instance
+    crate::models::EntityUpdate::default().metadata(
+        crate::models::EntityMetadataUpdate::FileSystem {
+            add_tools: vec![tool],
+            remove_tools: Vec::new(),
+            remove_legacy_tools: Vec::new(),
+        },
+    )
+}
+
+/// Tests for reading, writing, and sending filesystem entities
+#[cfg(test)]
+mod tests {
+    use uuid::Uuid;
+
+    use super::FileSystemEntity;
+
+    /// A stored filesystem without tools reads with no tool references at all
+    #[test]
+    fn compat_reads_missing_and_empty_tools() {
+        // read a row without a tools key and a row with empty tools
+        for raw in [r#"{"sha256":"abc"}"#, r#"{"sha256":"abc","tools":[]}"#] {
+            // read this row
+            let fs: FileSystemEntity = serde_json::from_str(raw).unwrap();
+            // neither list has anything in it
+            assert!(fs.tools.is_empty(), "{raw}");
+            assert!(fs.legacy_tools.is_empty(), "{raw}");
+        }
+    }
+
+    /// A filesystem stored with tool instances and legacy names reads back unchanged
+    #[test]
+    fn compat_reads_new_shape_unchanged() {
+        // build a row in the current shape
+        let id = Uuid::new_v4();
+        let raw = format!(r#"{{"sha256":"abc","tools":["{id}"],"legacy_tools":["binwalk"]}}"#);
+        // read the row
+        let fs: FileSystemEntity = serde_json::from_str(&raw).unwrap();
+        // both lists are what was stored
+        assert_eq!(fs.tools, vec![id]);
+        assert_eq!(fs.legacy_tools, vec!["binwalk".to_owned()]);
+    }
+
+    /// A filesystem serializes and deserializes unchanged, and an empty `legacy_tools` is left out
+    #[test]
+    fn new_shape_round_trips() {
+        // build a filesystem with legacy names and one without
+        let with_legacy = FileSystemEntity {
+            sha256: "abc".to_owned(),
+            tools: vec![Uuid::new_v4(), Uuid::new_v4()],
+            legacy_tools: vec!["binwalk".to_owned()],
+        };
+        let without_legacy = FileSystemEntity {
+            legacy_tools: Vec::new(),
+            ..with_legacy.clone()
+        };
+        // round trip each of them through JSON
+        for fs in [with_legacy, without_legacy] {
+            // serialize this filesystem
+            let value = serde_json::to_value(&fs).unwrap();
+            // an empty legacy list isn't written
+            assert_eq!(
+                value.get("legacy_tools").is_some(),
+                !fs.legacy_tools.is_empty()
+            );
+            // the tool instances are written as uuid strings
+            let ids = fs.tools.iter().map(ToString::to_string).collect::<Vec<_>>();
+            assert_eq!(value["tools"], serde_json::json!(ids));
+            // reading it back gives the same filesystem
+            let read: FileSystemEntity = serde_json::from_value(value.clone()).unwrap();
+            assert_eq!(serde_json::to_value(&read).unwrap(), value);
+        }
+    }
+
+    /// A filesystem request sends its tool instances as `tool_ids` and never sends tool names
+    #[test]
+    fn form_fields_send_tool_ids() {
+        // build a filesystem with a tool instance and a legacy name
+        let id = Uuid::new_v4();
+        let fs = FileSystemEntity {
+            sha256: "abc".to_owned(),
+            tools: vec![id],
+            legacy_tools: vec!["binwalk".to_owned()],
+        };
+        // get the fields its form sends
+        let fields = fs.form_fields();
+        // the kind, hash, and tool instance are sent and nothing else
+        assert_eq!(
+            fields,
+            vec![
+                ("kind", "FileSystem".to_owned()),
+                ("metadata[sha256]", "abc".to_owned()),
+                ("metadata[tool_ids][]", id.to_string()),
+            ]
+        );
+    }
+
+    /// The filesystem builder records the tool instance that found a new filesystem and adds it
+    /// to an existing filesystem by id
+    #[cfg(feature = "client")]
+    #[test]
+    fn builder_records_tool_instance() {
+        use crate::models::{EntityMetadataRequest, EntityMetadataUpdate};
+        // build an empty filesystem builder
+        let builder = super::FileSystemEntityBuilder::new("fs", "/tmp").unwrap();
+        let groups = vec!["corn".to_owned()];
+        let id = Uuid::new_v4();
+        // build the request for a new filesystem found by a tool instance
+        let req = builder.root_request(Some(id), "abc".to_owned(), "parent", &groups);
+        // the new filesystem records the tool instance and no legacy names
+        let EntityMetadataRequest::FileSystem(fs) = &req.metadata else {
+            panic!("not a filesystem request: {:?}", req.metadata);
+        };
+        assert_eq!(fs.tools, vec![id]);
+        assert_eq!(fs.legacy_tools, Vec::<String>::new());
+        // its form sends the tool instance in `tool_ids`
+        assert!(
+            fs.form_fields()
+                .iter()
+                .any(|field| *field == ("metadata[tool_ids][]", id.to_string()))
+        );
+        // a filesystem found without a tool instance records none
+        let req = builder.root_request(None, "abc".to_owned(), "parent", &groups);
+        let EntityMetadataRequest::FileSystem(fs) = &req.metadata else {
+            panic!("not a filesystem request: {:?}", req.metadata);
+        };
+        assert_eq!(fs.tools, Vec::<Uuid>::new());
+        assert!(
+            fs.form_fields()
+                .iter()
+                .all(|(name, _)| !name.contains("tool"))
+        );
+        // adding the tool to an existing filesystem adds only its id
+        let update = super::tool_update(id);
+        let Some(EntityMetadataUpdate::FileSystem {
+            add_tools,
+            remove_tools,
+            remove_legacy_tools,
+        }) = update.metadata
+        else {
+            panic!("not a filesystem update: {:?}", update.metadata);
+        };
+        assert_eq!(add_tools, vec![id]);
+        assert_eq!(remove_tools, Vec::<Uuid>::new());
+        assert_eq!(remove_legacy_tools, Vec::<String>::new());
     }
 }

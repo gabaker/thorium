@@ -9,7 +9,8 @@ use utoipa::OpenApi;
 use super::OpenApiSecurity;
 use crate::models::AuthedUser;
 use crate::models::{
-    Event, EventCacheStatus, EventCacheStatusOpts, EventIds, EventPeekOpts, EventPopOpts, EventType,
+    Event, EventCacheStatus, EventCacheStatusOpts, EventIds, EventPeekOpts, EventPopOpts,
+    EventType, WorkflowGraphChange, WorkflowGraphEvent,
 };
 use crate::utils::{ApiError, AppState};
 
@@ -187,7 +188,7 @@ async fn get_cache_status(
 #[derive(OpenApi)]
 #[openapi(
     paths(pop, peek, clear, reset_all, get_cache_status),
-    components(schemas(Event, EventCacheStatus, EventCacheStatusOpts, EventType, EventPeekOpts, EventPopOpts)),
+    components(schemas(Event, EventCacheStatus, EventCacheStatusOpts, EventType, EventPeekOpts, EventPopOpts, WorkflowGraphEvent, WorkflowGraphChange)),
     modifiers(&OpenApiSecurity),
 )]
 pub struct EventApiDocs;

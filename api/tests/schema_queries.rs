@@ -24,9 +24,8 @@ use thorium::models::schema::{
 };
 use thorium::models::{
     AssociationKind, CommitishKinds, Directionality, EntityKinds, EntityMetadata, ImageKey,
-    ImageVersion, NetworkPolicyRule, NodeHealth, NotificationLevel, NotificationType,
-    OutputDisplayType, OutputKind, RepoCheckout, RepoScheme, Resources, S3Objects, TagType,
-    VendorEntity,
+    NetworkPolicyRule, NodeHealth, NotificationLevel, NotificationType, OutputDisplayType,
+    OutputKind, RepoCheckout, RepoScheme, Resources, S3Objects, TagType, ToolVersion, VendorEntity,
 };
 use thorium::test_utilities::{self, CONF};
 use uuid::Uuid;
@@ -2163,7 +2162,7 @@ fn result_parts() -> (HashSet<String>, HashMap<EntityKinds, usize>) {
 /// * `entities` - The result's entity counts
 fn result<'a>(
     id: u128,
-    version: &'a ImageVersion,
+    version: &'a ToolVersion,
     files: &'a HashSet<String>,
     entities: &'a HashMap<EntityKinds, usize>,
 ) -> ResultsInsert<'a> {
@@ -2192,7 +2191,7 @@ fn stream_row<'a>(
     group: &'a str,
     id: u128,
     tool: &'a str,
-    version: &'a ImageVersion,
+    version: &'a ToolVersion,
 ) -> ResultsStreamTableRef<'a> {
     ResultsStreamTableRef {
         kind: &OutputKind::Files,
@@ -2240,7 +2239,7 @@ fn tag<'a>(group: &'a str, key: &'a str, value: &'a str) -> TagsTableRef<'a> {
 async fn results_statements_round_trip() -> Result<(), Error> {
     let ks = Keyspace::new("results_rt").await?;
     let (session, queries) = (&ks.session, &ks.queries);
-    let version = ImageVersion::Custom("1.2-custom".to_owned());
+    let version = ToolVersion::Custom("1.2-custom".to_owned());
     let (files, entities) = result_parts();
     // one result, read back with every column as written
     let written = result(1, &version, &files, &entities);
@@ -2517,7 +2516,7 @@ async fn tags_statements_round_trip() -> Result<(), Error> {
 async fn results_long_in_lists_return_every_row() -> Result<(), Error> {
     let ks = Keyspace::new("results_chunks").await?;
     let (session, queries) = (&ks.session, &ks.queries);
-    let version = ImageVersion::Custom("1".to_owned());
+    let version = ToolVersion::Custom("1".to_owned());
     let (files, entities) = result_parts();
     // a result whose id is last of 101
     queries
@@ -2607,7 +2606,7 @@ async fn results_long_in_lists_return_every_row() -> Result<(), Error> {
 async fn result_entity_counts_are_checked() -> Result<(), Error> {
     let ks = Keyspace::new("results_unsigned").await?;
     let (session, queries) = (&ks.session, &ks.queries);
-    let version = ImageVersion::Custom("1".to_owned());
+    let version = ToolVersion::Custom("1".to_owned());
     let files = HashSet::new();
     // the largest count a bigint holds reads back as written
     let largest = usize::try_from(i64::MAX).unwrap();
@@ -2658,7 +2657,7 @@ async fn results_rows_match_the_replaced_statements() -> Result<(), Error> {
     let ks = Keyspace::new("results_parity").await?;
     let (session, queries) = (&ks.session, &ks.queries);
     let legacy = legacy_statements(&ks.name);
-    let version = ImageVersion::Custom("2.0".to_owned());
+    let version = ToolVersion::Custom("2.0".to_owned());
     let (files, entities) = result_parts();
     // a result the way the API wrote it: files as a list and counts as signed integers
     let written = result(1, &version, &files, &entities);
@@ -2829,7 +2828,7 @@ async fn results_subset_insert_and_null_columns() -> Result<(), Error> {
     let ks = Keyspace::new("results_nulls").await?;
     let (session, queries) = (&ks.session, &ks.queries);
     let legacy = legacy_statements(&ks.name);
-    let version = ImageVersion::Custom("1".to_owned());
+    let version = ToolVersion::Custom("1".to_owned());
     let (files, entities) = result_parts();
     // a subset insert over a result with a child leaves the child in place
     let written = result(1, &version, &files, &entities);
@@ -2892,7 +2891,7 @@ async fn results_subset_insert_and_null_columns() -> Result<(), Error> {
         (
             Uuid,
             String,
-            Option<ImageVersion>,
+            Option<ToolVersion>,
             Option<String>,
             chrono::DateTime<Utc>,
             String,
@@ -2968,7 +2967,7 @@ async fn results_subset_insert_and_null_columns() -> Result<(), Error> {
 async fn results_deletes_and_negatives() -> Result<(), Error> {
     let ks = Keyspace::new("results_negatives").await?;
     let (session, queries) = (&ks.session, &ks.queries);
-    let version = ImageVersion::Custom("1".to_owned());
+    let version = ToolVersion::Custom("1".to_owned());
     let kind = OutputKind::Files;
     // two results for one key in group `seen`
     for (id, tool) in [(1, "strings"), (2, "yara")] {

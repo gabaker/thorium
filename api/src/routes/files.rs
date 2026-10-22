@@ -17,11 +17,11 @@ use crate::models::{
     ApiCursor, Association, AssociationListParams, AssociationTargetColumn, CarvedOrigin, Comment,
     CommentResponse, DeleteCommentParams, DeleteSampleParams, EntityKinds, EntityRequest,
     FileListParams, GrepDocumentMatches, GrepMatch, GrepMatches, GrepQueryParams, GrepRequest,
-    GrepSource, GrepStats, ImageVersion, Origin, OriginRequest, Output, OutputDisplayType,
-    OutputFormBuilder, OutputHandler, OutputKind, OutputMap, OutputResponse, PcapNetworkProtocol,
+    GrepSource, GrepStats, Origin, OriginRequest, Output, OutputDisplayType, OutputFormBuilder,
+    OutputHandler, OutputKind, OutputMap, OutputResponse, PcapNetworkProtocol,
     ResultFileDownloadParams, ResultGetParams, Sample, SampleCheck, SampleCheckResponse,
     SampleListLine, SampleSubmissionResponse, SubmissionChunk, SubmissionUpdate, TagCounts,
-    TagDeleteRequest, TagRequest, TruncationReason, ZipDownloadParams,
+    TagDeleteRequest, TagRequest, ToolVersion, TruncationReason, ZipDownloadParams,
 };
 use crate::utils::{ApiError, AppState};
 
@@ -864,7 +864,7 @@ async fn grep_sample(
 #[derive(OpenApi)]
 #[openapi(
     paths(list, upload, list_details, get_sample, delete_sample, exists, download, download_as_zip, download_result_file, download_result_entities, update, tag, delete_tags, create_comment, delete_comment, download_attachment, get_results, upload_results, grep, grep_sample),
-    components(schemas(ApiCursor<Sample>, ApiCursor<SampleListLine>, ApiCursor<GrepMatches>, CarvedOrigin, Comment, CommentResponse, DeleteCommentParams, DeleteSampleParams,FileListParams, GrepDocumentMatches, GrepMatch, GrepMatches, GrepQueryParams, GrepRequest, GrepSource, GrepStats, ImageVersion, Origin, OriginRequest, Output, OutputDisplayType, OutputHandler, OutputMap, OutputResponse, PcapNetworkProtocol, ResultGetParams, Sample, SampleCheck, SampleCheckResponse, SampleListLine, SampleSubmissionResponse, SubmissionChunk, SubmissionUpdate, TagDeleteRequest<Sample>, TagRequest<Sample>, TruncationReason, ZipDownloadParams, TagCounts, EntityKinds, EntityRequest)),
+    components(schemas(ApiCursor<Sample>, ApiCursor<SampleListLine>, ApiCursor<GrepMatches>, CarvedOrigin, Comment, CommentResponse, DeleteCommentParams, DeleteSampleParams,FileListParams, GrepDocumentMatches, GrepMatch, GrepMatches, GrepQueryParams, GrepRequest, GrepSource, GrepStats, ToolVersion, Origin, OriginRequest, Output, OutputDisplayType, OutputHandler, OutputMap, OutputResponse, PcapNetworkProtocol, ResultGetParams, Sample, SampleCheck, SampleCheckResponse, SampleListLine, SampleSubmissionResponse, SubmissionChunk, SubmissionUpdate, TagDeleteRequest<Sample>, TagRequest<Sample>, TruncationReason, ZipDownloadParams, TagCounts, EntityKinds, EntityRequest)),
     modifiers(&OpenApiSecurity),
 )]
 pub struct FileApiDocs;

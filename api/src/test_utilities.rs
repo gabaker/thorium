@@ -2,11 +2,13 @@
 
 mod api;
 pub mod events;
+pub mod faults;
 pub mod generators;
 #[cfg(test)]
 mod harness_tests;
 mod helpers;
 mod impls;
+pub mod mock_provider;
 #[cfg(feature = "upgrades-runtime")]
 pub mod upgrade_harness;
 
@@ -15,8 +17,11 @@ use base64::Engine;
 use crate::client::Error;
 pub use api::{
     BootstrapAction, CONF, TEST_CONFIG_VAR, TempBuckets, admin_client, bootstrap_plan,
-    get_redis_client, init_bucket, prepare_backends, read_only, redis_pool, s3_client,
-    scylla_session, start_api, test_config_path, wipe_dbs,
+    delete_entity_rows, drop_entity_redis_keys, entity_census_exists, entity_rows,
+    get_redis_client, graphic_exists, hold_instance_lock, hold_instance_lock_for, init_bucket,
+    instance_lock_exists, notification_rows, prepare_backends, read_only, redis_pool,
+    release_instance_lock, s3_client, scylla_session, set_entity_image, set_entity_kind_data,
+    start_api, test_config_path, use_api_stack_size, wipe_dbs,
 };
 
 // expose a blocking admin client for sync tests

@@ -6,6 +6,8 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 use chrono::{DateTime, Datelike, Utc};
 use futures::stream::{self, StreamExt, TryStreamExt};
 use itertools::Itertools;
+use scylla::statement::batch::{Batch, BatchType};
+use std::time::{Duration, Instant};
 use tracing::instrument;
 use uuid::Uuid;
 
@@ -13,19 +15,45 @@ use crate::models::backends::TagSupport;
 use crate::models::backends::db::ScyllaCursor;
 use crate::models::schema::scylla::EntitiesTableRef;
 use crate::models::{
-    Entity, EntityForm, EntityListLine, EntityListParams, EntityListSupplementRow, KeySupport,
-    TagDeleteRequest, TagRequest, User,
+    Entity, EntityForm, EntityGroupKindRow, EntityListLine, EntityListParams,
+    EntityListSupplementRow, EntityMetadata, GroupPolicy, KeySupport, TagDeleteRequest, TagRequest,
+    User,
 };
 use crate::utils::{ApiError, Shared, helpers};
-use crate::{deserialize, not_found};
+use crate::{conflict, conn, deserialize, internal_err, not_found, serialize};
+
+/// How long an instance lock is held before it expires, freeing a root whose holder died
+const INSTANCE_LOCK_EXPIRE_MS: u64 = 30_000;
+
+/// How long to wait between attempts to take an instance lock
+const INSTANCE_LOCK_RETRY: Duration = Duration::from_millis(50);
+
+/// The most bytes of rows one logged batch of a contained entity's copies carries, well under the
+/// 1 MiB batch size Scylla refuses by default
+const CONTAINED_BATCH_BYTES: usize = 512 * 1024;
+
+/// The bytes a row takes beyond its entity's data, for its keys and group
+const CONTAINED_ROW_OVERHEAD: usize = 512;
+
+/// Releases an instance lock only if the caller still holds it
+static UNLOCK_SCRIPT: std::sync::LazyLock<redis::Script> = std::sync::LazyLock::new(|| {
+    redis::Script::new(
+        r"
+        if redis.call('get', KEYS[1]) == ARGV[1] then
+            return redis.call('del', KEYS[1])
+        end
+        return 0
+        ",
+    )
+});
 
 /// Create a `Entity` in Scylla
 ///
 /// # Arguments
 ///
-/// * `req` - The request to create an entity
-/// * `entity_id` - The ID to set for this entity
 /// * `user` - The user creating the entity
+/// * `form` - The form to cast to an entity and write
+/// * `id` - The ID to set for this entity
 /// * `shared` - Shared Thorium objects
 #[instrument(name = "db::entities::create", skip(shared), err(Debug))]
 pub async fn create(
@@ -38,13 +66,42 @@ pub async fn create(
     let assoc_req = form.build_association_req(user, id, shared).await?;
     // take our form tags since we need those to setup tags and this entity object
     // gets abandoned in this function anyways
-    let mut tags = std::mem::take(&mut form.tags);
+    let tags = std::mem::take(&mut form.tags);
     // cast our form to an entity
-    let entity = form.cast(user, id, shared).await?;
+    let entity = Box::pin(form.cast(user, id, shared)).await?;
+    // write the entity's rows, census entries, and tags
+    insert(user, &entity, tags, shared).await?;
+    // create any associations if requested
+    if let Some(assoc_req) = assoc_req {
+        // create the associations for this entity
+        assoc_req.apply(user, shared).await?;
+    }
+    Ok(entity)
+}
+
+/// Write an already built entity's rows, census entries, and tags to every one of its groups
+///
+/// The entity's intrinsic tags are added to the given user tags.
+///
+/// # Arguments
+///
+/// * `user` - The user creating the entity
+/// * `entity` - The entity to write
+/// * `tags` - The user tags to give the entity
+/// * `shared` - Shared Thorium objects
+#[instrument(name = "db::entities::insert", skip_all, fields(id = entity.id.to_string()), err(Debug))]
+// tag requests hold the default hasher's maps
+#[allow(clippy::implicit_hasher)]
+pub async fn insert(
+    user: &User,
+    entity: &Entity,
+    mut tags: HashMap<String, HashSet<String>>,
+    shared: &Shared,
+) -> Result<(), ApiError> {
     // populate our intrinsic tags
     entity.populate_intrinsic_tags(&mut tags)?;
-    // get the current timestamp for when this entity was created
-    let now = Utc::now();
+    // the entity's rows are created when the entity was
+    let now = entity.created;
     let year = now.year();
     // get the partition size for repos
     let chunk_size = shared.config.thorium.entities.partition_size;
@@ -64,7 +121,7 @@ pub async fn create(
                 created: now,
                 id: entity.id,
                 name: &entity.name,
-                submitter: &user.username,
+                submitter: &entity.submitter,
                 kind_data: &entity.metadata,
                 description: entity.description.as_deref(),
                 image: entity.image.as_deref(),
@@ -111,12 +168,156 @@ pub async fn create(
         )
         .await?;
     }
-    // create any associations if requested
-    if let Some(assoc_req) = assoc_req {
-        // create the associations for this entity
-        assoc_req.apply(user, shared).await?;
+    Ok(())
+}
+
+/// Take the lock held while a root entity or one of its instances is written
+///
+/// Returns the token that releases the lock. A lock that's held by someone else is retried
+/// until `wait` has passed, after which the request is refused with a `409`.
+///
+/// # Arguments
+///
+/// * `root` - The id of the root entity being written
+/// * `name` - The name of the entity being written for the error message
+/// * `wait` - How long to wait for a lock someone else holds
+/// * `shared` - Shared Thorium objects
+#[instrument(name = "db::entities::lock_instances", skip(shared), err(Debug))]
+pub async fn lock_instances(
+    root: Uuid,
+    name: &str,
+    wait: Duration,
+    shared: &Shared,
+) -> Result<String, ApiError> {
+    // build the lock's key and this request's token
+    let key = super::keys::entities::instance_lock(&root, shared);
+    let token = Uuid::new_v4().to_string();
+    // track when we started waiting
+    let start = Instant::now();
+    // keep trying to take the lock until we hold it or give up
+    loop {
+        // try to take the lock if nobody holds it
+        let acquired: Option<String> = redis::cmd("set")
+            .arg(&key)
+            .arg(&token)
+            .arg("NX")
+            .arg("PX")
+            .arg(INSTANCE_LOCK_EXPIRE_MS)
+            .query_async(conn!(shared))
+            .await?;
+        // we hold the lock once it was set
+        if acquired.is_some() {
+            return Ok(token);
+        }
+        // give up once we've waited long enough
+        if start.elapsed() >= wait {
+            return conflict!(format!(
+                "`{name}` is being changed by another request; retry"
+            ));
+        }
+        // wait before trying again
+        tokio::time::sleep(INSTANCE_LOCK_RETRY).await;
     }
-    Ok(entity)
+}
+
+/// Release an instance lock if it's still held with this token
+///
+/// A lock that expired and was taken by another request is left alone.
+///
+/// # Arguments
+///
+/// * `root` - The id of the root entity whose lock to release
+/// * `token` - The token the lock was taken with
+/// * `shared` - Shared Thorium objects
+#[instrument(
+    name = "db::entities::unlock_instances",
+    skip(token, shared),
+    err(Debug)
+)]
+pub async fn unlock_instances(root: Uuid, token: &str, shared: &Shared) -> Result<(), ApiError> {
+    // build the lock's key
+    let key = super::keys::entities::instance_lock(&root, shared);
+    // delete the lock only if it still holds our token
+    let _: i64 = UNLOCK_SCRIPT
+        .key(&key)
+        .arg(token)
+        .invoke_async(conn!(shared))
+        .await?;
+    // fail here when a test asked for a release whose reply is lost
+    #[cfg(feature = "test-utilities")]
+    if crate::test_utilities::faults::take_unlock_failure(root) {
+        return internal_err!(format!(
+            "injected failure after releasing the lock of {root}"
+        ));
+    }
+    Ok(())
+}
+
+/// Record the highest revision any instance of a toolset or workflow was created at on every
+/// row of that root
+///
+/// The caller holds the root's lock, so the revision only grows.
+///
+/// # Arguments
+///
+/// * `root` - The toolset or workflow as stored, in every one of its groups
+/// * `revision` - The revision of the instance being created
+/// * `shared` - Shared Thorium objects
+#[instrument(
+    name = "db::entities::set_highest_revision",
+    skip(root, shared),
+    fields(id = root.id.to_string()),
+    err(Debug)
+)]
+pub async fn set_highest_revision(
+    mut root: Entity,
+    revision: u64,
+    shared: &Shared,
+) -> Result<(), ApiError> {
+    // set the revision on the root's metadata
+    match &mut root.metadata {
+        EntityMetadata::ToolSet(meta) => meta.highest_revision = revision,
+        EntityMetadata::WorkflowCatalog(meta) => meta.highest_revision = revision,
+        _ => {
+            return internal_err!(format!("{} is not a toolset or workflow catalog", root.id));
+        }
+    }
+    // drop the fields filled in when it's read
+    root.drop_associated_data();
+    // find the partition the root's rows are in
+    let year = root.created.year();
+    let chunk_size = shared.config.thorium.entities.partition_size;
+    let bucket = helpers::partition(root.created, year, chunk_size);
+    // rewrite every row of the root with its new metadata
+    write_rows(&root, year, bucket, shared).await
+}
+
+/// Mark an agent, toolset, or workflow modified now, as it's stored
+///
+/// The root must be read in every one of its groups, while its lock is held.
+///
+/// # Arguments
+///
+/// * `root` - The agent, toolset, or workflow, in every one of its groups
+/// * `shared` - Shared Thorium objects
+#[instrument(name = "db::entities::mark_modified", skip_all, fields(id = root.id.to_string()), err(Debug))]
+pub async fn mark_modified(mut root: Entity, shared: &Shared) -> Result<(), ApiError> {
+    // set the modified time on the root's metadata
+    let now = Utc::now();
+    match &mut root.metadata {
+        EntityMetadata::Agent(meta) => meta.modified = now,
+        EntityMetadata::ToolSet(meta) => meta.modified = now,
+        EntityMetadata::WorkflowCatalog(meta) => meta.modified = now,
+        _ => return internal_err!(format!("{} has no modified time", root.id)),
+    }
+    // drop the fields filled in when it's read
+    root.drop_associated_data();
+    // find the partition the root's rows are in
+    let year = root.created.year();
+    let chunk_size = shared.config.thorium.entities.partition_size;
+    let bucket = helpers::partition(root.created, year, chunk_size);
+    // rewrite every row of the root with its new metadata
+    write_rows(&root, year, bucket, shared).await
 }
 
 /// Get an entity from Scylla
@@ -130,11 +331,34 @@ pub async fn create(
 /// * `shared` - Shared Thorium objects
 #[instrument(name = "db::entities::get", skip(shared), err(Debug))]
 pub async fn get(groups: &[String], id: Uuid, shared: &Shared) -> Result<Entity, ApiError> {
+    // read the entity's rows in these groups
+    let mut entity = get_untagged(groups, id, shared).await?;
+    // get the tags for this entity
+    entity.get_tags(groups, shared).await?;
+    Ok(entity)
+}
+
+/// Get an entity from Scylla without its tags
+///
+/// # Arguments
+///
+/// * `groups` - The list of groups to check for the entity
+/// * `id` - The id of the entity
+/// * `shared` - Shared Thorium objects
+#[instrument(name = "db::entities::get_untagged", skip(shared), err(Debug))]
+pub async fn get_untagged(
+    groups: &[String],
+    id: Uuid,
+    shared: &Shared,
+) -> Result<Entity, ApiError> {
     // a user with no groups cannot see any entity, so report it as missing just
     // like an entity that doesn't exist in any of their groups
     if groups.is_empty() {
         return not_found!(format!("Entity {id} not found"));
     }
+    // count this read so tests can check how often a request reads an entity
+    #[cfg(feature = "test-utilities")]
+    crate::test_utilities::faults::count_entity_read(id);
     let mut entity: Option<Entity> = None;
     // break our groups into chunks of 100
     for groups_chunk in groups.chunks(100) {
@@ -159,14 +383,43 @@ pub async fn get(groups: &[String], id: Uuid, shared: &Shared) -> Result<Entity,
     }
     // if we didn't build an entity then return a 404
     match entity {
-        Some(mut entity) => {
-            // get the tags for this entity
-            entity.get_tags(groups, shared).await?;
-            // return the entity and its tags
-            Ok(entity)
-        }
+        Some(entity) => Ok(entity),
         None => not_found!(format!("Entity {id} not found")),
     }
+}
+
+/// Get every group an entity is in, including groups the caller can't see
+///
+/// Used to authorize writes to `Contained` entities, which need rights in all of their groups.
+///
+/// # Arguments
+///
+/// * `id` - The id of the entity
+/// * `shared` - Shared Thorium objects
+#[instrument(name = "db::entities::all_groups", skip(shared), err(Debug))]
+pub async fn all_groups(id: Uuid, shared: &Shared) -> Result<Vec<String>, ApiError> {
+    // read the groups from the entity's id partition
+    let rows = shared
+        .scylla
+        .queries
+        .entities_by_id
+        .all_groups(&shared.scylla.session, id)
+        .await?;
+    // collect each group once, as an entity may have several rows in a group
+    let mut groups: Vec<String> = Vec::new();
+    for row in rows {
+        // get the group from this row
+        let group = row?.group;
+        // add this group if we haven't seen it yet
+        if !groups.contains(&group) {
+            groups.push(group);
+        }
+    }
+    // an entity with no rows doesn't exist
+    if groups.is_empty() {
+        return not_found!(format!("Entity {id} not found"));
+    }
+    Ok(groups)
 }
 
 /// List entities in specific groups and with tags
@@ -370,6 +623,38 @@ async fn supplement_tag_lines(
     Ok(())
 }
 
+/// Get the group and kind of every row of some entities
+///
+/// Reads every entity's id partition in one query per 100 ids, without reading their data.
+///
+/// # Arguments
+///
+/// * `ids` - The ids of the entities to read
+/// * `shared` - Shared Thorium objects
+#[instrument(name = "db::entities::groups_and_kinds", skip(shared), err(Debug))]
+pub async fn groups_and_kinds(
+    ids: &[Uuid],
+    shared: &Shared,
+) -> Result<Vec<EntityGroupKindRow>, ApiError> {
+    // collect the rows of every entity
+    let mut rows = Vec::new();
+    // read the entities 100 at a time
+    for ids_chunk in ids.chunks(100) {
+        // read the group and kind of each row of these entities
+        let found = shared
+            .scylla
+            .queries
+            .entities_by_id
+            .get_groups_kinds_by_ids_chunk(&shared.scylla.session, ids_chunk)
+            .await?;
+        // keep each row
+        for row in found {
+            rows.push(row?);
+        }
+    }
+    Ok(rows)
+}
+
 /// Update an entity with its new data, removing rows for removed groups
 /// and old names if needed
 ///
@@ -399,37 +684,8 @@ pub async fn update(
     let chunk_size = shared.config.thorium.entities.partition_size;
     // get the partition to write this repo off too
     let bucket = helpers::partition(entity.created, year, chunk_size);
-    // concurrently update the entity in each group
-    stream::iter(entity.groups.iter())
-        .map(Ok::<&String, ApiError>)
-        .try_for_each_concurrent(100, |group| {
-            // build this group's row: only `group` differs, and every other field borrows the
-            // entity, with its metadata stored as JSON
-            let row = EntitiesTableRef {
-                kind: &entity.kind,
-                group,
-                year,
-                bucket,
-                created: entity.created,
-                id: entity.id,
-                name: &entity.name,
-                submitter: &entity.submitter,
-                kind_data: &entity.metadata,
-                description: entity.description.as_deref(),
-                image: entity.image.as_deref(),
-            };
-            async move {
-                // write this group's row
-                shared
-                    .scylla
-                    .queries
-                    .entities
-                    .insert(&shared.scylla.session, &row)
-                    .await?;
-                Ok(())
-            }
-        })
-        .await?;
+    // rewrite the entity's row in each of its groups
+    write_rows(&entity, year, bucket, shared).await?;
     // break up the groups delete into chunks to avoid cartesian product errors
     let delete_groups_chunks = remove_groups.chunks(100);
     // concurrently delete the entity's old data for each group chunk
@@ -489,6 +745,94 @@ pub async fn update(
     Ok(())
 }
 
+/// Write an entity's row in each of its groups
+///
+/// # Arguments
+///
+/// * `entity` - The entity whose rows to write
+/// * `year` - The year the entity was created
+/// * `bucket` - The partition the entity's rows are in
+/// * `shared` - Shared Thorium objects
+async fn write_rows(
+    entity: &Entity,
+    year: i32,
+    bucket: i32,
+    shared: &Shared,
+) -> Result<(), ApiError> {
+    // rewrite every copy of a contained entity in logged batches small enough for Scylla to
+    // accept; each batch is atomic, so a failure between batches leaves the copies differing
+    // until the next write rewrites them all
+    if entity.kind.group_policy() == GroupPolicy::Contained {
+        // measure the metadata as each row stores it, as JSON
+        let meta_bytes = serialize!(&entity.metadata).len();
+        // get how many rows fit in one batch
+        let row_bytes = meta_bytes
+            + entity.name.len()
+            + entity.submitter.len()
+            + entity.description.as_ref().map_or(0, String::len)
+            + entity.image.as_ref().map_or(0, String::len)
+            + CONTAINED_ROW_OVERHEAD;
+        let per_batch = (CONTAINED_BATCH_BYTES / row_bytes).max(1);
+        for groups in entity.groups.chunks(per_batch) {
+            // add an insert for each of these groups' rows
+            let mut batch = Batch::new(BatchType::Logged);
+            let mut values = Vec::with_capacity(groups.len());
+            for group in groups {
+                // add this group's insert and its row, which binds by column name
+                batch.append_statement(shared.scylla.queries.entities.insert.clone());
+                values.push(EntitiesTableRef {
+                    kind: &entity.kind,
+                    group,
+                    year,
+                    bucket,
+                    created: entity.created,
+                    id: entity.id,
+                    name: &entity.name,
+                    submitter: &entity.submitter,
+                    kind_data: &entity.metadata,
+                    description: entity.description.as_deref(),
+                    image: entity.image.as_deref(),
+                });
+            }
+            // write these rows at once
+            shared.scylla.session.batch(&batch, values).await?;
+        }
+    } else {
+        // concurrently update the entity in each group
+        stream::iter(entity.groups.iter())
+            .map(Ok::<&String, ApiError>)
+            .try_for_each_concurrent(100, |group| {
+                // build this group's row: only `group` differs, and every other field borrows
+                // the entity, with its metadata stored as JSON
+                let row = EntitiesTableRef {
+                    kind: &entity.kind,
+                    group,
+                    year,
+                    bucket,
+                    created: entity.created,
+                    id: entity.id,
+                    name: &entity.name,
+                    submitter: &entity.submitter,
+                    kind_data: &entity.metadata,
+                    description: entity.description.as_deref(),
+                    image: entity.image.as_deref(),
+                };
+                async move {
+                    // write this group's row
+                    shared
+                        .scylla
+                        .queries
+                        .entities
+                        .insert(&shared.scylla.session, &row)
+                        .await?;
+                    Ok(())
+                }
+            })
+            .await?;
+    }
+    Ok(())
+}
+
 /// Delete all tags from an entity
 ///
 /// # Arguments
@@ -515,13 +859,23 @@ async fn prune_tags(user: &User, entity: &Entity, shared: &Shared) -> Result<(),
     tag_del.groups = group_set.into_iter().collect();
     // delete these tags if our tag delete request isn't empty
     if !tag_del.tags.is_empty() {
-        // delete the requested tags
-        entity.delete_tags(user, tag_del, shared).await?;
+        // a contained entity's delete was authorized in all of its groups already
+        if entity.kind.group_policy() == GroupPolicy::Contained {
+            // delete its tags from every group directly
+            let key = Entity::build_key(entity.id.to_string(), &());
+            super::tags::delete(&key, &tag_del, shared).await?;
+        } else {
+            // delete the requested tags
+            entity.delete_tags(user, tag_del, shared).await?;
+        }
     }
     Ok(())
 }
 
 /// Delete an entity completely from all of its groups
+///
+/// The entity's census entries are left alone: entity census sets mark which buckets hold data
+/// rather than counting rows, so there's nothing to decrement.
 ///
 /// # Arguments
 ///
@@ -560,12 +914,5 @@ pub async fn delete(user: &User, entity: &Entity, shared: &Shared) -> Result<(),
             Ok(())
         })
         .await?;
-    // make a vec to store our census keys
-    // we're deleting so there will only ever be one
-    let mut keys = Vec::with_capacity(entity.groups.len());
-    // calculate the grouping for this form
-    let grouping = bucket / 10_000;
-    // build the keys for this items census cache
-    super::keys::entities::census_keys(&mut keys, &entity.groups, year, bucket, grouping, shared);
     Ok(())
 }

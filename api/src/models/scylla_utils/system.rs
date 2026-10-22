@@ -85,6 +85,7 @@ impl WorkerRow {
             resources: crate::deserialize!(&self.resources),
             pool: self.pool,
             active,
+            run: None,
         };
         Ok(worker)
     }

@@ -5,48 +5,30 @@ use std::collections::{HashMap, HashSet};
 use tracing::{Level, event, instrument, span};
 use uuid::Uuid;
 
+use super::images::UNTIMED_RUNTIME_CAP;
 use super::keys::{images::ImageKeys, jobs::JobKeys, reactions::ReactionKeys, streams::StreamKeys};
 use super::{helpers, logs, reactions, streams, system};
+use crate::models::runtime::DEFAULT_PROJECTED_RUNTIME;
 use crate::models::{
-    Checkpoint, GenericJobArgs, ImageScaler, JobActions, JobDetailsList, JobHandleStatus, JobList,
-    JobReactionIds, JobResets, JobStatus, Pipeline, RawJob, Reaction, ReactionStatus, RunningJob,
-    StageLogsAdd, StatusRequest, StatusUpdate, StreamObj, User, Worker, WorkerName,
+    Checkpoint, EntityMetadata, GenericJobArgs, ImageScaler, JobActions, JobDetailsList,
+    JobHandleStatus, JobList, JobReactionIds, JobResets, JobStatus, Pipeline, RawJob, Reaction,
+    ReactionStatus, RunningJob, StageLogsAdd, StageStats, StatusRequest, StatusUpdate, StreamObj,
+    ToolSpec, User, Worker, WorkerName, WorkloadRuntimes,
 };
 use crate::utils::{ApiError, Shared};
 use crate::{
     conflict, conn, deserialize, force_serialize, internal_err, not_found, query, serialize,
+    unauthorized,
 };
 
-/// Builds the status queue function call
-macro_rules! status_queue {
-    ($job:expr, $status:expr, $shared:expr) => {
-        JobKeys::status_queue(
-            &$job.group,
-            &$job.pipeline,
-            &$job.stage,
-            &$job.creator,
-            $status,
-            $shared,
-        )
-    };
-    ($job:expr, $user:expr, $status:expr, $shared:expr) => {
-        JobKeys::status_queue(
-            &$job.group,
-            &$job.pipeline,
-            &$job.stage,
-            &$user,
-            $status,
-            $shared,
-        )
-    };
-}
-
 /// Builds a [`redis::Pipeline`] with commands to create a [`RawJob`] in Redis
+///
+/// A job that belongs to a run records its run, and any other job marks its tool instance active.
 ///
 /// # Arguments
 ///
 /// * `pipe` - The Redis [`redis::Pipeline`] to build ontop of
-/// * `job` - The job object to add to redis
+/// * `cast` - The job object to add to redis
 /// * `shared` - Shared Thorium objects
 #[rustfmt::skip]
 #[instrument(name = "db::jobs::build", skip_all, err(Debug))]
@@ -58,14 +40,14 @@ pub async fn build<'a>(
     // build job keys
     let keys = JobKeys::new(cast, shared);
     // cast our job claim data
-    let job_claim = JobReactionIds::new(cast.id, cast.reaction);
+    let job_claim = JobReactionIds::new(cast);
     // cast to stream object
     let stream_obj = StreamObj::from(cast);
     // build pipeline to add job id to the right sorted sets
     let pipe = pipe
         // user requested job
-        .cmd("hsetnx").arg(&keys.data).arg("reaction").arg(&cast.reaction.to_string())
-        .cmd("hsetnx").arg(&keys.data).arg("id").arg(&cast.id.to_string())
+        .cmd("hsetnx").arg(&keys.data).arg("reaction").arg(cast.reaction.to_string())
+        .cmd("hsetnx").arg(&keys.data).arg("id").arg(cast.id.to_string())
         .cmd("hsetnx").arg(&keys.data).arg("group").arg(&cast.group)
         .cmd("hsetnx").arg(&keys.data).arg("pipeline").arg(&cast.pipeline)
         .cmd("hsetnx").arg(&keys.data).arg("stage").arg(&cast.stage)
@@ -75,13 +57,24 @@ pub async fn build<'a>(
         .cmd("hsetnx").arg(&keys.data).arg("status").arg(&serialize!(&cast.status))
         .cmd("hsetnx").arg(&keys.data).arg("deadline").arg(&serialize!(&cast.deadline))
         .cmd("hsetnx").arg(&keys.data).arg("worker").arg(&serialize!(&cast.worker))
-        .cmd("sadd").arg(ReactionKeys::jobs(&cast.group, &cast.reaction, shared)).arg(&cast.id.to_string())
+        .cmd("hsetnx").arg(&keys.data).arg("tool_instance").arg(&serialize!(&cast.tool_instance))
+        .cmd("sadd").arg(ReactionKeys::jobs(&cast.group, &cast.reaction, shared)).arg(cast.id.to_string())
         .cmd("zadd").arg(&keys.status).arg(cast.deadline.timestamp()).arg(&serialize!(&job_claim))
         .cmd("zadd").arg(StreamKeys::system_scaler(cast.scaler, "deadlines", shared))
             .arg(stream_obj.timestamp).arg(stream_obj.data);
     // inject the parent field if this job has a parent
     if let Some(parent) = cast.parent {
         pipe.cmd("hsetnx").arg(&keys.data).arg("parent").arg(parent.to_string());
+    }
+    // a job of a run records its run, and any other job marks its tool instance active
+    match cast.run {
+        Some(run) => {
+            pipe.cmd("hsetnx").arg(&keys.data).arg("run").arg(serialize!(&run));
+        }
+        None => {
+            pipe.cmd("zadd").arg(JobKeys::workloads(&cast.group, shared))
+                .arg(Utc::now().timestamp()).arg(cast.tool_instance.to_string());
+        }
     }
     // if this image is a generator then increment our reactions current active generators
     if cast.generator {
@@ -206,7 +199,7 @@ async fn get_workers<'a>(jobs: &'a HashSet<&Uuid>, shared: &Shared) -> Result<Ha
      // build a pipeline to get the workers for all jobs
     let mut pipe = redis::pipe();
     // get each jobs worker
-    for job in jobs.iter() {
+    for job in jobs {
         // build the key to this jobs data
         let key = JobKeys::data(job, shared);
         // add the command to get this jobs data
@@ -229,13 +222,16 @@ async fn get_workers<'a>(jobs: &'a HashSet<&Uuid>, shared: &Shared) -> Result<Ha
 
 /// Prune a dangling job
 ///
+/// The popped status queue entry carries the job's exact deadline member, so the deadline is
+/// removed by that member; an entry without one is logged and its deadline left in place.
+///
 /// # Arguments
 ///
 /// * `scaler` - The scaler the target jobs were spawned under
 /// * `worker` - The worker that is trying to claim jobs
-/// * `dest` - The running job stream to remove dangling jobs from
-/// * `job` - The id of the dangling job
-/// * `reaction` - The id for the reaction for this job
+/// * `dest` - The running job queue the entry was claimed into
+/// * `raw` - The popped status queue entry, exactly as it was stored
+/// * `entry` - The popped status queue entry
 /// * `shared` - Shared Thorium objects
 #[rustfmt::skip]
 #[instrument(name = "db::jobs::prune_dangling", skip_all, err(Debug))]
@@ -243,32 +239,29 @@ async fn prune_dangling(
     scaler: ImageScaler,
     worker: &Worker,
     dest: &str,
-    job: Uuid,
-    reaction: Uuid,
+    raw: &str,
+    entry: &JobReactionIds,
     shared: &Shared
 ) -> Result<(), ApiError> {
     // build a redis pipeline to prune this dangling job
     let mut pipe = redis::pipe();
-    // build the json objects to remove from the deadlines and running sorted sets
-    let deadline_obj = format!(
-        "{{\"group\":\"{}\",\"pipeline\":\"{}\",\"stage\":\"{}\",\"creator\":\"{}\",\"job_id\":\"{}\",\"reaction\":\"{}\"}}",
-        worker.group,
-        worker.pipeline,
-        worker.stage,
-        worker.user,
-        job,
-        reaction);
     // build the object to remove from the running stream
-    let running_obj = format!("{{\"job_id\":\"{job}\",\"worker\":\"{}\"}}", worker.name);
-    // build the entry for the status stream
-    let status_entry = JobReactionIds::new(job, reaction);
-    // remove this jobs data
-    pipe.cmd("del").arg(JobKeys::data_str(&job, shared))
-        .cmd("zrem").arg(&dest).arg(serialize!(&status_entry))
+    let running_obj = format!("{{\"job_id\":\"{}\",\"worker\":\"{}\"}}", entry.job, worker.name);
+    // remove this jobs data, its status entry, and its running entry
+    pipe.cmd("del").arg(JobKeys::data_str(&entry.job, shared))
+        .cmd("zrem").arg(dest).arg(raw)
         .cmd("zrem")
-            .arg(&StreamKeys::system_scaler(scaler, "deadlines", shared)).arg(deadline_obj)
-        .cmd("zrem")
-            .arg(&StreamKeys::system_scaler(scaler, "running", shared)).arg(running_obj);
+            .arg(StreamKeys::system_scaler(scaler, "running", shared)).arg(running_obj);
+    // remove the deadline member the entry names
+    match &entry.deadline {
+        Some(deadline) => {
+            pipe.cmd("zrem").arg(StreamKeys::system_scaler(scaler, "deadlines", shared)).arg(deadline);
+        }
+        None => {
+            // entries written before deadlines were carried can't name their deadline member
+            event!(Level::WARN, msg = "Dangling job entry has no deadline member", job = entry.job.to_string(), worker = &worker.name);
+        }
+    }
     // execute this pipeline
     let _:() = pipe.query_async(conn!(shared)).await?;
     Ok(())
@@ -354,7 +347,7 @@ pub async fn pop_job(scaler: ImageScaler, worker: &Worker, src: &str, dest: &str
                 // log that we found a job that is missing data
                 event!(Level::ERROR, msg = "Missing job data", job = job_info.job.to_string(), reaction = job_info.reaction.to_string());
                 // delete our dangling job
-                prune_dangling(scaler, worker, dest, job_info.job, job_info.reaction, shared).await?;
+                prune_dangling(scaler, worker, dest, &raw, &job_info, shared).await?;
                 // try to claim another job
                 continue;
             }
@@ -378,7 +371,7 @@ pub async fn pop_job(scaler: ImageScaler, worker: &Worker, src: &str, dest: &str
 /// * `shared` - Shared Thorium objects
 #[rustfmt::skip]
 #[instrument(name = "db::jobs::update_reaction", skip_all, err(Debug))]
-async fn update_reaction<'a>(pipe: &'a mut redis::Pipeline, job: &RawJob, reaction: &Reaction, shared: &Shared) -> Result<(), ApiError> {
+async fn update_reaction(pipe: &mut redis::Pipeline, job: &RawJob, reaction: &Reaction, shared: &Shared) -> Result<(), ApiError> {
     // get the timestamp for this reactions sla
     let timestamp = reaction.sla.timestamp();
     // if this reactions status is created then move it to the started set
@@ -470,7 +463,7 @@ async fn requeue_claimed(
     // build the key to this jobs data
     let data_key = JobKeys::data(&job.id, shared);
     // cast our job claim data
-    let job_claim = serialize!(&JobReactionIds::new(job.id, job.reaction));
+    let job_claim = serialize!(&JobReactionIds::new(job));
     // build the redis pipeline to undo this jobs claim
     let mut pipe = redis::pipe();
     // reset this jobs status and worker
@@ -511,14 +504,46 @@ pub async fn claim(
     // build keys to data/queues
     let image_key = ImageKeys::data(&pipeline.group, stage, shared);
     // get if the scaler for this image
-    let scaler: String = query!(cmd("hget").arg(&image_key).arg("scaler"), shared).await?;
+    let scaler: Option<String> = query!(cmd("hget").arg(&image_key).arg("scaler"), shared).await?;
+    // a stage that isn't an image has no stage queue jobs to claim
+    let Some(scaler) = scaler else {
+        return Ok(Vec::new());
+    };
     // if a scaler was defined then get it otherwise
     let scaler = deserialize!(&scaler);
     // get our current workers info
     let worker = super::system::get_worker(&worker.name, shared).await?;
+    // non-admins may only claim jobs for their own workers
+    if !user.is_admin() && worker.user != user.username {
+        return unauthorized!();
+    }
     // build the status queues
-    let src = JobKeys::status_queue(&pipeline.group, &pipeline.name, stage, &user.username, &JobStatus::Created, shared);
-    let dest = JobKeys::status_queue(&pipeline.group, &pipeline.name, stage, &user.username, &JobStatus::Running, shared);
+    let src = JobKeys::stage_queue(&pipeline.group, &pipeline.name, stage, &user.username, &JobStatus::Created, shared);
+    let dest = JobKeys::stage_queue(&pipeline.group, &pipeline.name, stage, &user.username, &JobStatus::Running, shared);
+    // claim jobs from this stage's queue
+    claim_from(scaler, &worker, &src, &dest, limit, shared).await
+}
+
+/// Claims jobs from a created queue into its running queue for a worker
+///
+/// # Arguments
+///
+/// * `scaler` - The scaler the worker was spawned under
+/// * `worker` - The worker that is claiming jobs
+/// * `src` - The created queue to claim jobs from
+/// * `dest` - The running queue to claim jobs into
+/// * `limit` - The max number of jobs to claim
+/// * `shared` - Shared Thorium objects
+#[rustfmt::skip]
+#[instrument(name = "db::jobs::claim_from", skip(worker, shared), err(Debug))]
+async fn claim_from(
+    scaler: ImageScaler,
+    worker: &Worker,
+    src: &str,
+    dest: &str,
+    limit: usize,
+    shared: &Shared,
+) -> Result<Vec<RawJob>, ApiError> {
     // build alist of jobs we have claimed
     let mut claimed = Vec::with_capacity(limit);
     // claim up to the requested number of jobs
@@ -526,10 +551,9 @@ pub async fn claim(
         // keep trying to claim a job until we get a valid one or there are no jobs to claim
         let (reaction, job) = loop {
             // try to claim a job
-            let job = match pop_job(scaler, &worker, &src, &dest, shared).await? {
-                Some(job) => job,
+            let Some(job) = pop_job(scaler, worker, src, dest, shared).await? else {
                 // there are not jobs to claim so stop trying
-                None => break 'claim_loop,
+                break 'claim_loop;
             };
             // try to get this jobs reaction data
             // get this jobs reaction info
@@ -543,13 +567,14 @@ pub async fn claim(
                             // log that we found a job that is missing data
                             event!(Level::ERROR, msg = "Missing reaction data", job = job.id.to_string());
                             // prune this dangling job
-                            prune_dangling(scaler, &worker, &dest, job.id,  job.reaction, shared).await?;
+                            let entry = JobReactionIds::new(&job);
+                            prune_dangling(scaler, worker, dest, &serialize!(&entry), &entry, shared).await?;
                         }
                         ClaimReactionErrorAction::Requeue => {
                             // log that we failed to get this jobs reaction
                             event!(Level::ERROR, msg = "Failed to get reaction data", job = job.id.to_string(), error = error.to_string());
                             // move this job back to its created queue so it can be claimed later
-                            requeue_claimed(scaler, &worker, &src, &dest, &job, shared).await?;
+                            requeue_claimed(scaler, worker, src, dest, &job, shared).await?;
                             // return any jobs we already claimed so they aren't abandoned either
                             if claimed.is_empty() {
                                 return Err(error);
@@ -565,7 +590,7 @@ pub async fn claim(
         // update all claimed job logs
         let update_cast = StatusUpdate::new(StatusRequest::claim_job(&job, &worker.name), None);
         // update this workers current job
-        system::update_worker_job(&worker, &job.reaction, &job.id, shared).await?;
+        system::update_worker_job(worker, &job.reaction, &job.id, shared).await?;
         // build the redis pipeline and execute it
         let mut pipe = redis::pipe();
         // update this jobs reaction data
@@ -584,6 +609,464 @@ pub async fn claim(
         }
     }
     Ok(claimed)
+}
+
+/// Claims jobs of a tool instance for a worker
+///
+/// A per-run worker pops its run's queue for the tool instance and a shared worker pops its
+/// user's shared queue for the tool instance. The scaler comes from the worker, so no image or
+/// tool instance is read.
+///
+/// # Arguments
+///
+/// * `user` - The user that is claiming jobs
+/// * `group` - The group the jobs are in
+/// * `tool_instance` - The tool instance whose jobs to claim
+/// * `limit` - The max number of jobs to claim
+/// * `worker` - The worker that is claiming jobs
+/// * `shared` - Shared Thorium objects
+#[rustfmt::skip]
+#[instrument(name = "db::jobs::claim_workload", skip(user, worker, shared), err(Debug))]
+pub async fn claim_workload(
+    user: &User,
+    group: &str,
+    tool_instance: Uuid,
+    limit: usize,
+    worker: &WorkerName,
+    shared: &Shared,
+) -> Result<Vec<RawJob>, ApiError> {
+    // get our current workers info
+    let worker = super::system::get_worker(&worker.name, shared).await?;
+    // non-admins may only claim jobs for their own workers
+    if !user.is_admin() && worker.user != user.username {
+        return unauthorized!();
+    }
+    // a per-run worker claims its run's jobs and a shared worker its user's shared jobs
+    let (src, dest) = match worker.run {
+        Some(run) => (
+            JobKeys::run_queue(group, &run, &tool_instance, &JobStatus::Created, shared),
+            JobKeys::run_queue(group, &run, &tool_instance, &JobStatus::Running, shared),
+        ),
+        None => (
+            JobKeys::workload_queue(group, &tool_instance, &worker.user, &JobStatus::Created, shared),
+            JobKeys::workload_queue(group, &tool_instance, &worker.user, &JobStatus::Running, shared),
+        ),
+    };
+    // claim jobs from the worker's queue
+    claim_from(worker.scaler, &worker, &src, &dest, limit, shared).await
+}
+
+/// Averages the recent runtimes of a tool instance over all of its groups and stores the average
+///
+/// Keys: the runtimes hash, then the runtime list of each group. Args: the tool instance, then
+/// the most its average may be. The average is written only when there are runtimes, so a seeded
+/// runtime is kept until the tool instance runs.
+static AVERAGE_RUNTIME_SCRIPT: std::sync::LazyLock<redis::Script> =
+    std::sync::LazyLock::new(|| {
+        redis::Script::new(
+            r"
+        local sum = 0
+        local total = 0
+        for i = 2, #KEYS do
+            local times = redis.call('lrange', KEYS[i], '0', '9999')
+            for j = 1, #times do
+                sum = sum + times[j]
+                total = total + 1
+            end
+        end
+        if total ~= 0 then
+            local avg = sum / total
+            local cap = tonumber(ARGV[2])
+            if avg > cap then
+                avg = cap
+            end
+            redis.call('hset', KEYS[1], ARGV[1], avg)
+        end
+        return total
+        ",
+        )
+    });
+
+/// Gets the longest a job of a tool instance may run in seconds
+///
+/// This is the timeout of the tool instance's workload, or [`UNTIMED_RUNTIME_CAP`] when it has
+/// none, runs no workload, or isn't in any of the groups (for example, it was deleted while its
+/// jobs ran).
+///
+/// # Arguments
+///
+/// * `groups` - The groups the tool instance ran in
+/// * `tool_instance` - The tool instance
+/// * `shared` - Shared Thorium objects
+#[instrument(name = "db::jobs::runtime_cap", skip(shared), err(Debug))]
+pub async fn runtime_cap(
+    groups: &[String],
+    tool_instance: Uuid,
+    shared: &Shared,
+) -> Result<u64, ApiError> {
+    // read the tool instance in the groups it ran in
+    let entity = match super::entities::get_untagged(groups, tool_instance, shared).await {
+        Ok(entity) => entity,
+        Err(err) if err.status() == StatusCode::NOT_FOUND => return Ok(UNTIMED_RUNTIME_CAP),
+        Err(err) => return Err(err),
+    };
+    // get the timeout of the workload it runs
+    let timeout = match &entity.metadata {
+        EntityMetadata::ToolInstance(meta) => match &meta.spec {
+            ToolSpec::Image(workload) => workload.execution.timeout,
+            ToolSpec::Harness(harness) => harness.workload.execution.timeout,
+            ToolSpec::Agentic(_) => None,
+        },
+        _ => None,
+    };
+    // a tool instance without a timeout is capped at a week
+    Ok(timeout.unwrap_or(UNTIMED_RUNTIME_CAP))
+}
+
+/// Seeds a new tool instance's runtime with its previous instance's runtime or the default
+///
+/// Keys: the runtimes hash. Args: the new tool instance, the previous tool instance (empty for a
+/// first version), and the default runtime. An existing runtime is never overwritten.
+static SEED_RUNTIME_SCRIPT: std::sync::LazyLock<redis::Script> = std::sync::LazyLock::new(|| {
+    redis::Script::new(
+        r"
+        local runtime = false
+        if ARGV[2] ~= '' then
+            runtime = redis.call('hget', KEYS[1], ARGV[2])
+        end
+        if not runtime then
+            runtime = ARGV[3]
+        end
+        return redis.call('hsetnx', KEYS[1], ARGV[1], runtime)
+        ",
+    )
+});
+
+/// The number of seconds a tool instance can go without a queued job before it is pruned
+const WORKLOAD_IDLE_SECS: i64 = 60 * 60;
+
+/// The job statuses counted for each tool instance and user
+const COUNTED_STATUSES: [JobStatus; 5] = [
+    JobStatus::Created,
+    JobStatus::Running,
+    JobStatus::Completed,
+    JobStatus::Failed,
+    JobStatus::Sleeping,
+];
+
+/// Gets the tool instances in a group's shared workload set, optionally only those last queued
+/// before a cutoff
+///
+/// # Arguments
+///
+/// * `group` - The group whose set to read
+/// * `before` - Only get the tool instances last queued at or before this timestamp
+/// * `shared` - Shared Thorium objects
+async fn workload_members(
+    group: &str,
+    before: Option<i64>,
+    shared: &Shared,
+) -> Result<Vec<Uuid>, ApiError> {
+    // read the whole set or the members scored before the cutoff
+    let key = JobKeys::workloads(group, shared);
+    let members: Vec<String> = match before {
+        Some(cutoff) => {
+            query!(
+                cmd("zrangebyscore").arg(&key).arg("-inf").arg(cutoff),
+                shared
+            )
+            .await?
+        }
+        None => query!(cmd("zrange").arg(&key).arg(0).arg(-1), shared).await?,
+    };
+    // only tool instance ids are ever added to the set
+    Ok(members
+        .iter()
+        .filter_map(|member| Uuid::parse_str(member).ok())
+        .collect())
+}
+
+/// Counts the jobs of tool instances in every status for each member of a group
+///
+/// The counts are returned per tool instance, then per user, then per status, in one pipeline.
+///
+/// # Arguments
+///
+/// * `group` - The group the jobs are in
+/// * `tool_instances` - The tool instances to count jobs for
+/// * `users` - The users to count jobs for
+/// * `shared` - Shared Thorium objects
+async fn count_workload_jobs(
+    group: &str,
+    tool_instances: &[Uuid],
+    users: &[&String],
+    shared: &Shared,
+) -> Result<Vec<(u64, u64, u64, u64, u64)>, ApiError> {
+    // an empty pipeline has nothing to count
+    if tool_instances.is_empty() || users.is_empty() {
+        return Ok(Vec::new());
+    }
+    // count every status of every tool instance and user in one pipeline
+    let mut pipe = redis::pipe();
+    for tool_instance in tool_instances {
+        for user in users {
+            for status in &COUNTED_STATUSES {
+                let key = JobKeys::workload_queue(group, tool_instance, user, status, shared);
+                pipe.cmd("zcount").arg(key).arg(0).arg(i64::MAX);
+            }
+        }
+    }
+    // read the counts five statuses at a time
+    let counts: Vec<(u64, u64, u64, u64, u64)> = pipe.query_async(conn!(shared)).await?;
+    Ok(counts)
+}
+
+/// Gets the per user status counts of every tool instance with shared jobs in a group
+///
+/// # Arguments
+///
+/// * `group` - The group to get stats for
+/// * `users` - The members of the group
+/// * `shared` - Shared Thorium objects
+#[instrument(name = "db::jobs::workload_stats", skip_all, err(Debug))]
+pub async fn workload_stats(
+    group: &str,
+    users: &[&String],
+    shared: &Shared,
+) -> Result<HashMap<Uuid, HashMap<String, StageStats>>, ApiError> {
+    // get the tool instances with shared jobs in this group
+    let tool_instances = workload_members(group, None, shared).await?;
+    // count their jobs for each user
+    let counts = count_workload_jobs(group, &tool_instances, users, shared).await?;
+    // build the stats of each tool instance from its users' counts
+    let mut stats = HashMap::with_capacity(tool_instances.len());
+    for (tool_instance, counts) in tool_instances.iter().zip(counts.chunks(users.len().max(1))) {
+        // keep only the users with jobs of this tool instance
+        let user_stats = users
+            .iter()
+            .zip(counts)
+            .filter_map(|(user, (created, running, completed, failed, sleeping))| {
+                let total = created + running + completed + failed + sleeping;
+                (total > 0).then(|| {
+                    let stage_stats = StageStats {
+                        created: *created,
+                        running: *running,
+                        completed: *completed,
+                        failed: *failed,
+                        sleeping: *sleeping,
+                        total,
+                    };
+                    ((*user).clone(), stage_stats)
+                })
+            })
+            .collect::<HashMap<String, StageStats>>();
+        // only report tool instances that have jobs
+        if !user_stats.is_empty() {
+            stats.insert(*tool_instance, user_stats);
+        }
+    }
+    Ok(stats)
+}
+
+/// Averages the recent runtimes of every active tool instance and prunes idle ones
+///
+/// Each tool instance in a group's shared workload set is averaged over its runtime lists in
+/// every group it ran in. Then each group's tool instances that haven't had a job queued for an
+/// hour and have no created, running, or sleeping jobs are removed from the set; any that gained
+/// a job while being removed is added back.
+///
+/// # Arguments
+///
+/// * `groups` - The groups to update runtimes for, with their members
+/// * `shared` - Shared Thorium objects
+#[instrument(name = "db::jobs::update_workload_runtimes", skip_all, err(Debug))]
+pub async fn update_workload_runtimes(
+    groups: &[(String, Vec<String>)],
+    shared: &Shared,
+) -> Result<(), ApiError> {
+    // collect the groups each active tool instance ran in
+    let mut active: HashMap<Uuid, Vec<&str>> = HashMap::new();
+    for (group, _) in groups {
+        for tool_instance in workload_members(group, None, shared).await? {
+            active.entry(tool_instance).or_default().push(group);
+        }
+    }
+    // average each active tool instance over every group it ran in
+    let runtimes = JobKeys::workload_runtimes(shared);
+    for (tool_instance, ran_in) in &active {
+        // get the most this tool instance's average may be
+        let groups = ran_in
+            .iter()
+            .map(|group| (*group).to_owned())
+            .collect::<Vec<String>>();
+        let cap = runtime_cap(&groups, *tool_instance, shared).await?;
+        // average its runtimes, clamped to that cap
+        let mut invocation = AVERAGE_RUNTIME_SCRIPT.key(&runtimes);
+        for group in ran_in {
+            invocation.key(JobKeys::workload_ttc(group, tool_instance, shared));
+        }
+        let _: i64 = invocation
+            .arg(tool_instance.to_string())
+            .arg(cap)
+            .invoke_async(conn!(shared))
+            .await?;
+    }
+    // prune each group's idle tool instances
+    let cutoff = Utc::now().timestamp() - WORKLOAD_IDLE_SECS;
+    for (group, users) in groups {
+        prune_idle_workloads(group, users, cutoff, shared).await?;
+    }
+    Ok(())
+}
+
+/// Get the tool instances whose counts show unfinished jobs, or finished ones when `unfinished`
+/// is false
+///
+/// # Arguments
+///
+/// * `tool_instances` - The tool instances that were counted
+/// * `counts` - Their counts, per tool instance then per user
+/// * `users` - The number of users counted for each tool instance
+/// * `unfinished` - Whether to keep the tool instances with unfinished jobs
+fn by_unfinished(
+    tool_instances: &[Uuid],
+    counts: &[(u64, u64, u64, u64, u64)],
+    users: usize,
+    unfinished: bool,
+) -> Vec<Uuid> {
+    // a tool instance has unfinished jobs when any user has created, running, or sleeping jobs
+    tool_instances
+        .iter()
+        .zip(counts.chunks(users.max(1)))
+        .filter(|(_, counts)| {
+            counts
+                .iter()
+                .any(|(created, running, _, _, sleeping)| created + running + sleeping > 0)
+                == unfinished
+        })
+        .map(|(tool_instance, _)| *tool_instance)
+        .collect()
+}
+
+/// Removes a group's tool instances that are idle and have no unfinished jobs
+///
+/// # Arguments
+///
+/// * `group` - The group to prune
+/// * `users` - The members of the group
+/// * `cutoff` - The latest queue time a tool instance can have and still be pruned
+/// * `shared` - Shared Thorium objects
+async fn prune_idle_workloads(
+    group: &str,
+    users: &[String],
+    cutoff: i64,
+    shared: &Shared,
+) -> Result<(), ApiError> {
+    // find the tool instances whose last job was queued before the cutoff
+    let idle = workload_members(group, Some(cutoff), shared).await?;
+    if idle.is_empty() {
+        return Ok(());
+    }
+    // keep only the idle ones with no unfinished jobs for any member
+    let users = users.iter().collect::<Vec<&String>>();
+    let counts = count_workload_jobs(group, &idle, &users, shared).await?;
+    let finished = by_unfinished(&idle, &counts, users.len(), false);
+    if finished.is_empty() {
+        return Ok(());
+    }
+    // let tests queue a job between counting and removing
+    #[cfg(feature = "test-utilities")]
+    crate::test_utilities::faults::wait_if_workload_prune_paused(group).await;
+    // remove the finished tool instances
+    let set = JobKeys::workloads(group, shared);
+    let members = finished
+        .iter()
+        .map(Uuid::to_string)
+        .collect::<Vec<String>>();
+    let _: () = query!(cmd("zrem").arg(&set).arg(&members), shared).await?;
+    // find any that gained a job while they were being removed
+    let counts = count_workload_jobs(group, &finished, &users, shared).await?;
+    let requeued = by_unfinished(&finished, &counts, users.len(), true);
+    // add those back so their jobs stay counted
+    if !requeued.is_empty() {
+        let now = Utc::now().timestamp();
+        let mut pipe = redis::pipe();
+        for tool_instance in &requeued {
+            pipe.cmd("zadd")
+                .arg(&set)
+                .arg(now)
+                .arg(tool_instance.to_string());
+        }
+        let _: () = pipe.query_async(conn!(shared)).await?;
+    }
+    Ok(())
+}
+
+/// Gets the runtime of every tool instance that has one
+///
+/// # Arguments
+///
+/// * `shared` - Shared Thorium objects
+#[instrument(name = "db::jobs::workload_runtimes", skip_all, err(Debug))]
+pub async fn workload_runtimes(shared: &Shared) -> Result<WorkloadRuntimes, ApiError> {
+    // read every tool instance's runtime
+    let raw: HashMap<String, f64> = query!(
+        cmd("hgetall").arg(JobKeys::workload_runtimes(shared)),
+        shared
+    )
+    .await?;
+    // key the runtimes by tool instance id, skipping fields that aren't ids
+    let runtimes = raw
+        .into_iter()
+        .filter_map(|(id, runtime)| Uuid::parse_str(&id).ok().map(|id| (id, runtime)))
+        .collect();
+    Ok(WorkloadRuntimes { runtimes })
+}
+
+/// Seeds a new tool instance's runtime with its previous instance's runtime or the default
+///
+/// # Arguments
+///
+/// * `tool_instance` - The new tool instance
+/// * `previous` - The tool instance it supersedes, if any
+/// * `shared` - Shared Thorium objects
+#[instrument(name = "db::jobs::seed_workload_runtime", skip(shared), err(Debug))]
+pub async fn seed_workload_runtime(
+    tool_instance: Uuid,
+    previous: Option<Uuid>,
+    shared: &Shared,
+) -> Result<(), ApiError> {
+    // seed the runtime without overwriting one that already exists
+    let previous = previous.map_or_else(String::new, |id| id.to_string());
+    let _: i64 = SEED_RUNTIME_SCRIPT
+        .key(JobKeys::workload_runtimes(shared))
+        .arg(tool_instance.to_string())
+        .arg(previous)
+        .arg(DEFAULT_PROJECTED_RUNTIME)
+        .invoke_async(conn!(shared))
+        .await?;
+    Ok(())
+}
+
+/// Removes a deleted tool instance's runtime
+///
+/// Removing a runtime that isn't stored is not an error.
+///
+/// # Arguments
+///
+/// * `tool_instance` - The tool instance that was deleted
+/// * `shared` - Shared Thorium objects
+#[instrument(name = "db::jobs::remove_workload_runtime", skip(shared), err(Debug))]
+pub async fn remove_workload_runtime(tool_instance: Uuid, shared: &Shared) -> Result<(), ApiError> {
+    // drop the instance's field from the runtimes hash
+    let _: i64 = query!(
+        cmd("hdel")
+            .arg(JobKeys::workload_runtimes(shared))
+            .arg(tool_instance.to_string()),
+        shared
+    )
+    .await?;
+    Ok(())
 }
 
 /// Updates the args for a job
@@ -627,7 +1110,7 @@ pub async fn sleep(
     // get our current args for this job
     let mut args: GenericJobArgs = deserialize!(&job.args);
     // add our new checkpoint arg
-    args.kwargs.insert("--checkpoint".to_owned(), vec!(checkpoint.data));
+    args.kwargs.insert("--checkpoint".to_owned(), vec![checkpoint.data]);
     // build a redis pipeline update this jobs status
     let mut pipe = redis::pipe();
     // updatethis jobs status to be Sleeping
@@ -679,15 +1162,15 @@ pub async fn proceed(
     };
     // cast to stream object
     let stream_obj = StreamObj::from(&job);
-    // build key to the time to complete queue for this image
-    let ttc_key = ImageKeys::ttc_queue(&job.group, &job.stage, shared);
+    // build key to the time to complete queue for this tool instance
+    let ttc_key = JobKeys::workload_ttc(&job.group, &job.tool_instance, shared);
     // build key to reaction data
     let reaction_data = ReactionKeys::data(&job.group, &job.reaction, shared);
     // build the status queues keys for non external jobs
-    let src = JobKeys::status_queue(&job.group, &job.pipeline, &job.stage, &job.creator, &JobStatus::Running, shared);
-    let dest = JobKeys::status_queue(&job.group, &job.pipeline, &job.stage, &job.creator, &status, shared);
+    let src = JobKeys::status_queue(&job, &JobStatus::Running, shared);
+    let dest = JobKeys::status_queue(&job, &status, shared);
     // cast our job claim data
-    let job_info = serialize!(&JobReactionIds::new(job.id, job.reaction));
+    let job_info = serialize!(&JobReactionIds::new(&job));
     // start building the redis pipeline for proceeding with this job
     let mut pipe = redis::pipe();
     // add running job specific commands if our status is running
@@ -702,7 +1185,7 @@ pub async fn proceed(
             // push this jobs time to complete into the time to complete queue
             .cmd("lpush").arg(&ttc_key).arg(runtime)
             // ensure that our time to completion list does not grow past 10k times
-            .cmd("ltrim").arg(ttc_key).arg(0).arg(10_000)
+            .cmd("ltrim").arg(ttc_key).arg(0).arg(9_999)
             // move this job to the correct status queues
             .cmd("zrem").arg(src).arg(&job_info)
             .cmd("zadd").arg(dest).arg(job.deadline.timestamp()).arg(&job_info);
@@ -781,7 +1264,7 @@ pub async fn proceed(
     }
 }
 
-/// ApiErrors out a job
+/// Errors out a job
 ///
 /// This updates the jobs status to error and will fail out the rest of the pipeline.
 ///
@@ -792,7 +1275,7 @@ pub async fn proceed(
 /// * `shared` - Shared Thorium objects
 #[rustfmt::skip]
 #[instrument(name = "db::jobs::error", skip_all, err(Debug))]
-pub async fn error<'a>(
+pub async fn error(
     job: RawJob,
     logs: StageLogsAdd,
     shared: &Shared,
@@ -809,12 +1292,12 @@ pub async fn error<'a>(
         return conflict!(format!("job {} must be running to error", &job.id));
     }
     // build the status queues keys for non external jobs
-    let src = JobKeys::status_queue(&job.group, &job.pipeline, &job.stage, &job.creator, &JobStatus::Running, shared);
-    let dest = JobKeys::status_queue(&job.group, &job.pipeline, &job.stage, &job.creator, &JobStatus::Failed, shared);
+    let src = JobKeys::status_queue(&job, &JobStatus::Running, shared);
+    let dest = JobKeys::status_queue(&job, &JobStatus::Failed, shared);
     // cast to stream object
     let stream_obj = StreamObj::from(&job);
     // cast our job claim data
-    let job_claim = serialize!(&JobReactionIds::new(job.id, job.reaction));
+    let job_claim = serialize!(&JobReactionIds::new(&job));
     // start building the redis pipeline for erroring out this job
     let mut pipe = redis::pipe();
     // the pipeline is only executed once, after the logs are saved
@@ -835,7 +1318,7 @@ pub async fn error<'a>(
     if job.generator {
         // build key to this reactions genrator set
         let gen_key = ReactionKeys::generators(&job.group, &job.reaction, shared);
-        pipe.cmd("srem").arg(gen_key).arg(&job.id.to_string());
+        pipe.cmd("srem").arg(gen_key).arg(job.id.to_string());
     }
     // save this jobs logs to scylla
     reactions::add_stage_logs(&job.reaction, &job.stage, logs, shared).await?;
@@ -982,16 +1465,17 @@ pub async fn bulk_reset(
         // log that we are reseting this job
         event!(Level::INFO, job=&job_id, old_status=job.status.to_string());
         // build the status queues keys for non external jobs
-        let src = JobKeys::status_queue(&job.group, &job.pipeline, &job.stage, &job.creator, &job.status, shared);
-        let dest = JobKeys::status_queue(&job.group, &job.pipeline, &job.stage, &job.creator, &JobStatus::Created, shared);
+        let src = JobKeys::status_queue(job, &job.status, shared);
+        let dest = JobKeys::status_queue(job, &JobStatus::Created, shared);
         // cast our job claim data
-        let job_claim = serialize!(&JobReactionIds::new(job.id, job.reaction));
+        let job_claim = serialize!(&JobReactionIds::new(job));
         // add the command shared by internal and external jobs
-        // update jobs status
+        // update this jobs status and clear its worker so its old worker can't handle it
         pipe.cmd("hset").arg(JobKeys::data(&job.id, shared))
                 .arg("status").arg(force_serialize!(&JobStatus::Created))
+                .arg("worker").arg(force_serialize!(&None::<String>))
             // add to created jobs set
-            .cmd("zadd").arg(status_queue!(job, &JobStatus::Created, shared))
+            .cmd("zadd").arg(JobKeys::status_queue(job, &JobStatus::Created, shared))
                 .arg(job.deadline.timestamp()).arg(&job_claim)
             // move these jobs to the correct status queue
             .cmd("zrem").arg(src).arg(&job_claim)
@@ -1017,7 +1501,7 @@ pub async fn bulk_reset(
         // check to see if these jobs still have a worker set to avoid an expensive scan
         let workers = get_workers(&missing, shared).await?;
         // remove the jobs whose workers we could find from the running stream
-        for (job, worker) in workers.iter() {
+        for (job, worker) in &workers {
             // build the object to remove from the running stream
             let entry = format!("{{\"job_id\":\"{job}\",\"worker\":\"{worker}\"}}");
             // add the command to remove this job from the running stream
@@ -1025,15 +1509,14 @@ pub async fn bulk_reset(
         }
         // build a hashset of the jobs would couldn't find workers for
         let no_workers: HashSet<&Uuid> = missing.iter()
-            .filter(|worker| !workers.contains_key(**worker))
-            .map(|worker| *worker)
+            .filter(|worker| !workers.contains_key(**worker)).copied()
             .collect();
         // get the orphaned entries in the running job stream if there is any
         if !no_workers.is_empty() {
             // find the entries for these jobs in the running stream
             let entry_map = find_in_running(&stream_key, &no_workers, shared).await?;
             // remove these missing entries from the running jobs stream
-            for (_, entry) in &entry_map {
+            for entry in entry_map.values() {
                 // add the command to remove this job from the running stream
                 pipe.cmd("zrem").arg(&stream_key).arg(entry);
             }
@@ -1043,7 +1526,7 @@ pub async fn bulk_reset(
             // log that we found a job that no longer has data
             event!(Level::ERROR, msg = "Deleting Job with no data", job = orphan.to_string());
             //. build the key to this jobs data
-            let key = JobKeys::data(*orphan, shared);
+            let key = JobKeys::data(orphan, shared);
             // add the command to delete this jobs data
             pipe.cmd("del").arg(key);
         }
@@ -1068,7 +1551,7 @@ pub async fn list_details(
     // get job data
     let raw: Vec<HashMap<String, String>> = jobs.names.iter()
         .fold(redis::pipe().atomic(), |pipe, id|
-            pipe.cmd("hgetall").arg(&JobKeys::data(id, shared)))
+            pipe.cmd("hgetall").arg(JobKeys::data(id, shared)))
         .query_async(conn!(shared))
         .await?;
     // build a vec to store our raw job details in

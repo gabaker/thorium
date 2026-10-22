@@ -440,6 +440,14 @@ impl DataCache {
     }
 
     /// Check an event and a trigger against the data in this cache
+    ///
+    /// Workflow graph events and model refresh events never meet a trigger.
+    ///
+    /// # Arguments
+    ///
+    /// * `user` - The user whose groups limit the data the trigger may match
+    /// * `event` - The event to check
+    /// * `trigger` - The trigger to check the event against
     #[instrument(name = "EventWorker::check", skip_all)]
     pub fn check(&self, user: &ScrubbedUser, event: &Event, trigger: &EventTrigger) -> bool {
         // handle each event type correctly
@@ -506,6 +514,9 @@ impl DataCache {
             }
             (EventData::NewTags { .. }, EventTrigger::NewSample) => false,
             (EventData::SigmaScannableResults { .. }, _) => false,
+            // workflow graph changes only rebuild instances and model refreshes only update
+            // catalogs, so neither ever meets a trigger
+            (EventData::WorkflowGraph(_) | EventData::ModelRefresh(_), _) => false,
         }
     }
 
@@ -550,7 +561,10 @@ impl DataCache {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use thorium::models::UserSettings;
+    use thorium::models::{
+        ModelRefreshEvent, ModelRefreshReason, ModelRefreshTarget, UserSettings,
+        WorkflowGraphChange, WorkflowGraphEvent,
+    };
 
     /// Build a scrubbed user for testing trigger cache filtering
     ///
@@ -592,6 +606,92 @@ mod tests {
             },
             depth: 0,
         }
+    }
+
+    /// Asserts that an event of a kind fires no reaction trigger and is cleared when filtered in a
+    /// batch, while a tag event in the same batch still matches a tag trigger
+    ///
+    /// # Arguments
+    ///
+    /// * `data` - The data of the event of the kind to check
+    fn assert_skips_reaction_triggers(data: EventData) {
+        // an enabled user in minerva, which has a new sample trigger and a tag trigger
+        let mut user = test_user("europa", UserRole::User);
+        user.groups = vec!["minerva".to_owned()];
+        let mut users = HashMap::default();
+        users.insert("europa".to_owned(), user.clone());
+        let tag_trigger = EventTrigger::Tag {
+            tag_types: vec![TagType::Files],
+            required: HashMap::from([("family".to_owned(), vec!["parser".to_owned()])]),
+            not: HashMap::default(),
+        };
+        let mut pipeline_triggers = HashMap::default();
+        pipeline_triggers.insert("on-new-sample".to_owned(), EventTrigger::NewSample);
+        pipeline_triggers.insert("on-parser".to_owned(), tag_trigger.clone());
+        let mut pipelines = HashMap::default();
+        pipelines.insert("harvest".to_owned(), pipeline_triggers);
+        let mut triggers = HashMap::default();
+        triggers.insert("minerva".to_owned(), pipelines);
+        let cache = TriggerCache {
+            users,
+            triggers,
+            max_depth: 5,
+        };
+        // an event of the kind under test
+        let mut event = test_event("europa");
+        event.data = data;
+        // a tag event whose tags match the tag trigger
+        let mut tags = test_event("europa");
+        tags.data = EventData::NewTags {
+            tag_type: TagType::Files,
+            item: "sample".to_owned(),
+            groups: vec!["minerva".to_owned()],
+            tags: HashMap::from([("family".to_owned(), HashSet::from(["parser".to_owned()]))]),
+        };
+        // filter both events in one batch
+        let (event_id, tags_id) = (event.id, tags.id);
+        let mut event_cache = HashMap::default();
+        let mut filtered = FilteredEvents::default();
+        cache.filter(&mut event_cache, vec![event.clone(), tags], &mut filtered);
+        // the event matched nothing, so it's only cleared
+        assert!(filtered.confirmed.iter().all(|(id, _)| *id != event_id));
+        assert!(filtered.potentials.iter().all(|(id, _)| *id != event_id));
+        assert_eq!(filtered.clears, vec![event_id]);
+        // the tag event may still fire its trigger
+        assert!(filtered.potentials.iter().any(|(id, _)| *id == tags_id));
+        // the event needs no data and never meets a trigger with data either
+        let data = DataCache::default();
+        assert!(data.has_data(&event));
+        assert!(!data.check(&user, &event, &tag_trigger));
+        assert!(!data.check(&user, &event, &EventTrigger::NewSample));
+    }
+
+    /// Model refresh events in a batch fire no reaction trigger and are cleared, while a tag event
+    /// in the same batch still matches a tag trigger
+    #[test]
+    fn model_refresh_events_skip_reaction_triggers() {
+        // a refresh of an endpoint in minerva
+        assert_skips_reaction_triggers(EventData::ModelRefresh(ModelRefreshEvent {
+            target: ModelRefreshTarget::GroupEndpoint {
+                groups: vec!["minerva".to_owned()],
+                endpoint: Uuid::new_v4(),
+            },
+            reason: ModelRefreshReason::Manual,
+        }));
+    }
+
+    /// Workflow graph events in a batch fire no reaction trigger and are cleared, while a tag event
+    /// in the same batch still matches a tag trigger
+    #[test]
+    fn workflow_graph_events_skip_reaction_triggers() {
+        // a workflow graph event for a tool in minerva
+        assert_skips_reaction_triggers(EventData::WorkflowGraph(WorkflowGraphEvent {
+            groups: vec!["minerva".to_owned()],
+            change: WorkflowGraphChange::ToolUpdated {
+                tool: Uuid::new_v4(),
+                tool_instance: Uuid::new_v4(),
+            },
+        }));
     }
 
     #[test]

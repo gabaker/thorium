@@ -121,3 +121,9 @@ reason = "Images run as Kubernetes workloads, which ignore Docker HEALTHCHECK; t
 tool = "trivy-config"
 rule = "DS-0029"
 reason = "Recommended packages are allowed in our images"
+
+[[ignore]]
+tool = "trivy-secret"
+rule = "private-key"
+paths = ["event-handler/tests/fixtures/test-only-rsa-key.pem"]
+reason = "A self-signed RSA key generated only for the event handler's model listing sign-in tests against local mock endpoints; it authenticates to nothing"

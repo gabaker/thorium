@@ -2,19 +2,27 @@
 
 use http::StatusCode;
 use serde_json::Value;
-use std::collections::{BTreeMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::path::PathBuf;
 
+use thorium::client::{ClientSettings, Users};
 use thorium::models::{
-    Backup, GroupAllowedUpdate, GroupUpdate, HostPathWhitelistUpdate, ImageBan, ImageBanKind,
-    ImageBanUpdate, ImageNetworkPolicyUpdate, ImageScaler, ImageUpdate, NetworkPolicyUpdate,
-    PipelineBan, PipelineBanKind, PipelineBanUpdate, PipelineRequest, PipelineUpdate, Pools,
-    RepoRequest, Resources, ScopedTokenRequest, SystemInfo, SystemSettings,
-    SystemSettingsResetParams, SystemSettingsUpdate, SystemSettingsUpdateParams, Volume,
+    AiSettingsUpdate, AllowedEndpoint, Backup, BedrockEndpointKind, CredentialKind, EntityMetadata,
+    EntityMetadataRequest, EntityMetadataUpdate, EntityUpdate, GroupAllowed, GroupAllowedUpdate,
+    GroupUpdate, HostPathWhitelistUpdate, ImageBan, ImageBanKind, ImageBanUpdate,
+    ImageNetworkPolicyUpdate, ImageScaler, ImageUpdate, ModelBan, ModelBanKind, ModelBanUpdate,
+    ModelEndpointEntity, ModelEndpointEntityRequest, ModelProvider, ModelProviderKind, ModelSecret,
+    ModelsConf, ModelsConfUpdate, NetworkPolicyUpdate, PipelineBan, PipelineBanKind,
+    PipelineBanUpdate, PipelineRequest, PipelineUpdate, Pools, RepoRequest, Resources,
+    ScopedTokenRequest, SystemInfo, SystemSettings, SystemSettingsResetParams,
+    SystemSettingsUpdate, SystemSettingsUpdateParams, UserCreate, UserCredentialRef,
+    UserModelEndpoint, UserModelSettingsUpdate, UserRole, UserSettingsUpdate, UserUpdate, Volume,
     VolumeTypes, WorkerDeleteMap, WorkerRegistrationList,
 };
+use thorium::test_utilities::generators::GroupRoles;
 use thorium::test_utilities::{self, generators};
 use thorium::{Error, Thorium, contains, fail, is, is_not, unwrap_variant, vec_in_vec};
+use uuid::Uuid;
 
 #[serial_test::serial]
 #[tokio::test]
@@ -196,7 +204,10 @@ async fn reset_settings() -> Result<(), Error> {
     // create user client
     let user_client = generators::client(&client).await?;
     // create group
-    let group = generators::groups(1, &user_client).await?.remove(0).name;
+    let group = generators::image_groups(1, &user_client)
+        .await?
+        .remove(0)
+        .name;
     // create an image with a whitelisted host path
     let image_req = generators::gen_host_path(&group, initially_valid_path);
     user_client.images.create(&image_req).await?;
@@ -237,7 +248,10 @@ async fn update_host_path_whitelist() -> Result<(), Error> {
     // get user client
     let user_client = generators::client(&client).await?;
     // create group
-    let group = generators::groups(1, &user_client).await?.remove(0).name;
+    let group = generators::image_groups(1, &user_client)
+        .await?
+        .remove(0)
+        .name;
     let settings_update_default_params = SystemSettingsUpdateParams::default();
     // update with an invalid relative host path on the whitelist
     let update = SystemSettingsUpdate::default()
@@ -290,6 +304,8 @@ async fn update_host_path_whitelist() -> Result<(), Error> {
     Ok(())
 }
 
+/// Verifies the consistency scan bans images and pipelines whose host paths are no longer
+/// whitelisted
 #[serial_test::serial]
 #[tokio::test]
 async fn host_path_consistency_scan() -> Result<(), Error> {
@@ -316,7 +332,10 @@ async fn host_path_consistency_scan() -> Result<(), Error> {
         .update_settings(&update, &SystemSettingsUpdateParams::default().no_scan())
         .await?;
     // create group
-    let group = generators::groups(1, &user_client).await?.remove(0).name;
+    let group = generators::image_groups(1, &user_client)
+        .await?
+        .remove(0)
+        .name;
     // create an image with paths on the whitelist
     let initially_valid_paths = [
         String::from(whitelisted_path) + "/here",
@@ -335,6 +354,10 @@ async fn host_path_consistency_scan() -> Result<(), Error> {
         &group,
         pipeline_name,
         serde_json::json!(vec![vec![&image_req.name]]),
+    )
+    .stage_tool(
+        &image_req.name,
+        generators::tool_instance(&[&group], &client).await?,
     );
     client.pipelines.create(&pipe_req).await?;
     // reset settings without scanning
@@ -412,7 +435,10 @@ async fn host_path_consistency_scan() -> Result<(), Error> {
     // add the image to the pipeline
     let mut order: Vec<Vec<String>> = pipeline.order.clone();
     order[0].push(image_req.name.clone());
-    let pipe_update = PipelineUpdate::default().order(order);
+    let pipe_update = PipelineUpdate::default().order(order).add_stage_tool(
+        &image_req.name,
+        generators::tool_instance(&[&group], &client).await?,
+    );
     user_client
         .pipelines
         .update(&group, &pipeline.name, &pipe_update)
@@ -1452,5 +1478,1044 @@ async fn get_many_nodes_in_chunks() -> Result<(), Error> {
             );
         }
     }
+    Ok(())
+}
+
+/// Build an `OpenAiCompatible` provider for a url
+///
+/// # Arguments
+///
+/// * `url` - The provider's base url
+fn compatible(url: &str) -> ModelProvider {
+    ModelProvider::OpenAiCompatible {
+        base_url: url.to_owned(),
+        extra_headers: BTreeMap::new(),
+        key_header: None,
+    }
+}
+
+/// Build a unique gateway url
+fn unique_url() -> String {
+    format!(
+        "https://{}.gateway.example/v1",
+        generators::gen_string(12).to_lowercase()
+    )
+}
+
+/// Build the allowed entry for an `OpenAiCompatible` url
+///
+/// # Arguments
+///
+/// * `url` - The allowed base url
+fn allowed(url: &str) -> AllowedEndpoint {
+    AllowedEndpoint::new(ModelProviderKind::OpenAiCompatible, Some(url.to_owned()))
+}
+
+/// Change the allowed model endpoints
+///
+/// # Arguments
+///
+/// * `admin` - The admin client
+/// * `update` - The change to make
+/// * `scan` - Whether to run the consistency scan afterwards
+async fn whitelist(admin: &Thorium, update: ModelsConfUpdate, scan: bool) -> Result<(), Error> {
+    // pick whether the scan runs
+    let params = if scan {
+        SystemSettingsUpdateParams::default()
+    } else {
+        SystemSettingsUpdateParams::default().no_scan()
+    };
+    admin
+        .system
+        .update_settings(&SystemSettingsUpdate::default().models(update), &params)
+        .await?;
+    Ok(())
+}
+
+/// Create a model endpoint without allowing it first
+///
+/// # Arguments
+///
+/// * `client` - The client to create it with
+/// * `group` - The group to create it in
+/// * `provider` - The endpoint's provider
+async fn create_endpoint(
+    client: &Thorium,
+    group: &str,
+    provider: ModelProvider,
+) -> Result<Uuid, Error> {
+    // create the endpoint straight through the entity route
+    let req = generators::gen_model_entity(
+        &[group],
+        EntityMetadataRequest::ModelEndpoint(ModelEndpointEntityRequest::new(provider)),
+    );
+    Ok(client.entities.create(req).await?.id)
+}
+
+/// Set one of a user's own model endpoints
+///
+/// # Arguments
+///
+/// * `client` - The user's client
+/// * `id` - The endpoint's id
+/// * `provider` - The endpoint's provider
+async fn set_user_endpoint(
+    client: &Thorium,
+    id: Uuid,
+    provider: ModelProvider,
+) -> Result<(), Error> {
+    // send the endpoint as a model settings update
+    let update =
+        UserModelSettingsUpdate::default().endpoint(id, UserModelEndpoint::new("own", provider));
+    let settings = UserSettingsUpdate::default().ai(AiSettingsUpdate::default().models(update));
+    client
+        .users
+        .update_self(UserUpdate::default().settings(settings))
+        .await?;
+    Ok(())
+}
+
+/// Get the bans of a group model endpoint
+///
+/// # Arguments
+///
+/// * `client` - The client to read it with
+/// * `id` - The endpoint
+async fn endpoint_bans(client: &Thorium, id: Uuid) -> Result<Vec<ModelBan>, Error> {
+    // read the endpoint's metadata
+    match client.entities.get(id).await?.metadata {
+        EntityMetadata::ModelEndpoint(meta) => Ok(meta.bans.into_values().collect()),
+        _ => Err(Error::new("not a model endpoint")),
+    }
+}
+
+/// Get the bans of one of a user's own endpoints
+///
+/// # Arguments
+///
+/// * `client` - The user's client
+/// * `id` - The endpoint
+async fn user_endpoint_bans(client: &Thorium, id: Uuid) -> Result<Vec<ModelBan>, Error> {
+    // read the user's own settings
+    let info = client.users.info().await?;
+    let models = info.settings.ai.map_or_default(|ai| ai.models);
+    Ok(models
+        .endpoints
+        .get(&id)
+        .map_or_default(|endpoint| endpoint.bans.values().cloned().collect()))
+}
+
+/// Count the bans of one kind in a list
+///
+/// # Arguments
+///
+/// * `bans` - The bans to count
+/// * `kind` - The kind to count
+fn count(bans: &[ModelBan], kind: &ModelBanKind) -> usize {
+    bans.iter().filter(|ban| &ban.ban_kind == kind).count()
+}
+
+/// With an empty whitelist no endpoint can be configured, and an allowed provider and url let
+/// exactly that endpoint be created
+#[serial_test::serial]
+#[tokio::test]
+async fn model_whitelist_on_create() -> Result<(), Error> {
+    // an empty whitelist and a user who owns a group
+    let admin = test_utilities::admin_client().await?;
+    admin
+        .system
+        .reset_settings(&SystemSettingsResetParams::default().no_scan())
+        .await?;
+    is!(
+        admin.system.get_settings().await?.models,
+        ModelsConf::default()
+    );
+    let owner = generators::user_with_role(&admin, UserRole::User).await?;
+    let group = generators::group_with_roles(
+        &GroupRoles::default().owner(&owner.username),
+        GroupAllowed::default(),
+        &admin,
+    )
+    .await?;
+    // no group endpoint and no user endpoint can be created
+    let anthropic = generators::gen_anthropic_provider();
+    let resp = create_endpoint(&owner.client, &group, anthropic.clone()).await;
+    fail!(resp, 400);
+    let resp = set_user_endpoint(&owner.client, Uuid::new_v4(), anthropic.clone()).await;
+    fail!(resp, 400);
+    // allowing Anthropic's default url allows only that url
+    whitelist(
+        &admin,
+        ModelsConfUpdate::default()
+            .add_endpoint(AllowedEndpoint::new(ModelProviderKind::Anthropic, None)),
+        false,
+    )
+    .await?;
+    create_endpoint(&owner.client, &group, anthropic.clone()).await?;
+    set_user_endpoint(&owner.client, Uuid::new_v4(), anthropic).await?;
+    let custom = ModelProvider::Anthropic {
+        base_url: Some("https://anthropic.proxy.example".into()),
+        version: "2023-06-01".into(),
+        betas: BTreeSet::new(),
+        workspace_id: None,
+    };
+    let refusal = create_endpoint(&owner.client, &group, custom).await;
+    fail!(refusal, 400);
+    let msg = refusal.err().and_then(|err| err.msg()).unwrap_or_default();
+    assert!(
+        msg.contains("Anthropic"),
+        "the refusal didn't name the provider's entries: {msg}"
+    );
+    // allowing a gateway url allows that url and no other
+    let url = unique_url();
+    whitelist(
+        &admin,
+        ModelsConfUpdate::default().add_endpoint(allowed(&url)),
+        false,
+    )
+    .await?;
+    create_endpoint(&owner.client, &group, compatible(&url)).await?;
+    let resp = create_endpoint(&owner.client, &group, compatible(&unique_url())).await;
+    fail!(resp, 400);
+    Ok(())
+}
+
+/// Whitelist entries match exactly apart from one trailing slash, Bedrock entries match any
+/// region, an update can't move an endpoint off the list, and only admins change the list
+#[serial_test::serial]
+#[tokio::test]
+// one scenario builds the shared fixtures every step of it checks
+#[allow(clippy::too_many_lines)]
+async fn model_whitelist_matching() -> Result<(), Error> {
+    // an allowed gateway url and Bedrock's default urls
+    let admin = test_utilities::admin_client().await?;
+    let owner = generators::user_with_role(&admin, UserRole::User).await?;
+    let group = generators::group_with_roles(
+        &GroupRoles::default().owner(&owner.username),
+        GroupAllowed::default(),
+        &admin,
+    )
+    .await?;
+    let url = unique_url();
+    whitelist(
+        &admin,
+        ModelsConfUpdate::default()
+            .add_endpoint(allowed(&url))
+            .add_endpoint(AllowedEndpoint::new(ModelProviderKind::Bedrock, None)),
+        false,
+    )
+    .await?;
+    // the url and the url with one trailing slash match
+    let kept = create_endpoint(&owner.client, &group, compatible(&url)).await?;
+    create_endpoint(&owner.client, &group, compatible(&format!("{url}/"))).await?;
+    // any other difference doesn't, and the refusal names the endpoint and the entries
+    for other in [
+        format!("{url}//"),
+        url.replacen("https://", "https://GW", 1),
+        url.replace("/v1", "/v2"),
+    ] {
+        let refusal = create_endpoint(&owner.client, &group, compatible(&other)).await;
+        fail!(refusal, 400);
+        let msg = refusal.err().and_then(|err| err.msg()).unwrap_or_default();
+        assert!(
+            msg.contains(&url),
+            "the refusal didn't list the entries: {msg}"
+        );
+    }
+    // Bedrock's default urls match in any region, a custom endpoint url doesn't
+    for region in ["us-east-1", "eu-west-3"] {
+        let bedrock = ModelProvider::Bedrock {
+            region: region.into(),
+            endpoint_kind: BedrockEndpointKind::Runtime,
+            endpoint_url: None,
+            workspace_id: None,
+        };
+        create_endpoint(&owner.client, &group, bedrock).await?;
+    }
+    let vpc = ModelProvider::Bedrock {
+        region: "us-east-1".into(),
+        endpoint_kind: BedrockEndpointKind::Runtime,
+        endpoint_url: Some("https://vpce.bedrock.example".into()),
+        workspace_id: None,
+    };
+    let resp = create_endpoint(&owner.client, &group, vpc).await;
+    fail!(resp, 400);
+    // an update that moves an endpoint off the list is refused and changes nothing
+    let before = owner.client.entities.get(kept).await?;
+    let update =
+        EntityMetadataUpdate::model_endpoint().endpoint_provider(compatible(&unique_url()));
+    let resp = owner
+        .client
+        .entities
+        .update(kept, EntityUpdate::default().metadata(update))
+        .await;
+    fail!(resp, 400);
+    let after = owner.client.entities.get(kept).await?;
+    match (&before.metadata, &after.metadata) {
+        (EntityMetadata::ModelEndpoint(before), EntityMetadata::ModelEndpoint(after)) => {
+            is!(&before.provider, &after.provider);
+        }
+        _ => return Err(Error::new("not a model endpoint")),
+    }
+    // a non-admin can't change the list
+    let update = SystemSettingsUpdate::default()
+        .models(ModelsConfUpdate::default().add_endpoint(allowed(&unique_url())));
+    let resp = owner
+        .client
+        .system
+        .update_settings(&update, &SystemSettingsUpdateParams::default())
+        .await;
+    fail!(resp, 401);
+    Ok(())
+}
+
+/// The consistency scan bans group and user endpoints that fall outside the whitelist once per
+/// endpoint with a notification, brings back a cleared ban, and clears only its own bans when the
+/// endpoint is allowed again
+#[serial_test::serial]
+#[tokio::test]
+// one scenario builds the shared fixtures every step of it checks
+#[allow(clippy::too_many_lines)]
+async fn model_whitelist_scan() -> Result<(), Error> {
+    // a group endpoint and a user endpoint on an allowed url
+    let admin = test_utilities::admin_client().await?;
+    let owner = generators::user_with_role(&admin, UserRole::User).await?;
+    let member = generators::user_with_role(&admin, UserRole::User).await?;
+    let group = generators::group_with_roles(
+        &GroupRoles::default()
+            .owner(&owner.username)
+            .user(&member.username),
+        GroupAllowed::default(),
+        &admin,
+    )
+    .await?;
+    let url = unique_url();
+    let other_url = unique_url();
+    whitelist(
+        &admin,
+        ModelsConfUpdate::default()
+            .add_endpoint(allowed(&url))
+            .add_endpoint(allowed(&other_url)),
+        false,
+    )
+    .await?;
+    let endpoint = create_endpoint(&owner.client, &group, compatible(&url)).await?;
+    let other = create_endpoint(&owner.client, &group, compatible(&other_url)).await?;
+    let own = Uuid::new_v4();
+    set_user_endpoint(&owner.client, own, compatible(&url)).await?;
+    let not_allowed = ModelBanKind::NotAllowedByDeployment;
+    // removing the entry without a scan bans nothing
+    whitelist(
+        &admin,
+        ModelsConfUpdate::default().remove_endpoint(allowed(&url)),
+        false,
+    )
+    .await?;
+    is!(
+        count(&endpoint_bans(&owner.client, endpoint).await?, &not_allowed),
+        0
+    );
+    is!(
+        count(&user_endpoint_bans(&owner.client, own).await?, &not_allowed),
+        0
+    );
+    // the next update with a scan bans both once, and a second scan adds nothing
+    for _ in 0..2 {
+        whitelist(&admin, ModelsConfUpdate::default(), true).await?;
+        is!(
+            count(&endpoint_bans(&owner.client, endpoint).await?, &not_allowed),
+            1
+        );
+        is!(
+            count(&user_endpoint_bans(&owner.client, own).await?, &not_allowed),
+            1
+        );
+        is!(
+            count(&endpoint_bans(&owner.client, other).await?, &not_allowed),
+            0
+        );
+    }
+    // each ban has a notification: on the endpoint for members, and for the user
+    let ban = endpoint_bans(&owner.client, endpoint)
+        .await?
+        .into_iter()
+        .find(|ban| ban.ban_kind == not_allowed)
+        .expect("no whitelist ban");
+    let notes = member
+        .client
+        .entities
+        .notifications::<ModelEndpointEntity>(endpoint)
+        .await?;
+    is!(
+        notes
+            .iter()
+            .filter(|note| note.ban_id == Some(ban.id))
+            .count(),
+        1
+    );
+    let user_ban = user_endpoint_bans(&owner.client, own)
+        .await?
+        .into_iter()
+        .find(|ban| ban.ban_kind == not_allowed)
+        .expect("no whitelist ban on the user endpoint");
+    let user_notes = owner.client.users.notifications().await?;
+    is!(
+        user_notes
+            .iter()
+            .filter(|note| note.ban_id == Some(user_ban.id))
+            .count(),
+        1
+    );
+    // an owner clears the ban while the endpoint is still outside, and the next scan adds it again
+    let clear = EntityMetadataUpdate::model_endpoint()
+        .model_bans_update(ModelBanUpdate::default().remove_ban(ban.id));
+    owner
+        .client
+        .entities
+        .update(endpoint, EntityUpdate::default().metadata(clear))
+        .await?;
+    is!(
+        count(&endpoint_bans(&owner.client, endpoint).await?, &not_allowed),
+        0
+    );
+    whitelist(&admin, ModelsConfUpdate::default(), true).await?;
+    is!(
+        count(&endpoint_bans(&owner.client, endpoint).await?, &not_allowed),
+        1
+    );
+    // a Generic ban on the same endpoint survives re-allowing the url
+    let generic = ModelBan::generic("paused by hand");
+    let add = EntityMetadataUpdate::model_endpoint()
+        .model_bans_update(ModelBanUpdate::default().add_ban(generic.clone()));
+    owner
+        .client
+        .entities
+        .update(endpoint, EntityUpdate::default().metadata(add))
+        .await?;
+    whitelist(
+        &admin,
+        ModelsConfUpdate::default().add_endpoint(allowed(&url)),
+        true,
+    )
+    .await?;
+    let bans = endpoint_bans(&owner.client, endpoint).await?;
+    is!(count(&bans, &not_allowed), 0);
+    is!(
+        count(&bans, &ModelBanKind::Generic("paused by hand".into())),
+        1
+    );
+    is!(
+        count(&user_endpoint_bans(&owner.client, own).await?, &not_allowed),
+        0
+    );
+    // the cleared bans' notifications are gone
+    let notes = member
+        .client
+        .entities
+        .notifications::<ModelEndpointEntity>(endpoint)
+        .await?;
+    assert!(
+        notes.iter().all(|note| note
+            .ban_id
+            .is_none_or(|id| bans.iter().any(|ban| ban.id == id))),
+        "a cleared whitelist ban left its notification"
+    );
+    let user_notes = owner.client.users.notifications().await?;
+    assert!(
+        user_notes
+            .iter()
+            .all(|note| note.ban_id != Some(user_ban.id)),
+        "a cleared user whitelist ban left its notification"
+    );
+    // clearing the whole list with a scan bans every endpoint
+    whitelist(&admin, ModelsConfUpdate::default().clear(), true).await?;
+    is!(
+        count(&endpoint_bans(&owner.client, endpoint).await?, &not_allowed),
+        1
+    );
+    is!(
+        count(&endpoint_bans(&owner.client, other).await?, &not_allowed),
+        1
+    );
+    is!(
+        count(&user_endpoint_bans(&owner.client, own).await?, &not_allowed),
+        1
+    );
+    Ok(())
+}
+
+/// Allowed endpoints are added, removed, and cleared through the settings update, read back
+/// sorted, and survive a backup and restore
+#[serial_test::serial]
+#[tokio::test]
+async fn model_whitelist_settings() -> Result<(), Error> {
+    // start from the default settings
+    let admin = test_utilities::admin_client().await?;
+    admin
+        .system
+        .reset_settings(&SystemSettingsResetParams::default().no_scan())
+        .await?;
+    // add two entries, adding one of them twice
+    let (first, second) = ("https://a.example/v1", "https://b.example/v1");
+    let update = ModelsConfUpdate::default()
+        .add_endpoint(allowed(second))
+        .add_endpoint(allowed(first));
+    whitelist(&admin, update.clone(), false).await?;
+    whitelist(
+        &admin,
+        ModelsConfUpdate::default().add_endpoint(allowed(first)),
+        false,
+    )
+    .await?;
+    let read = admin.system.get_settings().await?;
+    is!(
+        read.models
+            .allowed_endpoints
+            .iter()
+            .cloned()
+            .collect::<Vec<_>>(),
+        vec![allowed(first), allowed(second)]
+    );
+    let settings_update = SystemSettingsUpdate::default().models(update);
+    is!(&read, &settings_update);
+    // removing an entry that isn't there changes nothing
+    whitelist(
+        &admin,
+        ModelsConfUpdate::default().remove_endpoint(allowed("https://c.example/v1")),
+        false,
+    )
+    .await?;
+    is!(
+        admin.system.get_settings().await?.models,
+        read.models.clone()
+    );
+    // a backup holds the entries, a reset drops them, and a restore brings them back
+    let backup = admin.system.backup().await?;
+    is!(backup.settings.models.clone(), read.models.clone());
+    admin
+        .system
+        .reset_settings(&SystemSettingsResetParams::default().no_scan())
+        .await?;
+    is!(
+        admin.system.get_settings().await?.models,
+        ModelsConf::default()
+    );
+    admin.system.restore(&backup).await?;
+    is!(
+        admin.system.get_settings().await?.models,
+        read.models.clone()
+    );
+    // clearing the list empties it
+    whitelist(&admin, ModelsConfUpdate::default().clear(), false).await?;
+    is!(
+        admin.system.get_settings().await?.models,
+        ModelsConf::default()
+    );
+    Ok(())
+}
+
+/// An admin's backup keeps user model secrets and a restore brings back the same credential,
+/// while user responses still return only its fingerprint
+#[serial_test::serial]
+#[tokio::test]
+async fn backup_keeps_model_secrets() -> Result<(), Error> {
+    // a user with a credential for an allowed endpoint of their own
+    let admin = test_utilities::admin_client().await?;
+    let user = generators::user_with_role(&admin, UserRole::User).await?;
+    let url = unique_url();
+    whitelist(
+        &admin,
+        ModelsConfUpdate::default().add_endpoint(allowed(&url)),
+        false,
+    )
+    .await?;
+    let endpoint = Uuid::new_v4();
+    let secret = format!("sk-{}", generators::gen_string(32).to_lowercase());
+    let update = UserModelSettingsUpdate::default()
+        .endpoint(endpoint, UserModelEndpoint::new("own", compatible(&url)))
+        .credential(
+            endpoint,
+            UserCredentialRef::new(CredentialKind::ApiKey, Some(secret.as_str().into())),
+        );
+    let settings = UserSettingsUpdate::default().ai(AiSettingsUpdate::default().models(update));
+    user.client
+        .users
+        .update_self(UserUpdate::default().settings(settings))
+        .await?;
+    // the admin's backup holds the secret
+    let backup = admin.system.backup().await?;
+    let backed_up = backup
+        .users
+        .iter()
+        .find(|backed_up| backed_up.username == user.username)
+        .expect("the user isn't in the backup");
+    let models = &backed_up
+        .settings
+        .ai
+        .as_ref()
+        .expect("no ai settings in the backup")
+        .models;
+    assert!(
+        models.credentials[&endpoint]
+            .secrets
+            .primary
+            .as_ref()
+            .is_some_and(|stored| stored.expose() == secret),
+        "the backup lost the secret"
+    );
+    // a restore brings back the same credential, and responses hold only its fingerprint
+    admin.system.restore(&backup).await?;
+    let fingerprint = ModelSecret::from(secret.as_str()).fingerprint();
+    for info in [
+        user.client.users.info().await?,
+        admin.users.get(&user.username).await?,
+    ] {
+        let cred = info
+            .settings
+            .ai
+            .expect("no ai settings after the restore")
+            .models
+            .credentials[&endpoint]
+            .clone();
+        is!(cred.secrets.fingerprint, Some(fingerprint.clone()));
+        is!(cred.secrets.primary, None::<ModelSecret>);
+    }
+    Ok(())
+}
+
+/// The whitelist scan writes only a user's model settings, so changes made to the user while it
+/// runs are kept, and a user deleted while it runs stays deleted
+#[serial_test::serial]
+#[tokio::test]
+async fn model_whitelist_scan_keeps_concurrent_changes() -> Result<(), Error> {
+    // two users and an allowed url
+    let admin = test_utilities::admin_client().await?;
+    let changed = generators::user_with_role(&admin, UserRole::User).await?;
+    let deleted = generators::user_with_role(&admin, UserRole::User).await?;
+    let url = unique_url();
+    whitelist(
+        &admin,
+        ModelsConfUpdate::default().add_endpoint(allowed(&url)),
+        false,
+    )
+    .await?;
+    // give each user an endpoint of their own on the url
+    let own = Uuid::new_v4();
+    set_user_endpoint(&changed.client, own, compatible(&url)).await?;
+    set_user_endpoint(&deleted.client, Uuid::new_v4(), compatible(&url)).await?;
+    // remove the url with a scan that pauses before writing either user
+    test_utilities::faults::pause_scan_before_write(&changed.username);
+    test_utilities::faults::pause_scan_before_write(&deleted.username);
+    let scan = tokio::spawn({
+        let admin = admin.clone();
+        let url = url.clone();
+        async move {
+            whitelist(
+                &admin,
+                ModelsConfUpdate::default().remove_endpoint(allowed(&url)),
+                true,
+            )
+            .await
+        }
+    });
+    // change one user's role and delete the other while the scan waits on each, in the order
+    // the scan reaches them
+    let (mut role_changed, mut user_deleted) = (false, false);
+    for _ in 0..3000 {
+        // change the role once the scan waits on that user
+        if !role_changed && test_utilities::faults::scan_paused(&changed.username) {
+            let role = UserUpdate {
+                role: Some(UserRole::Analyst),
+                ..UserUpdate::default()
+            };
+            admin.users.update(&changed.username, role).await?;
+            test_utilities::faults::release_scan(&changed.username);
+            role_changed = true;
+        }
+        // delete the other user once the scan waits on them
+        if !user_deleted && test_utilities::faults::scan_paused(&deleted.username) {
+            admin.users.delete(&deleted.username).await?;
+            test_utilities::faults::release_scan(&deleted.username);
+            user_deleted = true;
+        }
+        // stop once both happened, otherwise check again shortly
+        if role_changed && user_deleted {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
+    // both changes happened and the scan finished
+    is!((role_changed, user_deleted), (true, true));
+    scan.await.map_err(|err| Error::new(err.to_string()))??;
+    // the role change was kept and the endpoint was still banned
+    is!(
+        admin.users.get(&changed.username).await?.role,
+        UserRole::Analyst
+    );
+    let bans = user_endpoint_bans(&changed.client, own).await?;
+    is!(count(&bans, &ModelBanKind::NotAllowedByDeployment), 1);
+    // the deleted user wasn't written back
+    let resp = admin.users.get(&deleted.username).await;
+    fail!(resp, 404);
+    Ok(())
+}
+
+/// A user whose stored settings don't parse doesn't stop the whitelist scan: the scan skips that
+/// user and still bans the endpoints of the other users whose urls were removed
+#[serial_test::serial]
+#[tokio::test]
+async fn model_whitelist_scan_skips_users_whose_settings_dont_parse() -> Result<(), Error> {
+    // a user with an endpoint of their own on an allowed url, and a second user
+    let admin = test_utilities::admin_client().await?;
+    let user = generators::user_with_role(&admin, UserRole::User).await?;
+    let broken = generators::user_with_role(&admin, UserRole::User).await?;
+    let removed = unique_url();
+    whitelist(
+        &admin,
+        ModelsConfUpdate::default().add_endpoint(allowed(&removed)),
+        false,
+    )
+    .await?;
+    let id = Uuid::new_v4();
+    set_user_endpoint(&user.client, id, compatible(&removed)).await?;
+    // store settings that don't parse for the second user, as a damaged record would hold
+    let key = format!(
+        "{}:user_data:{}",
+        test_utilities::CONF.thorium.namespace,
+        broken.username
+    );
+    let pool = test_utilities::get_redis_client(&test_utilities::CONF).await;
+    let mut conn = pool
+        .get()
+        .await
+        .map_err(|err| Error::new(format!("failed to get a Redis connection: {err}")))?;
+    let () = redis::cmd("HSET")
+        .arg(&key)
+        .arg("settings")
+        .arg("{broken-json")
+        .query_async(&mut *conn)
+        .await
+        .map_err(|err| Error::new(format!("failed to damage the settings: {err}")))?;
+    // remove the url with a scan
+    let scanned = whitelist(
+        &admin,
+        ModelsConfUpdate::default().remove_endpoint(allowed(&removed)),
+        true,
+    )
+    .await;
+    // repair the second user before checking, so later tests can list users
+    let () = redis::cmd("HSET")
+        .arg(&key)
+        .arg("settings")
+        .arg(r#"{"theme":"Automatic","ai":null}"#)
+        .query_async(&mut *conn)
+        .await
+        .map_err(|err| Error::new(format!("failed to repair the settings: {err}")))?;
+    // the scan finished and banned the first user's endpoint once
+    scanned?;
+    let bans = user_endpoint_bans(&user.client, id).await?;
+    is!(count(&bans, &ModelBanKind::NotAllowedByDeployment), 1);
+    Ok(())
+}
+
+/// A user's own change that lands between the whitelist scan's read and write makes the scan
+/// read the user again, so the change is kept and the scan's ban still lands
+#[serial_test::serial]
+#[tokio::test]
+async fn model_whitelist_scan_retries_changed_users() -> Result<(), Error> {
+    // a user and two allowed urls
+    let admin = test_utilities::admin_client().await?;
+    let user = generators::user_with_role(&admin, UserRole::User).await?;
+    let (removed, kept) = (unique_url(), unique_url());
+    whitelist(
+        &admin,
+        ModelsConfUpdate::default()
+            .add_endpoint(allowed(&removed))
+            .add_endpoint(allowed(&kept)),
+        false,
+    )
+    .await?;
+    // give the user an endpoint of their own on the url that will be removed
+    let first = Uuid::new_v4();
+    set_user_endpoint(&user.client, first, compatible(&removed)).await?;
+    // remove the first url with a scan that pauses before writing the user
+    test_utilities::faults::pause_scan_before_write(&user.username);
+    let scan = tokio::spawn({
+        let admin = admin.clone();
+        let removed = removed.clone();
+        async move {
+            whitelist(
+                &admin,
+                ModelsConfUpdate::default().remove_endpoint(allowed(&removed)),
+                true,
+            )
+            .await
+        }
+    });
+    // add a second endpoint on the other url once the scan waits on the user
+    let second = Uuid::new_v4();
+    let mut added = false;
+    for _ in 0..3000 {
+        // add the endpoint and let the scan go on once it's paused
+        if test_utilities::faults::scan_paused(&user.username) {
+            set_user_endpoint(&user.client, second, compatible(&kept)).await?;
+            test_utilities::faults::release_scan(&user.username);
+            added = true;
+            break;
+        }
+        // otherwise check again shortly
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
+    // the endpoint was added and the scan finished
+    is!(added, true);
+    scan.await.map_err(|err| Error::new(err.to_string()))??;
+    // the first endpoint was banned once
+    let bans = user_endpoint_bans(&user.client, first).await?;
+    is!(count(&bans, &ModelBanKind::NotAllowedByDeployment), 1);
+    // the second endpoint was kept without a ban
+    let info = user.client.users.info().await?;
+    let models = info.settings.ai.map_or_default(|ai| ai.models);
+    is!(models.endpoints.contains_key(&second), true);
+    is!(user_endpoint_bans(&user.client, second).await?.len(), 0);
+    Ok(())
+}
+
+/// A user deleted after the whitelist scan re-reads them but before it writes their ban
+/// notification leaves no notification behind for a new account with the same username
+#[serial_test::serial]
+#[tokio::test]
+async fn model_whitelist_scan_notification_skips_recreated_user() -> Result<(), Error> {
+    // a user with an endpoint of their own on an allowed url
+    let admin = test_utilities::admin_client().await?;
+    let user = generators::user_with_role(&admin, UserRole::User).await?;
+    let url = unique_url();
+    whitelist(
+        &admin,
+        ModelsConfUpdate::default().add_endpoint(allowed(&url)),
+        false,
+    )
+    .await?;
+    set_user_endpoint(&user.client, Uuid::new_v4(), compatible(&url)).await?;
+    // remove the url with a scan that pauses before writing the user's ban notification
+    test_utilities::faults::pause_scan_before_notify(&user.username);
+    let scan = tokio::spawn({
+        let admin = admin.clone();
+        let url = url.clone();
+        async move {
+            whitelist(
+                &admin,
+                ModelsConfUpdate::default().remove_endpoint(allowed(&url)),
+                true,
+            )
+            .await
+        }
+    });
+    // delete the user once the scan waits on their notification, then let it go on
+    let mut deleted = false;
+    for _ in 0..3000 {
+        // delete the user and release the scan once it's paused
+        if test_utilities::faults::scan_notify_paused(&user.username) {
+            admin.users.delete(&user.username).await?;
+            test_utilities::faults::release_scan_notify(&user.username);
+            deleted = true;
+            break;
+        }
+        // otherwise check again shortly
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
+    // the user was deleted and the scan finished
+    is!(deleted, true);
+    scan.await.map_err(|err| Error::new(err.to_string()))??;
+    // register a new account with the deleted user's username
+    let password = Uuid::new_v4().simple().to_string();
+    let recreated = register(&admin, &user.username, &password).await?;
+    // the new account sees none of the deleted user's notifications
+    let notifications = recreated.users.notifications().await?;
+    is!(notifications.len(), 0);
+    Ok(())
+}
+
+/// Register an account and get a client for it
+///
+/// # Arguments
+///
+/// * `admin` - The admin client whose host and secret key to register with
+/// * `username` - The username to register
+/// * `password` - The password to register with
+async fn register(admin: &Thorium, username: &str, password: &str) -> Result<Thorium, Error> {
+    // register the account with the secret key so it skips verification
+    let create = UserCreate::new(username, password, "fake@fake.gov").skip_verification();
+    let secret_key = Some(&test_utilities::CONF.thorium.secret_key);
+    Users::create(&admin.host, create, secret_key, &ClientSettings::default()).await?;
+    // log in as the new account
+    let (token, _) =
+        Thorium::auth(&admin.host, username, password, &reqwest::Client::new()).await?;
+    Thorium::build(&admin.host).token(&token).build().await
+}
+
+/// A user deleted and re-created after the whitelist scan re-reads them but before it writes
+/// their ban notification leaves no notification behind for the new account
+#[serial_test::serial]
+#[tokio::test]
+async fn model_whitelist_scan_notification_skips_user_recreated_mid_scan() -> Result<(), Error> {
+    // a user with an endpoint of their own on an allowed url
+    let admin = test_utilities::admin_client().await?;
+    let user = generators::user_with_role(&admin, UserRole::User).await?;
+    let url = unique_url();
+    whitelist(
+        &admin,
+        ModelsConfUpdate::default().add_endpoint(allowed(&url)),
+        false,
+    )
+    .await?;
+    set_user_endpoint(&user.client, Uuid::new_v4(), compatible(&url)).await?;
+    // remove the url with a scan that pauses before writing the user's ban notification
+    test_utilities::faults::pause_scan_before_notify(&user.username);
+    let scan = tokio::spawn({
+        let admin = admin.clone();
+        let url = url.clone();
+        async move {
+            whitelist(
+                &admin,
+                ModelsConfUpdate::default().remove_endpoint(allowed(&url)),
+                true,
+            )
+            .await
+        }
+    });
+    // delete and re-create the user once the scan waits on their notification, then let it go on
+    let password = Uuid::new_v4().simple().to_string();
+    let mut recreated = None;
+    for _ in 0..3000 {
+        // replace the user and release the scan once it's paused
+        if test_utilities::faults::scan_notify_paused(&user.username) {
+            admin.users.delete(&user.username).await?;
+            recreated = Some(register(&admin, &user.username, &password).await?);
+            test_utilities::faults::release_scan_notify(&user.username);
+            break;
+        }
+        // otherwise check again shortly
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
+    // the user was replaced and the scan finished
+    let recreated = recreated.ok_or_else(|| Error::new("the scan never paused".to_owned()))?;
+    scan.await.map_err(|err| Error::new(err.to_string()))??;
+    // the new account sees none of the deleted user's notifications
+    let notifications = recreated.users.notifications().await?;
+    is!(notifications.len(), 0);
+    Ok(())
+}
+
+/// A create that loses the race for a username leaves the notifications of the user that won
+/// it alone
+#[serial_test::serial]
+#[tokio::test]
+async fn losing_user_create_keeps_winner_notifications() -> Result<(), Error> {
+    // an allowed url and a username nobody has yet
+    let admin = test_utilities::admin_client().await?;
+    let url = unique_url();
+    whitelist(
+        &admin,
+        ModelsConfUpdate::default().add_endpoint(allowed(&url)),
+        false,
+    )
+    .await?;
+    let username = generators::gen_string(16).to_lowercase();
+    // start a create that pauses after its existing-user check
+    test_utilities::faults::pause_user_create(&username);
+    let losing = tokio::spawn({
+        let admin = admin.clone();
+        let username = username.clone();
+        async move {
+            let password = Uuid::new_v4().simple().to_string();
+            register(&admin, &username, &password).await
+        }
+    });
+    // wait for the first create to pause
+    let mut paused = false;
+    for _ in 0..3000 {
+        // stop waiting once the create is paused
+        if test_utilities::faults::user_create_paused(&username) {
+            paused = true;
+            break;
+        }
+        // otherwise check again shortly
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
+    is!(paused, true);
+    // a second create of the same username wins it
+    let password = Uuid::new_v4().simple().to_string();
+    let winner = register(&admin, &username, &password).await?;
+    // the winner gets a ban notification from the whitelist scan
+    set_user_endpoint(&winner, Uuid::new_v4(), compatible(&url)).await?;
+    whitelist(
+        &admin,
+        ModelsConfUpdate::default().remove_endpoint(allowed(&url)),
+        true,
+    )
+    .await?;
+    is!(winner.users.notifications().await?.len(), 1);
+    // let the first create go on; it loses the username
+    test_utilities::faults::release_user_create(&username);
+    let lost = losing
+        .await
+        .map_err(|err| Error::new(err.to_string()))?
+        .map(|_| ());
+    fail!(lost, 409);
+    // the winner still has its notification
+    is!(winner.users.notifications().await?.len(), 1);
+    Ok(())
+}
+
+/// A user re-created while the delete of the previous user of that name is finishing keeps the
+/// notifications it gets after it was created
+#[serial_test::serial]
+#[tokio::test]
+async fn user_recreated_during_delete_keeps_new_notifications() -> Result<(), Error> {
+    // an allowed url and a user to delete
+    let admin = test_utilities::admin_client().await?;
+    let url = unique_url();
+    whitelist(
+        &admin,
+        ModelsConfUpdate::default().add_endpoint(allowed(&url)),
+        false,
+    )
+    .await?;
+    let user = generators::user_with_role(&admin, UserRole::User).await?;
+    // start a delete that pauses once the user is removed
+    test_utilities::faults::pause_user_delete(&user.username);
+    let delete = tokio::spawn({
+        let admin = admin.clone();
+        let username = user.username.clone();
+        async move { admin.users.delete(&username).await }
+    });
+    // wait for the delete to pause
+    let mut paused = false;
+    for _ in 0..3000 {
+        // stop waiting once the delete is paused
+        if test_utilities::faults::user_delete_paused(&user.username) {
+            paused = true;
+            break;
+        }
+        // otherwise check again shortly
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
+    is!(paused, true);
+    // register a new account with the username and give it a ban notification
+    let password = Uuid::new_v4().simple().to_string();
+    let recreated = register(&admin, &user.username, &password).await?;
+    set_user_endpoint(&recreated, Uuid::new_v4(), compatible(&url)).await?;
+    whitelist(
+        &admin,
+        ModelsConfUpdate::default().remove_endpoint(allowed(&url)),
+        true,
+    )
+    .await?;
+    is!(recreated.users.notifications().await?.len(), 1);
+    // let the delete finish
+    test_utilities::faults::release_user_delete(&user.username);
+    delete.await.map_err(|err| Error::new(err.to_string()))??;
+    // the new account still has its notification
+    is!(recreated.users.notifications().await?.len(), 1);
     Ok(())
 }

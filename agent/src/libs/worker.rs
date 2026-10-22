@@ -204,8 +204,10 @@ impl Worker {
                         event!(parent: &span, Level::ERROR, error = error.msg());
                         // build the spawn error logs to send to Thorium
                         let logs = spawn_error_logs(&error);
+                        // get the jobs client to send our error logs with
+                        let client = &self.target.thorium.jobs;
                         // send our error logs to Thorium
-                        if let Err(error) = self.target.thorium.jobs.error(&job_id, &logs).await {
+                        if let Err(error) = client.error(&job_id, &logs, &self.target.name).await {
                             // log that we failed to update our stage logs in thorium
                             event!(
                                 parent: &span,

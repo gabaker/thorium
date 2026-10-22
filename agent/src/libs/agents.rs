@@ -147,9 +147,13 @@ fn get_executor(
     }
 }
 
+/// The state an agent keeps while it runs one job: its Thorium client, the worker that claimed the
+/// job, the job and its image, the executor, and the logs it ships to Thorium
 pub struct Agent {
     /// A client to Thorium
     pub thorium: Thorium,
+    /// The name of the worker that claimed this job
+    pub worker: String,
     /// The image we are executing a job for
     pub image: Image,
     /// The Job this agent is executing
@@ -185,6 +189,7 @@ impl Agent {
         let executor = get_executor(worker, target, &job, &sender)?;
         let agent = Agent {
             thorium: worker.thorium.clone(),
+            worker: target.name.clone(),
             image: target.image.clone(),
             job,
             stage_logs: StageLogsAdd::default(),
@@ -223,7 +228,7 @@ impl Agent {
                     )
                     .await?;
                 // empty our stage logs
-                self.stage_logs.logs.truncate(0);
+                self.stage_logs.logs.clear();
                 // increment how many batches are sent
                 batches_sent += 1;
                 // if we have sent our max number of batches then stop sending logs for a bit
@@ -245,7 +250,7 @@ impl Agent {
                 )
                 .await?;
             // empty our stage logs
-            self.stage_logs.logs.truncate(0);
+            self.stage_logs.logs.clear();
             self.stage_logs.logs.shrink_to_fit();
         }
         Ok(())
@@ -278,7 +283,7 @@ impl Agent {
                     )
                     .await?;
                 // empty our stage logs
-                self.stage_logs.logs.truncate(0);
+                self.stage_logs.logs.clear();
                 // increment how many batches are sent
                 batches_sent += 1;
                 // if we have sent our max number of batches then stop sending logs for a bit
@@ -300,7 +305,7 @@ impl Agent {
                 )
                 .await?;
             // empty our stage logs
-            self.stage_logs.logs.truncate(0);
+            self.stage_logs.logs.clear();
             self.stage_logs.logs.shrink_to_fit();
         }
         Ok(())
@@ -368,13 +373,13 @@ impl Agent {
             Some(runtime) => {
                 self.thorium
                     .jobs
-                    .proceed(&self.job, &self.stage_logs, runtime)
+                    .proceed(&self.job, &self.stage_logs, runtime, &self.worker)
                     .await?
             }
             None => {
                 self.thorium
                     .jobs
-                    .error(&self.job.id, &self.stage_logs)
+                    .error(&self.job.id, &self.stage_logs, &self.worker)
                     .await?
             }
         };
@@ -397,7 +402,7 @@ impl Agent {
         self.stage_logs.add(format!("Error: {err}"));
         self.thorium
             .jobs
-            .error(&self.job.id, &self.stage_logs)
+            .error(&self.job.id, &self.stage_logs, &self.worker)
             .await?;
         Ok(())
     }
@@ -414,7 +419,7 @@ impl Agent {
         self.stage_logs.add(format!("Error: {err}"));
         self.thorium
             .jobs
-            .error(&self.job.id, &self.stage_logs)
+            .error(&self.job.id, &self.stage_logs, &self.worker)
             .await?;
         Ok(())
     }
@@ -693,5 +698,252 @@ pub async fn execute(mut agent: Agent, log_path: String) {
                 event!(Level::INFO, msg = error.to_string());
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::HashMap;
+    use std::sync::{Arc, Mutex};
+    use thorium::models::{GenericJob, Image, StageLogsAdd};
+    use thorium::{Error, Thorium};
+    use tokio::fs::File;
+    use tokio::io::BufReader;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::net::TcpListener;
+
+    use super::cmd::tests::{generate_image, generate_job};
+    use super::{Agent, AgentExecutor, InFlight};
+    use crate::libs::children::Children;
+    use crate::libs::results::RawResults;
+    use crate::libs::tags::TagBundle;
+
+    /// The request lines a recording mock server has received
+    type Recorded = Arc<Mutex<Vec<String>>>;
+
+    /// Start a mock Thorium server that records each request line and answers every request
+    /// with a job handle response
+    async fn recording_server() -> (String, Recorded) {
+        // bind to a random local port
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        // track the request lines we receive
+        let recorded: Recorded = Arc::new(Mutex::new(Vec::new()));
+        let inner = recorded.clone();
+        // answer requests in the background
+        tokio::spawn(async move {
+            loop {
+                // accept the next connection
+                let (mut stream, _) = listener.accept().await.unwrap();
+                // read the whole request head and its json body
+                let mut buf = Vec::new();
+                let mut chunk = [0_u8; 4096];
+                loop {
+                    // read the next chunk of this request
+                    let read = stream.read(&mut chunk).await.unwrap();
+                    buf.extend_from_slice(&chunk[..read]);
+                    // check whether the head is complete and the body has arrived
+                    let text = String::from_utf8_lossy(&buf).to_string();
+                    let done = text.find("\r\n\r\n").is_some_and(|end| {
+                        // get the content length of this request
+                        let length = text[..end]
+                            .lines()
+                            .find_map(|line| {
+                                line.to_lowercase()
+                                    .strip_prefix("content-length:")
+                                    .map(|len| len.trim().parse::<usize>().unwrap())
+                            })
+                            .unwrap_or(0);
+                        // the body has arrived once the buffer holds the head and every body byte
+                        buf.len() >= end + 4 + length
+                    });
+                    // stop once the request is complete or the client closed the connection
+                    if done || read == 0 {
+                        break;
+                    }
+                }
+                // record this request line
+                let text = String::from_utf8_lossy(&buf).to_string();
+                let line = text.lines().next().unwrap_or_default().to_owned();
+                inner.lock().unwrap().push(line);
+                // answer with a job handle response and close the connection
+                let body = r#"{"status":"Completed"}"#;
+                let resp = format!(
+                    "HTTP/1.1 202 Accepted\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
+                    body.len()
+                );
+                stream.write_all(resp.as_bytes()).await.unwrap();
+                stream.shutdown().await.unwrap();
+            }
+        });
+        // return the server's address and the request lines it records
+        (format!("http://{addr}"), recorded)
+    }
+
+    /// An executor that is never asked to run anything
+    struct NoopExecutor;
+
+    #[async_trait::async_trait]
+    impl AgentExecutor for NoopExecutor {
+        /// Never called by these tests
+        ///
+        /// # Arguments
+        ///
+        /// * `_` - The image (unused)
+        fn result_paths(&self, _: &Image) -> (String, String) {
+            unimplemented!()
+        }
+        /// Never called by these tests
+        async fn init(&self) -> Result<(), Error> {
+            unimplemented!()
+        }
+        /// Never called by these tests
+        ///
+        /// # Arguments
+        ///
+        /// * `_` - The image (unused)
+        /// * `_` - The job (unused)
+        /// * `_` - The commit each repo is checked out to (unused)
+        async fn setup(
+            &mut self,
+            _: &Image,
+            _: &GenericJob,
+            _: &mut HashMap<String, String>,
+        ) -> Result<(), Error> {
+            unimplemented!()
+        }
+        /// Never called by these tests
+        ///
+        /// # Arguments
+        ///
+        /// * `_` - The image (unused)
+        /// * `_` - The job (unused)
+        /// * `_` - Where to write job logs (unused)
+        async fn execute(&mut self, _: &Image, _: &GenericJob, _: &str) -> Result<InFlight, Error> {
+            unimplemented!()
+        }
+        /// Never called by these tests
+        ///
+        /// # Arguments
+        ///
+        /// * `_` - The image (unused)
+        /// * `_` - The job (unused)
+        async fn sync_cache(&mut self, _: &Image, _: &GenericJob) -> Result<(), Error> {
+            unimplemented!()
+        }
+        /// Never called by these tests
+        ///
+        /// # Arguments
+        ///
+        /// * `_` - The image (unused)
+        async fn results(&mut self, _: &Image) -> Result<RawResults, Error> {
+            unimplemented!()
+        }
+        /// Never called by these tests
+        ///
+        /// # Arguments
+        ///
+        /// * `_` - The image (unused)
+        /// * `_` - The job (unused)
+        /// * `_` - The results to extract tags from (unused)
+        async fn tags(
+            &mut self,
+            _: &Image,
+            _: &GenericJob,
+            _: &RawResults,
+        ) -> Result<TagBundle, Error> {
+            unimplemented!()
+        }
+        /// Never called by these tests
+        ///
+        /// # Arguments
+        ///
+        /// * `_` - The image (unused)
+        async fn children(&mut self, _: &Image) -> Result<Children, Error> {
+            unimplemented!()
+        }
+        /// Never called by these tests
+        ///
+        /// # Arguments
+        ///
+        /// * `_` - The image (unused)
+        /// * `_` - The job (unused)
+        async fn clean_up(&mut self, _: &Image, _: &GenericJob) -> Result<(), Error> {
+            unimplemented!()
+        }
+    }
+
+    /// Build an agent for a job claimed by a named worker that talks to a host
+    ///
+    /// # Arguments
+    ///
+    /// * `host` - The Thorium host to talk to
+    /// * `worker` - The name of the worker that claimed the job
+    async fn agent(host: &str, worker: &str) -> Agent {
+        // build a client for our mock server
+        let thorium = Thorium::build(host).token("token").build().await.unwrap();
+        // build a channel for job logs
+        let (sender, receiver) = crossbeam::channel::unbounded();
+        Agent {
+            thorium,
+            worker: worker.to_owned(),
+            image: generate_image(),
+            job: generate_job(),
+            stage_logs: StageLogsAdd::default(),
+            receiver,
+            sender,
+            executor: Box::new(NoopExecutor),
+            completed: false,
+            runtime: None,
+            commits: HashMap::default(),
+        }
+    }
+
+    /// The agent's proceed and error calls name the worker it claimed with
+    #[tokio::test]
+    async fn job_handles_name_the_claiming_worker() {
+        // start a recording mock server
+        let (host, recorded) = recording_server().await;
+        // a job that succeeds proceeds naming its worker
+        let mut succeeded = agent(&host, "pod/worker 0").await;
+        succeeded.runtime = Some(3);
+        succeeded.proceed().await.unwrap();
+        // a job without a runtime errors naming its worker
+        let no_runtime = agent(&host, "pod/worker 0").await;
+        no_runtime.proceed().await.unwrap();
+        // a job that fails errors naming its worker
+        let mut failed = agent(&host, "pod/worker 0").await;
+        // give the failing job an empty log file to read its logs from
+        let log_path = std::env::temp_dir().join(format!("{}.log", failed.job.id));
+        tokio::fs::write(&log_path, "").await.unwrap();
+        let mut reader = BufReader::new(File::open(&log_path).await.unwrap());
+        failed
+            .error(&mut reader, &Error::new("boom"))
+            .await
+            .unwrap();
+        // remove the empty log file
+        tokio::fs::remove_file(&log_path).await.unwrap();
+        // every handle call carried the worker name
+        let lines = recorded.lock().unwrap().clone();
+        let handles: Vec<&String> = lines
+            .iter()
+            .filter(|line| line.contains("/api/jobs/handle/"))
+            .collect();
+        // each call names the worker in the order the jobs were handled
+        let expected = [
+            format!(
+                "POST /api/jobs/handle/{}/proceed/3?worker=pod%2Fworker+0 HTTP/1.1",
+                succeeded.job.id
+            ),
+            format!(
+                "POST /api/jobs/handle/{}/error?worker=pod%2Fworker+0 HTTP/1.1",
+                no_runtime.job.id
+            ),
+            format!(
+                "POST /api/jobs/handle/{}/error?worker=pod%2Fworker+0 HTTP/1.1",
+                failed.job.id
+            ),
+        ];
+        assert_eq!(handles, expected.iter().collect::<Vec<_>>());
     }
 }

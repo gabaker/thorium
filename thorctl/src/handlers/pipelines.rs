@@ -1,8 +1,9 @@
 use itertools::Itertools;
 use thorium::CtlConf;
-use thorium::{Error, Thorium, models::Pipeline};
+use thorium::models::{EntityMetadata, Pipeline, PipelineUpdate};
+use thorium::{Error, Thorium};
 
-use crate::args::pipelines::{DescribePipelines, GetPipelines, Pipelines};
+use crate::args::pipelines::{DescribePipelines, GetPipelines, Pipelines, StageTool};
 use crate::args::{Args, DescribeCommand};
 use crate::utils;
 
@@ -494,6 +495,56 @@ async fn export(
     report.into_result()
 }
 
+/// Set the tool that runs a pipeline stage
+///
+/// # Arguments
+///
+/// * `thorium` - The Thorium client
+/// * `cmd` - The stage tool command that was run
+async fn stage_tool(thorium: &Thorium, cmd: &StageTool) -> Result<(), Error> {
+    // find the tool the stage should run
+    let tool = super::tools::find_tool(thorium, &cmd.tool).await?;
+    // a pinned version must be one of the tool's instances
+    let id = match cmd.pin {
+        Some(pin) => {
+            let instance = thorium.entities.get(pin).await?;
+            match &instance.metadata {
+                EntityMetadata::ToolInstance(meta) if meta.tool == tool.id => pin,
+                _ => {
+                    return Err(Error::new(format!(
+                        "{pin} is not a version of the tool `{}`",
+                        tool.name
+                    )));
+                }
+            }
+        }
+        None => tool.id,
+    };
+    // find the pipeline's group if it wasn't given
+    let group = match &cmd.group {
+        Some(group) => group.clone(),
+        None => utils::pipelines::find_pipeline_group(thorium, &cmd.pipeline).await?,
+    };
+    // set the stage's tool
+    let update = PipelineUpdate::default().add_stage_tool(&cmd.stage, id);
+    thorium
+        .pipelines
+        .update(&group, &cmd.pipeline, &update)
+        .await?;
+    // say what the stage runs now
+    match cmd.pin {
+        Some(pin) => println!(
+            "Stage '{}' of pipeline '{}' runs tool '{}' pinned to version {pin}",
+            cmd.stage, cmd.pipeline, tool.name
+        ),
+        None => println!(
+            "Stage '{}' of pipeline '{}' runs the latest version of tool '{}'",
+            cmd.stage, cmd.pipeline, tool.name
+        ),
+    }
+    Ok(())
+}
+
 /// Handle all pipelines commands
 ///
 /// # Arguments
@@ -516,6 +567,7 @@ pub async fn handle(args: &Args, cmd: &Pipelines) -> Result<(), Error> {
         Pipelines::Get(cmd) => get(thorium, cmd).await,
         Pipelines::Describe(cmd) => describe(thorium, cmd).await,
         Pipelines::Edit(cmd) => edit::edit(thorium, &conf, cmd).await,
+        Pipelines::StageTool(cmd) => stage_tool(&thorium, cmd).await,
         Pipelines::Notifications(cmd) => notifications::handle(thorium, cmd).await,
         Pipelines::Bans(cmd) => bans::handle(thorium, cmd).await,
         Pipelines::Delete(cmd) => delete(thorium, cmd).await,

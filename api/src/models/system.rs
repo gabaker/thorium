@@ -1,5 +1,5 @@
 use chrono::prelude::*;
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::fmt::{Display, Formatter};
 use std::ops::Add;
 use std::path::PathBuf;
@@ -9,8 +9,8 @@ use crate::models::conversions;
 use crate::{Conf, matches_adds, matches_removes, matches_update};
 
 use super::{
-    Group, GroupStats, Image, ImageScaler, InvalidEnum, Pipeline, Requisition, Resources,
-    ScopedToken, User,
+    Group, GroupStats, Image, ImageScaler, InvalidEnum, ModelProvider, ModelProviderKind, Pipeline,
+    Requisition, Resources, ScopedToken, User,
 };
 
 /// The default IFF to use when initializing Thorium
@@ -122,21 +122,18 @@ impl SystemStats {
         self.groups.values().map(|map| map.total()).sum()
     }
 
-    /// Builds a vector of unique names for each of the group/user/pipeline/image combos
+    /// Builds a vector of unique names for each of the group/tool instance/user combos
     #[must_use]
     pub fn unique(&self) -> HashSet<String> {
         // build an empty list to store our unique names
         let mut unique = HashSet::with_capacity(self.groups.len() * 10);
         // crawl over each group
-        for (group, pipeline_map) in &self.groups {
-            // crawl over each pipeline and its user map
-            for (pipeline, user_map) in &pipeline_map.pipelines {
-                // crawl over each user and its stage map
-                for (user, stage_map) in &user_map.stages {
-                    // crawl over each stage
-                    for stage in stage_map.keys() {
-                        unique.insert(format!("{group}:{pipeline}:{user}:{stage}"));
-                    }
+        for (group, stats) in &self.groups {
+            // crawl over each tool instance and its user map
+            for (tool_instance, user_map) in &stats.workloads {
+                // crawl over each user with jobs for this tool instance
+                for user in user_map.keys() {
+                    unique.insert(format!("{group}:{tool_instance}:{user}"));
                 }
             }
         }
@@ -144,30 +141,13 @@ impl SystemStats {
     }
 
     /// Gets this users image requests sorted from small to large
+    ///
+    /// Requisitions name a pipeline stage, which workload jobs don't have, so no requisition is
+    /// built for the workload stats.
     #[must_use]
     pub fn users_jobs(&self) -> SpawnMap<'_> {
-        // build a map of all users jobs
-        let mut map: SpawnMap = HashMap::default();
-        // crawl over each group
-        for (group, pipeline_map) in &self.groups {
-            // crawl over each pipeline and its user map
-            for (pipeline, user_map) in &pipeline_map.pipelines {
-                // crawl over the pipelines by user
-                for (stage, pipe_stats) in &user_map.stages {
-                    // add these stages to our map based on the number of created + started jobs
-                    for (user, stage_stats) in pipe_stats {
-                        // get an entry to this users map
-                        let user_entry = map.entry(user).or_default();
-                        // build a requisition for this image
-                        let req = Requisition::new(user, group, pipeline, stage);
-                        // get an entry to this images rank group and add it
-                        let entry = user_entry.entry(stage_stats.running).or_default();
-                        entry.push((req, stage_stats.created));
-                    }
-                }
-            }
-        }
-        map
+        // workload jobs have no pipeline stage to build a requisition for
+        HashMap::default()
     }
 }
 
@@ -322,6 +302,9 @@ pub struct SystemSettingsUpdate {
     pub clear_host_path_whitelist: bool,
     /// Allow users to create any host path
     pub allow_unrestricted_host_paths: Option<bool>,
+    /// An update to the allowed model endpoints
+    #[serde(default)]
+    pub models: ModelsConfUpdate,
 }
 
 impl SystemSettingsUpdate {
@@ -435,6 +418,209 @@ impl SystemSettingsUpdate {
         self.allow_unrestricted_host_paths = Some(value);
         self
     }
+
+    /// Set the update to the allowed model endpoints
+    ///
+    /// # Arguments
+    ///
+    /// * `models` - The update to the allowed model endpoints
+    #[must_use]
+    pub fn models(mut self, models: ModelsConfUpdate) -> Self {
+        self.models = models;
+        self
+    }
+}
+
+/// Get the form whitelist entries and endpoint urls are compared in
+///
+/// A url and the same url with one trailing `/` are the same address, and nothing else is
+/// normalized, so a url ending in a single `/` loses it and a url ending in more than one keeps
+/// them all. Applying this more than once changes nothing.
+///
+/// # Arguments
+///
+/// * `url` - The url to normalize
+fn canonical_url(url: &str) -> &str {
+    // drop a single trailing slash, leaving a url ending in more than one alone
+    match url.strip_suffix('/') {
+        Some(rest) if !rest.ends_with('/') => rest,
+        _ => url,
+    }
+}
+
+/// The model endpoints users and groups may configure (admin managed)
+#[derive(Serialize, Deserialize, Debug, Clone, Default, PartialEq, Eq)]
+#[cfg_attr(feature = "api", derive(utoipa::ToSchema))]
+pub struct ModelsConf {
+    /// The allowed endpoints (empty = none can be configured)
+    #[serde(default)]
+    pub allowed_endpoints: BTreeSet<AllowedEndpoint>,
+}
+
+impl ModelsConf {
+    /// Whether an endpoint's provider and url are on the allowed list
+    ///
+    /// # Arguments
+    ///
+    /// * `provider` - The endpoint's provider and connection settings
+    #[must_use]
+    pub fn allows(&self, provider: &ModelProvider) -> bool {
+        // some entry must match the provider and its url exactly
+        self.allowed_endpoints
+            .iter()
+            .any(|entry| entry.matches(provider))
+    }
+
+    /// Make sure an endpoint is on the allowed list, naming it and its provider's entries if not
+    ///
+    /// # Arguments
+    ///
+    /// * `name` - The name of the endpoint, for the refusal
+    /// * `provider` - The endpoint's provider and connection settings
+    pub fn check(&self, name: &str, provider: &ModelProvider) -> Result<(), String> {
+        // an allowed endpoint passes
+        if self.allows(provider) {
+            return Ok(());
+        }
+        // list the entries for this provider
+        let kind = provider.kind();
+        let entries = self
+            .allowed_endpoints
+            .iter()
+            .filter(|entry| entry.provider == kind)
+            .map(|entry| match &entry.base_url {
+                Some(url) => format!("`{url}`"),
+                None => "its default url".to_owned(),
+            })
+            .collect::<Vec<String>>();
+        let entries = if entries.is_empty() {
+            "none".to_owned()
+        } else {
+            entries.join(", ")
+        };
+        let url = match provider.configured_url() {
+            Some(url) => format!("`{url}`"),
+            None => "its default url".to_owned(),
+        };
+        Err(format!(
+            "model endpoint `{name}` ({kind} at {url}) isn't on the deployment's allowed endpoint list; the allowed {kind} endpoints are: {entries}"
+        ))
+    }
+}
+
+/// One allowed model endpoint
+#[derive(Serialize, Deserialize, Debug, Clone, Hash, PartialEq, Eq, PartialOrd, Ord)]
+#[cfg_attr(feature = "api", derive(utoipa::ToSchema))]
+pub struct AllowedEndpoint {
+    /// The provider
+    pub provider: ModelProviderKind,
+    /// The exact base url allowed (unset = only the provider's default public url; for `Bedrock`
+    /// and `Vertex` the regional default urls)
+    pub base_url: Option<String>,
+}
+
+impl AllowedEndpoint {
+    /// Create an allowed endpoint
+    ///
+    /// # Arguments
+    ///
+    /// * `provider` - The provider
+    /// * `base_url` - The exact base url allowed, or `None` for the provider's default urls
+    #[must_use]
+    pub fn new(provider: ModelProviderKind, base_url: Option<String>) -> Self {
+        AllowedEndpoint { provider, base_url }.normalized()
+    }
+
+    /// Get this entry with its url in the form urls are compared in
+    ///
+    /// Urls match apart from one trailing slash, so entries are kept in this form and one
+    /// spelling of a url always finds the entry of the other.
+    #[must_use]
+    pub fn normalized(mut self) -> Self {
+        // drop a single trailing slash from the url
+        if let Some(url) = &mut self.base_url {
+            let trimmed = canonical_url(url).len();
+            url.truncate(trimmed);
+        }
+        self
+    }
+
+    /// Create the allowed endpoint that matches a provider's configured url
+    ///
+    /// # Arguments
+    ///
+    /// * `provider` - The provider to allow
+    #[must_use]
+    pub fn for_provider(provider: &ModelProvider) -> Self {
+        // allow the url the provider is configured with, or its default urls
+        let base_url = provider.configured_url().map(ToOwned::to_owned);
+        AllowedEndpoint::new(provider.kind(), base_url)
+    }
+
+    /// Whether this entry allows a provider
+    ///
+    /// # Arguments
+    ///
+    /// * `provider` - The provider to check
+    #[must_use]
+    pub fn matches(&self, provider: &ModelProvider) -> bool {
+        // the provider must be the same
+        if self.provider != provider.kind() {
+            return false;
+        }
+        // the urls must match apart from one trailing slash, or both use the default
+        match (&self.base_url, provider.configured_url()) {
+            (None, None) => true,
+            (Some(allowed), Some(url)) => canonical_url(allowed) == canonical_url(url),
+            _ => false,
+        }
+    }
+}
+
+/// An update to the allowed model endpoints
+#[derive(Serialize, Deserialize, Debug, Clone, Default)]
+#[cfg_attr(feature = "api", derive(utoipa::ToSchema))]
+pub struct ModelsConfUpdate {
+    /// The endpoints to allow
+    #[serde(default)]
+    pub add_endpoints: BTreeSet<AllowedEndpoint>,
+    /// The endpoints to stop allowing
+    #[serde(default)]
+    pub remove_endpoints: BTreeSet<AllowedEndpoint>,
+    /// Remove every allowed endpoint
+    #[serde(default)]
+    pub clear_endpoints: bool,
+}
+
+impl ModelsConfUpdate {
+    /// Allow an endpoint
+    ///
+    /// # Arguments
+    ///
+    /// * `endpoint` - The endpoint to allow
+    #[must_use]
+    pub fn add_endpoint(mut self, endpoint: AllowedEndpoint) -> Self {
+        self.add_endpoints.insert(endpoint);
+        self
+    }
+
+    /// Stop allowing an endpoint
+    ///
+    /// # Arguments
+    ///
+    /// * `endpoint` - The endpoint to stop allowing
+    #[must_use]
+    pub fn remove_endpoint(mut self, endpoint: AllowedEndpoint) -> Self {
+        self.remove_endpoints.insert(endpoint);
+        self
+    }
+
+    /// Remove every allowed endpoint before any are added
+    #[must_use]
+    pub fn clear(mut self) -> Self {
+        self.clear_endpoints = true;
+        self
+    }
 }
 
 /// Settings that can be dynamically changed in Thorium
@@ -463,6 +649,9 @@ pub struct SystemSettings {
     /// Allow users to create any host path, ignoring the whitelist; defaults to false
     #[serde(default)]
     pub allow_unrestricted_host_paths: bool,
+    /// The model endpoints users and groups may configure
+    #[serde(default)]
+    pub models: ModelsConf,
 }
 
 impl PartialEq<SystemSettingsUpdate> for SystemSettings {
@@ -482,6 +671,21 @@ impl PartialEq<SystemSettingsUpdate> for SystemSettings {
         matches_adds!(self.host_path_whitelist, update.host_path_whitelist.add_paths);
         matches_removes!(self.host_path_whitelist, update.host_path_whitelist.remove_paths);
         matches_update!(self.allow_unrestricted_host_paths, update.allow_unrestricted_host_paths);
+        // compare the entries an update names the way they're kept
+        let models = &update.models;
+        let adds = models.add_endpoints.iter().cloned().map(AllowedEndpoint::normalized).collect::<Vec<_>>();
+        let removes = models.remove_endpoints.iter().cloned().map(AllowedEndpoint::normalized).collect::<Vec<_>>();
+        // the endpoints an update leaves allowed are allowed and the ones it removes aren't
+        let allowed = &self.models.allowed_endpoints;
+        let mut kept = adds.iter().filter(|entry| !removes.contains(*entry));
+        if !kept.all(|entry| allowed.contains(entry)) {
+            return false;
+        }
+        matches_removes!(allowed, removes);
+        // a cleared list holds only what the update added
+        if models.clear_endpoints && allowed.iter().any(|entry| !adds.contains(entry)) {
+            return false;
+        }
         true
     }
 }
@@ -1216,6 +1420,9 @@ pub struct WorkerRegistration {
     pub resources: Resources,
     /// The pool this worker was spawned in
     pub pool: Pools,
+    /// The run this worker serves, for a per-run worker
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub run: Option<Uuid>,
 }
 
 impl WorkerRegistration {
@@ -1255,7 +1462,20 @@ impl WorkerRegistration {
             stage: stage.into(),
             resources,
             pool,
+            run: None,
         }
+    }
+
+    /// Set the run this worker serves, making it a per-run worker
+    ///
+    /// # Arguments
+    ///
+    /// * `run` - The run this worker serves
+    #[must_use]
+    pub fn run(mut self, run: Uuid) -> Self {
+        // set the run this worker serves
+        self.run = Some(run);
+        self
     }
 }
 
@@ -1276,6 +1496,7 @@ impl From<Worker> for WorkerRegistration {
             stage: worker.stage,
             resources: worker.resources,
             pool: worker.pool,
+            run: worker.run,
         }
     }
 }
@@ -1372,6 +1593,9 @@ pub struct Worker {
     pub pool: Pools,
     /// The current active job info for this worker if it has one
     pub active: Option<ActiveJob>,
+    /// The run this worker serves, for a per-run worker
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub run: Option<Uuid>,
 }
 
 /// A list of all active workers in Thorium
@@ -1429,6 +1653,7 @@ impl WorkerRegistrationList {
             stage: stage.into(),
             resources,
             pool,
+            run: None,
         };
         // add this worker
         self.workers.push(worker);
@@ -1680,6 +1905,116 @@ mod tests {
         let mut params = windows_params(&[]);
         params.clusters_from_config_ref(&windows_conf());
         assert_eq!(params.clusters, vec!["prod".to_owned(), "dev".to_owned()]);
+    }
+
+    /// Build an allowed gateway entry
+    ///
+    /// # Arguments
+    ///
+    /// * `url` - The allowed base url
+    fn gateway_entry(url: &str) -> crate::models::AllowedEndpoint {
+        crate::models::AllowedEndpoint::new(
+            crate::models::ModelProviderKind::OpenAiCompatible,
+            Some(url.to_owned()),
+        )
+    }
+
+    /// Build an `OpenAiCompatible` provider at a url
+    ///
+    /// # Arguments
+    ///
+    /// * `url` - The provider's base url
+    fn compatible(url: &str) -> crate::models::ModelProvider {
+        crate::models::ModelProvider::OpenAiCompatible {
+            base_url: url.to_owned(),
+            extra_headers: BTreeMap::new(),
+            key_header: None,
+        }
+    }
+
+    /// The model whitelist round-trips inside the system settings and loads empty when absent
+    #[test]
+    fn models_conf_round_trips() {
+        // settings with two allowed endpoints
+        let settings = SystemSettings {
+            models: crate::models::ModelsConf {
+                allowed_endpoints: std::collections::BTreeSet::from([
+                    gateway_entry("https://b.example/v1"),
+                    crate::models::AllowedEndpoint::new(
+                        crate::models::ModelProviderKind::Bedrock,
+                        None,
+                    ),
+                ]),
+            },
+            ..SystemSettings::default()
+        };
+        let raw = serde_json::to_string(&settings).unwrap();
+        let back: SystemSettings = serde_json::from_str(&raw).unwrap();
+        assert_eq!(back, settings);
+        // settings JSON without models loads an empty list
+        let mut value = serde_json::to_value(SystemSettings::default()).unwrap();
+        value.as_object_mut().unwrap().remove("models");
+        let loaded: SystemSettings = serde_json::from_value(value).unwrap();
+        assert_eq!(loaded.models, crate::models::ModelsConf::default());
+    }
+
+    /// Whitelist entries match the provider and url exactly apart from one trailing slash, and an
+    /// unset url matches only the provider's default urls
+    #[test]
+    fn whitelist_matching() {
+        use crate::models::{
+            AllowedEndpoint, BedrockEndpointKind, ModelProvider, ModelProviderKind, ModelsConf,
+        };
+        // an empty list allows nothing
+        assert!(!ModelsConf::default().allows(&compatible("https://gw.example/v1")));
+        // a gateway entry allows its url with or without one trailing slash
+        let conf = ModelsConf {
+            allowed_endpoints: std::collections::BTreeSet::from([
+                gateway_entry("https://gw.example/v1"),
+                AllowedEndpoint::new(ModelProviderKind::Bedrock, None),
+                AllowedEndpoint::new(ModelProviderKind::Anthropic, None),
+            ]),
+        };
+        assert!(conf.allows(&compatible("https://gw.example/v1")));
+        assert!(conf.allows(&compatible("https://gw.example/v1/")));
+        for url in [
+            "https://gw.example/v1//",
+            "https://GW.example/v1",
+            "https://gw.example/v2",
+        ] {
+            assert!(!conf.allows(&compatible(url)), "{url} was allowed");
+        }
+        // the same url under another provider isn't allowed
+        let litellm = ModelProvider::LiteLlm {
+            base_url: "https://gw.example/v1".to_owned(),
+            key_header: None,
+        };
+        assert!(!conf.allows(&litellm));
+        // a Bedrock entry without a url allows every region's default url and no custom one
+        let bedrock = |region: &str, endpoint_url: Option<&str>| ModelProvider::Bedrock {
+            region: region.to_owned(),
+            endpoint_kind: BedrockEndpointKind::Runtime,
+            endpoint_url: endpoint_url.map(ToOwned::to_owned),
+            workspace_id: None,
+        };
+        assert!(conf.allows(&bedrock("us-east-1", None)));
+        assert!(conf.allows(&bedrock("eu-west-3", None)));
+        assert!(!conf.allows(&bedrock("us-east-1", Some("https://vpce.example"))));
+        // an Anthropic entry without a url allows only the default url
+        let anthropic = |base_url: Option<&str>| ModelProvider::Anthropic {
+            base_url: base_url.map(ToOwned::to_owned),
+            version: "2023-06-01".to_owned(),
+            betas: std::collections::BTreeSet::new(),
+            workspace_id: None,
+        };
+        assert!(conf.allows(&anthropic(None)));
+        assert!(!conf.allows(&anthropic(Some("https://proxy.example"))));
+        // a refusal names the endpoint and the provider's entries
+        let err = conf
+            .check("my-gateway", &compatible("https://gw.example/v2"))
+            .unwrap_err();
+        assert!(err.contains("my-gateway"), "{err}");
+        assert!(err.contains("https://gw.example/v1"), "{err}");
     }
 }
 

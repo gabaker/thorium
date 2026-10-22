@@ -1,5 +1,5 @@
 //! Handles interactions related to pipelines in the backend
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 
 use chrono::{DateTime, Utc};
 use serde_json::value::Value;
@@ -35,6 +35,10 @@ pub struct PipelineRequest {
     pub triggers: HashMap<String, EventTrigger>,
     /// The description for this pipeline
     pub description: Option<String>,
+    /// The tools backing each stage, keyed by stage name (a Tool ID follows its latest instance,
+    /// a Tool Instance ID is pinned)
+    #[serde(default)]
+    pub stage_tools: BTreeMap<String, Uuid>,
 }
 
 impl PipelineRequest {
@@ -80,7 +84,21 @@ impl PipelineRequest {
             sla: None,
             triggers: HashMap::default(),
             description: None,
+            stage_tools: BTreeMap::default(),
         }
+    }
+
+    /// Sets the tool that backs a stage of a [`PipelineRequest`]
+    ///
+    /// # Arguments
+    ///
+    /// * `stage` - The name of the stage
+    /// * `tool` - The Tool ID to follow its latest instance or a Tool Instance ID to pin
+    #[must_use]
+    pub fn stage_tool<T: Into<String>>(mut self, stage: T, tool: Uuid) -> Self {
+        // set this stage's tool
+        self.stage_tools.insert(stage.into(), tool);
+        self
     }
 
     /// Sets the SLA for a [`PipelineRequest`]
@@ -207,6 +225,7 @@ impl From<Pipeline> for PipelineRequest {
             sla: Some(pipeline.sla),
             triggers: pipeline.triggers,
             description: pipeline.description,
+            stage_tools: pipeline.stage_tools,
         }
     }
 }
@@ -323,9 +342,41 @@ pub struct PipelineUpdate {
     /// An update to the ban list containing a list of bans to add or remove
     #[serde(default)]
     pub bans: PipelineBanUpdate,
+    /// The stage tools to add or replace, keyed by stage name (a Tool ID follows its latest
+    /// instance, a Tool Instance ID is pinned)
+    #[serde(default)]
+    pub add_stage_tools: BTreeMap<String, Uuid>,
+    /// The stage names whose tools to remove (only for stages this update also removes from `order`)
+    #[serde(default)]
+    pub remove_stage_tools: Vec<String>,
 }
 
 impl PipelineUpdate {
+    /// Adds or replaces the tool that backs a stage
+    ///
+    /// # Arguments
+    ///
+    /// * `stage` - The name of the stage
+    /// * `tool` - The Tool ID to follow its latest instance or a Tool Instance ID to pin
+    #[must_use]
+    pub fn add_stage_tool<T: Into<String>>(mut self, stage: T, tool: Uuid) -> Self {
+        // set this stage's tool
+        self.add_stage_tools.insert(stage.into(), tool);
+        self
+    }
+
+    /// Removes the tool that backs a stage this update also removes from the order
+    ///
+    /// # Arguments
+    ///
+    /// * `stage` - The name of the stage
+    #[must_use]
+    pub fn remove_stage_tool<T: Into<String>>(mut self, stage: T) -> Self {
+        // remove this stage's tool
+        self.remove_stage_tools.push(stage.into());
+        self
+    }
+
     /// Sets the updated order for a pipeline, converting the
     /// Vec<Vec<String> order to a JSON [`Value`]
     ///
@@ -584,6 +635,23 @@ pub struct Pipeline {
     /// A list of reasons the pipeline is banned mapped by ban UUID;
     /// if the list has any bans, the pipeline cannot be run
     pub bans: HashMap<Uuid, PipelineBan>,
+    /// The tools backing each stage, keyed by stage name (a Tool ID follows its latest instance,
+    /// a Tool Instance ID is pinned)
+    #[serde(default)]
+    pub stage_tools: BTreeMap<String, Uuid>,
+}
+
+impl Pipeline {
+    /// Get the stages of this pipeline that no tool backs, in order
+    #[must_use]
+    pub fn unconverted_stages(&self) -> Vec<&String> {
+        // keep the stages with no stage tool entry
+        self.order
+            .iter()
+            .flatten()
+            .filter(|stage| !self.stage_tools.contains_key(*stage))
+            .collect()
+    }
 }
 
 impl PartialEq<PipelineRequest> for Pipeline {
@@ -603,6 +671,7 @@ impl PartialEq<PipelineRequest> for Pipeline {
         );
         same!(&self.triggers, &request.triggers);
         same!(&self.description, &request.description);
+        same!(&self.stage_tools, &request.stage_tools);
         true
     }
 }
@@ -612,7 +681,7 @@ impl PartialEq<PipelineUpdate> for Pipeline {
     ///
     /// # Arguments
     ///
-    /// * `request` - The `PipelineUpdate` to compare against
+    /// * `update` - The `PipelineUpdate` to compare against
     #[rustfmt::skip]
     fn eq(&self, update: &PipelineUpdate) -> bool {
         // convert the update order to a Vec<Vec<String>> as in the pipeline order;
@@ -650,6 +719,16 @@ impl PartialEq<PipelineUpdate> for Pipeline {
         });
         matches_adds_map!(self.bans, bans_added);
         matches_removes_map!(self.bans, update.bans.bans_removed);
+        // every added stage tool must be set
+        for (stage, tool) in &update.add_stage_tools {
+            same!(self.stage_tools.get(stage), Some(tool));
+        }
+        // every removed stage tool that wasn't added back must be gone
+        for stage in &update.remove_stage_tools {
+            if !update.add_stage_tools.contains_key(stage) {
+                same!(self.stage_tools.contains_key(stage), false);
+            }
+        }
         true
     }
 }

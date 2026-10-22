@@ -41,8 +41,6 @@ pub struct K8s {
     filesystems: Vec<PathBuf>,
     /// The paths to any downloaded cache info
     cache: DownloadedCache,
-    /// whether this is a windows container or not
-    pub windows: bool,
 }
 
 impl K8s {
@@ -95,7 +93,6 @@ impl K8s {
             children: Vec::default(),
             filesystems: Vec::default(),
             cache: DownloadedCache::default(),
-            windows: false,
         };
         Ok(k8s)
     }
@@ -130,7 +127,6 @@ impl K8s {
             children: Vec::default(),
             filesystems: Vec::default(),
             cache: DownloadedCache::default(),
-            windows: true,
         };
         Ok(k8s)
     }
@@ -166,12 +162,6 @@ impl K8s {
             children: Vec::default(),
             filesystems: Vec::default(),
             cache: DownloadedCache::default(),
-            // KVM can run Windows or Linux jobs, so detect what's expected based
-            // on what OS this agent was compiled for
-            #[cfg(target_os = "windows")]
-            windows: true,
-            #[cfg(any(target_os = "linux", target_os = "macos"))]
-            windows: false,
         };
         Ok(k8s)
     }
@@ -189,26 +179,9 @@ impl AgentExecutor for K8s {
 
     /// Perform an initial setup for all jobs this agent executes
     ///
-    /// This are configs that are global to all jobs and currently that is only AI settings
+    /// K8s jobs share no global setup, and Thorium writes no model settings for them.
     #[instrument(name = "AgentExecutor<K8s>::init", skip_all, err(Debug))]
     async fn init(&self) -> Result<(), Error> {
-        // only setup AI settings on linux
-        if !self.windows {
-            // get our user settings
-            let user = self.thorium.users.info().await?;
-            // get our ai settings
-            if let Some(settings) = &user.settings.ai {
-                // get our default endpoints settings
-                if let Some(endpoint) = settings.endpoints.get(&settings.default_endpoint) {
-                    // serialize our endpoint settings
-                    let serialized = serde_norway::to_string(&endpoint)?;
-                    // create our parent folders
-                    tokio::fs::create_dir_all("/tmp/thorium").await?;
-                    // write our endpoint settings to disk
-                    tokio::fs::write("/tmp/thorium/ai.yaml", serialized).await?;
-                }
-            }
-        }
         Ok(())
     }
 
@@ -550,5 +523,48 @@ mod tests {
             purged.contains(&deps.samples.location.as_str()),
             "the samples dependency location must be purged between jobs, got {purged:?}"
         );
+    }
+
+    /// `init` writes no AI settings file and makes no API call, so a job never gets a user's
+    /// legacy AI endpoint
+    #[tokio::test]
+    async fn init_writes_no_ai_settings() {
+        // a listener that records whether anything connects to it
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let host = format!("http://{}", listener.local_addr().unwrap());
+        // an executor whose client points at the listener
+        let thorium = Thorium::build(host).token("token").build().await.unwrap();
+        let (logs, _receiver) = crossbeam::channel::unbounded();
+        let executor = K8s {
+            thorium,
+            logs,
+            entrypoint: Vec::new(),
+            cmd: Vec::new(),
+            samples: Vec::new(),
+            ephemerals: Vec::new(),
+            repos: Vec::new(),
+            results: Vec::new(),
+            tags: Vec::new(),
+            children: Vec::new(),
+            filesystems: Vec::new(),
+            cache: DownloadedCache::default(),
+        };
+        // note whether an AI settings file already exists
+        let path = std::path::Path::new("/tmp/thorium/ai.yaml");
+        let existed = path.exists();
+        // init succeeds at once without reaching the API
+        tokio::time::timeout(std::time::Duration::from_secs(10), executor.init())
+            .await
+            .expect("init waited on the API")
+            .unwrap();
+        assert!(
+            matches!(listener.accept(), Err(err) if err.kind() == std::io::ErrorKind::WouldBlock),
+            "init called the API"
+        );
+        // and writes no AI settings file
+        if !existed {
+            assert!(!path.exists(), "init wrote an AI settings file");
+        }
     }
 }

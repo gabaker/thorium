@@ -19,7 +19,7 @@ api = [
   "axum", "http", "tower", "axum-macros", "tower-http", "tokio-stream", "generic-array", "futures-util", "tokio-util", "serde_qs",
   "aws-sdk-s3", "aws-types", "aws-smithy-http", "aws-credential-types", "scylla-utils", "http-body", "axum-extra", "once_cell", "utoipa",
   "utoipa-swagger-ui", "lettre", "headers", "percent-encoding", "dashmap", "scc", "mime", "rmcp", "openidconnect", "humantime",
-  "grep", "constant_time_eq", "client", "trace"
+  "grep", "constant_time_eq", "serde_json_canonicalizer", "jsonschema", "client", "trace"
   ]
 
 # include scylla utility functions
@@ -37,7 +37,7 @@ rkyv-support = ["rkyv", "bytecheck"]
 client = [
   "reqwest", "tokio", "tokio-util", "futures", "git2", "shellexpand", "elasticsearch",
   "tokio-tar", "http", "gix", "gix-date", "async-trait", "data-encoding", "sha2", "walkdir-err",
-  "humantime"
+  "humantime", "serde_json_canonicalizer", "thorium-derive", "jsonschema"
   ]
 
 # include sync client dependencies
@@ -144,6 +144,10 @@ ldap3 = { version = "0.11", optional = true, default-features = false, features 
 itertools = { version = "0.14", optional = true }
 sha-1 = { version = "0.10", optional = true }
 sha2 = { version = "0.10", optional = true }
+serde_json_canonicalizer = { version = "0.3", optional = true }
+# validates tool input examples and results against author-written JSON schemas; default
+# features are off so remote and file references are never fetched
+jsonschema = { version = "0.58", default-features = false, optional = true }
 md-5 = { version = "0.10", optional = true }
 constant_time_eq = { version = "0.3", optional = true }
 data-encoding = { version = "2.9", optional = true }
@@ -304,3 +308,39 @@ path = "tests/entities/decompiled_function.rs"
 [[example]]
 name = "schema_report"
 required-features = ["scylla-utils", "client"]
+
+[[test]]
+name = "entities_group_auth"
+path = "tests/entities/group_auth.rs"
+
+[[test]]
+name = "entities_tools"
+path = "tests/entities/tools.rs"
+
+[[test]]
+name = "entities_tool_fields"
+path = "tests/entities/tool_fields.rs"
+
+[[test]]
+name = "entities_models"
+path = "tests/entities/models.rs"
+
+[[test]]
+name = "entities_agents"
+path = "tests/entities/agents.rs"
+
+[[test]]
+name = "entities_toolsets"
+path = "tests/entities/toolsets.rs"
+
+[[test]]
+name = "entities_delete_guard"
+path = "tests/entities/delete_guard.rs"
+
+[[test]]
+name = "entities_workflows"
+path = "tests/entities/workflows.rs"
+
+[[test]]
+name = "entities_default_stack"
+path = "tests/entities/default_stack.rs"

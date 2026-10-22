@@ -8,9 +8,10 @@ mod common;
 use test_utilities::{events, generators};
 use thorium::models::{
     Association, AssociationKind, AssociationRequest, AssociationTarget, Directionality, Entity,
-    EntityKinds, EntityListLine, EntityListOpts, EntityRequest, EventType,
+    EntityKinds, EntityListLine, EntityListOpts, EntityRequest, EntityUpdate, EventType, UserRole,
 };
 use thorium::test_utilities;
+use thorium::test_utilities::generators::TestUser;
 use thorium::{Error, Thorium, fail, is};
 use uuid::Uuid;
 
@@ -357,5 +358,83 @@ async fn list_lines() -> Result<(), thorium::Error> {
         lines.iter().map(|line| line.id).collect::<Vec<_>>(),
         vec![device.id]
     );
+    Ok(())
+}
+
+/// Send an update of a device with a PNG image as a user, returning the status code
+///
+/// # Arguments
+///
+/// * `client` - An admin client to get the API's url from
+/// * `sender` - The user sending the update
+/// * `id` - The device to update
+/// * `update` - The rest of the update
+/// * `images` - The file names and bytes of each image to send
+async fn send_images(
+    client: &Thorium,
+    sender: &TestUser,
+    id: Uuid,
+    update: EntityUpdate,
+    images: &[(&str, &[u8])],
+) -> Result<u16, Error> {
+    // add each image to the update's form
+    let mut form = update.to_form()?;
+    for (name, bytes) in images {
+        form = form.part(
+            "image",
+            reqwest::multipart::Part::bytes(bytes.to_vec())
+                .file_name((*name).to_owned())
+                .mime_str("image/png")?,
+        );
+    }
+    // send it with the user's token
+    let resp = reqwest::Client::new()
+        .patch(format!("{}/api/entities/{id}", client.host))
+        .header("authorization", sender.auth_header())
+        .multipart(form)
+        .send()
+        .await?;
+    Ok(resp.status().as_u16())
+}
+
+/// A refused update keeps the image the device already had, even when it uploaded an image
+/// over it, and deletes every other image it uploaded
+#[tokio::test]
+async fn refused_update_keeps_image() -> Result<(), Error> {
+    // a device with an image
+    let (client, group) = common::setup().await?;
+    let sender = generators::user_with_role(&client, UserRole::Admin).await?;
+    let req = request(&client, &group).await?;
+    let (_, device) = generators::entity(req, &client).await?;
+    let logo: &[(&str, &[u8])] = &[("logo.png", b"original")];
+    is!(
+        send_images(&client, &sender, device.id, EntityUpdate::default(), logo).await?,
+        204
+    );
+    let key = format!("{}/logo.png", device.id);
+    // an update that uploads over the image and then fails is refused
+    let empty_name = || EntityUpdate::default().name("");
+    let again: &[(&str, &[u8])] = &[("logo.png", b"replaced")];
+    is!(
+        send_images(&client, &sender, device.id, empty_name(), again).await?,
+        400
+    );
+    // the device still has its image
+    let read = client.entities.get(device.id).await?;
+    is!(read.image.as_deref(), Some(key.as_str()));
+    is!(test_utilities::graphic_exists(&key).await?, true);
+    // a refused update with two new images deletes both and keeps the original
+    let two: &[(&str, &[u8])] = &[("first.png", b"first"), ("second.png", b"second")];
+    is!(
+        send_images(&client, &sender, device.id, empty_name(), two).await?,
+        400
+    );
+    for name in ["first.png", "second.png"] {
+        is!(
+            test_utilities::graphic_exists(&format!("{}/{name}", device.id)).await?,
+            false
+        );
+    }
+    is!(test_utilities::graphic_exists(&key).await?, true);
     Ok(())
 }

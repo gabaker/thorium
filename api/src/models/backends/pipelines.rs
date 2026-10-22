@@ -1,11 +1,11 @@
 //! Wrappers for interacting with pipelines within Thorium with different backends
 //! Currently only Redis is supported
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use tracing::instrument;
 use uuid::Uuid;
 
-use crate::models::backends::{NotificationSupport, db};
+use crate::models::backends::{NotificationSupport, db, stage_tools};
 use crate::models::{
     DEFAULT_PIPELINE_SLA, Group, GroupAllowAction, Pipeline, PipelineBanKind, PipelineBanUpdate,
     PipelineDetailsList, PipelineKey, PipelineList, PipelineRequest, PipelineStats, PipelineUpdate,
@@ -13,12 +13,15 @@ use crate::models::{
 };
 use crate::utils::{ApiError, Shared, bounder};
 use crate::{
-    bad, can_delete, can_develop_many, conflict, deserialize_ext, deserialize_opt, extract,
-    is_admin, not_found, update_clear, update_opt_empty,
+    bad, can_delete, conflict, deserialize_ext, deserialize_opt, extract, is_admin, not_found,
+    update_clear, update_opt_empty,
 };
 
 impl PipelineRequest {
     /// Casts a PipelineRequest to a Pipeline
+    ///
+    /// Every stage in the order must have a tool in the request's stage tools, and each stage tool
+    /// must back a stage in the order and be able to run its workload.
     ///
     /// # Arguments
     ///
@@ -37,15 +40,26 @@ impl PipelineRequest {
         // bounds check sla
         bounder::number(sla as i64, "sla", 1, 3.154e+9 as i64)?;
         // bounds check our pipeline order
-        let order = bounder::pipeline_order(&self.order, user, group, shared).await?;
-        // flatten our order into a single vec
-        let images = order.iter().flatten().collect::<Vec<&String>>();
-        // get the scalers for all of our images
-        let scalers = db::images::get_scalers(&self.group, &images, shared).await?;
+        let order = bounder::pipeline_order(&self.order)?;
+        // every stage must be backed by a tool
+        let missing = order
+            .iter()
+            .flatten()
+            .filter(|stage| !self.stage_tools.contains_key(*stage))
+            .map(|stage| format!("`{stage}`"))
+            .collect::<Vec<String>>();
+        if !missing.is_empty() {
+            return bad!(format!(
+                "every stage needs a tool in stage_tools; these stages have none: {}",
+                missing.join(", ")
+            ));
+        }
+        // every stage tool must back a stage in the order
+        check_stage_names(&order, self.stage_tools.keys())?;
         // validate our triggers
         bounder::triggers(&self.triggers)?;
-        // make sure we can develop for all of these scalers
-        can_develop_many!(user.username, group, &scalers, user);
+        // make sure each stage's tool can back it and we can develop for its workload
+        stage_tools::check(user, group, &self.stage_tools, shared).await?;
         // build pipeline
         let pipeline = Pipeline {
             group: self.group,
@@ -56,9 +70,34 @@ impl PipelineRequest {
             triggers: self.triggers,
             description: self.description,
             bans: HashMap::default(),
+            stage_tools: self.stage_tools,
         };
         Ok(pipeline)
     }
+}
+
+/// Make sure every named stage is a stage in a pipeline's order
+///
+/// # Arguments
+///
+/// * `order` - The pipeline's order
+/// * `stages` - The stage names to check
+fn check_stage_names<'a, I: Iterator<Item = &'a String>>(
+    order: &[Vec<String>],
+    stages: I,
+) -> Result<(), ApiError> {
+    // find the named stages that aren't in the order
+    let unknown = stages
+        .filter(|stage| !order.iter().flatten().any(|name| name == *stage))
+        .map(|stage| format!("`{stage}`"))
+        .collect::<Vec<String>>();
+    if !unknown.is_empty() {
+        return bad!(format!(
+            "stage_tools names stages that aren't in the order: {}",
+            unknown.join(", ")
+        ));
+    }
+    Ok(())
 }
 
 impl PipelineList {
@@ -163,6 +202,8 @@ impl Pipeline {
     ) -> Result<Self, ApiError> {
         // ensure name is alphanumeric and lowercase
         bounder::string_lower(&req.name, "name", 1, 25)?;
+        // a new name can't be the word for an entity kind
+        bounder::entity_name(&req.name)?;
         // authorize this user is apart of this group
         let group = Group::authorize(user, &req.group, shared).await?;
         // make sure we can create pipelines in this group
@@ -254,13 +295,16 @@ impl Pipeline {
 
     /// Updates a pipeline
     ///
+    /// Every stage that stays in the order keeps a tool, every stage added to the order needs one,
+    /// and each tool must be able to back its stage. The tools of stages that leave the order are
+    /// dropped.
+    ///
     /// # Arguments
     ///
     /// * `update` - The updates to apply to this pipeline
     /// * `user` - The user that is updating this pipeline
     /// * `group` - The group the pipeline to update is from
     /// * `shared` - Shared objects in Thorium
-    /// * `span` - The span to log traces under
     #[instrument(name = "Pipeline::update", skip(user, group, shared), err(Debug))]
     pub async fn update(
         mut self,
@@ -273,47 +317,71 @@ impl Pipeline {
         group.allowable(GroupAllowAction::Pipelines)?;
         // make sure this group is editable
         group.editable(user)?;
-        // overlay update ontop of pipeline
-        let (add, remove) = if let Some(order) = update.order {
-            // get the images that are currently in this pipeline
-            let old = self
-                .order
+        // get the stages that are currently in this pipeline
+        let old = self
+            .order
+            .iter()
+            .flatten()
+            .cloned()
+            .collect::<HashSet<String>>();
+        // overlay the new order ontop of pipeline
+        if let Some(order) = &update.order {
+            self.order = bounder::pipeline_order(order)?;
+        }
+        // build the set of the stages in our updated pipeline
+        let new = self
+            .order
+            .iter()
+            .flatten()
+            .cloned()
+            .collect::<HashSet<String>>();
+        // a stage that stays in the order can't lose its tool
+        let kept = update
+            .remove_stage_tools
+            .iter()
+            .filter(|stage| new.contains(*stage) && !update.add_stage_tools.contains_key(*stage))
+            .map(|stage| format!("`{stage}`"))
+            .collect::<Vec<String>>();
+        if !kept.is_empty() {
+            return bad!(format!(
+                "stages that stay in the order can't lose their tool: {}",
+                kept.join(", ")
+            ));
+        }
+        // every added stage tool must back a stage in the order
+        check_stage_names(&self.order, update.add_stage_tools.keys())?;
+        // remove the stage tools this update removes
+        for stage in &update.remove_stage_tools {
+            self.stage_tools.remove(stage);
+        }
+        // add or replace the stage tools this update sets
+        self.stage_tools.extend(
+            update
+                .add_stage_tools
                 .iter()
-                .flatten()
-                .cloned()
-                .collect::<HashSet<String>>();
-            // build the new pipeline list
-            self.order = bounder::pipeline_order(&order, user, group, shared).await?;
-            // build the set of the updated images in our pipeline
-            let new = self
-                .order
-                .iter()
-                .flatten()
-                .cloned()
-                .collect::<HashSet<String>>();
-            // build a combined set
-            let combined: Vec<&String> = old.union(&new).collect();
-            // get the scalers for all of our images
-            let scalers = db::images::get_scalers(&self.group, &combined, shared).await?;
-            // make sure we can develop for all of these scalers
-            can_develop_many!(user.username, group, &scalers, user);
-            // get the added and removed images
-            let add = new
-                .difference(&old)
-                .into_iter()
-                .map(|name| name.to_owned())
-                .collect();
-            let remove = old.difference(&new).into_iter().cloned().collect();
-            (add, remove)
-        } else {
-            // just check our current images against our role
-            let images = self.order.iter().flatten().collect::<Vec<&String>>();
-            // get the scalers for all of our images
-            let scalers = db::images::get_scalers(&self.group, &images, shared).await?;
-            // make sure we can develop for all of these scalers
-            can_develop_many!(user.username, group, &scalers, user);
-            (Vec::default(), Vec::default())
-        };
+                .map(|(stage, id)| (stage.clone(), *id)),
+        );
+        // drop the tools of stages no longer in the order
+        self.stage_tools.retain(|stage, _| new.contains(stage));
+        // every stage added to the order needs a tool
+        let missing = self
+            .order
+            .iter()
+            .flatten()
+            .filter(|stage| !old.contains(*stage) && !self.stage_tools.contains_key(*stage))
+            .map(|stage| format!("`{stage}`"))
+            .collect::<Vec<String>>();
+        if !missing.is_empty() {
+            return bad!(format!(
+                "every stage needs a tool in stage_tools; these stages have none: {}",
+                missing.join(", ")
+            ));
+        }
+        // make sure each stage's tool can back it and we can develop for its workload
+        stage_tools::check(user, group, &self.stage_tools, shared).await?;
+        // get the added and removed stages
+        let add = new.difference(&old).cloned().collect::<Vec<String>>();
+        let remove = old.difference(&new).cloned().collect::<Vec<String>>();
         // priority
         if let Some(sla) = update.sla {
             self.sla = bounder::unsigned(sla, "sla", 0, 3.154e+9 as u64)?;
@@ -408,7 +476,35 @@ impl TryFrom<HashMap<String, String>> for Pipeline {
             triggers: deserialize_ext!(raw, "triggers", HashMap::default()),
             description: deserialize_opt!(raw, "description"),
             bans: deserialize_ext!(raw, "bans", HashMap::default()),
+            stage_tools: deserialize_ext!(raw, "stage_tools", BTreeMap::default()),
         };
         Ok(pipeline)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::HashMap;
+
+    use crate::models::Pipeline;
+
+    /// A pipeline hash written before stage tools existed reads with no stage tools
+    #[test]
+    fn pipeline_hash_without_stage_tools() {
+        // a pipeline hash with only the fields earlier versions wrote
+        let raw = [
+            ("group", "jupiter"),
+            ("name", "orbit"),
+            ("creator", "europa"),
+            ("order", "[[\"plant\"],[\"harvest\"]]"),
+            ("sla", "600"),
+        ]
+        .into_iter()
+        .map(|(key, value)| (key.to_owned(), value.to_owned()))
+        .collect::<HashMap<String, String>>();
+        // it reads with an empty stage tool map, so every stage is unconverted
+        let pipeline = Pipeline::try_from(raw).expect("a pipeline");
+        assert!(pipeline.stage_tools.is_empty());
+        assert_eq!(pipeline.unconverted_stages(), vec!["plant", "harvest"]);
     }
 }

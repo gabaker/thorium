@@ -15,17 +15,17 @@ use crate::models::{
     ConfigMap, Dependencies, DependencyPassStrategy, EphemeralDependencySettings, EventTrigger,
     FileSystemDependencySettings, FilesHandler, Group, GroupAllowed, GroupStats, GroupUsers,
     HostPath, HostPathTypes, HostPathWhitelistUpdate, Image, ImageArgs, ImageBan, ImageBanKind,
-    ImageBanUpdate, ImageLifetime, ImageScaler, ImageVersion, Kvm, KwargDependency, NFS,
-    NetworkPolicySet, Node, NodeGetParams, NodeHealth, NodeListLine, NodeListParams,
-    NodeRegistration, NodeUpdate, OutputCollection, OutputDisplayType, OutputHandler, Pipeline,
-    PipelineBan, PipelineBanKind, PipelineBanUpdate, PipelineStats, Pools, PruneAction,
-    PrunedReference, PrunedReferent, Reaction, RepoDependencySettings, Resources, RestoreParams,
-    ResultDependencySettings, SampleDependencySettings, ScalerStats, ScopedToken, ScopedTokenRole,
-    Secret, SecurityContext, SpawnLimits, StageStats, SystemInfo, SystemInfoParams, SystemSettings,
+    ImageBanUpdate, ImageLifetime, ImageScaler, Kvm, KwargDependency, NFS, NetworkPolicySet, Node,
+    NodeGetParams, NodeHealth, NodeListLine, NodeListParams, NodeRegistration, NodeUpdate,
+    OutputCollection, OutputDisplayType, OutputHandler, Pipeline, PipelineBan, PipelineBanKind,
+    PipelineBanUpdate, PipelineStats, Pools, PruneAction, PrunedReference, PrunedReferent,
+    Reaction, RepoDependencySettings, Resources, RestoreParams, ResultDependencySettings,
+    SampleDependencySettings, ScalerStats, ScopedToken, ScopedTokenRole, Secret, SecurityContext,
+    SpawnLimits, StageStats, SystemInfo, SystemInfoParams, SystemSettings,
     SystemSettingsResetParams, SystemSettingsUpdate, SystemSettingsUpdateParams, SystemStats,
-    TagDependencySettings, TagType, Theme, UnixInfo, User, UserRole, UserSettings, Volume,
-    VolumeTypes, Worker, WorkerDelete, WorkerDeleteMap, WorkerRegistration, WorkerRegistrationList,
-    WorkerStatus, WorkerUpdate,
+    TagDependencySettings, TagType, Theme, ToolVersion, UnixInfo, User, UserRole, UserSettings,
+    Volume, VolumeTypes, Worker, WorkerDelete, WorkerDeleteMap, WorkerRegistration,
+    WorkerRegistrationList, WorkerStatus, WorkerUpdate,
 };
 use crate::unauthorized;
 use crate::utils::{ApiError, AppState};
@@ -194,6 +194,11 @@ async fn settings_reset(
             .await?;
         // reset the scaler's cache after the scan
         SystemInfo::reset_cache(&user, &state.shared).await?;
+    } else if params.scan {
+        // model endpoints are always checked against the default allowed endpoint list
+        SystemSettings::default()
+            .scan_models(&user, &state.shared)
+            .await?;
     }
     Ok(StatusCode::NO_CONTENT)
 }
@@ -268,6 +273,9 @@ async fn settings_update(
             .await?;
         // reset the scaler's cache after the scan
         SystemInfo::reset_cache(&user, &state.shared).await?;
+    } else if params.scan {
+        // model endpoints are always checked against the allowed endpoint list
+        updated_settings.scan_models(&user, &state.shared).await?;
     }
     Ok(StatusCode::NO_CONTENT)
 }
@@ -406,6 +414,8 @@ async fn backup(
     Query(params): Query<BackupParams>,
     State(state): State<AppState>,
 ) -> Result<Json<Backup>, ApiError> {
+    // require a fully authed user since scoped tokens cannot dump Thorium's data
+    let user = user.require_full()?;
     // build a backup object
     let backup = Backup::new(&user, &params, &state.shared).await?;
     Ok(Json(backup))
@@ -448,6 +458,8 @@ async fn restore(
     State(state): State<AppState>,
     Json(backup): Json<Backup>,
 ) -> Result<StatusCode, ApiError> {
+    // require a fully authed user since scoped tokens cannot restore Thorium's data
+    let user = user.require_full()?;
     // start our system restore route span
     let span = span!(Level::INFO, "System Restore Route");
     // restore from backup object
@@ -782,7 +794,7 @@ async fn delete_workers(
 #[derive(OpenApi)]
 #[openapi(
     paths(init, info, stats, settings, settings_update, consistency_scan, settings_reset, cleanup, reset_cache, backup, restore, register_node, list_nodes, list_node_details, get_node, update_node, register_worker, delete_workers, get_worker, update_worker),
-    components(schemas(ActiveJob, ApiCursor<NodeListLine>, ArgStrategy, AutoTag, AutoTagLogic, Backup, BackupParams, BackupProblem, BackupProblems, BannedImageBan, ChildFilters, ChildFiltersUpdate, ChildrenDependencySettings, Cleanup, ConfigMap, Dependencies, DependencyPassStrategy, EphemeralDependencySettings, EventTrigger, FileSystemDependencySettings, FilesHandler, GenericBan, Group, GroupAllowed, GroupStats, GroupUsers, HostPath, HostPathTypes, HostPathWhitelistUpdate, Image, ImageArgs, ImageBan, ImageBanKind, ImageBanUpdate, ImageLifetime, ImageScaler, ImageVersion, InvalidHostPathBan, InvalidUrlBan, Kvm, KwargDependency, NetworkPolicySet, NFS, Node, NodeGetParams, NodeHealth, NodeListLine, NodeListParams, NodeRegistration, NodeUpdate, OutputCollection, OutputDisplayType, OutputHandler, Pipeline, PipelineBan, PipelineBanKind, PipelineBanUpdate, PipelineStats, Pools, PruneAction, PrunedReference, PrunedReferent, RepoDependencySettings, Resources, RestoreParams, ResultDependencySettings, SampleDependencySettings, ScalerStats, ScopedToken, ScopedTokenRole, Secret, SecurityContext, SpawnLimits, StageStats, SystemInfo, SystemInfoParams, SystemSettings, SystemSettingsUpdate, SystemSettingsResetParams, SystemSettingsUpdateParams, SystemStats, TagDependencySettings, TagType, Theme, UnixInfo, User, UserRole, UserSettings, Volume, VolumeTypes, Worker, WorkerDeleteMap, WorkerDelete, WorkerRegistration, WorkerRegistrationList, WorkerStatus, WorkerUpdate)),
+    components(schemas(ActiveJob, ApiCursor<NodeListLine>, ArgStrategy, AutoTag, AutoTagLogic, Backup, BackupParams, BackupProblem, BackupProblems, BannedImageBan, ChildFilters, ChildFiltersUpdate, ChildrenDependencySettings, Cleanup, ConfigMap, Dependencies, DependencyPassStrategy, EphemeralDependencySettings, EventTrigger, FileSystemDependencySettings, FilesHandler, GenericBan, Group, GroupAllowed, GroupStats, GroupUsers, HostPath, HostPathTypes, HostPathWhitelistUpdate, Image, ImageArgs, ImageBan, ImageBanKind, ImageBanUpdate, ImageLifetime, ImageScaler, ToolVersion, InvalidHostPathBan, InvalidUrlBan, Kvm, KwargDependency, NetworkPolicySet, NFS, Node, NodeGetParams, NodeHealth, NodeListLine, NodeListParams, NodeRegistration, NodeUpdate, OutputCollection, OutputDisplayType, OutputHandler, Pipeline, PipelineBan, PipelineBanKind, PipelineBanUpdate, PipelineStats, Pools, PruneAction, PrunedReference, PrunedReferent, RepoDependencySettings, Resources, RestoreParams, ResultDependencySettings, SampleDependencySettings, ScalerStats, ScopedToken, ScopedTokenRole, Secret, SecurityContext, SpawnLimits, StageStats, SystemInfo, SystemInfoParams, SystemSettings, SystemSettingsUpdate, SystemSettingsResetParams, SystemSettingsUpdateParams, SystemStats, TagDependencySettings, TagType, Theme, UnixInfo, User, UserRole, UserSettings, Volume, VolumeTypes, Worker, WorkerDeleteMap, WorkerDelete, WorkerRegistration, WorkerRegistrationList, WorkerStatus, WorkerUpdate)),
     modifiers(&OpenApiSecurity),
 )]
 pub struct SystemApiDocs;

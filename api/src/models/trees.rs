@@ -686,6 +686,9 @@ impl TreeGrowQuery {
 /// The different leaves in a tree
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[cfg_attr(feature = "api", derive(utoipa::ToSchema))]
+// an entity's metadata (a tool's spec included) makes it far larger than the other leaves; it
+// isn't boxed so clients keep building and matching `TreeNode::Entity(Entity)` unchanged
+#[allow(clippy::large_enum_variant)]
 pub enum TreeNode {
     /// A sample in Thorium
     Sample(Sample),

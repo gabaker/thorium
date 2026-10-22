@@ -47,10 +47,16 @@ macro_rules! spawn {
     };
 }
 
+/// Add a task to the scaler's task map at the first free second at or after the task's delay
+///
+/// # Arguments
+///
+/// * `$scaler` - The scaler to add the task to
+/// * `$task` - The task to add
 macro_rules! add_task {
     ($scaler:expr, $task:expr) => {{
         // get the datetime to start this task at
-        let mut start = crate::from_now!($task.delay(&$scaler.conf) as i64);
+        let mut start = crate::from_now!(i64::from($task.delay(&$scaler.conf)));
         // increase by 1 until we have found an open slot to start this job
         loop {
             // determine if a task already exists for this date
@@ -632,7 +638,7 @@ impl Scaler {
                     // decrease our users fair share ranks
                     self.allocatable.decrease_fair_share_ranks(&self.conf);
                 }
-            };
+            }
         }
         // add any blocking completed tasks back to our task list
         for task in completed {
@@ -825,6 +831,13 @@ impl Scaler {
     }
 
     /// Error out any workers jobs that have permenantly failed
+    ///
+    /// Each job is failed under the name of the worker that was running it.
+    ///
+    /// # Arguments
+    ///
+    /// * `error_out` - The workers whose jobs have permanently failed and why
+    /// * `failed` - The names of the workers that were failed out
     #[instrument(name = "Scaler::error_out", skip_all)]
     async fn error_out(&mut self, error_out: HashSet<ErrorOutKinds>, failed: &mut HashSet<String>) {
         // build a stream of our failed workers info
@@ -846,7 +859,12 @@ impl Scaler {
                     // get this workers job if it has one
                     if let Some(active) = &worker.active {
                         // try to fail out this job
-                        if let Err(error) = self.thorium.jobs.error(&active.job, &add).await {
+                        if let Err(error) = self
+                            .thorium
+                            .jobs
+                            .error(&active.job, &add, &worker.name)
+                            .await
+                        {
                             // we failed to error out this job
                             event!(
                                 Level::ERROR,

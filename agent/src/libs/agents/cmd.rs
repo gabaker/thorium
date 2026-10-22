@@ -654,18 +654,19 @@ impl CmdBuilder {
 }
 
 #[cfg(test)]
-mod tests {
+pub(super) mod tests {
     use super::*;
     use chrono::prelude::*;
     use std::collections::{HashMap, HashSet};
     use thorium::models::{
         ChildFilters, CommitishKinds, Dependencies, GenericJob, GenericJobArgs, Image, ImageArgs,
-        ImageVersion, JobStatus, OutputCollection, OutputDisplayType, RepoDependency, Resources,
-        ResultDependencySettings, SecurityContext,
+        JobStatus, OutputCollection, OutputDisplayType, RepoDependency, Resources,
+        ResultDependencySettings, SecurityContext, ToolVersion,
     };
     use uuid::Uuid;
 
-    fn generate_job() -> GenericJob {
+    /// Generate a running test job with empty args
+    pub(crate) fn generate_job() -> GenericJob {
         // generate a test job with empty args
         GenericJob {
             reaction: Uuid::new_v4(),
@@ -695,15 +696,18 @@ mod tests {
                 },
             ],
             trigger_depth: None,
+            tool_instance: Uuid::new_v4(),
+            run: None,
         }
     }
 
-    fn generate_image() -> Image {
+    /// Generate a test image
+    pub(crate) fn generate_image() -> Image {
         // generate a test image
         Image {
             group: "TestGroup".into(),
             name: "TestImage".into(),
-            version: Some(ImageVersion::SemVer(
+            version: Some(ToolVersion::SemVer(
                 semver::Version::parse("1.0.0").unwrap(),
             )),
             creator: "mcarson".into(),

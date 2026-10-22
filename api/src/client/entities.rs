@@ -6,9 +6,11 @@ use uuid::Uuid;
 
 use super::Error;
 use super::traits::{GenericClient, GrepClient, GrepClientHelper};
+use crate::models::backends::NotificationSupport;
 use crate::models::{
     Association, Cursor, Entity, EntityListLine, EntityListOpts, EntityRequest, EntityResponse,
-    EntityUpdate, GrepMatches, GrepOpts, GrepPage,
+    EntityUpdate, GrepMatches, GrepOpts, GrepPage, InstancedAgentToolset, ModelCredentialEntity,
+    Notification, ToolInstanceSummary,
 };
 use crate::{
     add_date, add_query, add_query_bool, add_query_list, add_query_list_clone, send, send_build,
@@ -175,6 +177,186 @@ impl Entities {
         let req = self.client.get(&url).header("authorization", &self.token);
         // send this request and build the associations from the response
         send_build!(self.client, req, Vec<Association>)
+    }
+
+    /// Lists the ban notifications of a model entity
+    ///
+    /// The type parameter is the metadata struct of the entity's kind (for example
+    /// [`ModelEndpointEntity`](crate::models::ModelEndpointEntity)); entities of other kinds
+    /// have none.
+    ///
+    /// # Arguments
+    ///
+    /// * `id` - The id of the entity to list notifications for
+    #[cfg_attr(
+        feature = "trace",
+        instrument(name = "Thorium::Entities::notifications", skip(self), err(Debug))
+    )]
+    pub async fn notifications<N: NotificationSupport>(
+        &self,
+        id: Uuid,
+    ) -> Result<Vec<Notification<N>>, Error> {
+        // build the url for listing this entity's notifications
+        let url = format!("{base}/api/entities/{id}/notifications", base = self.host);
+        // build our request
+        let req = self.client.get(&url).header("authorization", &self.token);
+        // send this request and build the notifications from the response
+        send_build!(self.client, req, Vec<Notification<N>>)
+    }
+
+    /// List a tool's instances, newest first, including deprecated instances
+    ///
+    /// # Arguments
+    ///
+    /// * `tool` - The id of the tool to list instances of
+    #[cfg_attr(
+        feature = "trace",
+        instrument(name = "Thorium::Entities::tool_instances", skip(self), err(Debug))
+    )]
+    pub async fn tool_instances(&self, tool: Uuid) -> Result<Vec<ToolInstanceSummary>, Error> {
+        // build the url for listing this tool's instances
+        let url = format!(
+            "{base}/api/entities/tools/{tool}/instances",
+            base = self.host
+        );
+        // build our request
+        let req = self.client.get(&url).header("authorization", &self.token);
+        // send this request and build the summaries from the response
+        send_build!(self.client, req, Vec<ToolInstanceSummary>)
+    }
+
+    /// Ask for a new instance of a workflow, which the event handler builds
+    ///
+    /// # Arguments
+    ///
+    /// * `workflow` - The id of the workflow to instance
+    #[cfg_attr(
+        feature = "trace",
+        instrument(name = "Thorium::Entities::request_instance", skip(self), err(Debug))
+    )]
+    pub async fn request_instance(&self, workflow: Uuid) -> Result<reqwest::Response, Error> {
+        // build the url for requesting an instance of this workflow
+        let url = format!(
+            "{base}/api/entities/workflows/{workflow}/instance",
+            base = self.host
+        );
+        // build our request
+        let req = self.client.post(&url).header("authorization", &self.token);
+        // send this request
+        send!(self.client, req)
+    }
+
+    /// Ask for a new instance of a toolset, which the event handler builds
+    ///
+    /// # Arguments
+    ///
+    /// * `tool_set` - The id of the toolset to instance
+    #[cfg_attr(
+        feature = "trace",
+        instrument(
+            name = "Thorium::Entities::request_tool_set_instance",
+            skip(self),
+            err(Debug)
+        )
+    )]
+    pub async fn request_tool_set_instance(
+        &self,
+        tool_set: Uuid,
+    ) -> Result<reqwest::Response, Error> {
+        // build the url for requesting an instance of this toolset
+        let url = format!(
+            "{base}/api/entities/toolsets/{tool_set}/instance",
+            base = self.host
+        );
+        // build our request
+        let req = self.client.post(&url).header("authorization", &self.token);
+        // send this request
+        send!(self.client, req)
+    }
+
+    /// Ask for a refresh of a model endpoint's catalog, which the event handler lists
+    ///
+    /// Only owners and managers of one of the endpoint's groups, and admins, may ask.
+    ///
+    /// # Arguments
+    ///
+    /// * `endpoint` - The id of the model endpoint to refresh
+    #[cfg_attr(
+        feature = "trace",
+        instrument(
+            name = "Thorium::Entities::refresh_model_endpoint",
+            skip(self),
+            err(Debug)
+        )
+    )]
+    pub async fn refresh_model_endpoint(&self, endpoint: Uuid) -> Result<reqwest::Response, Error> {
+        // build the url for refreshing this endpoint
+        let url = format!(
+            "{base}/api/entities/models/endpoints/{endpoint}/refresh",
+            base = self.host
+        );
+        // build our request
+        let req = self.client.post(&url).header("authorization", &self.token);
+        // send this request
+        send!(self.client, req)
+    }
+
+    /// Read a group model credential with its secrets, which only admins may do
+    ///
+    /// # Arguments
+    ///
+    /// * `credential` - The id of the model credential to read
+    #[cfg_attr(
+        feature = "trace",
+        instrument(
+            name = "Thorium::Entities::model_credential_secret",
+            skip(self),
+            err(Debug)
+        )
+    )]
+    pub async fn model_credential_secret(
+        &self,
+        credential: Uuid,
+    ) -> Result<ModelCredentialEntity, Error> {
+        // build the url for reading this credential's secrets
+        let url = format!(
+            "{base}/api/entities/models/credentials/{credential}/secret",
+            base = self.host
+        );
+        // build our request
+        let req = self.client.get(&url).header("authorization", &self.token);
+        // send this request and build the credential from the response
+        send_build!(self.client, req, ModelCredentialEntity)
+    }
+
+    /// Get one agent of a workflow instance and the stored spec of each tool it was given
+    ///
+    /// # Arguments
+    ///
+    /// * `workflow_instance` - The id of the workflow instance
+    /// * `agent` - The id of the agent in that instance
+    #[cfg_attr(
+        feature = "trace",
+        instrument(name = "Thorium::Entities::toolset", skip(self), err(Debug))
+    )]
+    pub async fn toolset(
+        &self,
+        workflow_instance: Uuid,
+        agent: Uuid,
+    ) -> Result<InstancedAgentToolset, Error> {
+        // build the url for reading this agent's toolset
+        let url = format!(
+            "{base}/api/entities/workflows/instances/{workflow_instance}/toolset",
+            base = self.host
+        );
+        // build our request naming the agent
+        let req = self
+            .client
+            .get(&url)
+            .header("authorization", &self.token)
+            .query(&[("agent", agent.to_string())]);
+        // send this request and build the toolset from the response
+        send_build!(self.client, req, InstancedAgentToolset)
     }
 
     /// Updates an [`Entity`] in Thorium

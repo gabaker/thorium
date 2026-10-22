@@ -19,11 +19,13 @@ use crate::utils::{ApiError, AppState};
 
 /// Creates a new group
 ///
+/// Scoped tokens cannot create groups.
+///
 /// # Arguments
 ///
 /// * `user` - The user that is creating this group
+/// * `state` - Shared Thorium objects
 /// * `group` - The group to create
-/// * `shared` - Shared Thorium objects
 #[utoipa::path(
     post,
     path = "/api/groups/",
@@ -44,6 +46,8 @@ async fn create(
     State(state): State<AppState>,
     Json(group): Json<GroupRequest>,
 ) -> Result<StatusCode, ApiError> {
+    // require a fully authed user since scoped tokens cannot create groups
+    let user = user.require_full()?;
     // create group
     Group::create(&user, group, &state.shared).await?;
     Ok(StatusCode::NO_CONTENT)
@@ -149,12 +153,14 @@ async fn list_details(
 
 /// Updates a group
 ///
+/// Scoped tokens cannot change group membership or settings.
+///
 /// # Arguments
 ///
-/// * `user` - The user that is creating this group
+/// * `user` - The user that is updating this group
 /// * `group` - The name of the group to update
+/// * `state` - Shared Thorium objects
 /// * `update` - The update to apply to this group
-/// * `shared` - Shared Thorium objects
 #[utoipa::path(
     patch,
     path = "/api/groups/:group",
@@ -177,6 +183,8 @@ async fn update(
     State(state): State<AppState>,
     Json(update): Json<GroupUpdate>,
 ) -> Result<StatusCode, ApiError> {
+    // require a fully authed user since scoped tokens cannot change group membership or settings
+    let user = user.require_full()?;
     // get group
     let group = Group::get(&user, &group, &state.shared).await?;
     // update group
@@ -186,11 +194,13 @@ async fn update(
 
 /// Delete group
 ///
+/// Scoped tokens cannot delete groups.
+///
 /// # Arguments
 ///
 /// * `user` - The user that is deleting this group
 /// * `group` - The name of the group to delete
-/// * `shared` - Shared Thorium objects
+/// * `state` - Shared Thorium objects
 #[utoipa::path(
     delete,
     path = "/api/groups/:group",
@@ -211,6 +221,8 @@ async fn delete_group(
     Path(group): Path<String>,
     State(state): State<AppState>,
 ) -> Result<StatusCode, ApiError> {
+    // require a fully authed user since scoped tokens cannot delete groups
+    let user = user.require_full()?;
     // get group
     let group = Group::get(&user, &group, &state.shared).await?;
     // delete group
@@ -252,9 +264,10 @@ async fn sync_ldap(
 ///
 /// # Arguments
 ///
+/// * `user` - The user that is getting these details
+/// * `_params` - The group list query params (unused)
 /// * `group` - The group to get details on
-/// * `user` - The user that is creating this group
-/// * `shared` - Shared Thorium objects
+/// * `state` - Shared Thorium objects
 #[utoipa::path(
     get,
     path = "/api/groups/:group/stats",
@@ -273,16 +286,14 @@ async fn sync_ldap(
 #[instrument(name = "routes::groups::get_stats", skip_all, err(Debug))]
 async fn get_stats(
     user: AuthedUser,
-    Query(params): Query<GroupListParams>,
+    Query(_params): Query<GroupListParams>,
     Path(group): Path<String>,
     State(state): State<AppState>,
 ) -> Result<Json<GroupStats>, ApiError> {
-    // get the grou we are getting pipeline statuses for
+    // get the group we are getting workload statuses for
     let group = Group::get(&user, &group, &state.shared).await?;
     // get the status object for this group
-    let status = group
-        .stats(params.cursor, params.limit, &state.shared)
-        .await?;
+    let status = group.stats(&state.shared).await?;
     Ok(Json(status))
 }
 

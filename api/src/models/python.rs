@@ -8,5 +8,7 @@ mod jobs;
 mod reactions;
 mod repos;
 mod results;
+mod tools;
 
 pub use cursors::{SampleCursor, SampleListLineCursor, TagCountsCursor};
+pub use tools::tool_portability;
