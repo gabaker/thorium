@@ -2,7 +2,7 @@
 
 use chrono::{DateTime, Utc};
 use cidr::{AnyIpCidr, Ipv4Cidr, Ipv6Cidr};
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap};
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 use std::str::FromStr;
 use uuid::Uuid;
@@ -237,6 +237,11 @@ pub struct NetworkPolicyRule {
     pub allowed_groups: Vec<String>,
     /// The list of Thorium tools within the restricted tool's own group to allow access to or from
     ///
+    /// An entry is a tool's or tool instance's id, which selects exactly that tool's or tool
+    /// instance's workers, or a tool's name, which selects the workers of every tool in the
+    /// group with exactly that name when the scaler renders the policy. A name entry follows
+    /// whatever tool holds that name, so use ids for security boundaries.
+    ///
     /// Restrictions on ports from [`NetworkPolicySettings::ports`] still apply
     #[serde(default)]
     pub allowed_tools: Vec<String>,
@@ -403,6 +408,11 @@ pub struct NetworkPolicyRuleRaw {
     #[serde(default)]
     pub allowed_groups: Vec<String>,
     /// The list of Thorium tools within the restricted tool's own group to allow access to or from
+    ///
+    /// An entry is a tool's or tool instance's id, which selects exactly that tool's or tool
+    /// instance's workers, or a tool's name, which selects the workers of every tool in the
+    /// group with exactly that name when the scaler renders the policy. A name entry follows
+    /// whatever tool holds that name, so use ids for security boundaries.
     ///
     /// Restrictions on ports from [`NetworkPolicySettings::ports`] still apply
     #[serde(default)]
@@ -1309,6 +1319,64 @@ pub struct NetworkPolicy {
     pub used_by: HashMap<String, Vec<String>>,
 }
 
+/// The max length of a K8s object name or label value
+pub const K8S_NAME_MAX_CHARS: usize = 63;
+
+/// Convert a value to the characters K8s allows in names and label values
+///
+/// The value is lowercased, every character outside `[a-z0-9-]` is replaced with `-`, and at
+/// most `max` characters are kept.
+///
+/// # Arguments
+///
+/// * `value` - The value to convert
+/// * `max` - The max number of characters to keep
+#[must_use]
+pub fn k8s_name(value: &str, max: usize) -> String {
+    // lowercase the value and replace every character K8s doesn't allow
+    value
+        .to_lowercase()
+        .replace(
+            |c: char| !c.is_ascii() || (!c.is_alphanumeric() && c != '-'),
+            "-",
+        )
+        .chars()
+        .take(max)
+        .collect()
+}
+
+/// Convert a tool's name to the value its workers' container name and `stage` label hold
+///
+/// The value fits in a K8s name, starts and ends with a letter or digit, and is never empty:
+/// a tool name with no allowed characters becomes `t`, like the tool part of a worker's name.
+///
+/// # Arguments
+///
+/// * `value` - The tool's name
+#[must_use]
+pub fn k8s_label(value: &str) -> String {
+    // keep only allowed characters and trim the dashes K8s doesn't allow at either end
+    let mut label = k8s_name(value, K8S_NAME_MAX_CHARS)
+        .trim_matches('-')
+        .to_owned();
+    // a container name can't be empty, so a tool name with no allowed characters gets a letter
+    if label.is_empty() {
+        label.push('t');
+    }
+    label
+}
+
+/// The ids of the tools in one group by their exact names
+///
+/// The scaler resolves the tool-name entries of a network policy's rules with the map of the
+/// group it renders the policy in.
+pub type ToolIdsByName = HashMap<String, BTreeSet<Uuid>>;
+
+/// The value of the tool label in the selector of a tool-name entry that no tool holds
+///
+/// The scaler only ever sets the tool label to a tool's id, so no worker matches this value.
+pub const NO_TOOL_LABEL_VALUE: &str = "none";
+
 // add K8's api support for the scaler
 cfg_if::cfg_if! {
     if #[cfg(feature = "k8s")] {
@@ -1420,16 +1488,40 @@ cfg_if::cfg_if! {
         }
 
 
+        /// Build a pod selector peer that matches one label
+        ///
+        /// # Arguments
+        ///
+        /// * `key` - The label's key
+        /// * `value` - The label's value
+        fn label_peer(key: &str, value: String) -> k8s_net::NetworkPolicyPeer {
+            k8s_net::NetworkPolicyPeer {
+                ip_block: None,
+                namespace_selector: None,
+                pod_selector: Some(LabelSelector {
+                    match_expressions: None,
+                    match_labels: Some([(key.to_owned(), value)].into_iter().collect()),
+                }),
+            }
+        }
+
         macro_rules! impl_from_rule {
-            ($to_or_from:ident, $rule_type:ident) => {
-                impl From<NetworkPolicyRule> for k8s_net::$rule_type {
-                    /// Convert a Thorium `NetworkPolicyRule` to a [`k8s_net::NetworkPolicyEgressRule`]
+            ($to_or_from:ident, $rule_type:ident, $method:ident) => {
+                impl NetworkPolicyRule {
+                    #[doc = concat!("Convert a Thorium `NetworkPolicyRule` to a [`k8s_net::", stringify!($rule_type), "`] in one group")]
+                    ///
+                    /// A tool or tool instance id in `allowed_tools` selects the workers labeled
+                    /// with it, and a tool name selects the workers of the tools in `tools` with
+                    /// exactly that name, or no worker when no tool in the group holds it.
                     ///
                     /// # Arguments
                     ///
-                    /// * `thorium_rule` - The Thorium rule to convert
+                    /// * `tools` - The ids of the tools in the group the rule is rendered in by name
                     #[allow(clippy::too_many_lines)]
-                    fn from(mut thorium_rule: NetworkPolicyRule) -> Self {
+                    #[must_use]
+                    pub fn $method(self, tools: &ToolIdsByName) -> k8s_net::$rule_type {
+                        // take the rule so its lists can be drained into peers
+                        let mut thorium_rule = self;
                         let peers: Vec<k8s_net::NetworkPolicyPeer> = if thorium_rule.allowed_all {
                             // provide an empty peers list to allow all peers
                             Vec::new()
@@ -1531,21 +1623,24 @@ cfg_if::cfg_if! {
                             }
                             // add tools as pod label selectors
                             for tool in thorium_rule.allowed_tools.drain(..) {
-                                peers.push(
-                                    k8s_net::NetworkPolicyPeer {
-                                        ip_block: None,
-                                        namespace_selector: None,
-                                        pod_selector: Some(LabelSelector {
-                                            match_expressions: None,
-                                            // use the "stage" label to select the tool
-                                            match_labels: Some(
-                                                [("stage".to_string(), tool)]
-                                                    .into_iter()
-                                                    .collect()
-                                                )
-                                        })
+                                match Uuid::parse_str(&tool) {
+                                    // an id names a tool instance or a tool, and ids never repeat
+                                    // across the two, so select the workers labeled with either
+                                    Ok(id) => {
+                                        peers.push(label_peer(super::requisitions::TOOL_INSTANCE_LABEL, id.to_string()));
+                                        peers.push(label_peer(super::requisitions::TOOL_LABEL, id.to_string()));
                                     }
-                                );
+                                    // a name selects the workers of each tool in the group with exactly
+                                    // that name by the tool's id, never by the lossy stage label
+                                    Err(_) => match tools.get(&tool).filter(|ids| !ids.is_empty()) {
+                                        Some(ids) => peers.extend(
+                                            ids.iter().map(|id| label_peer(super::requisitions::TOOL_LABEL, id.to_string()))
+                                        ),
+                                        // a name no tool holds still needs a peer, since a rule
+                                        // without peers would admit everything
+                                        None => peers.push(label_peer(super::requisitions::TOOL_LABEL, NO_TOOL_LABEL_VALUE.to_owned())),
+                                    },
+                                }
                             }
                             // add any custom K8's rules
                             for mut custom_rule in thorium_rule.allowed_custom.drain(..) {
@@ -1577,7 +1672,7 @@ cfg_if::cfg_if! {
                             }
                             peers
                         };
-                        Self {
+                        k8s_net::$rule_type {
                             ports: (!thorium_rule.ports.is_empty()).then_some(
                                         thorium_rule.ports
                                             .into_iter()
@@ -1592,8 +1687,8 @@ cfg_if::cfg_if! {
         }
 
         // NetworkPolicyRule to NetworkPolicyIngressRule
-        impl_from_rule!(from, NetworkPolicyIngressRule);
+        impl_from_rule!(from, NetworkPolicyIngressRule, to_k8s_ingress);
         // NetworkPolicyRule to NetworkPolicyEgressRule
-        impl_from_rule!(to, NetworkPolicyEgressRule);
+        impl_from_rule!(to, NetworkPolicyEgressRule, to_k8s_egress);
     }
 }

@@ -210,6 +210,40 @@ fn apply_replacements(content: &str, replacements: &[(&str, &str)]) -> Result<St
 #[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
+    use crate::libs::launchers::WorkloadSource;
+    use crate::libs::launchers::fake::FakeWorkloadSource;
+    use thorium::models::{ImageScaler, Kvm};
+    use uuid::Uuid;
+
+    /// The golden XML of a Kvm tool instance's worker is found under the run's group and the
+    /// tool's name, whatever golden paths the tool instance stores
+    #[tokio::test]
+    async fn golden_xml_from_run_group_and_tool() {
+        // a golden directory holding winvm's XML for group ceres
+        let golden = tempfile::tempdir().unwrap();
+        let dir = golden.path().join("ceres").join("winvm");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("winvm.xml"), b"<domain/>").unwrap();
+        // stored golden paths are never read
+        let stored = Kvm {
+            xml: "/elsewhere/winvm.xml".to_owned(),
+            qcow2: "/elsewhere/winvm.qcow2".to_owned(),
+        };
+        let id = Uuid::new_v4();
+        let mut source = FakeWorkloadSource::default();
+        let spec = crate::libs::launchers::tests::kvm_spec(Some(stored));
+        source.serve(id, "winvm", &["vesta", "ceres"], spec);
+        let worker = crate::libs::launchers::tests::worker(id, "ceres");
+        let image = source
+            .workload_image(&worker, ImageScaler::Kvm)
+            .await
+            .unwrap();
+        // the golden XML is found at the run group's path
+        let path = Overlayed::find_golden_xml(golden.path(), &image)
+            .await
+            .unwrap();
+        assert_eq!(path, dir.join("winvm.xml"));
+    }
 
     // XML replacement tests
 

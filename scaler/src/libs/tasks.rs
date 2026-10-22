@@ -380,7 +380,7 @@ pub async fn sync_ldap(thorium: Arc<Thorium>) -> Result<TaskResult, Error> {
     Ok(TaskResult::LdapSync)
 }
 
-/// Try to update the image runtimes
+/// Try to update the tool instance runtimes
 ///
 /// # Arguments
 ///
@@ -388,8 +388,8 @@ pub async fn sync_ldap(thorium: Arc<Thorium>) -> Result<TaskResult, Error> {
 pub async fn update_runtimes(thorium: Arc<Thorium>) -> Result<TaskResult, Error> {
     // start our update runtimes span
     let _ = span!(Level::INFO, "Updating Runtimes");
-    // try to sync our groups in ldap
-    thorium.images.update_runtimes().await?;
+    // average each tool instance's recorded runtimes
+    thorium.jobs.update_workload_runtimes().await?;
     Ok(TaskResult::UpdateRuntimes)
 }
 
@@ -419,6 +419,21 @@ fn cleanup_result() -> TaskResult {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::libs::test_api::{MockApi, World};
+
+    /// The runtimes task averages the tool instance runtimes and never the image runtimes
+    #[tokio::test]
+    async fn runtimes_task_updates_tool_instances() {
+        // run the runtimes task against a mock API
+        let api = MockApi::start(World::default()).await;
+        let thorium = Arc::new(api.client().await);
+        let result = update_runtimes(thorium).await.unwrap();
+        assert_eq!(result.next_task(), Tasks::UpdateRuntimes);
+        // it called the tool instance runtimes route once and no image route
+        assert_eq!(api.count("POST", "/api/jobs/workloads/runtimes/update"), 1);
+        assert_eq!(api.count("POST", "/api/images"), 0);
+        assert_eq!(api.requests.lock().unwrap().len(), 1);
+    }
 
     /// A completed cleanup reschedules `Cleanup`, so the Cleanup task keeps running for the life
     /// of the scaler and expired reaction lists keep being pruned.

@@ -56,7 +56,7 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 
 [dev-dependencies]
 thoradm = { path = ".", features = ["test-support"] }
-thorium-api = { workspace = true, features = ["api", "client", "trace", "ai", "scylla-utils", "rkyv-support", "test-utilities"] }
+thorium-api = { workspace = true, features = ["api", "client", "trace", "scylla-utils", "rkyv-support", "test-utilities"] }
 axum = "0.8"
 libc = "0.2"
 reqwest = { workspace = true }

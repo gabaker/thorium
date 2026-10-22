@@ -19,8 +19,8 @@ use crate::models::{
     ApiCursor, BulkReactionResponse, Group, JobHandleStatus, JobList, JobReactionIds,
     JobResetRequestor, JobResets, JobStatus, Pipeline, PlannedStage, RawJob, Reaction,
     ReactionActions, ReactionCache, ReactionCacheUpdate, ReactionExpire, ReactionList,
-    ReactionPlan, ReactionRequest, ReactionStatus, StageLogs, StageLogsAdd, StatusRequest,
-    StatusUpdate, SystemComponents, User,
+    ReactionPlan, ReactionRequest, ReactionStatus, RunProvenance, StageLogs, StageLogsAdd,
+    StatusRequest, StatusUpdate, SystemComponents, ToolKind, User,
 };
 use crate::utils::{ApiError, Shared};
 use crate::{
@@ -62,6 +62,7 @@ macro_rules! pipe_key {
 /// * `cast` - The [`Reaction`] to create in Redis
 /// * `cache` - The initial cache of this [`Reaction`]
 /// * `memo` - The tool instances already read for this request
+/// * `deadline` - The deadline to give the first stage's jobs instead of one from the SLA
 /// * `shared` - Shared Thorium objects
 #[rustfmt::skip]
 #[instrument(
@@ -74,6 +75,7 @@ pub async fn build(
     cast: Reaction,
     cache: ReactionCache,
     memo: &mut ToolInstanceMemo,
+    deadline: Option<DateTime<Utc>>,
     shared: &Shared,
 ) -> Result<(Reaction, JobHandleStatus), ApiError> {
     // build reaction data keys
@@ -162,7 +164,7 @@ pub async fn build(
             pipe.cmd("sadd").arg(ReactionKeys::tag(&cast.group, tag, shared))
                 .arg(&reaction_id));
     // create initial jobs
-    react(pipe, cast, memo, shared).await
+    react(pipe, cast, memo, deadline, shared).await
 }
 
 /// Recursively crawl parent reactions and build a list of their ephemeral files
@@ -210,6 +212,7 @@ pub async fn get_parent_ephemeral(
 /// * `request` - The [`ReactionRequest`] to add to the backend
 /// * `pipeline` - The [`Pipeline`] this [`Reaction`] is based on
 /// * `plan` - The stages resolved for this [`Reaction`]
+/// * `provenance` - The exact versions of the tool instances the plan runs
 /// * `memo` - The tool instances already read for this request
 /// * `shared` - Shared Thorium objects
 #[instrument(name = "db::reactions::create", skip_all, err(Debug))]
@@ -218,6 +221,7 @@ pub async fn create(
     request: ReactionRequest,
     pipeline: &Pipeline,
     plan: ReactionPlan,
+    provenance: RunProvenance,
     memo: &mut ToolInstanceMemo,
     shared: &Shared,
 ) -> Result<Reaction, ApiError> {
@@ -226,11 +230,41 @@ pub async fn create(
     let ephemeral = get_parent_ephemeral(&request.group, &request.parent, map, shared).await?;
     // cast to a reaction
     let (cast, cache, _) = request
-        .cast(user, pipeline, plan, ephemeral, shared)
+        .cast(user, pipeline, plan, provenance, ephemeral, shared)
         .await?;
     // build reaction creation pipeline
     let mut pipe = redis::pipe();
-    let (reaction, _) = build(&mut pipe, cast.clone(), cache, memo, shared).await?;
+    let (reaction, _) = build(&mut pipe, cast.clone(), cache, memo, None, shared).await?;
+    // create reaction along with its jobs in redis
+    let _: () = pipe.atomic().query_async(conn!(shared)).await?;
+    Ok(reaction)
+}
+
+/// Creates an already cast [`Reaction`] and its first jobs in Redis
+///
+/// # Arguments
+///
+/// * `cast` - The [`Reaction`] to create
+/// * `cache` - The initial cache of this [`Reaction`]
+/// * `memo` - The tool instances already read for this request
+/// * `deadline` - The deadline to give the first stage's jobs instead of one from the SLA
+/// * `shared` - Shared Thorium objects
+#[instrument(name = "db::reactions::create_cast", skip_all, err(Debug))]
+pub async fn create_cast(
+    cast: Reaction,
+    cache: ReactionCache,
+    memo: &mut ToolInstanceMemo,
+    deadline: Option<DateTime<Utc>>,
+    shared: &Shared,
+) -> Result<Reaction, ApiError> {
+    // let tests fail this creator's reaction write
+    #[cfg(feature = "test-utilities")]
+    if crate::test_utilities::faults::take_reaction_write_failure(&cast.creator) {
+        return crate::internal_err!("injected reaction write failure".to_owned());
+    }
+    // build the reaction and its first jobs in one pipeline
+    let mut pipe = redis::pipe();
+    let (reaction, _) = build(&mut pipe, cast, cache, memo, deadline, shared).await?;
     // create reaction along with its jobs in redis
     let _: () = pipe.atomic().query_async(conn!(shared)).await?;
     Ok(reaction)
@@ -243,7 +277,8 @@ pub async fn create(
 /// * `user` - The [`User`] creating these [`Reaction`]s
 /// * `requests` - The [`Reaction`] requests to add to the backend, with their index in the
 ///   original request
-/// * `pipe_cache` - The pipelines and resolved plans these [`Reaction`]s are based on
+/// * `pipe_cache` - The pipelines, resolved plans, and plan provenance these [`Reaction`]s are
+///   based on
 /// * `memo` - The tool instances already read for this request
 /// * `response` - The response holding the errors of requests that were already refused
 /// * `shared` - Shared Thorium objects
@@ -251,7 +286,7 @@ pub async fn create(
 pub async fn create_bulk<S: std::hash::BuildHasher>(
     user: &User,
     requests: Vec<(usize, ReactionRequest)>,
-    pipe_cache: &HashMap<String, (Pipeline, ReactionPlan), S>,
+    pipe_cache: &HashMap<String, (Pipeline, ReactionPlan, RunProvenance), S>,
     memo: &mut ToolInstanceMemo,
     mut response: BulkReactionResponse,
     shared: &Shared,
@@ -263,11 +298,18 @@ pub async fn create_bulk<S: std::hash::BuildHasher>(
         // get any ephemeral files from any parent reactions
         let map = HashMap::default();
         let ephemeral = get_parent_ephemeral(&req.group, &req.parent, map, shared).await?;
-        // get a reference to pipeline data and its plan
-        if let Some((pipeline, plan)) = pipe_cache.get(&pipe_key!(req)) {
+        // get a reference to pipeline data, its plan, and the plan's provenance
+        if let Some((pipeline, plan, provenance)) = pipe_cache.get(&pipe_key!(req)) {
             // cast this request to a full reaction
             match req
-                .cast(user, pipeline, plan.clone(), ephemeral, shared)
+                .cast(
+                    user,
+                    pipeline,
+                    plan.clone(),
+                    provenance.clone(),
+                    ephemeral,
+                    shared,
+                )
                 .await
             {
                 // we don't continue to track the index because any errors past this point
@@ -289,7 +331,7 @@ pub async fn create_bulk<S: std::hash::BuildHasher>(
     // add the commands to create all of these reactions to our redis pipeline
     for (cast, cache, _) in casts {
         // add this reaction to our redis pipeline
-        let (reaction, _) = build(&mut pipe, cast, cache, memo, shared).await?;
+        let (reaction, _) = build(&mut pipe, cast, cache, memo, None, shared).await?;
         // add this newly created reactions id to our response object
         response.created.push(reaction.id)
     }
@@ -849,9 +891,18 @@ async fn build_expire<'a>(
         .cmd("expire").arg(&sub_reacts.started).arg(shared.config.thorium.retention.data)
         .cmd("expire").arg(&sub_reacts.completed).arg(shared.config.thorium.retention.data)
         .cmd("expire").arg(&sub_reacts.failed).arg(shared.config.thorium.retention.data);
-    // a run's own reaction expires the run's queues, since the run ends after its sub reactions
+    // a run's own reaction expires the run's queues, since the run ends after its sub reactions:
+    // its plan's queues and those of every tool instance with a workload its provenance names,
+    // which covers the images its tool calls ran
     if reaction.run == Some(reaction.id) {
-        for tool_instance in reaction.plan.tool_instances() {
+        let mut queued = reaction.plan.tool_instances();
+        queued.extend(reaction.source.provenance().tools.iter()
+            .filter(|tool| tool.kind != ToolKind::Agentic)
+            .map(|tool| tool.tool_instance));
+        // expire each tool instance's queues once
+        queued.sort_unstable();
+        queued.dedup();
+        for tool_instance in queued {
             for status in [JobStatus::Created, JobStatus::Running, JobStatus::Completed, JobStatus::Failed, JobStatus::Sleeping] {
                 let key = JobKeys::run_queue(&reaction.group, &reaction.id, &tool_instance, &status, shared);
                 pipe.cmd("expire").arg(key).arg(shared.config.thorium.retention.data);
@@ -960,6 +1011,7 @@ fn sla_deadline(sla: DateTime<Utc>, remaining: f64) -> DateTime<Utc> {
 /// * `pipe` - The redis [`redis::Pipeline`] to build commands ontop of
 /// * `reaction` - The [`Reaction`] to create jobs for
 /// * `memo` - The tool instances already read for this request
+/// * `fixed` - The deadline to give these jobs instead of one from the SLA
 /// * `shared` - Shared Thorium objects
 #[rustfmt::skip]
 #[instrument(name = "db::reactions::react", skip_all, err(Debug))]
@@ -967,6 +1019,7 @@ pub async fn react(
     pipe: &mut redis::Pipeline,
     mut reaction: Reaction,
     memo: &mut ToolInstanceMemo,
+    fixed: Option<DateTime<Utc>>,
     shared: &Shared,
 ) -> Result<(Reaction, JobHandleStatus), ApiError> {
     // set status to complete if reaction has completed its final stage
@@ -989,8 +1042,9 @@ pub async fn react(
         // calculate cost to execute this job
         let cost = *next.get(index).unwrap_or(&DEFAULT_PROJECTED_RUNTIME);
         // get the timestamp we need to start this job by in order to meet the SLA, saturating
-        // at the earliest timestamp when the runtimes are too large to subtract
-        let deadline = sla_deadline(reaction.sla, cost + rest);
+        // at the earliest timestamp when the runtimes are too large to subtract, unless the
+        // caller fixed one
+        let deadline = fixed.unwrap_or_else(|| sla_deadline(reaction.sla, cost + rest));
         // build a raw job object for this stage
         let job: RawJob = RawJob::build(&reaction, &sub.name, deadline, &info)?;
         // add job build command onto our redis pipeline
@@ -1106,7 +1160,7 @@ pub async fn proceed(mut reaction: Reaction, shared: &Shared) -> Result<JobHandl
         // create the current stages jobs from the reaction's plan
         let mut pipe = redis::pipe();
         let mut memo = ToolInstanceMemo::default();
-        let (reaction, status) = react(&mut pipe, reaction, &mut memo, shared).await?;
+        let (reaction, status) = react(&mut pipe, reaction, &mut memo, None, shared).await?;
         // only advance this reaction if it is still on the stage we proceeded from and hasn't
         // been completed or failed, so concurrent proceeds can't both launch the next stage
         let data_key = ReactionKeys::data(&reaction.group, &reaction.id, shared);
@@ -1133,6 +1187,8 @@ pub async fn proceed(mut reaction: Reaction, shared: &Shared) -> Result<JobHandl
         };
         // we only try to proceed parent reactions if we are completing our current reaction
         if status == JobHandleStatus::Completed {
+            // a completed run ends, so its token stops working
+            delete_run_token(&reaction, shared).await?;
             // if we have a parent reaction then proceed it
             parent_proceed(&reaction, progress, shared).await?;
         }
@@ -1198,17 +1254,150 @@ async fn delete_ephemeral_and_cache_files(
     Ok(())
 }
 
+/// Deletes the run-scoped token a reaction owns, if it owns one
+///
+/// Only the reaction a run token was minted for owns it (its `run` is its own id), so a sub
+/// reaction that shares its parent's token never deletes it. A token that is already gone
+/// (expired or deleted by its owner) is ignored, and so is a token under that name that isn't
+/// scoped to this run (one its owner created after deleting the run's token).
+///
+/// # Arguments
+///
+/// * `reaction` - The reaction that completed, failed, or was deleted
+/// * `shared` - Shared Thorium objects
+#[instrument(name = "db::reactions::delete_run_token", skip_all, err(Debug))]
+async fn delete_run_token(reaction: &Reaction, shared: &Shared) -> Result<(), ApiError> {
+    // only the reaction that owns a run token deletes it
+    if reaction.run != Some(reaction.id) {
+        return Ok(());
+    }
+    // a reaction without a token has nothing to delete
+    let Some(name) = &reaction.run_token else {
+        return Ok(());
+    };
+    // load the token from its owner and delete it, ignoring a token that's already gone
+    match super::users::get_scoped_token(&reaction.creator, name, shared).await {
+        // only a token still scoped to this run is its run token
+        Ok(token) if token.run.as_ref().map(|run| run.reaction) == Some(reaction.id) => {
+            super::users::delete_scoped_token(&token, shared).await
+        }
+        // a same-named token the owner created later isn't the run's to delete
+        Ok(_) => Ok(()),
+        Err(error) if error.status() == axum::http::StatusCode::NOT_FOUND => Ok(()),
+        Err(error) => Err(error),
+    }
+}
+
+/// Removes a reaction's unclaimed jobs from their queues and deadline streams
+///
+/// # Arguments
+///
+/// * `reaction` - The reaction whose unclaimed jobs to remove
+/// * `shared` - Shared Thorium objects
+#[rustfmt::skip]
+#[instrument(name = "db::reactions::dequeue_jobs", skip_all, err(Debug))]
+async fn dequeue_jobs(reaction: &Reaction, shared: &Shared) -> Result<(), ApiError> {
+    // crawl over this reaction's jobs
+    let mut cursor = 0;
+    loop {
+        // list a page of this reaction's jobs with their details
+        let ids = list_jobs(reaction, cursor, 1000, shared).await?;
+        let jobs = RawJob::list_details(ids, shared).await?;
+        // remove each unclaimed job from its status queue and deadline stream
+        let mut pipe = redis::pipe();
+        jobs.details.iter()
+            .filter(|job| matches!(job.status, JobStatus::Created | JobStatus::Sleeping))
+            .fold(&mut pipe, |pipe, job|
+                pipe.cmd("zrem").arg(JobKeys::status_queue(job, &job.status, shared))
+                        .arg(force_serialize!(&JobReactionIds::new(job)))
+                    .cmd("zrem").arg(StreamKeys::system_scaler(job.scaler, "deadlines", shared))
+                        .arg(job.stream_data()));
+        let _: () = pipe.atomic().query_async(conn!(shared)).await?;
+        // stop once every job was crawled
+        match jobs.cursor {
+            Some(next) => cursor = next,
+            None => break,
+        }
+    }
+    Ok(())
+}
+
+/// Ends the unfinished work of a run whose own reaction is failing or being deleted
+///
+/// A run's jobs can only be claimed with its run token, which ends with the run, so the run's
+/// unclaimed jobs leave their queues and deadline streams and its unfinished sub reactions are
+/// failed with their unclaimed jobs removed the same way. Reactions that aren't a run's own
+/// reaction have nothing to end.
+///
+/// # Arguments
+///
+/// * `reaction` - The reaction that is failing or being deleted
+/// * `shared` - Shared Thorium objects
+#[instrument(name = "db::reactions::end_run", skip_all, err(Debug))]
+async fn end_run(reaction: &Reaction, shared: &Shared) -> Result<(), ApiError> {
+    // only a run's own reaction ends the run
+    if reaction.run != Some(reaction.id) {
+        return Ok(());
+    }
+    // remove the run's own unclaimed jobs
+    dequeue_jobs(reaction, shared).await?;
+    // fail each of the run's unfinished sub reactions
+    for status in [ReactionStatus::Created, ReactionStatus::Started] {
+        // list the sub reactions with this status
+        let key = ReactionKeys::sub_status_set(&reaction.group, &reaction.id, &status, shared);
+        let ids: Vec<String> = cmd("smembers").arg(key).query_async(conn!(shared)).await?;
+        for id in ids {
+            // skip ids that aren't reactions and sub reactions that are already gone
+            let Ok(id) = Uuid::parse_str(&id) else {
+                continue;
+            };
+            let sub = match get(&reaction.group, &id, shared).await {
+                Ok(sub) => sub,
+                Err(error) if error.status() == axum::http::StatusCode::NOT_FOUND => continue,
+                Err(error) => return Err(error),
+            };
+            // a sub reaction that finished meanwhile is left alone
+            if matches!(
+                sub.status,
+                ReactionStatus::Completed | ReactionStatus::Failed
+            ) {
+                continue;
+            }
+            // remove its unclaimed jobs and fail it without proceeding the ending run, boxing
+            // the recursive future
+            dequeue_jobs(&sub, shared).await?;
+            Box::pin(fail_inner(sub, false, shared)).await?;
+        }
+    }
+    Ok(())
+}
+
 /// Fails a reaction
 ///
 /// # Arguments
 ///
 /// * `reaction` - The reaction to fail
 /// * `shared` - Shared Thorium objects
-/// * `span` - The span to trace logs under
-#[rustfmt::skip]
 #[instrument(name = "db::reactions::fail", skip_all, err(Debug))]
-pub async fn fail(
+pub async fn fail(reaction: Reaction, shared: &Shared) -> Result<ReactionStatus, ApiError> {
+    // fail the reaction and proceed its parent if this finished the parent's sub reactions
+    fail_inner(reaction, true, shared).await
+}
+
+/// Fails a reaction, optionally proceeding its parent
+///
+/// A run that is ending fails its unfinished sub reactions without proceeding itself, since
+/// proceeding would complete the run that is being failed or deleted.
+///
+/// # Arguments
+///
+/// * `reaction` - The reaction to fail
+/// * `proceed_parent` - Whether to proceed the parent once its sub reactions are all finished
+/// * `shared` - Shared Thorium objects
+#[rustfmt::skip]
+async fn fail_inner(
     mut reaction: Reaction,
+    proceed_parent: bool,
     shared: &Shared,
 ) -> Result<ReactionStatus, ApiError> {
     // check if reaction is already failed
@@ -1261,8 +1450,14 @@ pub async fn fail(
     incr_parent(&reaction, &src_group_status, &mut pipe, shared);
     // execute redis pipeline
     let progress: Vec<u64> = pipe.atomic().query_async(conn!(shared)).await?;
-    // proceed with our parent reactions
-    parent_proceed(&reaction, progress, shared).await?;
+    // a failed run ends, so its unfinished work ends while its token still exists
+    end_run(&reaction, shared).await?;
+    // then its token stops working
+    delete_run_token(&reaction, shared).await?;
+    // proceed with our parent reactions unless our parent is the run that is ending
+    if proceed_parent {
+        parent_proceed(&reaction, progress, shared).await?;
+    }
     // try to delete any ephemeral files
     delete_ephemeral_and_cache_files(&reaction, shared).await?;
     Ok(ReactionStatus::Failed)
@@ -1494,6 +1689,8 @@ pub async fn list_jobs(
 #[rustfmt::skip]
 #[instrument(name = "db::reactions::delete", skip_all, err(Debug))]
 pub async fn delete(reaction: &Reaction, shared: &Shared) -> Result<(), ApiError> {
+    // a deleted run ends, so its unfinished sub reactions fail while its data is still there
+    end_run(reaction, shared).await?;
     // loop until jobs in this stage are deleted
     let mut cursor = 0;
     loop {
@@ -1549,6 +1746,8 @@ pub async fn delete(reaction: &Reaction, shared: &Shared) -> Result<(), ApiError
         .cmd("srem").arg(ReactionKeys::status(&reaction.group, &reaction.pipeline, &reaction.status, shared))
             .arg(&reaction_id)
         .query_async(conn!(shared)).await?;
+    // a deleted run ends, so its token stops working
+    delete_run_token(reaction, shared).await?;
     Ok(())
 }
 
@@ -1575,8 +1774,9 @@ pub async fn delete_all(
         // get list of reactions
         let reactions = Reaction::list(pipeline, cursor, 10, shared).await?
             .details(&group.name, shared).await?;
+        // delete each reaction; deleting the pipeline was already authorized for this user
         let delete_futs = reactions.details.iter()
-            .map(|item| item.delete(user, group, shared));
+            .map(|item| item.delete(user, group, None, shared));
         try_join_all(delete_futs).await?;
 
         // check if our cursor has been exhausted

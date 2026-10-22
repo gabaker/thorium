@@ -26,6 +26,7 @@ mod repos;
 mod search;
 mod streams;
 mod system;
+pub mod tool_runs;
 mod traits;
 mod trees;
 mod updates;

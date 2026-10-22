@@ -1,24 +1,41 @@
 //! MCP support for Thorium
 
 use axum::Router;
+use axum::extract::State;
+use axum::http::header::AUTHORIZATION;
 use axum::http::request::Parts;
+use axum::http::{HeaderMap, StatusCode};
+use axum::response::IntoResponse;
 use rmcp::handler::server::router::tool::ToolRouter;
-use rmcp::model::{ServerCapabilities, ServerInfo};
+use rmcp::handler::server::tool::ToolCallContext;
+use rmcp::model::{
+    CacheScope, CallToolRequestParams, CallToolResponse, CallToolResult, ListToolsResult,
+    PaginatedRequestParams, ProtocolVersion, ResultType, ServerCapabilities, ServerConfig,
+    ToolAnnotations,
+};
+use rmcp::service::RequestContext;
 use rmcp::transport::StreamableHttpServerConfig;
 use rmcp::transport::streamable_http_server::StreamableHttpService;
 use rmcp::transport::streamable_http_server::session::local::LocalSessionManager;
-use rmcp::{ErrorData, tool_handler};
-use std::net::IpAddr;
+use rmcp::{ErrorData, RoleServer, tool_handler};
+use serde::Serialize;
+use std::net::{IpAddr, SocketAddr};
 use std::str::FromStr;
+use tower::ServiceExt;
+use tracing::{Level, event};
 
 mod files;
 mod images;
 mod pipelines;
+mod run_scope;
+mod runs;
 mod trees;
 
 use crate::Conf;
 use crate::client::Thorium;
-use crate::utils::AppState;
+use crate::models::{AuthedUser, RunTokenScope};
+use crate::utils::{ApiError, AppState};
+use run_scope::RunTools;
 
 /// The config info needed for mcp clients
 #[derive(Clone, Copy)]
@@ -32,8 +49,10 @@ pub struct McpConfig {
 impl McpConfig {
     /// Get the url to talk to the Thorium API at
     pub fn get_url(&self) -> String {
+        // a socket address brackets an IPv6 address as a url needs
+        let addr = SocketAddr::new(self.ip, self.port);
         // build the url to talk to Thorium at
-        format!("http://{}:{}", self.ip, self.port)
+        format!("http://{addr}")
     }
 
     /// Grab our token from this requests parts
@@ -104,16 +123,94 @@ pub struct ThoriumMCP {
 
 #[tool_handler(router = self.tool_router)]
 impl rmcp::ServerHandler for ThoriumMCP {
-    fn get_info(&self) -> ServerInfo {
-        ServerInfo {
-            instructions: Some("A file analysis and data generation platform.".into()),
-            capabilities: ServerCapabilities::builder().enable_tools().build(),
-            ..Default::default()
+    /// Describe this server and the capabilities it offers
+    fn get_info(&self) -> ServerConfig {
+        // offer tools and say what Thorium is
+        ServerConfig::new(ServerCapabilities::builder().enable_tools().build())
+            .with_instructions("A file analysis and data generation platform.")
+    }
+
+    /// List the tools this server serves, or only the run's tools for a run-scoped token
+    ///
+    /// # Arguments
+    ///
+    /// * `_request` - The listing request, which has nothing to page through
+    /// * `context` - The request's context, carrying its HTTP request parts
+    async fn list_tools(
+        &self,
+        _request: Option<PaginatedRequestParams>,
+        context: RequestContext<RoleServer>,
+    ) -> Result<ListToolsResult, ErrorData> {
+        // list every tool, or only the run's tools for a run-scoped token
+        let all = self.tool_router.list_all();
+        let (tools, scope) = match self.run_tools(&context).await? {
+            Some(run_tools) => (run_tools.list(all), CacheScope::Private),
+            None => (all, CacheScope::Public),
+        };
+        // only the stateless revision carries cache hints
+        let hints = context
+            .protocol_version()
+            .is_some_and(|version| version >= ProtocolVersion::V_2026_07_28);
+        // a run's listing is its token's own, so only that client may cache it
+        Ok(ListToolsResult {
+            result_type: Some(ResultType::COMPLETE),
+            tools,
+            meta: None,
+            next_cursor: None,
+            ttl_ms: hints.then_some(0),
+            cache_scope: hints.then_some(scope),
+        })
+    }
+
+    /// Call a tool, checking a run-scoped token's results against its run tool's output schema
+    ///
+    /// # Arguments
+    ///
+    /// * `request` - The tool call
+    /// * `context` - The request's context, carrying its HTTP request parts
+    async fn call_tool(
+        &self,
+        request: CallToolRequestParams,
+        context: RequestContext<RoleServer>,
+    ) -> Result<CallToolResponse, ErrorData> {
+        // read the run's tools before the call takes the context
+        let run_tools = self.run_tools(&context).await?;
+        let name = request.name.to_string();
+        // call the tool with the token's normal limits
+        let called = ToolCallContext::new(self, request, context);
+        let response = self.tool_router.call(called).await?;
+        // a run tool's finished result must match its output schema
+        match (run_tools, response) {
+            (Some(run_tools), CallToolResponse::Complete(result)) => {
+                Ok(CallToolResponse::Complete(run_tools.check(&name, result)))
+            }
+            (_, response) => Ok(response),
         }
     }
 }
 
 impl ThoriumMCP {
+    /// Read the run tools of the run a request's token is limited to, if it is run-scoped
+    ///
+    /// # Arguments
+    ///
+    /// * `context` - The request's context, carrying its HTTP request parts
+    async fn run_tools(
+        &self,
+        context: &RequestContext<RoleServer>,
+    ) -> Result<Option<RunTools>, ErrorData> {
+        // the HTTP layer marks requests made with a run-scoped token with the token's run
+        let Some(parts) = context.extensions.get::<Parts>() else {
+            return Ok(None);
+        };
+        let Some(scope) = parts.extensions.get::<RunTokenScope>() else {
+            return Ok(None);
+        };
+        // read the run's tools with the token itself
+        let thorium = self.conf.client(parts).await?;
+        Ok(Some(RunTools::load(&thorium, scope).await?))
+    }
+
     /// Build a new Thorium MCP instance
     ///
     /// # Arguments
@@ -122,27 +219,138 @@ impl ThoriumMCP {
     pub fn new(mcp_conf: McpConfig) -> Self {
         Self {
             conf: mcp_conf,
-            tool_router: Self::sample_router()
-                + Self::images_router()
-                + Self::pipelines_router()
-                + Self::tree_router(),
+            tool_router: Self::router(),
         }
     }
+
+    /// Build the router holding every tool Thorium's MCP server exposes
+    fn router() -> ToolRouter<Self> {
+        // combine the sample, image, pipeline, tree, and tool run tools
+        let router = Self::sample_router()
+            + Self::images_router()
+            + Self::pipelines_router()
+            + Self::tree_router()
+            + Self::tool_runs_router();
+        // give each tool its title and annotations
+        describe_live_tools(router)
+    }
+}
+
+/// Build a tool result holding one JSON value
+///
+/// # Arguments
+///
+/// * `value` - The value to return
+pub(crate) fn json_result<T: Serialize>(value: &T) -> Result<CallToolResult, ErrorData> {
+    // serialize the value
+    let value = serde_json::to_value(value)
+        .map_err(|error| ErrorData::internal_error(error.to_string(), None))?;
+    // return the value as structured content and as a text block with the same JSON
+    Ok(CallToolResult::structured(value))
+}
+
+/// The title, read-only hint, and idempotent hint of each tool the server serves
+///
+/// No tool is destructive or reaches outside Thorium.
+const LIVE_TOOLS: [(&str, &str, bool, bool); 10] = [
+    ("get_sample", "Get sample", true, true),
+    ("get_sample_results", "Get sample results", true, true),
+    (
+        "list_sample_result_file_paths",
+        "List result files",
+        true,
+        true,
+    ),
+    ("get_sample_result_file", "Get result file", true, true),
+    ("list_images", "List images", true, true),
+    ("list_pipelines", "List pipelines", true, true),
+    ("start_tree", "Crawl related data", true, false),
+    ("run_tool", "Run tool", false, false),
+    ("get_tool_run", "Get tool run", true, true),
+    ("get_tool_run_results", "Get tool run results", true, true),
+];
+
+/// Give each tool in a router its title and annotations
+///
+/// # Arguments
+///
+/// * `router` - The router whose tools to describe
+fn describe_live_tools<S>(mut router: ToolRouter<S>) -> ToolRouter<S> {
+    for route in router.map.values_mut() {
+        // find this tool's title and hints
+        let Some((_, title, read_only, idempotent)) = LIVE_TOOLS
+            .iter()
+            .find(|(name, ..)| route.attr.name == *name)
+        else {
+            continue;
+        };
+        // title the tool and annotate how it may be used
+        route.attr.title = Some((*title).to_owned());
+        route.attr.annotations = Some(
+            ToolAnnotations::with_title(*title)
+                .read_only(*read_only)
+                .destructive(false)
+                .idempotent(*idempotent)
+                .open_world(false),
+        );
+    }
+    router
 }
 
 impl ThoriumMCP {
     /// Get the names of every tool Thorium's MCP server exposes
     #[must_use]
     pub fn tool_names() -> Vec<String> {
-        // list every tool in the same routers the server is built from
-        (Self::sample_router()
-            + Self::images_router()
-            + Self::pipelines_router()
-            + Self::tree_router())
-        .list_all()
-        .into_iter()
-        .map(|tool| tool.name.to_string())
-        .collect()
+        // list every tool in the same router the server is built from
+        Self::router()
+            .list_all()
+            .into_iter()
+            .map(|tool| tool.name.to_string())
+            .collect()
+    }
+}
+
+/// Get the run a request's token is limited to, if it is a run-scoped token
+///
+/// A request without a token or whose token doesn't authenticate carries no scope, since each
+/// tool refuses it itself, but an auth backend failure fails the request instead of serving it
+/// unscoped.
+///
+/// # Arguments
+///
+/// * `state` - Shared Thorium objects
+/// * `headers` - The request's headers
+async fn run_scope(
+    state: &AppState,
+    headers: &HeaderMap,
+) -> Result<Option<RunTokenScope>, ApiError> {
+    // MCP clients send the raw token, alone or after its scheme
+    let Some(header) = headers
+        .get(AUTHORIZATION)
+        .and_then(|value| value.to_str().ok())
+    else {
+        return Ok(None);
+    };
+    let token = header.split_once(' ').map_or(header, |(_, token)| token);
+    // authenticate it and keep its run scope
+    let authed = AuthedUser::from_raw_token(token, &state.shared).await;
+    scope_or_fail(authed.map(|user| user.run().cloned()))
+}
+
+/// Keep the run scope of an authenticated token, treating a token that doesn't authenticate as
+/// unscoped and failing on any other error
+///
+/// # Arguments
+///
+/// * `authed` - The run scope of the authenticated token, or why it didn't authenticate
+fn scope_or_fail(
+    authed: Result<Option<RunTokenScope>, ApiError>,
+) -> Result<Option<RunTokenScope>, ApiError> {
+    match authed {
+        // a token that doesn't authenticate is left to each tool to refuse
+        Err(error) if error.status() == StatusCode::UNAUTHORIZED => Ok(None),
+        // keep a token's scope, and fail on an auth backend error
+        other => other,
     }
 }
 
@@ -155,23 +363,177 @@ impl ThoriumMCP {
 pub fn mount(router: Router<AppState>, conf: &Conf) -> Router<AppState> {
     // create a new mcp config
     let mcp_conf = McpConfig::from(conf);
+    // accept only requests addressed to Thorium's own hosts, so a page on another site can't
+    // reach the server through DNS rebinding
+    let allowed_hosts = conf.thorium.mcp_allowed_hosts();
+    event!(
+        Level::INFO,
+        msg = "MCP server allowed hosts",
+        hosts = allowed_hosts.join(",")
+    );
+    let server_conf = StreamableHttpServerConfig::default()
+        .with_allowed_hosts(allowed_hosts)
+        .with_allowed_origins(conf.thorium.mcp.allowed_origins.clone());
     // create a new service
     let service = StreamableHttpService::new(
         move || Ok(ThoriumMCP::new(mcp_conf)),
         LocalSessionManager::default().into(),
-        StreamableHttpServerConfig::default(),
+        server_conf,
     );
-    // get a new mcp router
-    let mcp_router = Router::<AppState>::new().fallback_service(service);
+    // mark requests made with a run-scoped token with the token's run before serving them
+    let mcp_router = Router::<AppState>::new().fallback(
+        move |State(state): State<AppState>, mut req: axum::extract::Request| {
+            let service = service.clone();
+            async move {
+                // a request whose token doesn't authenticate is left to each tool to refuse, but
+                // one whose token can't be checked fails instead of being served unscoped
+                match run_scope(&state, req.headers()).await {
+                    Ok(Some(scope)) => {
+                        req.extensions_mut().insert(scope);
+                    }
+                    Ok(None) => (),
+                    Err(error) => {
+                        event!(
+                            Level::ERROR,
+                            msg = "MCP request refused: its token's run scope couldn't be read",
+                            status = error.status().as_u16()
+                        );
+                        return error.into_response();
+                    }
+                }
+                // serve the request with the MCP service
+                match service.oneshot(req).await {
+                    Ok(response) => response.into_response(),
+                    Err(never) => match never {},
+                }
+            }
+        },
+    );
     // nest our router
     router.nest("/mcp", mcp_router)
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{McpConfig, ThoriumMCP};
+    use super::{McpConfig, ThoriumMCP, scope_or_fail};
+    use crate::models::RunTokenScope;
+    use crate::utils::ApiError;
     use axum::http::request::Parts;
-    use axum::http::{HeaderValue, Request};
+    use axum::http::{HeaderValue, Request, StatusCode};
+    use serde_json::{Value, json};
+
+    /// Every tool the server serves has the title and annotations of its kind of use
+    #[test]
+    fn live_tool_titles_and_annotations() {
+        // the title, read-only, destructive, idempotent, and open world hints of each tool
+        let expected: [(&str, &str, bool, bool, bool); 10] = [
+            ("get_sample", "Get sample", true, false, true),
+            (
+                "get_sample_results",
+                "Get sample results",
+                true,
+                false,
+                true,
+            ),
+            (
+                "list_sample_result_file_paths",
+                "List result files",
+                true,
+                false,
+                true,
+            ),
+            (
+                "get_sample_result_file",
+                "Get result file",
+                true,
+                false,
+                true,
+            ),
+            ("list_images", "List images", true, false, true),
+            ("list_pipelines", "List pipelines", true, false, true),
+            ("start_tree", "Crawl related data", true, false, false),
+            ("run_tool", "Run tool", false, false, false),
+            ("get_tool_run", "Get tool run", true, false, true),
+            (
+                "get_tool_run_results",
+                "Get tool run results",
+                true,
+                false,
+                true,
+            ),
+        ];
+        // list the tools the server serves
+        let tools = ThoriumMCP::router().list_all();
+        assert_eq!(tools.len(), expected.len());
+        for (name, title, read_only, destructive, idempotent) in expected {
+            // find the tool
+            let tool = tools
+                .iter()
+                .find(|tool| tool.name == name)
+                .unwrap_or_else(|| panic!("{name} isn't served"));
+            // its title is set on the tool and its annotations
+            assert_eq!(tool.title.as_deref(), Some(title), "{name}");
+            let annotations = tool
+                .annotations
+                .as_ref()
+                .unwrap_or_else(|| panic!("{name} has no annotations"));
+            assert_eq!(annotations.title.as_deref(), Some(title), "{name}");
+            // its hints follow its kind of use, and no tool reaches outside Thorium
+            assert_eq!(annotations.read_only_hint, Some(read_only), "{name}");
+            assert_eq!(annotations.destructive_hint, Some(destructive), "{name}");
+            assert_eq!(annotations.idempotent_hint, Some(idempotent), "{name}");
+            assert_eq!(annotations.open_world_hint, Some(false), "{name}");
+        }
+    }
+
+    /// A JSON tool result carries the value as structured content and as one text block
+    #[test]
+    fn json_results_carry_matching_text() {
+        // build a result from an object
+        let value = json!({"sha256": "abc", "tags": {"Format": ["PE"]}});
+        let result = super::json_result(&value).expect("value serializes");
+        // the structured content is the value
+        assert_eq!(result.structured_content.as_ref(), Some(&value));
+        assert_eq!(result.is_error, Some(false));
+        // one text block holds the same JSON
+        assert_eq!(result.content.len(), 1);
+        let text = result.content[0].as_text().expect("a text block");
+        let parsed: Value = serde_json::from_str(&text.text).expect("the text is JSON");
+        assert_eq!(parsed, value);
+    }
+
+    /// The workspace locks one rmcp release, the current one, without the SSE server transport
+    #[test]
+    fn single_current_rmcp() {
+        // read the workspace lock file and the api manifest
+        let api = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+        let lock = std::fs::read_to_string(api.join("../Cargo.lock")).expect("lock file reads");
+        let manifest = std::fs::read_to_string(api.join("Cargo.toml")).expect("manifest reads");
+        // collect the version of every locked rmcp package
+        let lines = lock.lines().collect::<Vec<&str>>();
+        let versions = lines
+            .windows(2)
+            .filter(|pair| pair[0] == "name = \"rmcp\"")
+            .map(|pair| pair[1].to_owned())
+            .collect::<Vec<String>>();
+        // there is exactly one, on the 3.6 line or later
+        assert_eq!(versions.len(), 1, "{versions:?}");
+        let version = versions[0]
+            .trim_start_matches("version = \"")
+            .trim_end_matches('"');
+        let mut parts = version
+            .split('.')
+            .map(|part| part.parse::<u64>().unwrap_or(0));
+        let major = parts.next().unwrap_or(0);
+        let minor = parts.next().unwrap_or(0);
+        assert!((major, minor) >= (3, 6), "rmcp {version} is older than 3.6");
+        // the api never enables the SSE server transport
+        let rmcp_line = manifest
+            .lines()
+            .find(|line| line.starts_with("rmcp = "))
+            .expect("the api depends on rmcp");
+        assert!(!rmcp_line.contains("transport-sse-server"), "{rmcp_line}");
+    }
 
     /// Build request parts carrying the given raw Authorization header bytes
     ///
@@ -215,18 +577,64 @@ mod tests {
         // list every tool the server exposes
         let mut names = ThoriumMCP::tool_names();
         names.sort();
-        // the server exposes the sample, image, pipeline, and tree tools
+        // the server exposes the sample, image, pipeline, tree, and tool run tools
         assert_eq!(
             names,
             vec![
                 "get_sample",
                 "get_sample_result_file",
                 "get_sample_results",
+                "get_tool_run",
+                "get_tool_run_results",
                 "list_images",
                 "list_pipelines",
                 "list_sample_result_file_paths",
+                "run_tool",
                 "start_tree",
             ]
         );
+    }
+
+    /// The url the MCP tools call the API at parses for IPv4 and IPv6 interfaces alike
+    #[test]
+    fn get_url_brackets_ipv6() {
+        // an IPv4 interface keeps the plain host and port
+        let v4 = McpConfig {
+            ip: "0.0.0.0".parse().unwrap(),
+            port: 80,
+        };
+        assert_eq!(v4.get_url(), "http://0.0.0.0:80");
+        // an IPv6 interface is bracketed so the url parses
+        for (ip, expected) in [
+            ("::", "http://[::]:80"),
+            ("fd00::10", "http://[fd00::10]:80"),
+        ] {
+            let v6 = McpConfig {
+                ip: ip.parse().unwrap(),
+                port: 80,
+            };
+            assert_eq!(v6.get_url(), expected);
+            assert!(url::Url::parse(&v6.get_url()).is_ok(), "{}", v6.get_url());
+        }
+    }
+
+    /// A token that doesn't authenticate carries no run scope, a run-scoped token carries its
+    /// run, and any other authentication error fails the request
+    #[test]
+    fn scope_or_fail_fails_closed_on_backend_errors() {
+        // a run-scoped token keeps its run and any other token has none
+        let scope = RunTokenScope {
+            reaction: uuid::Uuid::new_v4(),
+            tool_instances: vec![uuid::Uuid::new_v4()],
+        };
+        assert_eq!(scope_or_fail(Ok(Some(scope.clone()))).unwrap(), Some(scope));
+        assert_eq!(scope_or_fail(Ok(None)).unwrap(), None);
+        // a token that doesn't authenticate is left to each tool to refuse
+        let refused = ApiError::new(StatusCode::UNAUTHORIZED, None);
+        assert_eq!(scope_or_fail(Err(refused)).unwrap(), None);
+        // an auth backend failure fails the request
+        let down = ApiError::new(StatusCode::INTERNAL_SERVER_ERROR, None);
+        let error = scope_or_fail(Err(down)).unwrap_err();
+        assert_eq!(error.status(), StatusCode::INTERNAL_SERVER_ERROR);
     }
 }

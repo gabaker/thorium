@@ -1087,7 +1087,71 @@ async fn names_in(client: &Thorium, group: &str) -> Result<Vec<String>, Error> {
     Ok(names)
 }
 
-/// Spec env values are shared and permanent, and image names in dependencies aren't looked up
+/// Dependency settings name tools: a tool instance, a missing id, and a tool the publisher
+/// can't see each get the same `400`, and a visible tool publishes
+#[tokio::test]
+async fn dependency_settings_name_visible_tools() -> Result<(), Error> {
+    // a user in one group, a tool in that group, and a tool in a group hidden from the user
+    let admin = test_utilities::admin_client().await?;
+    let user = plain_user(&admin).await?;
+    let group = group_for(&user.username, &admin).await?;
+    let hidden = generators::groups(1, &admin).await?.remove(0).name;
+    let (visible, visible_instance) =
+        generators::tool(&[&group], "1.0.0", &generators::gen_image_spec(), &admin).await?;
+    let (hidden_tool, _) =
+        generators::tool(&[&hidden], "1.0.0", &generators::gen_image_spec(), &admin).await?;
+    // build an Image spec naming a tool in one of its dependency lists
+    let naming = |kind: usize, id: Uuid| {
+        let mut spec = generators::gen_image_spec();
+        if let ToolSpec::Image(workload) = &mut spec {
+            let deps = &mut workload.data.dependencies;
+            match kind {
+                0 => deps.results.tools = vec![id],
+                1 => deps.children.tools = vec![id],
+                _ => deps.filesystems.tools = vec![id],
+            }
+        }
+        spec
+    };
+    // a tool instance, a missing id, and a hidden tool are refused alike in every list
+    let refused = [visible_instance.id, Uuid::new_v4(), hidden_tool.id];
+    for (kind, id) in refused.iter().enumerate() {
+        let resp = user
+            .client
+            .entities
+            .create(generators::gen_tool(&[&group], "1.0.0", &naming(kind, *id)))
+            .await;
+        fail!(resp, 400);
+        let Err(err) = resp else { unreachable!() };
+        let msg = err.msg().unwrap_or_default();
+        assert!(
+            msg.contains(&id.to_string()) && msg.contains("you can't see it"),
+            "{msg}"
+        );
+    }
+    // publishing a new version is checked the same way
+    let resp = user
+        .client
+        .entities
+        .update(
+            visible.id,
+            generators::gen_tool_publish("2.0.0", &naming(0, hidden_tool.id)),
+        )
+        .await;
+    fail!(resp, 400);
+    // a visible tool publishes in every list
+    for kind in 0..3 {
+        let (_, instance) =
+            generators::tool(&[&group], "1.0.0", &naming(kind, visible.id), &user.client).await?;
+        let ToolSpec::Image(workload) = &instance_meta(&instance).spec else {
+            unreachable!()
+        };
+        is!(workload.data.dependencies.tools(), vec![visible.id]);
+    }
+    Ok(())
+}
+
+/// Spec env values are shared and permanent, and the tools dependencies name are hashed
 #[tokio::test]
 async fn spec_env_and_image_names() -> Result<(), Error> {
     // an Image tool with a secret in its K8s env publishes without a warning
@@ -1124,15 +1188,15 @@ async fn spec_env_and_image_names() -> Result<(), Error> {
     admin.entities.delete(v1.id).await?;
     let resp = admin.entities.get(v1.id).await;
     fail!(resp, 404);
-    // image names in result dependencies publish without a lookup and are hashed
+    // tools named in result dependencies are hashed
     let mut deps = generators::gen_image_spec();
     if let ToolSpec::Image(workload) = &mut deps {
-        workload.data.dependencies.results.images = vec!["not-a-tool".into()];
+        workload.data.dependencies.results.tools = vec![tool.id];
     }
-    let (_, deps_instance) = generators::tool(&[&group], "1.0.0", &deps, &admin).await?;
+    let (other, deps_instance) = generators::tool(&[&group], "1.0.0", &deps, &admin).await?;
     let mut changed = deps.clone();
     if let ToolSpec::Image(workload) = &mut changed {
-        workload.data.dependencies.results.images = vec!["another".into()];
+        workload.data.dependencies.results.tools = vec![other.id];
     }
     assert_ne!(
         instance_meta(&deps_instance).spec_hash,
@@ -1479,6 +1543,89 @@ async fn intrinsic_tags() -> Result<(), Error> {
     is!(status, 204);
     let after = admin.entities.get(in_a.id).await?;
     is!(tag_values(&after, "ToolSpecHash"), vec![hash.clone()]);
+    Ok(())
+}
+
+/// Create a tool with a name in one group
+///
+/// # Arguments
+///
+/// * `name` - The tool's name
+/// * `group` - The tool's group
+/// * `client` - The client to create the tool with
+async fn named_tool(name: &str, group: &str, client: &Thorium) -> Result<Uuid, Error> {
+    // build a tool request and give it the name
+    let mut req = generators::gen_tool(&[group], "1.0.0", &generators::gen_agentic_spec());
+    name.clone_into(&mut req.name);
+    Ok(client.entities.create(req).await?.id)
+}
+
+/// List the names and ids of the tools in a group whose names contain a marker, the way the
+/// scaler lists a group's tools to resolve network policies' tool-name entries
+///
+/// # Arguments
+///
+/// * `group` - The group to list tools in
+/// * `marker` - The text the names must contain
+/// * `client` - The client to list with
+async fn named_tools(
+    group: &str,
+    marker: &str,
+    client: &Thorium,
+) -> Result<BTreeSet<(String, Uuid)>, Error> {
+    // list only the group's tools, one page at a time
+    let opts = EntityListOpts::default()
+        .groups(vec![group])
+        .kind(thorium::models::EntityKinds::Tool)
+        .page_size(500);
+    let mut cursor = client.entities.list(&opts).await?;
+    let mut tools = BTreeSet::new();
+    loop {
+        // keep the tools whose names hold the marker
+        for line in cursor.data.drain(..) {
+            if line.name.contains(marker) {
+                tools.insert((line.name, line.id));
+            }
+        }
+        // stop once every page has been read
+        if cursor.exhausted() {
+            break;
+        }
+        cursor.refill().await?;
+    }
+    Ok(tools)
+}
+
+/// The tool listing the scaler resolves network policies' tool-name entries with gives each
+/// tool in a group with its current exact name, so tools whose names differ only in case or
+/// punctuation, and tools with the same name in other groups, stay apart
+#[tokio::test]
+async fn tool_listing_resolves_exact_names_per_group() -> Result<(), Error> {
+    // two groups and a marker unique to this test
+    let admin = test_utilities::admin_client().await?;
+    let groups = generators::groups(2, &admin).await?;
+    let (a, b) = (groups[0].name.clone(), groups[1].name.clone());
+    let marker = generators::gen_string(10).to_lowercase();
+    // a granted name, a similar name in the same group, and the granted name in another group
+    let granted = named_tool(&format!("ghidra-{marker}"), &a, &admin).await?;
+    let similar = named_tool(&format!("Ghidra {marker}"), &a, &admin).await?;
+    let elsewhere = named_tool(&format!("ghidra-{marker}"), &b, &admin).await?;
+    // rename the similar tool to a name that loses its punctuation to the same stage label
+    admin
+        .entities
+        .update(
+            similar,
+            EntityUpdate::default().name(format!("ghidra_{marker}")),
+        )
+        .await?;
+    // each group lists its own tools under their current names
+    let in_a = BTreeSet::from([
+        (format!("ghidra-{marker}"), granted),
+        (format!("ghidra_{marker}"), similar),
+    ]);
+    is!(named_tools(&a, &marker, &admin).await?, in_a);
+    let in_b = BTreeSet::from([(format!("ghidra-{marker}"), elsewhere)]);
+    is!(named_tools(&b, &marker, &admin).await?, in_b);
     Ok(())
 }
 

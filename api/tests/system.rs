@@ -19,10 +19,166 @@ use thorium::models::{
     UserModelEndpoint, UserModelSettingsUpdate, UserRole, UserSettingsUpdate, UserUpdate, Volume,
     VolumeTypes, WorkerDeleteMap, WorkerRegistrationList,
 };
+use thorium::models::{NodeGetParams, ReactionRequest, ReactionStatus};
 use thorium::test_utilities::generators::GroupRoles;
 use thorium::test_utilities::{self, generators};
 use thorium::{Error, Thorium, contains, fail, is, is_not, unwrap_variant, vec_in_vec};
 use uuid::Uuid;
+
+/// Registered workers keep the tool instance they claim jobs for and the run a per-run worker
+/// serves
+#[tokio::test]
+async fn worker_records_tool_instance_and_run() -> Result<(), Error> {
+    // register a node with a shared and a per-run worker for one tool instance
+    let admin = test_utilities::admin_client().await?;
+    let suffix = generators::name_suffix();
+    let cluster = generators::readable_name("callisto-cluster", &suffix);
+    let node = generators::readable_name("callisto-node", &suffix);
+    generators::node(&cluster, &node, Resources::default(), &admin).await?;
+    let username = admin.users.info().await?.username;
+    let tool_instance = Uuid::new_v4();
+    let run = Uuid::new_v4();
+    let shared = generators::readable_name("callisto-shared", &suffix);
+    let per_run = generators::readable_name("callisto-run", &suffix);
+    let workers = WorkerRegistrationList::default()
+        .add(
+            &cluster,
+            &node,
+            &shared,
+            &username,
+            "vesta",
+            tool_instance,
+            None,
+            Resources::default(),
+            Pools::Deadline,
+        )
+        .add(
+            &cluster,
+            &node,
+            &per_run,
+            &username,
+            "vesta",
+            tool_instance,
+            Some(run),
+            Resources::default(),
+            Pools::Deadline,
+        );
+    admin
+        .system
+        .register_workers(ImageScaler::K8s, &workers)
+        .await?;
+    // each worker reads back its tool instance and run
+    let read = admin.system.get_worker(&shared).await?;
+    is!(read.tool_instance, tool_instance);
+    is!(read.run, None::<Uuid>);
+    let read = admin.system.get_worker(&per_run).await?;
+    is!(read.tool_instance, tool_instance);
+    is!(read.run, Some(run));
+    // the node lists both workers with their tool instance and run
+    let info = admin
+        .system
+        .get_node(&cluster, &node, &NodeGetParams::default())
+        .await?;
+    is!(info.workers[&shared].tool_instance, tool_instance);
+    is!(info.workers[&per_run].run, Some(run));
+    // clean up our workers
+    admin
+        .system
+        .delete_workers(
+            ImageScaler::K8s,
+            &WorkerDeleteMap::default().add(&shared).add(&per_run),
+        )
+        .await?;
+    Ok(())
+}
+
+/// A worker an admin registers for an External tool instance claims and proceeds that tool
+/// instance's job, which no scaler's deadline stream but the External one holds
+#[tokio::test]
+async fn external_worker_claims_its_tool_instance() -> Result<(), Error> {
+    // a one stage pipeline backed by an External tool
+    let admin = test_utilities::admin_client().await?;
+    let suffix = generators::name_suffix();
+    let cluster = generators::readable_name("himalia-cluster", &suffix);
+    let node = generators::readable_name("himalia-node", &suffix);
+    generators::node(&cluster, &node, Resources::default(), &admin).await?;
+    let group = generators::groups(1, &admin).await?.remove(0).name;
+    let (stage, tool_instance) = generators::stage_tool(
+        &group,
+        &generators::gen_image_spec_for(ImageScaler::External),
+        &admin,
+    )
+    .await?;
+    let pipeline = generators::gen_string(20).to_lowercase();
+    let req = PipelineRequest::new(&group, &pipeline, serde_json::json!([[&stage]]))
+        .stage_tool(&stage, tool_instance);
+    admin.pipelines.create(&req).await?;
+    // a reaction queues a job whose deadline is only in the External stream
+    let start = chrono::Utc::now() - chrono::Duration::days(1);
+    let end = chrono::Utc::now() + chrono::Duration::weeks(5200);
+    let created = admin
+        .reactions
+        .create(&ReactionRequest::new(&group, &pipeline))
+        .await?;
+    let reaction = admin.reactions.get(&group, created.id).await?;
+    let job_id = reaction.jobs[0];
+    let external = admin
+        .jobs
+        .deadlines(ImageScaler::External, &start, &end, 10_000)
+        .await?;
+    contains!(
+        external.iter().map(|dl| dl.job_id).collect::<Vec<_>>(),
+        &job_id
+    );
+    for scaler in [ImageScaler::K8s, ImageScaler::BareMetal] {
+        let deadlines = admin.jobs.deadlines(scaler, &start, &end, 10_000).await?;
+        is!(deadlines.iter().any(|dl| dl.job_id == job_id), false);
+    }
+    // an admin registers an External worker for the tool instance
+    let worker = generators::readable_name("himalia-worker", &suffix);
+    let username = admin.users.info().await?.username;
+    let workers = WorkerRegistrationList::default().add(
+        &cluster,
+        &node,
+        &worker,
+        &username,
+        &group,
+        tool_instance,
+        None,
+        Resources::default(),
+        Pools::Deadline,
+    );
+    admin
+        .system
+        .register_workers(ImageScaler::External, &workers)
+        .await?;
+    is!(
+        admin.system.get_worker(&worker).await?.tool_instance,
+        tool_instance
+    );
+    // the worker claims the job through the workload route and proceeds it
+    let claimed = admin
+        .jobs
+        .claim_workload(&group, tool_instance, &cluster, &node, &worker, 1)
+        .await?;
+    is!(claimed.len(), 1);
+    is!(claimed[0].id, job_id);
+    admin
+        .jobs
+        .proceed(&claimed[0], &generators::stage_logs(), 1, &worker)
+        .await?;
+    let reaction = admin.reactions.get(&group, created.id).await?;
+    is!(reaction.status, ReactionStatus::Completed);
+    // clean up our worker
+    admin
+        .system
+        .delete_workers(
+            ImageScaler::External,
+            &WorkerDeleteMap::default().add(&worker),
+        )
+        .await?;
+    Ok(())
+}
 
 #[serial_test::serial]
 #[tokio::test]
@@ -506,8 +662,8 @@ async fn worker_registration_requires_admin_body() -> Result<(), Error> {
         "phantom-worker",
         username,
         "attacker-group",
-        "attacker-pipeline",
-        "attacker-stage",
+        Uuid::nil(),
+        None,
         Resources::default(),
         Pools::Deadline,
     );
@@ -553,8 +709,8 @@ async fn delete_workers_is_all_or_nothing_body() -> Result<(), Error> {
             name,
             &username,
             "group",
-            "pipeline",
-            "stage",
+            Uuid::nil(),
+            None,
             Resources::default(),
             Pools::Deadline,
         );

@@ -659,10 +659,10 @@
             },
             "children": {
               "enabled": false,
-              "images": [],
               "kwarg": null,
               "location": "/tmp/thorium/prior-children",
-              "strategy": "Paths"
+              "strategy": "Paths",
+              "tools": []
             },
             "ephemeral": {
               "kwarg": null,
@@ -672,10 +672,10 @@
             },
             "filesystems": {
               "enabled": false,
-              "images": [],
               "kwarg": null,
               "location": "/tmp/thorium/prior-filesystems",
-              "strategy": "Paths"
+              "strategy": "Paths",
+              "tools": []
             },
             "repos": {
               "kwarg": null,
@@ -683,11 +683,11 @@
               "strategy": "Paths"
             },
             "results": {
-              "images": [],
               "kwarg": "None",
               "location": "/tmp/thorium/prior-results",
               "names": [],
-              "strategy": "Paths"
+              "strategy": "Paths",
+              "tools": []
             },
             "samples": {
               "kwarg": null,
@@ -793,10 +793,10 @@
             },
             "children": {
               "enabled": false,
-              "images": [],
               "kwarg": null,
               "location": "/tmp/thorium/prior-children",
-              "strategy": "Paths"
+              "strategy": "Paths",
+              "tools": []
             },
             "ephemeral": {
               "kwarg": null,
@@ -806,10 +806,10 @@
             },
             "filesystems": {
               "enabled": false,
-              "images": [],
               "kwarg": null,
               "location": "/tmp/thorium/prior-filesystems",
-              "strategy": "Paths"
+              "strategy": "Paths",
+              "tools": []
             },
             "repos": {
               "kwarg": null,
@@ -817,11 +817,11 @@
               "strategy": "Paths"
             },
             "results": {
-              "images": [],
               "kwarg": "None",
               "location": "/tmp/thorium/prior-results",
               "names": [],
-              "strategy": "Paths"
+              "strategy": "Paths",
+              "tools": []
             },
             "samples": {
               "kwarg": null,
@@ -952,10 +952,10 @@
         },
         "children": {
           "enabled": false,
-          "images": [],
           "kwarg": null,
           "location": "/tmp/thorium/prior-children",
-          "strategy": "Paths"
+          "strategy": "Paths",
+          "tools": []
         },
         "ephemeral": {
           "kwarg": null,
@@ -965,10 +965,10 @@
         },
         "filesystems": {
           "enabled": false,
-          "images": [],
           "kwarg": null,
           "location": "/tmp/thorium/prior-filesystems",
-          "strategy": "Paths"
+          "strategy": "Paths",
+          "tools": []
         },
         "repos": {
           "kwarg": null,
@@ -976,11 +976,11 @@
           "strategy": "Paths"
         },
         "results": {
-          "images": [],
           "kwarg": "None",
           "location": "/tmp/thorium/prior-results",
           "names": [],
-          "strategy": "Paths"
+          "strategy": "Paths",
+          "tools": []
         },
         "samples": {
           "kwarg": null,
@@ -1030,10 +1030,10 @@
         },
         "children": {
           "enabled": false,
-          "images": [],
           "kwarg": null,
           "location": "/tmp/thorium/prior-children",
-          "strategy": "Paths"
+          "strategy": "Paths",
+          "tools": []
         },
         "ephemeral": {
           "kwarg": null,
@@ -1043,10 +1043,10 @@
         },
         "filesystems": {
           "enabled": false,
-          "images": [],
           "kwarg": null,
           "location": "/tmp/thorium/prior-filesystems",
-          "strategy": "Paths"
+          "strategy": "Paths",
+          "tools": []
         },
         "repos": {
           "kwarg": null,
@@ -1054,11 +1054,11 @@
           "strategy": "Paths"
         },
         "results": {
-          "images": [],
           "kwarg": "None",
           "location": "/tmp/thorium/prior-results",
           "names": [],
-          "strategy": "Paths"
+          "strategy": "Paths",
+          "tools": []
         },
         "samples": {
           "kwarg": null,
@@ -1480,8 +1480,152 @@
       "idempotent": false
     }
   },
+  "ToolChildrenDependencySettings": {
+    "absent": {
+      "enabled": false,
+      "kwarg": null,
+      "location": "/tmp/thorium/prior-children",
+      "strategy": "Paths",
+      "tools": []
+    },
+    "default": {
+      "enabled": false,
+      "kwarg": null,
+      "location": "/tmp/thorium/prior-children",
+      "strategy": "Paths",
+      "tools": []
+    }
+  },
   "ToolChoice": {
     "default": "Auto"
+  },
+  "ToolDependencies": {
+    "absent": {
+      "cache": {
+        "enabled": true,
+        "generic": {
+          "kwarg": null,
+          "strategy": "Disabled"
+        },
+        "location": "/tmp/thorium/cache",
+        "use_parent_cache": false
+      },
+      "children": {
+        "enabled": false,
+        "kwarg": null,
+        "location": "/tmp/thorium/prior-children",
+        "strategy": "Paths",
+        "tools": []
+      },
+      "ephemeral": {
+        "kwarg": null,
+        "location": "/tmp/thorium/ephemeral",
+        "names": [],
+        "strategy": "Paths"
+      },
+      "filesystems": {
+        "enabled": false,
+        "kwarg": null,
+        "location": "/tmp/thorium/prior-filesystems",
+        "strategy": "Paths",
+        "tools": []
+      },
+      "repos": {
+        "kwarg": null,
+        "location": "/tmp/thorium/repos",
+        "strategy": "Paths"
+      },
+      "results": {
+        "kwarg": "None",
+        "location": "/tmp/thorium/prior-results",
+        "names": [],
+        "strategy": "Paths",
+        "tools": []
+      },
+      "samples": {
+        "kwarg": null,
+        "location": "/tmp/thorium/samples",
+        "naming": "Sha256",
+        "strategy": "Paths"
+      },
+      "tags": {
+        "enabled": false,
+        "kwarg": null,
+        "location": "/tmp/thorium/prior-tags",
+        "strategy": "Paths"
+      }
+    },
+    "default": {
+      "cache": {
+        "enabled": true,
+        "generic": {
+          "kwarg": null,
+          "strategy": "Disabled"
+        },
+        "location": "/tmp/thorium/cache",
+        "use_parent_cache": false
+      },
+      "children": {
+        "enabled": false,
+        "kwarg": null,
+        "location": "/tmp/thorium/prior-children",
+        "strategy": "Paths",
+        "tools": []
+      },
+      "ephemeral": {
+        "kwarg": null,
+        "location": "/tmp/thorium/ephemeral",
+        "names": [],
+        "strategy": "Paths"
+      },
+      "filesystems": {
+        "enabled": false,
+        "kwarg": null,
+        "location": "/tmp/thorium/prior-filesystems",
+        "strategy": "Paths",
+        "tools": []
+      },
+      "repos": {
+        "kwarg": null,
+        "location": "/tmp/thorium/repos",
+        "strategy": "Paths"
+      },
+      "results": {
+        "kwarg": "None",
+        "location": "/tmp/thorium/prior-results",
+        "names": [],
+        "strategy": "Paths",
+        "tools": []
+      },
+      "samples": {
+        "kwarg": null,
+        "location": "/tmp/thorium/samples",
+        "naming": "Sha256",
+        "strategy": "Paths"
+      },
+      "tags": {
+        "enabled": false,
+        "kwarg": null,
+        "location": "/tmp/thorium/prior-tags",
+        "strategy": "Paths"
+      }
+    }
+  },
+  "ToolFileSystemDependencySettings": {
+    "absent": {
+      "enabled": false,
+      "kwarg": null,
+      "location": "/tmp/thorium/prior-filesystems",
+      "strategy": "Paths",
+      "tools": []
+    },
+    "default": {
+      "enabled": false,
+      "kwarg": null,
+      "location": "/tmp/thorium/prior-filesystems",
+      "strategy": "Paths",
+      "tools": []
+    }
   },
   "ToolIcon": {
     "absent": {
@@ -1512,6 +1656,22 @@
     "default": {
       "max_result_bytes": 0,
       "path": null
+    }
+  },
+  "ToolResultDependencySettings": {
+    "absent": {
+      "kwarg": "None",
+      "location": "/tmp/thorium/prior-results",
+      "names": [],
+      "strategy": "Paths",
+      "tools": []
+    },
+    "default": {
+      "kwarg": "None",
+      "location": "/tmp/thorium/prior-results",
+      "names": [],
+      "strategy": "Paths",
+      "tools": []
     }
   },
   "ToolResultFormat": {
@@ -1646,10 +1806,10 @@
           },
           "children": {
             "enabled": false,
-            "images": [],
             "kwarg": null,
             "location": "/tmp/thorium/prior-children",
-            "strategy": "Paths"
+            "strategy": "Paths",
+            "tools": []
           },
           "ephemeral": {
             "kwarg": null,
@@ -1659,10 +1819,10 @@
           },
           "filesystems": {
             "enabled": false,
-            "images": [],
             "kwarg": null,
             "location": "/tmp/thorium/prior-filesystems",
-            "strategy": "Paths"
+            "strategy": "Paths",
+            "tools": []
           },
           "repos": {
             "kwarg": null,
@@ -1670,11 +1830,11 @@
             "strategy": "Paths"
           },
           "results": {
-            "images": [],
             "kwarg": "None",
             "location": "/tmp/thorium/prior-results",
             "names": [],
-            "strategy": "Paths"
+            "strategy": "Paths",
+            "tools": []
           },
           "samples": {
             "kwarg": null,
@@ -1742,10 +1902,10 @@
           },
           "children": {
             "enabled": false,
-            "images": [],
             "kwarg": null,
             "location": "/tmp/thorium/prior-children",
-            "strategy": "Paths"
+            "strategy": "Paths",
+            "tools": []
           },
           "ephemeral": {
             "kwarg": null,
@@ -1755,10 +1915,10 @@
           },
           "filesystems": {
             "enabled": false,
-            "images": [],
             "kwarg": null,
             "location": "/tmp/thorium/prior-filesystems",
-            "strategy": "Paths"
+            "strategy": "Paths",
+            "tools": []
           },
           "repos": {
             "kwarg": null,
@@ -1766,11 +1926,11 @@
             "strategy": "Paths"
           },
           "results": {
-            "images": [],
             "kwarg": "None",
             "location": "/tmp/thorium/prior-results",
             "names": [],
-            "strategy": "Paths"
+            "strategy": "Paths",
+            "tools": []
           },
           "samples": {
             "kwarg": null,

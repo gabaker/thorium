@@ -6,14 +6,14 @@
 //! instance's workload.
 
 use std::collections::hash_map::Entry;
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use tracing::instrument;
 use uuid::Uuid;
 
 use crate::models::backends::db;
 use crate::models::{
     Entity, EntityKinds, EntityMetadata, Group, ImageJobInfo, ImageScaler, Pipeline, PlannedStage,
-    ReactionPlan, ToolSpec, User,
+    ReactionPlan, RunProvenance, ToolSpec, User,
 };
 use crate::utils::{ApiError, Shared};
 use crate::{bad, not_found};
@@ -26,6 +26,103 @@ pub struct ToolInstanceMemo {
 }
 
 impl ToolInstanceMemo {
+    /// Remember a tool instance this request already read, so it isn't read again
+    ///
+    /// # Arguments
+    ///
+    /// * `entity` - The tool instance entity
+    pub fn remember(&mut self, entity: Entity) {
+        // keep the first read of each entity
+        self.entities.entry(entity.id).or_insert(entity);
+    }
+
+    /// Get an entity this request already read and found in a group
+    ///
+    /// # Arguments
+    ///
+    /// * `group` - The group the entity must have been found in
+    /// * `id` - The id of the entity
+    fn known(&self, group: &str, id: Uuid) -> Option<&Entity> {
+        // only an entity a read found in this group is known in it
+        self.entities
+            .get(&id)
+            .filter(|entity| entity.groups.iter().any(|known| known == group))
+    }
+
+    /// Read the entities in a group that no read so far found in it, in one batch
+    ///
+    /// An entity that isn't found in the group is left out without an error; a later lookup of
+    /// it reads it on its own and answers the same error a lookup without a prefetch does.
+    ///
+    /// # Arguments
+    ///
+    /// * `group` - The group the entities must be in
+    /// * `ids` - The ids of the entities to read
+    /// * `shared` - Shared Thorium objects
+    pub async fn prefetch(
+        &mut self,
+        group: &str,
+        ids: &[Uuid],
+        shared: &Shared,
+    ) -> Result<(), ApiError> {
+        // keep each id that is not known in this group yet once
+        let mut wanted = Vec::with_capacity(ids.len());
+        for id in ids {
+            if self.known(group, *id).is_none() && !wanted.contains(id) {
+                wanted.push(*id);
+            }
+        }
+        // there is nothing to read when every entity is already known
+        if wanted.is_empty() {
+            return Ok(());
+        }
+        // read the wanted entities in this group in one batch
+        let found = db::entities::get_many_untagged(&[group.to_owned()], &wanted, shared).await?;
+        // remember each entity and the group it was found in
+        for entity in found {
+            match self.entities.entry(entity.id) {
+                // add the group to an entity another group's read found
+                Entry::Occupied(entry) => {
+                    entry.into_mut().groups.push(group.to_owned());
+                }
+                // remember an entity no read found yet
+                Entry::Vacant(entry) => {
+                    entry.insert(entity);
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// Read the tools and tool instances backing some stages, and the latest instance of each
+    /// tool, in at most two batches
+    ///
+    /// # Arguments
+    ///
+    /// * `group` - The group of the pipeline
+    /// * `ids` - The Tool or Tool Instance ids backing the stages
+    /// * `shared` - Shared Thorium objects
+    pub async fn prefetch_stages(
+        &mut self,
+        group: &str,
+        ids: &[Uuid],
+        shared: &Shared,
+    ) -> Result<(), ApiError> {
+        // read the entities backing the stages
+        self.prefetch(group, ids, shared).await?;
+        // find the latest instance of each tool among them
+        let latest = ids
+            .iter()
+            .filter_map(|id| self.known(group, *id))
+            .filter_map(|entity| match &entity.metadata {
+                EntityMetadata::Tool(tool) => tool.latest,
+                _ => None,
+            })
+            .collect::<Vec<Uuid>>();
+        // read those instances in one more batch
+        self.prefetch(group, &latest, shared).await
+    }
+
     /// Get a tool or tool instance in a group, reading it only when no read so far found it
     /// in that group
     ///
@@ -140,6 +237,20 @@ impl ToolInstanceMemo {
         }
     }
 
+    /// Get the provenance of the tool instances a plan runs from the instances already read
+    ///
+    /// A plan's tool instances are all read while it's resolved, so this reads nothing.
+    ///
+    /// # Arguments
+    ///
+    /// * `plan` - The resolved plan
+    #[must_use]
+    pub fn provenance(&self, plan: &ReactionPlan) -> RunProvenance {
+        // describe each planned tool instance this request already read
+        let instances = plan.tool_instances();
+        RunProvenance::from_tools(instances.iter().filter_map(|id| self.entities.get(id)))
+    }
+
     /// Get the job settings of every tool instance in a step of a plan, by stage name
     ///
     /// # Arguments
@@ -153,6 +264,12 @@ impl ToolInstanceMemo {
         step: &'a [PlannedStage],
         shared: &Shared,
     ) -> Result<HashMap<&'a String, ImageJobInfo>, ApiError> {
+        // read the step's tool instances in one batch
+        let ids = step
+            .iter()
+            .map(|stage| stage.tool_instance)
+            .collect::<Vec<Uuid>>();
+        self.prefetch(group, &ids, shared).await?;
         // get each stage's tool instance settings
         let mut info = HashMap::with_capacity(step.len());
         for stage in step {
@@ -189,6 +306,13 @@ pub async fn resolve_plan(
             quoted(unconverted)
         ));
     }
+    // read the tools and instances backing every stage in at most two batches
+    let ids = pipeline
+        .stage_tools
+        .values()
+        .copied()
+        .collect::<Vec<Uuid>>();
+    memo.prefetch_stages(&pipeline.group, &ids, shared).await?;
     // resolve each stage of each step
     let mut stages = Vec::with_capacity(pipeline.order.len());
     for step in &pipeline.order {
@@ -263,34 +387,62 @@ pub async fn check(
     if stage_tools.is_empty() {
         return Ok(());
     }
-    // get the group and kind of every row of the named entities in one lookup
-    let ids = stage_tools.values().copied().collect::<Vec<Uuid>>();
-    let rows = db::entities::groups_and_kinds(&ids, shared).await?;
-    // check each stage's tool
+    // read the stages' tools and their latest instances in the pipeline's group in one batch
     let mut memo = ToolInstanceMemo::default();
+    let ids = stage_tools.values().copied().collect::<Vec<Uuid>>();
+    memo.prefetch_stages(&group.name, &ids, shared).await?;
+    // a user in the pipeline's group sees every entity found in it
+    let sees_group = user.is_admin() || user.groups.contains(&group.name);
+    // the stages whose tool was found in the group as a tool or instance need no row lookup
+    let answered = ids
+        .iter()
+        .copied()
+        .filter(|id| {
+            sees_group
+                && memo.known(&group.name, *id).is_some_and(|entity| {
+                    entity.kind == EntityKinds::Tool || entity.kind == EntityKinds::ToolInstance
+                })
+        })
+        .collect::<HashSet<Uuid>>();
+    // get the group and kind of every row of the other named entities in one lookup
+    let unanswered = ids
+        .iter()
+        .filter(|id| !answered.contains(id))
+        .copied()
+        .collect::<Vec<Uuid>>();
+    let rows = if unanswered.is_empty() {
+        Vec::new()
+    } else {
+        db::entities::groups_and_kinds(&unanswered, shared).await?
+    };
+    // check each stage's tool
     for (stage, id) in stage_tools {
-        // get this entity's rows
-        let rows = rows.iter().filter(|row| row.id == *id).collect::<Vec<_>>();
-        // a missing entity and one the user can't see get the same answer
-        let visible = user.is_admin() || rows.iter().any(|row| user.groups.contains(&row.group));
-        if rows.is_empty() || !visible {
-            return not_found!(format!(
-                "stage `{stage}`: tool `{id}` doesn't exist or you can't see it"
-            ));
-        }
-        // only tools and tool instances can back a stage
-        let kind = rows[0].kind;
-        if kind != EntityKinds::Tool && kind != EntityKinds::ToolInstance {
-            return bad!(format!(
-                "stage `{stage}` must be backed by a Tool or Tool Instance, not a {kind}"
-            ));
-        }
-        // the tool must be in the pipeline's group
-        if !rows.iter().any(|row| row.group == group.name) {
-            return bad!(format!(
-                "stage `{stage}`: tool `{id}` is not in the pipeline's group `{}`",
-                group.name
-            ));
+        // a stage answered by the batch passes the visibility, kind and group checks
+        if !answered.contains(id) {
+            // get this entity's rows
+            let rows = rows.iter().filter(|row| row.id == *id).collect::<Vec<_>>();
+            // a missing entity and one the user can't see get the same answer
+            let visible =
+                user.is_admin() || rows.iter().any(|row| user.groups.contains(&row.group));
+            if rows.is_empty() || !visible {
+                return not_found!(format!(
+                    "stage `{stage}`: tool `{id}` doesn't exist or you can't see it"
+                ));
+            }
+            // only tools and tool instances can back a stage
+            let kind = rows[0].kind;
+            if kind != EntityKinds::Tool && kind != EntityKinds::ToolInstance {
+                return bad!(format!(
+                    "stage `{stage}` must be backed by a Tool or Tool Instance, not a {kind}"
+                ));
+            }
+            // the tool must be in the pipeline's group
+            if !rows.iter().any(|row| row.group == group.name) {
+                return bad!(format!(
+                    "stage `{stage}`: tool `{id}` is not in the pipeline's group `{}`",
+                    group.name
+                ));
+            }
         }
         // resolve the tool instance this stage runs and make sure it runs a workload
         let instance = memo.resolve(&group.name, stage, *id, shared).await?;

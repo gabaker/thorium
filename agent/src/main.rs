@@ -2,13 +2,21 @@ use clap::Parser;
 
 mod args;
 mod libs;
+mod tool;
 use libs::Worker;
 use thorium::Error;
 use tracing::instrument;
 
-/// The Thorium agent main loop
+/// The Thorium agent main loop, or the tool wrapper CLI when the first argument is `tool`
 #[tokio::main]
 async fn main() -> Result<(), Error> {
+    // the CLI wrapper's subcommands parse their own args, since a worker's args are required
+    let raw_args: Vec<String> = std::env::args().collect();
+    if raw_args.get(1).map(String::as_str) == Some("tool") {
+        // run the wrapper command and exit with its code
+        let code = tool::main(raw_args[1..].to_vec()).await;
+        std::process::exit(code);
+    }
     // load command line args
     let args = args::Args::parse();
     // build our agent name by what scaler we are claiming jobs for

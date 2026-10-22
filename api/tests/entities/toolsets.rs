@@ -2781,6 +2781,9 @@ async fn intrinsic_tag_keys_refused() -> Result<(), Error> {
         ("ToolSetFollowsTool", unrelated.id.to_string()),
         ("ToolSetId", other.id.to_string()),
         ("ToolSetSelector", "toolset=ghidra".to_owned()),
+        ("ToolSetRevision", "9".to_owned()),
+        ("ToolSetDigest", "0".repeat(64)),
+        ("ToolSetStatus", "Ready".to_owned()),
         ("toolsetstatus", "Ready".to_owned()),
     ] {
         let req = generators::gen_toolset_instance_req(&instance).tag(key, value);
@@ -2797,6 +2800,11 @@ async fn intrinsic_tag_keys_refused() -> Result<(), Error> {
     for (key, value) in [
         ("ToolSetFollowsTool", unrelated.id.to_string()),
         ("ToolSetId", other.id.to_string()),
+        ("ToolSetSelector", "toolset=ghidra".to_owned()),
+        ("ToolSetRevision", "9".to_owned()),
+        ("ToolSetDigest", "0".repeat(64)),
+        ("ToolSetStatus", "Ready".to_owned()),
+        ("toolsetdigest", "0".repeat(64)),
     ] {
         let status = raw_tags(&europa, r1.id, false, json!({"tags": {key: [value]}})).await?;
         assert_eq!(status, 400, "{key}");

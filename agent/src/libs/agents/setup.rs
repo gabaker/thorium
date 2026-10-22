@@ -12,7 +12,7 @@ use thorium::models::{
     Association, AssociationKind, AssociationTarget, DependencyPassStrategy, Directionality,
     EntityKinds, EntityListOpts, EntityMetadata, FileDownloadOpts, FileNamingStrategy,
     FileSystemDependencySettings, FileSystemEntity, GenericJob, Image, ReactionCache,
-    RepoDownloadOpts, ResultGetParams, TreeNode, TreeOpts, TreeQuery, TreeRelationships,
+    RepoDownloadOpts, ResultGetParams, ToolSpec, TreeNode, TreeOpts, TreeQuery, TreeRelationships,
 };
 use tokio::fs::File;
 use tokio::io::AsyncWriteExt;
@@ -1053,6 +1053,13 @@ pub async fn download_filesystems<P: Into<PathBuf>>(
 ) -> Result<Vec<PathBuf>, Error> {
     // get our filesystem dependency settings
     let settings = &image.dependencies.filesystems;
+    // a restricted dependency names its tools in the job's tool instance
+    let tools = if settings.images.is_empty() {
+        Vec::new()
+    } else {
+        filesystem_tools(thorium, job).await?
+    };
+    let mut filter = FileSystemFilter::new(&tools, &settings.images);
     // build the root path to reconstruct filesystems under
     let root = target.into();
     // create a list of the paths to our reconstructed files
@@ -1066,6 +1073,7 @@ pub async fn download_filesystems<P: Into<PathBuf>>(
         reconstruct_sample_filesystems(
             thorium,
             settings,
+            &mut filter,
             sha256,
             &root,
             &mut opts,
@@ -1078,22 +1086,146 @@ pub async fn download_filesystems<P: Into<PathBuf>>(
     Ok(downloaded)
 }
 
-/// Check whether a filesystem was dumped by one of the images a filesystem dependency allows
+/// Which filesystems a filesystem dependency keeps, by the tools that dumped them
 ///
-/// Images are named, so only the legacy tool names a filesystem records can match them. Every
-/// filesystem is allowed when no images are named.
+/// A filesystem records the tool instances that dumped it, so each distinct tool instance is
+/// resolved to its tool once per job. A filesystem stored before tool instances records only
+/// legacy tool names, which match the listed tools' current names.
+#[derive(Debug, Default)]
+struct FileSystemFilter {
+    /// The tools whose filesystems are kept (none keeps every filesystem)
+    tools: HashSet<Uuid>,
+    /// The current names of the listed tools
+    names: HashSet<String>,
+    /// The tool each tool instance seen so far belongs to, or `None` if it couldn't be read
+    instances: HashMap<Uuid, Option<Uuid>>,
+}
+
+impl FileSystemFilter {
+    /// Build a filter for a filesystem dependency
+    ///
+    /// # Arguments
+    ///
+    /// * `tools` - The tools whose filesystems are kept
+    /// * `names` - The current names of those tools
+    fn new(tools: &[Uuid], names: &[String]) -> Self {
+        // keep the listed tools and their names
+        FileSystemFilter {
+            tools: tools.iter().copied().collect(),
+            names: names.iter().cloned().collect(),
+            instances: HashMap::new(),
+        }
+    }
+
+    /// Get the tool instances of a filesystem that haven't been resolved yet, each once
+    ///
+    /// # Arguments
+    ///
+    /// * `filesystem` - The filesystem to check
+    fn unresolved(&self, filesystem: &FileSystemEntity) -> Vec<Uuid> {
+        // nothing needs resolving without a restriction
+        if self.tools.is_empty() {
+            return Vec::new();
+        }
+        // list each tool instance not resolved yet once
+        let mut unresolved = Vec::new();
+        for instance in &filesystem.tools {
+            if !self.instances.contains_key(instance) && !unresolved.contains(instance) {
+                unresolved.push(*instance);
+            }
+        }
+        unresolved
+    }
+
+    /// Record the tool a tool instance belongs to
+    ///
+    /// # Arguments
+    ///
+    /// * `instance` - The tool instance
+    /// * `tool` - Its tool, or `None` if it couldn't be read
+    fn record(&mut self, instance: Uuid, tool: Option<Uuid>) {
+        // remember the tool for every later filesystem of this job
+        self.instances.insert(instance, tool);
+    }
+
+    /// Check whether a filesystem is kept
+    ///
+    /// # Arguments
+    ///
+    /// * `filesystem` - The filesystem to check
+    fn keeps(&self, filesystem: &FileSystemEntity) -> bool {
+        // every filesystem is kept without a restriction
+        if self.tools.is_empty() {
+            return true;
+        }
+        // keep a filesystem a tool instance of a listed tool dumped
+        let by_tool = filesystem.tools.iter().any(|instance| {
+            self.instances
+                .get(instance)
+                .copied()
+                .flatten()
+                .is_some_and(|tool| self.tools.contains(&tool))
+        });
+        // or one whose legacy tool names include a listed tool's name
+        by_tool
+            || filesystem
+                .legacy_tools
+                .iter()
+                .any(|name| self.names.contains(name))
+    }
+}
+
+/// Resolve the tool instances of a filesystem that the filter hasn't seen yet
 ///
 /// # Arguments
 ///
-/// * `images` - The names of the images whose filesystems are allowed
-/// * `filesystem` - The filesystem to check
-fn dumped_by_allowed_image(images: &[String], filesystem: &FileSystemEntity) -> bool {
-    // allow every filesystem without image restrictions, or one a named image dumped
-    images.is_empty()
-        || filesystem
-            .legacy_tools
-            .iter()
-            .any(|tool| images.contains(tool))
+/// * `thorium` - A client for Thorium
+/// * `filter` - The filter to record the tools in
+/// * `filesystem` - The filesystem whose tool instances to resolve
+async fn resolve_filesystem_tools(
+    thorium: &Thorium,
+    filter: &mut FileSystemFilter,
+    filesystem: &FileSystemEntity,
+) -> Result<(), Error> {
+    // read each tool instance not seen yet in this job
+    for instance in filter.unresolved(filesystem) {
+        let tool = match thorium.entities.get(instance).await {
+            // a tool instance belongs to its tool
+            Ok(entity) => match entity.metadata {
+                EntityMetadata::ToolInstance(meta) => Some(meta.tool),
+                _ => None,
+            },
+            // a tool instance that's gone or hidden matches no tool
+            Err(error) if matches!(error.status().map(|code| code.as_u16()), Some(401 | 404)) => {
+                None
+            }
+            // any other failure fails the setup
+            Err(error) => return Err(error),
+        };
+        filter.record(instance, tool);
+    }
+    Ok(())
+}
+
+/// Get the tools a job's tool instance restricts its filesystem dependency to
+///
+/// # Arguments
+///
+/// * `thorium` - A client for Thorium
+/// * `job` - The job whose tool instance to read
+async fn filesystem_tools(thorium: &Thorium, job: &GenericJob) -> Result<Vec<Uuid>, Error> {
+    // read the job's tool instance
+    let entity = thorium.entities.get(job.tool_instance).await?;
+    // only the workloads of Image and Harness tool instances have dependency settings
+    let tools = match entity.metadata {
+        EntityMetadata::ToolInstance(instance) => match instance.spec {
+            ToolSpec::Image(workload) => workload.data.dependencies.filesystems.tools,
+            ToolSpec::Harness(harness) => harness.workload.data.dependencies.filesystems.tools,
+            ToolSpec::Agentic(_) => Vec::new(),
+        },
+        _ => Vec::new(),
+    };
+    Ok(tools)
 }
 
 /// Find and reconstruct all filesystems that were dumped for a single sample
@@ -1102,6 +1234,7 @@ fn dumped_by_allowed_image(images: &[String], filesystem: &FileSystemEntity) -> 
 ///
 /// * `thorium` - A client for Thorium
 /// * `settings` - The filesystem dependency settings for our image
+/// * `filter` - Which filesystems the dependency keeps
 /// * `sha256` - The sha256 of the sample to reconstruct filesystems for
 /// * `root` - The root path to reconstruct filesystems under
 /// * `opts` - The options to use when downloading files
@@ -1112,6 +1245,7 @@ fn dumped_by_allowed_image(images: &[String], filesystem: &FileSystemEntity) -> 
 async fn reconstruct_sample_filesystems(
     thorium: &Thorium,
     settings: &FileSystemDependencySettings,
+    filter: &mut FileSystemFilter,
     sha256: &str,
     root: &Path,
     opts: &mut FileDownloadOpts,
@@ -1131,8 +1265,9 @@ async fn reconstruct_sample_filesystems(
         for entity in &cursor.data {
             // only handle filesystem entities
             if let EntityMetadata::FileSystem(filesystem) = &entity.metadata {
-                // skip filesystems that weren't dumped by one of our restricted images if we have any
-                if !dumped_by_allowed_image(&settings.images, filesystem) {
+                // skip filesystems that weren't dumped by one of our listed tools if we have any
+                resolve_filesystem_tools(thorium, filter, filesystem).await?;
+                if !filter.keeps(filesystem) {
                     continue;
                 }
                 // log that we are reconstructing this filesystem
@@ -1370,7 +1505,7 @@ fn resolve_file_name(
 
 #[cfg(test)]
 mod tests {
-    use super::{dumped_by_allowed_image, most_recent_target, repo_results_query_key, safe_join};
+    use super::{FileSystemFilter, most_recent_target, repo_results_query_key, safe_join};
     use std::path::Path;
 
     /// The trusted base directory every join must stay inside of
@@ -1510,29 +1645,63 @@ mod tests {
         assert_eq!(target, base.join("aaaaaaaaaaaaaaaa"));
     }
 
-    /// A filesystem dependency restricted to images matches the image names against a
-    /// filesystem's legacy tool names only, so a filesystem that records only tool instances
-    /// isn't taken; an unrestricted one takes every filesystem
+    /// A filesystem dependency restricted to tools keeps the filesystems a tool instance of a
+    /// listed tool dumped and old filesystems whose legacy names include a listed tool's name,
+    /// resolving each distinct tool instance once per job; an unrestricted one keeps every
+    /// filesystem
     #[test]
-    fn filesystem_image_restrictions_match_legacy_tool_names() {
-        // a filesystem stored with a tool name and one that records only a tool instance
-        let named: thorium::models::FileSystemEntity =
-            serde_json::from_str(r#"{"sha256":"a","tools":["binwalk"]}"#).unwrap();
-        let unnamed = thorium::models::FileSystemEntity {
-            sha256: "b".to_owned(),
-            tools: vec![uuid::Uuid::new_v4()],
-            legacy_tools: Vec::new(),
+    fn filesystem_tool_restrictions_match_tools_and_legacy_names() {
+        // tools X and Y, two instances of X, and one of Y
+        let x = uuid::Uuid::new_v4();
+        let y = uuid::Uuid::new_v4();
+        let (x1, x2, y1) = (
+            uuid::Uuid::new_v4(),
+            uuid::Uuid::new_v4(),
+            uuid::Uuid::new_v4(),
+        );
+        let owners = std::collections::HashMap::from([(x1, x), (x2, x), (y1, y)]);
+        let fs = |tools: Vec<uuid::Uuid>, legacy: &[&str]| thorium::models::FileSystemEntity {
+            sha256: "a".to_owned(),
+            tools,
+            legacy_tools: legacy.iter().map(|name| (*name).to_owned()).collect(),
         };
-        // a restriction to the named image takes the filesystem with that legacy name and not
-        // the one that records only a tool instance
-        let images = vec!["binwalk".to_owned()];
-        assert!(dumped_by_allowed_image(&images, &named));
-        assert!(!dumped_by_allowed_image(&images, &unnamed));
-        // a restriction to another image takes neither
-        let other = vec!["unblob".to_owned()];
-        assert!(!dumped_by_allowed_image(&other, &named));
-        // no restriction takes both
-        assert!(dumped_by_allowed_image(&[], &named));
-        assert!(dumped_by_allowed_image(&[], &unnamed));
+        // filesystems from each instance, an old one named after X, and an old unrelated one
+        let filesystems = [
+            (fs(vec![x1], &[]), true),
+            (fs(vec![x2], &[]), true),
+            (fs(vec![x1, y1], &[]), true),
+            (fs(vec![y1], &[]), false),
+            (fs(Vec::new(), &["strings"]), true),
+            (fs(Vec::new(), &["other"]), false),
+            (fs(vec![x2], &[]), true),
+        ];
+        // a restriction to X, whose current name is strings
+        let mut filter = FileSystemFilter::new(&[x], &["strings".to_owned()]);
+        let mut reads = Vec::new();
+        for (filesystem, kept) in &filesystems {
+            // resolve the instances this job hasn't seen yet
+            for instance in filter.unresolved(filesystem) {
+                reads.push(instance);
+                filter.record(instance, owners.get(&instance).copied());
+            }
+            assert_eq!(filter.keeps(filesystem), *kept, "{filesystem:?}");
+        }
+        // each distinct tool instance was read once
+        reads.sort_unstable();
+        let mut distinct = vec![x1, x2, y1];
+        distinct.sort_unstable();
+        assert_eq!(reads, distinct);
+        // a tool instance that couldn't be read matches no tool
+        let unknown = uuid::Uuid::new_v4();
+        let gone = fs(vec![unknown], &[]);
+        filter.record(unknown, None);
+        assert!(!filter.keeps(&gone));
+        // no restriction keeps every filesystem without reading anything
+        let open = FileSystemFilter::new(&[], &[]);
+        for (filesystem, _) in &filesystems {
+            assert_eq!(open.unresolved(filesystem), Vec::<uuid::Uuid>::new());
+            assert!(open.keeps(filesystem));
+        }
+        assert!(open.keeps(&gone));
     }
 }

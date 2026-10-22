@@ -13,7 +13,9 @@ use std::fmt;
 use strum::{AsRefStr, EnumDiscriminants, EnumString};
 use uuid::Uuid;
 
-use crate::models::{ArgStrategy, CredentialType, ModelApi, WorkloadEnvironment, WorkloadSpec};
+use crate::models::{
+    ArgStrategy, CredentialType, GenericJobArgs, ModelApi, WorkloadEnvironment, WorkloadSpec,
+};
 
 mod descriptors;
 mod harness_env;
@@ -23,10 +25,10 @@ mod portability;
 mod tests;
 
 pub use descriptors::{
-    ApprovalMode, HarnessToolEntry, ToolAnnotations, ToolApproval, ToolExposure, ToolInvocation,
-    ToolServerAuth, ToolServerDescriptor, ToolServerInput, ToolServerTimeouts,
-    ToolServerToolOverride, ToolServerTools, ToolServerTransport, ToolServerTrust, ToolServerValue,
-    ToolServersFile, is_valid_server_id,
+    ApprovalMode, HarnessAgentFile, HarnessRunFile, HarnessToolEntry, ToolAnnotations,
+    ToolApproval, ToolExposure, ToolInvocation, ToolServerAuth, ToolServerDescriptor,
+    ToolServerInput, ToolServerTimeouts, ToolServerToolOverride, ToolServerTools,
+    ToolServerTransport, ToolServerTrust, ToolServerValue, ToolServersFile, is_valid_server_id,
 };
 pub use harness_env::{HarnessEnv, HarnessEnvVar};
 
@@ -1175,14 +1177,16 @@ impl AgenticTool {
                 .capabilities
                 .effects
                 .contains(&ToolEffect::WritesExternal);
-        // build the annotations
-        rmcp::model::ToolAnnotations {
-            title: self.title.clone(),
-            read_only_hint: Some(read_only),
-            destructive_hint: Some(destructive),
-            idempotent_hint: Some(self.capabilities.idempotent),
-            open_world_hint: Some(open_world),
-        }
+        // build the annotations, titled when the tool has a title
+        let annotations = match &self.title {
+            Some(title) => rmcp::model::ToolAnnotations::with_title(title.clone()),
+            None => rmcp::model::ToolAnnotations::new(),
+        };
+        annotations
+            .read_only(read_only)
+            .destructive(destructive)
+            .idempotent(self.capabilities.idempotent)
+            .open_world(open_world)
     }
 
     /// Convert this tool to an MCP tool definition
@@ -1190,34 +1194,99 @@ impl AgenticTool {
     #[must_use]
     pub fn to_mcp_tool(&self) -> rmcp::model::Tool {
         // copy the fields a model reads and derive the annotations
-        rmcp::model::Tool {
-            name: self.function_name.clone().into(),
-            title: self.title.clone(),
-            description: Some(self.model_description.clone().into()),
-            input_schema: std::sync::Arc::new(self.input_schema.clone()),
-            output_schema: self.output_schema.clone().map(std::sync::Arc::new),
-            annotations: Some(self.mcp_annotations()),
-            icons: self.mcp_icons(),
+        let mut tool = rmcp::model::Tool::new(
+            self.function_name.clone(),
+            self.model_description.clone(),
+            std::sync::Arc::new(self.input_schema.clone()),
+        )
+        .with_annotations(self.mcp_annotations());
+        // carry the title, output schema, and icons when the tool has them
+        if let Some(title) = &self.title {
+            tool = tool.with_title(title.clone());
+        }
+        if let Some(output_schema) = &self.output_schema {
+            tool = tool.with_raw_output_schema(std::sync::Arc::new(output_schema.clone()));
+        }
+        if let Some(icons) = self.mcp_icons() {
+            tool = tool.with_icons(icons);
+        }
+        tool
+    }
+
+    /// Check an MCP tool result against this tool's output schema
+    ///
+    /// A successful result of a tool with an output schema must carry structured content that
+    /// matches the schema; one that doesn't becomes an error result naming the mismatch. Error
+    /// results and the results of tools without an output schema are returned unchanged.
+    ///
+    /// # Arguments
+    ///
+    /// * `result` - The result to check
+    #[cfg(feature = "api")]
+    #[must_use]
+    pub fn check_mcp_result(
+        &self,
+        result: rmcp::model::CallToolResult,
+    ) -> rmcp::model::CallToolResult {
+        // only successful results of tools with an output schema are checked
+        let Some(output_schema) = &self.output_schema else {
+            return result;
+        };
+        if result.is_error == Some(true) {
+            return result;
+        }
+        // find what keeps the result from matching the schema, if anything does
+        let mismatch = match (
+            portability::compile("output_schema", output_schema),
+            &result.structured_content,
+        ) {
+            (Err(error), _) => Some(error),
+            (Ok(_), None) => Some(format!(
+                "{} returned no structured content to match its output_schema",
+                self.function_name
+            )),
+            (Ok(validator), Some(content)) => validator.validate(content).err().map(|error| {
+                format!(
+                    "{} returned a result that doesn't match its output_schema at #{}: {error}",
+                    self.function_name,
+                    error.instance_path()
+                )
+            }),
+        };
+        // a result that doesn't match becomes an error naming the mismatch
+        match mismatch {
+            Some(message) => {
+                rmcp::model::CallToolResult::error(vec![rmcp::model::ContentBlock::text(message)])
+            }
+            None => result,
         }
     }
 
     /// Convert this tool's icons to MCP icons, if it has any
-    ///
-    /// The MCP icon type this server speaks has no theme, so each icon's theme is left out.
     #[cfg(feature = "api")]
     fn mcp_icons(&self) -> Option<Vec<rmcp::model::Icon>> {
         // a tool without icons sends none
         if self.icons.is_empty() {
             return None;
         }
-        // copy each icon's url, media type, and sizes
+        // copy each icon's url, media type, sizes, and theme
         let icons = self
             .icons
             .iter()
-            .map(|icon| rmcp::model::Icon {
-                src: icon.src.clone(),
-                mime_type: icon.mime_type.clone(),
-                sizes: (!icon.sizes.is_empty()).then(|| icon.sizes.clone()),
+            .map(|icon| {
+                // start from the icon's url
+                let mut mcp_icon = rmcp::model::Icon::new(icon.src.clone());
+                // add its media type, sizes, and theme when it has them
+                if let Some(mime_type) = &icon.mime_type {
+                    mcp_icon = mcp_icon.with_mime_type(mime_type.clone());
+                }
+                if !icon.sizes.is_empty() {
+                    mcp_icon = mcp_icon.with_sizes(icon.sizes.clone());
+                }
+                if let Some(theme) = icon.theme {
+                    mcp_icon = mcp_icon.with_theme(theme.into());
+                }
+                mcp_icon
             })
             .collect();
         Some(icons)
@@ -1396,6 +1465,22 @@ pub enum ToolIconTheme {
     Light,
     /// Drawn for a dark background
     Dark,
+}
+
+#[cfg(feature = "api")]
+impl From<ToolIconTheme> for rmcp::model::IconTheme {
+    /// Convert an icon theme to its MCP icon theme
+    ///
+    /// # Arguments
+    ///
+    /// * `theme` - The icon theme to convert
+    fn from(theme: ToolIconTheme) -> Self {
+        // each theme has the same meaning in MCP
+        match theme {
+            ToolIconTheme::Light => rmcp::model::IconTheme::Light,
+            ToolIconTheme::Dark => rmcp::model::IconTheme::Dark,
+        }
+    }
 }
 
 /// How portable an agentic tool's schemas are across model APIs (computed, never stored)
@@ -1584,6 +1669,103 @@ impl ToolInputMapping {
         }
         Ok(())
     }
+
+    /// Map a model's tool call input onto a container tool's job args and input samples
+    ///
+    /// Mapped properties are placed in the order of their names, a missing or `null` property
+    /// maps to nothing, and properties the mapping doesn't name are left out.
+    ///
+    /// # Arguments
+    ///
+    /// * `input` - The tool call's input object
+    pub fn map_input(
+        &self,
+        input: &serde_json::Map<String, serde_json::Value>,
+    ) -> Result<MappedToolInput, String> {
+        // start with no args and no samples
+        let mut mapped = MappedToolInput::default();
+        // place each mapped property that the input sets
+        for (property, target) in &self.args {
+            // skip properties the input leaves out or sets to null
+            let value = match input.get(property) {
+                None | Some(serde_json::Value::Null) => continue,
+                Some(value) => value,
+            };
+            match target {
+                // append each value as a positional
+                ArgTarget::Positional => mapped.args.positionals.extend(arg_values(value)),
+                // pass every value under the kwarg's key
+                ArgTarget::Kwarg(key) => mapped
+                    .args
+                    .kwargs
+                    .entry(key.clone())
+                    .or_default()
+                    .extend(arg_values(value)),
+                // pass the switch only when the property is true
+                ArgTarget::Switch(flag) => match value {
+                    serde_json::Value::Bool(true) => mapped.args.switches.push(flag.clone()),
+                    serde_json::Value::Bool(false) => (),
+                    _ => {
+                        return Err(format!(
+                            "input property `{property}` maps to the switch `{flag}`, so it must be true or false"
+                        ));
+                    }
+                },
+            }
+        }
+        // read the files to run on from the samples property
+        if let Some(property) = &self.samples {
+            match input.get(property) {
+                None | Some(serde_json::Value::Null) => (),
+                Some(serde_json::Value::Array(values)) => {
+                    // every value must be a SHA256 string
+                    let samples = values
+                        .iter()
+                        .map(|value| value.as_str().map(str::to_owned))
+                        .collect::<Option<Vec<String>>>()
+                        .ok_or_else(|| {
+                            format!("input property `{property}` must be a list of SHA256 strings")
+                        })?;
+                    mapped.samples = Some(samples);
+                }
+                Some(_) => {
+                    return Err(format!(
+                        "input property `{property}` must be a list of SHA256 strings"
+                    ));
+                }
+            }
+        }
+        Ok(mapped)
+    }
+}
+
+/// Get the job arg values one tool call input value maps to
+///
+/// An array gives one value per item, a string its text, and any other value its JSON text.
+///
+/// # Arguments
+///
+/// * `value` - The input value to convert
+fn arg_values(value: &serde_json::Value) -> Vec<String> {
+    // convert one value to its arg text
+    let text = |value: &serde_json::Value| match value {
+        serde_json::Value::String(text) => text.clone(),
+        other => other.to_string(),
+    };
+    match value {
+        serde_json::Value::Array(values) => values.iter().map(text).collect(),
+        other => vec![text(other)],
+    }
+}
+
+/// A model's tool call input mapped onto a container tool's job
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct MappedToolInput {
+    /// The job args the input maps to
+    pub args: GenericJobArgs,
+    /// The sample SHA256s the input names (unset when the mapping has no samples property or
+    /// the input leaves it out)
+    pub samples: Option<Vec<String>>,
 }
 
 /// Where a single tool call input property goes on the tool's job
@@ -1619,6 +1801,53 @@ pub struct ToolOutputDelivery {
     /// disk (0 = unlimited)
     #[serde(default)]
     pub max_result_bytes: u64,
+}
+
+impl ToolOutputDelivery {
+    /// Get the directory a tool's outputs are delivered to
+    ///
+    /// An unset path delivers them under the default tool results directory, in a directory named
+    /// after the tool's function name.
+    ///
+    /// # Arguments
+    ///
+    /// * `function_name` - The name a model calls the tool by
+    #[must_use]
+    pub fn resolved_path(&self, function_name: &str) -> String {
+        // use the configured directory or the function's default directory
+        match &self.path {
+            Some(path) => path.clone(),
+            None => format!("{DEFAULT_TOOL_RESULTS_DIR}/{function_name}"),
+        }
+    }
+
+    /// Get the most result bytes returned to a model for this tool in a harness
+    ///
+    /// # Arguments
+    ///
+    /// * `harness` - The harness's own limit (0 = unlimited)
+    #[must_use]
+    pub fn effective_max_result_bytes(&self, harness: u64) -> u64 {
+        effective_max_result_bytes(self.max_result_bytes, harness)
+    }
+}
+
+/// The directory container tool outputs are delivered under when a backing names no path
+pub const DEFAULT_TOOL_RESULTS_DIR: &str = "/tmp/thorium/tool-results";
+
+/// Get the most result bytes returned to a model: the smaller non-zero of two limits
+///
+/// # Arguments
+///
+/// * `backing` - The tool backing's limit (0 = unlimited)
+/// * `harness` - The harness's limit (0 = unlimited)
+#[must_use]
+pub fn effective_max_result_bytes(backing: u64, harness: u64) -> u64 {
+    // zero means unlimited, so only non-zero limits compete
+    match (backing, harness) {
+        (0, limit) | (limit, 0) => limit,
+        (backing, harness) => backing.min(harness),
+    }
 }
 
 /// A request to create a tool and its first tool instance

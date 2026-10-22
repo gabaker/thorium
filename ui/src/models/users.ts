@@ -175,6 +175,16 @@ export type ScopedToken = {
   token_expiration: string;
   /// Optional permanent expiration after which the token is deleted (ISO datetime or null)
   expires: string | null;
+  /// The run a run-scoped token is limited to (absent for tokens users create)
+  run?: RunTokenScope;
+};
+
+/// The workflow run or tool run a run-scoped token is limited to (mirrors `RunTokenScope`)
+export type RunTokenScope = {
+  /// The run's reaction id
+  reaction: string;
+  /// The tool instance ids the token may run
+  tool_instances: string[];
 };
 
 /// Request body for creating a scoped token (mirrors `ScopedTokenRequest`)

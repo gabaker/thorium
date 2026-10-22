@@ -9,10 +9,11 @@ use std::collections::{BTreeMap, HashSet};
 use thorium::conf::{FairShareWeights, IsRestricted, SpawnSlots, WorkerRestrictions};
 use thorium::models::{
     Deadline, Image, ImageScaler, NodeListParams, Pools, Requisition, Resources, SpawnLimits,
-    SpawnMap, SystemSettings, Worker, WorkerDeleteMap,
+    SpawnMap, SystemSettings, SystemStats, Worker, WorkerDeleteMap,
 };
 use thorium::{Conf, Error, Thorium};
-use tracing::{Level, Span, event, instrument};
+use tracing::{Level, event, instrument};
+use uuid::Uuid;
 
 mod pool;
 
@@ -84,8 +85,8 @@ pub struct Allocatable {
     weights: FairShareWeights,
     /// The current number of each type of unscoped requisition across all pools
     pub counts: HashMap<Requisition, i64>,
-    /// The number of each image type that has been spawned
-    pub image_counts: HashMap<String, HashMap<String, u64>>,
+    /// The number of workers spawned for each tool instance across every group
+    pub workload_counts: HashMap<Uuid, u64>,
     /// The count of workers spawned under fairshare
     fair_share_counts: HashMap<Requisition, u64>,
     /// The max number of pods we can spawn per loop
@@ -101,6 +102,7 @@ impl Allocatable {
     ///
     /// * `scaler_type` - The current scheduler in use
     /// * `conf` - The Thorium config
+    /// * `settings` - The Thorium system settings
     /// * `cache` - A cache of info from Thorium
     pub fn new(
         scaler_type: ImageScaler,
@@ -123,7 +125,7 @@ impl Allocatable {
             conf: conf.clone(),
             scaler_type,
             deadline_window: conf.thorium.scaler.deadline_window,
-            bans: BanSets::new(scaler_type),
+            bans: BanSets::new(),
             fairshare_pool: Pool::setup_fairshare(settings),
             deadlines_pool: Pool::default(),
             restrictions: conf.thorium.scaler.restrictions(scaler_type),
@@ -132,7 +134,7 @@ impl Allocatable {
             fair_share,
             weights: conf.thorium.scaler.fair_share_weights(scaler_type),
             counts: HashMap::default(),
-            image_counts: HashMap::default(),
+            workload_counts: HashMap::default(),
             fair_share_counts: HashMap::default(),
             spawn_limit: 0,
             changes: ReqMap::default(),
@@ -173,7 +175,7 @@ impl Allocatable {
             ),
         };
         // apply an update to this cluster
-        let freed = cluster.update(update, &mut self.image_counts, &mut self.counts);
+        let freed = cluster.update(update, &mut self.workload_counts, &mut self.counts);
         // get an entry to this clusters new cpu group
         let cpu_entry = self.clusters.entry(cluster.resources.cpu).or_default();
         // place this updated cluster in its new cpu group
@@ -344,79 +346,44 @@ impl Allocatable {
         }
     }
 
-    /// Increment this image spanwed count if this image has a spawn limit
-    fn increment_image_count(&mut self, image: &Image) {
-        // we only need to inrement this images count if it has a spawn limit set
-        if let SpawnLimits::Basic(_) = image.spawn_limit {
-            // get this groups image counts
-            let image_map = match self.image_counts.get_mut(&image.group) {
-                Some(image_entry) => image_entry,
-                None => {
-                    // insert a new group image count map
-                    self.image_counts
-                        .insert(image.group.clone(), HashMap::with_capacity(1));
-                    // get our groups count map
-                    self.image_counts.get_mut(&image.group).unwrap()
-                }
-            };
-            // get our images count
-            let count = match image_map.get_mut(&image.name) {
-                Some(count) => count,
-                None => {
-                    // add our image to our group map
-                    image_map.insert(image.name.clone(), 0);
-                    // get a mutable ref to our count
-                    image_map.get_mut(&image.name).unwrap()
-                }
-            };
-            // increment our count
-            *count += 1;
-        }
-    }
-
-    /// Check if the target pool can support this image being spawned once
+    /// Increment a tool instance's spawned count if its workload has a spawn limit
     ///
     /// # Arguments
     ///
+    /// * `tool_instance` - The tool instance a worker was spawned for
+    /// * `image` - The tool instance's projected image
+    fn increment_workload_count(&mut self, tool_instance: Uuid, image: &Image) {
+        // we only need to inrement this tool instance's count if it has a spawn limit set
+        if let SpawnLimits::Basic(_) = image.spawn_limit {
+            // increment our count
+            *self.workload_counts.entry(tool_instance).or_insert(0) += 1;
+        }
+    }
+
+    /// Check if the target pool can support this tool instance being spawned once
+    ///
+    /// # Arguments
+    ///
+    /// * `tool_instance` - The tool instance to check
+    /// * `image` - The tool instance's projected image
     /// * `pool` - The pool to check
-    /// * `image` - The image to check
-    fn enough(&mut self, image: &Image, pool: Pools) -> bool {
+    fn enough(&mut self, tool_instance: Uuid, image: &Image, pool: Pools) -> bool {
         // check the correct pool
         let enough_resources = match pool {
             Pools::FairShare => self.fairshare_pool.enough(image),
             Pools::Deadline => self.deadlines_pool.enough(image),
         };
-        // check if there are any spawn limits on this image
+        // check if there are any spawn limits on this tool instance
         let under_limit = match image.spawn_limit {
             SpawnLimits::Basic(limit) => {
-                // get this groups image counts
-                let image_map = match self.image_counts.get_mut(&image.group) {
-                    Some(image_entry) => image_entry,
-                    None => {
-                        // insert a new group image count map
-                        self.image_counts
-                            .insert(image.group.clone(), HashMap::with_capacity(1));
-                        // get our groups count map
-                        self.image_counts.get_mut(&image.group).unwrap()
-                    }
-                };
-                // get our images count
-                let count = match image_map.get(&image.name) {
-                    Some(count) => count,
-                    None => {
-                        // add our image to our group map
-                        image_map.insert(image.name.clone(), 0);
-                        // get a mutable ref to our count
-                        image_map.get_mut(&image.name).unwrap()
-                    }
-                };
-                // check if we are above our limit or not
-                if *count < limit {
-                    // we can spawn this
-                    true
-                } else {
-                    false
-                }
+                // get this tool instance's count across every group
+                let count = self
+                    .workload_counts
+                    .get(&tool_instance)
+                    .copied()
+                    .unwrap_or(0);
+                // check if we are below our limit or not
+                count < limit
             }
             SpawnLimits::Unlimited => true,
         };
@@ -518,18 +485,24 @@ impl Allocatable {
     ///
     /// # Arguments
     ///
-    /// * `image` - The image to allocate resources for
+    /// * `tool_instance` - The tool instance to allocate resources for
+    /// * `image` - The tool instance's projected image
     /// * `pool` - The pool we are trying to allocate resources in
-    fn try_allocate(&mut self, image: &Image, pool: Pools) -> Option<(String, String)> {
+    fn try_allocate(
+        &mut self,
+        tool_instance: Uuid,
+        image: &Image,
+        pool: Pools,
+    ) -> Option<(String, String)> {
         // check if we have enough resources in the target pool
-        if self.enough(image, pool) {
+        if self.enough(tool_instance, image, pool) {
             // try to allocate this image on a node
             return match self.allocate_cluster(image, pool) {
                 Some((cluster, node)) => {
                     // consume the resources from the correct pool
                     self.consume(image, pool);
-                    // incement the count for this image if it has a spawn limit
-                    self.increment_image_count(image);
+                    // incement the count for this tool instance if it has a spawn limit
+                    self.increment_workload_count(tool_instance, image);
                     // return our cluster and node
                     Some((cluster, node))
                 }
@@ -563,6 +536,15 @@ impl Allocatable {
     }
 
     /// Crawl over some users and try to spawn one job for each of them
+    ///
+    /// # Arguments
+    ///
+    /// * `cache` - A cache of info from Thorium
+    /// * `spawn_slots` - The number of spawn slots left in this scheduling loop
+    /// * `map` - The requisitions each user still has to spawn
+    /// * `rank` - The fair share rank these users currently have
+    /// * `users` - The users to try to spawn a job for
+    /// * `no_spawns` - The users that nothing could be spawned for
     fn try_fair_share_spawn(
         &mut self,
         cache: &Cache,
@@ -572,8 +554,6 @@ impl Allocatable {
         users: HashSet<String>,
         no_spawns: &mut HashSet<String>,
     ) {
-        // get our current span
-        let span = Span::current();
         // crawl over the users to try and spawn fair share jobs for
         'user: for user in users {
             // if we are out of spawn slots then keep this user at their current rank
@@ -591,18 +571,30 @@ impl Allocatable {
                         if *created == 0 {
                             continue;
                         }
-                        // get this jobs image info
-                        let Some(image) = cache.get_image(&req.group, &req.stage, &span) else {
+                        // get this jobs workload info
+                        let Some(workload) = cache.get_workload(&req.tool_instance) else {
+                            continue;
+                        };
+                        // get the workload's image in this requisition's group
+                        let Some(image) = workload.projection(&req.group) else {
                             continue;
                         };
                         // calculate a deadline based on our runtime
                         #[allow(clippy::cast_possible_truncation)]
                         let deadline = from_now!(image.runtime as i64);
                         // try to spawn this requisition
-                        if let Some((cluster, node)) = self.try_allocate(image, Pools::FairShare) {
+                        if let Some((cluster, node)) =
+                            self.try_allocate(req.tool_instance, image, Pools::FairShare)
+                        {
                             // build our newly spawned worker
-                            let spawned =
-                                Spawned::new(&cluster, &node, req.clone(), image, Pools::FairShare);
+                            let spawned = Spawned::new(
+                                &cluster,
+                                &node,
+                                req.clone(),
+                                &workload,
+                                image,
+                                Pools::FairShare,
+                            );
                             // get an entry to this clusters map in our change map
                             let cluster_entry = self.changes.spawns.entry(cluster).or_default();
                             // get an entry to the deadline group for this spawn
@@ -638,18 +630,16 @@ impl Allocatable {
     ///
     /// # Arguments
     ///
-    /// * `thorium` - A client for the Thorium api
+    /// * `stats` - The system stats for Thorium so we can assign resources to users
     /// * `cache` - A cache of info from Thorium to use when scheduling
     /// * `spawn_slots` - The remaining spawn slots to fill
-    #[instrument(name = "Allocatable::fairshare_allocation", skip_all, err(Debug))]
-    async fn fairshare_allocation(
+    #[instrument(name = "Allocatable::fairshare_allocation", skip_all)]
+    fn fairshare_allocation(
         &mut self,
-        thorium: &Thorium,
+        stats: &SystemStats,
         cache: &Cache,
         spawn_slots: &mut usize,
-    ) -> Result<(), Error> {
-        // get the system stats for for Thorium so we can assign resources to users
-        let stats = thorium.system.stats().await?;
+    ) {
         // Build a map of each users outstanding job reqs
         let mut map = stats.users_jobs();
         // track the users that do not spawn any jobs
@@ -673,29 +663,34 @@ impl Allocatable {
             // add our users to this rank group
             rank_entry.extend(users);
         }
-        Ok(())
     }
 
-    /// Gets a list of immediate deadlines to try to meet
+    /// Reads the window of immediate deadlines to try to meet
     ///
     /// # Arguments
     ///
     /// * `thorium` - A client for the Thorium api
-    #[instrument(name = "Allocatable::get_deadlines", skip_all, err(Debug))]
-    async fn get_deadlines(
-        &self,
-        thorium: &Thorium,
-        cache: &Cache,
-    ) -> Result<Vec<Deadline>, thorium::Error> {
+    #[instrument(name = "Allocatable::read_deadlines", skip_all, err(Debug))]
+    async fn read_deadlines(&self, thorium: &Thorium) -> Result<Vec<Deadline>, thorium::Error> {
         // build arbitrary dates for deadline reading
         let start = DateTime::from_timestamp(0, 0).unwrap();
         let end = Utc::now() + chrono::Duration::weeks(1000);
         // read the upcoming deadlines from the deadline stream
         let window = self.deadline_window;
-        let mut deadlines = thorium
+        thorium
             .jobs
             .deadlines(self.scaler_type, &start, &end, window)
-            .await?;
+            .await
+    }
+
+    /// Removes the deadlines we can't spawn workers for
+    ///
+    /// # Arguments
+    ///
+    /// * `cache` - A cache of info from Thorium to use when scheduling
+    /// * `deadlines` - The deadlines to filter
+    #[instrument(name = "Allocatable::filter_deadlines", skip_all)]
+    fn filter_deadlines(&self, cache: &Cache, mut deadlines: Vec<Deadline>) -> Vec<Deadline> {
         // log how many deadlines we retrieved
         let prefilter = deadlines.len();
         event!(Level::INFO, deadlines = prefilter);
@@ -707,7 +702,7 @@ impl Allocatable {
             let filtered = prefilter - deadlines.len();
             event!(Level::INFO, filtered = filtered);
         }
-        Ok(deadlines)
+        deadlines
     }
 
     /// Reset all of our nodes spawn limits
@@ -751,24 +746,20 @@ impl Allocatable {
         self.spawn_limit = node_cnt * 2;
     }
 
-    /// Allocate resources for workers spawned in the deadline pool
+    /// Allocate resources for workers spawned in the deadline pool, oldest deadlines first
     ///
     /// # Arguments
     ///
-    /// * `thorium` - A client for the Thorium api
     /// * `cache` - A cache of info from Thorium to use when scheduling
+    /// * `deadlines` - The deadlines to try to meet, oldest first
     /// * `spawn_slots` - The remaining spawn slots to fill
-    #[instrument(name = "Allocatable::deadline_allocation", skip_all, err(Debug))]
-    async fn deadline_allocation(
+    #[instrument(name = "Allocatable::deadline_allocation", skip_all)]
+    pub fn deadline_allocation(
         &mut self,
-        thorium: &Thorium,
         cache: &Cache,
+        deadlines: Vec<Deadline>,
         spawn_slots: &mut usize,
-    ) -> Result<(), Error> {
-        // get our current span
-        let span = Span::current();
-        // get the deadlines to try to meet
-        let deadlines = self.get_deadlines(thorium, cache).await?;
+    ) {
         // crawl over these deadlines and try to meet them
         for deadline in deadlines {
             // get this deadlines timestamp
@@ -803,14 +794,27 @@ impl Allocatable {
                 }
                 continue;
             }
-            // get this jobs image info
-            let Some(image) = cache.get_image(&req.group, &req.stage, &span) else {
+            // get this jobs workload info
+            let Some(workload) = cache.get_workload(&req.tool_instance) else {
+                continue;
+            };
+            // get the workload's image in this requisition's group
+            let Some(image) = workload.projection(&req.group) else {
                 continue;
             };
             // try to allocate resources for this deadline
-            if let Some((cluster, node)) = self.try_allocate(image, Pools::Deadline) {
+            if let Some((cluster, node)) =
+                self.try_allocate(req.tool_instance, image, Pools::Deadline)
+            {
                 // build our newly spawned worker
-                let spawned = Spawned::new(&cluster, &node, req.clone(), image, Pools::Deadline);
+                let spawned = Spawned::new(
+                    &cluster,
+                    &node,
+                    req.clone(),
+                    &workload,
+                    image,
+                    Pools::Deadline,
+                );
                 // get an entry to this clusters map in our change map
                 let cluster_entry = self.changes.spawns.entry(cluster).or_default();
                 // get an entry to the deadline group for this spawn
@@ -833,7 +837,6 @@ impl Allocatable {
                 break;
             }
         }
-        Ok(())
     }
 
     /// Scale down any existing workers to meet higher priority deadlines
@@ -919,15 +922,22 @@ impl Allocatable {
         let mut spawn_slots = self.spawn_limit;
         // clone our old counts so we can restore it
         let old_counts = self.counts.clone();
+        // read the system stats and the deadline window once for both passes
+        let stats = thorium.system.stats().await?;
+        let deadlines = self.read_deadlines(thorium).await?;
+        // fetch the workloads of the tool instances in demand that we haven't cached yet
+        cache
+            .prefetch_groups(thorium, demand(&stats, &deadlines))
+            .await;
+        // remove any deadlines we can't spawn due to missing cache info or bans
+        let deadlines = self.filter_deadlines(cache, deadlines);
         // increase our fair share ranks
         self.increase_fair_share_ranks(cache);
         // try to allocate resources based on fair share
-        self.fairshare_allocation(thorium, cache, &mut spawn_slots)
-            .await?;
+        self.fairshare_allocation(&stats, cache, &mut spawn_slots);
         // try to allocate resources based on deadline scheduling if we still have remaining spawn slots
         if spawn_slots > 0 {
-            self.deadline_allocation(thorium, cache, &mut spawn_slots)
-                .await?;
+            self.deadline_allocation(cache, deadlines, &mut spawn_slots);
         }
         // remove any empty cluster cpu groups
         self.clusters.retain(|_, clusters| !clusters.is_empty());
@@ -1032,14 +1042,13 @@ impl Allocatable {
     /// * `cache` - A cache of info from Thorium to use when scheduling
     #[instrument(name = "Allocatable::increase_fair_share_ranks", skip_all)]
     pub fn increase_fair_share_ranks(&mut self, cache: &Cache) {
-        // get our current span
-        let span = Span::current();
         // get all fair share ranks by user
         let mut by_user = self.fair_share_by_user();
         // crawl over all spawned requisitions
         for (req, count) in &self.counts {
-            // get this requisitions images info
-            if let Some(image) = cache.get_image(&req.group, &req.stage, &span) {
+            // get this requisitions workload info
+            let workload = cache.get_workload(&req.tool_instance);
+            if let Some(image) = workload.as_ref().and_then(|w| w.projection(&req.group)) {
                 // get this users fair share rank and increment it
                 match by_user.get_mut(&req.user) {
                     Some(rank) => *rank = self.calc_fair_share(*rank, *count, &image.resources),
@@ -1181,7 +1190,7 @@ impl Allocatable {
                     &alive,
                     deleted,
                     &mut freed,
-                    &mut self.image_counts,
+                    &mut self.workload_counts,
                     &mut self.counts,
                 );
                 // get an entry to this clusters new cpu grop
@@ -1200,8 +1209,8 @@ impl Allocatable {
 /// Sort the workers Thorium lists on a node into failed workers to delete and alive workers
 ///
 /// This is the per-node loop in [`Allocatable::prune_failed_workers`] extracted so it can be
-/// unit tested. A failed worker's image count is NOT decremented here: the failed worker is left
-/// out of `alive`, so `NodeResources::free` frees it and decrements its image count exactly once.
+/// unit tested. A failed worker's workload count is NOT decremented here: the failed worker is
+/// left out of `alive`, so `NodeResources::free` frees it and decrements its count exactly once.
 ///
 /// # Arguments
 ///
@@ -1220,7 +1229,7 @@ fn prune_failed_node_workers(
         // if this worker has failed then add it to our delete map
         if failed.contains(&name) {
             // add this failed worker to our delete map
-            // its image count is released when NodeResources::free frees it
+            // its workload count is released when NodeResources::free frees it
             deletes.add_mut(name);
         } else {
             // this worker is alive so add its name to our alive set
@@ -1229,11 +1238,37 @@ fn prune_failed_node_workers(
     }
 }
 
+/// Get the tool instances named by the system stats and the deadline window, and the groups
+/// each is named in
+///
+/// # Arguments
+///
+/// * `stats` - The system stats
+/// * `deadlines` - The deadline window
+#[must_use]
+pub fn demand(stats: &SystemStats, deadlines: &[Deadline]) -> HashMap<Uuid, HashSet<String>> {
+    // start with the tool instances with shared workload jobs in each group
+    let mut demand: HashMap<Uuid, HashSet<String>> = HashMap::new();
+    for (group, group_stats) in &stats.groups {
+        for id in group_stats.workloads.keys() {
+            demand.entry(*id).or_default().insert(group.clone());
+        }
+    }
+    // add the tool instance of every deadline in its group
+    for deadline in deadlines {
+        demand
+            .entry(deadline.tool_instance)
+            .or_default()
+            .insert(deadline.group.clone());
+    }
+    demand
+}
+
 /// Track a worker that the scheduler failed to spawn
 ///
 /// This is the spawn error branch in `Scaler::schedule` extracted so it can be unit tested.
 /// When a worker fails to spawn it is deleted from Thorium, and the fairshare pool resources and
-/// spawn limit image count that `try_allocate` consumed for it are released here. The failed
+/// spawn limit workload count that `try_allocate` consumed for it are released here. The failed
 /// worker never reaches `node.spawned` or Thorium's worker listing, so no other free path would
 /// ever release them. Deadline pool resources are not released here since the deadline pool is
 /// resized from observed cluster resources on every resources update.
@@ -1241,13 +1276,13 @@ fn prune_failed_node_workers(
 /// # Arguments
 ///
 /// * `fairshare_pool` - The fairshare pool the worker may have consumed resources from
-/// * `image_counts` - The current counts for spawned images
+/// * `workload_counts` - The current counts of spawned workers by tool instance
 /// * `spawn` - The worker that failed to spawn
 /// * `deleted` - The workers that were deleted this loop
 /// * `failed` - The workers to delete from Thorium
 pub fn record_failed_spawn(
     fairshare_pool: &mut Pool,
-    image_counts: &mut HashMap<String, HashMap<String, u64>>,
+    workload_counts: &mut HashMap<Uuid, u64>,
     spawn: Spawned,
     deleted: &mut HashSet<String>,
     failed: &mut WorkerDeleteMap,
@@ -1256,13 +1291,10 @@ pub fn record_failed_spawn(
     if spawn.pool == Pools::FairShare {
         fairshare_pool.release(spawn.resources);
     }
-    // get this groups image map
-    if let Some(image_map) = image_counts.get_mut(&spawn.req.group) {
-        // get this images current spawn count
-        if let Some(count) = image_map.get_mut(&spawn.req.stage) {
-            // release the spawn limit slot this worker consumed
-            *count = count.saturating_sub(1);
-        }
+    // get this tool instance's current spawn count
+    if let Some(count) = workload_counts.get_mut(&spawn.req.tool_instance) {
+        // release the spawn limit slot this worker consumed
+        *count = count.saturating_sub(1);
     }
     // add this failed worker to our delete map
     deleted.insert(spawn.name.clone());
@@ -1354,13 +1386,13 @@ impl ClusterResources {
     ///
     /// * `update` - The update to apply to this cluster
     /// * `active` - The currently active workers on this cluster
-    /// * `image_counts` - The current counts for spawned images
+    /// * `workload_counts` - The current counts of spawned workers by tool instance
     /// * `req_counts` - The current counts of all requisitions
     fn free_after_update(
         &mut self,
         mut update: AllocatableUpdate,
         active: &HashSet<String>,
-        image_counts: &mut HashMap<String, HashMap<String, u64>>,
+        workload_counts: &mut HashMap<Uuid, u64>,
         req_counts: &mut HashMap<Requisition, i64>,
     ) -> PoolFrees {
         // clear our  total resource count
@@ -1383,7 +1415,7 @@ impl ClusterResources {
                             active,
                             &HashSet::default(),
                             &mut freed,
-                            image_counts,
+                            workload_counts,
                             req_counts,
                         );
                         // add this nodes updated resources to our new total
@@ -1407,7 +1439,7 @@ impl ClusterResources {
                                 active,
                                 &HashSet::default(),
                                 &mut freed,
-                                image_counts,
+                                workload_counts,
                                 req_counts,
                             );
                             // this node just gets dropped since it needs to be removed
@@ -1437,13 +1469,12 @@ impl ClusterResources {
     /// # Arguments
     ///
     /// * `update` - The update to apply to this cluster
-    /// * `active` - The currently active workers on this cluster
-    /// * `image_counts` - The current counts for spawned images
+    /// * `workload_counts` - The current counts of spawned workers by tool instance
     /// * `req_counts` - The current counts for workers by requisition
     pub fn update(
         &mut self,
         mut update: AllocatableUpdate,
-        image_counts: &mut HashMap<String, HashMap<String, u64>>,
+        workload_counts: &mut HashMap<Uuid, u64>,
         req_counts: &mut HashMap<Requisition, i64>,
     ) -> PoolFrees {
         // get the names of all the active workers in this update
@@ -1480,7 +1511,7 @@ impl ClusterResources {
             cpu_entry.insert(name, node);
         }
         // crawl all of our currently active workers and remove any that no longer exist
-        self.free_after_update(update, &active, image_counts, req_counts)
+        self.free_after_update(update, &active, workload_counts, req_counts)
     }
 
     /// Check if we have enough resources to spawn one of these images on some node
@@ -1547,15 +1578,15 @@ impl ClusterResources {
     ///
     /// * `alive` - The set of all currently alive pods
     /// * `deleted` - The names of the workers to delete
-    /// * `frees` - The resources we have freed
-    /// * `image_counts` - The current counts for spawned images
+    /// * `freed` - The resources we have freed
+    /// * `workload_counts` - The current counts of spawned workers by tool instance
     /// * `req_counts` - The current counts for workers by requisition
     fn free(
         &mut self,
         alive: &HashSet<String>,
         deleted: &HashSet<String>,
         freed: &mut PoolFrees,
-        image_counts: &mut HashMap<String, HashMap<String, u64>>,
+        workload_counts: &mut HashMap<Uuid, u64>,
         req_counts: &mut HashMap<Requisition, i64>,
     ) {
         // track the current resources for this cluster
@@ -1567,7 +1598,7 @@ impl ClusterResources {
             // crawl over the nodes in this cpu group any resources we can
             for (node_name, mut node) in node_group.drain() {
                 // try to free any resources we can on this node
-                node.free(alive, deleted, freed, image_counts, req_counts);
+                node.free(alive, deleted, freed, workload_counts, req_counts);
                 // add this nodes updated resources to our new total
                 new_total += node.available;
                 // just retain this nodes current info since it was not in the update
@@ -1663,14 +1694,14 @@ impl NodeResources {
     /// * `alive` - The set of all currently alive pods
     /// * `deleted` - The set of deleted workers
     /// * `freed` - The resources that we have freed in each pool
-    /// * `image_counts` - The current counts for spawned images
+    /// * `workload_counts` - The current counts of spawned workers by tool instance
     /// * `req_counts` - The current counts for workers by requisition
     fn free(
         &mut self,
         alive: &HashSet<String>,
         deleted: &HashSet<String>,
         freed: &mut PoolFrees,
-        image_counts: &mut HashMap<String, HashMap<String, u64>>,
+        workload_counts: &mut HashMap<Uuid, u64>,
         req_counts: &mut HashMap<Requisition, i64>,
     ) {
         // crawl our worker deadline groups
@@ -1683,13 +1714,10 @@ impl NodeResources {
                     self.available += worker.resources;
                     // free resources from the right pool
                     freed.add(worker.pool, worker.resources);
-                    // get this groups image map
-                    if let Some(image_map) = image_counts.get_mut(&worker.req.group) {
-                        // get this image current spawn count
-                        if let Some(count) = image_map.get_mut(&worker.req.stage) {
-                            // decrement this images count by 1
-                            *count = count.saturating_sub(1);
-                        }
+                    // get this tool instance's current spawn count
+                    if let Some(count) = workload_counts.get_mut(&worker.req.tool_instance) {
+                        // decrement this tool instance's count by 1
+                        *count = count.saturating_sub(1);
                     }
                     // get the count for this requisition type
                     if let Some(req_count) = req_counts.get_mut(&worker.req) {
@@ -1713,6 +1741,233 @@ mod tests {
     use super::*;
     use chrono::Duration;
 
+    /// The tool instance the `husker` workers in these tests run
+    const HUSKER: Uuid = Uuid::from_u128(0x6875_736b_6572);
+
+    use crate::libs::DockerInfo;
+    use crate::libs::test_api::{
+        self, GROUP, MockApi, MockCrane, World, deadline, k8s_spec, spawned_reqs, tool_instance,
+    };
+    use std::sync::Arc;
+    use thorium::models::SpawnLimits;
+
+    /// Build a dry-run K8s scaler whose cache holds inspected K8s tool instances
+    ///
+    /// # Arguments
+    ///
+    /// * `instances` - Each tool instance's id, groups, and spawn limit
+    /// * `users` - The users to cache in every group
+    async fn scaler_with(
+        instances: &[(Uuid, &[&str], SpawnLimits)],
+        users: &[&str],
+    ) -> (crate::libs::Scaler, MockApi) {
+        // serve each tool instance from the mock API
+        let mut world = World::default();
+        let mut groups = HashSet::new();
+        for (i, (id, in_groups, limit)) in instances.iter().enumerate() {
+            let spec = k8s_spec(&format!("registry.example/tool-{i}:1"), limit.clone());
+            let entity = tool_instance(*id, &format!("tool-{i}"), "1.0.0", in_groups, spec);
+            world.entities.insert(*id, entity);
+            groups.extend(in_groups.iter().copied());
+        }
+        let groups = groups.into_iter().collect::<Vec<&str>>();
+        world.users = users
+            .iter()
+            .map(|name| test_api::user(name, &groups))
+            .collect();
+        let api = MockApi::start(world).await;
+        let crane = MockCrane::new();
+        let mut scaler = Box::pin(test_api::scaler(
+            &api,
+            test_api::conf(&crane),
+            ImageScaler::K8s,
+        ))
+        .await;
+        // cache and inspect every tool instance
+        let thorium = api.client().await;
+        {
+            let cache = Arc::get_mut(&mut scaler.cache).expect("cache is shared");
+            cache
+                .prefetch(&thorium, instances.iter().map(|(id, _, _)| *id).collect())
+                .await;
+            for i in 0..instances.len() {
+                cache.docker.insert(
+                    format!("registry.example/tool-{i}:1"),
+                    DockerInfo::deserialize(r#"{"architecture":"amd64","os":"linux","config":{}}"#)
+                        .unwrap(),
+                );
+            }
+        }
+        (scaler, api)
+    }
+
+    /// Two runs of one tool instance with a spawn limit of 1 in two groups never get two
+    /// workers, and a failed spawn and a freed worker each release the count
+    #[tokio::test]
+    async fn spawn_limits_count_tool_instances_across_groups() {
+        // one tool instance in two groups with a spawn limit of 1
+        let corn = Uuid::from_u128(0xc0);
+        let (mut scaler, _api) = Box::pin(scaler_with(
+            &[(corn, &[GROUP, "vesta"], SpawnLimits::Basic(1))],
+            &["io"],
+        ))
+        .await;
+        let (first, second) = (Uuid::new_v4(), Uuid::new_v4());
+        let deadlines = vec![
+            deadline("io", GROUP, corn, Some(first), 20),
+            deadline("io", "vesta", corn, Some(second), 10),
+        ];
+        // only one of the two runs gets a worker
+        let alloc = &mut scaler.allocatable;
+        alloc.deadline_allocation(&scaler.cache, deadlines.clone(), &mut 10);
+        let spawned = spawned_reqs(&alloc.changes.spawns);
+        assert_eq!(spawned.len(), 1, "{spawned:?}");
+        assert_eq!(spawned[0].run, Some(first));
+        assert_eq!(alloc.workload_counts[&corn], 1);
+        // a failed spawn releases the count so the next pass can spawn again
+        let failed_spawn = alloc
+            .changes
+            .spawns
+            .values()
+            .next()
+            .unwrap()
+            .values()
+            .next()
+            .unwrap()[0]
+            .clone();
+        alloc.changes.spawns.clear();
+        record_failed_spawn(
+            &mut alloc.fairshare_pool,
+            &mut alloc.workload_counts,
+            failed_spawn,
+            &mut HashSet::default(),
+            &mut WorkerDeleteMap::default(),
+        );
+        assert_eq!(alloc.workload_counts[&corn], 0);
+        alloc.deadline_allocation(&scaler.cache, deadlines, &mut 10);
+        let spawned = alloc
+            .changes
+            .spawns
+            .values()
+            .next()
+            .unwrap()
+            .values()
+            .next()
+            .unwrap()[0]
+            .clone();
+        assert_eq!(alloc.workload_counts[&corn], 1);
+        // a freed worker releases the count too
+        let mut node = NodeResources::new("node".to_owned(), SpawnSlots::default());
+        node.spawned.insert(Utc::now(), vec![spawned]);
+        node.free(
+            &HashSet::default(),
+            &HashSet::default(),
+            &mut PoolFrees::default(),
+            &mut alloc.workload_counts,
+            &mut HashMap::default(),
+        );
+        assert_eq!(alloc.workload_counts[&corn], 0);
+    }
+
+    /// The deadline pass serves per-run requisitions oldest first
+    #[tokio::test]
+    async fn deadline_pass_serves_oldest_runs_first() {
+        // one tool instance and three runs with deadlines of different ages
+        let corn = Uuid::from_u128(0xc1);
+        let (mut scaler, _api) = Box::pin(scaler_with(
+            &[(corn, &[GROUP], SpawnLimits::Basic(2))],
+            &["io"],
+        ))
+        .await;
+        let runs = [Uuid::new_v4(), Uuid::new_v4(), Uuid::new_v4()];
+        let deadlines = vec![
+            deadline("io", GROUP, corn, Some(runs[0]), 300),
+            deadline("io", GROUP, corn, Some(runs[1]), 200),
+            deadline("io", GROUP, corn, Some(runs[2]), 100),
+        ];
+        // with room for two workers the two oldest runs get them
+        scaler
+            .allocatable
+            .deadline_allocation(&scaler.cache, deadlines, &mut 10);
+        let spawned = spawned_reqs(&scaler.allocatable.changes.spawns);
+        let served = spawned.iter().map(|req| req.run).collect::<Vec<_>>();
+        assert_eq!(served, vec![Some(runs[0]), Some(runs[1])]);
+    }
+
+    /// Fair share ranks users over tool instances as it ranked them over stages: each round
+    /// spawns one worker per user from their least utilized requisitions, and a spawn limit
+    /// counts a tool instance's workers across every user, so a user whose only tool instance is
+    /// at its limit stops spawning while the other keeps going
+    #[tokio::test]
+    async fn fair_share_over_tool_instances() {
+        // io has jobs only on a tool instance limited to one worker, europa on both
+        let (open, limited) = (Uuid::from_u128(0xa1), Uuid::from_u128(0xa2));
+        let (mut scaler, _api) = Box::pin(scaler_with(
+            &[
+                (open, &[GROUP], SpawnLimits::Unlimited),
+                (limited, &[GROUP], SpawnLimits::Basic(1)),
+            ],
+            &["io", "europa"],
+        ))
+        .await;
+        let stats = test_api::workload_stats(&[
+            (limited, "io", 3, 0),
+            (open, "europa", 3, 0),
+            (limited, "europa", 3, 0),
+        ]);
+        // give fair share room for four spawns
+        let alloc = &mut scaler.allocatable;
+        alloc.fairshare_pool.resources = Resources::new(64_000, 131_072, 0, 64);
+        alloc.reset_spawns();
+        alloc.increase_fair_share_ranks(&scaler.cache);
+        // rank io below europa so the order users share a rank in does not decide who reaches
+        // the limited tool instance first
+        alloc.fair_share = BTreeMap::from([
+            (0, HashSet::from(["io".to_owned()])),
+            (1, HashSet::from(["europa".to_owned()])),
+        ]);
+        let mut slots = 4;
+        alloc.fairshare_allocation(&stats, &scaler.cache, &mut slots);
+        let spawned = spawned_reqs(&alloc.changes.spawns);
+        // every spawn names a shared requisition
+        assert!(spawned.iter().all(|req| req.run.is_none()), "{spawned:?}");
+        // io gets the limited tool instance's only worker and europa spawns on the open one
+        let io = spawned
+            .iter()
+            .filter(|req| req.user == "io")
+            .collect::<Vec<_>>();
+        assert_eq!(io.len(), 1, "{spawned:?}");
+        assert_eq!(io[0].tool_instance, limited);
+        let europa = spawned
+            .iter()
+            .filter(|req| req.user == "europa")
+            .collect::<Vec<_>>();
+        assert_eq!(europa.len(), 3, "{spawned:?}");
+        assert!(europa.iter().all(|req| req.tool_instance == open));
+        assert_eq!(alloc.workload_counts[&limited], 1);
+    }
+
+    /// The tool instances in demand are those with shared jobs in the stats and those named by
+    /// the deadline window, each with the groups it is named in
+    #[test]
+    fn demand_covers_stats_and_deadlines() {
+        // a tool instance in the stats and in a deadline in another group, and another only in
+        // a deadline
+        let (in_stats, in_deadlines) = (Uuid::from_u128(1), Uuid::from_u128(2));
+        let stats = test_api::workload_stats(&[(in_stats, "io", 1, 0)]);
+        let deadlines = vec![
+            deadline("io", GROUP, in_deadlines, None, 1),
+            deadline("io", "vesta", in_stats, None, 2),
+        ];
+        let demand = demand(&stats, &deadlines);
+        let expected: HashMap<Uuid, HashSet<String>> = [
+            (in_stats, [GROUP.to_owned(), "vesta".to_owned()].into()),
+            (in_deadlines, [GROUP.to_owned()].into()),
+        ]
+        .into();
+        assert_eq!(demand, expected);
+    }
+
     /// Build a spawned deadline worker eligible to be scaled down, tied to the given req
     ///
     /// The worker is placed in the deadline pool, marked not-yet-scaled-down, and given a
@@ -1735,18 +1990,19 @@ mod tests {
             scaled_down: false,
             // set the down scalable time in the past so it is eligible to scale down
             down_scalable: Utc::now() - Duration::minutes(5),
+            run_env: None,
         }
     }
 
     /// The victim filter in `scale_down_to_meet` excludes a worker only when it is the *same*
-    /// requisition (matches on user AND group AND pipeline AND stage), so a worker that shares
+    /// requisition (matches on user AND group AND tool instance AND run), so a worker that shares
     /// just one field with the incoming req (here the group) is still selected as a victim.
     #[test]
     fn victim_sharing_one_field_is_still_selected() {
         // the incoming requisition we are trying to make room for
-        let req = Requisition::new("alice", "corn", "pipe-a", "stage-a");
-        // a spawned worker that shares only the group but differs on user/pipeline/stage
-        let other = Requisition::new("bob", "corn", "pipe-b", "stage-b");
+        let req = Requisition::new("alice", "corn", Uuid::from_u128(1), None);
+        // a spawned worker that shares only the group but differs on user/tool instance
+        let other = Requisition::new("bob", "corn", Uuid::from_u128(2), None);
         let worker = scalable_worker(other, Resources::new(500, 256, 0, 1));
         // this worker is a different requisition, so it must be a valid scale down victim
         assert!(
@@ -1761,7 +2017,7 @@ mod tests {
     #[test]
     fn identical_requisition_is_never_a_victim() {
         // the incoming requisition we are trying to make room for
-        let req = Requisition::new("alice", "corn", "pipe-a", "stage-a");
+        let req = Requisition::new("alice", "corn", Uuid::from_u128(1), None);
         // a spawned worker for the exact same requisition
         let worker = scalable_worker(req.clone(), Resources::new(500, 256, 0, 1));
         // an identical requisition must be excluded from scale down candidates
@@ -1822,7 +2078,7 @@ mod tests {
         assert_eq!(deadline, total);
     }
 
-    /// Build a spawned worker in group `corn` for image `husker`
+    /// Build a spawned worker in group `corn` for tool instance `husker`
     ///
     /// # Arguments
     ///
@@ -1833,10 +2089,7 @@ mod tests {
         Spawned {
             name: name.to_owned(),
             pool,
-            ..scalable_worker(
-                Requisition::new("user", "corn", "pipeline", "husker"),
-                resources,
-            )
+            ..scalable_worker(Requisition::new("user", "corn", HUSKER, None), resources)
         }
     }
 
@@ -1850,19 +2103,16 @@ mod tests {
         let resources = Resources::new(2000, 4096, 0, 0);
         let mut fairshare_pool = Pool::default();
         fairshare_pool.resources = Resources::new(6000, 12288, 0, 0);
-        // the spawn limited image was counted when it was allocated
-        let mut image_counts: HashMap<String, HashMap<String, u64>> = HashMap::default();
-        image_counts
-            .entry("corn".to_owned())
-            .or_default()
-            .insert("husker".to_owned(), 1);
+        // the spawn limited tool instance was counted when it was allocated
+        let mut workload_counts: HashMap<Uuid, u64> = HashMap::default();
+        workload_counts.insert(HUSKER, 1);
         // the scheduler fails to create this fairshare worker
         let spawn = corn_worker("w1", Pools::FairShare, resources);
         let mut deleted = HashSet::default();
         let mut failed = WorkerDeleteMap::default();
         record_failed_spawn(
             &mut fairshare_pool,
-            &mut image_counts,
+            &mut workload_counts,
             spawn,
             &mut deleted,
             &mut failed,
@@ -1875,8 +2125,8 @@ mod tests {
         );
         // and its spawn limit slot must be released
         assert_eq!(
-            image_counts["corn"]["husker"], 0,
-            "a failed spawn must release its spawn limit image count"
+            workload_counts[&HUSKER], 0,
+            "a failed spawn must release its spawn limit workload count"
         );
     }
 
@@ -1884,13 +2134,13 @@ mod tests {
     #[test]
     fn failed_spawn_is_deleted() {
         let mut fairshare_pool = Pool::default();
-        let mut image_counts: HashMap<String, HashMap<String, u64>> = HashMap::default();
+        let mut workload_counts: HashMap<Uuid, u64> = HashMap::default();
         let spawn = corn_worker("w1", Pools::FairShare, Resources::default());
         let mut deleted = HashSet::default();
         let mut failed = WorkerDeleteMap::default();
         record_failed_spawn(
             &mut fairshare_pool,
-            &mut image_counts,
+            &mut workload_counts,
             spawn,
             &mut deleted,
             &mut failed,
@@ -1900,7 +2150,7 @@ mod tests {
         assert_eq!(failed.workers, vec!["w1".to_owned()]);
     }
 
-    /// Build a worker registered in Thorium in group `corn` for image `husker`
+    /// Build a worker registered in Thorium in group `corn` for tool instance `husker`
     ///
     /// # Arguments
     ///
@@ -1913,15 +2163,14 @@ mod tests {
             name: name.to_owned(),
             user: "user".to_owned(),
             group: "corn".to_owned(),
-            pipeline: "pipeline".to_owned(),
-            stage: "husker".to_owned(),
+            tool_instance: HUSKER,
+            run: None,
             status: thorium::models::WorkerStatus::Running,
             spawned: Utc::now(),
             heart_beat: None,
             resources: Resources::default(),
             pool: Pools::Deadline,
             active: None,
-            run: None,
         }
     }
 
@@ -1932,11 +2181,8 @@ mod tests {
     /// * `failed` - The workers that have failed
     fn free_two_husker_workers(failed: &HashSet<String>) -> u64 {
         // two husker workers are running so the spawn limit count is 2
-        let mut image_counts: HashMap<String, HashMap<String, u64>> = HashMap::default();
-        image_counts
-            .entry("corn".to_owned())
-            .or_default()
-            .insert("husker".to_owned(), 2);
+        let mut workload_counts: HashMap<Uuid, u64> = HashMap::default();
+        workload_counts.insert(HUSKER, 2);
         // Thorium lists both workers on this node
         let listed = vec![
             ("w1".to_owned(), registered_corn_worker("w1")),
@@ -1960,16 +2206,16 @@ mod tests {
             &alive,
             &HashSet::default(),
             &mut PoolFrees::default(),
-            &mut image_counts,
+            &mut workload_counts,
             &mut HashMap::default(),
         );
-        image_counts["corn"]["husker"]
+        workload_counts[&HUSKER]
     }
 
     /// Across both free paths in `free_deleted` (`prune_failed_workers` then
-    /// `NodeResources::free`) a failed worker decrements its image count exactly once, so one
-    /// failed worker out of two drops the count from 2 to 1. This keeps spawn limited images from
-    /// running more concurrent workers than their limit allows.
+    /// `NodeResources::free`) a failed worker decrements its workload count exactly once, so one
+    /// failed worker out of two drops the count from 2 to 1. This keeps spawn limited tool
+    /// instances from running more concurrent workers than their limit allows.
     #[test]
     fn failed_worker_decrements_image_count_once() {
         // one of the two running workers failed
@@ -1978,11 +2224,11 @@ mod tests {
         assert_eq!(
             free_two_husker_workers(&failed),
             1,
-            "a single failed worker must only decrement its image count once"
+            "a single failed worker must only decrement its workload count once"
         );
     }
 
-    /// When no worker failed the image count is unchanged.
+    /// When no worker failed the workload count is unchanged.
     #[test]
     fn alive_workers_keep_their_image_count() {
         assert_eq!(free_two_husker_workers(&HashSet::default()), 2);
@@ -1994,8 +2240,8 @@ mod tests {
         cluster: ClusterResources,
         /// The resources the update freed
         freed: PoolFrees,
-        /// The image counts after the update was applied
-        image_counts: HashMap<String, HashMap<String, u64>>,
+        /// The workload counts after the update was applied
+        workload_counts: HashMap<Uuid, u64>,
         /// The requisition counts after the update was applied
         req_counts: HashMap<Requisition, i64>,
     }
@@ -2009,11 +2255,8 @@ mod tests {
         // w1 holds 2 cores and 4 GiB from the fairshare pool
         let worker = corn_worker("w1", Pools::FairShare, Resources::new(2000, 4096, 0, 0));
         // w1 is counted against its spawn limit and its requisition count
-        let mut image_counts: HashMap<String, HashMap<String, u64>> = HashMap::default();
-        image_counts
-            .entry("corn".to_owned())
-            .or_default()
-            .insert("husker".to_owned(), 1);
+        let mut workload_counts: HashMap<Uuid, u64> = HashMap::default();
+        workload_counts.insert(HUSKER, 1);
         let mut req_counts: HashMap<Requisition, i64> = HashMap::default();
         req_counts.insert(worker.req.clone(), 1);
         // the scaler tracks w1 as spawned on its node
@@ -2042,11 +2285,11 @@ mod tests {
         let mut update = AllocatableUpdate::default();
         update.nodes.insert("node".to_owned(), node_update);
         // apply the update to our cluster
-        let freed = cluster.update(update, &mut image_counts, &mut req_counts);
+        let freed = cluster.update(update, &mut workload_counts, &mut req_counts);
         UpdatedCluster {
             cluster,
             freed,
-            image_counts,
+            workload_counts,
             req_counts,
         }
     }
@@ -2085,7 +2328,7 @@ mod tests {
             "an inactive worker's resources must be returned to its pool"
         );
         // and it must no longer count against its spawn limit or requisition count
-        assert_eq!(updated.image_counts["corn"]["husker"], 0);
+        assert_eq!(updated.workload_counts[&HUSKER], 0);
         assert_eq!(updated.req_counts.values().sum::<i64>(), 0);
     }
 
@@ -2099,7 +2342,7 @@ mod tests {
         assert_eq!(updated.freed.fairshare, Resources::default());
         assert_eq!(updated.freed.deadline, Resources::default());
         // and it still counts against its spawn limit and requisition count
-        assert_eq!(updated.image_counts["corn"]["husker"], 1);
+        assert_eq!(updated.workload_counts[&HUSKER], 1);
         assert_eq!(updated.req_counts.values().sum::<i64>(), 1);
     }
 }

@@ -405,6 +405,46 @@ fn check_workload_privileges(
     Ok(())
 }
 
+/// Check that every tool a workload's dependency settings name is a tool a user can see
+///
+/// Reads all of the ids in one lookup. A missing entity, an entity of another kind (a tool
+/// instance included), and a tool the user can't see get the same answer.
+///
+/// # Arguments
+///
+/// * `user` - The user publishing the workload
+/// * `workload` - The workload being published
+/// * `shared` - Shared Thorium objects
+#[instrument(name = "tools::check_dependency_tools", skip_all, err(Debug))]
+async fn check_dependency_tools(
+    user: &User,
+    workload: &WorkloadSpec,
+    shared: &Shared,
+) -> Result<(), ApiError> {
+    // get each listed tool once
+    let ids = workload.data.dependencies.tools();
+    if ids.is_empty() {
+        return Ok(());
+    }
+    // get the group and kind of every row of these entities
+    let rows = db::entities::groups_and_kinds(&ids, shared).await?;
+    // keep the tools this user can see; admins see every group
+    let is_admin = user.is_admin();
+    let visible = rows
+        .iter()
+        .filter(|row| row.kind == EntityKinds::Tool)
+        .filter(|row| is_admin || user.groups.contains(&row.group))
+        .map(|row| row.id)
+        .collect::<HashSet<Uuid>>();
+    // refuse the first id that isn't a visible tool
+    if let Some(missing) = ids.iter().find(|id| !visible.contains(id)) {
+        return bad!(format!(
+            "dependency tool `{missing}` doesn't exist, isn't a tool, or you can't see it"
+        ));
+    }
+    Ok(())
+}
+
 /// Check a requested version and spec for a tool and compute the spec's hash
 ///
 /// # Arguments
@@ -467,6 +507,8 @@ pub(crate) async fn prepare(
             let settings = db::system::get_settings(shared).await?;
             // check the settings only some publishers may use
             check_workload_privileges(user, workload, &settings)?;
+            // every tool its dependency settings name must be a tool the publisher can see
+            check_dependency_tools(user, workload, shared).await?;
             None
         }
     };

@@ -2662,6 +2662,96 @@ async fn delete_catalog() -> Result<(), Error> {
     Ok(())
 }
 
+/// A workflow instance in two groups is deleted from both by its submitter or by a manager of
+/// both, while a member who isn't the submitter and a manager of only one group can't delete it
+#[tokio::test]
+async fn instance_delete_needs_every_group() -> Result<(), Error> {
+    // the submitter and a plain member are in both groups, and two managers lead one or both
+    let admin = test_utilities::admin_client().await?;
+    let suffix = generators::name_suffix();
+    let submitter = moon_user(&admin, "io", &suffix).await?;
+    let member = moon_user(&admin, "callisto", &suffix).await?;
+    let partial = moon_user(&admin, "europa", &suffix).await?;
+    let full = moon_user(&admin, "ganymede", &suffix).await?;
+    let a = god_group(
+        &admin,
+        "minerva",
+        &suffix,
+        &GroupRoles::default()
+            .user(&submitter.username)
+            .user(&member.username)
+            .manager(&partial.username)
+            .manager(&full.username),
+    )
+    .await?;
+    let b = god_group(
+        &admin,
+        "vesta",
+        &suffix,
+        &GroupRoles::default()
+            .user(&submitter.username)
+            .user(&member.username)
+            .user(&partial.username)
+            .manager(&full.username),
+    )
+    .await?;
+    // a workflow in both groups, and the submitter's first instance of it
+    let solo = agent(&admin, "solo", &[&a, &b], |req| req).await?;
+    let req = WorkflowCatalogEntityRequest::default()
+        .agent(solo.id)
+        .entry_agent(solo.id);
+    let created = workflow(&admin, "shared", &[&a, &b], req).await?;
+    let (_, harness) = harness_tool(&[&a, &b], &admin).await?;
+    let r1 = submit(
+        &submitter.client,
+        &generators::gen_workflow_instance(&created, 1, None, &[(&solo, &[&harness])]),
+    )
+    .await?;
+    // a member who isn't the submitter can't delete it, and neither can a manager of one group
+    let (status, msg) = refusal(member.client.entities.delete(r1.id).await);
+    assert_eq!(status, 401, "{msg}");
+    let (status, msg) = refusal(partial.client.entities.delete(r1.id).await);
+    assert_eq!(status, 401, "{msg}");
+    // both refusals left the instance in both groups
+    let both = sorted_groups(&[a.clone(), b.clone()]);
+    assert_eq!(
+        sorted_groups(&admin.entities.get(r1.id).await?.groups),
+        both
+    );
+    // the submitter's next instance follows it
+    let r2 = submit(
+        &submitter.client,
+        &generators::gen_workflow_instance(&created, 2, Some(r1.id), &[(&solo, &[&harness])]),
+    )
+    .await?;
+    // a manager of both groups deletes the first from both
+    full.client.entities.delete(r1.id).await?;
+    let (status, _) = refusal(admin.entities.get(r1.id).await);
+    assert_eq!(status, 404);
+    assert_eq!(
+        listed(
+            &admin,
+            &[a.clone(), b.clone()],
+            EntityKinds::WorkflowInstance
+        )
+        .await?,
+        vec![r2.id]
+    );
+    // the submitter deletes their own instance from both groups
+    assert_eq!(
+        sorted_groups(&admin.entities.get(r2.id).await?.groups),
+        both
+    );
+    submitter.client.entities.delete(r2.id).await?;
+    let (status, _) = refusal(admin.entities.get(r2.id).await);
+    assert_eq!(status, 404);
+    assert_eq!(
+        listed(&admin, &[a, b], EntityKinds::WorkflowInstance).await?,
+        Vec::<Uuid>::new()
+    );
+    Ok(())
+}
+
 /// A `BuiltFrom` edge can't be written through the generic route, so no instance can be
 /// attached to another workflow
 #[tokio::test]
@@ -2763,6 +2853,8 @@ async fn intrinsic_tag_keys_refused() -> Result<(), Error> {
         ("InstanceFollowsTool", tool_root.id.to_string()),
         ("InstanceFollowsToolSet", tool_root.id.to_string()),
         ("WorkflowStatus", "Ready".to_owned()),
+        ("WorkflowRevision", "9".to_owned()),
+        ("WorkflowDigest", "0".repeat(64)),
         ("workflowrevision", "9".to_owned()),
     ] {
         let req = generators::gen_workflow_instance_req(&instance).tag(key, value);
@@ -2785,8 +2877,13 @@ async fn intrinsic_tag_keys_refused() -> Result<(), Error> {
     // the tag route refuses the intrinsic keys too, and keeps the stored tags
     for (key, value) in [
         ("InstanceFollowsTool", tool_root.id.to_string()),
+        ("InstanceFollowsToolSet", tool_root.id.to_string()),
         ("InstanceAgent", other.id.to_string()),
         ("WorkflowId", victim.id.to_string()),
+        ("WorkflowRevision", "9".to_owned()),
+        ("WorkflowDigest", "0".repeat(64)),
+        ("WorkflowStatus", "Ready".to_owned()),
+        ("workflowdigest", "0".repeat(64)),
     ] {
         let status = raw_tags(&io, r1.id, false, json!({"tags": {key: [value]}})).await?;
         assert_eq!(status, 400, "{key}");

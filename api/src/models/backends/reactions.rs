@@ -4,6 +4,7 @@
 use aws_sdk_s3::primitives::ByteStream;
 use axum::extract::{FromRequestParts, Multipart};
 use axum::http::request::Parts;
+use base64::Engine as _;
 use chrono::prelude::*;
 use futures::StreamExt;
 use futures::stream;
@@ -14,19 +15,29 @@ use uuid::Uuid;
 use super::db;
 use crate::models::ApiCursor;
 use crate::models::ReactionCursorParams;
+use crate::models::backends::run_files::{self, RunFileParts, ToolAccess};
 use crate::models::backends::stage_tools::{self, ToolInstanceMemo};
-use crate::models::{AuthedUser, PlannedStage, ReactionPlan, ReactionSource, ScopedToken};
 use crate::models::{
-    BulkReactionResponse, GenericJobOpts, Group, GroupAllowAction, ImageScaler, JobList, Pipeline,
-    Reaction, ReactionCache, ReactionCacheUpdate, ReactionDetailsList, ReactionExpire,
-    ReactionList, ReactionRequest, ReactionStatus, ReactionUpdate, Repo, RepoDependency, Sample,
-    StageLogs, StageLogsAdd, StatusUpdate, User, UserRole,
+    AgentProvenance, AuthedUser, PlannedStage, ReactionPlan, ReactionSource, RunProvenance,
+    ScopedToken, ToolProvenance,
+};
+use crate::models::{
+    AgenticTool, AgenticToolBacking, BulkReactionResponse, DEFAULT_PIPELINE_SLA, Entity,
+    EntityMetadata, GenericJobOpts, Group, GroupAllowAction, HarnessSpec, ImageScaler,
+    InstancedAgent, JobList, Pipeline, Reaction, ReactionCache, ReactionCacheUpdate,
+    ReactionDetailsList, ReactionExpire, ReactionList, ReactionRequest, ReactionStatus,
+    ReactionUpdate, ReactionWorkflowRun, Repo, RepoDependency, RepoDependencyRequest, RunInputs,
+    RunModels, RunTokenScope, Sample, ScopedTokenRequest, ScopedTokenRole, StageLogs, StageLogsAdd,
+    StatusUpdate, ToolInstanceEntity, ToolMechanism, ToolRunRequest, ToolSpec, User, UserRole,
+    WorkflowInstanceEntity, WorkflowResultKey, WorkflowRunRequest,
 };
 use crate::utils::{ApiError, Shared, bounder};
 use crate::{
-    bad, can_delete, can_modify, deserialize, deserialize_ext, deserialize_opt, extract, is_admin,
-    not_found, unauthorized,
+    bad, can_delete, can_modify, deserialize, deserialize_ext, deserialize_opt, extract,
+    internal_err_unwrapped, is_admin, not_found, unauthorized,
 };
+
+pub(crate) mod models;
 
 /// Updates to apply to cache files
 pub struct InternalReactionCacheFileUpdates {
@@ -158,14 +169,16 @@ impl ReactionRequest {
     /// * `user` - The user casting this reaction request
     /// * `pipeline` - The pipeline this reaction is for
     /// * `plan` - The stages resolved for this reaction
+    /// * `provenance` - The exact versions of the tool instances the plan runs
     /// * `parent_ephemeral` - Any ephemeral files from any parent reactions
     /// * `shared` - Shared Thorium objects
     #[instrument(name = "ReactionRequest::cast", skip_all, err(Debug))]
     pub async fn cast<'a>(
-        mut self,
+        self,
         user: &User,
         pipeline: &'a Pipeline,
         plan: ReactionPlan,
+        provenance: RunProvenance,
         parent_ephemeral: HashMap<String, Uuid>,
         shared: &Shared,
     ) -> Result<(Reaction, ReactionCache, &'a Pipeline), ApiError> {
@@ -175,8 +188,60 @@ impl ReactionRequest {
                 return bad!(format!("image {} is not in this pipeline", image));
             }
         }
-        // if no sla is given use the pipelines default
-        let sla_seconds = self.sla.unwrap_or(pipeline.sla);
+        // a pipeline reaction runs the pipeline's stages and records their tool instances
+        let source = ReactionSource::Pipeline {
+            name: pipeline.name.clone(),
+            provenance,
+        };
+        // cast to a reaction with the pipeline's default sla
+        let (cast, cache) = self
+            .cast_source(
+                user,
+                Uuid::new_v4(),
+                source,
+                pipeline.sla,
+                plan,
+                parent_ephemeral,
+                shared,
+            )
+            .await?;
+        // let tests make a pipeline's reactions belong to a run
+        #[cfg(feature = "test-utilities")]
+        let cast = Reaction {
+            run: crate::test_utilities::faults::reaction_run(&pipeline.name, cast.id),
+            ..cast
+        };
+        Ok((cast, cache, pipeline))
+    }
+
+    /// Casts a reaction request to a bounds checked Reaction that runs a source
+    ///
+    /// Pipeline reactions, tool runs, and workflow runs are all cast here, so every reaction
+    /// gets the input SHA256 and creator tags.
+    ///
+    /// # Arguments
+    ///
+    /// * `user` - The user casting this reaction request
+    /// * `id` - The id the reaction gets
+    /// * `source` - What the reaction runs
+    /// * `default_sla` - The sla in seconds to use when the request sets none
+    /// * `plan` - The stages resolved for this reaction
+    /// * `parent_ephemeral` - Any ephemeral files from any parent reactions
+    /// * `shared` - Shared Thorium objects
+    #[allow(clippy::too_many_arguments)]
+    #[instrument(name = "ReactionRequest::cast_source", skip_all, err(Debug))]
+    pub async fn cast_source(
+        mut self,
+        user: &User,
+        id: Uuid,
+        source: ReactionSource,
+        default_sla: u64,
+        plan: ReactionPlan,
+        parent_ephemeral: HashMap<String, Uuid>,
+        shared: &Shared,
+    ) -> Result<(Reaction, ReactionCache), ApiError> {
+        // if no sla is given use the default
+        let sla_seconds = self.sla.unwrap_or(default_sla);
         // bounds check sla
         bounder::number(sla_seconds as i64, "sla", 1, 3.154e+9 as i64)?;
         // build the repo dedendency objects
@@ -200,8 +265,6 @@ impl ReactionRequest {
                 kind: req.kind,
             });
         }
-        // gererate a uuuid for this reaction
-        let id = Uuid::new_v4();
         // upload our extra files
         let ephemeral = Self::upload_files(&id, self.buffers, shared).await?;
         // automatically add the sha256 and submitter tags
@@ -231,20 +294,12 @@ impl ReactionRequest {
             repos,
             trigger_depth: self.trigger_depth,
             has_cache: !self.cache.is_empty(),
-            source: ReactionSource::Pipeline {
-                name: pipeline.name.clone(),
-            },
+            source,
             plan,
             run_token: None,
             run: None,
         };
-        // let tests make a pipeline's reactions belong to a run
-        #[cfg(feature = "test-utilities")]
-        let cast = Reaction {
-            run: crate::test_utilities::faults::reaction_run(&pipeline.name, cast.id),
-            ..cast
-        };
-        Ok((cast, self.cache, pipeline))
+        Ok((cast, self.cache))
     }
 }
 
@@ -330,8 +385,13 @@ impl Reaction {
         request
             .can_override(user, group, &plan, &mut memo, shared)
             .await?;
-        // add reaction to backend
-        db::reactions::create(user, request, pipeline, plan, &mut memo, shared).await
+        // record the tool instances the plan runs from the reads that resolved it
+        let provenance = memo.provenance(&plan);
+        // add reaction to backend, boxing its large future
+        Box::pin(db::reactions::create(
+            user, request, pipeline, plan, provenance, &mut memo, shared,
+        ))
+        .await
     }
 
     /// Creates a new reactions in bulk
@@ -352,9 +412,10 @@ impl Reaction {
         requests: Vec<ReactionRequest>,
         shared: &Shared,
     ) -> Result<BulkReactionResponse, ApiError> {
-        // build cache of all different pipelines, their plans, and groups we are creating
-        // reactions for
-        let mut pipe_cache: HashMap<String, (Pipeline, ReactionPlan)> = HashMap::with_capacity(1);
+        // build cache of all different pipelines, their plans and provenance, and groups we are
+        // creating reactions for
+        let mut pipe_cache: HashMap<String, (Pipeline, ReactionPlan, RunProvenance)> =
+            HashMap::with_capacity(1);
         let mut group_cache = HashMap::with_capacity(1);
         // read each tool instance at most once for this request
         let mut memo = ToolInstanceMemo::default();
@@ -370,8 +431,10 @@ impl Reaction {
                     Pipeline::get(user, &req.group, &req.pipeline, shared).await?;
                 // resolve the tool instance each stage runs once per pipeline
                 let plan = stage_tools::resolve_plan(&pipeline, &mut memo, shared).await?;
+                // record the plan's tool instances once per pipeline from the reads above
+                let provenance = memo.provenance(&plan);
                 // insert into cache and set
-                e.insert((pipeline, plan));
+                e.insert((pipeline, plan, provenance));
                 // check if this group is also not in the cache
                 group_cache.entry(&req.group).or_insert(group);
             }
@@ -400,7 +463,7 @@ impl Reaction {
         // make sure none of these pipelines are banned
         let banned_pipelines = pipe_cache
             .iter()
-            .filter_map(|(key, (pipe, _))| (!pipe.bans.is_empty()).then_some(key))
+            .filter_map(|(key, (pipe, _, _))| (!pipe.bans.is_empty()).then_some(key))
             .collect::<Vec<&String>>();
         if !banned_pipelines.is_empty() {
             return bad!(format!(
@@ -430,7 +493,7 @@ impl Reaction {
         // make sure we can override args in each of the stages we try too
         for (key, stages) in override_cache {
             // get our pipeline, its plan, and its group from our caches
-            let Some((pipeline, plan)) = pipe_cache.get(&key) else {
+            let Some((pipeline, plan, _)) = pipe_cache.get(&key) else {
                 return unauthorized!();
             };
             let Some(group) = group_cache.get(&pipeline.group) else {
@@ -546,13 +609,28 @@ impl Reaction {
         is_admin!(user);
         // get the run's reaction
         let reaction = db::reactions::get(group, id, shared).await?;
-        // a reaction without a run token has none to read
-        let Some(name) = &reaction.run_token else {
-            return not_found!(format!("reaction {id} has no run token"));
-        };
-        // read the token from the user that owns it
+        // read the run's live token from the user that owns it
         let owner = User::force_get(&reaction.creator, shared).await?;
-        ScopedToken::get(&owner, name, shared).await
+        live_run_token(&reaction, &owner, shared).await
+    }
+
+    /// Get the models of a run's reaction with their credentials' secrets
+    ///
+    /// # Arguments
+    ///
+    /// * `user` - The user that is reading the run's models
+    /// * `group` - The group the run's reaction is in
+    /// * `id` - The id of the run's reaction
+    /// * `shared` - Shared objects in Thorium
+    #[instrument(name = "Reaction::run_models", skip_all, fields(reaction = id.to_string()), err(Debug))]
+    pub async fn run_models(
+        user: &AuthedUser,
+        group: &str,
+        id: &Uuid,
+        shared: &Shared,
+    ) -> Result<RunModels, ApiError> {
+        // build the run's models from its recorded bindings
+        models::run_models(user, group, id, shared).await
     }
 
     /// Gets a reaction object from the backend
@@ -603,8 +681,8 @@ impl Reaction {
     ///
     /// * `stage` - The stage these logs are from
     /// * `logs` - The logs to save into the backend
+    /// * `run` - The reaction of the run the user's token is limited to, if it's a run token
     /// * `shared` - Shared objects in Thorium
-    /// * `span` - The span to log traces under
     #[instrument(
         name = "Reactions::add_stage_logs",
         skip(self, shared, logs),
@@ -614,9 +692,12 @@ impl Reaction {
         &self,
         stage: &str,
         logs: StageLogsAdd,
+        run: Option<Uuid>,
         shared: &Shared,
     ) -> Result<(), ApiError> {
         event!(Level::INFO, reaction = self.id.to_string());
+        // make sure a run token only adds logs to its own run's reactions
+        self.authorize_run(run)?;
         // use correct backend to get reaction logs
         db::reactions::add_stage_logs(&self.id, stage, logs, shared).await
     }
@@ -803,6 +884,25 @@ impl Reaction {
         db::reactions::list_jobs(self, cursor, limit, shared).await
     }
 
+    /// Check that a run token only changes the reactions of its own run
+    ///
+    /// A run token may act in every group it holds, so the group checks alone would let it change
+    /// any reaction of its runner there; it also needs the reaction to be its run or one of the
+    /// run's sub reactions.
+    ///
+    /// # Arguments
+    ///
+    /// * `run` - The reaction of the run the user's token is limited to, if it's a run token
+    fn authorize_run(&self, run: Option<Uuid>) -> Result<(), ApiError> {
+        // a run token may only change the reactions of its own run
+        if let Some(run) = run
+            && self.run != Some(run)
+        {
+            return unauthorized!();
+        }
+        Ok(())
+    }
+
     /// Proceeds with the reaction
     ///
     /// This increments the current stage and either completes the reaction or creates
@@ -812,17 +912,20 @@ impl Reaction {
     ///
     /// * `user` - The user that is proceeding with the reaction
     /// * `group` - The group this reaction is in
+    /// * `run` - The reaction of the run the user's token is limited to, if it's a run token
     /// * `shared` - Shared objects in Thorium
-    /// * `span` - The span to log traces under
     #[instrument(name = "Reaction::proceed", skip_all, err(Debug))]
     pub async fn proceed(
         self,
         user: &User,
         group: &Group,
+        run: Option<Uuid>,
         shared: &Shared,
     ) -> Result<ReactionStatus, ApiError> {
         // make sure we can modify reactions in this group
         can_modify!(self.creator, group, user);
+        // make sure a run token only proceeds its own run's reactions
+        self.authorize_run(run)?;
         // use correct backend for proceeding with this reaction
         let status = db::reactions::proceed(self, shared).await?;
         // cast this JobHandleStatus to a reaction status
@@ -835,17 +938,20 @@ impl Reaction {
     ///
     /// * `user` - The user that is erroring out this reaction
     /// * `group` - The group this reaction is in
+    /// * `run` - The reaction of the run the user's token is limited to, if it's a run token
     /// * `shared` - Shared objects in Thorium
-    /// * `span` - The span to log traces under
     #[instrument(name = "Reaction::fail", skip_all, err(Debug))]
     pub async fn fail(
         self,
         user: &User,
         group: &Group,
+        run: Option<Uuid>,
         shared: &Shared,
     ) -> Result<ReactionStatus, ApiError> {
         // make sure we can modify reactions in this group
         can_modify!(self.creator, group, user);
+        // make sure a run token only fails its own run's reactions
+        self.authorize_run(run)?;
         // use correct backend for failing this reaction
         db::reactions::fail(self, shared).await
     }
@@ -856,18 +962,22 @@ impl Reaction {
     ///
     /// * `user` - The user that is deleting this reaction
     /// * `group` - The group this reaction is in
+    /// * `run` - The reaction of the run the user's token is limited to, if it's a run token
     /// * `shared` - Shared objects in Thorium
     #[instrument(name = "Reaction::delete", skip_all, err(Debug))]
     pub async fn delete(
         &self,
         user: &User,
         group: &Group,
+        run: Option<Uuid>,
         shared: &Shared,
     ) -> Result<(), ApiError> {
         // Create our span
         span!(Level::INFO, "Deleting Reaction");
         // make sure we can modify reactions in this group
         can_delete!(self, group, user);
+        // make sure a run token only deletes its own run's reactions
+        self.authorize_run(run)?;
         // use correct backend for deleteing this reaction
         db::reactions::delete(self, shared).await
     }
@@ -923,6 +1033,7 @@ impl Reaction {
     /// * `user` - The user that is updating this reaction
     /// * `group` - The group this reaction is in
     /// * `update` - The update to apply to this reaction
+    /// * `run` - The reaction of the run the user's token is limited to, if it's a run token
     /// * `shared` - Shared objects in Thorium
     #[instrument(name = "Reaction::update", skip_all, err(Debug))]
     pub async fn update(
@@ -930,12 +1041,15 @@ impl Reaction {
         user: &User,
         group: &Group,
         mut update: ReactionUpdate,
+        run: Option<Uuid>,
         shared: &Shared,
     ) -> Result<Reaction, ApiError> {
         // make sure we can edit/create reactions in this group
         group.allowable(GroupAllowAction::Reactions)?;
         // make sure this user can modify this reaction
         can_modify!(self.creator, group, user);
+        // make sure a run token only updates its own run's reactions
+        self.authorize_run(run)?;
         // get the options this update sets that differ from each stage's current options
         let changed = update
             .args
@@ -977,6 +1091,25 @@ impl Reaction {
         self.tags.retain(|tag| !update.remove_tags.contains(tag));
         // add new tags
         self.tags.extend(update.add_tags.clone());
+        // a run's generated files are written only when the run is created, so a harness never
+        // reads files someone else wrote under its run's name
+        let generated = [
+            run_files::RUN_FILE,
+            run_files::AGENT_FILE,
+            run_files::TOOLS_FILE,
+        ];
+        // refuse an update that writes any of them to a workflow run or tool run
+        if !matches!(self.source, ReactionSource::Pipeline { .. })
+            && update
+                .ephemeral
+                .keys()
+                .any(|name| generated.contains(&name.as_str()))
+        {
+            return unauthorized!(format!(
+                "a run's {} files can't be written by an update",
+                generated.join(", ")
+            ));
+        }
         // a file this update replaces is one the reaction already lists
         let replaces = update
             .ephemeral
@@ -1046,6 +1179,7 @@ impl Reaction {
     /// * `user` - The user that is updating this reactions cache
     /// * `group` - The group this reaction is in
     /// * `update` - The update to apply to this reactions cache
+    /// * `run` - The reaction of the run the user's token is limited to, if it's a run token
     /// * `shared` - Shared Thorium objects
     #[instrument(name = "ReactionRequest::update_cache", skip_all, err(Debug))]
     pub async fn update_cache(
@@ -1053,12 +1187,15 @@ impl Reaction {
         user: &User,
         group: &Group,
         update: &ReactionCacheUpdate,
+        run: Option<Uuid>,
         shared: &Shared,
     ) -> Result<(), ApiError> {
         // make sure we can edit/create reactions in this group
         group.allowable(GroupAllowAction::Reactions)?;
         // make sure this user can modify this reaction
         can_modify!(self.creator, group, user);
+        // make sure a run token only writes its own run's caches
+        self.authorize_run(run)?;
         // update this reactions cache
         db::reactions::update_cache(&self.group, &self.id, update, shared).await
     }
@@ -1105,6 +1242,7 @@ impl Reaction {
     /// * `user` - The user that is adding files to this reactions cache
     /// * `group` - The group this reaction is in
     /// * `form` - The form containing the files to add
+    /// * `run` - The reaction of the run the user's token is limited to, if it's a run token
     /// * `shared` - Shared Thorium objects
     #[instrument(name = "ReactionRequest::add_cache_files", skip_all, err(Debug))]
     pub async fn add_cache_files(
@@ -1112,12 +1250,15 @@ impl Reaction {
         user: &User,
         group: &Group,
         form: Multipart,
+        run: Option<Uuid>,
         shared: &Shared,
     ) -> Result<(), ApiError> {
         // make sure we can edit/create reactions in this group
         group.allowable(GroupAllowAction::Reactions)?;
         // make sure this user can modify this reaction
         can_modify!(self.creator, group, user);
+        // make sure a run token only writes its own run's caches
+        self.authorize_run(run)?;
         // get our current cache info
         let old = self.get_cache(shared).await?;
         // start with an empty update and add files to it as we go
@@ -1310,7 +1451,8 @@ impl TryFrom<(HashMap<String, String>, Vec<String>, Vec<String>)> for Reaction {
             map,
             "source",
             ReactionSource::Pipeline {
-                name: pipeline.clone()
+                name: pipeline.clone(),
+                provenance: RunProvenance::default(),
             }
         );
         // cast to a Reaction
@@ -1346,6 +1488,44 @@ impl TryFrom<(HashMap<String, String>, Vec<String>, Vec<String>)> for Reaction {
     }
 }
 
+/// Read the live run token of a run's reaction or of one of its sub reactions
+///
+/// The token is looked up by the name the reaction records, and a token under that name that
+/// isn't scoped to the reaction's run (one its owner created after deleting the run's token) is
+/// treated as missing, so it's never handed to the run's workers. A token whose owner can't edit
+/// in the reaction's group is treated as missing too, since every call made with it is refused.
+///
+/// # Arguments
+///
+/// * `reaction` - The reaction whose run token to read
+/// * `owner` - The user that created the reaction and owns its run token
+/// * `shared` - Shared Thorium objects
+pub(crate) async fn live_run_token(
+    reaction: &Reaction,
+    owner: &User,
+    shared: &Shared,
+) -> Result<ScopedToken, ApiError> {
+    // a reaction without a run token has none to read
+    let Some(name) = &reaction.run_token else {
+        return not_found!(format!("reaction {} has no run token", reaction.id));
+    };
+    // read the token from the user that owns it
+    let token = ScopedToken::get(owner, name, shared).await?;
+    // only a token scoped to this reaction's run is its run token
+    if reaction.run.is_none() || token.run.as_ref().map(|run| run.reaction) != reaction.run {
+        return not_found!(format!("reaction {} has no run token", reaction.id));
+    }
+    // a token whose owner can no longer edit in the run group can't do anything for the run
+    let group = db::groups::get(&reaction.group, shared).await?;
+    if group.editable(owner).is_err() {
+        return not_found!(format!(
+            "reaction {} has no usable run token: its owner can't edit in {}",
+            reaction.id, reaction.group
+        ));
+    }
+    Ok(token)
+}
+
 /// Get the scalers of the tool instances of the stages a reaction overrides args for
 ///
 /// # Arguments
@@ -1362,6 +1542,12 @@ async fn override_scalers(
     memo: &mut ToolInstanceMemo,
     shared: &Shared,
 ) -> Result<Vec<ImageScaler>, ApiError> {
+    // read the overridden stages' tool instances in one batch
+    let instances = stages
+        .iter()
+        .filter_map(|stage| plan.tool_instance(stage))
+        .collect::<Vec<Uuid>>();
+    memo.prefetch(group, &instances, shared).await?;
     // get the scaler of each overridden stage's tool instance
     let mut scalers = Vec::with_capacity(stages.len());
     for stage in stages {
@@ -1504,13 +1690,1016 @@ pub async fn select_run_group(
     choose_run_group(user, &groups, requested, scalers)
 }
 
+/// The tag every workflow run's reaction is listed under
+const WORKFLOW_RUN_TAG: &str = "WorkflowRun";
+
+/// Get the name of a tool from the name of one of its instances (`{tool}@{version}`)
+///
+/// # Arguments
+///
+/// * `entity` - The tool instance entity
+/// * `instance` - The tool instance's metadata
+fn tool_name(entity: &Entity, instance: &ToolInstanceEntity) -> String {
+    // instances are named after their tool and version
+    let suffix = format!("@{}", instance.version);
+    entity
+        .name
+        .strip_suffix(&suffix)
+        .unwrap_or(&entity.name)
+        .to_owned()
+}
+
+/// Get the tool instance metadata of an entity, if it's a tool instance
+///
+/// # Arguments
+///
+/// * `entity` - The entity to read
+fn instance_meta(entity: &Entity) -> Option<&ToolInstanceEntity> {
+    // only tool instances have tool instance metadata
+    match &entity.metadata {
+        EntityMetadata::ToolInstance(instance) => Some(instance),
+        _ => None,
+    }
+}
+
+/// Get the groups of a list that a user can read reactions in
+///
+/// # Arguments
+///
+/// * `user` - The user reading reactions
+/// * `groups` - The groups to filter
+fn readable_groups<'a>(user: &User, groups: &'a [String]) -> Vec<&'a String> {
+    // admins read every group and other users read the groups they're in
+    groups
+        .iter()
+        .filter(|group| user.is_admin() || user.groups.contains(*group))
+        .collect()
+}
+
+/// Get an entity a user starts a run of, as a 404 when the user can't see it
+///
+/// # Arguments
+///
+/// * `user` - The user starting the run
+/// * `id` - The id of the entity
+/// * `shared` - Shared Thorium objects
+async fn run_entity(user: &User, id: Uuid, shared: &Shared) -> Result<Entity, ApiError> {
+    // a user in no groups can't see any entity
+    if !user.is_admin() && user.groups.is_empty() {
+        return not_found!(format!("{id} not found"));
+    }
+    // the entity must exist in one of the user's groups
+    Entity::get(user, id, shared).await
+}
+
+/// Find a reaction by id in one of a list of groups
+///
+/// # Arguments
+///
+/// * `user` - The user looking for the reaction
+/// * `groups` - The groups the reaction may be in
+/// * `id` - The id of the reaction
+/// * `shared` - Shared Thorium objects
+async fn find_reaction(
+    user: &User,
+    groups: &[String],
+    id: &Uuid,
+    shared: &Shared,
+) -> Result<Reaction, ApiError> {
+    // check each group this user can read for the reaction
+    for group in readable_groups(user, groups) {
+        match db::reactions::get(group, id, shared).await {
+            // this group holds the reaction
+            Ok(reaction) => return Ok(reaction),
+            // a missing reaction in this group just means it's in another one
+            Err(error) if error.status() == axum::http::StatusCode::NOT_FOUND => (),
+            // any other error is a failed read, not a missing reaction
+            Err(error) => return Err(error),
+        }
+    }
+    not_found!(format!("reaction {id} not found"))
+}
+
+/// Resolve the repos of a run to the commitish each one is checked out at
+///
+/// # Arguments
+///
+/// * `user` - The user starting the run
+/// * `repos` - The repos the run was given
+/// * `shared` - Shared Thorium objects
+async fn resolve_repos(
+    user: &User,
+    repos: &[RepoDependencyRequest],
+    shared: &Shared,
+) -> Result<Vec<RepoDependency>, ApiError> {
+    // resolve each repo the same way a reaction cast does
+    let mut resolved = Vec::with_capacity(repos.len());
+    for req in repos {
+        // make sure the repo exists and this user can see it
+        let repo = Repo::get(user, &req.url, shared).await?;
+        // use the requested commitish or the repo's default checkout
+        let commitish = req.commitish.clone().or_else(|| {
+            repo.default_checkout
+                .map(|commitish| commitish.value().to_owned())
+        });
+        resolved.push(RepoDependency {
+            url: req.url.clone(),
+            commitish,
+            kind: req.kind,
+        });
+    }
+    Ok(resolved)
+}
+
+/// Encode a run file as a reaction buffer
+///
+/// # Arguments
+///
+/// * `value` - The run file to encode
+fn buffer<T: serde::Serialize>(value: &T) -> Result<String, ApiError> {
+    // buffers are uploaded base64 encoded
+    let raw = serde_json::to_vec_pretty(value)?;
+    Ok(base64::engine::general_purpose::STANDARD.encode(raw))
+}
+
+/// Get the groups a run's token is limited to
+///
+/// The token holds the run group plus every group of the run's inputs that the runner can see,
+/// limited to the groups the runner is a member of (an admin's actual groups), so an admin's or
+/// analyst's view of every group never widens it. The run group is never dropped, so a runner
+/// who isn't a member of it is refused when the token is minted.
+///
+/// # Arguments
+///
+/// * `user` - The user starting the run
+/// * `group` - The run group
+/// * `samples` - The run's input files
+/// * `repos` - The run's input repos
+/// * `shared` - Shared Thorium objects
+async fn run_token_groups(
+    user: &User,
+    group: &str,
+    samples: &[String],
+    repos: &[RepoDependency],
+    shared: &Shared,
+) -> Result<Vec<String>, ApiError> {
+    // admins hold every group, so only their actual groups can scope a token
+    let members = if user.role == UserRole::Admin {
+        &user.actual_groups
+    } else {
+        &user.groups
+    };
+    // the run group is always in the token
+    let mut groups = std::collections::BTreeSet::from([group.to_owned()]);
+    // add the groups of each input file the runner can see and is a member of
+    for sha256 in samples {
+        let sample = Sample::get(user, sha256, shared).await?;
+        groups.extend(
+            sample
+                .groups()
+                .into_iter()
+                .filter(|group| members.iter().any(|member| member == group))
+                .map(ToOwned::to_owned),
+        );
+    }
+    // add the groups of each input repo the runner can see and is a member of
+    for dependency in repos {
+        let repo = Repo::get(user, &dependency.url, shared).await?;
+        groups.extend(
+            repo.groups()
+                .into_iter()
+                .filter(|group| members.contains(group))
+                .cloned(),
+        );
+    }
+    // the set is already deduplicated and sorted
+    Ok(groups.into_iter().collect())
+}
+
+/// Work out the SLA in seconds of a run that mints a run token
+///
+/// A run token expires with its run's SLA, so a run's SLA can't be longer than the deployment's
+/// token lifetime (`thorium.auth.token_expire`), the longest a user's token value lives. An
+/// omitted SLA is the default pipeline SLA, cut to the token lifetime when that is shorter.
+///
+/// # Arguments
+///
+/// * `requested` - The SLA in seconds the run request set, if it set one
+/// * `token_expire` - The token lifetime in days (`thorium.auth.token_expire`)
+fn run_sla(requested: Option<u64>, token_expire: u32) -> Result<u64, ApiError> {
+    // the token lifetime in seconds is the longest SLA a run may have
+    let max = u64::from(token_expire) * 24 * 60 * 60;
+    match requested {
+        // a longer SLA would give the run a token that outlives every user token
+        Some(sla) if sla > max => bad!(format!(
+            "a run's SLA can be at most {max} seconds ({token_expire} days, the token lifetime set by thorium.auth.token_expire), because its run token expires with it"
+        )),
+        // any other requested SLA is kept as is
+        Some(sla) => Ok(sla),
+        // an omitted SLA is the default, cut to the token lifetime
+        None => Ok(DEFAULT_PIPELINE_SLA.min(max)),
+    }
+}
+
+/// Mint the run-scoped token of a workflow run or direct tool run and record it on the run
+///
+/// The token is named after the run's reaction, acts as a user, and expires with the run's SLA,
+/// which [`run_sla`] keeps within the deployment's token lifetime.
+///
+/// # Arguments
+///
+/// * `user` - The user starting the run
+/// * `cast` - The run's reaction, before it's written
+/// * `tool_instances` - The tool instances the run may run
+/// * `shared` - Shared Thorium objects
+#[instrument(name = "reactions::mint_run_token", skip_all, fields(reaction = cast.id.to_string()), err(Debug))]
+async fn mint_run_token(
+    user: &User,
+    cast: &mut Reaction,
+    tool_instances: Vec<Uuid>,
+    shared: &Shared,
+) -> Result<ScopedToken, ApiError> {
+    // the token reaches the run group and the inputs' groups
+    let groups = run_token_groups(user, &cast.group, &cast.samples, &cast.repos, shared).await?;
+    // build a user token for this run that ends with the run's SLA
+    let req = ScopedTokenRequest {
+        name: format!("run-{}", cast.id),
+        role: ScopedTokenRole::User,
+        groups,
+        expires: Some(cast.sla),
+        run: Some(RunTokenScope {
+            reaction: cast.id,
+            tool_instances,
+        }),
+    };
+    let token = ScopedToken::create(user, req, shared).await?;
+    // the run's workers use this token, and the run is its own run
+    cast.run_token = Some(token.name.clone());
+    cast.run = Some(cast.id);
+    Ok(token)
+}
+
+/// Write a run's reaction and its first jobs, deleting its run token if the write fails
+///
+/// # Arguments
+///
+/// * `cast` - The run's reaction
+/// * `cache` - The run's initial cache
+/// * `memo` - The tool instances already read for this request
+/// * `deadline` - The deadline to give the run's first jobs instead of one from the SLA
+/// * `token` - The run token minted for this run, if one was
+/// * `shared` - Shared Thorium objects
+async fn write_run(
+    cast: Reaction,
+    cache: ReactionCache,
+    memo: &mut ToolInstanceMemo,
+    deadline: Option<DateTime<Utc>>,
+    token: Option<ScopedToken>,
+    shared: &Shared,
+) -> Result<Reaction, ApiError> {
+    // write the run and queue its first jobs
+    match Box::pin(db::reactions::create_cast(
+        cast, cache, memo, deadline, shared,
+    ))
+    .await
+    {
+        Ok(reaction) => Ok(reaction),
+        Err(error) => {
+            // a run that wasn't written must leave no token behind
+            if let Some(token) = token
+                && let Err(cleanup) = db::users::delete_scoped_token(&token, shared).await
+            {
+                event!(
+                    Level::ERROR,
+                    msg = "Failed to delete an unused run token",
+                    token = token.name,
+                    error = cleanup.to_string()
+                );
+            }
+            Err(error)
+        }
+    }
+}
+
+/// Get the deadline of a run's harness job, so its container tool calls are queued with it
+///
+/// # Arguments
+///
+/// * `parent` - The run whose job's deadline to get
+/// * `shared` - Shared Thorium objects
+async fn parent_deadline(
+    parent: &Reaction,
+    shared: &Shared,
+) -> Result<Option<DateTime<Utc>>, ApiError> {
+    // use the earliest deadline of the run's jobs
+    let mut earliest: Option<DateTime<Utc>> = None;
+    for job in &parent.jobs {
+        let job = db::jobs::get(job, shared).await?;
+        earliest = Some(earliest.map_or(job.deadline, |current| current.min(job.deadline)));
+    }
+    Ok(earliest)
+}
+
+/// A workflow instance and everything a run of it reads before it's created
+struct WorkflowRunSources {
+    /// The workflow instance entity
+    entity: Entity,
+    /// The workflow instance
+    instance: WorkflowInstanceEntity,
+    /// The entry agent
+    entry: InstancedAgent,
+    /// The entry agent's harness tool instance entity
+    harness_entity: Entity,
+    /// The entry agent's harness
+    harness: HarnessSpec,
+    /// The spec of every tool bound to any of the instance's agents
+    specs: HashMap<Uuid, AgenticTool>,
+    /// The scalers of every workload the run may spawn
+    scalers: Vec<ImageScaler>,
+    /// The tool instances the run's token may run: every tool bound to a non-native mechanism
+    /// and the Image tool instance each of their `Container` backings pins
+    run_tools: Vec<Uuid>,
+    /// The exact versions of every agent and of every tool instance the run runs or may call
+    provenance: RunProvenance,
+}
+
+impl WorkflowRunSources {
+    /// Read a workflow instance and what a run of it needs
+    ///
+    /// The instance must be `Ready`, its entry agent must have a harness, and every bound tool
+    /// and every Image tool instance a container tool pins must still exist.
+    ///
+    /// # Arguments
+    ///
+    /// * `user` - The user starting the run
+    /// * `id` - The id of the workflow instance
+    /// * `shared` - Shared Thorium objects
+    #[instrument(name = "WorkflowRunSources::load", skip(user, shared), err(Debug))]
+    #[allow(clippy::too_many_lines)]
+    async fn load(user: &User, id: Uuid, shared: &Shared) -> Result<Self, ApiError> {
+        // the instance must exist, be visible, and be a workflow instance
+        let entity = run_entity(user, id, shared).await?;
+        let EntityMetadata::WorkflowInstance(instance) = &entity.metadata else {
+            return not_found!(format!("workflow instance {id} not found"));
+        };
+        let instance = instance.clone();
+        // only a ready instance can be run
+        if !instance.is_ready() {
+            return bad!(format!(
+                "workflow instance `{}` is {} and can't be run",
+                entity.name,
+                instance.status.as_str()
+            ));
+        }
+        // the entry agent and its harness must be in the instance
+        let Some(entry) = instance.entry_agent.and_then(|agent| instance.agent(agent)) else {
+            return bad!(format!(
+                "workflow instance `{}` has no entry agent",
+                entity.name
+            ));
+        };
+        let entry = entry.clone();
+        let Some(harness_id) = entry.harness else {
+            return bad!(format!(
+                "the entry agent `{}` of workflow instance `{}` has no harness",
+                entry.name, entity.name
+            ));
+        };
+        // read the harness and every bound tool in one lookup
+        let mut ids = vec![harness_id];
+        for binding in instance.agents.iter().flat_map(|agent| &agent.bindings) {
+            if !ids.contains(&binding.tool_instance) {
+                ids.push(binding.tool_instance);
+            }
+        }
+        let mut read = db::entities::get_many(&entity.groups, &ids, shared)
+            .await?
+            .into_iter()
+            .map(|entity| (entity.id, entity))
+            .collect::<HashMap<Uuid, Entity>>();
+        // the harness must still be a harness tool instance
+        let Some(harness_entity) = read.remove(&harness_id) else {
+            return not_found!(format!(
+                "harness tool instance {harness_id} no longer exists"
+            ));
+        };
+        let Some(ToolSpec::Harness(harness)) =
+            instance_meta(&harness_entity).map(|meta| &meta.spec)
+        else {
+            return bad!(format!(
+                "the harness `{}` of workflow instance `{}` isn't a Harness tool instance",
+                harness_entity.name, entity.name
+            ));
+        };
+        let harness = harness.clone();
+        // every bound tool must still be an agentic tool instance
+        let mut specs = HashMap::with_capacity(ids.len());
+        let mut pinned = Vec::new();
+        for tool_instance in ids.iter().skip(1) {
+            let Some(tool) = read.get(tool_instance) else {
+                return not_found!(format!("tool instance {tool_instance} no longer exists"));
+            };
+            let Some(ToolSpec::Agentic(spec)) = instance_meta(tool).map(|meta| &meta.spec) else {
+                return bad!(format!("bound tool `{}` isn't an Agentic tool", tool.name));
+            };
+            // remember the image tool instance each container tool runs
+            if let AgenticToolBacking::Container(container) = &spec.backing
+                && !pinned.contains(&container.tool_instance)
+            {
+                pinned.push(container.tool_instance);
+            }
+            specs.insert(*tool_instance, spec.clone());
+        }
+        // the run may run every tool bound to a non-native mechanism and the image it pins
+        let mut run_tools = Vec::new();
+        for binding in instance.agents.iter().flat_map(|agent| &agent.bindings) {
+            // native tools run inside the harness, never as tool runs
+            if binding.mechanism == ToolMechanism::Native
+                || run_tools.contains(&binding.tool_instance)
+            {
+                continue;
+            }
+            run_tools.push(binding.tool_instance);
+            // a container tool runs the image it pins
+            if let Some(AgenticTool {
+                backing: AgenticToolBacking::Container(container),
+                ..
+            }) = specs.get(&binding.tool_instance)
+                && !run_tools.contains(&container.tool_instance)
+            {
+                run_tools.push(container.tool_instance);
+            }
+        }
+        // the harness and every image a container tool pins can spawn a workload
+        let mut scalers = vec![harness.workload.environment.scaler()];
+        let images = if pinned.is_empty() {
+            Vec::new()
+        } else {
+            db::entities::get_many(&entity.groups, &pinned, shared).await?
+        };
+        for image in &pinned {
+            // each pinned image must still be an Image tool instance
+            let found = images.iter().find(|entity| entity.id == *image);
+            let Some(ToolSpec::Image(workload)) =
+                found.and_then(instance_meta).map(|meta| &meta.spec)
+            else {
+                return not_found!(format!("image tool instance {image} no longer exists"));
+            };
+            let scaler = workload.environment.scaler();
+            if !scalers.contains(&scaler) {
+                scalers.push(scaler);
+            }
+        }
+        // record every agent's hashes and the harness, bound tools, and pinned images just read
+        let agents = instance
+            .agents
+            .iter()
+            .map(|agent| AgentProvenance {
+                agent: agent.agent,
+                name: agent.name.clone(),
+                config_hash: agent.config_hash.clone(),
+                toolset_digest: agent.toolset_digest.clone(),
+            })
+            .collect();
+        let tools = std::iter::once(&harness_entity)
+            .chain(read.values())
+            .chain(images.iter())
+            .filter_map(ToolProvenance::from_entity)
+            .collect();
+        let provenance = RunProvenance::new(agents, tools);
+        Ok(WorkflowRunSources {
+            entity,
+            instance,
+            entry,
+            harness_entity,
+            harness,
+            specs,
+            scalers,
+            run_tools,
+            provenance,
+        })
+    }
+
+    /// Create a run of this workflow instance in a run group
+    ///
+    /// # Arguments
+    ///
+    /// * `user` - The user starting the run
+    /// * `group` - The run group
+    /// * `inputs` - The files and repos to run on
+    /// * `tags` - The tags to add to the run's reaction
+    /// * `sla` - The SLA of the run in seconds
+    /// * `parent` - The failed run this run retries, if it's a retry
+    /// * `shared` - Shared Thorium objects
+    #[allow(clippy::too_many_arguments)]
+    #[instrument(name = "WorkflowRunSources::create", skip_all, fields(group = group), err(Debug))]
+    #[allow(clippy::too_many_lines)]
+    async fn create(
+        self,
+        user: &User,
+        group: String,
+        inputs: RunInputs,
+        mut tags: Vec<String>,
+        sla: Option<u64>,
+        parent: Option<Uuid>,
+        shared: &Shared,
+    ) -> Result<Reaction, ApiError> {
+        // the run's token expires with its SLA, so the SLA can't pass the token lifetime
+        let sla = run_sla(sla, shared.config.thorium.auth.token_expire)?;
+        // the runner must be able to see every input file
+        if !inputs.samples.is_empty() {
+            Sample::authorize(user, &inputs.samples, shared).await?;
+        }
+        // resolve each repo to the commitish it's checked out at
+        let repos = resolve_repos(user, &inputs.repos, shared).await?;
+        // resolve each agent's model before anything is created
+        let bindings = models::resolve_run(
+            user,
+            &models::RunModelSources {
+                entity: &self.entity,
+                instance: &self.instance,
+                harness_entity: &self.harness_entity,
+                harness: &self.harness,
+            },
+            &group,
+            shared,
+        )
+        .await?;
+        // the run's results are stored under the instance's name and id when the run starts
+        let result_key = WorkflowResultKey::build(&self.entity.name, self.entity.id);
+        let id = Uuid::new_v4();
+        let harness_id = self.harness_entity.id;
+        // build the run's files
+        let access = ToolAccess::resolve(
+            &self.harness,
+            &shared.config.thorium.tool_access,
+            &run_files::worker_api_url(&shared.config),
+        );
+        let tools = run_files::tools_file(&self.instance, &self.harness, &self.specs, &access)
+            .map_err(|err| internal_err_unwrapped!(err))?;
+        let agents = run_files::agent_file(&self.instance, &self.entry)
+            .map_err(|err| internal_err_unwrapped!(err))?;
+        let run = run_files::run_file(&RunFileParts {
+            reaction: id,
+            samples: &inputs.samples,
+            repos: &repos,
+            workflow_instance: self.entity.id,
+            instance: &self.instance,
+            entry: &self.entry,
+            harness: &self.harness,
+            models: &bindings,
+        });
+        let buffers = HashMap::from([
+            (run_files::RUN_FILE.to_owned(), buffer(&run)?),
+            (run_files::AGENT_FILE.to_owned(), buffer(&agents)?),
+            (run_files::TOOLS_FILE.to_owned(), buffer(&tools)?),
+        ]);
+        // list the run under its workflow, its instance, and as a workflow run
+        tags.push(WORKFLOW_RUN_TAG.to_owned());
+        tags.push(format!("Workflow={}", self.instance.workflow));
+        tags.push(format!("WorkflowInstance={}", self.entity.id));
+        // build the request this run's reaction is cast from
+        let request = ReactionRequest {
+            group,
+            pipeline: format!("workflow:{}", self.entity.name),
+            args: HashMap::default(),
+            sla: Some(sla),
+            tags,
+            parent,
+            samples: inputs.samples,
+            buffers,
+            repos: repos
+                .iter()
+                .map(|repo| RepoDependencyRequest {
+                    url: repo.url.clone(),
+                    commitish: repo.commitish.clone(),
+                    kind: repo.kind,
+                })
+                .collect(),
+            trigger_depth: None,
+            cache: ReactionCache::default(),
+        };
+        // run the entry agent's harness as the one stage
+        let stage = match instance_meta(&self.harness_entity) {
+            Some(meta) => tool_name(&self.harness_entity, meta),
+            None => self.harness_entity.name.clone(),
+        };
+        let plan = ReactionPlan {
+            stages: vec![vec![PlannedStage {
+                name: stage,
+                tool_instance: harness_id,
+            }]],
+        };
+        let source = ReactionSource::WorkflowRun(ReactionWorkflowRun {
+            workflow_instance: self.entity.id,
+            digest: self.instance.digest.clone(),
+            agent: self.entry.agent,
+            harness: harness_id,
+            result_key,
+            models: bindings,
+            provenance: self.provenance,
+        });
+        // the harness was already read, so queueing its job reads nothing more
+        let mut memo = ToolInstanceMemo::default();
+        memo.remember(self.harness_entity);
+        let (mut cast, cache) = request
+            .cast_source(
+                user,
+                id,
+                source,
+                DEFAULT_PIPELINE_SLA,
+                plan,
+                HashMap::default(),
+                shared,
+            )
+            .await?;
+        // mint the run's token before its job is queued
+        let token = mint_run_token(user, &mut cast, self.run_tools, shared).await?;
+        // write the run, boxing its large future
+        Box::pin(write_run(cast, cache, &mut memo, None, Some(token), shared)).await
+    }
+}
+
+impl Reaction {
+    /// Run a single tool instance on some files or repos
+    ///
+    /// An Image tool instance runs itself and an Agentic tool instance with a `Container`
+    /// backing runs the Image tool instance it pins; every other kind is refused. A run with a
+    /// parent runs in its parent's group.
+    ///
+    /// A direct tool run mints its own run token. A tool run made with a run token (a harness's
+    /// tool call) must run one of the token's tool instances, is a sub run of the token's run in
+    /// its group, mints nothing, and runs on the run's inputs when it names none.
+    ///
+    /// # Arguments
+    ///
+    /// * `user` - The user starting the run
+    /// * `run` - The run the user's token is limited to, if it's a run token
+    /// * `id` - The id of the tool instance to run
+    /// * `req` - The inputs, run group, and args of the run
+    /// * `shared` - Shared Thorium objects
+    #[instrument(name = "Reaction::run_tool", skip(user, run, req, shared), err(Debug))]
+    #[allow(clippy::too_many_lines)]
+    pub async fn run_tool(
+        user: &User,
+        run: Option<&RunTokenScope>,
+        id: Uuid,
+        mut req: ToolRunRequest,
+        shared: &Shared,
+    ) -> Result<Reaction, ApiError> {
+        // a run token may only run its run's own tool instances
+        if let Some(run) = run
+            && !run.tool_instances.contains(&id)
+        {
+            return unauthorized!(format!("tool instance {id} isn't one of this run's tools"));
+        }
+        // a run token acts as a plain user, so its tool calls can't override the image's command,
+        // positionals, or kwargs
+        let opts = &req.args.opts;
+        if run.is_some()
+            && (opts.override_positionals || opts.override_kwargs || opts.override_cmd.is_some())
+        {
+            return unauthorized!("A run token's tool calls can't override args".to_owned());
+        }
+        // a run that mints its own token can't have an SLA past the token lifetime, while a run
+        // token's tool call shares its run's token and keeps its own SLA
+        if run.is_none() {
+            req.sla = Some(run_sla(req.sla, shared.config.thorium.auth.token_expire)?);
+        }
+        // the tool instance must exist and be visible
+        let entity = run_entity(user, id, shared).await?;
+        let Some(meta) = instance_meta(&entity) else {
+            return not_found!(format!("tool instance {id} not found"));
+        };
+        // find the Image tool instance this run's job runs, and the provenance of a pinned one
+        let mut memo = ToolInstanceMemo::default();
+        let (stage, image, scaler, pinned_provenance) = match &meta.spec {
+            // an Image tool instance runs itself
+            ToolSpec::Image(workload) => (
+                tool_name(&entity, meta),
+                id,
+                workload.environment.scaler(),
+                None,
+            ),
+            // a container tool runs the Image tool instance it pins
+            ToolSpec::Agentic(AgenticTool {
+                backing: AgenticToolBacking::Container(container),
+                ..
+            }) => {
+                // read the pinned tool instance in the container tool's groups
+                let pinned =
+                    db::entities::get_untagged(&entity.groups, container.tool_instance, shared)
+                        .await?;
+                // the pinned entity must still be a tool instance
+                let Some(pinned_meta) = instance_meta(&pinned) else {
+                    return not_found!(format!(
+                        "image tool instance {} no longer exists",
+                        container.tool_instance
+                    ));
+                };
+                // the pinned tool instance must be an Image tool instance
+                let ToolSpec::Image(workload) = &pinned_meta.spec else {
+                    return bad!(format!(
+                        "tool instance `{}` pins `{}`, which isn't an Image tool instance",
+                        entity.name, pinned.name
+                    ));
+                };
+                // the job runs the pinned image as its stage, recording its provenance
+                let found = (
+                    tool_name(&pinned, pinned_meta),
+                    pinned.id,
+                    workload.environment.scaler(),
+                    ToolProvenance::from_entity(&pinned),
+                );
+                // remember the pinned image so queueing its job reads it no more
+                memo.remember(pinned);
+                found
+            }
+            // Thorium MCP tools run through Thorium's MCP server, not as tool runs
+            ToolSpec::Agentic(AgenticTool {
+                backing: AgenticToolBacking::ThoriumMcp { .. },
+                ..
+            }) => {
+                return bad!(format!(
+                    "tool instance `{}` is an Agentic tool with a ThoriumMcp backing, which runs through Thorium's MCP server, not as a tool run",
+                    entity.name
+                ));
+            }
+            // native tools only run inside the harness that provides them
+            ToolSpec::Agentic(AgenticTool {
+                backing: AgenticToolBacking::HarnessNative { .. },
+                ..
+            }) => {
+                return bad!(format!(
+                    "tool instance `{}` is an Agentic tool with a HarnessNative backing, which runs only inside its harness",
+                    entity.name
+                ));
+            }
+            // a harness runs only as a workflow run's stage
+            ToolSpec::Harness(_) => {
+                return bad!(format!(
+                    "tool instance `{}` is a Harness, which runs only as a workflow run's stage",
+                    entity.name
+                ));
+            }
+        };
+        // a tool run made with a run token is a sub run of the token's run
+        let parent = match run {
+            Some(run) => {
+                // the run is found in the token's groups, whatever parent the request names
+                req.parent = Some(run.reaction);
+                Some(find_reaction(user, &user.groups, &run.reaction, shared).await?)
+            }
+            None => match &req.parent {
+                Some(parent) => Some(find_reaction(user, &entity.groups, parent, shared).await?),
+                None => None,
+            },
+        };
+        // a harness's tool call names no inputs when it runs on the run's own inputs
+        if let (Some(_), Some(parent)) = (run, &parent)
+            && req.inputs.samples.is_empty()
+            && req.inputs.repos.is_empty()
+        {
+            req.inputs.samples.clone_from(&parent.samples);
+            req.inputs.repos = parent
+                .repos
+                .iter()
+                .map(|repo| RepoDependencyRequest {
+                    url: repo.url.clone(),
+                    commitish: repo.commitish.clone(),
+                    kind: repo.kind,
+                })
+                .collect();
+        }
+        // a run needs something to run on
+        if let Err(err) = req.inputs.validate() {
+            return bad!(err);
+        }
+        // a sub run takes its parent's group and ignores any requested group
+        let (requested, parent_ephemeral) = match &parent {
+            Some(parent) => {
+                let ephemeral = db::reactions::get_parent_ephemeral(
+                    &parent.group,
+                    &Some(parent.id),
+                    HashMap::default(),
+                    shared,
+                )
+                .await?;
+                (Some(parent.group.clone()), ephemeral)
+            }
+            None => (req.group.clone(), HashMap::default()),
+        };
+        // a run token's tool call takes the run's group without choosing one, but the group is
+        // read again so a reactions kill switch or a demotion made mid-run still applies; any
+        // other run checks the runner can run the image there
+        let group = match (run, &parent) {
+            (Some(_), Some(parent)) => {
+                // read the run's group as it is now
+                let group = db::groups::get(&parent.group, shared).await?;
+                // the group must still allow reactions
+                group.allowable(GroupAllowAction::Reactions)?;
+                // and the runner must still be able to edit in it
+                group.editable(user)?;
+                parent.group.clone()
+            }
+            _ => {
+                select_run_group(
+                    user,
+                    &entity.groups,
+                    requested.as_deref(),
+                    &[scaler],
+                    shared,
+                )
+                .await?
+            }
+        };
+        // the runner must be able to see every input file
+        if !req.inputs.samples.is_empty() {
+            Sample::authorize(user, &req.inputs.samples, shared).await?;
+        }
+        // build the request this run's reaction is cast from
+        let request = ReactionRequest {
+            group,
+            pipeline: format!("tool:{} v{}", tool_name(&entity, meta), meta.version),
+            args: HashMap::from([(stage.clone(), req.args)]),
+            sla: req.sla,
+            tags: req.tags,
+            parent: req.parent,
+            samples: req.inputs.samples,
+            buffers: HashMap::default(),
+            repos: req.inputs.repos,
+            trigger_depth: None,
+            cache: ReactionCache::default(),
+        };
+        // run the image as the one stage
+        let plan = ReactionPlan {
+            stages: vec![vec![PlannedStage {
+                name: stage,
+                tool_instance: image,
+            }]],
+        };
+        // record the tool instance this run runs and the image it pins, both already read
+        let tools = ToolProvenance::from_entity(&entity)
+            .into_iter()
+            .chain(pinned_provenance)
+            .collect();
+        let source = ReactionSource::Tool {
+            tool_instance: id,
+            provenance: RunProvenance::new(Vec::new(), tools),
+        };
+        // an Image tool instance was already read, so queueing its job reads nothing more
+        if image == id {
+            memo.remember(entity);
+        }
+        let (mut cast, cache) = request
+            .cast_source(
+                user,
+                Uuid::new_v4(),
+                source,
+                DEFAULT_PIPELINE_SLA,
+                plan,
+                parent_ephemeral,
+                shared,
+            )
+            .await?;
+        match (run, parent) {
+            // a run token's tool call shares its run's token, workers, and job deadline
+            (Some(run), Some(parent)) => {
+                cast.run_token.clone_from(&parent.run_token);
+                cast.run = Some(run.reaction);
+                let deadline = parent_deadline(&parent, shared).await?;
+                // write the call, boxing its large future
+                Box::pin(write_run(cast, cache, &mut memo, deadline, None, shared)).await
+            }
+            // a direct tool run mints its own token scoped to this tool instance
+            _ => {
+                let token = mint_run_token(user, &mut cast, vec![id], shared).await?;
+                // write the run, boxing its large future
+                Box::pin(write_run(cast, cache, &mut memo, None, Some(token), shared)).await
+            }
+        }
+    }
+
+    /// Run a workflow instance on some files or repos
+    ///
+    /// # Arguments
+    ///
+    /// * `user` - The user starting the run
+    /// * `id` - The id of the workflow instance to run
+    /// * `req` - The inputs and run group of the run
+    /// * `shared` - Shared Thorium objects
+    #[instrument(name = "Reaction::run_workflow", skip(user, req, shared), err(Debug))]
+    pub async fn run_workflow(
+        user: &User,
+        id: Uuid,
+        req: WorkflowRunRequest,
+        shared: &Shared,
+    ) -> Result<Reaction, ApiError> {
+        // read the instance and what a run of it needs
+        let sources = WorkflowRunSources::load(user, id, shared).await?;
+        // a run needs something to run on
+        if let Err(err) = req.inputs.validate() {
+            return bad!(err);
+        }
+        // choose the run group, checking the runner can run every workload there
+        let group = select_run_group(
+            user,
+            &sources.entity.groups,
+            req.group.as_deref(),
+            &sources.scalers,
+            shared,
+        )
+        .await?;
+        // create the run, boxing its large future
+        Box::pin(sources.create(user, group, req.inputs, req.tags, req.sla, None, shared)).await
+    }
+
+    /// Retry a failed workflow run as a new run with the same inputs, linked to it as its parent
+    ///
+    /// Only `Failed` runs can be retried. The retry runs in the failed run's group, which is
+    /// checked again.
+    ///
+    /// # Arguments
+    ///
+    /// * `user` - The user retrying the run
+    /// * `id` - The id of the workflow instance the failed run ran
+    /// * `reaction` - The id of the failed run's reaction
+    /// * `shared` - Shared Thorium objects
+    #[instrument(name = "Reaction::retry_workflow_run", skip(user, shared), err(Debug))]
+    pub async fn retry_workflow_run(
+        user: &User,
+        id: Uuid,
+        reaction: Uuid,
+        shared: &Shared,
+    ) -> Result<Reaction, ApiError> {
+        // read the instance and what a run of it needs
+        let sources = WorkflowRunSources::load(user, id, shared).await?;
+        // find the failed run in one of the instance's groups
+        let failed = find_reaction(user, &sources.entity.groups, &reaction, shared).await?;
+        // it must be a run of this instance
+        let is_run = matches!(
+            &failed.source,
+            ReactionSource::WorkflowRun(run) if run.workflow_instance == id
+        );
+        if !is_run {
+            return bad!(format!(
+                "reaction {reaction} isn't a run of workflow instance {id}"
+            ));
+        }
+        // only failed runs can be retried
+        if failed.status != ReactionStatus::Failed {
+            return bad!(format!(
+                "only failed runs can be retried, but reaction {reaction} is {}",
+                failed.status
+            ));
+        }
+        // check the runner can still run in the failed run's group
+        let group = select_run_group(
+            user,
+            &sources.entity.groups,
+            Some(&failed.group),
+            &sources.scalers,
+            shared,
+        )
+        .await?;
+        // keep the tags the failed run's creator added, leaving out the ones every run gets
+        let automatic = [
+            failed.creator.clone(),
+            WORKFLOW_RUN_TAG.to_owned(),
+            format!("Workflow={}", sources.instance.workflow),
+            format!("WorkflowInstance={id}"),
+        ];
+        let tags = failed
+            .tags
+            .iter()
+            .filter(|tag| !automatic.contains(tag) && !failed.samples.contains(tag))
+            .cloned()
+            .collect();
+        // rerun on the same files and repos
+        let inputs = RunInputs {
+            samples: failed.samples.clone(),
+            repos: failed
+                .repos
+                .iter()
+                .map(|repo| RepoDependencyRequest {
+                    url: repo.url.clone(),
+                    commitish: repo.commitish.clone(),
+                    kind: repo.kind,
+                })
+                .collect(),
+        };
+        // create the retry, boxing its large future
+        Box::pin(sources.create(user, group, inputs, tags, None, Some(failed.id), shared)).await
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use axum::http::StatusCode;
 
-    use super::choose_run_group;
+    use super::{choose_run_group, run_sla};
     use crate::models::backends::groups::tests::{group, user};
-    use crate::models::{Group, ImageScaler, UserRole};
+    use crate::models::{DEFAULT_PIPELINE_SLA, Group, ImageScaler, UserRole};
 
     /// A K8s-only developer role
     const K8S_DEV: UserRole = UserRole::Developer {
@@ -1646,5 +2835,40 @@ mod tests {
             outside.msg().unwrap_or_default(),
             "you can't run in `other`"
         );
+    }
+
+    /// One day in seconds
+    const DAY: u64 = 24 * 60 * 60;
+
+    /// A requested SLA up to the token lifetime is kept as is
+    #[test]
+    fn run_sla_within_token_expire() {
+        // a one second SLA and one of exactly 90 days both fit a 90 day token lifetime
+        assert_eq!(run_sla(Some(1), 90).unwrap(), 1);
+        assert_eq!(run_sla(Some(90 * DAY), 90).unwrap(), 90 * DAY);
+    }
+
+    /// A requested SLA past the token lifetime is a 400 that names the limit and its setting
+    #[test]
+    fn run_sla_past_token_expire() {
+        // one second past a 90 day token lifetime is refused
+        let err = run_sla(Some(90 * DAY + 1), 90).unwrap_err();
+        assert_eq!(err.status(), StatusCode::BAD_REQUEST);
+        assert_eq!(
+            err.msg().unwrap_or_default(),
+            "a run's SLA can be at most 7776000 seconds (90 days, the token lifetime set by thorium.auth.token_expire), because its run token expires with it"
+        );
+        // and so is the century the generic SLA bound allows
+        let err = run_sla(Some(3_000_000_000), 90).unwrap_err();
+        assert_eq!(err.status(), StatusCode::BAD_REQUEST);
+    }
+
+    /// An omitted SLA is the default pipeline SLA, cut to the token lifetime when that's shorter
+    #[test]
+    fn run_sla_default() {
+        // a 90 day token lifetime keeps the 7 day default
+        assert_eq!(run_sla(None, 90).unwrap(), DEFAULT_PIPELINE_SLA);
+        // a 3 day token lifetime cuts it to 3 days
+        assert_eq!(run_sla(None, 3).unwrap(), 3 * DAY);
     }
 }

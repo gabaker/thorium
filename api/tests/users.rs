@@ -7,17 +7,211 @@ use thorium::client::{ClientSettings, Users};
 use thorium::models::{
     AiEndpointUpdate, AiSettings, AiSettingsUpdate, AwsRoleSource, BedrockEndpointKind,
     CredentialKind, FileDeleteOpts, FileDownloadOpts, Group, GroupAllowed, GroupAllowedUpdate,
-    GroupRequest, GroupUpdate, GroupUsersUpdate, ModelApi, ModelBan, ModelBanKind, ModelBanUpdate,
-    ModelCatalogEntryRequest, ModelEndpointEntityRequest, ModelProfileEntityRequest, ModelProvider,
-    ModelSecret, NotificationLevel, NotificationParams, NotificationRequest, NotificationType,
-    SampleRequest, ScopedTokenRequest, ScopedTokenRole, ScopedTokenUpdate, ScrubbedUser,
-    TagRequest, UserCreate, UserCredentialRef, UserModelEndpoint, UserModelSettings,
+    GroupRequest, GroupUpdate, GroupUsersUpdate, ImageScaler, ModelApi, ModelBan, ModelBanKind,
+    ModelBanUpdate, ModelCatalogEntryRequest, ModelEndpointEntityRequest,
+    ModelProfileEntityRequest, ModelProvider, ModelSecret, NotificationLevel, NotificationParams,
+    NotificationRequest, NotificationType, RunInputs, RunTokenScope, SampleRequest, ScopedToken,
+    ScopedTokenRequest, ScopedTokenRole, ScopedTokenUpdate, ScrubbedUser, TagRequest,
+    ToolRunRequest, UserCreate, UserCredentialRef, UserModelEndpoint, UserModelSettings,
     UserModelSettingsUpdate, UserRole, UserSettings, UserSettingsUpdate, UserUpdate,
 };
 use thorium::test_utilities::generators::GroupRoles;
 use thorium::test_utilities::{self, generators};
 use thorium::{Error, Thorium, fail, is, is_not};
 use uuid::Uuid;
+
+/// Get a connection to the test API's Redis database
+async fn users_redis() -> redis::aio::MultiplexedConnection {
+    // reuse the harness's pool so the connection selects the configured database
+    let pool = test_utilities::get_redis_client(&test_utilities::CONF).await;
+    let pooled = pool.get().await.expect("a Redis connection");
+    pooled.clone()
+}
+
+/// A tool run's token for a new developer, with the developer and the admin client
+async fn run_token_fixture() -> Result<(Thorium, generators::TestUser, ScopedToken), Error> {
+    // a developer who owns a group with an Image tool and a file
+    let admin = test_utilities::admin_client().await?;
+    let suffix = generators::name_suffix();
+    let runner = generators::named_user_with_role(
+        &admin,
+        &generators::readable_name("autonoe", &suffix),
+        UserRole::Developer {
+            k8s: true,
+            bare_metal: false,
+            windows: false,
+            external: false,
+            kvm: false,
+        },
+    )
+    .await?;
+    let group = generators::god_group(
+        &admin,
+        "bellona",
+        &suffix,
+        &GroupRoles::default().owner(&runner.username),
+    )
+    .await?;
+    let (_, image) =
+        thorium::test_utilities::runs::image_tool(&[group.as_str()], ImageScaler::K8s, &admin)
+            .await?;
+    let sha256 = runner
+        .client
+        .files
+        .create(generators::gen_sample(&group))
+        .await?
+        .sha256;
+    // run the tool and read the run's token as the admin
+    let created = runner
+        .client
+        .reactions
+        .run_tool(
+            image.id,
+            &ToolRunRequest::new(RunInputs::default().sample(&sha256)),
+        )
+        .await?;
+    let token = admin.reactions.run_token(&group, created.id).await?;
+    Ok((admin, runner, token))
+}
+
+/// A scoped token stored before run scopes existed loads with no run and authenticates as
+/// before, and a run token round trips its run with a value that never rotates
+#[tokio::test]
+async fn scoped_tokens_without_runs_load() -> Result<(), Error> {
+    // a user and a group they own
+    let admin = test_utilities::admin_client().await?;
+    let suffix = generators::name_suffix();
+    let owner = generators::moon_user(&admin, "erinome", &suffix).await?;
+    let group = generators::god_group(
+        &admin,
+        "pales",
+        &suffix,
+        &GroupRoles::default().owner(&owner.username),
+    )
+    .await?;
+    // write a scoped token the way it was stored before run scopes existed
+    let ns = &test_utilities::CONF.thorium.namespace;
+    let value = Uuid::new_v4().simple().to_string();
+    let name = format!("legacy-{suffix}");
+    let legacy = serde_json::json!({
+        "name": name,
+        "owner": owner.username,
+        "role": "User",
+        "groups": [group],
+        "token": value,
+        "token_expiration": Utc::now() + Duration::days(1),
+        "expires": null,
+    });
+    let mut conn = users_redis().await;
+    let _: () = redis::pipe()
+        .cmd("hset")
+        .arg(format!("{ns}:scoped_tokens:{}", owner.username))
+        .arg(&name)
+        .arg(legacy.to_string())
+        .cmd("hset")
+        .arg(format!("{ns}:scoped_token_map"))
+        .arg(&value)
+        .arg(serde_json::to_string(&(&owner.username, &name))?)
+        .query_async(&mut conn)
+        .await
+        .expect("write a legacy scoped token");
+    // it lists with no run and authenticates as the owner within its group
+    let listed = owner.client.users.get_scoped_token(&name).await?;
+    is!(listed.run.is_none(), true);
+    let scoped = scoped_client(&owner.client, &value).await?;
+    let info = scoped.users.info().await?;
+    is!(info.username, owner.username.clone());
+    is!(info.groups, vec![group.clone()]);
+    // a run token keeps its run, and its value expires with the token and is never rotated
+    let (admin, runner, token) = run_token_fixture().await?;
+    let scope = token.run.clone().expect("a run scope");
+    let listed = runner.client.users.get_scoped_token(&token.name).await?;
+    is!(listed.run, Some(scope.clone()));
+    is!(Some(listed.token_expiration), listed.expires);
+    is!(listed.token, token.token.clone());
+    // the run token authenticates within its groups
+    let scoped = scoped_client(&admin, &token.token).await?;
+    is!(scoped.users.info().await?.groups, token.groups.clone());
+    Ok(())
+}
+
+/// Users can't create run-scoped tokens themselves
+#[tokio::test]
+async fn scoped_token_create_refuses_runs() -> Result<(), Error> {
+    // a user and a group they own
+    let admin = test_utilities::admin_client().await?;
+    let client = generators::client(&admin).await?;
+    let group = create_group(&client).await?;
+    // a request with a run scope is refused and creates nothing
+    let mut req = ScopedTokenRequest::new("sneaky-run").group(&group);
+    req.run = Some(RunTokenScope {
+        reaction: Uuid::new_v4(),
+        tool_instances: vec![Uuid::new_v4()],
+    });
+    req.expires = Some(Utc::now() + Duration::hours(1));
+    fail!(client.users.create_scoped_token(&req).await, 400);
+    fail!(client.users.get_scoped_token("sneaky-run").await, 404);
+    Ok(())
+}
+
+/// Every update of a run token is refused with its owner's full token and leaves it unchanged,
+/// while the same updates still apply to an ordinary scoped token
+#[tokio::test]
+async fn run_tokens_are_immutable() -> Result<(), Error> {
+    // a run token and an ordinary token of the same runner
+    let (_, runner, token) = run_token_fixture().await?;
+    let group = token.groups[0].clone();
+    let plain = runner
+        .client
+        .users
+        .create_scoped_token(&ScopedTokenRequest::new("plain-token").group(&group))
+        .await?;
+    // every kind of update
+    let updates = [
+        ScopedTokenUpdate::default().role(ScopedTokenRole::User),
+        ScopedTokenUpdate::default().add_group(&group),
+        ScopedTokenUpdate::default().remove_group(&group),
+        ScopedTokenUpdate::default().expires(Utc::now() + Duration::days(30)),
+        ScopedTokenUpdate::default().clear_expires(),
+    ];
+    for update in &updates {
+        // the run token refuses it and is unchanged
+        fail!(
+            runner
+                .client
+                .users
+                .update_scoped_token(&token.name, update)
+                .await,
+            400
+        );
+        let stored = runner.client.users.get_scoped_token(&token.name).await?;
+        is!(stored.groups, token.groups.clone());
+        is!(stored.role, token.role.clone());
+        is!(stored.expires, token.expires);
+        is!(stored.run, token.run.clone());
+    }
+    // the ordinary token still takes each update but the group removal that would empty it
+    for update in updates
+        .iter()
+        .filter(|update| update.remove_groups.is_empty())
+    {
+        runner
+            .client
+            .users
+            .update_scoped_token(&plain.name, update)
+            .await?;
+    }
+    is!(
+        runner
+            .client
+            .users
+            .get_scoped_token(&plain.name)
+            .await?
+            .expires,
+        None::<chrono::DateTime<Utc>>
+    );
+    Ok(())
+}
 
 /// An admin creates a notification for a named user, who then lists and dismisses it while no
 /// other user sees it; a non-admin is refused and an unknown user is not found, with nothing

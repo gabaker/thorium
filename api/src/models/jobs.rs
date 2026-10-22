@@ -12,6 +12,9 @@ use crate::{matches_adds, matches_opt, matches_removes, matches_removes_map, sam
 #[cfg(feature = "python")]
 use pyo3::pyclass;
 
+/// The most jobs a worker can claim in one request
+pub const MAX_CLAIM_LIMIT: usize = 1000;
+
 /// A list of job ids with a cursor
 #[derive(Serialize, Debug)]
 pub struct JobList {

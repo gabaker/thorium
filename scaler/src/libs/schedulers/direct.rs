@@ -463,15 +463,14 @@ mod tests {
             name: name.to_owned(),
             user: "user".to_owned(),
             group: "group".to_owned(),
-            pipeline: "pipeline".to_owned(),
-            stage: "stage".to_owned(),
+            tool_instance: uuid::Uuid::nil(),
+            run: None,
             status: WorkerStatus::Running,
             spawned: Utc::now(),
             heart_beat: None,
             resources: Resources::default(),
             pool: Pools::Deadline,
             active: None,
-            run: None,
         }
     }
 
@@ -507,7 +506,7 @@ mod tests {
     fn scaled_down(name: &str, node: &str) -> Spawned {
         // build a spawned record for the worker with only the fields classification reads set
         Spawned {
-            req: Requisition::new("user", "group", "pipeline", "stage"),
+            req: Requisition::new("user", "group", uuid::Uuid::nil(), None),
             cluster: "cluster".to_owned(),
             node: node.to_owned(),
             name: name.to_owned(),
@@ -516,6 +515,7 @@ mod tests {
             spawn: false,
             scaled_down: true,
             down_scalable: Utc::now(),
+            run_env: None,
         }
     }
 

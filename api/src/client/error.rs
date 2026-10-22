@@ -105,9 +105,6 @@ pub enum Error {
     /// An error from dialoguer
     #[cfg(feature = "dialoguer-err")]
     Dialoguer(dialoguer::Error),
-    /// An error from the openai api
-    #[cfg(feature = "openai")]
-    OpenAI(openai_api_rs::v1::error::APIError),
     /// An mcp service error
     #[cfg(feature = "rmcp-err")]
     RmcpServiceError(rmcp::service::ServiceError),
@@ -197,8 +194,6 @@ impl Error {
             Error::ScyllaNextRow(error) => Some(error.to_string()),
             #[cfg(feature = "dialoguer-err")]
             Error::Dialoguer(error) => Some(error.to_string()),
-            #[cfg(feature = "openai")]
-            Error::OpenAI(error) => Some(error.to_string()),
             #[cfg(feature = "rmcp-err")]
             Error::RmcpServiceError(error) => Some(error.to_string()),
             #[cfg(feature = "walkdir-err")]
@@ -264,8 +259,6 @@ impl Error {
             Error::ScyllaNextRow(_) => "ScyllaNextRow",
             #[cfg(feature = "dialoguer-err")]
             Error::Dialoguer(_) => "Dialoguer",
-            #[cfg(feature = "openai")]
-            Error::OpenAI(_) => "OpenAI",
             #[cfg(feature = "rmcp-err")]
             Error::RmcpServiceError(_) => "RmcpServiceError",
             #[cfg(feature = "walkdir-err")]
@@ -577,13 +570,6 @@ impl From<Error> for rmcp::ErrorData {
             message: message.into(),
             data: None,
         }
-    }
-}
-
-#[cfg(feature = "openai")]
-impl From<openai_api_rs::v1::error::APIError> for Error {
-    fn from(error: openai_api_rs::v1::error::APIError) -> Self {
-        Error::OpenAI(error)
     }
 }
 

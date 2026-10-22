@@ -63,6 +63,17 @@ thorium:
   #         # provider returns no email claim at all. Leave empty to fail closed for no-email providers.
   #         approved_emails:
   #           - ".*@sandia\\.gov$"
+  # MCP server settings (optional). The MCP server at /api/mcp only answers requests whose Host
+  # header is loopback, an in-cluster thorium-api or thorium-mcp service name, or the host of an
+  # API url set in this file (the OAuth redirect base, the email verification base url, the MCP
+  # url given to harnesses, or a K8s cluster's api_url). List any other host MCP clients reach
+  # Thorium by, such as the ingress host, in allowed_hosts. allowed_origins limits which browser
+  # origins may call the server; when empty the Origin header isn't checked.
+  # mcp:
+  #   allowed_hosts:
+  #     - "thorium.example.com"
+  #   allowed_origins:
+  #     - "https://thorium.example.com"
 redis:
   host: "<REDIS_IP>"
   port: 6379

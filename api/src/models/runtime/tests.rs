@@ -9,7 +9,8 @@ use uuid::Uuid;
 
 use super::{
     BareMetalEnvironment, DroppedImageField, ExecutionSettings, JobDataSettings, K8sEnvironment,
-    KvmEnvironment, SchedulingSettings, WindowsEnvironment, WorkloadEnvironment, WorkloadSpec,
+    KvmEnvironment, SchedulingSettings, ToolDependencies, WindowsEnvironment, WorkloadEnvironment,
+    WorkloadSpec,
 };
 use crate::models::images::GenericBan;
 use crate::models::{
@@ -285,7 +286,7 @@ fn full_execution() -> ExecutionSettings {
 /// The job data settings of a fully populated image
 fn full_data() -> JobDataSettings {
     JobDataSettings {
-        dependencies: dependencies(),
+        dependencies: ToolDependencies::from_image(&dependencies()),
         output_collection: output_collection(),
         child_filters: child_filters(),
         display_type: OutputDisplayType::Table,
@@ -328,6 +329,62 @@ fn assert_round_trip<T: Serialize + DeserializeOwned + PartialEq + Debug>(value:
 fn image_value(image: &Image) -> Value {
     // images have no `PartialEq`, so they're compared as JSON
     serde_json::to_value(image).unwrap()
+}
+
+/// A spec's dependency settings name tools by id: image names aren't carried into a spec, a
+/// projection names no images, and a spec naming images in a tool list is refused
+#[test]
+fn dependency_settings_name_tools() {
+    // an image restricting every list to other images
+    let mut image = full_image(ImageScaler::K8s);
+    image.dependencies.results.images = vec!["plant".into()];
+    image.dependencies.children.images = vec!["grow".into()];
+    image.dependencies.filesystems.images = vec!["unpack".into()];
+    image.dependencies.filesystems.enabled = true;
+    // the spec keeps every other setting and names no tools
+    let mut spec = WorkloadSpec::from_image(&image).unwrap().spec;
+    let deps = &spec.data.dependencies;
+    assert_eq!(deps.tools(), Vec::<Uuid>::new());
+    assert!(deps.filesystems.enabled);
+    assert_eq!(deps.results.location, image.dependencies.results.location);
+    // listed tools are each named once, sorted
+    let first = Uuid::from_u128(1);
+    let second = Uuid::from_u128(2);
+    spec.data.dependencies.results.tools = vec![second];
+    spec.data.dependencies.children.tools = vec![first];
+    spec.data.dependencies.filesystems.tools = vec![second, first];
+    assert_eq!(spec.data.dependencies.tools(), vec![first, second]);
+    // a projection names no images
+    let projected = spec.project_image("corn", "harvester", 600.0);
+    assert_eq!(projected.dependencies.results.images, Vec::<String>::new());
+    assert_eq!(projected.dependencies.children.images, Vec::<String>::new());
+    assert_eq!(
+        projected.dependencies.filesystems.images,
+        Vec::<String>::new()
+    );
+    assert!(projected.dependencies.filesystems.enabled);
+    // the tool lists serialize as `tools`
+    let value = serde_json::to_value(&spec.data.dependencies).unwrap();
+    assert_eq!(value["results"]["tools"], json!([second.to_string()]));
+    // a list of image names in a tool list's place is refused
+    for kind in ["results", "children", "filesystems"] {
+        // the same settings parse without the image names
+        let mut settings = json!({ "enabled": true });
+        if kind == "results" {
+            settings = json!({});
+        }
+        let raw = json!({ kind: settings.clone() });
+        assert!(
+            serde_json::from_value::<ToolDependencies>(raw).is_ok(),
+            "{kind}"
+        );
+        settings["images"] = json!(["plant"]);
+        let raw = json!({ kind: settings });
+        assert!(
+            serde_json::from_value::<ToolDependencies>(raw).is_err(),
+            "{kind} accepted image names"
+        );
+    }
 }
 
 /// Every workload struct and enum round-trips through serde JSON
@@ -402,7 +459,10 @@ fn conversion_picks_environment() {
         assert_eq!(spec.execution.args, image.args);
         assert_eq!(spec.execution.timeout, image.timeout);
         assert_eq!(spec.execution.generator, image.generator);
-        assert_eq!(spec.data.dependencies, image.dependencies);
+        assert_eq!(
+            spec.data.dependencies,
+            ToolDependencies::from_image(&image.dependencies)
+        );
         assert_eq!(spec.data.output_collection, image.output_collection);
         assert_eq!(spec.data.child_filters, image.child_filters);
         assert_eq!(spec.data.display_type, image.display_type);
@@ -770,6 +830,7 @@ fn job_from_generator_spec() {
         has_cache: false,
         source: crate::models::ReactionSource::Pipeline {
             name: "harvest".into(),
+            provenance: crate::models::RunProvenance::default(),
         },
         plan: crate::models::ReactionPlan::default(),
         run_token: None,

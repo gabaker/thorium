@@ -13,10 +13,11 @@ use super::traits::TransferProgress;
 use super::{Cursor, Error, LogsCursor};
 use crate::models::Cursor as SearchCursor;
 use crate::models::{
-    BulkReactionResponse, CartedFile, DownloadedFile, FileDownloadOpts, Reaction, ReactionCache,
-    ReactionCacheFileUpdate, ReactionCacheUpdate, ReactionCreation, ReactionCursorOpts,
-    ReactionListParams, ReactionRequest, ReactionStatus, ReactionUpdate, ScopedToken, StageLogs,
-    StageLogsAdd, StatusUpdate, UncartedFile,
+    BulkReactionResponse, CartedFile, DownloadedFile, Entity, FileDownloadOpts,
+    HandleReactionResponse, Reaction, ReactionCache, ReactionCacheFileUpdate, ReactionCacheUpdate,
+    ReactionCreation, ReactionCursorOpts, ReactionListParams, ReactionRequest, ReactionSource,
+    ReactionStatus, ReactionUpdate, RunModels, ScopedToken, StageLogs, StageLogsAdd, StatusUpdate,
+    ToolRunRequest, UncartedFile, WorkflowRunRequest,
 };
 use crate::{add_query, add_query_list, send, send_build, send_bytes};
 
@@ -227,6 +228,268 @@ impl Reactions {
         let req = self.client.get(&url).header("authorization", &self.token);
         // send request and build the run's token
         send_build!(self.client, req, ScopedToken)
+    }
+
+    /// Get the Workflow Instance and the Tool Instances a reaction's provenance names
+    ///
+    /// The Workflow Instance of a workflow run comes first, then each tool instance in
+    /// provenance order. A reaction with an empty provenance (one created before provenance was
+    /// recorded) sends no request.
+    ///
+    /// # Arguments
+    ///
+    /// * `reaction` - The reaction whose provenance to read
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use thorium::Thorium;
+    /// use uuid::Uuid;
+    /// # use thorium::Error;
+    ///
+    /// # async fn exec() -> Result<(), Error> {
+    /// // create Thorium client
+    /// let thorium = Thorium::build("http://127.0.0.1").token("<token>").build().await?;
+    /// // have the id of a run
+    /// let id = Uuid::parse_str("d86ce41a-4a5b-43b5-aef9-bf90ff5d09ba")?;
+    /// // get the run and the entities it was created with
+    /// let reaction = thorium.reactions.get("Corn", id).await?;
+    /// let entities = thorium.reactions.provenance_entities(&reaction).await?;
+    /// # // allow test code to be compiled but don't unwrap as no API instance would be up
+    /// # Ok(())
+    /// # }
+    /// # tokio_test::block_on(async {
+    /// #    exec().await
+    /// # });
+    /// ```
+    #[cfg_attr(
+        feature = "trace",
+        tracing::instrument(name = "Thorium::Reactions::provenance_entities", skip_all, fields(id = reaction.id.to_string()), err(Debug))
+    )]
+    pub async fn provenance_entities(&self, reaction: &Reaction) -> Result<Vec<Entity>, Error> {
+        // a reaction created before provenance was recorded names nothing to read
+        let provenance = reaction.source.provenance();
+        if provenance.is_empty() {
+            return Ok(Vec::new());
+        }
+        // a workflow run's instance comes first, then each tool instance in provenance order
+        let workflow = match &reaction.source {
+            ReactionSource::WorkflowRun(run) => Some(run.workflow_instance),
+            ReactionSource::Pipeline { .. } | ReactionSource::Tool { .. } => None,
+        };
+        let ids = workflow
+            .into_iter()
+            .chain(provenance.tools.iter().map(|tool| tool.tool_instance))
+            .collect::<Vec<Uuid>>();
+        // read each entity the way the entities client does, so its visibility checks apply
+        let mut entities = Vec::with_capacity(ids.len());
+        for id in ids {
+            let url = format!("{host}/api/entities/{id}", host = self.host);
+            let req = self.client.get(&url).header("authorization", &self.token);
+            entities.push(send_build!(self.client, req, Entity)?);
+        }
+        Ok(entities)
+    }
+
+    /// Get the models a run's harness uses, with their credentials' secrets (admins only)
+    ///
+    /// # Arguments
+    ///
+    /// * `group` - The group the run's reaction is in
+    /// * `id` - The id of the run's reaction
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use thorium::Thorium;
+    /// use uuid::Uuid;
+    /// # use thorium::Error;
+    ///
+    /// # async fn exec() -> Result<(), Error> {
+    /// // create Thorium client
+    /// let thorium = Thorium::build("http://127.0.0.1").token("<token>").build().await?;
+    /// // have the id of a workflow run
+    /// let id = Uuid::parse_str("d86ce41a-4a5b-43b5-aef9-bf90ff5d09ba")?;
+    /// // get the run's models
+    /// let models = thorium.reactions.run_models("Corn", id).await?;
+    /// # // allow test code to be compiled but don't unwrap as no API instance would be up
+    /// # Ok(())
+    /// # }
+    /// # tokio_test::block_on(async {
+    /// #    exec().await
+    /// # });
+    /// ```
+    #[cfg_attr(
+        feature = "trace",
+        tracing::instrument(name = "Thorium::Reactions::run_models", skip(self), fields(id = id.to_string()), err(Debug))
+    )]
+    pub async fn run_models(&self, group: &str, id: Uuid) -> Result<RunModels, Error> {
+        // build url
+        let url = format!(
+            "{host}/api/reactions/{group}/{id}/run-models",
+            host = self.host
+        );
+        // build request
+        let req = self.client.get(&url).header("authorization", &self.token);
+        // send request and build the run's models
+        send_build!(self.client, req, RunModels)
+    }
+
+    /// Run a single tool instance on some files or repos
+    ///
+    /// # Arguments
+    ///
+    /// * `tool_instance` - The id of the tool instance to run
+    /// * `req` - The inputs, run group, and args of the run
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use thorium::Thorium;
+    /// use thorium::models::{RunInputs, ToolRunRequest};
+    /// use uuid::Uuid;
+    /// # use thorium::Error;
+    ///
+    /// # async fn exec() -> Result<(), Error> {
+    /// // create Thorium client
+    /// let thorium = Thorium::build("http://127.0.0.1").token("<token>").build().await?;
+    /// // have the id of a tool instance
+    /// let id = Uuid::parse_str("d86ce41a-4a5b-43b5-aef9-bf90ff5d09ba")?;
+    /// // run it on one file in the Corn group
+    /// let inputs = RunInputs::default().sample("63b9c2cbd4f4f1f6c2a0c2a1d7e0d2e6c2b6a8a3b1c4d5e6f7a8b9c0d1e2f3a4");
+    /// let created = thorium.reactions.run_tool(id, &ToolRunRequest::new(inputs).group("Corn")).await?;
+    /// # // allow test code to be compiled but don't unwrap as no API instance would be up
+    /// # Ok(())
+    /// # }
+    /// # tokio_test::block_on(async {
+    /// #    exec().await
+    /// # });
+    /// ```
+    #[cfg_attr(
+        feature = "trace",
+        tracing::instrument(name = "Thorium::Reactions::run_tool", skip(self, req), fields(tool_instance = tool_instance.to_string()), err(Debug))
+    )]
+    pub async fn run_tool(
+        &self,
+        tool_instance: Uuid,
+        req: &ToolRunRequest,
+    ) -> Result<ReactionCreation, Error> {
+        // build url
+        let url = format!(
+            "{host}/api/tools/instances/{tool_instance}/runs",
+            host = self.host
+        );
+        // build request
+        let req = self
+            .client
+            .post(&url)
+            .header("authorization", &self.token)
+            .json(req);
+        // send request and get the id of the run's reaction
+        send_build!(self.client, req, ReactionCreation)
+    }
+
+    /// Run a workflow instance on some files or repos
+    ///
+    /// # Arguments
+    ///
+    /// * `workflow_instance` - The id of the workflow instance to run
+    /// * `req` - The inputs and run group of the run
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use thorium::Thorium;
+    /// use thorium::models::{RunInputs, WorkflowRunRequest};
+    /// use uuid::Uuid;
+    /// # use thorium::Error;
+    ///
+    /// # async fn exec() -> Result<(), Error> {
+    /// // create Thorium client
+    /// let thorium = Thorium::build("http://127.0.0.1").token("<token>").build().await?;
+    /// // have the id of a workflow instance
+    /// let id = Uuid::parse_str("d86ce41a-4a5b-43b5-aef9-bf90ff5d09ba")?;
+    /// // run it on one file
+    /// let inputs = RunInputs::default().sample("63b9c2cbd4f4f1f6c2a0c2a1d7e0d2e6c2b6a8a3b1c4d5e6f7a8b9c0d1e2f3a4");
+    /// let created = thorium.reactions.run_workflow(id, &WorkflowRunRequest::new(inputs)).await?;
+    /// # // allow test code to be compiled but don't unwrap as no API instance would be up
+    /// # Ok(())
+    /// # }
+    /// # tokio_test::block_on(async {
+    /// #    exec().await
+    /// # });
+    /// ```
+    #[cfg_attr(
+        feature = "trace",
+        tracing::instrument(name = "Thorium::Reactions::run_workflow", skip(self, req), fields(workflow_instance = workflow_instance.to_string()), err(Debug))
+    )]
+    pub async fn run_workflow(
+        &self,
+        workflow_instance: Uuid,
+        req: &WorkflowRunRequest,
+    ) -> Result<ReactionCreation, Error> {
+        // build url
+        let url = format!(
+            "{host}/api/workflows/instances/{workflow_instance}/runs",
+            host = self.host
+        );
+        // build request
+        let req = self
+            .client
+            .post(&url)
+            .header("authorization", &self.token)
+            .json(req);
+        // send request and get the id of the run's reaction
+        send_build!(self.client, req, ReactionCreation)
+    }
+
+    /// Retry a failed workflow run as a new run linked to it
+    ///
+    /// # Arguments
+    ///
+    /// * `workflow_instance` - The id of the workflow instance the failed run ran
+    /// * `reaction` - The id of the failed run's reaction
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use thorium::Thorium;
+    /// use uuid::Uuid;
+    /// # use thorium::Error;
+    ///
+    /// # async fn exec() -> Result<(), Error> {
+    /// // create Thorium client
+    /// let thorium = Thorium::build("http://127.0.0.1").token("<token>").build().await?;
+    /// // have the ids of a workflow instance and one of its failed runs
+    /// let instance = Uuid::parse_str("d86ce41a-4a5b-43b5-aef9-bf90ff5d09ba")?;
+    /// let failed = Uuid::parse_str("4b2a6c1e-0c55-4d7e-9a1a-5f0c3e2d1b7a")?;
+    /// // retry the failed run
+    /// let created = thorium.reactions.retry_workflow_run(instance, failed).await?;
+    /// # // allow test code to be compiled but don't unwrap as no API instance would be up
+    /// # Ok(())
+    /// # }
+    /// # tokio_test::block_on(async {
+    /// #    exec().await
+    /// # });
+    /// ```
+    #[cfg_attr(
+        feature = "trace",
+        tracing::instrument(name = "Thorium::Reactions::retry_workflow_run", skip(self), fields(workflow_instance = workflow_instance.to_string(), reaction = reaction.to_string()), err(Debug))
+    )]
+    pub async fn retry_workflow_run(
+        &self,
+        workflow_instance: Uuid,
+        reaction: Uuid,
+    ) -> Result<ReactionCreation, Error> {
+        // build url
+        let url = format!(
+            "{host}/api/workflows/instances/{workflow_instance}/runs/{reaction}/retry",
+            host = self.host
+        );
+        // build request
+        let req = self.client.post(&url).header("authorization", &self.token);
+        // send request and get the id of the new run's reaction
+        send_build!(self.client, req, ReactionCreation)
     }
 
     /// Create [`Reaction`]s in bulk
@@ -1262,6 +1525,49 @@ impl Reactions {
             .header("authorization", &self.token);
         // send request
         send!(self.client, req)
+    }
+
+    /// Fail a [`Reaction`], counting it as finished in its parent
+    ///
+    /// # Arguments
+    ///
+    /// * `group` - The group the reaction is in
+    /// * `id` - The id of the reaction to fail
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use thorium::Thorium;
+    /// use uuid::Uuid;
+    /// # use thorium::Error;
+    ///
+    /// # async fn exec() -> Result<(), Error> {
+    /// // create Thorium client
+    /// let thorium = Thorium::build("http://127.0.0.1").token("<token>").build().await?;
+    /// // fail a reaction
+    /// let reaction = Uuid::parse_str("e0ca2720-50e0-4103-a412-344bbb714240")?;
+    /// let handled = thorium.reactions.fail("Corn", &reaction).await?;
+    /// # // allow test code to be compiled but don't unwrap as no API instance would be up
+    /// # Ok(())
+    /// # }
+    /// # tokio_test::block_on(async {
+    /// #    exec().await
+    /// # });
+    /// ```
+    #[cfg_attr(
+        feature = "trace",
+        tracing::instrument(name = "Thorium::Reactions::fail", skip(self), fields(id = id.to_string()), err(Debug))
+    )]
+    pub async fn fail(&self, group: &str, id: &Uuid) -> Result<HandleReactionResponse, Error> {
+        // build url for failing a reaction
+        let url = format!(
+            "{base}/api/reactions/handle/{group}/{id}/fail",
+            base = self.host
+        );
+        // build request
+        let req = self.client.post(&url).header("authorization", &self.token);
+        // send request and get the reaction's new status
+        send_build!(self.client, req, HandleReactionResponse)
     }
 
     /// Downloads an ephemeral file for a  [`Reaction`]

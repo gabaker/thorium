@@ -15,8 +15,15 @@ use uuid::Uuid;
 
 use super::super::bans::Ban;
 
+mod resolution;
 #[cfg(test)]
 mod tests;
+
+pub use resolution::{
+    AWS_CONFIG_FILE, AWS_PROFILE, AgentModelMismatch, CREDENTIALS_DIR, HarnessCredential,
+    HarnessModelEntry, HarnessModels, MismatchNames, ModelCandidateRejection, ModelRejectReason,
+    ModelResolutionError, RunModels,
+};
 
 /// The headers that carry a key for some provider and may never be set as extra headers
 const AUTH_HEADERS: &[&str] = &["authorization", "x-api-key", "api-key", "x-goog-api-key"];
@@ -200,6 +207,21 @@ fn check_required(field: &str, value: &str) -> Result<(), String> {
     // a required setting can't be empty
     if value.trim().is_empty() {
         return Err(format!("{field} is required and can't be empty"));
+    }
+    Ok(())
+}
+
+/// Check that a value has no control characters, since it's written on one line of the AWS config
+/// file a harness reads and a line break would let it add settings such as `credential_process`
+///
+/// # Arguments
+///
+/// * `field` - The name of the setting, for the error
+/// * `value` - The setting's value
+fn check_config_line(field: &str, value: &str) -> Result<(), String> {
+    // a control character could end the line or corrupt it
+    if value.chars().any(char::is_control) {
+        return Err(format!("{field} can't contain control characters"));
     }
     Ok(())
 }
@@ -735,10 +757,25 @@ impl CredentialKind {
         // check each kind's required metadata
         match self {
             CredentialKind::AwsAccessKey { access_key_id } => {
-                check_required("AwsAccessKey.access_key_id", access_key_id)
+                check_required("AwsAccessKey.access_key_id", access_key_id)?;
+                check_config_line("AwsAccessKey.access_key_id", access_key_id)
             }
-            CredentialKind::AwsAssumeRole { role_arn, .. } => {
-                check_required("AwsAssumeRole.role_arn", role_arn)
+            CredentialKind::AwsAssumeRole {
+                role_arn,
+                external_id,
+                session_name,
+                ..
+            } => {
+                // every value of an assumed role is a line of the harness's AWS config file
+                check_required("AwsAssumeRole.role_arn", role_arn)?;
+                check_config_line("AwsAssumeRole.role_arn", role_arn)?;
+                if let Some(external_id) = external_id {
+                    check_config_line("AwsAssumeRole.external_id", external_id)?;
+                }
+                if let Some(session_name) = session_name {
+                    check_config_line("AwsAssumeRole.session_name", session_name)?;
+                }
+                Ok(())
             }
             CredentialKind::AzureEntraClient {
                 tenant_id,
@@ -752,6 +789,28 @@ impl CredentialKind {
             | CredentialKind::AwsBearerToken
             | CredentialKind::GcpCredentialsJson { .. } => Ok(()),
         }
+    }
+
+    /// Validate the secrets this credential holds against its kind
+    ///
+    /// An access key's secret and session token are written on lines of the AWS config file an
+    /// assumed role's harness reads, so they can't contain control characters. Other kinds' secrets
+    /// (a GCP JSON file or a PEM certificate) span lines and are written to files of their own.
+    ///
+    /// # Arguments
+    ///
+    /// * `secrets` - The credential's secrets
+    pub fn validate_secrets(&self, secrets: &CredentialSecrets) -> Result<(), String> {
+        // only an access key's secrets are written into a config file
+        if matches!(self, CredentialKind::AwsAccessKey { .. }) {
+            if let Some(secret) = &secrets.primary {
+                check_config_line("AwsAccessKey secret", secret.expose())?;
+            }
+            if let Some(token) = &secrets.session_token {
+                check_config_line("AwsAccessKey session token", token.expose())?;
+            }
+        }
+        Ok(())
     }
 }
 

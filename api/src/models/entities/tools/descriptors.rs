@@ -13,6 +13,7 @@ use super::{
     AgenticTool, AgenticToolBacking, McpConfigFormat, ToolCapabilities, ToolEffect, ToolIcon,
     ToolLoading, ToolPortabilityReport, ToolResultFormat, ToolStrictness,
 };
+use crate::models::{InstancedAgent, ReactionModelBinding, RepoDependency, WorkflowLimits};
 
 /// The longest an MCP server id may be
 const MAX_SERVER_ID_LEN: usize = 31;
@@ -67,6 +68,46 @@ pub struct HarnessToolEntry {
     pub timeout: Option<u64>,
     /// How the harness carries out a call to this tool
     pub invocation: ToolInvocation,
+}
+
+/// A workflow run's request file (`run.json`, written by the API, read by the harness)
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "api", derive(utoipa::ToSchema))]
+pub struct HarnessRunFile {
+    /// The id of the workflow run's reaction
+    pub reaction: Uuid,
+    /// The SHA256s of the files the run was given
+    #[serde(default)]
+    pub samples: Vec<String>,
+    /// The repos the run was given, each with the commitish it's checked out at
+    #[serde(default)]
+    pub repos: Vec<RepoDependency>,
+    /// The workflow instance being run
+    pub workflow_instance: Uuid,
+    /// The workflow instance's digest
+    pub digest: String,
+    /// The entry agent that receives the run's inputs
+    pub agent: Uuid,
+    /// The workflow's run-wide limits
+    #[serde(default)]
+    pub limits: WorkflowLimits,
+    /// The max bytes of a tool result the harness returns to a model (0 = unlimited)
+    #[serde(default)]
+    pub max_result_bytes: u64,
+    /// The model each agent resolved to when the run was created, with no secrets
+    #[serde(default)]
+    pub models: Vec<ReactionModelBinding>,
+}
+
+/// A workflow run's agent file (`agent.json`, written by the API, read by the harness)
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "api", derive(utoipa::ToSchema))]
+pub struct HarnessAgentFile {
+    /// The entry agent's snapshot, with its prompts and tool bindings
+    pub agent: InstancedAgent,
+    /// The snapshot of each agent the entry agent delegates to, sorted by agent id
+    #[serde(default)]
+    pub sub_agents: Vec<InstancedAgent>,
 }
 
 /// A tool's MCP annotations, derived by Thorium from its spec (serialized with MCP's field names)

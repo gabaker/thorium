@@ -8,12 +8,16 @@
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::fmt;
+use uuid::Uuid;
 
 use super::conversions::ConversionError;
 use super::{
-    ChildFilters, Cleanup, Dependencies, Image, ImageArgs, ImageJobInfo, ImageLifetime,
-    ImageScaler, Kvm, OutputCollection, OutputDisplayType, Resources, ResourcesRequest,
-    SecurityContext, SpawnLimits, Volume,
+    CacheDependencySettings, ChildFilters, ChildrenDependencySettings, Cleanup, Dependencies,
+    DependencyPassStrategy, EphemeralDependencySettings, FileSystemDependencySettings, Image,
+    ImageArgs, ImageJobInfo, ImageLifetime, ImageScaler, Kvm, KwargDependency, OutputCollection,
+    OutputDisplayType, RepoDependencySettings, Resources, ResourcesRequest,
+    ResultDependencySettings, SampleDependencySettings, SecurityContext, SpawnLimits,
+    TagDependencySettings, Volume,
 };
 
 #[cfg(test)]
@@ -235,7 +239,7 @@ pub struct ExecutionSettings {
 pub struct JobDataSettings {
     /// How inputs are downloaded and passed in to each job
     #[serde(default)]
-    pub dependencies: Dependencies,
+    pub dependencies: ToolDependencies,
     /// How outputs are collected from each job
     #[serde(default)]
     pub output_collection: OutputCollection,
@@ -245,6 +249,283 @@ pub struct JobDataSettings {
     /// How each job's output is displayed in the UI
     #[serde(default)]
     pub display_type: OutputDisplayType,
+}
+
+/// How each job of a workload gets its inputs, naming the tools whose outputs it takes by id
+///
+/// The same settings as an image's [`Dependencies`], except that the results, children, and
+/// filesystems settings name tools by their ids instead of naming images.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+#[cfg_attr(
+    any(feature = "api", feature = "client"),
+    derive(thorium_derive::DigestValue)
+)]
+#[cfg_attr(feature = "api", derive(utoipa::ToSchema))]
+pub struct ToolDependencies {
+    /// The settings the agent uses when passing downloaded samples to tools
+    #[serde(default)]
+    pub samples: SampleDependencySettings,
+    /// The settings the agent uses when passing downloaded ephemeral files to tools
+    #[serde(default)]
+    pub ephemeral: EphemeralDependencySettings,
+    /// The settings the agent uses when passing prior results to tools
+    #[serde(default)]
+    pub results: ToolResultDependencySettings,
+    /// The settings the agent uses when passing prior repos to tools
+    #[serde(default)]
+    pub repos: RepoDependencySettings,
+    /// The settings the agent uses when passing tags to tools
+    #[serde(default)]
+    pub tags: TagDependencySettings,
+    /// The settings the agent uses when passing children files from past tools
+    #[serde(default)]
+    pub children: ToolChildrenDependencySettings,
+    /// The settings the agent uses when reconstructing filesystems dumped by past tools
+    #[serde(default)]
+    pub filesystems: ToolFileSystemDependencySettings,
+    /// The settings to use when getting cache info
+    #[serde(default)]
+    pub cache: CacheDependencySettings,
+}
+
+impl ToolDependencies {
+    /// Build a workload's dependency settings from an image's, with no tools named
+    ///
+    /// An image's settings name images, which have no tool ids, so the tool lists start empty.
+    ///
+    /// # Arguments
+    ///
+    /// * `deps` - The image's dependency settings
+    #[must_use]
+    pub fn from_image(deps: &Dependencies) -> Self {
+        // copy every setting but the image names
+        ToolDependencies {
+            samples: deps.samples.clone(),
+            ephemeral: deps.ephemeral.clone(),
+            results: ToolResultDependencySettings {
+                tools: Vec::new(),
+                location: deps.results.location.clone(),
+                kwarg: deps.results.kwarg.clone(),
+                strategy: deps.results.strategy.clone(),
+                names: deps.results.names.clone(),
+            },
+            repos: deps.repos.clone(),
+            tags: deps.tags.clone(),
+            children: ToolChildrenDependencySettings {
+                enabled: deps.children.enabled,
+                tools: Vec::new(),
+                location: deps.children.location.clone(),
+                kwarg: deps.children.kwarg.clone(),
+                strategy: deps.children.strategy.clone(),
+            },
+            filesystems: ToolFileSystemDependencySettings {
+                enabled: deps.filesystems.enabled,
+                tools: Vec::new(),
+                location: deps.filesystems.location.clone(),
+                kwarg: deps.filesystems.kwarg.clone(),
+                strategy: deps.filesystems.strategy.clone(),
+            },
+            cache: deps.cache.clone(),
+        }
+    }
+
+    /// Project these settings into an image's, with no images named
+    ///
+    /// Tools are named by id, which an image's settings can't hold, so the image lists start
+    /// empty; the thorium-agent fills them with the listed tools' current names.
+    #[must_use]
+    pub fn project(&self) -> Dependencies {
+        // copy every setting but the tool ids
+        Dependencies {
+            samples: self.samples.clone(),
+            ephemeral: self.ephemeral.clone(),
+            results: ResultDependencySettings {
+                images: Vec::new(),
+                location: self.results.location.clone(),
+                kwarg: self.results.kwarg.clone(),
+                strategy: self.results.strategy.clone(),
+                names: self.results.names.clone(),
+            },
+            repos: self.repos.clone(),
+            tags: self.tags.clone(),
+            children: ChildrenDependencySettings {
+                enabled: self.children.enabled,
+                images: Vec::new(),
+                location: self.children.location.clone(),
+                kwarg: self.children.kwarg.clone(),
+                strategy: self.children.strategy.clone(),
+            },
+            filesystems: FileSystemDependencySettings {
+                enabled: self.filesystems.enabled,
+                images: Vec::new(),
+                location: self.filesystems.location.clone(),
+                kwarg: self.filesystems.kwarg.clone(),
+                strategy: self.filesystems.strategy.clone(),
+            },
+            cache: self.cache.clone(),
+        }
+    }
+
+    /// Get every tool these settings name, each once and sorted
+    #[must_use]
+    pub fn tools(&self) -> Vec<Uuid> {
+        // gather the tools of every list
+        let tools = self
+            .results
+            .tools
+            .iter()
+            .chain(&self.children.tools)
+            .chain(&self.filesystems.tools)
+            .copied()
+            .collect::<BTreeSet<Uuid>>();
+        tools.into_iter().collect()
+    }
+}
+
+/// Get where prior result files are downloaded by default
+fn default_results_location() -> String {
+    // use the image settings' default
+    ResultDependencySettings::default().location
+}
+
+/// Get where prior children are downloaded by default
+fn default_children_location() -> String {
+    // use the image settings' default
+    ChildrenDependencySettings::default().location
+}
+
+/// Get how prior children are passed by default
+fn default_children_strategy() -> DependencyPassStrategy {
+    // use the image settings' default
+    ChildrenDependencySettings::default().strategy
+}
+
+/// Get where prior filesystems are reconstructed by default
+fn default_filesystems_location() -> String {
+    // use the image settings' default
+    FileSystemDependencySettings::default().location
+}
+
+/// Get how reconstructed filesystems are passed by default
+fn default_filesystems_strategy() -> DependencyPassStrategy {
+    // use the image settings' default
+    FileSystemDependencySettings::default().strategy
+}
+
+/// The settings for the agent downloading prior results for a workload's jobs
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[cfg_attr(
+    any(feature = "api", feature = "client"),
+    derive(thorium_derive::DigestValue)
+)]
+#[cfg_attr(feature = "api", derive(utoipa::ToSchema))]
+#[serde(deny_unknown_fields)]
+pub struct ToolResultDependencySettings {
+    /// The tools whose results are downloaded (none downloads no results)
+    #[serde(default)]
+    pub tools: Vec<Uuid>,
+    /// Where the agent stores downloaded prior result files
+    #[serde(default = "default_results_location")]
+    pub location: String,
+    /// The kwarg to pass these files in with if one is set (otherwise use positional args)
+    #[serde(default)]
+    pub kwarg: KwargDependency,
+    /// The strategy the agent uses when passing downloaded results to jobs
+    #[serde(default)]
+    pub strategy: DependencyPassStrategy,
+    /// Any files to limit the download to
+    #[serde(default)]
+    pub names: Vec<String>,
+}
+
+impl Default for ToolResultDependencySettings {
+    /// Build the default prior result settings, which name no tools
+    fn default() -> Self {
+        // match the image settings' defaults
+        ToolResultDependencySettings {
+            tools: Vec::new(),
+            location: default_results_location(),
+            kwarg: KwargDependency::default(),
+            strategy: DependencyPassStrategy::default(),
+            names: Vec::new(),
+        }
+    }
+}
+
+/// The settings for the agent downloading children of prior tools for a workload's jobs
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[cfg_attr(
+    any(feature = "api", feature = "client"),
+    derive(thorium_derive::DigestValue)
+)]
+#[cfg_attr(feature = "api", derive(utoipa::ToSchema))]
+#[serde(deny_unknown_fields)]
+pub struct ToolChildrenDependencySettings {
+    /// Whether children dependencies are enabled
+    pub enabled: bool,
+    /// The tools whose children are downloaded (none downloads the children of every tool)
+    #[serde(default)]
+    pub tools: Vec<Uuid>,
+    /// Where the agent stores downloaded children
+    #[serde(default = "default_children_location")]
+    pub location: String,
+    /// The kwarg to pass these children in with if one is set (otherwise use positional args)
+    pub kwarg: Option<String>,
+    /// The strategy the agent uses when passing downloaded children to jobs
+    #[serde(default = "default_children_strategy")]
+    pub strategy: DependencyPassStrategy,
+}
+
+impl Default for ToolChildrenDependencySettings {
+    /// Build the default children settings, which are disabled and name no tools
+    fn default() -> Self {
+        // match the image settings' defaults
+        ToolChildrenDependencySettings {
+            enabled: false,
+            tools: Vec::new(),
+            location: default_children_location(),
+            kwarg: None,
+            strategy: default_children_strategy(),
+        }
+    }
+}
+
+/// The settings for the agent reconstructing filesystems of prior tools for a workload's jobs
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[cfg_attr(
+    any(feature = "api", feature = "client"),
+    derive(thorium_derive::DigestValue)
+)]
+#[cfg_attr(feature = "api", derive(utoipa::ToSchema))]
+#[serde(deny_unknown_fields)]
+pub struct ToolFileSystemDependencySettings {
+    /// Whether filesystem dependencies are enabled
+    pub enabled: bool,
+    /// The tools whose filesystems are reconstructed (none reconstructs every tool's)
+    #[serde(default)]
+    pub tools: Vec<Uuid>,
+    /// Where the agent reconstructs filesystems
+    #[serde(default = "default_filesystems_location")]
+    pub location: String,
+    /// The kwarg to pass these filesystems in with if one is set (otherwise use positional args)
+    pub kwarg: Option<String>,
+    /// The strategy the agent uses when passing reconstructed filesystems to jobs
+    #[serde(default = "default_filesystems_strategy")]
+    pub strategy: DependencyPassStrategy,
+}
+
+impl Default for ToolFileSystemDependencySettings {
+    /// Build the default filesystem settings, which are disabled and name no tools
+    fn default() -> Self {
+        // match the image settings' defaults
+        ToolFileSystemDependencySettings {
+            enabled: false,
+            tools: Vec::new(),
+            location: default_filesystems_location(),
+            kwarg: None,
+            strategy: default_filesystems_strategy(),
+        }
+    }
 }
 
 /// An image field set to a non-default value that a conversion to a workload spec drops, because
@@ -462,7 +743,9 @@ impl WorkloadSpec {
     /// are copied for every environment. Fields the environment never reads are dropped, and the
     /// non-default ones are listed in the result (`env` by variable name only). An image's runtime,
     /// bans, scaler, group, name, creator, description, version, and pipelines are never part of
-    /// a spec, so they aren't listed.
+    /// a spec, so they aren't listed. The dependency settings name tools by id and images by
+    /// name, so the spec's tool lists start empty; a migration fills them from its map of image
+    /// names to tool ids.
     ///
     /// # Arguments
     ///
@@ -508,7 +791,7 @@ impl WorkloadSpec {
         };
         // copy the job data settings
         let data = JobDataSettings {
-            dependencies: image.dependencies.clone(),
+            dependencies: ToolDependencies::from_image(&image.dependencies),
             output_collection: image.output_collection.clone(),
             child_filters: image.child_filters.clone(),
             display_type: image.display_type,
@@ -528,7 +811,7 @@ impl WorkloadSpec {
     ///
     /// The projection is never stored. Its scaler comes from the environment, and fields the
     /// environment doesn't hold are left at their defaults (no bans, creator, version, or
-    /// description).
+    /// description). Its dependency image lists are empty, since the spec names tools by id.
     ///
     /// # Arguments
     ///
@@ -591,7 +874,7 @@ impl WorkloadSpec {
             used_by: Vec::new(),
             collect_logs: self.execution.collect_logs,
             generator: self.execution.generator,
-            dependencies: self.data.dependencies.clone(),
+            dependencies: self.data.dependencies.project(),
             display_type: self.data.display_type,
             output_collection: self.data.output_collection.clone(),
             child_filters: self.data.child_filters.clone(),

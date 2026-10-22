@@ -399,13 +399,11 @@ impl K8s {
         let (k8s_base_policies, k8s_policies) =
             self.get_all_thorium_network_policies(cache).await?;
         // setup base network policies, making sure everything in K8's matches our cache
-        self.setup_base_network_policies(k8s_base_policies).await;
+        self.setup_base_network_policies(k8s_base_policies, cache)
+            .await;
         // calculate which policies we need to delete and add
         let mut policies_to_remove: HashMap<String, Vec<String>> = HashMap::new();
         let mut policies_to_add: HashMap<String, Vec<(Uuid, NetworkPolicy)>> = HashMap::new();
-        // create a cache of generated policy specs mapped by K8's name
-        // to avoid generating multiple times
-        let mut policy_specs_by_k8s_name: HashMap<String, NetworkPolicy> = HashMap::new();
         // see which K8's policies are in the cache and how they compare
         for (ns, k8s_policies) in k8s_policies {
             let network_policies = cache.network_policies.ids_by_group_k8s_name.get(&ns);
@@ -435,25 +433,16 @@ impl K8s {
                 if let Some(id) = cached_policy_ids_k8s_name.remove(k8s_policy_name) {
                     // now try to get the policy's info
                     if let Some(cached_policy) = cache.network_policies.policies_by_id.get(&id) {
-                        // generate a policy spec to compare to (and possibly to deploy) or get a cached one
-                        let (_, cached_policy_spec) = policy_specs_by_k8s_name
-                            .raw_entry_mut()
-                            .from_key(k8s_policy_name)
-                            .or_insert(
-                                k8s_policy_name.clone(),
-                                NetworkPolicies::generate(
-                                    cached_policy.clone(),
-                                    std::iter::once(ns.clone()),
-                                )
-                                .remove(0)
-                                .1,
-                            );
-                        if !network_policies::policies_equal(&k8s_policy, cached_policy_spec) {
+                        // generate this namespace's policy spec to compare to (and possibly to deploy)
+                        let (_, cached_policy_spec) = NetworkPolicies::generate(
+                            cached_policy,
+                            std::iter::once(ns.clone()),
+                            &cache.network_policies.tool_ids,
+                        )
+                        .remove(0);
+                        if !network_policies::policies_equal(&k8s_policy, &cached_policy_spec) {
                             // if the policies differ, we need to delete and re-add the policy to update it
                             raw_entry_vec_push!(policies_to_remove, &ns, k8s_policy_name.clone());
-                            // clone our cached policy and set the correct namespace
-                            let mut cached_policy_spec = cached_policy_spec.clone();
-                            cached_policy_spec.metadata.namespace = Some(ns.clone());
                             raw_entry_vec_push!(policies_to_add, &ns, (id, cached_policy_spec));
                         }
                     } else {
@@ -482,27 +471,30 @@ impl K8s {
                             // skip this policy
                             return None;
                         };
-                        // generate a policy spec to compare to (and possibly to deploy) or get a cached one
-                        let cached_policy_spec =
-                            policy_specs_by_k8s_name.entry(k8s_name).or_insert(
-                                NetworkPolicies::generate(
-                                    cached_policy.clone(),
-                                    std::iter::once(ns.clone()),
-                                )
-                                .remove(0)
-                                .1,
-                            );
-                        // clone our spec and add the right namespace
-                        let mut cached_policy_spec = cached_policy_spec.clone();
-                        cached_policy_spec.metadata.namespace = Some(ns.clone());
+                        // generate this namespace's policy spec to deploy
+                        let (_, cached_policy_spec) = NetworkPolicies::generate(
+                            cached_policy,
+                            std::iter::once(ns.clone()),
+                            &cache.network_policies.tool_ids,
+                        )
+                        .remove(0);
                         Some((id, cached_policy_spec))
                     });
             // add all those specs to the list to add
             raw_entry_vec_extend!(policies_to_add, &ns, policy_specs_to_add);
         }
-        // remove and add network policies
-        self.remove_network_policies(policies_to_remove).await;
-        self.add_network_policies(policies_to_add).await;
+        // remove and add network policies; a changed policy is replaced by deleting and
+        // re-creating it
+        let removed = self.remove_network_policies(policies_to_remove).await;
+        let added = self.add_network_policies(policies_to_add).await;
+        // remember the tool ids every policy is now rendered with, but only when every delete and
+        // add succeeded: when a replaced policy's delete fails its create conflicts with the old
+        // copy, and the retried delete would then leave the policy missing, so the next sync
+        // reconciles every policy again instead
+        if removed && added {
+            self.network_policies.cache.reconciled_tool_ids =
+                Some(cache.network_policies.tool_ids.clone());
+        }
         Ok(())
     }
 
@@ -510,25 +502,27 @@ impl K8s {
     ///
     /// # Arguments
     ///
+    /// * `k8s_base_policies` - The base network policies in K8s by namespace
     /// * `cache` - A cache of info from Thorium to use while setting things up
     #[instrument(name = "Scheduler<K8s>::setup_base_network_policies", skip_all)]
     async fn setup_base_network_policies(
         &mut self,
         k8s_base_policies: Vec<(String, Vec<NetworkPolicy>)>,
+        cache: &Cache,
     ) {
         // calculate which base policies we need to delete and add
         let mut delete_base_policies: HashMap<String, Vec<String>> = HashMap::new();
-        let mut add_base_policies: HashMap<String, Vec<&NetworkPolicy>> = HashMap::new();
-        // create a set of base policy names to keep track of which policies
-        // already exist in each namespace
-        let base_policies_set: HashSet<&String> = self
-            .network_policies
-            .cache
-            .base_policy_specs
-            .keys()
-            .collect();
+        let mut add_base_policies: HashMap<String, Vec<NetworkPolicy>> = HashMap::new();
         for (ns, k8s_base_policies) in k8s_base_policies {
-            let mut base_policies_set = base_policies_set.clone();
+            // generate this namespace's base policy specs by name; each name not yet seen in
+            // K8s is left in the map to be added
+            let mut base_policies_set: HashMap<String, NetworkPolicy> = self
+                .network_policies
+                .cache
+                .base_policy_specs(cache.tool_ids(&ns))
+                .into_iter()
+                .map(|spec| (spec.metadata.name.clone().unwrap_or_default(), spec))
+                .collect();
             for k8s_base_policy in k8s_base_policies {
                 let Some(k8s_policy_name) = k8s_base_policy.metadata.name.as_ref() else {
                     // log that there's a base policy in K8's that has no name;
@@ -539,16 +533,9 @@ impl K8s {
                     continue;
                 };
                 // try to remove this base policy from the set
-                if base_policies_set.remove(k8s_policy_name) {
-                    // get the cached base policy now that we know it exists in the cache
-                    let cached_base_policy = self
-                        .network_policies
-                        .cache
-                        .base_policy_specs
-                        .get(k8s_policy_name)
-                        .unwrap();
+                if let Some(cached_base_policy) = base_policies_set.remove(k8s_policy_name) {
                     // make sure the policies are the same
-                    if !network_policies::policies_equal(&k8s_base_policy, cached_base_policy) {
+                    if !network_policies::policies_equal(&k8s_base_policy, &cached_base_policy) {
                         // the policies are not the same so we need to delete and re-add the base policy
                         raw_entry_vec_push!(delete_base_policies, &ns, k8s_policy_name.clone());
                         raw_entry_vec_push!(add_base_policies, &ns, cached_base_policy);
@@ -560,14 +547,7 @@ impl K8s {
             }
             // now we're left with base policies that don't already exist in the namespace,
             // so add them all to our list to be added
-            let base_policies = base_policies_set.into_iter().map(|name| {
-                self.network_policies
-                    .cache
-                    .base_policy_specs
-                    .get(name)
-                    .unwrap()
-            });
-            raw_entry_vec_extend!(add_base_policies, &ns, base_policies);
+            raw_entry_vec_extend!(add_base_policies, &ns, base_policies_set.into_values());
         }
         // remove base policies
         for (ns, base_policies) in delete_base_policies {
@@ -597,7 +577,7 @@ impl K8s {
         }
         // add base policies
         for (ns, base_policies) in add_base_policies {
-            if self.deploy_base_policies(&ns, base_policies).await {
+            if self.deploy_base_policies(&ns, base_policies.iter()).await {
                 // mark that this namespace has the base policies deployed if successful
                 self.network_policies
                     .cache
@@ -639,8 +619,11 @@ impl K8s {
                 // generate the spec(s) for this policy
                 Some(add_policy) => {
                     // generate policy specs for all of the policy's groups
-                    let policy_specs =
-                        NetworkPolicies::generate(add_policy.clone(), add_policy.groups.clone());
+                    let policy_specs = NetworkPolicies::generate(
+                        add_policy,
+                        add_policy.groups.clone(),
+                        &cache.network_policies.tool_ids,
+                    );
                     // extend our map with those specs
                     policy_specs_by_ns.extend(
                         policy_specs
@@ -658,6 +641,15 @@ impl K8s {
             }
         }
         self.add_network_policies(policy_specs_by_ns).await;
+        // a policy's spec in a namespace selects the tools its tool-name entries resolve to there,
+        // so reconcile every policy with K8s when those tools changed since the last reconcile
+        if self
+            .network_policies
+            .cache
+            .tools_changed(&cache.network_policies.tool_ids)
+        {
+            self.setup_network_policies(cache).await?;
+        }
         Ok(())
     }
 
@@ -683,10 +675,12 @@ impl K8s {
             .collect::<Vec<&String>>();
         // add the base network policies to all groups that haven't had it added yet
         for ns in namespaces_missing_base_policies {
-            if self
-                .deploy_base_policies(ns, self.network_policies.cache.base_policy_specs.values())
-                .await
-            {
+            // generate this namespace's base policy specs
+            let base_policies = self
+                .network_policies
+                .cache
+                .base_policy_specs(cache.tool_ids(ns));
+            if self.deploy_base_policies(ns, base_policies.iter()).await {
                 // if the deployment was successful, add this namespace to our set of
                 // namespaces base policies have been deployed to
                 self.network_policies
@@ -768,11 +762,18 @@ impl K8s {
     /// from K8's; re-add any network policies that couldn't be removed
     /// to our cache to attempt to remove them next time
     ///
+    /// Returns whether every policy was removed or was already gone.
+    ///
     /// # Arguments
     ///
     /// * `policies_to_remove` - The names of policies to remove mapped by namespace
     #[instrument(name = "Scheduler<K8s>::remove_network_policies", skip_all)]
-    async fn remove_network_policies(&mut self, policies_to_remove: HashMap<String, Vec<String>>) {
+    async fn remove_network_policies(
+        &mut self,
+        policies_to_remove: HashMap<String, Vec<String>>,
+    ) -> bool {
+        // track whether every policy was removed
+        let mut all_removed = true;
         // create a map of policy names and their errors to keep track of
         // which policies failed to be deleted, mapped by namespace
         let mut errors: HashMap<String, Vec<(String, kube::Error)>> = HashMap::new();
@@ -791,6 +792,7 @@ impl K8s {
                                 "Failed to delete network policy '{policy_name}': {k8s_err}"
                             );
                             event!(Level::ERROR, msg = msg);
+                            all_removed = false;
                             // add the policy back to our list of policies to remove to try again next time
                             raw_entry_vec_push!(
                                 self.network_policies.cache.policies_to_remove,
@@ -804,6 +806,7 @@ impl K8s {
                         let msg =
                             format!("Failed to delete network policy '{policy_name}': {k8s_err}");
                         event!(Level::ERROR, msg = msg);
+                        all_removed = false;
                         // add the policy back to our list of policies to remove to try again next time
                         raw_entry_vec_push!(
                             self.network_policies.cache.policies_to_remove,
@@ -814,11 +817,14 @@ impl K8s {
                 }
             }
         }
+        all_removed
     }
 
     /// Attempt to add the given network policies (mapped by namespace)
     /// from K8's; re-add any network policies that couldn't be removed
     /// to our cache to attempt to add them next time
+    ///
+    /// Returns whether every policy was added or already existed.
     ///
     /// # Arguments
     ///
@@ -827,7 +833,7 @@ impl K8s {
     async fn add_network_policies(
         &mut self,
         policies_to_add: HashMap<String, Vec<(Uuid, NetworkPolicy)>>,
-    ) {
+    ) -> bool {
         // create a list of policy ids, names, and their errors
         // to keep track of which policies failed to be created
         let mut errors: Vec<(Uuid, String, kube::Error)> = Vec::new();
@@ -837,6 +843,8 @@ impl K8s {
                 .deploy(&ns, policies, &mut errors)
                 .await;
         }
+        // track whether every policy was added
+        let mut all_added = true;
         // handle any errors
         for (policy_id, policy_name, k8s_err) in errors {
             match &k8s_err {
@@ -847,6 +855,7 @@ impl K8s {
                         let msg =
                             format!("Failed to deploy network policy '{policy_name}': {k8s_err}");
                         event!(Level::ERROR, msg = msg);
+                        all_added = false;
                         // add the policy back to our list of policies to add to try again next time
                         self.network_policies.cache.policies_to_add.push(policy_id);
                     }
@@ -855,11 +864,13 @@ impl K8s {
                     // log the error
                     let msg = format!("Failed to deploy network policy '{policy_name}': {k8s_err}");
                     event!(Level::ERROR, msg = msg);
+                    all_added = false;
                     // add the policy back to our list of policies to add to try again next time
                     self.network_policies.cache.policies_to_add.push(policy_id);
                 }
             }
         }
+        all_added
     }
 
     /// Deploy an iterator of network policies to K8's at the given namespace
@@ -1164,7 +1175,7 @@ mod tests {
     /// * `name` - The unique name of the worker
     fn scaled_down(namespace: &str, name: &str) -> Spawned {
         Spawned {
-            req: thorium::models::Requisition::new("user", namespace, "pipeline", "stage"),
+            req: thorium::models::Requisition::new("user", namespace, uuid::Uuid::nil(), None),
             cluster: "cluster".to_owned(),
             node: "node".to_owned(),
             name: name.to_owned(),
@@ -1173,6 +1184,7 @@ mod tests {
             spawn: false,
             scaled_down: true,
             down_scalable: chrono::Utc::now(),
+            run_env: None,
         }
     }
 
@@ -1208,5 +1220,217 @@ mod tests {
         // get the namespaces we will validate
         let to_validate = namespaces_to_validate(&downscales, &HashMap::default());
         assert!(to_validate.contains("a"));
+    }
+
+    /// The network policies an in-process fake of the kube API holds, by namespace and name
+    type FakePolicies =
+        std::sync::Arc<std::sync::Mutex<BTreeMap<(String, String), serde_json::Value>>>;
+
+    /// Build a kube status body for an error
+    ///
+    /// # Arguments
+    ///
+    /// * `code` - The HTTP status code
+    /// * `reason` - The kube reason
+    fn kube_status(code: u16, reason: &str) -> serde_json::Value {
+        serde_json::json!({
+            "kind": "Status",
+            "apiVersion": "v1",
+            "metadata": {},
+            "status": "Failure",
+            "message": reason,
+            "reason": reason,
+            "code": code,
+        })
+    }
+
+    /// Build a kube client whose network policy requests an in-process fake answers
+    ///
+    /// The fake lists, creates (conflicting on a name it holds), and deletes network policies,
+    /// and fails every delete with a `500` while `fail_deletes` is set.
+    ///
+    /// # Arguments
+    ///
+    /// * `policies` - The policies the fake holds
+    /// * `fail_deletes` - Whether deletes fail
+    fn fake_kube(
+        policies: &FakePolicies,
+        fail_deletes: &std::sync::Arc<std::sync::atomic::AtomicBool>,
+    ) -> kube::Client {
+        // answer each request from the held policies
+        let policies = policies.clone();
+        let fail_deletes = fail_deletes.clone();
+        let service = tower::service_fn(move |request: http::Request<kube::client::Body>| {
+            // give each request its own handle on the fake
+            let policies = policies.clone();
+            let fail_deletes = fail_deletes.clone();
+            async move {
+                // split the path into the namespace and the policy name, if any
+                let method = request.method().to_string();
+                let path = request.uri().path().to_owned();
+                let raw = request.into_body().collect_bytes().await?;
+                let rest = path
+                    .strip_prefix("/apis/networking.k8s.io/v1/namespaces/")
+                    .unwrap_or_default();
+                let mut parts = rest.split('/');
+                let ns = parts.next().unwrap_or_default().to_owned();
+                let name = parts.nth(1).map(ToOwned::to_owned);
+                // answer the network policy routes the scheduler calls
+                let (status, body) = {
+                    let mut held = policies.lock().unwrap();
+                    match (method.as_str(), name) {
+                        ("GET", None) => {
+                            let items = held
+                                .iter()
+                                .filter(|((held_ns, _), _)| *held_ns == ns)
+                                .map(|(_, policy)| policy.clone())
+                                .collect::<Vec<_>>();
+                            let list = serde_json::json!({
+                                "apiVersion": "networking.k8s.io/v1",
+                                "kind": "NetworkPolicyList",
+                                "metadata": {},
+                                "items": items,
+                            });
+                            (200, list)
+                        }
+                        ("POST", None) => {
+                            let mut policy: serde_json::Value = serde_json::from_slice(&raw)?;
+                            let name = policy["metadata"]["name"].as_str().unwrap().to_owned();
+                            if held.contains_key(&(ns.clone(), name.clone())) {
+                                (409, kube_status(409, "AlreadyExists"))
+                            } else {
+                                policy["metadata"]["namespace"] = serde_json::json!(ns);
+                                held.insert((ns, name), policy.clone());
+                                (201, policy)
+                            }
+                        }
+                        ("DELETE", Some(name)) => {
+                            if fail_deletes.load(std::sync::atomic::Ordering::SeqCst) {
+                                (500, kube_status(500, "InternalError"))
+                            } else {
+                                match held.remove(&(ns, name)) {
+                                    Some(policy) => (200, policy),
+                                    None => (404, kube_status(404, "NotFound")),
+                                }
+                            }
+                        }
+                        _ => (404, kube_status(404, "NotFound")),
+                    }
+                };
+                let response = http::Response::builder()
+                    .status(status)
+                    .header("content-type", "application/json")
+                    .body(kube::client::Body::from(serde_json::to_vec(&body)?))?;
+                Ok::<_, Box<dyn std::error::Error + Send + Sync>>(response)
+            }
+        });
+        kube::Client::new(service, "default")
+    }
+
+    /// Build a K8s scheduler whose client talks to a fake kube API, without base network policies
+    ///
+    /// # Arguments
+    ///
+    /// * `client` - The fake's kube client
+    /// * `conf` - The config to use
+    fn fake_scheduler(client: &kube::Client, conf: &Conf) -> K8s {
+        // build every wrapper on the fake's client
+        K8s {
+            name: "cluster0".to_owned(),
+            cluster: Cluster::new(client, conf, "cluster0", "ctx"),
+            pods: Pods::new(client, conf, "cluster0", "ctx"),
+            nodes: Nodes::new(client, conf, "cluster0", "ctx"),
+            services: Services::new(client),
+            namespaces: Namespaces::new(client),
+            secrets: Secrets::new(client, conf, "ctx"),
+            network_policies: NetworkPolicies::new(client, conf).unwrap(),
+            configs: ConfigMaps::new(client),
+            setup_concurrency: 1,
+        }
+    }
+
+    /// Get the tool ids a held policy's ingress peers select
+    ///
+    /// # Arguments
+    ///
+    /// * `policy` - The held policy's JSON
+    fn held_tools(policy: &serde_json::Value) -> Vec<String> {
+        // collect the tool label of every ingress peer
+        policy["spec"]["ingress"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .flat_map(|rule| rule["from"].as_array().cloned().unwrap_or_default())
+            .filter_map(|peer| {
+                peer["podSelector"]["matchLabels"][thorium::models::TOOL_LABEL]
+                    .as_str()
+                    .map(ToOwned::to_owned)
+            })
+            .collect()
+    }
+
+    /// A policy whose replacement's delete fails isn't recorded as reconciled, so after the
+    /// retried delete the next sync re-creates it with the current tool ids instead of leaving
+    /// the namespace without it
+    #[tokio::test]
+    async fn failed_policy_replace_is_reconciled_again() {
+        // a policy in one group whose ingress names a tool another tool now holds the name of
+        let api =
+            crate::libs::test_api::MockApi::start(crate::libs::test_api::World::default()).await;
+        let mut conf = Conf::new("../api/tests/thorium-testing.yml").unwrap();
+        conf.thorium.base_network_policies.clear();
+        let group = crate::libs::test_api::GROUP;
+        let policy: thorium::models::NetworkPolicy = serde_json::from_value(serde_json::json!({
+            "name": "fenced",
+            "id": Uuid::new_v4(),
+            "k8s_name": "fenced-1234",
+            "groups": [group],
+            "created": Utc::now(),
+            "forced_policy": false,
+            "default_policy": false,
+            "used_by": {},
+            "ingress": [{"id": Uuid::new_v4(), "allowed_tools": ["ghidra-cli"]}],
+        }))
+        .unwrap();
+        let (old_tool, new_tool) = (Uuid::new_v4(), Uuid::new_v4());
+        let ids = |tool: Uuid| -> crate::libs::cache::ToolIdsByGroup {
+            let tools: thorium::models::ToolIdsByName =
+                [("ghidra-cli".to_owned(), [tool].into_iter().collect())]
+                    .into_iter()
+                    .collect();
+            [(group.to_owned(), tools)].into_iter().collect()
+        };
+        let mut cache =
+            crate::libs::test_api::cache(&api, conf.clone(), ImageScaler::K8s, &[]).await;
+        cache.network_policies.insert(policy.clone());
+        cache.network_policies.tool_ids = ids(new_tool);
+        // K8s holds the policy as rendered for the tool that held the name before
+        let held: FakePolicies = std::sync::Arc::default();
+        let (_, stale) = NetworkPolicies::generate(&policy, [group], &ids(old_tool)).remove(0);
+        held.lock().unwrap().insert(
+            (group.to_owned(), "fenced-1234".to_owned()),
+            serde_json::to_value(&stale).unwrap(),
+        );
+        let fail_deletes = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true));
+        let client = fake_kube(&held, &fail_deletes);
+        let mut k8s = fake_scheduler(&client, &conf);
+        // the replace's delete fails, its create conflicts with the old copy, and the sync isn't
+        // recorded as reconciled
+        k8s.setup_network_policies(&cache).await.unwrap();
+        assert!(k8s.network_policies.cache.tools_changed(&ids(new_tool)));
+        assert_eq!(
+            held_tools(&held.lock().unwrap()[&(group.to_owned(), "fenced-1234".to_owned())]),
+            [old_tool.to_string()]
+        );
+        // once deletes work, the next sync retries the delete and re-creates the policy for the
+        // tool holding the name now
+        fail_deletes.store(false, std::sync::atomic::Ordering::SeqCst);
+        k8s.sync_network_policies(&cache).await.unwrap();
+        let held_now = held.lock().unwrap().clone();
+        let Some(policy) = held_now.get(&(group.to_owned(), "fenced-1234".to_owned())) else {
+            panic!("the replaced policy is missing from K8s");
+        };
+        assert_eq!(held_tools(policy), [new_tool.to_string()]);
+        assert!(!k8s.network_policies.cache.tools_changed(&ids(new_tool)));
     }
 }

@@ -133,6 +133,104 @@ fn harness_spec() -> HarnessSpec {
     }
 }
 
+/// A container tool's outputs land in its function's default directory unless a path is set,
+/// and the result size a model gets is the smaller non-zero of the backing's and harness's limits
+#[test]
+fn output_delivery_resolves_path_and_size() {
+    // an unset path delivers under the function's default directory
+    let delivery = ToolOutputDelivery::default();
+    assert_eq!(
+        delivery.resolved_path("run_ghidra"),
+        "/tmp/thorium/tool-results/run_ghidra"
+    );
+    // a set path is used as is
+    let custom = ToolOutputDelivery {
+        path: Some("/work/ghidra".to_owned()),
+        max_result_bytes: 0,
+    };
+    assert_eq!(custom.resolved_path("run_ghidra"), "/work/ghidra");
+    // the effective size for (backing, harness) limits, where 0 is unlimited
+    for (backing, harness, expected) in [(0, 0, 0), (100, 0, 100), (0, 50, 50), (100, 50, 50)] {
+        let delivery = ToolOutputDelivery {
+            path: None,
+            max_result_bytes: backing,
+        };
+        assert_eq!(
+            delivery.effective_max_result_bytes(harness),
+            expected,
+            "({backing}, {harness})"
+        );
+    }
+}
+
+/// A tool call input maps each mapped property onto a positional, a kwarg, or a switch and
+/// reads its files from the samples property; unmapped properties are left out
+#[test]
+fn input_mapping_maps_input() {
+    // map a target, depths, a verbose flag, a quiet flag, and files
+    let mapping = ToolInputMapping {
+        args: BTreeMap::from([
+            ("target".to_owned(), ArgTarget::Positional),
+            ("extra".to_owned(), ArgTarget::Positional),
+            ("depth".to_owned(), ArgTarget::Kwarg("--depth".to_owned())),
+            (
+                "verbose".to_owned(),
+                ArgTarget::Switch("--verbose".to_owned()),
+            ),
+            ("quiet".to_owned(), ArgTarget::Switch("--quiet".to_owned())),
+        ]),
+        samples: Some("files".to_owned()),
+    };
+    let input = json!({
+        "target": "main",
+        "extra": ["a", 2],
+        "depth": [1, 2],
+        "verbose": true,
+        "quiet": false,
+        "files": ["abc", "def"],
+        "unmapped": "ignored",
+    });
+    let mapped = mapping.map_input(input.as_object().unwrap()).unwrap();
+    // positionals follow the property names in order, arrays append each value
+    assert_eq!(mapped.args.positionals, vec!["a", "2", "main"]);
+    assert_eq!(
+        mapped.args.kwargs,
+        BTreeMap::from([("--depth".to_owned(), vec!["1".to_owned(), "2".to_owned()])])
+    );
+    // only true switches are passed
+    assert_eq!(mapped.args.switches, vec!["--verbose"]);
+    assert_eq!(
+        mapped.samples,
+        Some(vec!["abc".to_owned(), "def".to_owned()])
+    );
+    // missing and null properties map to nothing, and missing files leave the samples unset
+    let sparse = json!({"target": null});
+    let mapped = mapping.map_input(sparse.as_object().unwrap()).unwrap();
+    assert_eq!(mapped, super::MappedToolInput::default());
+    // a scalar kwarg is one value
+    let scalar = json!({"depth": "3"});
+    let mapped = mapping.map_input(scalar.as_object().unwrap()).unwrap();
+    assert_eq!(mapped.args.kwargs["--depth"], vec!["3"]);
+    // a switch that isn't a boolean is refused naming its property
+    let bad_switch = json!({"verbose": "yes"});
+    let error = mapping
+        .map_input(bad_switch.as_object().unwrap())
+        .unwrap_err();
+    assert!(error.contains("verbose"), "{error}");
+    // files that aren't a list of strings are refused naming the property
+    for files in [json!("abc"), json!([1, 2])] {
+        let bad_files = json!({ "files": files });
+        let error = mapping
+            .map_input(bad_files.as_object().unwrap())
+            .unwrap_err();
+        assert!(error.contains("files"), "{error}");
+    }
+    // an object value is passed as its JSON text
+    let object = json!({"target": {"a": 1}});
+    let mapped = mapping.map_input(object.as_object().unwrap()).unwrap();
+    assert_eq!(mapped.args.positionals, vec!["{\"a\":1}"]);
+}
+
 /// The harness file layout defaults to the standard Thorium paths, and overriding one path
 /// leaves the others at their defaults
 #[test]

@@ -8,7 +8,7 @@ use thorium::models::{ImageScaler, Node, Worker, WorkerDeleteMap};
 use tokio::process::Command;
 use tracing::{Level, event, instrument};
 
-use super::Launcher;
+use super::{Launcher, WorkloadSource};
 use crate::Error;
 use crate::libs::keys;
 
@@ -63,16 +63,14 @@ impl Windows {
 /// # Arguments
 ///
 /// * `thorium` - A Thorium client
-/// * `group` - The group this image is in
-/// * `name` - The name of the image to get info on
+/// * `worker` - The worker whose tool instance's image to get info on
 #[instrument(name = "windows::get_image_info", skip_all, err(Debug))]
 async fn get_image_info(
     thorium: &Thorium,
-    group: &str,
-    name: &str,
+    worker: &Worker,
 ) -> Result<(String, String, String), Error> {
-    // get this images info
-    let image = thorium.images.get(group, name).await?;
+    // get the image the worker's tool instance runs
+    let image = thorium.workload_image(worker, ImageScaler::Windows).await?;
     // get our images url
     let image_tag = match image.image {
         Some(image) => image,
@@ -189,8 +187,7 @@ impl Launcher for Windows {
             name = worker.name,
             user = worker.user,
             group = worker.group,
-            pipeline = worker.pipeline,
-            stage = worker.stage
+            tool_instance = %worker.tool_instance
         ),
         err(Debug)
     )]
@@ -200,12 +197,13 @@ impl Launcher for Windows {
         worker: Worker,
     ) -> Result<(Worker, Self::LaunchedWorkerData), Error> {
         // get our images info
-        let (image_tag, entrypoint, cmd) =
-            get_image_info(thorium, &worker.group, &worker.stage).await?;
+        let (image_tag, entrypoint, cmd) = get_image_info(thorium, &worker).await?;
+        // get the tool instance this worker runs as a string
+        let tool_instance = worker.tool_instance.to_string();
         // build this containers name
         let name = format!("thorium-{}", worker.name);
         // get the path to this workers keys
-        let keys_path = keys::path(&worker.user);
+        let keys_path = keys::for_worker(&worker);
         // break this path down into its parent and the full path to our key
         let (keys_mount, keys_path_str) = cast_paths(&keys_path)?;
         // build the docker run args
@@ -231,10 +229,8 @@ impl Launcher for Windows {
             "C:\\Thorium\\tracing.yml",
             "--group",
             &worker.group,
-            "--pipeline",
-            &worker.pipeline,
-            "--stage",
-            &worker.stage,
+            "--tool-instance",
+            &tool_instance,
             "--name",
             &worker.name,
             "windows",

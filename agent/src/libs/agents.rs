@@ -4,7 +4,7 @@ use crossbeam::channel::{Receiver, Sender};
 use std::collections::HashMap;
 #[cfg(target_os = "linux")]
 use std::os::unix::process::ExitStatusExt;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use thorium::models::{GenericJob, Image, StageLogsAdd};
 use thorium::{Error, Thorium};
 use tokio::fs::{File, OpenOptions};
@@ -24,7 +24,7 @@ pub use k8s::K8s;
 use crate::args::Envs;
 use crate::libs::cache;
 use crate::libs::children::Children;
-use crate::libs::{Target, results, tags};
+use crate::libs::{Target, Workload, results, tags, tool_runs};
 use crate::{Worker, from_now, log_string};
 
 use super::results::RawResults;
@@ -130,6 +130,14 @@ impl InFlight {
     }
 }
 
+/// Builds the executor that runs a job in this worker's environment
+///
+/// # Arguments
+///
+/// * `worker` - The worker this job was claimed by
+/// * `target` - The target this job is executing
+/// * `job` - The job to build an executor for
+/// * `sender` - The channel to send job logs over
 fn get_executor(
     worker: &Worker,
     target: &Target,
@@ -138,7 +146,12 @@ fn get_executor(
 ) -> Result<Box<dyn AgentExecutor + Send + Sync>, Error> {
     // instance the correct agent
     match &worker.args.env {
-        Envs::K8s(args) => Ok(Box::new(K8s::new(args, target, sender.clone())?)),
+        Envs::K8s(args) => Ok(Box::new(K8s::new(
+            args,
+            target,
+            sender.clone(),
+            worker.run_env.clone(),
+        )?)),
         Envs::BareMetal(_) => Ok(Box::new(BareMetal::new(target, job, sender.clone())?)),
         // we can use the k8s executor for containers on window
         Envs::Windows(args) => Ok(Box::new(K8s::from_windows(args, target, sender.clone())?)),
@@ -147,8 +160,7 @@ fn get_executor(
     }
 }
 
-/// The state an agent keeps while it runs one job: its Thorium client, the worker that claimed the
-/// job, the job and its image, the executor, and the logs it ships to Thorium
+/// Executes one claimed job and reports its results back to Thorium
 pub struct Agent {
     /// A client to Thorium
     pub thorium: Thorium,
@@ -156,6 +168,8 @@ pub struct Agent {
     pub worker: String,
     /// The image we are executing a job for
     pub image: Image,
+    /// The tool instance this job runs
+    pub workload: Workload,
     /// The Job this agent is executing
     pub job: GenericJob,
     /// The stage logs to send to Thorium
@@ -172,6 +186,8 @@ pub struct Agent {
     pub runtime: Option<u64>,
     /// A map of repos to their checked out commits
     commits: HashMap<String, String>,
+    /// Where the CLI wrapper records the tool runs a harness starts
+    pub tool_runs: PathBuf,
 }
 
 impl Agent {
@@ -191,6 +207,7 @@ impl Agent {
             thorium: worker.thorium.clone(),
             worker: target.name.clone(),
             image: target.image.clone(),
+            workload: target.workload.clone(),
             job,
             stage_logs: StageLogsAdd::default(),
             receiver,
@@ -199,6 +216,7 @@ impl Agent {
             completed: false,
             runtime: None,
             commits: HashMap::default(),
+            tool_runs: PathBuf::from(tool_runs::DEFAULT_TOOL_RUNS),
         };
         Ok(agent)
     }
@@ -549,8 +567,8 @@ async fn create_log_file<P: AsRef<Path>>(log_path: P) -> Result<File, Error> {
 /// # Arguments
 ///
 /// * `agent` - The agent that is executing this job
+/// * `reader` - A reader over the file this job's logs are written to
 /// * `log_path` - Where to write log files too
-/// * `span` - The span to log traces under
 #[instrument(name = "agents::sub_execute", skip(agent, reader), err(Debug))]
 pub async fn sub_execute(
     agent: &mut Agent,
@@ -562,6 +580,10 @@ pub async fn sub_execute(
         .executor
         .setup(&agent.image, &agent.job, &mut agent.commits)
         .await?;
+    // a harness starts with no tool runs recorded from an earlier job
+    if agent.workload.harness.is_some() && agent.tool_runs.exists() {
+        tokio::fs::remove_file(&agent.tool_runs).await?;
+    }
     // start executing this job
     let in_flight = agent
         .executor
@@ -573,12 +595,33 @@ pub async fn sub_execute(
     let status = agent.monitor(in_flight, reader).await?;
     // send any remaining logs from our log file
     agent.send_file_logs(reader).await?;
+    // handle the tool runs a harness left behind before its job proceeds or errors
+    if let Some(harness) = &agent.workload.harness {
+        tool_runs::clean_up(
+            &agent.thorium,
+            &agent.job,
+            harness.orphaned_runs,
+            &agent.tool_runs,
+            &mut agent.sender,
+        )
+        .await?;
+        agent.send_channel_logs().await?;
+    }
     // if this job finished successfully then look for results
     let code = match status {
         // this job successfuly completed its job
         JobStatus::Finished(code) => {
             // collect any results from this job
-            let raw_results = agent.executor.results(&agent.image).await?;
+            let mut raw_results = agent.executor.results(&agent.image).await?;
+            // a harness's conversation, traces, and status are always uploaded as result files
+            if let Some(harness) = &agent.workload.harness {
+                raw_results
+                    .add_files(
+                        &results::harness_files(&harness.interface.outputs),
+                        &mut agent.sender,
+                    )
+                    .await?;
+            }
             // collect any tags from our results or disk
             let tag_bundle = agent
                 .executor
@@ -586,12 +629,15 @@ pub async fn sub_execute(
                 .await?;
             // send any logs in our logs channel
             agent.send_channel_logs().await?;
-            // submit our results and tags
+            // get the tool name and version to store our results under
+            let tool =
+                results::ResultTool::for_job(&agent.thorium, &agent.workload, &agent.job).await?;
+            // submit our results on every input sample and repo
             let results = results::submit(
                 &agent.thorium,
                 &raw_results,
                 &agent.job,
-                &agent.image,
+                &tool,
                 &mut agent.sender,
             )
             .await?;
@@ -715,8 +761,9 @@ mod tests {
     use super::cmd::tests::{generate_image, generate_job};
     use super::{Agent, AgentExecutor, InFlight};
     use crate::libs::children::Children;
-    use crate::libs::results::RawResults;
+    use crate::libs::results::{RawResults, ResultTarget};
     use crate::libs::tags::TagBundle;
+    use crate::libs::test_server::{self, MockThorium};
 
     /// The request lines a recording mock server has received
     type Recorded = Arc<Mutex<Vec<String>>>;
@@ -888,6 +935,7 @@ mod tests {
             thorium,
             worker: worker.to_owned(),
             image: generate_image(),
+            workload: test_server::workload(None),
             job: generate_job(),
             stage_logs: StageLogsAdd::default(),
             receiver,
@@ -896,6 +944,7 @@ mod tests {
             completed: false,
             runtime: None,
             commits: HashMap::default(),
+            tool_runs: test_server::scratch().join("tool-runs.jsonl"),
         }
     }
 
@@ -945,5 +994,392 @@ mod tests {
             ),
         ];
         assert_eq!(handles, expected.iter().collect::<Vec<_>>());
+    }
+
+    /// An executor that runs a shell script as the job and collects a fixed result
+    struct ScriptExecutor {
+        /// The shell script the job runs
+        script: String,
+        /// Whether results were collected
+        collected: Arc<std::sync::atomic::AtomicBool>,
+    }
+
+    #[async_trait::async_trait]
+    impl AgentExecutor for ScriptExecutor {
+        /// Never called by these tests
+        ///
+        /// # Arguments
+        ///
+        /// * `_` - The image (unused)
+        fn result_paths(&self, _: &Image) -> (String, String) {
+            unimplemented!()
+        }
+        /// Nothing to initialize
+        async fn init(&self) -> Result<(), Error> {
+            Ok(())
+        }
+        /// Nothing to set up
+        ///
+        /// # Arguments
+        ///
+        /// * `_` - The image (unused)
+        /// * `_` - The job (unused)
+        /// * `_` - The commit each repo is checked out to (unused)
+        async fn setup(
+            &mut self,
+            _: &Image,
+            _: &GenericJob,
+            _: &mut HashMap<String, String>,
+        ) -> Result<(), Error> {
+            Ok(())
+        }
+        /// Run the script with its output going to the job's log file
+        ///
+        /// # Arguments
+        ///
+        /// * `_` - The image (unused)
+        /// * `_` - The job (unused)
+        /// * `log_path` - The job's log file, which the script's stdout and stderr are appended to
+        async fn execute(
+            &mut self,
+            _: &Image,
+            _: &GenericJob,
+            log_path: &str,
+        ) -> Result<InFlight, Error> {
+            // send the script's stdout and stderr to the log file
+            let log = std::fs::OpenOptions::new().append(true).open(log_path)?;
+            let child = tokio::process::Command::new("sh")
+                .args(["-c", &self.script])
+                .stdout(log.try_clone()?)
+                .stderr(log)
+                .spawn()?;
+            Ok(InFlight::Child(child))
+        }
+        /// Nothing to sync
+        ///
+        /// # Arguments
+        ///
+        /// * `_` - The image (unused)
+        /// * `_` - The job (unused)
+        async fn sync_cache(&mut self, _: &Image, _: &GenericJob) -> Result<(), Error> {
+            Ok(())
+        }
+        /// Collect a small json result
+        ///
+        /// # Arguments
+        ///
+        /// * `_` - The image (unused)
+        async fn results(&mut self, _: &Image) -> Result<RawResults, Error> {
+            // track that results were collected
+            self.collected
+                .store(true, std::sync::atomic::Ordering::SeqCst);
+            Ok(RawResults {
+                scan: false,
+                results: ResultTarget::Db(r#"{"answer":42}"#.to_owned()),
+                files: Vec::new(),
+                entities: HashMap::default(),
+                display_type: thorium::models::OutputDisplayType::Json,
+            })
+        }
+        /// No tags
+        ///
+        /// # Arguments
+        ///
+        /// * `_` - The image (unused)
+        /// * `_` - The job (unused)
+        /// * `_` - The results to extract tags from (unused)
+        async fn tags(
+            &mut self,
+            _: &Image,
+            _: &GenericJob,
+            _: &RawResults,
+        ) -> Result<TagBundle, Error> {
+            Ok(TagBundle::default())
+        }
+        /// No children
+        ///
+        /// # Arguments
+        ///
+        /// * `_` - The image (unused)
+        async fn children(&mut self, _: &Image) -> Result<Children, Error> {
+            Ok(Children::new("/nonexistent"))
+        }
+        /// Nothing to clean up
+        ///
+        /// # Arguments
+        ///
+        /// * `_` - The image (unused)
+        /// * `_` - The job (unused)
+        async fn clean_up(&mut self, _: &Image, _: &GenericJob) -> Result<(), Error> {
+            Ok(())
+        }
+    }
+
+    /// Run a harness job of a workflow run to its end against a mock API
+    ///
+    /// Returns the mock API, whether results were collected, and the job.
+    ///
+    /// # Arguments
+    ///
+    /// * `script` - The shell script the harness runs
+    /// * `status` - Where the harness writes its status file
+    async fn run_harness_job(
+        script: &'static str,
+        status: &std::path::Path,
+    ) -> (MockThorium, bool, GenericJob) {
+        // a mock API serving the job's workflow run reaction and creating results
+        let job = generate_job();
+        let run = thorium::models::ReactionWorkflowRun {
+            workflow_instance: uuid::Uuid::new_v4(),
+            digest: "sha256:abc".to_owned(),
+            agent: uuid::Uuid::new_v4(),
+            harness: uuid::Uuid::new_v4(),
+            result_key: "triage#r1".to_owned(),
+            models: Vec::new(),
+            provenance: thorium::models::RunProvenance::default(),
+        };
+        let reaction = serde_json::json!({
+            "id": job.reaction, "group": job.group, "creator": job.creator,
+            "pipeline": job.pipeline, "status": "Started", "current_stage": 0,
+            "current_stage_progress": 0, "current_stage_length": 1, "args": {},
+            "sla": chrono::Utc::now(), "jobs": [job.id], "tags": [], "parent": null,
+            "sub_reactions": 0, "completed_sub_reactions": 0, "generators": [],
+            "samples": job.samples, "ephemeral": [], "parent_ephemeral": {}, "repos": job.repos,
+            "trigger_depth": null, "has_cache": false,
+            "source": thorium::models::ReactionSource::WorkflowRun(run),
+            "plan": thorium::models::ReactionPlan::default(),
+        })
+        .to_string();
+        let reaction_path = format!("GET /api/reactions/{}/{} ", job.group, job.reaction);
+        let mock = MockThorium::start(move |line| {
+            if line.starts_with(&reaction_path) {
+                (200, reaction.clone())
+            } else if line.contains("/results/") {
+                (200, format!(r#"{{"id":"{}"}}"#, uuid::Uuid::new_v4()))
+            } else {
+                (200, "{}".to_owned())
+            }
+        })
+        .await;
+        // an agent running a harness that writes its status to the given path
+        let mut agent = agent(&mock.host, "worker0").await;
+        agent.job = job.clone();
+        agent.workload = test_server::workload(Some(thorium::models::HarnessOutputs {
+            status: status.to_string_lossy().into_owned(),
+            ..thorium::models::HarnessOutputs::default()
+        }));
+        let collected = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        agent.executor = Box::new(ScriptExecutor {
+            script: script.to_owned(),
+            collected: collected.clone(),
+        });
+        // run the job with a fresh log file
+        let log_path = std::env::temp_dir()
+            .join(format!("{}-thorium.log", job.id))
+            .to_string_lossy()
+            .into_owned();
+        let file = super::create_log_file(&log_path).await.unwrap();
+        let mut reader = BufReader::new(file);
+        super::sub_execute(&mut agent, &mut reader, &log_path)
+            .await
+            .unwrap();
+        tokio::fs::remove_file(&log_path).await.unwrap();
+        let collected = collected.load(std::sync::atomic::Ordering::SeqCst);
+        (mock, collected, job)
+    }
+
+    /// Run a harness job that leaves one uncollected tool run behind, through to its proceed or
+    /// error, against a mock API
+    ///
+    /// Returns the mock API, the job, and the orphaned tool run.
+    ///
+    /// # Arguments
+    ///
+    /// * `exit` - The code the harness exits with
+    async fn run_harness_with_orphan(exit: i32) -> (MockThorium, GenericJob, uuid::Uuid) {
+        // a workflow run whose harness started one tool run that is still running
+        let job = generate_job();
+        let orphan = uuid::Uuid::new_v4();
+        let run = thorium::models::ReactionWorkflowRun {
+            workflow_instance: uuid::Uuid::new_v4(),
+            digest: "sha256:abc".to_owned(),
+            agent: uuid::Uuid::new_v4(),
+            harness: uuid::Uuid::new_v4(),
+            result_key: "triage#r1".to_owned(),
+            models: Vec::new(),
+            provenance: thorium::models::RunProvenance::default(),
+        };
+        let mut reaction =
+            test_server::reaction(job.reaction, thorium::models::ReactionStatus::Started, None);
+        reaction.group.clone_from(&job.group);
+        reaction.samples.clone_from(&job.samples);
+        reaction.repos.clone_from(&job.repos);
+        reaction.source = thorium::models::ReactionSource::WorkflowRun(run);
+        let reaction_json = serde_json::to_string(&reaction).unwrap();
+        let mut sub = test_server::reaction(
+            orphan,
+            thorium::models::ReactionStatus::Started,
+            Some(job.reaction),
+        );
+        sub.group.clone_from(&job.group);
+        let listing = serde_json::json!({"cursor": null, "details": [sub]}).to_string();
+        let reaction_path = format!("GET /api/reactions/{}/{} ", job.group, job.reaction);
+        let sub_path = format!(
+            "GET /api/reactions/sub/{}/{}/details/",
+            job.group, job.reaction
+        );
+        let mock = MockThorium::start(move |line| {
+            if line.starts_with(&reaction_path) {
+                (200, reaction_json.clone())
+            } else if line.starts_with(&sub_path) {
+                (200, listing.clone())
+            } else if line.contains("/fail ") {
+                (202, r#"{"status":"Failed"}"#.to_owned())
+            } else if line.starts_with("DELETE /api/reactions/") {
+                (204, String::new())
+            } else if line.contains("/results/") {
+                (200, format!(r#"{{"id":"{}"}}"#, uuid::Uuid::new_v4()))
+            } else if line.starts_with("POST /api/jobs/handle/") {
+                (200, r#"{"status":"Completed"}"#.to_owned())
+            } else {
+                (200, "{}".to_owned())
+            }
+        })
+        .await;
+        // a harness that records the tool run the way the CLI wrapper does, then exits
+        let mut agent = agent(&mock.host, "worker0").await;
+        agent.job = job.clone();
+        let dir = test_server::scratch();
+        let status = dir.join("status.json");
+        std::fs::write(&status, r#"{"turns":1}"#).unwrap();
+        agent.workload = test_server::workload(Some(thorium::models::HarnessOutputs {
+            status: status.to_string_lossy().into_owned(),
+            ..thorium::models::HarnessOutputs::default()
+        }));
+        agent.tool_runs = dir.join("tool-runs.jsonl");
+        let line = serde_json::json!({
+            "reaction": orphan, "group": job.group, "started": chrono::Utc::now(),
+        });
+        let script = format!(
+            "printf '%s\\n' '{line}' >> {}; echo harness exits {exit} >&2; exit {exit}",
+            agent.tool_runs.display()
+        );
+        agent.executor = Box::new(ScriptExecutor {
+            script,
+            collected: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        });
+        // run the job through to its proceed or error
+        let log_path = dir.join("job.log").to_string_lossy().into_owned();
+        Box::pin(super::execute(agent, log_path)).await;
+        std::fs::remove_dir_all(&dir).unwrap();
+        (mock, job, orphan)
+    }
+
+    /// A harness's uncollected tool run is failed, then deleted, before the harness job errors or
+    /// proceeds; a failed harness uploads no results and a successful one uploads them, and its
+    /// output reaches the stage logs either way
+    #[tokio::test]
+    async fn harness_orphans_are_handled_before_the_job_ends() {
+        for (exit, handle) in [(1, "error"), (0, "proceed")] {
+            // a harness that leaves a running tool run behind
+            let (mock, job, orphan) = Box::pin(run_harness_with_orphan(exit)).await;
+            let lines = mock.lines();
+            let position = |pattern: &str| {
+                lines
+                    .iter()
+                    .position(|line| line.contains(pattern))
+                    .unwrap_or_else(|| panic!("no {pattern} in {lines:?}"))
+            };
+            // the orphan is failed, then deleted, then the job ends
+            let fail = position(&format!("/handle/{}/{orphan}/fail ", job.group));
+            let delete = position(&format!("DELETE /api/reactions/{}/{orphan} ", job.group));
+            let end = position(&format!("/api/jobs/handle/{}/{handle}", job.id));
+            assert!(fail < delete && delete < end, "{lines:?}");
+            // results are uploaded only when the harness exits 0
+            let results = mock.matching("/results/");
+            if exit == 0 {
+                assert_eq!(
+                    results.len(),
+                    job.samples.len() + job.repos.len(),
+                    "{lines:?}"
+                );
+                assert!(results.iter().all(|req| req.contains("status.json")));
+            } else {
+                assert!(results.is_empty(), "{lines:?}");
+            }
+            // the harness's output and the deletion reached the stage logs
+            let logs = mock.matching("/logs");
+            let expected = format!("harness exits {exit}");
+            assert!(logs.iter().any(|req| req.contains(&expected)), "{logs:?}");
+            assert!(
+                logs.iter().any(|req| req.contains(&orphan.to_string())),
+                "{logs:?}"
+            );
+        }
+    }
+
+    /// A harness that succeeds has its results stored under the run's result key on every
+    /// input, with its status file, and its output streamed to the stage logs
+    #[tokio::test]
+    async fn successful_harness_results_use_the_result_key() {
+        // a harness that prints a line and writes its status outside the result files directory
+        let dir = std::env::temp_dir().join(format!("thorium-harness-{}", uuid::Uuid::new_v4()));
+        tokio::fs::create_dir_all(&dir).await.unwrap();
+        let status = dir.join("status.json");
+        tokio::fs::write(&status, r#"{"turns":1}"#).await.unwrap();
+        let (mock, collected, job) =
+            run_harness_job("echo harness says hello; exit 0", &status).await;
+        tokio::fs::remove_dir_all(&dir).await.unwrap();
+        // results were collected and stored once on each input sample and repo
+        assert!(collected);
+        let results = mock.matching("/results/");
+        assert_eq!(
+            results.len(),
+            job.samples.len() + job.repos.len(),
+            "{:?}",
+            mock.lines()
+        );
+        for request in &results {
+            // each result is under the run's result key with no version and has the status file
+            assert!(
+                request.contains("name=\"tool\"\r\n\r\ntriage#r1\r\n"),
+                "{request}"
+            );
+            assert!(!request.contains("name=\"tool_version\""), "{request}");
+            assert!(request.contains("status.json"), "{request}");
+        }
+        // the harness's output reached the stage logs
+        let logs = mock.matching("/logs");
+        assert!(
+            logs.iter().any(|req| req.contains("harness says hello")),
+            "{logs:?}"
+        );
+    }
+
+    /// A harness that fails uploads no results, and its output still reaches the stage logs
+    #[tokio::test]
+    async fn failed_harness_uploads_no_results() {
+        // a harness that prints a line to stderr and exits non-zero
+        let status = std::env::temp_dir().join(format!("{}-status.json", uuid::Uuid::new_v4()));
+        let (mock, collected, job) =
+            run_harness_job("echo harness says goodbye >&2; exit 1", &status).await;
+        // no results were collected or stored and the reaction wasn't read
+        assert!(!collected);
+        assert!(mock.matching("/results/").is_empty(), "{:?}", mock.lines());
+        assert!(
+            mock.matching(&format!(
+                "GET /api/reactions/{}/{} ",
+                job.group, job.reaction
+            ))
+            .is_empty(),
+            "{:?}",
+            mock.lines()
+        );
+        // the harness's output reached the stage logs
+        let logs = mock.matching("/logs");
+        assert!(
+            logs.iter().any(|req| req.contains("harness says goodbye")),
+            "{logs:?}"
+        );
     }
 }

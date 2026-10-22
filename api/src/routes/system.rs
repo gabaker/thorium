@@ -716,7 +716,7 @@ async fn get_worker(
     State(state): State<AppState>,
 ) -> Result<Json<Worker>, ApiError> {
     // get this worker
-    let worker = Worker::get(&user, &name, &state.shared).await?;
+    let worker = Worker::get(&user, &name, user.run_reaction(), &state.shared).await?;
     Ok(Json(worker))
 }
 
@@ -752,7 +752,7 @@ async fn update_worker(
     Json(update): Json<WorkerUpdate>,
 ) -> Result<StatusCode, ApiError> {
     // get this worker from scylla
-    let worker = Worker::get(&user, &name, &state.shared).await?;
+    let worker = Worker::get(&user, &name, user.run_reaction(), &state.shared).await?;
     // add this new worker to our workers table
     worker.update(&user, &update, &state.shared).await?;
     Ok(StatusCode::NO_CONTENT)
@@ -789,7 +789,9 @@ async fn delete_workers(
     Json(deletes): Json<WorkerDeleteMap>,
 ) -> Result<StatusCode, ApiError> {
     // remove this new worker from our workers table
-    deletes.delete(&user, scaler, &state.shared).await?;
+    deletes
+        .delete(&user, scaler, user.run_reaction(), &state.shared)
+        .await?;
     Ok(StatusCode::NO_CONTENT)
 }
 

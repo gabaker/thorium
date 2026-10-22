@@ -114,3 +114,39 @@ impl Init {
         overlay_path
     }
 }
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used)]
+mod tests {
+    use super::*;
+    use crate::libs::launchers::WorkloadSource;
+    use crate::libs::launchers::fake::FakeWorkloadSource;
+    use thorium::models::ImageScaler;
+    use uuid::Uuid;
+
+    /// The golden image of a Kvm tool instance's worker is found under the run's group and the
+    /// tool's name
+    #[tokio::test]
+    async fn golden_image_from_run_group_and_tool() {
+        // a golden directory holding winvm's image for group ceres
+        let golden = tempfile::tempdir().unwrap();
+        let dir = golden.path().join("ceres").join("winvm");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("winvm.qcow2"), b"qcow2").unwrap();
+        // a run of winvm in ceres projects the image the launcher reads
+        let id = Uuid::new_v4();
+        let mut source = FakeWorkloadSource::default();
+        let spec = crate::libs::launchers::tests::kvm_spec(None);
+        source.serve(id, "winvm", &["vesta", "ceres"], spec);
+        let worker = crate::libs::launchers::tests::worker(id, "ceres");
+        let image = source
+            .workload_image(&worker, ImageScaler::Kvm)
+            .await
+            .unwrap();
+        // the golden image is found at the run group's path
+        let path = Init::find_golden_image(golden.path(), &image)
+            .await
+            .unwrap();
+        assert_eq!(path, dir.join("winvm.qcow2"));
+    }
+}

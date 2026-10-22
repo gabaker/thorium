@@ -10,6 +10,7 @@ use uuid::Uuid;
 
 use super::helpers::{FormatArgs, WaitForArgs, WatchArgs};
 use super::traits::search::{SearchParameterized, SearchParams, SearchSealed};
+use crate::utils::output::OutputFormat;
 
 /// The commands to send to the results task handler
 #[derive(Parser, Debug)]
@@ -68,6 +69,22 @@ thorctl results upload --display-type string --dry-run ./results
 "#
     )]
     Upload(UploadResults),
+    /// Show a tool or workflow run's results on each of its input files and repos
+    #[clap(version, author)]
+    Show(ShowResults),
+}
+
+/// A command to show a run's results
+#[derive(Parser, Debug)]
+pub struct ShowResults {
+    /// The id of the run's reaction
+    pub reaction: Uuid,
+    /// The group the run is in (searched for in all of your groups by default)
+    #[clap(short, long)]
+    pub group: Option<String>,
+    /// The format to print the results in (human readable by default)
+    #[clap(long, value_enum, ignore_case = true)]
+    pub format: Option<OutputFormat>,
 }
 
 #[derive(Default, Debug, Clone, clap::ValueEnum)]

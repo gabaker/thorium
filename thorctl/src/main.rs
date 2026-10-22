@@ -14,7 +14,7 @@ mod utils;
 
 use args::{Args, SubCommands};
 
-/// Parse the command line args, run the requested command, and exit with an error code if it failed
+/// Parses the command line arguments and runs the matching thorctl command
 #[tokio::main]
 async fn main() {
     // get the command line args that were passed in
@@ -48,7 +48,7 @@ async fn main() {
         SubCommands::ToolSets(tool_sets) => handlers::toolsets::handle(&args, tool_sets).await,
         SubCommands::Workflows(workflows) => handlers::workflows::handle(&args, workflows).await,
         SubCommands::Instances(instances) => handlers::instances::handle(&args, instances).await,
-        SubCommands::AI(ai) => handlers::ai::handle(&args, ai).await,
+        SubCommands::Runs(runs) => handlers::runs::handle(&args, runs).await,
         SubCommands::Cart(cart) => handlers::cart::handle(&args, cart).await,
         SubCommands::Uncart(uncart) => handlers::uncart::handle(&args, uncart).await,
         SubCommands::Run(run) => handlers::run::handle(&args, run).await,

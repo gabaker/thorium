@@ -14,74 +14,10 @@ use crate::models::AuthedUser;
 use crate::models::{
     Checkpoint, CommitishKinds, Deadline, GenericJob, GenericJobArgs, GenericJobOpts, Group,
     HandleJobResponse, ImageScaler, JobHandleParams, JobHandleStatus, JobListOpts,
-    JobResetRequestor, JobResets, JobStatus, Pipeline, RawJob, RepoDependency, RunningJob,
+    JobResetRequestor, JobResets, JobStatus, MAX_CLAIM_LIMIT, RawJob, RepoDependency, RunningJob,
     StageLogLine, StageLogsAdd, SystemComponents, WorkerName, WorkloadRuntimes,
 };
-use crate::utils::{ApiError, AppState};
-
-/// Claims a job from a specific pipeline and stage for a worker
-///
-/// # Arguments
-///
-/// * `user` - The user that is claiming a job
-/// * `group` - The group the target pipeline is in
-/// * `pipeline` - The name of the pipeline to claim from
-/// * `stage` - The specific stage to claim from
-/// * `worker` - The name of the worker that is claiming this job
-/// * `limit` - The max number of jobs to claim
-/// * `state` - Shared Thorium objects
-#[utoipa::path(
-    patch,
-    path = "/api/jobs/claim/:group/:pipeline/:stage/:cluster/:node/:worker/:limit",
-    params(
-        ("group" = String, Path, description = "The group the target pipeline is in"),
-        ("pipeline" = String, Path, description = "The name of the pipeline to claim from"),
-        ("stage" = String, Path, description = "The specific stage to claim from"),
-        ("cluster" = String, Path, description = "The name of the cluster of the worker that is claiming this job"),
-        ("node" = String, Path, description = "The name of the node of the worker that is claiming this job"),
-        ("worker" = String, Path, description = "The name of the worker that is claiming this job"),
-        ("limit" = usize, Path, description = "The max number of jobs to claim"),
-    ),
-    responses(
-        (status = 200, description = "Slept the specified job", body = Vec<GenericJob>),
-        (status = 401, description = "This user is not authorized to access this route"),
-    ),
-    security(
-        ("basic" = []),
-    )
-)]
-#[instrument(name = "routes::jobs::claim", skip_all, err(Debug))]
-async fn claim(
-    user: AuthedUser,
-    Path((group, pipeline, stage, cluster, node, worker, limit)): Path<(
-        String,
-        String,
-        String,
-        String,
-        String,
-        String,
-        usize,
-    )>,
-    State(state): State<AppState>,
-) -> Result<Json<Vec<GenericJob>>, ApiError> {
-    // get pipeline
-    let (group, pipeline) = Pipeline::get(&user, &group, &pipeline, &state.shared).await?;
-    // build the primary keys to the worker that is claiming this job
-    let worker = WorkerName::new(cluster, node, worker);
-    // claim jobs if any exist
-    let claims = GenericJob::claim(
-        &user,
-        &group,
-        &pipeline,
-        &stage,
-        limit,
-        &worker,
-        &state.shared,
-    )
-    .await?;
-    // return claimed jobs
-    Ok(Json(claims))
-}
+use crate::utils::{ApiError, AppState, bounder};
 
 /// Claims jobs of a tool instance for a worker
 ///
@@ -107,11 +43,12 @@ async fn claim(
         ("cluster" = String, Path, description = "The name of the cluster of the worker that is claiming jobs"),
         ("node" = String, Path, description = "The name of the node of the worker that is claiming jobs"),
         ("worker" = String, Path, description = "The name of the worker that is claiming jobs"),
-        ("limit" = usize, Path, description = "The max number of jobs to claim"),
+        ("limit" = usize, Path, description = "The max number of jobs to claim (1 to 1000)"),
     ),
     responses(
         (status = 200, description = "The claimed jobs", body = Vec<GenericJob>),
-        (status = 401, description = "This user is not authorized to claim jobs for this worker"),
+        (status = 400, description = "The limit is 0 or over 1000"),
+        (status = 401, description = "This user is not authorized to claim jobs for this worker, or the worker doesn't serve this group and tool instance"),
     ),
     security(
         ("basic" = []),
@@ -130,14 +67,23 @@ async fn claim_workload(
     )>,
     State(state): State<AppState>,
 ) -> Result<Json<Vec<GenericJob>>, ApiError> {
+    // a zero limit would claim every queued job and a huge one would exhaust memory
+    bounder::unsigned(limit as u64, "limit", 1, MAX_CLAIM_LIMIT as u64)?;
     // make sure we are a member of this group and it exists
     let group = Group::authorize(&user, &group, &state.shared).await?;
     // build the primary keys to the worker that is claiming jobs
     let worker = WorkerName::new(cluster, node, worker);
     // claim jobs if any exist
-    let claims =
-        GenericJob::claim_workload(&user, &group, tool_instance, limit, &worker, &state.shared)
-            .await?;
+    let claims = GenericJob::claim_workload(
+        &user,
+        &group,
+        tool_instance,
+        limit,
+        &worker,
+        user.run_reaction(),
+        &state.shared,
+    )
+    .await?;
     Ok(Json(claims))
 }
 
@@ -238,9 +184,16 @@ async fn proceed(
     // get the name of the worker that claimed this job
     let worker = params.worker.as_deref();
     // proceed with job
-    let status = job
-        .proceed(&user, &group, runtime, logs, worker, &state.shared)
-        .await?;
+    let status = Box::pin(job.proceed(
+        &user,
+        &group,
+        runtime,
+        logs,
+        worker,
+        user.run_reaction(),
+        &state.shared,
+    ))
+    .await?;
     // build response
     let response = Json(HandleJobResponse { status });
     Ok((StatusCode::ACCEPTED, response).into_response())
@@ -286,7 +239,14 @@ async fn error(
     let worker = params.worker.as_deref();
     // error out this job
     let status = job
-        .error(&user, &group, logs, worker, &state.shared)
+        .error(
+            &user,
+            &group,
+            logs,
+            worker,
+            user.run_reaction(),
+            &state.shared,
+        )
         .await?;
     // build response
     let response = Json(HandleJobResponse { status });
@@ -328,7 +288,15 @@ async fn sleep(
     // get job object
     let (group, job) = RawJob::get(&user, &id, &state.shared).await?;
     // sleep this job and set an optional checkpoint
-    let status = job.sleep(&user, &group, checkpoint, &state.shared).await?;
+    let status = job
+        .sleep(
+            &user,
+            &group,
+            checkpoint,
+            user.run_reaction(),
+            &state.shared,
+        )
+        .await?;
     // build response
     let response = Json(HandleJobResponse { status });
     Ok((StatusCode::ACCEPTED, response).into_response())
@@ -370,7 +338,13 @@ async fn checkpoint(
     let (group, job) = RawJob::get(&user, &id, &state.shared).await?;
     // checkpoint this job
     let status = job
-        .checkpoint(&user, &group, checkpoint, &state.shared)
+        .checkpoint(
+            &user,
+            &group,
+            checkpoint,
+            user.run_reaction(),
+            &state.shared,
+        )
         .await?;
     // build response
     let response = Json(HandleJobResponse { status });
@@ -545,7 +519,7 @@ async fn get_job(
 /// The struct containing our openapi docs
 #[derive(OpenApi)]
 #[openapi(
-    paths(claim, claim_workload, update_workload_runtimes, workload_runtimes, proceed, error, sleep, checkpoint, bulk_reset, read_deadlines, bulk_running, get_job),
+    paths(claim_workload, update_workload_runtimes, workload_runtimes, proceed, error, sleep, checkpoint, bulk_reset, read_deadlines, bulk_running, get_job),
     components(schemas(Checkpoint, CommitishKinds, Deadline, GenericJob, GenericJobArgs, GenericJobOpts, HandleJobResponse, ImageScaler, JobHandleParams, JobHandleStatus, JobListOpts, JobResetRequestor, JobResets, JobHandleStatus, JobStatus, RawJob, RepoDependency, RunningJob, StageLogLine, StageLogsAdd, SystemComponents, WorkloadRuntimes)),
     modifiers(&OpenApiSecurity),
 )]
@@ -565,10 +539,6 @@ async fn openapi() -> Json<utoipa::openapi::OpenApi> {
 pub fn mount(router: Router<AppState>) -> Router<AppState> {
     router
         .route("/jobs/{id}", get(get_job))
-        .route(
-            "/jobs/claim/{group}/{pipeline}/{stage}/{cluster}/{node}/{worker}/{limit}",
-            patch(claim),
-        )
         .route(
             "/jobs/workloads/claim/{group}/{tool_instance}/{cluster}/{node}/{worker}/{limit}",
             patch(claim_workload),

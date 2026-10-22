@@ -96,8 +96,8 @@ impl JobKeys {
 
     /// Builds the key to the status queue of a pipeline stage
     ///
-    /// Jobs are queued on workload and run queues, so these queues stay empty; the stage claim
-    /// and pipeline status still read them.
+    /// Jobs are queued on workload and run queues, so these queues stay empty; pipeline status
+    /// still reads them.
     ///
     /// # Arguments
     ///

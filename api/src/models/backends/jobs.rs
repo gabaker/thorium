@@ -9,8 +9,8 @@ use uuid::Uuid;
 use super::db;
 use crate::models::{
     Checkpoint, GenericJob, GenericJobArgs, Group, ImageJobInfo, ImageScaler, JobDetailsList,
-    JobHandleStatus, JobList, JobResets, JobStatus, Pipeline, RawJob, Reaction, RunningJob,
-    StageLogsAdd, Stream, StreamObj, User, WorkerName, WorkloadRuntimes,
+    JobHandleStatus, JobList, JobResets, JobStatus, RawJob, Reaction, RunningJob, StageLogsAdd,
+    Stream, StreamObj, User, WorkerName, WorkloadRuntimes,
 };
 use crate::utils::{ApiError, Shared};
 use crate::{
@@ -223,6 +223,24 @@ impl RawJob {
         Ok(())
     }
 
+    /// Check that a run token only handles its own run's jobs
+    ///
+    /// Worker names are listed publicly, so binding a job to its worker doesn't keep two runs of
+    /// one runner apart; a run token also needs the job to belong to its run.
+    ///
+    /// # Arguments
+    ///
+    /// * `run` - The reaction of the run the user's token is limited to, if it's a run token
+    fn authorize_run(&self, run: Option<Uuid>) -> Result<(), ApiError> {
+        // a run token may only handle the jobs of its own run
+        if let Some(run) = run
+            && self.run != Some(run)
+        {
+            return unauthorized!();
+        }
+        Ok(())
+    }
+
     /// Check that a non-admin user may finish or fail this job as the worker that claimed it
     ///
     /// # Arguments
@@ -263,8 +281,8 @@ impl RawJob {
     ///
     /// This will set the jobs status to complete and check if all other jobs in that stage have
     /// completed. If they have it will then create the next stage of the reactions jobs. A
-    /// runtime far above what this job's image may run for is refused, and one a little above
-    /// it is recorded as the most the image may run for.
+    /// runtime far above what this job's tool instance may run for is refused, and one a little
+    /// above it is recorded as the most the tool instance may run for.
     ///
     /// # Arguments
     ///
@@ -273,7 +291,9 @@ impl RawJob {
     /// * `runtime` - The amount of time it took to execute this job in seconds
     /// * `logs` - The logs to save for this job
     /// * `worker` - The name of the worker the request says claimed this job
+    /// * `run` - The reaction of the run the user's token is limited to, if it's a run token
     /// * `shared` - Shared objects in Thorium
+    #[allow(clippy::too_many_arguments)]
     #[instrument(name = "RawJob::proceed", skip_all, err(Debug))]
     pub async fn proceed(
         self,
@@ -282,10 +302,13 @@ impl RawJob {
         runtime: u64,
         logs: StageLogsAdd,
         worker: Option<&str>,
+        run: Option<Uuid>,
         shared: &Shared,
     ) -> Result<JobHandleStatus, ApiError> {
         // make sure this user can proceed with jobs from this group
         group.editable(user)?;
+        // make sure a run token only proceeds its own run's jobs
+        self.authorize_run(run)?;
         // make sure this user's worker claimed this job
         self.authorize_worker(user, worker)?;
         // get the longest this job's tool instance may run for
@@ -317,6 +340,7 @@ impl RawJob {
     /// * `group` - The name of the group this job is tied to
     /// * `logs` - The logs to save for this job
     /// * `worker` - The name of the worker the request says claimed this job
+    /// * `run` - The reaction of the run the user's token is limited to, if it's a run token
     /// * `shared` - Shared objects in Thorium
     #[instrument(name = "RawJob::error", skip_all, err(Debug))]
     pub async fn error(
@@ -325,10 +349,13 @@ impl RawJob {
         group: &Group,
         logs: StageLogsAdd,
         worker: Option<&str>,
+        run: Option<Uuid>,
         shared: &Shared,
     ) -> Result<JobHandleStatus, ApiError> {
         // make sure this user can error out jobs from this group
         group.editable(user)?;
+        // make sure a run token only fails its own run's jobs
+        self.authorize_run(run)?;
         // make sure this user's worker claimed this job
         self.authorize_worker(user, worker)?;
         // use correct backend to handle starting job
@@ -342,17 +369,25 @@ impl RawJob {
     /// * `user` - The user that is erroring out a job
     /// * `group` - The name of the group this job is tied to
     /// * `checkpoint` - The checkpoint to set
+    /// * `run` - The reaction of the run the user's token is limited to, if it's a run token
     /// * `shared` - Shared objects in Thorium
-    #[instrument(name = "Job::checkpoint", skip(self, user, group, shared), err(Debug))]
+    #[instrument(
+        name = "Job::checkpoint",
+        skip(self, user, group, run, shared),
+        err(Debug)
+    )]
     pub async fn checkpoint(
         mut self,
         user: &User,
         group: &Group,
         checkpoint: Checkpoint,
+        run: Option<Uuid>,
         shared: &Shared,
     ) -> Result<JobHandleStatus, ApiError> {
         // make sure this user can checkpoint jobs from this group
         group.editable(user)?;
+        // make sure a run token only checkpoints its own run's jobs
+        self.authorize_run(run)?;
         // make sure this is our claimed job
         self.authorize_claimed(user)?;
         // inject in this jobs new checkpoint arg
@@ -373,17 +408,21 @@ impl RawJob {
     /// * `user` - The user that is sleeping this job
     /// * `group` - The name of the group this job is tied to
     /// * `checkpoint` - The checkpoint to set
+    /// * `run` - The reaction of the run the user's token is limited to, if it's a run token
     /// * `shared` - Shared objects in Thorium
-    #[instrument(name = "Job::sleep", skip(self, user, group, shared), err(Debug))]
+    #[instrument(name = "Job::sleep", skip(self, user, group, run, shared), err(Debug))]
     pub async fn sleep(
         self,
         user: &User,
         group: &Group,
         checkpoint: Checkpoint,
+        run: Option<Uuid>,
         shared: &Shared,
     ) -> Result<JobHandleStatus, ApiError> {
         // make sure this user can sleep generators from this group
         group.editable(user)?;
+        // make sure a run token only sleeps its own run's jobs
+        self.authorize_run(run)?;
         // make sure this is our claimed job
         self.authorize_claimed(user)?;
         // use correct backend to handle starting job
@@ -393,7 +432,7 @@ impl RawJob {
     /// Resets jobs in bulk
     ///
     /// This will set all of the jobs statuses back to created except for any
-    /// completed or failed jobs.
+    /// completed or failed jobs and the jobs of completed or failed reactions.
     ///
     /// # Arguments
     ///
@@ -512,46 +551,6 @@ impl RawJob {
 }
 
 impl GenericJob {
-    /// Claims a requested number of pending generic jobs
-    ///
-    /// # Arguments
-    ///
-    /// * `user` - The user that is claiming a job
-    /// * `group` - The name of the group this job is tied to
-    /// * `pipeline` - The name of the pipeline is tied to
-    /// * `stage` - The name of the stage for this job
-    /// * `limit` - The number of jobs to claim at once
-    /// * `worker` - The worker that is claiming jobs
-    /// * `shared` - Shared objects in Thorium
-    /// * `span` - The span to log traces under
-    #[allow(clippy::too_many_arguments)]
-    #[instrument(
-        name = "GenericJob::claim",
-        skip(user, group, pipeline, worker, shared),
-        err(Debug)
-    )]
-    pub async fn claim(
-        user: &User,
-        group: &Group,
-        pipeline: &Pipeline,
-        stage: &str,
-        limit: usize,
-        worker: &WorkerName,
-        shared: &Shared,
-    ) -> Result<Vec<GenericJob>, ApiError> {
-        // make sure this user can claim jobs from this group
-        group.editable(user)?;
-        // claim job from backend if one exists
-        let raw_claims = db::jobs::claim(user, pipeline, stage, limit, worker, shared).await?;
-        // cast claims to GenericJobs
-        let claims = raw_claims
-            .into_iter()
-            .map(GenericJob::try_from)
-            .filter_map(Result::ok)
-            .collect();
-        Ok(claims)
-    }
-
     /// Claims a requested number of pending jobs of a tool instance for a worker
     ///
     /// # Arguments
@@ -561,10 +560,11 @@ impl GenericJob {
     /// * `tool_instance` - The tool instance whose jobs to claim
     /// * `limit` - The number of jobs to claim at once
     /// * `worker` - The worker that is claiming jobs
+    /// * `run` - The reaction of the run the user's token is limited to, if it's a run token
     /// * `shared` - Shared objects in Thorium
     #[instrument(
         name = "GenericJob::claim_workload",
-        skip(user, group, worker, shared),
+        skip(user, group, worker, run, shared),
         err(Debug)
     )]
     pub async fn claim_workload(
@@ -573,13 +573,14 @@ impl GenericJob {
         tool_instance: Uuid,
         limit: usize,
         worker: &WorkerName,
+        run: Option<Uuid>,
         shared: &Shared,
     ) -> Result<Vec<GenericJob>, ApiError> {
         // make sure this user can claim jobs from this group
         group.editable(user)?;
         // claim jobs from the worker's queue if any exist
         let raw_claims =
-            db::jobs::claim_workload(user, &group.name, tool_instance, limit, worker, shared)
+            db::jobs::claim_workload(user, &group.name, tool_instance, limit, worker, run, shared)
                 .await?;
         // cast claims to GenericJobs
         let claims = raw_claims
@@ -658,6 +659,67 @@ mod tests {
         assert_eq!(runtime_slack(3000), 300);
         assert_eq!(runtime_slack(36_000), 3600);
         assert_eq!(runtime_slack(u64::MAX), u64::MAX / 10);
+    }
+
+    /// Build a claimed job of a run, or of no run
+    ///
+    /// # Arguments
+    ///
+    /// * `run` - The run the job belongs to, if any
+    fn claimed(run: Option<Uuid>) -> RawJob {
+        // a running job claimed by a worker
+        let mut raw = [
+            ("reaction", Uuid::new_v4().to_string()),
+            ("id", Uuid::new_v4().to_string()),
+            ("group", "jupiter".to_owned()),
+            ("pipeline", "orbit".to_owned()),
+            ("stage", "plant".to_owned()),
+            ("creator", "europa".to_owned()),
+            ("args", "{}".to_owned()),
+            ("status", "\"Running\"".to_owned()),
+            ("deadline", "\"2026-10-19T00:00:00Z\"".to_owned()),
+            ("worker", "\"worker-0\"".to_owned()),
+            (
+                "tool_instance",
+                serde_json::to_string(&Uuid::new_v4()).expect("an id"),
+            ),
+        ]
+        .into_iter()
+        .map(|(key, value)| (key.to_owned(), value))
+        .collect::<HashMap<String, String>>();
+        // set the job's run if it has one
+        if let Some(run) = run {
+            raw.insert(
+                "run".to_owned(),
+                serde_json::to_string(&run).expect("a run"),
+            );
+        }
+        RawJob::from_data(raw).expect("a job")
+    }
+
+    /// A run token handles only the jobs of its own run, and other callers aren't limited by run
+    #[test]
+    fn run_tokens_handle_only_their_runs_jobs() {
+        // jobs of two runs and a pipeline job
+        let own = Uuid::new_v4();
+        let other = Uuid::new_v4();
+        let mine = claimed(Some(own));
+        let theirs = claimed(Some(other));
+        let shared = claimed(None);
+        assert_eq!(mine.run, Some(own));
+        // the run's own job passes
+        assert!(mine.authorize_run(Some(own)).is_ok());
+        // another run's job and a pipeline job are refused
+        for job in [&theirs, &shared] {
+            assert_eq!(
+                job.authorize_run(Some(own)).unwrap_err().status(),
+                axum::http::StatusCode::UNAUTHORIZED
+            );
+        }
+        // without a run token every job passes this check
+        for job in [&mine, &theirs, &shared] {
+            assert!(job.authorize_run(None).is_ok());
+        }
     }
 
     /// A finished job hash written before tool instances existed reads with the nil tool instance

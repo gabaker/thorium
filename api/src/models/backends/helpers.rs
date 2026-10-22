@@ -3,6 +3,7 @@
 use uuid::Uuid;
 
 use crate::bad;
+use crate::models::k8s_name;
 use crate::utils::ApiError;
 
 /// The max length of most names in K8's
@@ -39,13 +40,8 @@ pub fn to_k8s_name<T: AsRef<str>>(value: T, id: Uuid) -> Result<String, ApiError
         .chars()
         .take(K8_NAME_MAX_CHARS - id.len() - 1)
         .collect::<String>();
-    // convert to lowercase
-    let lower = truncated.to_lowercase();
-    // replace non-ascii and non-alphanumeric/non-"-" to "-"
-    let replaced = lower.replace(
-        |c: char| !c.is_ascii() || (!c.is_alphanumeric() && c != '-'),
-        "-",
-    );
+    // lowercase and replace every non-ascii and non-alphanumeric/non-"-" character with "-"
+    let replaced = k8s_name(&truncated, usize::MAX);
     let mut chars = replaced.chars();
     let k8s_name = if let Some(first_char) = chars.next() {
         if first_char == '-' {
@@ -153,6 +149,61 @@ pub fn parse_bracket_segments(input: &str) -> Result<Vec<&str>, ApiError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The K8s name conversion as it was written before it shared its character rules, kept as
+    /// the reference the shared rules must reproduce
+    ///
+    /// # Arguments
+    ///
+    /// * `value` - The value to convert
+    /// * `id` - The UUID to append
+    fn reference_k8s_name(value: &str, id: Uuid) -> String {
+        let id = id.to_string();
+        let truncated = value
+            .chars()
+            .take(K8_NAME_MAX_CHARS - id.len() - 1)
+            .collect::<String>();
+        let lower = truncated.to_lowercase();
+        let replaced = lower.replace(
+            |c: char| !c.is_ascii() || (!c.is_alphanumeric() && c != '-'),
+            "-",
+        );
+        let mut chars = replaced.chars();
+        if let Some(first_char) = chars.next() {
+            if first_char == '-' {
+                format!("z{}-{}", chars.collect::<String>(), id)
+            } else {
+                format!("{replaced}-{id}")
+            }
+        } else {
+            format!("{replaced}-{id}")
+        }
+    }
+
+    /// Network policy names convert to the same K8s names as before
+    #[test]
+    fn k8s_policy_names_unchanged() {
+        // a fixture of existing policy names
+        let names = [
+            "allow-dns",
+            "Egress To Models",
+            "corn_policy",
+            "-leading-dash",
+            "trailing-dash-",
+            "ünïcödé names 😄",
+            "MiXeD.Case+Plus",
+            "a-very-long-policy-name-that-goes-past-the-truncation-limit-for-sure",
+            "İstanbul",
+        ];
+        for name in names {
+            let id = Uuid::new_v4();
+            assert_eq!(
+                to_k8s_name(name, id).unwrap(),
+                reference_k8s_name(name, id),
+                "{name} must convert as before"
+            );
+        }
+    }
 
     // k8s name tests
 
