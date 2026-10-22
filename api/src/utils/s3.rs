@@ -3,7 +3,7 @@
 use aws_credential_types::provider::SharedCredentialsProvider;
 use aws_sdk_s3::operation::get_object::GetObjectOutput;
 use aws_sdk_s3::primitives::SdkBody;
-use aws_sdk_s3::types::{CompletedMultipartUpload, CompletedPart, Delete, ObjectIdentifier};
+use aws_sdk_s3::types::{CompletedMultipartUpload, CompletedPart};
 use aws_sdk_s3::{
     Client,
     config::{Credentials, retry::RetryConfig, timeout::TimeoutConfig},
@@ -767,61 +767,6 @@ impl S3Client {
         }
     }
 
-    /// List the objects with the given prefix, truncated to 10,000 keys maximum
-    ///
-    /// Returns a list of keys matching the given prefix with a maximum of 10,000
-    ///
-    /// # Caveats
-    ///
-    /// The client will return a maximum of 1000 keys per page, and this function
-    /// will concatenate a maximum of 10 pages, so 10,000 keys total. If there
-    /// are more objects than 10,000, those will not be included
-    ///
-    /// # Arguments
-    ///
-    /// * `prefix` - The prefix to check for objects
-    #[instrument(name = "S3Client::list_truncated", skip(self), err(Debug))]
-    pub async fn list_truncated(&self, prefix: &str) -> Result<Vec<String>, ApiError> {
-        // store a continuation token
-        let mut continuation_token = None;
-        // store our keys
-        let mut keys = Vec::new();
-        // count how many pages we've gotten
-        let mut page: u8 = 1;
-        loop {
-            // list objects with the given prefix
-            let mut resp = self
-                .client
-                .list_objects_v2()
-                .bucket(&self.bucket)
-                // match on the given prefix
-                .prefix(prefix)
-                // explicitly set max keys to 1000 per page
-                .max_keys(1000)
-                // set the token
-                .set_continuation_token(continuation_token)
-                .send()
-                .await?;
-            keys.extend(
-                resp.contents
-                    .take()
-                    .into_iter()
-                    // flatten None to an empty Vec
-                    .flatten()
-                    // get the keys for each object
-                    .filter_map(|object| object.key),
-            );
-            // increment our page count
-            page += 1;
-            // if we've gotten 10 pages or we don't have a next token, return our keys
-            if page > 10 || resp.next_continuation_token.is_none() {
-                return Ok(keys);
-            }
-            // we must have a continuation token, so set it for next loop
-            continuation_token = resp.next_continuation_token;
-        }
-    }
-
     /// Upload a single part of a multipart upload in the background
     ///
     /// Acquiring a permit before spawning applies backpressure to the incoming request body:
@@ -1580,92 +1525,6 @@ impl S3Client {
             .send()
             .await?;
         Ok(())
-    }
-
-    /// Delete all objects with the given prefix, truncated to 10,000 keys maximum
-    ///
-    /// Returns a list of keys that were deleted
-    ///
-    /// # Caveats
-    ///
-    /// The client will list a maximum of 1000 keys per page, and this function
-    /// will concatenate a maximum of 10 pages, so 10,000 keys total. If there
-    /// are more objects than 10,000, those will not be deleted
-    ///
-    /// # Arguments
-    ///
-    /// * `prefix` - The prefix to check for objects to delete
-    #[instrument(name = "S3Client::delete_bulk_truncated", skip(self), err(Debug))]
-    pub async fn delete_bulk_truncated(&self, prefix: &str) -> Result<Vec<String>, ApiError> {
-        // store a continuation token
-        let mut continuation_token = None;
-        // store our keys
-        let mut keys = Vec::new();
-        // count how many pages we've gotten
-        let mut page: u8 = 1;
-        loop {
-            // list objects with the given prefix
-            let mut resp = self
-                .client
-                .list_objects_v2()
-                .bucket(&self.bucket)
-                // match on the given prefix
-                .prefix(prefix)
-                // explicitly set max keys to 1000 per page
-                .max_keys(1000)
-                // set the token
-                .set_continuation_token(continuation_token)
-                .send()
-                .await?;
-            // make a list of ObjectIdentifiers for deletion
-            let object_identifiers: Vec<ObjectIdentifier> = resp
-                .contents
-                .take()
-                .into_iter()
-                .flatten()
-                .filter_map(|object| {
-                    object
-                        .key()
-                        // safe to unwrap because we're setting the key
-                        .map(|key| ObjectIdentifier::builder().key(key).build().unwrap())
-                })
-                .collect();
-            if !object_identifiers.is_empty() {
-                // Delete objects in bulk
-                let delete = Delete::builder()
-                    .set_objects(Some(object_identifiers))
-                    .build()
-                    // safe to unwrap because we're setting objects above
-                    .unwrap();
-                // delete the objects
-                let mut delete_resp = self
-                    .client
-                    .delete_objects()
-                    .bucket(&self.bucket)
-                    .delete(delete)
-                    .send()
-                    .await?;
-                // add the deleted keys to our list
-                keys.extend(
-                    delete_resp
-                        .deleted
-                        .take()
-                        .into_iter()
-                        // flatten None to an empty Vec
-                        .flatten()
-                        // get the keys for each object
-                        .filter_map(|object| object.key),
-                );
-            }
-            // increment our page count
-            page += 1;
-            // if we've gotten 10 pages or we don't have a next token, return our keys
-            if page > 10 || resp.next_continuation_token.is_none() {
-                return Ok(keys);
-            }
-            // we must have a continuation token, so set it for next loop
-            continuation_token = resp.next_continuation_token;
-        }
     }
 }
 
