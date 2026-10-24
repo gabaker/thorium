@@ -195,8 +195,10 @@ impl<K: CqlType, V: CqlType> CqlType for BTreeMap<K, V> {
 /// A value stored as JSON in a `text` column, serialized and parsed in one place
 ///
 /// Its `CqlType` is `text`, and it is written with `serde_json::to_string`, the same bytes the
-/// hand-serialized JSON strings it replaces held.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+/// hand-serialized JSON strings it replaces held. Serialized with serde as the inner value, so a
+/// row holding one is written into a JSON backup as plain JSON rather than as text.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(transparent)]
 pub struct JsonText<T>(pub T);
 
 impl<T> CqlType for JsonText<T> {

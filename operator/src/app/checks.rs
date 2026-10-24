@@ -45,7 +45,7 @@ pub async fn scylla_login(meta: &ClusterMeta) -> Result<(), CheckError> {
 /// # Arguments
 ///
 /// * `meta` - Thorium cluster client and metadata
-fn redis_info(meta: &ClusterMeta) -> Result<ConnectionInfo, Error> {
+pub(crate) fn redis_info(meta: &ClusterMeta) -> Result<ConnectionInfo, Error> {
     // get the redis config
     let conf = &meta.conf.redis;
     // the API refuses a username without a password, so do the same

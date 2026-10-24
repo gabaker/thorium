@@ -1,0 +1,2439 @@
+{
+  "replication": {
+    "class": "org.apache.cassandra.locator.NetworkTopologyStrategy",
+    "datacenter1": "1"
+  },
+  "tables": [
+    "associations",
+    "comments",
+    "commitish_list",
+    "commitishes",
+    "entities",
+    "events",
+    "logs",
+    "network_policies",
+    "nodes",
+    "notifications",
+    "repo_data",
+    "repos_list",
+    "results",
+    "results_stream",
+    "s3_ids",
+    "samples_list",
+    "schema_migration_issues",
+    "schema_migrations",
+    "tags"
+  ],
+  "columns": [
+    {
+      "table_name": "associations",
+      "column_name": "bucket",
+      "kind": "partition_key",
+      "position": 2,
+      "clustering_order": "NONE",
+      "type": "int"
+    },
+    {
+      "table_name": "associations",
+      "column_name": "created",
+      "kind": "clustering",
+      "position": 0,
+      "clustering_order": "DESC",
+      "type": "timestamp"
+    },
+    {
+      "table_name": "associations",
+      "column_name": "direction",
+      "kind": "clustering",
+      "position": 2,
+      "clustering_order": "ASC",
+      "type": "text"
+    },
+    {
+      "table_name": "associations",
+      "column_name": "extra_source",
+      "kind": "regular",
+      "position": -1,
+      "clustering_order": "NONE",
+      "type": "text"
+    },
+    {
+      "table_name": "associations",
+      "column_name": "extra_target",
+      "kind": "regular",
+      "position": -1,
+      "clustering_order": "NONE",
+      "type": "text"
+    },
+    {
+      "table_name": "associations",
+      "column_name": "group",
+      "kind": "partition_key",
+      "position": 0,
+      "clustering_order": "NONE",
+      "type": "text"
+    },
+    {
+      "table_name": "associations",
+      "column_name": "kind",
+      "kind": "regular",
+      "position": -1,
+      "clustering_order": "NONE",
+      "type": "text"
+    },
+    {
+      "table_name": "associations",
+      "column_name": "source",
+      "kind": "partition_key",
+      "position": 3,
+      "clustering_order": "NONE",
+      "type": "text"
+    },
+    {
+      "table_name": "associations",
+      "column_name": "submissions_other",
+      "kind": "regular",
+      "position": -1,
+      "clustering_order": "NONE",
+      "type": "uuid"
+    },
+    {
+      "table_name": "associations",
+      "column_name": "submissions_source",
+      "kind": "regular",
+      "position": -1,
+      "clustering_order": "NONE",
+      "type": "uuid"
+    },
+    {
+      "table_name": "associations",
+      "column_name": "submitter",
+      "kind": "regular",
+      "position": -1,
+      "clustering_order": "NONE",
+      "type": "text"
+    },
+    {
+      "table_name": "associations",
+      "column_name": "target",
+      "kind": "clustering",
+      "position": 1,
+      "clustering_order": "ASC",
+      "type": "text"
+    },
+    {
+      "table_name": "associations",
+      "column_name": "year",
+      "kind": "partition_key",
+      "position": 1,
+      "clustering_order": "NONE",
+      "type": "int"
+    },
+    {
+      "table_name": "comments",
+      "column_name": "author",
+      "kind": "regular",
+      "position": -1,
+      "clustering_order": "NONE",
+      "type": "text"
+    },
+    {
+      "table_name": "comments",
+      "column_name": "comment",
+      "kind": "regular",
+      "position": -1,
+      "clustering_order": "NONE",
+      "type": "text"
+    },
+    {
+      "table_name": "comments",
+      "column_name": "files",
+      "kind": "regular",
+      "position": -1,
+      "clustering_order": "NONE",
+      "type": "text"
+    },
+    {
+      "table_name": "comments",
+      "column_name": "group",
+      "kind": "partition_key",
+      "position": 0,
+      "clustering_order": "NONE",
+      "type": "text"
+    },
+    {
+      "table_name": "comments",
+      "column_name": "id",
+      "kind": "clustering",
+      "position": 1,
+      "clustering_order": "ASC",
+      "type": "uuid"
+    },
+    {
+      "table_name": "comments",
+      "column_name": "sha256",
+      "kind": "partition_key",
+      "position": 1,
+      "clustering_order": "NONE",
+      "type": "text"
+    },
+    {
+      "table_name": "comments",
+      "column_name": "uploaded",
+      "kind": "clustering",
+      "position": 0,
+      "clustering_order": "ASC",
+      "type": "timestamp"
+    },
+    {
+      "table_name": "comments_by_id",
+      "column_name": "group",
+      "kind": "clustering",
+      "position": 1,
+      "clustering_order": "ASC",
+      "type": "text"
+    },
+    {
+      "table_name": "comments_by_id",
+      "column_name": "id",
+      "kind": "partition_key",
+      "position": 0,
+      "clustering_order": "NONE",
+      "type": "uuid"
+    },
+    {
+      "table_name": "comments_by_id",
+      "column_name": "sha256",
+      "kind": "clustering",
+      "position": 0,
+      "clustering_order": "ASC",
+      "type": "text"
+    },
+    {
+      "table_name": "comments_by_id",
+      "column_name": "uploaded",
+      "kind": "clustering",
+      "position": 2,
+      "clustering_order": "ASC",
+      "type": "timestamp"
+    },
+    {
+      "table_name": "commitish_list",
+      "column_name": "bucket",
+      "kind": "partition_key",
+      "position": 3,
+      "clustering_order": "NONE",
+      "type": "int"
+    },
+    {
+      "table_name": "commitish_list",
+      "column_name": "group",
+      "kind": "partition_key",
+      "position": 1,
+      "clustering_order": "NONE",
+      "type": "text"
+    },
+    {
+      "table_name": "commitish_list",
+      "column_name": "key",
+      "kind": "clustering",
+      "position": 1,
+      "clustering_order": "DESC",
+      "type": "text"
+    },
+    {
+      "table_name": "commitish_list",
+      "column_name": "kind",
+      "kind": "partition_key",
+      "position": 0,
+      "clustering_order": "NONE",
+      "type": "text"
+    },
+    {
+      "table_name": "commitish_list",
+      "column_name": "repo",
+      "kind": "partition_key",
+      "position": 4,
+      "clustering_order": "NONE",
+      "type": "text"
+    },
+    {
+      "table_name": "commitish_list",
+      "column_name": "repo_data",
+      "kind": "regular",
+      "position": -1,
+      "clustering_order": "NONE",
+      "type": "text"
+    },
+    {
+      "table_name": "commitish_list",
+      "column_name": "timestamp",
+      "kind": "clustering",
+      "position": 0,
+      "clustering_order": "DESC",
+      "type": "timestamp"
+    },
+    {
+      "table_name": "commitish_list",
+      "column_name": "year",
+      "kind": "partition_key",
+      "position": 2,
+      "clustering_order": "NONE",
+      "type": "int"
+    },
+    {
+      "table_name": "commitishes",
+      "column_name": "data",
+      "kind": "regular",
+      "position": -1,
+      "clustering_order": "NONE",
+      "type": "text"
+    },
+    {
+      "table_name": "commitishes",
+      "column_name": "group",
+      "kind": "partition_key",
+      "position": 1,
+      "clustering_order": "NONE",
+      "type": "text"
+    },
+    {
+      "table_name": "commitishes",
+      "column_name": "key",
+      "kind": "partition_key",
+      "position": 3,
+      "clustering_order": "NONE",
+      "type": "text"
+    },
+    {
+      "table_name": "commitishes",
+      "column_name": "kind",
+      "kind": "partition_key",
+      "position": 0,
+      "clustering_order": "NONE",
+      "type": "text"
+    },
+    {
+      "table_name": "commitishes",
+      "column_name": "repo",
+      "kind": "partition_key",
+      "position": 2,
+      "clustering_order": "NONE",
+      "type": "text"
+    },
+    {
+      "table_name": "commitishes",
+      "column_name": "repo_data",
+      "kind": "regular",
+      "position": -1,
+      "clustering_order": "NONE",
+      "type": "text"
+    },
+    {
+      "table_name": "commitishes",
+      "column_name": "timestamp",
+      "kind": "regular",
+      "position": -1,
+      "clustering_order": "NONE",
+      "type": "timestamp"
+    },
+    {
+      "table_name": "committed_repo_data",
+      "column_name": "bucket",
+      "kind": "partition_key",
+      "position": 2,
+      "clustering_order": "NONE",
+      "type": "int"
+    },
+    {
+      "table_name": "committed_repo_data",
+      "column_name": "group",
+      "kind": "clustering",
+      "position": 1,
+      "clustering_order": "ASC",
+      "type": "text"
+    },
+    {
+      "table_name": "committed_repo_data",
+      "column_name": "key",
+      "kind": "clustering",
+      "position": 3,
+      "clustering_order": "ASC",
+      "type": "text"
+    },
+    {
+      "table_name": "committed_repo_data",
+      "column_name": "kind",
+      "kind": "clustering",
+      "position": 0,
+      "clustering_order": "ASC",
+      "type": "text"
+    },
+    {
+      "table_name": "committed_repo_data",
+      "column_name": "repo",
+      "kind": "clustering",
+      "position": 2,
+      "clustering_order": "ASC",
+      "type": "text"
+    },
+    {
+      "table_name": "committed_repo_data",
+      "column_name": "repo_data",
+      "kind": "partition_key",
+      "position": 0,
+      "clustering_order": "NONE",
+      "type": "text"
+    },
+    {
+      "table_name": "committed_repo_data",
+      "column_name": "timestamp",
+      "kind": "clustering",
+      "position": 4,
+      "clustering_order": "ASC",
+      "type": "timestamp"
+    },
+    {
+      "table_name": "committed_repo_data",
+      "column_name": "year",
+      "kind": "partition_key",
+      "position": 1,
+      "clustering_order": "NONE",
+      "type": "int"
+    },
+    {
+      "table_name": "entities",
+      "column_name": "bucket",
+      "kind": "partition_key",
+      "position": 3,
+      "clustering_order": "NONE",
+      "type": "int"
+    },
+    {
+      "table_name": "entities",
+      "column_name": "created",
+      "kind": "clustering",
+      "position": 0,
+      "clustering_order": "ASC",
+      "type": "timestamp"
+    },
+    {
+      "table_name": "entities",
+      "column_name": "description",
+      "kind": "regular",
+      "position": -1,
+      "clustering_order": "NONE",
+      "type": "text"
+    },
+    {
+      "table_name": "entities",
+      "column_name": "group",
+      "kind": "partition_key",
+      "position": 1,
+      "clustering_order": "NONE",
+      "type": "text"
+    },
+    {
+      "table_name": "entities",
+      "column_name": "id",
+      "kind": "clustering",
+      "position": 1,
+      "clustering_order": "ASC",
+      "type": "uuid"
+    },
+    {
+      "table_name": "entities",
+      "column_name": "image",
+      "kind": "regular",
+      "position": -1,
+      "clustering_order": "NONE",
+      "type": "text"
+    },
+    {
+      "table_name": "entities",
+      "column_name": "kind",
+      "kind": "partition_key",
+      "position": 0,
+      "clustering_order": "NONE",
+      "type": "text"
+    },
+    {
+      "table_name": "entities",
+      "column_name": "kind_data",
+      "kind": "regular",
+      "position": -1,
+      "clustering_order": "NONE",
+      "type": "text"
+    },
+    {
+      "table_name": "entities",
+      "column_name": "name",
+      "kind": "regular",
+      "position": -1,
+      "clustering_order": "NONE",
+      "type": "text"
+    },
+    {
+      "table_name": "entities",
+      "column_name": "submitter",
+      "kind": "regular",
+      "position": -1,
+      "clustering_order": "NONE",
+      "type": "text"
+    },
+    {
+      "table_name": "entities",
+      "column_name": "year",
+      "kind": "partition_key",
+      "position": 2,
+      "clustering_order": "NONE",
+      "type": "int"
+    },
+    {
+      "table_name": "entities_by_id",
+      "column_name": "bucket",
+      "kind": "clustering",
+      "position": 4,
+      "clustering_order": "ASC",
+      "type": "int"
+    },
+    {
+      "table_name": "entities_by_id",
+      "column_name": "created",
+      "kind": "clustering",
+      "position": 2,
+      "clustering_order": "ASC",
+      "type": "timestamp"
+    },
+    {
+      "table_name": "entities_by_id",
+      "column_name": "description",
+      "kind": "regular",
+      "position": -1,
+      "clustering_order": "NONE",
+      "type": "text"
+    },
+    {
+      "table_name": "entities_by_id",
+      "column_name": "group",
+      "kind": "clustering",
+      "position": 0,
+      "clustering_order": "ASC",
+      "type": "text"
+    },
+    {
+      "table_name": "entities_by_id",
+      "column_name": "id",
+      "kind": "partition_key",
+      "position": 0,
+      "clustering_order": "NONE",
+      "type": "uuid"
+    },
+    {
+      "table_name": "entities_by_id",
+      "column_name": "image",
+      "kind": "regular",
+      "position": -1,
+      "clustering_order": "NONE",
+      "type": "text"
+    },
+    {
+      "table_name": "entities_by_id",
+      "column_name": "kind",
+      "kind": "clustering",
+      "position": 1,
+      "clustering_order": "ASC",
+      "type": "text"
+    },
+    {
+      "table_name": "entities_by_id",
+      "column_name": "kind_data",
+      "kind": "regular",
+      "position": -1,
+      "clustering_order": "NONE",
+      "type": "text"
+    },
+    {
+      "table_name": "entities_by_id",
+      "column_name": "name",
+      "kind": "clustering",
+      "position": 5,
+      "clustering_order": "ASC",
+      "type": "text"
+    },
+    {
+      "table_name": "entities_by_id",
+      "column_name": "submitter",
+      "kind": "regular",
+      "position": -1,
+      "clustering_order": "NONE",
+      "type": "text"
+    },
+    {
+      "table_name": "entities_by_id",
+      "column_name": "year",
+      "kind": "clustering",
+      "position": 3,
+      "clustering_order": "ASC",
+      "type": "int"
+    },
+    {
+      "table_name": "entities_by_name",
+      "column_name": "bucket",
+      "kind": "clustering",
+      "position": 4,
+      "clustering_order": "ASC",
+      "type": "int"
+    },
+    {
+      "table_name": "entities_by_name",
+      "column_name": "created",
+      "kind": "clustering",
+      "position": 2,
+      "clustering_order": "ASC",
+      "type": "timestamp"
+    },
+    {
+      "table_name": "entities_by_name",
+      "column_name": "description",
+      "kind": "regular",
+      "position": -1,
+      "clustering_order": "NONE",
+      "type": "text"
+    },
+    {
+      "table_name": "entities_by_name",
+      "column_name": "group",
+      "kind": "clustering",
+      "position": 0,
+      "clustering_order": "ASC",
+      "type": "text"
+    },
+    {
+      "table_name": "entities_by_name",
+      "column_name": "id",
+      "kind": "clustering",
+      "position": 5,
+      "clustering_order": "ASC",
+      "type": "uuid"
+    },
+    {
+      "table_name": "entities_by_name",
+      "column_name": "image",
+      "kind": "regular",
+      "position": -1,
+      "clustering_order": "NONE",
+      "type": "text"
+    },
+    {
+      "table_name": "entities_by_name",
+      "column_name": "kind",
+      "kind": "clustering",
+      "position": 1,
+      "clustering_order": "ASC",
+      "type": "text"
+    },
+    {
+      "table_name": "entities_by_name",
+      "column_name": "kind_data",
+      "kind": "regular",
+      "position": -1,
+      "clustering_order": "NONE",
+      "type": "text"
+    },
+    {
+      "table_name": "entities_by_name",
+      "column_name": "name",
+      "kind": "partition_key",
+      "position": 0,
+      "clustering_order": "NONE",
+      "type": "text"
+    },
+    {
+      "table_name": "entities_by_name",
+      "column_name": "submitter",
+      "kind": "regular",
+      "position": -1,
+      "clustering_order": "NONE",
+      "type": "text"
+    },
+    {
+      "table_name": "entities_by_name",
+      "column_name": "year",
+      "kind": "clustering",
+      "position": 3,
+      "clustering_order": "ASC",
+      "type": "int"
+    },
+    {
+      "table_name": "events",
+      "column_name": "bucket",
+      "kind": "partition_key",
+      "position": 2,
+      "clustering_order": "NONE",
+      "type": "int"
+    },
+    {
+      "table_name": "events",
+      "column_name": "data",
+      "kind": "regular",
+      "position": -1,
+      "clustering_order": "NONE",
+      "type": "text"
+    },
+    {
+      "table_name": "events",
+      "column_name": "event_type",
+      "kind": "partition_key",
+      "position": 0,
+      "clustering_order": "NONE",
+      "type": "text"
+    },
+    {
+      "table_name": "events",
+      "column_name": "id",
+      "kind": "clustering",
+      "position": 1,
+      "clustering_order": "ASC",
+      "type": "uuid"
+    },
+    {
+      "table_name": "events",
+      "column_name": "parent",
+      "kind": "regular",
+      "position": -1,
+      "clustering_order": "NONE",
+      "type": "uuid"
+    },
+    {
+      "table_name": "events",
+      "column_name": "timestamp",
+      "kind": "clustering",
+      "position": 0,
+      "clustering_order": "ASC",
+      "type": "timestamp"
+    },
+    {
+      "table_name": "events",
+      "column_name": "trigger_depth",
+      "kind": "regular",
+      "position": -1,
+      "clustering_order": "NONE",
+      "type": "smallint"
+    },
+    {
+      "table_name": "events",
+      "column_name": "user",
+      "kind": "regular",
+      "position": -1,
+      "clustering_order": "NONE",
+      "type": "text"
+    },
+    {
+      "table_name": "events",
+      "column_name": "year",
+      "kind": "partition_key",
+      "position": 1,
+      "clustering_order": "NONE",
+      "type": "int"
+    },
+    {
+      "table_name": "logs",
+      "column_name": "bucket",
+      "kind": "partition_key",
+      "position": 2,
+      "clustering_order": "NONE",
+      "type": "int"
+    },
+    {
+      "table_name": "logs",
+      "column_name": "line",
+      "kind": "regular",
+      "position": -1,
+      "clustering_order": "NONE",
+      "type": "text"
+    },
+    {
+      "table_name": "logs",
+      "column_name": "position",
+      "kind": "clustering",
+      "position": 0,
+      "clustering_order": "ASC",
+      "type": "bigint"
+    },
+    {
+      "table_name": "logs",
+      "column_name": "reaction",
+      "kind": "partition_key",
+      "position": 0,
+      "clustering_order": "NONE",
+      "type": "uuid"
+    },
+    {
+      "table_name": "logs",
+      "column_name": "stage",
+      "kind": "partition_key",
+      "position": 1,
+      "clustering_order": "NONE",
+      "type": "text"
+    },
+    {
+      "table_name": "network_policies",
+      "column_name": "created",
+      "kind": "regular",
+      "position": -1,
+      "clustering_order": "NONE",
+      "type": "timestamp"
+    },
+    {
+      "table_name": "network_policies",
+      "column_name": "default_policy",
+      "kind": "regular",
+      "position": -1,
+      "clustering_order": "NONE",
+      "type": "boolean"
+    },
+    {
+      "table_name": "network_policies",
+      "column_name": "egress",
+      "kind": "regular",
+      "position": -1,
+      "clustering_order": "NONE",
+      "type": "text"
+    },
+    {
+      "table_name": "network_policies",
+      "column_name": "forced_policy",
+      "kind": "regular",
+      "position": -1,
+      "clustering_order": "NONE",
+      "type": "boolean"
+    },
+    {
+      "table_name": "network_policies",
+      "column_name": "group",
+      "kind": "partition_key",
+      "position": 0,
+      "clustering_order": "NONE",
+      "type": "text"
+    },
+    {
+      "table_name": "network_policies",
+      "column_name": "id",
+      "kind": "regular",
+      "position": -1,
+      "clustering_order": "NONE",
+      "type": "uuid"
+    },
+    {
+      "table_name": "network_policies",
+      "column_name": "ingress",
+      "kind": "regular",
+      "position": -1,
+      "clustering_order": "NONE",
+      "type": "text"
+    },
+    {
+      "table_name": "network_policies",
+      "column_name": "k8s_name",
+      "kind": "regular",
+      "position": -1,
+      "clustering_order": "NONE",
+      "type": "text"
+    },
+    {
+      "table_name": "network_policies",
+      "column_name": "name",
+      "kind": "clustering",
+      "position": 0,
+      "clustering_order": "ASC",
+      "type": "text"
+    },
+    {
+      "table_name": "network_policies_by_name",
+      "column_name": "created",
+      "kind": "regular",
+      "position": -1,
+      "clustering_order": "NONE",
+      "type": "timestamp"
+    },
+    {
+      "table_name": "network_policies_by_name",
+      "column_name": "default_policy",
+      "kind": "regular",
+      "position": -1,
+      "clustering_order": "NONE",
+      "type": "boolean"
+    },
+    {
+      "table_name": "network_policies_by_name",
+      "column_name": "egress",
+      "kind": "regular",
+      "position": -1,
+      "clustering_order": "NONE",
+      "type": "text"
+    },
+    {
+      "table_name": "network_policies_by_name",
+      "column_name": "forced_policy",
+      "kind": "regular",
+      "position": -1,
+      "clustering_order": "NONE",
+      "type": "boolean"
+    },
+    {
+      "table_name": "network_policies_by_name",
+      "column_name": "group",
+      "kind": "clustering",
+      "position": 0,
+      "clustering_order": "ASC",
+      "type": "text"
+    },
+    {
+      "table_name": "network_policies_by_name",
+      "column_name": "id",
+      "kind": "regular",
+      "position": -1,
+      "clustering_order": "NONE",
+      "type": "uuid"
+    },
+    {
+      "table_name": "network_policies_by_name",
+      "column_name": "ingress",
+      "kind": "regular",
+      "position": -1,
+      "clustering_order": "NONE",
+      "type": "text"
+    },
+    {
+      "table_name": "network_policies_by_name",
+      "column_name": "k8s_name",
+      "kind": "regular",
+      "position": -1,
+      "clustering_order": "NONE",
+      "type": "text"
+    },
+    {
+      "table_name": "network_policies_by_name",
+      "column_name": "name",
+      "kind": "partition_key",
+      "position": 0,
+      "clustering_order": "NONE",
+      "type": "text"
+    },
+    {
+      "table_name": "network_policies_default",
+      "column_name": "default_policy",
+      "kind": "clustering",
+      "position": 1,
+      "clustering_order": "ASC",
+      "type": "boolean"
+    },
+    {
+      "table_name": "network_policies_default",
+      "column_name": "group",
+      "kind": "partition_key",
+      "position": 0,
+      "clustering_order": "NONE",
+      "type": "text"
+    },
+    {
+      "table_name": "network_policies_default",
+      "column_name": "id",
+      "kind": "regular",
+      "position": -1,
+      "clustering_order": "NONE",
+      "type": "uuid"
+    },
+    {
+      "table_name": "network_policies_default",
+      "column_name": "name",
+      "kind": "clustering",
+      "position": 0,
+      "clustering_order": "ASC",
+      "type": "text"
+    },
+    {
+      "table_name": "nodes",
+      "column_name": "cluster",
+      "kind": "partition_key",
+      "position": 0,
+      "clustering_order": "NONE",
+      "type": "text"
+    },
+    {
+      "table_name": "nodes",
+      "column_name": "health",
+      "kind": "regular",
+      "position": -1,
+      "clustering_order": "NONE",
+      "type": "text"
+    },
+    {
+      "table_name": "nodes",
+      "column_name": "heart_beat",
+      "kind": "regular",
+      "position": -1,
+      "clustering_order": "NONE",
+      "type": "timestamp"
+    },
+    {
+      "table_name": "nodes",
+      "column_name": "node",
+      "kind": "clustering",
+      "position": 0,
+      "clustering_order": "ASC",
+      "type": "text"
+    },
+    {
+      "table_name": "nodes",
+      "column_name": "resources",
+      "kind": "regular",
+      "position": -1,
+      "clustering_order": "NONE",
+      "type": "text"
+    },
+    {
+      "table_name": "notifications",
+      "column_name": "ban_id",
+      "kind": "regular",
+      "position": -1,
+      "clustering_order": "NONE",
+      "type": "uuid"
+    },
+    {
+      "table_name": "notifications",
+      "column_name": "created",
+      "kind": "clustering",
+      "position": 0,
+      "clustering_order": "ASC",
+      "type": "timestamp"
+    },
+    {
+      "table_name": "notifications",
+      "column_name": "id",
+      "kind": "clustering",
+      "position": 1,
+      "clustering_order": "ASC",
+      "type": "uuid"
+    },
+    {
+      "table_name": "notifications",
+      "column_name": "key",
+      "kind": "partition_key",
+      "position": 1,
+      "clustering_order": "NONE",
+      "type": "text"
+    },
+    {
+      "table_name": "notifications",
+      "column_name": "kind",
+      "kind": "partition_key",
+      "position": 0,
+      "clustering_order": "NONE",
+      "type": "text"
+    },
+    {
+      "table_name": "notifications",
+      "column_name": "level",
+      "kind": "regular",
+      "position": -1,
+      "clustering_order": "NONE",
+      "type": "text"
+    },
+    {
+      "table_name": "notifications",
+      "column_name": "msg",
+      "kind": "regular",
+      "position": -1,
+      "clustering_order": "NONE",
+      "type": "text"
+    },
+    {
+      "table_name": "repo_data",
+      "column_name": "hash",
+      "kind": "clustering",
+      "position": 0,
+      "clustering_order": "ASC",
+      "type": "text"
+    },
+    {
+      "table_name": "repo_data",
+      "column_name": "repo",
+      "kind": "partition_key",
+      "position": 0,
+      "clustering_order": "NONE",
+      "type": "text"
+    },
+    {
+      "table_name": "repos",
+      "column_name": "bucket",
+      "kind": "clustering",
+      "position": 3,
+      "clustering_order": "DESC",
+      "type": "int"
+    },
+    {
+      "table_name": "repos",
+      "column_name": "creator",
+      "kind": "regular",
+      "position": -1,
+      "clustering_order": "NONE",
+      "type": "text"
+    },
+    {
+      "table_name": "repos",
+      "column_name": "default_checkout",
+      "kind": "regular",
+      "position": -1,
+      "clustering_order": "NONE",
+      "type": "text"
+    },
+    {
+      "table_name": "repos",
+      "column_name": "earliest",
+      "kind": "regular",
+      "position": -1,
+      "clustering_order": "NONE",
+      "type": "timestamp"
+    },
+    {
+      "table_name": "repos",
+      "column_name": "group",
+      "kind": "clustering",
+      "position": 0,
+      "clustering_order": "ASC",
+      "type": "text"
+    },
+    {
+      "table_name": "repos",
+      "column_name": "id",
+      "kind": "clustering",
+      "position": 4,
+      "clustering_order": "DESC",
+      "type": "uuid"
+    },
+    {
+      "table_name": "repos",
+      "column_name": "name",
+      "kind": "regular",
+      "position": -1,
+      "clustering_order": "NONE",
+      "type": "text"
+    },
+    {
+      "table_name": "repos",
+      "column_name": "provider",
+      "kind": "regular",
+      "position": -1,
+      "clustering_order": "NONE",
+      "type": "text"
+    },
+    {
+      "table_name": "repos",
+      "column_name": "scheme",
+      "kind": "regular",
+      "position": -1,
+      "clustering_order": "NONE",
+      "type": "text"
+    },
+    {
+      "table_name": "repos",
+      "column_name": "uploaded",
+      "kind": "clustering",
+      "position": 1,
+      "clustering_order": "DESC",
+      "type": "timestamp"
+    },
+    {
+      "table_name": "repos",
+      "column_name": "url",
+      "kind": "partition_key",
+      "position": 0,
+      "clustering_order": "NONE",
+      "type": "text"
+    },
+    {
+      "table_name": "repos",
+      "column_name": "user",
+      "kind": "regular",
+      "position": -1,
+      "clustering_order": "NONE",
+      "type": "text"
+    },
+    {
+      "table_name": "repos",
+      "column_name": "year",
+      "kind": "clustering",
+      "position": 2,
+      "clustering_order": "DESC",
+      "type": "int"
+    },
+    {
+      "table_name": "repos_list",
+      "column_name": "bucket",
+      "kind": "partition_key",
+      "position": 2,
+      "clustering_order": "NONE",
+      "type": "int"
+    },
+    {
+      "table_name": "repos_list",
+      "column_name": "creator",
+      "kind": "regular",
+      "position": -1,
+      "clustering_order": "NONE",
+      "type": "text"
+    },
+    {
+      "table_name": "repos_list",
+      "column_name": "default_checkout",
+      "kind": "regular",
+      "position": -1,
+      "clustering_order": "NONE",
+      "type": "text"
+    },
+    {
+      "table_name": "repos_list",
+      "column_name": "earliest",
+      "kind": "regular",
+      "position": -1,
+      "clustering_order": "NONE",
+      "type": "timestamp"
+    },
+    {
+      "table_name": "repos_list",
+      "column_name": "group",
+      "kind": "partition_key",
+      "position": 0,
+      "clustering_order": "NONE",
+      "type": "text"
+    },
+    {
+      "table_name": "repos_list",
+      "column_name": "id",
+      "kind": "clustering",
+      "position": 1,
+      "clustering_order": "DESC",
+      "type": "uuid"
+    },
+    {
+      "table_name": "repos_list",
+      "column_name": "name",
+      "kind": "regular",
+      "position": -1,
+      "clustering_order": "NONE",
+      "type": "text"
+    },
+    {
+      "table_name": "repos_list",
+      "column_name": "provider",
+      "kind": "regular",
+      "position": -1,
+      "clustering_order": "NONE",
+      "type": "text"
+    },
+    {
+      "table_name": "repos_list",
+      "column_name": "scheme",
+      "kind": "regular",
+      "position": -1,
+      "clustering_order": "NONE",
+      "type": "text"
+    },
+    {
+      "table_name": "repos_list",
+      "column_name": "uploaded",
+      "kind": "clustering",
+      "position": 0,
+      "clustering_order": "DESC",
+      "type": "timestamp"
+    },
+    {
+      "table_name": "repos_list",
+      "column_name": "url",
+      "kind": "regular",
+      "position": -1,
+      "clustering_order": "NONE",
+      "type": "text"
+    },
+    {
+      "table_name": "repos_list",
+      "column_name": "user",
+      "kind": "regular",
+      "position": -1,
+      "clustering_order": "NONE",
+      "type": "text"
+    },
+    {
+      "table_name": "repos_list",
+      "column_name": "year",
+      "kind": "partition_key",
+      "position": 1,
+      "clustering_order": "NONE",
+      "type": "int"
+    },
+    {
+      "table_name": "results",
+      "column_name": "children",
+      "kind": "regular",
+      "position": -1,
+      "clustering_order": "NONE",
+      "type": "map<text, uuid>"
+    },
+    {
+      "table_name": "results",
+      "column_name": "cmd",
+      "kind": "regular",
+      "position": -1,
+      "clustering_order": "NONE",
+      "type": "text"
+    },
+    {
+      "table_name": "results",
+      "column_name": "display_type",
+      "kind": "regular",
+      "position": -1,
+      "clustering_order": "NONE",
+      "type": "text"
+    },
+    {
+      "table_name": "results",
+      "column_name": "entities",
+      "kind": "regular",
+      "position": -1,
+      "clustering_order": "NONE",
+      "type": "map<text, bigint>"
+    },
+    {
+      "table_name": "results",
+      "column_name": "files",
+      "kind": "regular",
+      "position": -1,
+      "clustering_order": "NONE",
+      "type": "set<text>"
+    },
+    {
+      "table_name": "results",
+      "column_name": "id",
+      "kind": "partition_key",
+      "position": 0,
+      "clustering_order": "NONE",
+      "type": "uuid"
+    },
+    {
+      "table_name": "results",
+      "column_name": "result",
+      "kind": "regular",
+      "position": -1,
+      "clustering_order": "NONE",
+      "type": "text"
+    },
+    {
+      "table_name": "results",
+      "column_name": "tool",
+      "kind": "regular",
+      "position": -1,
+      "clustering_order": "NONE",
+      "type": "text"
+    },
+    {
+      "table_name": "results",
+      "column_name": "tool_version",
+      "kind": "regular",
+      "position": -1,
+      "clustering_order": "NONE",
+      "type": "text"
+    },
+    {
+      "table_name": "results",
+      "column_name": "uploaded",
+      "kind": "clustering",
+      "position": 0,
+      "clustering_order": "DESC",
+      "type": "timestamp"
+    },
+    {
+      "table_name": "results_auth",
+      "column_name": "bucket",
+      "kind": "clustering",
+      "position": 5,
+      "clustering_order": "ASC",
+      "type": "int"
+    },
+    {
+      "table_name": "results_auth",
+      "column_name": "cmd",
+      "kind": "regular",
+      "position": -1,
+      "clustering_order": "NONE",
+      "type": "text"
+    },
+    {
+      "table_name": "results_auth",
+      "column_name": "display_type",
+      "kind": "regular",
+      "position": -1,
+      "clustering_order": "NONE",
+      "type": "text"
+    },
+    {
+      "table_name": "results_auth",
+      "column_name": "group",
+      "kind": "clustering",
+      "position": 1,
+      "clustering_order": "ASC",
+      "type": "text"
+    },
+    {
+      "table_name": "results_auth",
+      "column_name": "id",
+      "kind": "clustering",
+      "position": 3,
+      "clustering_order": "ASC",
+      "type": "uuid"
+    },
+    {
+      "table_name": "results_auth",
+      "column_name": "key",
+      "kind": "partition_key",
+      "position": 0,
+      "clustering_order": "NONE",
+      "type": "text"
+    },
+    {
+      "table_name": "results_auth",
+      "column_name": "kind",
+      "kind": "clustering",
+      "position": 0,
+      "clustering_order": "ASC",
+      "type": "text"
+    },
+    {
+      "table_name": "results_auth",
+      "column_name": "tool",
+      "kind": "clustering",
+      "position": 2,
+      "clustering_order": "ASC",
+      "type": "text"
+    },
+    {
+      "table_name": "results_auth",
+      "column_name": "tool_version",
+      "kind": "regular",
+      "position": -1,
+      "clustering_order": "NONE",
+      "type": "text"
+    },
+    {
+      "table_name": "results_auth",
+      "column_name": "uploaded",
+      "kind": "clustering",
+      "position": 6,
+      "clustering_order": "ASC",
+      "type": "timestamp"
+    },
+    {
+      "table_name": "results_auth",
+      "column_name": "year",
+      "kind": "clustering",
+      "position": 4,
+      "clustering_order": "ASC",
+      "type": "int"
+    },
+    {
+      "table_name": "results_ids",
+      "column_name": "bucket",
+      "kind": "clustering",
+      "position": 4,
+      "clustering_order": "ASC",
+      "type": "int"
+    },
+    {
+      "table_name": "results_ids",
+      "column_name": "group",
+      "kind": "clustering",
+      "position": 2,
+      "clustering_order": "ASC",
+      "type": "text"
+    },
+    {
+      "table_name": "results_ids",
+      "column_name": "id",
+      "kind": "clustering",
+      "position": 0,
+      "clustering_order": "ASC",
+      "type": "uuid"
+    },
+    {
+      "table_name": "results_ids",
+      "column_name": "key",
+      "kind": "partition_key",
+      "position": 0,
+      "clustering_order": "NONE",
+      "type": "text"
+    },
+    {
+      "table_name": "results_ids",
+      "column_name": "kind",
+      "kind": "clustering",
+      "position": 1,
+      "clustering_order": "ASC",
+      "type": "text"
+    },
+    {
+      "table_name": "results_ids",
+      "column_name": "tool",
+      "kind": "regular",
+      "position": -1,
+      "clustering_order": "NONE",
+      "type": "text"
+    },
+    {
+      "table_name": "results_ids",
+      "column_name": "uploaded",
+      "kind": "clustering",
+      "position": 5,
+      "clustering_order": "ASC",
+      "type": "timestamp"
+    },
+    {
+      "table_name": "results_ids",
+      "column_name": "year",
+      "kind": "clustering",
+      "position": 3,
+      "clustering_order": "ASC",
+      "type": "int"
+    },
+    {
+      "table_name": "results_stream",
+      "column_name": "bucket",
+      "kind": "partition_key",
+      "position": 3,
+      "clustering_order": "NONE",
+      "type": "int"
+    },
+    {
+      "table_name": "results_stream",
+      "column_name": "cmd",
+      "kind": "regular",
+      "position": -1,
+      "clustering_order": "NONE",
+      "type": "text"
+    },
+    {
+      "table_name": "results_stream",
+      "column_name": "display_type",
+      "kind": "regular",
+      "position": -1,
+      "clustering_order": "NONE",
+      "type": "text"
+    },
+    {
+      "table_name": "results_stream",
+      "column_name": "group",
+      "kind": "partition_key",
+      "position": 1,
+      "clustering_order": "NONE",
+      "type": "text"
+    },
+    {
+      "table_name": "results_stream",
+      "column_name": "id",
+      "kind": "clustering",
+      "position": 1,
+      "clustering_order": "ASC",
+      "type": "uuid"
+    },
+    {
+      "table_name": "results_stream",
+      "column_name": "key",
+      "kind": "clustering",
+      "position": 2,
+      "clustering_order": "ASC",
+      "type": "text"
+    },
+    {
+      "table_name": "results_stream",
+      "column_name": "kind",
+      "kind": "partition_key",
+      "position": 0,
+      "clustering_order": "NONE",
+      "type": "text"
+    },
+    {
+      "table_name": "results_stream",
+      "column_name": "tool",
+      "kind": "regular",
+      "position": -1,
+      "clustering_order": "NONE",
+      "type": "text"
+    },
+    {
+      "table_name": "results_stream",
+      "column_name": "tool_version",
+      "kind": "regular",
+      "position": -1,
+      "clustering_order": "NONE",
+      "type": "text"
+    },
+    {
+      "table_name": "results_stream",
+      "column_name": "uploaded",
+      "kind": "clustering",
+      "position": 0,
+      "clustering_order": "DESC",
+      "type": "timestamp"
+    },
+    {
+      "table_name": "results_stream",
+      "column_name": "year",
+      "kind": "partition_key",
+      "position": 2,
+      "clustering_order": "NONE",
+      "type": "int"
+    },
+    {
+      "table_name": "s3_ids",
+      "column_name": "id",
+      "kind": "partition_key",
+      "position": 1,
+      "clustering_order": "NONE",
+      "type": "uuid"
+    },
+    {
+      "table_name": "s3_ids",
+      "column_name": "sha256",
+      "kind": "clustering",
+      "position": 0,
+      "clustering_order": "ASC",
+      "type": "text"
+    },
+    {
+      "table_name": "s3_ids",
+      "column_name": "type",
+      "kind": "partition_key",
+      "position": 0,
+      "clustering_order": "NONE",
+      "type": "text"
+    },
+    {
+      "table_name": "s3_sha256s",
+      "column_name": "id",
+      "kind": "clustering",
+      "position": 1,
+      "clustering_order": "ASC",
+      "type": "uuid"
+    },
+    {
+      "table_name": "s3_sha256s",
+      "column_name": "sha256",
+      "kind": "partition_key",
+      "position": 0,
+      "clustering_order": "NONE",
+      "type": "text"
+    },
+    {
+      "table_name": "s3_sha256s",
+      "column_name": "type",
+      "kind": "clustering",
+      "position": 0,
+      "clustering_order": "ASC",
+      "type": "text"
+    },
+    {
+      "table_name": "samples",
+      "column_name": "bucket",
+      "kind": "clustering",
+      "position": 4,
+      "clustering_order": "ASC",
+      "type": "int"
+    },
+    {
+      "table_name": "samples",
+      "column_name": "description",
+      "kind": "regular",
+      "position": -1,
+      "clustering_order": "NONE",
+      "type": "text"
+    },
+    {
+      "table_name": "samples",
+      "column_name": "group",
+      "kind": "clustering",
+      "position": 0,
+      "clustering_order": "ASC",
+      "type": "text"
+    },
+    {
+      "table_name": "samples",
+      "column_name": "id",
+      "kind": "clustering",
+      "position": 2,
+      "clustering_order": "DESC",
+      "type": "uuid"
+    },
+    {
+      "table_name": "samples",
+      "column_name": "md5",
+      "kind": "regular",
+      "position": -1,
+      "clustering_order": "NONE",
+      "type": "text"
+    },
+    {
+      "table_name": "samples",
+      "column_name": "name",
+      "kind": "regular",
+      "position": -1,
+      "clustering_order": "NONE",
+      "type": "text"
+    },
+    {
+      "table_name": "samples",
+      "column_name": "origin",
+      "kind": "regular",
+      "position": -1,
+      "clustering_order": "NONE",
+      "type": "text"
+    },
+    {
+      "table_name": "samples",
+      "column_name": "sha1",
+      "kind": "regular",
+      "position": -1,
+      "clustering_order": "NONE",
+      "type": "text"
+    },
+    {
+      "table_name": "samples",
+      "column_name": "sha256",
+      "kind": "partition_key",
+      "position": 0,
+      "clustering_order": "NONE",
+      "type": "text"
+    },
+    {
+      "table_name": "samples",
+      "column_name": "submitter",
+      "kind": "regular",
+      "position": -1,
+      "clustering_order": "NONE",
+      "type": "text"
+    },
+    {
+      "table_name": "samples",
+      "column_name": "uploaded",
+      "kind": "clustering",
+      "position": 1,
+      "clustering_order": "DESC",
+      "type": "timestamp"
+    },
+    {
+      "table_name": "samples",
+      "column_name": "year",
+      "kind": "clustering",
+      "position": 3,
+      "clustering_order": "ASC",
+      "type": "int"
+    },
+    {
+      "table_name": "samples_list",
+      "column_name": "bucket",
+      "kind": "partition_key",
+      "position": 2,
+      "clustering_order": "NONE",
+      "type": "int"
+    },
+    {
+      "table_name": "samples_list",
+      "column_name": "description",
+      "kind": "regular",
+      "position": -1,
+      "clustering_order": "NONE",
+      "type": "text"
+    },
+    {
+      "table_name": "samples_list",
+      "column_name": "group",
+      "kind": "partition_key",
+      "position": 0,
+      "clustering_order": "NONE",
+      "type": "text"
+    },
+    {
+      "table_name": "samples_list",
+      "column_name": "id",
+      "kind": "clustering",
+      "position": 1,
+      "clustering_order": "DESC",
+      "type": "uuid"
+    },
+    {
+      "table_name": "samples_list",
+      "column_name": "md5",
+      "kind": "regular",
+      "position": -1,
+      "clustering_order": "NONE",
+      "type": "text"
+    },
+    {
+      "table_name": "samples_list",
+      "column_name": "name",
+      "kind": "regular",
+      "position": -1,
+      "clustering_order": "NONE",
+      "type": "text"
+    },
+    {
+      "table_name": "samples_list",
+      "column_name": "origin",
+      "kind": "regular",
+      "position": -1,
+      "clustering_order": "NONE",
+      "type": "text"
+    },
+    {
+      "table_name": "samples_list",
+      "column_name": "sha1",
+      "kind": "regular",
+      "position": -1,
+      "clustering_order": "NONE",
+      "type": "text"
+    },
+    {
+      "table_name": "samples_list",
+      "column_name": "sha256",
+      "kind": "regular",
+      "position": -1,
+      "clustering_order": "NONE",
+      "type": "text"
+    },
+    {
+      "table_name": "samples_list",
+      "column_name": "submitter",
+      "kind": "regular",
+      "position": -1,
+      "clustering_order": "NONE",
+      "type": "text"
+    },
+    {
+      "table_name": "samples_list",
+      "column_name": "uploaded",
+      "kind": "clustering",
+      "position": 0,
+      "clustering_order": "DESC",
+      "type": "timestamp"
+    },
+    {
+      "table_name": "samples_list",
+      "column_name": "year",
+      "kind": "partition_key",
+      "position": 1,
+      "clustering_order": "NONE",
+      "type": "int"
+    },
+    {
+      "table_name": "schema_migration_issues",
+      "column_name": "accepted",
+      "kind": "regular",
+      "position": -1,
+      "clustering_order": "NONE",
+      "type": "boolean"
+    },
+    {
+      "table_name": "schema_migration_issues",
+      "column_name": "attempt",
+      "kind": "regular",
+      "position": -1,
+      "clustering_order": "NONE",
+      "type": "text"
+    },
+    {
+      "table_name": "schema_migration_issues",
+      "column_name": "checkpoint",
+      "kind": "regular",
+      "position": -1,
+      "clustering_order": "NONE",
+      "type": "text"
+    },
+    {
+      "table_name": "schema_migration_issues",
+      "column_name": "class",
+      "kind": "regular",
+      "position": -1,
+      "clustering_order": "NONE",
+      "type": "text"
+    },
+    {
+      "table_name": "schema_migration_issues",
+      "column_name": "count",
+      "kind": "regular",
+      "position": -1,
+      "clustering_order": "NONE",
+      "type": "bigint"
+    },
+    {
+      "table_name": "schema_migration_issues",
+      "column_name": "first_seen",
+      "kind": "regular",
+      "position": -1,
+      "clustering_order": "NONE",
+      "type": "timestamp"
+    },
+    {
+      "table_name": "schema_migration_issues",
+      "column_name": "last_seen",
+      "kind": "regular",
+      "position": -1,
+      "clustering_order": "NONE",
+      "type": "timestamp"
+    },
+    {
+      "table_name": "schema_migration_issues",
+      "column_name": "lease",
+      "kind": "regular",
+      "position": -1,
+      "clustering_order": "NONE",
+      "type": "text"
+    },
+    {
+      "table_name": "schema_migration_issues",
+      "column_name": "migration",
+      "kind": "partition_key",
+      "position": 0,
+      "clustering_order": "NONE",
+      "type": "text"
+    },
+    {
+      "table_name": "schema_migration_issues",
+      "column_name": "reason",
+      "kind": "clustering",
+      "position": 1,
+      "clustering_order": "ASC",
+      "type": "text"
+    },
+    {
+      "table_name": "schema_migration_issues",
+      "column_name": "resolved_count",
+      "kind": "regular",
+      "position": -1,
+      "clustering_order": "NONE",
+      "type": "bigint"
+    },
+    {
+      "table_name": "schema_migration_issues",
+      "column_name": "samples",
+      "kind": "regular",
+      "position": -1,
+      "clustering_order": "NONE",
+      "type": "set<text>"
+    },
+    {
+      "table_name": "schema_migration_issues",
+      "column_name": "transform",
+      "kind": "clustering",
+      "position": 0,
+      "clustering_order": "ASC",
+      "type": "text"
+    },
+    {
+      "table_name": "schema_migration_issues",
+      "column_name": "updated",
+      "kind": "regular",
+      "position": -1,
+      "clustering_order": "NONE",
+      "type": "timestamp"
+    },
+    {
+      "table_name": "schema_migration_issues",
+      "column_name": "worker",
+      "kind": "clustering",
+      "position": 2,
+      "clustering_order": "ASC",
+      "type": "text"
+    },
+    {
+      "table_name": "schema_migrations",
+      "column_name": "apply_key",
+      "kind": "regular",
+      "position": -1,
+      "clustering_order": "NONE",
+      "type": "text"
+    },
+    {
+      "table_name": "schema_migrations",
+      "column_name": "attempt",
+      "kind": "regular",
+      "position": -1,
+      "clustering_order": "NONE",
+      "type": "text"
+    },
+    {
+      "table_name": "schema_migrations",
+      "column_name": "backup",
+      "kind": "regular",
+      "position": -1,
+      "clustering_order": "NONE",
+      "type": "text"
+    },
+    {
+      "table_name": "schema_migrations",
+      "column_name": "counts",
+      "kind": "regular",
+      "position": -1,
+      "clustering_order": "NONE",
+      "type": "text"
+    },
+    {
+      "table_name": "schema_migrations",
+      "column_name": "entry",
+      "kind": "regular",
+      "position": -1,
+      "clustering_order": "NONE",
+      "type": "text"
+    },
+    {
+      "table_name": "schema_migrations",
+      "column_name": "fingerprint",
+      "kind": "regular",
+      "position": -1,
+      "clustering_order": "NONE",
+      "type": "text"
+    },
+    {
+      "table_name": "schema_migrations",
+      "column_name": "finished",
+      "kind": "regular",
+      "position": -1,
+      "clustering_order": "NONE",
+      "type": "timestamp"
+    },
+    {
+      "table_name": "schema_migrations",
+      "column_name": "id",
+      "kind": "clustering",
+      "position": 0,
+      "clustering_order": "ASC",
+      "type": "text"
+    },
+    {
+      "table_name": "schema_migrations",
+      "column_name": "job",
+      "kind": "regular",
+      "position": -1,
+      "clustering_order": "NONE",
+      "type": "text"
+    },
+    {
+      "table_name": "schema_migrations",
+      "column_name": "kind",
+      "kind": "partition_key",
+      "position": 0,
+      "clustering_order": "NONE",
+      "type": "text"
+    },
+    {
+      "table_name": "schema_migrations",
+      "column_name": "layouts",
+      "kind": "regular",
+      "position": -1,
+      "clustering_order": "NONE",
+      "type": "map<text, bigint>"
+    },
+    {
+      "table_name": "schema_migrations",
+      "column_name": "lease",
+      "kind": "regular",
+      "position": -1,
+      "clustering_order": "NONE",
+      "type": "text"
+    },
+    {
+      "table_name": "schema_migrations",
+      "column_name": "report",
+      "kind": "regular",
+      "position": -1,
+      "clustering_order": "NONE",
+      "type": "text"
+    },
+    {
+      "table_name": "schema_migrations",
+      "column_name": "result",
+      "kind": "regular",
+      "position": -1,
+      "clustering_order": "NONE",
+      "type": "text"
+    },
+    {
+      "table_name": "schema_migrations",
+      "column_name": "revision",
+      "kind": "regular",
+      "position": -1,
+      "clustering_order": "NONE",
+      "type": "text"
+    },
+    {
+      "table_name": "schema_migrations",
+      "column_name": "started",
+      "kind": "regular",
+      "position": -1,
+      "clustering_order": "NONE",
+      "type": "timestamp"
+    },
+    {
+      "table_name": "schema_migrations",
+      "column_name": "status",
+      "kind": "regular",
+      "position": -1,
+      "clustering_order": "NONE",
+      "type": "text"
+    },
+    {
+      "table_name": "schema_migrations",
+      "column_name": "updated",
+      "kind": "regular",
+      "position": -1,
+      "clustering_order": "NONE",
+      "type": "timestamp"
+    },
+    {
+      "table_name": "schema_migrations",
+      "column_name": "value",
+      "kind": "regular",
+      "position": -1,
+      "clustering_order": "NONE",
+      "type": "text"
+    },
+    {
+      "table_name": "schema_migrations",
+      "column_name": "version",
+      "kind": "regular",
+      "position": -1,
+      "clustering_order": "NONE",
+      "type": "text"
+    },
+    {
+      "table_name": "tags",
+      "column_name": "bucket",
+      "kind": "partition_key",
+      "position": 3,
+      "clustering_order": "NONE",
+      "type": "int"
+    },
+    {
+      "table_name": "tags",
+      "column_name": "group",
+      "kind": "partition_key",
+      "position": 1,
+      "clustering_order": "NONE",
+      "type": "text"
+    },
+    {
+      "table_name": "tags",
+      "column_name": "item",
+      "kind": "clustering",
+      "position": 1,
+      "clustering_order": "ASC",
+      "type": "text"
+    },
+    {
+      "table_name": "tags",
+      "column_name": "key",
+      "kind": "partition_key",
+      "position": 4,
+      "clustering_order": "NONE",
+      "type": "text"
+    },
+    {
+      "table_name": "tags",
+      "column_name": "key_lower",
+      "kind": "clustering",
+      "position": 2,
+      "clustering_order": "ASC",
+      "type": "text"
+    },
+    {
+      "table_name": "tags",
+      "column_name": "type",
+      "kind": "partition_key",
+      "position": 0,
+      "clustering_order": "NONE",
+      "type": "text"
+    },
+    {
+      "table_name": "tags",
+      "column_name": "uploaded",
+      "kind": "clustering",
+      "position": 0,
+      "clustering_order": "DESC",
+      "type": "timestamp"
+    },
+    {
+      "table_name": "tags",
+      "column_name": "value",
+      "kind": "partition_key",
+      "position": 5,
+      "clustering_order": "NONE",
+      "type": "text"
+    },
+    {
+      "table_name": "tags",
+      "column_name": "value_lower",
+      "kind": "clustering",
+      "position": 3,
+      "clustering_order": "ASC",
+      "type": "text"
+    },
+    {
+      "table_name": "tags",
+      "column_name": "year",
+      "kind": "partition_key",
+      "position": 2,
+      "clustering_order": "NONE",
+      "type": "int"
+    },
+    {
+      "table_name": "tags_by_item",
+      "column_name": "bucket",
+      "kind": "clustering",
+      "position": 2,
+      "clustering_order": "ASC",
+      "type": "int"
+    },
+    {
+      "table_name": "tags_by_item",
+      "column_name": "group",
+      "kind": "clustering",
+      "position": 0,
+      "clustering_order": "ASC",
+      "type": "text"
+    },
+    {
+      "table_name": "tags_by_item",
+      "column_name": "item",
+      "kind": "partition_key",
+      "position": 1,
+      "clustering_order": "NONE",
+      "type": "text"
+    },
+    {
+      "table_name": "tags_by_item",
+      "column_name": "key",
+      "kind": "clustering",
+      "position": 4,
+      "clustering_order": "ASC",
+      "type": "text"
+    },
+    {
+      "table_name": "tags_by_item",
+      "column_name": "key_lower",
+      "kind": "clustering",
+      "position": 6,
+      "clustering_order": "ASC",
+      "type": "text"
+    },
+    {
+      "table_name": "tags_by_item",
+      "column_name": "type",
+      "kind": "partition_key",
+      "position": 0,
+      "clustering_order": "NONE",
+      "type": "text"
+    },
+    {
+      "table_name": "tags_by_item",
+      "column_name": "uploaded",
+      "kind": "clustering",
+      "position": 3,
+      "clustering_order": "ASC",
+      "type": "timestamp"
+    },
+    {
+      "table_name": "tags_by_item",
+      "column_name": "value",
+      "kind": "clustering",
+      "position": 5,
+      "clustering_order": "ASC",
+      "type": "text"
+    },
+    {
+      "table_name": "tags_by_item",
+      "column_name": "value_lower",
+      "kind": "clustering",
+      "position": 7,
+      "clustering_order": "ASC",
+      "type": "text"
+    },
+    {
+      "table_name": "tags_by_item",
+      "column_name": "year",
+      "kind": "clustering",
+      "position": 1,
+      "clustering_order": "ASC",
+      "type": "int"
+    },
+    {
+      "table_name": "tags_case_insensitive",
+      "column_name": "bucket",
+      "kind": "partition_key",
+      "position": 3,
+      "clustering_order": "NONE",
+      "type": "int"
+    },
+    {
+      "table_name": "tags_case_insensitive",
+      "column_name": "group",
+      "kind": "partition_key",
+      "position": 1,
+      "clustering_order": "NONE",
+      "type": "text"
+    },
+    {
+      "table_name": "tags_case_insensitive",
+      "column_name": "item",
+      "kind": "clustering",
+      "position": 1,
+      "clustering_order": "ASC",
+      "type": "text"
+    },
+    {
+      "table_name": "tags_case_insensitive",
+      "column_name": "key",
+      "kind": "clustering",
+      "position": 2,
+      "clustering_order": "ASC",
+      "type": "text"
+    },
+    {
+      "table_name": "tags_case_insensitive",
+      "column_name": "key_lower",
+      "kind": "partition_key",
+      "position": 4,
+      "clustering_order": "NONE",
+      "type": "text"
+    },
+    {
+      "table_name": "tags_case_insensitive",
+      "column_name": "type",
+      "kind": "partition_key",
+      "position": 0,
+      "clustering_order": "NONE",
+      "type": "text"
+    },
+    {
+      "table_name": "tags_case_insensitive",
+      "column_name": "uploaded",
+      "kind": "clustering",
+      "position": 0,
+      "clustering_order": "ASC",
+      "type": "timestamp"
+    },
+    {
+      "table_name": "tags_case_insensitive",
+      "column_name": "value",
+      "kind": "clustering",
+      "position": 3,
+      "clustering_order": "ASC",
+      "type": "text"
+    },
+    {
+      "table_name": "tags_case_insensitive",
+      "column_name": "value_lower",
+      "kind": "partition_key",
+      "position": 5,
+      "clustering_order": "NONE",
+      "type": "text"
+    },
+    {
+      "table_name": "tags_case_insensitive",
+      "column_name": "year",
+      "kind": "partition_key",
+      "position": 2,
+      "clustering_order": "NONE",
+      "type": "int"
+    }
+  ],
+  "views": [
+    {
+      "view_name": "comments_by_id",
+      "base_table_name": "comments",
+      "where_clause": "id IS NOT null AND sha256 IS NOT null AND group IS NOT null AND uploaded IS NOT null",
+      "include_all_columns": false
+    },
+    {
+      "view_name": "committed_repo_data",
+      "base_table_name": "commitish_list",
+      "where_clause": "kind IS NOT null AND group IS NOT null AND repo IS NOT null AND repo_data IS NOT null AND key IS NOT null AND year IS NOT null AND bucket IS NOT null AND timestamp IS NOT null",
+      "include_all_columns": false
+    },
+    {
+      "view_name": "entities_by_id",
+      "base_table_name": "entities",
+      "where_clause": "id IS NOT null AND group IS NOT null AND kind IS NOT null AND created IS NOT null AND year IS NOT null AND bucket IS NOT null AND name IS NOT null",
+      "include_all_columns": false
+    },
+    {
+      "view_name": "entities_by_name",
+      "base_table_name": "entities",
+      "where_clause": "name IS NOT null AND group IS NOT null AND kind IS NOT null AND created IS NOT null AND year IS NOT null AND bucket IS NOT null AND id IS NOT null",
+      "include_all_columns": false
+    },
+    {
+      "view_name": "network_policies_by_name",
+      "base_table_name": "network_policies",
+      "where_clause": "name IS NOT null AND group IS NOT null",
+      "include_all_columns": false
+    },
+    {
+      "view_name": "network_policies_default",
+      "base_table_name": "network_policies",
+      "where_clause": "group IS NOT null AND name IS NOT null AND default_policy = true",
+      "include_all_columns": false
+    },
+    {
+      "view_name": "repos",
+      "base_table_name": "repos_list",
+      "where_clause": "group IS NOT null AND year IS NOT null AND bucket IS NOT null AND uploaded IS NOT null AND id IS NOT null AND url IS NOT null",
+      "include_all_columns": false
+    },
+    {
+      "view_name": "results_auth",
+      "base_table_name": "results_stream",
+      "where_clause": "kind IS NOT null AND group IS NOT null AND year IS NOT null AND bucket IS NOT null AND uploaded IS NOT null AND id IS NOT null AND key IS NOT null AND tool IS NOT null",
+      "include_all_columns": false
+    },
+    {
+      "view_name": "results_ids",
+      "base_table_name": "results_stream",
+      "where_clause": "kind IS NOT null AND group IS NOT null AND year IS NOT null AND bucket IS NOT null AND uploaded IS NOT null AND id IS NOT null AND key IS NOT null",
+      "include_all_columns": false
+    },
+    {
+      "view_name": "s3_sha256s",
+      "base_table_name": "s3_ids",
+      "where_clause": "type IS NOT null AND id IS NOT null AND sha256 IS NOT null",
+      "include_all_columns": false
+    },
+    {
+      "view_name": "samples",
+      "base_table_name": "samples_list",
+      "where_clause": "group IS NOT null AND year IS NOT null AND bucket IS NOT null AND uploaded IS NOT null AND id IS NOT null AND sha256 IS NOT null",
+      "include_all_columns": false
+    },
+    {
+      "view_name": "tags_by_item",
+      "base_table_name": "tags",
+      "where_clause": "type IS NOT null AND group IS NOT null AND item IS NOT null AND year IS NOT null AND bucket IS NOT null AND key IS NOT null AND value IS NOT null AND uploaded IS NOT null AND key_lower IS NOT null AND value_lower IS NOT null",
+      "include_all_columns": false
+    },
+    {
+      "view_name": "tags_case_insensitive",
+      "base_table_name": "tags",
+      "where_clause": "type IS NOT null AND group IS NOT null AND item IS NOT null AND year IS NOT null AND bucket IS NOT null AND key_lower IS NOT null AND value_lower IS NOT null AND uploaded IS NOT null AND key IS NOT null AND value IS NOT null",
+      "include_all_columns": false
+    }
+  ],
+  "types": [],
+  "indexes": []
+}

@@ -131,9 +131,12 @@ out.
 
 | Field | Type | Notes |
 |-------|------|-------|
-| `upgrade.target_revision` | string matching `^[0-9]{4}-[0-9]{2}-v[0-9]{2}$` | The revision to upgrade to. Unset, a cluster behind the operator waits in `UpgradeRequired` |
+| `upgrade.target_revision` | string matching `^[0-9]{4}-[0-9]{2}-v[0-9]{2}$`, or a feature branch's `-pre.<change>` form (the shipped catalog has none) | The revision to move to. Unset, a cluster behind the operator waits in `UpgradeRequired`; a revision older than the cluster's is a downgrade (see [Downgrading](./upgrades.md#downgrading)) |
+| `upgrade.starting_revision` | revision id | The revision a keyspace with data but no `schema_migrations` record is at; read only when neither the state ConfigMap nor a record exists, and reported stale once a record does |
 | `upgrade.auto_target_dev` | boolean, default `false` | Target the operator's latest revision whenever `target_revision` is unset; meant for development clusters |
-| `upgrade.approvals` | list of `{step, backup}` | Approvals for `Data` and `Manual` steps that have work to do. Only an approval with a non-empty `backup` counts. The operator never takes backups; `backup` is your reference to one you took |
+| `upgrade.approvals` | list of `{step, backup, accept_issues, accept_loss, confirm, accept_backup_gaps}` | Approvals for `Data` and `Manual` steps that have work to do. Only an approval with a non-empty `backup` counts. The operator never takes backups; `backup` is your reference to one you took. `accept_issues` lists reason codes of issue groups that don't fail the step's run. `accept_loss`, `confirm` (the code the blocked step shows), and `accept_backup_gaps` approve a downgrade step that loses data |
+| `upgrade.dangerous_downgrade_lossy` | boolean, default `false` | Accept the loss of every lossy downgrade step without a code or backup. Honored only when `auto_target_dev` is set and the namespace has the label `thorium.sandia.gov/dev: "true"`; otherwise ignored, with a `LossySettingRefused` condition |
+| `upgrade.drift_acknowledged` | list of `{backend, object, fingerprint}` | `unexpected` schema objects to accept, so they raise no `SchemaDrift` condition. `backend` is `scylla`, `elastic`, `redis`, or `s3`; `object` is named as `thoradm schema diff` names it; an entry with a `fingerprint` lapses when the object changes |
 
 See [Upgrading Thorium](./upgrades.md).
 
@@ -149,7 +152,13 @@ See [Upgrading Thorium](./upgrades.md).
 | `upgrade.current` | The revision the cluster is at |
 | `upgrade.target` | The revision it is upgrading to |
 | `upgrade.latest` | The newest revision this operator knows |
-| `upgrade.steps` | The steps left to run, each with `revision`, `step`, `kind`, `description`, `pause`, `state` (`Pending`, `Running`, `Done`, `Skipped`, `Blocked`, `Failed`), and `message` |
+| `upgrade.steps` | The steps left to run, each with `revision`, `step`, `kind`, `description`, `pause`, `state` (`Pending`, `Running`, `Done`, `Skipped`, `Blocked`, `Failed`, `Reingesting`, or `Waiting`), and `message`; also `reverse` on a downgrade path, `blocked` (what a blocked step waits for, including the confirmation code of a lossy step), and `loss` (what a lossy step loses) |
+| `upgrade.schema` | Each backend (`scylla`, `elastic`, `redis`, `s3`) as `ok` or `drift` against the recorded revision |
+| `upgrade.drift` | The counts of `missing`, `changed`, and `unexpected` objects, how many are acknowledged, the first 20 unacknowledged objects with their fingerprints, and how many more there are |
+| `upgrade.conditions` | `SchemaDrift`, `MigrationIssues`, `SearchIncomplete`, `LossySettingRefused`, `CatalogSkew`, `SchemaSkew`, and `MutableImageTag` while they hold, each with a message (see [Conditions](./upgrades.md#conditions)) |
+| `upgrade.failure` | The last failed Job of the current step: the Job, its pod, the largest issue groups, and the last 20 log lines |
+| `upgrade.stale_approvals` | Approvals that name no step of the plan |
+| `upgrade.loss` | What a lossy downgrade loses across its path, by step, estimated before you approve it (see [Accepting loss](./upgrades.md#accepting-loss)) |
 
 `kubectl get thoriumcluster` prints the `Phase` and `Revision` (`status.upgrade.current`) columns;
 `-o wide` adds `Message`.
@@ -171,6 +180,8 @@ How soon the operator checks a cluster again:
 | Worker nodes that failed to provision (`Error`) | every minute |
 | `UpgradeRequired` or an invalid target | every hour, and immediately on a spec change |
 | An upgrade step waiting for a backend | every 15 seconds |
+| A rebuild's reingest after the rollout | every minute, until the search streamer has finished |
+| Schema drift | at most every hour, after a schema apply, and when the acknowledgements change |
 | A blocked upgrade step | every minute |
 | An unconverted pre-Helm cluster | every 10 minutes |
 | A second `ThoriumCluster` in the Kubernetes cluster | every 5 minutes |
@@ -388,6 +399,7 @@ Secret read plus root on the nodes. Grant it like `cluster-admin`.
 |----------|---------------|-------------|-------|
 | `2026-10-v01` | 1.8.1 | Thorium deployed by the minithor or megathor scripts before the Helm charts (the baseline every converted cluster starts from) | none |
 | `2026-10-v02` | 1.8.1 | Thorium deployed by the Helm charts with the chart-managed operator | `scylla-role` (Infra), `elastic-identity` (Infra), `elastic-reindex-keyword-mappings` (Data), `finalize` (Config) |
+| `2026-10-v03` | 1.8.1 | Schema apply runs before any step that changes data | `schema-apply` (Infra), `users-settings-theme` (Data) |
 
 `thoradm migrate list` prints the catalog of the build you run. See [Upgrading
 Thorium](./upgrades.md) for what each step does.
@@ -396,9 +408,11 @@ Thorium](./upgrades.md) for what each step does.
 
 - The operator applies its own CRD at startup, so rolling the operator back to an older version
   also rolls the cluster-scoped CRD back.
-- The operator doesn't perform `Data` or `Manual` steps itself and never takes backups: an
-  approved step that needs work describes the manual procedure and waits for it. The `pause`
-  list of a step is informational; nothing is scaled down for you.
+- The operator never takes backups. It runs a `Data` step as a thoradm migration Job, scaling down
+  the components the step's `pause` list names and restoring them afterwards (see [Data
+  migrations](./upgrades.md#data-migrations)). A step without a migration Job, the Elasticsearch
+  reindex of `2026-10-v02`, describes the manual procedure after its approval and waits for you to
+  do it.
 - The chart-managed Elasticsearch's TLS certificate isn't verified, since ECK's CA lives in a
   namespace the operator can't read. An external Elasticsearch can be verified with
   `elastic_ca_secret`.

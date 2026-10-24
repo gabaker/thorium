@@ -37,6 +37,16 @@ pub enum StepState {
     Unknown,
 }
 
+impl StepState {
+    /// Whether an entry in this state finishes its step: the step is done, had nothing to do, or
+    /// is a derived rebuild whose reingest goes on after the plan (`Reingesting`)
+    #[must_use]
+    pub fn finishes(self) -> bool {
+        // a rebuild that is reingesting is finished as far as the plan goes
+        matches!(self, Self::Done | Self::Skipped | Self::Reingesting)
+    }
+}
+
 /// A step planned to bring a cluster to its target revision
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct PlannedStep {
@@ -165,6 +175,9 @@ pub enum UpgradeConditionType {
     /// A derived rebuild's reingest hasn't finished, so search results are incomplete (the sources
     /// still reingesting)
     SearchIncomplete,
+    /// The cluster runs a mutable image tag (such as `latest`), so a new image pushed under the
+    /// same tag doesn't change the schema-apply trigger key or run the Job
+    MutableImageTag,
     /// A value this build doesn't know, written by a newer operator
     #[serde(other)]
     Unknown,
@@ -190,6 +203,17 @@ pub struct DriftSummary {
     /// How many unacknowledged objects aren't listed
     #[serde(default)]
     pub more: u32,
+    /// The unlisted unacknowledged objects that block the steps targeting them, so a step is
+    /// blocked however many objects drift; the operator keeps them out of the status
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub blockers: Vec<DriftEntry>,
+    /// Whether more blocking objects were left out of `blockers` than it carries; every step with
+    /// targets is then blocked, since the object it targets may be among them
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub blockers_truncated: bool,
+    /// Each probed backend's status, which counts every unacknowledged object, listed or not
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub backends: BTreeMap<SchemaBackend, BackendSchemaStatus>,
 }
 
 /// One drifted object in the status

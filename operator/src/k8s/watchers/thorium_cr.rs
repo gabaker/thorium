@@ -441,6 +441,108 @@ async fn refuse_invalid_namespace(
     Err(error)
 }
 
+/// Record why a cluster couldn't be gated and drop it from the shared info
+///
+/// # Arguments
+///
+/// * `state` - Controller context including client instance and optional URL
+/// * `cluster` - The cluster that couldn't be gated
+/// * `tracker` - The status tracker of the cluster being reconciled
+/// * `error` - Why the cluster couldn't be gated
+async fn gate_failed(
+    state: &State,
+    cluster: &ThoriumCluster,
+    tracker: &crds::StatusTracker,
+    error: Error,
+) -> Error {
+    // a cluster that couldn't be gated isn't known to be current
+    forget(state, cluster);
+    // record why the cluster couldn't be gated
+    crds::set_status(
+        &state.client,
+        tracker,
+        ClusterPhase::Error,
+        Some(crds::error_message(&error)),
+    )
+    .await;
+    error
+}
+
+/// Recover the record of a cluster whose state is missing or mirrors none, then gate it again
+///
+/// This writes the `thorium` Secret and bootstraps Thorium's Scylla role, reads the record with a
+/// status Job, and rebuilds the state from it. It returns the action to take while recovery waits,
+/// or the upgrade the recovered state calls for, if any.
+///
+/// # Arguments
+///
+/// * `state` - Controller context including client instance and optional URL
+/// * `meta` - The cluster's metadata and merged config
+async fn recover_record(
+    state: &State,
+    meta: &ClusterMeta,
+) -> Result<Result<Option<upgrades::Pending>, Action>, Error> {
+    // the status Job mounts the Secret and logs in as Thorium's role, so both come first
+    let recover =
+        upgrades::recover_with(meta, async |meta| Ok(operate::prepare(meta).await?.err()));
+    if let Some(action) = recover.await? {
+        return Ok(Err(action));
+    }
+    // the state mirrors the record now, so it decides what the cluster needs
+    match upgrades::gate(&state.client, &meta.status).await? {
+        Gate::Current => Ok(Ok(None)),
+        Gate::Upgrade(recovered) => Ok(Ok(Some(recovered))),
+        Gate::Hold(action) => Ok(Err(action)),
+        Gate::NeedsRecord => Ok(Err(Action::requeue(Duration::from_secs(15)))),
+    }
+}
+
+/// Apply a cluster: recover its record when none is known, bring it to its target revision, and
+/// reconcile it
+///
+/// # Arguments
+///
+/// * `state` - Controller context including client instance and optional URL
+/// * `meta` - The cluster's metadata and merged config
+/// * `pending` - The upgrade the gate decided on, if any
+/// * `needs_record` - Whether the gate found no record, which is recovered first
+async fn apply_cluster(
+    state: &State,
+    meta: &ClusterMeta,
+    pending: Option<upgrades::Pending>,
+    needs_record: bool,
+) -> Result<Action, Error> {
+    // recover the record when none is known, then gate the cluster again
+    let mut pending = pending;
+    if needs_record {
+        match recover_record(state, meta).await? {
+            Err(action) => return Ok(action),
+            Ok(recovered) => pending = recovered,
+        }
+    }
+    // bring the cluster to its target revision before reconciling it
+    if let Some(pending) = pending
+        && let Some(action) = upgrades::run(meta, pending).await?
+    {
+        return Ok(action);
+    }
+    // box the apply since its future is too large to keep on the stack
+    let action = Box::pin(operate::apply(meta, state.url.clone(), &state.shared)).await?;
+    // read and report schema drift when it is due; it never holds the reconcile, but a read under
+    // way or a record it followed asks to be looked at again soon
+    let drift = upgrades::check_drift(meta).await;
+    // follow the reingest of a derived rebuild until the search-streamer finished it, looking again
+    // sooner than the day a ready cluster waits
+    let ready = Action::requeue(Duration::from_secs(operate::APPLY_REQUEUE_SECS));
+    let reingest = upgrades::track_reingest(meta).await;
+    // only a cluster that would otherwise wait its usual day is asked back sooner
+    match (action == ready, drift, reingest) {
+        (true, Some(again), _) => Ok(again),
+        (true, None, Some(secs)) => Ok(Action::requeue(Duration::from_secs(secs))),
+        _ => Ok(action),
+    }
+}
+
 /// Reconcile changes to `ThoriumCluster`
 ///
 /// # Arguments
@@ -466,6 +568,7 @@ pub async fn reconcile(cluster: Arc<ThoriumCluster>, state: Arc<State>) -> Resul
     }
     // decide whether this cluster must be upgraded first, which needs only the cluster itself
     // so an unconverted or half-converted cluster is caught before its config is resolved
+    let mut needs_record = false;
     let pending = if cluster.metadata.deletion_timestamp.is_none() {
         match upgrades::gate(&state.client, &tracker).await {
             Ok(Gate::Current) => None,
@@ -479,19 +582,14 @@ pub async fn reconcile(cluster: Arc<ThoriumCluster>, state: Arc<State>) -> Resul
                 forget(&state, &cluster);
                 return Ok(action);
             }
-            Err(error) => {
-                // a cluster that couldn't be gated isn't known to be current
+            Ok(Gate::NeedsRecord) => {
+                // the watchers wait for the apply that follows recovering the record, which
+                // needs the config resolved
                 forget(&state, &cluster);
-                // record why the cluster couldn't be gated
-                crds::set_status(
-                    &state.client,
-                    &tracker,
-                    ClusterPhase::Error,
-                    Some(crds::error_message(&error)),
-                )
-                .await;
-                return Err(error);
+                needs_record = true;
+                None
             }
+            Err(error) => return Err(gate_failed(&state, &cluster, &tracker, error).await),
         }
     } else {
         None
@@ -544,14 +642,7 @@ pub async fn reconcile(cluster: Arc<ThoriumCluster>, state: Arc<State>) -> Resul
         |event| async {
             match event {
                 Finalizer::Apply(_cluster) => {
-                    // bring the cluster to its target revision before reconciling it
-                    if let Some(pending) = pending
-                        && let Some(action) = upgrades::run(&meta, pending).await?
-                    {
-                        return Ok(action);
-                    }
-                    // box the apply since its future is too large to keep on the stack
-                    Box::pin(operate::apply(&meta, state.url.clone(), &state.shared)).await
+                    apply_cluster(&state, &meta, pending, needs_record).await
                 }
                 Finalizer::Cleanup(_cluster) => operate::cleanup(&meta, &state.shared).await,
             }
@@ -575,7 +666,8 @@ pub async fn reconcile(cluster: Arc<ThoriumCluster>, state: Arc<State>) -> Resul
 /// Hash the parts of a `ThoriumCluster` that should trigger a reconcile
 ///
 /// Status updates are excluded so the operator's own status patches don't retrigger it. The
-/// inline config annotation is included since setting it releases a held cluster.
+/// inline config annotation is included since setting it releases a held cluster, and the
+/// schema-apply retry annotation since setting it retries a failed schema-apply Job.
 ///
 /// # Arguments
 ///
@@ -600,6 +692,13 @@ fn reconcile_predicate(cluster: &ThoriumCluster) -> Option<u64> {
         .annotations
         .as_ref()
         .and_then(|annotations| annotations.get(upgrades::ALLOW_INLINE_CONFIG))
+        .hash(&mut hasher);
+    // hash the schema-apply retry request, which retries a failed Job at once
+    cluster
+        .metadata
+        .annotations
+        .as_ref()
+        .and_then(|annotations| annotations.get(upgrades::RETRY_SCHEMA_APPLY))
         .hash(&mut hasher);
     Some(hasher.finish())
 }
@@ -1029,7 +1128,23 @@ mod tests {
             .annotations
             .get_or_insert_default()
             .insert(upgrades::ALLOW_INLINE_CONFIG.to_owned(), "false".to_owned());
-        assert_ne!(reconcile_predicate(&cluster), allowed);
+        let disallowed = reconcile_predicate(&cluster);
+        assert_ne!(disallowed, allowed);
+        // setting the schema-apply retry annotation does, since it retries a failed Job at once
+        cluster
+            .metadata
+            .annotations
+            .get_or_insert_default()
+            .insert(upgrades::RETRY_SCHEMA_APPLY.to_owned(), "1".to_owned());
+        let retried = reconcile_predicate(&cluster);
+        assert_ne!(retried, disallowed);
+        // and so does each new value of it
+        cluster
+            .metadata
+            .annotations
+            .get_or_insert_default()
+            .insert(upgrades::RETRY_SCHEMA_APPLY.to_owned(), "2".to_owned());
+        assert_ne!(reconcile_predicate(&cluster), retried);
     }
 
     /// Build a cluster created at a time

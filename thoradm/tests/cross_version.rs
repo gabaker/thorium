@@ -1056,7 +1056,7 @@ async fn check_newer_refused(
 /// newer, a legacy backup without `--legacy`, and a copy that records a failure (without
 /// `--accept-failures`) are refused before anything is written
 #[tokio::test]
-#[ignore = "run at the backup compatibility review, with older thoradm binaries named in THORADM_OLDER_BINARIES"]
+#[ignore = "needs older thoradm builds to compare against; run at the backup compatibility review: THORADM_OLDER_BINARIES=<label>=<path to an older thoradm>[,<label>=<path>...] cargo test -p thoradm --test cross_version -- --ignored backups_from_older_builds_restore"]
 #[allow(clippy::too_many_lines)]
 async fn backups_from_older_builds_restore() {
     let binaries = older_binaries();

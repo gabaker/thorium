@@ -85,6 +85,21 @@ pub enum Error {
     WorkersEnded(String),
     /// The requested operation exists but is not implemented yet
     NotImplemented(String),
+    /// The command line or the config can't be used as given
+    Usage(String),
+    /// A backend couldn't be reached or a statement failed in a way a retry may not repeat
+    Transient(String),
+    /// A migration run ended `Failed` because an issue group went over its limit, which a retry
+    /// would repeat, so a Job fails at once
+    DataIssues(String),
+    /// A migration run failed systematically: the migration, not the data, is wrong, which a
+    /// retry would repeat, so a Job fails at once
+    Systematic(String),
+    /// A backend the command needs is unavailable, so nothing was read or changed
+    Unavailable(String),
+    /// The live schema differs from the recorded revision; the command printed its report and
+    /// exits with a code no other error uses
+    Drift(String),
 }
 
 impl Error {
@@ -99,13 +114,27 @@ impl Error {
 
     /// The exit code thoradm returns for this error
     ///
-    /// Operations that aren't implemented yet exit with 3 so scripts can tell them apart from
-    /// failures; everything else exits with 1.
+    /// Operations that aren't implemented yet, and commands whose backend is unavailable, exit
+    /// with 3 so scripts can tell them apart from failures, a config or command line that can't
+    /// be used exits with 2, a backend that couldn't be reached exits with 4 so an operator Job
+    /// retries it, and everything else exits with 1. A migration run that failed on its issue
+    /// groups exits with 5 and one that failed systematically with 6, which an operator Job
+    /// doesn't retry. A schema comparison that found drift exits with 7.
     #[must_use]
     pub fn exit_code(&self) -> u8 {
-        // unimplemented work gets its own code so scripts can fall back to a manual procedure
         match self {
-            Error::NotImplemented(_) => 3,
+            // unimplemented work and an unavailable backend get their own code so scripts can fall
+            // back to a manual procedure
+            Error::NotImplemented(_) | Error::Unavailable(_) => 3,
+            // a usage error is the caller's to fix
+            Error::Usage(_) => 2,
+            // a transient failure is the one kind a Job's retry may get past
+            Error::Transient(_) => 4,
+            // a run that failed on its issue groups, or systematically, would fail the same way
+            Error::DataIssues(_) => 5,
+            Error::Systematic(_) => 6,
+            // drift found by a read-only comparison, which no other error means
+            Error::Drift(_) => 7,
             _ => crate::outcome::RunOutcome::Aborted.code(),
         }
     }
@@ -175,6 +204,12 @@ impl std::fmt::Display for Error {
             Error::Dialoguer(err) => write!(f, "Dialoguer: {err}"),
             Error::WorkersEnded(msg) => write!(f, "{msg}"),
             Error::NotImplemented(err) => write!(f, "Not implemented: {err}"),
+            Error::Usage(err) => write!(f, "Usage Error: {err}"),
+            Error::Transient(err) => write!(f, "Transient Error: {err}"),
+            Error::DataIssues(err) => write!(f, "Data issues: {err}"),
+            Error::Systematic(err) => write!(f, "Systematic failure: {err}"),
+            Error::Unavailable(err) => write!(f, "Unavailable: {err}"),
+            Error::Drift(err) => write!(f, "Schema drift: {err}"),
         }
     }
 }
@@ -530,5 +565,31 @@ impl From<std::path::StripPrefixError> for Error {
 impl From<dialoguer::Error> for Error {
     fn from(error: dialoguer::Error) -> Self {
         Error::Dialoguer(error)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::Error;
+
+    /// Drift exits with 7 and no other error shares the code, so scripts and Jobs can tell a
+    /// comparison that found drift from every other failure
+    #[test]
+    fn drift_exits_with_a_code_of_its_own() {
+        // the code a comparison that found drift exits with
+        assert_eq!(Error::Drift("a table differs".to_owned()).exit_code(), 7);
+        // no other kind of error exits with it
+        let others = [
+            Error::new("generic"),
+            Error::Usage("usage".to_owned()),
+            Error::Transient("transient".to_owned()),
+            Error::Unavailable("unavailable".to_owned()),
+            Error::NotImplemented("not yet".to_owned()),
+            Error::DataIssues("issues".to_owned()),
+            Error::Systematic("systematic".to_owned()),
+        ];
+        for other in others {
+            assert_ne!(other.exit_code(), 7, "{other}");
+        }
     }
 }

@@ -1,5 +1,5 @@
 use k8s_openapi::api::apps::v1::Deployment;
-use k8s_openapi::api::core::v1::{Pod, PodStatus};
+use k8s_openapi::api::core::v1::{Pod, PodSpec, PodStatus};
 use kube::Api;
 use kube::api::{DeleteParams, ListParams, Patch, PatchParams, PostParams};
 use serde_json::Value;
@@ -698,16 +698,32 @@ fn mount_elastic_ca(
     deployment: &mut Deployment,
     cluster: &ThoriumCluster,
 ) -> Result<(), serde_json::Error> {
-    // skip deployments of clusters without an Elastic CA
-    let Some(secret_ref) = &cluster.spec.elastic_ca_secret else {
-        return Ok(());
-    };
     // get this deployment's pod spec
     let Some(pod) = deployment
         .spec
         .as_mut()
         .and_then(|spec| spec.template.spec.as_mut())
     else {
+        return Ok(());
+    };
+    // mount the CA into the pod's containers
+    mount_elastic_ca_in_pod(pod, cluster)
+}
+
+/// Mount a cluster's Elastic CA into every container of a pod
+///
+/// This does nothing unless the `ThoriumCluster` sets `elastic_ca_secret`.
+///
+/// # Arguments
+///
+/// * `pod` - The pod spec to add the CA to
+/// * `cluster` - The `ThoriumCluster` this pod belongs to
+pub(crate) fn mount_elastic_ca_in_pod(
+    pod: &mut PodSpec,
+    cluster: &ThoriumCluster,
+) -> Result<(), serde_json::Error> {
+    // skip pods of clusters without an Elastic CA
+    let Some(secret_ref) = &cluster.spec.elastic_ca_secret else {
         return Ok(());
     };
     // project just the CA key of the Secret to a fixed file name
@@ -753,6 +769,20 @@ fn run_as_thorium(deployment: &mut Deployment) -> Result<(), serde_json::Error> 
     else {
         return Ok(());
     };
+    // restrict the pod and each of its containers
+    restrict_pod(pod)
+}
+
+/// Run a pod as the image's unprivileged `thorium` user under restricted Pod Security
+///
+/// The pod runs as `THORIUM_UID` under the runtime's default seccomp profile, and each
+/// container drops every Linux capability and can't gain privileges. Settings already in the
+/// pod's security context are kept, and each container's security context is replaced.
+///
+/// # Arguments
+///
+/// * `pod` - The pod spec to restrict
+pub(crate) fn restrict_pod(pod: &mut PodSpec) -> Result<(), serde_json::Error> {
     // run the whole pod as the thorium user under the default seccomp profile
     let context = pod.security_context.get_or_insert_with(Default::default);
     context.run_as_non_root = Some(true);
@@ -793,10 +823,17 @@ pub async fn create_or_update(
     let Some(name) = deployment.metadata.name.clone() else {
         return Err(Error::new("Cannot create a Deployment without a name"));
     };
+    // a component an upgrade step paused stays at zero until its new Deployment is applied
+    let paused = crate::upgrades::paused_components(meta)
+        .await
+        .contains_key(&name);
+    if paused && let Some(spec) = deployment.spec.as_mut() {
+        spec.replicas = Some(0);
+    }
     // use default post params
     let params = PostParams::default();
     // create the deployment, or patch it towards our template if it already exists
-    match meta.deploy_api.create(&params, &deployment).await {
+    let applied = match meta.deploy_api.create(&params, &deployment).await {
         Ok(_) => {
             println!("Deployment created {name} in namespace {}", meta.namespace);
             Ok(())
@@ -827,7 +864,13 @@ pub async fn create_or_update(
         Err(error) => Err(Error::new(format!(
             "Failed to create {name} deployment: {error}"
         ))),
+    };
+    applied?;
+    // the new release's Deployment is applied, so the component gets its recorded count back
+    if paused {
+        crate::upgrades::restore_paused(meta, &name).await?;
     }
+    Ok(())
 }
 
 /// Delete a k8s deployment within a given namespace

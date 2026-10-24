@@ -1,3 +1,19 @@
+-- schema_migrations.INSERT
+INSERT INTO {ns}.schema_migrations (kind, id, fingerprint, apply_key, layouts, revision, version, entry, result, value, status, attempt, lease, started, finished, job, backup, counts, report, updated) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+-- schema_migrations.SELECT_ALL
+SELECT kind, id, fingerprint, apply_key, layouts, revision, version, entry, result, value, status, attempt, lease, started, finished, job, backup, counts, report, updated FROM {ns}.schema_migrations
+-- schema_migrations.SCAN
+SELECT kind, id, fingerprint, apply_key, layouts, revision, version, entry, result, value, status, attempt, lease, started, finished, job, backup, counts, report, updated FROM {ns}.schema_migrations WHERE token(kind) >= ? AND token(kind) <= ?
+-- schema_migrations.CENSUS
+SELECT kind, count(*) AS count FROM {ns}.schema_migrations WHERE token(kind) >= ? AND token(kind) <= ? GROUP BY kind
+-- schema_migration_issues.INSERT
+INSERT INTO {ns}.schema_migration_issues (migration, transform, reason, worker, attempt, checkpoint, lease, class, count, first_seen, last_seen, samples, resolved_count, accepted, updated) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+-- schema_migration_issues.SELECT_ALL
+SELECT migration, transform, reason, worker, attempt, checkpoint, lease, class, count, first_seen, last_seen, samples, resolved_count, accepted, updated FROM {ns}.schema_migration_issues
+-- schema_migration_issues.SCAN
+SELECT migration, transform, reason, worker, attempt, checkpoint, lease, class, count, first_seen, last_seen, samples, resolved_count, accepted, updated FROM {ns}.schema_migration_issues WHERE token(migration) >= ? AND token(migration) <= ?
+-- schema_migration_issues.CENSUS
+SELECT migration, count(*) AS count FROM {ns}.schema_migration_issues WHERE token(migration) >= ? AND token(migration) <= ? GROUP BY migration
 -- samples_list.INSERT
 INSERT INTO {ns}.samples_list (group, year, bucket, uploaded, id, sha256, sha1, md5, name, description, submitter, origin) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 -- samples_list.SELECT_ALL
@@ -334,3 +350,31 @@ INSERT INTO {ns}.notifications (kind, key, created, id, msg, level, ban_id) VALU
 INSERT INTO {ns}.logs (reaction, stage, bucket, position, line) VALUES (?, ?, ?, ?, ?)
 -- logs.get
 SELECT position, line FROM {ns}.logs WHERE reaction = ? AND stage = ? AND bucket IN ? AND position >= ? PER PARTITION LIMIT ?
+-- schema_migrations.insert
+INSERT INTO {ns}.schema_migrations (kind, id, fingerprint, apply_key, layouts, revision, version, entry, result, value, status, attempt, lease, started, finished, job, backup, counts, report, updated) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+-- schema_migrations.insert_expiring
+INSERT INTO {ns}.schema_migrations (kind, id, fingerprint, apply_key, layouts, revision, version, entry, result, value, status, attempt, lease, started, finished, job, backup, counts, report, updated) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) USING TTL ?
+-- schema_migrations.get
+SELECT kind, id, fingerprint, apply_key, layouts, revision, version, entry, result, value, status, attempt, lease, started, finished, job, backup, counts, report, updated FROM {ns}.schema_migrations WHERE kind = ? AND id = ?
+-- schema_migrations.list
+SELECT kind, id, fingerprint, apply_key, layouts, revision, version, entry, result, value, status, attempt, lease, started, finished, job, backup, counts, report, updated FROM {ns}.schema_migrations WHERE kind = ?
+-- schema_migrations.delete
+DELETE FROM {ns}.schema_migrations WHERE kind = ? AND id = ?
+-- schema_migrations.delete_kind
+DELETE FROM {ns}.schema_migrations WHERE kind = ?
+-- schema_migration_issues.insert
+INSERT INTO {ns}.schema_migration_issues (migration, transform, reason, worker, attempt, checkpoint, lease, class, count, first_seen, last_seen, samples, resolved_count, accepted, updated) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+-- schema_migration_issues.list
+SELECT migration, transform, reason, worker, attempt, checkpoint, lease, class, count, first_seen, last_seen, samples, resolved_count, accepted, updated FROM {ns}.schema_migration_issues WHERE migration = ?
+-- schema_migration_issues.get_group
+SELECT migration, transform, reason, worker, attempt, checkpoint, lease, class, count, first_seen, last_seen, samples, resolved_count, accepted, updated FROM {ns}.schema_migration_issues WHERE migration = ? AND transform = ? AND reason = ?
+-- schema_migration_issues.update_worker
+UPDATE {ns}.schema_migration_issues SET attempt = ?, checkpoint = ?, lease = ?, updated = ? WHERE migration = ? AND transform = ? AND reason = ? AND worker = ?
+-- schema_migration_issues.update_issue
+UPDATE {ns}.schema_migration_issues SET attempt = ?, class = ?, count = ?, samples = ?, first_seen = ?, last_seen = ?, updated = ? WHERE migration = ? AND transform = ? AND reason = ? AND worker = ?
+-- schema_migration_issues.resolve
+UPDATE {ns}.schema_migration_issues SET count = ?, resolved_count = ?, updated = ? WHERE migration = ? AND transform = ? AND reason = ? AND worker = ?
+-- schema_migration_issues.accept
+UPDATE {ns}.schema_migration_issues SET accepted = ?, updated = ? WHERE migration = ? AND transform = ? AND reason = ? AND worker = ?
+-- schema_migration_issues.delete_pass
+DELETE FROM {ns}.schema_migration_issues WHERE migration = ?

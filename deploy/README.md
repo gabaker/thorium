@@ -104,17 +104,37 @@ diff afterwards.
 A change that needs work on existing deployments (beyond what a normal reconcile does) ships as a
 new revision:
 
-1. Add a `CatalogEntry` (`YYYY-MM-vNN`, after the last one) with its `StepDef`s to `CATALOG` in
-   `api/src/models/upgrades.rs`. `Data` and `Manual` steps need an approval; give them a
-   `manual_procedure` when the operator can't do the work itself.
-2. Add an executor for every new step to `EXECUTORS` in `operator/src/upgrades/steps.rs`
+1. Add a `CatalogEntry` (`YYYY-MM-vNN`, after the last one) with its `StepDef`s in a new file under
+   `api/src/models/upgrades/catalog/` and append its `ENTRY` to `CATALOG` in
+   `api/src/models/upgrades/catalog.rs`. Set `released_with` to the Thorium version the revision
+   ships in. `Data` and `Manual` steps need an approval; give them a `manual_procedure` when the
+   operator can't do the work itself. A reverse edge registers the artifacts its steps'
+   reversibility needs (round-trip fixtures, compatibility tests, lossy changes, sensitive fields)
+   in `ARTIFACTS` in the same file; the catalog tests check them.
+2. Commit the revision's schema snapshot and record its fingerprint in the entry's `schema`:
+   `cargo run -p thorium-api --example schema_report -- --write-snapshot <revision>` writes
+   `api/schema/revisions/<revision>.json` and prints the fingerprint;
+   `committed_snapshots_are_generated_and_complete` enforces both.
+3. Add an executor for every new step to `EXECUTORS` in `operator/src/upgrades/steps.rs`
    (unattended for `Config`/`Infra`, guarded for `Data`/`Manual`); the `every_step_has_an_executor`
    test enforces it.
-3. Register any data migration a step names (`thoradm_migration`) in `MIGRATIONS` in
-   `thoradm/src/migrate.rs`; `catalog_migrations_are_registered` enforces it.
-4. Review how a namespace without recorded state is seeded (`operator/src/upgrades/detect.rs`).
-5. Document the revision and its steps in "Upgrading Thorium"
-   (`api/docs/src/admins/deploy/upgrades.md`, section "Revisions").
+4. Register any data migration a step names (`thoradm_migration`) in `MIGRATIONS` in
+   `thoradm/src/migrate/registry.rs`; `catalog_migrations_are_registered` enforces it.
+5. Review how a namespace without recorded state is seeded (`operator/src/upgrades/detect.rs` and
+   the operator's `FIRST_HELM_REVISION`), and update the catalog test that pins `latest()` and the
+   operator and thoradm tests and probes that name the newest revision.
+6. Document the revision and its steps in "Upgrading Thorium"
+   (`api/docs/src/admins/deploy/upgrades.md`, section "Revisions"), regenerate its upgrade-paths
+   table with `THORIUM_BLESS=1 cargo test -p thorium-api --lib models::upgrades::paths`, and update
+   any chart, megathor, or docs example that names the newest revision as a target revision.
+
+A release that drops old revisions from its catalog (squashing them into a new baseline entry and
+deleting their edges, executors, and migrations) also raises the support floor: append a
+`SupportFloor` (`minimum`, `intermediate`, `since_version`) to `FLOORS` in
+`api/src/models/upgrades/catalog.rs`, set `MINIMUM_REVISION` and `INTERMEDIATE_RELEASE` in
+`charts/scripts/convert-to-helm.sh` to the new floor (the test
+`conversion_script_refuses_baselines_below_the_floor` enforces it), and regenerate the
+upgrade-paths table as above.
 
 ## Pointers for admins
 

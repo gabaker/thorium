@@ -1,13 +1,43 @@
 //! Revision-based upgrades of a Thorium deployment
 //!
-//! A revision (`YYYY-MM-vNN`) names a point in Thorium's deployment history that needs a known
-//! set of steps to reach from the revision before it. The catalog of revisions and steps lives
+//! A revision (`YYYY-MM-vNN`, or `YYYY-MM-vNN-pre.<change>` on a feature branch) names a point
+//! in Thorium's deployment history; the catalog's edges list the steps that move a deployment
+//! from one revision to another. The catalog of revisions and steps lives
 //! here so the operator (which plans and runs upgrades) and thoradm (which runs data
 //! migrations) work from the same data. Decisions are made only from revisions; the Thorium
 //! version a revision was released with is advisory.
 
+#[cfg(all(test, feature = "scylla-utils"))]
+mod artifact_tests;
+#[cfg(feature = "scylla-utils")]
+mod artifacts;
 mod catalog;
+mod checks;
+#[cfg(all(feature = "scylla-utils", any(test, feature = "test-utilities")))]
+pub mod downgrade_fixtures;
+#[cfg(all(test, feature = "upgrades-runtime"))]
+mod downgrade_tests;
+#[cfg(any(test, feature = "test-utilities"))]
+pub mod fixtures;
+mod gate;
+#[cfg(test)]
+mod gate_tests;
+#[cfg(all(test, feature = "scylla-utils"))]
+mod legacy_tests;
+mod paths;
 mod plan;
+#[cfg(all(feature = "scylla-utils", any(test, feature = "test-utilities")))]
+pub mod plan_fixtures;
+#[cfg(feature = "upgrades-runtime")]
+mod planner;
+#[cfg(all(test, feature = "upgrades-runtime"))]
+mod planner_tests;
+#[cfg(feature = "scylla-utils")]
+mod reasons;
+#[cfg(all(test, feature = "upgrades-runtime"))]
+mod reasons_tests;
+#[cfg(all(test, feature = "upgrades-runtime"))]
+mod rebuild_tests;
 mod registry;
 mod reversibility;
 mod revisions;
@@ -15,19 +45,47 @@ mod state;
 mod status;
 mod steps;
 mod transforms;
+#[cfg(test)]
+mod unknown_tests;
+#[cfg(feature = "scylla-utils")]
+mod users_theme;
+#[cfg(all(test, feature = "scylla-utils"))]
+mod users_theme_tests;
 
+#[cfg(feature = "scylla-utils")]
+pub use artifacts::{
+    CompatibilityTest, EnumVariant, FillException, ReverseArtifacts, SensitiveField, SensitiveKind,
+    StepChanges, StepFixtures, lint_fills,
+};
+#[cfg(feature = "scylla-utils")]
+pub use catalog::ARTIFACTS;
 pub use catalog::{
-    CATALOG, Catalog, CatalogEntry, FLOORS, REINDEX_PROCEDURE, SupportFloor, entry, latest, step,
+    CATALOG, Catalog, CatalogEntry, FLOORS, REINDEX_PROCEDURE, SCHEMA_APPLY_STEP, SupportFloor,
+    USERS_SETTINGS_THEME_REVERSE_STEP, USERS_SETTINGS_THEME_STEP, entry, latest, step,
+};
+pub use checks::MAX_GROUP_MAX;
+pub use gate::{
+    CODE_LEN, CONSUMED_REFUSAL, LossGate, LossVerdict, LossySetting, confirmation_code,
+    consumed_codes, recorded_code,
 };
 pub use plan::{
     ChainLink, PlanDirection, PlanItem, PlannedPass, UpgradePlan, plan, resolve_target,
 };
-pub use registry::{Enumeration, LayoutDef, SchemaBackend};
+#[cfg(feature = "upgrades-runtime")]
+pub use planner::{ChainOutcome, FusedChain, NextWork};
+pub use registry::{Enumeration, LAYOUTS, LayoutDef, SchemaBackend};
+#[cfg(feature = "scylla-utils")]
+pub use registry::{
+    LEGACY, LegacyDef, LegacyKind, LegacyNeed, LegacyUse, backend_name, is_legacy, legacy_def,
+};
 pub use reversibility::{
     EnumMapping, Fill, FillValue, PrivilegeOrder, Reversibility, VariantGrants,
 };
 pub use revisions::{REVISION_PATTERN, RevisionId, UpgradeError};
-pub use state::{AppliedStep, IssueSummary, UpgradeState, label_value};
+pub use state::{
+    APPLY_KEY_MARKER, AppliedStep, DEPLOYMENT_MARKER, HELD_FAILURE_MARKER, IssueSummary,
+    RECORD_MARKER, RESET_STATE_STEP, RESTORED_STEP, RETRY_VALUE_MARKER, UpgradeState, label_value,
+};
 pub use status::{
     BackendSchemaStatus, BlockReason, ConfirmRefusal, DriftEntry, DriftKind, DriftSummary,
     FieldLoss, JobFailure, LossReport, PlannedStep, StepLoss, StepState, UpgradeApproval,
@@ -42,9 +100,18 @@ pub use transforms::{
 };
 #[cfg(feature = "scylla-utils")]
 pub use transforms::{Record, TransformDef};
+#[cfg(feature = "scylla-utils")]
+pub use users_theme::{
+    USERS_SETTINGS_THEME, classify_reverse as users_theme_classify_reverse,
+    down as users_theme_down, native_fixtures as users_theme_native_fixtures,
+    round_trip_fixtures as users_theme_round_trip_fixtures, user_hash,
+};
 
 #[cfg(test)]
 use catalog::HELM_STEPS;
+
+#[cfg(test)]
+mod graph_tests;
 
 /// The `ConfigMap` in a Thorium namespace that records its upgrade state
 pub const STATE_CONFIG_MAP: &str = "thorium-upgrade-state";
@@ -119,13 +186,19 @@ mod tests {
         assert!(serde_json::from_str::<RevisionId>("\"latest\"").is_err());
     }
 
-    /// The CRD's revision pattern accepts what the parser accepts, apart from the month range
+    /// The CRD's revision pattern accepts what the parser accepts, apart from the month range and
+    /// the length
     #[test]
     fn pattern_matches_parser() {
         // compile the pattern the CRD validates target revisions with
         let pattern = regex::Regex::new(REVISION_PATTERN).expect("valid pattern");
         // well formed ids pass both
-        for good in ["2026-10-v02", "2027-01-v99"] {
+        for good in [
+            "2026-10-v02",
+            "2027-01-v99",
+            "2026-10-v02-pre.schema-test-5b",
+            "2026-10-v02-pre.1",
+        ] {
             assert!(pattern.is_match(good) && good.parse::<RevisionId>().is_ok());
         }
         // malformed ids fail both
@@ -135,47 +208,35 @@ mod tests {
             "2026-10-V01",
             "latest",
             "2026-10-v001",
+            "2026-10-v02-pre.",
+            "2026-10-v02-pre.Users",
+            "2026-10-v02-pre.a--b",
+            "2026-10-v02-pre.a-",
+            "2026-10-v02-pre.a_b",
+            "2026-10-v02-rc.1",
         ] {
             assert!(!pattern.is_match(bad) && bad.parse::<RevisionId>().is_err());
         }
-        // only the parser checks the month is in range
-        for month in ["2026-13-v01", "2026-00-v01"] {
-            assert!(pattern.is_match(month) && month.parse::<RevisionId>().is_err());
+        // only the parser checks the month is in range and the id fits in a label
+        let long = format!("2026-10-v02-pre.{}", "a".repeat(48));
+        for parser_only in ["2026-13-v01", "2026-00-v01", long.as_str()] {
+            assert!(pattern.is_match(parser_only) && parser_only.parse::<RevisionId>().is_err());
         }
     }
 
-    /// The catalog's ids are valid, strictly increasing, and its step ids unique
+    /// The catalog passes its checks, and its forward edges are listed oldest first
     #[test]
     fn catalog_is_consistent() {
-        // every id is valid and newer than the one before it
+        // ids parse, steps are unique and documented, and pre-release edges can be reverted
+        assert_eq!(Catalog::PRODUCTION.check(), Ok(()));
+        // the forward edges are listed oldest first
         let ids = CATALOG
             .iter()
+            .filter(|entry| !entry.is_downward())
             .map(CatalogEntry::revision)
             .collect::<Vec<_>>();
         assert!(ids.windows(2).all(|pair| pair[0] < pair[1]));
-        // every step id is unique across the catalog
-        let mut steps = CATALOG
-            .iter()
-            .flat_map(|entry| entry.steps.iter().map(|step| step.id))
-            .collect::<Vec<_>>();
-        let count = steps.len();
-        steps.sort_unstable();
-        steps.dedup();
-        assert_eq!(steps.len(), count, "duplicate step ids");
-        // steps that need approval say how to do them by hand
-        for (_, step) in CATALOG
-            .iter()
-            .flat_map(|e| e.steps.iter().map(move |s| (e, s)))
-        {
-            if step.kind.needs_approval() {
-                assert!(
-                    step.manual_procedure.is_some(),
-                    "{} has no procedure",
-                    step.id
-                );
-            }
-        }
-        assert_eq!(latest(), rev("2026-10-v02"));
+        assert_eq!(latest(), rev("2026-10-v03"));
     }
 
     /// Planning covers every unfinished step between the two revisions
@@ -247,15 +308,18 @@ mod tests {
         assert!(!state.advance(&rev("2026-10-v02"), "1.9.0"));
     }
 
-    /// Planning rejects backwards, unknown, and too new revisions
+    /// Planning rejects unreachable, unknown, and too new revisions
     #[test]
     fn plan_errors() {
-        // targets older than the cluster are refused
+        // targets older than the cluster have no path, since the catalog has no edge back
         let current = UpgradeState::new(rev("2026-10-v02"), "1.8.1");
-        assert!(matches!(
+        assert_eq!(
             plan(&current, &rev("2026-10-v01")),
-            Err(UpgradeError::Backwards { .. })
-        ));
+            Err(UpgradeError::NoPath {
+                from: rev("2026-10-v02"),
+                to: rev("2026-10-v01")
+            })
+        );
         // targets past the catalog are unknown
         assert!(matches!(
             plan(&current, &rev("2099-01-v01")),
@@ -489,7 +553,7 @@ mod tests {
         let (entry, step) = super::step("elastic-reindex-keyword-mappings").expect("step");
         assert_eq!(entry.id, "2026-10-v02");
         assert_eq!(step.kind, StepKind::Data);
-        assert_eq!(step.thoradm_migration, Some("elastic-keyword-mappings"));
+        assert_eq!(step.thoradm_migration, Some("elastic-rebuild"));
         assert_eq!(step.pause, &[UpgradeComponent::SearchStreamer]);
         assert!(super::step("nope").is_none());
         // a revision is found by id
@@ -544,30 +608,30 @@ mod tests {
         // an unknown id names the latest known revision
         let unknown = UpgradeError::UnknownRevision("2026-10-v00".to_owned()).to_string();
         assert!(unknown.contains("2026-10-v00") && unknown.contains(latest().as_str()));
-        // a cluster ahead of the catalog is told downgrades aren't supported
+        // a cluster ahead of the catalog is told to revert it with the newer build
         let ahead = UpgradeError::AheadOfCatalog {
             current: rev("2099-01-v01"),
             latest: latest(),
         }
         .to_string();
-        assert!(ahead.contains("2099-01-v01") && ahead.contains("downgrades are not supported"));
-        // a state in a newer layout names both versions and refuses the downgrade
+        assert!(ahead.contains("2099-01-v01"));
+        assert!(ahead.contains(&format!("thoradm migrate revert --to {}", latest())));
+        // a state in a newer layout names both versions and the revert command
         let schema = UpgradeError::SchemaAhead {
             found: 2,
             supported: 1,
         }
         .to_string();
         assert!(schema.contains("written by a newer Thorium operator"));
-        assert!(
-            schema.contains("schema version 2") && schema.contains("downgrades are not supported")
-        );
-        // a backwards target names both revisions
-        let backwards = UpgradeError::Backwards {
-            current: rev("2026-10-v02"),
-            target: rev("2026-10-v01"),
+        assert!(schema.contains("schema version 2"));
+        assert!(schema.contains(&format!("thoradm migrate revert --to {}", latest())));
+        // an unreachable target names both revisions
+        let no_path = UpgradeError::NoPath {
+            from: rev("2026-10-v02"),
+            to: rev("2026-10-v01"),
         }
         .to_string();
-        assert!(backwards.contains("2026-10-v01") && backwards.contains("2026-10-v02"));
+        assert!(no_path.contains("2026-10-v01") && no_path.contains("2026-10-v02"));
     }
 
     /// Planned steps and upgrade progress serialize with plain names and fill defaults

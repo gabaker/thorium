@@ -154,6 +154,11 @@ async fn every_column_and_view_change_is_found() {
     let scylla = harness.scylla().await;
     let mut unset = Vec::new();
     for name in snapshot_tables() {
+        // a table the oracle ignores outright, such as the schema record a restore writes, has
+        // no change to find
+        if oracle.ignores(name) {
+            continue;
+        }
         let table = live_table(&scylla, &harness.conf.thorium.namespace, name).await;
         let Some(rows) = snapshot.scylla.get(name) else {
             continue;

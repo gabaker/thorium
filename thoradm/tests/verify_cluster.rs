@@ -312,7 +312,12 @@ async fn each_divergence_from_the_backup_is_found() {
         run.describe()
     );
     // bring the view back, as an API pod's schema setup would, for the tests after this one
-    let _ = Box::pin(thorium::utils::Shared::new(harness.conf.clone())).await;
+    let _ = Box::pin(thorium::utils::Shared::with_opts(
+        harness.conf.clone(),
+        thorium::utils::StartupOpts { apply_schema: true },
+    ))
+    .await
+    .expect("the API starts and applies the schema");
 }
 
 /// A restore killed during its table step leaves a partial target, which a plain re-run refuses;

@@ -233,6 +233,8 @@ async fn icons_stay_in_their_namespace() -> Result<(), Error> {
         .build()
         .unwrap();
     test_utilities::init_bucket(&s3, lifecycle, &graphics_bucket()).await?;
+    // the bucket and its icons go away when the test ends, however it ends
+    let _bucket = test_utilities::TempBuckets::new(&CONF.thorium.s3, vec![graphics_bucket()]);
     // start an API for each of two namespaces on free ports
     let (first, host_a) = start_api("ica", free_port()?)?;
     let mut children = ChildApis(vec![first]);

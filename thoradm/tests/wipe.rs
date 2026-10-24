@@ -32,7 +32,6 @@ use thoradm::backup::failures::{
 use thoradm::backup::manifest::Manifest;
 use thoradm::backup::sink::TokioFs;
 use thoradm::backup::target::Target;
-use thoradm::backup::views::ViewStatements;
 use thoradm::backup::wipe;
 use thoradm::shared::retry::RetryPolicy;
 use thorium::models::{FileDeleteOpts, SystemInfo};
@@ -545,15 +544,6 @@ async fn a_wipe_that_fails_partway_stops_and_resumes() {
     let log = FailureLog::open(&reports, FailurePolicy::Continue, &TokioFs)
         .await
         .unwrap();
-    // the statements of the views the wipe drops, which the resumed restore recreates them from
-    let (views, unfound) = ViewStatements::capture(&scylla, &ns, &target.tables, &backup, &reports)
-        .await
-        .expect("failed to capture the views");
-    assert!(unfound.is_empty(), "{unfound:?}");
-    views
-        .save(&reports, &TokioFs)
-        .await
-        .expect("failed to save the views");
     let snapshots = wipe::ScyllaSnapshots { scylla: &scylla };
     let plan = wipe::plan(&scylla, &snapshots, &target, ns.clone(), &backup, None)
         .await

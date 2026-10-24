@@ -12,8 +12,8 @@ use thoradm::backup::tables::{
     Output, OutputStream, RepoData, RepoList, S3Id, SamplesList, Tag,
 };
 
-/// The file to edit when a resource has no registry entry
-const REGISTRY_FILE: &str = "thoradm/src/backup/coverage.rs";
+/// The file to edit when a resource has no registry entry: the api crate's class table
+const REGISTRY_FILE: &str = "api/src/models/schema/classes.rs";
 
 /// The source trees of the services that build Thorium's Redis keys, from the workspace root
 const KEY_BUILDERS: &[&str] = &[
@@ -34,6 +34,14 @@ const UNREACHABLE: &[(&str, &str)] = &[
     (
         "stage_logs:*",
         "the API only deletes it; stage logs are stored in the logs table",
+    ),
+    (
+        "schema-writer",
+        "only a running writing thoradm command holds it, and none runs while the fixture is loaded",
+    ),
+    (
+        "rebucket:*",
+        "only a running census rebuild keeps it, and none runs while the fixture is loaded",
     ),
 ];
 

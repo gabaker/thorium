@@ -2,13 +2,15 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
+use super::queries::migrations::SchemaStateQueries;
 use super::queries::{
     CommentsByIdQueries, CommentsQueries, SamplesListQueries, SamplesQueries, ScyllaQueries,
 };
 use super::scylla::{
     AssociationsTable, CommentsTable, CommitishListTable, CommitishesTable, EntitiesTable,
     LogsTable, NetworkPoliciesTable, NodesTable, NotificationsTable, RepoDataTable, ReposListTable,
-    ResultsStreamTable, ResultsTable, S3IdsTable, SamplesListTable, TagsTable,
+    ResultsStreamTable, ResultsTable, S3IdsTable, SamplesListTable, SchemaMigrationIssuesTable,
+    SchemaMigrationsTable, TagsTable,
 };
 use super::{InKind, InList, Projection, TableStatements, plan_in_chunks};
 use crate::models::{
@@ -304,6 +306,10 @@ fn level_one<T: TableStatements>(table: &str) -> Vec<(String, String)> {
 /// Every generated statement, the full-row statements of each converted table first
 fn generated_statements() -> Vec<(String, String)> {
     let mut statements = Vec::new();
+    statements.extend(level_one::<SchemaMigrationsTable>("schema_migrations"));
+    statements.extend(level_one::<SchemaMigrationIssuesTable>(
+        "schema_migration_issues",
+    ));
     statements.extend(level_one::<SamplesListTable>("samples_list"));
     statements.extend(level_one::<S3IdsTable>("s3_ids"));
     statements.extend(level_one::<CommentsTable>("comments"));
@@ -321,6 +327,7 @@ fn generated_statements() -> Vec<(String, String)> {
     statements.extend(level_one::<NotificationsTable>("notifications"));
     statements.extend(level_one::<LogsTable>("logs"));
     statements.extend(ScyllaQueries::statements("{ns}"));
+    statements.extend(SchemaStateQueries::statements("{ns}"));
     statements
 }
 

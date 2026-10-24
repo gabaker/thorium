@@ -1,6 +1,7 @@
 //! The generated statements Thorium runs against Scylla, one queries struct per table and view
 
 mod entities;
+pub mod migrations;
 mod repos;
 mod results;
 mod samples;

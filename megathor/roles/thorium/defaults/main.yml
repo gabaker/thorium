@@ -15,12 +15,25 @@ thorium_ready_timeout: 1800
 # is set (see "Upgrading Thorium" in the Thorium deployment docs)
 thorium_upgrade_target_revision: ""
 # Approvals for upgrade steps that change data or need manual work, each naming the backup taken
-# first: [{step: <step id>, backup: <where the backup is>}]
+# first: [{step: <step id>, backup: <where the backup is>}]. A step may also set acceptIssues (a list
+# of reason codes of issue groups that don't fail its run), and a downgrade step that loses data
+# needs acceptLoss: true and confirm: <the code its status shows>, plus acceptBackupGaps: true for a
+# lost field no backup covers
 thorium_upgrade_approvals: []
 # Follow the operator's latest upgrade revision without a target (for development clusters). When
 # set, megathor also labels the Thorium namespace thorium.sandia.gov/dev=true, which together with
 # this marks a dev cluster for the operator
 thorium_upgrade_auto_target_dev: false
+# Accept the loss of every lossy downgrade step without a per-step approval, confirmation code, or
+# backup. The operator honors it only on a dev cluster (thorium_upgrade_auto_target_dev with the
+# namespace label megathor then puts on); anywhere else it is ignored and the status shows a
+# LossySettingRefused condition
+thorium_upgrade_dangerous_downgrade_lossy: false
+# Unexpected schema objects to accept as drift, so they raise no SchemaDrift condition:
+# [{backend: scylla|elastic|redis|s3, object: <name as thoradm schema diff shows it>,
+# fingerprint: <observed fingerprint, optional>}]. With a fingerprint an entry lapses when the object
+# changes again
+thorium_upgrade_drift_acknowledged: []
 
 # The Thorium image (<thorium_container_registry>/<thorium_image>, or just thorium_image with an
 # empty registry); an empty version uses the chart's appVersion. Offline deployments pull it from

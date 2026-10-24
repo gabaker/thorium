@@ -43,6 +43,7 @@ use crate::backup::manifest::{
 use crate::backup::new_backup::TableTally;
 use crate::backup::s3::S3BackupShared;
 use crate::backup::s3::{ComponentIndex, STAGING_DIR, clear_staging, remove_staging, sync_dirs};
+use crate::backup::schema::{BackupSchemaRecord, SCHEMA_FILE};
 use crate::backup::sink::{
     PRIVATE_DIR_MODE, PRIVATE_FILE_MODE, SinkFactory, TokioFs, create_private_dir,
 };
@@ -1706,6 +1707,9 @@ pub async fn run(
         usize::try_from(backup_args.s3_concurrency).unwrap_or(usize::MAX),
     );
     controller.resume = resumed.is_some();
+    // the deployment's schema record is read before the data, so it never names a newer revision
+    // than the archives hold when an upgrade finishes during the backup
+    let record = BackupSchemaRecord::read(scylla, &config.thorium.namespace).await?;
     // the API prunes dangling references only when asked
     controller.prune_dangling = backup_args.prune_dangling;
     // an object a row names that the bucket lacks fails its object unless broken links are accepted
@@ -1725,6 +1729,15 @@ pub async fn run(
         } else {
             None
         };
+        // the deployment's schema record rides with the backup, so a restore can bring back its
+        // schema version and upgrade position; a keyspace that never recorded one leaves none, and
+        // an earlier run's file in a resumed backup root is removed with it
+        match &record {
+            Some(record) => record.write(root, sinks.as_ref()).await?,
+            None => {
+                let _ = sinks.remove(&root.join(SCHEMA_FILE)).await;
+            }
+        }
         let counts = log.totals();
         let (tables, s3) = controller.entries(&components, &log);
         let manifest = Manifest {

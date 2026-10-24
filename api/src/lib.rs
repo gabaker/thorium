@@ -260,14 +260,40 @@ fn build_app(
 }
 
 #[cfg(feature = "api")]
-/// Launches the Thorium api using axum
+/// Launches the Thorium api using axum with the default startup options
+///
+/// # Arguments
+///
+/// * `config` - The Thorium config
+///
+/// # Panics
+///
+/// Will panic if we cannot connect to any databases, or if the applied schema isn't one this
+/// build can run on.
+pub async fn axum(config: Conf) {
+    // start without applying the schema, panicking on a refused one
+    if let Err(err) = axum_with(config, utils::StartupOpts::default()).await {
+        panic!("{err}");
+    }
+}
+
+#[cfg(feature = "api")]
+/// Launches the Thorium api using axum, returning the startup schema check's refusal
+///
+/// # Arguments
+///
+/// * `config` - The Thorium config
+/// * `opts` - The startup options
 ///
 /// # Panics
 ///
 /// Will panic if we cannot connect to any databases or execute db setup commands.
-pub async fn axum(config: Conf) {
-    // setup shared object
-    let shared = Box::pin(utils::Shared::new(config.clone())).await;
+pub async fn axum_with(
+    config: Conf,
+    opts: utils::StartupOpts,
+) -> Result<(), models::schema::SchemaCheckError> {
+    // setup shared object, which refuses a schema this build can't run on
+    let shared = Box::pin(utils::Shared::with_opts(config.clone(), opts)).await?;
     // get our log level
     let log_level = shared.config.thorium.tracing.local.level;
     // log interface/port we are binding to
@@ -278,6 +304,13 @@ pub async fn axum(config: Conf) {
             &config.thorium.interface, &config.thorium.port
         ),
     );
+    // warn when stored files are carted with the public default password
+    if let Some(warning) = models::schema::default_password_warning(&config) {
+        println!(
+            "{}",
+            serde_json::json!({"timestamp": chrono::Utc::now(), "level": "WARN", "msg": warning})
+        );
+    }
     // build our app state
     let state = utils::AppState::new(shared);
     // run a scan on our data based on the current system settings
@@ -332,4 +365,5 @@ pub async fn axum(config: Conf) {
     error!(log_level, "Failed to bind server in 10 attempts".to_owned());
     // shutdown our trace provider if we ever exit
     crate::utils::trace::shutdown(trace_provider);
+    Ok(())
 }

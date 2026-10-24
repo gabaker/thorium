@@ -1,5 +1,6 @@
 # Runs Thorium's Rust static checks: cargo check, clippy, and rustfmt; the unit tests that need no
-# services along with a check that the chart's CRD matches the operator; thoradm's tests that
+# services along with a check that the chart's CRD matches the operator, the schema change
+# warnings, and a check that the schema pattern test series stays off main; thoradm's tests that
 # need no backing services; and a check that every copy of Thorium's version matches the Cargo
 # workspace version (.github/scripts/versions.py)
 #
@@ -411,11 +412,15 @@ jobs:
 
       # the operator's reconcile and upgrade tests use an in-process fake kube
       # API, and the API library's tests cover the upgrade catalog and the
-      # shipped configs, so none of these need a cluster or backing services
+      # shipped configs, so none of these need a cluster or backing services.
+      # With scylla-utils they also run the schema checks that fail the job:
+      # each catalog revision's recorded fingerprint against its committed
+      # snapshot, and the fingerprint snapshot of the declared schema
       - name: Run unit tests
         run: |
           cargo +nightly test --locked -p thorium-operator
           cargo +nightly test --locked -p thorium-api --no-default-features --features client --lib
+          cargo +nightly test --locked -p thorium-api --no-default-features --features scylla-utils,client --lib
 
       # the integration tests need a live Thorium, so they are only compiled
       # here to catch API changes that break them
@@ -430,6 +435,42 @@ jobs:
           if ! diff -u deploy/charts/thorium/charts/operator/crds/thoriumcluster.yaml "${RUNNER_TEMP}/thoriumcluster.yaml"; then
             echo "::error file=deploy/charts/thorium/charts/operator/crds/thoriumcluster.yaml::The CRD is out of date; regenerate it with: cargo run -p thorium-operator -- crd > deploy/charts/thorium/charts/operator/crds/thoriumcluster.yaml"
             exit 1
+          fi
+
+      # warns about schema changes the latest catalog revision's snapshot doesn't
+      # have, and about breaking changes no catalog step migrates yet, as
+      # annotations and a job summary; the warnings never fail the job (a release
+      # tag included), but failing to produce them does. It runs even after a
+      # failed step so the warnings are always shown
+      - name: Report schema changes
+        if: ${{ !cancelled() }}
+        run: |
+          mkdir -p "${RUNNER_TEMP}/schema"
+          cargo +nightly run --locked -q -p thorium-api --no-default-features --features scylla-utils,client \
+            --example schema_report -- --sarif "${RUNNER_TEMP}/schema/schema-changes.sarif"
+          python3 .github/scripts/lint_report.py --tool schema --format sarif \
+            --input "${RUNNER_TEMP}/schema/schema-changes.sarif" --output-dir "${RUNNER_TEMP}/schema"
+
+      # the schema pattern test series lives on its own test branch: finding it
+      # fails the job on main and warns on every other branch. The pattern is
+      # assembled so it never matches its own text, and an ordinary
+      # schema_tests module doesn't match it
+      - name: Check that the schema test series is absent
+        if: ${{ !cancelled() }}
+        env:
+          ON_MAIN: ${{ github.ref == 'refs/heads/main' }}
+        run: |
+          word="schema"; tail="test"
+          pattern="\\b${word}[-_]${tail}(\\b|[-_.0-9])"
+          if hits=$(git grep -nE "$pattern" -- . ':!.gitlab/' ':!.github/'); then
+            echo "$hits"
+            if [ "$ON_MAIN" = "true" ]; then
+              echo "::error::The schema test series is present on main; it belongs only on its test branch"
+              exit 1
+            fi
+            echo "::warning::The schema test series is present; it must be removed before this branch reaches main"
+          else
+            echo "No schema test series content found"
           fi
 
       # saved even when a test fails, since the build output is still valid

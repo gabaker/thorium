@@ -6,4 +6,4 @@ mod scylla_setup;
 
 pub use elastic_setup::elastic;
 pub use redis_setup::redis;
-pub use scylla_setup::Scylla;
+pub use scylla_setup::{Scylla, SnapshotLoader};

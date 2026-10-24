@@ -71,6 +71,11 @@ extra_values=()
 
 # The revision every converted deployment starts from
 BASELINE_REVISION="2026-10-v01"
+# The oldest revision this release's operator upgrades from (the catalog's floor; empty while no
+# revision has been squashed into a baseline), and the Thorium release to convert with instead
+# when the baseline is below it
+MINIMUM_REVISION=""
+INTERMEDIATE_RELEASE=""
 # Where the pre-Helm ThoriumCluster is saved
 SNAPSHOT_SECRET="thorium-legacy-cluster"
 # Where the upgrade revision is recorded
@@ -129,6 +134,15 @@ fi
 if [ "$cleanup" != true ] && { { [ -n "$admin_user" ] && [ -z "$admin_password" ]; } || { [ -z "$admin_user" ] && [ -n "$admin_password" ]; }; }; then
     echo "ERROR: --admin-user and its password (--admin-password, --admin-password-stdin, or" \
         "THORIUM_ADMIN_PASSWORD) must be given together" >&2
+    exit 1
+fi
+
+# a converted deployment must start at a revision this release's operator upgrades from
+if [ -n "$MINIMUM_REVISION" ] && [[ "$BASELINE_REVISION" < "$MINIMUM_REVISION" ]]; then
+    echo "ERROR: this script records revision $BASELINE_REVISION, older than $MINIMUM_REVISION," \
+        "the oldest revision this Thorium release upgrades from. Convert the deployment with" \
+        "the convert-to-helm.sh script of Thorium $INTERMEDIATE_RELEASE, let that release finish" \
+        "upgrading it, then follow the table of valid upgrade paths in the upgrade guide" >&2
     exit 1
 fi
 

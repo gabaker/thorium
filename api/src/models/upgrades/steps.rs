@@ -41,8 +41,8 @@ impl StepKind {
 
 /// A Thorium component that must be scaled to zero while an upgrade step runs
 ///
-/// This is informational: the operator does not scale components, the step's manual procedure
-/// does.
+/// The operator records the component's replica count and scales its Deployment to zero before
+/// the step runs, and restores it only after the new release's Deployments are applied.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub enum UpgradeComponent {
     /// The Thorium API
@@ -90,8 +90,8 @@ pub struct StepDef {
     pub kind: StepKind,
     /// What this step does
     pub description: &'static str,
-    /// The components that must be paused (scaled to zero) while this step runs (informational;
-    /// the operator does not scale them, the step's manual procedure does)
+    /// The components the operator pauses (scales to zero) before this step runs and restores
+    /// after the new release's Deployments are applied
     pub pause: &'static [UpgradeComponent],
     /// The thoradm migration that performs this step, if thoradm runs it
     pub thoradm_migration: Option<&'static str>,

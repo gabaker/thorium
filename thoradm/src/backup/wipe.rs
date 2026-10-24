@@ -5,7 +5,7 @@
 //! remain afterwards. Before anything is deleted the preflight checks the namespace given to
 //! `--wipe` against thoradm's config, the namespace the API serves against thoradm's, and the
 //! guards below, then builds the plan the admin confirms. The wipe itself drops each table's
-//! registered views and truncates the table, rewriting `wipe.json` after each table so a re-run
+//! declared views and truncates the table, rewriting `wipe.json` after each table so a re-run
 //! can resume.
 
 use chrono::{DateTime, Utc};
@@ -29,7 +29,6 @@ use super::manifest::write_json_atomic;
 use super::sink::SinkFactory;
 use super::target::Target;
 use super::utils::drop_materialized_view;
-use super::views::droppable_views_of;
 use crate::Error;
 use crate::shared::retry::RetryPolicy;
 
@@ -864,7 +863,9 @@ impl Wiper<'_> {
         Ok(())
     }
 
-    /// Drops one table's registered views and truncates it, returning whether it was truncated
+    /// Drops one table's declared views and truncates it, returning whether it was truncated; a
+    /// legacy view only older keyspaces hold stays, since a wipe never drops an undeclared
+    /// object, and the truncate empties it with its table
     ///
     /// # Arguments
     ///
@@ -874,8 +875,8 @@ impl Wiper<'_> {
         // the table's keyspace and name
         let keyspace = &self.target.keyspace;
         let table = report.tables[index].table.clone();
-        // drop the views first, so no table is truncated while it has views
-        for view in droppable_views_of(self.scylla, keyspace, &table).await? {
+        // drop the declared views first, so the restore's schema apply builds them on the loaded rows
+        for view in Registry::views_of(&table).filter(|view| !Registry::is_legacy_view(view)) {
             let dropped = self
                 .retry
                 .run(|| drop_materialized_view(keyspace, view, self.scylla))

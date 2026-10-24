@@ -2214,6 +2214,9 @@ cmd_deploy() {
         # dev clusters take every upgrade revision their operator ships
         echo "    upgrade:"
         echo "      autoTargetDev: true"
+        # lossy downgrade steps run without per-step approvals on a dev cluster, which the
+        # namespace label deploy puts on marks as one
+        echo "      dangerousDowngradeLossy: true"
         if [ -n "$proxy" ] && [ "$proxy" != none ]; then
             # the scaler reaches registries through the proxy
             local no_proxy_value

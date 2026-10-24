@@ -33,7 +33,7 @@ pub(in crate::models::upgrades) const HELM_STEPS: &[StepDef] = &[
                       not a keyword (megathor deployments before the indexes were left to the \
                       search-streamer); skipped when every index is already correct",
         pause: &[UpgradeComponent::SearchStreamer],
-        thoradm_migration: Some("elastic-keyword-mappings"),
+        thoradm_migration: Some("elastic-rebuild"),
         manual_procedure: Some(REINDEX_PROCEDURE),
         ..StepDef::BASE
     },
@@ -51,7 +51,7 @@ pub(super) const ENTRY: CatalogEntry = CatalogEntry {
     id: "2026-10-v02",
     released_with: "1.8.1",
     description: "Thorium deployed by the Helm charts with the chart-managed operator",
-    schema: None,
+    schema: Some("34f954f5941b0d85cab0e897236f57ff201724c443e8e6dc61f00e55e40e306c"),
     prerelease: false,
     sibling: false,
     steps: HELM_STEPS,

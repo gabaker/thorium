@@ -24,6 +24,9 @@ enum Unattended {
     ScyllaRole,
     /// Make sure Thorium's Elastic user authenticates with the privileges it needs
     ElasticIdentity,
+    /// Run the schema-apply Job, converging Scylla to the target schema before any step that
+    /// changes data
+    SchemaApply,
     /// Record the new revision, which the runner does once every step is done
     Finalize,
 }
@@ -33,6 +36,8 @@ enum Unattended {
 enum Guarded {
     /// Reindex Elastic indexes whose `group` isn't a keyword
     ElasticReindex,
+    /// Run the step's thoradm migration as a migration Job, after a check Job and an approval
+    ThoradmJob,
 }
 
 /// The executor of every step id this operator can run
@@ -46,23 +51,64 @@ const EXECUTORS: &[(&str, Executor)] = &[
         Executor::Unattended(Unattended::ElasticIdentity),
     ),
     (
+        "schema-apply",
+        Executor::Unattended(Unattended::SchemaApply),
+    ),
+    (
         "elastic-reindex-keyword-mappings",
         Executor::Guarded(Guarded::ElasticReindex),
     ),
     ("finalize", Executor::Unattended(Unattended::Finalize)),
 ];
 
-/// Find the executor for a step id
+/// Find the executor registered for a step id
 ///
 /// # Arguments
 ///
 /// * `id` - The id of the step
-fn executor(id: &str) -> Option<Executor> {
+fn registered(id: &str) -> Option<Executor> {
     // find the executor registered for this step id
     EXECUTORS
         .iter()
         .find(|(step, _)| *step == id)
         .map(|(_, executor)| *executor)
+}
+
+/// Find the executor of a step: the one registered for its id, or, for a data step that names a
+/// thoradm migration and has none of its own, the migration Job
+///
+/// # Arguments
+///
+/// * `step` - The step
+fn executor(step: &StepDef) -> Option<Executor> {
+    // a registered executor wins, since the reindex step names a migration too but leaves the work
+    // to an admin
+    registered(step.id).or_else(|| {
+        (step.thoradm_migration.is_some() && step.kind.needs_approval())
+            .then_some(Executor::Guarded(Guarded::ThoradmJob))
+    })
+}
+
+/// Whether a step is run by thoradm as a migration Job
+///
+/// # Arguments
+///
+/// * `step` - The step
+#[must_use]
+pub fn runs_in_thoradm(step: &StepDef) -> bool {
+    // the migration Job is the executor of a data step with a migration and none of its own
+    matches!(executor(step), Some(Executor::Guarded(Guarded::ThoradmJob)))
+}
+
+/// Whether a step is the one that applies the schema
+///
+/// # Arguments
+///
+/// * `step` - The step
+#[must_use]
+pub fn is_schema_apply(step: &StepDef) -> bool {
+    // the step the schema-apply Job runs for
+    step.id == super::schema_apply::STEP
 }
 
 /// How running a step went
@@ -140,6 +186,9 @@ enum Guard {
     Approved(String),
 }
 
+/// The words of the message of a step that waits only for an approval, which the history keeps
+pub(super) const APPROVAL_WAIT: &str = "Waiting for an approval";
+
 /// Describe a guarded step waiting for an approval
 ///
 /// # Arguments
@@ -147,7 +196,7 @@ enum Guard {
 /// * `step` - The step waiting for an approval
 /// * `work` - What the step would change
 /// * `empty_backup` - Whether an approval was set for the step without a backup
-fn approval_needed(step: &StepDef, work: &str, empty_backup: bool) -> String {
+pub(super) fn approval_needed(step: &StepDef, work: &str, empty_backup: bool) -> String {
     // point out an approval that can't be used since it names no backup
     let empty = if empty_backup {
         format!(" The approval set for step {} names no backup.", step.id)
@@ -155,7 +204,7 @@ fn approval_needed(step: &StepDef, work: &str, empty_backup: bool) -> String {
         String::new()
     };
     format!(
-        "{work} Waiting for an approval: step {id} changes data and needs an approval: add \
+        "{work} {APPROVAL_WAIT}: step {id} changes data and needs an approval: add \
          {{step: {id}, backup: <where your backup is>}} to spec.upgrade.approvals (Helm \
          value operator.cluster.upgrade.approvals).{empty} The operator does not take backups; \
          the backup is your reference to one you took yourself.",
@@ -180,6 +229,72 @@ fn manual_work_needed(step: &StepDef, work: &str) -> String {
     )
 }
 
+/// Check a step's approvals, returning whether one names a backup and whether one names none
+///
+/// # Arguments
+///
+/// * `step` - The step to check the approvals of
+/// * `approvals` - The approvals set on the cluster
+fn approval_state(step: &StepDef, approvals: &[UpgradeApproval]) -> (bool, bool) {
+    // look at every approval for this step, noting any that names no backup
+    let mut matching = approvals.iter().filter(|approval| approval.step == step.id);
+    let mut empty_backup = false;
+    let approved = matching.any(|approval| {
+        let named = !approval.backup.trim().is_empty();
+        empty_backup |= !named;
+        named
+    });
+    (approved, empty_backup)
+}
+
+/// Get the first sentence of the first line of a text
+///
+/// # Arguments
+///
+/// * `text` - The text to take the sentence from
+fn first_sentence(text: &str) -> &str {
+    // keep the first line, then cut it after its first sentence
+    let line = text.lines().next().unwrap_or_default();
+    match line.find(". ") {
+        Some(end) => &line[..=end],
+        None => line,
+    }
+}
+
+/// Say in one log line what an admin must do for a blocked step
+///
+/// The step's status keeps the full message; the line gives its start and points there.
+///
+/// # Arguments
+///
+/// * `step` - The blocked step
+/// * `approvals` - The approvals set on the cluster
+/// * `target` - The revision the upgrade is moving to
+/// * `details` - The full message the step blocked with
+pub fn block_log_line(
+    step: &StepDef,
+    approvals: &[UpgradeApproval],
+    target: &str,
+    details: &str,
+) -> String {
+    // a data step blocks on an approval until one names a backup, then on any manual procedure
+    let approved = approval_state(step, approvals).0;
+    let need = match (step.kind.needs_approval(), approved, step.manual_procedure) {
+        (true, false, _) => ", which needs an approval naming a backup.".to_owned(),
+        (true, true, Some(procedure)) => {
+            format!(", which needs manual work: {}", first_sentence(procedure))
+        }
+        _ => format!(": {}", first_sentence(details)),
+    };
+    // end the summary as a sentence before pointing at the full message
+    let period = if need.ends_with('.') { "" } else { "." };
+    format!(
+        "The upgrade to {target} is blocked at step {}{need}{period} Its full message is in the \
+         ThoriumCluster's status.upgrade.steps.",
+        step.id
+    )
+}
+
 /// Decide what to do with a guarded step from its check and the cluster's approvals
 ///
 /// A step with nothing to do is skipped without an approval. Otherwise it only runs with an
@@ -196,14 +311,8 @@ fn guard(step: &StepDef, work: Work, approvals: &[UpgradeApproval]) -> Guard {
         Work::Nothing(reason) => return Guard::Skip(reason),
         Work::Needed(work) => work,
     };
-    // find the approvals for this step and whether any of them names a backup
-    let mut matching = approvals.iter().filter(|approval| approval.step == step.id);
-    let mut empty_backup = false;
-    let approved = matching.any(|approval| {
-        let named = !approval.backup.trim().is_empty();
-        empty_backup |= !named;
-        named
-    });
+    // find whether an approval for this step names a backup
+    let (approved, empty_backup) = approval_state(step, approvals);
     // only an approval naming a backup lets the step change data
     if approved {
         Guard::Approved(work)
@@ -244,6 +353,10 @@ async fn run_unattended(meta: &ClusterMeta, unattended: Unattended) -> Result<St
     match unattended {
         Unattended::ScyllaRole => scylla_role(meta).await,
         Unattended::ElasticIdentity => elastic_identity(meta).await,
+        // the schema-apply Job needs the upgrade in flight, so the runner runs it
+        Unattended::SchemaApply => Err(Error::new(
+            "The schema-apply step runs through the upgrade, not on its own",
+        )),
         // the runner records the revision once every step is done
         Unattended::Finalize => Ok(StepResult::Done(None)),
     }
@@ -266,6 +379,13 @@ async fn run_guarded(
     // check whether the step has anything to change
     let checked = match guarded {
         Guarded::ElasticReindex => reindex_work(meta).await,
+        // a migration Job is checked by a check Job, which needs the upgrade in flight
+        Guarded::ThoradmJob => {
+            return Err(Error::new(format!(
+                "Step {} runs through the upgrade as a migration Job, not on its own",
+                step.id
+            )));
+        }
     };
     let work = match checked {
         Ok(work) => work,
@@ -279,6 +399,10 @@ async fn run_guarded(
             // reindexing means stopping the search-streamer and deleting indexes, which the
             // operator doesn't do on its own, so an approved reindex is done by hand
             Guarded::ElasticReindex => Ok(StepResult::Blocked(manual_work_needed(step, &work))),
+            Guarded::ThoradmJob => Err(Error::new(format!(
+                "Step {} runs through the upgrade as a migration Job, not on its own",
+                step.id
+            ))),
         },
     }
 }
@@ -296,7 +420,7 @@ pub async fn execute(
     approvals: &[UpgradeApproval],
 ) -> Result<StepResult, Error> {
     // find this step's executor
-    let Some(executor) = executor(step.id) else {
+    let Some(executor) = executor(step) else {
         return Err(Error::new(format!(
             "This operator has no executor for upgrade step {}",
             step.id
@@ -327,7 +451,8 @@ mod tests {
         // check every step of every revision
         for entry in CATALOG {
             for step in entry.steps {
-                let executor = executor(step.id).unwrap_or_else(|| {
+                // a data step thoradm performs runs as a migration Job without an entry of its own
+                let executor = executor(step).unwrap_or_else(|| {
                     panic!("step {} of revision {} has no executor", step.id, entry.id)
                 });
                 assert_eq!(

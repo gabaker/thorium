@@ -5,6 +5,7 @@
 #![allow(dead_code)]
 
 pub mod archives;
+pub mod base_namespace;
 pub mod classes;
 pub mod cluster;
 pub mod columns;
@@ -18,11 +19,13 @@ pub mod harness;
 pub mod kill;
 pub mod kinds;
 pub mod legacy;
+pub mod migrate;
 pub mod mock_s3;
 pub mod names;
 pub mod objects;
 pub mod oracle;
 pub mod proxy;
+pub mod record;
 pub mod records;
 pub mod schema;
 pub mod seed;

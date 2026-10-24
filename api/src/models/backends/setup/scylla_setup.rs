@@ -7,10 +7,15 @@ use scylla::client::session::Session;
 use std::time::Duration as StdDuration;
 
 use crate::models::schema::queries::ScyllaQueries;
-use crate::models::schema::scylla::{AssociationsTable, ResultsTable, ThoriumKeyspace};
 use crate::models::schema::statements::prepare_all;
-use crate::models::schema::{Keyspace, ObjectDef, ScyllaObject, TableDef, connect};
+use crate::models::schema::{ApplyOptions, ApplyTarget, apply, check_startup, connect};
+use crate::models::schema::{RevisionSnapshot, SchemaCheckError, SchemaCheckPass, SnapshotError};
+use crate::models::upgrades::Catalog;
+use crate::utils::StartupOpts;
 use crate::{Conf, setup};
+
+/// Loads a revision's committed snapshot
+pub type SnapshotLoader = fn(&str) -> Option<Result<RevisionSnapshot, SnapshotError>>;
 
 /// The scylla client and prepared statments
 pub struct Scylla {
@@ -21,12 +26,58 @@ pub struct Scylla {
 }
 
 impl Scylla {
-    /// Create a new scylla client
+    /// Connect to Scylla, check the applied schema against this build's catalog, and prepare
+    /// every statement
+    ///
+    /// Issues no DDL unless `opts` asks the API to apply the schema first. A schema this build
+    /// can't run on is returned as an error immediately, while connection failures are retried.
     ///
     /// # Arguments
     ///
     /// * `config` - The Thorium config
-    pub async fn new(config: &Conf) -> Self {
+    /// * `opts` - The startup options
+    pub async fn start(config: &Conf, opts: StartupOpts) -> Result<Self, SchemaCheckError> {
+        // judge the applied schema against the catalog this build ships
+        let (scylla, pass) = Self::start_with(
+            config,
+            opts,
+            Catalog::PRODUCTION,
+            RevisionSnapshot::committed,
+        )
+        .await?;
+        // a later additive schema starts with one warning naming its revision
+        if let Some(warning) = pass.warning() {
+            println!(
+                "{}",
+                serde_json::json!({
+                    "timestamp": chrono::Utc::now(),
+                    "level": "WARN",
+                    "msg": warning
+                })
+            );
+        }
+        Ok(scylla)
+    }
+
+    /// Connect to Scylla, judge the applied schema against a catalog, and prepare every
+    /// statement
+    ///
+    /// # Arguments
+    ///
+    /// * `config` - The Thorium config
+    /// * `opts` - The startup options
+    /// * `catalog` - The revisions this build knows
+    /// * `snapshots` - Loads a revision's committed snapshot
+    ///
+    /// # Panics
+    ///
+    /// Panics when Scylla can't be connected to and set up in four attempts.
+    pub async fn start_with(
+        config: &Conf,
+        opts: StartupOpts,
+        catalog: Catalog,
+        snapshots: SnapshotLoader,
+    ) -> Result<(Self, SchemaCheckPass), SchemaCheckError> {
         // loop and try to complete this future
         for _ in 0..4 {
             // get the correct timeout for scylla
@@ -34,14 +85,24 @@ impl Scylla {
             // get a clone of our config and log
             let config_clone = config.clone();
             // build the future for our setup
-            let mut future = tokio::spawn(async move { build(config_clone).await });
+            let mut future = tokio::spawn(async move {
+                Box::pin(build(config_clone, opts, catalog, snapshots)).await
+            });
             // timeout appears to just hang so were going to check it manually
             loop {
                 // check if this future has completed yet
                 if let Poll::Ready(join_result) = poll!(&mut future) {
                     // if this future has errored out then panic with that error
                     match join_result {
-                        Ok(client) => return client,
+                        // a refusal is final, but a failed read of the record is retried
+                        Ok(Err(err)) if err.is_transient() => {
+                            setup!(
+                                config.thorium.tracing.local.level,
+                                format!("Scylla setup error {err}")
+                            );
+                            break;
+                        }
+                        Ok(started) => return started,
                         // there was an error so print it and try again
                         Err(err) => {
                             // print our error and try again
@@ -98,138 +159,54 @@ pub async fn new_session(config: &Conf) -> Session {
         .expect("Failed to build scylla session")
 }
 
-/// Setup a keyspace for Thorium
+/// Apply the declared schema to the keyspace, for the API's dev-only apply flag
 ///
 /// # Arguments
 ///
-/// * `session` - The scylla session to use
+/// * `session` - The scylla session to apply with
 /// * `config` - The Thorium config
-async fn setup_keyspace(session: &Session, config: &Conf) {
-    // build keyspace create command
-    let keyspace_cmd = format!(
-        "CREATE KEYSPACE IF NOT EXISTS {ns} WITH REPLICATION = \
-            {{'class' : 'NetworkTopologyStrategy', 'replication_factor': {repl_factor}}}",
-        ns = &config.thorium.namespace,
-        repl_factor = &config.scylla.replication
-    );
-    // setup scylla keyspaces
-    session
-        .query_unpaged(keyspace_cmd, &[])
+async fn apply_declared_schema(session: &Session, config: &Conf) -> Result<(), SchemaCheckError> {
+    // converge to the declared schema and record it, the way `thoradm schema apply` does
+    let options = ApplyOptions {
+        target: ApplyTarget::Declared,
+        dry_run: false,
+    };
+    let progress = |line: &str| {
+        setup!(config.thorium.tracing.local.level, line.to_owned());
+    };
+    // a refused data-shaping setting is final, and any other failure is retried
+    apply(session, config, &options, "api --apply-schema", &progress)
         .await
-        .expect("Failed to setup keyspace");
+        .map(|_| ())
+        .map_err(|err| {
+            SchemaCheckError::from_apply(&err).unwrap_or_else(|| {
+                SchemaCheckError::Unreadable(format!("failed to apply the schema: {err}"))
+            })
+        })
 }
 
-/// Check if a table in Thorium's keyspace has a column
+/// Build a session, check the applied schema, and prepare the statements
 ///
 /// # Arguments
 ///
-/// * `session` - The scylla session to use
 /// * `config` - The Thorium config
-/// * `table` - The table to check
-/// * `column` - The column to look for
-async fn column_exists(session: &Session, config: &Conf, table: &str, column: &str) -> bool {
-    // Scylla stores unquoted identifiers in lower case, so look them up that way
-    let keyspace = config.thorium.namespace.to_lowercase();
-    let table = table.to_lowercase();
-    let column = column.to_lowercase();
-    // look for this column in the schema tables
-    session
-        .query_unpaged(
-            "SELECT column_name FROM system_schema.columns \
-                WHERE keyspace_name = ? AND table_name = ? AND column_name = ?",
-            (&keyspace, &table, &column),
-        )
-        .await
-        .unwrap_or_else(|err| panic!("Failed to read the columns of {table}: {err}"))
-        .into_rows_result()
-        .is_ok_and(|rows| rows.rows_num() > 0)
-}
-
-/// Add a column to a table that was created before the column was added to its definition
-///
-/// Tables are created with `CREATE TABLE IF NOT EXISTS`, so a keyspace created by an older
-/// release keeps its old columns, and statements naming newer columns fail to prepare. A column
-/// that already exists, with any type, is left alone.
-///
-/// # Arguments
-///
-/// * `session` - The scylla session to use
-/// * `config` - The Thorium config
-/// * `table` - The declared table to add the column to
-/// * `column` - The column to add
-async fn add_missing_column(session: &Session, config: &Conf, table: &TableDef, column: &str) {
-    // nothing needs to change when the column already exists
-    if column_exists(session, config, table.name, column).await {
-        return;
-    }
-    // add the column to the existing table with its declared type
-    let alter = table
-        .alter_add_cql(&config.thorium.namespace, column)
-        .unwrap_or_else(|| panic!("{} declares no column {column}", table.name));
-    if let Err(err) = session.query_unpaged(alter, &[]).await {
-        // another API instance starting at the same time may have added it first
-        assert!(
-            column_exists(session, config, table.name, column).await,
-            "Failed to add column {column} to {}: {err}",
-            table.name
-        );
-    }
-}
-
-/// Get the definition of a declared table
-///
-/// # Arguments
-///
-/// * `object` - The declared table's definition
-fn table_def(object: ObjectDef) -> TableDef {
-    match object {
-        ObjectDef::Table(table) => table,
-        ObjectDef::View(view) => panic!("{} is a view, not a table", view.name),
-    }
-}
-
-/// Create every declared table and view that doesn't exist yet, in creation order, and add the
-/// columns keyspaces from older releases lack
-///
-/// # Arguments
-///
-/// * `session` - The scylla session to use
-/// * `config` - The Thorium config
-async fn create_declared_objects(session: &Session, config: &Conf) {
-    // every object goes in the namespace's keyspace, created in declaration order
-    let keyspace = &config.thorium.namespace;
-    for object in <ThoriumKeyspace as Keyspace>::OBJECTS {
-        // a table's default TTL comes from the setting its declaration names
-        let ttl = match object {
-            ObjectDef::Table(table) => table
-                .ttl
-                .and_then(|source| config.table_ttl(source.config_path)),
-            ObjectDef::View(_) => None,
-        };
-        // create the object if it's missing
-        let create = object.create_cql(keyspace, ttl);
-        session
-            .query_unpaged(create, &[])
-            .await
-            .unwrap_or_else(|err| panic!("Failed to create {}: {err}", object.name()));
-    }
-    // add the columns tables created before April 2026 lack
-    let results = table_def(<ResultsTable as ScyllaObject>::DEF);
-    add_missing_column(session, config, &results, "entities").await;
-    // add the columns tables created before August 2026 lack
-    let associations = table_def(<AssociationsTable as ScyllaObject>::DEF);
-    add_missing_column(session, config, &associations, "submissions_source").await;
-    add_missing_column(session, config, &associations, "submissions_other").await;
-}
-
-/// Build a session and setup tables/materialized views/prepared statements
-async fn build(config: Conf) -> Scylla {
+/// * `opts` - The startup options
+/// * `catalog` - The revisions this build knows
+/// * `snapshots` - Loads a revision's committed snapshot
+async fn build(
+    config: Conf,
+    opts: StartupOpts,
+    catalog: Catalog,
+    snapshots: SnapshotLoader,
+) -> Result<(Scylla, SchemaCheckPass), SchemaCheckError> {
     // Create a new session for scylla
     let session = new_session(&config).await;
-    // setup our keyspace if it doesn't already exist
-    setup_keyspace(&session, &config).await;
-    // create the declared tables and views from their definitions
-    create_declared_objects(&session, &config).await;
+    // apply the declared schema first when asked to, which is the only DDL the API ever issues
+    if opts.apply_schema {
+        apply_declared_schema(&session, &config).await?;
+    }
+    // refuse to go on when the applied schema isn't one this build can run on
+    let pass = check_startup(&session, &config, &catalog, &snapshots).await?;
     // fail before serving when any registered statement doesn't prepare, naming each one
     if let Err(err) = prepare_all(&session, &config.thorium.namespace).await {
         panic!("{err}");
@@ -239,5 +216,5 @@ async fn build(config: Conf) -> Scylla {
         .await
         .expect("Failed to prepare the generated scylla statements");
     // build our scylla client
-    Scylla { session, queries }
+    Ok((Scylla { session, queries }, pass))
 }

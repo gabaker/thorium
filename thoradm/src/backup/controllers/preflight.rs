@@ -19,19 +19,20 @@ use tracing::{info, warn};
 
 use crate::Error;
 use crate::args::{BackupComponents, RestoreBackup};
-use crate::backup::coverage::{Coverage, Registry};
+use crate::backup::coverage::{Coverage, RECORD_TABLES, Registry, Store};
 use crate::backup::failures::{
     FAILURES_FILE, FailureKind, FailureLog, FailureRecord, Operation, read_records,
 };
 use crate::backup::manifest::{
     self, LOCK_FILE, Layout, MANIFEST_FILE, MARKER_FILE, Manifest, PRUNED_FILE,
 };
+use crate::backup::schema::BackupSchemaRecord;
+use crate::backup::schema_restore::{self, ConvergeTo};
 use crate::backup::sink::SinkFactory;
 use crate::backup::target::{Target, backup_components};
 use crate::backup::utils::is_link;
 use crate::backup::verify::{REPORT_FILE, Verifier, missing_object};
 use crate::backup::version::{self, VersionMismatch};
-use crate::backup::views::{VIEWS_FILE, ViewStatements};
 use crate::backup::wipe::{self, WipeReport};
 
 /// The component a restore records its preflight refusals under
@@ -58,8 +59,12 @@ pub struct Cleared {
     pub target: Target,
     /// The tables and buckets that held data before a `--merge` restore
     pub merged_into: Vec<String>,
-    /// The statements of the views the restore drops, saved to `views.cql`
-    pub views: ViewStatements,
+    /// The backup's schema record, when it holds one
+    pub schema: Option<BackupSchemaRecord>,
+    /// What the restore converges the keyspace to around the load
+    pub converge_to: ConvergeTo,
+    /// Why the backup's schema record isn't restored, when it holds one that isn't
+    pub record_skipped: Option<String>,
     /// The wipe plan of a `--wipe` restore whose target holds data, run before the first restore
     pub wipe: Option<WipeReport>,
     /// The API's version and thoradm's, when they differed and `--allow-version-mismatch` let
@@ -498,6 +503,10 @@ async fn describe(
             .to_owned(),
     );
     for entry in Registry::excluded() {
+        // the tables the schema record carries are in the backup, so they aren't listed as missing
+        if entry.store == Store::ScyllaTable && RECORD_TABLES.contains(&entry.name) {
+            continue;
+        }
         if let Coverage::Excluded { reason } = entry.coverage {
             lines.push(format!(
                 "  - {} {} ({}): {reason}",
@@ -758,8 +767,39 @@ pub async fn run(
         },
         None => Recorded::default(),
     };
-    // the target is empty, or the admin asks to merge into it or to wipe it first
+    // the components the backup holds decide what its schema record can do
     let components = backup_components(&args.backup, manifest.as_ref()).await?;
+    // the backup's schema record reads
+    let loaded = match BackupSchemaRecord::load(&args.backup).await {
+        Ok(loaded) => loaded,
+        Err(error) => return refuse(log, "schema", error).await,
+    };
+    // the record replaces the target's only when the backup holds the whole deployment's state;
+    // otherwise the target's own record stays, and the summary says so
+    let (schema, record_skipped) = match loaded {
+        Some(record) => match schema_restore::record_trusted(&record, &components) {
+            Ok(()) => (Some(record), None),
+            Err(reason) => {
+                warn!("{reason}");
+                (None, Some(reason))
+            }
+        },
+        None => (None, None),
+    };
+    // stored files are restored as they were encrypted, so the configured files password must be
+    // the backup's whenever the backup holds files
+    if let Some(record) = &schema
+        && schema_restore::restores_files(&components)
+        && let Err(reason) = schema_restore::check_files_password(record, config)
+    {
+        return refuse(log, "schema", reason).await;
+    }
+    // the revision the record names is one this thoradm can converge to
+    let converge_to = match schema_restore::converge_target(schema.as_ref()) {
+        Ok(to) => to,
+        Err(reason) => return refuse(log, "schema", reason).await,
+    };
+    // the target is empty, or the admin asks to merge into it or to wipe it first
     let target = Target::new(config, &components);
     let mut wipe_plan = None;
     let merged_into = if let Some(given) = &args.wipe {
@@ -787,29 +827,6 @@ pub async fn run(
             }
         }
     };
-    // every view the restore drops can be recreated: from Scylla, or for a view an interrupted
-    // restore left dropped, from an earlier views.cql
-    let (views, unfound) = ViewStatements::capture(
-        scylla,
-        &config.thorium.namespace,
-        &target.tables,
-        &args.backup,
-        reports,
-    )
-    .await?;
-    if !unfound.is_empty() {
-        let reason = format!(
-            "{} {} missing, as an interrupted restore leaves views, and no earlier {VIEWS_FILE} \
-             under {}/reports/restore-*/ or beside the report directory holds their statements; \
-             replay an earlier {VIEWS_FILE} with cqlsh, or restart one API pod, whose schema setup \
-             creates missing views, then run the restore again",
-            unfound.join(", "),
-            if unfound.len() == 1 { "is" } else { "are" },
-            args.backup.display()
-        );
-        return refuse(log, "views", reason).await;
-    }
-    views.save(reports, sinks).await?;
     let cleared = Cleared {
         legacy: manifest.is_none(),
         manifest,
@@ -818,7 +835,9 @@ pub async fn run(
         broken_links,
         target,
         merged_into,
-        views,
+        schema,
+        record_skipped,
+        converge_to,
         wipe: wipe_plan,
         version_mismatch,
     };

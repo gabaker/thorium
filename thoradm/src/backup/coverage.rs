@@ -1,42 +1,21 @@
 //! The coverage registry: every resource Thorium stores and how backup and restore treat it
 //!
-//! Each Scylla table and view, Redis key family, and S3 bucket role has one entry, classified as
-//! backed up (by a named component) or excluded (with a reason an admin can read). The
-//! completeness tests fail when Thorium stores something no entry classifies, and a known gap in
-//! today's coverage is stated on its entry until the change that closes it.
+//! The resources, their data classes, and their coverage (backed up or excluded, the reason, a
+//! known gap, a table's archived columns) come from the api crate's class table,
+//! [`CLASSES`]; this registry adds the backup component that carries each backed-up resource.
+//! A backed-up table or bucket role names its component in [`COMPONENTS`], a view is carried by
+//! its base table's component, and every backed-up Redis family by the Redis backup; thoradm
+//! fails to build when a backed-up table or bucket role has no component. The completeness tests
+//! fail when Thorium stores something no entry classifies.
 
 use crate::args::BackupComponents;
 use std::fmt::Write;
+use std::ops::Deref;
+use thorium::models::schema::{BackupCoverage, CLASSES, ClassEntry, DataClass};
 
-/// The store a registry entry describes
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize)]
-#[serde(rename_all = "kebab-case")]
-pub enum Store {
-    /// A Scylla table, by name
-    ScyllaTable,
-    /// A Scylla materialized view, by name
-    ScyllaView,
-    /// A Redis key family, as a pattern relative to the namespace
-    Redis,
-    /// An S3 bucket role from the config, optionally narrowed to key prefixes
-    S3,
-}
+pub use thorium::models::schema::{ColumnCoverage, Store};
 
-impl Store {
-    /// Returns the store's name for humans
-    #[must_use]
-    pub fn label(self) -> &'static str {
-        // name each store the way the admin guide does
-        match self {
-            Store::ScyllaTable => "Scylla table",
-            Store::ScyllaView => "Scylla view",
-            Store::Redis => "Redis",
-            Store::S3 => "S3 bucket",
-        }
-    }
-}
-
-/// Whether a resource is part of what a restore must bring back
+/// The group a resource's data class is shown under in the admin docs and the restore preflight
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum Category {
@@ -44,11 +23,28 @@ pub enum Category {
     Core,
     /// Data a restore rebuilds from other backed-up data (census streams, `system_info`)
     Derived,
-    /// Runtime state that is invalid after a restore (reactions, jobs, logs, events, caches)
+    /// Runtime state that is invalid after a restore (reactions, jobs, logs, events, caches),
+    /// whether or not every write of it sets a TTL
     Ephemeral,
 }
 
 impl Category {
+    /// Returns the group a data class is shown under: `Expiring` and `Runtime` alike are
+    /// ephemeral
+    ///
+    /// # Arguments
+    ///
+    /// * `class` - The data class
+    #[must_use]
+    pub const fn of(class: DataClass) -> Category {
+        // state that expires and state that doesn't are both invalid after a restore
+        match class {
+            DataClass::Core => Category::Core,
+            DataClass::Derived => Category::Derived,
+            DataClass::Expiring | DataClass::Runtime => Category::Ephemeral,
+        }
+    }
+
     /// Returns the category's name for humans
     #[must_use]
     pub fn label(self) -> &'static str {
@@ -74,40 +70,31 @@ pub enum Coverage {
     },
 }
 
-/// The columns of a backed-up table, split by whether its archive carries them
-#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
-pub struct ColumnCoverage {
-    /// The columns the archive struct carries in the current format version
-    pub archived: &'static [&'static str],
-    /// The columns it doesn't carry, each with the reason
-    pub excluded: &'static [(&'static str, &'static str)],
-}
-
 /// One resource Thorium stores, and how backup and restore treat it
-#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+///
+/// It dereferences to the resource's class table entry for its store, name, columns, and gap.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct CoverageEntry {
-    /// The store the resource lives in
-    pub store: Store,
-    /// The table or view name, the Redis key pattern after `{ns}:`, or the bucket role
-    pub name: &'static str,
-    /// For an S3 entry, the key layouts its objects follow (the results bucket's result files and
-    /// entity blobs); empty means the bucket's keys follow no layout thoradm reads
-    pub prefixes: &'static [&'static str],
-    /// For a view, its base table; restore drops and recreates the view with that table
-    pub base_table: Option<&'static str>,
-    /// For a backed-up table, its archived and excluded columns
-    pub columns: Option<ColumnCoverage>,
+    /// The resource's class table entry
+    pub info: ClassEntry,
     /// Whether the resource is backed up, and by which component
     pub coverage: Coverage,
-    /// The resource's category
+    /// The group the resource's data class is shown under
     pub category: Category,
-    /// A known gap in how today's backup or restore covers this resource, stated until the
-    /// change that closes it
-    pub gap: Option<&'static str>,
-    /// For a table or view, whether only keyspaces older releases created hold it: the API's setup
-    /// doesn't create it, so thoradm acts on it where it exists and skips it elsewhere
-    pub legacy: bool,
 }
+
+impl Deref for CoverageEntry {
+    type Target = ClassEntry;
+
+    /// Returns the resource's class table entry
+    fn deref(&self) -> &ClassEntry {
+        // the entry holds everything but the component
+        &self.info
+    }
+}
+
+/// The tables the backup's schema record, `schema.json`, carries instead of a table archive
+pub const RECORD_TABLES: [&str; 2] = ["schema_migrations", "schema_migration_issues"];
 
 /// The columns format 2 added to the archives, by table; a format-1 backup doesn't carry them, so
 /// its restore leaves them unset
@@ -121,705 +108,156 @@ pub const FORMAT_2_COLUMNS: &[(&str, &str)] = &[
     ("associations", "submissions_other"),
 ];
 
-/// Builds a backed-up table entry
+/// The backup component that carries each backed-up table and bucket role
 ///
-/// # Arguments
-///
-/// * `name` - The table name
-/// * `component` - The component that backs it up
-/// * `archived` - The columns its archive carries
-/// * `excluded` - The columns it doesn't carry, with reasons
-/// * `gap` - A known gap in its coverage
-const fn table(
-    name: &'static str,
-    component: BackupComponents,
-    archived: &'static [&'static str],
-    excluded: &'static [(&'static str, &'static str)],
-    gap: Option<&'static str>,
-) -> CoverageEntry {
-    // a backed-up table is core data with its column split
-    CoverageEntry {
-        store: Store::ScyllaTable,
-        name,
-        prefixes: &[],
-        base_table: None,
-        columns: Some(ColumnCoverage { archived, excluded }),
-        coverage: Coverage::BackedUp(component),
-        category: Category::Core,
-        gap,
-        legacy: false,
-    }
-}
-
-/// Builds a view entry, backed up through its base table
-///
-/// # Arguments
-///
-/// * `name` - The view name
-/// * `base` - The base table
-/// * `component` - The component that backs up the base table
-const fn view(
-    name: &'static str,
-    base: &'static str,
-    component: BackupComponents,
-) -> CoverageEntry {
-    // a view is rebuilt from its base table, so it shares the base table's component
-    CoverageEntry {
-        store: Store::ScyllaView,
-        name,
-        prefixes: &[],
-        base_table: Some(base),
-        columns: None,
-        coverage: Coverage::BackedUp(component),
-        category: Category::Core,
-        gap: None,
-        legacy: false,
-    }
-}
-
-/// Builds an entry for a view only keyspaces older releases created hold, backed up through its
-/// base table where it exists
-///
-/// # Arguments
-///
-/// * `name` - The view name
-/// * `base` - The base table
-/// * `component` - The component that backs up the base table
-const fn legacy_view(
-    name: &'static str,
-    base: &'static str,
-    component: BackupComponents,
-) -> CoverageEntry {
-    // a legacy view is a view that restore and verification skip where it doesn't exist
-    CoverageEntry {
-        legacy: true,
-        ..view(name, base, component)
-    }
-}
-
-/// Builds an entry for a resource backed up by a component
-///
-/// # Arguments
-///
-/// * `store` - The store the resource lives in
-/// * `name` - The Redis pattern or bucket role
-/// * `component` - The component that backs it up
-/// * `gap` - A known gap in its coverage
-const fn backed_up(
-    store: Store,
-    name: &'static str,
-    component: BackupComponents,
-    gap: Option<&'static str>,
-) -> CoverageEntry {
-    // backed-up Redis families and buckets are core data
-    CoverageEntry {
-        store,
-        name,
-        prefixes: &[],
-        base_table: None,
-        columns: None,
-        coverage: Coverage::BackedUp(component),
-        category: Category::Core,
-        gap,
-        legacy: false,
-    }
-}
-
-/// Builds an entry for a resource that isn't backed up
-///
-/// # Arguments
-///
-/// * `store` - The store the resource lives in
-/// * `name` - The table name, Redis pattern, or bucket role
-/// * `category` - The resource's category
-/// * `reason` - Why it isn't backed up
-/// * `gap` - A known gap, when the resource should be backed up and isn't yet
-const fn excluded(
-    store: Store,
-    name: &'static str,
-    category: Category,
-    reason: &'static str,
-    gap: Option<&'static str>,
-) -> CoverageEntry {
-    // an excluded resource has no component
-    CoverageEntry {
-        store,
-        name,
-        prefixes: &[],
-        base_table: None,
-        columns: None,
-        coverage: Coverage::Excluded { reason },
-        category,
-        gap,
-        legacy: false,
-    }
-}
-
-/// The reason runtime Redis state of reactions and jobs isn't backed up
-const RUNTIME: &str =
-    "runtime state of reactions, jobs, workers, or services, invalid after a restore";
-
-/// Every resource Thorium stores; the completeness tests fail on anything not listed here
-pub const COVERAGE: &[CoverageEntry] = &[
-    // Scylla tables that are backed up
-    table(
+/// Views are carried by their base table's component and backed-up Redis families by
+/// [`BackupComponents::Redis`], so neither is listed.
+pub const COMPONENTS: &[(Store, &str, BackupComponents)] = &[
+    (
+        Store::ScyllaTable,
         "samples_list",
         BackupComponents::SamplesList,
-        &[
-            "group",
-            "year",
-            "bucket",
-            "sha256",
-            "sha1",
-            "md5",
-            "id",
-            "name",
-            "description",
-            "submitter",
-            "origin",
-            "uploaded",
-        ],
-        &[],
-        None,
     ),
-    table(
-        "s3_ids",
-        BackupComponents::S3Ids,
-        &["type", "id", "sha256"],
-        &[],
-        None,
-    ),
-    table(
-        "comments",
-        BackupComponents::Comments,
-        &[
-            "group", "sha256", "uploaded", "id", "author", "comment", "files",
-        ],
-        &[],
-        None,
-    ),
-    table(
-        "results",
-        BackupComponents::Results,
-        &[
-            "id",
-            "tool",
-            "cmd",
-            "uploaded",
-            "result",
-            "files",
-            "display_type",
-            "children",
-            "tool_version",
-            "entities",
-        ],
-        &[],
-        None,
-    ),
-    table(
+    (Store::ScyllaTable, "s3_ids", BackupComponents::S3Ids),
+    (Store::ScyllaTable, "comments", BackupComponents::Comments),
+    (Store::ScyllaTable, "results", BackupComponents::Results),
+    (
+        Store::ScyllaTable,
         "results_stream",
         BackupComponents::ResultsStream,
-        &[
-            "kind",
-            "group",
-            "year",
-            "bucket",
-            "key",
-            "tool",
-            "display_type",
-            "uploaded",
-            "cmd",
-            "id",
-            "tool_version",
-        ],
-        &[],
-        None,
     ),
-    table(
-        "tags",
-        BackupComponents::Tags,
-        &[
-            "type", "group", "year", "bucket", "key", "value", "uploaded", "item",
-        ],
-        &[
-            ("key_lower", "recomputed from key on restore"),
-            ("value_lower", "recomputed from value on restore"),
-        ],
-        None,
-    ),
-    table(
-        "repo_data",
-        BackupComponents::RepoData,
-        &["repo", "hash"],
-        &[],
-        None,
-    ),
-    table(
-        "repos_list",
-        BackupComponents::RepoList,
-        &[
-            "group",
-            "year",
-            "bucket",
-            "uploaded",
-            "id",
-            "creator",
-            "name",
-            "provider",
-            "scheme",
-            "url",
-            "user",
-            "default_checkout",
-            "earliest",
-        ],
-        &[],
-        None,
-    ),
-    table(
+    (Store::ScyllaTable, "tags", BackupComponents::Tags),
+    (Store::ScyllaTable, "repo_data", BackupComponents::RepoData),
+    (Store::ScyllaTable, "repos_list", BackupComponents::RepoList),
+    (
+        Store::ScyllaTable,
         "commitishes",
         BackupComponents::Commitish,
-        &[
-            "kind",
-            "group",
-            "repo",
-            "key",
-            "data",
-            "repo_data",
-            "timestamp",
-        ],
-        &[],
-        None,
     ),
-    table(
+    (
+        Store::ScyllaTable,
         "commitish_list",
         BackupComponents::CommitishList,
-        &[
-            "kind",
-            "group",
-            "year",
-            "bucket",
-            "repo",
-            "timestamp",
-            "key",
-            "repo_data",
-        ],
-        &[],
-        None,
     ),
-    table(
+    (
+        Store::ScyllaTable,
         "network_policies",
         BackupComponents::NetworkPolicies,
-        &[
-            "group",
-            "name",
-            "id",
-            "k8s_name",
-            "created",
-            "ingress",
-            "egress",
-            "forced_policy",
-            "default_policy",
-        ],
-        &[],
-        None,
     ),
-    table(
-        "entities",
-        BackupComponents::Entities,
-        &[
-            "kind",
-            "group",
-            "year",
-            "bucket",
-            "created",
-            "id",
-            "name",
-            "submitter",
-            "kind_data",
-            "description",
-            "image",
-        ],
-        &[],
-        None,
-    ),
-    table(
+    (Store::ScyllaTable, "entities", BackupComponents::Entities),
+    (
+        Store::ScyllaTable,
         "associations",
         BackupComponents::Associations,
-        &[
-            "group",
-            "year",
-            "bucket",
-            "created",
-            "direction",
-            "kind",
-            "source",
-            "target",
-            "submitter",
-            "extra_source",
-            "extra_target",
-            "submissions_source",
-            "submissions_other",
-        ],
-        &[],
-        None,
     ),
-    table(
+    (
+        Store::ScyllaTable,
         "notifications",
         BackupComponents::Notifications,
-        &["kind", "key", "created", "id", "msg", "level", "ban_id"],
-        &[],
-        None,
     ),
-    table(
-        "nodes",
-        BackupComponents::Nodes,
-        &["cluster", "node", "health", "heart_beat", "resources"],
-        &[],
-        None,
-    ),
-    // Scylla tables that are not backed up
-    excluded(
-        Store::ScyllaTable,
-        "logs",
-        Category::Ephemeral,
-        "stage logs of reactions, which are runtime state and expire by TTL",
-        None,
-    ),
-    CoverageEntry {
-        legacy: true,
-        ..excluded(
-            Store::ScyllaTable,
-            "events",
-            Category::Ephemeral,
-            "a table of trigger events nothing reads or writes",
-            None,
-        )
-    },
-    // Scylla views, rebuilt from their base tables
-    view("samples", "samples_list", BackupComponents::SamplesList),
-    view("s3_sha256s", "s3_ids", BackupComponents::S3Ids),
-    view("comments_by_id", "comments", BackupComponents::Comments),
-    view(
-        "results_auth",
-        "results_stream",
-        BackupComponents::ResultsStream,
-    ),
-    view(
-        "results_ids",
-        "results_stream",
-        BackupComponents::ResultsStream,
-    ),
-    view("tags_by_item", "tags", BackupComponents::Tags),
-    view("tags_case_insensitive", "tags", BackupComponents::Tags),
-    view("repos", "repos_list", BackupComponents::RepoList),
-    view(
-        "committed_repo_data",
-        "commitish_list",
-        BackupComponents::CommitishList,
-    ),
-    view(
-        "network_policies_by_name",
-        "network_policies",
-        BackupComponents::NetworkPolicies,
-    ),
-    view(
-        "network_policies_default",
-        "network_policies",
-        BackupComponents::NetworkPolicies,
-    ),
-    view("entities_by_id", "entities", BackupComponents::Entities),
-    legacy_view("entities_by_name", "entities", BackupComponents::Entities),
-    // Redis families in the Redis backup
-    backed_up(Store::Redis, "users", BackupComponents::Redis, None),
-    backed_up(Store::Redis, "user_data:*", BackupComponents::Redis, None),
-    backed_up(Store::Redis, "user_groups:*", BackupComponents::Redis, None),
-    backed_up(
-        Store::Redis,
-        "users_token_map",
-        BackupComponents::Redis,
-        None,
-    ),
-    backed_up(
-        Store::Redis,
-        "users_email_map",
-        BackupComponents::Redis,
-        None,
-    ),
-    backed_up(
-        Store::Redis,
-        "oauth:alias_to_user:*",
-        BackupComponents::Redis,
-        None,
-    ),
-    backed_up(Store::Redis, "analysts", BackupComponents::Redis, None),
-    backed_up(Store::Redis, "groups", BackupComponents::Redis, None),
-    backed_up(Store::Redis, "groups_data:*", BackupComponents::Redis, None),
-    backed_up(
-        Store::Redis,
-        "groups_direct:*",
-        BackupComponents::Redis,
-        None,
-    ),
-    backed_up(
-        Store::Redis,
-        "groups_metagroups:*",
-        BackupComponents::Redis,
-        None,
-    ),
-    backed_up(
-        Store::Redis,
-        "groups_combined:*",
-        BackupComponents::Redis,
-        None,
-    ),
-    backed_up(Store::Redis, "images:*", BackupComponents::Redis, None),
-    backed_up(Store::Redis, "image_data:*", BackupComponents::Redis, None),
-    backed_up(
-        Store::Redis,
-        "image_used_by:*",
-        BackupComponents::Redis,
-        None,
-    ),
-    backed_up(Store::Redis, "pipelines:*", BackupComponents::Redis, None),
-    backed_up(
-        Store::Redis,
-        "pipeline_data:*",
-        BackupComponents::Redis,
-        None,
-    ),
-    backed_up(
-        Store::Redis,
-        "system_settings",
-        BackupComponents::Redis,
-        None,
-    ),
-    backed_up(
-        Store::Redis,
-        "scoped_token_map",
-        BackupComponents::Redis,
-        None,
-    ),
-    backed_up(
-        Store::Redis,
-        "scoped_tokens:*",
-        BackupComponents::Redis,
-        None,
-    ),
-    backed_up(Store::Redis, "netpols:*", BackupComponents::Redis, None),
-    // Redis state rebuilt from other data
-    excluded(
-        Store::Redis,
-        "netpol_used_by:*",
-        Category::Derived,
-        "rebuilt by the Redis restore from the restored images' network policies",
-        None,
-    ),
-    excluded(
-        Store::Redis,
-        "census:*",
-        Category::Derived,
-        "counts rebuilt from the Scylla tables by thoradm census, which restore runs",
-        None,
-    ),
-    excluded(
-        Store::Redis,
-        "system_info",
-        Category::Derived,
-        "re-initialized by restore",
-        None,
-    ),
-    excluded(
-        Store::Redis,
-        "system_keys",
-        Category::Ephemeral,
-        "written at setup and read by nothing",
-        None,
-    ),
-    // Redis runtime state
-    excluded(
-        Store::Redis,
-        "reactions:*",
-        Category::Ephemeral,
-        RUNTIME,
-        None,
-    ),
-    excluded(
-        Store::Redis,
-        "reactions_group:*",
-        Category::Ephemeral,
-        RUNTIME,
-        None,
-    ),
-    excluded(
-        Store::Redis,
-        "reaction_data:*",
-        Category::Ephemeral,
-        RUNTIME,
-        None,
-    ),
-    excluded(
-        Store::Redis,
-        "reaction_jobs:*",
-        Category::Ephemeral,
-        RUNTIME,
-        None,
-    ),
-    excluded(
-        Store::Redis,
-        "reaction_tags:*",
-        Category::Ephemeral,
-        RUNTIME,
-        None,
-    ),
-    excluded(
-        Store::Redis,
-        "reaction_cache:*",
-        Category::Ephemeral,
-        RUNTIME,
-        None,
-    ),
-    excluded(
-        Store::Redis,
-        "sub_reactions:*",
-        Category::Ephemeral,
-        RUNTIME,
-        None,
-    ),
-    excluded(
-        Store::Redis,
-        "generators:*",
-        Category::Ephemeral,
-        RUNTIME,
-        None,
-    ),
-    excluded(
-        Store::Redis,
-        "stage_logs:*",
-        Category::Ephemeral,
-        RUNTIME,
-        None,
-    ),
-    excluded(Store::Redis, "logs:*", Category::Ephemeral, RUNTIME, None),
-    excluded(
-        Store::Redis,
-        "job_queue:*",
-        Category::Ephemeral,
-        RUNTIME,
-        None,
-    ),
-    excluded(
-        Store::Redis,
-        "job_data:*",
-        Category::Ephemeral,
-        RUNTIME,
-        None,
-    ),
-    excluded(
-        Store::Redis,
-        "workers:*",
-        Category::Ephemeral,
-        RUNTIME,
-        None,
-    ),
-    excluded(
-        Store::Redis,
-        "worker_data:*",
-        Category::Ephemeral,
-        RUNTIME,
-        None,
-    ),
-    excluded(
-        Store::Redis,
-        "streams:*",
-        Category::Ephemeral,
-        RUNTIME,
-        None,
-    ),
-    excluded(
-        Store::Redis,
-        "event-handler:*",
-        Category::Ephemeral,
-        RUNTIME,
-        None,
-    ),
-    excluded(
-        Store::Redis,
-        "search-streamer:*",
-        Category::Ephemeral,
-        RUNTIME,
-        None,
-    ),
-    excluded(
-        Store::Redis,
-        "cursors:*",
-        Category::Ephemeral,
-        RUNTIME,
-        None,
-    ),
-    excluded(
-        Store::Redis,
-        "image_ttc:*",
-        Category::Ephemeral,
-        RUNTIME,
-        None,
-    ),
-    excluded(
-        Store::Redis,
-        "oauth:context:*",
-        Category::Ephemeral,
-        "OAuth login contexts, which expire",
-        None,
-    ),
-    excluded(
-        Store::Redis,
-        "oauth:registration_sessions:*",
-        Category::Ephemeral,
-        "OAuth registration sessions, which expire",
-        None,
-    ),
-    excluded(
-        Store::Redis,
-        "oauth:link_token:*",
-        Category::Ephemeral,
-        "OAuth account-link tokens, which expire",
-        None,
-    ),
-    // S3 bucket roles
-    backed_up(Store::S3, "files", BackupComponents::S3IdsObjects, None),
-    backed_up(Store::S3, "repos", BackupComponents::S3IdsObjects, None),
-    backed_up(
+    (Store::ScyllaTable, "nodes", BackupComponents::Nodes),
+    (Store::S3, "files", BackupComponents::S3IdsObjects),
+    (Store::S3, "repos", BackupComponents::S3IdsObjects),
+    (
         Store::S3,
         "attachments",
         BackupComponents::CommentAttachments,
-        None,
     ),
-    CoverageEntry {
-        store: Store::S3,
-        name: "results",
-        prefixes: &["{id}/{file}", "{id}/__thorium_entities/{kind}.json"],
-        base_table: None,
-        columns: None,
-        coverage: Coverage::BackedUp(BackupComponents::ResultFiles),
-        category: Category::Core,
-        gap: None,
-        legacy: false,
-    },
-    backed_up(Store::S3, "graphics", BackupComponents::Graphics, None),
-    excluded(
-        Store::S3,
-        "ephemeral",
-        Category::Ephemeral,
-        "per-reaction scratch files",
-        None,
-    ),
-    excluded(
-        Store::S3,
-        "reaction_cache",
-        Category::Ephemeral,
-        "per-reaction cache files",
-        None,
-    ),
+    (Store::S3, "results", BackupComponents::ResultFiles),
+    (Store::S3, "graphics", BackupComponents::Graphics),
 ];
+
+/// Returns whether two names are equal, in a constant context
+///
+/// # Arguments
+///
+/// * `left` - One name
+/// * `right` - The other name
+const fn same_name(left: &str, right: &str) -> bool {
+    // compare the names byte by byte
+    let (left, right) = (left.as_bytes(), right.as_bytes());
+    // names of different lengths can't be equal
+    if left.len() != right.len() {
+        return false;
+    }
+    // walk both names, stopping at the first byte that differs
+    let mut index = 0;
+    while index < left.len() {
+        if left[index] != right[index] {
+            return false;
+        }
+        index += 1;
+    }
+    // every byte matched
+    true
+}
+
+/// Returns the component [`COMPONENTS`] lists for a table or bucket role, failing the build when
+/// it lists none
+///
+/// # Arguments
+///
+/// * `store` - The resource's store
+/// * `name` - The table name or bucket role
+const fn listed_component(store: Store, name: &str) -> BackupComponents {
+    // find the resource's row
+    let mut index = 0;
+    while index < COMPONENTS.len() {
+        let (listed_store, listed_name, component) = COMPONENTS[index];
+        // the row is the one with the same store and name
+        if listed_store as u8 == store as u8 && same_name(listed_name, name) {
+            return component;
+        }
+        index += 1;
+    }
+    // a resource with no row fails the build, so a new backed-up resource can't be forgotten
+    panic!("a backed-up table or bucket role in the class table has no component in COMPONENTS")
+}
+
+/// Returns how the backup treats a class table entry
+///
+/// # Arguments
+///
+/// * `info` - The resource's class table entry
+const fn coverage_of(info: &ClassEntry) -> Coverage {
+    // an excluded resource keeps its reason
+    if let BackupCoverage::Excluded { reason } = info.backup {
+        return Coverage::Excluded { reason };
+    }
+    // a backed-up resource is carried by its store's component
+    let component = match (info.store, info.base_table) {
+        (Store::Redis, _) => BackupComponents::Redis,
+        (Store::ScyllaView, Some(base)) => listed_component(Store::ScyllaTable, base),
+        (Store::ScyllaView, None) => panic!("a backed-up view in the class table has no base"),
+        (store, _) => listed_component(store, info.name),
+    };
+    Coverage::BackedUp(component)
+}
+
+/// Builds the registry from the class table, in the class table's order
+const fn build() -> [CoverageEntry; CLASSES.len()] {
+    // start every slot from the first entry, then fill each in order
+    let first = CoverageEntry {
+        info: CLASSES[0],
+        coverage: coverage_of(&CLASSES[0]),
+        category: Category::of(CLASSES[0].class),
+    };
+    let mut entries = [first; CLASSES.len()];
+    let mut index = 1;
+    while index < CLASSES.len() {
+        entries[index] = CoverageEntry {
+            info: CLASSES[index],
+            coverage: coverage_of(&CLASSES[index]),
+            category: Category::of(CLASSES[index].class),
+        };
+        index += 1;
+    }
+    entries
+}
+
+/// Every resource Thorium stores, built from the class table at compile time; the completeness
+/// tests fail on anything not listed
+pub const COVERAGE: &[CoverageEntry] = &build();
 
 /// Returns whether a registry name or pattern matches a resource's name
 ///
@@ -1049,9 +487,12 @@ impl From<&CoverageEntry> for JsonEntry {
 
 #[cfg(test)]
 mod tests {
-    use super::{COVERAGE, Category, Coverage, Registry, Store, pattern_matches};
+    use super::{
+        COMPONENTS, COVERAGE, Category, Coverage, RECORD_TABLES, Registry, Store, pattern_matches,
+    };
     use crate::args::BackupComponents;
     use strum::IntoEnumIterator;
+    use thorium::models::schema::{BackupCoverage, CLASSES, DataClass};
 
     /// Builds a name an entry's pattern matches, filling a wildcard with one segment
     ///
@@ -1119,9 +560,14 @@ mod tests {
                     assert!(entry.columns.is_none() && entry.base_table.is_none());
                 }
             }
-            // a backed-up resource is core data
+            // a backed-up resource is core data, except a view, which is derived
             if matches!(entry.coverage, Coverage::BackedUp(_)) {
-                assert_eq!(entry.category, Category::Core, "{}", entry.name);
+                let category = if entry.store == Store::ScyllaView {
+                    Category::Derived
+                } else {
+                    Category::Core
+                };
+                assert_eq!(entry.category, category, "{}", entry.name);
             }
         }
     }
@@ -1233,6 +679,94 @@ mod tests {
             }
             assert_eq!(cells[4], entry.category.label(), "{row}");
             assert_eq!(cells[5], entry.gap.unwrap_or(""), "{row}");
+        }
+    }
+
+    /// The schema record tables aren't archived as tables: each is excluded from the components,
+    /// and its reason says the backup's schema record, `schema.json`, carries it, with no gap
+    #[test]
+    fn the_schema_record_tables_are_carried_by_schema_json() {
+        // check each table the schema record lives in
+        for name in RECORD_TABLES {
+            let entry = Registry::classify(Store::ScyllaTable, name)
+                .unwrap_or_else(|| panic!("{name} is unclassified"));
+            let Coverage::Excluded { reason } = entry.coverage else {
+                panic!("{name} is archived as a table, and the record carries it too");
+            };
+            assert!(
+                reason.contains("`schema.json`"),
+                "{name}'s reason doesn't name the record that carries it: {reason}"
+            );
+            assert_eq!(entry.gap, None, "{name} still names a gap");
+        }
+    }
+
+    /// The registry is the api crate's class table, entry for entry and in order, with only the
+    /// backup component added: an excluded entry keeps the table's reason, a backed-up one gets
+    /// its component, every listed component belongs to a backed-up table or bucket role, and
+    /// `Expiring` and `Runtime` entries are both shown as `EPHEMERAL`
+    #[test]
+    fn registry_is_the_class_table_with_components() {
+        // one registry entry per class table entry, holding that entry unchanged
+        assert_eq!(COVERAGE.len(), CLASSES.len());
+        for (entry, class) in COVERAGE.iter().zip(CLASSES) {
+            assert_eq!(&entry.info, class, "{}", class.name);
+            // the coverage follows the table's backup decision
+            match (entry.coverage, class.backup) {
+                (Coverage::Excluded { reason }, BackupCoverage::Excluded { reason: listed }) => {
+                    assert_eq!(reason, listed, "{}", class.name);
+                }
+                (Coverage::BackedUp(component), BackupCoverage::BackedUp) => {
+                    // a view shares its base table's component, a Redis family the Redis backup's
+                    let expected = match (class.store, class.base_table) {
+                        (Store::Redis, _) => BackupComponents::Redis,
+                        (Store::ScyllaView, Some(base)) => {
+                            Registry::classify(Store::ScyllaTable, base)
+                                .and_then(|base| match base.coverage {
+                                    Coverage::BackedUp(component) => Some(component),
+                                    Coverage::Excluded { .. } => None,
+                                })
+                                .unwrap_or_else(|| panic!("{}'s base isn't backed up", class.name))
+                        }
+                        (store, _) => COMPONENTS
+                            .iter()
+                            .find(|(listed, name, _)| *listed == store && *name == class.name)
+                            .map_or_else(
+                                || panic!("{} has no component", class.name),
+                                |(_, _, component)| *component,
+                            ),
+                    };
+                    assert_eq!(component, expected, "{}", class.name);
+                }
+                (coverage, backup) => panic!("{}: {coverage:?} against {backup:?}", class.name),
+            }
+            // expiring and runtime state share the ephemeral label
+            let label = match class.class {
+                DataClass::Core => "CORE",
+                DataClass::Derived => "DERIVED",
+                DataClass::Expiring | DataClass::Runtime => "EPHEMERAL",
+            };
+            assert_eq!(entry.category.label(), label, "{}", class.name);
+        }
+        assert_eq!(
+            Category::of(DataClass::Expiring),
+            Category::of(DataClass::Runtime)
+        );
+        // every component row names a backed-up table or bucket role of the class table
+        for (store, name, _) in COMPONENTS {
+            assert!(
+                matches!(store, Store::ScyllaTable | Store::S3),
+                "{name} needs no component row"
+            );
+            let backed_up = CLASSES.iter().any(|class| {
+                class.store == *store
+                    && class.name == *name
+                    && class.backup == BackupCoverage::BackedUp
+            });
+            assert!(
+                backed_up,
+                "{name} isn't a backed-up resource of the class table"
+            );
         }
     }
 }

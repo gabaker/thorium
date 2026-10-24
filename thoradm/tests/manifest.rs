@@ -9,13 +9,11 @@ use data_encoding::HEXLOWER;
 use sha2::{Digest, Sha256};
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
-use thoradm::args::BackupComponents;
 use thoradm::backup::coverage::{Registry, Store};
 use thoradm::backup::failures::Operation;
 use thoradm::backup::manifest::{
-    FORMAT_VERSION, InProgressMarker, Manifest, ObjectIndexLine, S3Entry, SiblingEntry, TableEntry,
+    FORMAT_VERSION, Manifest, ObjectIndexLine, S3Entry, SiblingEntry, TableEntry,
 };
-use thoradm::backup::sink::TokioFs;
 use thoradm::backup::tables::{
     Association, Comment, Commitish, CommitishList, Entity, NetworkPolicy, Node, Notification,
     Output, OutputStream, RepoData, RepoList, S3Id, SamplesList, Tag,
@@ -238,7 +236,16 @@ async fn the_manifest_matches_what_the_backup_holds() {
     let files_bucket = manifest.buckets.get("files");
     assert_eq!(files_bucket, Some(&harness.conf.thorium.files.bucket));
     assert!(manifest.partition_sizes.contains_key("files"));
-    assert_eq!(manifest.siblings, Vec::new());
+    // the schema record is the one sibling, listed as the file holds it
+    let schema = std::fs::read(out.join("schema.json")).unwrap();
+    assert_eq!(
+        manifest.siblings,
+        vec![SiblingEntry {
+            name: "schema.json".to_owned(),
+            len: schema.len() as u64,
+            sha256: HEXLOWER.encode(&Sha256::digest(&schema)),
+        }]
+    );
     // every table the backup ran has an entry, and each entry matches its files
     let tables: BTreeSet<&str> = Registry::backed_up(Store::ScyllaTable)
         .map(|entry| entry.name)
@@ -265,20 +272,13 @@ async fn the_manifest_matches_what_the_backup_holds() {
     }
 }
 
-/// A sibling file another feature put in the backup root is listed with its length and sha256
+/// The schema record a backup writes beside its archives is listed with its length and sha256
 #[tokio::test]
 async fn a_sibling_file_is_listed_with_its_length_and_sha256() {
     let harness = Harness::get().await;
     let _guard = harness.shared_guard().await;
-    // an interrupted backup that holds a schema record beside its marker
+    // a backup of one table
     let out = harness.scratch("sibling");
-    InProgressMarker::new(chrono::Utc::now(), vec![BackupComponents::Tags])
-        .write(&out, &TokioFs)
-        .await
-        .unwrap();
-    let schema = br#"{"revision": "2026-10-v01"}"#;
-    std::fs::write(out.join("schema.json"), schema).unwrap();
-    // finishing the backup lists the schema record
     let output = harness
         .thoradm()
         .args(["backup", "new", "tags", "-o"])
@@ -291,13 +291,15 @@ async fn a_sibling_file_is_listed_with_its_length_and_sha256() {
         "{}",
         String::from_utf8_lossy(&output.stderr)
     );
+    // the manifest lists the schema record exactly as the file holds it
+    let schema = std::fs::read(out.join("schema.json")).unwrap();
     let manifest = Manifest::read(&out).await.unwrap().expect("no manifest");
     assert_eq!(
         manifest.siblings,
         vec![SiblingEntry {
             name: "schema.json".to_owned(),
             len: schema.len() as u64,
-            sha256: HEXLOWER.encode(&Sha256::digest(schema)),
+            sha256: HEXLOWER.encode(&Sha256::digest(&schema)),
         }]
     );
 }

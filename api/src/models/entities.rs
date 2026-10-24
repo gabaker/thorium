@@ -1922,10 +1922,16 @@ impl EntityMetadataUpdate {
                 form = crate::multipart_date!(form, "metadata[collection_start]", start);
                 form = crate::multipart_date!(form, "metadata[collection_end]", end);
                 // clear the collection's start/end window if requested
-                form =
-                    crate::multipart_text_to_string!(form, "metadata[clear_collection_start]", clear_start);
-                form =
-                    crate::multipart_text_to_string!(form, "metadata[clear_collection_end]", clear_end);
+                form = crate::multipart_text_to_string!(
+                    form,
+                    "metadata[clear_collection_start]",
+                    clear_start
+                );
+                form = crate::multipart_text_to_string!(
+                    form,
+                    "metadata[clear_collection_end]",
+                    clear_end
+                );
             }
             EntityMetadataUpdate::FileSystem {
                 mut add_tools,
@@ -2016,7 +2022,11 @@ impl EntityMetadataUpdate {
                     remove_applies_to
                 );
                 // sigma actions are serialized to json per element
-                crate::multipart_list_serialize!(form, "metadata[add_sigma_actions][]", add_actions);
+                crate::multipart_list_serialize!(
+                    form,
+                    "metadata[add_sigma_actions][]",
+                    add_actions
+                );
                 // action indices to remove are sent as plain integers
                 for index in remove_actions {
                     form = form.text("metadata[remove_sigma_actions][]", index.to_string());

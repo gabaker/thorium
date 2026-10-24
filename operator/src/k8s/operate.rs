@@ -14,6 +14,7 @@ use crate::k8s::clusters::{ClusterMeta, cluster_name_and_namespace};
 use crate::k8s::controller::{SharedInfo, ThoriumInfo};
 use crate::k8s::crds::{ClusterPhase, KUBE_CONFIG_KEY, KUBE_CONFIG_SECRET, ThoriumCluster};
 use crate::k8s::deployments::RolloutHashes;
+use crate::upgrades;
 
 /// How long a reconcile waits for deployments to finish rolling out before requeueing, so a
 /// pending rollout never blocks a newer spec from being reconciled for long
@@ -26,7 +27,7 @@ const HEALTH_TIMEOUT: Duration = Duration::from_secs(60);
 const WAITING_REQUEUE_SECS: u64 = 15u64;
 
 /// How long in seconds to wait before reconciling a ready cluster that has no new events
-const APPLY_REQUEUE_SECS: u64 = 86400u64;
+pub(crate) const APPLY_REQUEUE_SECS: u64 = 86400u64;
 
 /// How long in seconds to wait before retrying nodes that failed to provision
 const NODE_FAILURE_REQUEUE_SECS: u64 = 60u64;
@@ -210,6 +211,85 @@ async fn check_backends(
     Ok(BackendChecks { notes, missing })
 }
 
+/// Apply the schema in the schema-apply Job when it is due, then create or update the API
+///
+/// The API is the first component rolled out, so holding it while the Job runs or after it
+/// failed holds every component. Returns the action to take while the rollout is held.
+///
+/// # Arguments
+///
+/// * `meta` - Thorium cluster metadata being operated upon
+/// * `host_aliases` - The host aliases to add to each pod
+/// * `hashes` - The hashes of the inputs the API's pods are built from
+async fn roll_api(
+    meta: &ClusterMeta,
+    host_aliases: &Vec<K8sHostAliases>,
+    hashes: &RolloutHashes,
+) -> Result<Option<Action>, Error> {
+    // hold the rollout until the schema is applied for what is deployed now
+    if let Some(action) = upgrades::apply_schema(meta).await? {
+        return Ok(Some(action));
+    }
+    // create or update api deployment from CR
+    k8s::deployments::deploy_api(meta, host_aliases, hashes).await?;
+    Ok(None)
+}
+
+/// What preparing the backends leaves for the rest of an apply
+pub(crate) struct Prepared {
+    /// The rendered thorium.yml, which is written to the `thorium` Secret
+    rendered: k8s::secrets::RenderedConfig,
+    /// Non-fatal problems to report alongside the ready phase
+    notes: Vec<String>,
+    /// Privileged bootstrap steps that couldn't run because a Secret they need is missing
+    missing: Vec<String>,
+    /// The hash of the inputs of the privileged bootstrap steps
+    bootstrap_hash: String,
+    /// Whether the privileged bootstrap steps ran this time
+    bootstrap_due: bool,
+}
+
+/// Prepare Thorium's backends and write the config the components mount
+///
+/// This creates the `ConfigMap`s and registry secrets, renders `thorium.yml`, bootstraps Thorium's
+/// Scylla role, checks every backend with Thorium's own credentials, and only then writes the
+/// `thorium` Secret, so a bad config is reported in the status instead of being rolled out. It is
+/// all that has to be done before a thoradm Job can mount the Secret and log in. A backend that
+/// isn't up yet returns the action to take while the cluster is still provisioning.
+///
+/// # Arguments
+///
+/// * `meta` - Thorium cluster metadata being operated upon
+pub(crate) async fn prepare(meta: &ClusterMeta) -> Result<Result<Prepared, Action>, Error> {
+    // create or update ConfigMaps
+    k8s::config_maps::create_or_update_all(meta).await?;
+    // create or update registry secrets
+    k8s::secrets::create_or_update_registry_auth(meta).await?;
+    // render thorium.yml without writing it so the backends can be checked first
+    let rendered = k8s::secrets::render_thorium_config(&meta.conf)?;
+    // hash the inputs of our privileged bootstrap steps
+    let bootstrap_hash = app::bootstrap::input_hash(meta, &rendered.hash).await?;
+    // only run the privileged bootstrap steps when their inputs changed
+    let bootstrap_due = app::bootstrap::is_due(&meta.cluster, &bootstrap_hash);
+    // prepare and check every backend, waiting on any that isn't up yet
+    let BackendChecks { notes, missing } = match check_backends(meta, bootstrap_due).await {
+        Ok(checks) => checks,
+        Err(CheckError::Waiting(details)) => {
+            return Ok(Err(still_provisioning(meta, details).await));
+        }
+        Err(CheckError::Failed(error)) => return Err(error),
+    };
+    // write the checked config right before the components that mount it are deployed
+    k8s::secrets::write_thorium_config(meta, &rendered).await?;
+    Ok(Ok(Prepared {
+        rendered,
+        notes,
+        missing,
+        bootstrap_hash,
+        bootstrap_due,
+    }))
+}
+
 /// Create or update a `ThoriumCluster`
 ///
 /// This creates or updates a Thorium cluster using a `ThoriumCluster` CRD as defined
@@ -266,24 +346,17 @@ pub async fn apply(
     if status.phase.is_none() || status.observed_generation != meta.cluster.metadata.generation {
         k8s::crds::set_status(&meta.client, &meta.status, ClusterPhase::Provisioning, None).await;
     }
-    // create or update ConfigMaps
-    k8s::config_maps::create_or_update_all(meta).await?;
-    // create or update registry secrets
-    k8s::secrets::create_or_update_registry_auth(meta).await?;
-    // render thorium.yml without writing it so the backends can be checked first
-    let rendered = k8s::secrets::render_thorium_config(&meta.conf)?;
-    // hash the inputs of our privileged bootstrap steps
-    let bootstrap_hash = app::bootstrap::input_hash(meta, &rendered.hash).await?;
-    // only run the privileged bootstrap steps when their inputs changed
-    let bootstrap_due = app::bootstrap::is_due(&meta.cluster, &bootstrap_hash);
-    // prepare and check every backend, waiting on any that isn't up yet
-    let BackendChecks { notes, mut missing } = match check_backends(meta, bootstrap_due).await {
-        Ok(checks) => checks,
-        Err(CheckError::Waiting(details)) => return Ok(still_provisioning(meta, details).await),
-        Err(CheckError::Failed(error)) => return Err(error),
+    // prepare the backends and write the config the components mount, or wait on a backend
+    let Prepared {
+        rendered,
+        notes,
+        mut missing,
+        bootstrap_hash,
+        bootstrap_due,
+    } = match prepare(meta).await? {
+        Ok(prepared) => prepared,
+        Err(action) => return Ok(action),
     };
-    // write the checked config right before the components that mount it are deployed
-    k8s::secrets::write_thorium_config(meta, &rendered).await?;
     // create or update API service
     k8s::services::create_or_update_all(meta).await?;
     // read the Elastic CA every component mounts so rotating it rolls them out
@@ -292,8 +365,10 @@ pub async fn apply(
     let banner = k8s::config_maps::banner(meta).await?;
     // roll the API out whenever its config, banner, or Elastic CA change
     let api_hashes = api_rollout(&rendered.hash, &banner, &elastic_ca);
-    // create or update api deployment from CR
-    k8s::deployments::deploy_api(meta, &host_aliases, &api_hashes).await?;
+    // converge Scylla in the schema-apply Job, then create or update the api deployment
+    if let Some(action) = roll_api(meta, &host_aliases, &api_hashes).await? {
+        return Ok(action);
+    }
     // build API url host string
     let host: String = app::helpers::get_thorium_host(meta, url.as_ref());
     // check back later if the api deployment doesn't finish rolling out soon
@@ -566,6 +641,8 @@ pub async fn cleanup(meta: &ClusterMeta, shared: &Arc<SharedInfo>) -> Result<Act
     }
     // delete node provision pods by name, including any created before they were labelled
     k8s::nodes::cleanup_provision_pods(meta).await?;
+    // delete the thoradm Jobs, each staying until its pods are gone
+    k8s::jobs::delete_all(meta).await?;
     // remove the resources that don't depend on this cluster's config
     cleanup_namespace(&meta.cluster, &meta.client).await?;
     // log completion of cluster deletion
@@ -1067,5 +1144,145 @@ mod tests {
             ["pods", "deployments", "services", "secrets", "configmaps"],
             "{kinds:?}"
         );
+    }
+
+    /// Deleting a cluster deletes its thoradm Jobs in the foreground before the resources its
+    /// namespace holds
+    #[tokio::test]
+    async fn cleanup_deletes_thoradm_jobs() {
+        // a cluster without a k8s scaler or nodes whose provision pods and Jobs can be deleted
+        let jobs_path = "/apis/batch/v1/namespaces/thorium/jobs";
+        let fake = FakeKube::default()
+            .route(
+                "DELETE",
+                "/api/v1/namespaces/thorium/pods",
+                200,
+                serde_json::json!({"apiVersion": "v1", "kind": "PodList", "metadata": {}, "items": []}),
+            )
+            .route(
+                "DELETE",
+                jobs_path,
+                200,
+                serde_json::json!({"apiVersion": "batch/v1", "kind": "JobList", "metadata": {}, "items": []}),
+            );
+        let cluster = namespaced_cluster(serde_json::json!({
+            "components": {"api": {}},
+            "registry": "registry/thorium",
+            "config": {}
+        }));
+        // leave out the configured k8s clusters, so there are no nodes to clean up
+        let mut meta = meta_for(cluster, &fake.client());
+        meta.conf.thorium.scaler.k8s.clusters.clear();
+        // delete the cluster
+        cleanup(&meta, &Arc::new(SharedInfo::default()))
+            .await
+            .expect("cleanup");
+        // the Jobs were deleted in the foreground before any Deployment
+        let writes = fake.writes();
+        let jobs = writes
+            .iter()
+            .position(|request| request.method == "DELETE" && request.path == jobs_path)
+            .expect("the thoradm Jobs were deleted");
+        assert_eq!(writes[jobs].body["propagationPolicy"], "Foreground");
+        let deployments = writes
+            .iter()
+            .position(|request| request.path.starts_with(DEPLOYMENTS_PATH))
+            .expect("the deployments were deleted");
+        assert!(jobs < deployments, "{writes:?}");
+    }
+
+    /// The deployments path in the test namespace, where the API deployment is created
+    const DEPLOYMENTS_PATH: &str = "/apis/apps/v1/namespaces/thorium/deployments";
+
+    /// Check whether any request touched a Deployment
+    ///
+    /// # Arguments
+    ///
+    /// * `fake` - The fake kube API
+    fn touched_deployments(fake: &FakeKube) -> bool {
+        // any request under the deployments path creates, patches, or reads one
+        fake.requests()
+            .iter()
+            .any(|request| request.path.starts_with(DEPLOYMENTS_PATH))
+    }
+
+    /// The schema-apply Job completes before the API, the first component, is created
+    #[tokio::test]
+    async fn schema_job_completes_before_components() {
+        use crate::upgrades::schema_apply_tests as fixtures;
+        // a fresh install whose deployments can be created
+        let cluster = fixtures::cluster();
+        let fake = fixtures::fake_kube(&cluster, &fixtures::state(None), &[]).route(
+            "POST",
+            DEPLOYMENTS_PATH,
+            201,
+            serde_json::json!({"apiVersion": "apps/v1", "kind": "Deployment", "metadata": {"name": "api"}}),
+        );
+        let meta = meta_for(cluster, &fake.client());
+        let hashes = api_rollout("config", "", b"");
+        // the first reconcile starts the Job and touches no Deployment
+        let held = roll_api(&meta, &Vec::new(), &hashes).await.expect("roll");
+        assert!(held.is_some());
+        assert_eq!(fixtures::created_jobs(&fake).len(), 1);
+        assert!(!touched_deployments(&fake));
+        // while the Job runs nothing is created
+        let name = fixtures::created_jobs(&fake)[0]["metadata"]["name"]
+            .as_str()
+            .expect("name")
+            .to_owned();
+        let key = fixtures::created_jobs(&fake)[0]["metadata"]["annotations"]["thorium.sandia.gov/trigger-key"]
+            .as_str()
+            .expect("key")
+            .to_owned();
+        fake.set_route(
+            "GET",
+            fixtures::JOBS_PATH,
+            200,
+            fixtures::job_list(&[fixtures::job(&name, &key, 0, None)]),
+        );
+        let held = roll_api(&meta, &Vec::new(), &hashes).await.expect("roll");
+        assert!(held.is_some());
+        assert!(!touched_deployments(&fake));
+        assert_eq!(fixtures::created_jobs(&fake).len(), 1);
+        // once it completed the API is created
+        let done = fixtures::job(&name, &key, 0, Some(("Complete", chrono::Utc::now())));
+        fake.set_route("GET", fixtures::JOBS_PATH, 200, fixtures::job_list(&[done]));
+        let held = roll_api(&meta, &Vec::new(), &hashes).await.expect("roll");
+        assert!(held.is_none());
+        assert!(
+            fake.writes()
+                .iter()
+                .any(|request| request.method == "POST" && request.path == DEPLOYMENTS_PATH)
+        );
+    }
+
+    /// A failed schema-apply Job holds every component and is reported in the status
+    #[tokio::test]
+    async fn failed_schema_job_holds_components() {
+        use crate::upgrades::schema_apply_tests as fixtures;
+        // a Job for the current key that just failed
+        let cluster = fixtures::cluster();
+        let key = fixtures::key_of(&cluster);
+        let failed = fixtures::job(
+            "schema-apply-failed",
+            &key,
+            0,
+            Some(("Failed", chrono::Utc::now())),
+        );
+        let fake = fixtures::fake_kube(&cluster, &fixtures::state(None), &[failed]);
+        let meta = meta_for(cluster, &fake.client());
+        // the API isn't created and the cluster is held in the error phase
+        let held = roll_api(&meta, &Vec::new(), &api_rollout("config", "", b""))
+            .await
+            .expect("roll");
+        assert!(held.is_some());
+        assert!(!touched_deployments(&fake));
+        let status = meta.status.current();
+        assert_eq!(status.phase, Some(ClusterPhase::Error));
+        let failure = status
+            .upgrade
+            .and_then(|upgrade| upgrade.failure)
+            .expect("failure");
+        assert_eq!(failure.job, "schema-apply-failed");
     }
 }

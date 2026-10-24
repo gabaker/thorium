@@ -21,7 +21,8 @@ static BACKUP: OnceCell<PathBuf> = OnceCell::const_new();
 
 /// Returns the clean backup of the broad fixture, taking it on first use
 ///
-/// The backup holds a `schema.json` sibling, so the sibling checks have something to check.
+/// The backup holds the `schema.json` sibling its run wrote, so the sibling checks have something
+/// to check.
 async fn clean_backup() -> &'static Path {
     BACKUP
         .get_or_init(|| async {
@@ -30,13 +31,7 @@ async fn clean_backup() -> &'static Path {
             fixture::broad(harness).await;
             let _ = Box::pin(fixture::value_classes(harness)).await;
             common::seed::icon(&harness.api_url, &harness.token).await;
-            // a schema record beside an in-progress marker, which a backup run then finishes
             let out = harness.scratch("clean");
-            InProgressMarker::new(chrono::Utc::now(), Vec::new())
-                .write(&out, &TokioFs)
-                .await
-                .unwrap();
-            std::fs::write(out.join("schema.json"), br#"{"revision": "2026-10-v01"}"#).unwrap();
             let taken = harness
                 .thoradm()
                 .args(["--workers", "4", "backup", "new", "-m", "4", "-o"])

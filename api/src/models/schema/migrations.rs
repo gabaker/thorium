@@ -8,16 +8,17 @@ use std::str::FromStr;
 
 use super::{Fingerprint, RecordStatus, ScyllaStoreAsStr};
 use crate::models::InvalidEnum;
-use crate::models::upgrades::{IssueReason, RevisionId};
+use crate::models::upgrades::{IssueReason, RevisionId, StepLoss};
 
 /// The kind of a `schema_migrations` row, its partition key
 ///
 /// Stored as text through `ScyllaStoreAsStr`, which calls the hand-written `as_str` and `FromStr`
 /// below, not serde; the stored text is `backend`, `run`, `revision`, `history`, `config`,
-/// `consumed_code`, `archived_history`, or `job_result`
+/// `consumed_code`, `archived_history`, `job_result`, or `legacy_drop`
 ///
-/// It has no `Unknown` catch-all: every reader queries one kind's partition by name, so a kind
-/// added later is invisible to an older reader, never an error
+/// It has no `Unknown` catch-all: a reader that queries one kind's partition by name never sees a
+/// kind added later, but a reader that scans the whole table, as a backup of `schema_migrations`
+/// does, must tolerate kinds it doesn't know
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, ScyllaStoreAsStr)]
 pub enum MigrationRecordKind {
     /// The applied fingerprint and layout versions of one backend, or of the deployment; stored as
@@ -39,11 +40,14 @@ pub enum MigrationRecordKind {
     ArchivedHistory,
     /// One Job's full result, read by the status Job for the operator; stored as `job_result`
     JobResult,
+    /// The audit row of one legacy object `thoradm schema drop-legacy` dropped: who, when, the
+    /// object's id and its row count; append-only; stored as `legacy_drop`
+    LegacyDrop,
 }
 
 impl MigrationRecordKind {
     /// Every record kind, in the order they are declared
-    pub const ALL: [MigrationRecordKind; 8] = [
+    pub const ALL: [MigrationRecordKind; 9] = [
         Self::Backend,
         Self::Run,
         Self::Revision,
@@ -52,6 +56,7 @@ impl MigrationRecordKind {
         Self::ConsumedCode,
         Self::ArchivedHistory,
         Self::JobResult,
+        Self::LegacyDrop,
     ];
 
     /// The text this kind is stored as in Scylla, which never changes once released
@@ -67,6 +72,7 @@ impl MigrationRecordKind {
             Self::ConsumedCode => "consumed_code",
             Self::ArchivedHistory => "archived_history",
             Self::JobResult => "job_result",
+            Self::LegacyDrop => "legacy_drop",
         }
     }
 }
@@ -215,6 +221,9 @@ pub struct PassCheckpoint {
     pub done: bool,
     /// This worker's counts so far
     pub counts: PassCounts,
+    /// What this worker has applied so far in each group of the pass's report, which the pass's
+    /// end sums into the applied report
+    pub report_counts: BTreeMap<String, ReportCounts>,
 }
 
 /// What one pass did, kept per pass (a fused pass counts once for its whole chain)
@@ -240,6 +249,22 @@ pub struct PassCounts {
     pub skipped: u64,
     /// Objects recorded as issues
     pub flagged: u64,
+}
+
+impl PassCounts {
+    /// Describe the counts as the work a step found, the text a step's history entry records as its
+    /// `work`
+    ///
+    /// The thoradm run writing the step's entry and the operator recording it use this one text, so
+    /// both entries of a step agree.
+    #[must_use]
+    pub fn work_text(&self) -> String {
+        // the class counts of the pass, then what it wrote
+        format!(
+            "{} objects read: {} current, {} migratable, {} unrecognized, {} error; {} written",
+            self.read, self.current, self.migratable, self.unrecognized, self.error, self.written
+        )
+    }
 }
 
 /// What `thoradm migrate check` found, written to the check Job's own `job_result` row (its only
@@ -276,6 +301,11 @@ pub struct CheckReport {
     /// status and the approval message stay small
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub summary: Option<ReportSummary>,
+    /// What the step would lose, when the migration performs a lossy reverse step: each lost field
+    /// with how many objects hold a value to fill and whether today's `thoradm backup` covers it,
+    /// which the approval message and the confirmation code's loss report are built from
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub loss: Option<StepLoss>,
 }
 
 /// A digest of a migration's report, carried in its check result
@@ -288,6 +318,115 @@ pub struct ReportSummary {
     pub skipped_total: u64,
     /// How many warnings the report holds for the admin to act on before approving
     pub warnings: u64,
+}
+
+/// The most bytes of JSON an applied report stores in its pass row
+pub const MAX_REPORT_BYTES: usize = 256 * 1024;
+
+/// The most skipped items an applied report lists; the rest are only counted
+pub const MAX_REPORT_SKIPPED: usize = 500;
+
+/// The most notes an applied report lists
+pub const MAX_REPORT_NOTES: usize = 200;
+
+/// The most bytes of any one string in an applied report
+pub const MAX_REPORT_STRING: usize = 256;
+
+/// What a pass applied, stored in its pass row when it ends
+///
+/// It holds names, codes, and counts only, never object contents or secrets, and stays within
+/// [`MAX_REPORT_BYTES`] of JSON: over budget, the notes go first, then the skipped list is
+/// trimmed, and the totals always stay
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct AppliedReport {
+    /// What was changed or left alone in each group, by group name
+    pub groups: BTreeMap<String, ReportCounts>,
+    /// How many items were skipped in total, including those the list leaves out
+    pub skipped_total: u64,
+    /// The items skipped, with why, up to [`MAX_REPORT_SKIPPED`]
+    pub skipped: Vec<SkippedItem>,
+    /// How many notes were warnings, including those the list leaves out
+    pub warnings_total: u64,
+    /// What the migration noted about items, up to [`MAX_REPORT_NOTES`]
+    pub notes: Vec<ReportNote>,
+    /// How many mappings (an item and what it became) the migration made; counted, never listed
+    pub mappings_total: u64,
+}
+
+/// One item a pass skipped
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SkippedItem {
+    /// The group the item belongs to
+    pub group: String,
+    /// The item's name or key
+    pub item: String,
+    /// Why, as a reason code (`<category>:<field>`)
+    pub reason: String,
+}
+
+/// One note a migration made about an item
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ReportNote {
+    /// The group the item belongs to
+    pub group: String,
+    /// The item's name or key
+    pub item: String,
+    /// What the migration noted, a fixed text the migration defines
+    pub note: String,
+    /// Whether the admin should act on it
+    pub warning: bool,
+}
+
+impl AppliedReport {
+    /// The report without its lists, as a check result carries it
+    #[must_use]
+    pub fn summary(&self) -> ReportSummary {
+        // keep the counts and totals, and drop every list
+        ReportSummary {
+            groups: self.groups.clone(),
+            skipped_total: self.skipped_total,
+            warnings: self.warnings_total,
+        }
+    }
+
+    /// Cut the report to its stored bounds: strings, list lengths, then the whole to fit
+    /// [`MAX_REPORT_BYTES`], dropping notes first and then trimming the skipped list
+    pub fn bound(&mut self) {
+        // cut every string and list to its own bound
+        let cut = |text: &mut String| {
+            if text.len() > MAX_REPORT_STRING {
+                let end = (0..=MAX_REPORT_STRING)
+                    .rev()
+                    .find(|at| text.is_char_boundary(*at))
+                    .unwrap_or(0);
+                text.truncate(end);
+            }
+        };
+        self.skipped.truncate(MAX_REPORT_SKIPPED);
+        self.notes.truncate(MAX_REPORT_NOTES);
+        for item in &mut self.skipped {
+            cut(&mut item.group);
+            cut(&mut item.item);
+            cut(&mut item.reason);
+        }
+        for note in &mut self.notes {
+            cut(&mut note.group);
+            cut(&mut note.item);
+            cut(&mut note.note);
+        }
+        // the size of the stored form
+        let size =
+            |report: &AppliedReport| serde_json::to_string(report).map_or(0, |json| json.len());
+        // over budget, drop the notes before touching the skipped list
+        if size(self) > MAX_REPORT_BYTES {
+            self.notes.clear();
+        }
+        // still over budget, halve the skipped list until it fits
+        while size(self) > MAX_REPORT_BYTES && !self.skipped.is_empty() {
+            self.skipped.truncate(self.skipped.len() / 2);
+        }
+    }
 }
 
 /// What a migration found or changed in one group of its report
@@ -380,6 +519,10 @@ pub struct StatusReport {
     /// The full result of the writing Job asked for with `--result`, when one was
     #[serde(default)]
     pub job_result: Option<RecordStatus>,
+    /// The report of the check Job asked for with `--result`, when the row holds one, since a
+    /// check Job's result is a [`CheckReport`], not a record status
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub check: Option<CheckReport>,
 }
 
 /// Which catalog a build knows

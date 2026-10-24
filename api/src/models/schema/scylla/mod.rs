@@ -3,6 +3,7 @@
 mod associations;
 mod entities;
 mod logs;
+mod migrations;
 mod network_policies;
 mod nodes;
 mod notifications;
@@ -14,6 +15,10 @@ mod tags;
 pub use associations::{AssociationsTable, AssociationsTableRef};
 pub use entities::{EntitiesByIdView, EntitiesTable, EntitiesTableRef};
 pub use logs::{LogsTable, LogsTableRef};
+pub use migrations::{
+    SchemaMigrationIssueRow, SchemaMigrationIssuesTable, SchemaMigrationIssuesTableRef,
+    SchemaMigrationRow, SchemaMigrationsTable, SchemaMigrationsTableRef,
+};
 pub use network_policies::{
     NetworkPoliciesByNameView, NetworkPoliciesDefaultView, NetworkPoliciesTable,
     NetworkPoliciesTableRef,
@@ -36,8 +41,15 @@ pub use samples::{
 pub use tags::{TagsByItemView, TagsCaseInsensitiveView, TagsTable, TagsTableRef};
 
 /// Every Scylla object Thorium declares, in creation order
+///
+/// The migration-state tables come first: `schema apply` creates `schema_migrations` before
+/// anything else, so the record exists before any object it describes
 #[thorium::keyspace]
 pub struct ThoriumKeyspace {
+    /// The migration state table: the schema record, the revision, and the history
+    schema_migrations: SchemaMigrationsTable,
+    /// The working rows of each migration pass: worker checkpoints and issue groups
+    schema_migration_issues: SchemaMigrationIssuesTable,
     /// The associations table
     associations: AssociationsTable,
     /// The entities table
