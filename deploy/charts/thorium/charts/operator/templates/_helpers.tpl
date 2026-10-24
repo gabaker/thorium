@@ -67,6 +67,14 @@ bound in the thorium namespace with watchOwnNamespaceOnly and cluster-wide other
 - apiGroups: ["apps"]
   resources: ["deployments"]
   verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+# the thoradm Jobs (such as the schema-apply Job), found by label and deleted with their pods
+- apiGroups: ["batch"]
+  resources: ["jobs"]
+  verbs: ["get", "list", "watch", "create", "delete", "deletecollection"]
+# the log tail of a failed thoradm Job's pod, reported in the status
+- apiGroups: [""]
+  resources: ["pods/log"]
+  verbs: ["get"]
 {{- end -}}
 
 {{/*

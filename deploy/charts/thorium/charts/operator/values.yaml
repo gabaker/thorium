@@ -179,16 +179,39 @@ cluster:
   # operator's latest revision waits in the UpgradeRequired phase, changing nothing, until a
   # target is set (see "Upgrading Thorium" in the Thorium deployment docs)
   upgrade:
-    # the revision to upgrade to (e.g. 2026-10-v02); empty waits for one
+    # the revision to upgrade to (e.g. 2026-10-v02, or a feature branch's
+    # 2026-10-v02-pre.<change> on a dev cluster); empty waits for one
     targetRevision: ""
+    # the revision a keyspace that has data but no record in schema_migrations is at; read only
+    # when the operator finds no state ConfigMap and no record, and then it names the revision
+    # `thoradm schema apply --seed-revision` records after checking the live schema against that
+    # revision's snapshot (2026-10-v01 for a converted pre-Helm deployment, 2026-10-v02 for a
+    # Helm deployment from before upgrade states). Reported as stale once a record exists
+    startingRevision: ""
     # target the operator's latest revision whenever targetRevision is empty; meant for dev
     # clusters, which take every upgrade as soon as their operator ships it. Dev clusters also
     # label the release namespace thorium.sandia.gov/dev=true, which this chart never sets (run
     # kubectl label as a cluster admin; minithor and megathor do it for you)
     autoTargetDev: false
+    # accept the loss of every lossy downgrade step without a per-step approval, confirmation code,
+    # or backup. It is honored only on a dev cluster (autoTargetDev with the
+    # thorium.sandia.gov/dev=true label on the release namespace); anywhere else it is ignored and
+    # the status shows a LossySettingRefused condition. minithor sets it true
+    dangerousDowngradeLossy: false
     # approvals for steps that change data or need manual work, each naming the backup taken
-    # first: [{step: <step id>, backup: <where the backup is>}]
+    # first: [{step: <step id>, backup: <where the backup is>}]. A step that runs as a migration
+    # Job may also list acceptIssues, the reason codes of issue groups that don't fail its run
+    # (taken from its check report or a failed run's status), which re-approves a failed step.
+    # A downgrade step that loses data needs acceptLoss: true and confirm: <the code its status
+    # shows>, which is for that one block of that one step and is used up when the step runs; a
+    # lost field no backup covers also needs acceptBackupGaps: true
     approvals: []
+    # schema objects the live backends hold that the recorded revision doesn't know (`unexpected`
+    # drift, as `thoradm schema diff` names them) that you accept, so they raise no SchemaDrift
+    # condition: [{backend: scylla|elastic|redis|s3, object: <name>, fingerprint: <observed
+    # fingerprint>}]. With a fingerprint the entry lapses when the object changes again; without
+    # one it covers whatever the object becomes and is counted separately in the status
+    driftAcknowledged: []
   # The k8s scaler's view of this cluster
   scaler:
     # the config's thorium.scaler.k8s.clusters entry for this cluster, which is also its

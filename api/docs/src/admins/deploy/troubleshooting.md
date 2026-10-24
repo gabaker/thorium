@@ -68,37 +68,125 @@ The operator is newer than the cluster's revision. Components keep running their
 version, and node provisioning pauses, until you set a target. Review `status.upgrade.steps` and
 set the target as described in [Setting a target](./upgrades.md#setting-a-target).
 
+### "stopped before it finished"
+
+> ... Step `<step>` of revision `<revision>` stopped before it finished (migration Job `<job>`),
+> and the components the upgrade paused stay at zero replicas: `<component>` (`<count>`), ... To
+> go on, set spec.upgrade.target_revision to `<revision>` or a later revision again, and the
+> upgrade resumes from where it stopped; to go back, restore the backup step `<step>`'s approval
+> names (`<backup>`). Don't scale the paused components up by hand
+
+When the stopped step is part of a downgrade, the message says "`<revision>` or an earlier one"
+instead, since a downgrade goes on under a target at or below the step's revision.
+
+The target was cleared, set to the cluster's revision, or set to one the operator can't use while
+a migration step ran, so the operator stopped the step's Job (see [How steps
+run](./upgrades.md#how-steps-run)). While the Job's pod writes its checkpoint the message ends
+"Waiting for the migration Job `<job>` to stop and write its checkpoint". A hold between steps
+says "The upgrade stopped between steps" and names the step that paused the components. The
+components stay at zero; don't scale them up by hand, since the older pods would run on partly
+converted data. Set the target again to resume, or restore the backup the message names. A message
+that adds "The operator can't stop the migration Job of the open run until the cluster's config
+resolves" names a config error to fix first (see [Config errors](#config-errors)); the operator
+tries again every minute.
+
 ### Invalid or impossible targets
 
 | Message | Cause and fix |
 |---------|---------------|
-| Revision `"<raw>"` is not a revision id like 2026-10-v02 | The target isn't `YYYY-MM-vNN`. Fix the value |
+| Revision `"<raw>"` is not a revision id like 2026-10-v02 or 2026-10-v02-pre.`<change>` | The target isn't `YYYY-MM-vNN` (or a feature branch's `YYYY-MM-vNN-pre.<change>`). Fix the value |
 | Revision `<rev>` is not known to this Thorium build (latest is `<latest>`) | The target is newer than this operator, or a revision that doesn't exist. Use a revision from `thoradm migrate list` of the same build |
-| The target revision `<target>` is older than this cluster's revision `<current>`; upgrades never move backwards | Set the target to the current or a newer revision |
-| This cluster is at revision `<current>`, which is newer than this Thorium build's latest revision `<latest>`; deploy a Thorium build that knows revision `<current>` (downgrades are not supported) | The operator was rolled back. Deploy the newer operator again |
-| This cluster's upgrade state (schema version `<n>`) was written by a newer Thorium operator than this one ... | The `thorium-upgrade-state` ConfigMap was written by a newer operator. Deploy that operator again |
+| This Thorium build's catalog has no path from revision `<current>` to revision `<target>` | The target can't be reached from the cluster's revision. A target older than it needs reverse edges all the way down (`thoradm migrate list` marks an edge without one `one-way`); otherwise set the target to the current or a newer revision, or restore from a backup |
+| Step `<step>` of revision `<revision>` can't be undone, so this downgrade is refused before anything runs; restore from backup instead ... | A step between the cluster's revision and the older target has no reverse. Keep the target, or restore a backup taken before that step ran |
+| Step `<step>` of revision `<revision>` finished on this cluster, but no step on the path down to the target undoes it ... | Downgrade one revision at a time, along the edges the cluster took (see [Downgrading](./upgrades.md#downgrading)), or restore from a backup |
+| This cluster is at revision `<current>`, which is newer than this Thorium build's latest revision `<latest>`; with the Thorium build that knows revision `<current>` still deployed, revert the cluster to `<latest>` ... | The operator was rolled back past a revision it doesn't know. Deploy the newer operator again, revert the cluster with it as the message says (lower the target, or `thoradm migrate revert --to <latest>`), and then deploy the older one (see [Downgrading](./upgrades.md#downgrading)); or, when the newer operator refuses the revert as irreversible, restore from a backup taken before the step it names |
+| This cluster's upgrade state (schema version `<n>`) was written by a newer Thorium operator than this one ... | The `thorium-upgrade-state` ConfigMap was written by a newer operator. Deploy that operator again and revert the cluster with it |
+| This cluster is at pre-release revision `<id>`, which this Thorium build doesn't know; revert it with the image of the branch that applied it ... | A development cluster ran a feature branch's pre-release revision. Deploy that branch's image again, set the target to the base release the message names (or run `thoradm migrate revert --to <base>`), and deploy this build once the cluster is back at it |
+| This cluster is at revision `<current>`, older than `<minimum>`, the oldest revision this Thorium release upgrades from; install Thorium `<intermediate>` first ... | The deployment is too old for this release to upgrade directly. Deploy the named Thorium release, let it finish upgrading, then deploy this one; older deployments follow the table of valid upgrade paths in [Upgrading Thorium](./upgrades.md) |
 
 These hold the cluster in `Error` and are checked again every hour or when the spec changes.
 
 ### "is blocked at step elastic-reindex-keyword-mappings"
 
-> The upgrade to 2026-10-v02 is blocked at step elastic-reindex-keyword-mappings: Elastic indexes
-> `<indexes>` do not map group as a keyword and must be reindexed. Waiting for an approval:
-> ...
+> The upgrade to `<target>` is blocked at step elastic-reindex-keyword-mappings, which needs an
+> approval naming a backup. Its full message is in the ThoriumCluster's status.upgrade.steps.
 
-The step found work to do and needs an approval naming your backup. Add
+The step's check Job found Elasticsearch indexes that are missing or mapped differently from the
+ones this release declares, and the step needs an approval naming your backup. Add
 `{step: elastic-reindex-keyword-mappings, backup: <where your backup is>}` to
 `spec.upgrade.approvals` (Helm `operator.cluster.upgrade.approvals`). An approval whose `backup` is
 empty doesn't count, and the message says so ("names no backup"). See
-[Approvals](./upgrades.md#approvals).
+[Approvals](./upgrades.md#approvals). Once it is approved, the operator scales the search streamer to
+zero and runs the `elastic-rebuild` migration Job, and the search streamer refills the indexes after
+the rollout (see [Reindexing Elasticsearch](./upgrades.md#reindexing-elasticsearch)). A Job that
+fails because Thorium's Elasticsearch user may not delete the indexes needs `delete_index` granted
+on them; its logs are in `status.upgrade.failure`. minithor and megathor stop waiting with an error
+as soon as a step is `Blocked`.
 
-> ... Waiting for manual work: step elastic-reindex-keyword-mappings is approved, but the operator
-> can't run it on its own, so follow its procedure: ...
+### The `elastic-identity` step keeps failing
 
-The step is approved but the operator doesn't reindex by itself. Follow [Reindexing
-Elasticsearch](./upgrades.md#reindexing-elasticsearch); the operator checks every minute and
-records the step as `Done` ("fixed manually: ...") once the indexes are correct. minithor and
-megathor stop waiting with an error as soon as a step is `Blocked`.
+A step `elastic-identity` that keeps failing with a TLS error about the certificate, such as
+`certificate verify failed`, means the current components verify Elasticsearch's certificate and
+the config doesn't let them: pre-Helm deployments stored `insecure_certificates: false` although
+their components never checked. Skip verification for ECK's self-signed certificate with the
+`elastic` setting `insecure_certificates: true`, or verify against a CA with `elastic_ca_secret`;
+see step 4 of [Moving a pre-Helm deployment without
+Helm](./deploy-thorium.md#moving-a-pre-helm-deployment-without-helm) and [Elasticsearch
+certificates](./helm-configuration.md#elasticsearch-certificates). A pre-Helm deployment kept
+outside Helm also needs the `thorium.sandia.gov/allow-inline-config: "true"` annotation from step 3
+of that procedure, or the operator treats it as unconverted and changes nothing.
+
+### A step is blocked by schema drift
+
+> Step `<step>` targets schema objects that differ from the recorded revision: scylla
+> `<object>` (unexpected). Restore them to the recorded definition, or acknowledge an unexpected
+> object in spec.upgrade.drift_acknowledged; thoradm schema diff has the details
+
+A step that targets a Scylla, Redis, or S3 object that is `changed` or `unexpected` waits until the
+object matches the recorded revision again or, for an `unexpected` one, you acknowledge it. A
+`missing` object, a `changed` Elasticsearch index, and a changed Redis layout the step itself
+converts don't block it. When more than 200 objects past the first 20 would block, every step with
+targets waits. Run `thoradm schema diff` for the full list. See [Schema
+drift](./upgrades.md#schema-drift).
+
+### Conditions in `status.upgrade.conditions`
+
+| Condition | What to do |
+|-----------|------------|
+| `SchemaDrift` | The live schema differs from the recorded revision. `thoradm schema diff` lists the objects; restore them or acknowledge `unexpected` ones (see [Schema drift](./upgrades.md#schema-drift)) |
+| `MigrationIssues` | A migration finished with issue groups. `thoradm migrate issues --id <migration>` lists them; fix the objects and run `thoradm migrate run --id <migration> --reason <code>` (see [Data migrations](./upgrades.md#data-migrations)) |
+| `SearchIncomplete` | Search results are incomplete until the search streamer finishes reingesting from Scylla. It clears itself; the message names the sources still reingesting (see [Rebuilding Elasticsearch indexes](./upgrades.md#rebuilding-elasticsearch-indexes)) |
+| `LossySettingRefused` | `dangerousDowngradeLossy` is set but the cluster isn't a development cluster (`autoTargetDev` and the `thorium.sandia.gov/dev=true` label on the namespace). Unset it or label the namespace; lossy steps need their own approvals meanwhile (see [Accepting loss](./upgrades.md#accepting-loss)) |
+| `CatalogSkew` | The image's thoradm knows another revision catalog than the operator, so no data-changing step is planned. Deploy the operator and the image of the same release |
+| `SchemaSkew` | The schema-apply Job reported a schema fingerprint other than the one the operator's build declares; the rollout continues. Deploy the operator and the image of the same release |
+| `MutableImageTag` | The cluster runs a mutable image tag such as `latest`, so a new image under the same tag doesn't run the schema apply again. Use a version tag, or set the `thorium.sandia.gov/retry-schema-apply` annotation on the `ThoriumCluster` to a new value after pulling a new image |
+
+### A lossy downgrade step stays blocked
+
+> Step `<step>` loses data: ... To accept the loss, take a backup and add the approval {step:
+> `<step>`, backup: <where your backup is>, acceptLoss: true, confirm: `<code>`} ...
+
+> The approval for `<step>` was refused: ... Repeat the current code `<code>` as confirm
+
+The step needs an approval with `acceptLoss: true` and the code it shows now. A code belongs to one
+block of one step and is used up when the step runs, so a failed run needs a new approval with the
+new code. When the message says a field "isn't covered by thoradm backup", add
+`acceptBackupGaps: true` to accept that a backup can't restore it. See [Accepting
+loss](./upgrades.md#accepting-loss).
+
+### The API refuses to start
+
+The API checks the schema applied to Scylla when it starts. It exits, and the pod restarts, with
+one of these messages.
+
+| Message | Cause and fix |
+|---------|---------------|
+| the Thorium schema isn't applied: the keyspace, the schema_migrations table, or the deployment's record doesn't exist; run `thoradm schema apply` | Nothing was applied to this Scylla. With the operator the schema-apply Job does it before components roll out; otherwise run `thoradm schema apply` |
+| the applied schema `<fingerprint>` is older than the one this build needs, `<fingerprint>`: the operator hasn't applied revision `<revision>` yet | The new image started before its schema was applied. Wait for the operator's schema-apply Job to finish, or run `thoradm schema apply` |
+| the applied schema `<fingerprint>` is revision `<revision>`, which changes what this build ... reads incompatibly (`<objects>`); roll the deployment forward to a build that knows it | A newer release applied its schema and the deployment went back to an older image. Roll forward, or downgrade the revision first (see [Downgrading](./upgrades.md#downgrading)) |
+| the applied schema `<fingerprint>` is in no revision this build knows ...; a newer build probably applied it | Same cause with a build this one has never heard of. Roll forward, or compare the two with `thoradm schema diff` |
+| `<setting>` differs from the value recorded for this deployment while data shaped by it exists; set it back to the recorded value | A data-shaping setting (such as a partition size) changed. Put the old value back, or let the operator move the data (see [Changing a partition size](./upgrades.md#changing-a-partition-size)) |
+| the schema record couldn't be read: ... | Scylla failed the read; the API tries again. See the Scylla pods |
 
 ## Config errors
 

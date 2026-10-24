@@ -229,7 +229,7 @@ fn backup_with(harness: &Harness, binary: &Path, legacy: bool, dir: &Path) -> Ve
 /// binary was built from, and `THORADM_GOLDEN_TOOLCHAIN` and `THORADM_GOLDEN_HARNESS` the toolchain
 /// and the harness's commit, for its provenance.
 #[tokio::test]
-#[ignore = "writes a committed golden; run by tests/fixtures/golden/generate.sh"]
+#[ignore = "writes a committed golden and needs the thoradm build that writes it; run by the generator script: thoradm/tests/fixtures/golden/generate.sh <legacy|format-1|format-2> <path to the thoradm binary> <commit that binary was built from>"]
 async fn generate_golden() {
     let name = required("THORADM_GOLDEN_NAME");
     let binary = PathBuf::from(required("THORADM_GOLDEN_BINARY"));

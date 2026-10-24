@@ -5,4 +5,5 @@ pub mod progress;
 pub mod redis;
 pub mod retry;
 pub mod scylla;
+pub mod termination;
 pub mod workers;

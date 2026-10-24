@@ -15,7 +15,7 @@ use common::seed;
 use common::state::{TargetState, target_state};
 use std::path::{Path, PathBuf};
 use std::process::{Output, Stdio};
-use thoradm::backup::coverage::{Category, Coverage, Registry};
+use thoradm::backup::coverage::{Category, Coverage, RECORD_TABLES, Registry};
 use thoradm::backup::failures::{FAILURES_FILE, FailureRecord, Operation, read_records};
 use thoradm::backup::manifest::{InProgressMarker, MANIFEST_FILE, Manifest};
 use thoradm::backup::sink::TokioFs;
@@ -567,6 +567,14 @@ async fn the_confirmation_names_redis_and_everything_the_backup_lacks() {
         };
         ephemeral += usize::from(entry.category == Category::Ephemeral);
         let line = format!("{} ({}): {reason}", entry.name, entry.category.label());
+        // the schema record's tables are in the backup, so the confirmation doesn't list them
+        if RECORD_TABLES.contains(&entry.name) {
+            assert!(
+                !stderr.contains(&line),
+                "{line} is listed as missing: {stderr}"
+            );
+            continue;
+        }
         assert!(stderr.contains(&line), "{line}: {stderr}");
     }
     assert!(ephemeral > 5, "only {ephemeral} ephemeral entries");

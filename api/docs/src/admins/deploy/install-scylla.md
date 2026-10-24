@@ -127,9 +127,10 @@ cluster through the `scylla-client` Service: `scylla-client.scylla.svc.cluster.l
 
 ## 4) Thorium's role
 
-Thorium logs in as its own role, which must be a superuser because the API creates its keyspace
-(with the replication factor in `scylla.replication`) and tables. Don't create the keyspace
-yourself. Choose one of:
+Thorium logs in as its own role, which must be a superuser because `thoradm schema apply`, which
+the operator runs as a Job with Thorium's config before it rolls out the components, creates the
+keyspace (with the replication factor in `scylla.replication`) and tables as that role. Don't
+create the keyspace yourself. Choose one of:
 
 - **Let the operator create the role.** On a fresh Scylla the default `cassandra`/`cassandra`
   superuser exists, and the operator uses it to create Thorium's role with the configured

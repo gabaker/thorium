@@ -9,6 +9,7 @@ use thorium::Error;
 use thorium::models::backends::setup::Scylla;
 use thorium::models::schema::statements::{prepare_all, registry};
 use thorium::test_utilities::{self, CONF};
+use thorium::utils::StartupOpts;
 use uuid::Uuid;
 
 /// Run a CQL statement, failing with its text on error
@@ -40,9 +41,14 @@ async fn started_keyspace(session: &Session, suffix: &str) -> Result<String, Err
     // run the API's Scylla startup against the new keyspace
     let mut conf = CONF.clone();
     conf.thorium.namespace.clone_from(&keyspace);
-    tokio::spawn(async move { Scylla::new(&conf).await.session })
-        .await
-        .map_err(|err| Error::new(format!("the API's startup failed: {err}")))?;
+    tokio::spawn(async move {
+        Scylla::start(&conf, StartupOpts { apply_schema: true })
+            .await
+            .expect("the API starts")
+            .session
+    })
+    .await
+    .map_err(|err| Error::new(format!("the API's startup failed: {err}")))?;
     Ok(keyspace)
 }
 
@@ -178,7 +184,13 @@ async fn the_prepare_check_names_statements_that_fail() -> Result<(), Error> {
     // the API's startup refuses the keyspace instead of serving with statements that can't run
     let mut conf = CONF.clone();
     conf.thorium.namespace.clone_from(&keyspace);
-    let started = tokio::spawn(async move { Scylla::new(&conf).await.session }).await;
+    let started = tokio::spawn(async move {
+        Scylla::start(&conf, StartupOpts::default())
+            .await
+            .expect("the API starts")
+            .session
+    })
+    .await;
     assert!(started.is_err(), "the API started without nodes.heart_beat");
     // drop the test's broken keyspace
     exec(&session, &format!("DROP KEYSPACE IF EXISTS {keyspace}")).await

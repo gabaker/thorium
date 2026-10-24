@@ -5,10 +5,26 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
 
+use super::plan::has_transform;
 use super::{
-    CATALOG, HASH_LABEL, HASH_LABEL_LEN, JobFailure, MAX_HISTORY, MAX_LABEL_LEN, REVISION_LABEL,
-    RevisionId, STATE_SCHEMA_VERSION, StepLoss, StepState, UpgradeError, VERSION_LABEL, entry,
+    Catalog, CatalogEntry, HASH_LABEL, HASH_LABEL_LEN, JobFailure, MAX_HISTORY, MAX_LABEL_LEN,
+    REVISION_LABEL, RevisionId, STATE_SCHEMA_VERSION, StepDef, StepLoss, StepState, UpgradeError,
+    VERSION_LABEL, entry,
 };
+
+/// The step of the history entry `thoradm migrate reset-state` writes; its revision is the one
+/// the deployment was reset to, so every step above it counts as unfinished again
+pub const RESET_STATE_STEP: &str = "reset-state";
+
+/// The step of the history entry `thoradm restore` appends; its revision is the backup's, so
+/// every step above it counts as unfinished again
+pub const RESTORED_STEP: &str = "restored";
+
+/// The step of the history entry the operator appends when it stops an upgrade short of its target
+/// (the target is cleared or set to a revision the deployment doesn't rise above); its revision is
+/// the one the deployment stayed at, so every check-only step above it counts as unfinished again
+/// and the next attempt runs it before its first conversion
+pub const UPGRADE_STOPPED_STEP: &str = "upgrade-stopped";
 
 /// A step recorded in a cluster's upgrade history
 ///
@@ -91,10 +107,39 @@ pub struct UpgradeState {
     /// The steps applied to this deployment, oldest first
     #[serde(default)]
     pub applied: Vec<AppliedStep>,
-    /// Data schema markers by backend
+    /// The fingerprints last applied and observed, as `{backend: fingerprint}` (the deployment
+    /// fingerprint under [`DEPLOYMENT_MARKER`]), and under [`APPLY_KEY_MARKER`] the schema-apply
+    /// trigger key the last successful apply ran for, under [`HELD_FAILURE_MARKER`] the failed
+    /// schema-apply attempt holding the rollout, under [`RETRY_VALUE_MARKER`] the last retry
+    /// annotation value a schema-apply attempt used, and under [`RECORD_MARKER`] that the state
+    /// mirrors the record in `schema_migrations`
     #[serde(default)]
     pub schema: BTreeMap<String, String>,
 }
+
+/// The key in [`UpgradeState::schema`] holding the schema-apply trigger key the last successful
+/// apply ran for: the image reference, the revision, and the hashes of the data-shaping and table
+/// TTL settings
+pub const APPLY_KEY_MARKER: &str = "apply_key";
+
+/// The key in [`UpgradeState::schema`] holding the deployment fingerprint the last successful
+/// schema-apply Job reported
+pub const DEPLOYMENT_MARKER: &str = "deployment";
+
+/// The key in [`UpgradeState::schema`] holding the failed schema-apply attempt that holds the
+/// rollout, as JSON with its trigger key, attempt counter, Job name, and failure reason, so it
+/// keeps holding after its Job is deleted
+pub const HELD_FAILURE_MARKER: &str = "held_failure";
+
+/// The key in [`UpgradeState::schema`] holding the last value of the cluster's retry-schema-apply
+/// annotation that a finished schema-apply attempt used, so that value never forces another
+pub const RETRY_VALUE_MARKER: &str = "retry_value";
+
+/// The key in [`UpgradeState::schema`] marking a state as a mirror of the record in
+/// `schema_migrations`: set whenever the operator rebuilds the state from a `thoradm schema status`
+/// result, so a state without it is one no record is known for (written before the record existed,
+/// or recreated by hand)
+pub const RECORD_MARKER: &str = "record";
 
 /// The first [`UpgradeState`] layout version, used for state written before it was recorded
 const FIRST_SCHEMA_VERSION: u32 = 1;
@@ -166,7 +211,9 @@ impl UpgradeState {
         Ok(())
     }
 
-    /// Whether a step finished (done or skipped) in this deployment's history
+    /// Whether a step of this build's catalog finished in this deployment's history
+    ///
+    /// See [`Catalog::finished`] for when a step counts as finished.
     ///
     /// # Arguments
     ///
@@ -174,12 +221,8 @@ impl UpgradeState {
     /// * `step` - The id of the step
     #[must_use]
     pub fn finished(&self, revision: &str, step: &str) -> bool {
-        // a step is finished once any history entry for it is done or skipped
-        self.applied.iter().any(|applied| {
-            applied.revision == revision
-                && applied.step == step
-                && matches!(applied.outcome, StepState::Done | StepState::Skipped)
-        })
+        // judge the step against the catalog this build deploys
+        Catalog::PRODUCTION.finished(self, revision, step)
     }
 
     /// Record a step in this deployment's history, dropping the oldest entries past the cap
@@ -205,27 +248,8 @@ impl UpgradeState {
     /// * `target` - The newest revision to move to
     /// * `version` - The Thorium version recording the new revision
     pub fn advance(&mut self, target: &RevisionId, version: &str) -> bool {
-        // walk the revisions after the current one in order, stopping at the first unfinished one
-        let start = self.revision.clone();
-        let mut moved = false;
-        for entry in CATALOG
-            .iter()
-            .filter(|entry| entry.id > start.as_str() && entry.id <= target.as_str())
-        {
-            // stop at the first revision with an unfinished step
-            if !entry
-                .steps
-                .iter()
-                .all(|step| self.finished(entry.id, step.id))
-            {
-                break;
-            }
-            // every step of this revision finished so record it
-            self.revision = entry.revision();
-            self.applied_by_version = Some(version.to_owned());
-            moved = true;
-        }
-        moved
+        // walk the path through the catalog this build deploys
+        Catalog::PRODUCTION.advance(self, target, version)
     }
 
     /// Hash the parts of this state that describe the deployment
@@ -286,4 +310,307 @@ impl UpgradeState {
             )
         })
     }
+}
+
+impl Catalog {
+    /// Whether a step finished in a deployment's history
+    ///
+    /// A forward step is finished only when its `Done` or `Skipped` entry is newer than the
+    /// latest entry that lowered the revision below the step's revision: a `reset-state` or
+    /// `restored` entry, or a finished step of a downward edge that reverses no particular step
+    /// (the edge's record), each lowering to its own revision. A finished step that reverses a
+    /// forward step lowers only that step. So a step reverted, reset, or restored since its `Done`
+    /// runs again. A check-only step is also lowered by an `upgrade-stopped` entry, which the
+    /// operator records when an upgrade stops short of its target, so a check holds only within
+    /// the attempt that ran it. A step of a downward edge is finished only when its entry is newer
+    /// than the latest finished forward step that raised the deployment above the edge's revision.
+    ///
+    /// # Arguments
+    ///
+    /// * `state` - The deployment's recorded upgrade state
+    /// * `revision` - The revision the step belongs to
+    /// * `step` - The id of the step
+    #[must_use]
+    pub fn finished(&self, state: &UpgradeState, revision: &str, step: &str) -> bool {
+        // find the newest entry finishing this step
+        let Some(done) = state.applied.iter().rposition(|applied| {
+            applied.revision == revision && applied.step == step && is_finished(applied)
+        }) else {
+            return false;
+        };
+        // a step whose revision doesn't parse can't be lowered past
+        let Ok(own) = revision.parse::<RevisionId>() else {
+            return true;
+        };
+        // a step of a downward edge counts until something raises the deployment past it again
+        let downward = self.step(step).is_some_and(|(edge, _)| edge.is_downward());
+        let undone = state.applied[done + 1..].iter().any(|later| {
+            if downward {
+                self.raises_above(later, &own)
+            } else {
+                self.lowers_below(later, &own, step)
+            }
+        });
+        !undone
+    }
+
+    /// Whether a forward step changed, or began to change, a deployment's data: its newest entry
+    /// that started or finished it (`Running`, `Done`, `Skipped`, or `Reingesting`) is newer than
+    /// every entry that lowered the deployment below the step's revision or undid the step
+    ///
+    /// A run that started and never finished, as one stopped or failed partway, counts: its Job
+    /// may have written part of its data. A step that only blocked never ran.
+    ///
+    /// # Arguments
+    ///
+    /// * `state` - The deployment's recorded upgrade state
+    /// * `revision` - The revision the step belongs to
+    /// * `step` - The id of the step
+    #[must_use]
+    pub(super) fn touched(&self, state: &UpgradeState, revision: &str, step: &str) -> bool {
+        // find the newest entry that started or finished this step
+        let Some(ran) = state.applied.iter().rposition(|applied| {
+            applied.revision == revision
+                && applied.step == step
+                && (is_finished(applied) || applied.outcome == StepState::Running)
+        }) else {
+            return false;
+        };
+        // a step whose revision doesn't parse can't be lowered past
+        let Ok(own) = revision.parse::<RevisionId>() else {
+            return true;
+        };
+        // a later reset, restore, revert, or stop that undoes the step ends what it did
+        !state.applied[ran + 1..]
+            .iter()
+            .any(|later| self.lowers_below(later, &own, step))
+    }
+
+    /// The steps whose latest finishing entry is `Reingesting`: a derived rebuild whose Job
+    /// finished and whose reingest hasn't been seen to finish
+    ///
+    /// A step a reset, restore, or revert has undone since isn't listed.
+    ///
+    /// # Arguments
+    ///
+    /// * `state` - The deployment's recorded upgrade state
+    #[must_use]
+    pub fn reingesting<'a>(&self, state: &'a UpgradeState) -> Vec<&'a AppliedStep> {
+        // keep the latest finishing entry of each step, in the order they were recorded
+        let mut latest: Vec<&AppliedStep> = Vec::new();
+        for entry in &state.applied {
+            if is_finished(entry) {
+                latest.retain(|kept| !(kept.revision == entry.revision && kept.step == entry.step));
+                latest.push(entry);
+            }
+        }
+        // those that are still reingesting, unless something undid the step since
+        latest
+            .into_iter()
+            .filter(|entry| {
+                entry.outcome == StepState::Reingesting
+                    && self.finished(state, &entry.revision, &entry.step)
+            })
+            .collect()
+    }
+
+    /// Whether stopping an upgrade now would undo anything: a check-only step on a forward edge
+    /// above the deployment's revision counts as finished
+    ///
+    /// Once the stop is recorded no such step counts as finished, so a deployment held at its
+    /// revision records the stop once.
+    ///
+    /// # Arguments
+    ///
+    /// * `state` - The deployment's recorded upgrade state
+    #[must_use]
+    pub fn stops_checks(&self, state: &UpgradeState) -> bool {
+        // look for a finished check-only step of an edge the deployment hasn't reached
+        self.steps().any(|(edge, step)| {
+            step.check_only
+                && !edge.is_downward()
+                && !self.at_or_below(&edge.revision(), &state.revision)
+                && self.finished(state, edge.id, step.id)
+        })
+    }
+
+    /// Whether a history entry lowered the deployment below a forward step's revision, or undid
+    /// that step on its own (a revert of that step, or a stopped upgrade undoing a check-only step)
+    ///
+    /// # Arguments
+    ///
+    /// * `applied` - The history entry
+    /// * `own` - The revision of the forward step
+    /// * `step` - The id of the forward step
+    fn lowers_below(&self, applied: &AppliedStep, own: &RevisionId, step: &str) -> bool {
+        // only finished entries move the revision
+        if !is_finished(applied) {
+            return false;
+        }
+        // work out which revision the entry lowered the deployment to, if it lowered it
+        let catalog_step = self.step(&applied.step);
+        let lowered = match catalog_step {
+            // a reset or restore lowers to the revision it records
+            _ if applied.step == RESET_STATE_STEP || applied.step == RESTORED_STEP => true,
+            // an upgrade stopped short of its target ends its attempt, which lowers only the
+            // check-only steps, since a check holds only within the attempt that ran it
+            _ if applied.step == UPGRADE_STOPPED_STEP => self
+                .step(step)
+                .is_some_and(|(edge, def)| def.check_only && !edge.is_downward()),
+            // a step reversing one forward step undoes only that step
+            Some((edge, def)) if edge.is_downward() && def.reverses.is_some() => {
+                return def.reverses == Some(step);
+            }
+            // the record of a downward edge lowers to the edge's revision
+            Some((edge, _)) => edge.is_downward(),
+            // anything else this catalog doesn't know moves nothing
+            None => false,
+        };
+        // a lowering entry undoes the step unless the deployment stayed at or above its revision
+        lowered
+            && applied
+                .revision
+                .parse::<RevisionId>()
+                .is_ok_and(|to| !self.at_or_below(own, &to))
+    }
+
+    /// Whether a history entry is a finished forward step that raised the deployment above a
+    /// downward step's revision
+    ///
+    /// # Arguments
+    ///
+    /// * `applied` - The history entry
+    /// * `own` - The revision of the downward step
+    fn raises_above(&self, applied: &AppliedStep, own: &RevisionId) -> bool {
+        // only finished forward steps of this catalog raise the revision
+        is_finished(applied)
+            && self
+                .step(&applied.step)
+                .is_some_and(|(edge, _)| !edge.is_downward())
+            && applied
+                .revision
+                .parse::<RevisionId>()
+                .is_ok_and(|to| to != *own && self.at_or_below(own, &to))
+    }
+
+    /// Move a deployment's recorded revision along the path to a target, past every edge whose
+    /// steps all finished
+    ///
+    /// Returns whether the revision moved.
+    ///
+    /// # Arguments
+    ///
+    /// * `state` - The deployment's recorded upgrade state
+    /// * `target` - The revision to move towards
+    /// * `version` - The Thorium version recording the new revision
+    pub fn advance(&self, state: &mut UpgradeState, target: &RevisionId, version: &str) -> bool {
+        // without a path there is nothing to move along
+        let Ok(path) = self.path(&state.revision, target) else {
+            return false;
+        };
+        // move past each edge in order, stopping at the first with work left
+        let mut moved = false;
+        for edge in path {
+            // stop at the first edge with a step still to run
+            if !self.edge_steps(state, edge).is_empty() {
+                break;
+            }
+            // every step of this edge finished so record the revision it reaches
+            state.revision = edge.revision();
+            state.applied_by_version = Some(version.to_owned());
+            moved = true;
+        }
+        moved
+    }
+
+    /// Get the steps of an edge a deployment still has to run
+    ///
+    /// On a forward edge these are its unfinished steps. On a downward edge a step reversing a
+    /// forward step runs only while that forward step counts as finished, and any other step runs
+    /// while it is unfinished itself.
+    ///
+    /// On a downward edge the steps reversing a transform run in the reverse order of the forward
+    /// steps they undo, in the places the edge lists such steps, so transforms of one family
+    /// revert newest first whichever order the edge declares them in. Every other step, such as a
+    /// rebuild run from the reverted data, stays where the edge lists it.
+    ///
+    /// # Arguments
+    ///
+    /// * `state` - The deployment's recorded upgrade state
+    /// * `edge` - The edge to check
+    #[must_use]
+    pub fn edge_steps(
+        &self,
+        state: &UpgradeState,
+        edge: &'static CatalogEntry,
+    ) -> Vec<&'static StepDef> {
+        // keep every step that still has work to do
+        let mut steps = edge
+            .steps
+            .iter()
+            .filter(|step| match step.reverses {
+                // a revert step is needed only while the step it reverses counts as finished
+                Some(forward) if edge.is_downward() => {
+                    self.step(forward).is_some_and(|(forward_edge, _)| {
+                        self.finished(state, forward_edge.id, forward)
+                    })
+                }
+                // any other step is needed until it finished
+                _ => !self.finished(state, edge.id, step.id),
+            })
+            .collect::<Vec<_>>();
+        // a forward edge runs its steps in the order it lists them
+        if !edge.is_downward() {
+            return steps;
+        }
+        // find the places of the reverses of transforms and the forward steps they undo
+        let (places, mut reverses): (Vec<usize>, Vec<_>) = steps
+            .iter()
+            .enumerate()
+            .filter_map(|(place, step)| {
+                self.transform_position(step)
+                    .map(|position| (place, (position, *step)))
+            })
+            .unzip();
+        // put them back in those places, the reverse of the newest forward step first
+        reverses.sort_by_key(|(position, _)| std::cmp::Reverse(*position));
+        for (place, (_, step)) in places.into_iter().zip(reverses) {
+            steps[place] = step;
+        }
+        steps
+    }
+
+    /// Find where the forward transform a reverse step undoes sits in the catalog: its edge's
+    /// index and its index on that edge, which order the forward steps from oldest to newest
+    ///
+    /// Returns `None` for a step reversing no forward step, or one reversing a step without a
+    /// transform.
+    ///
+    /// # Arguments
+    ///
+    /// * `step` - The reverse step
+    fn transform_position(&self, step: &StepDef) -> Option<(usize, usize)> {
+        // look the reversed step up on every forward edge
+        let forward = step.reverses?;
+        self.edges
+            .iter()
+            .enumerate()
+            .filter(|(_, edge)| !edge.is_downward())
+            .find_map(|(index, edge)| {
+                edge.steps
+                    .iter()
+                    .position(|candidate| candidate.id == forward && has_transform(candidate))
+                    .map(|place| (index, place))
+            })
+    }
+}
+
+/// Whether a history entry finished its step (`Done`, `Skipped`, or `Reingesting`)
+///
+/// # Arguments
+///
+/// * `applied` - The history entry
+fn is_finished(applied: &AppliedStep) -> bool {
+    // done, skipped, and reingesting entries finish a step
+    applied.outcome.finishes()
 }

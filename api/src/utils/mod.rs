@@ -10,7 +10,7 @@ mod utils_api_reexport {
     pub mod shared;
     pub use self::s3::StandardHashes;
     pub use errors::{ApiError, ApiErrorResponse};
-    pub use shared::{AppState, Shared};
+    pub use shared::{AppState, Shared, StartupOpts};
 }
 
 #[cfg(feature = "api")]

@@ -36,6 +36,23 @@ impl std::fmt::Display for ElasticIndex {
 }
 
 impl ElasticIndex {
+    /// Every index, in the order the schema registry declares them
+    pub const ALL: [ElasticIndex; 4] = [
+        ElasticIndex::SampleResults,
+        ElasticIndex::RepoResults,
+        ElasticIndex::SampleTags,
+        ElasticIndex::RepoTags,
+    ];
+
+    /// The search-streamer source this index belongs to
+    #[must_use]
+    pub const fn source(&self) -> ElasticSource {
+        match self {
+            ElasticIndex::SampleResults | ElasticIndex::RepoResults => ElasticSource::Results,
+            ElasticIndex::SampleTags | ElasticIndex::RepoTags => ElasticSource::Tags,
+        }
+    }
+
     /// Get the full index name for a specific index
     ///
     /// # Arguments
@@ -58,6 +75,22 @@ impl ElasticIndex {
     /// * `elastic_conf` - The elastic config
     #[must_use]
     pub fn create_body(&self, elastic_conf: &crate::conf::Elastic) -> serde_json::Value {
+        // add our highlighting limits to this index's mappings
+        serde_json::json!({
+            "mappings": self.mappings(),
+            "settings": {
+                "index": {
+                    "highlight": {
+                        "max_analyzed_offset": elastic_conf.max_analyzed_offset
+                    }
+                }
+            }
+        })
+    }
+
+    /// Build this index's mappings, which depend on no configuration
+    #[must_use]
+    pub fn mappings(&self) -> serde_json::Value {
         // get the field that identifies the item each document describes
         let id_field = match self {
             ElasticIndex::SampleResults | ElasticIndex::SampleTags => "sha256",
@@ -81,17 +114,8 @@ impl ElasticIndex {
         for field in text_fields {
             properties[*field] = serde_json::json!({ "type": "text" });
         }
-        // build the full body with our highlighting limits
-        serde_json::json!({
-            "mappings": { "properties": properties },
-            "settings": {
-                "index": {
-                    "highlight": {
-                        "max_analyzed_offset": elastic_conf.max_analyzed_offset
-                    }
-                }
-            }
-        })
+        // wrap our fields as the index's properties
+        serde_json::json!({ "properties": properties })
     }
 
     /// Get the earliest date for documents in the given index

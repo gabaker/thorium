@@ -169,7 +169,10 @@ vault and its password file along with [the rest of your backups](./operate.md#b
 | `thorium_operator_{cpu,memory}_{requests,limits}` | `256m`/`256Mi` requests, `512m`/`512Mi` limits | The operator's resources |
 | `thorium_cluster_cidrs` | `[]` | The cluster's service and pod CIDRs (see [Proxies](#proxies)) |
 | `thorium_upgrade_target_revision` | `""` | The revision to upgrade to (see [Upgrades](#upgrades)) |
-| `thorium_upgrade_approvals` | `[]` | Approvals for upgrade steps that change data: `[{step: <id>, backup: <where>}]` |
+| `thorium_upgrade_approvals` | `[]` | Approvals for upgrade steps that change data: `[{step: <id>, backup: <where>}]`; a step may also set `acceptIssues`, and a downgrade step that loses data needs `acceptLoss: true`, `confirm: <code>`, and for a lost field no backup covers `acceptBackupGaps: true` (see [Accepting loss](./upgrades.md#accepting-loss)) |
+| `thorium_upgrade_auto_target_dev` | `false` | Follow the operator's latest revision without a target, and label the Thorium namespace `thorium.sandia.gov/dev=true`, which together mark a development cluster (see [Setting a target](./upgrades.md#setting-a-target)) |
+| `thorium_upgrade_dangerous_downgrade_lossy` | `false` | Accept the loss of every lossy downgrade step without a code or backup; honored only on a development cluster |
+| `thorium_upgrade_drift_acknowledged` | `[]` | `unexpected` schema objects to accept: `[{backend: scylla, object: <name>, fingerprint: <optional>}]` (see [Schema drift](./upgrades.md#schema-drift)) |
 
 ### Backing services
 
@@ -212,7 +215,7 @@ nodes in `group_vars/single_node.yml`.
 | `thorium_deployment_name` | `operator.cluster.name` |
 | `thorium_scaler_enabled: false` | `operator.cluster.components.scaler: null` |
 | `thorium_nodes` | `operator.cluster.scaler.k8s.nodes` |
-| `thorium_upgrade_target_revision`, `thorium_upgrade_approvals` | `operator.cluster.upgrade.targetRevision`, `.approvals` |
+| `thorium_upgrade_target_revision`, `thorium_upgrade_approvals`, `thorium_upgrade_auto_target_dev`, `thorium_upgrade_dangerous_downgrade_lossy`, `thorium_upgrade_drift_acknowledged` | `operator.cluster.upgrade.targetRevision`, `.approvals`, `.autoTargetDev`, `.dangerousDowngradeLossy`, `.driftAcknowledged` |
 | `thorium_scylla_admin_secret`, `thorium_elastic_admin_secret` | `operator.cluster.bootstrap.scylla`, `.elastic` |
 | `thorium_external_*`, `scylla_replication_factor`, `s3_endpoint`, `s3_thorium_region`, `s3_use_path_style`, `thorium_tracing_endpoint` | `operator.backends.*` |
 | `thorium_ingress_enabled`, `thorium_ingress_hostname`, `thorium_tls_cert_secret_name` | `operator.ingress.type` (`traefik` or `none`), `.host`, `.tls.secretName` |
@@ -350,7 +353,7 @@ playbook again. When the new operator knows a newer revision than the deployment
 work to do wait for an approval naming the backup you took first:
 
 ```yaml
-thorium_upgrade_target_revision: "2026-10-v02"
+thorium_upgrade_target_revision: "2026-10-v03"
 thorium_upgrade_approvals:
   - step: elastic-reindex-keyword-mappings
     backup: "thoradm backup 2026-10-08 on /mnt/backups"
@@ -371,7 +374,7 @@ thorium_deployment_name: dev
 infra_operators_enabled: false
 thorium_values_files:
   - /path/to/thorium-converted-values.yaml   # last, so its values win
-thorium_upgrade_target_revision: "2026-10-v02"
+thorium_upgrade_target_revision: "2026-10-v03"
 ```
 
 Add `thorium_upgrade_approvals` if the reindex step blocks (see

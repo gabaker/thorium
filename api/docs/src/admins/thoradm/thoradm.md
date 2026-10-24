@@ -21,7 +21,8 @@ Every Thorium API also serves a Linux build at `<THORIUM_URL>/api/binaries/linux
 
 Thoradm uses both the Thorctl config for user information (to verify admin status, for example)
 and the cluster config, `thorium.yml`. The cluster config holds the credentials Thoradm needs to
-read and restore data in Redis, S3, and Scylla. `thoradm migrate` needs neither.
+read and restore data in Redis, S3, and Scylla. `thoradm migrate list` and `plan` need neither;
+every other `thoradm migrate` subcommand needs the cluster config but not the Thorctl config.
 
 The Thorium operator writes the full, rendered `thorium.yml` to the `thorium` Secret in the
 thorium namespace (`<prefix>-thorium` with a namespace prefix). The `ThoriumCluster` itself holds
@@ -85,9 +86,12 @@ A backup holds every resource that can't be rebuilt from other data: every Scyll
 S3 ids, comments, results, tags, repos, commitishes, network policies, entities, associations,
 notifications, and nodes (the materialized views are rebuilt from them); the users and their scoped
 tokens, groups, network-policy sets, images, pipelines, and system settings held in Redis; and the
-objects in the `files`, `repos`, `attachments`, `results`, and `graphics` buckets. The Taking
-Backups guide lists every resource and the component that backs it up, generated from thoradm's
-coverage registry, in [What Is Backed Up](./taking_backups.md#what-is-backed-up). To read the same
+objects in the `files`, `repos`, `attachments`, `results`, and `graphics` buckets. It also holds the
+deployment's schema record, every row of the `schema_migrations` and `schema_migration_issues`
+Scylla tables except the Job results, as `schema.json` beside the archives (see [The Schema
+Record](#the-schema-record)). The Taking Backups guide lists every resource and the component that
+backs it up, generated from thoradm's coverage registry, in [What Is Backed
+Up](./taking_backups.md#what-is-backed-up). To read the same
 list from the installed binary, without a config file or a cluster, run `thoradm backup coverage`;
 `--json` prints it as a JSON array with one object per resource, in the same order.
 
@@ -96,7 +100,8 @@ A backup doesn't hold runtime state, which is invalid after a restore, or data a
 | Not backed up | Why |
 |---|---|
 | The `logs` and `events` Scylla tables | Stage logs of reactions, which expire by TTL, and a table of trigger events that nothing reads or writes, which only keyspaces older releases created hold |
-| The Redis keys of reactions, jobs, workers, and services: `reactions:*`, `reactions_group:*`, `reaction_data:*`, `reaction_jobs:*`, `reaction_tags:*`, `reaction_cache:*`, `sub_reactions:*`, `generators:*`, `stage_logs:*`, `logs:*`, `job_queue:*`, `job_data:*`, `workers:*`, `worker_data:*`, `streams:*`, `event-handler:*`, `search-streamer:*`, `cursors:*`, and `image_ttc:*` | Runtime state, invalid after a restore |
+| The `job_result` rows of the `schema_migrations` Scylla table | The results of upgrade Jobs, which expire after seven days; a restore would make them permanent |
+| The Redis keys of reactions, jobs, workers, and services: `reactions:*`, `reactions_group:*`, `reaction_data:*`, `reaction_jobs:*`, `reaction_tags:*`, `reaction_cache:*`, `sub_reactions:*`, `generators:*`, `stage_logs:*`, `logs:*`, `job_queue:*`, `job_data:*`, `workers:*`, `worker_data:*`, `streams:*`, `event-handler:*`, `search-streamer:*`, `cursors:*`, `schema-writer`, `rebucket:*`, and `image_ttc:*` | Runtime state, invalid after a restore |
 | The OAuth keys `oauth:context:*`, `oauth:registration_sessions:*`, and `oauth:link_token:*` | Login contexts, registration sessions, and account-link tokens, which expire |
 | `netpol_used_by:*` | Rebuilt by the Redis restore from the restored images' network policies |
 | `census:*` | Counts rebuilt from the Scylla tables by the census that restore runs |
@@ -213,6 +218,15 @@ and the flag that overrides it.
   configure the target's API with the source cluster's `secret_key`, or every restored password
   login fails after the restore (the operator's own users keep the target's passwords, so the
   operator and the components still log in). Thoradm doesn't check it.
+- **Redis reachable from thoradm, and no other writer.** Each of the restore's two `schema apply`
+  runs (steps 3 and 6 below) holds the namespace's [writer lease](#the-writer-lease) in Redis, so
+  the thoradm config must reach Redis even for a backup that holds no `redis.json`. A restore is
+  refused while a migration, a schema apply, `reset-state`, or another restore holds the lease
+  (`the namespace's writer lease is held by <holder>; wait for it to finish`), and when Redis can't
+  be reached (`Redis can't be reached at <host>:<port>, which the restore needs for the namespace's
+  writer lease`). The lease is held around each apply and not across the whole restore, because a
+  Redis restore can flush the database that holds it, so pause every other writer yourself. A
+  restore has no `--force-break-lease`.
 - **An admin in the Thorctl config.** The Redis data is restored through the API, so the Thorctl
   config must hold an admin's token for the target's API.
 - **A thoradm of the API's version.** A restore of a backup holding `redis.json`, and every
@@ -227,8 +241,10 @@ and the flag that overrides it.
 
 **Keep the source's `secret_key`.** A backup doesn't record the `secret_key` its password hashes
 were made with, and thoradm restores into a deployment with another key without a warning. Before
-restoring a backup of another deployment, configure the target's API with the source's
-`thorium.secret_key`, or restore only into a deployment already configured with the same key.
+restoring a backup of another deployment, install the target with the source's key (set
+`global.credentials.thoriumSecretKey` to the `thoriumSecretKey` in the source's
+`thorium-credentials` Secret; see [Credentials](../deploy/helm-configuration.md#credentials)), or
+restore only into a deployment already configured with the same key.
 Otherwise every restored password user is locked out until you reset the passwords as [A Restore
 into Another `secret_key`](#a-restore-into-another-secret_key) describes. The operator's own users
 aren't, since a restore keeps the target's (see [What a Restore Keeps of the
@@ -276,8 +292,8 @@ When the target already holds data, choose what happens to it. `--merge` and `--
 other.
 
 **`--wipe <namespace>`** rolls the namespace's tables back to the backup. It truncates every
-backed-up table the backup holds but `nodes`, whose rows the restore keeps (after saving and
-dropping its views, which the restore recreates). It deletes nothing from object storage and sends no S3 request at all, so it never
+backed-up table the backup holds but `nodes`, whose rows the restore keeps (after dropping its
+declared views, which the restore's `schema apply` creates again). It deletes nothing from object storage and sends no S3 request at all, so it never
 lists a bucket: every bucket is left as it is. It keeps what the backup doesn't hold: the stage logs
 table, the events table where an older release created it, and the buckets. After the restore, the tables and Redis equal the backup and
 every object the backup's rows name is present (an object at the same key is overwritten), but an
@@ -340,10 +356,9 @@ table, `wipe.json` has no `finished` time and lists in `snapshots` the truncate 
 tables already emptied left, and nothing has been restored. A plain re-run is then
 refused by the empty-target check, since the tables not yet truncated still hold rows. Fix the cause and run the same `--wipe <namespace>` restore again: it finds the unfinished
 `wipe.json` (the newest under `reports/restore-*/`, or in or beside the `--report-dir`), says it is
-resuming it, records it as `resumed_from`, wipes what is left, takes the views the first run dropped
-from that run's `views.cql`, and restores. When the first run left the target empty, the re-run has
-nothing to wipe, so it writes no `wipe.json` and records no `resumed_from`; it still takes the
-dropped views from the first run's `views.cql`.
+resuming it, records it as `resumed_from`, wipes what is left, and restores. When the first run left
+the target empty, the re-run has nothing to wipe, so it writes no `wipe.json` and records no
+`resumed_from`.
 
 **`--merge`** adds the backup's data to a namespace whose own data must stay. Use it only for that:
 rows and objects created after the backup survive, rows and objects deleted after the backup come
@@ -398,21 +413,28 @@ The restore runs in this order:
 1. **The preflight** verifies the backup and checks the target and the flags; a refusal changes
    nothing.
 2. **The wipe**, with `--wipe <namespace>` (see [Merge or Wipe](#merge-or-wipe)).
-3. **Redis.** The API restores Redis in steps: wipe (every key of the namespace, or with
+3. **The schema, before loading**, under the writer lease. `schema apply` converges the keyspace to the schema of the
+   backup's revision, so the tables exist (a dropped keyspace is created again) and have every
+   column the backup's rows carry; nothing is dropped. The files password is checked first (see
+   [The Schema Record](#the-schema-record)).
+4. **Redis.** The API restores Redis in steps: wipe (every key of the namespace, or with
    `--redis-flush-all` a `FLUSHDB ASYNC` of the database), init, settings, users, scoped tokens,
    groups, images, pipelines, and network-policy sets.
-4. **The tables.** Before it loads the first table, restore saves the statement of every
-   materialized view of the tables it restores to `views.cql` in the report, from Scylla's own
-   `DESCRIBE`. It drops each table's views just before loading the table, and once every table is
-   loaded it recreates them from the saved statements and waits for them to build: no API restart
-   is needed. Each node is written as registered, with no heartbeat: its workers were Redis state,
-   so each node must check in again before the scheduler counts it.
-5. **The objects**, each uploaded to its original key, addressing buckets the way
+5. **The tables.** Restore drops each table's materialized views just before loading the table.
+   Each node is written as registered, with no heartbeat: its workers were Redis state, so each
+   node must check in again before the scheduler counts it.
+6. **The schema, after loading**, under the writer lease again. `schema apply` runs again and creates every view the table
+   restores dropped from the schema, waiting for them to build with no time limit and logging the
+   views still building every ten seconds: no API restart is needed. A view whose name a table
+   holds is refused, naming the view, and the table has to be dropped by hand (see
+   the Views paragraph below). Then restore writes the backup's schema record (see [The Schema
+   Record](#the-schema-record)).
+7. **The objects**, each uploaded to its original key, addressing buckets the way
    `thorium.s3.use_path_style` says. A failed upload is aborted (no parts are left in the bucket),
    retried if its error is transient, and recorded if it still fails.
-6. **The census** of every restored table, and of every table when the backup holds `redis.json`
+8. **The census** of every restored table, and of every table when the backup holds `redis.json`
    (whose restore deletes every census stream), so the listings work at once.
-7. **The summary**, logged and written as `summary.json`.
+9. **The summary**, logged and written as `summary.json`.
 
 Restored notifications keep the TTL they had left when the backup ran, and permanent ones stay
 permanent; from a format-1 or legacy backup, which keeps no TTLs, they take the table's default TTL
@@ -431,19 +453,92 @@ over the following moments. Pause every writer first, as for any restore: a key 
 flush may be deleted with the rest. The [Taking Backups
 guide](./taking_backups.md#large-restores-flushing-the-redis-database) covers it in full.
 
-**Views.** Restore waits for the recreated views to build with no time limit (a large table's view
-can take long). It logs each view as it finishes (`View <keyspace>.<view> built after <n>s`) and,
-every 30 seconds, which views are built and which are still building, with how many of the nodes
-that reported have finished each one. Each view is recreated on its own: one that can't be is recorded (operation
-`post-restore`, the view as its key) and the others are recreated all the same, and a view another
-client (an API pod) created first counts as recreated when its definition matches the saved
-statement (otherwise it is recorded). A restore that is interrupted leaves its `views.cql`; running
-the restore again takes any view it finds missing from the newest earlier `views.cql` that holds its
-statement for this namespace's keyspace (under `reports/restore-*/`, or in or beside the
-`--report-dir`; files that restores of the same backup into other namespaces left hold their
-keyspaces' statements and are skipped), and the preflight refuses (check `views`) when no such file
-holds it. Then replay an earlier `views.cql` with `cqlsh -f` after checking it, or restart one API
-pod, whose schema setup creates missing views.
+**Views.** `schema apply` defines every view, so the restore saves no view statements: it creates
+each view it dropped, and any view an interrupted restore left dropped, from the schema, and waits
+for them to build, with no time limit, logging every 10 seconds how many views are built and which are
+still building (and, on a cluster, how many nodes have finished each). A view that can't be created is
+recorded (operation `post-restore`, key `schema apply`) and the summary says the views couldn't be recreated; once the cause is fixed, run
+`thoradm schema apply`, which creates them. The schema apply that converges the keyspace before any
+row is restored records its failure with operation `pre-restore` and key `schema apply`.
+
+### The Schema Record
+
+A backup holds the deployment's schema record as `schema.json` in the backup directory, beside the
+table archives and listed in the manifest's `siblings`: every row of the `schema_migrations` and
+`schema_migration_issues` Scylla tables except the Job results, which expire. It is the applied
+fingerprint and layout version of each backend, the revision and the full applied history, the
+state of each migration pass, the consumed lossy-approval codes, any history an earlier restore
+archived, and the data-shaping settings. The file also names the thoradm version that wrote it, and
+holds the files password's salted hash, so it is as private as the rest of the backup. Rows of a kind this thoradm doesn't know, such as the audit row a later release writes when it
+drops a legacy object, are carried as they are under `other` and written back by a restore, merged
+with the target's own rows of those kinds. A deployment
+whose keyspace has no `schema_migrations` table has no record, and its backup has no `schema.json`.
+
+A restore with a record:
+
+- **Refuses before writing anything** when the record can't be read or is of a newer format, when
+  its revision is one this thoradm has no schema snapshot of (restore with the thoradm version
+  named in the file), or, for a backup that holds files (the `s3-ids` or `s3-ids-objects`
+  component), when the configured `files.password` isn't the password the backup was taken with.
+  Stored files are restored as they were encrypted, so another password would leave files nothing
+  opens; a backup of other tables restores whatever the password. The refusal, a `preflight` record for the check `schema`, names the setting
+  and never prints a password or a hash.
+- **Replaces the target's record** with the backup's after the data is loaded, but only from a
+  backup that holds every Scylla table and Redis (`all` or `no-s3`) and whose record names a
+  revision. A backup of some components says nothing about the rest, so restoring its record
+  would rewind the target's revision under data it never touched: the restore then leaves the
+  target's revision, history, and fingerprints alone, writes no `restored` entry, and the
+  summary's warnings say why. The record's rows are written over the target's one partition at a
+  time, the revision row last, and only then are the rows the backup lacks deleted, so a restore
+  that stops partway leaves the old record with some new rows beside it, never none; run the
+  restore again to finish it: the applied
+  fingerprints and layouts, the revision, the history, the migration passes with their workers and
+  issue groups. Restoring a backup taken at an older revision into a deployment at a newer one
+  sets the revision to the older one, so the operator's upgrade run finds the steps after it
+  unfinished and runs them again once it reads the record (see [Resetting the Recorded
+  State](#resetting-the-recorded-state) for when it does). Use the target's thoradm (the API's
+  version, see [Restore Requirements](#restore-requirements)): it has a snapshot of every earlier
+  revision and converges the keyspace to the backup's revision before loading, so rows with a column
+  a later step dropped can be inserted. A backup whose record names a revision newer than the
+  target's thoradm knows is refused before anything is written; restore it into a deployment of
+  that version or newer.
+- **Keeps what it replaces.** Every history entry the restore replaces is kept as an
+  `archived_history` row keyed `<the backup's finish time>/<original id>`, so a restore run again
+  writes the same keys, and the restored history ends with a
+  `restored` entry naming the backup, the backup's revision, the revision it replaced, and
+  thoradm's version and the OS user. Consumed lossy-approval codes are merged, never replaced, so a
+  code used after the backup was taken still counts as used. A backup of the restored deployment
+  carries the archived rows and the `restored` entry.
+- **Leaves the data-shaping settings as the restoring cluster has them.** A restore re-buckets
+  every row with the cluster's partition sizes, so the settings recorded afterward are the
+  cluster's, not the backup's.
+
+A backup without `schema.json` was taken before the record existed (by a pre-Helm or first Helm
+release, or by a thoradm without the record) or of a keyspace that never recorded one. Its Scylla
+and Redis data is in the layouts of revision `2026-10-v02`, the first Helm revision: the revision
+before it, the pre-Helm baseline `2026-10-v01`, differs from it only in Elastic, which a backup
+doesn't hold. A restore of such a backup:
+
+- **Records `2026-10-v02` under a target that records a newer revision**, such as a fresh install
+  of this release, when the backup holds every Scylla table and Redis (`all` or `no-s3`). The
+  target's history is archived as for a backup with a record, the history becomes one `restored`
+  entry saying the backup held no record, and the target's fingerprints stay, since the restore
+  applied the target's schema. The operator then plans every step after `2026-10-v02` and runs
+  them like any upgrade (the data steps wait for their approvals), converting the restored data;
+  each step checks every object first and leaves the ones already in the newer layout as they
+  are, so data a merge target held is safe. The confirmation names the revision the restore
+  records, the summary names the revision recorded, the one it replaced, and the steps the
+  operator plans, and the operator starts them once it reads the record (see [Resetting the
+  Recorded State](#resetting-the-recorded-state) for when it does).
+- **Refuses before writing anything** when this release no longer upgrades from `2026-10-v02`
+  (it is older than the release's oldest supported revision, see the upgrade guide's [Upgrade
+  paths](../deploy/upgrades.md#upgrade-paths)). The refusal names the release to restore with
+  first: restore the backup with that release's thoradm into a cluster of that release, let its
+  operator finish the upgrade, then take a new backup and restore it with this release.
+- **Leaves the target's record alone** when the target records no revision, or none newer than
+  `2026-10-v02`, and when the backup lacks a Scylla table or Redis; the summary's warnings say why
+  for a backup that lacks some. The operator treats a deployment with no revision recorded as one
+  waiting for `spec.upgrade.starting_revision`.
 
 **A failed Redis restore.** A Redis step that fails stops the Redis restore with a `redis` record
 whose error names the step and what the steps before it wrote, and the rest of the restore carries
@@ -475,7 +570,11 @@ restore replaces the bootstrapped admin with the backup's users, whose logins wo
 3. **Clear Scylla's truncate snapshots** after a `--wipe` restore, once the check passes:
    `nodetool clearsnapshot <namespace>` on every Scylla node frees the disk the wiped data still
    holds (the restore's final report lists the snapshots and prints the command).
-4. **Resume the writers and users.** Nodes restored from the backup check in again on their own.
+4. **Make the operator read the restored record** when the restore moved the revision (the
+   summary's `not_done` says so): delete the `thorium-upgrade-state` ConfigMap and restart the
+   operator, as [Resetting the Recorded State](#resetting-the-recorded-state) shows. Until it reads
+   the record it reports the old revision and doesn't run the steps after the restored one.
+5. **Resume the writers and users.** Nodes restored from the backup check in again on their own.
 
 `verify --cluster` writes its report like `verify` and checks:
 
@@ -507,10 +606,11 @@ password login of a restored user (`thorctl login`, the Web UI, `POST /api/users
 `401`. The operator's own users keep the target's passwords (see [What a Restore Keeps of the
 Target](#what-a-restore-keeps-of-the-target)), so the operator and the components keep working.
 
-If you have the source's `secret_key`, you can configure the target's API with it and restart the
-API. The restored passwords then verify again, but the operator's own users, whose hashes the
-restore kept from the target, no longer do: the operator fails with `401 Unauthorized` until their
-passwords are set again under the source's key. Right after the restart:
+If you have the source's `secret_key`, you can set it as the target's `thoriumSecretKey` and run
+`helm upgrade` (see [Changing credentials](../deploy/helm-configuration.md#changing-credentials)).
+The restored passwords then verify again, but the operator's own users, whose hashes the restore
+kept from the target, no longer do: the operator fails with `401 Unauthorized` until their
+passwords are set again under the source's key. Right after the upgrade:
 
 1. **Log in as a restored admin** whose password the source's key verifies, keeping the
    `Authed.token` the response returns.
@@ -527,9 +627,9 @@ passwords are set again under the source's key. Right after the restart:
    ```
 
 3. **Restart the operator** (`kubectl -n thorium rollout restart deployment operator`), which then
-   logs in again.
+   logs in again and returns to `Ready`.
 
-A password you reset under the target's key before the switch stops verifying too. Without the
+A password you reset under the target's key before the upgrade stops verifying too. Without the
 source's `secret_key`, reset the passwords under the target's key instead:
 
 1. **Log in as an admin**: the operator's `thorium` user, whose password is in the `thorium-pass`
@@ -582,13 +682,13 @@ Each run writes its failures, one JSON object per line, to a `failures.jsonl` wh
 | Command | Where it writes its report |
 |---|---|
 | `backup new` | `failures.jsonl` in the backup directory; a resumed run moves the interrupted run's to `reports/backup-<time>/` |
-| `backup restore` | `reports/restore-<time>/` in the backup, or `--report-dir`: `failures.jsonl`, `verify.json` (the preflight's verify), `views.cql`, `wipe.json` (with `--wipe`), and `summary.json` |
+| `backup restore` | `reports/restore-<time>/` in the backup, or `--report-dir`: `failures.jsonl`, `verify.json` (the preflight's verify), `wipe.json` (with `--wipe`), and `summary.json` |
 | `backup verify` | `reports/verify-<time>/` in the backup, or `--report-dir`: `failures.jsonl` and `verify.json` |
 | `backup scrub` | `reports/scrub-<time>/failures.jsonl` in the backup |
 
 A restore's `summary.json` holds what each component restored, skipped, and failed, the failures,
 whether the backup was restored as legacy, what `--merge` merged into or `--wipe` truncated, the
-objects the backup is missing, the views recreated, the census rebuilt, and its warnings; it is
+objects the backup is missing, the views recreated, the schema record restored, the census rebuilt, and its warnings; it is
 written only when the restore gets past the preflight (and a `--wipe` restore past its wipe).
 
 ## System Settings
@@ -730,31 +830,333 @@ thoradm users dedupe [--dry-run] [-y]
 ## Migrate
 
 `thoradm migrate` lists the [upgrade revisions](../deploy/upgrades.md) of the build you run and the
-steps between them. It reads no config, so it runs anywhere, including inside the cluster with
-`kubectl -n thorium exec deploy/api -- /app/thoradm migrate list`.
+steps between them, and runs, checks, reverts, and records the data migrations behind them.
+`list` and `plan` read no config, so they run anywhere, including inside the cluster with
+`kubectl -n thorium exec deploy/api -- /app/thoradm migrate list`. Every other subcommand reads the
+cluster and needs the thoradm config. The operator runs these commands itself as Jobs during an
+upgrade; run one by hand to preview a migration, repair issues, or recover.
 
 ```Bash
 thoradm migrate list
 thoradm migrate plan --from <revision> [--to <revision>]
-thoradm migrate run <migration id>
-thoradm migrate verify <migration id>
+thoradm migrate check --id <migration> [--all] [--samples] [--slices <n>] [--batch-rows <n>]
+thoradm migrate run --id <migration> [--objects <keys>] [--reason <code>] [--accept-issues <code>]
+                    [--confirm <code>] [--backup <ref>] [--slices <n>] [--batch-rows <n>]
+                    [--force-break-lease]
+thoradm migrate verify --id <migration>
+thoradm migrate issues --id <migration> [--reason <code>]
+thoradm migrate report --id <migration>
+thoradm migrate revert --to <revision> [--dry-run] [--backup <ref>] [--confirm <code>]
+                       [--accept-backup-gaps]
+thoradm migrate reset-state --to <revision> --i-restored-data
+thoradm migrate record --revision <revision> [--state <file>] [--seed]
 ```
 
-`list` prints every revision and its steps:
+`list` prints every revision edge and its steps. A release edge marked `one-way` has no reverse
+edge, so a cluster can't be downgraded across it; `revert` marks an edge that goes back to an older
+revision. A feature branch between releases can also add `pre-release` edges (to or from its
+`-pre.<change>` revision) and `sibling` edges (an alternative path to a depth the main chain already
+reaches, which `auto_target_dev` never targets); the shipped catalog has none. A step shows its kind, `needs approval + backup` when it
+changes data, the component it `scales down`, and the `migration` it runs:
 
 ```
 2026-10-v01 (released with Thorium 1.8.1): Thorium deployed by the minithor or megathor scripts before the Helm charts (the baseline every converted cluster starts from)
-2026-10-v02 (released with Thorium 1.8.1): Thorium deployed by the Helm charts with the chart-managed operator
+2026-10-v02 (released with Thorium 1.8.1; from 2026-10-v01; one-way): Thorium deployed by the Helm charts with the chart-managed operator
   - scylla-role [Infra]: Check that Thorium's Scylla role logs in with the configured credentials
   - elastic-identity [Infra]: Check that Thorium's Elastic user authenticates and holds the index privileges Thorium needs
-  - elastic-reindex-keyword-mappings [Data, needs approval + backup, scales down search-streamer, migration elastic-keyword-mappings (not implemented; manual procedure)]: Reindex Elastic indexes created without mappings, whose group field is not a keyword (megathor deployments before the indexes were left to the search-streamer); skipped when every index is already correct
+  - elastic-reindex-keyword-mappings [Data, needs approval + backup, scales down search-streamer, migration elastic-rebuild]: Reindex Elastic indexes created without mappings, whose group field is not a keyword (megathor deployments before the indexes were left to the search-streamer); skipped when every index is already correct
   - finalize [Config]: Record the new revision
+2026-10-v03 (released with Thorium 1.8.1; from 2026-10-v02): Schema apply runs before any step that changes data
+  - schema-apply [Infra]: Apply the schema in a Job before any step that changes data, creating missing tables, columns, and views and recording what was applied
+  - users-settings-theme [Data, needs approval + backup, scales down api, migration users-settings-theme]: Move each user's theme from its own field into the user's settings
+2026-10-v02 (released with Thorium 1.8.1; from 2026-10-v03; revert): Revert the revision that applies the schema first
+  - users-settings-theme-reverse [Data, needs approval + backup, scales down api, migration users-settings-theme-reverse]: Move the theme of any user stored in its own field into the user's settings, the layout the first Helm revision reads; users already there are skipped
 ```
 
 `plan` prints the steps from one revision to another (the latest by default), for example
 `thoradm migrate plan --from 2026-10-v01`. Find a cluster's revision in the `Revision` column of
-`kubectl -n thorium get thoriumcluster`.
+`kubectl -n thorium get thoriumcluster`, or with `thoradm schema status`. A target the catalog has
+no path to exits 1.
 
-`run` and `verify` take a migration id from `list`. No migration is implemented in Thoradm yet:
-both print the manual procedure for the migration and exit with code 3, which scripts can tell
-apart from a failure (exit code 1, such as for an unknown id).
+**The migrations.** `--id` names a migration, which a step's `migration` in `list` names. The
+migrations built into this release are `elastic-rebuild`; the users migrations, which move a user's
+theme between its own field and the user's `settings` (`users-settings-theme` on the way up to
+`2026-10-v03`, `users-settings-theme-reverse` on the way back from it to `2026-10-v02`, which skips
+every user already in the layout `2026-10-v02` reads); and the six
+`rebucket-<data type>` migrations (`rebucket-files`, `rebucket-repos`, `rebucket-results`,
+`rebucket-entities`, `rebucket-associations`, `rebucket-tags`) that the operator plans when a
+partition size changes (see [Changing a partition size](../deploy/upgrades.md#changing-a-partition-size)).
+Thoradm can check, run, and verify every one of them, `elastic-rebuild` included, which the operator
+runs as the migration Job of the Elasticsearch reindex step (see [Reindexing
+Elasticsearch](../deploy/upgrades.md#reindexing-elasticsearch)). An unknown id exits 1. A
+migration thoradm can't perform prints its manual procedure and exits 3 on `check`, `run`, and
+`verify`, and one it can only check does so on `run` and `verify`; this release registers neither
+kind.
+
+| Subcommand | What it does |
+|---|---|
+| `check` | Classifies every object the migration would touch (`current`, `migratable`, `unrecognized`, `error`) and writes nothing but its own result. It prints the report as JSON: the counts, the rows a run would rewrite, how long the paused components would stay down, the largest issue groups by reason code, and, for a step that loses data, the loss estimate. `--all` prints every group and `--samples` up to 20 sample keys each, to the terminal only. Exits 0 |
+| `run` | Runs the migration: it splits the work into `--slices` (default 16) contiguous slices, one worker each, and checkpoints after every batch of at most `--batch-rows` rows (default 10000), so a stopped run resumes where it stopped. It prints a JSON summary with the status, the counts, and the issue groups. A pass that finishes, with groups within the limit or accepted, exits 0 |
+| `run --objects <keys>` | Processes only these object keys, such as objects you fixed by hand after an issue |
+| `run --reason <code>` | Re-runs one issue group: scans the family, writes the objects that now convert, and recounts every group. It prints `group <code>: <n> objects before, <m> after` and exits 5 while the group still holds objects. When it ends the pass, the operator continues without a new approval |
+| `run --accept-issues <code>` | Reason codes whose groups don't fail the run (the operator passes the approval's `acceptIssues`; a code that matches no group is ignored) |
+| `run --confirm <code>` | The confirmation code of a lossy step. Thoradm records the code as consumed before anything else, and refuses a code already consumed (see [Accepting loss](../deploy/upgrades.md#accepting-loss)) |
+| `run --force-break-lease` | Takes the writer lease although another writer holds it (see [The Writer Lease](#the-writer-lease)) |
+| `run --backup <ref>`, `--running-entry <json>` | Passed by the operator: the approval's backup reference, recorded in the pass, and the step's `Running` history entry with its paused replica counts, written before anything else |
+| `verify` | Loads every object of the migration's family through the API's own deserialization. Exits 0 when all load, and 5 when some don't |
+| `issues` | Lists the issue groups of the current attempt, summed across workers. `--reason <code>` shows one group: its class, count, resolved count, whether it was accepted, and its sample keys from every worker |
+| `report` | Prints what the migration's last pass applied, as JSON; exits 1 when the pass hasn't ended |
+| `revert` | Moves a cluster back to an older revision: it reads the recorded revision and history, plans the reverse path, and runs each step's migration in turn. `--dry-run` prints the steps, what each loses, and the confirmation code of each lossy one, and changes nothing. `--dry-run` also shows whether `thoradm backup` covers each lost field, and names the components a step expects to be stopped while it runs; the revert stops none of them, so scale them to zero first. A step that loses data runs only with `--confirm <its code>` (and `--backup`), one lossy step per run: the next code exists once this step's entries are recorded. A step that loses a field no `thoradm backup` covers, which a backup can't restore, is refused unless `--accept-backup-gaps` is also given, the way the operator's approval needs `acceptBackupGaps`. A step thoradm doesn't run stops the revert with that step's manual procedure. An interrupted step exits 4; run the revert again to resume it. An interrupted lossy step's code changed when its run was recorded, so run `--dry-run` again for its new code and rerun with that code. When every step has run it records the older revision |
+| `reset-state` | Rewrites the recorded revision after data was restored or wiped other than by `backup restore`, when the record names a revision the data isn't at; refuses with exit 2 without `--i-restored-data` (see below) |
+| `record` | Run by the operator to copy its entries into the record and move the recorded revision once every step is recorded; `--seed` records the revision and history of the `--state` ConfigMap when the keyspace holds none |
+
+Exit codes of the `migrate` and `schema` subcommands:
+
+| Exit code | Meaning |
+|---|---|
+| 0 | Done: the command ran, and a migration pass ended within its limits |
+| 1 | A refusal or an error, such as an unknown id, no recorded revision, or a held lease (see stderr) |
+| 2 | The config or an argument can't be used |
+| 3 | A migration thoradm can't run, a revision with no committed snapshot to converge to, or a backend a read-only command (`schema diff`, `schema legacy`) can't reach |
+| 4 | A failure a retry may get past: a lost connection, an interrupted run (SIGTERM, resumable), or an unreachable Redis |
+| 5 | A migration ended `Failed` because an issue group went over the step's limit, a `verify` found objects that don't load, or a `--reason` group still holds objects |
+| 6 | A migration failed systematically: the migration, not the data, is wrong |
+| 7 | `schema diff` found drift |
+
+Exit codes 1 to 3, 5, and 6 fail a Job at once, and 4 is retried, which is how the operator treats a
+migration Job.
+
+### Issue groups and reason codes
+
+A migration classifies each object it reads. An object that can't be converted is not written and
+is recorded in an issue group named by a reason code (for example `malformed_json:settings`), with
+up to 20 sample keys per worker. A group that holds more objects than the step's limit fails the
+run; a smaller one is recorded and the run finishes with issues, which the `MigrationIssues`
+condition reports. Fix the objects and re-run the group with `run --reason <code>`, or accept the
+code with `acceptIssues` (see [Data migrations](../deploy/upgrades.md#data-migrations)).
+
+### The Writer Lease
+
+Commands that write take the namespace's writer lease, so at most one writer runs at a time: the
+operator's Jobs, `thoradm migrate run`, `thoradm schema apply` (not `--dry-run`), `thoradm migrate reset-state`, the two schema applies of a
+restore, and `thoradm migrate revert` through the runs it makes. The lease is the Redis key
+`<namespace>:schema-writer`, renewed by a heartbeat every ten seconds while it is held and expiring
+after 30 seconds without one. A writer whose lease is broken or lost stops at its next batch. A
+command that finds the lease held exits 1 with `the namespace's writer lease is held by <holder>;
+wait for it to finish`, and Redis failing exits 4. `--force-break-lease`, on `migrate run` and
+`schema apply` only, takes the lease over even though another writer holds it, and the holder's
+workers stop at their next batch; use it only when the holder is gone, such as a crashed Job whose
+lease hasn't expired.
+
+### Resetting the Recorded State
+
+`thoradm migrate reset-state --to <revision> --i-restored-data` fixes a record that names a
+revision the data isn't at, as after restoring a backup taken at an older revision or wiping data
+with tools other than `thoradm backup restore` (which writes the backup's record itself, or for a
+backup without one the revision its data is at). Without
+`--i-restored-data` it refuses with exit code 2. It takes the writer lease, so it refuses while a Job or another
+command is writing, voids the migration work and recorded pause counts of revisions above the
+target, appends one `reset-state` entry to the history, and writes the revision row last, so a
+stopped run leaves the old revision and can be run again. The entry lowers the revision, so every
+step above the target counts as unfinished again although its old `Done` entry stays in the
+history, and the operator's upgrade run runs those steps again once a target is set. The
+operator reads the record when its hourly drift read is due, at its next reconcile after that
+(at least daily), and within seconds after that read, and rebuilds its ConfigMap mirror from it
+when it holds a `reset-state` or `restored` entry the mirror lacks. Until then it plans from its
+`thorium-upgrade-state` ConfigMap, and an operator older than the revision that ConfigMap holds
+refuses the cluster (`AheadOfCatalog`) without ever reading the record. After a restore or a
+reset, delete the ConfigMap and restart the operator to make it read the record at once (a quiet
+cluster may not reconcile again for a day, so deleting the ConfigMap alone isn't enough):
+
+```bash
+kubectl -n thorium delete configmap thorium-upgrade-state
+kubectl -n thorium rollout restart deployment operator
+```
+
+## The Declared Schema
+
+`thoradm schema` works with the schema this build declares: the Scylla tables and materialized
+views, Elasticsearch's indexes, and the layout versions of Redis and S3.
+
+```Bash
+thoradm schema print [--backend scylla|elastic|redis|s3] [--canonical]
+thoradm schema hash [--backend scylla|elastic|redis|s3]
+thoradm schema apply [--dry-run] [--wait-for-scylla <secs>] [--seed-revision <revision>]
+                     [--to-revision <revision>] [--accept-partition-sizes]
+                     [--recreate-view <view>]... [--yes] [--force-break-lease]
+thoradm schema status [--acknowledged <json>] [--no-probe] [--result <job uid>]
+                      [--wait-for-scylla <secs>]
+thoradm schema diff [--json] [--acknowledged <file>]
+thoradm schema verify-views [--view <view>] [--sample <n>]
+thoradm schema legacy [--json]
+thoradm schema drop-legacy --object <backend:name> [--execute] [--confirm]
+```
+
+| Subcommand | What it does |
+|---|---|
+| `print` | Prints the declared schema as CQL, or with `--canonical` in canonical JSON, optionally for one backend. Reads no config |
+| `hash` | Prints the declared fingerprints: the deployment's and each backend's. Reads no config |
+| `apply` | Creates the keyspace and the `schema_migrations` tables, then converges every declared object: it creates what is missing and adds missing columns, and it never drops anything. It records what it applied. `--dry-run` prints the statements and takes no lease. The operator runs the same command as the schema-apply Job before it rolls components out |
+| `status` | Prints the deployment's record (revision, fingerprints, history), a capped drift summary, and this thoradm's catalog identity on one `THORIUM-RESULT` line, read-only. `--no-probe` skips the probe of the live schema and reports the record only |
+| `diff` | Compares the live schema with the snapshot of the recorded revision (see [Comparing the Live Schema](#comparing-the-live-schema)) |
+| `verify-views` | Compares each declared materialized view with its base table by token range, read-only; `--sample <n>` checks only that many random token ranges. Scylla updates views in the background, so rows written while it runs can show a view briefly out of step: run it again, with writers paused, before recreating a view it reports |
+| `legacy`, `drop-legacy` | List and drop the objects older releases created (see [Legacy Schema Objects](#legacy-schema-objects)) |
+
+`schema apply` refuses, and exits 1, when a data-shaping setting (`thorium.files.partition_size`
+and the other partition sizes, or `files.password`) differs from the recorded one while data shaped
+by it exists, naming the setting and never printing a value. The operator then plans the matching
+`rebucket-<data type>` step (see [Changing a partition size](../deploy/upgrades.md#changing-a-partition-size)).
+`--accept-partition-sizes` records the configured partition sizes although sampled rows suggest
+others, and the operator passes it once the schema-apply step is approved. A table whose configured
+default TTL differs from the live one is altered.
+
+- `--seed-revision <revision>` records that revision when `schema_migrations` holds none, after
+  probing the live schema against the revision's snapshot; it is refused when another revision is
+  recorded or the live schema doesn't match.
+- `--to-revision <revision>` (which excludes `--seed-revision` and `--recreate-view`) converges to
+  an older revision's committed snapshot instead of the declared schema: it creates the tables, columns, and views that snapshot has and the live schema
+  lacks (what a later step dropped) and drops nothing a newer revision added. It is the first step
+  of reversing a step that dropped something.
+- `--recreate-view <view>` (repeatable) drops a declared materialized view and recreates it from the
+  declaration, then waits for it to build. Routes that read the view fail while it is dropped and
+  then see missing rows until its build finishes. It asks for confirmation unless `--yes` is given,
+  which is required without a terminal. A create that fails after the drop leaves the view missing;
+  run the command again.
+- When a table holds the name of a declared materialized view, `schema apply` and
+  `--recreate-view` refuse before changing anything, naming the view. Neither drops a table, so
+  drop it by hand once you have checked it holds nothing you need; the next `schema apply` creates
+  the view. `schema diff` reports the table as drift either way.
+- When a materialized view holds the name of a declared table, `schema apply` refuses the same
+  way before changing anything, naming the table. It never drops a view, so drop it by hand once
+  you have checked nothing needs it; the next `schema apply` creates the table.
+- `--wait-for-scylla <secs>` waits up to that long for Scylla to accept connections.
+
+`schema apply` exits 0 on success, 1 when it refuses, 2 for an unusable config or flag, 3 when
+`--to-revision` names a revision with no committed snapshot, and 4 when Scylla or Redis can't be
+reached or a statement failed in a way a retry may get past.
+
+## Comparing the Live Schema
+
+`thoradm schema diff` probes Scylla, Redis, S3, and Elasticsearch read-only and compares what it finds
+with the schema snapshot of the revision the deployment's record names. It prints every difference
+(`--json` prints the report as JSON), marking an object `missing`, `changed`, or `unexpected`.
+The snapshot is the recorded revision's, or, once a schema apply has created the objects of a later
+revision before the record moves to it, that later revision's, so an upgrade in progress doesn't
+show its own new objects as `unexpected`. `--acknowledged <file>` takes a JSON list in the form of the `ThoriumCluster`'s
+`spec.upgrade.drift_acknowledged`; an acknowledged `unexpected` object is not drift.
+
+| Exit code | Meaning |
+|---|---|
+| 0 | Every backend matches the recorded revision (or only acknowledged objects differ) |
+| 1 | A refusal, such as no recorded revision to compare with |
+| 2 | The config or the acknowledgements file can't be used |
+| 3 | A backend the comparison needs is unavailable |
+| 4 | A read failed in a way a retry may get past |
+| 7 | The report was printed and at least one object differs |
+
+## Legacy Schema Objects
+
+Older releases created two Scylla objects that Thorium no longer uses: the `events` table and the
+`entities_by_name` view. Thorium no longer creates them, a keyspace an older release created keeps
+both with their rows, and starting Thorium against that keyspace leaves them alone. They cost disk
+and, for the view, write work, and an admin can remove them on purpose. Two commands list and drop
+them. Neither runs unless you type it, and `thoradm schema apply` never drops anything.
+
+Each object is named `<backend>:<name>`, here `scylla:events` and `scylla:entities_by_name`. A
+legacy object is one Thorium's registry of retired objects lists; only those can be dropped.
+
+### Listing Legacy Objects
+
+`thoradm schema legacy` only reads. It prints two sections and a count, or one JSON document with
+`--json`.
+
+```Bash
+thoradm schema legacy [--json]
+```
+
+```
+Legacy objects
+  scylla:events  (table, class Runtime)
+    present:     yes
+    rows:        18204
+    created by:  2026-10-v01, 2026-10-v02
+    used by:     none
+    downgrade to 2026-10-v03: recreated (it does not use this object)
+    downgrade to 2026-10-v02: recreated (it does not use this object)
+    downgrade to 2026-10-v01: recreated (it does not use this object)
+    droppable:   yes
+  scylla:entities_by_name  (view, class Derived)
+    ...
+
+Not registered (cannot be dropped by this command)
+  none
+
+no unmanaged extra objects
+```
+
+The first section has one block per registered object: whether the keyspace holds it, its row count,
+the revisions that created it and the revisions that read it, what a downgrade to each revision you
+can still move to does to it, and whether it can be dropped. A downgrade line says one of:
+
+| Line | Meaning |
+|---|---|
+| `recreated (it does not use this object)` | The revision doesn't use the object, so a downgrade creates it again |
+| `recreated and rebuilt from the base table` | The revision uses the object and its data can be recreated |
+| `DATA LOSS (N rows)` | The revision uses the object and its rows are the only copy, so dropping it would lose them |
+
+The second section lists each object that is live and named in a past revision's schema but that
+Thorium neither declares nor registers as legacy. Thoradm doesn't know whether any revision needs
+such an object, so no command drops it; each entry names the revisions that list it and says to ask
+a developer to register it as legacy or declare it again. The last line counts the live objects no
+revision names, which no Thorium command touches; `thoradm schema diff` lists them.
+
+### Dropping Legacy Objects
+
+```Bash
+thoradm schema drop-legacy --object <id> [--object <id> ...] [--execute] [--confirm]
+```
+
+Every object is named with `--object`; there is no way to drop all of them at once. Without
+`--execute` the command is a dry run: it prints each object's row count, the statement it would
+run, and what a downgrade does to the object afterwards, and drops nothing.
+
+```Bash
+# see what dropping the events table would do
+thoradm schema drop-legacy --object scylla:events
+# drop both legacy objects, typing each id when asked
+thoradm schema drop-legacy --object scylla:events --object scylla:entities_by_name --execute
+```
+
+With `--execute` the command asks you to type each object's id before it drops anything; a wrong
+answer drops nothing. `--confirm` skips the questions, and is required with `--execute` when no terminal is attached.
+An object the keyspace doesn't hold is skipped.
+
+The command refuses, exits 1, and drops nothing in the whole list when any object is:
+
+```
+scylla:samples_list is a declared object; refusing.
+scylla:tools is not a registered legacy object. Registered: scylla:events, scylla:entities_by_name.
+refused: scylla:foo is used by 2026-10-v02 (required data, 42 rows); a downgrade would lose it.
+```
+
+That is, an object Thorium declares, an id that isn't a registered legacy object (including an
+object only a past revision names), or an object that a revision you can still move to uses with
+rows that are the only copy. It also refuses when the keyspace has no `schema_migrations` table,
+since a drop must be recorded: run `thoradm schema apply` first.
+
+Each drop writes one row to `schema_migrations` under the kind `legacy_drop`, holding the time,
+the object's id, how many rows it held, and the operating system user and host that ran the command.
+A dry run writes nothing. The rows are part of a backup's schema record (`schema.json`), like the rest
+of `schema_migrations` except the Job results, and a restore writes them back.
+
+| Exit code | Meaning |
+|---|---|
+| 0 | Done, or a dry run |
+| 1 | A refusal, or a drop that was refused |
+| 2 | The config can't be loaded |
+| 3 | Scylla is unavailable |
+| 4 | A read or statement failed in a way a retry may get past |
+
+A dropped legacy object comes back when a deployment downgrades to a revision whose schema
+lists it, because a downgrade creates every object the target revision lists and the keyspace lacks.
+Dropping them first doesn't stop `2026-10-v01` from moving to `2026-10-v02` and later.

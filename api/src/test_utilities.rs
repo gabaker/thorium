@@ -2,13 +2,18 @@
 
 mod api;
 pub mod generators;
+#[cfg(test)]
+mod harness_tests;
 mod helpers;
 mod impls;
+#[cfg(feature = "upgrades-runtime")]
+pub mod upgrade_harness;
 
 use crate::client::Error;
 pub use api::{
-    CONF, admin_client, get_redis_client, init_bucket, redis_pool, s3_client, scylla_session,
-    wipe_dbs,
+    BootstrapAction, CONF, TEST_CONFIG_VAR, TempBuckets, admin_client, bootstrap_plan,
+    get_redis_client, init_bucket, prepare_backends, read_only, redis_pool, s3_client,
+    scylla_session, start_api, test_config_path, wipe_dbs,
 };
 
 // expose a blocking admin client for sync tests

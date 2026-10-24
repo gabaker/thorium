@@ -27,6 +27,7 @@ use super::s3::S3;
 use crate::conf::OauthProvider;
 use crate::info;
 use crate::models::backends::setup::{self, Scylla};
+use crate::models::schema::SchemaCheckError;
 use crate::utils::ApiError;
 use crate::{conf::Conf, error};
 
@@ -344,13 +345,43 @@ pub struct Shared {
     pub banner: String,
 }
 
+/// Startup options for the API beyond its config
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct StartupOpts {
+    /// Apply the schema before connecting (dev only, off by default)
+    pub apply_schema: bool,
+}
+
 impl Shared {
-    /// Sets up the shared object
+    /// Sets up the shared object, panicking when the applied schema isn't one this build runs on
+    ///
+    /// Issues no DDL: the schema must already be applied.
     ///
     /// # Arguments
     ///
     /// * `config` - The Thorium config to use
+    ///
+    /// # Panics
+    ///
+    /// Panics when the startup schema check refuses the live schema.
     pub async fn new(config: Conf) -> Self {
+        // set up with the default options, which apply nothing
+        Box::pin(Self::with_opts(config, StartupOpts::default()))
+            .await
+            .unwrap_or_else(|err| panic!("{err}"))
+    }
+
+    /// Sets up the shared object, returning the startup schema check's refusal
+    ///
+    /// # Arguments
+    ///
+    /// * `config` - The Thorium config to use
+    /// * `opts` - The startup options
+    ///
+    /// # Panics
+    ///
+    /// Panics when a backend can't be connected to or the S3 config is unusable.
+    pub async fn with_opts(config: Conf, opts: StartupOpts) -> Result<Self, SchemaCheckError> {
         // log the namespace we will be using
         info!(
             config.thorium.tracing.local.level,
@@ -358,8 +389,8 @@ impl Shared {
         );
         // setup redis connection pool
         let redis = retry!(setup::redis(&config), 2, "Redis setup", config);
-        // setup scylla session and prepared statements
-        let scylla = Scylla::new(&config).await;
+        // check the applied schema, then prepare scylla's statements
+        let scylla = Scylla::start(&config, opts).await?;
         // setup the elastic client
         let elastic = retry!(setup::elastic(&config), 60, "Elastic setup", &config);
         // build an email client if its configured
@@ -373,7 +404,7 @@ impl Shared {
         let banner = fs::read_to_string("banner.txt")
             .await
             .unwrap_or("Add your custom Thorium banner here!".to_owned());
-        Shared {
+        Ok(Shared {
             config,
             redis,
             scylla,
@@ -382,7 +413,7 @@ impl Shared {
             email,
             oauth,
             banner,
-        }
+        })
     }
 }
 

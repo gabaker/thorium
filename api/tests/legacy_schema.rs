@@ -1,9 +1,13 @@
 //! Tests that the API starts on keyspaces created by releases older than its tables
 
+use chrono::{DateTime, Utc};
 use scylla::client::session::Session;
 use thorium::Error;
 use thorium::models::backends::setup::Scylla;
+use thorium::models::schema::ConfigRecord;
 use thorium::test_utilities::{self, CONF};
+use thorium::utils::StartupOpts;
+use thorium::utils::helpers::partition;
 
 /// The associations table as releases before August 2026 created it
 const OLD_ASSOCIATIONS: &str = "CREATE TABLE {ns}.associations ( \
@@ -108,12 +112,17 @@ async fn old_keyspace(session: &Session, keyspace: &str) -> Result<(), Error> {
     .await?;
     exec(session, &OLD_ASSOCIATIONS.replace("{ns}", keyspace)).await?;
     exec(session, &OLD_RESULTS.replace("{ns}", keyspace)).await?;
-    // seed a row in each table
+    // seed a row in each table, bucketed as the configured associations partition size gives
+    let created = DateTime::parse_from_rfc3339("2026-01-02T03:04:05Z")
+        .expect("a valid time")
+        .with_timezone(&Utc);
+    let size = ConfigRecord::partition_sizes_of(&CONF)["associations"];
+    let bucket = partition(created, 2026, size);
     exec(
         session,
         &format!(
             "INSERT INTO {keyspace}.associations (group, year, bucket, source, created, target, \
-            direction, kind, submitter) VALUES ('minerva', 2026, 7, 'corn', \
+            direction, kind, submitter) VALUES ('minerva', 2026, {bucket}, 'corn', \
             '2026-01-02T03:04:05Z', 'husk', 'To', 'FileFor', 'io')"
         ),
     )
@@ -143,7 +152,12 @@ async fn setup_adds_columns_older_keyspaces_lack() -> Result<(), Error> {
     conf.thorium.namespace.clone_from(&keyspace);
     let first = tokio::spawn({
         let conf = conf.clone();
-        async move { Scylla::new(&conf).await.session }
+        async move {
+            Scylla::start(&conf, StartupOpts { apply_schema: true })
+                .await
+                .expect("the API starts")
+                .session
+        }
     })
     .await;
     assert!(
@@ -203,7 +217,13 @@ async fn setup_adds_columns_older_keyspaces_lack() -> Result<(), Error> {
         .map_err(|err| Error::new(err.to_string()))?;
     assert_eq!(rows, vec![("harvest".to_owned(), "reap".to_owned(), None)]);
     // a second start succeeds and leaves the columns as they were
-    let second = tokio::spawn(async move { Scylla::new(&conf).await.session }).await;
+    let second = tokio::spawn(async move {
+        Scylla::start(&conf, StartupOpts { apply_schema: true })
+            .await
+            .expect("the API starts")
+            .session
+    })
+    .await;
     assert!(second.is_ok(), "a second setup failed");
     assert_eq!(
         columns(&session, &keyspace, "associations").await?,
@@ -229,13 +249,24 @@ async fn setup_handles_upper_case_namespaces() -> Result<(), Error> {
     exec(&session, &format!("DROP KEYSPACE IF EXISTS {keyspace}")).await?;
     let fresh = tokio::spawn({
         let conf = conf.clone();
-        async move { Scylla::new(&conf).await.session }
+        async move {
+            Scylla::start(&conf, StartupOpts { apply_schema: true })
+                .await
+                .expect("the API starts")
+                .session
+        }
     })
     .await;
     assert!(fresh.is_ok(), "setup failed on a fresh keyspace");
     // setup adds the missing columns to a keyspace from an older release
     old_keyspace(&session, &keyspace).await?;
-    let old = tokio::spawn(async move { Scylla::new(&conf).await.session }).await;
+    let old = tokio::spawn(async move {
+        Scylla::start(&conf, StartupOpts { apply_schema: true })
+            .await
+            .expect("the API starts")
+            .session
+    })
+    .await;
     assert!(
         old.is_ok(),
         "setup failed on a keyspace from an older release"
@@ -314,7 +345,13 @@ async fn setup_creates_no_events_table_or_entities_by_name_view() -> Result<(), 
     exec(&session, &format!("DROP KEYSPACE IF EXISTS {keyspace}")).await?;
     let mut conf = CONF.clone();
     conf.thorium.namespace.clone_from(&keyspace);
-    let setup = tokio::spawn(async move { Scylla::new(&conf).await.session }).await;
+    let setup = tokio::spawn(async move {
+        Scylla::start(&conf, StartupOpts { apply_schema: true })
+            .await
+            .expect("the API starts")
+            .session
+    })
+    .await;
     assert!(setup.is_ok(), "setup failed on an empty keyspace");
     // the declared objects exist and the unused ones don't
     assert!(object_exists(&session, &keyspace, "entities").await?);
@@ -344,7 +381,12 @@ async fn setup_leaves_the_events_table_and_entities_by_name_view_in_place() -> R
     conf.thorium.namespace.clone_from(&keyspace);
     let first = tokio::spawn({
         let conf = conf.clone();
-        async move { Scylla::new(&conf).await.session }
+        async move {
+            Scylla::start(&conf, StartupOpts { apply_schema: true })
+                .await
+                .expect("the API starts")
+                .session
+        }
     })
     .await;
     assert!(first.is_ok(), "setup failed on an empty keyspace");
@@ -376,7 +418,13 @@ async fn setup_leaves_the_events_table_and_entities_by_name_view_in_place() -> R
     )
     .await?;
     // a second start succeeds on the keyspace holding both
-    let second = tokio::spawn(async move { Scylla::new(&conf).await.session }).await;
+    let second = tokio::spawn(async move {
+        Scylla::start(&conf, StartupOpts { apply_schema: true })
+            .await
+            .expect("the API starts")
+            .session
+    })
+    .await;
     assert!(
         second.is_ok(),
         "setup failed on a keyspace holding the events table and entities_by_name view"

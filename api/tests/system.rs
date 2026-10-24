@@ -459,8 +459,15 @@ async fn host_path_consistency_scan() -> Result<(), Error> {
 /// (a scheduling-plane DoS, and on reactor deployments a path to admin-token theft). Every sibling
 /// `/api/system/*` method is admin-gated. The secure behavior is that a non-admin registration is
 /// rejected with `401`.
+#[serial_test::parallel]
 #[tokio::test]
 async fn worker_registration_requires_admin() -> Result<(), Error> {
+    // the lock's panic guard needs an unwind safe future, which the client's is not
+    std::panic::AssertUnwindSafe(worker_registration_requires_admin_body()).await
+}
+
+/// The body of [`worker_registration_requires_admin`], run behind the parallel lock
+async fn worker_registration_requires_admin_body() -> Result<(), Error> {
     // get an admin client just to resolve the API host and create the low-priv user
     let admin = test_utilities::admin_client().await?;
     // get a low privilege (non-admin) user client
@@ -495,8 +502,15 @@ async fn worker_registration_requires_admin() -> Result<(), Error> {
 /// `delete_workers` checks workers 25 at a time but deletes nothing until every chunk has been
 /// checked, so a missing worker in a later chunk fails the request without leaving the earlier
 /// chunks deleted (a partially applied delete).
+#[serial_test::parallel]
 #[tokio::test]
 async fn delete_workers_is_all_or_nothing() -> Result<(), Error> {
+    // the lock's panic guard needs an unwind safe future, which the client's is not
+    std::panic::AssertUnwindSafe(delete_workers_is_all_or_nothing_body()).await
+}
+
+/// The body of [`delete_workers_is_all_or_nothing`], run behind the parallel lock
+async fn delete_workers_is_all_or_nothing_body() -> Result<(), Error> {
     // get admin client
     let client = test_utilities::admin_client().await?;
     // register our test node
@@ -554,8 +568,15 @@ async fn delete_workers_is_all_or_nothing() -> Result<(), Error> {
 ///
 /// The owner lookup for a missing worker returns nil, which is reported as the worker not being
 /// found rather than as a redis type error.
+#[serial_test::parallel]
 #[tokio::test]
 async fn non_admin_deleting_missing_worker_is_not_found() -> Result<(), Error> {
+    // the lock's panic guard needs an unwind safe future, which the client's is not
+    std::panic::AssertUnwindSafe(non_admin_deleting_missing_worker_is_not_found_body()).await
+}
+
+/// The body of [`non_admin_deleting_missing_worker_is_not_found`], run behind the parallel lock
+async fn non_admin_deleting_missing_worker_is_not_found_body() -> Result<(), Error> {
     // get an admin client to create our non-admin user
     let admin = test_utilities::admin_client().await?;
     let user = generators::client(&admin).await?;
@@ -570,8 +591,15 @@ async fn non_admin_deleting_missing_worker_is_not_found() -> Result<(), Error> {
 
 /// The system info an admin gets names the namespace the API serves, and a body from an API that
 /// doesn't report one parses with none
+#[serial_test::parallel]
 #[tokio::test]
 async fn info_names_the_namespace() -> Result<(), Error> {
+    // the lock's panic guard needs an unwind safe future, which the client's is not
+    std::panic::AssertUnwindSafe(info_names_the_namespace_body()).await
+}
+
+/// The body of [`info_names_the_namespace`], run behind the parallel lock
+async fn info_names_the_namespace_body() -> Result<(), Error> {
     // get admin client
     let client = test_utilities::admin_client().await?;
     // the info names the namespace in the API's config
@@ -1030,6 +1058,9 @@ fn redis_url() -> String {
 
 /// A user deleted after a backup lists the users but before it reads them doesn't fail the
 /// backup: the backup reads the records again and returns them without that user
+///
+/// The test opens a Redis `MONITOR`, which streams every command the server runs, so the Redis
+/// must be this run's own (the test needs the `MONITOR` right on it).
 #[serial_test::serial]
 #[tokio::test]
 async fn a_user_deleted_while_a_backup_reads_is_left_out() -> Result<(), Error> {

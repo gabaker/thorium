@@ -10,4 +10,7 @@ pub struct Args {
     /// Put the api in benchmarking mode (doesn't do anything yet)
     #[clap(long)]
     pub bench: bool,
+    /// Apply the Scylla schema before starting (dev only; deployments run `thoradm schema apply`)
+    #[clap(long)]
+    pub apply_schema: bool,
 }

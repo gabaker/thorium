@@ -61,6 +61,8 @@ pub enum Operation {
     Verify,
     /// A restore preflight check
     Preflight,
+    /// A step before any row is restored (the schema apply that converges the keyspace)
+    PreRestore,
     /// A post-restore step (views, nodes, census)
     PostRestore,
     /// Truncating a table during a `--wipe` restore
@@ -769,4 +771,23 @@ pub fn read_records(path: &Path) -> Result<Vec<FailureRecord>, Error> {
         }
     }
     Ok(records)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::Operation;
+
+    /// The step before any row is restored round-trips as `pre-restore`, and an operation this
+    /// reader doesn't know still parses as unknown
+    #[test]
+    fn the_pre_restore_operation_round_trips() {
+        // the operation is written in kebab case and read back as itself
+        let written = serde_json::to_string(&Operation::PreRestore).expect("serializes");
+        assert_eq!(written, "\"pre-restore\"");
+        let read: Operation = serde_json::from_str(&written).expect("parses");
+        assert_eq!(read, Operation::PreRestore);
+        // an operation added later parses as unknown
+        let later: Operation = serde_json::from_str("\"added-later\"").expect("parses");
+        assert_eq!(later, Operation::Unknown);
+    }
 }

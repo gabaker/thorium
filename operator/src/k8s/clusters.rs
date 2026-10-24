@@ -366,6 +366,7 @@ pub fn apply_elastic_ca(cluster: &crds::ThoriumCluster, conf: &mut Conf) {
 pub(crate) mod tests {
     use super::*;
     use serde_json::json;
+    use std::collections::{BTreeMap, BTreeSet};
 
     /// Build a full Thorium config like the one the Helm chart renders with its secrets
     pub(crate) fn sample_config() -> serde_json::Value {
@@ -516,6 +517,10 @@ pub(crate) mod tests {
         pub body: serde_json::Value,
     }
 
+    /// A function that answers a request the fake kube API receives, or leaves it to the routes
+    pub(crate) type Handler =
+        Box<dyn FnMut(&FakeRequest) -> Option<(u16, serde_json::Value)> + Send>;
+
     /// A canned answer the fake kube API gives every request with a method and path
     #[derive(Debug, Clone)]
     struct FakeRoute {
@@ -532,13 +537,18 @@ pub(crate) mod tests {
     /// An in-process fake of the kube API that gives canned answers and records every request
     ///
     /// A request without a matching route gets a 404 `Status`, which kube reports as a
-    /// missing object.
-    #[derive(Debug, Clone, Default)]
+    /// missing object. Paths given to [`FakeKube::unique_names`] answer a create whose name
+    /// already exists there with a 409 `AlreadyExists`, like the kube API.
+    #[derive(Clone, Default)]
     pub(crate) struct FakeKube {
+        /// Answers a request from state the test keeps, ahead of the canned routes
+        handler: Arc<std::sync::Mutex<Option<Handler>>>,
         /// The canned answers, the first matching one winning
         routes: Arc<std::sync::Mutex<Vec<FakeRoute>>>,
         /// Every request received, oldest first
         requests: Arc<std::sync::Mutex<Vec<FakeRequest>>>,
+        /// The names that exist at each collection path that checks for duplicate creates
+        names: Arc<std::sync::Mutex<BTreeMap<String, BTreeSet<String>>>>,
     }
 
     /// Build the `Status` body the kube API answers a failed request with
@@ -558,6 +568,43 @@ pub(crate) mod tests {
             "reason": reason,
             "code": code
         })
+    }
+
+    impl FakeRequest {
+        /// Get a query parameter of the request, percent-decoded
+        ///
+        /// # Arguments
+        ///
+        /// * `name` - The parameter to get
+        pub(crate) fn query_param(&self, name: &str) -> Option<String> {
+            // find the parameter among the query's pairs
+            let raw = self
+                .query
+                .as_deref()?
+                .split('&')
+                .find_map(|pair| pair.strip_prefix(name)?.strip_prefix('='))?;
+            // decode the escaped bytes, which kube writes as %XX
+            let mut bytes = Vec::with_capacity(raw.len());
+            let mut rest = raw.as_bytes();
+            while let Some((&byte, tail)) = rest.split_first() {
+                let hex = tail.get(..2).and_then(|hex| std::str::from_utf8(hex).ok());
+                match (byte, hex.and_then(|hex| u8::from_str_radix(hex, 16).ok())) {
+                    (b'%', Some(decoded)) => {
+                        bytes.push(decoded);
+                        rest = &tail[2..];
+                    }
+                    (b'+', _) => {
+                        bytes.push(b' ');
+                        rest = tail;
+                    }
+                    _ => {
+                        bytes.push(byte);
+                        rest = tail;
+                    }
+                }
+            }
+            String::from_utf8(bytes).ok()
+        }
     }
 
     impl FakeKube {
@@ -583,6 +630,66 @@ pub(crate) mod tests {
                 status,
                 body,
             });
+            self
+        }
+
+        /// Replace the canned answer for a method and path, as the cluster changes between
+        /// reconciles
+        ///
+        /// # Arguments
+        ///
+        /// * `method` - The HTTP method to answer
+        /// * `path` - The exact path to answer
+        /// * `status` - The status code to answer with
+        /// * `body` - The JSON body to answer with
+        pub(crate) fn set_route(
+            &self,
+            method: &'static str,
+            path: &str,
+            status: u16,
+            body: serde_json::Value,
+        ) {
+            // drop the earlier answers for this method and path, then add the new one
+            let mut routes = self.routes.lock().expect("routes lock");
+            routes.retain(|route| route.method != method || route.path != path);
+            routes.push(FakeRoute {
+                method,
+                path: path.to_owned(),
+                status,
+                body,
+            });
+        }
+
+        /// Answer a create at a collection path whose name already exists there with a 409
+        /// `AlreadyExists`, starting from some names that exist
+        ///
+        /// # Arguments
+        ///
+        /// * `path` - The collection path objects are created at
+        /// * `existing` - The names of the objects that already exist there
+        pub(crate) fn unique_names(self, path: &str, existing: &[&str]) -> Self {
+            // track the names at this path, starting with the existing ones
+            let names = existing.iter().map(|name| (*name).to_owned()).collect();
+            self.names
+                .lock()
+                .expect("names lock")
+                .insert(path.to_owned(), names);
+            self
+        }
+
+        /// Answer requests from a function over state the test keeps, before any canned route
+        ///
+        /// A request the function answers `None` for falls through to the routes.
+        ///
+        /// # Arguments
+        ///
+        /// * `handler` - The function that answers a request
+        pub(crate) fn with_handler(
+            self,
+            handler: impl FnMut(&FakeRequest) -> Option<(u16, serde_json::Value)> + Send + 'static,
+        ) -> Self {
+            // the handler is consulted first for every request
+            *self.handler.lock().expect("handler lock") = Some(Box::new(handler));
             self
         }
 
@@ -616,31 +723,59 @@ pub(crate) mod tests {
                     let query = request.uri().query().map(ToOwned::to_owned);
                     let raw = request.into_body().collect_bytes().await?;
                     let body = serde_json::from_slice(&raw).unwrap_or(serde_json::Value::Null);
+                    // a create reusing a name at a path that checks names conflicts
+                    let duplicate = method == "POST"
+                        && fake
+                            .names
+                            .lock()
+                            .expect("names lock")
+                            .get_mut(&path)
+                            .zip(body["metadata"]["name"].as_str())
+                            .is_some_and(|(names, name)| !names.insert(name.to_owned()));
+                    // keep the request for later assertions
+                    let received = FakeRequest {
+                        method: method.clone(),
+                        path: path.clone(),
+                        query,
+                        body,
+                    };
                     fake.requests
                         .lock()
                         .expect("requests lock")
-                        .push(FakeRequest {
-                            method: method.clone(),
-                            path: path.clone(),
-                            query,
-                            body,
-                        });
-                    // find the canned answer, treating anything unknown as missing
-                    let (status, body) = fake
-                        .routes
+                        .push(received.clone());
+                    // a handler's answer wins over every canned route
+                    let handled = fake
+                        .handler
                         .lock()
-                        .expect("routes lock")
-                        .iter()
-                        .find(|route| route.method == method && route.path == path)
-                        .map_or_else(
-                            || (404, kube_status(404, "NotFound")),
-                            |route| (route.status, route.body.clone()),
-                        );
-                    // answer with the JSON body
+                        .expect("handler lock")
+                        .as_mut()
+                        .and_then(|handler| handler(&received));
+                    // find the canned answer, treating anything unknown as missing
+                    let (status, body) = if let Some(handled) = handled {
+                        handled
+                    } else if duplicate {
+                        (409, kube_status(409, "AlreadyExists"))
+                    } else {
+                        fake.routes
+                            .lock()
+                            .expect("routes lock")
+                            .iter()
+                            .find(|route| route.method == method && route.path == path)
+                            .map_or_else(
+                                || (404, kube_status(404, "NotFound")),
+                                |route| (route.status, route.body.clone()),
+                            )
+                    };
+                    // answer with the JSON body, or with the text itself for a body that is a string,
+                    // as a pod's log is
+                    let bytes = match &body {
+                        serde_json::Value::String(text) => text.clone().into_bytes(),
+                        other => serde_json::to_vec(other)?,
+                    };
                     let response = http::Response::builder()
                         .status(status)
                         .header("content-type", "application/json")
-                        .body(kube::client::Body::from(serde_json::to_vec(&body)?))?;
+                        .body(kube::client::Body::from(bytes))?;
                     Ok::<_, Box<dyn std::error::Error + Send + Sync>>(response)
                 }
             });

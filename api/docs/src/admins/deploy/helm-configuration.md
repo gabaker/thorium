@@ -48,7 +48,10 @@ A credential you leave empty is generated on the first install and read back wit
 one, so setting a new value changes it (see [Changing credentials](#changing-credentials)).
 
 > **Never change `thoriumSecretKey` on an existing deployment.** Changing it locks out every
-> user, including the operator's own. **Back up the `thorium-credentials` Secret** with the rest
+> user, including the operator's own. After a restore of another deployment's backup, switching to
+> the source's key brings the restored users back but still needs the operator's users reset (see
+> [A Restore into Another `secret_key`](../thoradm/thoradm.md#a-restore-into-another-secret_key)).
+> **Back up the `thorium-credentials` Secret** with the rest
 > of your deployment (see [Backups](./operate.md#backups)).
 
 ### Changing credentials
@@ -145,8 +148,19 @@ refuses to generate credentials when it can't read the old ones:
 | `registryAuth` | Credentials for tool image registries, as `registry host: base64(user:password)`; the operator writes them to the `registry-token` pull secret and the scaler's `docker-skopeo` Secret |
 | `namespaceBlacklist` | Extra namespaces Thorium must never use for a group (see [Namespaces](#namespaces)) |
 | `bootstrap` | The initial admin user and the privileged Scylla and Elasticsearch setup (see [External services](#external-services)) |
-| `upgrade` | `targetRevision`, `autoTargetDev`, and `approvals` (see [Upgrading Thorium](./upgrades.md)) |
+| `upgrade` | `targetRevision`, `startingRevision`, `autoTargetDev`, `dangerousDowngradeLossy`, `approvals`, and `driftAcknowledged` (see [Upgrading Thorium](./upgrades.md) and the table below) |
 | `scaler.k8s` | The k8s scaler's view of this cluster: `nodes` (the nodes Thorium may run jobs on; empty means every node), `alias` (the name Thorium shows), and `context` (the kube context name, `kubernetes-admin@cluster.local` for a scaler using its service account; change it only together with a kube config) |
+
+The `upgrade` values:
+
+| Value | Notes |
+|-------|-------|
+| `targetRevision` | The revision to upgrade or downgrade to; empty waits for one (see [Setting a target](./upgrades.md#setting-a-target)) |
+| `startingRevision` | The revision a keyspace with data but no record is at; read only when the operator finds neither a state ConfigMap nor a record (see [Where a deployment starts](./upgrades.md#where-a-deployment-starts)) |
+| `autoTargetDev` | Target the operator's latest revision whenever `targetRevision` is empty. For development clusters, which also label their namespace `thorium.sandia.gov/dev=true` (the chart never labels it) |
+| `dangerousDowngradeLossy` | Accept the loss of every lossy downgrade step without a code or backup. Honored only on a development cluster; ignored, with a `LossySettingRefused` condition, anywhere else (see [Accepting loss](./upgrades.md#accepting-loss)) |
+| `approvals` | `[{step, backup}]` for steps that change data or need manual work. A step may also list `acceptIssues` (reason codes of issue groups that don't fail its run), and a lossy downgrade step needs `acceptLoss: true` and `confirm: <code>`, plus `acceptBackupGaps: true` for a lost field no backup covers (see [Approvals](./upgrades.md#approvals)) |
+| `driftAcknowledged` | `[{backend, object, fingerprint}]` for `unexpected` schema objects you accept; `fingerprint` is optional and makes the entry lapse when the object changes (see [Schema drift](./upgrades.md#schema-drift)) |
 
 The initial admin user comes from `bootstrap.admin.secret` (default the `thorium-admin` Secret the
 chart renders, with keys `username` and `password`); the toolbox import logs in with the same
@@ -197,7 +211,7 @@ the services up yourself.
 
 | Service | Toggle | When managed, the chart | When external, you provide | Either way |
 |---------|--------|-------------------------|----------------------------|------------|
-| Scylla | `global.managed.scylla` | Deploys a `ScyllaCluster`; the operator creates Thorium's role with the default `cassandra` superuser | `operator.backends.scylla.nodes` (and `replication`), and either Thorium's role with `scyllaUsername`/`scyllaPassword`, or the Scylla bootstrap with an admin Secret | The operator checks Thorium's login; the API creates its keyspace |
+| Scylla | `global.managed.scylla` | Deploys a `ScyllaCluster`; the operator creates Thorium's role with the default `cassandra` superuser | `operator.backends.scylla.nodes` (and `replication`), and either Thorium's role with `scyllaUsername`/`scyllaPassword`, or the Scylla bootstrap with an admin Secret | The operator checks Thorium's login; its schema-apply Job (`thoradm schema apply`) creates the keyspace |
 | Elasticsearch | `global.managed.elastic` | Deploys Elasticsearch and Kibana through ECK, with Thorium's user and role in ECK's file realm | `operator.backends.elastic.node`, optionally `caSecret`, and either Thorium's user with `elasticUsername`/`elasticPassword`, or the Elasticsearch bootstrap with an admin Secret | The operator checks Thorium's credentials and index privileges; the search streamer creates the indexes |
 | Redis | `global.managed.redis` | Deploys Redis | `operator.backends.redis.host` (and `port`) and `global.credentials.redisPassword` | The operator checks `AUTH` and `PING` |
 | S3 | `global.managed.s3` | Deploys SeaweedFS and, with Quickwit, creates the `quickwit` bucket | `operator.backends.s3.endpoint` (and `region`, `usePathStyle`), `s3AccessKey`/`s3SecretToken`, and with Quickwit `global.quickwit.s3Endpoint` and a `quickwit` bucket you created | The operator creates Thorium's buckets |
@@ -278,8 +292,8 @@ Thorium's own identities on an external Scylla or Elasticsearch must either exis
 created by the operator from an admin Secret you opt into. Admin Secrets are always read from the
 thorium namespace.
 
-- **Scylla**: create Thorium's role as a superuser (the API creates its keyspace) and set
-  `global.credentials.scyllaUsername` and `scyllaPassword` to it, or set
+- **Scylla**: create Thorium's role as a superuser (the schema-apply Job creates the keyspace as
+  that role) and set `global.credentials.scyllaUsername` and `scyllaPassword` to it, or set
   `operator.cluster.bootstrap.scylla.enabled: true` with `adminSecret` naming a Secret that holds
   superuser credentials (`{name, username or usernameKey, passwordKey}`). Without an admin Secret
   the bootstrap uses the default `cassandra`/`cassandra` superuser, which only exists on a fresh
@@ -289,7 +303,8 @@ thorium namespace.
 - **Elasticsearch**: create Thorium's user with at least `view_index_metadata`, `write`, and
   `read` on every index in `global.elasticIndices`, plus `create_index` on any of them you don't
   pre-create (the search streamer creates them); `all` on `thorium*` covers the defaults, and the
-  search streamer's `--reindex` also needs `delete_index`. Then set
+  search streamer's `--reindex` and the Elasticsearch reindex step's `elastic-rebuild` migration
+  also need `delete_index`. Then set
   `global.credentials.elasticUsername` and `elasticPassword`, or set
   `operator.cluster.bootstrap.elastic.adminSecret.name` to a Secret holding superuser credentials;
   the operator then creates a role with `all` on `thorium*` (plus any configured index outside

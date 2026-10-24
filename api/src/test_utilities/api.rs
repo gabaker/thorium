@@ -11,7 +11,8 @@ use std::{sync::LazyLock, time::Duration};
 use tokio::sync::OnceCell;
 use tokio_util::time::FutureExt;
 
-use crate::models::schema::connect;
+use crate::models::schema::{ApplyOptions, ApplyTarget, apply, connect};
+use crate::utils::StartupOpts;
 use crate::{Conf, Error, Thorium, client::ClientSettings, conf::S3, models::AuthResponse};
 
 /// The path to a valid Thorium config in the testing directory
@@ -20,14 +21,185 @@ use crate::{Conf, Error, Thorium, client::ClientSettings, conf::S3, models::Auth
 /// Its values can be overridden using environment variables.
 static CONF_PATH: &str = "../api/tests/thorium-testing.yml";
 
+/// The environment variable that names the namespace the harness runs in
+const NAMESPACE_VAR: &str = "THORIUM__THORIUM__NAMESPACE";
+
+/// The environment variable that names a config file to use instead of [`CONF_PATH`]
+///
+/// With it set the harness is read-only: it never wipes or creates anything, so a config that
+/// points at a real deployment can't damage it.
+pub const TEST_CONFIG_VAR: &str = "THORIUM_TEST_CONFIG";
+
 /// The config to use for integration tests
 ///
-/// The config to read is hard-coded to the config in the tests directory, but that is just
-/// a template. Use environment variables (e.g. `THORIUM__THORIUM__S3__ENDPOINT`) or
-/// update the template manually to configure tests.
+/// The config to read is the file `THORIUM_TEST_CONFIG` names when it's set, and otherwise the
+/// template in the tests directory. Either way, environment variables (e.g.
+/// `THORIUM__THORIUM__S3__ENDPOINT`) override the file's values.
 pub static CONF: LazyLock<Conf> = LazyLock::new(|| {
-    Conf::new(CONF_PATH).unwrap_or_else(|_| panic!("Failed to load config at '{CONF_PATH}'"))
+    // load the config the harness reads
+    let path = test_config_path(std::env::var(TEST_CONFIG_VAR).ok().as_deref());
+    let mut conf = Conf::new(&path).unwrap_or_else(|_| panic!("Failed to load config at '{path}'"));
+    // a run that names no namespace gets one of its own, or fails in CI
+    let configured = std::env::var(NAMESPACE_VAR).is_ok_and(|namespace| !namespace.is_empty());
+    let ci = std::env::var("CI").is_ok_and(|value| value == "true");
+    match choose_namespace(configured, ci, read_only()) {
+        Ok(NamespaceChoice::Keep) => {}
+        Ok(NamespaceChoice::Generate) => {
+            // the stamp is the current epoch minute and the random part tells processes apart
+            let minutes = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map_or(0, |elapsed| elapsed.as_secs() / 60);
+            conf.thorium.namespace = generated_namespace(minutes, rand::random());
+        }
+        Err(error) => panic!("{error}"),
+    }
+    conf
 });
+
+/// How the harness picks the namespace it runs in
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum NamespaceChoice {
+    /// Use the namespace the config and its environment overrides name
+    Keep,
+    /// Run in a namespace made up for this process
+    Generate,
+}
+
+/// Decide where the harness's namespace comes from
+///
+/// A namespace named in the environment is always kept, and so is any namespace of a read-only
+/// harness, which only reads what its config points at. Without one, a local run makes up a
+/// random namespace so developers and runs never share a keyspace, and a CI run fails because
+/// the job's namespace must have been chosen by the pipeline.
+///
+/// # Arguments
+///
+/// * `configured` - Whether `THORIUM__THORIUM__NAMESPACE` is set to a non-empty value
+/// * `ci` - Whether the `CI` environment variable is `true`
+/// * `read_only` - Whether `THORIUM_TEST_CONFIG` is set
+pub fn choose_namespace(
+    configured: bool,
+    ci: bool,
+    read_only: bool,
+) -> Result<NamespaceChoice, String> {
+    // a namespace the environment names, or a read-only harness's own, is the one to use
+    if configured || read_only {
+        return Ok(NamespaceChoice::Keep);
+    }
+    // otherwise CI must have named one, and a local run makes one up
+    if ci {
+        return Err(
+            "set THORIUM__THORIUM__NAMESPACE to this job's namespace (testing_ci_<stamp>_<random>): \
+             CI runs never share a default namespace"
+                .to_owned(),
+        );
+    }
+    Ok(NamespaceChoice::Generate)
+}
+
+/// Build a namespace unique to one process: `testing_ci_<stamp>_<random>`
+///
+/// The stamp is the epoch minute in seven hex digits and the random part is eight hex digits, so
+/// the name is 27 characters (the longest a keyspace suffix budget allows) and shows its age.
+///
+/// # Arguments
+///
+/// * `epoch_minutes` - The current time in minutes since the Unix epoch
+/// * `random` - Random bits that tell concurrent processes apart
+#[must_use]
+pub fn generated_namespace(epoch_minutes: u64, random: u32) -> String {
+    // the stamp in seven hex digits, then the random part in eight
+    format!("{TEST_NAMESPACE_PREFIX}ci_{epoch_minutes:07x}_{random:08x}")
+}
+
+/// Choose the config file the harness loads
+///
+/// # Arguments
+///
+/// * `override_path` - The value of `THORIUM_TEST_CONFIG`, if it is set
+#[must_use]
+pub fn test_config_path(override_path: Option<&str>) -> String {
+    // an unset or empty variable leaves the template in place
+    match override_path {
+        Some(path) if !path.is_empty() => path.to_owned(),
+        _ => CONF_PATH.to_owned(),
+    }
+}
+
+/// Whether the harness is read-only because `THORIUM_TEST_CONFIG` is set
+#[must_use]
+pub fn read_only() -> bool {
+    // a set, non-empty variable is the override
+    std::env::var(TEST_CONFIG_VAR).is_ok_and(|path| !path.is_empty())
+}
+
+/// One thing the harness does to the backends before it starts the API
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BootstrapAction {
+    /// Drop the test namespace's keyspace and delete its Redis keys
+    WipeDatabases,
+    /// Create the test buckets, with a lifecycle on each one it creates
+    InitBuckets,
+    /// Apply the declared schema to the empty keyspace
+    ApplySchema,
+}
+
+/// The actions the harness takes before it starts the API, in order
+///
+/// A read-only harness takes none: it only reads what the config points at.
+///
+/// # Arguments
+///
+/// * `read_only` - Whether `THORIUM_TEST_CONFIG` is set
+#[must_use]
+pub fn bootstrap_plan(read_only: bool) -> Vec<BootstrapAction> {
+    // wipe first so the schema lands on an empty keyspace
+    if read_only {
+        Vec::new()
+    } else {
+        vec![
+            BootstrapAction::WipeDatabases,
+            BootstrapAction::InitBuckets,
+            BootstrapAction::ApplySchema,
+        ]
+    }
+}
+
+/// Apply the declared schema to the namespace's keyspace, as `thoradm schema apply` would
+///
+/// # Arguments
+///
+/// * `config` - The Thorium config we are using for tests
+async fn apply_schema(config: &Conf) -> Result<(), Error> {
+    // connect to scylla and converge it to the declared schema
+    let scylla = get_scylla_client(config).await?;
+    let options = ApplyOptions {
+        target: ApplyTarget::Declared,
+        dry_run: false,
+    };
+    apply(&scylla, config, &options, "test harness", &|_| ())
+        .await
+        .map_err(|err| Error::new(format!("Failed to apply the schema: {err}")))?;
+    Ok(())
+}
+
+/// Prepare the backends for a test API by running the bootstrap plan
+///
+/// # Arguments
+///
+/// * `conf` - The Thorium config the tests use
+/// * `read_only` - Whether `THORIUM_TEST_CONFIG` is set
+pub async fn prepare_backends(conf: &Conf, read_only: bool) -> Result<(), Error> {
+    // run each planned action in order
+    for action in bootstrap_plan(read_only) {
+        match action {
+            BootstrapAction::WipeDatabases => wipe_dbs(conf).await?,
+            BootstrapAction::InitBuckets => init_s3_buckets(&conf.thorium.s3, conf).await?,
+            BootstrapAction::ApplySchema => apply_schema(conf).await?,
+        }
+    }
+    Ok(())
+}
 
 /// The addr to talk to the api at
 ///
@@ -36,15 +208,7 @@ pub static CONF: LazyLock<Conf> = LazyLock::new(|| {
 /// outright or, when an http proxy is configured in the environment, gets handed to a proxy that
 /// cannot route it. The tests only ever talk to the API running in their own process, so rewrite
 /// a wildcard bind to loopback rather than dialing it.
-static ADDR: LazyLock<String> = LazyLock::new(|| {
-    // pick a host we can actually connect to, since a wildcard bind is not a destination
-    let host = match CONF.thorium.interface.as_str() {
-        "0.0.0.0" => "127.0.0.1",
-        "::" | "[::]" => "[::1]",
-        interface => interface,
-    };
-    format!("http://{}:{}", host, CONF.thorium.port)
-});
+static ADDR: LazyLock<String> = LazyLock::new(|| addr_of(&CONF));
 
 /// Build a scylla client for a specific cluster
 ///
@@ -278,6 +442,151 @@ pub async fn init_bucket(
     Ok(())
 }
 
+/// Deletes the test buckets it names, with their objects, when it is dropped
+///
+/// A test that creates a bucket holds one of these so the bucket goes away when the test ends
+/// however it ends, a panic included. Only buckets starting with [`TEST_BUCKET_PREFIX`] are
+/// deleted.
+pub struct TempBuckets {
+    /// The S3 settings of the store that holds the buckets
+    s3: S3,
+    /// The buckets to delete
+    buckets: Vec<String>,
+}
+
+impl TempBuckets {
+    /// Names the buckets to delete when the guard is dropped
+    ///
+    /// # Arguments
+    ///
+    /// * `s3` - The S3 settings of the store that holds the buckets
+    /// * `buckets` - The buckets to delete
+    #[must_use]
+    pub fn new(s3: &S3, buckets: Vec<String>) -> Self {
+        // keep the settings rather than a client, since the guard deletes from a thread with a
+        // runtime of its own, and a client's pooled connections belong to the runtime that made it
+        TempBuckets {
+            s3: s3.clone(),
+            buckets,
+        }
+    }
+}
+
+impl Drop for TempBuckets {
+    /// Deletes the buckets
+    fn drop(&mut self) {
+        // the test's own runtime may be shutting down, so delete from a thread with a runtime of
+        // its own and wait for it
+        let s3 = self.s3.clone();
+        let buckets = std::mem::take(&mut self.buckets);
+        let _ = std::thread::spawn(move || {
+            // a runtime that can't be built leaves the buckets to their lifecycle
+            let Ok(runtime) = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+            else {
+                return;
+            };
+            runtime.block_on(async {
+                // a client built here uses this runtime's connections
+                let s3 = s3_client(&s3);
+                for bucket in &buckets {
+                    // a bucket that can't be deleted is left to its lifecycle
+                    if let Err(err) = delete_bucket_with_objects(&s3, bucket).await {
+                        eprintln!("Couldn't delete temporary bucket {bucket}: {err}");
+                    }
+                }
+            });
+        })
+        .join();
+    }
+}
+
+/// Delete a test bucket after deleting every object in it
+///
+/// Only buckets starting with [`TEST_BUCKET_PREFIX`] are touched, and a bucket that doesn't exist
+/// is a success.
+///
+/// # Arguments
+///
+/// * `s3_client` - The S3 client to delete with
+/// * `bucket` - The name of the bucket to delete
+async fn delete_bucket_with_objects(
+    s3_client: &aws_sdk_s3::Client,
+    bucket: &str,
+) -> Result<(), Error> {
+    // refuse any bucket that isn't marked as a test bucket
+    if !bucket.starts_with(TEST_BUCKET_PREFIX) {
+        return Err(Error::new(format!(
+            "Refusing to delete bucket '{bucket}': test buckets must start with \
+            '{TEST_BUCKET_PREFIX}'"
+        )));
+    }
+    // delete every object a page at a time
+    let mut token = None;
+    loop {
+        // a missing bucket has nothing to delete
+        let page = match s3_client
+            .list_objects_v2()
+            .bucket(bucket)
+            .set_continuation_token(token.take())
+            .send()
+            .await
+        {
+            Ok(page) => page,
+            Err(err)
+                if err.as_service_error().is_some_and(
+                    aws_sdk_s3::operation::list_objects_v2::ListObjectsV2Error::is_no_such_bucket,
+                ) =>
+            {
+                return Ok(());
+            }
+            Err(err) => {
+                return Err(Error::new(format!(
+                    "Error listing S3 bucket '{}': {}",
+                    bucket,
+                    DisplayErrorContext(&err)
+                )));
+            }
+        };
+        for object in page.contents() {
+            if let Some(key) = object.key() {
+                s3_client
+                    .delete_object()
+                    .bucket(bucket)
+                    .key(key)
+                    .send()
+                    .await
+                    .map_err(|err| {
+                        Error::new(format!(
+                            "Error deleting object '{key}' in '{bucket}': {}",
+                            DisplayErrorContext(&err)
+                        ))
+                    })?;
+            }
+        }
+        // stop after the last page
+        match page.next_continuation_token() {
+            Some(next) => token = Some(next.to_owned()),
+            None => break,
+        }
+    }
+    // then the bucket itself
+    s3_client
+        .delete_bucket()
+        .bucket(bucket)
+        .send()
+        .await
+        .map_err(|err| {
+            Error::new(format!(
+                "Error deleting S3 bucket '{}': {}",
+                bucket,
+                DisplayErrorContext(&err)
+            ))
+        })?;
+    Ok(())
+}
+
 /// Build an S3 client for the test object store
 ///
 /// # Arguments
@@ -354,37 +663,69 @@ async fn init_s3_buckets(s3_conf: &S3, conf: &Conf) -> Result<(), Error> {
 /// A write-once cell for the admin token, written to when the API is stood up for the first time
 static ADMIN_TOKEN: OnceCell<String> = OnceCell::const_new();
 
-/// Bootstrap a test API, running the API on another thread and returning
-/// a token for authenticating with the running API
-async fn bootstrap_test_api() -> Result<String, Error> {
-    // wipe our databases
-    wipe_dbs(&CONF).await?;
-    // initiate s3 buckets
-    init_s3_buckets(&CONF.thorium.s3, &CONF).await?;
+/// The address a config's API listens on, as a client dials it
+///
+/// # Arguments
+///
+/// * `conf` - The Thorium config the API runs with
+fn addr_of(conf: &Conf) -> String {
+    // a wildcard bind is not a destination, so dial loopback instead
+    let host = match conf.thorium.interface.as_str() {
+        "0.0.0.0" => "127.0.0.1",
+        "::" | "[::]" => "[::1]",
+        interface => interface,
+    };
+    format!("http://{}:{}", host, conf.thorium.port)
+}
+
+/// Run the API on its own thread and bootstrap an admin on it
+///
+/// Gives up as soon as the API's thread has exited, such as when startup refuses the schema,
+/// instead of polling an address nothing will ever listen on.
+///
+/// # Arguments
+///
+/// * `conf` - The Thorium config to run the API with
+/// * `attempts` - How many one-second bootstrap attempts to make while the API is running
+///
+/// # Panics
+///
+/// Panics if the runtime for the API's thread can't be built.
+pub async fn start_api(conf: &Conf, attempts: u32) -> Result<AuthResponse, Error> {
     // spawn the api
-    std::thread::spawn(move || {
+    let api_conf = conf.clone();
+    let api = std::thread::spawn(move || {
         // create a tokio runtime
         let rt = tokio::runtime::Builder::new_multi_thread()
             .enable_all()
             .thread_stack_size(8 << 20)
             .build()
             .expect("Failed to spawn tokio runtime for the test API");
-        // spawn our api
-        rt.block_on(async move { crate::axum(CONF.clone()).await });
+        // run our api, returning the startup refusal if there is one
+        rt.block_on(async move { crate::axum_with(api_conf, StartupOpts::default()).await })
     });
-    // try to bootstrap for 60 seconds until it works
-    let mut attempts = 0;
+    let addr = addr_of(conf);
+    // try to bootstrap until it works
+    let mut tried = 0;
     // start trying to bootstrap
     let resp = loop {
+        // stop at once when the API has exited
+        if api.is_finished() {
+            return Err(match api.join() {
+                Ok(Ok(())) => Error::new("The test API exited before it was bootstrapped"),
+                Ok(Err(err)) => Error::new(format!("The test API refused to start: {err}")),
+                Err(_) => Error::new("The test API panicked while starting"),
+            });
+        }
         // start with default client settings
         let settings = ClientSettings::default();
         // boot strap an admin Thorium client with the password "password"
         let attempt = Thorium::bootstrap(
-            &ADDR,
+            &addr,
             "thorium",
             "password",
             "fake@fake.gov",
-            &CONF.thorium.secret_key,
+            &conf.thorium.secret_key,
             &settings,
         )
         .await;
@@ -394,14 +735,13 @@ async fn bootstrap_test_api() -> Result<String, Error> {
             // this attempt failed so sleep for 1 second
             Err(error) => {
                 // increment our attempts by 1
-                attempts += 1;
+                tried += 1;
                 // check if we have used up all of our attempts yet
-                if attempts == 300 {
+                if tried == attempts {
                     // report the address we dialed and why the last try failed, since without
                     // them every cause looks identical from five minutes away
                     return Err(Error::new(format!(
-                        "Failed to bootstrap Thorium at {} after {attempts} attempts: {error:#?}",
-                        *ADDR
+                        "Failed to bootstrap Thorium at {addr} after {tried} attempts: {error:#?}"
                     )));
                 }
                 // sleep for 1 second
@@ -409,6 +749,17 @@ async fn bootstrap_test_api() -> Result<String, Error> {
             }
         }
     };
+    Ok(resp)
+}
+
+/// Bootstrap a test API, running the API on another thread and returning
+/// a token for authenticating with the running API
+async fn bootstrap_test_api() -> Result<String, Error> {
+    // wipe the databases, create the buckets, and apply the schema, unless the config came from
+    // an override and the harness is read-only
+    prepare_backends(&CONF, read_only()).await?;
+    // run the api and bootstrap an admin on it for up to five minutes
+    let resp = start_api(&CONF, 300).await?;
     // get our auth token if we got one
     let auth_token = match resp {
         AuthResponse::Authed { token, .. } => token,

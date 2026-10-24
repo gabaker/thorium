@@ -27,6 +27,8 @@ pub mod system;
 pub mod tags;
 pub mod trees;
 pub mod users;
+#[cfg(all(test, feature = "upgrades-runtime"))]
+mod users_cast_tests;
 
 pub use cursors::{
     CursorCore, ElasticCursor, ExistsCursor, GrepCursor, GrepCursorRetain, GroupedScyllaCursor,

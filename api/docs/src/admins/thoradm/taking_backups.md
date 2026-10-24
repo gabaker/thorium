@@ -381,7 +381,7 @@ logged on stderr as it happens. An empty file means nothing failed.
 | `key` | When known | The partition key, S3 key, Redis file, or archive path, as far as it could be read |
 | `object` | When known | A short name for the object (a sha256, an id, a partition) |
 | `referrer` | Broken links | The record that names the missing object, as `<table or collection>:<id>`: `entities:<entity id>`, `users:<user name>`, `s3_ids:<id>`, `results:<result id>`, or `comments:<sha256>/<comment id>` |
-| `operation` | Always | What failed: `read-range`, `deserialize-row`, `write-archive`, `read-archive`, `download`, `redis`, `verify` for a failed check of scrub or verify, and others for restore |
+| `operation` | Always | What failed: `read-range`, `deserialize-row`, `write-archive`, `read-archive`, `download`, `redis`, `verify` for a failed check of scrub or verify, and others for restore, such as `pre-restore` for the schema apply before any row is restored and `post-restore` for the steps after the load |
 | `attempts` | Always | The attempts made, including the first |
 | `error` | Always | The last error, on one line |
 | `at` | Always | When the last attempt ended |
@@ -437,19 +437,21 @@ lists what today's backup or restore doesn't carry yet. The Thoradm guide's
 | Scylla table | `nodes` | Backed up | `nodes` | CORE |  |
 | Scylla table | `logs` | Excluded | stage logs of reactions, which are runtime state and expire by TTL | EPHEMERAL |  |
 | Scylla table | `events`, only in keyspaces older releases created | Excluded | a table of trigger events nothing reads or writes | EPHEMERAL |  |
-| Scylla view | `samples` (view of `samples_list`) | Backed up | `samples-list` | CORE |  |
-| Scylla view | `s3_sha256s` (view of `s3_ids`) | Backed up | `s3-ids` | CORE |  |
-| Scylla view | `comments_by_id` (view of `comments`) | Backed up | `comments` | CORE |  |
-| Scylla view | `results_auth` (view of `results_stream`) | Backed up | `results-stream` | CORE |  |
-| Scylla view | `results_ids` (view of `results_stream`) | Backed up | `results-stream` | CORE |  |
-| Scylla view | `tags_by_item` (view of `tags`) | Backed up | `tags` | CORE |  |
-| Scylla view | `tags_case_insensitive` (view of `tags`) | Backed up | `tags` | CORE |  |
-| Scylla view | `repos` (view of `repos_list`) | Backed up | `repo-list` | CORE |  |
-| Scylla view | `committed_repo_data` (view of `commitish_list`) | Backed up | `commitish-list` | CORE |  |
-| Scylla view | `network_policies_by_name` (view of `network_policies`) | Backed up | `network-policies` | CORE |  |
-| Scylla view | `network_policies_default` (view of `network_policies`) | Backed up | `network-policies` | CORE |  |
-| Scylla view | `entities_by_id` (view of `entities`) | Backed up | `entities` | CORE |  |
-| Scylla view | `entities_by_name` (view of `entities`), only in keyspaces older releases created | Backed up | `entities` | CORE |  |
+| Scylla table | `schema_migrations` | Excluded | the deployment's schema record: its applied fingerprints, layout versions, revision and applied history (one row per entry, uncapped), and the settings that shape stored data; carried in the backup's schema record, `schema.json`, instead of a table archive, and written back by restore, which keeps the restoring cluster's data-shaping settings and leaves out the Job results, which expire | CORE |  |
+| Scylla table | `schema_migration_issues` | Excluded | the checkpoints and issue groups of data migration passes; carried in the backup's schema record, `schema.json`, instead of a table archive, and written back by restore | CORE |  |
+| Scylla view | `samples` (view of `samples_list`) | Backed up | `samples-list` | DERIVED |  |
+| Scylla view | `s3_sha256s` (view of `s3_ids`) | Backed up | `s3-ids` | DERIVED |  |
+| Scylla view | `comments_by_id` (view of `comments`) | Backed up | `comments` | DERIVED |  |
+| Scylla view | `results_auth` (view of `results_stream`) | Backed up | `results-stream` | DERIVED |  |
+| Scylla view | `results_ids` (view of `results_stream`) | Backed up | `results-stream` | DERIVED |  |
+| Scylla view | `tags_by_item` (view of `tags`) | Backed up | `tags` | DERIVED |  |
+| Scylla view | `tags_case_insensitive` (view of `tags`) | Backed up | `tags` | DERIVED |  |
+| Scylla view | `repos` (view of `repos_list`) | Backed up | `repo-list` | DERIVED |  |
+| Scylla view | `committed_repo_data` (view of `commitish_list`) | Backed up | `commitish-list` | DERIVED |  |
+| Scylla view | `network_policies_by_name` (view of `network_policies`) | Backed up | `network-policies` | DERIVED |  |
+| Scylla view | `network_policies_default` (view of `network_policies`) | Backed up | `network-policies` | DERIVED |  |
+| Scylla view | `entities_by_id` (view of `entities`) | Backed up | `entities` | DERIVED |  |
+| Scylla view | `entities_by_name` (view of `entities`), only in keyspaces older releases created | Backed up | `entities` | DERIVED |  |
 | Redis | `users` | Backed up | `redis` | CORE |  |
 | Redis | `user_data:*` | Backed up | `redis` | CORE |  |
 | Redis | `user_groups:*` | Backed up | `redis` | CORE |  |
@@ -493,6 +495,8 @@ lists what today's backup or restore doesn't carry yet. The Thoradm guide's
 | Redis | `event-handler:*` | Excluded | runtime state of reactions, jobs, workers, or services, invalid after a restore | EPHEMERAL |  |
 | Redis | `search-streamer:*` | Excluded | runtime state of reactions, jobs, workers, or services, invalid after a restore | EPHEMERAL |  |
 | Redis | `cursors:*` | Excluded | runtime state of reactions, jobs, workers, or services, invalid after a restore | EPHEMERAL |  |
+| Redis | `schema-writer` | Excluded | the namespace's writer lease, held only while a writing thoradm command runs | EPHEMERAL |  |
+| Redis | `rebucket:*` | Excluded | the progress of a census rebuild, valid only for the run that wrote it | EPHEMERAL |  |
 | Redis | `image_ttc:*` | Excluded | runtime state of reactions, jobs, workers, or services, invalid after a restore | EPHEMERAL |  |
 | Redis | `oauth:context:*` | Excluded | OAuth login contexts, which expire | EPHEMERAL |  |
 | Redis | `oauth:registration_sessions:*` | Excluded | OAuth registration sessions, which expire | EPHEMERAL |  |
@@ -615,6 +619,7 @@ The paths below start at the backup directory, `<backup>`. Placeholders:
 | `<backup>/manifest.json` | file | 0600 | `backup new`, at its end | What a finished backup holds (see [The manifest](#the-manifest)). Its presence is what makes a backup finished |
 | `<backup>/failures.jsonl` | file | 0600 | `backup new` | Every object the backup couldn't back up, one JSON line each (see [Reading `failures.jsonl`](#reading-failuresjsonl)); empty when nothing failed |
 | `<backup>/redis.json` | file | 0600 | `backup new`, component `redis` | The Redis data the API serves to admins, as JSON: `settings`, `users`, `groups`, `images`, `pipelines`, `scoped_tokens`, and `network_policy_sets` (and `pruned`, with `--prune-dangling`) |
+| `<backup>/schema.json` | file | 0600 | `backup new` | The deployment's schema record, every row of `schema_migrations` and `schema_migration_issues` but the Job results, as JSON with a `format` version (see [The Schema Record](./thoradm.md#the-schema-record)); absent when the keyspace holds no `schema_migrations` table |
 | `<backup>/pruned.jsonl` | file | 0600 | `backup new --prune-dangling`, component `redis` | Only when references were pruned: one JSON line per change made to the Redis state (see [Pruning dangling references](#pruning-dangling-references)) |
 | `<backup>/<table>` | directory | 0700 | `backup new`, the table's component | One table's archives, and for `s3_ids`, `comments`, and `results`, its component's objects |
 | `<backup>/<table>/data` | directory | 0700 | `backup new` | The table's archive data files |
@@ -666,7 +671,7 @@ finished backup. A run stopped by `--abort-on-failure` doesn't write it. Its fie
 | `tables` | One entry per backed-up table, by table name: `archives` (each archive's `uuid`, `data_len` in bytes, map `entries`, `rows`, and `map_sha256`), `ranges` (each token range's `start`, `end`, and the `rows` read from it), the table's total `rows`, its `skipped` rows, and the `columns` its archives carry |
 | `s3` | One entry per S3 component, by component name: the `bucket_roles` its objects came from, the `objects` copied and their total `bytes`, the object `index` file (relative to the backup directory), and its `index_sha256` |
 | `redis` | When `redis` was backed up: the `len` and `sha256` of `redis.json`, and its record `counts` of `users`, `groups`, `images`, and `pipelines` |
-| `siblings` | Other files in the backup directory that another feature wrote (`schema.json`), each with its `name`, `len`, and `sha256`; empty when there are none |
+| `siblings` | The files the backup writes beside its components (`schema.json`, the schema record), each with its `name`, `len`, and `sha256`; empty for a backup of a keyspace with no `schema_migrations` table |
 | `api_version_mismatch` | Only when `--allow-version-mismatch` let the backup of `redis` go ahead against an API of another version: `thoradm`, thoradm's version, and `api`, the version the API reported (`null` when it reported none). Absent otherwise |
 | `pruned` | Only when `--prune-dangling` dropped references: the `count` of lines in `pruned.jsonl` and its `sha256`. Absent otherwise |
 
@@ -801,7 +806,7 @@ Before it writes anything, it runs a preflight. Each check below refuses the res
 | Recorded failures | The backup's manifest records failed or skipped objects, which the backup doesn't hold, or references `--prune-dangling` dropped (its `pruned` entry). Each object, and the count of pruned references, is listed as a record above the refusal. Accepted broken links don't refuse: the restore logs them as known and its summary lists them | `--accept-failures` |
 | Empty target | Any backed-up table the backup holds already has a row in the target, `nodes` aside, whose rows a restore keeps (buckets aren't examined) | `--merge`, or `--wipe <namespace>` |
 | Wipe | Only with `--wipe <namespace>`, in place of the empty-target check: the namespace given isn't the one the cluster config names; the API serves another namespace, or doesn't say which; or the namespace isn't a keyspace the wipe may truncate in or holds none of the tables a backup holds (see [Merge or Wipe](./thoradm.md#merge-or-wipe)) | None |
-| Views | A view the restore drops is already missing (as an interrupted restore leaves it) and no earlier `views.cql` holds its statement (see [Running a Restore](./thoradm.md#running-a-restore)) | None |
+| Schema | The backup's `schema.json` can't be read or is of a newer format; its revision is one this thoradm has no schema snapshot of; or the configured `files.password` isn't the one the backup was taken with (the reason names the setting, never a password or a hash). See [The Schema Record](./thoradm.md#the-schema-record) | None |
 | Confirmation | No terminal is attached and `--confirm` wasn't given; or the restore isn't confirmed at the prompt; or, for a wipe on a terminal, the namespace isn't typed | `--confirm` (without a terminal) |
 
 - **A legacy backup** (no manifest) restores only with `--legacy`. Its completeness can't be
@@ -837,6 +842,11 @@ Before it writes anything, it runs a preflight. Each check below refuses the res
 - **An interrupted backup** has no override: finish it first by running the same `backup new` into
   it again.
 - **Without a terminal** the restore needs `--confirm`.
+- **Redis, for the writer lease.** The restore runs `schema apply` before and after it loads the
+  tables, and each run holds the namespace's writer lease in Redis, so the thoradm config must reach
+  Redis even for a backup without `redis.json`. A migration, another schema apply, `reset-state`, or
+  another restore holding the lease refuses the restore, which has no `--force-break-lease` (see
+  [Running a Restore](./thoradm.md#running-a-restore)).
 
 Every restore replaces the namespace's Redis data with `redis.json`, deleting every key of the
 namespace first, or with `--redis-flush-all` every key in the database (see

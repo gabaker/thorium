@@ -73,3 +73,32 @@ pub struct DriftReport {
     /// The findings for each backend
     pub backends: BTreeMap<SchemaBackend, BackendDrift>,
 }
+
+mod acknowledge;
+#[cfg(test)]
+mod acknowledge_tests;
+mod compare;
+#[cfg(test)]
+mod compare_tests;
+#[cfg(feature = "client")]
+mod live;
+mod mappings;
+mod observe;
+mod rows;
+#[cfg(test)]
+mod tests;
+
+pub use acknowledge::Acknowledgement;
+pub use compare::{LegacyObjects, converged_revision};
+#[cfg(feature = "client")]
+pub use live::{diff, elastic_client, probe_configured};
+pub use mappings::mapping_object;
+#[cfg(any(feature = "api", feature = "client"))]
+pub use mappings::probe_elastic;
+#[cfg(any(feature = "api", feature = "client"))]
+pub use observe::probe;
+pub use observe::{layout_objects, probe_scylla, recorded_layouts};
+pub use rows::{
+    ColumnRow, IndexRow, ProbeError, SchemaRows, TypeRow, ViewRow, canonical_filter,
+    canonical_replication,
+};

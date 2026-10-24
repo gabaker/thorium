@@ -1,5 +1,5 @@
-//! Recognizes unconverted pre-Helm deployments and works out where a namespace without a
-//! recorded upgrade state starts
+//! Recognizes unconverted pre-Helm deployments and works out which revision to suggest for a
+//! namespace with a keyspace but no record of its revision
 
 use k8s_openapi::api::core::v1::Secret;
 use kube::{Api, Client};
@@ -16,10 +16,10 @@ const LEGACY_SNAPSHOT_SECRET: &str = "thorium-legacy-cluster";
 /// The annotation that lets a `ThoriumCluster` keep its credentials inline in `spec.config`
 pub const ALLOW_INLINE_CONFIG: &str = "thorium.sandia.gov/allow-inline-config";
 
-/// Where a namespace without a recorded upgrade state starts
+/// What a namespace holds, from which a starting revision is suggested
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Detected {
-    /// No operator has run here, so this is a fresh install at the latest revision
+    /// No operator has run here
     Fresh,
     /// An operator already ran here before upgrade states were recorded
     BeforeTracking,
@@ -95,14 +95,16 @@ fn inline_by_choice(cluster: &ThoriumCluster) -> bool {
     allows_inline(cluster) && cluster.spec.config_secrets.is_empty()
 }
 
-/// Work out where a namespace without a recorded upgrade state starts
+/// Work out what a namespace holds, to suggest the revision a keyspace with data and no record
+/// is at
 ///
 /// A namespace converted by `convert-to-helm.sh` keeps the pre-conversion `ThoriumCluster` in
 /// [`LEGACY_SNAPSHOT_SECRET`], so one that lost its state is still pre-Helm. Every operator
-/// creates [`OPERATOR_PASS_SECRET`] the first time it runs, so a namespace without it is a
-/// fresh install. Where an operator did run, a cluster that keeps its config inline on purpose
-/// with no config secrets is a pre-Helm deployment kept outside Helm, while one with config
-/// secrets was deployed by the Helm charts before states were recorded.
+/// creates [`OPERATOR_PASS_SECRET`] the first time it runs. Where an operator did run, a cluster
+/// that keeps its config inline on purpose with no config secrets is a pre-Helm deployment kept
+/// outside Helm, while one with config secrets was deployed by the Helm charts before states
+/// were recorded. Whether the namespace is a fresh install is never decided from Secrets: the
+/// record in Scylla says.
 ///
 /// # Arguments
 ///

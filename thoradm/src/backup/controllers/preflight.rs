@@ -15,12 +15,13 @@ use std::io::IsTerminal;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use thorium::models::BackupParams;
+use thorium::models::upgrades::{Catalog, RevisionId};
 use thorium::{Conf, CtlConf, Thorium};
 use tracing::{info, warn};
 
 use crate::Error;
 use crate::args::{BackupComponents, RestoreBackup};
-use crate::backup::coverage::{Coverage, Registry};
+use crate::backup::coverage::{Coverage, RECORD_TABLES, Registry, Store};
 use crate::backup::failures::{
     FAILURES_FILE, FailureKind, FailureLog, FailureRecord, Operation, read_records,
 };
@@ -28,12 +29,13 @@ use crate::backup::kept::{self, KeptUsers};
 use crate::backup::manifest::{
     self, LOCK_FILE, Layout, MANIFEST_FILE, MARKER_FILE, Manifest, PRUNED_FILE,
 };
+use crate::backup::schema::BackupSchemaRecord;
+use crate::backup::schema_restore::{self, ConvergeTo};
 use crate::backup::sink::SinkFactory;
 use crate::backup::target::{Target, backup_components};
 use crate::backup::utils::is_link;
 use crate::backup::verify::{REPORT_FILE, Verifier, missing_object};
 use crate::backup::version::{self, VersionMismatch};
-use crate::backup::views::{VIEWS_FILE, ViewStatements};
 use crate::backup::wipe::{self, WipeReport};
 
 /// The component a restore records its preflight refusals under
@@ -60,8 +62,15 @@ pub struct Cleared {
     pub target: Target,
     /// The tables and buckets that held data before a `--merge` restore
     pub merged_into: Vec<String>,
-    /// The statements of the views the restore drops, saved to `views.cql`
-    pub views: ViewStatements,
+    /// The backup's schema record, when it holds one
+    pub schema: Option<BackupSchemaRecord>,
+    /// The revision the restore records for a backup that holds no record, when the target
+    /// records a newer one
+    pub baseline: Option<RevisionId>,
+    /// What the restore converges the keyspace to around the load
+    pub converge_to: ConvergeTo,
+    /// Why the backup's schema record isn't restored, when it holds one that isn't
+    pub record_skipped: Option<String>,
     /// The wipe plan of a `--wipe` restore whose target holds data, run before the first restore
     pub wipe: Option<WipeReport>,
     /// The API's version and thoradm's, when they differed and `--allow-version-mismatch` let
@@ -516,6 +525,10 @@ async fn describe(
     if let Some(plan) = &cleared.wipe {
         lines.extend(plan.describe());
     }
+    // the revision recorded for a backup without a record, which the operator upgrades from
+    if let Some(baseline) = &cleared.baseline {
+        lines.push(baseline_line(baseline));
+    }
     // what the flags accepted
     if let Some(mismatch) = &cleared.version_mismatch {
         lines.push(version::accepted(mismatch));
@@ -563,6 +576,10 @@ async fn describe(
             .to_owned(),
     );
     for entry in Registry::excluded() {
+        // the tables the schema record carries are in the backup, so they aren't listed as missing
+        if entry.store == Store::ScyllaTable && RECORD_TABLES.contains(&entry.name) {
+            continue;
+        }
         if let Coverage::Excluded { reason } = entry.coverage {
             lines.push(format!(
                 "  - {} {} ({}): {reason}",
@@ -573,6 +590,20 @@ async fn describe(
         }
     }
     lines
+}
+
+/// Says that the restore records the baseline revision for a backup without a schema record, and
+/// what the operator does once it reads it
+///
+/// # Arguments
+///
+/// * `baseline` - The revision the restore records
+fn baseline_line(baseline: &RevisionId) -> String {
+    format!(
+        "The backup holds no schema record, so the restore records revision {baseline} in place \
+         of the target's newer one; the operator then plans every upgrade step after {baseline}, \
+         which converts the restored data"
+    )
 }
 
 /// Says that the Redis restore deletes every key of the namespace, or with a flush every key of
@@ -772,6 +803,53 @@ async fn check_wipe(
     }
 }
 
+/// Decides what a restore of a backup without a schema record does with the target's record
+///
+/// A whole backup records the baseline revision its data is at under a target recording a newer
+/// one, and is refused when this release no longer upgrades from the baseline; a backup lacking
+/// some of the deployment's state leaves the target's record as it is, with a warning saying why
+/// when the target records a newer revision.
+///
+/// # Arguments
+///
+/// * `config` - The config of the cluster to restore
+/// * `scylla` - A session to the cluster's Scylla
+/// * `components` - The components the backup holds
+///
+/// # Returns
+///
+/// The baseline to record and the warning to give, or the reason for refusing the restore
+async fn check_baseline(
+    config: &Conf,
+    scylla: &Session,
+    components: &[BackupComponents],
+) -> Result<Result<(Option<RevisionId>, Option<String>), String>, Error> {
+    // the revision the target records, and the deployment state the backup lacks
+    let recorded = schema_restore::read_revision(scylla, &config.thorium.namespace).await?;
+    let missing = schema_restore::missing_state(components);
+    match schema_restore::recordless_baseline(recorded.as_deref(), &Catalog::PRODUCTION) {
+        // a whole backup records the baseline
+        Ok(Some(found)) if missing.is_empty() => Ok(Ok((Some(found), None))),
+        // a partial one says nothing about the rest of the deployment, so the record stays
+        Ok(Some(found)) => {
+            let reason = format!(
+                "the backup holds no schema record and lacks {}, so the target's revision {} \
+                 stays: a backup of some components says nothing about the revision the rest of \
+                 the deployment is at; a whole backup without a record (all or no-s3) records \
+                 revision {found}, whose layouts its data is in",
+                missing.join(", "),
+                recorded.as_deref().unwrap_or("none")
+            );
+            warn!("{reason}");
+            Ok(Ok((None, Some(reason))))
+        }
+        // a whole backup this release can't upgrade is refused
+        Err(reason) if missing.is_empty() => Ok(Err(reason)),
+        // a target the baseline doesn't replace keeps its record
+        Ok(None) | Err(_) => Ok(Ok((None, None))),
+    }
+}
+
 /// Runs every preflight check, in order, before the restore's first write
 ///
 /// # Arguments
@@ -823,8 +901,54 @@ pub async fn run(
         },
         None => Recorded::default(),
     };
-    // the target is empty, or the admin asks to merge into it or to wipe it first
+    // the components the backup holds decide what its schema record can do
     let components = backup_components(&args.backup, manifest.as_ref()).await?;
+    // the backup's schema record reads
+    let loaded = match BackupSchemaRecord::load(&args.backup).await {
+        Ok(loaded) => loaded,
+        Err(error) => return refuse(log, "schema", error).await,
+    };
+    // a backup that holds no record at all is at the baseline revision
+    let recordless = loaded.is_none();
+    // the record replaces the target's only when the backup holds the whole deployment's state;
+    // otherwise the target's own record stays, and the summary says so
+    let (schema, mut record_skipped) = match loaded {
+        Some(record) => match schema_restore::record_trusted(&record, &components) {
+            Ok(()) => (Some(record), None),
+            Err(reason) => {
+                warn!("{reason}");
+                (None, Some(reason))
+            }
+        },
+        None => (None, None),
+    };
+    // stored files are restored as they were encrypted, so the configured files password must be
+    // the backup's whenever the backup holds files
+    if let Some(record) = &schema
+        && schema_restore::restores_files(&components)
+        && let Err(reason) = schema_restore::check_files_password(record, config)
+    {
+        return refuse(log, "schema", reason).await;
+    }
+    // the revision the record names is one this thoradm can converge to
+    let converge_to = match schema_restore::converge_target(schema.as_ref()) {
+        Ok(to) => to,
+        Err(reason) => return refuse(log, "schema", reason).await,
+    };
+    // a backup without a record holds its data in the layouts deployments had before revisions
+    // were recorded, so a whole one records that baseline under a target recording a newer
+    // revision, or is refused when this release no longer upgrades from it
+    let mut baseline = None;
+    if recordless {
+        match check_baseline(config, scylla, &components).await? {
+            Ok((found, skipped)) => {
+                baseline = found;
+                record_skipped = skipped;
+            }
+            Err(reason) => return refuse(log, "schema", reason).await,
+        }
+    }
+    // the target is empty, or the admin asks to merge into it or to wipe it first
     let target = Target::new(config, &components);
     let mut wipe_plan = None;
     let merged_into = if let Some(given) = &args.wipe {
@@ -852,29 +976,6 @@ pub async fn run(
             }
         }
     };
-    // every view the restore drops can be recreated: from Scylla, or for a view an interrupted
-    // restore left dropped, from an earlier views.cql
-    let (views, unfound) = ViewStatements::capture(
-        scylla,
-        &config.thorium.namespace,
-        &target.tables,
-        &args.backup,
-        reports,
-    )
-    .await?;
-    if !unfound.is_empty() {
-        let reason = format!(
-            "{} {} missing, as an interrupted restore leaves views, and no earlier {VIEWS_FILE} \
-             under {}/reports/restore-*/ or beside the report directory holds their statements; \
-             replay an earlier {VIEWS_FILE} with cqlsh, or restart one API pod, whose schema setup \
-             creates missing views, then run the restore again",
-            unfound.join(", "),
-            if unfound.len() == 1 { "is" } else { "are" },
-            args.backup.display()
-        );
-        return refuse(log, "views", reason).await;
-    }
-    views.save(reports, sinks).await?;
     let cleared = Cleared {
         legacy: manifest.is_none(),
         manifest,
@@ -883,7 +984,10 @@ pub async fn run(
         broken_links,
         target,
         merged_into,
-        views,
+        schema,
+        record_skipped,
+        baseline,
+        converge_to,
         wipe: wipe_plan,
         version_mismatch,
     };
@@ -915,7 +1019,9 @@ pub async fn report_dir(args: &RestoreBackup) -> Result<PathBuf, Error> {
 mod tests {
     use clap::Parser;
 
-    use super::{RestoreBackup, Verdict, check_recorded_failures, confirm, confirm_wipe};
+    use super::{
+        RestoreBackup, Verdict, baseline_line, check_recorded_failures, confirm, confirm_wipe,
+    };
     use crate::backup::failures::{
         FAILURES_FILE, FailureLog, FailurePolicy, FailureRecord, Operation, read_records,
     };
@@ -946,6 +1052,19 @@ mod tests {
         // --confirm lets both proceed
         assert!(confirm(&lines, true).is_ok());
         assert!(confirm_wipe(&lines, "thorium", true).is_ok());
+    }
+
+    /// The confirmation of a backup without a schema record names the revision the restore records
+    #[test]
+    fn the_confirmation_names_the_recorded_baseline() {
+        // the first Helm revision, which a whole backup without a record gets
+        let baseline: thorium::models::upgrades::RevisionId =
+            thorium::models::upgrades::FIRST_HELM_REVISION
+                .parse()
+                .unwrap();
+        let line = baseline_line(&baseline);
+        assert!(line.contains("records revision 2026-10-v02"), "{line}");
+        assert!(line.contains("no schema record"), "{line}");
     }
 
     /// A linked `failures.jsonl` refuses the restore instead of being read, even under

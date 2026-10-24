@@ -182,6 +182,17 @@ impl FaultProxy {
             .is_some()
     }
 
+    /// Returns how many times the current rules have fired in total, counted since `set_rules`
+    pub async fn firings(&self) -> u64 {
+        // add up each rule's firing count
+        self.rules
+            .read()
+            .await
+            .iter()
+            .map(|rule| rule.fired.load(Ordering::SeqCst))
+            .sum()
+    }
+
     /// Returns how many connections the proxy has accepted
     #[must_use]
     pub fn connections(&self) -> u64 {

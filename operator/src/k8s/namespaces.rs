@@ -45,10 +45,6 @@ pub async fn has_dev_label(client: &Client, namespace: &str) -> Result<bool, Err
 /// * `client` - The kube client to read the Namespace with
 /// * `namespace` - The Namespace the `ThoriumCluster` is in
 /// * `upgrade` - The `ThoriumCluster`'s upgrade settings
-#[cfg_attr(
-    not(test),
-    expect(dead_code, reason = "no non-test caller reads the dev label")
-)]
 pub async fn is_dev_cluster(
     client: &Client,
     namespace: &str,

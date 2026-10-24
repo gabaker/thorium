@@ -225,7 +225,7 @@ playbook with:
 - `thorium_deployment_name: dev` (the old `ThoriumCluster` name);
 - `infra_operators_enabled: false` (the old operators keep running);
 - the converted values file last in `thorium_values_files`;
-- `thorium_upgrade_target_revision: 2026-10-v02`, and `thorium_upgrade_approvals` if the reindex
+- `thorium_upgrade_target_revision: 2026-10-v03`, and `thorium_upgrade_approvals` if the reindex
   step needs it.
 
 The converted values are applied after megathor's own, so their admin bootstrap setting wins.
