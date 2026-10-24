@@ -1772,9 +1772,13 @@ impl Tags {
         }
     }
 }
+/// The public default files password, which carts stored files only as a safeguard against
+/// running a sample by accident
+pub const DEFAULT_FILES_PASSWORD: &str = "SecretCornIsBest";
+
 /// Helps serde default the files cart password
 fn default_files_password() -> String {
-    "SecretCornIsBest".to_owned()
+    DEFAULT_FILES_PASSWORD.to_owned()
 }
 
 /// Helps serde default the files bucket to thorium-files

@@ -1,0 +1,2359 @@
+{
+  "backends": {
+    "elastic": "c1770f2ccf3cbcf1af2387732a54a7365f9f5d5e4b7f8082811f261c688268d7",
+    "redis": "aa2ae3b00d020dc00810e00d50493eaa1cfc73e3f343545ee847804aaeb8e364",
+    "s3": "5a647d2e12a64df7059fd26f653ba60435f7698c1b512e74e17f31226b8a3d1c",
+    "scylla": "cac70b24e9c4a849a1ba327c68d3f682a56e481b5fe3619f7a6f963c9f9fac03"
+  },
+  "deployment": "86722e9607083db0e1f7d2b527ce3c4937c78b34fdc5cdb3ef5691eb70fbbdfd",
+  "objects": [
+    {
+      "backend": "scylla",
+      "canonical": {
+        "clustering_key": [
+          {
+            "name": "created",
+            "order": "desc"
+          },
+          {
+            "name": "target",
+            "order": "asc"
+          },
+          {
+            "name": "direction",
+            "order": "asc"
+          }
+        ],
+        "columns": [
+          {
+            "name": "bucket",
+            "type": "int"
+          },
+          {
+            "name": "created",
+            "type": "timestamp"
+          },
+          {
+            "name": "direction",
+            "type": "text"
+          },
+          {
+            "name": "extra_source",
+            "type": "text"
+          },
+          {
+            "name": "extra_target",
+            "type": "text"
+          },
+          {
+            "name": "group",
+            "type": "text"
+          },
+          {
+            "name": "kind",
+            "type": "text"
+          },
+          {
+            "name": "source",
+            "type": "text"
+          },
+          {
+            "name": "submissions_other",
+            "type": "uuid"
+          },
+          {
+            "name": "submissions_source",
+            "type": "uuid"
+          },
+          {
+            "name": "submitter",
+            "type": "text"
+          },
+          {
+            "name": "target",
+            "type": "text"
+          },
+          {
+            "name": "year",
+            "type": "int"
+          }
+        ],
+        "kind": "table",
+        "name": "associations",
+        "partition_key": [
+          "group",
+          "year",
+          "bucket",
+          "source"
+        ],
+        "static": []
+      },
+      "fingerprint": "c91e0c7e583471eff9ea656c955d78b9cb3fabe24ca0ee7a9ca5c0e8e031a9ea",
+      "name": "associations"
+    },
+    {
+      "backend": "scylla",
+      "canonical": {
+        "clustering_key": [
+          {
+            "name": "uploaded",
+            "order": "asc"
+          },
+          {
+            "name": "id",
+            "order": "asc"
+          }
+        ],
+        "columns": [
+          {
+            "name": "author",
+            "type": "text"
+          },
+          {
+            "name": "comment",
+            "type": "text"
+          },
+          {
+            "name": "files",
+            "type": "text"
+          },
+          {
+            "name": "group",
+            "type": "text"
+          },
+          {
+            "name": "id",
+            "type": "uuid"
+          },
+          {
+            "name": "sha256",
+            "type": "text"
+          },
+          {
+            "name": "uploaded",
+            "type": "timestamp"
+          }
+        ],
+        "kind": "table",
+        "name": "comments",
+        "partition_key": [
+          "group",
+          "sha256"
+        ],
+        "static": []
+      },
+      "fingerprint": "bd1ee3dbeb2a112ebeb1b7c1299709db6777632286e9e26b6d2a7f22fc69ade5",
+      "name": "comments"
+    },
+    {
+      "backend": "scylla",
+      "canonical": {
+        "base": "comments",
+        "clustering_key": [
+          {
+            "name": "sha256",
+            "order": "asc"
+          },
+          {
+            "name": "group",
+            "order": "asc"
+          },
+          {
+            "name": "uploaded",
+            "order": "asc"
+          }
+        ],
+        "columns": [
+          {
+            "name": "group",
+            "type": "text"
+          },
+          {
+            "name": "id",
+            "type": "uuid"
+          },
+          {
+            "name": "sha256",
+            "type": "text"
+          },
+          {
+            "name": "uploaded",
+            "type": "timestamp"
+          }
+        ],
+        "filter": null,
+        "kind": "view",
+        "name": "comments_by_id",
+        "partition_key": [
+          "id"
+        ]
+      },
+      "fingerprint": "b79dc31bed77194379b6a449384c1e9c7715da2e1b04ef08d5c98a8db4f3a623",
+      "name": "comments_by_id"
+    },
+    {
+      "backend": "scylla",
+      "canonical": {
+        "clustering_key": [
+          {
+            "name": "timestamp",
+            "order": "desc"
+          },
+          {
+            "name": "key",
+            "order": "desc"
+          }
+        ],
+        "columns": [
+          {
+            "name": "bucket",
+            "type": "int"
+          },
+          {
+            "name": "group",
+            "type": "text"
+          },
+          {
+            "name": "key",
+            "type": "text"
+          },
+          {
+            "name": "kind",
+            "type": "text"
+          },
+          {
+            "name": "repo",
+            "type": "text"
+          },
+          {
+            "name": "repo_data",
+            "type": "text"
+          },
+          {
+            "name": "timestamp",
+            "type": "timestamp"
+          },
+          {
+            "name": "year",
+            "type": "int"
+          }
+        ],
+        "kind": "table",
+        "name": "commitish_list",
+        "partition_key": [
+          "kind",
+          "group",
+          "year",
+          "bucket",
+          "repo"
+        ],
+        "static": []
+      },
+      "fingerprint": "fd7c1529657868a0f59f8d5881aafa86b23cd3645ac71222ec520afb9cfc1f63",
+      "name": "commitish_list"
+    },
+    {
+      "backend": "scylla",
+      "canonical": {
+        "clustering_key": [],
+        "columns": [
+          {
+            "name": "data",
+            "type": "text"
+          },
+          {
+            "name": "group",
+            "type": "text"
+          },
+          {
+            "name": "key",
+            "type": "text"
+          },
+          {
+            "name": "kind",
+            "type": "text"
+          },
+          {
+            "name": "repo",
+            "type": "text"
+          },
+          {
+            "name": "repo_data",
+            "type": "text"
+          },
+          {
+            "name": "timestamp",
+            "type": "timestamp"
+          }
+        ],
+        "kind": "table",
+        "name": "commitishes",
+        "partition_key": [
+          "kind",
+          "group",
+          "repo",
+          "key"
+        ],
+        "static": []
+      },
+      "fingerprint": "52bdf03402c59ee0f22709e0a50df3cc4133249f59c7ca0e50561ba6f8ca281d",
+      "name": "commitishes"
+    },
+    {
+      "backend": "scylla",
+      "canonical": {
+        "base": "commitish_list",
+        "clustering_key": [
+          {
+            "name": "kind",
+            "order": "asc"
+          },
+          {
+            "name": "group",
+            "order": "asc"
+          },
+          {
+            "name": "repo",
+            "order": "asc"
+          },
+          {
+            "name": "key",
+            "order": "asc"
+          },
+          {
+            "name": "timestamp",
+            "order": "asc"
+          }
+        ],
+        "columns": [
+          {
+            "name": "bucket",
+            "type": "int"
+          },
+          {
+            "name": "group",
+            "type": "text"
+          },
+          {
+            "name": "key",
+            "type": "text"
+          },
+          {
+            "name": "kind",
+            "type": "text"
+          },
+          {
+            "name": "repo",
+            "type": "text"
+          },
+          {
+            "name": "repo_data",
+            "type": "text"
+          },
+          {
+            "name": "timestamp",
+            "type": "timestamp"
+          },
+          {
+            "name": "year",
+            "type": "int"
+          }
+        ],
+        "filter": null,
+        "kind": "view",
+        "name": "committed_repo_data",
+        "partition_key": [
+          "repo_data",
+          "year",
+          "bucket"
+        ]
+      },
+      "fingerprint": "14d8bc1c9b488138d7a25e73d245692b7fafc33409ae7030aaed16d368eff93f",
+      "name": "committed_repo_data"
+    },
+    {
+      "backend": "scylla",
+      "canonical": {
+        "clustering_key": [
+          {
+            "name": "created",
+            "order": "asc"
+          },
+          {
+            "name": "id",
+            "order": "asc"
+          }
+        ],
+        "columns": [
+          {
+            "name": "bucket",
+            "type": "int"
+          },
+          {
+            "name": "created",
+            "type": "timestamp"
+          },
+          {
+            "name": "description",
+            "type": "text"
+          },
+          {
+            "name": "group",
+            "type": "text"
+          },
+          {
+            "name": "id",
+            "type": "uuid"
+          },
+          {
+            "name": "image",
+            "type": "text"
+          },
+          {
+            "name": "kind",
+            "type": "text"
+          },
+          {
+            "name": "kind_data",
+            "type": "text"
+          },
+          {
+            "name": "name",
+            "type": "text"
+          },
+          {
+            "name": "submitter",
+            "type": "text"
+          },
+          {
+            "name": "year",
+            "type": "int"
+          }
+        ],
+        "kind": "table",
+        "name": "entities",
+        "partition_key": [
+          "kind",
+          "group",
+          "year",
+          "bucket"
+        ],
+        "static": []
+      },
+      "fingerprint": "b4b053d48e069df6c3dee40ff87ec46a818b3b2eb608809bc191f8092b4ac5f3",
+      "name": "entities"
+    },
+    {
+      "backend": "scylla",
+      "canonical": {
+        "base": "entities",
+        "clustering_key": [
+          {
+            "name": "group",
+            "order": "asc"
+          },
+          {
+            "name": "kind",
+            "order": "asc"
+          },
+          {
+            "name": "created",
+            "order": "asc"
+          },
+          {
+            "name": "year",
+            "order": "asc"
+          },
+          {
+            "name": "bucket",
+            "order": "asc"
+          },
+          {
+            "name": "name",
+            "order": "asc"
+          }
+        ],
+        "columns": [
+          {
+            "name": "bucket",
+            "type": "int"
+          },
+          {
+            "name": "created",
+            "type": "timestamp"
+          },
+          {
+            "name": "description",
+            "type": "text"
+          },
+          {
+            "name": "group",
+            "type": "text"
+          },
+          {
+            "name": "id",
+            "type": "uuid"
+          },
+          {
+            "name": "image",
+            "type": "text"
+          },
+          {
+            "name": "kind",
+            "type": "text"
+          },
+          {
+            "name": "kind_data",
+            "type": "text"
+          },
+          {
+            "name": "name",
+            "type": "text"
+          },
+          {
+            "name": "submitter",
+            "type": "text"
+          },
+          {
+            "name": "year",
+            "type": "int"
+          }
+        ],
+        "filter": null,
+        "kind": "view",
+        "name": "entities_by_id",
+        "partition_key": [
+          "id"
+        ]
+      },
+      "fingerprint": "ee05031fe932a9ebe5813ba51f02b702f1bc3d19868d45b78091e5a235e51bd8",
+      "name": "entities_by_id"
+    },
+    {
+      "backend": "scylla",
+      "canonical": {
+        "clustering_key": [
+          {
+            "name": "position",
+            "order": "asc"
+          }
+        ],
+        "columns": [
+          {
+            "name": "bucket",
+            "type": "int"
+          },
+          {
+            "name": "line",
+            "type": "text"
+          },
+          {
+            "name": "position",
+            "type": "bigint"
+          },
+          {
+            "name": "reaction",
+            "type": "uuid"
+          },
+          {
+            "name": "stage",
+            "type": "text"
+          }
+        ],
+        "kind": "table",
+        "name": "logs",
+        "partition_key": [
+          "reaction",
+          "stage",
+          "bucket"
+        ],
+        "static": []
+      },
+      "fingerprint": "bbc1cd0859a750bb84188d2baa83a063787f0df55116583e66fbfda241bf30d4",
+      "name": "logs"
+    },
+    {
+      "backend": "scylla",
+      "canonical": {
+        "clustering_key": [
+          {
+            "name": "name",
+            "order": "asc"
+          }
+        ],
+        "columns": [
+          {
+            "name": "created",
+            "type": "timestamp"
+          },
+          {
+            "name": "default_policy",
+            "type": "boolean"
+          },
+          {
+            "name": "egress",
+            "type": "text"
+          },
+          {
+            "name": "forced_policy",
+            "type": "boolean"
+          },
+          {
+            "name": "group",
+            "type": "text"
+          },
+          {
+            "name": "id",
+            "type": "uuid"
+          },
+          {
+            "name": "ingress",
+            "type": "text"
+          },
+          {
+            "name": "k8s_name",
+            "type": "text"
+          },
+          {
+            "name": "name",
+            "type": "text"
+          }
+        ],
+        "kind": "table",
+        "name": "network_policies",
+        "partition_key": [
+          "group"
+        ],
+        "static": []
+      },
+      "fingerprint": "0d34f5bacabc500d2cce2110a98169c810740d8a5d74d873172e35806c8df200",
+      "name": "network_policies"
+    },
+    {
+      "backend": "scylla",
+      "canonical": {
+        "base": "network_policies",
+        "clustering_key": [
+          {
+            "name": "group",
+            "order": "asc"
+          }
+        ],
+        "columns": [
+          {
+            "name": "created",
+            "type": "timestamp"
+          },
+          {
+            "name": "default_policy",
+            "type": "boolean"
+          },
+          {
+            "name": "egress",
+            "type": "text"
+          },
+          {
+            "name": "forced_policy",
+            "type": "boolean"
+          },
+          {
+            "name": "group",
+            "type": "text"
+          },
+          {
+            "name": "id",
+            "type": "uuid"
+          },
+          {
+            "name": "ingress",
+            "type": "text"
+          },
+          {
+            "name": "k8s_name",
+            "type": "text"
+          },
+          {
+            "name": "name",
+            "type": "text"
+          }
+        ],
+        "filter": null,
+        "kind": "view",
+        "name": "network_policies_by_name",
+        "partition_key": [
+          "name"
+        ]
+      },
+      "fingerprint": "9c8c9c3542014bd94f0407e49cef67e834029bb4ce23dd6e0465812cdf9d5662",
+      "name": "network_policies_by_name"
+    },
+    {
+      "backend": "scylla",
+      "canonical": {
+        "base": "network_policies",
+        "clustering_key": [
+          {
+            "name": "name",
+            "order": "asc"
+          },
+          {
+            "name": "default_policy",
+            "order": "asc"
+          }
+        ],
+        "columns": [
+          {
+            "name": "default_policy",
+            "type": "boolean"
+          },
+          {
+            "name": "group",
+            "type": "text"
+          },
+          {
+            "name": "id",
+            "type": "uuid"
+          },
+          {
+            "name": "name",
+            "type": "text"
+          }
+        ],
+        "filter": "default_policy = true",
+        "kind": "view",
+        "name": "network_policies_default",
+        "partition_key": [
+          "group"
+        ]
+      },
+      "fingerprint": "062223d15bf7b87bbb55a28138ae0ac5ab85986dec651de6235be31fd145610b",
+      "name": "network_policies_default"
+    },
+    {
+      "backend": "scylla",
+      "canonical": {
+        "clustering_key": [
+          {
+            "name": "node",
+            "order": "asc"
+          }
+        ],
+        "columns": [
+          {
+            "name": "cluster",
+            "type": "text"
+          },
+          {
+            "name": "health",
+            "type": "text"
+          },
+          {
+            "name": "heart_beat",
+            "type": "timestamp"
+          },
+          {
+            "name": "node",
+            "type": "text"
+          },
+          {
+            "name": "resources",
+            "type": "text"
+          }
+        ],
+        "kind": "table",
+        "name": "nodes",
+        "partition_key": [
+          "cluster"
+        ],
+        "static": []
+      },
+      "fingerprint": "ba46f393941a7a2f894a6dd664c30dfc53bd0fcaedc4f51428133d8d0cc263e2",
+      "name": "nodes"
+    },
+    {
+      "backend": "scylla",
+      "canonical": {
+        "clustering_key": [
+          {
+            "name": "created",
+            "order": "asc"
+          },
+          {
+            "name": "id",
+            "order": "asc"
+          }
+        ],
+        "columns": [
+          {
+            "name": "ban_id",
+            "type": "uuid"
+          },
+          {
+            "name": "created",
+            "type": "timestamp"
+          },
+          {
+            "name": "id",
+            "type": "uuid"
+          },
+          {
+            "name": "key",
+            "type": "text"
+          },
+          {
+            "name": "kind",
+            "type": "text"
+          },
+          {
+            "name": "level",
+            "type": "text"
+          },
+          {
+            "name": "msg",
+            "type": "text"
+          }
+        ],
+        "kind": "table",
+        "name": "notifications",
+        "partition_key": [
+          "kind",
+          "key"
+        ],
+        "static": []
+      },
+      "fingerprint": "731741445e52e85ce02205af6f41f8c7cedba29e20f82c4e11d9251a7b195193",
+      "name": "notifications"
+    },
+    {
+      "backend": "scylla",
+      "canonical": {
+        "clustering_key": [
+          {
+            "name": "hash",
+            "order": "asc"
+          }
+        ],
+        "columns": [
+          {
+            "name": "hash",
+            "type": "text"
+          },
+          {
+            "name": "repo",
+            "type": "text"
+          }
+        ],
+        "kind": "table",
+        "name": "repo_data",
+        "partition_key": [
+          "repo"
+        ],
+        "static": []
+      },
+      "fingerprint": "fa6b72d9a74d2879b71bd5747311e112831ab02553859ff18d2b5bb5912b7e7f",
+      "name": "repo_data"
+    },
+    {
+      "backend": "scylla",
+      "canonical": {
+        "base": "repos_list",
+        "clustering_key": [
+          {
+            "name": "group",
+            "order": "asc"
+          },
+          {
+            "name": "uploaded",
+            "order": "desc"
+          },
+          {
+            "name": "year",
+            "order": "desc"
+          },
+          {
+            "name": "bucket",
+            "order": "desc"
+          },
+          {
+            "name": "id",
+            "order": "desc"
+          }
+        ],
+        "columns": [
+          {
+            "name": "bucket",
+            "type": "int"
+          },
+          {
+            "name": "creator",
+            "type": "text"
+          },
+          {
+            "name": "default_checkout",
+            "type": "text"
+          },
+          {
+            "name": "earliest",
+            "type": "timestamp"
+          },
+          {
+            "name": "group",
+            "type": "text"
+          },
+          {
+            "name": "id",
+            "type": "uuid"
+          },
+          {
+            "name": "name",
+            "type": "text"
+          },
+          {
+            "name": "provider",
+            "type": "text"
+          },
+          {
+            "name": "scheme",
+            "type": "text"
+          },
+          {
+            "name": "uploaded",
+            "type": "timestamp"
+          },
+          {
+            "name": "url",
+            "type": "text"
+          },
+          {
+            "name": "user",
+            "type": "text"
+          },
+          {
+            "name": "year",
+            "type": "int"
+          }
+        ],
+        "filter": null,
+        "kind": "view",
+        "name": "repos",
+        "partition_key": [
+          "url"
+        ]
+      },
+      "fingerprint": "d4f8658c68d904cf0e549e8d9393bf13cfd688ef8bd0839a33f5c9ccc6c13d3c",
+      "name": "repos"
+    },
+    {
+      "backend": "scylla",
+      "canonical": {
+        "clustering_key": [
+          {
+            "name": "uploaded",
+            "order": "desc"
+          },
+          {
+            "name": "id",
+            "order": "desc"
+          }
+        ],
+        "columns": [
+          {
+            "name": "bucket",
+            "type": "int"
+          },
+          {
+            "name": "creator",
+            "type": "text"
+          },
+          {
+            "name": "default_checkout",
+            "type": "text"
+          },
+          {
+            "name": "earliest",
+            "type": "timestamp"
+          },
+          {
+            "name": "group",
+            "type": "text"
+          },
+          {
+            "name": "id",
+            "type": "uuid"
+          },
+          {
+            "name": "name",
+            "type": "text"
+          },
+          {
+            "name": "provider",
+            "type": "text"
+          },
+          {
+            "name": "scheme",
+            "type": "text"
+          },
+          {
+            "name": "uploaded",
+            "type": "timestamp"
+          },
+          {
+            "name": "url",
+            "type": "text"
+          },
+          {
+            "name": "user",
+            "type": "text"
+          },
+          {
+            "name": "year",
+            "type": "int"
+          }
+        ],
+        "kind": "table",
+        "name": "repos_list",
+        "partition_key": [
+          "group",
+          "year",
+          "bucket"
+        ],
+        "static": []
+      },
+      "fingerprint": "ef6aaba4c7a2eb14cac60e203c96abeaf7e80c677394d5674ad321bd3a36a85f",
+      "name": "repos_list"
+    },
+    {
+      "backend": "scylla",
+      "canonical": {
+        "clustering_key": [
+          {
+            "name": "uploaded",
+            "order": "desc"
+          }
+        ],
+        "columns": [
+          {
+            "name": "children",
+            "type": "map<text, uuid>"
+          },
+          {
+            "name": "cmd",
+            "type": "text"
+          },
+          {
+            "name": "display_type",
+            "type": "text"
+          },
+          {
+            "name": "entities",
+            "type": "map<text, bigint>"
+          },
+          {
+            "name": "files",
+            "type": "set<text>"
+          },
+          {
+            "name": "id",
+            "type": "uuid"
+          },
+          {
+            "name": "result",
+            "type": "text"
+          },
+          {
+            "name": "tool",
+            "type": "text"
+          },
+          {
+            "name": "tool_version",
+            "type": "text"
+          },
+          {
+            "name": "uploaded",
+            "type": "timestamp"
+          }
+        ],
+        "kind": "table",
+        "name": "results",
+        "partition_key": [
+          "id"
+        ],
+        "static": []
+      },
+      "fingerprint": "8d78eac3c3f90c31435391e23848d2a893b9978596e205dd6675ef825088e22a",
+      "name": "results"
+    },
+    {
+      "backend": "scylla",
+      "canonical": {
+        "base": "results_stream",
+        "clustering_key": [
+          {
+            "name": "kind",
+            "order": "asc"
+          },
+          {
+            "name": "group",
+            "order": "asc"
+          },
+          {
+            "name": "tool",
+            "order": "asc"
+          },
+          {
+            "name": "id",
+            "order": "asc"
+          },
+          {
+            "name": "year",
+            "order": "asc"
+          },
+          {
+            "name": "bucket",
+            "order": "asc"
+          },
+          {
+            "name": "uploaded",
+            "order": "asc"
+          }
+        ],
+        "columns": [
+          {
+            "name": "bucket",
+            "type": "int"
+          },
+          {
+            "name": "cmd",
+            "type": "text"
+          },
+          {
+            "name": "display_type",
+            "type": "text"
+          },
+          {
+            "name": "group",
+            "type": "text"
+          },
+          {
+            "name": "id",
+            "type": "uuid"
+          },
+          {
+            "name": "key",
+            "type": "text"
+          },
+          {
+            "name": "kind",
+            "type": "text"
+          },
+          {
+            "name": "tool",
+            "type": "text"
+          },
+          {
+            "name": "tool_version",
+            "type": "text"
+          },
+          {
+            "name": "uploaded",
+            "type": "timestamp"
+          },
+          {
+            "name": "year",
+            "type": "int"
+          }
+        ],
+        "filter": null,
+        "kind": "view",
+        "name": "results_auth",
+        "partition_key": [
+          "key"
+        ]
+      },
+      "fingerprint": "425ef0bce725c18f081d0c43d6dacb828d027cdb415da9aee1fd1575c0aaefff",
+      "name": "results_auth"
+    },
+    {
+      "backend": "scylla",
+      "canonical": {
+        "base": "results_stream",
+        "clustering_key": [
+          {
+            "name": "id",
+            "order": "asc"
+          },
+          {
+            "name": "kind",
+            "order": "asc"
+          },
+          {
+            "name": "group",
+            "order": "asc"
+          },
+          {
+            "name": "year",
+            "order": "asc"
+          },
+          {
+            "name": "bucket",
+            "order": "asc"
+          },
+          {
+            "name": "uploaded",
+            "order": "asc"
+          }
+        ],
+        "columns": [
+          {
+            "name": "bucket",
+            "type": "int"
+          },
+          {
+            "name": "group",
+            "type": "text"
+          },
+          {
+            "name": "id",
+            "type": "uuid"
+          },
+          {
+            "name": "key",
+            "type": "text"
+          },
+          {
+            "name": "kind",
+            "type": "text"
+          },
+          {
+            "name": "tool",
+            "type": "text"
+          },
+          {
+            "name": "uploaded",
+            "type": "timestamp"
+          },
+          {
+            "name": "year",
+            "type": "int"
+          }
+        ],
+        "filter": null,
+        "kind": "view",
+        "name": "results_ids",
+        "partition_key": [
+          "key"
+        ]
+      },
+      "fingerprint": "4ec3b78fea58aac1dd7d4605dcdf5642460c5ca99259fabc1fa7ce9da4adf7ef",
+      "name": "results_ids"
+    },
+    {
+      "backend": "scylla",
+      "canonical": {
+        "clustering_key": [
+          {
+            "name": "uploaded",
+            "order": "desc"
+          },
+          {
+            "name": "id",
+            "order": "asc"
+          },
+          {
+            "name": "key",
+            "order": "asc"
+          }
+        ],
+        "columns": [
+          {
+            "name": "bucket",
+            "type": "int"
+          },
+          {
+            "name": "cmd",
+            "type": "text"
+          },
+          {
+            "name": "display_type",
+            "type": "text"
+          },
+          {
+            "name": "group",
+            "type": "text"
+          },
+          {
+            "name": "id",
+            "type": "uuid"
+          },
+          {
+            "name": "key",
+            "type": "text"
+          },
+          {
+            "name": "kind",
+            "type": "text"
+          },
+          {
+            "name": "tool",
+            "type": "text"
+          },
+          {
+            "name": "tool_version",
+            "type": "text"
+          },
+          {
+            "name": "uploaded",
+            "type": "timestamp"
+          },
+          {
+            "name": "year",
+            "type": "int"
+          }
+        ],
+        "kind": "table",
+        "name": "results_stream",
+        "partition_key": [
+          "kind",
+          "group",
+          "year",
+          "bucket"
+        ],
+        "static": []
+      },
+      "fingerprint": "81c5ea16a56a1c41d8f20e5feef54aa3677363e0706f7ddcec96f64dcd0e943b",
+      "name": "results_stream"
+    },
+    {
+      "backend": "scylla",
+      "canonical": {
+        "clustering_key": [
+          {
+            "name": "sha256",
+            "order": "asc"
+          }
+        ],
+        "columns": [
+          {
+            "name": "id",
+            "type": "uuid"
+          },
+          {
+            "name": "sha256",
+            "type": "text"
+          },
+          {
+            "name": "type",
+            "type": "text"
+          }
+        ],
+        "kind": "table",
+        "name": "s3_ids",
+        "partition_key": [
+          "type",
+          "id"
+        ],
+        "static": []
+      },
+      "fingerprint": "30b130d2c8aad95ece8063fe2da3e262c39cc88792c328deee0cf23fd8801f59",
+      "name": "s3_ids"
+    },
+    {
+      "backend": "scylla",
+      "canonical": {
+        "base": "s3_ids",
+        "clustering_key": [
+          {
+            "name": "type",
+            "order": "asc"
+          },
+          {
+            "name": "id",
+            "order": "asc"
+          }
+        ],
+        "columns": [
+          {
+            "name": "id",
+            "type": "uuid"
+          },
+          {
+            "name": "sha256",
+            "type": "text"
+          },
+          {
+            "name": "type",
+            "type": "text"
+          }
+        ],
+        "filter": null,
+        "kind": "view",
+        "name": "s3_sha256s",
+        "partition_key": [
+          "sha256"
+        ]
+      },
+      "fingerprint": "d4fcc325a8974e2aa368d67cab46dedf86ded3cd2c2484f680fa9e9aeb2b7d31",
+      "name": "s3_sha256s"
+    },
+    {
+      "backend": "scylla",
+      "canonical": {
+        "base": "samples_list",
+        "clustering_key": [
+          {
+            "name": "group",
+            "order": "asc"
+          },
+          {
+            "name": "uploaded",
+            "order": "desc"
+          },
+          {
+            "name": "id",
+            "order": "desc"
+          },
+          {
+            "name": "year",
+            "order": "asc"
+          },
+          {
+            "name": "bucket",
+            "order": "asc"
+          }
+        ],
+        "columns": [
+          {
+            "name": "bucket",
+            "type": "int"
+          },
+          {
+            "name": "description",
+            "type": "text"
+          },
+          {
+            "name": "group",
+            "type": "text"
+          },
+          {
+            "name": "id",
+            "type": "uuid"
+          },
+          {
+            "name": "md5",
+            "type": "text"
+          },
+          {
+            "name": "name",
+            "type": "text"
+          },
+          {
+            "name": "origin",
+            "type": "text"
+          },
+          {
+            "name": "sha1",
+            "type": "text"
+          },
+          {
+            "name": "sha256",
+            "type": "text"
+          },
+          {
+            "name": "submitter",
+            "type": "text"
+          },
+          {
+            "name": "uploaded",
+            "type": "timestamp"
+          },
+          {
+            "name": "year",
+            "type": "int"
+          }
+        ],
+        "filter": null,
+        "kind": "view",
+        "name": "samples",
+        "partition_key": [
+          "sha256"
+        ]
+      },
+      "fingerprint": "affa642941fb615f3220429c1c3c8939899f2c0833bc1fd92e40a5ef49936975",
+      "name": "samples"
+    },
+    {
+      "backend": "scylla",
+      "canonical": {
+        "clustering_key": [
+          {
+            "name": "uploaded",
+            "order": "desc"
+          },
+          {
+            "name": "id",
+            "order": "desc"
+          }
+        ],
+        "columns": [
+          {
+            "name": "bucket",
+            "type": "int"
+          },
+          {
+            "name": "description",
+            "type": "text"
+          },
+          {
+            "name": "group",
+            "type": "text"
+          },
+          {
+            "name": "id",
+            "type": "uuid"
+          },
+          {
+            "name": "md5",
+            "type": "text"
+          },
+          {
+            "name": "name",
+            "type": "text"
+          },
+          {
+            "name": "origin",
+            "type": "text"
+          },
+          {
+            "name": "sha1",
+            "type": "text"
+          },
+          {
+            "name": "sha256",
+            "type": "text"
+          },
+          {
+            "name": "submitter",
+            "type": "text"
+          },
+          {
+            "name": "uploaded",
+            "type": "timestamp"
+          },
+          {
+            "name": "year",
+            "type": "int"
+          }
+        ],
+        "kind": "table",
+        "name": "samples_list",
+        "partition_key": [
+          "group",
+          "year",
+          "bucket"
+        ],
+        "static": []
+      },
+      "fingerprint": "095e74b3da16b98ce9eab44fc70c7076275e68638123db3f9288081d5dea8559",
+      "name": "samples_list"
+    },
+    {
+      "backend": "scylla",
+      "canonical": {
+        "clustering_key": [
+          {
+            "name": "transform",
+            "order": "asc"
+          },
+          {
+            "name": "reason",
+            "order": "asc"
+          },
+          {
+            "name": "worker",
+            "order": "asc"
+          }
+        ],
+        "columns": [
+          {
+            "name": "accepted",
+            "type": "boolean"
+          },
+          {
+            "name": "attempt",
+            "type": "text"
+          },
+          {
+            "name": "checkpoint",
+            "type": "text"
+          },
+          {
+            "name": "class",
+            "type": "text"
+          },
+          {
+            "name": "count",
+            "type": "bigint"
+          },
+          {
+            "name": "first_seen",
+            "type": "timestamp"
+          },
+          {
+            "name": "last_seen",
+            "type": "timestamp"
+          },
+          {
+            "name": "lease",
+            "type": "text"
+          },
+          {
+            "name": "migration",
+            "type": "text"
+          },
+          {
+            "name": "reason",
+            "type": "text"
+          },
+          {
+            "name": "resolved_count",
+            "type": "bigint"
+          },
+          {
+            "name": "samples",
+            "type": "set<text>"
+          },
+          {
+            "name": "transform",
+            "type": "text"
+          },
+          {
+            "name": "updated",
+            "type": "timestamp"
+          },
+          {
+            "name": "worker",
+            "type": "text"
+          }
+        ],
+        "kind": "table",
+        "name": "schema_migration_issues",
+        "partition_key": [
+          "migration"
+        ],
+        "static": []
+      },
+      "fingerprint": "65212b2b131cbdfb0b8c35730214599b682def78797acc5248ebd7500b62dbf0",
+      "name": "schema_migration_issues"
+    },
+    {
+      "backend": "scylla",
+      "canonical": {
+        "clustering_key": [
+          {
+            "name": "id",
+            "order": "asc"
+          }
+        ],
+        "columns": [
+          {
+            "name": "apply_key",
+            "type": "text"
+          },
+          {
+            "name": "attempt",
+            "type": "text"
+          },
+          {
+            "name": "backup",
+            "type": "text"
+          },
+          {
+            "name": "counts",
+            "type": "text"
+          },
+          {
+            "name": "entry",
+            "type": "text"
+          },
+          {
+            "name": "fingerprint",
+            "type": "text"
+          },
+          {
+            "name": "finished",
+            "type": "timestamp"
+          },
+          {
+            "name": "id",
+            "type": "text"
+          },
+          {
+            "name": "job",
+            "type": "text"
+          },
+          {
+            "name": "kind",
+            "type": "text"
+          },
+          {
+            "name": "layouts",
+            "type": "map<text, bigint>"
+          },
+          {
+            "name": "lease",
+            "type": "text"
+          },
+          {
+            "name": "report",
+            "type": "text"
+          },
+          {
+            "name": "result",
+            "type": "text"
+          },
+          {
+            "name": "revision",
+            "type": "text"
+          },
+          {
+            "name": "started",
+            "type": "timestamp"
+          },
+          {
+            "name": "status",
+            "type": "text"
+          },
+          {
+            "name": "updated",
+            "type": "timestamp"
+          },
+          {
+            "name": "value",
+            "type": "text"
+          },
+          {
+            "name": "version",
+            "type": "text"
+          }
+        ],
+        "kind": "table",
+        "name": "schema_migrations",
+        "partition_key": [
+          "kind"
+        ],
+        "static": []
+      },
+      "fingerprint": "bf1fbca97e07532dd60fb8f59cb97f837e5b2f265d9b04ba71a31ce083c4ae3e",
+      "name": "schema_migrations"
+    },
+    {
+      "backend": "scylla",
+      "canonical": {
+        "clustering_key": [
+          {
+            "name": "uploaded",
+            "order": "desc"
+          },
+          {
+            "name": "item",
+            "order": "asc"
+          },
+          {
+            "name": "key_lower",
+            "order": "asc"
+          },
+          {
+            "name": "value_lower",
+            "order": "asc"
+          }
+        ],
+        "columns": [
+          {
+            "name": "bucket",
+            "type": "int"
+          },
+          {
+            "name": "group",
+            "type": "text"
+          },
+          {
+            "name": "item",
+            "type": "text"
+          },
+          {
+            "name": "key",
+            "type": "text"
+          },
+          {
+            "name": "key_lower",
+            "type": "text"
+          },
+          {
+            "name": "type",
+            "type": "text"
+          },
+          {
+            "name": "uploaded",
+            "type": "timestamp"
+          },
+          {
+            "name": "value",
+            "type": "text"
+          },
+          {
+            "name": "value_lower",
+            "type": "text"
+          },
+          {
+            "name": "year",
+            "type": "int"
+          }
+        ],
+        "kind": "table",
+        "name": "tags",
+        "partition_key": [
+          "type",
+          "group",
+          "year",
+          "bucket",
+          "key",
+          "value"
+        ],
+        "static": []
+      },
+      "fingerprint": "f46589ae71ef205af194d4b2049fcc6a58b0f2fb462e9831996388122dd2418a",
+      "name": "tags"
+    },
+    {
+      "backend": "scylla",
+      "canonical": {
+        "base": "tags",
+        "clustering_key": [
+          {
+            "name": "group",
+            "order": "asc"
+          },
+          {
+            "name": "year",
+            "order": "asc"
+          },
+          {
+            "name": "bucket",
+            "order": "asc"
+          },
+          {
+            "name": "uploaded",
+            "order": "asc"
+          },
+          {
+            "name": "key",
+            "order": "asc"
+          },
+          {
+            "name": "value",
+            "order": "asc"
+          },
+          {
+            "name": "key_lower",
+            "order": "asc"
+          },
+          {
+            "name": "value_lower",
+            "order": "asc"
+          }
+        ],
+        "columns": [
+          {
+            "name": "bucket",
+            "type": "int"
+          },
+          {
+            "name": "group",
+            "type": "text"
+          },
+          {
+            "name": "item",
+            "type": "text"
+          },
+          {
+            "name": "key",
+            "type": "text"
+          },
+          {
+            "name": "key_lower",
+            "type": "text"
+          },
+          {
+            "name": "type",
+            "type": "text"
+          },
+          {
+            "name": "uploaded",
+            "type": "timestamp"
+          },
+          {
+            "name": "value",
+            "type": "text"
+          },
+          {
+            "name": "value_lower",
+            "type": "text"
+          },
+          {
+            "name": "year",
+            "type": "int"
+          }
+        ],
+        "filter": null,
+        "kind": "view",
+        "name": "tags_by_item",
+        "partition_key": [
+          "type",
+          "item"
+        ]
+      },
+      "fingerprint": "bb788f763a7d6265e19f9712e0711e41e329f7f26917f71414261c56aa1faa24",
+      "name": "tags_by_item"
+    },
+    {
+      "backend": "scylla",
+      "canonical": {
+        "base": "tags",
+        "clustering_key": [
+          {
+            "name": "uploaded",
+            "order": "asc"
+          },
+          {
+            "name": "item",
+            "order": "asc"
+          },
+          {
+            "name": "key",
+            "order": "asc"
+          },
+          {
+            "name": "value",
+            "order": "asc"
+          }
+        ],
+        "columns": [
+          {
+            "name": "bucket",
+            "type": "int"
+          },
+          {
+            "name": "group",
+            "type": "text"
+          },
+          {
+            "name": "item",
+            "type": "text"
+          },
+          {
+            "name": "key",
+            "type": "text"
+          },
+          {
+            "name": "key_lower",
+            "type": "text"
+          },
+          {
+            "name": "type",
+            "type": "text"
+          },
+          {
+            "name": "uploaded",
+            "type": "timestamp"
+          },
+          {
+            "name": "value",
+            "type": "text"
+          },
+          {
+            "name": "value_lower",
+            "type": "text"
+          },
+          {
+            "name": "year",
+            "type": "int"
+          }
+        ],
+        "filter": null,
+        "kind": "view",
+        "name": "tags_case_insensitive",
+        "partition_key": [
+          "type",
+          "group",
+          "year",
+          "bucket",
+          "key_lower",
+          "value_lower"
+        ]
+      },
+      "fingerprint": "1ad8b8ac0dc30f815709e720ab113703fe77067de871e176b2a3ebf03adfc365",
+      "name": "tags_case_insensitive"
+    },
+    {
+      "backend": "elastic",
+      "canonical": {
+        "body": {
+          "mappings": {
+            "properties": {
+              "children": {
+                "type": "text"
+              },
+              "files": {
+                "type": "text"
+              },
+              "group": {
+                "type": "keyword"
+              },
+              "results": {
+                "type": "text"
+              },
+              "streamed": {
+                "type": "date"
+              },
+              "url": {
+                "type": "keyword"
+              }
+            }
+          }
+        },
+        "kind": "index",
+        "name": "RepoResults"
+      },
+      "fingerprint": "bbb75e95f404c4407f34952685379a165d9909bbbbc4c9fa5e85b8817ba77a17",
+      "name": "RepoResults"
+    },
+    {
+      "backend": "elastic",
+      "canonical": {
+        "body": {
+          "mappings": {
+            "properties": {
+              "group": {
+                "type": "keyword"
+              },
+              "streamed": {
+                "type": "date"
+              },
+              "tags": {
+                "type": "text"
+              },
+              "url": {
+                "type": "keyword"
+              }
+            }
+          }
+        },
+        "kind": "index",
+        "name": "RepoTags"
+      },
+      "fingerprint": "93f12d27c665313dc38d4bc70f1c765b49e124ca3acc18b0b6b2278f81898479",
+      "name": "RepoTags"
+    },
+    {
+      "backend": "elastic",
+      "canonical": {
+        "body": {
+          "mappings": {
+            "properties": {
+              "children": {
+                "type": "text"
+              },
+              "files": {
+                "type": "text"
+              },
+              "group": {
+                "type": "keyword"
+              },
+              "results": {
+                "type": "text"
+              },
+              "sha256": {
+                "type": "keyword"
+              },
+              "streamed": {
+                "type": "date"
+              }
+            }
+          }
+        },
+        "kind": "index",
+        "name": "SampleResults"
+      },
+      "fingerprint": "03e7cf3b493d04566de3c1a9416a551c68f1db28197a5e82ba63be4178a57959",
+      "name": "SampleResults"
+    },
+    {
+      "backend": "elastic",
+      "canonical": {
+        "body": {
+          "mappings": {
+            "properties": {
+              "group": {
+                "type": "keyword"
+              },
+              "sha256": {
+                "type": "keyword"
+              },
+              "streamed": {
+                "type": "date"
+              },
+              "tags": {
+                "type": "text"
+              }
+            }
+          }
+        },
+        "kind": "index",
+        "name": "SampleTags"
+      },
+      "fingerprint": "27535e0d9c61f2e625a3bd36983209a234cee6b94fc30a035f8f86a9a24fac87",
+      "name": "SampleTags"
+    },
+    {
+      "backend": "redis",
+      "canonical": {
+        "census_associations": 1
+      },
+      "fingerprint": "b33f4e531bacbaee19848008b59757ff5f5bb4659b7acb5a56e9bf5f6179ccba",
+      "name": "census_associations"
+    },
+    {
+      "backend": "redis",
+      "canonical": {
+        "census_commitish": 1
+      },
+      "fingerprint": "2e40e211b7726d794653d9a73c612465c675345b514e91f7e62aca82227517c2",
+      "name": "census_commitish"
+    },
+    {
+      "backend": "redis",
+      "canonical": {
+        "census_entities": 1
+      },
+      "fingerprint": "c9e856702c2375a4778721457d3104ab71d371a7463d52052b16cc894be83193",
+      "name": "census_entities"
+    },
+    {
+      "backend": "redis",
+      "canonical": {
+        "census_repos": 1
+      },
+      "fingerprint": "ef03a82e6eff0ec5806fd8e5c07b9ab51e4608054b8079eb6d8e3b0a87d902c4",
+      "name": "census_repos"
+    },
+    {
+      "backend": "redis",
+      "canonical": {
+        "census_samples": 1
+      },
+      "fingerprint": "38755eb5d4e75f8c882d2bff557b08c15e07556435df86229bb3360eabc04f76",
+      "name": "census_samples"
+    },
+    {
+      "backend": "redis",
+      "canonical": {
+        "census_tags": 1
+      },
+      "fingerprint": "5490a608961951d297a8290ce817feca5f48eed24d838483a223f380b4c1298b",
+      "name": "census_tags"
+    },
+    {
+      "backend": "redis",
+      "canonical": {
+        "census_tags_case_insensitive": 1
+      },
+      "fingerprint": "67d48cd5f5a3c18fbf44f9f08b7e3ec95ce173860a08997ff6dd6d2a5d248130",
+      "name": "census_tags_case_insensitive"
+    },
+    {
+      "backend": "redis",
+      "canonical": {
+        "cursors": 2
+      },
+      "fingerprint": "a7ec36ca301987ae5227e146af7d77acc208c1085f5de886f757c2aa68e9f45f",
+      "name": "cursors"
+    },
+    {
+      "backend": "redis",
+      "canonical": {
+        "events": 1
+      },
+      "fingerprint": "cfa0bd3ada29b861fa269aec3007dd4ce194a6f3e2f5cd9125d654e08637a8ca",
+      "name": "events"
+    },
+    {
+      "backend": "redis",
+      "canonical": {
+        "groups": 1
+      },
+      "fingerprint": "71d42e043feaada63e2011db43a49eb8bbfa7b1c3d61d8ef2053eab3cd1f5f8e",
+      "name": "groups"
+    },
+    {
+      "backend": "redis",
+      "canonical": {
+        "images": 1
+      },
+      "fingerprint": "90ea7e380195ccdd4e74cd2a5de101689079f76205d7c087674674397903caf1",
+      "name": "images"
+    },
+    {
+      "backend": "redis",
+      "canonical": {
+        "jobs": 1
+      },
+      "fingerprint": "d4b59252fc3f618aaca04c5e48195d70e6ef3b9146896a47f229845786e9aa6e",
+      "name": "jobs"
+    },
+    {
+      "backend": "redis",
+      "canonical": {
+        "network_policies": 1
+      },
+      "fingerprint": "bce8b41861e9545a69ef03b173fbc914b7d2b93126b9a1ffa2d9a1ad5737b0a8",
+      "name": "network_policies"
+    },
+    {
+      "backend": "redis",
+      "canonical": {
+        "oauth": 1
+      },
+      "fingerprint": "989ae04a9b29cf082951cbde13250ab496fcee2cffb9a23216450ab2fb4beb48",
+      "name": "oauth"
+    },
+    {
+      "backend": "redis",
+      "canonical": {
+        "pipelines": 1
+      },
+      "fingerprint": "9cacf2ff5055d51a8b25b5cf501f36a72dc8039d895eabda097c5aa87e51caad",
+      "name": "pipelines"
+    },
+    {
+      "backend": "redis",
+      "canonical": {
+        "reactions": 1
+      },
+      "fingerprint": "671cf2470b9d70cad4f0d063de9025899a1db3e091df2880ae9b8db2b7fb7ed2",
+      "name": "reactions"
+    },
+    {
+      "backend": "redis",
+      "canonical": {
+        "search_events": 1
+      },
+      "fingerprint": "c1e4a9d5c81e1d300f3445c408771bafb541c5f115778db071869c09382ee358",
+      "name": "search_events"
+    },
+    {
+      "backend": "redis",
+      "canonical": {
+        "search_streamer_init": 1
+      },
+      "fingerprint": "9f8a27cc7efb2288e5d1d16650d29ddf7ce8df4fcf200ab6b3570f4158110401",
+      "name": "search_streamer_init"
+    },
+    {
+      "backend": "redis",
+      "canonical": {
+        "streams": 1
+      },
+      "fingerprint": "a00512d214a417b476c00783394cdf6b50a906cb58f9e6e60f05260273b4bcaa",
+      "name": "streams"
+    },
+    {
+      "backend": "redis",
+      "canonical": {
+        "system": 1
+      },
+      "fingerprint": "abae339dc4a6c3205122de9942829f205dd62df09a4b11987da25a98b3d3e5d5",
+      "name": "system"
+    },
+    {
+      "backend": "redis",
+      "canonical": {
+        "users": 2
+      },
+      "fingerprint": "f71026552616bdfb36505cad5858e6a1f5b4b82d11769d3f431da99e89fef9c1",
+      "name": "users"
+    },
+    {
+      "backend": "redis",
+      "canonical": {
+        "vendors": 1
+      },
+      "fingerprint": "1121de5d7f2f335632c44663848f7afce7f8acfed56a05765f10c16d7db8a612",
+      "name": "vendors"
+    },
+    {
+      "backend": "redis",
+      "canonical": {
+        "workers": 1
+      },
+      "fingerprint": "d02327dce332e2a18e1be8b22f224d1b62d42daa3fedd90586ea5223060e8193",
+      "name": "workers"
+    },
+    {
+      "backend": "s3",
+      "canonical": {
+        "attachments": 1
+      },
+      "fingerprint": "4f59a322b4ae38482ef26fe548635be217af8d54a8684dc67fbc0d4101f92690",
+      "name": "attachments"
+    },
+    {
+      "backend": "s3",
+      "canonical": {
+        "ephemeral": 1
+      },
+      "fingerprint": "41b14d3f7501c929cb364d55a91ef1118ba352ab05c030281f47a0515555a91d",
+      "name": "ephemeral"
+    },
+    {
+      "backend": "s3",
+      "canonical": {
+        "files": 1
+      },
+      "fingerprint": "bf691cca807f5f1b4b641c45369c656c9a0f1e911163c02313ce2ad62f3a0862",
+      "name": "files"
+    },
+    {
+      "backend": "s3",
+      "canonical": {
+        "graphics": 1
+      },
+      "fingerprint": "e7f31f4e7da60e08b2d494fa4e7fe630eb78b0a495b3cb035a353a87d82aa98e",
+      "name": "graphics"
+    },
+    {
+      "backend": "s3",
+      "canonical": {
+        "reaction_cache": 1
+      },
+      "fingerprint": "02a90540673dba3979bbd9d287d9d13d5ea1741be0369209d118503adb0de7be",
+      "name": "reaction_cache"
+    },
+    {
+      "backend": "s3",
+      "canonical": {
+        "repos": 1
+      },
+      "fingerprint": "8a3eb60edb258187eef394529a21abc401fa89b82117c54ddd074cd8faa8c2b1",
+      "name": "repos"
+    },
+    {
+      "backend": "s3",
+      "canonical": {
+        "results": 1
+      },
+      "fingerprint": "240f6a775fe3e5d3ab53161c15916e0dfbfeeef36d14cac3246a276ed1871132",
+      "name": "results"
+    }
+  ],
+  "revision": "2026-10-v03"
+}

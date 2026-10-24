@@ -27,7 +27,7 @@ Thorium.
 
 | Service | Holds | Notes |
 |---------|-------|-------|
-| ScyllaDB | Thorium's primary data | The API creates its keyspace |
+| ScyllaDB | Thorium's primary data | `thoradm schema apply`, which the operator runs as a Job before it rolls out the components, creates its keyspace and tables |
 | Redis | Users, groups, settings, caches, and job queues | |
 | Elasticsearch | The search index of results and tags | Derived data: the search streamer rebuilds it from Scylla |
 | S3-compatible store | Files, repos, results, comment attachments, graphics, ephemeral files, and the reaction cache | The operator creates Thorium's buckets |
@@ -154,6 +154,7 @@ deployment is at in the `thorium-upgrade-state` ConfigMap in the thorium namespa
 |----------|---------|
 | `2026-10-v01` | A deployment made by the minithor or megathor scripts before the Helm charts; the baseline every converted deployment starts from |
 | `2026-10-v02` | A deployment made by the Helm charts with the chart-managed operator |
+| `2026-10-v03` | Adds the step that applies the schema before any step that changes data |
 
 When an operator knows a newer revision than the deployment's, it waits in `UpgradeRequired`
 until an admin sets a target revision, then runs the steps in order. The Thorium version a

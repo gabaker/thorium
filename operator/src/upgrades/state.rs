@@ -137,7 +137,7 @@ pub async fn save(client: &Client, namespace: &str, stored: &mut StoredState) ->
 mod tests {
     use super::*;
     use crate::k8s::clusters::tests::{FakeKube, kube_status};
-    use crate::upgrades::tests::{CONFIG_MAPS_PATH, STATE_PATH, state_config_map};
+    use crate::upgrades::tests::{CONFIG_MAPS_PATH, STATE_PATH, raw_state_config_map};
     use thorium::models::upgrades::{HASH_LABEL, REVISION_LABEL, RevisionId, VERSION_LABEL};
 
     /// A saved state round trips through its `ConfigMap`
@@ -265,7 +265,7 @@ mod tests {
         // a recorded state is read with the version it was read at
         let revision: RevisionId = "2026-10-v01".parse().expect("revision");
         let state = UpgradeState::new(revision, "1.8.1");
-        let fake = FakeKube::default().route("GET", STATE_PATH, 200, state_config_map(&state));
+        let fake = FakeKube::default().route("GET", STATE_PATH, 200, raw_state_config_map(&state));
         let stored = load(&fake.client(), "thorium")
             .await
             .expect("load")
@@ -281,7 +281,7 @@ mod tests {
         // answer both writes with a new version
         let revision: RevisionId = "2026-10-v02".parse().expect("revision");
         let state = UpgradeState::new(revision, "1.8.1");
-        let mut written = state_config_map(&state);
+        let mut written = raw_state_config_map(&state);
         written["metadata"]["resourceVersion"] = serde_json::json!("6");
         let fake = FakeKube::default()
             .route("POST", CONFIG_MAPS_PATH, 201, written.clone())

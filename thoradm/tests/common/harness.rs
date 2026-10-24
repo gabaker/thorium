@@ -645,7 +645,12 @@ fn spawn_api(conf: Conf) {
             .thread_stack_size(8 << 20)
             .build()
             .expect("failed to build the test API's runtime");
-        runtime.block_on(async move { thorium::axum(conf).await });
+        let opts = thorium::utils::StartupOpts { apply_schema: true };
+        runtime.block_on(async move {
+            thorium::axum_with(conf, opts)
+                .await
+                .expect("the API starts")
+        });
     });
 }
 

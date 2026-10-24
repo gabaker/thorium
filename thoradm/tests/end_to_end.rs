@@ -28,7 +28,7 @@ use thorium::test_utilities::generators;
 /// `backup verify --cluster` passes; the seeded sample, result, entity, and repo read back through
 /// the API
 #[tokio::test]
-#[ignore = "run by hand on a cluster named in THORADM_E2E_CLUSTER_CONF and THORADM_E2E_CTL_CONF, with its writers paused"]
+#[ignore = "needs a deployed cluster with its writers paused; run by hand: THORADM_E2E_CLUSTER_CONF=<cluster config> THORADM_E2E_CTL_CONF=<Thorctl config with an admin token> cargo test -p thoradm --test end_to_end -- --ignored a_cluster_restores_its_own_backup (or THORADM_E2E_HARNESS=1 instead of the two configs, for the test harness namespace)"]
 #[allow(clippy::too_many_lines)]
 async fn a_cluster_restores_its_own_backup() {
     // the cluster the environment names, or the harness's namespace, held alone while it restores

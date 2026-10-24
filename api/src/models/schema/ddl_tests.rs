@@ -3,7 +3,7 @@
 
 use std::collections::BTreeMap;
 
-use super::scylla::{NetworkPoliciesDefaultView, ThoriumKeyspace};
+use super::scylla::{MIGRATION_STATE_TABLES, NetworkPoliciesDefaultView, ThoriumKeyspace};
 use super::{
     ClusterOrder, ColumnDef, ColumnRole, CqlDesc, CqlNative, Keyspace, ObjectDef, RegistryError,
     ScyllaObject, TableDef, ViewDef, validate,
@@ -417,15 +417,23 @@ fn golden(name: &str, actual: &str) -> String {
 }
 
 /// Every declared table and view creates the same schema as the setup statements Thorium ran
-/// before its schema was declared, compared as Scylla's schema tables describe it
+/// before its schema was declared, compared as Scylla's schema tables describe it; the
+/// migration-state tables, which no setup statement created, are left out
 #[test]
 fn declared_schema_matches_setup_statements() {
     // the setup statements as they were written before the schema was declared
     let legacy_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("src/models/schema/goldens/legacy_ddl.cql");
     let legacy = parse_all(&std::fs::read_to_string(legacy_path).expect("legacy DDL reads"));
-    let generated = parse_all(&declared_ddl());
-    let objects = <ThoriumKeyspace as Keyspace>::OBJECTS;
+    let mut generated = parse_all(&declared_ddl());
+    // the migration-state tables have no setup statement: only `schema apply` creates them
+    for name in MIGRATION_STATE_TABLES {
+        assert!(generated.remove(name).is_some(), "{name} isn't declared");
+    }
+    let objects = <ThoriumKeyspace as Keyspace>::OBJECTS
+        .iter()
+        .filter(|object| !MIGRATION_STATE_TABLES.contains(&object.name()))
+        .collect::<Vec<_>>();
     // the same 16 tables and 12 views on both sides
     assert_eq!(
         objects

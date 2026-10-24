@@ -297,9 +297,16 @@
           "properties": {
             "targetRevision": {
               "type": "string",
-              "pattern": "^([0-9]{4}-[0-9]{2}-v[0-9]{2})?$"
+              "pattern": "^([0-9]{4}-[0-9]{2}-v[0-9]{2}(-pre\\.[a-z0-9]+(-[a-z0-9]+)*)?)?$"
+            },
+            "startingRevision": {
+              "type": "string",
+              "pattern": "^([0-9]{4}-[0-9]{2}-v[0-9]{2}(-pre\\.[a-z0-9]+(-[a-z0-9]+)*)?)?$"
             },
             "autoTargetDev": {
+              "type": "boolean"
+            },
+            "dangerousDowngradeLossy": {
               "type": "boolean"
             },
             "approvals": {
@@ -319,6 +326,52 @@
                   "backup": {
                     "type": "string",
                     "minLength": 1
+                  },
+                  "acceptIssues": {
+                    "type": "array",
+                    "items": {
+                      "type": "string",
+                      "minLength": 1
+                    }
+                  },
+                  "acceptLoss": {
+                    "type": "boolean"
+                  },
+                  "confirm": {
+                    "type": "string",
+                    "minLength": 1
+                  },
+                  "acceptBackupGaps": {
+                    "type": "boolean"
+                  }
+                }
+              }
+            },
+            "driftAcknowledged": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": [
+                  "backend",
+                  "object"
+                ],
+                "properties": {
+                  "backend": {
+                    "type": "string",
+                    "enum": [
+                      "scylla",
+                      "elastic",
+                      "redis",
+                      "s3"
+                    ]
+                  },
+                  "object": {
+                    "type": "string",
+                    "minLength": 1
+                  },
+                  "fingerprint": {
+                    "type": "string"
                   }
                 }
               }

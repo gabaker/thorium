@@ -22,10 +22,12 @@ api = [
   ]
 
 # include scylla utility functions
-scylla-utils = ["scylla", "thorium-derive", "thorium-derive/schema", "utoipa", "sha2"]
+scylla-utils = ["scylla", "thorium-derive", "thorium-derive/schema", "utoipa", "sha2", "tokio", "argon2", "serde-value"]
 
 # include the shared upgrade runtime: the migration runner API thoradm and the test harness run
-upgrades-runtime = ["scylla-utils", "async-trait", "tokio-util", "bb8-redis", "redis", "aws-sdk-s3"]
+upgrades-runtime = [
+  "scylla-utils", "async-trait", "tokio-util", "bb8-redis", "redis", "aws-sdk-s3", "futures", "tracing", "serde-value"
+]
 
 # include rkyv support for some structs
 rkyv-support = ["rkyv", "bytecheck"]
@@ -68,7 +70,7 @@ dialoguer-err = ["dialoguer"]
 trace = ["tracing-opentelemetry", "opentelemetry", "opentelemetry_sdk", "opentelemetry-jaeger", "opentelemetry-otlp", "opentelemetry-semantic-conventions", "tracing", "tracing-subscriber", "tracing-core", "valuable"]
 
 # include features required for integration tests
-test-utilities = ["api", "search-streamer"]
+test-utilities = ["api", "search-streamer", "upgrades-runtime"]
 
 # Force openssl-sys to staticly link in the openssl library. Necessary when
 # cross compiling to x86_64-unknown-linux-musl.
@@ -121,6 +123,7 @@ redis = { version = "0.32.1", default-features = false, features = ["tokio-comp"
 argon2 = { version = "0.5", optional = true }
 crossbeam = { version = "0.8", optional = true }
 futures = { version = "0.3.31", optional = true }
+serde-value = { version = "0.7", optional = true }
 futures-cpupool = { version = "0.1.8", optional = true }
 tokio = { workspace = true, optional = true }
 tokio-stream = { version = "0.1", optional = true }
@@ -294,3 +297,9 @@ path = "tests/entities/compiled_function.rs"
 [[test]]
 name = "entities_decompiled_function"
 path = "tests/entities/decompiled_function.rs"
+
+# The schema change report CI runs and the revision snapshot writer; a development tool that ships
+# in no binary
+[[example]]
+name = "schema_report"
+required-features = ["scylla-utils", "client"]

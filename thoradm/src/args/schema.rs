@@ -2,6 +2,7 @@
 
 use clap::Parser;
 use std::path::PathBuf;
+use thorium::models::schema::DEFAULT_VIEW_WAIT_SECS;
 use thorium::models::upgrades::SchemaBackend;
 
 /// The schema subcommands
@@ -16,7 +17,7 @@ pub enum SchemaSubCommands {
     /// Create the keyspace and `schema_migrations`, then converge every declared object
     #[clap(version, author)]
     Apply(ApplySchema),
-    /// Compare the live schema with the recorded revision's snapshot (exits 2 on drift)
+    /// Compare the live schema with the recorded revision's snapshot (exits 7 on drift)
     #[clap(version, author)]
     Diff(DiffSchema),
     /// Print the deployment's record, a capped drift summary, and thoradm's catalog identity on
@@ -26,6 +27,13 @@ pub enum SchemaSubCommands {
     /// Compare each declared materialized view with its base table by token range (read-only)
     #[clap(version, author)]
     VerifyViews(VerifyViews),
+    /// List the legacy objects older releases created, and the objects no command can drop
+    /// (read-only)
+    #[clap(version, author)]
+    Legacy(LegacySchema),
+    /// Drop registered legacy objects: a dry run unless `--execute` is given
+    #[clap(version, author)]
+    DropLegacy(DropLegacy),
 }
 
 /// Print the declared schema
@@ -48,6 +56,8 @@ pub struct HashSchema {
 }
 
 /// Apply the declared schema
+// each switch is one command-line flag, so a field per flag reads as the command line does
+#[allow(clippy::struct_excessive_bools)]
 #[derive(Parser, Debug, Clone)]
 pub struct ApplySchema {
     /// Print the statements without executing them
@@ -61,20 +71,34 @@ pub struct ApplySchema {
     /// recorded with its source
     #[clap(long)]
     pub seed_revision: Option<String>,
+    /// Converge to this older revision's committed snapshot instead of the declared schema: create
+    /// the tables, columns, and views it has that the live schema lacks (what a contract step
+    /// dropped), and drop nothing a newer revision added; the first step of reversing a contract
+    /// step
+    #[clap(long, conflicts_with_all = ["seed_revision", "recreate_view"])]
+    pub to_revision: Option<String>,
     /// Record the configured partition sizes although sampled rows suggest others (the operator
     /// passes it once the schema-apply step is approved)
     #[clap(long)]
     pub accept_partition_sizes: bool,
-    /// Record a changed `earliest.<type>` setting instead of refusing it
-    #[clap(long)]
-    pub accept_config: Vec<String>,
     /// Drop this declared materialized view and recreate it from the registry, then wait for its
-    /// build; routes reading it fail until the build finishes (repeatable)
+    /// build; routes reading it fail while it is dropped, then see missing rows until its build
+    /// finishes (repeatable)
     #[clap(long)]
     pub recreate_view: Vec<String>,
     /// Recreate views without asking for confirmation (required without a terminal)
     #[clap(long)]
     pub yes: bool,
+    /// Take the namespace's writer lease even though another writer holds it; the holder's
+    /// workers stop at their next batch
+    #[clap(long)]
+    pub force_break_lease: bool,
+    /// Wait up to this many seconds for materialized views to build on every Scylla node, then
+    /// fail naming the views and the nodes that haven't built them, recording nothing; a node
+    /// that is down never reports, so the apply can't finish while one is down (the default of
+    /// five hours is under the operator's six hour Job limit)
+    #[clap(long, default_value_t = DEFAULT_VIEW_WAIT_SECS, value_parser = clap::value_parser!(u64).range(1..))]
+    pub view_wait_secs: u64,
 }
 
 /// Compare the live schema with the recorded revision
@@ -115,4 +139,27 @@ pub struct VerifyViews {
     /// Check only this many random token ranges instead of scanning every base table in full
     #[clap(long)]
     pub sample: Option<u32>,
+}
+
+/// List the legacy objects
+#[derive(Parser, Debug, Clone)]
+pub struct LegacySchema {
+    /// Print the listing as JSON
+    #[clap(long)]
+    pub json: bool,
+}
+
+/// Drop registered legacy objects
+#[derive(Parser, Debug, Clone)]
+pub struct DropLegacy {
+    /// A legacy object to drop, as `<backend>:<name>` (repeatable; there is no default of all)
+    #[clap(long, required = true)]
+    pub object: Vec<String>,
+    /// Drop the objects instead of printing the plan
+    #[clap(long)]
+    pub execute: bool,
+    /// With `--execute`, drop without asking for each object's id to be typed (required without a
+    /// terminal)
+    #[clap(long)]
+    pub confirm: bool,
 }

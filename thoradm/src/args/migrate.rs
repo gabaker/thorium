@@ -27,6 +27,9 @@ pub enum MigrateSubCommands {
     /// List the issue groups a migration recorded, or one group's sample keys
     #[clap(version, author)]
     Issues(ListIssues),
+    /// Print what a migration's last pass applied
+    #[clap(version, author)]
+    Report(ReportMigration),
     /// Move a cluster back to an older revision through revert or reverse edges
     #[clap(version, author)]
     Revert(RevertMigrations),
@@ -85,7 +88,7 @@ pub struct RunMigration {
     pub objects: Vec<String>,
     /// Re-run one issue group: scan the family, write the objects that now convert, and recount
     /// every group seen
-    #[clap(long)]
+    #[clap(long, conflicts_with = "objects")]
     pub reason: Option<String>,
     /// Reason codes whose groups don't fail the run, passed by the operator from the approval's
     /// `accept_issues`
@@ -103,6 +106,32 @@ pub struct RunMigration {
     /// workers stop at their next batch
     #[clap(long)]
     pub force_break_lease: bool,
+    /// The approval's backup reference, recorded in the pass row (passed by the operator)
+    #[clap(long)]
+    pub backup: Option<String>,
+    /// How many slices to split a new pass into, one worker each
+    #[clap(long, default_value_t = 16)]
+    pub slices: u32,
+    /// The most rows one batch reads before the worker checkpoints
+    #[clap(long, default_value_t = 10_000)]
+    pub batch_rows: usize,
+    /// The least time between two checkpoints of one worker, in milliseconds
+    #[clap(long, default_value_t = 1000, hide = true)]
+    pub checkpoint_ms: u64,
+    /// How many times a timed out read or write is retried before the run stops resumable
+    #[clap(long, default_value_t = 12, hide = true)]
+    pub retries: u32,
+    /// The first pause before a retry, in milliseconds
+    #[clap(long, default_value_t = 250, hide = true)]
+    pub backoff_ms: u64,
+}
+
+/// The migration whose last pass report to print
+#[derive(Parser, Debug, Clone)]
+pub struct ReportMigration {
+    /// The id of the migration (see `thoradm migrate list`)
+    #[clap(long)]
+    pub id: String,
 }
 
 /// The data migration to check
@@ -117,6 +146,12 @@ pub struct CheckMigration {
     /// Print up to 20 sample keys per group (stdout only, never a Job result)
     #[clap(long)]
     pub samples: bool,
+    /// How many slices to split the check into, one worker each
+    #[clap(long, default_value_t = 4)]
+    pub slices: u32,
+    /// The most rows one batch reads
+    #[clap(long, default_value_t = 10_000)]
+    pub batch_rows: usize,
 }
 
 /// The issue groups to list
@@ -137,6 +172,23 @@ pub struct RevertMigrations {
     /// The older revision to move the cluster to (e.g. 2026-10-v02)
     #[clap(long)]
     pub to: String,
+    /// Print the steps the revert runs, what each loses, and the confirmation code of each lossy
+    /// one, and change nothing
+    #[clap(long)]
+    pub dry_run: bool,
+    /// Where the backup taken before the revert is, recorded with every step that changes data
+    /// (required to run one)
+    #[clap(long)]
+    pub backup: Option<String>,
+    /// The confirmation code of the lossy step the revert stops at, repeated to accept its loss;
+    /// each code is for one block of one step, so a revert with several lossy steps is run once
+    /// per step
+    #[clap(long)]
+    pub confirm: Option<String>,
+    /// Let a lossy step run although a field it loses isn't covered by `thoradm backup`, so a
+    /// backup can't restore it; the plan shows each lost field's coverage
+    #[clap(long)]
+    pub accept_backup_gaps: bool,
 }
 
 /// The revision to record at the end of a plan

@@ -119,7 +119,9 @@ operator:
     upgrade:
       targetRevision: {{ thorium_upgrade_target_revision | to_json }}
       autoTargetDev: {{ thorium_upgrade_auto_target_dev | bool | to_json }}
+      dangerousDowngradeLossy: {{ thorium_upgrade_dangerous_downgrade_lossy | bool | to_json }}
       approvals: {{ thorium_upgrade_approvals | to_json }}
+      driftAcknowledged: {{ thorium_upgrade_drift_acknowledged | to_json }}
 {% if thorium_scylla_admin_secret | default('', true) | length > 0 or thorium_elastic_admin_secret | default('', true) | length > 0 %}
     bootstrap:
 {% if thorium_scylla_admin_secret | default('', true) | length > 0 %}

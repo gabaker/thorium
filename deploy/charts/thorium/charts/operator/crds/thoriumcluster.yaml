@@ -2659,12 +2659,12 @@ spec:
                       upgrade state `ConfigMap` is missing and `thoradm schema status` finds data but no record;
                       reported as stale once a record exists
                     nullable: true
-                    pattern: ^[0-9]{4}-[0-9]{2}-v[0-9]{2}$
+                    pattern: ^[0-9]{4}-[0-9]{2}-v[0-9]{2}(-pre\.[a-z0-9]+(-[a-z0-9]+)*)?$
                     type: string
                   target_revision:
                     description: The revision (`YYYY-MM-vNN`) to upgrade this cluster to
                     nullable: true
-                    pattern: ^[0-9]{4}-[0-9]{2}-v[0-9]{2}$
+                    pattern: ^[0-9]{4}-[0-9]{2}-v[0-9]{2}(-pre\.[a-z0-9]+(-[a-z0-9]+)*)?$
                     type: string
                 type: object
               version:
@@ -2731,6 +2731,7 @@ spec:
                           - CatalogSkew
                           - LossySettingRefused
                           - SearchIncomplete
+                          - MutableImageTag
                           - Unknown
                           type: string
                       required:
@@ -2751,6 +2752,61 @@ spec:
                         description: Objects covered by an acknowledgement (the spec's or the catalog's)
                         minimum: 0.0
                         type: integer
+                      backends:
+                        additionalProperties:
+                          description: A backend's schema status as shown in `status.upgrade.schema`
+                          enum:
+                          - ok
+                          - drift
+                          - unknown
+                          type: string
+                        description: Each probed backend's status, which counts every unacknowledged object, listed or not
+                        type: object
+                      blockers:
+                        description: |-
+                          The unlisted unacknowledged objects that block the steps targeting them, so a step is
+                          blocked however many objects drift; the operator keeps them out of the status
+                        items:
+                          description: One drifted object in the status
+                          properties:
+                            backend:
+                              description: The backend the object belongs to
+                              enum:
+                              - scylla
+                              - elastic
+                              - redis
+                              - s3
+                              - unknown
+                              type: string
+                            fingerprint:
+                              description: The observed fingerprint, to copy into an acknowledgement (absent for `missing`)
+                              nullable: true
+                              type: string
+                            kind:
+                              description: How it differs
+                              enum:
+                              - missing
+                              - changed
+                              - unexpected
+                              - unknown
+                              type: string
+                            lapsed:
+                              description: Whether an acknowledgement for it lapsed because the object changed
+                              type: boolean
+                            object:
+                              description: The object as `thoradm schema diff` names it
+                              type: string
+                          required:
+                          - backend
+                          - kind
+                          - object
+                          type: object
+                        type: array
+                      blockers_truncated:
+                        description: |-
+                          Whether more blocking objects were left out of `blockers` than it carries; every step with
+                          targets is then blocked, since the object it targets may be among them
+                        type: boolean
                       changed:
                         description: Unacknowledged `changed` objects
                         minimum: 0.0
@@ -2984,14 +3040,14 @@ spec:
                         pause:
                           default: []
                           description: |-
-                            The components that must be paused (scaled to zero) while this step runs (informational;
-                            the operator does not scale them, the step's manual procedure does)
+                            The components the operator pauses (scales to zero) before this step runs and restores
+                            after the new release's Deployments are applied
                           items:
                             description: |-
                               A Thorium component that must be scaled to zero while an upgrade step runs
 
-                              This is informational: the operator does not scale components, the step's manual procedure
-                              does.
+                              The operator records the component's replica count and scales its Deployment to zero before
+                              the step runs, and restores it only after the new release's Deployments are applied.
                             enum:
                             - Api
                             - Scaler

@@ -11,6 +11,29 @@
 //! revision. The operator refuses to touch an unconverted one.
 
 mod detect;
+#[cfg(test)]
+mod downgrade_tests;
+mod drift;
+#[cfg(test)]
+mod drift_tests;
+#[cfg(test)]
+mod follow_tests;
+mod handover;
+mod lossy;
+mod migration;
+#[cfg(test)]
+mod migration_tests;
+#[cfg(test)]
+mod n1;
+mod pause;
+mod rebucket;
+mod record;
+#[cfg(test)]
+mod record_tests;
+mod reingest;
+mod schema_apply;
+#[cfg(test)]
+mod sim;
 mod state;
 mod steps;
 
@@ -18,9 +41,12 @@ use kube::Client;
 use kube::runtime::controller::Action;
 use std::time::Duration;
 use thorium::Error;
+#[cfg(test)]
+use thorium::models::upgrades;
 use thorium::models::upgrades::{
-    self, AppliedStep, PlannedStep, RevisionId, StepState, UpgradeError, UpgradeState,
-    UpgradeStatus,
+    AppliedStep, BlockReason, Catalog, CatalogEntry, LossReport, PlannedStep, RECORD_MARKER,
+    RevisionId, StepDef, StepState, UPGRADE_STOPPED_STEP, UpgradeApproval, UpgradeError,
+    UpgradeState, UpgradeStatus,
 };
 
 use crate::k8s::clusters::{ClusterMeta, cluster_name_and_namespace};
@@ -28,7 +54,14 @@ use crate::k8s::crds::{
     self, ClusterPhase, StatusTracker, ThoriumCluster, ThoriumClusterStatus, UpgradeSpec,
 };
 pub use detect::ALLOW_INLINE_CONFIG;
-use detect::Detected;
+pub use drift::check as check_drift;
+pub use pause::{held as paused_components, restore_applied as restore_paused};
+use record::Moved;
+pub use record::recover_with;
+pub use reingest::track as track_reingest;
+#[cfg(test)]
+pub(crate) use schema_apply::tests as schema_apply_tests;
+pub use schema_apply::{RETRY_ANNOTATION as RETRY_SCHEMA_APPLY, ensure as apply_schema};
 use state::StoredState;
 
 /// The Thorium version of this operator, recorded with every revision it applies
@@ -40,7 +73,7 @@ const BASELINE_REVISION: &str = "2026-10-v01";
 
 /// The revision deployed by the first Helm charts, recorded for Helm clusters created before
 /// upgrade states were
-const FIRST_HELM_REVISION: &str = "2026-10-v02";
+const FIRST_HELM_REVISION: &str = thorium::models::upgrades::FIRST_HELM_REVISION;
 
 /// How long in seconds to wait before rechecking a cluster held for an admin's decision; a
 /// spec change (like setting a target revision) reconciles it right away
@@ -56,6 +89,26 @@ const BLOCKED_REQUEUE_SECS: u64 = 60;
 /// How long in seconds to wait before rechecking a step waiting on a backend
 const WAITING_REQUEUE_SECS: u64 = 15;
 
+#[cfg(test)]
+thread_local! {
+    /// The catalog tests plan with on their thread instead of this build's
+    pub(crate) static CATALOG_OVERRIDE: std::cell::RefCell<Option<Catalog>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+/// Get the catalog the operator plans and runs steps from: this build's
+///
+/// Tests can inject another on their thread.
+#[must_use]
+pub(crate) fn catalog() -> Catalog {
+    // a test's injected catalog stands in for this build's
+    #[cfg(test)]
+    if let Some(catalog) = CATALOG_OVERRIDE.with(|catalog| *catalog.borrow()) {
+        return catalog;
+    }
+    Catalog::PRODUCTION
+}
+
 /// What to do with a `ThoriumCluster` before reconciling it
 pub enum Gate {
     /// The cluster is at the operator's latest revision, so reconcile it normally
@@ -64,6 +117,18 @@ pub enum Gate {
     Upgrade(Pending),
     /// Leave the cluster alone and check it again later
     Hold(Action),
+    /// No record is known (the state `ConfigMap` is missing, or mirrors none): resolve the config,
+    /// write the `thorium` Secret, and bootstrap Thorium's Scylla role, then run the status Job
+    /// and plan from its result
+    NeedsRecord,
+    /// Hold the cluster, but first stop the migration Jobs of the runs its state has open, and
+    /// record the ones that ended, once its config is resolved ([`stop`])
+    Stop {
+        /// The action to return once nothing is left stopping
+        action: Action,
+        /// The recorded upgrade state, whose open runs are stopped
+        stored: StoredState,
+    },
 }
 
 /// An upgrade waiting to run once the cluster's config is resolved
@@ -74,18 +139,62 @@ pub struct Pending {
     target: RevisionId,
     /// The steps that bring the cluster to the target revision
     steps: Vec<PlannedStep>,
+    /// The approvals set on the cluster, which the status checks against the plan
+    approvals: Vec<UpgradeApproval>,
+    /// How soon in seconds a held step should be looked at again, set when a Job the upgrade waits
+    /// on is running somewhere in the plan
+    requeue_hint: Option<u64>,
 }
 
 impl Pending {
     /// Build the upgrade progress to report while this upgrade runs
     fn progress(&self) -> UpgradeStatus {
-        // report the recorded revision, the target, and every planned step
-        progress(
+        // report the recorded revision, the target, every planned step, and the approvals that
+        // name none of them
+        let mut progress = progress(
             &self.stored.state.revision,
             Some(&self.target),
             self.steps.clone(),
-        )
+        );
+        progress.stale_approvals = stale_approvals(&self.approvals, &self.steps);
+        // the loss across every lossy step on the path, estimated before anything is approved
+        let losses = self
+            .steps
+            .iter()
+            .filter_map(|step| step.loss.clone())
+            .collect::<Vec<_>>();
+        progress.loss = (!losses.is_empty()).then_some(LossReport { steps: losses });
+        progress
     }
+}
+
+/// List the approvals that name a step the plan doesn't have
+///
+/// A step that is already done, belongs to another revision, or doesn't exist is no longer in the
+/// plan, so an approval left in the values for it is visible in the status.
+///
+/// # Arguments
+///
+/// * `approvals` - The approvals set on the cluster
+/// * `steps` - The steps left in the plan
+fn stale_approvals(approvals: &[UpgradeApproval], steps: &[PlannedStep]) -> Vec<String> {
+    // an approval is stale unless a step in the plan has its id
+    let mut stale = Vec::new();
+    // the step ids already reported, so an id approved more than once is listed once
+    let mut seen = std::collections::BTreeSet::new();
+    for approval in approvals {
+        // the re-bucket steps are planned by the schema apply, not by the plan
+        let planned = steps.iter().any(|step| step.step == approval.step)
+            || rebucket::STEPS.iter().any(|step| step.id == approval.step);
+        if !planned && seen.insert(approval.step.as_str()) {
+            stale.push(format!(
+                "{}: not a step in the plan (it is done, belongs to another revision, or doesn't \
+                 exist)",
+                approval.step
+            ));
+        }
+    }
+    stale
 }
 
 /// Build the upgrade progress reported in a cluster's status
@@ -104,7 +213,7 @@ fn progress(
     UpgradeStatus {
         current: Some(current.to_string()),
         target: target.map(ToString::to_string),
-        latest: Some(upgrades::latest().to_string()),
+        latest: Some(catalog().latest().to_string()),
         steps,
         ..UpgradeStatus::default()
     }
@@ -148,76 +257,6 @@ fn legacy_message(signals: &[String]) -> String {
     )
 }
 
-/// Build the state a namespace without a recorded upgrade state starts from
-///
-/// Returns the state along with why it starts at its revision.
-///
-/// # Arguments
-///
-/// * `detected` - What the namespace holds
-/// * `at` - When the starting revision is recorded (RFC3339)
-fn starting_state(detected: Detected, at: String) -> Result<(UpgradeState, &'static str), Error> {
-    // parse a revision id this build ships with
-    let known = |raw: &str| {
-        raw.parse::<RevisionId>()
-            .map_err(|error| Error::new(error.to_string()))
-    };
-    // pick the revision this namespace starts at
-    let (revision, message) = match detected {
-        Detected::Fresh => (upgrades::latest(), "fresh install"),
-        Detected::BeforeTracking => (
-            known(FIRST_HELM_REVISION)?,
-            "Helm deployment from before upgrade states were recorded",
-        ),
-        Detected::PreHelm(reason) => (known(BASELINE_REVISION)?, reason),
-    };
-    // record where this namespace starts
-    let mut state = UpgradeState::new(revision.clone(), OPERATOR_VERSION);
-    state.record(AppliedStep {
-        revision: revision.to_string(),
-        step: "record-revision".to_owned(),
-        outcome: StepState::Done,
-        message: Some(message.to_owned()),
-        at: Some(at),
-        by: Some(format!("thorium-operator {OPERATOR_VERSION}")),
-        ..AppliedStep::default()
-    });
-    Ok((state, message))
-}
-
-/// Record the starting revision of a namespace without an upgrade state
-///
-/// # Arguments
-///
-/// * `client` - The kube client to use
-/// * `namespace` - The namespace of the cluster
-/// * `cluster` - The cluster being reconciled
-async fn seed(
-    client: &Client,
-    namespace: &str,
-    cluster: &ThoriumCluster,
-) -> Result<StoredState, Error> {
-    // work out what this namespace holds and where it starts
-    let detected = detect::detect(client, namespace, cluster).await?;
-    let (state, message) = starting_state(detected, chrono::Utc::now().to_rfc3339())?;
-    // log where this namespace starts
-    println!(
-        "Recording revision {} for {namespace}: {message}",
-        state.revision
-    );
-    // the recorded Thorium version is advisory, so a mismatch is only a warning
-    if let Some(warning) = state.version_mismatch() {
-        println!("Warning: {warning}");
-    }
-    // save the new state
-    let mut stored = StoredState {
-        state,
-        resource_version: None,
-    };
-    state::save(client, namespace, &mut stored).await?;
-    Ok(stored)
-}
-
 /// What to do with a cluster given its recorded upgrade state and upgrade spec
 #[derive(Debug, PartialEq, Eq)]
 enum Decision {
@@ -251,20 +290,28 @@ fn decide(state: &UpgradeState, spec: &UpgradeSpec) -> Decision {
     // remember the revision the cluster is at
     let current = state.revision.clone();
     // resolve the target and the steps left to the latest revision
-    let latest = upgrades::latest();
-    let planned = upgrades::resolve_target(spec.target_revision.as_deref(), spec.auto_target_dev)
-        .and_then(|target| Ok((target, upgrades::plan(state, &latest)?)));
+    let catalog = catalog();
+    let latest = catalog.latest();
+    let planned = catalog
+        .resolve_target(
+            spec.target_revision.as_deref(),
+            spec.auto_target_dev,
+            &latest,
+        )
+        .and_then(|target| Ok((target, catalog.plan(state, &latest)?)));
     let (target, remaining) = match planned {
         Ok(planned) => planned,
         Err(error) => return Decision::Error(error.to_string()),
     };
-    // a target older than the cluster's revision is always a mistake
+    // a target older than the cluster's revision is reached only by the catalog's edges back
     if let Some(target) = target.as_ref().filter(|target| **target < current) {
-        let error = UpgradeError::Backwards {
-            current: current.clone(),
-            target: target.clone(),
+        return match catalog.plan(state, target) {
+            Ok(steps) => Decision::Upgrade {
+                target: target.clone(),
+                steps,
+            },
+            Err(error) => Decision::Error(error.to_string()),
         };
-        return Decision::Error(error.to_string());
     }
     // a cluster at the latest revision is reconciled normally
     if current == latest {
@@ -294,17 +341,40 @@ fn decide(state: &UpgradeState, spec: &UpgradeSpec) -> Decision {
             progress: progress(&current, Some(&target), remaining),
         },
         // plan the steps to the target
-        Some(target) => match upgrades::plan(state, &target) {
+        Some(target) => match catalog.plan(state, &target) {
             Ok(steps) => Decision::Upgrade { target, steps },
             Err(error) => Decision::Error(error.to_string()),
         },
     }
 }
 
+/// Report a starting revision that is still set once a record exists as stale
+///
+/// The field only matters while a keyspace has data and no record; it is N-only, so a leftover
+/// value is reported the way a stale approval is and changes nothing.
+///
+/// # Arguments
+///
+/// * `progress` - The upgrade progress to report
+/// * `cluster` - The cluster being gated
+fn note_stale_start(mut progress: UpgradeStatus, cluster: &ThoriumCluster) -> UpgradeStatus {
+    // approvals that name no step of the plan are stale
+    progress.stale_approvals = stale_approvals(&cluster.spec.upgrade.approvals, &progress.steps);
+    // a set starting revision is stale once the state mirrors a record
+    if let Some(revision) = &cluster.spec.upgrade.starting_revision {
+        progress.stale_approvals.push(format!(
+            "spec.upgrade.starting_revision {revision}: a record exists, so it is no longer read"
+        ));
+    }
+    progress
+}
+
 /// Decide what to do with a `ThoriumCluster` before reconciling it
 ///
 /// This only needs the cluster and its namespace, not its resolved config, so a cluster whose
-/// config can't be resolved is still held when it is behind or unconverted.
+/// config can't be resolved is still held when it is behind or unconverted. A state that is
+/// missing or mirrors no record returns [`Gate::NeedsRecord`], which reconcile resolves once the
+/// config is.
 ///
 /// # Arguments
 ///
@@ -320,39 +390,262 @@ pub async fn gate(client: &Client, tracker: &StatusTracker) -> Result<Gate, Erro
         let message = legacy_message(&signals);
         return Ok(hold_error(client, tracker, message, LEGACY_REQUEUE_SECS).await);
     }
-    // load the recorded state or work out where this namespace starts
-    let stored = match state::load(client, &namespace).await? {
-        Some(stored) => stored,
-        None => seed(client, &namespace, cluster).await?,
+    // a state that is missing, or mirrors no record, needs the record recovered first, which
+    // needs the cluster's config resolved
+    let Some(mut stored) = state::load(client, &namespace).await? else {
+        return Ok(Gate::NeedsRecord);
     };
-    // act on what the recorded state and upgrade spec call for
-    match decide(&stored.state, &cluster.spec.upgrade) {
+    if !stored.state.schema.contains_key(RECORD_MARKER) {
+        return Ok(Gate::NeedsRecord);
+    }
+    // a cluster this operator reverted waits for the previous operator, reporting nothing newer
+    if handover::applies(&stored.state, &cluster.spec.upgrade) {
+        // a hand-over that stopped before it rewrote the state in the previous layout does it now
+        let mut stored = stored;
+        if let Err(error) = handover::keep_previous_layout(client, &namespace, &mut stored).await {
+            println!("{error}");
+        }
+        return Ok(Gate::Hold(
+            handover::hold(client, tracker, &stored.state).await,
+        ));
+    }
+    // say whether the dev setting for lossy steps is honored or refused here
+    lossy::report(client, tracker).await;
+    // decide what the recorded state and upgrade spec call for
+    let decision = decide(&stored.state, &cluster.spec.upgrade);
+    // a hand-over marker that no downgrade in flight carries was left by one that was abandoned,
+    // and a later restore or reset to its revision would otherwise be taken for a hand-over
+    if stale_hand_over(&decision, &stored.state) {
+        stored.state.schema.remove(handover::HANDED_OVER_MARKER);
+        state::save(client, &namespace, &mut stored).await?;
+    }
+    // an upgrade the decision no longer takes above the cluster's revision stopped short of its
+    // target, which ends its attempt
+    if stops_attempt(&decision, &stored.state) {
+        record_stop(client, &namespace, &mut stored).await?;
+    }
+    // act on the decision
+    match decision {
         Decision::Current(progress) => {
+            // a starting revision that is still set once a record exists is stale
+            let progress = note_stale_start(progress, cluster);
             crds::set_upgrade_progress(client, tracker, progress).await;
             Ok(Gate::Current)
         }
         Decision::Error(message) => {
-            Ok(hold_error(client, tracker, message, HOLD_REQUEUE_SECS).await)
+            // a target that can't be used holds the cluster, stopping any run it has open
+            let message = with_hold_note(message, &stored.state);
+            let gate = hold_error(client, tracker, message, HOLD_REQUEUE_SECS).await;
+            Ok(stop_first(gate, stored))
         }
         Decision::Required { message, progress } => {
+            // a cluster held at its revision stops any run it has open
+            let progress = note_stale_start(progress, cluster);
             crds::set_upgrade_status(
                 client,
                 tracker,
                 ClusterPhase::UpgradeRequired,
-                Some(message),
+                Some(with_hold_note(message, &stored.state)),
                 progress,
             )
             .await;
-            Ok(Gate::Hold(Action::requeue(Duration::from_secs(
-                HOLD_REQUEUE_SECS,
-            ))))
+            let hold = Gate::Hold(Action::requeue(Duration::from_secs(HOLD_REQUEUE_SECS)));
+            Ok(stop_first(hold, stored))
         }
         Decision::Upgrade { target, steps } => Ok(Gate::Upgrade(Pending {
             stored,
             target,
             steps,
+            approvals: cluster.spec.upgrade.approvals.clone(),
+            requeue_hint: None,
         })),
     }
+}
+
+/// Add what a hold leaves behind to its message: the run it stops and the components that stay
+/// paused, with the two ways forward
+///
+/// # Arguments
+///
+/// * `message` - Why the cluster is held
+/// * `state` - The cluster's recorded upgrade state
+fn with_hold_note(message: String, state: &UpgradeState) -> String {
+    // the oldest open run is the one the note names
+    let open = migration::open_runs(state).first().copied();
+    match pause::hold_note(state, open) {
+        Some(note) => format!("{message}. {note}"),
+        None => message,
+    }
+}
+
+/// Turn a hold into a stop when the state has a run open, so its Job is stopped before the hold
+///
+/// # Arguments
+///
+/// * `gate` - The hold the decision called for
+/// * `stored` - The recorded upgrade state
+fn stop_first(gate: Gate, stored: StoredState) -> Gate {
+    // only a hold of a state with an open run has a Job to stop
+    match gate {
+        Gate::Hold(action) if !migration::open_runs(&stored.state).is_empty() => {
+            Gate::Stop { action, stored }
+        }
+        other => other,
+    }
+}
+
+/// Stop the migration Jobs of the runs a held cluster has open, record the ones that ended, and
+/// return when to look at the cluster again
+///
+/// The hold's status names the stopped step; while a stopped Job's pod is still writing its
+/// checkpoint the message says so and the cluster is looked at again every 15 seconds, and then
+/// the hold's own action applies.
+///
+/// # Arguments
+///
+/// * `meta` - Thorium cluster client and metadata
+/// * `action` - The action the hold returns once nothing is left stopping
+/// * `stored` - The recorded upgrade state the gate read
+pub async fn stop(
+    meta: &ClusterMeta,
+    action: Action,
+    stored: StoredState,
+) -> Result<Action, Error> {
+    // the note the gate reported, from the state before anything is recorded
+    let mut stored = stored;
+    let before = with_hold_note(String::new(), &stored.state);
+    // stop the running Jobs and record the ones that ended
+    let sweep = migration::stop_open_runs(meta, &mut stored).await?;
+    // a run recorded as ended changes what the note says
+    let after = with_hold_note(String::new(), &stored.state);
+    let status = meta.status.current();
+    let mut message = status.message.clone().unwrap_or_default();
+    if !before.is_empty() && before != after {
+        message = message.replace(&before, &after);
+    }
+    // a Job still stopping is waited for, and looked at again soon
+    let again = if sweep.stopping.is_empty() {
+        action
+    } else {
+        message = format!(
+            "{message}. Waiting for the migration Job {} to stop and write its checkpoint",
+            sweep.stopping.join(", ")
+        );
+        Action::requeue(Duration::from_secs(WAITING_REQUEUE_SECS))
+    };
+    // report it in the hold's phase
+    if let Some(phase) = status.phase
+        && status.message.as_deref() != Some(message.as_str())
+    {
+        log(&message);
+        crds::set_status(&meta.client, &meta.status, phase, Some(message)).await;
+    }
+    Ok(again)
+}
+
+/// Keep holding a cluster whose open runs can't be stopped yet because its config doesn't resolve,
+/// and look at it again in a minute
+///
+/// # Arguments
+///
+/// * `client` - The kube client to update the status with
+/// * `tracker` - The cluster being held and the status last written for it
+/// * `error` - Why the config doesn't resolve
+pub async fn stop_unresolved(client: &Client, tracker: &StatusTracker, error: &Error) -> Action {
+    // say why the Job can't be stopped yet, keeping the hold's phase and message
+    let status = tracker.current();
+    let message = format!(
+        "{}. The operator can't stop the migration Job of the open run until the cluster's config \
+         resolves, and tries again every minute: {}",
+        status.message.unwrap_or_default(),
+        crds::error_message(error)
+    );
+    eprintln!("Error: {message}");
+    if let Some(phase) = status.phase {
+        crds::set_status(client, tracker, phase, Some(message)).await;
+    }
+    Action::requeue(Duration::from_secs(BLOCKED_REQUEUE_SECS))
+}
+
+/// Whether the state carries a hand-over marker that a downgrade abandoned before it reached the
+/// marker's revision left behind
+///
+/// A downgrade marks its target in every save of the state, so the marker stays while the decision
+/// still runs a downgrade to it. A marker at the state's revision is a hand-over (or one that
+/// resumes), which the gate answers before deciding anything.
+///
+/// # Arguments
+///
+/// * `decision` - What the gate decided for the cluster
+/// * `state` - The cluster's recorded upgrade state
+fn stale_hand_over(decision: &Decision, state: &UpgradeState) -> bool {
+    // a state with no marker has nothing stale
+    let Some(marked) = state.schema.get(handover::HANDED_OVER_MARKER) else {
+        return false;
+    };
+    // a downgrade still headed to the marked revision carries the marker
+    let carried = matches!(decision, Decision::Upgrade { target, .. } if marked == target.as_str());
+    // and a marker at the cluster's revision is a hand-over, not a leftover
+    !carried && marked != state.revision.as_str()
+}
+
+/// Whether a decision stops an upgrade short of its target in a way that ends its attempt
+///
+/// A cluster held at its revision (its target cleared or set to that revision), or sent back
+/// below it, no longer upgrades past it. The stop matters only while a check-only step of an edge
+/// above the revision counts as finished, so it is recorded once.
+///
+/// # Arguments
+///
+/// * `decision` - What the gate decided for the cluster
+/// * `state` - The cluster's recorded upgrade state
+fn stops_attempt(decision: &Decision, state: &UpgradeState) -> bool {
+    // only a hold or a move down stops an upgrade
+    let stopped = match decision {
+        Decision::Required { .. } => true,
+        Decision::Upgrade { target, .. } => *target < state.revision,
+        Decision::Current(_) | Decision::Error(_) => false,
+    };
+    // and only a finished check above the revision is undone by it
+    stopped && catalog().stops_checks(state)
+}
+
+/// Record in the upgrade history that an upgrade stopped short of its target
+///
+/// The entry sits at the revision the cluster stayed at, so every check-only step above it runs
+/// again in the next attempt, right before the steps that rely on it.
+///
+/// # Arguments
+///
+/// * `client` - The kube client to use
+/// * `namespace` - The namespace the state lives in
+/// * `stored` - The recorded state, which is saved with the entry
+async fn record_stop(
+    client: &Client,
+    namespace: &str,
+    stored: &mut StoredState,
+) -> Result<(), Error> {
+    // note the stop at the revision the cluster stayed at
+    let revision = stored.state.revision.to_string();
+    log(&format!(
+        "The upgrade stopped short of its target at revision {revision}; its check-only steps run \
+         again in the next attempt"
+    ));
+    stored.state.record(AppliedStep {
+        revision,
+        step: UPGRADE_STOPPED_STEP.to_owned(),
+        outcome: StepState::Done,
+        message: Some(
+            "The upgrade stopped short of its target, so its check-only steps run again in the \
+             next attempt"
+                .to_owned(),
+        ),
+        at: Some(chrono::Utc::now().to_rfc3339()),
+        by: Some(format!("thorium-operator {OPERATOR_VERSION}")),
+        ..AppliedStep::default()
+    });
+    // save it at the version read, like a finished step
+    state::save(client, namespace, stored).await
 }
 
 /// Check whether a cluster's status already reports a step as blocked
@@ -368,6 +661,24 @@ fn reported_blocked(status: &ThoriumClusterStatus, id: &str) -> bool {
             .steps
             .iter()
             .any(|step| step.step == id && step.state == StepState::Blocked)
+    })
+}
+
+/// Check whether a cluster's status already reports a step as blocked with a message
+///
+/// # Arguments
+///
+/// * `status` - The status last written for the cluster being upgraded
+/// * `id` - The id of the step
+/// * `details` - The message the step is blocked with
+fn reported_same_block(status: &ThoriumClusterStatus, id: &str, details: &str) -> bool {
+    // look for the step blocked with this exact message among the reported steps
+    status.upgrade.as_ref().is_some_and(|upgrade| {
+        upgrade.steps.iter().any(|step| {
+            step.step == id
+                && step.state == StepState::Blocked
+                && step.message.as_deref() == Some(details)
+        })
     })
 }
 
@@ -388,12 +699,14 @@ fn recorded_blocked(state: &UpgradeState, revision: &str, id: &str) -> bool {
     })
 }
 
-/// Check whether a step blocked on an admin earlier in this upgrade
+/// Check whether a step blocked earlier in this upgrade on work an admin had to do
 ///
-/// The upgrade history in the state `ConfigMap` is the main record: it survives the
-/// `ThoriumCluster` being recreated and status rewrites that replace the reported steps (such
-/// as holding the cluster when its target is cleared). The reported status covers a block the
-/// history no longer holds, such as one dropped by the history cap.
+/// A wait for an approval, or for the check that decides whether one is needed, is not work to
+/// fix: a step that waited only for that and then has nothing to do was not fixed by hand. The
+/// upgrade history in the state `ConfigMap` is the main record: it survives the `ThoriumCluster`
+/// being recreated and status rewrites that replace the reported steps (such as holding the
+/// cluster when its target is cleared). The reported status covers a block the history no longer
+/// holds, such as one dropped by the history cap.
 ///
 /// # Arguments
 ///
@@ -405,28 +718,67 @@ fn previously_blocked(
     state: &UpgradeState,
     step: &PlannedStep,
 ) -> bool {
-    // check the persisted history first, then the reported status
-    recorded_blocked(state, &step.revision, &step.step) || reported_blocked(status, &step.step)
+    // a block in the history that wasn't only a wait for an approval
+    let recorded = state.applied.iter().any(|applied| {
+        applied.revision == step.revision
+            && applied.step == step.step
+            && applied.outcome == StepState::Blocked
+            && !waits_for_approval(applied.message.as_deref())
+    });
+    // or a reported block that wasn't
+    recorded
+        || status.upgrade.as_ref().is_some_and(|upgrade| {
+            upgrade.steps.iter().any(|reported| {
+                reported.step == step.step
+                    && reported.state == StepState::Blocked
+                    && reported.blocked != Some(BlockReason::Approval)
+                    && !waits_for_approval(reported.message.as_deref())
+            })
+        })
 }
 
-/// Turn the result of a step that blocked earlier and now has nothing to do into a done step
+/// Check whether a block's message says the step waits only for an approval
+///
+/// # Arguments
+///
+/// * `message` - The block's message, if it has one
+fn waits_for_approval(message: Option<&str>) -> bool {
+    // the message of an approval wait names it
+    message.is_some_and(|message| message.contains(steps::APPROVAL_WAIT))
+}
+
+/// Note a step that blocked earlier and now has nothing to do as fixed by hand
 ///
 /// A step that blocked on an admin and later finds nothing to do was fixed by hand, so it is
-/// recorded as done rather than skipped; a step with nothing to do from the start stays
-/// skipped.
+/// recorded as skipped with the note `fixed manually`; a step with nothing to do from the start
+/// stays an ordinary skip.
 ///
 /// # Arguments
 ///
 /// * `result` - What running the step returned
 /// * `blocked_before` - Whether the step blocked earlier in this upgrade
 fn credit_manual_fix(result: steps::StepResult, blocked_before: bool) -> steps::StepResult {
-    // only a skip after an earlier block counts as a manual fix
+    // only a skip after an earlier block counts as a manual fix, recorded as a skip so the copy
+    // into the record, which never takes a `Done` entry of a gated step, doesn't strand it
     match result {
         steps::StepResult::Skipped(details) if blocked_before => {
-            steps::StepResult::Done(Some(format!("fixed manually: {details}")))
+            steps::StepResult::Skipped(format!("fixed manually: {details}"))
         }
         other => other,
     }
+}
+
+/// Write a line to the operator's log, its standard output
+///
+/// # Arguments
+///
+/// * `line` - The line to write
+fn log(line: &str) {
+    // write the line where the operator's other messages go
+    println!("{line}");
+    // keep it for the tests running on this thread to read back
+    #[cfg(test)]
+    tests::LOGGED.with(|logged| logged.borrow_mut().push(line.to_owned()));
 }
 
 /// Describe a held step and pick how long in seconds to wait before checking it again
@@ -435,12 +787,142 @@ fn credit_manual_fix(result: steps::StepResult, blocked_before: bool) -> steps::
 ///
 /// * `state` - The state reported for the held step
 fn hold_timing(state: StepState) -> (&'static str, u64) {
-    // blocked steps need an admin, so they're checked less often than waits on a backend
-    if state == StepState::Blocked {
-        ("is blocked", BLOCKED_REQUEUE_SECS)
-    } else {
-        ("is waiting", WAITING_REQUEUE_SECS)
+    // blocked and failed steps need an admin, so they're checked less often than waits on a backend
+    match state {
+        StepState::Blocked => ("is blocked", BLOCKED_REQUEUE_SECS),
+        StepState::Failed => ("has failed", BLOCKED_REQUEUE_SECS),
+        StepState::Running => ("is running", WAITING_REQUEUE_SECS),
+        _ => ("is waiting", WAITING_REQUEUE_SECS),
     }
+}
+
+/// How an upgrade reads the record before planning and moves its revision at the end
+///
+/// The operator does both through thoradm Jobs ([`Jobs`]); the seam lets the tests of the steps
+/// themselves run without those Jobs.
+pub(crate) trait RecordOps {
+    /// Read the record and plan again from what its full history finished
+    ///
+    /// Returns the action to take while the read waits.
+    ///
+    /// # Arguments
+    ///
+    /// * `meta` - Thorium cluster client and metadata
+    /// * `pending` - The upgrade about to run, whose state and steps are replaced
+    async fn refresh(
+        &self,
+        meta: &ClusterMeta,
+        pending: &mut Pending,
+    ) -> Result<Option<Action>, Error>;
+
+    /// Record a revision and mirror the record in the upgrade's state
+    ///
+    /// # Arguments
+    ///
+    /// * `meta` - Thorium cluster client and metadata
+    /// * `pending` - The upgrade whose state mirrors the record afterwards
+    /// * `revision` - The revision to record
+    async fn move_revision(
+        &self,
+        meta: &ClusterMeta,
+        pending: &mut Pending,
+        revision: &RevisionId,
+    ) -> Result<Moved, Error>;
+
+    /// Find a step of the catalog, which tests replace to give a step schema targets
+    ///
+    /// # Arguments
+    ///
+    /// * `id` - The id of the step
+    fn step(&self, id: &str) -> Option<(&'static CatalogEntry, &'static StepDef)> {
+        // this build's catalog's step, or a test's injected catalog's
+        catalog().step(id)
+    }
+}
+
+/// The record read and moved through thoradm Jobs, which is how the operator does it
+struct Jobs;
+
+impl RecordOps for Jobs {
+    /// Read the record with a status Job
+    ///
+    /// # Arguments
+    ///
+    /// * `meta` - Thorium cluster client and metadata
+    /// * `pending` - The upgrade about to run
+    async fn refresh(
+        &self,
+        meta: &ClusterMeta,
+        pending: &mut Pending,
+    ) -> Result<Option<Action>, Error> {
+        // the status Job reads Scylla for the operator
+        record::refresh(meta, pending).await
+    }
+
+    /// Record a revision with a `migrate record` Job
+    ///
+    /// # Arguments
+    ///
+    /// * `meta` - Thorium cluster client and metadata
+    /// * `pending` - The upgrade whose state mirrors the record afterwards
+    /// * `revision` - The revision to record
+    async fn move_revision(
+        &self,
+        meta: &ClusterMeta,
+        pending: &mut Pending,
+        revision: &RevisionId,
+    ) -> Result<Moved, Error> {
+        // the record Job writes Scylla for the operator
+        record::move_revision(meta, pending, revision).await
+    }
+}
+
+/// What running a step through the upgrade came to
+enum Executed {
+    /// A result recorded the way every step's is
+    Result(steps::StepResult),
+    /// The step finished a migration Job, with the entry that records it
+    Entry(Box<AppliedStep>),
+    /// The step is held in this state, with what it waits on
+    Held(StepState, String),
+    /// The step's own Job already reported where it stands, and this is when to look again
+    Action(Action),
+}
+
+/// Run a step: the schema-apply step and the steps thoradm runs need the upgrade in flight, so they
+/// run here; every other step goes through its executor
+///
+/// # Arguments
+///
+/// * `meta` - Thorium cluster client and metadata
+/// * `pending` - The upgrade being run
+/// * `index` - The index of the step to run
+/// * `def` - The step in the catalog
+async fn execute_step(
+    meta: &ClusterMeta,
+    pending: &mut Pending,
+    index: usize,
+    def: &'static thorium::models::upgrades::StepDef,
+) -> Result<Executed, Error> {
+    // the schema-apply step runs its Job, which holds the plan until it finishes
+    if steps::is_schema_apply(def) {
+        return Ok(match schema_apply::run_step(meta, pending).await? {
+            Some(action) => Executed::Action(action),
+            None => Executed::Result(steps::StepResult::Done(None)),
+        });
+    }
+    // a data step thoradm performs runs as a check Job and a migration Job
+    if steps::runs_in_thoradm(def) {
+        return Ok(match migration::advance(meta, pending, index, def).await? {
+            migration::Advance::Skipped(reason) => {
+                Executed::Result(steps::StepResult::Skipped(reason))
+            }
+            migration::Advance::Finished(entry) => Executed::Entry(entry),
+            migration::Advance::Held { state, message } => Executed::Held(state, message),
+        });
+    }
+    // every other step has an executor of its own
+    Ok(Executed::Result(steps::execute(meta, def).await?))
 }
 
 /// Run one step of an upgrade and record it once it finishes
@@ -453,16 +935,23 @@ fn hold_timing(state: StepState) -> (&'static str, u64) {
 /// * `pending` - The upgrade being run, whose state and steps are updated
 /// * `index` - The index of the step to run
 /// * `start` - The revision the upgrade started from
+/// * `ops` - How the record is moved
 async fn run_step(
     meta: &ClusterMeta,
     pending: &mut Pending,
     index: usize,
     start: &RevisionId,
+    ops: &impl RecordOps,
 ) -> Result<Option<Action>, Error> {
     // find this step in the catalog
     let id = pending.steps[index].step.clone();
-    let (_, def) = upgrades::step(&id)
+    let (_, def) = ops
+        .step(&id)
         .ok_or_else(|| Error::new(format!("Upgrade step {id} is not in the catalog")))?;
+    // the finalize step is the `migrate record` Job, which records the revision itself
+    if record::is_finalize(&id) {
+        return finalize_step(meta, pending, index, ops).await;
+    }
     // a step already reported as blocked keeps that status while it is checked again, so the
     // status doesn't flap between running and blocked every recheck
     let reported = meta.status.current();
@@ -478,7 +967,7 @@ async fn run_step(
             "Upgrading from revision {start} to {}: running step {id}",
             pending.target
         );
-        println!("{message}");
+        log(&message);
         crds::set_upgrade_status(
             &meta.client,
             &meta.status,
@@ -488,9 +977,22 @@ async fn run_step(
         )
         .await;
     }
-    // run the step, recording a failure in the progress before returning it
-    let result = match steps::execute(meta, def, &meta.cluster.spec.upgrade.approvals).await {
-        Ok(result) => result,
+    // run the step unless drift in an object it targets blocks it, recording a failure in the
+    // progress before returning it
+    let drifted = drift::block_soon(&mut pending.stored.state, def);
+    // a block by drift moved the record's read, which is saved so the next reconcile sees it
+    if drifted.as_ref().is_some_and(|(_, changed)| *changed) {
+        state::save(&meta.client, &meta.namespace, &mut pending.stored).await?;
+    }
+    let executed = match drifted
+        .map(|(details, _)| details)
+        .or_else(|| unknown_outcome(&pending.stored.state, &id))
+    {
+        Some(details) => Ok(Executed::Result(steps::StepResult::Blocked(details))),
+        None => execute_step(meta, pending, index, def).await,
+    };
+    let executed = match executed {
+        Ok(executed) => executed,
         Err(error) => {
             pending.steps[index].state = StepState::Failed;
             let message = crds::error_message(&error);
@@ -499,11 +1001,37 @@ async fn run_step(
             return Err(Error::new(format!("Upgrade step {id} failed: {message}")));
         }
     };
+    let result = match executed {
+        Executed::Result(result) => result,
+        // a step held on an admin is reported and recorded like any other block
+        Executed::Held(StepState::Blocked, details) => steps::StepResult::Blocked(details),
+        // a step held any other way is reported in its state
+        Executed::Held(state, details) => {
+            return Ok(Some(hold_step(meta, pending, index, state, details).await));
+        }
+        // a step whose own Job already reported the hold needs nothing more
+        Executed::Action(action) => return Ok(Some(action)),
+        // a migration that finished has its own entry, with the approval and the work it found
+        Executed::Entry(entry) => {
+            pending.steps[index].state = entry.outcome;
+            pending.steps[index].message.clone_from(&entry.message);
+            pending.stored.state.record(*entry);
+            state::save(&meta.client, &meta.namespace, &mut pending.stored).await?;
+            return Ok(None);
+        }
+    };
     // split finished steps from ones that must be checked again later
     let (outcome, details) = match credit_manual_fix(result, blocked_before) {
         steps::StepResult::Done(details) => (StepState::Done, details),
         steps::StepResult::Skipped(details) => (StepState::Skipped, Some(details)),
         steps::StepResult::Blocked(details) => {
+            // log what the admin must do when the step wasn't already reported blocked with
+            // this message, so rechecks of an unchanged block don't repeat it
+            if !reported_same_block(&reported, &id, &details) {
+                let approvals = &meta.cluster.spec.upgrade.approvals;
+                let target = pending.target.to_string();
+                log(&steps::block_log_line(def, approvals, &target, &details));
+            }
             // report the block, then remember it in the history so a later manual fix is
             // credited even if the reported status is lost
             let action = hold_step(meta, pending, index, StepState::Blocked, details).await;
@@ -531,12 +1059,72 @@ async fn run_step(
         by: Some(format!("thorium-operator {OPERATOR_VERSION}")),
         ..AppliedStep::default()
     });
-    pending
-        .stored
-        .state
-        .advance(&pending.target, OPERATOR_VERSION);
     state::save(&meta.client, &meta.namespace, &mut pending.stored).await?;
     Ok(None)
+}
+
+/// Say why a step is blocked when its latest history entry holds an outcome this build doesn't know
+///
+/// A newer operator wrote the entry, so this one can't tell whether the step ran, and it changes
+/// nothing for the step until that is resolved; everything else keeps reconciling.
+///
+/// # Arguments
+///
+/// * `state` - The cluster's recorded upgrade state
+/// * `id` - The id of the step
+fn unknown_outcome(state: &UpgradeState, id: &str) -> Option<String> {
+    // only the step's newest entry decides, a note that it blocked aside
+    let newest = state
+        .applied
+        .iter()
+        .rfind(|entry| entry.step == id && entry.outcome != StepState::Blocked)?;
+    (newest.outcome == StepState::Unknown).then(|| {
+        format!(
+            "Step {id}'s history records an outcome this build doesn't know, written by a newer \
+             Thorium operator, so it can't tell whether the step ran and runs nothing for it. \
+             Deploy the Thorium version that recorded it, or reset the recorded revision with \
+             `thoradm migrate reset-state` once the data is known to be at the revision you reset \
+             it to"
+        )
+    })
+}
+
+/// Run the finalize step: a `migrate record` Job copies the operator's entries into the record
+/// and moves its revision once every step of the path is recorded
+///
+/// Returns the action to take while the Job runs.
+///
+/// # Arguments
+///
+/// * `meta` - Thorium cluster client and metadata
+/// * `pending` - The upgrade being run, whose state mirrors the record once the Job is done
+/// * `index` - The index of the finalize step
+/// * `ops` - How the record is moved
+async fn finalize_step(
+    meta: &ClusterMeta,
+    pending: &mut Pending,
+    index: usize,
+    ops: &impl RecordOps,
+) -> Result<Option<Action>, Error> {
+    // the revision this step's edge reaches
+    let revision = pending.steps[index]
+        .revision
+        .parse::<RevisionId>()
+        .map_err(|error| Error::new(error.to_string()))?;
+    match ops.move_revision(meta, pending, &revision).await? {
+        // the Job is running: report the step and check on it again soon
+        Moved::Wait(_) => {
+            let details = format!("Recording revision {revision} in schema_migrations");
+            Ok(Some(
+                hold_step(meta, pending, index, StepState::Running, details).await,
+            ))
+        }
+        // the Job recorded the finalize step itself and the state mirrors it
+        Moved::Done => {
+            pending.steps[index].state = StepState::Done;
+            Ok(None)
+        }
+    }
 }
 
 /// Record in the upgrade history that a step blocked on an admin
@@ -572,7 +1160,8 @@ async fn record_block(
 
 /// Report a step that is blocked on an admin or waiting on a backend
 ///
-/// Returns when to check the step again.
+/// Returns when to check the step again, sooner when a Job the upgrade waits on is running. A
+/// failed step puts the cluster in the error phase; any other hold keeps it upgrading.
 ///
 /// # Arguments
 ///
@@ -588,8 +1177,10 @@ async fn hold_step(
     state: StepState,
     details: String,
 ) -> Action {
-    // describe the hold and pick when to check the step again
+    // describe the hold and pick when to check the step again, sooner when a Job the upgrade waits
+    // on is running
     let (verb, secs) = hold_timing(state);
+    let secs = pending.requeue_hint.map_or(secs, |hint| hint.min(secs));
     // describe why the step is held
     let message = format!(
         "The upgrade to {} {verb} at step {}: {details}",
@@ -598,11 +1189,20 @@ async fn hold_step(
     // record it in the step's progress
     pending.steps[index].state = state;
     pending.steps[index].message = Some(details);
-    println!("{message}");
+    // a block is logged once by the runner rather than at every recheck
+    if state != StepState::Blocked {
+        log(&message);
+    }
+    // a failed step is an error an admin must act on
+    let phase = if state == StepState::Failed {
+        ClusterPhase::Error
+    } else {
+        ClusterPhase::Upgrading
+    };
     crds::set_upgrade_status(
         &meta.client,
         &meta.status,
-        ClusterPhase::Upgrading,
+        phase,
         Some(message),
         pending.progress(),
     )
@@ -623,12 +1223,13 @@ fn target_hold(
     target: &RevisionId,
 ) -> Result<Option<(String, UpgradeStatus)>, UpgradeError> {
     // a cluster at the latest revision is current
-    let latest = upgrades::latest();
+    let catalog = catalog();
+    let latest = catalog.latest();
     if *target >= latest {
         return Ok(None);
     }
     // list the steps left to the latest revision
-    let remaining = upgrades::plan(state, &latest)?;
+    let remaining = catalog.plan(state, &latest)?;
     let message = format!(
         "This cluster reached its target revision {target}, but this operator deploys \
          revision {latest}; set spec.upgrade.target_revision to {latest} to continue"
@@ -645,25 +1246,100 @@ fn target_hold(
 ///
 /// * `meta` - Thorium cluster client and metadata
 /// * `pending` - The upgrade to run
-pub async fn run(meta: &ClusterMeta, mut pending: Pending) -> Result<Option<Action>, Error> {
-    // remember where this upgrade started for its messages
+pub async fn run(meta: &ClusterMeta, pending: Pending) -> Result<Option<Action>, Error> {
+    // the operator reads and moves the record through thoradm Jobs
+    run_with(meta, pending, &Jobs).await
+}
+
+/// Run the steps that bring a cluster to its target revision, reading and moving the record the
+/// way `ops` does
+///
+/// # Arguments
+///
+/// * `meta` - Thorium cluster client and metadata
+/// * `pending` - The upgrade to run
+/// * `ops` - How the record is read and moved
+async fn run_with(
+    meta: &ClusterMeta,
+    mut pending: Pending,
+    ops: &impl RecordOps,
+) -> Result<Option<Action>, Error> {
+    // an upgrade that starts ends the hand-over of an earlier downgrade, while a marker naming
+    // this run's own target is the one a downgrade in flight carries, so it stays
+    let marked = pending
+        .stored
+        .state
+        .schema
+        .get(handover::HANDED_OVER_MARKER);
+    if marked.is_some_and(|marked| *marked != pending.target.as_str()) {
+        pending
+            .stored
+            .state
+            .schema
+            .remove(handover::HANDED_OVER_MARKER);
+        state::save(&meta.client, &meta.namespace, &mut pending.stored).await?;
+    }
+    // read the record first: the plan comes from what its full history finished, never from the
+    // state's window of entries
+    if let Some(action) = ops.refresh(meta, &mut pending).await? {
+        return Ok(Some(action));
+    }
+    // remember where this upgrade started for its messages, and keep it in the state because the
+    // recorded revision moves past it as each edge finishes; the next save of the state, which
+    // the first step's entry makes, keeps it
     let start = pending.stored.state.revision.clone();
+    pending
+        .stored
+        .state
+        .schema
+        .entry(migration::START_MARKER.to_owned())
+        .or_insert_with(|| start.to_string());
+    // a downgrade marks the revision it hands the cluster over at in every save of the state, so
+    // the save that moves the revision there marks it too and a run that stops before the
+    // hand-over finishes resumes it; the marker has no effect until the cluster is at the target
+    if pending.target < start {
+        pending.stored.state.schema.insert(
+            handover::HANDED_OVER_MARKER.to_owned(),
+            pending.target.to_string(),
+        );
+    }
     // the recorded Thorium version is advisory, so a mismatch is only a warning
     if let Some(warning) = pending.stored.state.version_mismatch() {
         println!("Warning: {warning}");
     }
+    // say whether the image's thoradm plans the same catalog, then check every gated step in the
+    // plan so the admin sees each one's scope before approving
+    migration::report_skew(meta, &pending.stored.state).await;
+    if migration::skew(&pending.stored.state).is_none() {
+        migration::preflight(meta, &mut pending).await?;
+    }
     // run each step in order, stopping at any that must be checked again later
     for index in 0..pending.steps.len() {
-        if let Some(action) = run_step(meta, &mut pending, index, &start).await? {
+        if let Some(action) = run_step(meta, &mut pending, index, &start, ops).await? {
             return Ok(Some(action));
         }
     }
-    // move past any revisions without steps
+    // every step has run, so the next upgrade records its own start; the move below saves the state
+    pending.stored.state.schema.remove(migration::START_MARKER);
+    // record the target revision, which moves past any revisions without steps
     let target = pending.target.clone();
-    if pending.stored.state.advance(&target, OPERATOR_VERSION) {
-        state::save(&meta.client, &meta.namespace, &mut pending.stored).await?;
+    if let Moved::Wait(action) = ops.move_revision(meta, &mut pending, &target).await? {
+        let message = format!("Recording revision {target} in schema_migrations");
+        crds::set_upgrade_status(
+            &meta.client,
+            &meta.status,
+            ClusterPhase::Upgrading,
+            Some(message),
+            pending.progress(),
+        )
+        .await;
+        return Ok(Some(action));
     }
     println!("Upgraded {} from revision {start} to {target}", meta.name);
+    // a downgrade ends by handing the cluster over to the previous operator
+    if target < start {
+        return Ok(Some(handover::finish(meta, &mut pending, &target).await?));
+    }
     // a target older than the latest revision still holds the cluster
     let held = target_hold(&pending.stored.state, &target)
         .map_err(|error| Error::new(error.to_string()))?;
@@ -694,6 +1370,7 @@ pub async fn run(meta: &ClusterMeta, mut pending: Pending) -> Result<Option<Acti
 
 #[cfg(test)]
 pub(crate) mod tests {
+    use super::steps::fixture::{self, Check};
     use super::*;
     use crate::k8s::clusters::tests::{
         FakeKube, full_spec, meta_for, namespaced_cluster, pre_helm_spec,
@@ -718,12 +1395,129 @@ pub(crate) mod tests {
     pub(crate) const STATUS_PATH: &str =
         "/apis/sandia.gov/v1/namespaces/thorium/thoriumclusters/thorium/status";
 
+    thread_local! {
+        /// The lines the upgrade code logged on this test's thread
+        pub(super) static LOGGED: std::cell::RefCell<Vec<String>> =
+            const { std::cell::RefCell::new(Vec::new()) };
+    }
+
+    /// The record moved locally, the way the thoradm Jobs move it in Scylla, so the tests of the
+    /// steps themselves run without those Jobs
+    pub(crate) struct LocalRecord;
+
+    impl RecordOps for LocalRecord {
+        /// Plan from the state the gate read, since no record is read
+        ///
+        /// # Arguments
+        ///
+        /// * `_meta` - Thorium cluster client and metadata
+        /// * `_pending` - The upgrade about to run
+        fn refresh(
+            &self,
+            _meta: &ClusterMeta,
+            _pending: &mut Pending,
+        ) -> impl std::future::Future<Output = Result<Option<Action>, Error>> {
+            // the state is the record
+            std::future::ready(Ok(None))
+        }
+
+        /// Record the finalize step and advance the state's revision
+        ///
+        /// # Arguments
+        ///
+        /// * `meta` - Thorium cluster client and metadata
+        /// * `pending` - The upgrade whose state is advanced and saved
+        /// * `revision` - The revision to record
+        async fn move_revision(
+            &self,
+            meta: &ClusterMeta,
+            pending: &mut Pending,
+            revision: &RevisionId,
+        ) -> Result<Moved, Error> {
+            // a state already at the revision has nothing to move
+            if pending.stored.state.revision == *revision {
+                return Ok(Moved::Done);
+            }
+            // thoradm records the finalize step of the edges it crosses
+            let finalized =
+                pending.stored.state.applied.iter().any(|applied| {
+                    applied.step == "finalize" && applied.revision == revision.as_str()
+                });
+            if !finalized && pending.steps.iter().any(|step| step.step == "finalize") {
+                pending.stored.state.record(AppliedStep {
+                    revision: revision.to_string(),
+                    step: "finalize".to_owned(),
+                    outcome: StepState::Done,
+                    at: Some(chrono::Utc::now().to_rfc3339()),
+                    by: Some("thoradm test".to_owned()),
+                    ..AppliedStep::default()
+                });
+            }
+            // the revision moves along the catalog the test plans with
+            catalog().advance(&mut pending.stored.state, &pending.target, OPERATOR_VERSION);
+            state::save(&meta.client, &meta.namespace, &mut pending.stored).await?;
+            Ok(Moved::Done)
+        }
+    }
+
+    /// Run an upgrade with the record moved locally
+    ///
+    /// # Arguments
+    ///
+    /// * `meta` - Thorium cluster client and metadata
+    /// * `pending` - The upgrade to run
+    pub(crate) async fn run_local(
+        meta: &ClusterMeta,
+        pending: Pending,
+    ) -> Result<Option<Action>, Error> {
+        // the same run the operator does, with the record moved in memory
+        Box::pin(run_with(meta, pending, &LocalRecord)).await
+    }
+
+    /// Take the lines logged on this thread since the last call that report a blocked step
+    fn take_block_logs() -> Vec<String> {
+        // drain the logged lines and keep the ones about a block
+        LOGGED
+            .with(std::cell::RefCell::take)
+            .into_iter()
+            .filter(|line| line.contains("blocked"))
+            .collect()
+    }
+
+    /// Run a pending upgrade again as its requeue does, from the recorded state and the status
+    /// the last run reported, and return the status this run reported with the state it
+    /// left recorded
+    ///
+    /// # Arguments
+    ///
+    /// * `cluster` - The cluster being upgraded, with the approvals for this run
+    /// * `state` - The cluster's recorded upgrade state
+    /// * `status` - The status the last run reported
+    /// * `check` - What the fixture step's check finds in this run
+    async fn rerun(
+        mut cluster: ThoriumCluster,
+        state: &UpgradeState,
+        status: ThoriumClusterStatus,
+        check: Check,
+    ) -> (ThoriumClusterStatus, UpgradeState) {
+        // gate the cluster with the status it reported last
+        cluster.status = Some(status);
+        let (fake, pending) = Box::pin(pending_upgrade(&cluster, state)).await;
+        // run the step with the given check
+        fixture::script(check);
+        let meta = meta_for(cluster, &fake.client());
+        Box::pin(run_local(&meta, pending)).await.expect("run");
+        // keep the state this run saved, or the one it started from when it saved none
+        let saved = saved_state(&fake).unwrap_or_else(|| state.clone());
+        (meta.status.current(), saved)
+    }
+
     /// Parse a revision id that must be valid
     ///
     /// # Arguments
     ///
     /// * `raw` - The id to parse
-    fn rev(raw: &str) -> RevisionId {
+    pub(crate) fn rev(raw: &str) -> RevisionId {
         // parse the id, failing the test when it is malformed
         raw.parse().expect("valid revision")
     }
@@ -750,7 +1544,7 @@ pub(crate) mod tests {
     ///
     /// * `state` - The state to record the steps in
     /// * `steps` - The ids of the finished steps
-    fn finish(state: &mut UpgradeState, steps: &[&str]) {
+    pub(crate) fn finish(state: &mut UpgradeState, steps: &[&str]) {
         // record each step as done
         for step in steps {
             state.record(AppliedStep {
@@ -765,12 +1559,55 @@ pub(crate) mod tests {
         }
     }
 
-    /// Build the upgrade state `ConfigMap` the kube API returns for a state
+    /// Puts the catalog and the fixture step's check back when a test that planned with them ends
+    pub(crate) struct CatalogGuard;
+
+    impl Drop for CatalogGuard {
+        /// Remove the catalog and the check a test injected
+        fn drop(&mut self) {
+            // the thread may run another test
+            CATALOG_OVERRIDE.with(|catalog| *catalog.borrow_mut() = None);
+            fixture::clear();
+        }
+    }
+
+    /// Plan with the catalog through the first Helm revision, with the fixture step in the place
+    /// of its reindex
+    ///
+    /// The tests of the generic upgrade mechanics below run its Scylla and Elastic checks, which
+    /// they stub, and the fixture step, whose check they script; the production reindex runs as a
+    /// migration Job and the steps after the revision have tests of their own.
+    pub(crate) fn first_helm_fixture() -> CatalogGuard {
+        // the baseline, then the first Helm revision with the fixture step for its reindex
+        let mut edges = upgrades::CATALOG.split_at(2).0.to_vec();
+        let steps = edges[1]
+            .steps
+            .iter()
+            .map(|step| {
+                if step.id == "elastic-reindex-keyword-mappings" {
+                    fixture::DEF
+                } else {
+                    *step
+                }
+            })
+            .collect::<Vec<_>>();
+        edges[1].steps = Box::leak(steps.into_boxed_slice());
+        let edges: &'static [CatalogEntry] = Box::leak(edges.into_boxed_slice());
+        CATALOG_OVERRIDE.with(|catalog| {
+            *catalog.borrow_mut() = Some(Catalog {
+                edges,
+                floors: upgrades::FLOORS,
+            });
+        });
+        CatalogGuard
+    }
+
+    /// Build the upgrade state `ConfigMap` the kube API returns for a state exactly as it is
     ///
     /// # Arguments
     ///
     /// * `state` - The state the `ConfigMap` holds
-    pub(crate) fn state_config_map(state: &UpgradeState) -> serde_json::Value {
+    pub(crate) fn raw_state_config_map(state: &UpgradeState) -> serde_json::Value {
         // wrap the serialized state in a ConfigMap at a fixed resource version
         serde_json::json!({
             "apiVersion": "v1",
@@ -780,12 +1617,27 @@ pub(crate) mod tests {
         })
     }
 
+    /// Build the upgrade state `ConfigMap` the kube API returns for a state that mirrors a record
+    ///
+    /// # Arguments
+    ///
+    /// * `state` - The state the `ConfigMap` holds, which gets the record marker when it lacks it
+    pub(crate) fn state_config_map(state: &UpgradeState) -> serde_json::Value {
+        // a state the operator rebuilt from a record carries the marker
+        let mut mirrored = state.clone();
+        mirrored
+            .schema
+            .entry(RECORD_MARKER.to_owned())
+            .or_insert_with(|| "scylla".to_owned());
+        raw_state_config_map(&mirrored)
+    }
+
     /// Build a chart shaped cluster in the test namespace with upgrade settings
     ///
     /// # Arguments
     ///
     /// * `upgrade` - The cluster's `spec.upgrade`
-    fn chart_cluster(upgrade: serde_json::Value) -> ThoriumCluster {
+    pub(crate) fn chart_cluster(upgrade: serde_json::Value) -> ThoriumCluster {
         // add the upgrade settings to a chart shaped spec
         let mut raw = full_spec();
         raw["upgrade"] = upgrade;
@@ -797,7 +1649,7 @@ pub(crate) mod tests {
     /// # Arguments
     ///
     /// * `cluster` - The cluster whose status is patched
-    fn fake_with_status(cluster: &ThoriumCluster) -> FakeKube {
+    pub(crate) fn fake_with_status(cluster: &ThoriumCluster) -> FakeKube {
         // answer every status patch with the cluster itself
         FakeKube::default().route(
             "PATCH",
@@ -812,7 +1664,7 @@ pub(crate) mod tests {
     /// # Arguments
     ///
     /// * `fake` - The fake kube API that received the patches
-    fn status_patches(fake: &FakeKube) -> Vec<serde_json::Value> {
+    pub(crate) fn status_patches(fake: &FakeKube) -> Vec<serde_json::Value> {
         // keep the status of every write to the status subresource, oldest first
         fake.writes()
             .into_iter()
@@ -826,7 +1678,7 @@ pub(crate) mod tests {
     /// # Arguments
     ///
     /// * `fake` - The fake kube API that received the writes
-    fn saved_state(fake: &FakeKube) -> Option<UpgradeState> {
+    pub(crate) fn saved_state(fake: &FakeKube) -> Option<UpgradeState> {
         // find the last replaced state ConfigMap and parse the state it holds
         let saved = fake
             .writes()
@@ -836,16 +1688,17 @@ pub(crate) mod tests {
         Some(serde_json::from_str(raw).expect("state parses"))
     }
 
-    /// Record the reindex step of revision `2026-10-v02` as blocked in a state
+    /// Record a step of revision `2026-10-v02` as blocked on manual work in a state
     ///
     /// # Arguments
     ///
     /// * `state` - The state to record the block in
-    fn block_reindex(state: &mut UpgradeState) {
+    /// * `step` - The id of the blocked step
+    fn block_step(state: &mut UpgradeState, step: &str) {
         // record the block the way the operator does when the step first blocks
         state.record(AppliedStep {
             revision: FIRST_HELM_REVISION.to_owned(),
-            step: "elastic-reindex-keyword-mappings".to_owned(),
+            step: step.to_owned(),
             outcome: StepState::Blocked,
             message: Some("Waiting for manual work".to_owned()),
             at: None,
@@ -854,18 +1707,18 @@ pub(crate) mod tests {
         });
     }
 
-    /// Find how the reindex step finished in a saved state
+    /// Find how the fixture step finished in a saved state
     ///
     /// # Arguments
     ///
     /// * `state` - The saved state
-    fn reindex_outcome(state: &UpgradeState) -> &AppliedStep {
+    fn fixture_outcome(state: &UpgradeState) -> &AppliedStep {
         // the finished entry is the last one recorded for the step
         state
             .applied
             .iter()
-            .rfind(|applied| applied.step == "elastic-reindex-keyword-mappings")
-            .expect("reindex recorded")
+            .rfind(|applied| applied.step == fixture::STEP)
+            .expect("fixture step recorded")
     }
 
     /// Serve canned Elastic answers on a local port, returning its url
@@ -939,66 +1792,6 @@ pub(crate) mod tests {
         format!("http://{addr}")
     }
 
-    /// Answer Elastic requests as a cluster whose repo results index maps group as text
-    ///
-    /// # Arguments
-    ///
-    /// * `method` - The request method
-    /// * `path` - The request path
-    fn text_group_elastic(method: &str, path: &str) -> (u16, String) {
-        match (method, path) {
-            // only the repo results index exists
-            ("HEAD", "/thorium_repo_results") => (200, String::new()),
-            // and it maps group as text
-            ("GET", "/thorium_repo_results/_mapping") => (
-                200,
-                r#"{"thorium_repo_results":{"mappings":{"properties":{"group":{"type":"text"}}}}}"#
-                    .to_owned(),
-            ),
-            _ => (404, "{}".to_owned()),
-        }
-    }
-
-    /// Answer Elastic requests as a cluster whose repo results index maps group correctly
-    ///
-    /// # Arguments
-    ///
-    /// * `method` - The request method
-    /// * `path` - The request path
-    fn keyword_group_elastic(method: &str, path: &str) -> (u16, String) {
-        match (method, path) {
-            // only the repo results index exists
-            ("HEAD", "/thorium_repo_results") => (200, String::new()),
-            // and it maps group as a keyword
-            ("GET", "/thorium_repo_results/_mapping") => (
-                200,
-                r#"{"thorium_repo_results":{"mappings":{"properties":{"group":{"type":"keyword"}}}}}"#
-                    .to_owned(),
-            ),
-            _ => (404, "{}".to_owned()),
-        }
-    }
-
-    /// Answer Elastic requests as a cluster that rejects reading the repo results mappings
-    ///
-    /// # Arguments
-    ///
-    /// * `method` - The request method
-    /// * `path` - The request path
-    fn unauthorized_mapping_elastic(method: &str, path: &str) -> (u16, String) {
-        match (method, path) {
-            // only the repo results index exists
-            ("HEAD", "/thorium_repo_results") => (200, String::new()),
-            // but reading its mappings is rejected
-            ("GET", "/thorium_repo_results/_mapping") => (
-                401,
-                r#"{"error":{"type":"security_exception","reason":"unable to authenticate"},"status":401}"#
-                    .to_owned(),
-            ),
-            _ => (404, "{}".to_owned()),
-        }
-    }
-
     /// Answer Elastic requests as a cluster where Thorium's user authenticates with every
     /// privilege it needs and no index exists yet
     ///
@@ -1056,7 +1849,7 @@ pub(crate) mod tests {
     /// # Arguments
     ///
     /// * `cluster` - The cluster to track
-    fn tracked(cluster: &ThoriumCluster) -> StatusTracker {
+    pub(crate) fn tracked(cluster: &ThoriumCluster) -> StatusTracker {
         StatusTracker::new(std::sync::Arc::new(cluster.clone()))
     }
 
@@ -1066,7 +1859,7 @@ pub(crate) mod tests {
     ///
     /// * `cluster` - The cluster to gate
     /// * `state` - The cluster's recorded upgrade state
-    async fn pending_upgrade(
+    pub(crate) async fn pending_upgrade(
         cluster: &ThoriumCluster,
         state: &UpgradeState,
     ) -> (FakeKube, Pending) {
@@ -1098,38 +1891,6 @@ pub(crate) mod tests {
         })
     }
 
-    /// Gate a cluster in a namespace without a state and return the state it recorded and the
-    /// status patches it wrote
-    ///
-    /// # Arguments
-    ///
-    /// * `cluster` - The cluster to gate
-    /// * `secrets` - The paths and names of the Secrets the namespace holds
-    async fn seeded(
-        cluster: &ThoriumCluster,
-        secrets: &[(&str, &str)],
-    ) -> (UpgradeState, Vec<serde_json::Value>) {
-        // serve the Secrets and accept the new state
-        let created =
-            state_config_map(&UpgradeState::new(rev(BASELINE_REVISION), OPERATOR_VERSION));
-        let mut fake = fake_with_status(cluster).route("POST", CONFIG_MAPS_PATH, 201, created);
-        for (path, name) in secrets {
-            fake = fake.route("GET", path, 200, secret_metadata(name));
-        }
-        // gate the cluster
-        gate(&fake.client(), &tracked(cluster)).await.expect("gate");
-        // get the state it created
-        let created = fake
-            .writes()
-            .into_iter()
-            .find(|request| request.method == "POST")
-            .expect("state created");
-        let state =
-            serde_json::from_str(created.body["data"][STATE_KEY].as_str().expect("state key"))
-                .expect("state parses");
-        (state, status_patches(&fake))
-    }
-
     /// Check that a written state `ConfigMap` is labelled and annotated for its state
     ///
     /// # Arguments
@@ -1150,60 +1911,6 @@ pub(crate) mod tests {
             .expect("hash annotation");
         assert_eq!(full, state.hash());
         assert_eq!(labels[HASH_LABEL].as_str(), Some(&full[..32]));
-    }
-
-    /// Answer Elastic requests as a megathor deployment whose repo indexes were created
-    /// without mappings and whose unused file indexes were left behind
-    ///
-    /// # Arguments
-    ///
-    /// * `method` - The request method
-    /// * `path` - The request path
-    fn megathor_elastic(method: &str, path: &str) -> (u16, String) {
-        // every index exists, including the unused ones
-        if method == "HEAD" {
-            return (200, String::new());
-        }
-        // the repo indexes map group as text and the sample indexes as a keyword
-        let kind = |index: &str| {
-            if index.starts_with("thorium_repo_") {
-                "text"
-            } else {
-                "keyword"
-            }
-        };
-        match path.strip_suffix("/_mapping") {
-            Some(index) => (
-                200,
-                format!(
-                    r#"{{"{}":{{"mappings":{{"properties":{{"group":{{"type":"{}"}}}}}}}}}}"#,
-                    index.trim_start_matches('/'),
-                    kind(index.trim_start_matches('/'))
-                ),
-            ),
-            None => (404, "{}".to_owned()),
-        }
-    }
-
-    /// Answer Elastic requests as a deployment with custom index names whose repo results
-    /// index maps group as text
-    ///
-    /// # Arguments
-    ///
-    /// * `method` - The request method
-    /// * `path` - The request path
-    fn custom_index_elastic(method: &str, path: &str) -> (u16, String) {
-        match (method, path) {
-            // only the custom repo results index exists
-            ("HEAD", "/e2e_repo_results") => (200, String::new()),
-            // and it maps group as text
-            ("GET", "/e2e_repo_results/_mapping") => (
-                200,
-                r#"{"e2e_repo_results":{"mappings":{"properties":{"group":{"type":"text"}}}}}"#
-                    .to_owned(),
-            ),
-            _ => (404, "{}".to_owned()),
-        }
     }
 
     /// Gate a cluster against a fresh fake and return the fake with the tracked status
@@ -1276,11 +1983,11 @@ pub(crate) mod tests {
         assert_eq!(progress.target, None);
         assert_eq!(progress.steps, Vec::new());
         // a target at the latest revision is reported too
-        let Decision::Current(progress) = decide(&state, &spec(Some(FIRST_HELM_REVISION), false))
-        else {
+        let latest = upgrades::latest().to_string();
+        let Decision::Current(progress) = decide(&state, &spec(Some(&latest), false)) else {
             panic!("a current cluster should be reconciled");
         };
-        assert_eq!(progress.target.as_deref(), Some(FIRST_HELM_REVISION));
+        assert_eq!(progress.target.as_deref(), Some(latest.as_str()));
     }
 
     /// A cluster behind the latest revision without a target is held and shown its steps
@@ -1297,7 +2004,7 @@ pub(crate) mod tests {
         // every step to the latest revision is listed as pending
         assert_eq!(progress.current.as_deref(), Some(BASELINE_REVISION));
         assert_eq!(progress.target, None);
-        assert_eq!(progress.steps.len(), 4);
+        assert_eq!(progress.steps.len(), 6);
         assert!(
             progress
                 .steps
@@ -1312,7 +2019,8 @@ pub(crate) mod tests {
         // a baseline cluster
         let state = UpgradeState::new(rev(BASELINE_REVISION), OPERATOR_VERSION);
         // auto targeting and an explicit target both upgrade to the latest revision
-        for upgrade in [spec(None, true), spec(Some(FIRST_HELM_REVISION), false)] {
+        let latest = upgrades::latest().to_string();
+        for upgrade in [spec(None, true), spec(Some(&latest), false)] {
             let Decision::Upgrade { target, steps } = decide(&state, &upgrade) else {
                 panic!("a targeted cluster should be upgraded");
             };
@@ -1327,7 +2035,9 @@ pub(crate) mod tests {
                     "scylla-role",
                     "elastic-identity",
                     "elastic-reindex-keyword-mappings",
-                    "finalize"
+                    "finalize",
+                    "schema-apply",
+                    "users-settings-theme"
                 ]
             );
         }
@@ -1347,7 +2057,15 @@ pub(crate) mod tests {
             .iter()
             .map(|step| step.step.as_str())
             .collect::<Vec<_>>();
-        assert_eq!(ids, ["elastic-reindex-keyword-mappings", "finalize"]);
+        assert_eq!(
+            ids,
+            [
+                "elastic-reindex-keyword-mappings",
+                "finalize",
+                "schema-apply",
+                "users-settings-theme"
+            ]
+        );
     }
 
     /// A cluster at an older target than the latest revision is held until the target moves
@@ -1363,7 +2081,7 @@ pub(crate) mod tests {
         // the message names the target and how to continue
         assert!(message.contains("at its target revision 2026-10-v01"));
         assert_eq!(progress.target.as_deref(), Some(BASELINE_REVISION));
-        assert_eq!(progress.steps.len(), 4);
+        assert_eq!(progress.steps.len(), 6);
     }
 
     /// Backwards, malformed, unknown, and too new revisions are errors
@@ -1375,7 +2093,7 @@ pub(crate) mod tests {
         else {
             panic!("a backwards target should be an error");
         };
-        assert!(message.contains("never move backwards"));
+        assert!(message.contains("has no path from revision"));
         // malformed and unknown targets are errors
         for target in ["latest", "2099-01-v01", "2026-10-v00"] {
             assert!(
@@ -1391,7 +2109,7 @@ pub(crate) mod tests {
         let Decision::Error(message) = decide(&ahead, &spec(None, false)) else {
             panic!("a cluster ahead of the catalog should be an error");
         };
-        assert!(message.contains("downgrades are not supported"));
+        assert!(message.contains("thoradm migrate revert --to"));
         // a state in a newer layout is an error too, even at a known revision with a target
         let mut newer = UpgradeState::new(rev(BASELINE_REVISION), "9.9.9");
         newer.schema_version = thorium::models::upgrades::STATE_SCHEMA_VERSION + 1;
@@ -1400,32 +2118,8 @@ pub(crate) mod tests {
                 panic!("a state in a newer layout should be an error");
             };
             assert!(message.contains("written by a newer Thorium operator"));
-            assert!(message.contains("downgrades are not supported"));
+            assert!(message.contains("thoradm migrate revert --to"));
         }
-    }
-
-    /// A fresh namespace starts at the latest revision and an older Helm one at the first
-    /// Helm revision, each with a finished record step
-    #[test]
-    fn starting_state_by_detection() {
-        // a fresh install starts at the latest revision
-        let (fresh, message) =
-            starting_state(Detected::Fresh, "2026-10-08T00:00:00Z".to_owned()).expect("fresh");
-        assert_eq!(fresh.revision, upgrades::latest());
-        assert_eq!(message, "fresh install");
-        assert!(fresh.finished(upgrades::latest().as_str(), "record-revision"));
-        assert_eq!(fresh.applied[0].at.as_deref(), Some("2026-10-08T00:00:00Z"));
-        assert_eq!(fresh.applied_by_version.as_deref(), Some(OPERATOR_VERSION));
-        // a Helm deployment from before states were recorded starts at the first Helm revision
-        let (before, _) = starting_state(Detected::BeforeTracking, String::new()).expect("before");
-        assert_eq!(before.revision, rev(FIRST_HELM_REVISION));
-        assert!(before.finished(FIRST_HELM_REVISION, "record-revision"));
-        // a pre-Helm deployment starts at the baseline with the reason it is one
-        let (pre_helm, message) =
-            starting_state(Detected::PreHelm("why"), String::new()).expect("pre-Helm");
-        assert_eq!(pre_helm.revision, rev(BASELINE_REVISION));
-        assert_eq!(message, "why");
-        assert_eq!(pre_helm.applied[0].message.as_deref(), Some("why"));
     }
 
     /// Only a step already reported as blocked keeps its blocked status while rechecked
@@ -1460,9 +2154,18 @@ pub(crate) mod tests {
             hold_timing(StepState::Blocked),
             ("is blocked", BLOCKED_REQUEUE_SECS)
         );
-        // anything else waits on a backend
+        // a failed step needs an admin as much as a blocked one
+        assert_eq!(
+            hold_timing(StepState::Failed),
+            ("has failed", BLOCKED_REQUEUE_SECS)
+        );
+        // a running Job is looked at soon, and anything else waits on a backend
         assert_eq!(
             hold_timing(StepState::Running),
+            ("is running", WAITING_REQUEUE_SECS)
+        );
+        assert_eq!(
+            hold_timing(StepState::Waiting),
             ("is waiting", WAITING_REQUEUE_SECS)
         );
     }
@@ -1476,7 +2179,7 @@ pub(crate) mod tests {
             .expect("plan")
             .expect("held");
         assert!(message.contains("reached its target revision 2026-10-v01"));
-        assert_eq!(progress.steps.len(), 4);
+        assert_eq!(progress.steps.len(), 6);
         assert_eq!(progress.target.as_deref(), Some(BASELINE_REVISION));
         // reaching the latest revision holds nothing
         let current = UpgradeState::new(upgrades::latest(), OPERATOR_VERSION);
@@ -1512,113 +2215,6 @@ pub(crate) mod tests {
             status["message"]
                 .as_str()
                 .is_some_and(|message| message.contains("convert-to-helm.sh"))
-        );
-    }
-
-    /// A fresh namespace records the latest revision and is reconciled normally
-    #[tokio::test]
-    async fn gate_seeds_fresh_install() {
-        // a chart cluster in a namespace no operator ran in
-        let cluster = chart_cluster(serde_json::json!({}));
-        let created = state_config_map(&UpgradeState::new(upgrades::latest(), OPERATOR_VERSION));
-        let fake = fake_with_status(&cluster).route("POST", CONFIG_MAPS_PATH, 201, created);
-        // the cluster is current
-        let gated = gate(&fake.client(), &tracked(&cluster))
-            .await
-            .expect("gate");
-        assert!(matches!(gated, Gate::Current));
-        // the state was created at the latest revision with a record step
-        let created = fake
-            .writes()
-            .into_iter()
-            .find(|request| request.method == "POST")
-            .expect("state created");
-        assert_eq!(
-            created.body["metadata"]["labels"][REVISION_LABEL],
-            upgrades::latest().to_string()
-        );
-        let state: UpgradeState =
-            serde_json::from_str(created.body["data"][STATE_KEY].as_str().expect("state key"))
-                .expect("state parses");
-        assert!(state.finished(upgrades::latest().as_str(), "record-revision"));
-        assert_eq!(state.applied.len(), 1);
-        assert_eq!(state.applied[0].message.as_deref(), Some("fresh install"));
-        assert_eq!(state.applied_by_version.as_deref(), Some(OPERATOR_VERSION));
-        // the labels carry the version and the start of the full hash in the annotation
-        assert_labels_match_state(&created.body, &state);
-        // the progress names the latest revision without changing the phase
-        let status = &status_patches(&fake)[0];
-        assert_eq!(status["upgrade"]["current"], upgrades::latest().to_string());
-        assert!(status.get("phase").is_none());
-    }
-
-    /// A Helm namespace an operator already ran in records the first Helm revision and is
-    /// reconciled normally
-    #[tokio::test]
-    async fn gate_records_pre_tracking_helm_cluster() {
-        // a chart cluster whose namespace holds the operator's user Secret
-        let cluster = chart_cluster(serde_json::json!({}));
-        let (state, statuses) =
-            seeded(&cluster, &[(OPERATOR_PASS_PATH, "thorium-operator-pass")]).await;
-        // the recorded revision is the first Helm revision with the reason
-        assert_eq!(state.revision, rev(FIRST_HELM_REVISION));
-        assert!(
-            state.applied[0]
-                .message
-                .as_deref()
-                .is_some_and(|message| message.contains("before upgrade states were recorded"))
-        );
-        // the first Helm revision is the latest, so the cluster is current without a target
-        let last = statuses.last().expect("status");
-        assert_eq!(last["upgrade"]["current"], FIRST_HELM_REVISION);
-        assert!(last.get("phase").is_none());
-    }
-
-    /// A converted cluster that lost its state starts at the baseline again, so no upgrade
-    /// step is skipped, and waits for a target
-    #[tokio::test]
-    async fn gate_reseeds_converted_cluster_at_baseline() {
-        // a converted chart cluster whose operator ran and whose snapshot is kept
-        let cluster = chart_cluster(serde_json::json!({}));
-        let (state, statuses) = seeded(
-            &cluster,
-            &[
-                (SNAPSHOT_PATH, "thorium-legacy-cluster"),
-                (OPERATOR_PASS_PATH, "thorium-operator-pass"),
-            ],
-        )
-        .await;
-        // the baseline is recorded with the reason
-        assert_eq!(state.revision, rev(BASELINE_REVISION));
-        assert!(
-            state.applied[0]
-                .message
-                .as_deref()
-                .is_some_and(|message| message.contains("convert-to-helm.sh"))
-        );
-        // every upgrade step is still ahead of it
-        let last = statuses.last().expect("status");
-        assert_eq!(last["phase"], "UpgradeRequired");
-        assert_eq!(last["upgrade"]["steps"].as_array().map(Vec::len), Some(4));
-    }
-
-    /// A pre-Helm cluster kept outside Helm with inline config starts at the baseline
-    #[tokio::test]
-    async fn gate_seeds_inline_cluster_at_baseline() {
-        // a pre-Helm cluster that opted into inline config, deployed by an earlier operator
-        let mut cluster = namespaced_cluster(pre_helm_spec());
-        cluster.metadata.annotations = Some(std::collections::BTreeMap::from([(
-            ALLOW_INLINE_CONFIG.to_owned(),
-            "true".to_owned(),
-        )]));
-        let (state, _) = seeded(&cluster, &[(OPERATOR_PASS_PATH, "thorium-operator-pass")]).await;
-        // the baseline is recorded so the first Helm revision's steps run
-        assert_eq!(state.revision, rev(BASELINE_REVISION));
-        assert!(
-            state.applied[0]
-                .message
-                .as_deref()
-                .is_some_and(|message| message.contains("kept outside Helm"))
         );
     }
 
@@ -1670,7 +2266,7 @@ pub(crate) mod tests {
         assert_eq!(writes.len(), 1, "{writes:?}");
         let status = &status_patches(&fake)[0];
         assert_eq!(status["phase"], "UpgradeRequired");
-        assert_eq!(status["upgrade"]["steps"].as_array().map(Vec::len), Some(4));
+        assert_eq!(status["upgrade"]["steps"].as_array().map(Vec::len), Some(6));
         assert_eq!(status["upgrade"]["steps"][2]["state"], "Pending");
     }
 
@@ -1710,6 +2306,102 @@ pub(crate) mod tests {
         assert!(fake.writes().is_empty(), "{:?}", fake.writes());
     }
 
+    /// An upgrade whose target is set back to the cluster's revision, or cleared, is stopped: the
+    /// gate records the stop once, and the next attempt runs the check-only steps again while the
+    /// data steps that finished stay finished
+    #[tokio::test]
+    async fn gate_records_a_stop_that_ends_the_attempts_checks() {
+        // an attempt at the first Helm revision ran both checks and blocked at the reindex
+        let mut attempted = converted_state();
+        for check in ["scylla-role", "elastic-identity"] {
+            attempted.record(AppliedStep {
+                revision: FIRST_HELM_REVISION.to_owned(),
+                step: check.to_owned(),
+                outcome: StepState::Done,
+                at: Some("2026-10-08T00:01:00Z".to_owned()),
+                ..AppliedStep::default()
+            });
+        }
+        block_step(&mut attempted, "elastic-reindex-keyword-mappings");
+        // resuming the attempt doesn't run the checks again
+        let resumed = chart_cluster(serde_json::json!({"target_revision": FIRST_HELM_REVISION}));
+        let fake =
+            fake_with_status(&resumed).route("GET", STATE_PATH, 200, state_config_map(&attempted));
+        let Ok(Gate::Upgrade(pending)) = gate(&fake.client(), &tracked(&resumed)).await else {
+            panic!("a targeted cluster should be upgraded");
+        };
+        let ids = pending
+            .steps
+            .iter()
+            .map(|step| step.step.as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(ids, ["elastic-reindex-keyword-mappings", "finalize"]);
+        assert!(saved_state(&fake).is_none());
+        // the target set back to the cluster's revision, or cleared, stops the upgrade
+        for upgrade in [
+            serde_json::json!({"target_revision": BASELINE_REVISION}),
+            serde_json::json!({}),
+        ] {
+            let cluster = chart_cluster(upgrade);
+            let fake = fake_with_status(&cluster)
+                .route("GET", STATE_PATH, 200, state_config_map(&attempted))
+                .route("PUT", STATE_PATH, 200, state_config_map(&attempted));
+            let gated = gate(&fake.client(), &tracked(&cluster))
+                .await
+                .expect("gate");
+            assert!(matches!(gated, Gate::Hold(_)));
+            // the stop is recorded at the revision the cluster stayed at
+            let stopped = saved_state(&fake).expect("the stop is saved");
+            let entry = stopped.applied.last().expect("an entry");
+            assert_eq!(
+                (entry.revision.as_str(), entry.step.as_str(), entry.outcome),
+                (BASELINE_REVISION, UPGRADE_STOPPED_STEP, StepState::Done)
+            );
+            assert!(entry.at.is_some());
+            // holding the stopped cluster again records nothing more
+            let fake = fake_with_status(&cluster)
+                .route("GET", STATE_PATH, 200, state_config_map(&stopped))
+                .route("PUT", STATE_PATH, 200, state_config_map(&stopped));
+            gate(&fake.client(), &tracked(&cluster))
+                .await
+                .expect("gate");
+            assert!(saved_state(&fake).is_none());
+            // the next attempt runs both checks again ahead of the reindex
+            let fake = fake_with_status(&resumed).route(
+                "GET",
+                STATE_PATH,
+                200,
+                state_config_map(&stopped),
+            );
+            let Ok(Gate::Upgrade(pending)) = gate(&fake.client(), &tracked(&resumed)).await else {
+                panic!("a targeted cluster should be upgraded");
+            };
+            let ids = pending
+                .steps
+                .iter()
+                .map(|step| step.step.as_str())
+                .collect::<Vec<_>>();
+            assert_eq!(
+                ids,
+                [
+                    "scylla-role",
+                    "elastic-identity",
+                    "elastic-reindex-keyword-mappings",
+                    "finalize"
+                ]
+            );
+        }
+        // a held cluster that never ran a check records no stop
+        let cluster = chart_cluster(serde_json::json!({}));
+        let fake = fake_with_status(&cluster)
+            .route("GET", STATE_PATH, 200, state_config_map(&converted_state()))
+            .route("PUT", STATE_PATH, 200, state_config_map(&converted_state()));
+        gate(&fake.client(), &tracked(&cluster))
+            .await
+            .expect("gate");
+        assert!(saved_state(&fake).is_none());
+    }
+
     /// A malformed recorded state is an error rather than a fresh start
     #[tokio::test]
     async fn gate_rejects_bad_state() {
@@ -1734,22 +2426,20 @@ pub(crate) mod tests {
     /// normal reconcile
     #[tokio::test]
     async fn run_finishes_upgrade() {
+        // plan with the steps of the first Helm revision
+        let _catalog = first_helm_fixture();
         // a cluster that finished every step but the last
         let cluster = chart_cluster(serde_json::json!({"auto_target_dev": true}));
         let mut state = UpgradeState::new(rev(BASELINE_REVISION), "1.8.1");
         finish(
             &mut state,
-            &[
-                "scylla-role",
-                "elastic-identity",
-                "elastic-reindex-keyword-mappings",
-            ],
+            &["scylla-role", "elastic-identity", fixture::STEP],
         );
         let (fake, pending) = pending_upgrade(&cluster, &state).await;
         assert_eq!(pending.steps.len(), 1);
         // run the upgrade
         let meta = meta_for(cluster, &fake.client());
-        assert_eq!(run(&meta, pending).await.expect("run"), None);
+        assert_eq!(run_local(&meta, pending).await.expect("run"), None);
         // the state was replaced at the version read with the new revision
         let written = fake
             .writes()
@@ -1758,15 +2448,10 @@ pub(crate) mod tests {
             .expect("state saved");
         assert_eq!(written.body["metadata"]["resourceVersion"], "5");
         let saved = saved_state(&fake).expect("state saved");
-        assert_eq!(saved.revision, rev(FIRST_HELM_REVISION));
+        assert_eq!(saved.revision, catalog().latest());
         assert!(saved.finished(FIRST_HELM_REVISION, "finalize"));
         // every step is recorded once and the new revision names this operator
-        for step in [
-            "scylla-role",
-            "elastic-identity",
-            "elastic-reindex-keyword-mappings",
-            "finalize",
-        ] {
+        for step in ["scylla-role", "elastic-identity", fixture::STEP, "finalize"] {
             let count = saved
                 .applied
                 .iter()
@@ -1780,13 +2465,15 @@ pub(crate) mod tests {
         // the cluster ends in the provisioning phase at its new revision
         let last = status_patches(&fake).pop().expect("status");
         assert_eq!(last["phase"], "Provisioning");
-        assert_eq!(last["upgrade"]["current"], FIRST_HELM_REVISION);
+        assert_eq!(last["upgrade"]["current"], catalog().latest().to_string());
     }
 
     /// A ready cluster upgraded by `auto_target_dev` gets back to ready in the same reconcile
     /// even though ready is what the reconcile started from
     #[tokio::test]
     async fn ready_restored_after_auto_targeted_upgrade() {
+        // plan with the steps of the first Helm revision
+        let _catalog = first_helm_fixture();
         // a ready cluster that finished every step but the last
         let mut cluster = chart_cluster(serde_json::json!({"auto_target_dev": true}));
         cluster.status = Some(ThoriumClusterStatus {
@@ -1797,16 +2484,12 @@ pub(crate) mod tests {
         let mut state = UpgradeState::new(rev(BASELINE_REVISION), "1.8.1");
         finish(
             &mut state,
-            &[
-                "scylla-role",
-                "elastic-identity",
-                "elastic-reindex-keyword-mappings",
-            ],
+            &["scylla-role", "elastic-identity", fixture::STEP],
         );
         let (fake, pending) = pending_upgrade(&cluster, &state).await;
         // run the upgrade, which hands the cluster to the deploy as provisioning
         let meta = meta_for(cluster, &fake.client());
-        assert_eq!(run(&meta, pending).await.expect("run"), None);
+        assert_eq!(run_local(&meta, pending).await.expect("run"), None);
         assert_eq!(
             status_patches(&fake).pop().expect("status")["phase"],
             "Provisioning"
@@ -1826,120 +2509,118 @@ pub(crate) mod tests {
         assert_eq!(last["message"], serde_json::Value::Null);
     }
 
-    /// An index whose group field isn't a keyword blocks the upgrade on an approval
+    /// A step whose check finds work blocks the upgrade on an approval
     #[tokio::test]
-    async fn run_blocks_on_text_mappings() {
-        // a cluster whose only unfinished data step is the reindex check
+    async fn run_blocks_on_work_until_approved() {
+        // a cluster whose only unfinished data step is the fixture step
+        let _catalog = first_helm_fixture();
         let cluster = chart_cluster(serde_json::json!({"auto_target_dev": true}));
         let mut state = UpgradeState::new(rev(BASELINE_REVISION), "1.8.1");
         finish(&mut state, &["scylla-role", "elastic-identity"]);
         let (fake, pending) = pending_upgrade(&cluster, &state).await;
-        // point the cluster at an Elastic with a text group mapping
-        let mut meta = meta_for(cluster, &fake.client());
-        meta.conf.elastic.node = fake_elastic(text_group_elastic).await;
+        // the step's check finds rows to change
+        fixture::script(Check::Needed("Fixture rows a and b are wrong.".to_owned()));
+        let meta = meta_for(cluster, &fake.client());
         // the upgrade is blocked and rechecked on the blocked interval
-        let action = run(&meta, pending).await.expect("run");
+        let action = run_local(&meta, pending).await.expect("run");
         assert_eq!(
             action,
             Some(Action::requeue(Duration::from_secs(BLOCKED_REQUEUE_SECS)))
         );
         // the block is recorded without finishing the step or moving the revision
         let saved = saved_state(&fake).expect("block recorded");
-        assert!(recorded_blocked(
-            &saved,
-            FIRST_HELM_REVISION,
-            "elastic-reindex-keyword-mappings"
-        ));
-        assert!(!saved.finished(FIRST_HELM_REVISION, "elastic-reindex-keyword-mappings"));
+        assert!(recorded_blocked(&saved, FIRST_HELM_REVISION, fixture::STEP));
+        assert!(!saved.finished(FIRST_HELM_REVISION, fixture::STEP));
         assert_eq!(saved.revision, rev(BASELINE_REVISION));
-        // the status names the index and the approval it waits for
+        // the status names the work and the approval it waits for
         let last = status_patches(&fake).pop().expect("status");
         assert_eq!(last["phase"], "Upgrading");
         assert_eq!(last["upgrade"]["steps"][0]["state"], "Blocked");
         let message = last["upgrade"]["steps"][0]["message"]
             .as_str()
             .unwrap_or_default();
-        assert!(message.contains("thorium_repo_results"));
+        assert!(message.contains("Fixture rows a and b"));
         assert!(message.contains("Waiting for an approval"));
         assert!(message.contains("operator.cluster.upgrade.approvals"));
     }
 
-    /// An approved reindex is still blocked, on the manual procedure since the operator can't
-    /// reindex on its own
+    /// An approved step the operator can't run on its own is still blocked, on its manual
+    /// procedure
     #[tokio::test]
-    async fn run_approved_reindex_waits_for_manual_work() {
-        // a cluster that approved the reindex with a backup
+    async fn run_approved_step_waits_for_manual_work() {
+        // a cluster that approved the fixture step with a backup
+        let _catalog = first_helm_fixture();
         let cluster = chart_cluster(serde_json::json!({
             "auto_target_dev": true,
-            "approvals": [{"step": "elastic-reindex-keyword-mappings", "backup": "snapshot-1"}]
+            "approvals": [{"step": fixture::STEP, "backup": "snapshot-1"}]
         }));
         let mut state = UpgradeState::new(rev(BASELINE_REVISION), "1.8.1");
         finish(&mut state, &["scylla-role", "elastic-identity"]);
         let (fake, pending) = pending_upgrade(&cluster, &state).await;
-        // point the cluster at an Elastic with a text group mapping
-        let mut meta = meta_for(cluster, &fake.client());
-        meta.conf.elastic.node = fake_elastic(text_group_elastic).await;
+        // the step's check finds rows to change
+        fixture::script(Check::Needed("Fixture rows a and b are wrong.".to_owned()));
+        let meta = meta_for(cluster, &fake.client());
         // the upgrade is blocked and the step is left unfinished
-        let action = run(&meta, pending).await.expect("run");
+        let action = run_local(&meta, pending).await.expect("run");
         assert_eq!(
             action,
             Some(Action::requeue(Duration::from_secs(BLOCKED_REQUEUE_SECS)))
         );
         let saved = saved_state(&fake).expect("block recorded");
-        assert!(!saved.finished(FIRST_HELM_REVISION, "elastic-reindex-keyword-mappings"));
+        assert!(!saved.finished(FIRST_HELM_REVISION, fixture::STEP));
         // the status gives the manual procedure rather than asking for an approval
         let last = status_patches(&fake).pop().expect("status");
         let message = last["upgrade"]["steps"][0]["message"]
             .as_str()
             .unwrap_or_default();
         assert!(message.contains("Waiting for manual work"));
-        assert!(message.contains("search-streamer"));
+        assert!(message.contains(fixture::PROCEDURE));
         assert!(!message.contains("Waiting for an approval"));
     }
 
-    /// Correct mappings skip the reindex step and finish the upgrade
+    /// A step whose check finds nothing to do is skipped and the upgrade finishes
     #[tokio::test]
-    async fn run_skips_reindex_when_mappings_are_correct() {
-        // a cluster whose only unfinished steps are the reindex check and finalize
+    async fn run_skips_a_step_with_nothing_to_do() {
+        // plan with the fixture step in the first Helm revision
+        let _catalog = first_helm_fixture();
+        // a cluster whose only unfinished steps are the fixture step and finalize
         let cluster = chart_cluster(serde_json::json!({"auto_target_dev": true}));
         let mut state = UpgradeState::new(rev(BASELINE_REVISION), "1.8.1");
         finish(&mut state, &["scylla-role", "elastic-identity"]);
         let (fake, pending) = pending_upgrade(&cluster, &state).await;
-        // point the cluster at an Elastic with a keyword group mapping
-        let mut meta = meta_for(cluster, &fake.client());
-        meta.conf.elastic.node = fake_elastic(keyword_group_elastic).await;
+        // the step's check finds every row as it should be
+        fixture::script(Check::Nothing("every fixture row is right".to_owned()));
+        let meta = meta_for(cluster, &fake.client());
         // the upgrade finishes
-        assert_eq!(run(&meta, pending).await.expect("run"), None);
-        // the reindex step is recorded as skipped rather than fixed manually
+        assert_eq!(run_local(&meta, pending).await.expect("run"), None);
+        // the step is recorded as skipped rather than fixed manually
         let saved = saved_state(&fake).expect("state saved");
-        let reindex = reindex_outcome(&saved);
-        assert_eq!(reindex.outcome, StepState::Skipped);
+        let skipped = fixture_outcome(&saved);
+        assert_eq!(skipped.outcome, StepState::Skipped);
         assert!(
-            !reindex
+            !skipped
                 .message
                 .as_deref()
                 .unwrap_or_default()
                 .contains("fixed manually")
         );
-        assert_eq!(saved.revision, rev(FIRST_HELM_REVISION));
+        assert_eq!(saved.revision, catalog().latest());
     }
 
-    /// An unreachable Elastic leaves the step running and rechecks it soon
+    /// A backend the step's check can't reach leaves the step running and rechecks it soon
     #[tokio::test]
     async fn run_waits_on_unreachable_backend() {
-        // a cluster whose only unfinished data step is the reindex check
+        // a cluster whose only unfinished data step is the fixture step
+        let _catalog = first_helm_fixture();
         let cluster = chart_cluster(serde_json::json!({"auto_target_dev": true}));
         let mut state = UpgradeState::new(rev(BASELINE_REVISION), "1.8.1");
         finish(&mut state, &["scylla-role", "elastic-identity"]);
         let (fake, pending) = pending_upgrade(&cluster, &state).await;
-        // point the cluster at a local port nothing listens on
-        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
-        let addr = listener.local_addr().expect("local addr");
-        drop(listener);
-        let mut meta = meta_for(cluster, &fake.client());
-        meta.conf.elastic.node = format!("http://{addr}");
+        // the step's check can't reach its backend
+        fixture::script(Check::Waiting("the fixture backend isn't up".to_owned()));
+        let meta = meta_for(cluster, &fake.client());
         // the step waits on the backend
-        let action = run(&meta, pending).await.expect("run");
+        let action = run_local(&meta, pending).await.expect("run");
         assert_eq!(
             action,
             Some(Action::requeue(Duration::from_secs(WAITING_REQUEUE_SECS)))
@@ -1951,7 +2632,8 @@ pub(crate) mod tests {
     /// A step already reported as blocked isn't reported as running again while rechecked
     #[tokio::test]
     async fn run_keeps_blocked_status_while_rechecking() {
-        // a cluster whose status already reports the reindex step as blocked
+        // a cluster whose status already reports the fixture step as blocked
+        let _catalog = first_helm_fixture();
         let mut cluster = chart_cluster(serde_json::json!({"auto_target_dev": true}));
         let mut state = UpgradeState::new(rev(BASELINE_REVISION), "1.8.1");
         finish(&mut state, &["scylla-role", "elastic-identity"]);
@@ -1963,10 +2645,10 @@ pub(crate) mod tests {
             ..ThoriumClusterStatus::default()
         });
         let before = status_patches(&fake).len();
-        // recheck the step against an Elastic that still maps group as text
-        let mut meta = meta_for(cluster, &fake.client());
-        meta.conf.elastic.node = fake_elastic(text_group_elastic).await;
-        run(&meta, pending).await.expect("run");
+        // recheck the step, whose check still finds work
+        fixture::script(Check::Needed("Fixture rows a and b are wrong.".to_owned()));
+        let meta = meta_for(cluster, &fake.client());
+        run_local(&meta, pending).await.expect("run");
         // the only new status is the blocked one, never a running one
         let patches = status_patches(&fake);
         let new = &patches[before..];
@@ -1974,13 +2656,13 @@ pub(crate) mod tests {
         assert_eq!(new[0]["upgrade"]["steps"][0]["state"], "Blocked");
     }
 
-    /// Only a skip after an earlier block is credited as a manual fix
+    /// Only a skip after an earlier block is noted as a manual fix
     #[test]
     fn manual_fix_is_credited_after_a_block() {
-        // a skip after a block becomes done with the skip reason
+        // a skip after a block stays a skip, with the note that it was fixed by hand
         assert_eq!(
             credit_manual_fix(steps::StepResult::Skipped("nothing to do".to_owned()), true),
-            steps::StepResult::Done(Some("fixed manually: nothing to do".to_owned()))
+            steps::StepResult::Skipped("fixed manually: nothing to do".to_owned())
         );
         // a skip without an earlier block stays a skip
         assert_eq!(
@@ -2000,66 +2682,102 @@ pub(crate) mod tests {
         }
     }
 
+    /// A step that only waited for its approval or its check and then found nothing to do wasn't
+    /// fixed by hand, while one that blocked on work an admin had to do was
+    #[test]
+    fn a_wait_for_an_approval_is_not_a_fix_by_hand() {
+        let planned = PlannedStep {
+            revision: FIRST_HELM_REVISION.to_owned(),
+            step: fixture::STEP.to_owned(),
+            kind: thorium::models::upgrades::StepKind::Data,
+            description: String::new(),
+            pause: Vec::new(),
+            state: StepState::Pending,
+            message: None,
+            phase: None,
+            prerelease: false,
+            reverse: false,
+            pass: None,
+            blocked: None,
+            loss: None,
+        };
+        let status = ThoriumClusterStatus::default();
+        // a block that waited for an approval is no fix
+        let mut waited = UpgradeState::new(rev(BASELINE_REVISION), "1.8.1");
+        waited.record(AppliedStep {
+            revision: FIRST_HELM_REVISION.to_owned(),
+            step: planned.step.clone(),
+            outcome: StepState::Blocked,
+            message: Some("Waiting for an approval: step needs an approval".to_owned()),
+            ..AppliedStep::default()
+        });
+        assert!(!previously_blocked(&status, &waited, &planned));
+        // a block on manual work is
+        let mut manual = UpgradeState::new(rev(BASELINE_REVISION), "1.8.1");
+        block_step(&mut manual, fixture::STEP);
+        assert!(previously_blocked(&status, &manual, &planned));
+        // so is a block with no message, or an approval wait followed by manual work
+        let mut both = waited.clone();
+        block_step(&mut both, fixture::STEP);
+        assert!(previously_blocked(&status, &both, &planned));
+    }
+
     /// A block only counts for the same step of the same revision
     #[test]
     fn recorded_block_matches_step_and_revision() {
-        // a state with the reindex step blocked
+        // a state with the fixture step blocked
         let mut state = UpgradeState::new(rev(BASELINE_REVISION), "1.8.1");
         assert!(!recorded_blocked(
             &state,
             FIRST_HELM_REVISION,
-            "elastic-reindex-keyword-mappings"
+            fixture::STEP
         ));
-        block_reindex(&mut state);
+        block_step(&mut state, fixture::STEP);
         // the block is found for that step only
-        assert!(recorded_blocked(
-            &state,
-            FIRST_HELM_REVISION,
-            "elastic-reindex-keyword-mappings"
-        ));
+        assert!(recorded_blocked(&state, FIRST_HELM_REVISION, fixture::STEP));
         assert!(!recorded_blocked(&state, FIRST_HELM_REVISION, "finalize"));
-        assert!(!recorded_blocked(
-            &state,
-            BASELINE_REVISION,
-            "elastic-reindex-keyword-mappings"
-        ));
+        assert!(!recorded_blocked(&state, BASELINE_REVISION, fixture::STEP));
         // a block entry doesn't finish the step
-        assert!(!state.finished(FIRST_HELM_REVISION, "elastic-reindex-keyword-mappings"));
+        assert!(!state.finished(FIRST_HELM_REVISION, fixture::STEP));
     }
 
     /// A step whose history records a block and that now has nothing to do is recorded as
-    /// done and fixed manually, and the upgrade finishes
+    /// skipped and fixed manually, and the upgrade finishes
     #[tokio::test]
     async fn run_credits_manual_fix_recorded_in_history() {
-        // a cluster whose history records the reindex step as blocked
+        // plan with the steps of the first Helm revision
+        let _catalog = first_helm_fixture();
+        // a cluster whose history records the fixture step as blocked
         let cluster = chart_cluster(serde_json::json!({"auto_target_dev": true}));
         let mut state = UpgradeState::new(rev(BASELINE_REVISION), "1.8.1");
         finish(&mut state, &["scylla-role", "elastic-identity"]);
-        block_reindex(&mut state);
+        block_step(&mut state, fixture::STEP);
         let (fake, pending) = pending_upgrade(&cluster, &state).await;
-        // the admin fixed the mappings by hand
-        let mut meta = meta_for(cluster, &fake.client());
-        meta.conf.elastic.node = fake_elastic(keyword_group_elastic).await;
-        assert_eq!(run(&meta, pending).await.expect("run"), None);
-        // the reindex step is recorded as done and fixed manually
+        // the admin fixed the rows by hand
+        fixture::script(Check::Nothing("every fixture row is right".to_owned()));
+        let meta = meta_for(cluster, &fake.client());
+        assert_eq!(run_local(&meta, pending).await.expect("run"), None);
+        // the step is recorded as skipped and fixed manually
         let saved = saved_state(&fake).expect("state saved");
-        let reindex = reindex_outcome(&saved);
-        assert_eq!(reindex.outcome, StepState::Done);
+        let fixed = fixture_outcome(&saved);
+        assert_eq!(fixed.outcome, StepState::Skipped);
         assert!(
-            reindex
+            fixed
                 .message
                 .as_deref()
                 .unwrap_or_default()
                 .starts_with("fixed manually")
         );
-        assert_eq!(saved.revision, rev(FIRST_HELM_REVISION));
+        assert_eq!(saved.revision, catalog().latest());
     }
 
-    /// A step the status reports as blocked, without a block in the history, is also credited
-    /// as fixed manually once it has nothing to do
+    /// A step the status reports as blocked, without a block in the history, is also noted as
+    /// fixed manually once it has nothing to do
     #[tokio::test]
     async fn run_credits_manual_fix_reported_in_status() {
-        // a cluster whose status reports the reindex step as blocked
+        // plan with the steps of the first Helm revision
+        let _catalog = first_helm_fixture();
+        // a cluster whose status reports the fixture step as blocked
         let mut cluster = chart_cluster(serde_json::json!({"auto_target_dev": true}));
         let mut state = UpgradeState::new(rev(BASELINE_REVISION), "1.8.1");
         finish(&mut state, &["scylla-role", "elastic-identity"]);
@@ -2070,16 +2788,16 @@ pub(crate) mod tests {
             upgrade: Some(progress(&state.revision, Some(&pending.target), steps)),
             ..ThoriumClusterStatus::default()
         });
-        // the admin fixed the mappings by hand
-        let mut meta = meta_for(cluster, &fake.client());
-        meta.conf.elastic.node = fake_elastic(keyword_group_elastic).await;
-        assert_eq!(run(&meta, pending).await.expect("run"), None);
-        // the reindex step is recorded as done and fixed manually
+        // the admin fixed the rows by hand
+        fixture::script(Check::Nothing("every fixture row is right".to_owned()));
+        let meta = meta_for(cluster, &fake.client());
+        assert_eq!(run_local(&meta, pending).await.expect("run"), None);
+        // the step is recorded as skipped and fixed manually
         let saved = saved_state(&fake).expect("state saved");
-        let reindex = reindex_outcome(&saved);
-        assert_eq!(reindex.outcome, StepState::Done);
+        let fixed = fixture_outcome(&saved);
+        assert_eq!(fixed.outcome, StepState::Skipped);
         assert!(
-            reindex
+            fixed
                 .message
                 .as_deref()
                 .unwrap_or_default()
@@ -2090,16 +2808,17 @@ pub(crate) mod tests {
     /// A step whose block is already in the history isn't recorded again while rechecked
     #[tokio::test]
     async fn run_records_a_block_once() {
-        // a cluster whose history already records the reindex step as blocked
+        // a cluster whose history already records the fixture step as blocked
+        let _catalog = first_helm_fixture();
         let cluster = chart_cluster(serde_json::json!({"auto_target_dev": true}));
         let mut state = UpgradeState::new(rev(BASELINE_REVISION), "1.8.1");
         finish(&mut state, &["scylla-role", "elastic-identity"]);
-        block_reindex(&mut state);
+        block_step(&mut state, fixture::STEP);
         let (fake, pending) = pending_upgrade(&cluster, &state).await;
-        // the mappings still need manual work
-        let mut meta = meta_for(cluster, &fake.client());
-        meta.conf.elastic.node = fake_elastic(text_group_elastic).await;
-        let action = run(&meta, pending).await.expect("run");
+        // the rows still need work
+        fixture::script(Check::Needed("Fixture rows a and b are wrong.".to_owned()));
+        let meta = meta_for(cluster, &fake.client());
+        let action = run_local(&meta, pending).await.expect("run");
         assert_eq!(
             action,
             Some(Action::requeue(Duration::from_secs(BLOCKED_REQUEUE_SECS)))
@@ -2155,7 +2874,10 @@ pub(crate) mod tests {
         assert_eq!(status.phase, Some(ClusterPhase::UpgradeRequired));
         // the hold message names both revisions and the Helm value to set
         let message = status.message.clone().unwrap_or_default();
-        assert!(message.contains(BASELINE_REVISION) && message.contains(FIRST_HELM_REVISION));
+        assert!(
+            message.contains(BASELINE_REVISION)
+                && message.contains(&upgrades::latest().to_string())
+        );
         assert!(message.contains("operator.cluster.upgrade.targetRevision"));
         // the next reconcile, seeing that status, writes nothing
         let mut reported = cluster.clone();
@@ -2168,6 +2890,8 @@ pub(crate) mod tests {
     /// and the new revision is recorded with this operator's version
     #[tokio::test]
     async fn run_upgrades_state_from_older_version() {
+        // plan with the steps of the first Helm revision
+        let _catalog = first_helm_fixture();
         // a state edited by hand with an old version and an unknown field
         let cluster = chart_cluster(serde_json::json!({"auto_target_dev": true}));
         let raw = serde_json::json!({
@@ -2175,10 +2899,11 @@ pub(crate) mod tests {
             "revision": BASELINE_REVISION,
             "applied_by_version": "0.9.0",
             "note": "edited by hand",
+            "schema": {"record": "scylla"},
             "applied": [
                 {"revision": FIRST_HELM_REVISION, "step": "scylla-role", "outcome": "Done"},
                 {"revision": FIRST_HELM_REVISION, "step": "elastic-identity", "outcome": "Done"},
-                {"revision": FIRST_HELM_REVISION, "step": "elastic-reindex-keyword-mappings", "outcome": "Done"}
+                {"revision": FIRST_HELM_REVISION, "step": fixture::STEP, "outcome": "Done"}
             ]
         });
         let cm = serde_json::json!({
@@ -2200,83 +2925,31 @@ pub(crate) mod tests {
         );
         // the upgrade finishes and records this operator's version
         let meta = meta_for(cluster, &fake.client());
-        assert_eq!(run(&meta, pending).await.expect("run"), None);
+        assert_eq!(run_local(&meta, pending).await.expect("run"), None);
         let saved = saved_state(&fake).expect("state saved");
-        assert_eq!(saved.revision, rev(FIRST_HELM_REVISION));
+        assert_eq!(saved.revision, catalog().latest());
         assert_eq!(saved.applied_by_version.as_deref(), Some(OPERATOR_VERSION));
-    }
-
-    /// The reindex block names only the indexes that don't map group as a keyword, not the
-    /// correct sample indexes or unused leftovers
-    #[tokio::test]
-    async fn run_blocks_naming_only_text_indexes() {
-        // a megathor style cluster whose remaining data step is the reindex check
-        let cluster = chart_cluster(serde_json::json!({"auto_target_dev": true}));
-        let mut state = UpgradeState::new(rev(BASELINE_REVISION), "1.8.1");
-        finish(&mut state, &["scylla-role", "elastic-identity"]);
-        let (fake, pending) = pending_upgrade(&cluster, &state).await;
-        let mut meta = meta_for(cluster, &fake.client());
-        meta.conf.elastic.node = fake_elastic(megathor_elastic).await;
-        // the step blocks
-        run(&meta, pending).await.expect("run");
-        let last = status_patches(&fake).pop().expect("status");
-        assert_eq!(last["upgrade"]["steps"][0]["state"], "Blocked");
-        // only the two repo indexes are named
-        let message = last["upgrade"]["steps"][0]["message"]
-            .as_str()
-            .unwrap_or_default();
-        assert!(
-            message.contains("thorium_repo_results, thorium_repo_tags"),
-            "{message}"
-        );
-        assert!(!message.contains("thorium_sample_"), "{message}");
-        assert!(!message.contains("thorium_file_"), "{message}");
-    }
-
-    /// The reindex check uses the index names configured for the cluster
-    #[tokio::test]
-    async fn run_checks_custom_index_names() {
-        // a cluster with custom index names whose remaining data step is the reindex check
-        let cluster = chart_cluster(serde_json::json!({"auto_target_dev": true}));
-        let mut state = UpgradeState::new(rev(BASELINE_REVISION), "1.8.1");
-        finish(&mut state, &["scylla-role", "elastic-identity"]);
-        let (fake, pending) = pending_upgrade(&cluster, &state).await;
-        let mut meta = meta_for(cluster, &fake.client());
-        meta.conf.elastic.results.repos = "e2e_repo_results".to_owned();
-        meta.conf.elastic.results.samples = "e2e_sample_results".to_owned();
-        meta.conf.elastic.tags.repos = "e2e_repo_tags".to_owned();
-        meta.conf.elastic.tags.samples = "e2e_sample_tags".to_owned();
-        meta.conf.elastic.node = fake_elastic(custom_index_elastic).await;
-        // the step blocks on the custom index
-        run(&meta, pending).await.expect("run");
-        let last = status_patches(&fake).pop().expect("status");
-        let message = last["upgrade"]["steps"][0]["message"]
-            .as_str()
-            .unwrap_or_default();
-        assert!(message.contains("e2e_repo_results"), "{message}");
-        assert!(!message.contains("thorium_repo_results"), "{message}");
     }
 
     /// Rechecking a blocked step that is still blocked writes neither the status nor the state
     #[tokio::test]
     async fn run_blocked_recheck_writes_nothing() {
-        // block the reindex step once
+        // block the fixture step once on work that needs an approval
+        let _catalog = first_helm_fixture();
         let cluster = chart_cluster(serde_json::json!({"auto_target_dev": true}));
         let mut state = UpgradeState::new(rev(BASELINE_REVISION), "1.8.1");
         finish(&mut state, &["scylla-role", "elastic-identity"]);
         let (fake, pending) = pending_upgrade(&cluster, &state).await;
-        let mut meta = meta_for(cluster.clone(), &fake.client());
-        let elastic = fake_elastic(text_group_elastic).await;
-        meta.conf.elastic.node.clone_from(&elastic);
-        run(&meta, pending).await.expect("run");
+        fixture::script(Check::Needed("Fixture rows a and b are wrong.".to_owned()));
+        let meta = meta_for(cluster.clone(), &fake.client());
+        run_local(&meta, pending).await.expect("run");
         // recheck with the recorded block and the reported status, as the requeue does
         let blocked = saved_state(&fake).expect("block recorded");
         let mut reported = cluster;
         reported.status = Some(meta.status.current());
         let (fake, pending) = pending_upgrade(&reported, &blocked).await;
-        let mut meta = meta_for(reported, &fake.client());
-        meta.conf.elastic.node = elastic;
-        let action = run(&meta, pending).await.expect("run");
+        let meta = meta_for(reported, &fake.client());
+        let action = run_local(&meta, pending).await.expect("run");
         assert_eq!(
             action,
             Some(Action::requeue(Duration::from_secs(BLOCKED_REQUEUE_SECS)))
@@ -2285,44 +2958,142 @@ pub(crate) mod tests {
         assert!(fake.writes().is_empty(), "{:?}", fake.writes());
     }
 
+    /// A step blocked on manual work logs its id and the start of its procedure once per
+    /// block rather than at every recheck, and logs again when it blocks again after it
+    /// stopped being blocked
+    #[tokio::test]
+    async fn run_logs_manual_work_once_per_block() {
+        // a cluster that approved the fixture step with a backup
+        let _catalog = first_helm_fixture();
+        let cluster = chart_cluster(serde_json::json!({
+            "auto_target_dev": true,
+            "approvals": [{"step": fixture::STEP, "backup": "snapshot-1"}]
+        }));
+        let mut state = UpgradeState::new(rev(BASELINE_REVISION), "1.8.1");
+        finish(&mut state, &["scylla-role", "elastic-identity"]);
+        let work = || Check::Needed("Fixture rows a and b are wrong.".to_owned());
+        // the first run blocks the step on manual work and logs it once
+        let (status, state) = rerun(
+            cluster.clone(),
+            &state,
+            ThoriumClusterStatus::default(),
+            work(),
+        )
+        .await;
+        let lines = take_block_logs();
+        assert_eq!(lines.len(), 1, "{lines:?}");
+        // the line names the step, gives the first sentence of the procedure, and points at
+        // the status for the rest
+        let line = &lines[0];
+        assert!(line.contains(fixture::STEP), "{line}");
+        assert!(line.contains("needs manual work"), "{line}");
+        assert!(line.contains("Stop the fixture writer"), "{line}");
+        assert!(line.contains("BEFORE changing anything"), "{line}");
+        assert!(!line.contains("Then fix every fixture row"), "{line}");
+        assert!(line.contains("status.upgrade.steps"), "{line}");
+        // rechecking while the step stays blocked logs nothing more
+        let (status, state) = rerun(cluster.clone(), &state, status, work()).await;
+        let (status, state) = rerun(cluster.clone(), &state, status, work()).await;
+        assert_eq!(take_block_logs(), Vec::<String>::new());
+        // a backend the check can't reach turns the block into a wait, which isn't logged as a
+        // block
+        let unreachable = Check::Waiting("the fixture backend isn't up".to_owned());
+        let (status, state) = rerun(cluster.clone(), &state, status, unreachable).await;
+        assert_eq!(
+            status.upgrade.as_ref().expect("upgrade").steps[0].state,
+            StepState::Running
+        );
+        assert_eq!(take_block_logs(), Vec::<String>::new());
+        // blocking again once the backend is back logs the block again
+        rerun(cluster, &state, status, work()).await;
+        let lines = take_block_logs();
+        assert_eq!(lines.len(), 1, "{lines:?}");
+        assert!(lines[0].contains(fixture::STEP), "{lines:?}");
+    }
+
+    /// A step blocked waiting for an approval logs its id and that it needs an approval naming
+    /// a backup once per block, and logs the manual work once the approval turns the block
+    /// into one on manual work
+    #[tokio::test]
+    async fn run_logs_approval_wait_once_per_block() {
+        // a cluster without approvals whose fixture rows need work
+        let _catalog = first_helm_fixture();
+        let cluster = chart_cluster(serde_json::json!({"auto_target_dev": true}));
+        let mut state = UpgradeState::new(rev(BASELINE_REVISION), "1.8.1");
+        finish(&mut state, &["scylla-role", "elastic-identity"]);
+        let work = || Check::Needed("Fixture rows a and b are wrong.".to_owned());
+        // the first run blocks the step on an approval and logs it once
+        let (status, state) = rerun(
+            cluster.clone(),
+            &state,
+            ThoriumClusterStatus::default(),
+            work(),
+        )
+        .await;
+        let lines = take_block_logs();
+        assert_eq!(lines.len(), 1, "{lines:?}");
+        let line = &lines[0];
+        assert!(line.contains(fixture::STEP), "{line}");
+        assert!(line.contains("needs an approval naming a backup"), "{line}");
+        assert!(line.contains("status.upgrade.steps"), "{line}");
+        // rechecking while it still waits for the approval logs nothing more
+        let (status, state) = rerun(cluster, &state, status, work()).await;
+        assert_eq!(take_block_logs(), Vec::<String>::new());
+        // approving the step blocks it on manual work instead, which is logged
+        let approved = chart_cluster(serde_json::json!({
+            "auto_target_dev": true,
+            "approvals": [{"step": fixture::STEP, "backup": "snapshot-1"}]
+        }));
+        rerun(approved, &state, status, work()).await;
+        let lines = take_block_logs();
+        assert_eq!(lines.len(), 1, "{lines:?}");
+        assert!(lines[0].contains("needs manual work"), "{lines:?}");
+        assert!(lines[0].contains("Stop the fixture writer"), "{lines:?}");
+    }
+
     /// A step whose backend answers with an error fails the upgrade without recording the step
     #[tokio::test]
     async fn run_fails_step_on_backend_error() {
-        // a cluster whose only unfinished data step is the reindex check
+        // a cluster whose only unfinished data step is the fixture step
+        let _catalog = first_helm_fixture();
         let cluster = chart_cluster(serde_json::json!({"auto_target_dev": true}));
         let mut state = UpgradeState::new(rev(BASELINE_REVISION), "1.8.1");
         finish(&mut state, &["scylla-role", "elastic-identity"]);
         let (fake, pending) = pending_upgrade(&cluster, &state).await;
-        // point the cluster at an Elastic that rejects reading the mappings
-        let mut meta = meta_for(cluster, &fake.client());
-        meta.conf.elastic.node = fake_elastic(unauthorized_mapping_elastic).await;
+        // the step's backend rejects the check
+        fixture::script(Check::Failed(
+            "Failed to read fixture table fixture_rows: 401 unable to authenticate".to_owned(),
+        ));
+        let meta = meta_for(cluster, &fake.client());
         // the upgrade fails naming the step
-        let error = run(&meta, pending).await.expect_err("the step should fail");
+        let error = run_local(&meta, pending)
+            .await
+            .expect_err("the step should fail");
         assert!(
             error
                 .to_string()
-                .contains("Upgrade step elastic-reindex-keyword-mappings failed"),
+                .contains("Upgrade step fixture-guarded failed"),
             "{error}"
         );
         // the step is reported as failed with why
         let last = status_patches(&fake).pop().expect("status");
-        assert_eq!(
-            last["upgrade"]["steps"][0]["step"],
-            "elastic-reindex-keyword-mappings"
-        );
+        assert_eq!(last["upgrade"]["steps"][0]["step"], fixture::STEP);
         assert_eq!(last["upgrade"]["steps"][0]["state"], "Failed");
         let message = last["upgrade"]["steps"][0]["message"]
             .as_str()
             .unwrap_or_default();
-        assert!(message.contains("thorium_repo_results"), "{message}");
+        assert!(message.contains("fixture_rows"), "{message}");
         // nothing is saved, so a retry runs the step again
         assert!(saved_state(&fake).is_none());
     }
 
     /// The elastic identity step finishes as done once Thorium's user authenticates with the
-    /// privileges it needs, and the upgrade moves on to the reindex check
+    /// privileges it needs, and the upgrade moves on to the step after it
     #[tokio::test]
     async fn run_elastic_identity_done() {
+        // plan with the fixture step in the first Helm revision, which finds nothing to do
+        let _catalog = first_helm_fixture();
+        fixture::script(Check::Nothing("every fixture row is right".to_owned()));
         // a cluster that only finished the Scylla role step
         let cluster = chart_cluster(serde_json::json!({"auto_target_dev": true}));
         let mut state = UpgradeState::new(rev(BASELINE_REVISION), "1.8.1");
@@ -2333,8 +3104,8 @@ pub(crate) mod tests {
         let mut meta = meta_for(cluster, &fake.client());
         meta.conf.elastic.node = fake_elastic(privileged_elastic).await;
         // the upgrade finishes
-        assert_eq!(run(&meta, pending).await.expect("run"), None);
-        // the identity step is done and the reindex check ran after it
+        assert_eq!(run_local(&meta, pending).await.expect("run"), None);
+        // the identity step is done and the fixture step ran after it
         let saved = saved_state(&fake).expect("state saved");
         let identity = saved
             .applied
@@ -2342,15 +3113,17 @@ pub(crate) mod tests {
             .rfind(|applied| applied.step == "elastic-identity")
             .expect("identity recorded");
         assert_eq!(identity.outcome, StepState::Done);
-        assert_eq!(reindex_outcome(&saved).outcome, StepState::Skipped);
-        assert_eq!(saved.revision, rev(FIRST_HELM_REVISION));
+        assert_eq!(fixture_outcome(&saved).outcome, StepState::Skipped);
+        assert_eq!(saved.revision, catalog().latest());
     }
 
     /// An Elastic bootstrap whose admin Secret is missing blocks the elastic identity step,
     /// recording the block once
     #[tokio::test]
     async fn run_elastic_identity_blocks_on_missing_secret() {
-        // a cluster bootstrapping an external Elastic that only finished the Scylla role step
+        // a cluster bootstrapping an external Elastic that only finished the Scylla role step, whose
+        // later data step the operator checks in process
+        let _catalog = first_helm_fixture();
         let cluster = elastic_bootstrap_cluster();
         let mut state = UpgradeState::new(rev(BASELINE_REVISION), "1.8.1");
         finish(&mut state, &["scylla-role"]);
@@ -2359,7 +3132,7 @@ pub(crate) mod tests {
         let mut meta = meta_for(cluster, &fake.client());
         meta.conf.elastic.node = fake_elastic(rejecting_elastic).await;
         // the upgrade is blocked and rechecked on the blocked interval
-        let action = run(&meta, pending).await.expect("run");
+        let action = run_local(&meta, pending).await.expect("run");
         assert_eq!(
             action,
             Some(Action::requeue(Duration::from_secs(BLOCKED_REQUEUE_SECS)))
@@ -2388,12 +3161,20 @@ pub(crate) mod tests {
             "{message}"
         );
         assert!(message.contains("elastic-admin"), "{message}");
+        // the operator's log gets one line naming the step and pointing at the status
+        let lines = take_block_logs();
+        assert_eq!(lines.len(), 1, "{lines:?}");
+        assert!(lines[0].contains("elastic-identity"), "{lines:?}");
+        assert!(lines[0].contains("status.upgrade.steps"), "{lines:?}");
     }
 
     /// An elastic identity step that blocked earlier is recorded as done once Thorium's user
     /// authenticates
     #[tokio::test]
     async fn run_elastic_identity_done_after_block() {
+        // plan with the fixture step in the first Helm revision, which finds nothing to do
+        let _catalog = first_helm_fixture();
+        fixture::script(Check::Nothing("every fixture row is right".to_owned()));
         // a cluster whose history records the identity step as blocked on its admin Secret
         let cluster = elastic_bootstrap_cluster();
         let mut state = UpgradeState::new(rev(BASELINE_REVISION), "1.8.1");
@@ -2411,7 +3192,7 @@ pub(crate) mod tests {
         // Thorium's user now holds every privilege, so the admin Secret isn't needed
         let mut meta = meta_for(cluster, &fake.client());
         meta.conf.elastic.node = fake_elastic(privileged_elastic).await;
-        assert_eq!(run(&meta, pending).await.expect("run"), None);
+        assert_eq!(run_local(&meta, pending).await.expect("run"), None);
         // the step finishes as done after its block
         let saved = saved_state(&fake).expect("state saved");
         let identity = saved
@@ -2421,5 +3202,33 @@ pub(crate) mod tests {
             .expect("identity recorded");
         assert_eq!(identity.outcome, StepState::Done);
         assert!(saved.finished(FIRST_HELM_REVISION, "elastic-identity"));
+    }
+
+    /// Build an approval for a step with a backup named
+    ///
+    /// # Arguments
+    ///
+    /// * `step` - The step the approval names
+    fn approval_for(step: &str) -> UpgradeApproval {
+        // the approval an admin adds once a backup exists
+        UpgradeApproval {
+            step: step.to_owned(),
+            backup: "snap-1".to_owned(),
+            ..UpgradeApproval::default()
+        }
+    }
+
+    /// An approval whose step id begins another stale approval's id is still reported, and an id
+    /// approved twice is reported once
+    #[test]
+    fn stale_approvals_are_listed_once_per_exact_step_id() {
+        // a stale id that another stale id starts with is reported on its own
+        let stale = stale_approvals(&[approval_for("users-v2-old"), approval_for("users")], &[]);
+        assert_eq!(stale.len(), 2, "{stale:?}");
+        assert!(stale[0].starts_with("users-v2-old:"), "{stale:?}");
+        assert!(stale[1].starts_with("users:"), "{stale:?}");
+        // the same stale id approved twice is reported once
+        let stale = stale_approvals(&[approval_for("gone"), approval_for("gone")], &[]);
+        assert_eq!(stale.len(), 1, "{stale:?}");
     }
 }

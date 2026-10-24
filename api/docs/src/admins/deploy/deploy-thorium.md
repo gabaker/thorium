@@ -64,6 +64,15 @@ metadata:
   name: thorium
   namespace: thorium
 ---
+# the thoradm Jobs the operator runs (schema apply, migrations, record reads) use this account; it
+# holds no role and mounts no token, since thoradm only talks to Thorium's backends
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: thorium-jobs
+  namespace: thorium
+automountServiceAccountToken: false
+---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRole
 metadata:
@@ -131,6 +140,13 @@ rules:
   - apiGroups: ["apps"]
     resources: ["deployments"]
     verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  # the thoradm Jobs it runs, and the logs of their pods it reports
+  - apiGroups: ["batch"]
+    resources: ["jobs"]
+    verbs: ["get", "list", "watch", "create", "delete", "deletecollection"]
+  - apiGroups: [""]
+    resources: ["pods/log"]
+    verbs: ["get"]
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: RoleBinding
@@ -578,10 +594,10 @@ outside Helm with a current operator. The current operator refuses a `ThoriumClu
 its credentials inline without either the `thorium.sandia.gov/allow-inline-config: "true"`
 annotation or `config_secrets`, and records the starting revision the first time it sees the
 namespace (see [Where a deployment starts](./upgrades.md#where-a-deployment-starts)). This
-procedure annotates the cluster so the operator records revision `2026-10-v01` and runs every
-upgrade step, and moves the credentials into a config Secret afterwards. The examples use the
-pre-Helm name `dev` in the namespace `thorium`; use `<prefix>-thorium` for a deployment with a
-namespace prefix.
+procedure annotates the cluster so the operator accepts it, records revision `2026-10-v01` so the
+operator runs every upgrade step, and moves the credentials into a config Secret afterwards. The
+examples use the pre-Helm name `dev` in the namespace `thorium`; use `<prefix>-thorium` for a
+deployment with a namespace prefix.
 
 1. **Retire other instances and back up.** A cluster runs one Thorium deployment, so retire every
    other pre-Helm instance first (see
@@ -606,15 +622,16 @@ namespace prefix.
 
 3. **Annotate the `ThoriumCluster`** so the operator accepts its inline credentials. Leave
    `config_secrets` empty until the operator has recorded the revision: a `ThoriumCluster` with
-   `config_secrets` and no recorded revision is taken for a Helm deployment and starts at
-   `2026-10-v02`, skipping that revision's checks.
+   `config_secrets` and no recorded revision is taken for a Helm deployment, and the operator
+   suggests `2026-10-v02`, skipping that revision's checks.
 
    ```bash
    kubectl -n thorium annotate thoriumcluster dev thorium.sandia.gov/allow-inline-config=true
    ```
 
-   Instead of relying on the annotation for the starting revision, you can record it yourself
-   before starting the new operator, the same way `convert-to-helm.sh` does:
+   The keyspace holds data but no record of its revision, so the new operator records nothing
+   until you name the revision (step 8). You can record it yourself instead, before starting the
+   new operator, the same way `convert-to-helm.sh` does:
 
    ```bash
    kubectl -n thorium create -f - <<EOF
@@ -650,35 +667,46 @@ namespace prefix.
    `thorium-operator` ClusterRole, which the old scaler keeps using until the new operator
    replaces it.
 
-7. **Replace the operator.** Delete the old operator Deployment (already scaled to 0) and create the
-   one from [Operator Deployment](#operator-deployment) with the new image; it applies the new CRD
-   when it starts:
+7. **Replace the operator.** First set `spec.version` to the new release: the operator reads the
+   deployment's record with a thoradm Job that runs the image `spec.version` names, and a pre-Helm
+   image's thoradm has no `schema` command, so the read fails and the operator waits in
+   `Provisioning` ("Reading the deployment's record from Scylla"). The components keep running
+   their current image until the upgrade has run. Then delete the old operator Deployment (already
+   scaled to 0) and create the one from [Operator Deployment](#operator-deployment) with the new
+   image; it applies the new CRD when it starts:
 
    ```bash
+   kubectl -n thorium patch thoriumcluster dev --type merge -p '{"spec":{"version":"<VERSION>"}}'
    kubectl -n thorium delete deployment operator
    kubectl apply -f operator.yaml
    ```
 
-8. **Confirm the revision.** The `ThoriumCluster` goes to `UpgradeRequired` at revision
-   `2026-10-v01`:
+8. **Record the revision.** Unless you created the ConfigMap in step 3, the operator finds data
+   and no record and waits in `UpgradeRequired`, suggesting `2026-10-v01` ("This namespace has a
+   Thorium keyspace with data but no record of the revision it is at"). Name it; the operator
+   records it once the live schema matches that revision's schema, and the `ThoriumCluster` goes
+   to `UpgradeRequired` at revision `2026-10-v01`:
 
    ```bash
+   kubectl -n thorium patch thoriumcluster dev --type merge \
+     -p '{"spec":{"upgrade":{"starting_revision":"2026-10-v01"}}}'
+
    kubectl -n thorium get thoriumcluster -o wide
    kubectl -n thorium get configmap thorium-upgrade-state \
      -o jsonpath='{.metadata.labels.thorium\.sandia\.gov/state-revision}'; echo
    ```
 
-9. **Upgrade.** In one edit, set the components' version and the target revision; the operator
-   runs the `2026-10-v02` steps and then rolls out the new components:
+9. **Upgrade.** Set the target revision; the operator runs the steps up to `2026-10-v03` and then
+   rolls out the new components of the version set in step 7:
 
    ```bash
    kubectl -n thorium patch thoriumcluster dev --type merge \
-     -p '{"spec":{"version":"<VERSION>","upgrade":{"target_revision":"2026-10-v02"}}}'
+     -p '{"spec":{"upgrade":{"target_revision":"2026-10-v03"}}}'
    ```
 
    If the `elastic-reindex-keyword-mappings` step blocks, approve it in `spec.upgrade.approvals`
-   and follow [Reindexing Elasticsearch](./upgrades.md#reindexing-elasticsearch). Wait for
-   `Ready`.
+   with a reference to your backup; the operator then rebuilds the indexes (see [Reindexing
+   Elasticsearch](./upgrades.md#reindexing-elasticsearch)). Wait for `Ready`.
 
 10. **Move the credentials into a config Secret** (recommended once the revision is
     recorded). Create a Secret with the credentials from `spec.config` in the

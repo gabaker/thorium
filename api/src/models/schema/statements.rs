@@ -1,20 +1,22 @@
 //! The one registry of every statement Thorium runs against Scylla
 //!
 //! The registry holds the API's queries structs (their census and backup statements included),
-//! the search streamer's statements when the `search-streamer` feature is on, and each declared
-//! table's full-row insert, token-range scan, and census, which thoradm backs up and restores
-//! with. The statement validation and the prepare check both read it, so no consumer registers
-//! statements of its own.
+//! the statements on the migration-state tables, the search streamer's statements when the
+//! `search-streamer` feature is on, and each declared table's full-row insert, token-range scan,
+//! and census, which thoradm backs up and restores with. The statement validation and the prepare
+//! check both read it, so no consumer registers statements of its own.
 
 use scylla::client::session::Session;
 use std::fmt;
 
 use super::definition::{ScyllaObject, TableStatements};
 use super::queries::ScyllaQueries;
+use super::queries::migrations::SchemaStateQueries;
 use super::scylla::{
     AssociationsTable, CommentsTable, CommitishListTable, CommitishesTable, EntitiesTable,
     LogsTable, NetworkPoliciesTable, NodesTable, NotificationsTable, RepoDataTable, ReposListTable,
-    ResultsStreamTable, ResultsTable, S3IdsTable, SamplesListTable, TagsTable,
+    ResultsStreamTable, ResultsTable, S3IdsTable, SamplesListTable, SchemaMigrationIssuesTable,
+    SchemaMigrationsTable, TagsTable,
 };
 
 /// One statement in the registry
@@ -73,7 +75,8 @@ fn full_row<T: TableStatements>(ns: &str) -> Vec<RegisteredStatement> {
 }
 
 /// Every registered statement for a keyspace: each declared table's full-row statements, then
-/// the API's queries structs, then the search streamer's statements
+/// the API's queries structs, then the statements on the migration-state tables, then the search
+/// streamer's statements
 ///
 /// # Arguments
 ///
@@ -82,6 +85,8 @@ fn full_row<T: TableStatements>(ns: &str) -> Vec<RegisteredStatement> {
 pub fn registry(ns: &str) -> Vec<RegisteredStatement> {
     // each declared table's full-row statements, in declaration order
     let mut statements = [
+        full_row::<SchemaMigrationsTable>(ns),
+        full_row::<SchemaMigrationIssuesTable>(ns),
         full_row::<SamplesListTable>(ns),
         full_row::<S3IdsTable>(ns),
         full_row::<CommentsTable>(ns),
@@ -102,6 +107,8 @@ pub fn registry(ns: &str) -> Vec<RegisteredStatement> {
     .concat();
     // the API's statements, including its census and backup statements
     statements.extend(register("", ScyllaQueries::statements(ns)));
+    // the statements on the migration-state tables, which thoradm and the startup check run
+    statements.extend(register("", SchemaStateQueries::statements(ns)));
     // the search streamer's statements, compiled in only for the streamer
     #[cfg(feature = "search-streamer")]
     statements.extend(register("search.", super::queries::search::statements(ns)));

@@ -17,10 +17,11 @@ pub use backup::{
 };
 pub use migrate::{
     CheckMigration, ListIssues, MigrateSubCommands, MigrationTarget, PlanMigrations,
-    RecordRevision, ResetState, RevertMigrations, RunMigration,
+    RecordRevision, ReportMigration, ResetState, RevertMigrations, RunMigration,
 };
 pub use schema::{
-    ApplySchema, DiffSchema, HashSchema, PrintSchema, SchemaSubCommands, StatusSchema, VerifyViews,
+    ApplySchema, DiffSchema, DropLegacy, HashSchema, LegacySchema, PrintSchema, SchemaSubCommands,
+    StatusSchema, VerifyViews,
 };
 
 /// Provide a default admin config path

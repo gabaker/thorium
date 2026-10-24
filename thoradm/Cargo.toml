@@ -48,6 +48,7 @@ async-walkdir = "2.1"
 dirs = "6"
 strum = { workspace = true }
 bb8-redis = "0.24"
+elasticsearch = "9.0.0-alpha.1"
 redis = { version = "0.32.1", default-features = false, features = ["tokio-comp", "script"] }
 tracing = { workspace = true }
 rand = "0.9"

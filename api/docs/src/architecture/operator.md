@@ -59,10 +59,16 @@ are kept.
 
 ## Revisions
 
-Each deployment records the upgrade revision it is at in the `thorium-upgrade-state` ConfigMap.
-The operator ships a catalog of revisions and the steps between them; it changes nothing on a
-cluster behind its latest revision until an admin sets a target, and steps that change data need
-an approval naming a backup. See [Upgrading Thorium](../admins/deploy/upgrades.md).
+Each deployment records the upgrade revision it is at, and the history of every step applied, in
+Scylla, and mirrors it in the `thorium-upgrade-state` ConfigMap. The operator ships a catalog of
+revisions and the steps between them; it changes nothing on a cluster behind its latest revision
+until an admin sets a target, and steps that change data need an approval naming a backup. The
+operator never talks to Scylla itself: it runs `thoradm` as Kubernetes Jobs in the thorium namespace,
+one writing Job at a time, to apply the schema, check and run data migrations, and read the record
+and the schema drift. A target older than the deployment's revision runs the reverse steps, and a
+step that loses data needs its own confirmation. See [Upgrading
+Thorium](../admins/deploy/upgrades.md) and, for how these paths are tested, [Testing Upgrades and
+Schema Changes](./testing-upgrades.md).
 
 ## Learn more
 

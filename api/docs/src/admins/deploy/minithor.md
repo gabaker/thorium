@@ -173,7 +173,10 @@ the script (every backing service in the cluster, an nginx ingress, toolbox `mod
 1 GiB Elasticsearch heap), then the values your flags produce (written to
 `~/.cache/minithor/values.yaml`, or `values-<profile>.yaml` for another profile), then your
 `--values` files and `--set` flags. The flag values also set `global.clusterCIDRs` to the
-profile's service and pod CIDRs and `operator.cluster.upgrade.autoTargetDev: true`. After
+profile's service and pod CIDRs, `operator.cluster.upgrade.autoTargetDev: true`, and
+`operator.cluster.upgrade.dangerousDowngradeLossy: true` (a development cluster accepts the loss of
+a lossy downgrade step without a code or backup; see [Accepting
+loss](./upgrades.md#accepting-loss)). After
 installing the chart, minithor labels the Thorium namespace `thorium.sandia.gov/dev=true` when the
 `ThoriumCluster` has `autoTargetDev`, and removes the label when your values turn it off (see
 [Setting a target](./upgrades.md#setting-a-target)). To use an

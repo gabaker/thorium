@@ -146,7 +146,11 @@ async fn recorded(family: &str, group: &str) -> Members {
     let mut conn = pool.get().await.unwrap();
     // find this family's streams for the group
     let pattern = format!("{ns}:census:{family}:stream:*");
-    let keys: Vec<String> = conn.keys(&pattern).await.unwrap();
+    // scan for the keys rather than list them, so a large Redis is not blocked while we read
+    let keys: Vec<String> = {
+        let found = conn.scan_match::<_, String>(&pattern).await.unwrap();
+        found.collect().await
+    };
     let mut members = Members::new();
     for key in keys {
         // a family's key names the group after its kind segments

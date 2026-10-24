@@ -4,7 +4,8 @@ use std::collections::HashSet;
 
 use super::definition::{ColumnDef, ColumnRole, ObjectDef, TableDef, ViewDef};
 use super::elastic::ElasticIndexDef;
-use crate::models::upgrades::{LayoutDef, SchemaBackend};
+use super::scylla::ThoriumKeyspace;
+use crate::models::upgrades::{LAYOUTS, LayoutDef, SchemaBackend};
 
 /// The ordered set of every declared Scylla object, implemented by `#[thorium::keyspace]`
 pub trait Keyspace {
@@ -318,8 +319,37 @@ pub struct SchemaObject {
 pub enum SchemaDefinition {
     /// A Scylla table or view, from its derive
     Scylla(ObjectDef),
-    /// An Elastic index's mappings and settings, from the search-streamer's index body
+    /// An Elastic index's mappings, from the search-streamer's index body
     Elastic(ElasticIndexDef),
     /// A Redis or S3 layout version constant
     Layout(LayoutDef),
+}
+
+impl SchemaObject {
+    /// Every object Thorium declares: the Scylla keyspace in creation order, then the Elastic
+    /// indexes, then the Redis and S3 layouts
+    #[must_use]
+    pub fn declared() -> Vec<SchemaObject> {
+        // start with every Scylla object in creation order
+        let scylla = ThoriumKeyspace::OBJECTS.iter().map(|def| SchemaObject {
+            backend: SchemaBackend::Scylla,
+            name: def.name().to_owned(),
+            definition: SchemaDefinition::Scylla(*def),
+        });
+        // then the fixed Elastic indexes
+        let elastic = ElasticIndexDef::declared()
+            .into_iter()
+            .map(|def| SchemaObject {
+                backend: SchemaBackend::Elastic,
+                name: def.name.to_owned(),
+                definition: SchemaDefinition::Elastic(def),
+            });
+        // then each Redis family and S3 bucket role's layout
+        let layouts = LAYOUTS.iter().map(|layout| SchemaObject {
+            backend: layout.backend,
+            name: layout.family.to_owned(),
+            definition: SchemaDefinition::Layout(*layout),
+        });
+        scylla.chain(elastic).chain(layouts).collect()
+    }
 }

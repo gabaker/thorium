@@ -441,12 +441,119 @@ async fn refuse_invalid_namespace(
     Err(error)
 }
 
+/// Record why a cluster couldn't be gated and drop it from the shared info
+///
+/// # Arguments
+///
+/// * `state` - Controller context including client instance and optional URL
+/// * `cluster` - The cluster that couldn't be gated
+/// * `tracker` - The status tracker of the cluster being reconciled
+/// * `error` - Why the cluster couldn't be gated
+async fn gate_failed(
+    state: &State,
+    cluster: &ThoriumCluster,
+    tracker: &crds::StatusTracker,
+    error: Error,
+) -> Error {
+    // a cluster that couldn't be gated isn't known to be current
+    forget(state, cluster);
+    // record why the cluster couldn't be gated
+    crds::set_status(
+        &state.client,
+        tracker,
+        ClusterPhase::Error,
+        Some(crds::error_message(&error)),
+    )
+    .await;
+    error
+}
+
+/// Recover the record of a cluster whose state is missing or mirrors none, then gate it again
+///
+/// This writes the `thorium` Secret and bootstraps Thorium's Scylla role, reads the record with a
+/// status Job, and rebuilds the state from it. It returns the action to take while recovery waits,
+/// or the upgrade the recovered state calls for, if any.
+///
+/// # Arguments
+///
+/// * `state` - Controller context including client instance and optional URL
+/// * `meta` - The cluster's metadata and merged config
+async fn recover_record(
+    state: &State,
+    meta: &ClusterMeta,
+) -> Result<Result<Option<upgrades::Pending>, Action>, Error> {
+    // the status Job mounts the Secret and logs in as Thorium's role, so both come first
+    let recover =
+        upgrades::recover_with(meta, async |meta| Ok(operate::prepare(meta).await?.err()));
+    if let Some(action) = recover.await? {
+        return Ok(Err(action));
+    }
+    // the state mirrors the record now, so it decides what the cluster needs
+    match upgrades::gate(&state.client, &meta.status).await? {
+        Gate::Current => Ok(Ok(None)),
+        Gate::Upgrade(recovered) => Ok(Ok(Some(recovered))),
+        Gate::Hold(action) => Ok(Err(action)),
+        // a recovered state with a run open has its Job stopped before the hold
+        Gate::Stop { action, stored } => Ok(Err(upgrades::stop(meta, action, stored).await?)),
+        Gate::NeedsRecord => Ok(Err(Action::requeue(Duration::from_secs(15)))),
+    }
+}
+
+/// Apply a cluster: recover its record when none is known, bring it to its target revision, and
+/// reconcile it
+///
+/// # Arguments
+///
+/// * `state` - Controller context including client instance and optional URL
+/// * `meta` - The cluster's metadata and merged config
+/// * `pending` - The upgrade the gate decided on, if any
+/// * `needs_record` - Whether the gate found no record, which is recovered first
+async fn apply_cluster(
+    state: &State,
+    meta: &ClusterMeta,
+    pending: Option<upgrades::Pending>,
+    needs_record: bool,
+) -> Result<Action, Error> {
+    // recover the record when none is known, then gate the cluster again
+    let mut pending = pending;
+    if needs_record {
+        match recover_record(state, meta).await? {
+            Err(action) => return Ok(action),
+            Ok(recovered) => pending = recovered,
+        }
+    }
+    // bring the cluster to its target revision before reconciling it
+    if let Some(pending) = pending
+        && let Some(action) = upgrades::run(meta, pending).await?
+    {
+        return Ok(action);
+    }
+    // box the apply since its future is too large to keep on the stack
+    let action = Box::pin(operate::apply(meta, state.url.clone(), &state.shared)).await?;
+    // read and report schema drift when it is due; it never holds the reconcile, but a read under
+    // way or a record it followed asks to be looked at again soon
+    let drift = upgrades::check_drift(meta).await;
+    // follow the reingest of a derived rebuild until the search-streamer finished it, looking again
+    // sooner than the day a ready cluster waits
+    let ready = Action::requeue(Duration::from_secs(operate::APPLY_REQUEUE_SECS));
+    let reingest = upgrades::track_reingest(meta).await;
+    // only a cluster that would otherwise wait its usual day is asked back sooner
+    match (action == ready, drift, reingest) {
+        (true, Some(again), _) => Ok(again),
+        (true, None, Some(secs)) => Ok(Action::requeue(Duration::from_secs(secs))),
+        _ => Ok(action),
+    }
+}
+
 /// Reconcile changes to `ThoriumCluster`
 ///
 /// # Arguments
 ///
 /// * `cluster` - Thorium cluster being changed
 /// * `state` - Controller context including client instance and optional URL
+// the gate, the config, the namespace check, and the apply run in this order, which reads best in
+// one place
+#[allow(clippy::too_many_lines)]
 pub async fn reconcile(cluster: Arc<ThoriumCluster>, state: Arc<State>) -> Result<Action, Error> {
     // list every cluster to find the one the operator manages
     let listing = list_clusters(&state, &cluster).await;
@@ -466,6 +573,7 @@ pub async fn reconcile(cluster: Arc<ThoriumCluster>, state: Arc<State>) -> Resul
     }
     // decide whether this cluster must be upgraded first, which needs only the cluster itself
     // so an unconverted or half-converted cluster is caught before its config is resolved
+    let (mut needs_record, mut stop) = (false, None);
     let pending = if cluster.metadata.deletion_timestamp.is_none() {
         match upgrades::gate(&state.client, &tracker).await {
             Ok(Gate::Current) => None,
@@ -479,19 +587,20 @@ pub async fn reconcile(cluster: Arc<ThoriumCluster>, state: Arc<State>) -> Resul
                 forget(&state, &cluster);
                 return Ok(action);
             }
-            Err(error) => {
-                // a cluster that couldn't be gated isn't known to be current
+            Ok(Gate::NeedsRecord) => {
+                // the watchers wait for the apply that follows recovering the record, which
+                // needs the config resolved
                 forget(&state, &cluster);
-                // record why the cluster couldn't be gated
-                crds::set_status(
-                    &state.client,
-                    &tracker,
-                    ClusterPhase::Error,
-                    Some(crds::error_message(&error)),
-                )
-                .await;
-                return Err(error);
+                needs_record = true;
+                None
             }
+            Ok(Gate::Stop { action, stored }) => {
+                // a held cluster is left alone once its open runs' Jobs are stopped
+                forget(&state, &cluster);
+                stop = Some((action, stored));
+                None
+            }
+            Err(error) => return Err(gate_failed(&state, &cluster, &tracker, error).await),
         }
     } else {
         None
@@ -511,6 +620,10 @@ pub async fn reconcile(cluster: Arc<ThoriumCluster>, state: Arc<State>) -> Resul
                 )
                 .await;
             }
+            // a held cluster with a run open stays held until its config resolves
+            if stop.is_some() {
+                return Ok(upgrades::stop_unresolved(&state.client, &tracker, &error).await);
+            }
             // the watchers can't act on a cluster whose config doesn't resolve
             forget(&state, &cluster);
             // record why we couldn't build this cluster's config
@@ -529,6 +642,10 @@ pub async fn reconcile(cluster: Arc<ThoriumCluster>, state: Arc<State>) -> Resul
     if cluster.metadata.deletion_timestamp.is_none() {
         refuse_invalid_namespace(&state, &tracker, &meta).await?;
     }
+    // a held cluster with a run open has the run's Job stopped, and is then left alone
+    if let Some((action, stored)) = stop {
+        return upgrades::stop(&meta, action, stored).await;
+    }
     // get the api for this cluster's namespace to manage its finalizer with
     let clusters_api: Api<ThoriumCluster> = Api::namespaced(meta.client.clone(), &meta.namespace);
     // log which cluster we are reconciling
@@ -544,14 +661,7 @@ pub async fn reconcile(cluster: Arc<ThoriumCluster>, state: Arc<State>) -> Resul
         |event| async {
             match event {
                 Finalizer::Apply(_cluster) => {
-                    // bring the cluster to its target revision before reconciling it
-                    if let Some(pending) = pending
-                        && let Some(action) = upgrades::run(&meta, pending).await?
-                    {
-                        return Ok(action);
-                    }
-                    // box the apply since its future is too large to keep on the stack
-                    Box::pin(operate::apply(&meta, state.url.clone(), &state.shared)).await
+                    apply_cluster(&state, &meta, pending, needs_record).await
                 }
                 Finalizer::Cleanup(_cluster) => operate::cleanup(&meta, &state.shared).await,
             }
@@ -575,7 +685,8 @@ pub async fn reconcile(cluster: Arc<ThoriumCluster>, state: Arc<State>) -> Resul
 /// Hash the parts of a `ThoriumCluster` that should trigger a reconcile
 ///
 /// Status updates are excluded so the operator's own status patches don't retrigger it. The
-/// inline config annotation is included since setting it releases a held cluster.
+/// inline config annotation is included since setting it releases a held cluster, and the
+/// schema-apply retry annotation since setting it retries a failed schema-apply Job.
 ///
 /// # Arguments
 ///
@@ -600,6 +711,13 @@ fn reconcile_predicate(cluster: &ThoriumCluster) -> Option<u64> {
         .annotations
         .as_ref()
         .and_then(|annotations| annotations.get(upgrades::ALLOW_INLINE_CONFIG))
+        .hash(&mut hasher);
+    // hash the schema-apply retry request, which retries a failed Job at once
+    cluster
+        .metadata
+        .annotations
+        .as_ref()
+        .and_then(|annotations| annotations.get(upgrades::RETRY_SCHEMA_APPLY))
         .hash(&mut hasher);
     Some(hasher.finish())
 }
@@ -983,7 +1101,8 @@ mod tests {
         );
     }
 
-    /// Status changes don't retrigger a reconcile but spec and deletion changes do
+    /// Status changes don't retrigger a reconcile but spec and deletion changes do, and so does each
+    /// new value of the schema-apply retry annotation
     #[test]
     fn predicate_ignores_status() {
         // hash a cluster
@@ -1029,7 +1148,23 @@ mod tests {
             .annotations
             .get_or_insert_default()
             .insert(upgrades::ALLOW_INLINE_CONFIG.to_owned(), "false".to_owned());
-        assert_ne!(reconcile_predicate(&cluster), allowed);
+        let disallowed = reconcile_predicate(&cluster);
+        assert_ne!(disallowed, allowed);
+        // setting the schema-apply retry annotation does, since it retries a failed Job at once
+        cluster
+            .metadata
+            .annotations
+            .get_or_insert_default()
+            .insert(upgrades::RETRY_SCHEMA_APPLY.to_owned(), "1".to_owned());
+        let retried = reconcile_predicate(&cluster);
+        assert_ne!(retried, disallowed);
+        // and so does each new value of it
+        cluster
+            .metadata
+            .annotations
+            .get_or_insert_default()
+            .insert(upgrades::RETRY_SCHEMA_APPLY.to_owned(), "2".to_owned());
+        assert_ne!(reconcile_predicate(&cluster), retried);
     }
 
     /// Build a cluster created at a time
@@ -1747,6 +1882,198 @@ mod tests {
             fake.requests()
         );
         assert_eq!(cluster_writes(&fake), Vec::<String>::new());
+    }
+
+    /// The name of the migration Job the held-cluster tests find running
+    const HELD_JOB: &str = "migration-users-settings-theme-000000000000";
+
+    /// Build the state of a cluster at the first Helm revision whose `users-settings-theme` run is
+    /// open, with the API paused at three replicas
+    fn held_state() -> thorium::models::upgrades::UpgradeState {
+        // the run started under an approval naming a backup, and holds the API's count
+        let mut state = thorium::models::upgrades::UpgradeState::new(
+            thorium::models::upgrades::FIRST_HELM_REVISION
+                .parse()
+                .expect("revision"),
+            "1.8.1",
+        );
+        state.record(thorium::models::upgrades::AppliedStep {
+            revision: "2026-10-v03".to_owned(),
+            step: "users-settings-theme".to_owned(),
+            outcome: thorium::models::upgrades::StepState::Running,
+            job: Some(HELD_JOB.to_owned()),
+            backup: Some("snap-1".to_owned()),
+            paused: std::collections::BTreeMap::from([("api".to_owned(), 3)]),
+            ..thorium::models::upgrades::AppliedStep::default()
+        });
+        state
+    }
+
+    /// Build the Job list the kube API returns while the held run's migration Job runs
+    fn held_jobs() -> serde_json::Value {
+        // one active Job carrying the operator's kind and step labels
+        serde_json::json!({"apiVersion": "batch/v1", "kind": "JobList", "metadata": {},
+            "items": [{"apiVersion": "batch/v1", "kind": "Job",
+                "metadata": {"name": HELD_JOB, "namespace": "thorium", "uid": "uid-held",
+                    "resourceVersion": "11",
+                    "labels": {"thorium.sandia.gov/job-kind": "migration",
+                        "thorium.sandia.gov/step": "users-settings-theme"}},
+                "spec": {"template": {"spec": {"containers": []}}},
+                "status": {"active": 1}}]})
+    }
+
+    /// A reconcile of a cluster whose target was cleared while a migration Job runs stops the Job
+    /// in the foreground, pinned to the version listed, records the stop, and holds the cluster
+    /// with a message naming the step, the Job, the paused API, and the ways forward
+    #[tokio::test]
+    async fn a_cleared_target_stops_the_running_migration_job() {
+        // a cluster with no target, a run open, its Job running, and a config that resolves
+        let cluster = created_cluster("thorium", "thorium", "2026-10-01T00:00:00Z");
+        let state = held_state();
+        let config = crate::k8s::clusters::tests::sample_config();
+        let yaml = serde_norway::to_string(&config).expect("config renders");
+        let encoded = base64::Engine::encode(&base64::engine::general_purpose::STANDARD, yaml);
+        let jobs = "/apis/batch/v1/namespaces/thorium/jobs";
+        let fake = fake_listing(std::slice::from_ref(&cluster), &cluster)
+            .route(
+                "GET",
+                crate::upgrades::tests::STATE_PATH,
+                200,
+                crate::upgrades::tests::state_config_map(&state),
+            )
+            .route(
+                "PUT",
+                crate::upgrades::tests::STATE_PATH,
+                200,
+                crate::upgrades::tests::state_config_map(&state),
+            )
+            .route(
+                "GET",
+                "/api/v1/namespaces/thorium/secrets/config",
+                200,
+                serde_json::json!({
+                    "apiVersion": "v1",
+                    "kind": "Secret",
+                    "metadata": {"name": "config", "namespace": "thorium"},
+                    "data": {"thorium.yml": encoded}
+                }),
+            )
+            .route("GET", jobs, 200, held_jobs())
+            .route(
+                "DELETE",
+                &format!("{jobs}/{HELD_JOB}"),
+                200,
+                serde_json::json!({"kind": "Status", "apiVersion": "v1", "status": "Success"}),
+            );
+        let state = applied_state(&fake, &cluster).await;
+        // the reconcile holds the cluster and looks again soon while the Job stops
+        let action = Box::pin(reconcile(Arc::new(cluster), state.clone()))
+            .await
+            .expect("reconcile");
+        assert_eq!(action, Action::requeue(Duration::from_secs(15)));
+        // the Job was deleted once, in the foreground, pinned to its UID and listed version
+        let writes = fake.writes();
+        let deletes = writes
+            .iter()
+            .filter(|request| request.method == "DELETE")
+            .collect::<Vec<_>>();
+        assert_eq!(deletes.len(), 1, "{writes:?}");
+        assert!(deletes[0].path.ends_with(HELD_JOB), "{deletes:?}");
+        assert_eq!(deletes[0].body["propagationPolicy"], "Foreground");
+        assert_eq!(deletes[0].body["preconditions"]["uid"], "uid-held");
+        assert_eq!(deletes[0].body["preconditions"]["resourceVersion"], "11");
+        // the stop was recorded as a block of the step
+        let saved = writes
+            .iter()
+            .rfind(|request| request.method == "PUT")
+            .expect("the state is saved");
+        let saved: thorium::models::upgrades::UpgradeState = serde_json::from_str(
+            saved.body["data"]["state.json"]
+                .as_str()
+                .expect("a saved state"),
+        )
+        .expect("the state parses");
+        let last = saved.applied.last().expect("an entry");
+        assert_eq!(last.step, "users-settings-theme");
+        assert_eq!(last.outcome, thorium::models::upgrades::StepState::Blocked);
+        // the last status holds the cluster and explains the stop
+        let status = writes
+            .iter()
+            .rfind(|request| request.path.ends_with("/status"))
+            .expect("a status");
+        assert_eq!(status.body["status"]["phase"], "UpgradeRequired");
+        let message = status.body["status"]["message"]
+            .as_str()
+            .unwrap_or_default();
+        for part in [
+            "users-settings-theme",
+            HELD_JOB,
+            "api (3)",
+            "snap-1",
+            "set spec.upgrade.target_revision",
+            "to stop",
+        ] {
+            assert!(message.contains(part), "{part}: {message}");
+        }
+        // no Deployment was read or written
+        assert!(
+            fake.requests()
+                .iter()
+                .all(|request| !request.path.contains("/deployments")),
+            "{:?}",
+            fake.requests()
+        );
+    }
+
+    /// A held cluster with a run open whose config doesn't resolve stays held, touches no Job, and is
+    /// looked at again in a minute, with the status saying why the Job isn't stopped yet
+    #[tokio::test]
+    async fn a_held_cluster_whose_config_doesnt_resolve_keeps_holding() {
+        // a cluster with no target and a run open, whose config Secret is missing
+        let cluster = created_cluster("thorium", "thorium", "2026-10-01T00:00:00Z");
+        let state = held_state();
+        let fake = fake_listing(std::slice::from_ref(&cluster), &cluster)
+            .route(
+                "GET",
+                crate::upgrades::tests::STATE_PATH,
+                200,
+                crate::upgrades::tests::state_config_map(&state),
+            )
+            .route(
+                "GET",
+                "/apis/batch/v1/namespaces/thorium/jobs",
+                200,
+                held_jobs(),
+            );
+        let state = applied_state(&fake, &cluster).await;
+        // the reconcile succeeds with a retry in a minute
+        let action = Box::pin(reconcile(Arc::new(cluster), state.clone()))
+            .await
+            .expect("the hold is kept");
+        assert_eq!(action, Action::requeue(Duration::from_secs(60)));
+        // no Job was listed or deleted, and the watchers stop acting on the cluster
+        assert!(
+            fake.requests()
+                .iter()
+                .all(|request| !request.path.contains("/jobs")),
+            "{:?}",
+            fake.requests()
+        );
+        assert_eq!(shared_keys(&state), other_key());
+        // the hold's phase stays, and its message says why the Job isn't stopped yet
+        let writes = fake.writes();
+        assert!(
+            writes
+                .iter()
+                .all(|request| request.path.ends_with("/status")),
+            "{writes:?}"
+        );
+        let last = writes.last().expect("a status");
+        assert_eq!(last.body["status"]["phase"], "UpgradeRequired");
+        let message = last.body["status"]["message"].as_str().unwrap_or_default();
+        for part in ["users-settings-theme", "api (3)", "config", "every minute"] {
+            assert!(message.contains(part), "{part}: {message}");
+        }
     }
 
     /// Deleting the managed cluster when its config Secret is missing cleans up only its own

@@ -11,6 +11,8 @@ pub(super) mod monitors;
 pub(crate) mod new_backup;
 mod restore;
 pub(crate) mod s3;
+pub mod schema;
+pub mod schema_restore;
 mod scrub;
 pub mod sink;
 pub mod target;

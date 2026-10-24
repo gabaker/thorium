@@ -86,7 +86,7 @@ async fn download() -> Result<(), thorium::Error> {
     // upload this file
     let resp = client.files.create(file_req).await?;
     // download the file and check that it's valid
-    let temp_path = std::env::temp_dir().join("UNCARTED_MAL");
+    let temp_path = std::env::temp_dir().join(format!("UNCARTED_MAL_{}", Uuid::new_v4()));
     // build the options for downloading this file
     let mut opts = FileDownloadOpts::default().uncart();
     // download this file
@@ -132,7 +132,7 @@ async fn download_large() -> Result<(), thorium::Error> {
     // make sure the api hashed the whole stream and not just part of it
     is!(resp.sha256, sha256);
     // download the file and check that it's valid
-    let temp_path = std::env::temp_dir().join("UNCARTED_LARGE_MAL");
+    let temp_path = std::env::temp_dir().join(format!("UNCARTED_LARGE_MAL_{}", Uuid::new_v4()));
     // build the options for downloading this file
     let mut opts = FileDownloadOpts::default().uncart();
     // download this file
@@ -188,7 +188,8 @@ async fn upload_saturates_parts() -> Result<(), thorium::Error> {
     // make sure the api hashed the whole stream and not just part of it
     is!(resp.sha256, sha256);
     // download the file and check that it's valid
-    let temp_path = std::env::temp_dir().join("UNCARTED_SATURATING_MAL");
+    let temp_path =
+        std::env::temp_dir().join(format!("UNCARTED_SATURATING_MAL_{}", Uuid::new_v4()));
     // build the options for downloading this file
     let mut opts = FileDownloadOpts::default().uncart();
     // download this file

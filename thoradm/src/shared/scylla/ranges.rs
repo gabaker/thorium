@@ -11,31 +11,8 @@
 /// * `chunks` - How many ranges to split the ring into
 #[must_use]
 pub fn build_token_ranges(chunks: u64) -> Vec<(i64, i64)> {
-    // the ring holds 2^64 tokens; split them as evenly as whole tokens allow
-    let chunks = u128::from(chunks.max(1));
-    let ring: u128 = 1 << 64;
-    let (size, extra) = (ring / chunks, ring % chunks);
-    // the first `extra` ranges take one more token than the rest, so every token is used
-    let mut ranges = Vec::with_capacity(usize::try_from(chunks).unwrap_or(0));
-    let mut start: u128 = 0;
-    for index in 0..chunks {
-        let len = size + u128::from(index < extra);
-        let end = start + len - 1;
-        ranges.push((ring_token(start), ring_token(end)));
-        start = end + 1;
-    }
-    ranges
-}
-
-/// Converts a position on the ring, counted from its first token, into the token itself
-///
-/// # Arguments
-///
-/// * `position` - The position, from 0 (`i64::MIN`) to 2^64 - 1 (`i64::MAX`)
-fn ring_token(position: u128) -> i64 {
-    // positions count up from i64::MIN, so shift them down by 2^63
-    let token = i128::try_from(position).unwrap_or(i128::MAX) + i128::from(i64::MIN);
-    i64::try_from(token).unwrap_or(i64::MAX)
+    // the runner's slices and every other range reader split the ring the same way
+    thorium::models::schema::token_ranges(chunks)
 }
 
 #[cfg(test)]
@@ -45,7 +22,7 @@ mod tests {
     /// The ranges cover the whole ring in order, each starting one token after the last ends
     #[test]
     fn ranges_cover_the_ring_contiguously_with_no_overlap() {
-        for chunks in [1_u64, 2, 3, 10, 1000] {
+        for chunks in [1_u64, 2, 3, 8, 10, 1000] {
             let ranges = build_token_ranges(chunks);
             // one range per chunk, from the first token to the last
             assert_eq!(ranges.len() as u64, chunks, "{chunks} chunks");

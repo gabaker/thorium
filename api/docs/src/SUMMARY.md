@@ -39,6 +39,7 @@
         - [Tracing/Logging](./architecture/tracing.md)
         - [Event Handler](./architecture/event-handler.md)
         - [Operator](./architecture/operator.md)
+        - [Testing Upgrades and Schema Changes](./architecture/testing-upgrades.md)
     - [Deploying Thorium](./admins/deploy/deploy.md)
         - [Deployment Concepts](./admins/deploy/concepts.md)
         - [Planning a Deployment](./admins/deploy/planning.md)

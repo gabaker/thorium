@@ -137,13 +137,39 @@ impl Target {
 
     /// Returns every table of the target that already holds data, by name
     ///
+    /// A declared table the keyspace doesn't hold, as in a dropped keyspace, holds no data.
+    ///
     /// # Arguments
     ///
     /// * `scylla` - A session to the target's Scylla
     pub async fn holding_data(&self, scylla: &Session) -> Result<Vec<String>, Error> {
         let mut holding = Vec::new();
+        // a table the keyspace doesn't hold, as in a dropped keyspace, holds no data
+        let live = scylla
+            .query_unpaged(
+                "SELECT table_name FROM system_schema.tables WHERE keyspace_name = ?",
+                (self.keyspace.to_lowercase(),),
+            )
+            .await?
+            .into_rows_result()
+            .map_err(|error| {
+                Error::new(format!(
+                    "failed to list the tables of {}: {error}",
+                    self.keyspace
+                ))
+            })?
+            .rows::<(String,)>()
+            .map_err(|error| {
+                Error::new(format!(
+                    "failed to list the tables of {}: {error}",
+                    self.keyspace
+                ))
+            })?
+            .filter_map(Result::ok)
+            .map(|(table,)| table)
+            .collect::<std::collections::BTreeSet<_>>();
         // a table holds data when it has one row
-        for table in &self.tables {
+        for table in self.tables.iter().filter(|table| live.contains(**table)) {
             let query = format!("SELECT * FROM {}.{table} LIMIT 1", self.keyspace);
             let rows = scylla.query_unpaged(query, &[]).await?;
             let found = rows

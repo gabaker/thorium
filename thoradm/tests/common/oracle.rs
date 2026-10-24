@@ -140,6 +140,16 @@ pub const ORACLE_RULES: &[OracleRule] = &[
         reason: "excluded and read by nothing",
     },
     OracleRule {
+        location: "schema_migrations",
+        kind: OracleRuleKind::Ignore,
+        reason: "a restore records the schema: the backup's record, which the schema record tests compare, and the restoring cluster's own data-shaping settings and fingerprints",
+    },
+    OracleRule {
+        location: "schema_migration_issues",
+        kind: OracleRuleKind::Ignore,
+        reason: "a restore writes the backup's record of migration passes, which the schema record tests compare",
+    },
+    OracleRule {
         location: "event-handler:*",
         kind: OracleRuleKind::Ignore,
         reason: "the API raises the event handler's cache-refresh flag when it restores; runtime state",
@@ -776,6 +786,17 @@ impl Oracle {
             .map(|rule| &rule.kind)
     }
 
+    /// Says whether this oracle ignores a table, view, or Redis pattern outright
+    ///
+    /// # Arguments
+    ///
+    /// * `location` - The location to look up
+    #[must_use]
+    pub fn ignores(&self, location: &str) -> bool {
+        // an ignore rule names the location exactly
+        self.rule(location) == Some(&OracleRuleKind::Ignore)
+    }
+
     /// Returns every difference between an expected and a found snapshot, empty when they match
     ///
     /// # Arguments
@@ -811,6 +832,10 @@ impl Oracle {
         let empty = BTreeMap::new();
         let tables: BTreeSet<&String> = expected.scylla.keys().chain(found.scylla.keys()).collect();
         for table in tables {
+            // a table the oracle ignores outright, such as the schema record a restore writes
+            if self.rule(table) == Some(&OracleRuleKind::Ignore) {
+                continue;
+            }
             let before = expected.scylla.get(table).unwrap_or(&empty);
             let after = found.scylla.get(table).unwrap_or(&empty);
             // rows on one side only
@@ -1126,6 +1151,15 @@ fn compare_redis_value(
             );
         }
         (RedisValueRepr::Hash(before), RedisValueRepr::Hash(after)) => {
+            // a user's theme is one property whether stored flat or inside `settings`
+            let (before, after) = if entry == "user_data:*" {
+                (
+                    effective_user_settings(before),
+                    effective_user_settings(after),
+                )
+            } else {
+                (before.clone(), after.clone())
+            };
             let fields: BTreeSet<&String> = before.keys().chain(after.keys()).collect();
             for field in fields
                 .into_iter()
@@ -1224,6 +1258,39 @@ impl Comparison<'_> {
             _ => same_text(before, after, self.json),
         }
     }
+}
+
+/// Folds a user hash's flat `theme` field into its `settings` field, so users stored in either
+/// layout compare by their effective settings
+///
+/// A user with no theme reads as the default theme, and absent or null AI settings are left out.
+///
+/// # Arguments
+///
+/// * `fields` - The user hash's fields
+fn effective_user_settings(fields: &BTreeMap<String, String>) -> BTreeMap<String, String> {
+    // settings that don't parse stay as written so a corrupt value still shows as a difference
+    let mut fields = fields.clone();
+    let flat = fields.remove("theme");
+    let stored = match fields.get("settings") {
+        Some(raw) => match serde_json::from_str::<Value>(raw) {
+            Ok(Value::Object(map)) => map,
+            Ok(_) | Err(_) => return fields,
+        },
+        None => serde_json::Map::new(),
+    };
+    // the flat theme wins over one inside the settings, and the default fills a missing theme
+    let theme = flat
+        .and_then(|flat| serde_json::from_str::<Value>(&flat).ok())
+        .or_else(|| stored.get("theme").cloned())
+        .unwrap_or_else(|| Value::String("Automatic".to_owned()));
+    let mut effective = serde_json::Map::new();
+    effective.insert("theme".to_owned(), theme);
+    if let Some(ai) = stored.get("ai").filter(|ai| !ai.is_null()) {
+        effective.insert("ai".to_owned(), ai.clone());
+    }
+    fields.insert("settings".to_owned(), Value::Object(effective).to_string());
+    fields
 }
 
 /// Returns the schema node of the records a Redis family holds, if it holds `Backup` records

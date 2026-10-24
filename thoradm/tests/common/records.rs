@@ -591,7 +591,12 @@ pub async fn seed_and_observe(
     sizes: bool,
 ) -> Vec<String> {
     // connect the API's record writers to this namespace
-    let shared = Box::pin(Shared::new(harness.conf.clone())).await;
+    let shared = Box::pin(Shared::with_opts(
+        harness.conf.clone(),
+        thorium::utils::StartupOpts { apply_schema: true },
+    ))
+    .await
+    .expect("the API starts and applies the schema");
     let client = harness.client().await;
     let tree = schema.tree();
     let settings_node = part_node(&tree, "settings").clone();
@@ -789,7 +794,11 @@ fn record_key(ns: &str, family: &str, record: &Value) -> String {
 
 /// Hash fields the API stores in a record that its `Backup` schema has no property for, with the
 /// reason
-pub const UNMAPPED_FIELDS: &[(&str, &str, &str)] = &[];
+pub const UNMAPPED_FIELDS: &[(&str, &str, &str)] = &[(
+    "user_data",
+    "theme",
+    "the flat form of users[].settings.theme, which the oracle folds into settings",
+)];
 
 /// Returns every hash field of the backed-up record families that maps to no schema property
 ///
@@ -865,7 +874,12 @@ pub fn flavor_count() -> usize {
 /// Panics if a record can't be written.
 pub async fn seed_flavors(harness: &Harness, picks: &[usize]) {
     // connect the API's record writers to this namespace
-    let shared = Box::pin(Shared::new(harness.conf.clone())).await;
+    let shared = Box::pin(Shared::with_opts(
+        harness.conf.clone(),
+        thorium::utils::StartupOpts { apply_schema: true },
+    ))
+    .await
+    .expect("the API starts and applies the schema");
     let tree = BackupSchema::load().tree();
     let all = flavors(Shape::of(&tree));
     let picks: BTreeSet<usize> = picks.iter().map(|pick| pick % all.len()).collect();

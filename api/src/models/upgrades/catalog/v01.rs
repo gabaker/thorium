@@ -9,7 +9,7 @@ pub(super) const ENTRY: CatalogEntry = CatalogEntry {
     released_with: "1.8.1",
     description: "Thorium deployed by the minithor or megathor scripts before the Helm \
                   charts (the baseline every converted cluster starts from)",
-    schema: None,
+    schema: Some("34f954f5941b0d85cab0e897236f57ff201724c443e8e6dc61f00e55e40e306c"),
     prerelease: false,
     sibling: false,
     steps: &[],

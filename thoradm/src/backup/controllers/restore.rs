@@ -16,6 +16,8 @@ use thorium::Conf;
 use thorium::CtlConf;
 use thorium::Thorium;
 use thorium::models::RestoreParams;
+use thorium::models::schema::scylla::SchemaMigrationsTable;
+use thorium::models::upgrades::{Catalog, RevisionId};
 use tokio::task::JoinHandle;
 use tracing::{info, warn};
 
@@ -31,6 +33,8 @@ use crate::backup::graphics::Graphic;
 use crate::backup::kept::{self, KeptUsers};
 use crate::backup::manifest::{self, FORMAT_VERSION};
 use crate::backup::s3::S3RestoreShared;
+use crate::backup::schema::BackupSchemaRecord;
+use crate::backup::schema_restore::{self, ConvergeTo, Origin, RecordRestored};
 use crate::backup::sink::{SinkFactory, TokioFs, create_private_dir};
 use crate::backup::tables::{
     Association, Comment, Commitish, CommitishList, Entity, NetworkPolicy, Node, Notification,
@@ -39,7 +43,7 @@ use crate::backup::tables::{
 use crate::backup::utils::{first_link, is_link};
 use crate::backup::verify::TABLES;
 use crate::backup::version;
-use crate::backup::views::{self, ViewStatements};
+use crate::backup::views;
 use crate::backup::wipe::{ScyllaSnapshots, WIPE_FILE, WipeReport, Wiper};
 use crate::backup::{
     Monitor, MonitorUpdate, Restore, RestoreWorker, S3Monitor, S3MonitorUpdate, S3Restore,
@@ -741,6 +745,22 @@ impl<R: S3Restore> S3RestoreController<R> {
     }
 }
 
+/// What the restore does with the schema: the record the backup holds and what to converge to
+#[derive(Debug, Clone)]
+pub struct SchemaRestore {
+    /// The backup's schema record, when it holds one
+    pub record: Option<BackupSchemaRecord>,
+    /// The revision the restore records for a backup that holds no record, when the target
+    /// records a newer one
+    pub baseline: Option<RevisionId>,
+    /// What the keyspace converges to before and after the load
+    pub to: ConvergeTo,
+    /// The backup, as the admin named it, which the Restored entry records
+    pub reference: String,
+    /// What the archived history keys start with: the backup's finish time
+    pub stamp: String,
+}
+
 /// The restore controller for Thorium
 pub struct RestoreController {
     /// The Thorctl config to use to restore
@@ -753,8 +773,8 @@ pub struct RestoreController {
     s3_conf: Conf,
     /// The number of workers each step uses
     workers: usize,
-    /// The statements of the views the restore drops, when the preflight captured them
-    views: Option<ViewStatements>,
+    /// The backup's schema record and what the restore converges the keyspace to
+    schema: Option<SchemaRestore>,
     /// The format version the backup's archives were written in
     format: u32,
     /// Whether the API flushes its whole Redis database before the Redis restore, instead of
@@ -850,7 +870,7 @@ impl RestoreController {
             namespace: config.thorium.namespace.clone(),
             s3_conf: config.clone(),
             workers,
-            views: None,
+            schema: None,
             format: FORMAT_VERSION,
             redis_flush_all: false,
             kept_users: KeptUsers::default(),
@@ -1009,85 +1029,136 @@ impl RestoreController {
         self
     }
 
-    /// Takes the statements of the views a restore drops, which the preflight captured
+    /// Takes the schema record and target the preflight chose
     ///
     /// # Arguments
     ///
-    /// * `statements` - Each view's statement, by view name
+    /// * `schema` - What the restore does with the schema
     #[must_use]
-    pub fn with_views(mut self, statements: ViewStatements) -> Self {
-        // the restore recreates these once the tables are loaded
-        self.views = Some(statements);
+    pub fn with_schema(mut self, schema: SchemaRestore) -> Self {
+        // the restore converges around the load and writes the record after it
+        self.schema = Some(schema);
         self
     }
 
-    /// Returns the statements of the views the restore drops: the preflight's, or for a restore
-    /// run without one, those of every registered view the target has, saved to `views.cql`
+    /// Converges the target's Scylla schema, before the load so the tables exist with the columns
+    /// the backup's rows carry, and after it so every view the table restores dropped exists again
+    ///
+    /// Each apply holds the namespace's writer lease, so a restore is refused while a migration or
+    /// another schema apply runs.
     ///
     /// # Arguments
     ///
-    /// * `path` - The backup being restored
-    /// * `log` - The run's failure log, beside which `views.cql` is written
-    async fn view_statements(
-        &mut self,
-        path: &Path,
-        log: &FailureLog,
-    ) -> Result<ViewStatements, Error> {
-        // the preflight already captured and saved them
-        if let Some(statements) = self.views.take() {
-            return Ok(statements);
-        }
-        // otherwise capture every registered view's statement, beside the run's failure log
-        let report_dir = log.path().parent().unwrap_or(path).to_path_buf();
-        let tables: Vec<&str> = TABLES.iter().map(|(table, _)| *table).collect();
-        let (statements, missing) =
-            ViewStatements::capture(&self.scylla, &self.namespace, &tables, path, &report_dir)
-                .await?;
-        // a view already missing with no earlier statement can't come back
-        for view in missing {
-            warn!(
-                "{view} is missing and no earlier views.cql holds it, so restore can't recreate it"
-            );
-        }
-        // save them for an admin to replay
-        statements.save(&report_dir, &TokioFs).await?;
-        Ok(statements)
+    /// * `to` - What to converge to
+    ///
+    /// # Returns
+    ///
+    /// How many views the run built
+    async fn converge(&self, to: &ConvergeTo) -> Result<usize, Error> {
+        // the apply changes the schema, so it holds the namespace's writer lease like `thoradm
+        // schema apply`, which refuses it while a migration runs
+        let redis = crate::shared::redis::get_client(&self.s3_conf)
+            .await
+            .map_err(|err| Error::Transient(format!("Redis can't be reached: {err}")))?;
+        let lease = crate::migrate::context::lease_in(&redis, &self.namespace, false, false)
+            .await
+            .map_err(|err| match err {
+                // name Redis and the lease so the cause is clear, not the pool's own message
+                Error::Transient(cause) => Error::Transient(format!(
+                    "Redis can't be reached at {}:{}, which the restore needs for the namespace's \
+                     writer lease: {cause}",
+                    self.s3_conf.redis.host, self.s3_conf.redis.port
+                )),
+                other => other,
+            })?;
+        // the applier's progress lines are the restore's
+        let progress = |line: &str| info!("schema apply: {line}");
+        let result = schema_restore::converge(&self.scylla, &self.s3_conf, to, &progress).await;
+        // give the lease up, so the next writer needn't wait for it to expire
+        lease.release().await;
+        Ok(result?.views_built.len())
     }
 
-    /// Recreates the views the table restores dropped, recording a failure in the run's failure
-    /// log for each view that can't be recreated; the others are recreated all the same
+    /// Converges after the load, recording a failure in the run's failure log when the views can't
+    /// be recreated
     ///
     /// # Arguments
     ///
-    /// * `statements` - Each view's statement, by view name
+    /// * `to` - What to converge to
     /// * `log` - The run's failure log
     ///
     /// # Returns
     ///
-    /// How many views were recreated, or `None` when any couldn't be
-    async fn recreate_views(
+    /// How many views were built, or `None` when the apply failed
+    async fn converge_after(
         &self,
-        statements: &ViewStatements,
+        to: &ConvergeTo,
         log: &FailureLog,
     ) -> Result<Option<usize>, Error> {
         // a view that can't be recreated leaves view-backed routes failing, so it is recorded
-        match statements.recreate(&self.scylla, &self.namespace).await {
-            Ok(done) if done.failed.is_empty() => Ok(Some(done.views.len())),
-            Ok(done) => {
-                for (view, error) in &done.failed {
-                    let record = FailureRecord::failed(
-                        "views",
-                        Operation::PostRestore,
-                        format!("couldn't recreate view {}.{view}: {error}", self.namespace),
-                    )
-                    .key(view);
-                    log.record(&record).await?;
-                }
-                Ok(None)
-            }
+        match self.converge(to).await {
+            Ok(built) => Ok(Some(built)),
             Err(error) => {
                 let record = FailureRecord::failed("views", Operation::PostRestore, &error)
-                    .key(views::VIEWS_FILE);
+                    .key("schema apply");
+                log.record(&record).await?;
+                Ok(None)
+            }
+        }
+    }
+
+    /// Writes the backup's schema record into the target, or the baseline revision for a backup
+    /// that holds none, keeping the history it replaces, and records a failure when it can't be
+    /// written
+    ///
+    /// # Arguments
+    ///
+    /// * `schema` - The record and the backup's name
+    /// * `backends` - The target's backend rows, which a baseline keeps
+    /// * `log` - The run's failure log
+    async fn restore_record(
+        &self,
+        schema: &SchemaRestore,
+        backends: &[SchemaMigrationsTable],
+        log: &FailureLog,
+    ) -> Result<Option<RecordRestored>, Error> {
+        // the time the record is written, which the Restored entry and a baseline's rows carry
+        let at = Utc::now();
+        // the backup's record, or the baseline its data is at; a backup that holds no record
+        // under a target recording no newer revision leaves the target's alone
+        let (record, baseline) = match (&schema.record, &schema.baseline) {
+            (Some(record), _) => (std::borrow::Cow::Borrowed(record), None),
+            (None, Some(baseline)) => (
+                std::borrow::Cow::Owned(schema_restore::baseline_record(baseline, backends, at)),
+                Some(baseline),
+            ),
+            (None, None) => return Ok(None),
+        };
+        let by = schema_restore::restored_by();
+        let origin = Origin {
+            reference: &schema.reference,
+            by: &by,
+            at,
+            stamp: &schema.stamp,
+            baseline: baseline.is_some(),
+        };
+        match schema_restore::restore_record(&self.scylla, &self.namespace, &record, &origin).await
+        {
+            Ok(mut done) => {
+                // a baseline lowers the revision, so the summary lists what the operator plans
+                let replaced = done
+                    .replaced_revision
+                    .as_deref()
+                    .and_then(|replaced| replaced.parse::<RevisionId>().ok());
+                if let (Some(baseline), Some(replaced)) = (baseline, replaced) {
+                    done.planned =
+                        schema_restore::planned_after(baseline, &replaced, &Catalog::PRODUCTION);
+                }
+                Ok(Some(done))
+            }
+            Err(error) => {
+                let record = FailureRecord::failed("schema", Operation::PostRestore, &error)
+                    .key("schema.json");
                 log.record(&record).await?;
                 Ok(None)
             }
@@ -1152,11 +1223,12 @@ impl RestoreController {
 
     /// Restore a clusters data from disk
     ///
-    /// Redis first, then every table, the ones that link or name others after them, then the
-    /// views the tables' restores dropped (even when a table step stopped the restore), then every
-    /// S3 object. Each component's failed objects are recorded and the restore carries on, unless
-    /// `--abort-on-failure` stopped it. A component that can't run at all is recorded and ends the
-    /// restore.
+    /// The schema is converged first, so the tables exist with the backup's columns, then Redis,
+    /// then every table, the ones that link or name others after them, then the schema again so
+    /// the views the tables' restores dropped exist (even when a table step stopped the restore),
+    /// then the backup's schema record, then every S3 object. Each component's failed objects are
+    /// recorded and the restore carries on, unless `--abort-on-failure` stopped it. A component
+    /// that can't run at all is recorded and ends the restore.
     ///
     /// # Arguments
     ///
@@ -1167,10 +1239,27 @@ impl RestoreController {
         path: &Path,
         log: &Arc<FailureLog>,
     ) -> Result<RestoreDone, Error> {
-        // save the statements of the views the table restores drop, before the first drop
-        let statements = self.view_statements(path, log).await?;
         // a target that already holds nodes keeps them, so the backup's aren't restored
         let keep_nodes = kept::holds_nodes(&self.scylla, &self.namespace).await?;
+        // converge the keyspace to what the backup's rows need before the first row is written
+        let schema = self.schema.take();
+        let to = schema
+            .as_ref()
+            .map_or(ConvergeTo::Declared, |schema| schema.to.clone());
+        // without a record to restore, the target's own fingerprints stand through both applies
+        let keep = match &schema {
+            Some(SchemaRestore {
+                record: Some(_), ..
+            }) => Vec::new(),
+            _ => schema_restore::read_backends(&self.scylla, &self.namespace).await?,
+        };
+        if let Err(error) = self.converge(&to).await {
+            let record =
+                FailureRecord::failed("schema", Operation::PreRestore, &error).key("schema apply");
+            log.record(&record).await?;
+            return Err(error);
+        }
+        schema_restore::put_back_backends(&self.scylla, &self.namespace, &keep).await?;
         // restore our redis cluster first
         let (redis_restored, kept_users) = self.restore_redis(path.to_path_buf(), log).await?;
         let mut kept = kept_users
@@ -1188,8 +1277,15 @@ impl RestoreController {
             kept.push(format!("table {}", kept::NODES_TABLE));
         }
         let tables = self.restore_steps(&steps, path, log).await;
-        let recreated = self.recreate_views(&statements, log).await?;
+        let recreated = self.converge_after(&to, log).await?;
+        schema_restore::put_back_backends(&self.scylla, &self.namespace, &keep).await?;
         tables?;
+        // the backup's record, or the baseline its data is at, replaces the target's once the
+        // data it describes is there
+        let schema_record = match &schema {
+            Some(schema) => self.restore_record(schema, &keep, log).await?,
+            None => None,
+        };
         // then the objects, and last the census of the restored tables, which the Redis restore
         // emptied and which listings read
         self.restore_steps(&OBJECT_STEPS, path, log).await?;
@@ -1201,16 +1297,16 @@ impl RestoreController {
                 path.display()
             ),
             None => warn!(
-                "Restored {}, but its views couldn't be recreated: replay {} with cqlsh, or \
-                 restart one API pod, whose schema setup creates missing views",
-                path.display(),
-                views::VIEWS_FILE
+                "Restored {}, but its views couldn't be recreated: run `thoradm schema apply` to \
+                 create them, or restart one API pod",
+                path.display()
             ),
         }
         Ok(RestoreDone {
             views_recreated: recreated,
             census,
             redis_restored,
+            schema_record,
             kept,
         })
     }
@@ -1270,6 +1366,8 @@ pub struct RestoreDone {
     pub census: Vec<String>,
     /// Whether the API restored the backup's Redis state, clearing the Redis database first
     pub redis_restored: bool,
+    /// What the restore did with the backup's schema record, when the backup held one
+    pub schema_record: Option<RecordRestored>,
     /// What the restore kept of the target in place of the backup's (`user <name>`, `table nodes`)
     pub kept: Vec<String>,
 }
@@ -1334,6 +1432,61 @@ pub const REINDEX_STEP: &str = "Elastic isn't rebuilt: run the search-streamer w
      rebuild the search indexes from the restored data (see the admin guide, How Restore Uses a \
      Backup)";
 
+/// How an admin makes the operator read a moved record at once instead of at its hourly drift read
+const FOLLOW_NOW: &str = "`kubectl -n <namespace> delete configmap thorium-upgrade-state` and then \
+     `kubectl -n <namespace> rollout restart deployment operator`";
+
+/// Describes the step a recorded baseline leaves to the operator and the admin: the steps after the
+/// baseline run once the operator reads the record, the data steps among them after their approvals
+///
+/// # Arguments
+///
+/// * `record` - What the restore did with the schema record
+fn baseline_step(record: &RecordRestored) -> String {
+    // the operator follows the record at its drift read, or at once after a restart without its mirror
+    format!(
+        "the restored data is converted by the {} upgrade steps after revision {}, which the \
+         operator plans and runs once it reads the record: at its hourly drift read, or at once \
+         after {FOLLOW_NOW}; the data steps among them wait for their approvals (see the upgrade \
+         guide)",
+        record.planned.len(),
+        record.revision.as_deref().unwrap_or("none")
+    )
+}
+
+/// Describes the step a restored record leaves to the operator when it moved the revision: the
+/// operator plans from its mirror until it reads the record
+///
+/// # Arguments
+///
+/// * `record` - What the restore did with the schema record
+fn moved_step(record: &RecordRestored) -> String {
+    // the operator keeps planning from its ConfigMap mirror until it reads the moved record
+    format!(
+        "the restore moved the recorded revision from {} to {}; the operator keeps reporting the \
+         old revision and runs any upgrade steps after the new one only once it reads the record: \
+         at its hourly drift read, or at once after {FOLLOW_NOW} (see the upgrade guide)",
+        record.replaced_revision.as_deref().unwrap_or("none"),
+        record.revision.as_deref().unwrap_or("none")
+    )
+}
+
+/// Lists the steps a restored schema record leaves to the operator and the admin
+///
+/// # Arguments
+///
+/// * `record` - What the restore did with the schema record, if it restored one
+fn record_steps(record: Option<&RecordRestored>) -> Option<String> {
+    match record {
+        // a recorded baseline leaves the conversion of the restored data to the operator
+        Some(record) if record.baseline => Some(baseline_step(record)),
+        // a record that moved the revision leaves the operator to follow it
+        Some(record) if record.revision != record.replaced_revision => Some(moved_step(record)),
+        // a record at the target's revision, or none, leaves the operator nothing to follow
+        _ => None,
+    }
+}
+
 /// What a restore did, logged when it ends and written as `summary.json` in its report directory
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RestoreSummary {
@@ -1363,6 +1516,9 @@ pub struct RestoreSummary {
     pub broken_links: Vec<FailureRecord>,
     /// How many views the restore recreated, or `None` when they couldn't be
     pub views_recreated: Option<usize>,
+    /// What the restore did with the backup's schema record, when the backup held one
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub schema_record: Option<RecordRestored>,
     /// The census kinds the restore rebuilt
     pub census: Vec<String>,
     /// What the restore kept of the target in place of the backup's: its operator users
@@ -1438,6 +1594,36 @@ impl RestoreSummary {
         match self.views_recreated {
             Some(count) => info!("restore summary: {count} views recreated"),
             None => warn!("restore summary: the views couldn't be recreated"),
+        }
+        match &self.schema_record {
+            // a baseline is said as such, with the steps it leaves for the operator
+            Some(record) if record.baseline => {
+                info!(
+                    "restore summary: the backup holds no schema record, so the restore recorded \
+                     revision {}, whose layouts its data is in (replacing {}), and archived {} \
+                     history entries",
+                    record.revision.as_deref().unwrap_or("none"),
+                    record.replaced_revision.as_deref().unwrap_or("none"),
+                    record.archived
+                );
+                if !record.planned.is_empty() {
+                    info!(
+                        "restore summary: the operator plans these steps once it reads the record: \
+                         {}",
+                        record.planned.join(", ")
+                    );
+                }
+            }
+            Some(record) => info!(
+                "restore summary: schema record restored at revision {} (replacing {}): {} rows, \
+                 {} issue rows, {} history entries archived",
+                record.revision.as_deref().unwrap_or("none"),
+                record.replaced_revision.as_deref().unwrap_or("none"),
+                record.rows,
+                record.issues,
+                record.archived
+            ),
+            None => (),
         }
         if !self.census.is_empty() {
             info!(
@@ -1589,6 +1775,9 @@ async fn restore_warnings(
 /// Restores a backup to a cluster and returns how the run ended
 ///
 /// Every preflight check runs before the first write; a refusal is recorded and changes nothing.
+/// When the backup holds the whole deployment's state, its schema record, or the baseline
+/// revision when it holds none, replaces the target's, and the summary names the steps left to
+/// the operator; otherwise the target keeps its own record and the summary says why.
 ///
 /// # Arguments
 ///
@@ -1671,13 +1860,29 @@ pub async fn run(
         .as_ref()
         .map_or(1, |manifest| manifest.format_version);
     let mut controller = RestoreController::new(config, ctl_conf, scylla, workers)
-        .with_views(cleared.views.clone())
+        .with_schema(SchemaRestore {
+            record: cleared.schema.clone(),
+            baseline: cleared.baseline.clone(),
+            to: cleared.converge_to.clone(),
+            reference: restore_args.backup.display().to_string(),
+            stamp: cleared.manifest.as_ref().map_or_else(
+                || "legacy".to_owned(),
+                |manifest| {
+                    manifest
+                        .finished
+                        .to_rfc3339_opts(chrono::SecondsFormat::Nanos, true)
+                },
+            ),
+        })
         .with_transfers(restore_args.retries, concurrency)
         .with_format(format)
         .with_redis_flush_all(restore_args.redis_flush_all)
         .with_kept_users(kept_users.clone());
     // retore this cluster from disk
     let done = controller.restore(&restore_args.backup, &log).await?;
+    // a recorded baseline or a moved revision leaves the operator a record to follow
+    let mut not_done = vec![REINDEX_STEP.to_owned()];
+    not_done.extend(record_steps(done.schema_record.as_ref()));
     // sum up what was restored and what the flags accepted
     let summary = RestoreSummary {
         backup: restore_args.backup.clone(),
@@ -1695,14 +1900,16 @@ pub async fn run(
         missing_from_backup: cleared.missing.clone(),
         broken_links: cleared.broken_links.clone(),
         views_recreated: done.views_recreated,
+        schema_record: done.schema_record,
         census: done.census,
         kept: done.kept,
-        not_done: vec![REINDEX_STEP.to_owned()],
+        not_done,
         warnings: restore_warnings(config, restore_args, done.redis_restored, format)
             .await
             .into_iter()
             .chain(cleared.version_mismatch.as_ref().map(version::accepted))
             .chain(kept_users.unread)
+            .chain(cleared.record_skipped.clone())
             .collect(),
         started,
         finished: Utc::now(),
@@ -1742,11 +1949,68 @@ pub async fn handle(restore_args: &RestoreBackup, args: &Args) -> Result<RunOutc
 
 #[cfg(test)]
 mod tests {
-    use super::restore_warnings;
+    use super::{RecordRestored, record_steps, restore_warnings};
     use crate::args::RestoreBackup;
     use clap::Parser;
     use std::path::{Path, PathBuf};
     use thorium::Conf;
+
+    /// Builds what a restore did with a schema record
+    ///
+    /// # Arguments
+    ///
+    /// * `revision` - The revision the record was restored at
+    /// * `replaced` - The revision the target recorded before the restore
+    /// * `baseline` - Whether the restore recorded the baseline
+    fn restored(revision: &str, replaced: &str, baseline: bool) -> RecordRestored {
+        RecordRestored {
+            revision: Some(revision.to_owned()),
+            replaced_revision: Some(replaced.to_owned()),
+            archived: 0,
+            rows: 0,
+            issues: 0,
+            baseline,
+            planned: vec!["2026-10-v03 drain-reactions".to_owned()],
+        }
+    }
+
+    /// A restore that leaves the revision where it was leaves the operator nothing to follow
+    #[test]
+    fn an_unmoved_record_leaves_no_step() {
+        // the same revision before and after, and no record at all
+        assert_eq!(
+            record_steps(Some(&restored("2026-10-v04", "2026-10-v04", false))),
+            None
+        );
+        assert_eq!(record_steps(None), None);
+    }
+
+    /// A restore that moves the revision tells the admin how to make the operator follow it
+    #[test]
+    fn a_moved_record_names_the_restart() {
+        // a record restored at an older revision than the target's
+        let step = record_steps(Some(&restored("2026-10-v03", "2026-10-v04", false))).unwrap();
+        assert!(step.contains("from 2026-10-v04 to 2026-10-v03"), "{step}");
+        assert!(
+            step.contains("rollout restart deployment operator"),
+            "{step}"
+        );
+    }
+
+    /// A recorded baseline names its planned steps and the restart
+    #[test]
+    fn a_baseline_names_its_steps_and_the_restart() {
+        // a record-less backup restored at the baseline revision
+        let step = record_steps(Some(&restored("2026-10-v02", "2026-10-v03", true))).unwrap();
+        assert!(
+            step.contains("1 upgrade steps after revision 2026-10-v02"),
+            "{step}"
+        );
+        assert!(
+            step.contains("rollout restart deployment operator"),
+            "{step}"
+        );
+    }
 
     /// Loads the test config the integration tests start from
     fn conf() -> Conf {

@@ -313,7 +313,12 @@ async fn runtime(client: &Thorium, names: &Names, group: &str) {
 /// * `group` - The group to give a metagroup
 async fn logins(harness: &Harness, client: &Thorium, names: &Names, group: &str) {
     // the API's shared state for this namespace
-    let shared = Box::pin(thorium::utils::Shared::new(harness.conf.clone())).await;
+    let shared = Box::pin(thorium::utils::Shared::with_opts(
+        harness.conf.clone(),
+        thorium::utils::StartupOpts { apply_schema: true },
+    ))
+    .await
+    .expect("the API starts and applies the schema");
     // a metagroup on the main group, which an LDAP sync would fill
     let mut found = client.groups.get(group).await.unwrap();
     found.users.metagroups.insert(names.group("saturn"));

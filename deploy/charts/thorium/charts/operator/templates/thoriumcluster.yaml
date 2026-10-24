@@ -70,12 +70,43 @@ spec:
     {{- with .targetRevision }}
     target_revision: {{ . | quote }}
     {{- end }}
+    {{- with .startingRevision }}
+    starting_revision: {{ . | quote }}
+    {{- end }}
     auto_target_dev: {{ .autoTargetDev | default false }}
+    {{- if .dangerousDowngradeLossy }}
+    dangerous_downgrade_lossy: true
+    {{- end }}
     {{- with .approvals }}
     approvals:
       {{- range . }}
       - step: {{ .step | quote }}
         backup: {{ .backup | quote }}
+        {{- with .acceptIssues }}
+        accept_issues:
+          {{- range . }}
+          - {{ . | quote }}
+          {{- end }}
+        {{- end }}
+        {{- if .acceptLoss }}
+        accept_loss: true
+        {{- end }}
+        {{- with .confirm }}
+        confirm: {{ . | quote }}
+        {{- end }}
+        {{- if .acceptBackupGaps }}
+        accept_backup_gaps: true
+        {{- end }}
+      {{- end }}
+    {{- end }}
+    {{- with .driftAcknowledged }}
+    drift_acknowledged:
+      {{- range . }}
+      - backend: {{ .backend | quote }}
+        object: {{ .object | quote }}
+        {{- with .fingerprint }}
+        fingerprint: {{ . | quote }}
+        {{- end }}
       {{- end }}
     {{- end }}
   {{- end }}

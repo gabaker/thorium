@@ -15,7 +15,10 @@ use serde_json::json;
 use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex, PoisonError};
 use thorium::Error;
-use thorium::models::upgrades::{SchemaBackend, UpgradeApproval, UpgradeStatus};
+use thorium::models::upgrades::{
+    DriftSummary, JobFailure, SchemaBackend, UpgradeApproval, UpgradeCondition,
+    UpgradeConditionType, UpgradeStatus,
+};
 
 /// A struct representing an environment variable
 #[derive(Serialize, Deserialize, Clone, Debug, JsonSchema, Hash, Eq, PartialEq)]
@@ -961,7 +964,7 @@ pub async fn set_upgrade_status(
     let current = tracker.current();
     let generation = tracker.cluster.metadata.generation;
     if status_unchanged(&current, generation, phase, message.as_ref(), None)
-        && current.upgrade.as_ref() == Some(&upgrade)
+        && upgrade_unchanged(&current, &upgrade)
     {
         return;
     }
@@ -972,7 +975,7 @@ pub async fn set_upgrade_status(
         "phase": phase,
         "message": message,
         "observed_generation": generation,
-        "upgrade": upgrade,
+        "upgrade": upgrade_value(&current, &upgrade),
     });
     // stamp the time only when the phase or message changed
     if transitioned {
@@ -994,11 +997,223 @@ pub async fn set_upgrade_progress(
     upgrade: UpgradeStatus,
 ) {
     // skip the update if the progress didn't change
-    if tracker.current().upgrade.as_ref() == Some(&upgrade) {
+    if upgrade_unchanged(&tracker.current(), &upgrade) {
         return;
     }
     // patch just the upgrade progress
-    send_status_patch(client, tracker, json!({ "upgrade": upgrade })).await;
+    let current = tracker.current();
+    send_status_patch(
+        client,
+        tracker,
+        json!({ "upgrade": upgrade_value(&current, &upgrade) }),
+    )
+    .await;
+}
+
+/// Build the upgrade progress as a merge patch sends it
+///
+/// A list the progress leaves out when it is empty isn't cleared by a merge patch, so a list that
+/// was reported and is empty now is sent as an empty list.
+///
+/// # Arguments
+///
+/// * `current` - The status last written
+/// * `upgrade` - The upgrade progress to report
+fn upgrade_value(current: &ThoriumClusterStatus, upgrade: &UpgradeStatus) -> serde_json::Value {
+    // stale approvals that were reported and no longer are, are cleared explicitly
+    let mut value = serde_json::to_value(upgrade).unwrap_or_default();
+    let reported = current
+        .upgrade
+        .as_ref()
+        .is_some_and(|reported| !reported.stale_approvals.is_empty());
+    if reported
+        && upgrade.stale_approvals.is_empty()
+        && let Some(fields) = value.as_object_mut()
+    {
+        fields.insert("stale_approvals".to_owned(), json!([]));
+    }
+    value
+}
+
+/// Check whether merging an upgrade progress into a status would leave it unchanged
+///
+/// Fields an upgrade progress leaves out when empty, such as its conditions and failure, are
+/// kept by the merge, so they are compared as the merge would leave them.
+///
+/// # Arguments
+///
+/// * `current` - The status last written
+/// * `upgrade` - The upgrade progress to merge
+fn upgrade_unchanged(current: &ThoriumClusterStatus, upgrade: &UpgradeStatus) -> bool {
+    // merge the progress into the current one the way the API server would
+    let mut merged = serde_json::to_value(&current.upgrade).unwrap_or_default();
+    json_patch::merge(
+        &mut merged,
+        &serde_json::to_value(upgrade).unwrap_or_default(),
+    );
+    // compare the parsed results, since a null the merge removes reads back as unset
+    serde_json::from_value::<UpgradeStatus>(merged).ok() == current.upgrade
+}
+
+/// Set or clear one condition in a `ThoriumCluster`'s upgrade status, leaving the others
+///
+/// A condition that held and no longer does is kept with status `"False"` and the given
+/// message; one that never held is left out.
+///
+/// # Arguments
+///
+/// * `client` - The kube client to patch the status with
+/// * `tracker` - The cluster to update and the status last written for it
+/// * `kind` - The condition to set
+/// * `holds` - Whether the condition holds
+/// * `message` - What the condition means for an admin
+pub async fn set_upgrade_condition(
+    client: &Client,
+    tracker: &StatusTracker,
+    kind: UpgradeConditionType,
+    holds: bool,
+    message: String,
+) {
+    // get the conditions reported now
+    let mut conditions = tracker
+        .current()
+        .upgrade
+        .map_or_else(Vec::new, |upgrade| upgrade.conditions);
+    let existing = conditions
+        .iter()
+        .position(|condition| condition.kind == kind);
+    // a condition that never held needs no entry
+    if existing.is_none() && !holds {
+        return;
+    }
+    // build the condition as it should be reported
+    let status = if holds { "True" } else { "False" };
+    let condition = UpgradeCondition {
+        kind,
+        status: status.to_owned(),
+        message,
+    };
+    // replace the existing entry or add one, skipping the update if nothing changed
+    match existing {
+        Some(index) if conditions[index] == condition => return,
+        Some(index) => conditions[index] = condition,
+        None => conditions.push(condition),
+    }
+    // patch the full list since a merge patch replaces lists whole
+    send_status_patch(
+        client,
+        tracker,
+        json!({ "upgrade": { "conditions": conditions } }),
+    )
+    .await;
+}
+
+/// Report the schema drift in a `ThoriumCluster`'s upgrade status: each backend's status and the
+/// capped summary
+///
+/// # Arguments
+///
+/// * `client` - The kube client to patch the status with
+/// * `tracker` - The cluster to update and the status last written for it
+/// * `summary` - The drift the status Job reported
+pub async fn set_upgrade_drift(client: &Client, tracker: &StatusTracker, summary: &DriftSummary) {
+    // skip the update if the reported drift is already this one
+    let current = tracker.current().upgrade;
+    let reported = current.as_ref().and_then(|upgrade| upgrade.drift.as_ref());
+    let schema = current.as_ref().map(|upgrade| &upgrade.schema);
+    if reported == Some(summary) && schema == Some(&summary.backends) {
+        return;
+    }
+    // patch both; a merge patch replaces the objects list whole
+    send_status_patch(
+        client,
+        tracker,
+        json!({ "upgrade": { "schema": summary.backends, "drift": summary } }),
+    )
+    .await;
+}
+
+/// Set or clear the failed Job reported in a `ThoriumCluster`'s upgrade status
+///
+/// # Arguments
+///
+/// * `client` - The kube client to patch the status with
+/// * `tracker` - The cluster to update and the status last written for it
+/// * `failure` - The failed Job to report, or None to clear it
+pub async fn set_upgrade_failure(
+    client: &Client,
+    tracker: &StatusTracker,
+    failure: Option<JobFailure>,
+) {
+    // skip the update if the reported failure is already this one
+    let current = tracker
+        .current()
+        .upgrade
+        .and_then(|upgrade| upgrade.failure);
+    if current == failure {
+        return;
+    }
+    // a null clears the failure in a merge patch
+    send_status_patch(
+        client,
+        tracker,
+        json!({ "upgrade": { "failure": failure } }),
+    )
+    .await;
+}
+
+/// Set a `ThoriumCluster`'s status to what the previous release's types parse, removing every
+/// newer upgrade field a merge patch would otherwise keep
+///
+/// # Arguments
+///
+/// * `client` - The kube client to patch the status with
+/// * `tracker` - The cluster to update and the status last written for it
+/// * `phase` - The new phase for this `ThoriumCluster`
+/// * `message` - What an admin does next
+/// * `upgrade` - The upgrade progress to report, which holds no field the previous release lacks
+pub async fn set_handover_status(
+    client: &Client,
+    tracker: &StatusTracker,
+    phase: ClusterPhase,
+    message: String,
+    upgrade: UpgradeStatus,
+) {
+    // skip the update if the status already is this one
+    let current = tracker.current();
+    let generation = tracker.cluster.metadata.generation;
+    if status_unchanged(&current, generation, phase, Some(&message), None)
+        && current.upgrade.as_ref() == Some(&upgrade)
+    {
+        return;
+    }
+    // a null removes a field in a merge patch, so every newer one is sent as null
+    let mut value = serde_json::to_value(&upgrade).unwrap_or_default();
+    if let Some(fields) = value.as_object_mut() {
+        for newer in [
+            "schema",
+            "drift",
+            "conditions",
+            "stale_approvals",
+            "loss",
+            "failure",
+        ] {
+            fields.insert(newer.to_owned(), serde_json::Value::Null);
+        }
+        fields.insert("steps".to_owned(), json!([]));
+    }
+    let transitioned = current.phase != Some(phase) || current.message.as_ref() != Some(&message);
+    let mut status = json!({
+        "phase": phase,
+        "message": message,
+        "observed_generation": generation,
+        "upgrade": value,
+    });
+    // stamp the time only when the phase or message changed
+    if transitioned {
+        status["last_transition"] = json!(chrono::Utc::now().to_rfc3339());
+    }
+    send_status_patch(client, tracker, status).await;
 }
 
 /// Send a merge patch to a `ThoriumCluster`'s status subresource, logging any failure
@@ -2030,5 +2245,66 @@ mod tests {
         let mut found = Vec::new();
         find_unsigned_formats(&writes[0].body, &mut found);
         assert!(found.is_empty(), "{found:?}");
+    }
+
+    /// A condition is set, kept through progress updates that leave it out, and cleared to
+    /// false, each written once
+    #[tokio::test]
+    async fn upgrade_conditions_survive_progress() {
+        // a cluster reporting progress, with status patches answered
+        let mut cluster = crate::k8s::clusters::tests::namespaced_cluster(
+            crate::k8s::clusters::tests::full_spec(),
+        );
+        cluster.status = Some(ThoriumClusterStatus {
+            upgrade: Some(progress_at("2026-10-v02")),
+            ..ThoriumClusterStatus::default()
+        });
+        let path = "/apis/sandia.gov/v1/namespaces/thorium/thoriumclusters/thorium/status";
+        let fake = crate::k8s::clusters::tests::FakeKube::default().route(
+            "PATCH",
+            path,
+            200,
+            serde_json::to_value(&cluster).expect("cluster"),
+        );
+        let client = fake.client();
+        let tracker = StatusTracker::new(Arc::new(cluster));
+        let kind = UpgradeConditionType::SchemaSkew;
+        // clearing a condition that never held writes nothing
+        set_upgrade_condition(&client, &tracker, kind, false, "fine".to_owned()).await;
+        assert!(fake.writes().is_empty());
+        // setting it writes it once
+        set_upgrade_condition(&client, &tracker, kind, true, "skewed".to_owned()).await;
+        set_upgrade_condition(&client, &tracker, kind, true, "skewed".to_owned()).await;
+        assert_eq!(fake.writes().len(), 1);
+        // the same progress, which leaves the conditions out, writes nothing and keeps them
+        set_upgrade_progress(&client, &tracker, progress_at("2026-10-v02")).await;
+        assert_eq!(fake.writes().len(), 1);
+        let conditions = tracker.current().upgrade.expect("upgrade").conditions;
+        assert_eq!(conditions.len(), 1);
+        // clearing it keeps it as false
+        set_upgrade_condition(&client, &tracker, kind, false, "fine".to_owned()).await;
+        assert_eq!(fake.writes().len(), 2);
+        let conditions = tracker.current().upgrade.expect("upgrade").conditions;
+        assert_eq!(conditions[0].status, "False");
+        // a failure is reported, then cleared with a null
+        let failure = JobFailure {
+            job: "job".to_owned(),
+            pod: None,
+            log_tail: Vec::new(),
+        };
+        set_upgrade_failure(&client, &tracker, Some(failure)).await;
+        set_upgrade_failure(&client, &tracker, None).await;
+        set_upgrade_failure(&client, &tracker, None).await;
+        let writes = fake.writes();
+        assert_eq!(writes.len(), 4);
+        assert!(writes[3].body["status"]["upgrade"]["failure"].is_null());
+        assert!(
+            tracker
+                .current()
+                .upgrade
+                .expect("upgrade")
+                .failure
+                .is_none()
+        );
     }
 }

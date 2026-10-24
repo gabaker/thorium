@@ -542,16 +542,26 @@ async fn every_bucket_key_is_in_the_index_or_declared_orphan() {
         .filter_map(|row| row.expect("a row decodes").0)
         .collect();
     let client = harness.client().await;
+    let namespace = &harness.conf.thorium.namespace;
     for user in client.users.list_details().await.unwrap() {
         if user.has_image {
+            // the API keys an icon by namespace and username; an icon stored by username alone
+            // from an older release is named by its own record all the same
+            let namespaced = format!("users/{namespace}/{}/icon.", user.username);
+            let by_name = format!("users/{}/icon.", user.username);
             referenced.extend(
                 keys.iter()
-                    .filter(|key| key.starts_with(&format!("users/{}/icon.", user.username)))
+                    .filter(|key| key.starts_with(&namespaced) || key.starts_with(&by_name))
                     .cloned(),
             );
         }
     }
-    assert!(referenced.contains(&seeded.image) && referenced.contains(&seeded.icon));
+    assert!(
+        referenced.contains(&seeded.image) && referenced.contains(&seeded.icon),
+        "the rows name {referenced:?}, not the seeded image {} and icon {}",
+        seeded.image,
+        seeded.icon
+    );
     // every key in the bucket is in the index, or is the declared orphan
     let index = indexed(&dir);
     let missing: Vec<&String> = keys

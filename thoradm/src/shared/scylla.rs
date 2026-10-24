@@ -2,12 +2,18 @@
 
 use scylla::client::session::Session;
 use scylla::client::session_builder::SessionBuilder;
+use scylla::errors::{
+    ConnectionError, ConnectionPoolError, ConnectionSetupRequestErrorKind, DbError, MetadataError,
+    NewSessionError,
+};
 #[cfg(feature = "test-support")]
 use scylla::policies::address_translator::AddressTranslator;
 #[cfg(feature = "test-support")]
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 use thorium::Conf;
 use thorium::models::schema::session_builder;
+use tracing::warn;
 
 mod controller;
 mod ranges;
@@ -97,4 +103,102 @@ pub async fn get_client(config: &Conf) -> Result<Session, Error> {
     // build a scylla session
     let scylla = builder(config).build().await?;
     Ok(scylla)
+}
+
+/// How long to wait between attempts to connect while waiting for Scylla
+const CONNECT_RETRY: Duration = Duration::from_secs(3);
+
+/// Build a scylla client, retrying until the wait runs out
+///
+/// # Arguments
+///
+/// * `config` - The config for this Thorium cluster
+/// * `wait` - How many seconds to keep retrying, if any
+pub async fn connect_waiting(config: &Conf, wait: Option<u64>) -> Result<Session, Error> {
+    // stop retrying once the wait has passed
+    let deadline = Instant::now() + Duration::from_secs(wait.unwrap_or_default());
+    loop {
+        // try once, and again after a pause while the wait lasts
+        match get_client(config).await {
+            Ok(session) => return Ok(session),
+            Err(err) if Instant::now() < deadline => {
+                warn!("Scylla isn't accepting connections yet: {err}");
+                tokio::time::sleep(CONNECT_RETRY).await;
+            }
+            Err(Error::ScyllaNewSession(err)) => {
+                return Err(Error::Transient(format!("Scylla can't be reached: {err}")));
+            }
+            Err(err) => return Err(err),
+        }
+    }
+}
+
+/// Check whether a failed session means Scylla rejected Thorium's login rather than being
+/// unreachable
+///
+/// # Arguments
+///
+/// * `error` - The error the session failed with
+#[must_use]
+pub fn is_auth_error(error: &NewSessionError) -> bool {
+    // get the last error of the control connection behind a failed metadata fetch
+    let NewSessionError::MetadataError(MetadataError::ConnectionPoolError(
+        ConnectionPoolError::Broken {
+            last_connection_error: ConnectionError::ConnectionSetupRequestError(setup),
+        },
+    )) = error
+    else {
+        return false;
+    };
+    // check why the control connection's login failed
+    is_auth_setup_error(&setup.error)
+}
+
+/// Check whether a failed connection setup request means Scylla rejected the credentials
+///
+/// # Arguments
+///
+/// * `kind` - Why the connection setup request failed
+fn is_auth_setup_error(kind: &ConnectionSetupRequestErrorKind) -> bool {
+    // Scylla answered the login with an authentication error or demanded credentials
+    matches!(
+        kind,
+        ConnectionSetupRequestErrorKind::DbError(DbError::AuthenticationError, _)
+            | ConnectionSetupRequestErrorKind::MissingAuthentication
+    )
+}
+
+#[cfg(test)]
+mod tests {
+    use scylla::errors::{ConnectionSetupRequestErrorKind, DbError, NewSessionError};
+
+    use super::{is_auth_error, is_auth_setup_error};
+
+    /// A login Scylla rejects, or one it demands credentials for, is an authentication failure
+    /// and nothing else a connection can fail with is
+    ///
+    /// The driver's `ConnectionSetupRequestError` can't be built outside the driver, so the
+    /// classification of its kind is tested apart from the error that wraps it.
+    #[test]
+    fn only_a_rejected_login_is_an_authentication_failure() {
+        // a rejected login and a missing one
+        assert!(is_auth_setup_error(
+            &ConnectionSetupRequestErrorKind::DbError(
+                DbError::AuthenticationError,
+                "bad credentials".to_owned()
+            )
+        ));
+        assert!(is_auth_setup_error(
+            &ConnectionSetupRequestErrorKind::MissingAuthentication
+        ));
+        // an overloaded node and a role without a privilege are other failures
+        assert!(!is_auth_setup_error(
+            &ConnectionSetupRequestErrorKind::DbError(DbError::Overloaded, "busy".to_owned())
+        ));
+        assert!(!is_auth_setup_error(
+            &ConnectionSetupRequestErrorKind::DbError(DbError::Unauthorized, "denied".to_owned())
+        ));
+        // an error that isn't a failed login at all
+        assert!(!is_auth_error(&NewSessionError::EmptyKnownNodesList));
+    }
 }

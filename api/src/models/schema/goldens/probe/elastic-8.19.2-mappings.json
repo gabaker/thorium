@@ -1,0 +1,94 @@
+{
+  "RepoResults": {
+    "testing_l7_cap_capture_results_repos": {
+      "mappings": {
+        "properties": {
+          "children": {
+            "type": "text"
+          },
+          "files": {
+            "type": "text"
+          },
+          "group": {
+            "type": "keyword"
+          },
+          "results": {
+            "type": "text"
+          },
+          "streamed": {
+            "type": "date"
+          },
+          "url": {
+            "type": "keyword"
+          }
+        }
+      }
+    }
+  },
+  "RepoTags": {
+    "testing_l7_cap_capture_tags_repos": {
+      "mappings": {
+        "properties": {
+          "group": {
+            "type": "keyword"
+          },
+          "streamed": {
+            "type": "date"
+          },
+          "tags": {
+            "type": "text"
+          },
+          "url": {
+            "type": "keyword"
+          }
+        }
+      }
+    }
+  },
+  "SampleResults": {
+    "testing_l7_cap_capture_results_samples": {
+      "mappings": {
+        "properties": {
+          "children": {
+            "type": "text"
+          },
+          "files": {
+            "type": "text"
+          },
+          "group": {
+            "type": "keyword"
+          },
+          "results": {
+            "type": "text"
+          },
+          "sha256": {
+            "type": "keyword"
+          },
+          "streamed": {
+            "type": "date"
+          }
+        }
+      }
+    }
+  },
+  "SampleTags": {
+    "testing_l7_cap_capture_tags_samples": {
+      "mappings": {
+        "properties": {
+          "group": {
+            "type": "keyword"
+          },
+          "sha256": {
+            "type": "keyword"
+          },
+          "streamed": {
+            "type": "date"
+          },
+          "tags": {
+            "type": "text"
+          }
+        }
+      }
+    }
+  }
+}

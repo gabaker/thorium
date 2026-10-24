@@ -134,9 +134,16 @@ jobs:
             -e s3_region=us-east-1
           check prefixed dev-thorium -e namespace_prefix=dev -e thorium_version=1.2.3 \
             -e thorium_container_registry=registry.example.com:5000 -e thorium_scaler_enabled=false
-          check dev thorium -e thorium_upgrade_auto_target_dev=true
+          check dev thorium -e thorium_upgrade_auto_target_dev=true \
+            -e thorium_upgrade_dangerous_downgrade_lossy=true
           grep -q '^      autoTargetDev: true$' "${render_dir}/dev.yaml" \
             || { echo "thorium_upgrade_auto_target_dev didn't set autoTargetDev"; exit 1; }
+          grep -q '^      dangerousDowngradeLossy: true$' "${render_dir}/dev.yaml" \
+            || { echo "thorium_upgrade_dangerous_downgrade_lossy didn't set dangerousDowngradeLossy"; exit 1; }
+          grep -q '^      dangerousDowngradeLossy: false$' "${render_dir}/defaults.yaml" \
+            || { echo "dangerousDowngradeLossy isn't false by default"; exit 1; }
+          grep -q '^      driftAcknowledged: \[\]$' "${render_dir}/defaults.yaml" \
+            || { echo "driftAcknowledged isn't empty by default"; exit 1; }
       # Only a dev deployment's namespace keeps the dev label, which marks it a dev cluster
       - name: Check megathor labels the Thorium namespace only for autoTargetDev
         run: |
