@@ -1,9 +1,9 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::io::Write;
 
+use crate::utils::paint::Paint;
 use futures::stream::{self, StreamExt};
 use http::StatusCode;
-use owo_colors::OwoColorize;
 use thorium::{
     Error, Thorium,
     models::{Repo, Sample, TagDeleteRequest, TagRequest},

@@ -3,6 +3,8 @@
 //! Secrets are read from files or stdin and only ever sent to the API; every view prints
 //! credentials by their fingerprints, since the API never returns a secret.
 
+mod documents;
+
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
@@ -20,6 +22,7 @@ use thorium::{Error, Thorium};
 use uuid::Uuid;
 
 use crate::args::Args;
+use crate::args::helpers::EditArgs;
 use crate::args::models::{
     AddBan, AddOwnEndpoint, Bans, Catalogs, ClearBan, CreateArgs, CreateCredential, Credentials,
     DeleteModel, DescribeArgs, DescribeBan, DescribeCatalogModel, Endpoints, GetBans, GetCatalog,
@@ -27,6 +30,7 @@ use crate::args::models::{
     RemoveOwnEndpoint, RotateCredential, SetDefaultProfiles, SetOwnCredential, Settings,
     UpdateCredential, UpdateEndpoint, UpdateOwnEndpoint, UpdateProfile,
 };
+use crate::handlers::agents::confirm_delete;
 use crate::utils;
 use crate::utils::output::{self, OutputFormat, View};
 use crate::utils::render;
@@ -812,15 +816,39 @@ async fn create(
 
 /// Delete a model entity of one kind
 ///
+/// A dry run only says what would be deleted. Otherwise the person is asked to confirm unless
+/// `--skip-confirm` was given, and without a terminal the delete is refused. A delete that
+/// Thorium refuses because something still references the entity prints the reason on one line.
+///
 /// # Arguments
 ///
 /// * `thorium` - The Thorium client
 /// * `kind` - The kind to delete
 /// * `cmd` - The delete command
 async fn delete(thorium: &Thorium, kind: EntityKinds, cmd: &DeleteModel) -> Result<(), Error> {
-    // find and delete the entity
+    // find the entity
     let entity = find(thorium, &[kind], &cmd.entity).await?;
-    thorium.entities.delete(entity.id).await?;
+    // a dry run only says what would be deleted
+    if cmd.dry_run {
+        println!(
+            "Dry run: would delete {} {} ({})",
+            kind_name(kind),
+            entity.name,
+            entity.id
+        );
+        return Ok(());
+    }
+    // confirm the deletion
+    if !confirm_delete(kind_name(kind), &entity.name, cmd.skip_confirm)? {
+        println!("Cancelled.");
+        return Ok(());
+    }
+    // delete the entity, which the API refuses while something still references it
+    thorium
+        .entities
+        .delete(entity.id)
+        .await
+        .map_err(utils::delete_refusal)?;
     println!(
         "Deleted {} {} ({})",
         kind_name(kind),
@@ -830,13 +858,45 @@ async fn delete(thorium: &Thorium, kind: EntityKinds, cmd: &DeleteModel) -> Resu
     Ok(())
 }
 
+/// Refuse the edit flags that only make sense with a document change, and refuse mixing a
+/// document change with flags that change one setting each
+///
+/// # Arguments
+///
+/// * `edit` - The edit flags
+/// * `flags_given` - Whether any flag that changes one setting was given
+fn check_update_flags(edit: &EditArgs, flags_given: bool) -> Result<(), Error> {
+    // a document change and per-setting flags are two ways of saying the same thing
+    if edit.has_changes() && flags_given {
+        return Err(Error::new(
+            "Use either --file, --patch, --set and --unset, or the flags that change one setting each, not both",
+        ));
+    }
+    // these only act on a document change
+    let lone = edit.dry_run || edit.force || edit.skip_confirm || edit.format.is_some();
+    if lone && !edit.has_changes() {
+        return Err(Error::new(
+            "--dry-run, --force, --skip-confirm and --format need --file, --patch, --set or --unset",
+        ));
+    }
+    Ok(())
+}
+
 /// Update a model endpoint
+///
+/// A file, `--set`, or patch changes the endpoint's whole document; otherwise the flags change
+/// its fields. The two can't be combined.
 ///
 /// # Arguments
 ///
 /// * `thorium` - The Thorium client
 /// * `cmd` - The update command
 async fn update_endpoint(thorium: &Thorium, cmd: &UpdateEndpoint) -> Result<(), Error> {
+    // change the endpoint's document when asked to
+    check_update_flags(&cmd.edit, cmd.has_flag_changes())?;
+    if cmd.edit.has_changes() {
+        return documents::update::<documents::Endpoint>(thorium, &cmd.endpoint, &cmd.edit).await;
+    }
     // find the endpoint
     let endpoint = find(thorium, &[EntityKinds::ModelEndpoint], &cmd.endpoint).await?;
     // build the metadata update
@@ -997,11 +1057,19 @@ async fn create_profile(thorium: &Thorium, cmd: &CreateArgs) -> Result<(), Error
 
 /// Update a model profile
 ///
+/// A file, `--set`, or patch changes the profile's whole document; otherwise the flags change
+/// its fields. The two can't be combined.
+///
 /// # Arguments
 ///
 /// * `thorium` - The Thorium client
 /// * `cmd` - The update command
 async fn update_profile(thorium: &Thorium, cmd: &UpdateProfile) -> Result<(), Error> {
+    // change the profile's document when asked to
+    check_update_flags(&cmd.edit, cmd.has_flag_changes())?;
+    if cmd.edit.has_changes() {
+        return documents::update::<documents::Profile>(thorium, &cmd.profile, &cmd.edit).await;
+    }
     // find the profile
     let profile = find(thorium, &[EntityKinds::ModelProfile], &cmd.profile).await?;
     // build the metadata update
@@ -1798,7 +1866,7 @@ async fn refresh(thorium: &Thorium, cmd: &RefreshEndpoint) -> Result<(), Error> 
 /// * `cmd` - The models command to execute
 pub async fn handle(args: &Args, cmd: &Models) -> Result<(), Error> {
     // load our config and instance our client
-    let (_, thorium) = utils::get_client(args).await?;
+    let (conf, thorium) = utils::get_client(args).await?;
     // call the right models handler
     let result = match cmd {
         Models::Endpoints(cmd) => match cmd {
@@ -1811,6 +1879,10 @@ pub async fn handle(args: &Args, cmd: &Models) -> Result<(), Error> {
                     .map(|_| ())
             }
             Endpoints::Update(cmd) => update_endpoint(&thorium, cmd).await,
+            Endpoints::Edit(cmd) => {
+                documents::edit::<documents::Endpoint>(&thorium, &conf, cmd).await
+            }
+            Endpoints::Spec(cmd) => documents::spec::<documents::Endpoint>(&thorium, cmd).await,
             Endpoints::Delete(cmd) => delete(&thorium, EntityKinds::ModelEndpoint, cmd).await,
         },
         Models::Catalogs(cmd) => match cmd {
@@ -1822,6 +1894,10 @@ pub async fn handle(args: &Args, cmd: &Models) -> Result<(), Error> {
             Profiles::Describe(cmd) => describe(&thorium, EntityKinds::ModelProfile, cmd).await,
             Profiles::Create(cmd) => create_profile(&thorium, cmd).await,
             Profiles::Update(cmd) => update_profile(&thorium, cmd).await,
+            Profiles::Edit(cmd) => {
+                documents::edit::<documents::Profile>(&thorium, &conf, cmd).await
+            }
+            Profiles::Spec(cmd) => documents::spec::<documents::Profile>(&thorium, cmd).await,
             Profiles::Delete(cmd) => delete(&thorium, EntityKinds::ModelProfile, cmd).await,
         },
         Models::Credentials(cmd) => match cmd {
@@ -1860,7 +1936,55 @@ pub async fn handle(args: &Args, cmd: &Models) -> Result<(), Error> {
 
 #[cfg(test)]
 mod tests {
-    use super::refreshed_at;
+    use clap::Parser;
+
+    use super::{check_update_flags, refreshed_at};
+    use crate::args::helpers::EditArgs;
+
+    /// Parse edit flags the way a command line gives them
+    ///
+    /// # Arguments
+    ///
+    /// * `args` - The flags to parse
+    fn edit_flags(args: &[&str]) -> EditArgs {
+        // wrap the flags in a command that flattens them
+        /// A command holding only the shared edit flags
+        #[derive(Parser)]
+        struct Wrapper {
+            /// The shared edit flags
+            #[clap(flatten)]
+            edit: EditArgs,
+        }
+        let mut full = vec!["thorctl"];
+        full.extend_from_slice(args);
+        Wrapper::try_parse_from(full).unwrap().edit
+    }
+
+    /// A document change and the flags that change one setting each can't be mixed
+    #[test]
+    fn document_changes_and_flags_cannot_be_mixed() {
+        // either one alone is fine
+        check_update_flags(&edit_flags(&["--set", "name=a"]), false).unwrap();
+        check_update_flags(&edit_flags(&[]), true).unwrap();
+        check_update_flags(&edit_flags(&[]), false).unwrap();
+        // both together are refused, naming the two ways
+        let err = check_update_flags(&edit_flags(&["--patch", "{}"]), true).unwrap_err();
+        assert!(err.to_string().contains("not both"), "{err}");
+    }
+
+    /// The flags that act on a document change are refused without one
+    #[test]
+    fn document_only_flags_need_a_document_change() {
+        // each lone flag is refused
+        for flag in ["--dry-run", "--force", "--skip-confirm", "--yes"] {
+            let err = check_update_flags(&edit_flags(&[flag]), false).unwrap_err();
+            assert!(err.to_string().contains("--dry-run"), "{flag}: {err}");
+        }
+        let err = check_update_flags(&edit_flags(&["-o", "json"]), true).unwrap_err();
+        assert!(err.to_string().contains("--format"), "{err}");
+        // and accepted beside a change
+        check_update_flags(&edit_flags(&["--dry-run", "--set", "name=a"]), false).unwrap();
+    }
 
     /// A requested refresh counts as done only once a refresh finished at or after the request
     #[test]

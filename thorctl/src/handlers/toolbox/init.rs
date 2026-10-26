@@ -20,6 +20,8 @@ use super::build::{BaseImage, config_base_dir, default_version, load_config};
 use super::prompt::{self, ImageConfigAnswers, PipelineConfigAnswers};
 use crate::args::Args;
 use crate::args::toolbox::{Init, InitImage, InitPipeline, InitToolbox, PipelineSpec};
+
+mod tool;
 use crate::handlers::imports::editor;
 use crate::handlers::imports::merge::{IMAGE_FIELD_ORDER, PIPELINE_FIELD_ORDER};
 use crate::handlers::progress;
@@ -1376,7 +1378,7 @@ fn report_single_outcome(kind: &str, path: &Path, outcome: WriteOutcome) -> Resu
 ///
 /// # Arguments
 ///
-/// * `cmd` - The init subcommand (toolbox, image, or pipeline)
+/// * `cmd` - The init subcommand (toolbox, image, pipeline, or tool)
 /// * `args` - The top-level thorctl args
 pub async fn handle(cmd: &Init, args: &Args) -> Result<(), Error> {
     // route each init variant to its dedicated scaffolder
@@ -1384,6 +1386,7 @@ pub async fn handle(cmd: &Init, args: &Args) -> Result<(), Error> {
         Init::Toolbox(cmd) => init_toolbox(cmd, args).await,
         Init::Image(cmd) => init_image(cmd, args).await,
         Init::Pipeline(cmd) => init_pipeline(cmd, args).await,
+        Init::Tool(cmd) => tool::init_tool(cmd).await,
     }
 }
 

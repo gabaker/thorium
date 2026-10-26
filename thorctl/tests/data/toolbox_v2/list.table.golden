@@ -1,0 +1,10 @@
+ KIND     | NAME          | GROUPS | VERSIONS     
+----------+---------------+--------+--------------
+ tool     | pal-harness   | static | 1.0.0        
+ tool     | strings       | static | 1.0.0,latest 
+ tool     | strings-agent | static | 1.0.0        
+ toolset  | kit           | static |              
+ agent    | triage        | static |              
+ workflow | triage-flow   | static |              
+ pipeline | strings-only  | static | latest       
+ build    | base          |        | 1            

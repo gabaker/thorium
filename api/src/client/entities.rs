@@ -10,7 +10,7 @@ use crate::models::backends::NotificationSupport;
 use crate::models::{
     Association, Cursor, Entity, EntityListLine, EntityListOpts, EntityRequest, EntityResponse,
     EntityUpdate, GrepMatches, GrepOpts, GrepPage, InstancedAgentToolset, ModelCredentialEntity,
-    Notification, ToolInstanceSummary,
+    Notification, TagDeleteRequest, TagRequest, ToolInstanceSummary,
 };
 use crate::{
     add_date, add_query, add_query_bool, add_query_list, add_query_list_clone, send, send_build,
@@ -35,6 +35,9 @@ pub struct Entities {
     /// A reqwest client for reqwests
     client: reqwest::Client,
 }
+
+#[cfg(test)]
+mod tests;
 
 #[cfg(test)]
 impl Entities {
@@ -441,6 +444,106 @@ impl Entities {
         let req = self
             .client
             .delete(&url)
+            .header("authorization", &self.token);
+        // send this request
+        send!(self.client, req)
+    }
+
+    /// Adds tags to an [`Entity`] in Thorium
+    ///
+    /// # Arguments
+    ///
+    /// * `id` - The id of the entity to add tags to
+    /// * `tags` - The tag request to send, naming the groups the tags are visible to
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use thorium::Thorium;
+    /// use thorium::models::TagRequest;
+    /// # use thorium::Error;
+    /// use uuid::Uuid;
+    ///
+    /// # async fn exec() -> Result<(), Error> {
+    /// // create a Thorium client
+    /// let thorium = Thorium::build("http://127.0.0.1").token("<token>").build().await?;
+    /// // build a request to add a tag in one group
+    /// let tags = TagRequest::default().add("plant", "corn").group("corn");
+    /// // add the tag to an entity (use a real entity id though)
+    /// thorium.entities.tag(Uuid::new_v4(), &tags).await?;
+    /// # // allow test code to be compiled but don't unwrap as no API instance would be up
+    /// # Ok(())
+    /// # }
+    /// # tokio_test::block_on(async {
+    /// #    exec().await
+    /// # });
+    /// ```
+    #[cfg_attr(
+        feature = "trace",
+        instrument(name = "Thorium::Entities::tag", skip(self, tags), err(Debug))
+    )]
+    pub async fn tag(
+        &self,
+        id: Uuid,
+        tags: &TagRequest<Entity>,
+    ) -> Result<reqwest::Response, Error> {
+        // build url for tagging an entity
+        let url = format!("{base}/api/entities/tags/{id}", base = self.host);
+        // build request
+        let req = self
+            .client
+            .post(&url)
+            .json(tags)
+            .header("authorization", &self.token);
+        // send this request
+        send!(self.client, req)
+    }
+
+    /// Removes tags from an [`Entity`] in Thorium
+    ///
+    /// # Arguments
+    ///
+    /// * `id` - The id of the entity to remove tags from
+    /// * `tags_del` - The delete request to send, naming the groups to remove the tags from
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use thorium::Thorium;
+    /// use thorium::models::TagDeleteRequest;
+    /// # use thorium::Error;
+    /// use uuid::Uuid;
+    ///
+    /// # async fn exec() -> Result<(), Error> {
+    /// // create a Thorium client
+    /// let thorium = Thorium::build("http://127.0.0.1").token("<token>").build().await?;
+    /// // build a request to remove a tag from one group
+    /// let tags_del = TagDeleteRequest::default().add("plant", "corn").group("corn");
+    /// // remove the tag from an entity (use a real entity id though)
+    /// thorium.entities.untag(Uuid::new_v4(), &tags_del).await?;
+    /// # // allow test code to be compiled but don't unwrap as no API instance would be up
+    /// # Ok(())
+    /// # }
+    /// # tokio_test::block_on(async {
+    /// #    exec().await
+    /// # });
+    /// ```
+    #[cfg_attr(
+        feature = "trace",
+        instrument(name = "Thorium::Entities::untag", skip(self, tags_del), err(Debug))
+    )]
+    pub async fn untag(
+        &self,
+        id: Uuid,
+        tags_del: &TagDeleteRequest<Entity>,
+    ) -> Result<reqwest::Response, Error> {
+        // build url for removing tags from an entity
+        let url = format!("{base}/api/entities/tags/{id}", base = self.host);
+        // build request
+        let req = self
+            .client
+            .delete(&url)
+            .json(tags_del)
             .header("authorization", &self.token);
         // send this request
         send!(self.client, req)

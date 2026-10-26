@@ -2,32 +2,36 @@ use itertools::Itertools;
 use thorium::CtlConf;
 use thorium::models::{EntityMetadata, Pipeline, PipelineUpdate};
 use thorium::{Error, Thorium};
+use uuid::Uuid;
 
 use crate::args::pipelines::{DescribePipelines, GetPipelines, Pipelines, StageTool};
 use crate::args::{Args, DescribeCommand};
+use crate::handlers::run_batch::BatchOpts;
 use crate::utils;
+use crate::utils::pipelines::stage_tools::StageToolRef;
 
 mod bans;
+mod create;
 mod edit;
 mod notifications;
+pub(crate) mod view;
 
 cfg_if::cfg_if! {
     if #[cfg(any(target_os = "linux", target_os = "macos"))] {
-        use std::collections::{BTreeMap, BTreeSet};
-
         use futures::stream::{self, StreamExt};
-        use thorium::models::PipelineRequest;
 
         use crate::args::pipelines::{ExportPipelines, ImportPipelines};
         use crate::handlers::imports::{
             self, ConflictMode, editor::resolve_editor, merge::PIPELINE_FIELD_ORDER,
         };
-        use crate::handlers::images::{ImageExportOpts, export_images_with};
         use crate::handlers::images::import::{ImageImportOpts, categorize_from_disk};
         use crate::handlers::exports::{
-            self, ConfigExport, DiskConflictResolver, ExportReport, ExportedConfig,
+            self, ConfigExport, DiskConflictResolver, ExportReport,
         };
         use crate::handlers::progress::{Bar, BarKind};
+        use edit::{PipelineAt, PipelineData, PipelineEdit};
+        use import::PipelineConfig;
+        use crate::handlers::edit::Editable;
 
         pub(crate) mod import;
     }
@@ -198,70 +202,14 @@ async fn delete(
     Ok(())
 }
 
-/// Keep only the referenced images that have a config in the export directory
+/// Import pipelines to Thorium
 ///
-/// An image with no on-disk config is fine as long as it already exists in the
-/// target group (the pipeline will use the existing image); otherwise the import
-/// fails, naming the pipelines that reference it.
-///
-/// # Arguments
-///
-/// * `thorium` - The Thorium client
-/// * `cmd` - The import pipelines command being executed
-/// * `image_refs` - Each referenced image mapped to the pipelines that reference it
-/// * `progress` - The progress bar to log through
-#[cfg(any(target_os = "linux", target_os = "macos"))]
-async fn images_to_import(
-    thorium: &Thorium,
-    cmd: &ImportPipelines,
-    image_refs: BTreeMap<String, BTreeSet<String>>,
-    progress: &Bar,
-) -> Result<Vec<String>, Error> {
-    let images_dir = cmd.import.join("images");
-    let mut on_disk = Vec::with_capacity(image_refs.len());
-    for (image, pipelines) in image_refs {
-        // images with a config in the export are imported normally
-        let path = images_dir.join(format!("{image}.json"));
-        let exists = tokio::fs::try_exists(&path)
-            .await
-            .map_err(|err| Error::new(format!("Failed to stat '{}': {err}", path.display())))?;
-        if exists {
-            on_disk.push(image);
-            continue;
-        }
-        // otherwise the image has to already exist in the target group
-        match thorium.images.get(&cmd.group, &image).await {
-            Ok(_) => progress.info(format!(
-                "Image '{image}' has no config in '{}'; using the existing image in group '{}'",
-                images_dir.display(),
-                cmd.group
-            )),
-            Err(err) if err.status() == Some(http::StatusCode::NOT_FOUND) => {
-                return Err(Error::new(format!(
-                    "Pipeline(s) {} reference image '{image}', which is neither in '{}' nor in group '{}'",
-                    pipelines.iter().map(|name| format!("'{name}'")).join(", "),
-                    images_dir.display(),
-                    cmd.group
-                )));
-            }
-            Err(err) => {
-                return Err(Error::new(format!(
-                    "Failed to get image '{}': {err}",
-                    utils::resource_id(&cmd.group, &image)
-                )));
-            }
-        }
-    }
-    Ok(on_disk)
-}
-
-/// Import pipelines and the images they reference to Thorium
-///
-/// The whole import — images first, then pipelines — shares one rollback journal,
-/// so stopping partway (editor Quit or an error) can offer to undo everything
-/// applied so far. The user is asked to confirm once, up front, when existing
-/// resources conflict or groups will be created. Referenced images without a config
-/// in the export are allowed when they already exist in the target group.
+/// Every config must name a tool for each stage, which is checked before anything is requested
+/// from Thorium; the tools are then looked up by name in the target group. The whole import
+/// shares one rollback journal, so stopping partway (editor Quit or an error) can offer to undo
+/// everything applied so far. The user is asked to confirm once, up front, when existing
+/// resources conflict or groups will be created. Thorium doesn't create or update images, so an
+/// export's image configs are not imported.
 ///
 /// # Arguments
 ///
@@ -284,26 +232,18 @@ async fn import(
     } else {
         imports::dedup_names(cmd.pipelines.clone(), &progress)
     };
-    // load each pipeline request once, collecting the images it references as we go;
-    // ordered maps keep processing and prompts in a stable order between runs
-    let mut pipeline_items = Vec::with_capacity(pipeline_names.len());
-    let mut image_refs: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
+    // read every config first so an export without stage tools fails before any request
+    let mut configs: Vec<(String, PipelineConfig)> = Vec::with_capacity(pipeline_names.len());
     for name in &pipeline_names {
-        let request = import::load_request(&cmd.import, &cmd.group, name).await?;
-        // collect every image across all stages; a malformed order contributes no images
-        // here and is rejected by the shared driver before anything is applied
-        let order = request.deserialize_image_order().unwrap_or_default();
-        for image in order.into_iter().flatten() {
-            image_refs
-                .entry(image.to_owned())
-                .or_default()
-                .insert(name.clone());
-        }
+        configs.push((name.clone(), import::load_config(&cmd.import, name).await?));
+    }
+    // resolve each pipeline's tools in the target group
+    let mut pipeline_items = Vec::with_capacity(configs.len());
+    for (name, config) in &configs {
+        let request = import::to_request(thorium, &cmd.group, config).await?;
         pipeline_items.push((name.clone(), None, request));
     }
-    // keep the images that have configs on disk; the rest must already exist
-    let image_names = images_to_import(thorium, cmd, image_refs, &progress).await?;
-    // build the image import options from the pipeline import's flags
+    // build the import options from the pipeline import's flags
     let opts = ImageImportOpts {
         import_dir: &cmd.import,
         group: &cmd.group,
@@ -317,12 +257,11 @@ async fn import(
         is_terminal: imports::is_interactive_terminal(),
         workers,
     };
-    // categorize both halves before changing anything
-    let images = categorize_from_disk(thorium, &opts, &image_names, &progress).await?;
+    // categorize before changing anything; pipelines bring no images
+    let images = categorize_from_disk(thorium, &opts, &[], &progress).await?;
     let pipelines =
         imports::categorize::categorize_pipelines(thorium, pipeline_items, &progress).await?;
-    // images are applied before the pipelines that reference them; the shared driver
-    // owns the confirmation, journal, and settle
+    // the shared driver owns the confirmation, journal, and settle
     Box::pin(imports::disk::run_disk_import(
         thorium,
         conf,
@@ -335,46 +274,12 @@ async fn import(
     .await
 }
 
-/// Collect the images referenced by exported pipeline configs, in sorted order
+/// Export pipelines from Thorium
 ///
-/// A pipeline whose image order can't be read is logged and recorded as failed.
-///
-/// # Arguments
-///
-/// * `exported` - The pipeline configs now on disk
-/// * `progress` - The progress bar to log through
-/// * `report` - The export report to record failures in
-#[cfg(any(target_os = "linux", target_os = "macos"))]
-fn referenced_images(
-    exported: &[ExportedConfig<PipelineRequest>],
-    progress: &Bar,
-    report: &mut ExportReport,
-) -> BTreeSet<String> {
-    let mut images = BTreeSet::new();
-    for config in exported {
-        // add every image across all of this pipeline's stages
-        match config.request.deserialize_image_order() {
-            Ok(order) => images.extend(order.into_iter().flatten().map(ToOwned::to_owned)),
-            Err(err) => {
-                progress.error(format!(
-                    "Failed to read the image order of pipeline '{}': {err}",
-                    config.name
-                ));
-                report.fail("pipeline", config.name.clone());
-            }
-        }
-    }
-    images
-}
-
-/// Export pipelines and the images they reference from Thorium
-///
-/// Pipeline configs are written first, then the configs (and K8s tarballs) of every
-/// image referenced by a pipeline config on disk, all through one conflict resolver
-/// so "Overwrite all"/"Skip all" carry across both passes. A Quit at a conflict
-/// prompt stops writing pipeline configs but still exports the images of those
-/// already on disk (without further prompts, leaving differing files untouched) so
-/// the export stays importable, then exits non-zero ("Export stopped early").
+/// Pipeline configs are written through one conflict resolver so "Overwrite all"/"Skip all"
+/// carry across them. Each stage's tool is written by name (and version, when pinned), so the
+/// config imports into any deployment whose target group has tools of those names. Thorium
+/// doesn't create images, so none are exported.
 ///
 /// # Arguments
 ///
@@ -418,18 +323,21 @@ async fn export(
     );
     // explicit names are de-duplicated so one pipeline is never exported twice
     let names = listed.unwrap_or_else(|| imports::dedup_names(cmd.pipelines.clone(), &progress));
-    // one resolver for the pipeline and image passes so "all" choices carry across both
     let can_prompt = !cmd.skip_conflicts && imports::is_interactive_terminal();
     let editor = resolve_editor(cmd.editor.as_deref(), conf);
     let mut resolver = DiskConflictResolver::new(cmd.overwrite, can_prompt, editor.to_string())
         .explicit_skip(cmd.skip_conflicts);
     let mut report = ExportReport::default();
-    // fetch the pipelines concurrently (bounded by --workers, never zero); `buffered`
-    // keeps the input order so prompts and errors come out in a stable order
+    // fetch the pipelines and their tools concurrently (bounded by --workers, never zero);
+    // `buffered` keeps the input order so prompts and errors come out in a stable order
     let fetch_workers = std::cmp::min(args.workers, names.len()).max(1);
-    let fetched: Vec<(String, Result<Pipeline, Error>)> = stream::iter(names)
+    let fetched: Vec<(String, Result<PipelineData, Error>)> = stream::iter(names)
         .map(|name| async move {
-            let result = thorium.pipelines.get(&cmd.group, &name).await;
+            let target = PipelineAt {
+                group: cmd.group.clone(),
+                name: name.clone(),
+            };
+            let result = PipelineEdit::fetch(thorium, &target).await;
             (name, result)
         })
         .buffered(fetch_workers)
@@ -443,68 +351,135 @@ async fn export(
         review: cmd.review,
         editor,
     };
-    let exported = exports::export_configs::<Pipeline, PipelineRequest>(
+    exports::export_configs::<PipelineData, PipelineConfig>(
         &cfg,
         fetched,
-        |request: &PipelineRequest| request.name.as_str(),
+        |config: &PipelineConfig| config.name.as_str(),
         &mut resolver,
         &progress,
         &mut report,
     )
     .await;
-    // collect the images referenced by the pipeline configs now on disk, since those
-    // are what a later import needs
-    let images = referenced_images(&exported, &progress, &mut report);
-    // after a Quit, finish the images the exported pipelines need without prompting again
-    if report.stopped {
-        resolver.stop_prompting();
-        if !images.is_empty() {
-            progress.warning(format!(
-                "Export stopped early; still exporting the {} image(s) referenced by the pipelines \
-                 already on disk (differing image configs are left untouched)",
-                images.len()
-            ));
-        }
-    }
-    // export the referenced images; an empty set is skipped since there is nothing to do
-    if !images.is_empty() {
-        progress.set_message("Exporting image configs");
-        let opts = ImageExportOpts {
-            group: &cmd.group,
-            output: &cmd.output,
-            config_only: cmd.config_only,
-            review: cmd.review,
-            editor,
-        };
-        let image_report = export_images_with(
-            thorium,
-            &opts,
-            images.into_iter().collect(),
-            &mut resolver,
-            &progress,
-            args,
-            conf,
-        )
-        .await;
-        report.failures.extend(image_report.failures);
-        report.stopped |= image_report.stopped;
-    }
+    // report the configs left untouched, which refuses the export unless --skip-conflicts asked
+    resolver.settle(&mut report, &progress);
     // print the final banner and exit non-zero on any failure or a Quit
     progress.refresh(report.banner(), BarKind::Timer);
     progress.finish();
     report.into_result()
 }
 
-/// Set the tool that runs a pipeline stage
+/// Remove a stage, and with it the stage's tool, from a pipeline
+///
+/// # Arguments
+///
+/// * `thorium` - The Thorium client
+/// * `group` - The pipeline's group
+/// * `cmd` - The stage tool command that was run
+async fn remove_stage(thorium: &Thorium, group: &str, cmd: &StageTool) -> Result<(), Error> {
+    // read the pipeline's order
+    let pipeline = thorium.pipelines.get(group, &cmd.pipeline).await?;
+    // drop the stage, and any group it leaves empty
+    let order: Vec<Vec<String>> = pipeline
+        .order
+        .iter()
+        .map(|stages| {
+            stages
+                .iter()
+                .filter(|stage| **stage != cmd.stage)
+                .cloned()
+                .collect::<Vec<String>>()
+        })
+        .filter(|stages| !stages.is_empty())
+        .collect();
+    // the stage must be in the pipeline, and a pipeline keeps at least one stage
+    if !pipeline
+        .order
+        .iter()
+        .flatten()
+        .any(|stage| *stage == cmd.stage)
+    {
+        return Err(Error::new(format!(
+            "Pipeline '{}' has no stage '{}'",
+            utils::resource_id(group, &cmd.pipeline),
+            cmd.stage
+        )));
+    }
+    if order.is_empty() {
+        return Err(Error::new(format!(
+            "Stage '{}' is the only stage of pipeline '{}'; delete the pipeline instead",
+            cmd.stage,
+            utils::resource_id(group, &cmd.pipeline)
+        )));
+    }
+    // remove the stage from the order together with its tool
+    let update = PipelineUpdate::default()
+        .order(order)
+        .remove_stage_tool(&cmd.stage);
+    thorium
+        .pipelines
+        .update(group, &cmd.pipeline, &update)
+        .await?;
+    println!(
+        "Removed stage '{}' from pipeline '{}'",
+        cmd.stage, cmd.pipeline
+    );
+    Ok(())
+}
+
+/// Find the id a stage should run: a tool, or one of the tool's versions
+///
+/// Returns the id, the tool's name, and whether the stage is pinned to a version.
 ///
 /// # Arguments
 ///
 /// * `thorium` - The Thorium client
 /// * `cmd` - The stage tool command that was run
-async fn stage_tool(thorium: &Thorium, cmd: &StageTool) -> Result<(), Error> {
-    // find the tool the stage should run
-    let tool = super::tools::find_tool(thorium, &cmd.tool).await?;
+/// * `group` - The pipeline's group, which a tool named without a group is looked up in
+/// * `named` - The tool as the user named it
+async fn stage_tool_id(
+    thorium: &Thorium,
+    cmd: &StageTool,
+    group: &str,
+    named: &str,
+) -> Result<(Uuid, String, bool), Error> {
+    // a version can be named with the tool as TOOL@VERSION
+    let wanted = StageToolRef::parse(named)?;
+    if wanted.version.is_some() && cmd.pin.is_some() {
+        return Err(Error::new(
+            "Name the version as TOOL@VERSION or with --pin, not both",
+        ));
+    }
+    // find the tool the stage should run, in the pipeline's group unless the name says another
+    let qualified = if Uuid::parse_str(&wanted.tool).is_ok() || wanted.tool.contains('/') {
+        wanted.tool.clone()
+    } else {
+        format!("{group}/{}", wanted.tool)
+    };
+    let tool = super::tools::find_tool(thorium, &qualified).await?;
     // a pinned version must be one of the tool's instances
+    if let Some(version) = &wanted.version {
+        let EntityMetadata::Tool(meta) = &tool.metadata else {
+            return Err(Error::new(format!("'{}' is not a tool", tool.name)));
+        };
+        let id = meta
+            .instances
+            .iter()
+            .find(|summary| summary.version.to_string() == *version)
+            .map(|summary| summary.id)
+            .ok_or_else(|| {
+                Error::new(format!(
+                    "Tool '{}' has no version '{version}' (it has: {})",
+                    tool.name,
+                    meta.instances
+                        .iter()
+                        .map(|summary| summary.version.to_string())
+                        .collect::<Vec<String>>()
+                        .join(", ")
+                ))
+            })?;
+        return Ok((id, tool.name, true));
+    }
+    // an instance named with --pin must be a version of this tool
     let id = match cmd.pin {
         Some(pin) => {
             let instance = thorium.entities.get(pin).await?;
@@ -520,10 +495,35 @@ async fn stage_tool(thorium: &Thorium, cmd: &StageTool) -> Result<(), Error> {
         }
         None => tool.id,
     };
+    Ok((id, tool.name, cmd.pin.is_some()))
+}
+
+/// Set the tool that runs a pipeline stage, or remove the stage
+///
+/// # Arguments
+///
+/// * `thorium` - The Thorium client
+/// * `cmd` - The stage tool command that was run
+async fn stage_tool(thorium: &Thorium, cmd: &StageTool) -> Result<(), Error> {
+    // the tool to set is needed unless the stage is being removed
+    let named = match (&cmd.tool, cmd.remove) {
+        (Some(tool), false) => Some(tool.as_str()),
+        (_, true) => None,
+        (None, false) => return Err(Error::new("A tool is needed to set a stage's tool")),
+    };
     // find the pipeline's group if it wasn't given
     let group = match &cmd.group {
         Some(group) => group.clone(),
         None => utils::pipelines::find_pipeline_group(thorium, &cmd.pipeline).await?,
+    };
+    // find the id to set before any write
+    let found = match named {
+        Some(named) => Some(stage_tool_id(thorium, cmd, &group, named).await?),
+        None => None,
+    };
+    // removing a stage takes its own path
+    let Some((id, tool_name, pinned)) = found else {
+        return remove_stage(thorium, &group, cmd).await;
     };
     // set the stage's tool
     let update = PipelineUpdate::default().add_stage_tool(&cmd.stage, id);
@@ -532,15 +532,16 @@ async fn stage_tool(thorium: &Thorium, cmd: &StageTool) -> Result<(), Error> {
         .update(&group, &cmd.pipeline, &update)
         .await?;
     // say what the stage runs now
-    match cmd.pin {
-        Some(pin) => println!(
-            "Stage '{}' of pipeline '{}' runs tool '{}' pinned to version {pin}",
-            cmd.stage, cmd.pipeline, tool.name
-        ),
-        None => println!(
-            "Stage '{}' of pipeline '{}' runs the latest version of tool '{}'",
-            cmd.stage, cmd.pipeline, tool.name
-        ),
+    if pinned {
+        println!(
+            "Stage '{}' of pipeline '{}' runs tool '{tool_name}' pinned to version {id}",
+            cmd.stage, cmd.pipeline
+        );
+    } else {
+        println!(
+            "Stage '{}' of pipeline '{}' runs the latest version of tool '{tool_name}'",
+            cmd.stage, cmd.pipeline
+        );
     }
     Ok(())
 }
@@ -563,10 +564,15 @@ pub async fn handle(args: &Args, cmd: &Pipelines) -> Result<(), Error> {
         super::update::ask_update(&thorium).await?;
     }
     // call the right pipelines handler
-    match cmd {
+    let result = match cmd {
         Pipelines::Get(cmd) => get(thorium, cmd).await,
         Pipelines::Describe(cmd) => describe(thorium, cmd).await,
+        Pipelines::Create(cmd) => create::create(&thorium, cmd).await,
         Pipelines::Edit(cmd) => edit::edit(thorium, &conf, cmd).await,
+        Pipelines::Update(cmd) => edit::update(thorium, cmd).await,
+        Pipelines::Run(cmd) => {
+            crate::handlers::runs::run_pipeline(&thorium, cmd, &BatchOpts::from_args(args)).await
+        }
         Pipelines::StageTool(cmd) => stage_tool(&thorium, cmd).await,
         Pipelines::Notifications(cmd) => notifications::handle(thorium, cmd).await,
         Pipelines::Bans(cmd) => bans::handle(thorium, cmd).await,
@@ -582,6 +588,58 @@ pub async fn handle(args: &Args, cmd: &Pipelines) -> Result<(), Error> {
             // resolve the container runtime (docker/podman) before any image work
             super::container::init_runtime(args.container_runtime, conf.container_runtime);
             export(&thorium, cmd, args, &conf).await
+        }
+    };
+    // show the API's status code and message with any refusal
+    result.map_err(show_status)
+}
+
+/// Turn an API refusal into a message that names its status code, as the tool commands print it
+///
+/// Other errors are returned unchanged.
+///
+/// # Arguments
+///
+/// * `err` - The error a pipelines command returned
+fn show_status(err: Error) -> Error {
+    // an error with a status came from the API: print its code and message, not its debug form
+    match err.status() {
+        Some(_) => Error::new(err.to_string()),
+        None => err,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::show_status;
+    use thorium::Error;
+
+    /// An API refusal prints as its status code and the API's message
+    #[test]
+    fn refusals_print_their_code_and_message() {
+        // a 400 the API answered with a JSON error
+        let err = Error::Thorium {
+            code: http::StatusCode::BAD_REQUEST,
+            msg: Some(r#"{"error":"the name 'pipeline' is reserved"}"#.to_owned()),
+        };
+        // the message is plain text with the code, which main prints as it is
+        match show_status(err) {
+            Error::Generic(msg) => {
+                assert!(msg.contains("400"), "{msg}");
+                assert!(msg.contains("the name 'pipeline' is reserved"), "{msg}");
+            }
+            other => panic!("expected a plain message, got {other:?}"),
+        }
+    }
+
+    /// An error without a status is returned as it was
+    #[test]
+    fn other_errors_are_unchanged() {
+        // a local error, such as a bad stage list
+        let err = Error::new("A pipeline needs at least one stage");
+        match show_status(err) {
+            Error::Generic(msg) => assert_eq!(msg, "A pipeline needs at least one stage"),
+            other => panic!("expected the same message, got {other:?}"),
         }
     }
 }

@@ -89,12 +89,11 @@ macro_rules! calc_remove_add_vec {
 /// Returns a vec of values to remove and a map of values to add
 /// in a tuple: `(remove, add)`
 ///
-/// We remove everything that's in the old but not in the new and
-/// add everything that's in the new but not in the old. We're okay
-/// to mutate `old` with `extract_if` before calculating what we add because
-/// `new` will contain all the values we want to keep; nothing we
-/// extract from `old` in the first step will affect the calculation of
-/// what we want to add.
+/// We remove every key that's in the old but not in the new and
+/// add every key whose value is new or changed. A changed key is only
+/// added, never also removed, because the API applies some removals
+/// after the additions (pipeline triggers), which would drop it; an
+/// added key replaces the old value either way.
 ///
 /// # Limitations
 ///
@@ -103,17 +102,9 @@ macro_rules! calc_remove_add_vec {
 macro_rules! calc_remove_add_map {
     ($old:expr, $new:expr) => {
         (
-            // calculate the list of keys to remove
-            $old.iter()
-                .filter_map(|(key, value)| {
-                    // check if either the value was modified or the key is missing
-                    match $new.get(key) {
-                        Some(new_value) => value != new_value,
-                        None => true,
-                    }
-                    // return the key to remove it
-                    .then_some(key)
-                })
+            // calculate the list of keys to remove: only the ones that are missing
+            $old.keys()
+                .filter(|key| !$new.contains_key(*key))
                 .cloned()
                 .collect(),
             // calculate the map to add

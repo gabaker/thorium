@@ -14,11 +14,22 @@ mod utils;
 
 use args::{Args, SubCommands};
 
-/// Parses the command line arguments and runs the matching thorctl command
+/// Installs the interrupt handler, parses the command line, runs the matching Thorctl command,
+/// and exits with a non-zero code after printing the error if the command fails
 #[tokio::main]
 async fn main() {
+    // restore the terminal and remove temporary files if we are interrupted
+    utils::interrupt::install();
     // get the command line args that were passed in
     let args = Args::parse();
+    // print a completion script before any config or client is loaded, like `--help` does
+    if let SubCommands::Completions(completions) = &args.cmd {
+        if let Err(error) = handlers::completions::handle(completions) {
+            eprintln!("{error:#?}");
+            std::process::exit(1);
+        }
+        return;
+    }
     // fall into the right handler and execute this users command
     let thorctl_result = match &args.cmd {
         SubCommands::Login(login) => handlers::clusters::login(&args, login).await,
@@ -54,10 +65,18 @@ async fn main() {
         SubCommands::Run(run) => handlers::run::handle(&args, run).await,
         SubCommands::Update => handlers::update::update(&args).await,
         SubCommands::Config(config) => handlers::config::config(&args, config),
+        // completions were already printed above, before the config was needed
+        SubCommands::Completions(_) => Ok(()),
         SubCommands::Toolbox(toolbox) => handlers::toolbox::handle(&args, toolbox).await,
     };
+    // a prompt that failed or ended on a key press may have left the cursor hidden
+    utils::interrupt::restore_terminal();
     // error if thorctl failed
     if let Err(error) = thorctl_result {
+        // a prompt that read Ctrl-C as a key press ends like an interrupt, without an error dump
+        if utils::interrupt::was_interrupted(&error) {
+            utils::interrupt::exit_interrupted();
+        }
         // print our error to stderr nicely if possible
         match error {
             Error::Generic(msg) => eprintln!("{msg}"),

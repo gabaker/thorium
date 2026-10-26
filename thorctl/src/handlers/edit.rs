@@ -1,22 +1,35 @@
-//! A shared editor-based "edit an entity" flow for images and pipelines.
+//! The shared "edit a resource" flows.
 //!
-//! Both `images edit` and `pipelines edit` fetch the resource, open its editable
-//! [`MergeableImage`]/[`MergeablePipeline`] view in the user's editor, then diff
+//! [`edit_with`] and [`update_with`] drive every resource that implements [`Editable`]: they
+//! read the resource, build a candidate view from an editor or from `--file`, `--patch`,
+//! `--set` and `--unset`, validate it before any request, show a diff, confirm, check that the
+//! resource did not change meanwhile, and apply the update.
+//!
+//! Images and pipelines use the older [`edit_entity`] driver, which fetches the resource, opens
+//! its editable [`MergeableImage`]/[`MergeablePipeline`] view in the user's editor, then diffs
 //! the result into an update. The differences between the two are captured by the
-//! [`EditableEntity`] trait; [`edit_entity`] is the shared driver.
+//! [`EditableEntity`] trait.
+
+mod diff;
+mod editable;
+mod flow;
+pub(crate) mod seams;
+#[cfg(test)]
+mod tests;
+
+pub use editable::{Editable, default_header};
+pub use flow::{edit_with, update_with};
 
 use colored::Colorize;
 use serde::Serialize;
 use serde::de::DeserializeOwned;
-use thorium::models::{Image, ImageUpdate, Pipeline, PipelineUpdate};
+use thorium::models::{Image, ImageUpdate};
 use thorium::{CtlConf, Error, Thorium};
 
 use crate::handlers::imports::editor::{
     editor_loop_with_text, prompt_reedit, resolve_editor, save_recovery_file,
 };
-use crate::handlers::imports::merge::{
-    IMAGE_FIELD_ORDER, MergeableImage, MergeablePipeline, PIPELINE_FIELD_ORDER,
-};
+use crate::handlers::imports::merge::{IMAGE_FIELD_ORDER, MergeableImage};
 use crate::handlers::imports::update;
 use crate::utils;
 
@@ -243,53 +256,6 @@ impl EditableEntity for ImageEditable {
         update: &ImageUpdate,
     ) -> Result<(), Error> {
         thorium.images.update(group, name, update).await?;
-        Ok(())
-    }
-}
-
-/// [`EditableEntity`] for Thorium pipelines
-pub struct PipelineEditable;
-
-impl EditableEntity for PipelineEditable {
-    type Data = Pipeline;
-    type View = MergeablePipeline;
-    type Update = PipelineUpdate;
-    const KIND: &'static str = "Pipeline";
-    const FIELD_ORDER: &'static [&'static str] = PIPELINE_FIELD_ORDER;
-
-    /// Resolve the pipeline's group, searching for it when one isn't supplied
-    async fn resolve_group(
-        thorium: &Thorium,
-        name: &str,
-        group: Option<&str>,
-    ) -> Result<String, Error> {
-        match group {
-            Some(group) => Ok(group.to_string()),
-            None => utils::pipelines::find_pipeline_group(thorium, name).await,
-        }
-    }
-
-    /// Fetch the current pipeline from Thorium
-    async fn fetch(thorium: &Thorium, group: &str, name: &str) -> Result<Pipeline, Error> {
-        thorium.pipelines.get(group, name).await
-    }
-
-    /// Compute the pipeline update from the current pipeline and the edited view
-    fn calculate_update(
-        data: Pipeline,
-        view: MergeablePipeline,
-    ) -> Result<Option<PipelineUpdate>, Error> {
-        update::calculate_pipeline_update_from_mergeable(data, view)
-    }
-
-    /// Apply the pipeline update in Thorium
-    async fn send_update(
-        thorium: &Thorium,
-        group: &str,
-        name: &str,
-        update: &PipelineUpdate,
-    ) -> Result<(), Error> {
-        thorium.pipelines.update(group, name, update).await?;
         Ok(())
     }
 }

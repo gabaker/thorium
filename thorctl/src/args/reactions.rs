@@ -46,6 +46,37 @@ pub enum Reactions {
     /// Create reactions
     #[clap(version, author)]
     Create(CreateReactions),
+    /// Add or remove the tags a reaction is listed under
+    #[clap(version, author)]
+    Update(UpdateReaction),
+    /// Fail a reaction that has not finished (the same as `runs cancel`)
+    #[clap(version, author)]
+    Fail(super::runs::CancelRun),
+}
+
+/// A command to change a reaction's tags
+#[derive(Parser, Debug)]
+#[clap(group(
+    clap::ArgGroup::new("change")
+        .required(true)
+        .multiple(true)
+        .args(["add_tag", "remove_tag"])
+))]
+pub struct UpdateReaction {
+    /// The id of the reaction
+    pub reaction: Uuid,
+    /// The group the reaction is in (searched for in all of your groups by default)
+    #[clap(short, long)]
+    pub group: Option<String>,
+    /// A tag to list the reaction under
+    #[clap(long)]
+    pub add_tag: Vec<String>,
+    /// A tag to stop listing the reaction under
+    #[clap(long)]
+    pub remove_tag: Vec<String>,
+    /// Show what would change without changing it
+    #[clap(long)]
+    pub dry_run: bool,
 }
 
 /// A command to get info on some reactions
@@ -980,4 +1011,78 @@ pub async fn params_to_cursors(
         );
     }
     Ok(cursors)
+}
+
+#[cfg(test)]
+mod update_tests {
+    use clap::Parser;
+
+    use super::{Reactions, UpdateReaction};
+    use crate::args::{Args, SubCommands};
+
+    /// The id every command below targets
+    const ID: &str = "6a3e2f9c-1b7d-4a58-9c0e-3d5f7a1b2c4d";
+
+    /// Parse a `reactions` command line
+    ///
+    /// # Arguments
+    ///
+    /// * `argv` - The arguments after `thorctl reactions`
+    fn reactions(argv: &[&str]) -> Result<Reactions, clap::Error> {
+        let mut full = vec!["thorctl", "reactions"];
+        full.extend_from_slice(argv);
+        match Args::try_parse_from(full)?.cmd {
+            SubCommands::Reactions(cmd) => Ok(cmd),
+            other => panic!("expected reactions, got {other:?}"),
+        }
+    }
+
+    /// `reactions update` takes tags to add and remove and needs at least one
+    #[test]
+    fn update_parses_tag_changes() {
+        // both kinds of change together
+        let Reactions::Update(UpdateReaction {
+            add_tag,
+            remove_tag,
+            group,
+            dry_run,
+            ..
+        }) = reactions(&[
+            "update",
+            ID,
+            "-g",
+            "corn",
+            "--add-tag",
+            "a",
+            "--add-tag",
+            "b",
+            "--remove-tag",
+            "c",
+            "--dry-run",
+        ])
+        .unwrap()
+        else {
+            panic!("expected reactions update");
+        };
+        assert_eq!(add_tag, ["a", "b"]);
+        assert_eq!(remove_tag, ["c"]);
+        assert_eq!(group.as_deref(), Some("corn"));
+        assert!(dry_run);
+        // one kind of change is enough
+        assert!(reactions(&["update", ID, "--remove-tag", "c"]).is_ok());
+        // no change at all is a usage error
+        assert!(reactions(&["update", ID]).is_err());
+    }
+
+    /// `reactions fail` takes the same flags as `runs cancel`
+    #[test]
+    fn fail_takes_the_cancel_flags() {
+        let Reactions::Fail(cmd) =
+            reactions(&["fail", ID, "-g", "corn", "--yes", "--dry-run"]).unwrap()
+        else {
+            panic!("expected reactions fail");
+        };
+        assert!(cmd.skip_confirm && cmd.dry_run);
+        assert_eq!(cmd.group.as_deref(), Some("corn"));
+    }
 }

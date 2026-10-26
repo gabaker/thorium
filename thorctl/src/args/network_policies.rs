@@ -318,7 +318,8 @@ pub struct NetworkPolicyRules {
     pub egress: Option<Vec<NetworkPolicyRuleRaw>>,
 }
 
-#[derive(clap::Args, Debug, Clone)]
+/// A command to delete a network policy
+#[derive(Parser, Debug, Clone)]
 pub struct DeleteNetworkPolicy {
     /// The name of the network policy to delete
     pub name: String,
@@ -326,6 +327,9 @@ pub struct DeleteNetworkPolicy {
     /// share the same name
     #[clap(long)]
     pub id: Option<Uuid>,
+    /// Delete without asking for confirmation
+    #[clap(long, visible_alias = "yes")]
+    pub skip_confirm: bool,
 }
 
 #[derive(clap::Args, Debug, Clone)]

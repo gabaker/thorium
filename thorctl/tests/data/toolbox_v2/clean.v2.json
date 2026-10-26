@@ -1,0 +1,230 @@
+{
+  "format_version": 2,
+  "name": "Clean v2 toolbox",
+  "registry": "ghcr.io/example",
+  "groups": {
+    "static": {
+      "description": "Static analysis"
+    }
+  },
+  "tools": {
+    "strings": {
+      "kind": "Image",
+      "groups": [
+        "static"
+      ],
+      "description": "Extract printable strings",
+      "latest": "latest",
+      "versions": {
+        "1.0.0": {
+          "dir": "images/strings",
+          "spec": {
+            "Image": {
+              "environment": {
+                "K8s": {
+                  "image": "ghcr.io/example/strings:1.0.0",
+                  "scheduling": {
+                    "resources": {
+                      "cpu": 1000,
+                      "memory": 512
+                    },
+                    "spawn_limit": "Unlimited",
+                    "lifetime": null
+                  }
+                }
+              },
+              "execution": {
+                "timeout": 300,
+                "collect_logs": true
+              }
+            }
+          },
+          "build": {
+            "build_path": "images/strings",
+            "build_image": true,
+            "image_tags": [
+              "ghcr.io/example/strings:1.0.0"
+            ]
+          }
+        },
+        "latest": {
+          "spec": {
+            "Image": {
+              "environment": {
+                "K8s": {
+                  "image": "ghcr.io/example/strings:latest",
+                  "scheduling": {
+                    "resources": {
+                      "cpu": 1000,
+                      "memory": 512
+                    },
+                    "spawn_limit": "Unlimited",
+                    "lifetime": null
+                  }
+                }
+              },
+              "execution": {
+                "timeout": 300,
+                "collect_logs": true
+              }
+            }
+          }
+        }
+      }
+    },
+    "strings-agent": {
+      "kind": "Agentic",
+      "groups": [
+        "static"
+      ],
+      "description": "Lets a model count strings",
+      "versions": {
+        "1.0.0": {
+          "spec": {
+            "Agentic": {
+              "function_name": "count_strings",
+              "model_description": "Count the printable strings in a sample",
+              "input_schema": {
+                "type": "object"
+              },
+              "backing": {
+                "Container": {
+                  "tool_instance": "ref:tool/strings@1.0.0"
+                }
+              },
+              "timeout": 60
+            }
+          }
+        }
+      }
+    },
+    "pal-harness": {
+      "kind": "Harness",
+      "groups": [
+        "static"
+      ],
+      "versions": {
+        "1.0.0": {
+          "spec": {
+            "Harness": {
+              "workload": {
+                "environment": {
+                  "K8s": {
+                    "image": "ghcr.io/example/pal:1.0.0",
+                    "scheduling": {
+                      "resources": {
+                        "cpu": 1000,
+                        "memory": 512
+                      },
+                      "spawn_limit": "Unlimited",
+                      "lifetime": null
+                    }
+                  }
+                },
+                "execution": {
+                  "timeout": 300,
+                  "collect_logs": true
+                }
+              }
+            }
+          },
+          "provides": [
+            {
+              "tool": "strings-agent"
+            }
+          ]
+        }
+      }
+    }
+  },
+  "toolsets": {
+    "kit": {
+      "groups": [
+        "static"
+      ],
+      "description": "Triage tools",
+      "selector": "category=triage",
+      "tools": [
+        {
+          "tool": "strings-agent"
+        }
+      ]
+    }
+  },
+  "agents": {
+    "triage": {
+      "groups": [
+        "static"
+      ],
+      "description": "Triage agent",
+      "config": {
+        "system_prompt": "Triage files",
+        "max_turns": 5
+      },
+      "harness": {
+        "tool": "pal-harness"
+      },
+      "tools": [
+        {
+          "tool": "strings-agent"
+        }
+      ],
+      "toolsets": [
+        {
+          "toolset": "kit"
+        }
+      ]
+    }
+  },
+  "workflows": {
+    "triage-flow": {
+      "groups": [
+        "static"
+      ],
+      "description": "Triage workflow",
+      "agents": [
+        "triage"
+      ],
+      "entry_agent": "triage"
+    }
+  },
+  "pipelines": {
+    "strings-only": {
+      "versions": {
+        "latest": {
+          "dir": "pipelines/static/strings-only",
+          "description": "",
+          "config": {
+            "group": "static",
+            "name": "strings-only",
+            "order": [
+              [
+                "strings"
+              ]
+            ],
+            "sla": 600,
+            "triggers": {},
+            "description": null
+          },
+          "stage_tools": {
+            "strings": {
+              "tool": "strings",
+              "version": "1.0.0"
+            }
+          }
+        }
+      }
+    }
+  },
+  "builds": {
+    "base": {
+      "1": {
+        "build_path": "images/base",
+        "build_image": true,
+        "image_tags": [
+          "ghcr.io/example/base:1"
+        ]
+      }
+    }
+  }
+}

@@ -1172,8 +1172,10 @@ Configuration:
                               with the same --namespace-prefix so its runtime trusts it)
   --registry-user <name>      Enable registry basic auth for this user (implies
                               --registry; see 'credentials --all' for the password)
-  --toolbox <path|url>        Toolbox to import (default: the toolbox on GitHub main);
-                              fetched on this host
+  --toolbox <path|url>        Toolbox to import, as a legacy or format 2 toolbox file
+                              (default: the toolbox on GitHub main); fetched on this host
+                              and imported by a Job that logs in as the admin user (see
+                              'kubectl logs job/<toolbox-import-...>' for the import report)
   --no-toolbox                Don't import a toolbox
   --banner <file>             Login banner text
   --docker-config <file>      .dockerconfigjson for pulling the Thorium image

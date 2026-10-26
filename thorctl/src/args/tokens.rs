@@ -97,6 +97,9 @@ pub struct DeleteScopedTokens {
     /// The names of the scoped tokens to delete
     #[clap(required = true)]
     pub names: Vec<String>,
+    /// Delete without asking for confirmation
+    #[clap(long, visible_alias = "yes")]
+    pub skip_confirm: bool,
 }
 
 /// A command to describe scoped tokens in full

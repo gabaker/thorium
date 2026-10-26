@@ -226,10 +226,92 @@ pub fn prepend_current_dir(output: &Path) -> String {
     output.to_string_lossy().to_string()
 }
 
+/// Turn a name from Thorium into one file or directory name that is valid on every platform
+///
+/// Run reactions name generated pipelines such as `workflow:<instance>#r1` or
+/// `tool:<name> v<version>`, and `:` is invalid in a Windows file name, so every character
+/// Windows refuses (`< > : " / \ | ? *` and ASCII control characters) becomes `_`. Trailing dots
+/// and spaces, which Windows drops, are trimmed, and a name that would be empty, `.` or `..`
+/// becomes `_` so it never points at the parent or current directory. Names made only of
+/// `[a-z0-9.-]` come back unchanged.
+///
+/// # Arguments
+///
+/// * `name` - The name to turn into a path component
+pub fn path_component(name: &str) -> String {
+    // replace every character Windows refuses in a file name with `_`
+    let replaced: String = name
+        .chars()
+        .map(|c| {
+            if c.is_ascii_control()
+                || matches!(c, '<' | '>' | ':' | '"' | '/' | '\\' | '|' | '?' | '*')
+            {
+                '_'
+            } else {
+                c
+            }
+        })
+        .collect();
+    // drop the trailing dots and spaces Windows would silently strip
+    let trimmed = replaced.trim_end_matches(['.', ' ']);
+    // a name left empty (which includes `.` and `..`, being all dots) becomes `_`
+    if trimmed.is_empty() {
+        return "_".to_owned();
+    }
+    trimmed.to_owned()
+}
+
 #[cfg(test)]
 mod tests {
 
-    use super::is_hidden;
+    use super::{is_hidden, path_component};
+
+    /// Names with only characters valid on every platform come back unchanged
+    #[test]
+    fn path_component_keeps_ordinary_names() {
+        // pipeline, stage and tool names with only safe characters are unchanged
+        for name in ["harvest", "corn-1.2", "a.b-c9", ".hidden", "x"] {
+            assert_eq!(path_component(name), name);
+        }
+        // `#` and inner spaces are valid on every platform and stay as they are
+        assert_eq!(path_component("harvester#r1"), "harvester#r1");
+        assert_eq!(path_component("corn v1.0"), "corn v1.0");
+    }
+
+    /// Every character Windows refuses in a file name becomes `_`
+    #[test]
+    fn path_component_replaces_unsafe_characters() {
+        // run pseudo pipeline names lose their `:`
+        assert_eq!(path_component("workflow:triage#r1"), "workflow_triage#r1");
+        assert_eq!(path_component("tool:corn v1.0"), "tool_corn v1.0");
+        // every character Windows refuses becomes `_`
+        for unsafe_char in [
+            '<', '>', ':', '"', '/', '\\', '|', '?', '*', '\0', '\n', '\x1f', '\x7f',
+        ] {
+            let name = format!("a{unsafe_char}b");
+            assert_eq!(path_component(&name), "a_b", "{name:?}");
+        }
+        // a path separator can never add a directory level
+        assert_eq!(path_component("../../etc"), ".._.._etc");
+    }
+
+    /// Trailing dots and spaces are trimmed
+    #[test]
+    fn path_component_trims_trailing_dots_and_spaces() {
+        // Windows drops trailing dots and spaces, so they are trimmed
+        assert_eq!(path_component("name. "), "name");
+        assert_eq!(path_component("name..."), "name");
+        assert_eq!(path_component("tool:corn v1. "), "tool_corn v1");
+    }
+
+    /// Names that would be empty or name the current or parent directory become `_`
+    #[test]
+    fn path_component_never_names_special_directories() {
+        // empty, current and parent directory names become `_`
+        for name in ["", ".", "..", "...", "  ", ". ."] {
+            assert_eq!(path_component(name), "_", "{name:?}");
+        }
+    }
 
     #[test]
     fn test_is_hidden() {

@@ -26,10 +26,34 @@ fn temp_file(name: &str, contents: &str) -> std::path::PathBuf {
     path
 }
 
-/// `toolbox import` refuses every manifest before it talks to the API, pointing to the tool
-/// commands
+/// Run thorctl against an API stand-in and return its output
+///
+/// # Arguments
+///
+/// * `keys` - The keys file pointing at the stand-in
+/// * `args` - The arguments after `toolbox`
+async fn toolbox(keys: &std::path::Path, args: &[&std::path::Path]) -> std::process::Output {
+    // run the toolbox command, giving up if it hangs
+    tokio::time::timeout(
+        Duration::from_secs(60),
+        Command::new(env!("CARGO_BIN_EXE_thorctl"))
+            .arg("--keys")
+            .arg(keys)
+            .arg("--skip-update")
+            .arg("toolbox")
+            .args(args)
+            .stdin(std::process::Stdio::null())
+            .output(),
+    )
+    .await
+    .expect("thorctl timed out")
+    .expect("thorctl ran")
+}
+
+/// `toolbox import` and `toolbox update` refuse a toolbox that can't be loaded, or that
+/// `--strict` doesn't accept, before they connect to the API
 #[tokio::test]
-async fn toolbox_import_fails_fast() -> Result<(), Error> {
+async fn toolbox_import_refuses_bad_toolboxes_before_connecting() -> Result<(), Error> {
     // an API stand-in that counts the connections it gets
     let listener = TcpListener::bind("127.0.0.1:0").await?;
     let addr = listener.local_addr()?;
@@ -45,40 +69,49 @@ async fn toolbox_import_fails_fast() -> Result<(), Error> {
         "keys.yml",
         &format!("api: http://{addr}\nusername: europa\npassword: hunter2\n"),
     );
-    // a manifest with legacy images, one with only pipelines, and a toolbox directory
-    let images = temp_file(
+    // a manifest that isn't one, an empty directory, a missing file, and a legacy toolbox that
+    // has an image that can't be converted
+    let invalid = temp_file(
         "toolbox.json",
         r#"{"name":"moons","version":"1.0.0","images":[{"name":"scan","group":"jupiter"}]}"#,
     );
-    let pipelines = temp_file(
-        "toolbox.json",
-        r#"{"name":"moons","version":"1.0.0","pipelines":[{"name":"orbit","group":"jupiter"}]}"#,
-    );
     let directory = std::env::temp_dir().join(unique("thorctl-toolbox-dir-"));
     std::fs::create_dir_all(&directory)?;
-    for manifest in [&images, &pipelines, &directory] {
-        // import the manifest
-        let out = tokio::time::timeout(
-            Duration::from_secs(60),
-            Command::new(env!("CARGO_BIN_EXE_thorctl"))
-                .arg("--keys")
-                .arg(&keys)
-                .arg("--skip-update")
-                .arg("toolbox")
-                .arg("import")
-                .arg(manifest)
-                .stdin(std::process::Stdio::null())
-                .output(),
-        )
-        .await
-        .expect("thorctl timed out")?;
-        // it fails, naming the tool commands and not the snapshot command
-        assert!(!out.status.success(), "{manifest:?} imported");
+    let missing = directory.join("nothing.json");
+    let legacy = temp_file(
+        "toolbox.json",
+        include_str!("data/toolbox_v2/small.legacy.json"),
+    );
+    let refused: [(&str, &std::path::Path, &[&str]); 5] = [
+        ("import", &invalid, &[]),
+        ("import", &directory, &[]),
+        ("import", &missing, &[]),
+        ("import", &legacy, &["--strict"]),
+        ("update", &legacy, &["--strict"]),
+    ];
+    for (command, manifest, flags) in refused {
+        // run the command
+        let mut args: Vec<&std::path::Path> = vec![command.as_ref(), manifest];
+        args.extend(flags.iter().map(|flag| std::path::Path::new(*flag)));
+        let out = toolbox(&keys, &args).await;
+        // it fails and says why
+        assert!(
+            !out.status.success(),
+            "{command} {manifest:?} {flags:?} succeeded"
+        );
         let stderr = String::from_utf8_lossy(&out.stderr);
-        assert!(stderr.contains("thorctl tools create"), "{stderr}");
-        assert!(stderr.contains("pipelines stage-tool"), "{stderr}");
-        assert!(!stderr.contains("tools snapshot"), "{stderr}");
+        assert!(!stderr.trim().is_empty(), "{stderr}");
+        assert!(!stderr.contains("not implemented"), "{stderr}");
     }
+    // a strict import of the legacy toolbox names the conversion issue it stopped at
+    let out = toolbox(
+        &keys,
+        &["import".as_ref(), legacy.as_ref(), "--strict".as_ref()],
+    )
+    .await;
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(stderr.contains("missing_field:image"), "{stderr}");
+    assert!(stderr.contains("--strict"), "{stderr}");
     // the stand-in got no connection
     assert_eq!(connections.load(Ordering::SeqCst), 0);
     Ok(())

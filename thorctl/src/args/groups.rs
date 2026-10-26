@@ -18,6 +18,22 @@ pub enum Groups {
     /// Describe specific groups, displaying/saving details in JSON format
     #[clap(version, author)]
     Describe(DescribeGroups),
+    /// Create a group that you own
+    #[clap(version, author)]
+    Create(CreateGroup),
+}
+
+/// A command to create a group
+#[derive(Parser, Debug)]
+pub struct CreateGroup {
+    /// The name of the group to create (lowercase letters, numbers and dashes)
+    pub name: String,
+    /// What the group is for
+    #[clap(short, long)]
+    pub description: Option<String>,
+    /// Another user to make an owner of the group (repeatable); you are always an owner
+    #[clap(long, value_name = "USER")]
+    pub owner: Vec<String>,
 }
 
 #[derive(Parser, Debug)]
@@ -139,3 +155,47 @@ impl DescribeSealed for DescribeGroups {
 }
 
 impl DescribeCommand for DescribeGroups {}
+
+#[cfg(test)]
+mod tests {
+    use clap::Parser;
+
+    use super::Groups;
+    use crate::args::{Args, SubCommands};
+
+    /// `groups create` takes a name, a description and any number of owners
+    #[test]
+    fn create_args() {
+        // parse a create that uses every flag
+        let args = Args::try_parse_from([
+            "thorctl",
+            "groups",
+            "create",
+            "corn",
+            "-d",
+            "Corn things",
+            "--owner",
+            "bob",
+            "--owner",
+            "sarah",
+        ])
+        .expect("groups create parses");
+        let SubCommands::Groups(Groups::Create(cmd)) = &args.cmd else {
+            panic!("expected groups create");
+        };
+        assert_eq!(cmd.name, "corn");
+        assert_eq!(cmd.description.as_deref(), Some("Corn things"));
+        assert_eq!(cmd.owner, ["bob", "sarah"]);
+        // only the name is required
+        let args = Args::try_parse_from(["thorctl", "groups", "create", "corn"])
+            .expect("a bare create parses");
+        let SubCommands::Groups(Groups::Create(cmd)) = &args.cmd else {
+            panic!("expected groups create");
+        };
+        assert!(cmd.description.is_none() && cmd.owner.is_empty());
+        // a create without a name is refused
+        assert!(Args::try_parse_from(["thorctl", "groups", "create"]).is_err());
+        // the singular alias reaches the same command
+        assert!(Args::try_parse_from(["thorctl", "group", "create", "corn"]).is_ok());
+    }
+}

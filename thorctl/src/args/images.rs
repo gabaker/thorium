@@ -416,7 +416,7 @@ pub struct DeleteImages {
     #[clap(short, long, required = true)]
     pub group: String,
     /// Skip the confirmation dialog
-    #[clap(long)]
+    #[clap(long, visible_alias = "yes")]
     pub skip_confirm: bool,
 }
 
@@ -459,7 +459,10 @@ pub struct ImportImages {
     ///
     /// Each skipped image logs a warning listing the fields that differ,
     /// making this safe for non-interactive imports that must never
-    /// overwrite local changes.
+    /// overwrite local changes. A summary line says how many were skipped.
+    ///
+    /// Without a terminal, an import that finds differing resources refuses (exit 1)
+    /// unless this or --overwrite is given.
     #[clap(long)]
     pub skip_conflicts: bool,
     /// Automatically roll back applied changes if the import stops early
@@ -496,6 +499,9 @@ pub struct ExportImages {
     pub overwrite: bool,
     /// Skip on-disk conflicts: write new configs and leave differing existing ones
     /// untouched with a warning (use --overwrite to overwrite instead)
+    ///
+    /// Without a terminal, differing configs end the export in an error unless this or
+    /// --overwrite is given; with this flag a summary line says how many were skipped.
     #[clap(long)]
     pub skip_conflicts: bool,
     /// Open each config in an editor to review/tweak it before writing (requires a terminal)
@@ -508,7 +514,45 @@ pub struct ExportImages {
 
 #[cfg(test)]
 mod tests {
-    use super::parse_name_group;
+    use clap::Parser;
+
+    use super::{Images, parse_name_group};
+    use crate::args::{Args, SubCommands};
+
+    /// Parse thorctl arguments into an images command
+    ///
+    /// # Arguments
+    ///
+    /// * `args` - The arguments after `thorctl images`
+    fn parse(args: &[&str]) -> Result<Images, clap::Error> {
+        // prepend the binary and subcommand names
+        let mut full = vec!["thorctl", "images"];
+        full.extend_from_slice(args);
+        // parse them into an images command
+        let SubCommands::Images(images) = Args::try_parse_from(full)?.cmd else {
+            panic!("expected an images command");
+        };
+        Ok(images)
+    }
+
+    /// `images delete` skips its confirmation with `--skip-confirm` or its `--yes` alias, and
+    /// asks by default
+    #[test]
+    fn delete_skip_confirm_and_yes() {
+        // the confirmation is asked unless a flag skips it
+        let Images::Delete(cmd) = parse(&["delete", "scanner", "-g", "corn"]).unwrap() else {
+            panic!("expected images delete");
+        };
+        assert!(!cmd.skip_confirm);
+        // both spellings skip it
+        for flag in ["--skip-confirm", "--yes"] {
+            let Images::Delete(cmd) = parse(&["delete", "scanner", "-g", "corn", flag]).unwrap()
+            else {
+                panic!("expected images delete");
+            };
+            assert!(cmd.skip_confirm, "{flag} did not skip the confirmation");
+        }
+    }
 
     /// A bare name parses with no group
     #[test]

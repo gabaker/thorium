@@ -5,11 +5,13 @@
 use clap::Parser;
 use clap::builder::NonEmptyStringValueParser;
 use std::path::PathBuf;
-use thorium::client::conf;
 use uuid::Uuid;
 
 use crate::utils;
+use crate::utils::pipelines::stage_tools::{StageToolRef, parse_stage_tool};
 
+use super::helpers::{EditArgs, ShortFormatArgs};
+use super::runs::RunPipeline;
 use super::traits::describe::{DescribeCommand, DescribeFormat, DescribeSealed};
 use super::traits::search::{SearchParameterized, SearchParams, SearchSealed};
 use super::{CreateNotification, GetNotificationOpts};
@@ -24,16 +26,33 @@ pub enum Pipelines {
     /// for the full raw config)
     #[clap(version, author)]
     Describe(DescribePipelines),
-    /// Edit/update a pipeline
+    /// Create a pipeline from stages and the tool that runs each one
     ///
-    /// Group, name, and bans are not editable here
+    /// The API needs a tool for every stage, so give each stage in `--stage` a matching
+    /// `--stage-tool STAGE=TOOL[@VERSION]` (or describe the pipeline in a `--spec` file).
+    #[clap(version, author, verbatim_doc_comment)]
+    Create(CreatePipeline),
+    /// Edit a pipeline in an editor, or from `--file`, `--patch`, `--set` and `--unset`
+    ///
+    /// The document lists the order, SLA, description, triggers, and the tool behind each stage.
+    /// Group, name, and bans are not editable here.
     #[clap(version, author, verbatim_doc_comment)]
     Edit(EditPipeline),
-    /// Set the tool that runs a pipeline stage
+    /// Update a pipeline from flags or a document without opening an editor
     ///
-    /// The stage follows the tool's latest version, or the version given with `--pin`
+    /// Typed flags (`--order`, `--sla`, ...) and the document flags (`--file`, `--patch`,
+    /// `--set`, `--unset`) can be combined; the document flags apply first.
+    #[clap(version, author, verbatim_doc_comment)]
+    Update(UpdatePipeline),
+    /// Set the tool that runs a pipeline stage, or remove a stage
+    ///
+    /// The stage follows the tool's latest version, or the version given as TOOL@VERSION or
+    /// with `--pin`
     #[clap(version, author, verbatim_doc_comment)]
     StageTool(StageTool),
+    /// Run a pipeline on files or repos
+    #[clap(version, author)]
+    Run(RunPipeline),
     /// Manage/list pipeline notifications
     #[clap(subcommand)]
     Notifications(PipelineNotifications),
@@ -269,40 +288,178 @@ impl DescribeSealed for DescribePipelines {
 
 impl DescribeCommand for DescribePipelines {}
 
-/// Provide the help message for the editor arg
-fn editor_help() -> String {
-    format!(
-        "The editor to use when editing the pipeline ('{}' by default); the default can be modified \
-    using 'thorctl config --default-editor', but this flag overrides any set defaults",
-        conf::default_default_editor()
-    )
-}
-
 /// Args for editing a pipeline
 #[derive(Parser, Debug)]
 pub struct EditPipeline {
-    /// The name of the pipeline to edit
+    /// The name of the pipeline to edit, optionally as `<GROUP>/<PIPELINE>`
+    #[clap(value_name = "[GROUP/]PIPELINE")]
     pub pipeline: String,
     /// The group the pipeline is in; required if other pipelines have
     /// the same name
+    #[clap(conflicts_with = "group_flag")]
     pub group: Option<String>,
-    /// The editor to use when editing the pipeline
-    #[clap(short, long, help = editor_help())]
-    pub editor: Option<String>,
+    /// The group the pipeline is in, as a flag
+    #[clap(short = 'g', long = "group", value_name = "GROUP")]
+    pub group_flag: Option<String>,
+    /// The editor to use when editing the pipeline (the short name of `--editor`)
+    #[clap(
+        id = "editor_short",
+        short = 'e',
+        hide = true,
+        value_name = "EDITOR",
+        conflicts_with = "editor"
+    )]
+    pub editor_short: Option<String>,
+    /// How to change the pipeline, and what to do with the change
+    #[clap(flatten)]
+    pub edit: EditArgs,
 }
 
-/// A command to set the tool that runs a pipeline stage
+impl EditPipeline {
+    /// The group the user gave, as an argument or as `--group`
+    #[must_use]
+    pub fn group_name(&self) -> Option<&str> {
+        self.group_flag.as_deref().or(self.group.as_deref())
+    }
+}
+
+/// Stages in run order, as groups of stages that run together
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StageOrder(pub Vec<Vec<String>>);
+
+/// Parse an `--order` value such as `A,B;C` into stage groups
+///
+/// # Arguments
+///
+/// * `raw` - The text to parse
+pub fn parse_order(raw: &str) -> Result<StageOrder, String> {
+    // groups run one after another and a group's stages run together
+    let groups: Vec<Vec<String>> = raw
+        .split(';')
+        .map(|group| {
+            group
+                .split(',')
+                .map(|stage| stage.trim().to_owned())
+                .collect()
+        })
+        .collect();
+    // every stage needs a name
+    if groups.iter().flatten().any(String::is_empty) {
+        return Err(format!(
+            "'{raw}' has an empty stage; write stages like 'A,B;C'"
+        ));
+    }
+    Ok(StageOrder(groups))
+}
+
+/// Args for creating a pipeline
+#[derive(Parser, Debug)]
+pub struct CreatePipeline {
+    /// The name of the new pipeline
+    #[clap(value_parser = NonEmptyStringValueParser::new())]
+    pub name: String,
+    /// The group to create the pipeline in
+    #[clap(short, long)]
+    pub group: String,
+    /// A stage, or comma separated stages that run together; repeat for each step in run order
+    #[clap(long, value_name = "STAGE[,STAGE]...", value_parser = parse_order)]
+    pub stage: Vec<StageOrder>,
+    /// The tool that runs a stage (`TOOL` follows its latest version, `TOOL@VERSION` pins one);
+    /// every stage needs one
+    #[clap(long, value_name = "STAGE=TOOL[@VERSION]", value_parser = parse_stage_tool)]
+    pub stage_tool: Vec<(String, StageToolRef)>,
+    /// The seconds a reaction has to meet the pipeline's SLA
+    #[clap(long)]
+    pub sla: Option<u64>,
+    /// A description of the pipeline
+    #[clap(short, long)]
+    pub description: Option<String>,
+    /// A trigger that starts the pipeline: `NAME=JSON` or `NAME=@FILE`; repeatable
+    #[clap(long, value_name = "NAME=JSON|@FILE")]
+    pub trigger: Vec<String>,
+    /// A YAML or JSON document describing the pipeline (`-` reads stdin); the flags above
+    /// add to or replace what it holds
+    #[clap(long, value_name = "FILE|-")]
+    pub spec: Option<String>,
+    /// Print the pipeline that would be created without creating it
+    #[clap(long)]
+    pub dry_run: bool,
+    /// How to print the new pipeline
+    #[clap(flatten)]
+    pub format: ShortFormatArgs,
+}
+
+/// Args for updating a pipeline without an editor
+#[derive(Parser, Debug)]
+pub struct UpdatePipeline {
+    /// The pipeline to update, optionally as `<GROUP>/<PIPELINE>`
+    #[clap(value_name = "[GROUP/]PIPELINE")]
+    pub pipeline: String,
+    /// The group the pipeline is in; required if other pipelines have the same name
+    #[clap(short, long)]
+    pub group: Option<String>,
+    /// Replace the order: `;` separates steps and `,` separates stages that run together
+    /// (`--order 'A,B;C'`); every new stage needs a `--stage-tool`
+    #[clap(long, value_name = "STAGES", value_parser = parse_order)]
+    pub order: Option<StageOrder>,
+    /// The seconds a reaction has to meet the pipeline's SLA
+    #[clap(long)]
+    pub sla: Option<u64>,
+    /// Set the pipeline's description
+    #[clap(short, long, conflicts_with = "clear_description")]
+    pub description: Option<String>,
+    /// Remove the pipeline's description
+    #[clap(long)]
+    pub clear_description: bool,
+    /// Add or replace a trigger: `NAME=JSON` or `NAME=@FILE`; repeatable
+    #[clap(long, value_name = "NAME=JSON|@FILE")]
+    pub add_trigger: Vec<String>,
+    /// Remove a trigger by name; repeatable
+    #[clap(long, value_name = "NAME")]
+    pub remove_trigger: Vec<String>,
+    /// Set the tool that runs a stage (`TOOL` follows its latest version, `TOOL@VERSION` pins
+    /// one); repeatable
+    #[clap(long, value_name = "STAGE=TOOL[@VERSION]", value_parser = parse_stage_tool)]
+    pub stage_tool: Vec<(String, StageToolRef)>,
+    /// Remove a stage's tool; only valid for a stage the update also removes from the order
+    #[clap(long, value_name = "STAGE")]
+    pub remove_stage_tool: Vec<String>,
+    /// How to change the pipeline from a document, and what to do with the change
+    #[clap(flatten)]
+    pub edit: EditArgs,
+}
+
+impl UpdatePipeline {
+    /// Whether any typed flag asks for a change
+    #[must_use]
+    pub fn has_flag_changes(&self) -> bool {
+        self.order.is_some()
+            || self.sla.is_some()
+            || self.description.is_some()
+            || self.clear_description
+            || !self.add_trigger.is_empty()
+            || !self.remove_trigger.is_empty()
+            || !self.stage_tool.is_empty()
+            || !self.remove_stage_tool.is_empty()
+    }
+}
+
+/// A command to set the tool that runs a pipeline stage, or to remove a stage
 #[derive(Parser, Debug, Clone)]
 pub struct StageTool {
     /// The name of the pipeline
     pub pipeline: String,
     /// The name of the stage
     pub stage: String,
-    /// The tool to run the stage with, by ID or name
-    pub tool: String,
+    /// The tool to run the stage with, by ID or name; `TOOL@VERSION` pins a version
+    #[clap(required_unless_present = "remove")]
+    pub tool: Option<String>,
     /// Pin the stage to this version of the tool (a tool instance ID) instead of its latest
-    #[clap(long)]
+    #[clap(long, conflicts_with = "remove")]
     pub pin: Option<Uuid>,
+    /// Remove the stage (and its tool) from the pipeline instead of setting its tool
+    #[clap(long, conflicts_with = "tool")]
+    pub remove: bool,
     /// The group the pipeline is in; required if other pipelines have the same name
     #[clap(short, long)]
     pub group: Option<String>,
@@ -400,7 +557,7 @@ pub struct DeletePipelines {
     #[clap(short, long, required = true)]
     pub group: String,
     /// Skip the confirmation dialog
-    #[clap(long)]
+    #[clap(long, visible_alias = "yes")]
     pub skip_confirm: bool,
 }
 
@@ -427,6 +584,9 @@ pub struct ExportPipelines {
     pub overwrite: bool,
     /// Skip on-disk conflicts: write new configs and leave differing existing ones
     /// untouched with a warning (use --overwrite to overwrite instead)
+    ///
+    /// Without a terminal, differing configs end the export in an error unless this or
+    /// --overwrite is given; with this flag a summary line says how many were skipped.
     #[clap(long)]
     pub skip_conflicts: bool,
     /// Open each config in an editor to review/tweak it before writing (requires a terminal)
@@ -477,7 +637,10 @@ pub struct ImportPipelines {
     ///
     /// Each skipped resource logs a warning listing the fields that differ,
     /// making this safe for non-interactive imports that must never
-    /// overwrite local changes.
+    /// overwrite local changes. A summary line says how many were skipped.
+    ///
+    /// Without a terminal, an import that finds differing resources refuses (exit 1)
+    /// unless this or --overwrite is given.
     #[clap(long)]
     pub skip_conflicts: bool,
     /// Automatically roll back applied changes if the import stops early
@@ -498,6 +661,7 @@ mod tests {
 
     use super::Pipelines;
     use crate::args::{Args, SubCommands};
+    use crate::utils::output::OutputFormat;
 
     /// Parse thorctl arguments into a pipelines command
     ///
@@ -527,8 +691,9 @@ mod tests {
         };
         assert_eq!(cmd.pipeline, "orbit");
         assert_eq!(cmd.stage, "plant");
-        assert_eq!(cmd.tool, "scanner");
+        assert_eq!(cmd.tool.as_deref(), Some("scanner"));
         assert_eq!(cmd.pin, None);
+        assert!(!cmd.remove);
         assert_eq!(cmd.group, None);
         // a pinned version and group are taken
         let pinned = "69ff8820-f688-4968-bd6f-45a4cb0f78a9";
@@ -550,5 +715,254 @@ mod tests {
         // the tool is required and the pin must be an id
         assert!(parse(&["stage-tool", "orbit", "plant"]).is_err());
         assert!(parse(&["stage-tool", "orbit", "plant", "scanner", "--pin", "latest"]).is_err());
+    }
+
+    /// `pipelines stage-tool --remove` takes no tool, and cannot be combined with one
+    #[test]
+    fn stage_tool_remove_args() {
+        // removing needs only the pipeline and the stage
+        let Pipelines::StageTool(cmd) =
+            parse(&["stage-tool", "orbit", "plant", "--remove", "-g", "jupiter"]).unwrap()
+        else {
+            panic!("expected pipelines stage-tool");
+        };
+        assert!(cmd.remove);
+        assert_eq!(cmd.tool, None);
+        // a tool or a pin makes no sense with --remove
+        assert!(parse(&["stage-tool", "orbit", "plant", "scanner", "--remove"]).is_err());
+        let pinned = "69ff8820-f688-4968-bd6f-45a4cb0f78a9";
+        assert!(parse(&["stage-tool", "orbit", "plant", "--remove", "--pin", pinned]).is_err());
+        // without --remove the tool is still required
+        assert!(parse(&["stage-tool", "orbit", "plant"]).is_err());
+    }
+
+    /// `--order` and `--stage` write steps with `;` and stages that run together with `,`
+    #[test]
+    fn order_text_parses_into_groups() {
+        let order = super::parse_order("A,B;C").unwrap();
+        assert_eq!(
+            order.0,
+            vec![vec!["A".to_owned(), "B".to_owned()], vec!["C".to_owned()]]
+        );
+        // spaces around names are ignored and a lone stage is one group
+        assert_eq!(
+            super::parse_order(" A ").unwrap().0,
+            vec![vec!["A".to_owned()]]
+        );
+        // empty stages are refused
+        assert!(super::parse_order("A,,B").is_err());
+        assert!(super::parse_order("A;").is_err());
+        assert!(super::parse_order("").is_err());
+    }
+
+    /// `pipelines create` takes a name, a group, stages with tools, and the optional settings
+    #[test]
+    fn create_args() {
+        let Pipelines::Create(cmd) = parse(&[
+            "create",
+            "orbit",
+            "-g",
+            "jupiter",
+            "--stage",
+            "plant",
+            "--stage",
+            "grow,fertilize",
+            "--stage-tool",
+            "plant=seeder",
+            "--stage-tool",
+            "grow=grower@1.2.0",
+            "--sla",
+            "3600",
+            "-d",
+            "A pipeline",
+            "--trigger",
+            "t=NewSample",
+            "--dry-run",
+            "-o",
+            "json",
+        ])
+        .unwrap() else {
+            panic!("expected pipelines create");
+        };
+        assert_eq!(
+            (cmd.name.as_str(), cmd.group.as_str()),
+            ("orbit", "jupiter")
+        );
+        assert_eq!(cmd.stage.len(), 2);
+        assert_eq!(
+            cmd.stage[1].0,
+            vec![vec!["grow".to_owned(), "fertilize".to_owned()]]
+        );
+        assert_eq!(cmd.stage_tool[1].0, "grow");
+        assert_eq!(cmd.stage_tool[1].1.version.as_deref(), Some("1.2.0"));
+        assert_eq!(cmd.sla, Some(3600));
+        assert_eq!(cmd.description.as_deref(), Some("A pipeline"));
+        assert_eq!(cmd.trigger, ["t=NewSample"]);
+        assert!(cmd.dry_run);
+        assert_eq!(cmd.format.format, Some(OutputFormat::Json));
+        // the group is required, and a stage tool needs STAGE=TOOL
+        assert!(parse(&["create", "orbit"]).is_err());
+        assert!(parse(&["create", "orbit", "-g", "j", "--stage-tool", "plant"]).is_err());
+        // a spec can stand in for the stages
+        let Pipelines::Create(cmd) = parse(&["create", "orbit", "-g", "j", "--spec", "-"]).unwrap()
+        else {
+            panic!("expected pipelines create");
+        };
+        assert_eq!(cmd.spec.as_deref(), Some("-"));
+    }
+
+    /// `pipelines update` takes typed flags and the shared document flags together
+    #[test]
+    fn update_args() {
+        let Pipelines::Update(cmd) = parse(&[
+            "update",
+            "jupiter/orbit",
+            "--order",
+            "A,B;C",
+            "--sla",
+            "10",
+            "-d",
+            "text",
+            "--add-trigger",
+            "t=NewSample",
+            "--remove-trigger",
+            "old",
+            "--stage-tool",
+            "C=tool@1.0.0",
+            "--remove-stage-tool",
+            "D",
+            "--set",
+            "sla=5",
+            "--patch",
+            "{}",
+            "--dry-run",
+            "--yes",
+        ])
+        .unwrap() else {
+            panic!("expected pipelines update");
+        };
+        assert_eq!(cmd.pipeline, "jupiter/orbit");
+        assert_eq!(cmd.order.unwrap().0.len(), 2);
+        assert_eq!(cmd.sla, Some(10));
+        assert_eq!(cmd.add_trigger, ["t=NewSample"]);
+        assert_eq!(cmd.remove_trigger, ["old"]);
+        assert_eq!(cmd.stage_tool[0].0, "C");
+        assert_eq!(cmd.remove_stage_tool, ["D"]);
+        assert!(cmd.edit.dry_run && cmd.edit.skip_confirm);
+        assert_eq!(cmd.edit.ops.len(), 1);
+        // --description and --clear-description are exclusive
+        assert!(parse(&["update", "orbit", "-d", "x", "--clear-description"]).is_err());
+        // a bad order is a usage error
+        assert!(parse(&["update", "orbit", "--order", "A,,B"]).is_err());
+    }
+
+    /// `pipelines update` knows whether a typed flag asks for a change
+    #[test]
+    fn update_flag_changes_are_detected() {
+        let Pipelines::Update(none) = parse(&["update", "orbit", "--set", "sla=1"]).unwrap() else {
+            panic!("expected pipelines update");
+        };
+        assert!(!none.has_flag_changes());
+        let Pipelines::Update(some) = parse(&["update", "orbit", "--clear-description"]).unwrap()
+        else {
+            panic!("expected pipelines update");
+        };
+        assert!(some.has_flag_changes());
+    }
+
+    /// `pipelines edit` keeps its positional group and `-e`, and gains `-g` and the edit flags
+    #[test]
+    fn edit_args() {
+        // the existing positional group still works
+        let Pipelines::Edit(cmd) = parse(&["edit", "orbit", "jupiter", "-e", "nano"]).unwrap()
+        else {
+            panic!("expected pipelines edit");
+        };
+        assert_eq!(cmd.group_name(), Some("jupiter"));
+        assert_eq!(cmd.editor_short.as_deref(), Some("nano"));
+        // so does the long editor flag, now from the shared flags
+        let Pipelines::Edit(cmd) = parse(&["edit", "orbit", "--editor", "vim"]).unwrap() else {
+            panic!("expected pipelines edit");
+        };
+        assert_eq!(cmd.edit.editor.as_deref(), Some("vim"));
+        assert_eq!(cmd.group_name(), None);
+        // the group can also be a flag, but not both ways
+        let Pipelines::Edit(cmd) = parse(&["edit", "orbit", "-g", "jupiter"]).unwrap() else {
+            panic!("expected pipelines edit");
+        };
+        assert_eq!(cmd.group_name(), Some("jupiter"));
+        assert!(parse(&["edit", "orbit", "jupiter", "-g", "jupiter"]).is_err());
+        // the non-interactive sources and the result format are taken
+        let Pipelines::Edit(cmd) = parse(&[
+            "edit",
+            "orbit",
+            "--set",
+            "sla=5",
+            "--unset",
+            "description",
+            "--file",
+            "f.yml",
+            "--dry-run",
+            "--skip-confirm",
+            "--force",
+            "-o",
+            "yaml",
+        ])
+        .unwrap() else {
+            panic!("expected pipelines edit");
+        };
+        assert!(cmd.edit.has_changes());
+        assert!(cmd.edit.dry_run && cmd.edit.skip_confirm && cmd.edit.force);
+        assert_eq!(cmd.edit.format, Some(OutputFormat::Yaml));
+        // -e and --editor together are refused
+        assert!(parse(&["edit", "orbit", "-e", "a", "--editor", "b"]).is_err());
+    }
+
+    /// `pipelines run` takes the common run flags and a parent reaction
+    #[test]
+    fn run_args() {
+        let Pipelines::Run(cmd) = parse(&[
+            "run",
+            "jupiter/orbit",
+            "--sample",
+            "abc",
+            "--tag",
+            "t1",
+            "--parent",
+            "6a3e2f9c-1b7d-4a58-9c0e-3d5f7a1b2c4d",
+            "--wait",
+            "--output",
+            "out",
+        ])
+        .unwrap() else {
+            panic!("expected pipelines run");
+        };
+        assert_eq!(cmd.pipeline, "jupiter/orbit");
+        assert_eq!(cmd.common.inputs.samples, ["abc"]);
+        assert_eq!(cmd.common.tag, ["t1"]);
+        assert!(cmd.parent.is_some());
+        assert!(cmd.common.wait);
+        // the pipeline is required, and --wait conflicts with --wait-for
+        assert!(parse(&["run"]).is_err());
+        assert!(parse(&["run", "orbit", "--wait", "--wait-for", "status=Completed"]).is_err());
+    }
+
+    /// `pipelines delete` skips its confirmation with `--skip-confirm` or its `--yes` alias, and
+    /// asks by default
+    #[test]
+    fn delete_skip_confirm_and_yes() {
+        // the confirmation is asked unless a flag skips it
+        let Pipelines::Delete(cmd) = parse(&["delete", "orbit", "-g", "corn"]).unwrap() else {
+            panic!("expected pipelines delete");
+        };
+        assert!(!cmd.skip_confirm);
+        // both spellings skip it
+        for flag in ["--skip-confirm", "--yes"] {
+            let Pipelines::Delete(cmd) = parse(&["delete", "orbit", "-g", "corn", flag]).unwrap()
+            else {
+                panic!("expected pipelines delete");
+            };
+            assert!(cmd.skip_confirm, "{flag} did not skip the confirmation");
+        }
     }
 }

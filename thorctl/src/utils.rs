@@ -34,6 +34,29 @@ pub const IMAGE_SET_FIELDS: &[&[&str]] = &[
     &["child_filters", "file_extension"],
 ];
 
+/// Turn Thorium refusing a delete because something still references the entity into a one
+/// line error
+///
+/// Any other error is returned untouched.
+///
+/// # Arguments
+///
+/// * `err` - The error from a delete
+pub fn delete_refusal(err: Error) -> Error {
+    // only a conflict is a refusal that names its referrers
+    if err.status() != Some(http::StatusCode::CONFLICT) {
+        return err;
+    }
+    // unwrap the reason from the API's error body when it's in one
+    let msg = err.msg().unwrap_or_default();
+    let reason = serde_json::from_str::<serde_json::Value>(&msg)
+        .ok()
+        .and_then(|body| body["error"].as_str().map(ToOwned::to_owned))
+        .unwrap_or(msg);
+    // keep only the first line so the refusal prints as one clean line
+    Error::new(reason.lines().next().unwrap_or_default().to_owned())
+}
+
 /// Sort the arrays found at the given object-key paths so set-valued fields serialize
 /// in a stable order
 ///
@@ -216,12 +239,17 @@ pub mod diff;
 pub mod fs;
 pub mod groups;
 pub mod images;
+pub mod interrupt;
 pub mod notifications;
 pub mod output;
+pub mod paint;
+pub mod patch;
 pub mod pipelines;
 pub mod reactions;
 pub mod render;
 pub mod repos;
+pub mod run_wait;
+pub mod spec_io;
 pub mod watch;
 
 /// Render a Thorium resource's identity for display as `group/name`
@@ -493,6 +521,9 @@ macro_rules! print_warning {
 
 /// Print a warning message if any of the insecure settings are set
 ///
+/// The user is then asked whether to continue, which needs a terminal; without one the command
+/// fails with a message naming how to skip the warning.
+///
 /// # Arguments
 ///
 /// * `api` - The API we're connecting to
@@ -531,7 +562,9 @@ pub fn warn_insecure(
         // return immediately if none of the insecure options are set
         return Ok(());
     }
-    // ask the user for permission to update Thorctl
+    // the question needs a terminal; without one say how to proceed instead of failing in the prompt
+    require_confirm_terminal("`thorctl config --skip-insecure-warning=true`")?;
+    // ask the user whether to continue with the insecure settings
     let response = dialoguer::Confirm::new()
         .with_prompt("Continue?:")
         .interact()?;
@@ -557,15 +590,123 @@ pub fn warn_insecure(
 pub fn require_confirm_terminal(skip_flag: &str) -> Result<(), Error> {
     // dialoguer reads the answer from stdin and draws the prompt on stderr, so both
     // must be terminals for the prompt to work
-    if std::io::IsTerminal::is_terminal(&std::io::stdin())
-        && std::io::IsTerminal::is_terminal(&std::io::stderr())
-    {
+    if Terminal.can_ask() {
         Ok(())
     } else {
-        Err(Error::new(format!(
-            "No terminal available to confirm this action; pass {skip_flag} to proceed non-interactively"
-        )))
+        Err(no_terminal_error(skip_flag))
     }
+}
+
+/// The error for a confirmation that needs a terminal when there is none
+///
+/// # Arguments
+///
+/// * `skip_flag` - The flag that bypasses the prompt (e.g. "--skip-confirm")
+fn no_terminal_error(skip_flag: &str) -> Error {
+    // name the flag so a script knows how to proceed
+    Error::new(format!(
+        "No terminal available to confirm this action; pass {skip_flag} to proceed non-interactively"
+    ))
+}
+
+/// The line printed when a person answers no to a confirmation
+pub const DECLINED_MESSAGE: &str = "Cancelled; nothing was changed.";
+
+/// Say that a confirmation was declined and nothing was changed
+///
+/// The line goes to stderr so it never mixes into output a script reads from stdout.
+pub fn report_declined() {
+    // a decline is a decision, not an error, so the command goes on to exit 0
+    eprintln!("{DECLINED_MESSAGE}");
+}
+
+/// Where a yes/no confirmation gets its answer
+///
+/// The commands that confirm before acting ask through this so the answer can be supplied
+/// without a terminal in tests.
+pub trait Asker {
+    /// Whether a person can be asked (stdin and stderr are both terminals)
+    fn can_ask(&self) -> bool;
+
+    /// Ask a yes/no question whose default answer is no
+    ///
+    /// # Arguments
+    ///
+    /// * `question` - The question to put to the person
+    fn ask(&self, question: &str) -> Result<bool, Error>;
+}
+
+/// The real terminal, which asks with a `dialoguer` prompt
+pub struct Terminal;
+
+impl Asker for Terminal {
+    /// Whether both stdin and stderr are terminals
+    fn can_ask(&self) -> bool {
+        // dialoguer reads from stdin and draws on stderr
+        std::io::IsTerminal::is_terminal(&std::io::stdin())
+            && std::io::IsTerminal::is_terminal(&std::io::stderr())
+    }
+
+    /// Ask on the terminal, defaulting to no
+    ///
+    /// # Arguments
+    ///
+    /// * `question` - The question to put to the person
+    fn ask(&self, question: &str) -> Result<bool, Error> {
+        // an irreversible action defaults to no, so a stray Enter changes nothing
+        dialoguer::Confirm::new()
+            .with_prompt(question)
+            .default(false)
+            .interact()
+            .map_err(|err| Error::new(format!("Failed to read user input: {err}")))
+    }
+}
+
+/// Fail with a message naming the skip flag when `asker` has no one to ask
+///
+/// # Arguments
+///
+/// * `asker` - Where the answer would come from
+/// * `skip_flag` - The flag that bypasses the prompt, named in the refusal
+pub fn require_asker<A: Asker>(asker: &A, skip_flag: &str) -> Result<(), Error> {
+    // refuse clearly, not with a raw prompt error, when nobody can be asked
+    if asker.can_ask() {
+        Ok(())
+    } else {
+        Err(no_terminal_error(skip_flag))
+    }
+}
+
+/// Confirm an irreversible action unless the user passed the flag that skips the question
+///
+/// Returns `true` to go ahead. Without the flag and without a terminal the action is refused
+/// with an error that names the flag, and a no answer returns `false` after saying nothing
+/// was changed.
+///
+/// # Arguments
+///
+/// * `asker` - Where the answer comes from
+/// * `question` - The question to put to the person
+/// * `skip_flag` - The flag that bypasses the prompt, named in the refusal
+/// * `skipped` - Whether that flag was given
+pub fn confirm_or_skip<A: Asker>(
+    asker: &A,
+    question: &str,
+    skip_flag: &str,
+    skipped: bool,
+) -> Result<bool, Error> {
+    // the flag answers for the person
+    if skipped {
+        return Ok(true);
+    }
+    // nobody to ask means refusing with the flag named
+    require_asker(asker, skip_flag)?;
+    // ask, and say so when the answer is no
+    let confirmed = asker.ask(question)?;
+    if !confirmed {
+        report_declined();
+    }
+    Ok(confirmed)
 }
 
 /// Print an insecure warning message if a [`CtlConf`] is configured for
@@ -693,7 +834,35 @@ mod tests {
 
     use regex::RegexSet;
 
-    use super::filter_str;
+    use super::{delete_refusal, filter_str};
+    use thorium::Error;
+
+    /// A conflict becomes the API's one line reason, and other errors are left alone
+    #[test]
+    fn delete_refusal_keeps_only_the_reason() {
+        // a conflict whose body wraps the reason in JSON
+        let conflict = Error::Thorium {
+            code: http::StatusCode::CONFLICT,
+            msg: Some(
+                r#"{"error":"toolset `kit` is still referenced by agent `a`; delete them"}"#
+                    .to_owned(),
+            ),
+        };
+        let line = delete_refusal(conflict);
+        assert_eq!(
+            line.to_string(),
+            "Error: toolset `kit` is still referenced by agent `a`; delete them"
+        );
+        // any other status keeps its code and message
+        let missing = Error::Thorium {
+            code: http::StatusCode::NOT_FOUND,
+            msg: Some("no such entity".to_owned()),
+        };
+        assert_eq!(
+            delete_refusal(missing).to_string(),
+            "Code: 404 Not Found Error: no such entity"
+        );
+    }
 
     /// `policy_suffix` renders only the qualifiers that apply
     #[test]
@@ -814,5 +983,103 @@ mod tests {
         assert!(!filter_str("include_ignore.txt", &filter, &skip,));
         // does not match filter -> should fail
         assert!(!filter_str("image.png", &filter, &skip,));
+    }
+}
+
+/// Test doubles for the confirmation prompts
+#[cfg(test)]
+pub(crate) mod testing {
+    use std::cell::RefCell;
+
+    use thorium::Error;
+
+    use super::Asker;
+
+    /// An [`Asker`] that answers from a script instead of a terminal
+    pub struct Scripted {
+        /// Whether a person can be asked
+        pub terminal: bool,
+        /// The answer given to every question
+        pub answer: bool,
+        /// The questions asked, in order
+        pub asked: RefCell<Vec<String>>,
+    }
+
+    impl Scripted {
+        /// A terminal that answers every question with `answer`
+        ///
+        /// # Arguments
+        ///
+        /// * `answer` - The answer to give
+        pub fn answering(answer: bool) -> Self {
+            Scripted {
+                terminal: true,
+                answer,
+                asked: RefCell::new(Vec::new()),
+            }
+        }
+
+        /// No terminal: asking is refused
+        pub fn no_terminal() -> Self {
+            Scripted {
+                terminal: false,
+                answer: false,
+                asked: RefCell::new(Vec::new()),
+            }
+        }
+    }
+
+    impl Asker for Scripted {
+        /// Whether the script plays a terminal
+        fn can_ask(&self) -> bool {
+            self.terminal
+        }
+
+        /// Record the question and give the scripted answer
+        ///
+        /// # Arguments
+        ///
+        /// * `question` - The question put to the person
+        fn ask(&self, question: &str) -> Result<bool, Error> {
+            self.asked.borrow_mut().push(question.to_owned());
+            Ok(self.answer)
+        }
+    }
+}
+
+/// Tests for the shared confirmation helper
+#[cfg(test)]
+mod confirm_tests {
+    use super::confirm_or_skip;
+    use super::testing::Scripted;
+
+    /// The skip flag answers yes without asking, even with no terminal
+    #[test]
+    fn skip_flag_answers_without_asking() {
+        let asker = Scripted::no_terminal();
+        assert!(confirm_or_skip(&asker, "Delete?", "--skip-confirm", true).unwrap());
+        assert!(asker.asked.borrow().is_empty());
+    }
+
+    /// Without the flag and a terminal the action is refused, naming the flag and never asking
+    #[test]
+    fn no_terminal_refuses_naming_the_flag() {
+        let asker = Scripted::no_terminal();
+        let err = confirm_or_skip(&asker, "Delete?", "--skip-confirm", false)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("--skip-confirm"), "{err}");
+        assert!(err.contains("No terminal available"), "{err}");
+        assert!(asker.asked.borrow().is_empty());
+    }
+
+    /// A terminal is asked the question and its answer is returned
+    #[test]
+    fn terminal_answers_are_returned() {
+        let yes = Scripted::answering(true);
+        assert!(confirm_or_skip(&yes, "Delete?", "--skip-confirm", false).unwrap());
+        assert_eq!(yes.asked.borrow().as_slice(), ["Delete?"]);
+        let no = Scripted::answering(false);
+        assert!(!confirm_or_skip(&no, "Delete?", "--skip-confirm", false).unwrap());
     }
 }

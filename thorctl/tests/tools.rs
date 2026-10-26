@@ -4,11 +4,13 @@ mod common;
 
 use common::{TestUser, assert_success, stdout, unique};
 use serde_json::Value;
+use std::process::Stdio;
 use thorium::Error;
 use thorium::models::{
     EntityKinds, EntityListOpts, EntityMetadata, GroupRequest, GroupUsersRequest, ToolSpec,
 };
 use thorium::test_utilities::generators;
+use tokio::io::AsyncWriteExt;
 
 /// Write a spec to a file in a format
 ///
@@ -608,5 +610,599 @@ async fn tools_model_api_fields() -> Result<(), Error> {
         .map(|line| line.name)
         .collect::<Vec<String>>();
     assert_eq!(names, vec![name]);
+    Ok(())
+}
+
+/// Run `tools create` with the spec piped to stdin
+///
+/// # Arguments
+///
+/// * `user` - The user to run thorctl as
+/// * `args` - The `tools create` arguments after the global flags
+/// * `spec` - The spec to write to stdin
+async fn create_from_stdin(
+    user: &TestUser,
+    args: &[&str],
+    spec: &ToolSpec,
+) -> std::process::Output {
+    // start thorctl with a pipe for stdin and write the spec to it
+    let mut child = user
+        .command(args)
+        .stdin(Stdio::piped())
+        .spawn()
+        .expect("failed to start thorctl");
+    let value = serde_json::to_value(spec).expect("failed to convert the spec");
+    let raw = serde_norway::to_string(&value).expect("failed to write yaml");
+    child
+        .stdin
+        .take()
+        .expect("no stdin")
+        .write_all(raw.as_bytes())
+        .await
+        .expect("failed to write stdin");
+    child.wait_with_output().await.expect("thorctl failed")
+}
+
+/// The `key=value` tags of a tool, without the one Thorium sets, sorted
+///
+/// # Arguments
+///
+/// * `tool` - The tool as JSON
+fn user_tags(tool: &Value) -> Vec<String> {
+    // each tag key has its values as keys of an object
+    let mut tags = Vec::new();
+    for (key, values) in tool["tags"].as_object().into_iter().flatten() {
+        if key == "submitter" {
+            continue;
+        }
+        for value in values
+            .as_object()
+            .into_iter()
+            .flatten()
+            .map(|(value, _)| value)
+        {
+            tags.push(format!("{key}={value}"));
+        }
+    }
+    tags.sort();
+    tags
+}
+
+/// `tools create` puts tags on the tool, reads a spec from stdin, checks the spec with a dry run
+/// without creating anything, sets a harness's env, disabled models and native tools, and refuses
+/// harness settings on another kind of tool
+#[tokio::test]
+// one scenario walks every create flag against shared fixtures
+#[allow(clippy::too_many_lines)]
+async fn tools_create_extras() -> Result<(), Error> {
+    // a tool created from stdin with tags
+    let user = TestUser::new("tools-create-extras").await?;
+    let name = unique("tool");
+    let spec = generators::gen_agentic_spec();
+    let args = [
+        "tools",
+        "create",
+        "--spec",
+        "-",
+        "-n",
+        &name,
+        "-g",
+        &user.group,
+        "-v",
+        "1.0.0",
+        "--tag",
+        "env=prod",
+        "--tag",
+        "env=dev",
+        "--tag",
+        "team=a",
+    ];
+    let out = create_from_stdin(&user, &args, &spec).await;
+    assert_success(&out);
+    let args = ["tools", "describe", &name, "-o", "json"];
+    let tool = json(&user.run("tools-create-extras-describe", &args).await);
+    assert_eq!(user_tags(&tool), vec!["env=dev", "env=prod", "team=a"]);
+    // a dry run creates nothing
+    let dry = unique("tool");
+    let path = write_spec(&spec, true);
+    let args = [
+        "tools",
+        "create",
+        "--spec",
+        &path,
+        "-n",
+        &dry,
+        "-g",
+        &user.group,
+        "-v",
+        "1.0.0",
+        "--dry-run",
+    ];
+    let out = user.run("tools-create-dry-run", &args).await;
+    assert_success(&out);
+    assert!(stdout(&out).contains("Would create"), "{}", stdout(&out));
+    let out = user
+        .run("tools-create-dry-run-gone", &["tools", "describe", &dry])
+        .await;
+    assert!(!out.status.success());
+    // a dry run still refuses a spec that isn't one
+    let bad = std::env::temp_dir().join(format!("{}.yaml", unique("bad")));
+    std::fs::write(&bad, "Agentic:\n  colour: red\n").expect("failed to write the spec");
+    let bad = bad.to_string_lossy().into_owned();
+    let args = [
+        "tools",
+        "create",
+        "--spec",
+        &bad,
+        "-n",
+        &dry,
+        "-g",
+        &user.group,
+        "-v",
+        "1.0.0",
+        "--dry-run",
+    ];
+    assert!(
+        !user
+            .run("tools-create-dry-run-bad", &args)
+            .await
+            .status
+            .success()
+    );
+    // harness settings on an agentic tool are refused and nothing is created
+    let args = [
+        "tools",
+        "create",
+        "--spec",
+        &path,
+        "-n",
+        &dry,
+        "-g",
+        &user.group,
+        "-v",
+        "1.0.0",
+        "--disable-model",
+        "gpt-5",
+    ];
+    let out = user.run("tools-create-harness-only", &args).await;
+    assert!(!out.status.success());
+    assert!(String::from_utf8_lossy(&out.stderr).contains("harness"));
+    // a harness gets its env, disabled models and native tool at creation
+    let (_, native) = generators::tool(
+        &[&user.group],
+        "1.0.0",
+        &generators::gen_native_spec(),
+        &user.client,
+    )
+    .await?;
+    let harness = unique("harness");
+    let harness_path = write_spec(&generators::gen_harness_spec(), true);
+    let native_id = native.id.to_string();
+    let args = [
+        "tools",
+        "create",
+        "--spec",
+        &harness_path,
+        "-n",
+        &harness,
+        "-g",
+        &user.group,
+        "-v",
+        "1.0.0",
+        "--harness-env",
+        "ModelId",
+        "--harness-env",
+        "OpenAiApiKey=LITELLM_API_KEY",
+        "--disable-model",
+        "gpt-5",
+        "--provides",
+        &native_id,
+    ];
+    assert_success(&user.run("tools-create-harness", &args).await);
+    let args = ["tools", "describe", &harness, "-o", "json"];
+    let described = json(&user.run("tools-create-harness-describe", &args).await);
+    let meta = &described["metadata"]["Tool"];
+    assert_eq!(
+        meta["harness_env"]["export"],
+        serde_json::json!(["ModelId", "OpenAiApiKey"])
+    );
+    assert_eq!(
+        meta["harness_env"]["names"]["OpenAiApiKey"],
+        "LITELLM_API_KEY"
+    );
+    assert_eq!(meta["disabled_models"], serde_json::json!(["gpt-5"]));
+    let latest = meta["latest"].as_str().expect("a latest version").parse()?;
+    let instance = user.client.entities.get(latest).await?;
+    let EntityMetadata::ToolInstance(instance) = &instance.metadata else {
+        panic!("expected a tool instance");
+    };
+    assert_eq!(instance.provides, vec![native.id]);
+    // a tag needs a value
+    let args = [
+        "tools",
+        "create",
+        "--spec",
+        &path,
+        "-n",
+        &dry,
+        "-g",
+        &user.group,
+        "-v",
+        "1.0.0",
+        "--tag",
+        "novalue",
+    ];
+    assert!(
+        !user
+            .run("tools-create-bad-tag", &args)
+            .await
+            .status
+            .success()
+    );
+    Ok(())
+}
+
+/// `tools get` filters on kind and tags and lists past its limit with `--no-limit`
+#[tokio::test]
+// one scenario walks every filter against shared fixtures
+#[allow(clippy::too_many_lines)]
+async fn tools_get_filters() -> Result<(), Error> {
+    // tools of two kinds, one with tags
+    let user = TestUser::new("tools-get-filters").await?;
+    let agentic = unique("agentic");
+    let image = unique("image");
+    let agentic_path = write_spec(&generators::gen_agentic_spec(), true);
+    let args = [
+        "tools",
+        "create",
+        "--spec",
+        &agentic_path,
+        "-n",
+        &agentic,
+        "-g",
+        &user.group,
+        "-v",
+        "1.0.0",
+        "--tag",
+        "env=prod",
+        "--tag",
+        "team=a",
+    ];
+    assert_success(&user.run("tools-get-filters-agentic", &args).await);
+    create(
+        &user,
+        "tools-get-filters-image",
+        &write_spec(&generators::gen_image_spec(), true),
+        &image,
+        &user.group,
+    )
+    .await;
+    // the kind filter keeps one kind
+    let args = [
+        "tools",
+        "get",
+        "-g",
+        &user.group,
+        "--kind",
+        "image",
+        "-o",
+        "json",
+    ];
+    let listed = json(&user.run("tools-get-kind", &args).await);
+    let names = |listed: &Value| {
+        listed
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|tool| tool["name"].as_str().unwrap().to_owned())
+            .collect::<Vec<String>>()
+    };
+    assert_eq!(names(&listed), vec![image.clone()]);
+    // the tag filter keeps tools with every tag given
+    let args = [
+        "tools",
+        "get",
+        "-g",
+        &user.group,
+        "--tag",
+        "env=prod",
+        "-o",
+        "json",
+    ];
+    let listed = json(&user.run("tools-get-tag", &args).await);
+    assert_eq!(names(&listed), vec![agentic.clone()]);
+    let args = [
+        "tools",
+        "get",
+        "-g",
+        &user.group,
+        "--tag",
+        "env=prod",
+        "--tag",
+        "team=b",
+        "-o",
+        "json",
+    ];
+    let listed = json(&user.run("tools-get-tags-unmatched", &args).await);
+    assert_eq!(names(&listed), Vec::<String>::new());
+    // the filters combine
+    let args = [
+        "tools",
+        "get",
+        "-g",
+        &user.group,
+        "--kind",
+        "image",
+        "--tag",
+        "env=prod",
+        "-o",
+        "json",
+    ];
+    let listed = json(&user.run("tools-get-kind-and-tag", &args).await);
+    assert_eq!(names(&listed), Vec::<String>::new());
+    // without a limit every tool is listed, and with the default limit only one page's worth
+    for _ in 0..50 {
+        let spec = generators::gen_agentic_spec();
+        generators::tool(&[&user.group], "1.0.0", &spec, &user.client).await?;
+    }
+    let args = [
+        "tools",
+        "get",
+        "-g",
+        &user.group,
+        "--no-limit",
+        "-o",
+        "json",
+    ];
+    let listed = json(&user.run("tools-get-no-limit", &args).await);
+    assert_eq!(names(&listed).len(), 52);
+    let args = ["tools", "get", "-g", &user.group, "-o", "json"];
+    let listed = json(&user.run("tools-get-default-limit", &args).await);
+    assert_eq!(names(&listed).len(), 50);
+    // a limit and no limit conflict
+    let args = ["tools", "get", "--limit", "3", "--no-limit"];
+    assert!(
+        !user
+            .run("tools-get-limit-conflict", &args)
+            .await
+            .status
+            .success()
+    );
+    Ok(())
+}
+
+/// `tools deprecate --undo` restores a deprecated version as the latest
+#[tokio::test]
+async fn tools_deprecate_undo() -> Result<(), Error> {
+    // a tool with two versions
+    let user = TestUser::new("tools-deprecate-undo").await?;
+    let spec = generators::gen_agentic_spec();
+    let name = unique("tool");
+    create(
+        &user,
+        "tools-undo-create",
+        &write_spec(&spec, true),
+        &name,
+        &user.group,
+    )
+    .await;
+    let next = write_spec(&described(&spec, "the next version"), true);
+    let args = ["tools", "publish", &name, "-v", "1.1.0", "--spec", &next];
+    assert_success(&user.run("tools-undo-publish", &args).await);
+    let versions = json(
+        &user
+            .run(
+                "tools-undo-versions",
+                &["tools", "versions", &name, "-o", "json"],
+            )
+            .await,
+    );
+    let newest = versions[0]["id"].as_str().unwrap().to_owned();
+    // deprecating the newest moves latest back, and --undo moves it forward again
+    assert_success(
+        &user
+            .run("tools-undo-deprecate", &["tools", "deprecate", &newest])
+            .await,
+    );
+    let out = user
+        .run(
+            "tools-undo-describe",
+            &["tools", "describe", &name, "-o", "json"],
+        )
+        .await;
+    assert_ne!(
+        json(&out)["metadata"]["Tool"]["latest"],
+        Value::String(newest.clone())
+    );
+    let out = user
+        .run("tools-undo", &["tools", "deprecate", &newest, "--undo"])
+        .await;
+    assert_success(&out);
+    assert!(stdout(&out).contains("Restored"), "{}", stdout(&out));
+    let out = user
+        .run(
+            "tools-undo-describe-again",
+            &["tools", "describe", &name, "-o", "json"],
+        )
+        .await;
+    assert_eq!(
+        json(&out)["metadata"]["Tool"]["latest"],
+        Value::String(newest)
+    );
+    Ok(())
+}
+
+/// Convert a stored image the way `tools snapshot` and the migration of stored images do
+///
+/// # Arguments
+///
+/// * `image` - The stored image
+fn converted(image: &thorium::models::Image) -> thorium::client::migrations::ImageMigration {
+    // an image's tool is found by the image's own name
+    let map = thorium::client::migrations::ToolIdMap::from_images([image]);
+    let ctx = thorium::client::migrations::ImageContext {
+        creator_in_group: true,
+        last_modified: None,
+        map: &map,
+    };
+    thorium::client::migrations::convert_image(image, &ctx).expect("the image converts")
+}
+
+/// Read a tool's latest spec through `tools spec`
+///
+/// # Arguments
+///
+/// * `user` - The user to run thorctl as
+/// * `name` - The tool's name
+async fn spec_of(user: &TestUser, name: &str) -> ToolSpec {
+    // print the spec as JSON and parse it
+    let out = user
+        .run("spec-of", &["tools", "spec", name, "--format", "json"])
+        .await;
+    assert_success(&out);
+    serde_json::from_value(json(&out)).expect("a tool spec")
+}
+
+/// Build a request for an image with nothing but a container image to run
+///
+/// # Arguments
+///
+/// * `group` - The group the image is in
+fn plain_image(group: &str) -> thorium::models::ImageRequest {
+    // the conversion of an image with dependency lists needs the tools they name, so use none
+    thorium::models::ImageRequest::new(group.to_owned(), generators::gen_string(20))
+        .version(thorium::models::ToolVersion::from("1.0.0"))
+        .image("registry.local/scan:1")
+}
+
+/// `tools snapshot` creates an Image tool whose spec is the migration's conversion of the image,
+/// for the images of each environment, and never creates anything on a dry run
+#[tokio::test]
+async fn tools_snapshot_converts_images() -> Result<(), Error> {
+    // an image in each of two environments the conversion supports
+    let user = TestUser::new("tools-snapshot").await?;
+    thorium::test_utilities::faults::allow_image_writes(&user.group);
+    let k8s = plain_image(&user.group);
+    user.client.images.create(&k8s).await?;
+    let bare = plain_image(&user.group).scaler(thorium::models::ImageScaler::BareMetal);
+    user.client.images.create(&bare).await?;
+    for request in [&k8s, &bare] {
+        let image = user.client.images.get(&user.group, &request.name).await?;
+        let target = format!("{}/{}", user.group, request.name);
+        // a dry run says what would be created and creates nothing
+        let args = ["tools", "snapshot", &target, "--dry-run"];
+        let out = user.run("tools-snapshot-dry-run", &args).await;
+        assert_success(&out);
+        assert!(stdout(&out).contains("Would create"), "{}", stdout(&out));
+        let out = user
+            .run(
+                "tools-snapshot-dry-run-gone",
+                &["tools", "describe", &request.name],
+            )
+            .await;
+        assert!(!out.status.success());
+        // the snapshot keeps the image's name, group and version, and its spec is the conversion's
+        let out = user
+            .run("tools-snapshot", &["tools", "snapshot", &target])
+            .await;
+        assert_success(&out);
+        assert!(stdout(&out).contains("Created tool"), "{}", stdout(&out));
+        let tool = json(
+            &user
+                .run(
+                    "tools-snapshot-describe",
+                    &["tools", "describe", &request.name, "-o", "json"],
+                )
+                .await,
+        );
+        assert_eq!(tool["groups"], serde_json::json!([user.group]));
+        assert_eq!(
+            spec_of(&user, &request.name).await,
+            converted(&image).tool.spec
+        );
+        let versions = json(
+            &user
+                .run(
+                    "tools-snapshot-versions",
+                    &["tools", "versions", &request.name, "-o", "json"],
+                )
+                .await,
+        );
+        assert_eq!(versions[0]["version"]["SemVer"], "1.0.0");
+    }
+    Ok(())
+}
+
+/// `tools snapshot` never replaces an existing tool, takes another name, version and group, and
+/// refuses an image that doesn't exist or can't be converted
+#[tokio::test]
+async fn tools_snapshot_conflicts_and_options() -> Result<(), Error> {
+    // an image and a second group
+    let user = TestUser::new("tools-snapshot-options").await?;
+    thorium::test_utilities::faults::allow_image_writes(&user.group);
+    let request = plain_image(&user.group);
+    user.client.images.create(&request).await?;
+    let target = format!("{}/{}", user.group, request.name);
+    assert_success(
+        &user
+            .run("tools-snapshot-first", &["tools", "snapshot", &target])
+            .await,
+    );
+    // a second snapshot under the same name is refused and creates nothing
+    let out = user
+        .run("tools-snapshot-again", &["tools", "snapshot", &target])
+        .await;
+    assert!(!out.status.success());
+    assert!(String::from_utf8_lossy(&out.stderr).contains("already exists"));
+    let args = ["tools", "get", "-g", &user.group, "-o", "json"];
+    let listed = json(&user.run("tools-snapshot-count", &args).await);
+    assert_eq!(listed.as_array().map(Vec::len), Some(1));
+    // another name and version make a second tool
+    let args = ["tools", "snapshot", &target, "-n", "second", "-v", "9.9.9"];
+    assert_success(&user.run("tools-snapshot-renamed", &args).await);
+    let versions = json(
+        &user
+            .run(
+                "tools-snapshot-renamed-versions",
+                &["tools", "versions", "second", "-o", "json"],
+            )
+            .await,
+    );
+    assert_eq!(versions[0]["version"]["SemVer"], "9.9.9");
+    // an image that doesn't exist is the API's refusal
+    let missing = format!("{}/{}", user.group, unique("noimage"));
+    let out = user
+        .run("tools-snapshot-missing", &["tools", "snapshot", &missing])
+        .await;
+    assert!(!out.status.success());
+    // a target that isn't GROUP/IMAGE is refused
+    let out = user
+        .run(
+            "tools-snapshot-bad-target",
+            &["tools", "snapshot", "noslash"],
+        )
+        .await;
+    assert!(!out.status.success());
+    assert!(String::from_utf8_lossy(&out.stderr).contains("GROUP/IMAGE"));
+    // an image whose dependency lists name no tool is skipped by the conversion, and nothing is
+    // created
+    let empty = generators::gen_image(&user.group);
+    user.client.images.create(&empty).await?;
+    let target = format!("{}/{}", user.group, empty.name);
+    let out = user
+        .run(
+            "tools-snapshot-unconvertible",
+            &["tools", "snapshot", &target],
+        )
+        .await;
+    assert!(!out.status.success());
+    assert!(String::from_utf8_lossy(&out.stderr).contains("can't become a tool"));
+    let out = user
+        .run(
+            "tools-snapshot-unconvertible-gone",
+            &["tools", "describe", &empty.name],
+        )
+        .await;
+    assert!(!out.status.success());
     Ok(())
 }

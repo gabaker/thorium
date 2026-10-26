@@ -3,9 +3,9 @@
 //! Both commands share the same skeleton — categorize, confirm, create the
 //! target group, apply images then pipelines under one rollback journal, and
 //! settle. The only difference is whether there are pipelines to apply, so
-//! `images import` simply passes an empty pipeline list. The toolbox import has
-//! extra pre-apply steps (policies, bundled images, collisions) and drives its
-//! own flow.
+//! `images import` simply passes an empty pipeline list. The toolbox import is a different
+//! flow (see `toolbox::import`) that creates tools, workflows, and network policies under its
+//! own journal.
 
 use std::collections::HashSet;
 use thorium::{CtlConf, Error, Thorium};
@@ -241,11 +241,79 @@ async fn apply_plan(
     })
 }
 
+/// The most conflicting resource names an import message lists before summarizing the rest
+const MAX_LISTED: usize = 10;
+
+/// Refuse an import that would have to decide conflicts when nobody can be asked and the
+/// user did not say how to settle them
+///
+/// An interactive import asks about each existing resource that differs. With no terminal
+/// there is no one to ask, so the import stops before changing anything unless
+/// `--skip-conflicts` or `--overwrite` settled the conflicts up front; a script then learns
+/// from the exit code that the import did not run. `toolbox import` refuses the same way.
+///
+/// # Arguments
+///
+/// * `opts` - The image import options (carries the conflict mode)
+/// * `plan` - The categorized resources this import will act on
+/// * `can_prompt` - Whether the session can prompt
+fn refuse_unattended_conflicts(
+    opts: &ImageImportOpts<'_>,
+    plan: &ImportPlan<'_>,
+    can_prompt: bool,
+) -> Result<(), Error> {
+    // a flag, a person to ask, or --migrate-registry (which never asks) settles conflicts
+    if opts.mode != ConflictMode::Interactive || can_prompt || opts.migrate_registry {
+        return Ok(());
+    }
+    // existing resources that already match are not conflicts
+    let conflicts = plan.conflict_labels();
+    if conflicts.is_empty() {
+        return Ok(());
+    }
+    // stop with one line that names the flags and what differs
+    Err(Error::new(format!(
+        "{} existing resource(s) differ from the import and no terminal is available to ask; \
+         pass --skip-conflicts to leave them untouched or --overwrite to apply the \
+         differences: {}",
+        conflicts.len(),
+        super::list_bounded(&conflicts, MAX_LISTED)
+    )))
+}
+
+/// Summarize the existing resources an import leaves untouched because of `--skip-conflicts`
+///
+/// Returns `None` when nothing was skipped or the import was not told to skip conflicts. The
+/// names are listed up to a bound so the line stays one line.
+///
+/// # Arguments
+///
+/// * `opts` - The image import options (carries the conflict mode)
+/// * `plan` - The categorized resources this import will act on
+fn skipped_summary(opts: &ImageImportOpts<'_>, plan: &ImportPlan<'_>) -> Option<String> {
+    // only --skip-conflicts leaves differing resources untouched on purpose
+    if opts.mode != ConflictMode::SkipConflicts || opts.migrate_registry {
+        return None;
+    }
+    // existing resources that already match were not skipped
+    let skipped = plan.conflict_labels();
+    if skipped.is_empty() {
+        return None;
+    }
+    Some(format!(
+        "Skipped {} existing resource(s) that differ ({}); --skip-conflicts left them untouched",
+        skipped.len(),
+        super::list_bounded(&skipped, MAX_LISTED)
+    ))
+}
+
 /// Run an on-disk import of already-categorized images and (optionally) pipelines
 ///
 /// Images are applied before the pipelines that reference them, under one journal,
 /// so a Quit or error partway through can offer to undo everything. Owns the
-/// whole flow from the confirmation gate through settling the journal.
+/// whole flow from the confirmation gate through settling the journal. Existing resources that
+/// conflict with no way to ask about them refuse the import before anything changes, and the
+/// number left untouched by `--skip-conflicts` is reported at the end.
 ///
 /// # Arguments
 ///
@@ -276,6 +344,8 @@ pub async fn run_disk_import(
     let can_prompt = opts.mode == ConflictMode::Interactive
         && opts.is_terminal
         && super::is_interactive_terminal();
+    // stop before changing anything when conflicts need a decision nobody can make
+    refuse_unattended_conflicts(opts, &plan, can_prompt)?;
     // confirm (or announce) before changing anything
     if !confirm_or_announce(thorium, conf, progress, opts, &plan, can_prompt).await? {
         progress.finish_with_message("Import cancelled; nothing was changed");
@@ -310,6 +380,10 @@ pub async fn run_disk_import(
         rollback_on_failure,
     )
     .await?;
+    // say how many existing resources --skip-conflicts left untouched, even in quiet mode
+    if let Some(summary) = skipped_summary(opts, &plan) {
+        progress.warning(summary);
+    }
     // pick the final banner and exit non-zero if any resource failed
     super::finish_import(progress, outcome, &failures)
 }
@@ -358,5 +432,203 @@ mod tests {
         assert_eq!(kept.len(), 1);
         assert_eq!(kept[0].name, "ok");
         assert_eq!(failures, vec!["pipeline 'g/bad'".to_string()]);
+    }
+
+    /// Build the import options for a mode
+    ///
+    /// # Arguments
+    ///
+    /// * `mode` - How existing resources are handled
+    fn opts(mode: ConflictMode) -> ImageImportOpts<'static> {
+        ImageImportOpts {
+            import_dir: std::path::Path::new("/export"),
+            group: "g",
+            registry: None,
+            registry_override: None,
+            skip_push: true,
+            migrate_registry: false,
+            mode,
+            editor: None,
+            is_terminal: false,
+            workers: 1,
+        }
+    }
+
+    /// Build a pipeline that already exists with a different order than the incoming one
+    ///
+    /// # Arguments
+    ///
+    /// * `name` - The pipeline name
+    fn changed_pipeline(name: &str) -> CategorizedPipeline {
+        let mut categorized = pipeline(name, serde_json::json!([["new"]]));
+        categorized.existing = Some(thorium::models::Pipeline {
+            group: "g".to_string(),
+            name: name.to_string(),
+            creator: "tester".to_string(),
+            order: vec![vec!["old".to_string()]],
+            sla: 3600,
+            triggers: std::collections::HashMap::new(),
+            description: None,
+            bans: std::collections::HashMap::new(),
+            stage_tools: std::collections::BTreeMap::new(),
+        });
+        categorized
+    }
+
+    /// An existing pipeline whose stored copy already matches the incoming request
+    ///
+    /// # Arguments
+    ///
+    /// * `name` - The pipeline name
+    fn unchanged_pipeline(name: &str) -> CategorizedPipeline {
+        let mut categorized = changed_pipeline(name);
+        categorized.existing.as_mut().unwrap().order = vec![vec!["new".to_string()]];
+        categorized
+    }
+
+    /// With no terminal, differing resources stop an interactive import and name both flags
+    #[test]
+    fn unattended_conflicts_are_refused() {
+        let pipelines = vec![changed_pipeline("a"), changed_pipeline("b")];
+        let plan = ImportPlan::new(&[], &pipelines, Vec::new());
+        let err = refuse_unattended_conflicts(&opts(ConflictMode::Interactive), &plan, false)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("--skip-conflicts"), "{err}");
+        assert!(err.contains("--overwrite"), "{err}");
+        assert!(err.contains("g/a") && err.contains("g/b"), "{err}");
+    }
+
+    /// Nothing is refused when a flag settled the conflicts, someone can answer, or nothing differs
+    #[test]
+    fn conflicts_that_can_be_decided_are_not_refused() {
+        let pipelines = vec![changed_pipeline("a")];
+        let plan = ImportPlan::new(&[], &pipelines, Vec::new());
+        // the flags settle the conflicts up front
+        for mode in [ConflictMode::Force, ConflictMode::SkipConflicts] {
+            refuse_unattended_conflicts(&opts(mode), &plan, false).unwrap();
+        }
+        // a terminal can be asked
+        refuse_unattended_conflicts(&opts(ConflictMode::Interactive), &plan, true).unwrap();
+        // --migrate-registry never asks about conflicts
+        let mut migrate = opts(ConflictMode::Interactive);
+        migrate.migrate_registry = true;
+        refuse_unattended_conflicts(&migrate, &plan, false).unwrap();
+        // an existing resource that already matches is not a conflict
+        let same = vec![unchanged_pipeline("a")];
+        let plan = ImportPlan::new(&[], &same, Vec::new());
+        refuse_unattended_conflicts(&opts(ConflictMode::Interactive), &plan, false).unwrap();
+    }
+
+    /// The skip summary counts and names what was skipped, only for `--skip-conflicts`
+    #[test]
+    fn skip_summary_counts_and_names_the_skipped() {
+        let pipelines = vec![
+            changed_pipeline("a"),
+            changed_pipeline("b"),
+            unchanged_pipeline("same"),
+        ];
+        let plan = ImportPlan::new(&[], &pipelines, Vec::new());
+        let summary = skipped_summary(&opts(ConflictMode::SkipConflicts), &plan).unwrap();
+        assert!(summary.contains('2'), "{summary}");
+        assert!(
+            summary.contains("g/a") && summary.contains("g/b"),
+            "{summary}"
+        );
+        assert!(!summary.contains("same"), "{summary}");
+        assert!(!summary.contains('\n'), "{summary}");
+        // other modes skip nothing
+        assert!(skipped_summary(&opts(ConflictMode::Force), &plan).is_none());
+        assert!(skipped_summary(&opts(ConflictMode::Interactive), &plan).is_none());
+        // nothing differs, nothing is reported
+        let same = vec![unchanged_pipeline("a")];
+        let plan = ImportPlan::new(&[], &same, Vec::new());
+        assert!(skipped_summary(&opts(ConflictMode::SkipConflicts), &plan).is_none());
+    }
+
+    /// A long skip list names only the first resources and counts the rest
+    #[test]
+    fn skip_summary_bounds_the_names() {
+        let pipelines: Vec<CategorizedPipeline> = (0..25)
+            .map(|index| changed_pipeline(&format!("p{index:02}")))
+            .collect();
+        let plan = ImportPlan::new(&[], &pipelines, Vec::new());
+        let summary = skipped_summary(&opts(ConflictMode::SkipConflicts), &plan).unwrap();
+        assert!(summary.contains("25"), "{summary}");
+        assert!(
+            summary.contains("g/p00") && summary.contains("g/p09"),
+            "{summary}"
+        );
+        assert!(!summary.contains("g/p10"), "{summary}");
+        assert!(summary.contains("15 more"), "{summary}");
+    }
+
+    /// Start a mock API that lists the group `g` and records every request
+    async fn groups_api() -> (String, crate::utils::run_wait::testing::Requests) {
+        crate::utils::run_wait::testing::mock(|line, _| {
+            if line.starts_with("GET /api/groups/") {
+                (
+                    200,
+                    serde_json::json!({"cursor": null, "names": ["g"]}).to_string(),
+                )
+            } else {
+                (404, r#"{"error":"not found"}"#.to_owned())
+            }
+        })
+        .await
+    }
+
+    /// Run the on-disk import of changed pipelines against the mock API in a mode
+    ///
+    /// # Arguments
+    ///
+    /// * `mode` - How existing resources are handled
+    async fn import_changed(mode: ConflictMode) -> (Result<(), Error>, Vec<String>) {
+        let (host, requests) = groups_api().await;
+        let thorium = crate::utils::run_wait::testing::client(&host).await;
+        let conf = CtlConf::new(thorium::Keys::new_token(&host, "token"));
+        let progress =
+            Bar::new_or_quiet("test", "", crate::handlers::progress::BarKind::Timer, true);
+        let result = run_disk_import(
+            &thorium,
+            &conf,
+            &progress,
+            &opts(mode),
+            Vec::new(),
+            vec![changed_pipeline("a")],
+            false,
+        )
+        .await;
+        // every request line the API saw
+        let lines = requests
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|(line, _)| line.clone())
+            .collect();
+        (result, lines)
+    }
+
+    /// Without a terminal an import of differing pipelines refuses (exit 1) and writes nothing
+    #[tokio::test]
+    async fn unattended_import_with_conflicts_changes_nothing() {
+        let (result, lines) = import_changed(ConflictMode::Interactive).await;
+        let err = result.unwrap_err().to_string();
+        assert!(err.contains("--skip-conflicts"), "{err}");
+        assert!(
+            lines.iter().all(|line| line.starts_with("GET ")),
+            "{lines:?}"
+        );
+    }
+
+    /// With `--skip-conflicts` the same import succeeds and writes nothing
+    #[tokio::test]
+    async fn skip_conflicts_import_succeeds_without_writing() {
+        let (result, lines) = import_changed(ConflictMode::SkipConflicts).await;
+        result.unwrap();
+        assert!(
+            lines.iter().all(|line| line.starts_with("GET ")),
+            "{lines:?}"
+        );
     }
 }

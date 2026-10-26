@@ -18,8 +18,8 @@ use std::fmt;
 use uuid::Uuid;
 
 use crate::models::{
-    Dependencies, DroppedImageField, Entity, EntityKinds, EntityMetadata, Image, Pipeline,
-    ToolInstanceSummary, ToolSpec, ToolVersion, WorkloadSpec,
+    Dependencies, DroppedImageField, Entity, EntityKinds, EntityMetadata, Image, ImageConversion,
+    ImageRequest, Pipeline, ToolInstanceSummary, ToolSpec, ToolVersion, WorkloadSpec,
 };
 
 #[cfg(test)]
@@ -467,6 +467,27 @@ impl ToolIdMap {
         ToolIdMap { ids }
     }
 
+    /// Map every named image to the id of the tool migrated from it
+    ///
+    /// Images that exist only as requests (an offline conversion) have no stored [`Image`], so
+    /// they are mapped by their group and name alone.
+    ///
+    /// # Arguments
+    ///
+    /// * `names` - The group and name of each image to map
+    #[must_use]
+    pub fn from_names<'a, I: IntoIterator<Item = (&'a str, &'a str)>>(names: I) -> Self {
+        // map each image by its group and name
+        let ids = names
+            .into_iter()
+            .map(|(group, name)| {
+                let key = (group.to_owned(), name.to_owned());
+                (key, ToolIdMap::tool_id(group, name))
+            })
+            .collect();
+        ToolIdMap { ids }
+    }
+
     /// Get the id of the tool migrated from an image in this map
     ///
     /// # Arguments
@@ -529,6 +550,36 @@ impl ToolIdMap {
         I: IntoIterator<Item = &'a Image>,
         I::IntoIter: Clone,
     {
+        // settle on each image's group, name, and dependency settings
+        self.settle_dependencies(
+            images.into_iter().map(|image| {
+                (
+                    image.group.as_str(),
+                    image.name.as_str(),
+                    &image.dependencies,
+                )
+            }),
+            skipped,
+        );
+    }
+
+    /// Remove every image whose dependency lists would empty, until none would
+    ///
+    /// This is [`ToolIdMap::settle`] for images known only by their group, name, and dependency
+    /// settings, such as the image requests of an offline conversion.
+    ///
+    /// # Arguments
+    ///
+    /// * `images` - The group, name, and dependency settings of each image being migrated
+    /// * `skipped` - The images already skipped by group and name, with their reasons
+    pub fn settle_dependencies<'a, I>(
+        &mut self,
+        images: I,
+        skipped: &mut BTreeMap<(String, String), MigrationReason>,
+    ) where
+        I: IntoIterator<Item = (&'a str, &'a str, &'a Dependencies)>,
+        I::IntoIter: Clone,
+    {
         // remove every image already skipped
         for (group, name) in skipped.keys() {
             self.remove(group, name);
@@ -538,15 +589,15 @@ impl ToolIdMap {
         loop {
             // check every image that is still mapped
             let mut removed = false;
-            for image in images.clone() {
+            for (group, name, dependencies) in images.clone() {
                 // skip images that are no longer mapped
-                if self.get(&image.group, &image.name).is_none() {
+                if self.get(group, name).is_none() {
                     continue;
                 }
                 // remove an image whose dependency lists would empty
-                if let Err(reason) = rewrite_dependencies(&image.group, &image.dependencies, self) {
-                    self.remove(&image.group, &image.name);
-                    skipped.insert((image.group.clone(), image.name.clone()), reason);
+                if let Err(reason) = rewrite_dependencies(group, dependencies, self) {
+                    self.remove(group, name);
+                    skipped.insert((group.to_owned(), name.to_owned()), reason);
                     removed = true;
                 }
             }
@@ -845,16 +896,22 @@ fn choose_version(
 ///
 /// # Arguments
 ///
-/// * `image` - The image being converted
-fn secret_warning(image: &Image) -> Option<MigrationNote> {
+/// * `group` - The image's group
+/// * `name` - The image's name
+/// * `env` - The image's env variables
+fn secret_warning(
+    group: &str,
+    name: &str,
+    env: &HashMap<String, Option<String>>,
+) -> Option<MigrationNote> {
     // find the names that look like secrets
-    let names = secret_env_names(image.env.keys());
+    let names = secret_env_names(env.keys());
     if names.is_empty() {
         return None;
     }
     Some(MigrationNote::new(
-        &image.group,
-        &image.name,
+        group,
+        name,
         format!(
             "env variables whose names look like secrets: {}; the migrated spec is visible to the tool's groups, so move their values to a K8s Secret volume",
             names.join(", ")
@@ -892,6 +949,111 @@ pub fn convert_image(image: &Image, ctx: &ImageContext<'_>) -> Result<ImageMigra
         Err(reason) => return Err(SkippedItem::new(group, image_item(name), reason)),
     };
     // note and raise an issue for each dropped dependency name
+    let (mut notes, issues) = dropped_dependency_notes(group, name, &rewrite);
+    // choose who publishes the tool and its version, noting both
+    let submitter = choose_submitter(image, ctx.creator_in_group, &mut notes);
+    let version = choose_version(image, ctx.last_modified, &mut notes);
+    // list the fields the environment drops, naming env variables only
+    notes.extend(dropped_fields_note(group, name, &conversion.dropped));
+    // warn about env variable names that look like secrets, never their values
+    let warnings = secret_warning(group, name, &image.env)
+        .into_iter()
+        .collect();
+    // build the tool
+    let tool = migrated_tool_from(
+        group,
+        name,
+        image.description.clone(),
+        version,
+        submitter,
+        conversion,
+        rewrite.tools,
+    );
+    Ok(ImageMigration {
+        tool,
+        notes,
+        warnings,
+        issues,
+    })
+}
+
+/// Convert an image request into the tool it would be migrated to
+///
+/// This is [`convert_image`] for an image that exists only as a request, such as a legacy
+/// toolbox entry converted offline. The spec is the request's conversion for its scaler's
+/// environment (the same conversion a stored image gets), a request the conversion rejects is
+/// skipped with `missing_field:image`, and dependency names are rewritten, noted, and refused
+/// exactly as for a stored image. The tool has the given group, name, and version label rather
+/// than the request's own. A request has no creator or modification time, so the tool is
+/// published as the operator account, which an offline caller ignores, and no note is made of
+/// who publishes it or of the version.
+///
+/// # Arguments
+///
+/// * `group` - The group the tool is published in
+/// * `name` - The tool's name
+/// * `label` - The version label of the tool's first instance
+/// * `request` - The image request to convert
+/// * `map` - The ids of the tools migrated from every image
+pub fn convert_image_request(
+    group: &str,
+    name: &str,
+    label: ToolVersion,
+    request: &ImageRequest,
+    map: &ToolIdMap,
+) -> Result<ImageMigration, SkippedItem> {
+    // the only way the spec conversion rejects a request is a missing container image
+    let Ok(conversion) = WorkloadSpec::from_image_request(request) else {
+        return Err(SkippedItem::new(
+            group,
+            image_item(name),
+            MigrationReason::missing_field("image"),
+        ));
+    };
+    // rewrite the dependency names as tool ids
+    let rewrite = match rewrite_dependencies(group, &request.dependencies, map) {
+        Ok(rewrite) => rewrite,
+        Err(reason) => return Err(SkippedItem::new(group, image_item(name), reason)),
+    };
+    // note and raise an issue for each dropped dependency name
+    let (mut notes, issues) = dropped_dependency_notes(group, name, &rewrite);
+    // list the fields the environment drops, naming env variables only
+    notes.extend(dropped_fields_note(group, name, &conversion.dropped));
+    // warn about env variable names that look like secrets, never their values
+    let warnings = secret_warning(group, name, &request.env)
+        .into_iter()
+        .collect();
+    // build the tool
+    let tool = migrated_tool_from(
+        group,
+        name,
+        request.description.clone(),
+        label,
+        MigratedSubmitter::Operator,
+        conversion,
+        rewrite.tools,
+    );
+    Ok(ImageMigration {
+        tool,
+        notes,
+        warnings,
+        issues,
+    })
+}
+
+/// Note and raise an issue for each dependency name a rewrite dropped
+///
+/// # Arguments
+///
+/// * `group` - The image's group
+/// * `name` - The image's name
+/// * `rewrite` - The image's rewritten dependency lists
+fn dropped_dependency_notes(
+    group: &str,
+    name: &str,
+    rewrite: &DependencyRewrite,
+) -> (Vec<MigrationNote>, Vec<SkippedItem>) {
+    // add a note and an issue for each dropped name
     let mut notes = Vec::new();
     let mut issues = Vec::new();
     for (kind, dropped) in &rewrite.dropped {
@@ -909,40 +1071,67 @@ pub fn convert_image(image: &Image, ctx: &ImageContext<'_>) -> Result<ImageMigra
             kind.dropped_reason(),
         ));
     }
-    // choose who publishes the tool and its version, noting both
-    let submitter = choose_submitter(image, ctx.creator_in_group, &mut notes);
-    let version = choose_version(image, ctx.last_modified, &mut notes);
-    // list the fields the environment drops, naming env variables only
-    if !conversion.dropped.is_empty() {
-        let fields = conversion
-            .dropped
-            .iter()
-            .map(ToString::to_string)
-            .collect::<Vec<String>>()
-            .join(", ");
-        notes.push(MigrationNote::new(
-            group,
-            name,
-            format!("dropped fields its environment never reads: {fields}"),
-        ));
+    (notes, issues)
+}
+
+/// Note the fields an image's environment never reads, naming env variables only
+///
+/// # Arguments
+///
+/// * `group` - The image's group
+/// * `name` - The image's name
+/// * `dropped` - The fields the conversion dropped
+fn dropped_fields_note(
+    group: &str,
+    name: &str,
+    dropped: &[DroppedImageField],
+) -> Option<MigrationNote> {
+    // an empty list needs no note
+    if dropped.is_empty() {
+        return None;
     }
-    // warn about env variable names that look like secrets, never their values
-    let warnings = secret_warning(image).into_iter().collect();
+    // list the dropped fields in their fixed order
+    let fields = dropped
+        .iter()
+        .map(ToString::to_string)
+        .collect::<Vec<String>>()
+        .join(", ");
+    Some(MigrationNote::new(
+        group,
+        name,
+        format!("dropped fields its environment never reads: {fields}"),
+    ))
+}
+
+/// Build a migrated tool from an image's conversion and its rewritten dependency lists
+///
+/// # Arguments
+///
+/// * `group` - The tool's group
+/// * `name` - The tool's name
+/// * `description` - The tool's description
+/// * `version` - The version label of the tool's first instance
+/// * `submitter` - Who the tool is published as
+/// * `conversion` - The image's conversion to a spec
+/// * `tools` - The ids of the tools the image's dependency lists name
+fn migrated_tool_from(
+    group: &str,
+    name: &str,
+    description: Option<String>,
+    version: ToolVersion,
+    submitter: MigratedSubmitter,
+    conversion: ImageConversion,
+    tools: DependencyTools,
+) -> MigratedTool {
     // name the tools the image's dependency lists name in the spec
     let mut spec = conversion.spec;
     let dependencies = &mut spec.data.dependencies;
-    dependencies
-        .results
-        .tools
-        .clone_from(&rewrite.tools.results);
-    dependencies
-        .children
-        .tools
-        .clone_from(&rewrite.tools.children);
+    dependencies.results.tools.clone_from(&tools.results);
+    dependencies.children.tools.clone_from(&tools.children);
     dependencies
         .filesystems
         .tools
-        .clone_from(&rewrite.tools.filesystems);
+        .clone_from(&tools.filesystems);
     // tag the tool with the image it was migrated from
     let mut tags = HashMap::new();
     tags.insert(
@@ -950,24 +1139,18 @@ pub fn convert_image(image: &Image, ctx: &ImageContext<'_>) -> Result<ImageMigra
         HashSet::from([name.to_owned()]),
     );
     // build the tool
-    let tool = MigratedTool {
+    MigratedTool {
         id: ToolIdMap::tool_id(group, name),
         group: group.to_owned(),
         name: name.to_owned(),
-        description: image.description.clone(),
+        description,
         version,
         spec: ToolSpec::Image(spec),
         submitter,
         tags,
         dropped: conversion.dropped,
-        dependency_tools: rewrite.tools,
-    };
-    Ok(ImageMigration {
-        tool,
-        notes,
-        warnings,
-        issues,
-    })
+        dependency_tools: tools,
+    }
 }
 
 /// An entity in a group, as the conversions need to see it
@@ -1120,6 +1303,35 @@ pub struct StageResolution {
 }
 
 impl StageResolution {
+    /// Record a stage's target, or skip the stage when it has none
+    ///
+    /// # Arguments
+    ///
+    /// * `group` - The pipeline's group
+    /// * `pipeline` - The pipeline's name
+    /// * `stage` - The stage's name
+    /// * `target` - What the stage resolved to, if anything
+    fn settle_stage(
+        &mut self,
+        group: &str,
+        pipeline: &str,
+        stage: &str,
+        target: Option<StageTarget>,
+    ) {
+        match target {
+            // a resolved stage is recorded by name
+            Some(target) => {
+                self.stages.insert(stage.to_owned(), target);
+            }
+            // an unresolved stage's image wasn't migrated
+            None => self.skipped.push(SkippedItem::new(
+                group,
+                stage_item(pipeline, stage),
+                MigrationReason::invalid_value("stages.*"),
+            )),
+        }
+    }
+
     /// Get the `stage_tools` entries to add: each pinned stage's tool instance
     #[must_use]
     pub fn stage_tools(&self) -> BTreeMap<String, Uuid> {
@@ -1201,18 +1413,56 @@ pub fn resolve_stages(
             map.and_then(|map| map.get(group, stage))
                 .map(|tool| StageTarget::Planned { tool })
         };
-        match stored.or_else(planned) {
-            Some(target) => {
-                resolution.stages.insert(stage.clone(), target);
-            }
-            None => resolution.skipped.push(SkippedItem::new(
-                group,
-                format!("pipeline {} stage {stage}", pipeline.name),
-                MigrationReason::invalid_value("stages.*"),
-            )),
-        }
+        resolution.settle_stage(group, &pipeline.name, stage, stored.or_else(planned));
     }
     resolution
+}
+
+/// Resolve the stages of a pipeline request to the tools their images convert to
+///
+/// This is [`resolve_stages`] for a pipeline that exists only as a request, such as a legacy
+/// toolbox pipeline converted offline, where no tool is stored yet. A stage whose image is in
+/// `map` resolves to the id its tool would get, and any other stage's image wasn't converted,
+/// so it's skipped with `invalid_value:stages.*`. A stage repeated in `stages` resolves once.
+///
+/// # Arguments
+///
+/// * `group` - The pipeline's group
+/// * `pipeline` - The pipeline's name
+/// * `stages` - The pipeline's stage names (the images it runs)
+/// * `map` - The ids the images to be converted would get
+#[must_use]
+pub fn resolve_request_stages<'a, I: IntoIterator<Item = &'a str>>(
+    group: &str,
+    pipeline: &str,
+    stages: I,
+    map: &ToolIdMap,
+) -> StageResolution {
+    // resolve each stage through the map only, since nothing is stored
+    let mut resolution = StageResolution::default();
+    let mut seen = HashSet::new();
+    for stage in stages {
+        // a stage seen before is already resolved or skipped
+        if !seen.insert(stage) {
+            continue;
+        }
+        let planned = map
+            .get(group, stage)
+            .map(|tool| StageTarget::Planned { tool });
+        resolution.settle_stage(group, pipeline, stage, planned);
+    }
+    resolution
+}
+
+/// Describe a pipeline stage in a skipped item
+///
+/// # Arguments
+///
+/// * `pipeline` - The pipeline's name
+/// * `stage` - The stage's name
+fn stage_item(pipeline: &str, stage: &str) -> String {
+    // name the item's type, the pipeline, and the stage
+    format!("pipeline {pipeline} stage {stage}")
 }
 
 /// One stored `entities` row, as the provenance rewrite sees it

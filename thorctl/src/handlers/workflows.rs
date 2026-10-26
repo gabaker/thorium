@@ -3,23 +3,31 @@
 use serde::Serialize;
 use thorium::models::{
     Entity, EntityKinds, EntityListOpts, EntityMetadata, EntityMetadataRequest,
-    EntityMetadataUpdate, EntityRequest, EntityUpdate, InstancedAgentToolset, ModelAuthSource,
-    ModelMatcher, WorkflowCatalogEntity, WorkflowCatalogEntityRequest, WorkflowLimits,
+    EntityMetadataUpdate, EntityRequest, EntityUpdate, InstancedAgentToolset, ModelMatcher,
+    WorkflowCatalogEntity,
 };
-use thorium::{Error, Thorium};
+use thorium::{CtlConf, Error, Thorium};
 use uuid::Uuid;
 
 use crate::args::Args;
 use crate::args::workflows::{
-    AddAgent, CreateWorkflow, DescribeWorkflow, GetWorkflows, RemoveAgent, SetEntry, ShowToolset,
-    Workflows,
+    AddAgent, CreateWorkflow, DeleteWorkflow, DescribeWorkflow, EditWorkflow, GetWorkflows,
+    RemoveAgent, RunWorkflow, SetEntry, ShowToolset, SpecWorkflow, UpdateWorkflow, Workflows,
 };
-use crate::handlers::agents::find;
+use crate::handlers::agents::refs::resolve_agent;
+use crate::handlers::agents::{confirm_delete, find};
+use crate::handlers::edit::{Editable, edit_with, update_with};
 use crate::handlers::instances::find_instance;
+use crate::handlers::run_batch::BatchOpts;
 use crate::utils;
 use crate::utils::output::{self, OutputFormat, View};
 use crate::utils::render;
+use crate::utils::spec_io;
 use crate::utils::watch;
+
+mod edit;
+
+use edit::{WorkflowEditable, WorkflowTarget};
 
 /// Get a workflow's metadata, if the entity is a workflow catalog
 ///
@@ -183,6 +191,13 @@ fn describe_text(workflow: &Entity, ansi: bool) -> String {
             "Latest instance",
             &meta
                 .latest_instance
+                .map_or_else(|| "-".to_owned(), |id| id.to_string()),
+            ansi,
+        ));
+        lines.push(render::field(
+            "Newest instance",
+            &meta
+                .newest_instance
                 .map_or_else(|| "-".to_owned(), |id| id.to_string()),
             ansi,
         ));
@@ -360,60 +375,37 @@ async fn describe(thorium: &Thorium, cmd: &DescribeWorkflow) -> Result<(), Error
     .await
 }
 
-/// Create a workflow
+/// Create a workflow from its flags and spec
 ///
 /// # Arguments
 ///
 /// * `thorium` - The Thorium client
 /// * `cmd` - The create command to execute
-async fn create(thorium: &Thorium, cmd: &CreateWorkflow) -> Result<(), Error> {
-    // find each agent and the entry agent
-    let mut req = WorkflowCatalogEntityRequest::default();
-    for agent in &cmd.agent {
-        req = req.agent(
-            find(thorium, EntityKinds::Agent, "an AI agent", agent)
-                .await?
-                .id,
-        );
+/// * `spec` - The spec document, if one was given
+async fn create(
+    thorium: &Thorium,
+    cmd: &CreateWorkflow,
+    spec: Option<&serde_json::Value>,
+) -> Result<(), Error> {
+    // describe the workflow from its spec and flags
+    let view = edit::create_view(spec, cmd)?;
+    // find each agent and the entry agent in the workflow's groups
+    let mut agents = Vec::new();
+    for agent in &view.agents {
+        agents.push(resolve_agent(thorium, &view.groups, agent).await?);
     }
-    if let Some(entry) = &cmd.entry {
-        req = req.entry_agent(
-            find(thorium, EntityKinds::Agent, "an AI agent", entry)
-                .await?
-                .id,
-        );
-    }
-    // add the default models in priority order
-    for model_id in &cmd.default_model {
-        req = req.default_model(ModelMatcher {
-            model_id: model_id.clone(),
-            ..ModelMatcher::default()
-        });
-    }
-    // set the limits and settings that were given
-    if let Some(max) = cmd.max_alive_sub_agents {
-        req = req.limits(WorkflowLimits {
-            max_alive_sub_agents: Some(max),
-        });
-    }
-    if !cmd.model_auth.is_empty() {
-        req = req.model_auth(ModelAuthSource {
-            levels: cmd.model_auth.iter().map(|level| (*level).into()).collect(),
-        });
-    }
-    if cmd.no_auto_instance {
-        req = req.auto_instance(false);
-    }
-    if cmd.extend_target_groups {
-        req = req.extend_target_groups();
-    }
+    let entry = match &view.entry_agent {
+        Some(entry) => Some(resolve_agent(thorium, &view.groups, entry).await?),
+        None => None,
+    };
+    let req = edit::create_request(&view, &agents, entry, cmd.extend_target_groups)?;
     // create the workflow
     let mut entity = EntityRequest::new(
-        &cmd.name,
+        &view.name,
         EntityMetadataRequest::WorkflowCatalog(req),
-        cmd.group.clone(),
+        view.groups.clone(),
     );
-    entity.description.clone_from(&cmd.description);
+    entity.description.clone_from(&view.description);
     let resp = thorium.entities.create(entity).await?;
     println!("Created workflow {} ({})", resp.name, resp.id);
     Ok(())
@@ -587,29 +579,344 @@ async fn toolset(thorium: &Thorium, cmd: &ShowToolset) -> Result<(), Error> {
     )
 }
 
+/// Edit a workflow in an editor, or from `--file`, `--set`, `--unset` and `--patch`
+///
+/// # Arguments
+///
+/// * `thorium` - The Thorium client
+/// * `conf` - The Thorctl config
+/// * `cmd` - The edit command to execute
+async fn edit_workflow(thorium: &Thorium, conf: &CtlConf, cmd: &EditWorkflow) -> Result<(), Error> {
+    // find the workflow
+    let workflow = find(
+        thorium,
+        EntityKinds::WorkflowCatalog,
+        "a workflow",
+        &cmd.workflow,
+    )
+    .await?;
+    let target = WorkflowTarget {
+        id: workflow.id,
+        extend_target_groups: cmd.extend_target_groups,
+    };
+    // run the shared edit flow, which prints the result
+    edit_with::<WorkflowEditable>(thorium, conf, &target, &cmd.edit).await?;
+    Ok(())
+}
+
+/// Update a workflow from flags, `--file`, `--set`, `--unset` and `--patch`
+///
+/// # Arguments
+///
+/// * `thorium` - The Thorium client
+/// * `cmd` - The update command to execute
+async fn update_workflow(thorium: &Thorium, cmd: &UpdateWorkflow) -> Result<(), Error> {
+    // find the workflow
+    let workflow = find(
+        thorium,
+        EntityKinds::WorkflowCatalog,
+        "a workflow",
+        &cmd.workflow,
+    )
+    .await?;
+    let target = WorkflowTarget {
+        id: workflow.id,
+        extend_target_groups: cmd.extend_target_groups,
+    };
+    // turn the typed flags into edits that apply before the `--set` and `--unset` edits
+    let view = WorkflowEditable::to_view(&workflow);
+    let mut args = cmd.edit.clone();
+    let mut ops = edit::typed_ops(cmd, &view)?;
+    ops.append(&mut args.ops);
+    args.ops = ops;
+    // run the shared update flow, which prints the result
+    update_with::<WorkflowEditable>(thorium, &target, &args).await?;
+    Ok(())
+}
+
+/// Print a workflow as a spec
+///
+/// # Arguments
+///
+/// * `thorium` - The Thorium client
+/// * `cmd` - The spec command to execute
+async fn print_spec(thorium: &Thorium, cmd: &SpecWorkflow) -> Result<(), Error> {
+    // find the workflow and build its view
+    let workflow = find(
+        thorium,
+        EntityKinds::WorkflowCatalog,
+        "a workflow",
+        &cmd.workflow,
+    )
+    .await?;
+    let view = WorkflowEditable::to_view(&workflow);
+    // write the view as JSON or, by default, YAML
+    let text = match cmd.format.format {
+        Some(OutputFormat::Json) => utils::curated_json(&view, WorkflowEditable::FIELD_ORDER)?,
+        _ => utils::curated_yaml(&view, WorkflowEditable::FIELD_ORDER)?,
+    };
+    // print it, or save it to the file asked for
+    match &cmd.output {
+        Some(path) => std::fs::write(path, text)
+            .map_err(|err| Error::new(format!("Failed to write {}: {err}", path.display()))),
+        None => {
+            print!("{text}");
+            Ok(())
+        }
+    }
+}
+
+/// Delete a workflow
+///
+/// # Arguments
+///
+/// * `thorium` - The Thorium client
+/// * `cmd` - The delete command to execute
+async fn delete_workflow(thorium: &Thorium, cmd: &DeleteWorkflow) -> Result<(), Error> {
+    // find the workflow
+    let workflow = find(
+        thorium,
+        EntityKinds::WorkflowCatalog,
+        "a workflow",
+        &cmd.workflow,
+    )
+    .await?;
+    // a dry run only says what would be deleted
+    if cmd.dry_run {
+        println!(
+            "Dry run: would delete workflow {} ({})",
+            workflow.name, workflow.id
+        );
+        return Ok(());
+    }
+    // confirm the deletion
+    if !confirm_delete("workflow", &workflow.name, cmd.skip_confirm)? {
+        println!("Cancelled.");
+        return Ok(());
+    }
+    // delete the workflow, which the API refuses while something still needs it
+    thorium
+        .entities
+        .delete(workflow.id)
+        .await
+        .map_err(utils::delete_refusal)?;
+    println!("Deleted workflow {} ({})", workflow.name, workflow.id);
+    Ok(())
+}
+
+/// Whether a name is of the form `{workflow}#r{revision}`
+///
+/// # Arguments
+///
+/// * `value` - The name to check
+fn names_revision(value: &str) -> bool {
+    // a revision is a number after the last `#r`, behind a non-empty workflow name
+    value
+        .rsplit_once("#r")
+        .is_some_and(|(root, revision)| !root.is_empty() && revision.parse::<u64>().is_ok())
+}
+
+/// Get the latest instance of a workflow
+///
+/// # Arguments
+///
+/// * `workflow` - The workflow
+fn latest_instance_of(workflow: &Entity) -> Result<Uuid, Error> {
+    // the workflow keeps its newest ready instance
+    let meta = workflow_meta(workflow);
+    if let Some(latest) = meta.and_then(|meta| meta.latest_instance) {
+        return Ok(latest);
+    }
+    // the next instance gets the revision after the highest one ever given out
+    let next = meta.map_or(0, |meta| meta.highest_revision) + 1;
+    let name = &workflow.name;
+    // an instance that isn't ready (Invalid, for example) is named so its errors can be read
+    let newest = meta
+        .and_then(|meta| meta.newest_instance)
+        .map_or_else(String::new, |newest| {
+            format!(
+                " its newest instance ({newest}) is not ready, and `thorctl instances describe \
+                 {newest}` shows its status and errors;"
+            )
+        });
+    Err(Error::new(format!(
+        "Workflow {name} has no ready instance yet;{newest} request one with `thorctl instances \
+         request workflow {name}` and wait for it with `--wait-for instance-revision={next}`"
+    )))
+}
+
+/// Find the instance a run command names
+///
+/// A workflow's name or ID means its latest instance, `{workflow}#r{revision}` one revision, and
+/// an instance's ID that instance.
+///
+/// # Arguments
+///
+/// * `thorium` - The Thorium client
+/// * `value` - What the command was given
+pub(crate) async fn run_instance(thorium: &Thorium, value: &str) -> Result<String, Error> {
+    // a revision name is an instance name
+    if names_revision(value) {
+        return Ok(value.to_owned());
+    }
+    // an ID names a workflow or an instance, and anything else is left to the instance lookup
+    if let Ok(id) = Uuid::parse_str(value) {
+        let found = thorium.entities.get(id).await?;
+        if found.kind == EntityKinds::WorkflowCatalog {
+            return latest_instance_of(&found).map(|latest| latest.to_string());
+        }
+        return Ok(value.to_owned());
+    }
+    // a name is a workflow's, or failing that an instance's
+    match find(thorium, EntityKinds::WorkflowCatalog, "a workflow", value).await {
+        Ok(workflow) => latest_instance_of(&workflow).map(|latest| latest.to_string()),
+        Err(not_a_workflow) => match find_instance(thorium, value).await {
+            Ok(instance) => Ok(instance.id.to_string()),
+            Err(_) => Err(not_a_workflow),
+        },
+    }
+}
+
+/// Run a workflow and follow it as the command's flags ask
+///
+/// # Arguments
+///
+/// * `thorium` - The Thorium client
+/// * `cmd` - The run command to execute
+/// * `opts` - How a batch of runs is started and printed
+async fn run(thorium: &Thorium, cmd: &RunWorkflow, opts: &BatchOpts) -> Result<(), Error> {
+    // find the instance to run, noting a lookup by workflow name on stderr
+    let instance = run_instance(thorium, &cmd.instance).await?;
+    if instance != cmd.instance {
+        eprintln!("Running {} at instance {instance}", cmd.instance);
+    }
+    // run it with the same inputs and flags
+    let resolved = RunWorkflow {
+        instance,
+        common: cmd.common.clone(),
+    };
+    crate::handlers::runs::run_workflow(thorium, &resolved, opts).await
+}
+
 /// Handle all workflow commands
+///
+/// A create's spec file is read before any request is made.
 ///
 /// # Arguments
 ///
 /// * `args` - The arguments passed to Thorctl
 /// * `cmd` - The workflows command to execute
 pub async fn handle(args: &Args, cmd: &Workflows) -> Result<(), Error> {
+    // read a create's spec before making any request
+    let spec = match cmd {
+        Workflows::Create(CreateWorkflow {
+            spec: Some(path), ..
+        }) => Some(spec_io::read_document(&path.to_string_lossy(), "--spec")?),
+        _ => None,
+    };
     // load our config and instance our client
-    let (_, thorium) = utils::get_client(args).await?;
+    let (conf, thorium) = utils::get_client(args).await?;
     // call the right workflows handler
     let result = match cmd {
         Workflows::Get(cmd) => get(&thorium, cmd).await,
         Workflows::Describe(cmd) => describe(&thorium, cmd).await,
-        Workflows::Create(cmd) => create(&thorium, cmd).await,
+        Workflows::Create(cmd) => create(&thorium, cmd, spec.as_ref()).await,
         Workflows::AddAgent(cmd) => add_agent(&thorium, cmd).await,
         Workflows::RemoveAgent(cmd) => remove_agent(&thorium, cmd).await,
         Workflows::Entry(cmd) => set_entry(&thorium, cmd).await,
         Workflows::Toolset(cmd) => toolset(&thorium, cmd).await,
-        Workflows::Run(cmd) => crate::handlers::runs::run_workflow(&thorium, cmd).await,
+        Workflows::Update(cmd) => update_workflow(&thorium, cmd).await,
+        Workflows::Edit(cmd) => edit_workflow(&thorium, &conf, cmd).await,
+        Workflows::Spec(cmd) => print_spec(&thorium, cmd).await,
+        Workflows::Delete(cmd) => delete_workflow(&thorium, cmd).await,
+        Workflows::Run(cmd) => run(&thorium, cmd, &BatchOpts::from_args(args)).await,
     };
     // show the API's status code with any refusal
     result.map_err(|err| match err.status() {
         Some(_) => Error::new(err.to_string()),
         None => err,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{latest_instance_of, names_revision};
+    use crate::handlers::agents::fixtures::entity;
+    use thorium::models::{EntityKinds, EntityMetadata, WorkflowCatalogEntity};
+    use uuid::Uuid;
+
+    /// Build a workflow named `triage` with a latest instance or none
+    ///
+    /// # Arguments
+    ///
+    /// * `latest` - The workflow's latest instance
+    fn workflow(latest: Option<Uuid>) -> thorium::models::Entity {
+        // only the latest instance matters to a run by name
+        entity(
+            "triage",
+            EntityKinds::WorkflowCatalog,
+            EntityMetadata::WorkflowCatalog(WorkflowCatalogEntity {
+                latest_instance: latest,
+                ..WorkflowCatalogEntity::default()
+            }),
+            &["lab"],
+        )
+    }
+
+    /// A name with `#r` and a number names one revision, and nothing else does
+    #[test]
+    fn revisions_are_named_with_a_number() {
+        // a revision of a workflow
+        assert!(names_revision("triage#r1"));
+        assert!(names_revision("my flow#r12"));
+        // a bare name, an ID, and a malformed revision are not revision names
+        assert!(!names_revision("triage"));
+        assert!(!names_revision("triage#r"));
+        assert!(!names_revision("triage#rx"));
+        assert!(!names_revision("#r1 "));
+        assert!(!names_revision(&Uuid::new_v4().to_string()));
+    }
+
+    /// A run by name goes to the workflow's latest instance, or says how to get one
+    #[test]
+    fn latest_instance_is_the_default() {
+        // the latest instance is the one the workflow names
+        let latest = Uuid::new_v4();
+        assert_eq!(latest_instance_of(&workflow(Some(latest))).unwrap(), latest);
+        // a workflow with no ready instance names the command that requests one
+        let err = latest_instance_of(&workflow(None)).unwrap_err();
+        let text = err.to_string();
+        assert!(
+            text.contains("triage") && text.contains("no ready instance"),
+            "{text}"
+        );
+        assert!(text.contains("instances request workflow triage"), "{text}");
+        assert!(text.contains("instance-revision=1"), "{text}");
+        assert!(!text.contains("newest instance"), "{text}");
+        // a workflow whose only instance is Invalid names it and waits for the next revision
+        let newest = Uuid::new_v4();
+        let invalid = entity(
+            "triage",
+            EntityKinds::WorkflowCatalog,
+            EntityMetadata::WorkflowCatalog(WorkflowCatalogEntity {
+                newest_instance: Some(newest),
+                highest_revision: 1,
+                ..WorkflowCatalogEntity::default()
+            }),
+            &["lab"],
+        );
+        let text = latest_instance_of(&invalid).unwrap_err().to_string();
+        assert!(
+            text.contains(&format!("newest instance ({newest}) is not ready")),
+            "{text}"
+        );
+        assert!(
+            text.contains(&format!("instances describe {newest}")),
+            "{text}"
+        );
+        assert!(text.contains("instance-revision=2"), "{text}");
+        // an entity that isn't a workflow has none either
+        let other = entity("yara", EntityKinds::Tool, EntityMetadata::Other, &["lab"]);
+        assert!(latest_instance_of(&other).is_err());
+    }
 }

@@ -117,6 +117,54 @@ thorctl config --disable-proxy=true
 thorctl config --clear-proxy
 ```
 
+### Shell completions
+
+`thorctl completions <SHELL>` prints a tab-completion script for `bash`, `zsh`, `fish`, `powershell`, or `elvish` to
+stdout. The script is generated from Thorctl's own command tree, so it always lists the commands and flags of the
+version that printed it. The command needs no config file and no login, so you can run it before you log in. Install
+the script once for your shell, and print it again after you update Thorctl.
+
+**bash**
+
+```bash
+mkdir -p ~/.local/share/bash-completion/completions
+thorctl completions bash > ~/.local/share/bash-completion/completions/thorctl
+```
+
+**zsh** (any directory on your `$fpath`, with the file named `_thorctl`)
+
+```bash
+mkdir -p ~/.zfunc
+thorctl completions zsh > ~/.zfunc/_thorctl
+```
+
+Add `fpath=(~/.zfunc $fpath)` to `~/.zshrc` before the line that runs `compinit`.
+
+**fish**
+
+```bash
+mkdir -p ~/.config/fish/completions
+thorctl completions fish > ~/.config/fish/completions/thorctl.fish
+```
+
+**PowerShell** (adds the script to your profile, which `$PROFILE` names)
+
+```powershell
+New-Item -Force -ItemType File $PROFILE
+thorctl completions powershell >> $PROFILE
+```
+
+**elvish**
+
+```bash
+mkdir -p ~/.config/elvish/lib
+thorctl completions elvish > ~/.config/elvish/lib/thorctl.elv
+```
+
+Add `use thorctl` to `~/.config/elvish/rc.elv`.
+
+Start a new shell afterwards so it loads the script. `thorctl completions --help` repeats these steps.
+
 ### Thorctl Help
 
 Thorctl will print help info if you pass in either the `-h` or `--help` flags.
