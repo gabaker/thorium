@@ -61,11 +61,6 @@ async fn create_helper(
 /// * `submissions` - The submission ids tied to each side of the association, if any
 /// * `direction` - The directionality of the `source -> target` rows
 /// * `shared` - Shared Thorium objects
-#[instrument(
-    name = "db::associations::create",
-    skip(user, targets, shared),
-    err(Debug)
-)]
 #[expect(clippy::too_many_arguments)]
 pub async fn create(
     user: &User,
@@ -77,13 +72,59 @@ pub async fn create(
     direction: Directionality,
     shared: &Shared,
 ) -> Result<(), ApiError> {
+    // the associations are created now
+    create_at(
+        user,
+        size_hint,
+        kind,
+        source,
+        targets,
+        submissions,
+        direction,
+        Utc::now(),
+        shared,
+    )
+    .await
+}
+
+/// Create associations from a single source to many targets across groups at a chosen time
+///
+/// The rows are keyed by their creation time, so a writer that must be able to repeat a write
+/// without duplicating rows passes the same time every time.
+///
+/// # Arguments
+///
+/// * `user` - The user creating these associations
+/// * `size_hint` - A hint for how many associations are being created
+/// * `kind` - The kind of associations being created
+/// * `source` - The source these associations originate from
+/// * `targets` - The targets to associate with the source and their groups
+/// * `submissions` - The submission ids tied to each side of the association, if any
+/// * `direction` - The directionality of the `source -> target` rows
+/// * `now` - When the associations are created
+/// * `shared` - Shared Thorium objects
+#[instrument(
+    name = "db::associations::create",
+    skip(user, targets, shared),
+    err(Debug)
+)]
+#[expect(clippy::too_many_arguments)]
+pub async fn create_at(
+    user: &User,
+    size_hint: usize,
+    kind: AssociationKind,
+    source: AssociationTarget,
+    targets: &Vec<(AssociationTarget, Vec<String>)>,
+    submissions: Option<AssociatedSubmissions>,
+    direction: Directionality,
+    now: DateTime<Utc>,
+    shared: &Shared,
+) -> Result<(), ApiError> {
     // get the submission ids tied to each side of this association if any are set
     // the other submission is applied to every target so this is only meaningful for single target requests
     let submissions_source = submissions.as_ref().and_then(|subs| subs.source);
     let submissions_other = submissions.as_ref().and_then(|subs| subs.other);
-    // get the current time for when we are inserting these rows
-    let now = Utc::now();
-    // get the current year
+    // get the year of the time we are inserting these rows at
     let year = now.year();
     // get the partition size to use for files and tags
     let chunk = shared.config.thorium.associations.partition_size;

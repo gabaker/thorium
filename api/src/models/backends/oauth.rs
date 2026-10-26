@@ -443,6 +443,10 @@ impl OAuthUserCreate {
 
     /// Register a new user from an OAuth registration session
     ///
+    /// The verification email is sent before the user is created. When it can't be sent, the
+    /// verification token saved for it is discarded and the send's error is returned, so no half
+    /// made user is left behind.
+    ///
     /// # Arguments
     ///
     /// * `provider` - The provider to create a new registration session with
@@ -564,7 +568,13 @@ impl OAuthUserCreate {
         // user-supplied email can never be auto-verified for an address the registrant does not own
         match &shared.email {
             // send our verification email
-            Some(email_client) => cast.send_verification_email(email_client, shared).await?,
+            Some(email_client) => {
+                // forget the token when the email can't be sent so no half made user is left behind
+                if let Err(error) = cast.send_verification_email(email_client, shared).await {
+                    db::users::discard_verification_token(&cast.username, shared).await?;
+                    return Err(error);
+                }
+            }
             // fail closed as OAuth registration requires email verification to be enabled
             None => {
                 return unavailable!(

@@ -19,6 +19,7 @@ mod helpers;
 mod images;
 mod jobs;
 mod keys;
+pub mod migrations;
 mod network_policies;
 mod pipelines;
 mod reactions;

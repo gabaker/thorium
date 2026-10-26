@@ -14,11 +14,15 @@ use crate::outcome::RunOutcome;
 
 mod check;
 pub mod context;
+mod drain;
 mod elastic_rebuild;
 #[cfg(feature = "test-support")]
 pub mod fixture;
+mod images_to_tools;
 mod issues;
 mod loss;
+pub mod pipelines_to_tool_stages;
+mod provenance_to_legacy_tools;
 mod record;
 pub mod registry;
 mod report;
@@ -365,6 +369,9 @@ mod tests {
     use clap::Parser;
     use thorium::models::upgrades::CATALOG;
 
+    /// The migrations that can run but that no catalog step performs yet
+    const UNCATALOGED: [&str; 1] = ["images-to-tools"];
+
     /// Every migration the catalog references is registered, and every registered migration
     /// is performed by a catalog step
     #[test]
@@ -381,11 +388,13 @@ mod tests {
         }
         // a registered migration no catalog step uses could never be run by an upgrade
         for migration in MIGRATIONS.iter().filter(|migration| {
-            // a fixture or rebucket migration has no catalog step, and a check-only migration may
-            // be registered ahead of the step that runs it
+            // a fixture or rebucket migration has no catalog step, a check-only migration may be
+            // registered ahead of the step that runs it, and so may a migration whose writer is
+            // built and run by hand before the revision that performs it is cataloged
             !migration.id.starts_with("fixture-")
                 && !migration.id.starts_with("rebucket-")
                 && migration.support != Support::CheckOnly
+                && !UNCATALOGED.contains(&migration.id)
         }) {
             assert!(
                 step_for(migration.id).is_some(),
@@ -421,6 +430,28 @@ mod tests {
                 assert!(step_for(migration.id).is_none(), "{}", migration.id);
             }
         }
+    }
+
+    /// The image conversion is registered as runnable, runs in its own pass, and covers the images
+    /// and the entities its tools are written to
+    #[test]
+    fn the_image_conversion_is_registered_and_runnable() {
+        // look it up as a run would
+        let migration = find("images-to-tools").expect("the migration is registered");
+        assert_eq!(migration.support, Support::Yes);
+        assert_eq!(migration.pass, "images-to-tools");
+        assert_eq!(migration.families, ["images", "entities"]);
+    }
+
+    /// The pipeline conversion is registered, runs in the `pipelines` pass, and covers the pipelines
+    /// family
+    #[test]
+    fn the_pipeline_conversion_is_registered() {
+        // look it up as a run would
+        let migration = find("pipelines-to-tool-stages").expect("the migration is registered");
+        assert_eq!(migration.support, Support::CheckOnly);
+        assert_eq!(migration.pass, "pipelines");
+        assert_eq!(migration.families, ["pipelines"]);
     }
 
     /// A migration thoradm can't perform fails with the not implemented exit code and the manual

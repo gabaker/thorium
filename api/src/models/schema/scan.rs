@@ -5,7 +5,8 @@
 //! partition finished, so a resumed worker starts right after it. Neighbouring tokens live on the
 //! same shard, so workers walking their own contiguous slices spread over the cluster's cores.
 
-use scylla::value::{CqlValue, Row};
+use chrono::{DateTime, SecondsFormat, Utc};
+use scylla::value::{CqlTimestamp, CqlValue, Row};
 use std::collections::BTreeMap;
 
 use super::pass_store::{backend_error, is_rejection};
@@ -113,6 +114,9 @@ pub struct ScyllaScan {
 
 /// Render a column value as text for a record's key
 ///
+/// Text and ids render as they display. A timestamp renders as RFC 3339 UTC with nanoseconds, the
+/// form an issue key gives it, so a record is found by the key its issue group lists.
+///
 /// # Arguments
 ///
 /// * `value` - The column's value
@@ -125,6 +129,13 @@ fn render(value: &CqlValue) -> String {
         CqlValue::SmallInt(number) => number.to_string(),
         CqlValue::TinyInt(number) => number.to_string(),
         CqlValue::Uuid(id) => id.to_string(),
+        // a time is RFC 3339 UTC with nanoseconds, as issue keys give it, so `--objects` finds
+        // the record by the key its issue group lists
+        CqlValue::Timestamp(CqlTimestamp(millis)) => {
+            DateTime::<Utc>::from_timestamp_millis(*millis).map_or_else(String::new, |time| {
+                time.to_rfc3339_opts(SecondsFormat::Nanos, true)
+            })
+        }
         other => format!("{other:?}"),
     }
 }

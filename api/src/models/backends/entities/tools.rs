@@ -15,11 +15,13 @@
 //! body arrives. Tag changes take no lock.
 
 use chrono::{DateTime, Utc};
+use futures::future::BoxFuture;
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::time::Duration;
 use tracing::{Level, event, instrument};
 use uuid::Uuid;
 
+use crate::client::migrations::MigratedTool;
 use crate::models::backends::db;
 use crate::models::entities::digests::ThorDigest;
 use crate::models::{
@@ -28,8 +30,8 @@ use crate::models::{
     EntityMetadataForm, EntityMetadataUpdateForm, EntityResponse, Event, Group, GroupAllowAction,
     HarnessEnv, HarnessSpec, HarnessToolAccess, NetworkPolicy, NetworkPolicyUpdate, SystemSettings,
     ToolEntity, ToolEntityRequest, ToolInstanceEntity, ToolInstanceEntityRequest,
-    ToolInstanceSummary, ToolKind, ToolPortabilityReport, ToolSpec, ToolVersion, User,
-    WorkflowGraphChange, WorkloadEnvironment, WorkloadSpec,
+    ToolInstanceSummary, ToolKind, ToolPortabilityReport, ToolSpec, ToolVersion, User, UserRole,
+    UserSettings, WorkflowGraphChange, WorkloadEnvironment, WorkloadSpec,
 };
 use crate::utils::{ApiError, Shared, helpers};
 use crate::{bad, bad_internal, conflict, internal_err, not_found, unauthorized};
@@ -50,6 +52,21 @@ pub(crate) struct PreparedInstance {
     spec_hash: String,
     /// The checked native tool instances a harness instance provides, sorted by id
     provides: Vec<Entity>,
+}
+
+/// The id and time a publish uses when it must write the same rows every time it is repeated
+///
+/// The API leaves the stamp out, so a publish gets a random instance id and the current time. A
+/// migration derives both from what it migrates, so a crashed run that repeats a publish
+/// overwrites the rows it already wrote instead of duplicating them. A stamped create also
+/// skips the check that the tools a spec's dependency settings name already exist, because a
+/// migration creates those tools in the same pass, in any order.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PublishStamp {
+    /// The id of the first instance the publish creates
+    pub instance_id: Uuid,
+    /// When the tool, its instance, and the edge between them are created
+    pub at: DateTime<Utc>,
 }
 
 /// Map a model validation message to a `400`
@@ -455,8 +472,12 @@ async fn check_dependency_tools(
 /// * `version` - The requested version label
 /// * `spec` - The requested JSON encoded spec
 /// * `provides` - The native tool instances a harness instance provides
+/// * `check_dependencies` - Whether every tool the spec's dependency settings name must already
+///   exist; a migration turns this off because the tools its specs name are created by the same
+///   pass, in any order
 /// * `shared` - Shared Thorium objects
 #[instrument(name = "tools::prepare", skip_all, err(Debug))]
+#[expect(clippy::too_many_arguments)]
 pub(crate) async fn prepare(
     user: &User,
     kind: ToolKind,
@@ -464,6 +485,7 @@ pub(crate) async fn prepare(
     version: &str,
     spec: &str,
     provides: &[Uuid],
+    check_dependencies: bool,
     shared: &Shared,
 ) -> Result<PreparedInstance, ApiError> {
     // parse the version label
@@ -508,7 +530,9 @@ pub(crate) async fn prepare(
             // check the settings only some publishers may use
             check_workload_privileges(user, workload, &settings)?;
             // every tool its dependency settings name must be a tool the publisher can see
-            check_dependency_tools(user, workload, shared).await?;
+            if check_dependencies {
+                check_dependency_tools(user, workload, shared).await?;
+            }
             None
         }
     };
@@ -694,6 +718,36 @@ pub(crate) async fn instances(
     Ok(entities)
 }
 
+/// Get every instance of a tool in some groups, newest first, without their tags
+///
+/// A tool's summaries, its latest instance, and the version checks of a publish only need an
+/// instance's row, so they skip the tag read each instance would otherwise cost.
+///
+/// # Arguments
+///
+/// * `user` - The user reading the instances
+/// * `tool` - The id of the tool
+/// * `groups` - The groups to read the instances in
+/// * `shared` - Shared Thorium objects
+pub(crate) async fn instances_untagged(
+    user: &User,
+    tool: Uuid,
+    groups: &[String],
+    shared: &Shared,
+) -> Result<Vec<Entity>, ApiError> {
+    // get the ids of the tool's instances
+    let ids = instance_ids(user, tool, groups, shared).await?;
+    // there is nothing to read without instances
+    if ids.is_empty() {
+        return Ok(Vec::new());
+    }
+    // get the instances' rows, which come back newest first
+    let mut entities = db::entities::get_many_untagged(groups, &ids, shared).await?;
+    // keep the creation order stable for instances created in the same millisecond
+    entities.sort_by_key(|entity| std::cmp::Reverse(entity.created));
+    Ok(entities)
+}
+
 /// Summarize a tool's instances, newest first
 ///
 /// # Arguments
@@ -841,6 +895,8 @@ pub(crate) struct PublishPlan {
     spec_hash: String,
     /// When the instance is published
     now: DateTime<Utc>,
+    /// When the edge is created, or `None` to create it at the moment it is written
+    edge_at: Option<DateTime<Utc>>,
 }
 
 /// Run every check of a publish and build what it would write, writing nothing
@@ -851,6 +907,7 @@ pub(crate) struct PublishPlan {
 /// * `tool` - The tool to publish an instance of, in all of its groups
 /// * `prepared` - The checked version and spec
 /// * `existing` - The tool's existing instances, newest first
+/// * `stamp` - The id and time to publish with, or `None` for a random id and the current time
 /// * `shared` - Shared Thorium objects
 #[instrument(name = "tools::validate_publish", skip_all, fields(tool = tool.id.to_string()), err(Debug))]
 pub(crate) async fn validate_publish(
@@ -858,6 +915,7 @@ pub(crate) async fn validate_publish(
     tool: &Entity,
     prepared: PreparedInstance,
     existing: &[Entity],
+    stamp: Option<PublishStamp>,
     shared: &Shared,
 ) -> Result<PublishPlan, ApiError> {
     // the label must be new and the spec must differ from the latest instance's
@@ -865,13 +923,15 @@ pub(crate) async fn validate_publish(
     // the new instance supersedes the most recently created one
     let previous = existing.first().map(|entity| entity.id);
     // build the new instance in every group of its tool
-    let now = Utc::now();
+    let now = stamp.map_or_else(Utc::now, |stamp| stamp.at);
     let name = format!("{}@{}", tool.name, prepared.version);
-    // tests may choose the new instance's id
+    // a stamp chooses the id; otherwise tests may choose it
     #[cfg(feature = "test-utilities")]
-    let id = crate::test_utilities::faults::take_create_id(&name).unwrap_or_else(Uuid::new_v4);
+    let fallback =
+        || crate::test_utilities::faults::take_create_id(&name).unwrap_or_else(Uuid::new_v4);
     #[cfg(not(feature = "test-utilities"))]
-    let id = Uuid::new_v4();
+    let fallback = Uuid::new_v4;
+    let id = stamp.map_or_else(fallback, |stamp| stamp.instance_id);
     let instance = Entity {
         id,
         name,
@@ -900,6 +960,7 @@ pub(crate) async fn validate_publish(
         version: prepared.version,
         spec_hash: prepared.spec_hash,
         now,
+        edge_at: stamp.map(|stamp| stamp.at),
     })
 }
 
@@ -916,8 +977,10 @@ pub(crate) async fn validate_publish(
 /// * `existing` - The tool's existing instances, newest first
 /// * `tags` - The user tags to give the new instance
 /// * `new_tool_tags` - The user tags of the tool when the tool itself still needs to be created
+/// * `stamp` - The id and time to publish with, or `None` for a random id and the current time
 /// * `shared` - Shared Thorium objects
 #[instrument(name = "tools::publish", skip_all, fields(tool = tool.id.to_string()), err(Debug))]
+#[expect(clippy::too_many_arguments)]
 pub(crate) async fn publish(
     user: &User,
     tool: &mut Entity,
@@ -925,10 +988,11 @@ pub(crate) async fn publish(
     existing: &[Entity],
     tags: HashMap<String, HashSet<String>>,
     new_tool_tags: Option<HashMap<String, HashSet<String>>>,
+    stamp: Option<PublishStamp>,
     shared: &Shared,
 ) -> Result<Entity, ApiError> {
     // check everything and build what would be written
-    let plan = validate_publish(user, tool, prepared, existing, shared).await?;
+    let plan = validate_publish(user, tool, prepared, existing, stamp, shared).await?;
     // write it
     Box::pin(write_publish(user, tool, plan, tags, new_tool_tags, shared)).await
 }
@@ -964,6 +1028,7 @@ pub(crate) async fn write_publish(
         version,
         spec_hash,
         now,
+        edge_at,
     } = plan;
     // write the instance first, since nothing reads it until the edge exists
     db::entities::insert(user, &instance, tags, shared).await?;
@@ -1009,7 +1074,7 @@ pub(crate) async fn write_publish(
         id: tool.id,
         name: tool.name.clone(),
     };
-    db::associations::create(
+    db::associations::create_at(
         user,
         tool.groups.len(),
         AssociationKind::PublishedFrom,
@@ -1017,6 +1082,7 @@ pub(crate) async fn write_publish(
         &vec![(target, tool.groups.clone())],
         None,
         Directionality::To,
+        edge_at.unwrap_or_else(Utc::now),
         shared,
     )
     .await?;
@@ -1168,8 +1234,52 @@ pub(crate) async fn create_tool(
     crate::utils::bounder::entity_name(&name)?;
     // take the tool's fields from the form
     let req = ToolEntityRequest::from_form(&mut metadata)?;
+    // create the tool from its request
+    Box::pin(create_tool_from_request(
+        user,
+        id,
+        name,
+        description,
+        image,
+        groups,
+        req,
+        tags,
+        None,
+        shared,
+    ))
+    .await
+}
+
+/// Create a tool and its first instance from a checked name and request
+///
+/// # Arguments
+///
+/// * `user` - The user creating the tool
+/// * `id` - The id of the new tool
+/// * `name` - The checked name
+/// * `description` - The requested description
+/// * `image` - The tool's uploaded image, if one was uploaded
+/// * `groups` - The checked groups
+/// * `req` - The tool's request
+/// * `tags` - The requested user tags
+/// * `stamp` - The first instance's id and the time to create with, or `None` for a random id
+///   and the current time
+/// * `shared` - Shared Thorium objects
+#[expect(clippy::too_many_arguments)]
+async fn create_tool_from_request(
+    user: &User,
+    id: Uuid,
+    name: String,
+    description: Option<String>,
+    image: Option<String>,
+    groups: Vec<String>,
+    req: ToolEntityRequest,
+    tags: HashMap<String, HashSet<String>>,
+    stamp: Option<PublishStamp>,
+    shared: &Shared,
+) -> Result<EntityResponse, ApiError> {
     // build the tool, which has no latest instance until its first is published
-    let now = Utc::now();
+    let now = stamp.map_or_else(Utc::now, |stamp| stamp.at);
     let mut meta = ToolEntity::new(req.kind, now);
     // a harness gets its env and disabled models on the root
     if req.harness_env.is_some() || !req.disabled_models.is_empty() {
@@ -1203,6 +1313,7 @@ pub(crate) async fn create_tool(
         &req.version,
         &req.spec,
         &req.provides,
+        stamp.is_none(),
         shared,
     )
     .await?;
@@ -1214,6 +1325,7 @@ pub(crate) async fn create_tool(
         &[],
         HashMap::default(),
         Some(tags),
+        stamp,
         shared,
     ))
     .await?;
@@ -1222,6 +1334,84 @@ pub(crate) async fn create_tool(
     resp.tool_instance = Some(instance.id);
     resp.portability = instance_portability(&instance);
     Ok(resp)
+}
+
+/// Create the tool an image migrates to, with its first instance, through the publish path
+///
+/// The tool is created as an administrator named `submitter`, so its submitter and `submitter`
+/// tag read as that user, and the publish's checks that only an administrator passes (a
+/// non-default security context) hold for a spec the image was allowed to have. The tool's id,
+/// its first instance's id, and every time written come from the migration, so repeating the
+/// call writes the same rows.
+///
+/// # Arguments
+///
+/// * `tool` - The tool an image converts into
+/// * `submitter` - The username to create the tool as
+/// * `stamp` - The first instance's id and the time to create everything at
+/// * `shared` - Shared Thorium objects
+pub fn create_migrated_tool<'a>(
+    tool: &'a MigratedTool,
+    submitter: &'a str,
+    stamp: PublishStamp,
+    shared: &'a Shared,
+) -> BoxFuture<'a, Result<EntityResponse, ApiError>> {
+    // box the future so callers outside this crate never have to prove it is `Send` themselves
+    Box::pin(create_migrated_tool_inner(tool, submitter, stamp, shared))
+}
+
+/// Create the tool an image migrates to, with its first instance
+///
+/// # Arguments
+///
+/// * `tool` - The tool an image converts into
+/// * `submitter` - The username to create the tool as
+/// * `stamp` - The first instance's id and the time to create everything at
+/// * `shared` - Shared Thorium objects
+#[instrument(name = "tools::create_migrated_tool", skip_all, err(Debug))]
+async fn create_migrated_tool_inner(
+    tool: &MigratedTool,
+    submitter: &str,
+    stamp: PublishStamp,
+    shared: &Shared,
+) -> Result<EntityResponse, ApiError> {
+    // check the name and group like any created tool
+    let name = check_name_and_groups(Some(&tool.name), std::slice::from_ref(&tool.group))?;
+    // act as an administrator who is a member of the tool's group
+    let user = User {
+        username: submitter.to_owned(),
+        password: None,
+        email: String::new(),
+        role: UserRole::Admin,
+        groups: vec![tool.group.clone()],
+        actual_groups: vec![tool.group.clone()],
+        token: String::new(),
+        token_expiration: stamp.at,
+        unix: None,
+        settings: UserSettings::default(),
+        verified: true,
+        verification_token: None,
+        verification_sent: None,
+        aliases: HashMap::default(),
+        image: None,
+    };
+    // encode the first instance's version and spec the way a request carries them
+    let req = ToolEntityRequest::new(tool.version.to_string(), &tool.spec)
+        .map_err(|err| bad_internal!(format!("the migrated spec can't be encoded: {err}")))?;
+    // create the tool and its first instance with the migration's id and time
+    Box::pin(create_tool_from_request(
+        &user,
+        tool.id,
+        name,
+        tool.description.clone(),
+        None,
+        vec![tool.group.clone()],
+        req,
+        tool.tags.clone(),
+        Some(stamp),
+        shared,
+    ))
+    .await
 }
 
 /// Create a tool instance directly for an existing tool from a submitted form
@@ -1367,13 +1557,17 @@ async fn locked_publish(
         requested.version,
         requested.spec,
         requested.provides,
+        true,
         shared,
     )
     .await?;
     // get the tool's existing instances
-    let existing = instances(user, tool.id, &tool.groups, shared).await?;
+    let existing = instances_untagged(user, tool.id, &tool.groups, shared).await?;
     // publish the instance
-    Box::pin(publish(user, tool, prepared, &existing, tags, None, shared)).await
+    Box::pin(publish(
+        user, tool, prepared, &existing, tags, None, None, shared,
+    ))
+    .await
 }
 
 /// Publish a new instance of a tool from a tool update
@@ -1558,7 +1752,7 @@ pub(crate) async fn refresh_latest(
     let mut entity = db::entities::get(&groups, tool, shared).await?;
     entity.groups = groups;
     // find the newest instance that isn't deprecated
-    let existing = instances(user, entity.id, &entity.groups, shared).await?;
+    let existing = instances_untagged(user, entity.id, &entity.groups, shared).await?;
     let latest = find_latest(&existing);
     // get the tool's current latest
     let meta = tool_meta(&mut entity)?;
@@ -1947,7 +2141,7 @@ pub(crate) async fn list_summaries(
         return not_found!(format!("Tool {} not found", tool.id));
     }
     // read the instances in the groups the user can see the tool in
-    let found = instances(user, tool.id, &tool.groups, shared).await?;
+    let found = instances_untagged(user, tool.id, &tool.groups, shared).await?;
     Ok(summarize(&found))
 }
 

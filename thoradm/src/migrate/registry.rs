@@ -268,6 +268,10 @@ pub const MIGRATIONS: &[MigrationDef] = &[
     REBUCKETS[5],
     USERS_SETTINGS_THEME,
     USERS_SETTINGS_THEME_REVERSE,
+    super::images_to_tools::IMAGES_TO_TOOLS,
+    super::pipelines_to_tool_stages::PIPELINES_TO_TOOL_STAGES,
+    super::provenance_to_legacy_tools::PROVENANCE_TO_LEGACY_TOOLS,
+    super::drain::DRAIN_REACTIONS,
 ];
 
 /// Every data migration thoradm knows about, appended in the order they were added, followed by
@@ -283,6 +287,10 @@ pub const MIGRATIONS: &[MigrationDef] = &[
     REBUCKETS[5],
     USERS_SETTINGS_THEME,
     USERS_SETTINGS_THEME_REVERSE,
+    super::images_to_tools::IMAGES_TO_TOOLS,
+    super::pipelines_to_tool_stages::PIPELINES_TO_TOOL_STAGES,
+    super::provenance_to_legacy_tools::PROVENANCE_TO_LEGACY_TOOLS,
+    super::drain::DRAIN_REACTIONS,
     super::fixture::THEME,
     super::fixture::STRICT,
     super::fixture::CHAIN,
