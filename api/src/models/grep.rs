@@ -336,6 +336,8 @@ pub struct GrepRequest {
 /// is sent in the request body as a [`GrepRequest`].
 #[derive(Deserialize, Debug)]
 #[cfg_attr(feature = "api", derive(utoipa::ToSchema))]
+#[cfg_attr(feature = "api", derive(utoipa::IntoParams))]
+#[cfg_attr(feature = "api", into_params(parameter_in = Query))]
 pub struct GrepQueryParams {
     /// Whether this search should ignore case or not
     #[serde(default)]

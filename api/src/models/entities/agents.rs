@@ -30,19 +30,24 @@ pub struct AgentEntity {
     /// The harness this agent runs in (Tool = latest, `ToolInstance` = pinned; populated from
     /// associations)
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "api", schema(no_recursion))]
     pub harness: Option<Box<Entity>>,
     /// The tools this agent follows at their latest instance (populated from associations)
     #[serde(default)]
+    #[cfg_attr(feature = "api", schema(no_recursion))]
     pub latest_tools: Vec<Entity>,
     /// The tool instances this agent is pinned to (populated from associations)
     #[serde(default)]
+    #[cfg_attr(feature = "api", schema(no_recursion))]
     pub pinned_tools: Vec<Entity>,
     /// The toolsets this agent uses (`ToolSet` = latest, `ToolSetInstance` = pinned; populated from
     /// associations)
     #[serde(default)]
+    #[cfg_attr(feature = "api", schema(no_recursion))]
     pub tool_sets: Vec<Entity>,
     /// The agents this agent can delegate to (populated from associations)
     #[serde(default)]
+    #[cfg_attr(feature = "api", schema(no_recursion))]
     pub sub_agents: Vec<Entity>,
     /// When this agent was last modified (any edit, including its edges; not part of
     /// `config_hash`)

@@ -6,7 +6,7 @@ use axum::routing::get;
 use tracing::instrument;
 use utoipa::OpenApi;
 
-use super::OpenApiSecurity;
+use super::{OpenApiParameterExamples, OpenApiSecurity};
 use crate::models::AuthedUser;
 use crate::models::ElasticSearchParams;
 use crate::models::backends;
@@ -27,14 +27,19 @@ pub mod events;
     get,
     path = "/api/search/",
     params(
-        ("params" = ElasticSearchParams, description = "The query params to use with this request"),
+        ElasticSearchParams,
     ),
     responses(
         (status = 200, description = "Returned Elasticsearch docs matching search", body = ApiCursor<ElasticDoc>),
+        (status = 400, description = "The request is invalid: a query parameter has an invalid value"),
         (status = 401, description = "This user is not authorized to access this route"),
+        (status = 404, description = "A resource named in the request, such as a path value, group or body field, does not exist or is not visible to this user"),
+        (status = 500, description = "An internal error occurred, such as a backing database, cache or object store failing"),
+        (status = 503, description = "A search index does not exist yet (the search streamer creates them), or a service Thorium depends on, such as Redis, is unavailable"),
     ),
     security(
         ("basic" = []),
+        ("bearer" = []),
     )
 )]
 #[instrument(name = "routes::search::search", skip_all, err(Debug))]
@@ -53,7 +58,7 @@ async fn search(
 #[openapi(
     paths(search),
     components(schemas(ApiCursor<ElasticDoc>, ElasticDoc, ElasticIndex, ElasticSearchParams)),
-    modifiers(&OpenApiSecurity),
+    modifiers(&OpenApiSecurity, &OpenApiParameterExamples),
 )]
 pub struct SearchApiDocs;
 

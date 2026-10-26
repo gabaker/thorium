@@ -9,7 +9,7 @@ use super::shared;
 use crate::is_admin;
 use utoipa::OpenApi;
 
-use super::OpenApiSecurity;
+use super::{OpenApiParameterExamples, OpenApiSecurity};
 use crate::models::AuthedUser;
 use crate::models::pipelines::{BannedImageBan, GenericBan};
 use crate::models::{
@@ -18,6 +18,9 @@ use crate::models::{
     PipelineList, PipelineListParams, PipelineRequest, PipelineUpdate, TagType,
 };
 use crate::utils::{ApiError, AppState};
+
+/// A notification for a pipeline as the documents describe it
+pub type PipelineNotification = Notification<Pipeline>;
 
 /// Creates a new pipeline in a group
 ///
@@ -29,15 +32,19 @@ use crate::utils::{ApiError, AppState};
 #[utoipa::path(
     post,
     path = "/api/pipelines/",
-    params(
-        ("request" = PipelineRequest, description = "The pipeline to create"),
-    ),
+    request_body = PipelineRequest,
     responses(
         (status = 204, description = "Pipeline created"),
-        (status = 401, description = "This user is not authorized to access this route"),
+        (status = 400, description = "The request is invalid: the JSON body is malformed or fails validation"),
+        (status = 401, description = "This user is not authorized to access this route. A run token is refused."),
+        (status = 409, description = "A pipeline with this name already exists in the group"),
+        (status = 422, description = "The JSON body is well formed but does not match the expected shape, for example a required field is missing or has the wrong type"),
+        (status = 500, description = "An internal error occurred, such as a backing database, cache or object store failing"),
+        (status = 503, description = "A service Thorium depends on, such as Redis or LDAP, is unavailable"),
     ),
     security(
         ("basic" = []),
+        ("bearer" = []),
     )
 )]
 #[instrument(name = "routes::pipelines::create", skip_all, err(Debug))]
@@ -63,7 +70,7 @@ async fn create(
 /// * `state` - Shared Thorium objects
 #[utoipa::path(
     get,
-    path = "/api/pipelines/data/:group/:pipeline",
+    path = "/api/pipelines/data/{group}/{pipeline}",
     params(
         ("group" = String, Path, description = "The group this pipeline is in"),
         ("pipeline" = String, Path, description = "The name of the pipeline to get details about"),
@@ -71,9 +78,13 @@ async fn create(
     responses(
         (status = 200, description = "Pipeline details", body = Pipeline),
         (status = 401, description = "This user is not authorized to access this route"),
+        (status = 404, description = "A resource named in the request, such as a path value, group or body field, does not exist or is not visible to this user"),
+        (status = 500, description = "An internal error occurred, such as a backing database, cache or object store failing"),
+        (status = 503, description = "A service Thorium depends on, such as Redis or LDAP, is unavailable"),
     ),
     security(
         ("basic" = []),
+        ("bearer" = []),
     )
 )]
 #[instrument(name = "routes::pipelines::get", skip_all, err(Debug))]
@@ -96,17 +107,22 @@ async fn get_pipeline(
 /// * `state` - Shared Thorium objects
 #[utoipa::path(
     get,
-    path = "/api/pipelines/list/:group/",
+    path = "/api/pipelines/list/{group}/",
     params(
         ("group" = String, Path, description = "The group this pipeline is in"),
-        ("params" = PipelineListParams, Query, description = "The query params to use for this request")
+        PipelineListParams,
     ),
     responses(
         (status = 200, description = "Pipeline details", body = PipelineList),
+        (status = 400, description = "The request is invalid: a query parameter has an invalid value"),
         (status = 401, description = "This user is not authorized to access this route"),
+        (status = 404, description = "A resource named in the request, such as a path value, group or body field, does not exist or is not visible to this user"),
+        (status = 500, description = "An internal error occurred, such as a backing database, cache or object store failing"),
+        (status = 503, description = "A service Thorium depends on, such as Redis or LDAP, is unavailable"),
     ),
     security(
         ("basic" = []),
+        ("bearer" = []),
     )
 )]
 #[instrument(
@@ -136,17 +152,22 @@ async fn list(
 /// * `state` - Shared Thorium objects
 #[utoipa::path(
     get,
-    path = "/api/pipelines/list/:group/details/",
+    path = "/api/pipelines/list/{group}/details/",
     params(
         ("group" = String, Path, description = "The group this pipeline is in"),
-        ("params" = PipelineListParams, Query, description = "The query params to use for this request")
+        PipelineListParams,
     ),
     responses(
         (status = 200, description = "Pipeline details", body = PipelineDetailsList),
+        (status = 400, description = "The request is invalid: a query parameter has an invalid value"),
         (status = 401, description = "This user is not authorized to access this route"),
+        (status = 404, description = "A resource named in the request, such as a path value, group or body field, does not exist or is not visible to this user"),
+        (status = 500, description = "An internal error occurred, such as a backing database, cache or object store failing"),
+        (status = 503, description = "A service Thorium depends on, such as Redis or LDAP, is unavailable"),
     ),
     security(
         ("basic" = []),
+        ("bearer" = []),
     )
 )]
 #[instrument(
@@ -180,18 +201,24 @@ async fn list_details(
 /// * `update` - The update to apply
 #[utoipa::path(
     patch,
-    path = "/api/pipelines/:group/:pipeline",
+    path = "/api/pipelines/{group}/{pipeline}",
     params(
         ("group" = String, Path, description = "The group this pipeline is in"),
         ("pipeline" = String, Path, description = "The name of the pipeline to update"),
-        ("update" = PipelineUpdate, description = "The update to apply")
     ),
+    request_body = PipelineUpdate,
     responses(
         (status = 204, description = "Pipeline updated"),
-        (status = 401, description = "This user is not authorized to access this route"),
+        (status = 400, description = "The request is invalid: the JSON body is malformed or fails validation"),
+        (status = 401, description = "This user is not authorized to access this route. A run token is refused."),
+        (status = 404, description = "A resource named in the request, such as a path value, group or body field, does not exist or is not visible to this user"),
+        (status = 422, description = "The JSON body is well formed but does not match the expected shape, for example a required field is missing or has the wrong type"),
+        (status = 500, description = "An internal error occurred, such as a backing database, cache or object store failing"),
+        (status = 503, description = "A service Thorium depends on, such as Redis or LDAP, is unavailable"),
     ),
     security(
         ("basic" = []),
+        ("bearer" = []),
     )
 )]
 #[instrument(name = "routes::pipelines::update", skip_all, err(Debug))]
@@ -224,17 +251,21 @@ async fn update(
 /// * `state` - Shared Thorium objects
 #[utoipa::path(
     delete,
-    path = "/api/pipelines/:group/:pipeline",
+    path = "/api/pipelines/{group}/{pipeline}",
     params(
         ("group" = String, Path, description = "The group this pipeline is in"),
         ("pipeline" = String, Path, description = "The name of the pipeline to delete"),
     ),
     responses(
         (status = 204, description = "Pipeline deleted"),
-        (status = 401, description = "This user is not authorized to access this route"),
+        (status = 401, description = "This user is not authorized to access this route. A run token is refused."),
+        (status = 404, description = "A resource named in the request, such as a path value, group or body field, does not exist or is not visible to this user"),
+        (status = 500, description = "An internal error occurred, such as a backing database, cache or object store failing"),
+        (status = 503, description = "A service Thorium depends on, such as Redis or LDAP, is unavailable"),
     ),
     security(
         ("basic" = []),
+        ("bearer" = []),
     )
 )]
 #[instrument(
@@ -268,18 +299,24 @@ async fn delete_pipeline(
 /// * `req` - The notification request that was sent
 #[utoipa::path(
     post,
-    path = "/api/pipelines/notifications/:group/:pipeline",
+    path = "/api/pipelines/notifications/{group}/{pipeline}",
     params(
         ("group" = String, Path, description = "The group this pipeline is in"),
         ("pipeline" = String, Path, description = "The name of the pipeline the notification will be created for"),
-        ("params" = NotificationParams, description = "The notification params sent with the request"),
+        NotificationParams,
     ),
     responses(
         (status = 204, description = "Pipeline notification created"),
+        (status = 400, description = "The request is invalid: the JSON body is malformed or fails validation; a query parameter has an invalid value"),
         (status = 401, description = "This user is not authorized to access this route"),
+        (status = 404, description = "A resource named in the request, such as a path value, group or body field, does not exist or is not visible to this user"),
+        (status = 422, description = "The JSON body is well formed but does not match the expected shape, for example a required field is missing or has the wrong type"),
+        (status = 500, description = "An internal error occurred, such as a backing database, cache or object store failing"),
+        (status = 503, description = "A service Thorium depends on, such as Redis or LDAP, is unavailable"),
     ),
     security(
         ("basic" = []),
+        ("bearer" = []),
     )
 )]
 #[instrument(name = "routes::pipelines::create_notification", skip_all, err(Debug))]
@@ -300,7 +337,7 @@ async fn create_notification(
     shared::notifications::create_notification(pipeline, key, req, params, &state.shared).await
 }
 
-/// Get the all of the pipeline's notifications
+/// Get all of the pipeline's notifications
 ///
 /// # Arguments
 ///
@@ -310,17 +347,21 @@ async fn create_notification(
 /// * `state` - Shared Thorium objects
 #[utoipa::path(
     get,
-    path = "/api/pipelines/notifications/:group/:pipeline",
+    path = "/api/pipelines/notifications/{group}/{pipeline}",
     params(
         ("group" = String, Path, description = "The group this pipeline is in"),
         ("pipeline" = String, Path, description = "The name of the pipeline whose notifications are being requested"),
     ),
     responses(
-        //(status = 200, description = "Pipeline notifications", body = Vec<Notification<Pipeline>>),
+        (status = 200, description = "Pipeline notifications", body = Vec<PipelineNotification>),
         (status = 401, description = "This user is not authorized to access this route"),
+        (status = 404, description = "A resource named in the request, such as a path value, group or body field, does not exist or is not visible to this user"),
+        (status = 500, description = "An internal error occurred, such as a backing database, cache or object store failing"),
+        (status = 503, description = "A service Thorium depends on, such as Redis or LDAP, is unavailable"),
     ),
     security(
         ("basic" = []),
+        ("bearer" = []),
     )
 )]
 #[instrument(name = "routes::pipelines::get_notifications", skip_all, err(Debug))]
@@ -337,7 +378,7 @@ async fn get_notifications(
     shared::notifications::get_notifications(pipeline, key, &state.shared).await
 }
 
-/// Delete a specific notification from an pipeline
+/// Delete a specific notification from a pipeline
 ///
 /// # Arguments
 ///
@@ -348,7 +389,7 @@ async fn get_notifications(
 /// * `state` - Shared Thorium objects
 #[utoipa::path(
     delete,
-    path = "/api/pipelines/notifications/:group/:pipeline/:id",
+    path = "/api/pipelines/notifications/{group}/{pipeline}/{id}",
     params(
         ("group" = String, Path, description = "The group this pipeline is in"),
         ("pipeline" = String, Path, description = "The name of the pipeline whose log is being deleted"),
@@ -356,10 +397,15 @@ async fn get_notifications(
     ),
     responses(
         (status = 204, description = "Pipeline notification deleted"),
+        (status = 400, description = "The request is invalid: a path parameter has an invalid value"),
         (status = 401, description = "This user is not authorized to access this route"),
+        (status = 404, description = "A resource named in the request, such as a path value, group or body field, does not exist or is not visible to this user"),
+        (status = 500, description = "An internal error occurred, such as a backing database, cache or object store failing"),
+        (status = 503, description = "A service Thorium depends on, such as Redis or LDAP, is unavailable"),
     ),
     security(
         ("basic" = []),
+        ("bearer" = []),
     )
 )]
 #[instrument(name = "routes::pipelines::delete_notification", skip_all, err(Debug))]
@@ -381,9 +427,9 @@ async fn delete_notification(
 /// The struct containing our openapi docs
 #[derive(OpenApi)]
 #[openapi(
-    paths(create, get_pipeline, list, list_details, update, delete_pipeline),
+    paths(create, get_pipeline, list, list_details, update, delete_pipeline, get_notifications, create_notification, delete_notification),
     components(schemas(BannedImageBan, EventTrigger, GenericBan, Pipeline, PipelineBan, PipelineBanKind, PipelineBanUpdate, PipelineDetailsList, PipelineList, PipelineListParams, PipelineRequest, PipelineUpdate, TagType)),
-    modifiers(&OpenApiSecurity),
+    modifiers(&OpenApiSecurity, &OpenApiParameterExamples),
 )]
 pub struct PipelineApiDocs;
 

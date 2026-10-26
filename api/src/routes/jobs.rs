@@ -8,7 +8,7 @@ use tracing::instrument;
 use utoipa::OpenApi;
 use uuid::Uuid;
 
-use super::OpenApiSecurity;
+use super::{OpenApiParameterExamples, OpenApiSecurity};
 
 use crate::models::AuthedUser;
 use crate::models::{
@@ -36,7 +36,7 @@ use crate::utils::{ApiError, AppState, bounder};
 /// * `state` - Shared Thorium objects
 #[utoipa::path(
     patch,
-    path = "/api/jobs/workloads/claim/:group/:tool_instance/:cluster/:node/:worker/:limit",
+    path = "/api/jobs/workloads/claim/{group}/{tool_instance}/{cluster}/{node}/{worker}/{limit}",
     params(
         ("group" = String, Path, description = "The group the jobs are in"),
         ("tool_instance" = Uuid, Path, description = "The tool instance whose jobs to claim"),
@@ -49,9 +49,13 @@ use crate::utils::{ApiError, AppState, bounder};
         (status = 200, description = "The claimed jobs", body = Vec<GenericJob>),
         (status = 400, description = "The limit is 0 or over 1000"),
         (status = 401, description = "This user is not authorized to claim jobs for this worker, or the worker doesn't serve this group and tool instance"),
+        (status = 404, description = "A resource named in the request, such as a path value, group or body field, does not exist or is not visible to this user"),
+        (status = 500, description = "An internal error occurred, such as a backing database, cache or object store failing"),
+        (status = 503, description = "A service Thorium depends on, such as Redis or LDAP, is unavailable"),
     ),
     security(
         ("basic" = []),
+        ("bearer" = []),
     )
 )]
 #[instrument(name = "routes::jobs::claim_workload", skip_all, err(Debug))]
@@ -100,9 +104,12 @@ async fn claim_workload(
     responses(
         (status = 204, description = "Tool instance runtimes updated"),
         (status = 401, description = "This user is not an admin"),
+        (status = 500, description = "An internal error occurred, such as a backing database, cache or object store failing"),
+        (status = 503, description = "A service Thorium depends on, such as Redis or LDAP, is unavailable"),
     ),
     security(
         ("basic" = []),
+        ("bearer" = []),
     )
 )]
 #[instrument(name = "routes::jobs::update_workload_runtimes", skip_all, err(Debug))]
@@ -128,9 +135,12 @@ async fn update_workload_runtimes(
     responses(
         (status = 200, description = "The tool instance runtimes", body = WorkloadRuntimes),
         (status = 401, description = "This user is not an admin"),
+        (status = 500, description = "An internal error occurred, such as a backing database, cache or object store failing"),
+        (status = 503, description = "A service Thorium depends on, such as Redis or LDAP, is unavailable"),
     ),
     security(
         ("basic" = []),
+        ("bearer" = []),
     )
 )]
 #[instrument(name = "routes::jobs::workload_runtimes", skip_all, err(Debug))]
@@ -155,20 +165,26 @@ async fn workload_runtimes(
 /// * `logs` - Any logs to append to this jobs stage logs
 #[utoipa::path(
     post,
-    path = "/api/jobs/handle/:id/proceed/:runtime",
+    path = "/api/jobs/handle/{id}/proceed/{runtime}",
     params(
         ("id" = Uuid, Path, description = "The uuid of the job that was completed"),
         ("runtime" = u64, Path, description = "The amount of time in seconds this job took to complete"),
         ("worker" = Option<String>, Query, description = "The name of the worker that claimed this job (required for non-admins)"),
-        ("logs" = StageLogsAdd, description = "Any logs to append to this jobs stage logs"),
     ),
+    request_body = StageLogsAdd,
     responses(
         (status = 202, description = "Proceeding with specified job", body = HandleJobResponse),
         (status = 400, description = "The worker that claimed this job was not set"),
         (status = 401, description = "This user is not authorized to access this route"),
+        (status = 404, description = "A resource named in the request, such as a path value, group or body field, does not exist or is not visible to this user"),
+        (status = 409, description = "The job is not running or sleeping, or another request already handled it"),
+        (status = 422, description = "The JSON body is well formed but does not match the expected shape, for example a required field is missing or has the wrong type"),
+        (status = 500, description = "An internal error occurred, such as a backing database, cache or object store failing"),
+        (status = 503, description = "A service Thorium depends on, such as Redis or LDAP, is unavailable"),
     ),
     security(
         ("basic" = []),
+        ("bearer" = []),
     )
 )]
 #[instrument(name = "routes::jobs::proceed", skip_all, err(Debug))]
@@ -210,19 +226,25 @@ async fn proceed(
 /// * `logs` - Any logs to append to this jobs stage logs
 #[utoipa::path(
     post,
-    path = "/api/jobs/handle/:id/error",
+    path = "/api/jobs/handle/{id}/error",
     params(
         ("id" = Uuid, Path, description = "The uuid of the job that was completed"),
         ("worker" = Option<String>, Query, description = "The name of the worker that claimed this job (required for non-admins)"),
-        ("logs" = StageLogsAdd, description = "Any logs to append to this jobs stage logs"),
     ),
+    request_body = StageLogsAdd,
     responses(
         (status = 202, description = "Handle specified failed job", body = HandleJobResponse),
         (status = 400, description = "The worker that claimed this job was not set"),
         (status = 401, description = "This user is not authorized to access this route"),
+        (status = 404, description = "A resource named in the request, such as a path value, group or body field, does not exist or is not visible to this user"),
+        (status = 409, description = "The job is not running, or another request already handled it"),
+        (status = 422, description = "The JSON body is well formed but does not match the expected shape, for example a required field is missing or has the wrong type"),
+        (status = 500, description = "An internal error occurred, such as a backing database, cache or object store failing"),
+        (status = 503, description = "A service Thorium depends on, such as Redis or LDAP, is unavailable"),
     ),
     security(
         ("basic" = []),
+        ("bearer" = []),
     )
 )]
 #[instrument(name = "routes::jobs::error", skip_all, fields(job = id.to_string()), err(Debug))]
@@ -265,17 +287,24 @@ async fn error(
 /// * `checkpoint` - A checkpoint object to use when waking this job
 #[utoipa::path(
     post,
-    path = "/api/jobs/handle/:id/sleep",
+    path = "/api/jobs/handle/{id}/sleep",
     params(
         ("id" = Uuid, Path, description = "The uuid of the job that was completed"),
-        ("checkpoint" = Checkpoint, description = "A checkpoint object to use when waking this job"),
     ),
+    request_body = Checkpoint,
     responses(
         (status = 202, description = "Slept the specified job", body = HandleJobResponse),
+        (status = 400, description = "The request is invalid: the JSON body is malformed or fails validation; a path parameter has an invalid value"),
         (status = 401, description = "This user is not authorized to access this route"),
+        (status = 404, description = "A resource named in the request, such as a path value, group or body field, does not exist or is not visible to this user"),
+        (status = 409, description = "The job is not running"),
+        (status = 422, description = "The JSON body is well formed but does not match the expected shape, for example a required field is missing or has the wrong type"),
+        (status = 500, description = "An internal error occurred, such as a backing database, cache or object store failing"),
+        (status = 503, description = "A service Thorium depends on, such as Redis or LDAP, is unavailable"),
     ),
     security(
         ("basic" = []),
+        ("bearer" = []),
     )
 )]
 #[instrument(name = "routes::jobs::sleep", skip_all, fields(job = id.to_string()), err(Debug))]
@@ -314,17 +343,23 @@ async fn sleep(
 /// * `checkpoint` - A checkpoint object to use when waking this job
 #[utoipa::path(
     post,
-    path = "/api/jobs/handle/:id/checkpoint",
+    path = "/api/jobs/handle/{id}/checkpoint",
     params(
         ("id" = Uuid, Path, description = "The uuid of the job that was completed"),
-        ("checkpoint" = Checkpoint, description = "A checkpoint object to use when waking this job"),
     ),
+    request_body = Checkpoint,
     responses(
         (status = 202, description = "Slept the specified job", body = HandleJobResponse),
+        (status = 400, description = "The request is invalid: the JSON body is malformed or fails validation; a path parameter has an invalid value"),
         (status = 401, description = "This user is not authorized to access this route"),
+        (status = 404, description = "A resource named in the request, such as a path value, group or body field, does not exist or is not visible to this user"),
+        (status = 422, description = "The JSON body is well formed but does not match the expected shape, for example a required field is missing or has the wrong type"),
+        (status = 500, description = "An internal error occurred, such as a backing database, cache or object store failing"),
+        (status = 503, description = "A service Thorium depends on, such as Redis or LDAP, is unavailable"),
     ),
     security(
         ("basic" = []),
+        ("bearer" = []),
     )
 )]
 #[instrument(name = "routes::jobs::checkpoint", skip_all, fields(job = id.to_string()), err(Debug))]
@@ -361,16 +396,19 @@ async fn checkpoint(
 #[utoipa::path(
     post,
     path = "/api/jobs/bulk/reset",
-    params(
-        ("resets" = JobResets, description = "The jobs to reset"),
-    ),
+    request_body = JobResets,
     responses(
         // TODO_UTOIPA: this func doesn't seem to return *anything*, a sanity check here would be good
         (status = 200, description = "Reset the specified job(s)"),
+        (status = 400, description = "The request is invalid: the JSON body is malformed or fails validation"),
         (status = 401, description = "This user is not authorized to access this route"),
+        (status = 422, description = "The JSON body is well formed but does not match the expected shape, for example a required field is missing or has the wrong type"),
+        (status = 500, description = "An internal error occurred, such as a backing database, cache or object store failing"),
+        (status = 503, description = "A service Thorium depends on, such as Redis or LDAP, is unavailable"),
     ),
     security(
         ("basic" = []),
+        ("bearer" = []),
     )
 )]
 #[instrument(name = "routes::jobs::bulk_reset", skip_all, err(Debug))]
@@ -397,19 +435,23 @@ async fn bulk_reset(
 /// * `state` - Shared Thorium objects
 #[utoipa::path(
     get,
-    path = "/api/jobs/deadlines/:scaler/:start/:end",
+    path = "/api/jobs/deadlines/{scaler}/{start}/{end}",
     params(
-        ("scalar" = ImageScaler, Path, description = "The scaler to get deadlines for"),
+        ("scaler" = ImageScaler, Path, description = "The scaler to get deadlines for"),
         ("start" = i64, Path, description = "The starting timestamp in epoch time to list from"),
         ("end" = i64, Path, description = "The ending timestamp in epoch time to list to"),
-        ("params" = JobListOpts, Query, description = "The query params to use for this request"),
+        JobListOpts,
     ),
     responses(
         (status = 200, description = "Slept the specified job", body = Vec<Deadline>),
+        (status = 400, description = "The request is invalid: a path parameter has an invalid value; a query parameter has an invalid value"),
         (status = 401, description = "This user is not authorized to access this route"),
+        (status = 500, description = "An internal error occurred, such as a backing database, cache or object store failing"),
+        (status = 503, description = "A service Thorium depends on, such as Redis or LDAP, is unavailable"),
     ),
     security(
         ("basic" = []),
+        ("bearer" = []),
     )
 )]
 #[instrument(name = "routes::jobs::read_deadlines", skip_all, err(Debug))]
@@ -438,26 +480,30 @@ async fn read_deadlines(
 /// # Arguments
 ///
 /// * `user` - The user that is listing jobs
-/// * `scaler` - The scaler to get running jbos for
+/// * `scaler` - The scaler to get running jobs for
 /// * `start` - The starting timestamp in epoch time to list from
 /// * `end` - The ending timestamp in epoch time to list to
 /// * `params` - The query params to use for this request
 /// * `state` - Shared Thorium objects
 #[utoipa::path(
     get,
-    path = "/api/jobs/bulk/running/:scaler/:start/:end",
+    path = "/api/jobs/bulk/running/{scaler}/{start}/{end}",
     params(
-        ("scalar" = ImageScaler, Path, description = "The scaler to get running jbos for"),
+        ("scaler" = ImageScaler, Path, description = "The scaler to get running jobs for"),
         ("start" = i64, Path, description = "The starting timestamp in epoch time to list from"),
         ("end" = i64, Path, description = "The ending timestamp in epoch time to list to"),
-        ("params" = JobListOpts, Query, description = "The query params to use for this request"),
+        JobListOpts,
     ),
     responses(
         (status = 200, description = "List of running jobs", body = Vec<RunningJob>),
+        (status = 400, description = "The request is invalid: a path parameter has an invalid value; a query parameter has an invalid value"),
         (status = 401, description = "This user is not authorized to access this route"),
+        (status = 500, description = "An internal error occurred, such as a backing database, cache or object store failing"),
+        (status = 503, description = "A service Thorium depends on, such as Redis or LDAP, is unavailable"),
     ),
     security(
         ("basic" = []),
+        ("bearer" = []),
     )
 )]
 #[instrument(name = "routes::jobs::bulk_running", skip_all, err(Debug))]
@@ -498,11 +544,15 @@ async fn bulk_running(
     ),
     responses(
         (status = 200, description = "The job", body = RawJob),
+        (status = 400, description = "The request is invalid: a path parameter has an invalid value"),
         (status = 401, description = "This user is not an admin"),
         (status = 404, description = "The job does not exist"),
+        (status = 500, description = "An internal error occurred, such as a backing database, cache or object store failing"),
+        (status = 503, description = "A service Thorium depends on, such as Redis or LDAP, is unavailable"),
     ),
     security(
         ("basic" = []),
+        ("bearer" = []),
     )
 )]
 #[instrument(name = "routes::jobs::get_job", skip_all, err(Debug))]
@@ -521,7 +571,7 @@ async fn get_job(
 #[openapi(
     paths(claim_workload, update_workload_runtimes, workload_runtimes, proceed, error, sleep, checkpoint, bulk_reset, read_deadlines, bulk_running, get_job),
     components(schemas(Checkpoint, CommitishKinds, Deadline, GenericJob, GenericJobArgs, GenericJobOpts, HandleJobResponse, ImageScaler, JobHandleParams, JobHandleStatus, JobListOpts, JobResetRequestor, JobResets, JobHandleStatus, JobStatus, RawJob, RepoDependency, RunningJob, StageLogLine, StageLogsAdd, SystemComponents, WorkloadRuntimes)),
-    modifiers(&OpenApiSecurity),
+    modifiers(&OpenApiSecurity, &OpenApiParameterExamples),
 )]
 pub struct JobApiDocs;
 

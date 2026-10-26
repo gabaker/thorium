@@ -8,7 +8,7 @@ use axum::routing::get;
 use tracing::{Level, event, instrument};
 use utoipa::OpenApi;
 
-use super::OpenApiSecurity;
+use super::{OpenApiParameterExamples, OpenApiSecurity};
 
 /// API identification route
 ///
@@ -17,9 +17,11 @@ use super::OpenApiSecurity;
 /// * `state` - Shared Thorium objects
 #[utoipa::path(
     get,
-    path = "/api/",
+    path = "/api",
     responses(
-        (status = 200, description = "Identify this API as the Thorium API", body = String, example = json!("Thorium"))
+        (status = 200, description = "Identify this API as the Thorium API", body = String, example = json!("Thorium")),
+        (status = 500, description = "An internal error occurred, such as a backing database, cache or object store failing"),
+        (status = 503, description = "A service Thorium depends on, such as Redis or LDAP, is unavailable"),
     )
 )]
 #[instrument(name = "routes::basic::identify", skip_all, err(Debug))]
@@ -44,7 +46,7 @@ pub async fn banner(State(state): State<AppState>) -> Result<String, ApiError> {
     Ok(state.shared.banner.clone())
 }
 
-/// API identification route
+/// API health route
 ///
 /// # Arguments
 ///
@@ -85,10 +87,7 @@ pub async fn health(State(state): State<AppState>) -> StatusCode {
     path = "/api/version",
     responses(
         (status = 200, description = "Return the current Thorium version", body = Version),
-        (status = 401, description = "This user is not authorized to access this route"),
-    ),
-    security(
-        ("basic" = []),
+        (status = 500, description = "An internal error occurred, such as a backing database, cache or object store failing"),
     )
 )]
 #[instrument(name = "routes::basic::version", skip_all, err(Debug))]
@@ -103,7 +102,7 @@ pub async fn version() -> Result<Json<Version>, ApiError> {
 #[openapi(
     paths(identify, banner, health, version),
     components(schemas(Version, ApiErrorResponse)),
-    modifiers(&OpenApiSecurity),
+    modifiers(&OpenApiSecurity, &OpenApiParameterExamples),
 )]
 pub struct BasicApiDocs;
 

@@ -1349,6 +1349,8 @@ impl RepoListOpts {
 /// The query params for listing results
 #[derive(Deserialize, Debug)]
 #[cfg_attr(feature = "api", derive(utoipa::ToSchema))]
+#[cfg_attr(feature = "api", derive(utoipa::IntoParams))]
+#[cfg_attr(feature = "api", into_params(parameter_in = Query))]
 pub struct RepoListParams {
     /// The groups to list data from
     #[serde(default)]
@@ -1423,6 +1425,8 @@ impl From<RepoListOpts> for RepoListParams {
 
 /// The query params for downloading a specific commit
 #[derive(Deserialize, Debug)]
+#[cfg_attr(feature = "api", derive(utoipa::IntoParams))]
+#[cfg_attr(feature = "api", into_params(parameter_in = Query))]
 #[cfg_attr(feature = "api", derive(utoipa::ToSchema))]
 pub struct RepoDownloadOpts {
     /// The specific branch, tag, or commit to download
@@ -1432,6 +1436,7 @@ pub struct RepoDownloadOpts {
     pub kinds: Vec<CommitishKinds>,
     /// The progress bar to update
     #[serde(skip_deserializing)]
+    #[cfg_attr(feature = "api", param(ignore))]
     pub progress: Option<ProgressBar>,
 }
 

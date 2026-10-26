@@ -8,11 +8,11 @@ use openidconnect::{AuthorizationCode, CsrfToken};
 use tracing::{Level, event, instrument};
 use utoipa::OpenApi;
 
-use super::OpenApiSecurity;
+use super::{OpenApiParameterExamples, OpenApiSecurity};
 
 use crate::models::{
-    AuthResponse, OAuthCallbackParams, OAuthLinkParams, OAuthMaybeAuthed,
-    OAuthRegistrationSessionId, OAuthUserCreate, OAuthUsernameCheck,
+    AuthResponse, OAuthCallbackParams, OAuthLinkParams, OAuthMaybeAuthed, OAuthUserCreate,
+    OAuthUsernameCheck,
 };
 use crate::unauthorized;
 use crate::utils::{ApiError, AppState};
@@ -27,6 +27,8 @@ use crate::utils::{ApiError, AppState};
     path = "/api/oauth/",
     responses(
         (status = 200, description = "The list of oauth providers", body=Vec<String>),
+        (status = 401, description = "The OAuth login or link is refused: the provider is not configured, or the token is invalid or expired"),
+        (status = 500, description = "An internal error occurred, such as a backing database, cache or object store failing"),
     ),
 )]
 #[instrument(name = "routes::oauth::list_providers", skip_all, err(Debug))]
@@ -56,8 +58,14 @@ async fn list_providers(State(state): State<AppState>) -> Result<Json<Vec<String
 #[utoipa::path(
     get,
     path = "/api/oauth/{name}/auth",
+    params(
+        ("name" = String, Path, description = "The name of the OAuth provider"),
+    ),
     responses(
         (status = 303, description = "Redirect to the OAuth provider"),
+        (status = 401, description = "The OAuth login or link is refused: the provider is not configured, or the token is invalid or expired"),
+        (status = 500, description = "An internal error occurred, such as a backing database, cache or object store failing"),
+        (status = 503, description = "A service Thorium depends on, such as Redis or LDAP, is unavailable"),
     ),
 )]
 #[instrument(name = "routes::oauth::generate_challenege", skip(state), err(Debug))]
@@ -87,12 +95,17 @@ async fn generate_challenge(
 /// * `state` - Shared Thorium objects
 #[utoipa::path(
     get,
-    path = "/api/oauth/{provider}/callback",
+    path = "/api/oauth/{name}/callback",
     params(
-        ("params" = OAuthCallbackParams, description = "Query params for verifying an OAuth challenge"),
+        ("name" = String, Path, description = "The name of the OAuth provider"),
+        OAuthCallbackParams,
     ),
     responses(
-        (status = 200, description = "An Oauth registration session", body=OAuthRegistrationSessionId),
+        (status = 200, description = "The authenticated user's token, a request to verify the user's email, or a registration session for a new user", body = OAuthMaybeAuthed),
+        (status = 400, description = "The request is invalid: a query parameter has an invalid value"),
+        (status = 401, description = "The OAuth login or link is refused: the provider is not configured, or the token is invalid or expired"),
+        (status = 500, description = "An internal error occurred, such as a backing database, cache or object store failing"),
+        (status = 503, description = "A service Thorium depends on, such as Redis or LDAP, is unavailable"),
     ),
 )]
 #[instrument(name = "routes::oauth::callback", skip(state), err(Debug))]
@@ -131,9 +144,18 @@ async fn callback(
 /// * `create_req` - The info needed to register this new user
 #[utoipa::path(
     post,
-    path = "/api/oauth/{provider}/register",
+    path = "/api/oauth/{name}/register",
+    params(
+        ("name" = String, Path, description = "The name of the OAuth provider"),
+    ),
     responses(
         (status = 200, description = "A user authentication response", body=AuthResponse),
+        (status = 400, description = "The request is invalid: the JSON body is malformed or fails validation"),
+        (status = 401, description = "The OAuth login or link is refused: the provider is not configured, or the token is invalid or expired"),
+        (status = 409, description = "A user with this email already exists, so an account link email was sent instead"),
+        (status = 422, description = "The JSON body is well formed but does not match the expected shape, for example a required field is missing or has the wrong type"),
+        (status = 500, description = "An internal error occurred, such as a backing database, cache or object store failing"),
+        (status = 503, description = "A service Thorium depends on, such as Redis or LDAP, is unavailable"),
     ),
 )]
 #[instrument(name = "routes::oauth::register", skip(state), err(Debug))]
@@ -160,13 +182,17 @@ async fn register(
 /// * `state` - Shared Thorium objects
 #[utoipa::path(
     post,
-    path = "/api/oauth/{provider}/link",
+    path = "/api/oauth/{name}/link",
     params(
-        ("params" = OAuthLinkParams, description = "Query params for linking an existing user to a new OAuth alias"),
+        ("name" = String, Path, description = "The name of the OAuth provider"),
+        OAuthLinkParams,
     ),
     responses(
         (status = 204, description = "The OAuth alias was linked to the account"),
+        (status = 400, description = "The username or token query parameter is missing"),
         (status = 401, description = "The link token is invalid, expired, or already used"),
+        (status = 500, description = "An internal error occurred, such as a backing database, cache or object store failing"),
+        (status = 503, description = "A service Thorium depends on, such as Redis or LDAP, is unavailable"),
     ),
 )]
 #[instrument(name = "routes::oauth::link", skip(state), err(Debug))]
@@ -196,12 +222,17 @@ async fn link(
 /// * `state` - Shared Thorium objects
 #[utoipa::path(
     delete,
-    path = "/api/oauth/{provider}/link",
+    path = "/api/oauth/{name}/link",
     params(
-        ("params" = OAuthLinkParams, description = "Query params for revoking an attempt to link a new OAuth alias"),
+        ("name" = String, Path, description = "The name of the OAuth provider"),
+        OAuthLinkParams,
     ),
     responses(
-        (status = 204),
+        (status = 204, description = "The OAuth link attempt was revoked"),
+        (status = 400, description = "The username or token query parameter is missing"),
+        (status = 401, description = "The OAuth login or link is refused: the provider is not configured, or the token is invalid or expired"),
+        (status = 500, description = "An internal error occurred, such as a backing database, cache or object store failing"),
+        (status = 503, description = "A service Thorium depends on, such as Redis or LDAP, is unavailable"),
     ),
 )]
 #[instrument(name = "routes::oauth::revoke_link_attempt", skip(state), err(Debug))]
@@ -230,9 +261,17 @@ async fn revoke_link_attempt(
 #[utoipa::path(
     post,
     path = "/api/oauth/{name}/username/available",
+    params(
+        ("name" = String, Path, description = "The name of the OAuth provider"),
+    ),
     responses(
         (status = 204, description = "This username is available"),
+        (status = 400, description = "The request is invalid: the JSON body is malformed or fails validation"),
+        (status = 401, description = "The OAuth login or link is refused: the provider is not configured, or the token is invalid or expired"),
         (status = 409, description = "This username is taken"),
+        (status = 422, description = "The JSON body is well formed but does not match the expected shape, for example a required field is missing or has the wrong type"),
+        (status = 500, description = "An internal error occurred, such as a backing database, cache or object store failing"),
+        (status = 503, description = "A service Thorium depends on, such as Redis or LDAP, is unavailable"),
     ),
 )]
 #[instrument(name = "routes::oauth::list_providers", skip_all, err(Debug))]
@@ -264,7 +303,7 @@ async fn username_available(
 #[openapi(
     paths(list_providers, generate_challenge, callback, register, link, revoke_link_attempt, username_available),
     components(schemas(OAuthCallbackParams, OAuthMaybeAuthed, OAuthUserCreate, AuthResponse, OAuthLinkParams, OAuthUsernameCheck)),
-    modifiers(&OpenApiSecurity),
+    modifiers(&OpenApiSecurity, &OpenApiParameterExamples),
 )]
 pub struct OAuthApiDocs;
 

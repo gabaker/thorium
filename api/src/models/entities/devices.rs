@@ -25,6 +25,7 @@ pub struct DeviceEntity {
     #[serde(default)]
     pub urls: Vec<String>,
     /// The vendor entity associated with this device
+    #[cfg_attr(feature = "api", schema(no_recursion))]
     pub vendors: Vec<Entity>,
     pub critical_system: Option<bool>,
     pub sensitive_location: Option<bool>,

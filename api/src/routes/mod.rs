@@ -26,7 +26,7 @@ mod routes_reexport {
     pub mod users;
 
     use basic::BasicApiDocs;
-    use docs::OpenApiSecurity;
+    use docs::{OpenApiParameterExamples, OpenApiSecurity};
 }
 
 #[cfg(feature = "api")]

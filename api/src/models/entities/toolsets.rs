@@ -102,6 +102,7 @@ pub struct ToolSetEntity {
     /// The explicitly included tools (Tool = latest, `ToolInstance` = pinned; populated from
     /// associations)
     #[serde(default)]
+    #[cfg_attr(feature = "api", schema(no_recursion))]
     pub tools: Vec<Entity>,
     /// When this toolset was last modified (any edit, including its `Includes` edges)
     pub modified: DateTime<Utc>,

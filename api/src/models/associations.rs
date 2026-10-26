@@ -484,6 +484,7 @@ pub struct Association {
 
 /// A request to associate one piece of data with another
 #[derive(Debug, Serialize, Deserialize)]
+#[cfg_attr(feature = "api", derive(utoipa::ToSchema))]
 pub struct AssociationRequest {
     /// The kind of association to make
     pub kind: AssociationKind,
@@ -494,7 +495,7 @@ pub struct AssociationRequest {
     /// The groups for this association
     #[serde(default)]
     pub groups: Vec<String>,
-    /// Whether this is a bidirecitonal relationship or not
+    /// Whether this is a bidirectional relationship or not
     pub is_bidirectional: bool,
     /// The specific submissions tied to each side of this association if any are known
     ///
@@ -869,6 +870,8 @@ fn default_list_limit() -> usize {
 
 #[derive(Deserialize, Debug)]
 #[cfg_attr(feature = "api", derive(utoipa::ToSchema))]
+#[cfg_attr(feature = "api", derive(utoipa::IntoParams))]
+#[cfg_attr(feature = "api", into_params(parameter_in = Query))]
 pub struct AssociationListParams {
     /// The groups to list data from
     #[serde(default)]

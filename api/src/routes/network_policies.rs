@@ -8,7 +8,7 @@ use tracing::instrument;
 use utoipa::OpenApi;
 use uuid::Uuid;
 
-use super::OpenApiSecurity;
+use super::{OpenApiParameterExamples, OpenApiSecurity};
 use crate::is_admin;
 use crate::models::AuthedUser;
 use crate::models::{
@@ -22,6 +22,8 @@ use crate::utils::{ApiError, AppState};
 /// The query params that may be required to identify a network policy
 #[derive(Debug, Deserialize)]
 #[cfg_attr(feature = "api", derive(utoipa::ToSchema))]
+#[cfg_attr(feature = "api", derive(utoipa::IntoParams))]
+#[cfg_attr(feature = "api", into_params(parameter_in = Query))]
 struct NetworkPolicyParams {
     /// The network policy's ID, necessary if one or more distinct network policies
     /// share the same name
@@ -38,15 +40,19 @@ struct NetworkPolicyParams {
 #[utoipa::path(
     post,
     path = "/api/network-policies",
-    params(
-        ("request" = NetworkPolicyRequest, description = "The network policy request"),
-    ),
+    request_body = NetworkPolicyRequest,
     responses(
         (status = 204, description = "Network Policy created"),
+        (status = 400, description = "The request is invalid: the JSON body is malformed or fails validation"),
         (status = 401, description = "This user is not authorized to access this route"),
+        (status = 404, description = "A resource named in the request, such as a path value, group or body field, does not exist or is not visible to this user"),
+        (status = 422, description = "The JSON body is well formed but does not match the expected shape, for example a required field is missing or has the wrong type"),
+        (status = 500, description = "An internal error occurred, such as a backing database, cache or object store failing"),
+        (status = 503, description = "A service Thorium depends on, such as Redis or LDAP, is unavailable"),
     ),
     security(
         ("basic" = []),
+        ("bearer" = []),
     )
 )]
 #[instrument(name = "routes::network_policies::create", skip_all, err(Debug))]
@@ -73,14 +79,19 @@ async fn create(
     get,
     path = "/api/network-policies/",
     params(
-        ("params" = NetworkPolicyListParams, description = "The network policy request"),
+        NetworkPolicyListParams,
     ),
     responses(
         (status = 200, description = "Network Policy list", body = ApiCursor<NetworkPolicyListLine>),
+        (status = 400, description = "The request is invalid: a query parameter has an invalid value"),
         (status = 401, description = "This user is not authorized to access this route"),
+        (status = 404, description = "A resource named in the request, such as a path value, group or body field, does not exist or is not visible to this user"),
+        (status = 500, description = "An internal error occurred, such as a backing database, cache or object store failing"),
+        (status = 503, description = "A service Thorium depends on, such as Redis or LDAP, is unavailable"),
     ),
     security(
         ("basic" = []),
+        ("bearer" = []),
     )
 )]
 #[instrument(name = "routes::network_policies::list", skip_all, err(Debug))]
@@ -110,14 +121,19 @@ async fn list(
     get,
     path = "/api/network-policies/details/",
     params(
-        ("params" = NetworkPolicyListParams, description = "The query params to use for this request"),
+        NetworkPolicyListParams,
     ),
     responses(
         (status = 200, description = "Network Policy list by creation date with details", body = ApiCursor<NetworkPolicy>),
+        (status = 400, description = "The request is invalid: a query parameter has an invalid value"),
         (status = 401, description = "This user is not authorized to access this route"),
+        (status = 404, description = "A resource named in the request, such as a path value, group or body field, does not exist or is not visible to this user"),
+        (status = 500, description = "An internal error occurred, such as a backing database, cache or object store failing"),
+        (status = 503, description = "A service Thorium depends on, such as Redis or LDAP, is unavailable"),
     ),
     security(
         ("basic" = []),
+        ("bearer" = []),
     )
 )]
 #[instrument(name = "routes::network_policies::list_details", skip_all, err(Debug))]
@@ -154,17 +170,22 @@ async fn list_details(
 /// * `state` - Shared Thorium objects
 #[utoipa::path(
     get,
-    path = "/api/network-policies/:name",
+    path = "/api/network-policies/{name}",
     params(
         ("name" = String, Path, description = "The network policy name"),
-        ("params" = NetworkPolicyParams, Query, description = "The query params to use for this request"),
+        NetworkPolicyParams,
     ),
     responses(
         (status = 200, description = "Network Policy details", body = NetworkPolicy),
+        (status = 400, description = "The request is invalid: a query parameter has an invalid value"),
         (status = 401, description = "This user is not authorized to access this route"),
+        (status = 404, description = "A resource named in the request, such as a path value, group or body field, does not exist or is not visible to this user"),
+        (status = 500, description = "An internal error occurred, such as a backing database, cache or object store failing"),
+        (status = 503, description = "A service Thorium depends on, such as Redis or LDAP, is unavailable"),
     ),
     security(
         ("basic" = []),
+        ("bearer" = []),
     )
 )]
 #[instrument(
@@ -185,27 +206,33 @@ async fn get_network_policy(
     Ok(Json(network_policy))
 }
 
-/// Delete a network policy from the given groups (or completely delete the network policy)
+/// Updates a network policy
 ///
 /// # Arguments
 ///
-/// * `user` - The user that is creating this network policy
-/// * `request` - The network policy request
+/// * `user` - The user that is updating this network policy
+/// * `request` - The network policy update
 /// * `state` - Shared Thorium objects
 #[utoipa::path(
     patch,
-    path = "/api/network-policies/:name",
+    path = "/api/network-policies/{name}",
     params(
         ("name" = String, Path, description = "The network policy name"),
-        ("params" = NetworkPolicyParams, Query, description = "The query params to use for this request"),
-        ("update" = NetworkPolicyUpdate, description = "The update to apply to this network policy"),
+        NetworkPolicyParams,
     ),
+    request_body = NetworkPolicyUpdate,
     responses(
         (status = 204, description = "Network Policy updated"),
+        (status = 400, description = "The request is invalid: the JSON body is malformed or fails validation; a query parameter has an invalid value"),
         (status = 401, description = "This user is not authorized to access this route"),
+        (status = 404, description = "A resource named in the request, such as a path value, group or body field, does not exist or is not visible to this user"),
+        (status = 422, description = "The JSON body is well formed but does not match the expected shape, for example a required field is missing or has the wrong type"),
+        (status = 500, description = "An internal error occurred, such as a backing database, cache or object store failing"),
+        (status = 503, description = "A service Thorium depends on, such as Redis or LDAP, is unavailable"),
     ),
     security(
         ("basic" = []),
+        ("bearer" = []),
     )
 )]
 #[instrument(name = "routes::network_policies::update", skip_all, err(Debug))]
@@ -236,17 +263,22 @@ async fn update(
 /// * `state` - Shared Thorium objects
 #[utoipa::path(
     delete,
-    path = "/api/network-policies/:name",
+    path = "/api/network-policies/{name}",
     params(
         ("name" = String, Path, description = "The network policy name"),
-        ("params" = NetworkPolicyParams, Query, description = "The query params to use for this request"),
+        NetworkPolicyParams,
     ),
     responses(
         (status = 204, description = "Network Policy deleted"),
+        (status = 400, description = "The request is invalid: a query parameter has an invalid value"),
         (status = 401, description = "This user is not authorized to access this route"),
+        (status = 404, description = "A resource named in the request, such as a path value, group or body field, does not exist or is not visible to this user"),
+        (status = 500, description = "An internal error occurred, such as a backing database, cache or object store failing"),
+        (status = 503, description = "A service Thorium depends on, such as Redis or LDAP, is unavailable"),
     ),
     security(
         ("basic" = []),
+        ("bearer" = []),
     )
 )]
 #[instrument(name = "routes::network_policies::delete", skip_all, err(Debug))]
@@ -274,16 +306,20 @@ async fn delete(
 /// * `state` - Shared Thorium objects
 #[utoipa::path(
     get,
-    path = "/api/network-policies/default/:group/",
+    path = "/api/network-policies/default/{group}/",
     params(
         ("group" = String, Path, description = "The group to get default network policies for"),
     ),
     responses(
         (status = 200, description = "Network Policy list", body = Vec<NetworkPolicyListLine>),
         (status = 401, description = "This user is not authorized to access this route"),
+        (status = 404, description = "A resource named in the request, such as a path value, group or body field, does not exist or is not visible to this user"),
+        (status = 500, description = "An internal error occurred, such as a backing database, cache or object store failing"),
+        (status = 503, description = "A service Thorium depends on, such as Redis or LDAP, is unavailable"),
     ),
     security(
         ("basic" = []),
+        ("bearer" = []),
     )
 )]
 #[instrument(
@@ -310,7 +346,7 @@ async fn get_all_default(
 #[openapi(
     paths(get_network_policy, update, delete, create, list, get_all_default, list_details),
     components(schemas(ApiCursor<NetworkPolicy>, ApiCursor<NetworkPolicyListLine>, IpBlock, IpBlockRaw, Ipv4Block, Ipv6Block, NetworkPolicy, NetworkPolicyCustomK8sRule, NetworkPolicyCustomLabel, NetworkPolicyListLine, NetworkPolicyListParams, NetworkPolicyParams, NetworkPolicyPort, NetworkPolicyRequest, NetworkPolicyRule, NetworkPolicyRuleRaw, NetworkPolicyUpdate, NetworkProtocol)),
-    modifiers(&OpenApiSecurity),
+    modifiers(&OpenApiSecurity, &OpenApiParameterExamples),
 )]
 pub struct NetworkPolicyDocs;
 

@@ -34,6 +34,8 @@ fn default_search_event_pop_limit() -> usize {
 /// The params for popping events
 #[derive(Serialize, Deserialize, Debug)]
 #[cfg_attr(feature = "api", derive(utoipa::ToSchema))]
+#[cfg_attr(feature = "api", derive(utoipa::IntoParams))]
+#[cfg_attr(feature = "api", into_params(parameter_in = Query))]
 pub struct SearchEventPopOpts {
     /// The max number of events to pop and return
     #[serde(default = "default_search_event_pop_limit")]

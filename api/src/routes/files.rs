@@ -10,7 +10,7 @@ use tracing::instrument;
 use utoipa::OpenApi;
 use uuid::Uuid;
 
-use super::OpenApiSecurity;
+use super::{OpenApiParameterExamples, OpenApiSecurity};
 use crate::models::AuthedUser;
 use crate::models::backends::{self, CommentSupport, TagSupport};
 use crate::models::{
@@ -50,17 +50,25 @@ use crate::utils::{ApiError, AppState};
 /// * `state` - Shared Thorium objects
 /// * `multipart` - The multipart form containing the file upload
 #[utoipa::path(
-    get,
+    post,
     path = "/api/files/",
-    params(
-        ("multipart", description = "The multipart form containing the file upload")
+    request_body(
+        content = Vec<u8>,
+        content_type = "multipart/form-data",
+        description = "The multipart form containing the file to upload, its groups, tags, and origin",
     ),
     responses(
         (status = 200, description = "File uploaded to Thorium", body = SampleSubmissionResponse),
+        (status = 400, description = "The request is invalid: the multipart form is malformed or fails validation"),
         (status = 401, description = "This user is not authorized to access this route"),
+        (status = 404, description = "A resource named in the request, such as a path value, group or body field, does not exist or is not visible to this user"),
+        (status = 409, description = "This user already uploaded this same file in the submission, so nothing was added"),
+        (status = 500, description = "An internal error occurred, such as a backing database, cache or object store failing"),
+        (status = 503, description = "A service Thorium depends on, such as Redis or LDAP, is unavailable"),
     ),
     security(
         ("basic" = []),
+        ("bearer" = []),
     )
 )]
 #[instrument(name = "routes::files::upload", skip_all, err(Debug))]
@@ -83,16 +91,20 @@ async fn upload(
 /// * `state` - Shared Thorium objects
 #[utoipa::path(
     get,
-    path = "/api/files/sample/:sha256",
+    path = "/api/files/sample/{sha256}",
     params(
         ("sha256" = String, Path, description = "Sha256 of the sample to get info on")
     ),
     responses(
         (status = 200, description = "Return a sample in Thorium", body = Sample),
         (status = 401, description = "This user is not authorized to access this route"),
+        (status = 404, description = "A resource named in the request, such as a path value, group or body field, does not exist or is not visible to this user"),
+        (status = 500, description = "An internal error occurred, such as a backing database, cache or object store failing"),
+        (status = 503, description = "A service Thorium depends on, such as Redis or LDAP, is unavailable"),
     ),
     security(
         ("basic" = []),
+        ("bearer" = []),
     )
 )]
 #[instrument(name = "routes::files::get_sample", skip_all, err(Debug))]
@@ -116,15 +128,18 @@ async fn get_sample(
 #[utoipa::path(
     post,
     path = "/api/files/exists",
-    params(
-        ("check" = SampleCheck, description = "Sha256 and group of the sample for which to check existence, optionally include sample name and origin information")
-    ),
+    request_body = SampleCheck,
     responses(
         (status = 200, description = "Check if a submission has already been created", body = SampleCheckResponse),
+        (status = 400, description = "The request is invalid: the JSON body is malformed or fails validation"),
         (status = 401, description = "This user is not authorized to access this route"),
+        (status = 422, description = "The JSON body is well formed but does not match the expected shape, for example a required field is missing or has the wrong type"),
+        (status = 500, description = "An internal error occurred, such as a backing database, cache or object store failing"),
+        (status = 503, description = "A service Thorium depends on, such as Redis or LDAP, is unavailable"),
     ),
     security(
         ("basic" = []),
+        ("bearer" = []),
     )
 )]
 #[instrument(name = "routes::files::exists", skip_all, err(Debug))]
@@ -147,16 +162,20 @@ async fn exists(
 /// * `state` - Shared Thorium objects
 #[utoipa::path(
     get,
-    path = "/api/files/sample/:sha256/download",
+    path = "/api/files/sample/{sha256}/download",
     params(
         ("sha256" = String, Path, description = "Sha256 of file to download")
     ),
     responses(
         (status = 200, description = "Download a file by sha256", body = Vec<u8>),
         (status = 401, description = "This user is not authorized to access this route"),
+        (status = 404, description = "A resource named in the request, such as a path value, group or body field, does not exist or is not visible to this user"),
+        (status = 500, description = "An internal error occurred, such as a backing database, cache or object store failing"),
+        (status = 503, description = "A service Thorium depends on, such as Redis or LDAP, is unavailable"),
     ),
     security(
         ("basic" = []),
+        ("bearer" = []),
     )
 )]
 #[instrument(name = "routes::files::download", skip_all, err(Debug))]
@@ -173,7 +192,7 @@ async fn download(
     Ok(([(header::CONTENT_TYPE, "application/octet-stream")], body))
 }
 
-/// Download a file by sha2566 as an encrypted zip
+/// Download a file by sha256 as an encrypted zip
 ///
 /// # Arguments
 ///
@@ -182,17 +201,21 @@ async fn download(
 /// * `state` - Shared Thorium objects
 #[utoipa::path(
     get,
-    path = "/api/files/sample/:sha256/download/zip",
+    path = "/api/files/sample/{sha256}/download/zip",
     params(
         ("sha256" = String, Path, description = "Sha256 of file to download"),
-        ("params" = ZipDownloadParams, description = "Optional password to encrypt the ZIP download")
+        ZipDownloadParams,
     ),
     responses(
-        (status = 200, description = "Download a file by sha2566 as an encrypted zip", body = Vec<u8>),
+        (status = 200, description = "Download a file by sha256 as an encrypted zip", body = Vec<u8>),
         (status = 401, description = "This user is not authorized to access this route"),
+        (status = 404, description = "A resource named in the request, such as a path value, group or body field, does not exist or is not visible to this user"),
+        (status = 500, description = "An internal error occurred, such as a backing database, cache or object store failing"),
+        (status = 503, description = "A service Thorium depends on, such as Redis or LDAP, is unavailable"),
     ),
     security(
         ("basic" = []),
+        ("bearer" = []),
     )
 )]
 #[instrument(name = "routes::files::download_as_zip", skip_all, err(Debug))]
@@ -216,17 +239,23 @@ async fn download_as_zip(
 /// * `update` - The update to apply to this submission
 #[utoipa::path(
     patch,
-    path = "/api/files/sample/:sha256",
+    path = "/api/files/sample/{sha256}",
     params(
         ("sha256" = String, Path, description = "Sha256 of sample to update"),
-        ("update" = SubmissionUpdate, description = "JSON-formatted update to apply to this submission")
     ),
+    request_body = SubmissionUpdate,
     responses(
         (status = 204, description = "Sample updated"),
+        (status = 400, description = "The request is invalid: the JSON body is malformed or fails validation"),
         (status = 401, description = "This user is not authorized to access this route"),
+        (status = 404, description = "A resource named in the request, such as a path value, group or body field, does not exist or is not visible to this user"),
+        (status = 422, description = "The JSON body is well formed but does not match the expected shape, for example a required field is missing or has the wrong type"),
+        (status = 500, description = "An internal error occurred, such as a backing database, cache or object store failing"),
+        (status = 503, description = "A service Thorium depends on, such as Redis or LDAP, is unavailable"),
     ),
     security(
         ("basic" = []),
+        ("bearer" = []),
     )
 )]
 #[instrument(name = "routes::files::update", skip_all, err(Debug))]
@@ -253,18 +282,23 @@ async fn update(
 /// * `state` - Shared Thorium objects
 #[utoipa::path(
     delete,
-    path = "/api/files/sample/:sha256/:submission",
+    path = "/api/files/sample/{sha256}/{submission}",
     params(
         ("sha256" = String, Path, description = "Sha256 to delete a submission from"),
         ("submission" = Uuid, Path, description = "Uuid of the sample submission to delete"),
-        ("DeleteSampleParams" = DeleteSampleParams, description = "Group of the sample to delete")
+        DeleteSampleParams,
     ),
     responses(
         (status = 204, description = "Sample deleted"),
+        (status = 400, description = "The request is invalid: a path parameter has an invalid value; a query parameter has an invalid value"),
         (status = 401, description = "This user is not authorized to access this route"),
+        (status = 404, description = "A resource named in the request, such as a path value, group or body field, does not exist or is not visible to this user"),
+        (status = 500, description = "An internal error occurred, such as a backing database, cache or object store failing"),
+        (status = 503, description = "A service Thorium depends on, such as Redis or LDAP, is unavailable"),
     ),
     security(
         ("basic" = []),
+        ("bearer" = []),
     )
 )]
 #[instrument(name = "routes::files::delete_sample", skip_all, err(Debug))]
@@ -293,17 +327,23 @@ async fn delete_sample(
 /// * `tags` - The new tags to apply
 #[utoipa::path(
     post,
-    path = "/api/files/tags/:sha256",
+    path = "/api/files/tags/{sha256}",
     params(
         ("sha256" = String, Path, description = "Sha256 for which to add tags"),
-        ("tags" = TagRequest<Sample>, description = "JSON-formatted tags to apply to sample")
     ),
+    request_body = TagRequest<Sample>,
     responses(
         (status = 204, description = "Sample tags updated"),
+        (status = 400, description = "The request is invalid: the JSON body is malformed or fails validation"),
         (status = 401, description = "This user is not authorized to access this route"),
+        (status = 404, description = "A resource named in the request, such as a path value, group or body field, does not exist or is not visible to this user"),
+        (status = 422, description = "The JSON body is well formed but does not match the expected shape, for example a required field is missing or has the wrong type"),
+        (status = 500, description = "An internal error occurred, such as a backing database, cache or object store failing"),
+        (status = 503, description = "A service Thorium depends on, such as Redis or LDAP, is unavailable"),
     ),
     security(
         ("basic" = []),
+        ("bearer" = []),
     )
 )]
 #[instrument(name = "routes::files::tag", skip_all, err(Debug))]
@@ -330,17 +370,23 @@ async fn tag(
 /// * `tags_del` - The tags to delete and the groups to delete them from
 #[utoipa::path(
     delete,
-    path = "/api/files/tags/:sha256",
+    path = "/api/files/tags/{sha256}",
     params(
         ("sha256" = String, Path, description = "Sha256 for which to delete tags"),
-        ("tags_del" = TagDeleteRequest<Sample>, description = "JSON-formatted tags to delete")
     ),
+    request_body = TagDeleteRequest<Sample>,
     responses(
         (status = 204, description = "Sample tags deleted"),
+        (status = 400, description = "The request is invalid: the JSON body is malformed or fails validation"),
         (status = 401, description = "This user is not authorized to access this route"),
+        (status = 404, description = "A resource named in the request, such as a path value, group or body field, does not exist or is not visible to this user"),
+        (status = 422, description = "The JSON body is well formed but does not match the expected shape, for example a required field is missing or has the wrong type"),
+        (status = 500, description = "An internal error occurred, such as a backing database, cache or object store failing"),
+        (status = 503, description = "A service Thorium depends on, such as Redis or LDAP, is unavailable"),
     ),
     security(
         ("basic" = []),
+        ("bearer" = []),
     )
 )]
 #[instrument(name = "routes::files::delete_tags", skip_all, err(Debug))]
@@ -366,17 +412,26 @@ async fn delete_tags(
 /// * `multipart` - The multipart form to parse
 #[utoipa::path(
     post,
-    path = "/api/files/comment/:sha256",
+    path = "/api/files/comment/{sha256}",
     params(
         ("sha256" = String, Path, description = "Sha256 for which to create comment"),
-        ("multipart", description = "The multipart form to parse to create comment"),
+    ),
+    request_body(
+        content = Vec<u8>,
+        content_type = "multipart/form-data",
+        description = "The multipart form with the comment's text, groups, and any attachments",
     ),
     responses(
         (status = 200, description = "Comment creation response", body = CommentResponse),
+        (status = 400, description = "The request is invalid: the multipart form is malformed or fails validation"),
         (status = 401, description = "This user is not authorized to access this route"),
+        (status = 404, description = "A resource named in the request, such as a path value, group or body field, does not exist or is not visible to this user"),
+        (status = 500, description = "An internal error occurred, such as a backing database, cache or object store failing"),
+        (status = 503, description = "A service Thorium depends on, such as Redis or LDAP, is unavailable"),
     ),
     security(
         ("basic" = []),
+        ("bearer" = []),
     )
 )]
 #[instrument(name = "routes::files::create_comment", skip_all, err(Debug))]
@@ -406,18 +461,23 @@ async fn create_comment(
 /// * `state` - Shared Thorium objects
 #[utoipa::path(
     delete,
-    path = "/api/files/comment/:sha256/:id",
+    path = "/api/files/comment/{sha256}/{id}",
     params(
         ("sha256" = String, Path, description = "Sha256 for which to delete comment"),
         ("id" = Uuid, Path, description = "Uuid of the comment to delete"),
-        ("params" = DeleteCommentParams, description = "Groups the comment to be deleted is part of")
+        DeleteCommentParams,
     ),
     responses(
         (status = 204, description = "Sample comment deleted"),
+        (status = 400, description = "The request is invalid: a path parameter has an invalid value; a query parameter has an invalid value"),
         (status = 401, description = "This user is not authorized to access this route"),
+        (status = 404, description = "A resource named in the request, such as a path value, group or body field, does not exist or is not visible to this user"),
+        (status = 500, description = "An internal error occurred, such as a backing database, cache or object store failing"),
+        (status = 503, description = "A service Thorium depends on, such as Redis or LDAP, is unavailable"),
     ),
     security(
         ("basic" = []),
+        ("bearer" = []),
     )
 )]
 #[instrument(name = "routes::files::delete_comment", skip_all, err(Debug))]
@@ -447,18 +507,23 @@ async fn delete_comment(
 /// * `state` - Shared Thorium objects
 #[utoipa::path(
     get,
-    path = "/api/files/comment/download/:sha256/:comment/:name",
+    path = "/api/files/comment/download/{sha256}/{comment}/{name}",
     params(
         ("sha256" = String, Path, description = "Sha256 of sample the comment atachment is tied to"),
         ("comment" = Uuid, Path, description = "Uuid of of the comment to download an attachment from"),
-        ("attachment" = Uuid, Path, description = "Uuid of the attachment to download")
+        ("name" = Uuid, Path, description = "Uuid of the attachment to download")
     ),
     responses(
         (status = 200, description = "Download a file by sha256", body = Vec<u8>),
+        (status = 400, description = "The request is invalid: a path parameter has an invalid value"),
         (status = 401, description = "This user is not authorized to access this route"),
+        (status = 404, description = "A resource named in the request, such as a path value, group or body field, does not exist or is not visible to this user"),
+        (status = 500, description = "An internal error occurred, such as a backing database, cache or object store failing"),
+        (status = 503, description = "A service Thorium depends on, such as Redis or LDAP, is unavailable"),
     ),
     security(
         ("basic" = []),
+        ("bearer" = []),
     )
 )]
 #[instrument(name = "routes::files::download_attachment", skip_all, err(Debug))]
@@ -490,14 +555,19 @@ async fn download_attachment(
     get,
     path = "/api/files/",
     params(
-        ("params" = FileListParams, description = "Query params to use for this file list request"),
+        FileListParams,
     ),
     responses(
         (status = 200, description = "JSON-formatted cursor response containing the sha256 of a sample, the samples group information, submission uuid, and upload timestamp", body = ApiCursor<SampleListLine>),
+        (status = 400, description = "The request is invalid: a query parameter has an invalid value"),
         (status = 401, description = "This user is not authorized to access this route"),
+        (status = 404, description = "A resource named in the request, such as a path value, group or body field, does not exist or is not visible to this user"),
+        (status = 500, description = "An internal error occurred, such as a backing database, cache or object store failing"),
+        (status = 503, description = "A service Thorium depends on, such as Redis or LDAP, is unavailable"),
     ),
     security(
         ("basic" = []),
+        ("bearer" = []),
     )
 )]
 #[instrument(name = "routes::files::list", skip_all, err(Debug))]
@@ -520,16 +590,21 @@ async fn list(
 /// * `state` - Shared Thorium objects
 #[utoipa::path(
     get,
-    path = "/api/files/details",
+    path = "/api/files/details/",
     params(
-        ("params" = FileListParams, description = "Query params to use for this file list request"),
+        FileListParams,
     ),
     responses(
         (status = 200, description = "JSON-formatted cursor response containing the sha256, sha1, and md5 hashes of a sample, plus tags amd submission information", body = ApiCursor<Sample>),
+        (status = 400, description = "The request is invalid: a query parameter has an invalid value"),
         (status = 401, description = "This user is not authorized to access this route"),
+        (status = 404, description = "A resource named in the request, such as a path value, group or body field, does not exist or is not visible to this user"),
+        (status = 500, description = "An internal error occurred, such as a backing database, cache or object store failing"),
+        (status = 503, description = "A service Thorium depends on, such as Redis or LDAP, is unavailable"),
     ),
     security(
         ("basic" = []),
+        ("bearer" = []),
     )
 )]
 #[instrument(name = "routes::files::list_details", skip_all, err(Debug))]
@@ -558,15 +633,19 @@ async fn list_details(
     path = "/api/files/associations/{sha256}",
     params(
         ("sha256" = String, Path, description = "Sha256 of sample to get associations for"),
-        ("params" = AssociationListParams, description = "Query params to use for this association list request"),
+        AssociationListParams,
     ),
     responses(
         (status = 200, description = "JSON-formatted cursor response containing the associations for a sample", body = ApiCursor<Association>),
+        (status = 400, description = "The request is invalid: a query parameter has an invalid value"),
         (status = 401, description = "This user is not authorized to access this route"),
         (status = 404, description = "The sample does not exist"),
+        (status = 500, description = "An internal error occurred, such as a backing database, cache or object store failing"),
+        (status = 503, description = "A service Thorium depends on, such as Redis or LDAP, is unavailable"),
     ),
     security(
         ("basic" = []),
+        ("bearer" = []),
     )
 )]
 #[instrument(name = "routes::files::list_associations", skip_all, err(Debug))]
@@ -596,14 +675,19 @@ async fn list_associations(
     get,
     path = "/api/files/count/",
     params(
-        ("params" = FileListParams, description = "Query params to use for this file count request"),
+        FileListParams,
     ),
     responses(
         (status = 200, description = "JSON-formatted cursor response containing the counts of files and tags", body = TagCounts),
+        (status = 400, description = "The request is invalid: a query parameter has an invalid value"),
         (status = 401, description = "This user is not authorized to access this route"),
+        (status = 404, description = "A resource named in the request, such as a path value, group or body field, does not exist or is not visible to this user"),
+        (status = 500, description = "An internal error occurred, such as a backing database, cache or object store failing"),
+        (status = 503, description = "A service Thorium depends on, such as Redis or LDAP, is unavailable"),
     ),
     security(
         ("basic" = []),
+        ("bearer" = []),
     )
 )]
 #[instrument(name = "routes::files::count", skip_all, err(Debug))]
@@ -627,16 +711,26 @@ async fn count(
 /// * `upload` - The results being submitted
 #[utoipa::path(
     post,
-    path = "/api/files/results/:sha256",
+    path = "/api/files/results/{sha256}",
     params(
         ("sha256" = String, Path, description = "Sha256 of sample for which to save results"),
-        ("upload", description = "The multipart form containing the results upload")    ),
+    ),
+    request_body(
+        content = Vec<u8>,
+        content_type = "multipart/form-data",
+        description = "The multipart form containing the results and any result files",
+    ),
     responses(
         (status = 200, description = "JSON-formatted response containing the uuid of the new result", body = OutputResponse),
+        (status = 400, description = "The request is invalid: the multipart form is malformed or fails validation"),
         (status = 401, description = "This user is not authorized to access this route"),
+        (status = 404, description = "A resource named in the request, such as a path value, group or body field, does not exist or is not visible to this user"),
+        (status = 500, description = "An internal error occurred, such as a backing database, cache or object store failing"),
+        (status = 503, description = "A service Thorium depends on, such as Redis or LDAP, is unavailable"),
     ),
     security(
         ("basic" = []),
+        ("bearer" = []),
     )
 )]
 #[instrument(name = "routes::files::upload_results", skip_all, err(Debug))]
@@ -667,17 +761,22 @@ async fn upload_results(
 /// * `state` - Shared Thorium objects
 #[utoipa::path(
     get,
-    path = "/api/files/results/:sha256",
+    path = "/api/files/results/{sha256}",
     params(
         ("sha256" = String, Path, description = "Sha256 of sample for which to get results"),
-        ("params" = ResultGetParams, description = "Query params to use for this results get request"),
+        ResultGetParams,
     ),
     responses(
         (status = 200, description = "JSON-formatted response containing tool results", body = OutputMap),
+        (status = 400, description = "The request is invalid: a query parameter has an invalid value"),
         (status = 401, description = "This user is not authorized to access this route"),
+        (status = 404, description = "A resource named in the request, such as a path value, group or body field, does not exist or is not visible to this user"),
+        (status = 500, description = "An internal error occurred, such as a backing database, cache or object store failing"),
+        (status = 503, description = "A service Thorium depends on, such as Redis or LDAP, is unavailable"),
     ),
     security(
         ("basic" = []),
+        ("bearer" = []),
     )
 )]
 #[instrument(name = "routes::files::get_results", skip_all, err(Debug))]
@@ -705,16 +804,24 @@ async fn get_results(
 /// * `state` - Shared Thorium objects
 #[utoipa::path(
     get,
-    path = "/api/files/results/:sha256/:tool/:result_id",
+    path = "/api/files/result-files/{sha256}/{tool}/{result_id}",
     params(
-        ("params" = ResultFileDownloadParams, description = "Parameters for downloading result files"),
+        ("sha256" = String, Path, description = "The sha256 of the sample the result is for"),
+        ("tool" = String, Path, description = "The tool that created the result"),
+        ("result_id" = Uuid, Path, description = "The id of the result"),
+        ResultFileDownloadParams,
     ),
     responses(
         (status = 200, description = "Response containing body of requested result file", body = Vec<u8>),
+        (status = 400, description = "The request is invalid: a path parameter has an invalid value; a query parameter has an invalid value"),
         (status = 401, description = "This user is not authorized to access this route"),
+        (status = 404, description = "A resource named in the request, such as a path value, group or body field, does not exist or is not visible to this user"),
+        (status = 500, description = "An internal error occurred, such as a backing database, cache or object store failing"),
+        (status = 503, description = "A service Thorium depends on, such as Redis or LDAP, is unavailable"),
     ),
     security(
         ("basic" = []),
+        ("bearer" = []),
     )
 )]
 #[instrument(name = "routes::files::download_result_file", skip_all, err(Debug))]
@@ -749,16 +856,27 @@ async fn download_result_file(
 /// * `path_params` - All params in this url path
 /// * `state` - Shared Thorium objects
 #[utoipa::path(
-     get,
-     path = "/api/files/result-files/:sha256/:tool/:result_id/:entity_kind",
-     responses(
-         (status = 200, description = "Response containing body of requested entity requests", body = Vec<EntityRequest>),
-         (status = 401, description = "This user is not authorized to access this route"),
-     ),
-     security(
-         ("basic" = []),
-     )
- )]
+    get,
+    path = "/api/files/result-files/{sha256}/{tool}/{result_id}/{entity_kind}",
+    params(
+        ("sha256" = String, Path, description = "The sha256 of the sample the results are for"),
+        ("tool" = String, Path, description = "The tool (or workflow result key) that created the results"),
+        ("result_id" = Uuid, Path, description = "The id of the results"),
+        ("entity_kind" = EntityKinds, Path, description = "The kind of entity requests to download"),
+    ),
+    responses(
+        (status = 200, description = "The entity requests the results hold, as a byte stream of JSON", body = Vec<EntityRequest>),
+        (status = 400, description = "The request is invalid: a path parameter has an invalid value"),
+        (status = 401, description = "This user is not authorized to access this route"),
+        (status = 404, description = "The sample, results, or entity requests do not exist"),
+        (status = 500, description = "An internal error occurred, such as a backing database, cache or object store failing"),
+        (status = 503, description = "A service Thorium depends on, such as Redis or LDAP, is unavailable"),
+    ),
+    security(
+        ("basic" = []),
+        ("bearer" = []),
+    )
+)]
 #[instrument(name = "routes::files::download_result_entities", skip_all, err(Debug))]
 async fn download_result_entities(
     user: AuthedUser,
@@ -797,16 +915,21 @@ async fn download_result_entities(
     post,
     path = "/api/files/grep/",
     params(
-        ("params" = GrepQueryParams, description = "The query params for this grep search"),
+        GrepQueryParams,
     ),
     request_body = GrepRequest,
     responses(
-        (status = 200, description = "A page of grep matches", body = ApiCursor<GrepMatches>),
-        (status = 400, description = "This grep pattern is not a valid regex"),
+        (status = 200, description = "A page of grep matches, with a cursor to continue searching samples that were not reached", body = ApiCursor<GrepMatches>),
+        (status = 400, description = "The request is invalid: the pattern is not a valid regex; the JSON body is malformed; a query parameter has an invalid value"),
         (status = 401, description = "This user is not authorized to access this route"),
+        (status = 404, description = "The cursor or a group named in the request does not exist or is not visible to this user"),
+        (status = 422, description = "The JSON body is well formed but does not match the expected shape, for example a required field is missing or has the wrong type"),
+        (status = 500, description = "An internal error occurred, such as a backing database, cache or object store failing"),
+        (status = 503, description = "A service Thorium depends on, such as Redis or LDAP, is unavailable"),
     ),
     security(
         ("basic" = []),
+        ("bearer" = []),
     )
 )]
 #[instrument(name = "routes::files::grep", skip_all, err(Debug))]
@@ -834,19 +957,24 @@ async fn grep(
 /// * `request` - The grep request body containing the regex pattern
 #[utoipa::path(
     post,
-    path = "/api/files/grep/:sha256",
+    path = "/api/files/grep/{sha256}",
     params(
         ("sha256" = String, Path, description = "The sha256 of the sample to grep"),
-        ("params" = GrepQueryParams, description = "The query params for this grep search"),
+        GrepQueryParams,
     ),
     request_body = GrepRequest,
     responses(
         (status = 200, description = "The grep matches for this sample", body = GrepMatches),
-        (status = 400, description = "This grep pattern is not a valid regex"),
+        (status = 400, description = "The request is invalid: the pattern is not a valid regex; the JSON body is malformed; a query parameter has an invalid value"),
         (status = 401, description = "This user is not authorized to access this route"),
+        (status = 404, description = "The sample does not exist or is not visible to this user"),
+        (status = 422, description = "The JSON body is well formed but does not match the expected shape, for example a required field is missing or has the wrong type"),
+        (status = 500, description = "An internal error occurred, such as a backing database, cache or object store failing"),
+        (status = 503, description = "A service Thorium depends on, such as Redis or LDAP, is unavailable"),
     ),
     security(
         ("basic" = []),
+        ("bearer" = []),
     )
 )]
 #[instrument(name = "routes::files::grep_sample", skip_all, err(Debug))]
@@ -867,9 +995,9 @@ async fn grep_sample(
 /// The struct containing our openapi docs
 #[derive(OpenApi)]
 #[openapi(
-    paths(list, upload, list_details, get_sample, delete_sample, exists, download, download_as_zip, download_result_file, download_result_entities, update, tag, delete_tags, create_comment, delete_comment, download_attachment, get_results, upload_results, grep, grep_sample),
+    paths(list, upload, list_details, count, get_sample, delete_sample, exists, download, download_as_zip, download_result_file, download_result_entities, update, tag, delete_tags, list_associations, create_comment, delete_comment, download_attachment, get_results, upload_results, grep, grep_sample),
     components(schemas(ApiCursor<Sample>, ApiCursor<SampleListLine>, ApiCursor<GrepMatches>, CarvedOrigin, Comment, CommentResponse, DeleteCommentParams, DeleteSampleParams,FileListParams, GrepDocumentMatches, GrepMatch, GrepMatches, GrepQueryParams, GrepRequest, GrepSource, GrepStats, ToolVersion, Origin, OriginRequest, Output, OutputDisplayType, OutputHandler, OutputMap, OutputResponse, PcapNetworkProtocol, ResultGetParams, Sample, SampleCheck, SampleCheckResponse, SampleListLine, SampleSubmissionResponse, SubmissionChunk, SubmissionUpdate, TagDeleteRequest<Sample>, TagRequest<Sample>, TruncationReason, ZipDownloadParams, TagCounts, EntityKinds, EntityRequest)),
-    modifiers(&OpenApiSecurity),
+    modifiers(&OpenApiSecurity, &OpenApiParameterExamples),
 )]
 pub struct FileApiDocs;
 

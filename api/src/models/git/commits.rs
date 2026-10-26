@@ -716,6 +716,8 @@ fn default_commitish_kinds() -> Vec<CommitishKinds> {
 
 /// The options that you can set when listing repo commits in Thorium
 #[derive(Deserialize, Debug)]
+#[cfg_attr(feature = "api", derive(utoipa::IntoParams))]
+#[cfg_attr(feature = "api", into_params(parameter_in = Query))]
 pub struct CommitishListParams {
     /// The cursor to use to continue this search
     pub cursor: Option<Uuid>,

@@ -183,7 +183,7 @@ fn build_app(
     api_router = trees::mount(api_router);
     api_router = mcp::mount(api_router, &conf);
     // add our api routes
-    app = app.nest("/api", api_router);
+    app = app.nest(docs::API_PREFIX, api_router);
     // create a ui router and mount our ui routes then merge it
     app = ui::mount(app);
     // setup our tracing
