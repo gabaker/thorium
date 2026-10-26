@@ -1,0 +1,56 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="800" height="272" viewBox="0 0 800 272" role="img" aria-label="Heatmap of replication rate for 3 families across 6 runs, rows alphabetical by family">
+  <title>Per-family replication rate by run (%)</title>
+  <rect x="0.5" y="0.5" width="799" height="271" rx="12" fill="#1a1a19" stroke="rgba(255,255,255,0.10)" stroke-width="1"/>
+  <g font-family="system-ui, -apple-system, 'Segoe UI', sans-serif">
+  <text x="28" y="46" font-size="15" fill="#ffffff" font-weight="600">Per-family replication rate by run (%)</text>
+  <text x="28" y="66" font-size="12" fill="#c3c2b7">Blue → green = low → high rate · families A–Z · &quot;–&quot; = not yet run</text>
+  <text x="232.17" y="94" font-size="12" fill="#898781" text-anchor="middle">Run 1</text>
+  <text x="330.5" y="94" font-size="12" fill="#898781" text-anchor="middle">Run 2</text>
+  <text x="428.83" y="94" font-size="12" fill="#898781" text-anchor="middle">Run 3</text>
+  <text x="527.17" y="94" font-size="12" fill="#898781" text-anchor="middle">Run 4</text>
+  <text x="625.5" y="94" font-size="12" fill="#898781" text-anchor="middle">Run 5</text>
+  <text x="723.83" y="94" font-size="12" fill="#898781" text-anchor="middle">Run 6</text>
+  <text x="176" y="122.5" font-size="12" fill="#c3c2b7" text-anchor="end">Alpha</text>
+  <rect x="184" y="104" width="96.33" height="28" fill="#16ad88" rx="2"/>
+  <text x="232.17" y="122.5" font-size="11" fill="#0b0b0b" text-anchor="middle" font-weight="600" style="font-variant-numeric: tabular-nums">50.0</text>
+  <rect x="282.33" y="104" width="96.33" height="28" fill="#4bca4b" rx="2"/>
+  <text x="330.5" y="122.5" font-size="11" fill="#0b0b0b" text-anchor="middle" font-weight="600" style="font-variant-numeric: tabular-nums">70.0</text>
+  <rect x="380.67" y="104" width="96.33" height="28" fill="#396aae" rx="2"/>
+  <text x="428.83" y="122.5" font-size="11" fill="#ffffff" text-anchor="middle" font-weight="600" style="font-variant-numeric: tabular-nums">20.0</text>
+  <rect x="479" y="104" width="96.33" height="28" fill="#396aae" rx="2"/>
+  <text x="527.17" y="122.5" font-size="11" fill="#ffffff" text-anchor="middle" font-weight="600" style="font-variant-numeric: tabular-nums">20.0</text>
+  <rect x="577.33" y="104" width="96.33" height="28" fill="#16ad88" rx="2"/>
+  <text x="625.5" y="122.5" font-size="11" fill="#0b0b0b" text-anchor="middle" font-weight="600" style="font-variant-numeric: tabular-nums">55.0</text>
+  <rect x="675.67" y="104" width="96.33" height="28" fill="#4bca4b" rx="2"/>
+  <text x="723.83" y="122.5" font-size="11" fill="#0b0b0b" text-anchor="middle" font-weight="600" style="font-variant-numeric: tabular-nums">80.0</text>
+  <text x="176" y="152.5" font-size="11" fill="#c3c2b7" text-anchor="end">Extraordi…mily Name</text>
+  <rect x="184" y="134" width="96.33" height="28" fill="#7deb60" rx="2"/>
+  <text x="232.17" y="152.5" font-size="11" fill="#0b0b0b" text-anchor="middle" font-weight="600" style="font-variant-numeric: tabular-nums">100.0</text>
+  <rect x="282.33" y="134" width="96.33" height="28" fill="#7deb60" rx="2"/>
+  <text x="330.5" y="152.5" font-size="11" fill="#0b0b0b" text-anchor="middle" font-weight="600" style="font-variant-numeric: tabular-nums">100.0</text>
+  <rect x="380.67" y="134" width="96.33" height="28" fill="#30508f" rx="2"/>
+  <text x="428.83" y="152.5" font-size="11" fill="#ffffff" text-anchor="middle" font-weight="600" style="font-variant-numeric: tabular-nums">10.0</text>
+  <rect x="479" y="134" width="96.33" height="28" fill="#30508f" rx="2"/>
+  <text x="527.17" y="152.5" font-size="11" fill="#ffffff" text-anchor="middle" font-weight="600" style="font-variant-numeric: tabular-nums">10.0</text>
+  <rect x="577.33" y="134" width="96.33" height="28" fill="#7deb60" rx="2"/>
+  <text x="625.5" y="152.5" font-size="11" fill="#0b0b0b" text-anchor="middle" font-weight="600" style="font-variant-numeric: tabular-nums">90.0</text>
+  <text x="723.83" y="152.5" font-size="11" fill="#898781" text-anchor="middle" font-weight="600">–</text>
+  <text x="176" y="182.5" font-size="12" fill="#c3c2b7" text-anchor="end">Zed</text>
+  <text x="232.17" y="182.5" font-size="11" fill="#898781" text-anchor="middle" font-weight="600">–</text>
+  <text x="330.5" y="182.5" font-size="11" fill="#898781" text-anchor="middle" font-weight="600">–</text>
+  <text x="428.83" y="182.5" font-size="11" fill="#898781" text-anchor="middle" font-weight="600">–</text>
+  <text x="527.17" y="182.5" font-size="11" fill="#898781" text-anchor="middle" font-weight="600">–</text>
+  <rect x="577.33" y="164" width="96.33" height="28" fill="#2b8cbc" rx="2"/>
+  <text x="625.5" y="182.5" font-size="11" fill="#0b0b0b" text-anchor="middle" font-weight="600" style="font-variant-numeric: tabular-nums">33.3</text>
+  <text x="723.83" y="182.5" font-size="11" fill="#898781" text-anchor="middle" font-weight="600">–</text>
+  <text x="74" y="217" font-size="11" fill="#898781" text-anchor="end" style="font-variant-numeric: tabular-nums">0</text>
+  <rect x="80" y="208" width="20" height="10" fill="#30508f" rx="2"/>
+  <rect x="102" y="208" width="20" height="10" fill="#396aae" rx="2"/>
+  <rect x="124" y="208" width="20" height="10" fill="#2b8cbc" rx="2"/>
+  <rect x="146" y="208" width="20" height="10" fill="#16ad88" rx="2"/>
+  <rect x="168" y="208" width="20" height="10" fill="#4bca4b" rx="2"/>
+  <rect x="190" y="208" width="20" height="10" fill="#7deb60" rx="2"/>
+  <text x="216" y="217" font-size="11" fill="#898781" style="font-variant-numeric: tabular-nums">100</text>
+  <text x="64" y="244" font-size="11" fill="#898781">Source: Scoreboard table · rate = (replicated + 0.5 × partial) / static GT</text>
+  </g>
+</svg>

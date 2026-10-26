@@ -1,0 +1,73 @@
+[package]
+name = "thorpal"
+version = { workspace = true }
+authors = { workspace = true }
+edition = { workspace = true }
+description = "An agentic system that drives an LLM to reverse engineer binaries through Ghidra."
+license-file = "../LICENSE"
+
+[lib]
+name = "thorpal"
+path = "src/lib.rs"
+
+[dependencies]
+rig = { workspace = true, features = ["bedrock", "rmcp"] }
+# MCP client support for workflow.yaml `mcp_servers` (rig only enables rmcp's
+# `client` feature, so the transports come from here); the `"2"` requirement
+# matches the rig fork's rmcp dep exactly so rmcp::model::Tool and ServerSink
+# unify across the two crates in one lockfile resolution
+rmcp = { version = "2", features = [
+    "client", "transport-child-process", "transport-streamable-http-client",
+    "transport-streamable-http-client-reqwest", "reqwest",
+] }
+# names the client type for cert-tolerant MCP transports; "0.13" matches
+# rmcp's own reqwest requirement so both resolve to one crate instance (the
+# TLS backend comes from rmcp's enabled reqwest features)
+reqwest = { version = "0.13", default-features = false }
+thorium-derive = { workspace = true, features = ["thorpal"] }
+inventory = { workspace = true }
+tokio = { workspace = true }
+anyhow = "1"
+ghidra-cli = { workspace = true }
+rhai = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { version = "0.3", default-features = false, features = ["registry"] }
+serde = { workspace = true }
+serde_json = { workspace = true }
+serde_norway = { workspace = true }
+chrono = { workspace = true }
+http = { workspace = true }
+dirs = "6"
+rand = "0.9"
+futures = "0.3"
+async-trait = "0.1"
+md-5 = "0.10"
+sha1 = "0.10"
+sha2 = "0.10"
+regex = "1.11"
+# native container/decompression tools (improvement 0006)
+cab = "0.6"
+cfb = "0.15"
+zip = { version = "4", default-features = false, features = ["deflate-flate2"] }
+flate2 = "1"
+lzma-rs = { version = "0.3", features = ["raw_decoder"] }
+# xz is decoded via liblzma (already in the workspace graph through zip):
+# lzma-rs's xz path buffers the whole output in memory with no limit, while
+# liblzma streams pull-based under a memlimit, so output caps actually hold
+liblzma = "0.4"
+# the crc32 API-hash family (improvement 0007; already in the graph via flate2)
+crc32fast = "1"
+# BM25 relevance ranking for forum search (search_forum tool + TUI board search);
+# language_detection/parallelism stay off -- the forum is small technical English
+bm25 = "2.3.2"
+yara-x = { version = "1.21.0", default-features = false, features = [
+    "constant-folding", "exact-atoms", "fast-regexp", "generate-proto-code",
+    "console-module", "cuckoo-module", "dex-module", "dotnet-module",
+    "elf-module", "lnk-module", "macho-module", "math-module",
+    "hash-module", "pe-module", "string-module", "time-module", "vt-module",
+] }
+
+[dev-dependencies]
+tempfile = "3"
+# the retry tests fast-forward tokio's paused clock through the backoff sleeps
+tokio = { workspace = true, features = ["test-util"] }

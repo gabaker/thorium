@@ -9,13 +9,71 @@ use crate::args::{
     config::{Config, ConfigOpts},
 };
 
+/// Update the ThorPal settings in the `ai` block of the Thorctl configuration
+///
+/// # Arguments
+///
+/// * `config` - The config to modify
+/// * `opts` - The optional updates to the Thorctl config
+fn update_ai_config(config: &mut CtlConf, opts: &ConfigOpts) -> Result<(), Error> {
+    // skip the ai block entirely if no ai settings were passed
+    let any_set = opts.ai_provider.is_some()
+        || opts.ghidra_install.is_some()
+        || opts.clear_ghidra_install
+        || opts.ghidra_projects.is_some()
+        || opts.ai_workflow.is_some()
+        || opts.clear_ai_workflow
+        || opts.report_template.is_some()
+        || opts.clear_report_template;
+    if !any_set {
+        return Ok(());
+    }
+    // the ThorPal settings live in the ai block, so it must already exist
+    let Some(ai) = config.ai.as_mut() else {
+        return Err(Error::new(
+            "No `ai` config block set: add an `ai` block with a provider section \
+            such as `openai`, `litellm`, `anthropic`, or `bedrock` to your Thorctl \
+            config first",
+        ));
+    };
+    // switch the active AI provider, validating that its block exists
+    if let Some(provider) = opts.ai_provider {
+        ai.provider = Some(provider);
+        // refuse to write a selector that points at a missing block
+        ai.resolve()?;
+    }
+    // set or clear the Ghidra install
+    if opts.clear_ghidra_install {
+        ai.ghidra_install = None;
+    } else if let Some(ghidra_install) = &opts.ghidra_install {
+        ai.ghidra_install = Some(ghidra_install.clone());
+    }
+    // set the Ghidra projects directory
+    if let Some(ghidra_projects) = &opts.ghidra_projects {
+        ai.ghidra_projects = Some(ghidra_projects.clone());
+    }
+    // set or clear the workflow
+    if opts.clear_ai_workflow {
+        ai.workflow = None;
+    } else if let Some(workflow) = &opts.ai_workflow {
+        ai.workflow = Some(workflow.clone());
+    }
+    // set or clear the report template
+    if opts.clear_report_template {
+        ai.report_template = None;
+    } else if let Some(report_template) = &opts.report_template {
+        ai.report_template = Some(report_template.clone());
+    }
+    Ok(())
+}
+
 /// Update the Thorctl configuration, returning the modified [`CtlConf`]
 ///
 /// # Arguments
 ///
 /// * `config` - The config to modify
 /// * `cmd` - The optional updates to the Thorctl config
-fn update_config(mut config: CtlConf, opts: &ConfigOpts) -> CtlConf {
+fn update_config(mut config: CtlConf, opts: &ConfigOpts) -> Result<CtlConf, Error> {
     // set opts if they were set
     if let Some(keys) = &opts.git_ssh_keys {
         config.git = Some(GitSettings::new(keys));
@@ -64,7 +122,14 @@ fn update_config(mut config: CtlConf, opts: &ConfigOpts) -> CtlConf {
     if let Some(default_editor) = &opts.default_editor {
         config.default_editor.clone_from(default_editor);
     }
-    config
+    // this config is about to be written back out, so migrate any legacy flat
+    // ai keys into a nested `litellm` block first (loading never rewrites them)
+    if let Some(ai) = config.ai.as_mut() {
+        ai.migrate_legacy();
+    }
+    // update the ThorPal settings in the ai block
+    update_ai_config(&mut config, opts)?;
+    Ok(config)
 }
 
 /// Modify the Thorctl configuration file given by `--config`
@@ -83,7 +148,7 @@ pub fn config(args: &Args, cmd: &Config) -> Result<(), Error> {
         )));
     };
     // update the Thorctl config
-    let new_conf = update_config(thorctl_conf, &cmd.config_opts);
+    let new_conf = update_config(thorctl_conf, &cmd.config_opts)?;
     // write the new configuration file
     let conf_file = std::fs::File::create(&args.config)?;
     serde_norway::to_writer(conf_file, &new_conf)?;

@@ -2,6 +2,8 @@
 
 use std::path::PathBuf;
 
+use thorium::client::conf::AiProviderKind;
+
 /// A command to modify the Thorctl configuration file
 #[derive(clap::Parser, Debug)]
 pub struct Config {
@@ -66,4 +68,29 @@ pub struct ConfigOpts {
     /// The default editor Thorctl will use
     #[clap(long)]
     pub default_editor: Option<String>,
+    /// The AI provider ThorPal talks to (requires that provider's block in the `ai` config)
+    #[clap(long, value_enum)]
+    pub ai_provider: Option<AiProviderKind>,
+    /// The Ghidra installation directory ThorPal analyzes binaries with (requires an `ai` config)
+    #[clap(long, conflicts_with = "clear_ghidra_install")]
+    pub ghidra_install: Option<PathBuf>,
+    /// Clear the Ghidra installation directory so agents using Ghidra cannot run
+    #[clap(long, conflicts_with = "ghidra_install")]
+    pub clear_ghidra_install: bool,
+    /// The directory ThorPal creates/opens Ghidra projects under (requires an `ai` config)
+    #[clap(long)]
+    pub ghidra_projects: Option<PathBuf>,
+    /// The path to a ThorPal workflow to use instead of the builtin one (requires an `ai` config)
+    #[clap(long, conflicts_with = "clear_ai_workflow")]
+    pub ai_workflow: Option<PathBuf>,
+    /// Clear the ThorPal workflow path so the builtin workflow is used
+    #[clap(long, conflicts_with = "ai_workflow")]
+    pub clear_ai_workflow: bool,
+    /// The path to a markdown report template ThorPal uses instead of the builtin one
+    /// (requires an `ai` config)
+    #[clap(long, conflicts_with = "clear_report_template")]
+    pub report_template: Option<PathBuf>,
+    /// Clear the ThorPal report template path so the builtin template is used
+    #[clap(long, conflicts_with = "report_template")]
+    pub clear_report_template: bool,
 }

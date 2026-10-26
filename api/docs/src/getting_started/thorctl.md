@@ -146,6 +146,70 @@ thorctl config --disable-proxy=true
 thorctl config --clear-proxy
 ```
 
+#### AI Settings
+
+`thorctl analyze chat <BINARY>` and `thorctl analyze summary <BINARY>` analyze a local binary with ThorPal.
+They are configured with the `ai` block of the config. Each supported LLM provider's settings
+live in a block named after it (`openai`, `litellm`, `anthropic`, or `bedrock`), and `provider`
+selects the active one:
+
+```yaml
+ai:
+  # The provider ThorPal talks to: openai, litellm, anthropic, or bedrock.
+  # Optional while exactly one provider block is configured.
+  provider: anthropic
+  # The OpenAI API (endpoint is optional and defaults to the official API)
+  openai:
+    api_key: <KEY>
+    model: <MODEL>
+  # A LiteLLM (OpenAI-compatible) gateway (api_key is optional for no-auth gateways)
+  litellm:
+    endpoint: https://llm.example.com
+    api_key: <KEY>
+    model: <MODEL>
+  # The Anthropic API (endpoint is optional and defaults to the official API)
+  anthropic:
+    api_key: <KEY>
+    model: <MODEL>
+  # AWS Bedrock authenticates through the AWS credential chain instead of an
+  # API key; region and profile are both optional (region wins when both are set).
+  # An explicit access key pair (plus optional session token) overrides the chain.
+  # Set mantle: true to talk to Bedrock's Mantle (Anthropic Messages API) endpoint,
+  # required for models only served there (e.g. anthropic.claude-mythos-5).
+  bedrock:
+    region: us-east-1
+    profile: my-aws-profile
+    mantle: true
+    access_key_id: <AWS_ACCESS_KEY_ID>
+    secret_access_key: <AWS_SECRET_ACCESS_KEY>
+    session_token: <AWS_SESSION_TOKEN>
+    model: <MODEL>
+  # The Ghidra install ThorPal analyzes binaries with. Agents that use the Ghidra
+  # tools refuse to start when this is not set.
+  ghidra_install: /opt/ghidra
+  # The directory Ghidra projects are created under (default: ./GhidraProjects)
+  ghidra_projects: /home/user/GhidraProjects
+  # A custom ThorPal workflow to use instead of the builtin one
+  workflow: /home/user/workflow.yaml
+  # The persistent cross-session Rhai script library (default: ~/.thorium/scripts)
+  scripts_dir: /home/user/thorpal-scripts
+```
+
+Configs written before provider blocks existed, with `endpoint`, `api_key`, and `model` directly
+under `ai`, keep working: they are read as a `litellm` provider.
+
+Once the `ai` block exists, the ThorPal settings can also be set with `thorctl config`:
+
+```
+thorctl config --ai-provider anthropic
+thorctl config --ghidra-install /opt/ghidra --ghidra-projects ~/GhidraProjects
+thorctl config --ai-workflow ~/workflow.yaml
+thorctl config --clear-ghidra-install --clear-ai-workflow
+```
+
+The `--ghidra-install` (or `GHIDRA_INSTALL`) and `--workflow` flags on `thorctl analyze` override the
+config for a single run.
+
 ### Command Overview
 
 | Command | What it does | Guide |
@@ -275,6 +339,7 @@ Commands:
   workflows         Create, edit, and inspect workflows that wire AI agents together
   instances         List, describe, and compare tool, toolset, and workflow instances
   runs              List, describe, retry, and cancel runs, singly or by batch
+  analyze           Analyze samples with ThorPal [aliases: ai, si]
   cart              Cart files locally
   uncart            Uncart files locally
   run               Start a tool, workflow, or pipeline run (`run <KIND> <NAME>`), or run one
@@ -316,7 +381,7 @@ Each subcommand of Thorctl (eg `files`) has its own help menu to inform users on
 subcommand.
 
 ```bash
-$ thorctl files upload --help
+$ thorctl files upload -h
 Upload some files and/or directories to Thorium
 
 Usage: thorctl files upload [OPTIONS] --groups <FILE_GROUPS> <TARGETS|--from-file <FROM_FILE>>

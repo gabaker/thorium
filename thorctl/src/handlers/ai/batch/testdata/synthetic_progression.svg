@@ -1,0 +1,62 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="800" height="580" viewBox="0 0 800 580" role="img" aria-label="Aggregate progression: replication rate 75.0% (run 1) to 57.8% (run 5); total cost per run $2,135 to $451">
+  <title>Thorctl AI evaluation — aggregate progression</title>
+  <rect x="0.5" y="0.5" width="799" height="579" rx="12" fill="#1a1a19" stroke="rgba(255,255,255,0.10)" stroke-width="1"/>
+  <g font-family="system-ui, -apple-system, 'Segoe UI', sans-serif">
+  <text x="28" y="46" font-size="15" fill="#ffffff" font-weight="600">Thorctl AI evaluation — aggregate progression</text>
+  <text x="28" y="66" font-size="12" fill="#c3c2b7">Pooled replication rate and total estimated cost over each run's scored corpus</text>
+  <text x="64" y="100" font-size="12" fill="#c3c2b7">Replication rate (%)</text>
+  <line x1="64" y1="292" x2="772" y2="292" stroke="#2c2c2a" stroke-width="1"/>
+  <text x="56" y="296" font-size="11" fill="#898781" text-anchor="end" style="font-variant-numeric: tabular-nums">0</text>
+  <line x1="64" y1="256" x2="772" y2="256" stroke="#2c2c2a" stroke-width="1"/>
+  <text x="56" y="260" font-size="11" fill="#898781" text-anchor="end" style="font-variant-numeric: tabular-nums">20</text>
+  <line x1="64" y1="220" x2="772" y2="220" stroke="#2c2c2a" stroke-width="1"/>
+  <text x="56" y="224" font-size="11" fill="#898781" text-anchor="end" style="font-variant-numeric: tabular-nums">40</text>
+  <line x1="64" y1="184" x2="772" y2="184" stroke="#2c2c2a" stroke-width="1"/>
+  <text x="56" y="188" font-size="11" fill="#898781" text-anchor="end" style="font-variant-numeric: tabular-nums">60</text>
+  <line x1="64" y1="148" x2="772" y2="148" stroke="#2c2c2a" stroke-width="1"/>
+  <text x="56" y="152" font-size="11" fill="#898781" text-anchor="end" style="font-variant-numeric: tabular-nums">80</text>
+  <line x1="64" y1="112" x2="772" y2="112" stroke="#2c2c2a" stroke-width="1"/>
+  <text x="56" y="116" font-size="11" fill="#898781" text-anchor="end" style="font-variant-numeric: tabular-nums">100</text>
+  <path d="M 134.8 157 L 276.4 139 L 418 265 L 559.6 265 L 701.2 187.94" fill="none" stroke="#3987e5" stroke-width="2" stroke-linejoin="round" stroke-linecap="round"/>
+  <circle cx="134.8" cy="157" r="4.5" fill="#3987e5" stroke="#1a1a19" stroke-width="2"/>
+  <text x="134.8" y="147" font-size="11" fill="#ffffff" text-anchor="middle" font-weight="600" style="font-variant-numeric: tabular-nums">75.0</text>
+  <circle cx="276.4" cy="139" r="4.5" fill="#3987e5" stroke="#1a1a19" stroke-width="2"/>
+  <text x="276.4" y="129" font-size="11" fill="#ffffff" text-anchor="middle" font-weight="600" style="font-variant-numeric: tabular-nums">85.0</text>
+  <circle cx="418" cy="265" r="4.5" fill="#3987e5" stroke="#1a1a19" stroke-width="2"/>
+  <text x="418" y="283" font-size="11" fill="#ffffff" text-anchor="middle" font-weight="600" style="font-variant-numeric: tabular-nums">15.0</text>
+  <circle cx="559.6" cy="265" r="4.5" fill="#3987e5" stroke="#1a1a19" stroke-width="2"/>
+  <text x="559.6" y="283" font-size="11" fill="#ffffff" text-anchor="middle" font-weight="600" style="font-variant-numeric: tabular-nums">15.0</text>
+  <circle cx="701.2" cy="187.94" r="4.5" fill="#3987e5" stroke="#1a1a19" stroke-width="2"/>
+  <text x="701.2" y="177.94" font-size="11" fill="#ffffff" text-anchor="middle" font-weight="600" style="font-variant-numeric: tabular-nums">57.8</text>
+  <text x="64" y="330" font-size="12" fill="#c3c2b7">Total cost per run (USD)</text>
+  <line x1="64" y1="492" x2="772" y2="492" stroke="#2c2c2a" stroke-width="1"/>
+  <text x="56" y="496" font-size="11" fill="#898781" text-anchor="end" style="font-variant-numeric: tabular-nums">0</text>
+  <line x1="64" y1="462" x2="772" y2="462" stroke="#2c2c2a" stroke-width="1"/>
+  <text x="56" y="466" font-size="11" fill="#898781" text-anchor="end" style="font-variant-numeric: tabular-nums">500</text>
+  <line x1="64" y1="432" x2="772" y2="432" stroke="#2c2c2a" stroke-width="1"/>
+  <text x="56" y="436" font-size="11" fill="#898781" text-anchor="end" style="font-variant-numeric: tabular-nums">1,000</text>
+  <line x1="64" y1="402" x2="772" y2="402" stroke="#2c2c2a" stroke-width="1"/>
+  <text x="56" y="406" font-size="11" fill="#898781" text-anchor="end" style="font-variant-numeric: tabular-nums">1,500</text>
+  <line x1="64" y1="372" x2="772" y2="372" stroke="#2c2c2a" stroke-width="1"/>
+  <text x="56" y="376" font-size="11" fill="#898781" text-anchor="end" style="font-variant-numeric: tabular-nums">2,000</text>
+  <line x1="64" y1="342" x2="772" y2="342" stroke="#2c2c2a" stroke-width="1"/>
+  <text x="56" y="346" font-size="11" fill="#898781" text-anchor="end" style="font-variant-numeric: tabular-nums">2,500</text>
+  <path d="M 122.8 492 L 122.8 367.93 Q 122.8 363.93 126.8 363.93 L 142.8 363.93 Q 146.8 363.93 146.8 367.93 L 146.8 492 Z" fill="#d95926"/>
+  <text x="134.8" y="355.93" font-size="11" fill="#ffffff" text-anchor="middle" font-weight="600" style="font-variant-numeric: tabular-nums">$2,135</text>
+  <path d="M 264.4 492 L 264.4 477.99 Q 264.4 473.99 268.4 473.99 L 284.4 473.99 Q 288.4 473.99 288.4 477.99 L 288.4 492 Z" fill="#d95926"/>
+  <text x="276.4" y="465.99" font-size="11" fill="#ffffff" text-anchor="middle" font-weight="600" style="font-variant-numeric: tabular-nums">$300</text>
+  <path d="M 406 492 L 406 483.4 Q 406 479.4 410 479.4 L 426 479.4 Q 430 479.4 430 483.4 L 430 492 Z" fill="#d95926"/>
+  <text x="418" y="471.4" font-size="11" fill="#ffffff" text-anchor="middle" font-weight="600" style="font-variant-numeric: tabular-nums">$210</text>
+  <path d="M 547.6 492 L 547.6 480.97 Q 547.6 476.97 551.6 476.97 L 567.6 476.97 Q 571.6 476.97 571.6 480.97 L 571.6 492 Z" fill="#d95926"/>
+  <text x="559.6" y="468.97" font-size="11" fill="#ffffff" text-anchor="middle" font-weight="600" style="font-variant-numeric: tabular-nums">$250</text>
+  <path d="M 689.2 492 L 689.2 468.95 Q 689.2 464.95 693.2 464.95 L 709.2 464.95 Q 713.2 464.95 713.2 468.95 L 713.2 492 Z" fill="#d95926"/>
+  <text x="701.2" y="456.95" font-size="11" fill="#ffffff" text-anchor="middle" font-weight="600" style="font-variant-numeric: tabular-nums">$451</text>
+  <line x1="64" y1="492" x2="772" y2="492" stroke="#383835" stroke-width="1"/>
+  <text x="134.8" y="514" font-size="12" fill="#c3c2b7" text-anchor="middle">Run 1</text>
+  <text x="276.4" y="514" font-size="12" fill="#c3c2b7" text-anchor="middle">Run 2</text>
+  <text x="418" y="514" font-size="12" fill="#c3c2b7" text-anchor="middle">Run 3</text>
+  <text x="559.6" y="514" font-size="12" fill="#c3c2b7" text-anchor="middle">Run 4</text>
+  <text x="701.2" y="514" font-size="12" fill="#c3c2b7" text-anchor="middle">Run 5</text>
+  <text x="64" y="552" font-size="11" fill="#898781">Rate = (Σ replicated + 0.5 Σ partial) / Σ static GT · Cost = Σ estimated $ per run · Source: Scoreboard table</text>
+  </g>
+</svg>

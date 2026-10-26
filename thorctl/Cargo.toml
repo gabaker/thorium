@@ -12,7 +12,6 @@ license-file = "../LICENSE"
 vendored-openssl = ["openssl/vendored"]
 
 [dependencies]
-thorium-api = { workspace = true, features = ["client", "kanal-err", "dialoguer-err"]}
 clap = { workspace = true }
 clap_complete = { workspace = true }
 tokio = { workspace = true }
@@ -21,6 +20,8 @@ config = { version = "0.15", features = ["yaml"] }
 serde = { workspace = true }
 serde_json = { workspace = true }
 serde_norway = { workspace = true }
+thorium-api = { workspace = true, features = ["client", "kanal-err", "dialoguer-err"]}
+thorpal = { workspace = true }
 colored = "3"
 owo-colors = "4"
 tabled = "0.21"
@@ -31,6 +32,8 @@ walkdir = "2.5"
 async-walkdir = "2"
 pathdiff = "0.2"
 futures = "0.3"
+anyhow = "1"
+humantime = "2"
 generic-array = "0.14"
 sha2 = "0.10"
 data-encoding = "2.9"
@@ -56,6 +59,7 @@ dirs = "6"
 cfg-if = "1"
 reqwest = { workspace = true , default-features = false, features = ["rustls-tls"] }
 tui-banner = { version = "0.2", git = "https://github.com/mjcarson/tui-banner.git", branch = "ManuallyDrivenWaveAnimation" }
+color-eyre = "0.6.3"
 crossterm = { version = "0.29.0", features = ["event-stream"] }
 ratatui = "0.30.0"
 unicode-width = "0.2"
@@ -65,8 +69,13 @@ unicode-segmentation = "1.12.0"
 libc = "0.2"
 tui-markdown = "0.3.7"
 sigma-rust = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+zip = { version = "4", default-features = false, features = ["deflate-flate2"] }
+ghidra-cli = { workspace = true }
 
 [dev-dependencies]
 thorium-api = { workspace = true, features = ["client", "trace", "test-utilities"] }
 # pseudo-terminals for the prompt smoke tests
 libc = "0.2"
+tempfile = "3"

@@ -257,6 +257,7 @@ See `{THORIUM_URL}/api/docs/user/getting_started/thorctl.html` for per-OS instal
 | `thorctl rules` | Create, get, list, update, delete, and bulk-import YARA/Sigma detection rules; view rule notifications |
 | `thorctl rulesets` | Create, get, list, update, and delete rule sets (named collections of rules) |
 | `thorctl hunts` | Create, watch, list, cancel, and delete hunts; list a hunt's hits |
+| `thorctl analyze` (aliases `ai`, `si`) | Chat with, summarize, or batch-evaluate local binaries using ThorPal |
 | `thorctl cart` | Cart (encrypt/neuter) files locally |
 | `thorctl uncart` | Uncart files locally |
 | `thorctl run` | `run tool\|workflow\|pipeline <NAME>` starts a run; `--one-per-input --batch <NAME> --workers N` fans a list (`--sample-list -` reads stdin) into one run per input and `--wait` follows the batch (exit 0 all completed, 1 any failed, 3 timed out; `-o json` prints JSON lines); `--dry-run` previews. The legacy `run <PIPELINE> <SHA256>` still creates one reaction and shows its output |

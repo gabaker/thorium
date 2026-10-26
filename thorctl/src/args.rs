@@ -7,6 +7,7 @@ use uuid::Uuid;
 
 use self::{
     agents::Agents,
+    ai::Ai,
     associations::Associations,
     cart::Cart,
     clusters::{Clusters, Login},
@@ -39,6 +40,7 @@ use self::{
 use crate::{args::toolbox::Toolbox, utils::repos::validate_repo_url};
 
 pub mod agents;
+pub mod ai;
 pub mod associations;
 pub mod cart;
 pub mod clusters;
@@ -246,6 +248,9 @@ Examples:
     /// List, describe, retry, and cancel runs, singly or by batch
     #[clap(version, author, subcommand)]
     Runs(Runs),
+    /// Analyze samples with ThorPal
+    #[clap(version, author, subcommand, visible_aliases = ["ai", "si"])]
+    Analyze(Ai),
     /// Cart files locally
     #[clap(version, author)]
     Cart(Cart),
@@ -267,6 +272,23 @@ Examples:
     /// Perform toolbox related tasks
     #[clap(version, author, subcommand)]
     Toolbox(Toolbox),
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The analyze subcommand parses under its primary name and both aliases
+    #[test]
+    fn analyze_aliases() {
+        // every spelling must land on the same analyze subcommand
+        for name in ["analyze", "ai", "si"] {
+            // parse a minimal invocation under this spelling
+            let args = Args::try_parse_from(["thorctl", name, "check"]).unwrap();
+            // the parsed command must be the analyze subcommand's check action
+            assert!(matches!(args.cmd, SubCommands::Analyze(Ai::Check)));
+        }
+    }
 }
 
 /// The mode our command is in

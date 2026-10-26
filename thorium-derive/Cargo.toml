@@ -21,8 +21,13 @@ python = ["sync"]
 # the schema derives: tables, views, projections, and keyspaces
 schema = []
 
+thorpal = ["dep:convert_case"]
+
 [dependencies]
 syn = { version = "2.0", features = ["full"] }
 quote = "1.0"
 proc-macro2 = "1.0"
 darling = "0.21"
+# pinned to the same version rig-derive uses so both macros derive identical
+# PascalCase tool struct names from the same fn names
+convert_case = { version = "0.11", optional = true }

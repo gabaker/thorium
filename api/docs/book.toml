@@ -10,7 +10,7 @@ create-missing = false
 [output.html]
 default-theme = "navy"
 preferred-dark-theme = "navy"
-additional-css = ["assets/asciinema-player.css"]
+additional-css = ["assets/asciinema-player.css", "theme/widescreen.css"]
 additional-js = ["assets/asciinema-player.min.js", "assets/casts-init.js"]
 
 [output.html.fold]

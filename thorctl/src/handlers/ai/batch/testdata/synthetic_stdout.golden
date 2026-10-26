@@ -1,0 +1,10 @@
+| Run | Families | Rate | Δ (pp) | Cost |
+|-----|----------|------|--------|------|
+| 1 | 2 | 75.0% | — | $2,134.56 |
+| 2 | 2 | 85.0% | +10.0 | $300.25 |
+| 3 | 2 | 15.0% | −70.0 | $210.00 |
+| 4 | 2 | 15.0% | 0.0 | $250.50 |
+| 5 | 3 | 57.8% | — | $450.75 |
+written   progression.svg
+written   per_family_heatmap.svg
+written   evaluation.md
