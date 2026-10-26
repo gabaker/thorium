@@ -6,8 +6,10 @@
 //! a file whose on-disk content matches what we'd write is a silent no-op, and a
 //! file that *differs* is either overwritten (`--overwrite`), resolved by prompting
 //! the user (Merge / Overwrite / Skip / Overwrite-all / Skip-all / Quit), or —
-//! when we can't prompt and `--overwrite` wasn't given — skipped with a warning so
-//! nothing is silently clobbered.
+//! when we can't prompt — kept as it is: with `--skip-conflicts` the export reports how
+//! many files it left untouched and succeeds, and without it the export ends in an error
+//! naming `--skip-conflicts` and `--overwrite`, so a script can tell that files were not
+//! written and nothing is silently clobbered.
 //!
 //! "Merge" opens the file's on-disk and freshly-exported versions in the user's
 //! editor as a git-style conflict view (see [`crate::handlers::imports::editor`]),
@@ -67,6 +69,9 @@ pub struct DiskConflictResolver {
     /// The user explicitly asked to skip conflicts (`--skip-conflicts`), so an
     /// auto-skip warning shouldn't suggest a different flag
     explicit_skip: bool,
+    /// The files left untouched because no one could be asked and nothing settled the
+    /// conflict up front, in the order they were met
+    skipped: Vec<String>,
 }
 
 impl DiskConflictResolver {
@@ -85,6 +90,7 @@ impl DiskConflictResolver {
             skip_all: false,
             editor,
             explicit_skip: false,
+            skipped: Vec::new(),
         }
     }
 
@@ -98,38 +104,6 @@ impl DiskConflictResolver {
     pub fn explicit_skip(mut self, explicit: bool) -> Self {
         self.explicit_skip = explicit;
         self
-    }
-
-    /// Stop prompting for the rest of the run, leaving every later differing file
-    /// untouched as if the user had chosen "Skip all"
-    ///
-    /// Used after the user picks Quit when an export still has to finish writing
-    /// files that resources already on disk depend on.
-    pub fn stop_prompting(&mut self) {
-        self.skip_all = true;
-    }
-
-    /// Write `content` to `path` with no save-time validation
-    ///
-    /// For files without a parseable schema (e.g. `description.md`); a "Merge"
-    /// only checks for unresolved conflict markers.
-    ///
-    /// # Arguments
-    ///
-    /// * `path` - The file to write
-    /// * `content` - The content we want on disk
-    /// * `progress` - The progress bar (suspended while prompting)
-    pub async fn write_text(
-        &mut self,
-        path: &Path,
-        content: &str,
-        progress: &Bar,
-    ) -> Result<WriteOutcome, Error> {
-        // markdown/plain text has no schema, so a merge only needs the marker check
-        self.write_inner(path, content, progress, |_| {
-            Ok::<(), serde_norway::Error>(())
-        })
-        .await
     }
 
     /// Write `content` to `path`, validating a "Merge" result as a config that
@@ -157,29 +131,6 @@ impl DiskConflictResolver {
         // is caught on save (with line/column) rather than at import time
         self.write_inner(path, content, progress, |resolved| {
             validate_config::<T>(resolved, strict_json)
-        })
-        .await
-    }
-
-    /// Write `content` to `path`, validating a "Merge" result as TOML that
-    /// deserializes into `T`
-    ///
-    /// Covers `manifest.toml` and `config.toml`.
-    ///
-    /// # Arguments
-    ///
-    /// * `path` - The file to write
-    /// * `content` - The content we want on disk
-    /// * `progress` - The progress bar (suspended while prompting)
-    pub async fn write_toml<T: DeserializeOwned>(
-        &mut self,
-        path: &Path,
-        content: &str,
-        progress: &Bar,
-    ) -> Result<WriteOutcome, Error> {
-        // validate a merged manifest/config so a broken hand-merge is caught on save
-        self.write_inner(path, content, progress, |resolved| {
-            toml::from_str::<T>(resolved).map(|_| ())
         })
         .await
     }
@@ -295,15 +246,22 @@ impl DiskConflictResolver {
 
     /// Resolve a conflict, warning when we auto-skip a differing file because we
     /// can't prompt and weren't told to overwrite
-    fn resolve(&self, path: &Path, progress: &Bar) -> Resolution {
+    ///
+    /// # Arguments
+    ///
+    /// * `path` - The on-disk file that differs from what the export would write
+    /// * `progress` - The progress bar to warn through
+    fn resolve(&mut self, path: &Path, progress: &Bar) -> Resolution {
         let kind = self.resolve_kind();
         // the only un-chosen skip is the non-interactive case; surface it loudly
         if matches!(kind, Resolution::Skip) && !self.skip_all {
+            // remember the file so the end of the export can report what was left untouched
+            self.skipped.push(path.display().to_string());
             // don't suggest a different flag to a user who explicitly asked to skip
             let hint = if self.explicit_skip {
                 "leaving it untouched (--skip-conflicts)"
             } else {
-                "pass --overwrite to overwrite"
+                "pass --skip-conflicts to keep it or --overwrite to overwrite"
             };
             progress.warning(format!(
                 "Skipping '{}' — an existing on-disk copy differs; {hint}",
@@ -312,7 +270,48 @@ impl DiskConflictResolver {
         }
         kind
     }
+
+    /// Settle the files this export left untouched because no one could decide about them
+    ///
+    /// With `--skip-conflicts` the skips were asked for, so one summary line says how many
+    /// there were (even in quiet mode). Without the flag, and without a terminal to ask on,
+    /// they are recorded in `report` so the export ends with an error that names the flags.
+    ///
+    /// # Arguments
+    ///
+    /// * `report` - The export report to record refused conflicts in
+    /// * `progress` - The progress bar to warn through
+    pub fn settle(&mut self, report: &mut ExportReport, progress: &Bar) {
+        // nothing was skipped without a decision
+        let skipped = std::mem::take(&mut self.skipped);
+        if skipped.is_empty() {
+            return;
+        }
+        if self.explicit_skip {
+            // the user asked for the skips, so just say how many there were
+            progress.warning(skipped_line(&skipped));
+        } else {
+            // nobody could decide, so the export ends in an error naming the flags
+            report.refused = skipped;
+        }
+    }
 }
+
+/// The one line that says how many on-disk configs `--skip-conflicts` left untouched
+///
+/// # Arguments
+///
+/// * `skipped` - The paths of the configs that were skipped
+fn skipped_line(skipped: &[String]) -> String {
+    format!(
+        "Skipped {} existing config(s) that differ ({}); --skip-conflicts left them untouched",
+        skipped.len(),
+        crate::handlers::imports::list_bounded(skipped, MAX_LISTED)
+    )
+}
+
+/// The most skipped paths an export message lists before counting the rest
+const MAX_LISTED: usize = 10;
 
 /// A config parse error from whichever parser validated a merged file
 #[derive(Debug)]
@@ -396,6 +395,9 @@ pub struct ExportReport {
     pub failures: Vec<(&'static str, String)>,
     /// The user chose Quit at a conflict prompt, so some resources were not exported
     pub stopped: bool,
+    /// The on-disk configs left untouched because they differ and nothing could settle
+    /// the conflict (no terminal, neither `--overwrite` nor `--skip-conflicts`)
+    pub refused: Vec<String>,
 }
 
 impl ExportReport {
@@ -413,7 +415,7 @@ impl ExportReport {
     pub fn banner(&self) -> &'static str {
         if self.stopped {
             "Export stopped early"
-        } else if self.failures.is_empty() {
+        } else if self.failures.is_empty() && self.refused.is_empty() {
             "Export complete!"
         } else {
             "Export finished with errors"
@@ -441,8 +443,29 @@ impl ExportReport {
     /// Turn this report into the command's result
     ///
     /// A user-chosen Quit is not a success: it returns an error so scripts don't
-    /// treat a partial export as complete, and any failures are included.
+    /// treat a partial export as complete, and any failures are included. So are configs
+    /// left untouched because nothing could decide about them.
     pub fn into_result(self) -> Result<(), Error> {
+        // configs left untouched with no way to decide are an error of their own
+        let refused = (!self.refused.is_empty()).then(|| {
+            format!(
+                "{} existing config(s) on disk differ from the export and no terminal is \
+                 available to ask; pass --skip-conflicts to keep them or --overwrite to \
+                 replace them: {}",
+                self.refused.len(),
+                crate::handlers::imports::list_bounded(&self.refused, MAX_LISTED)
+            )
+        });
+        let base = self.base_result();
+        match (base, refused) {
+            (result, None) => result,
+            (Ok(()), Some(refused)) => Err(Error::new(refused)),
+            (Err(err), Some(refused)) => Err(Error::new(format!("{refused}; also: {err}"))),
+        }
+    }
+
+    /// The result from quitting and failures alone, without refused conflicts
+    fn base_result(&self) -> Result<(), Error> {
         match (self.stopped, self.failures.is_empty()) {
             (false, true) => Ok(()),
             (false, false) => Err(Error::new(format!(
@@ -741,17 +764,10 @@ mod tests {
         let stopped = ExportReport {
             failures: Vec::new(),
             stopped: true,
+            refused: Vec::new(),
         };
         assert_eq!(stopped.banner(), "Export stopped early");
         assert!(stopped.into_result().is_err());
-    }
-
-    /// stopping prompts makes every later conflict skip without asking
-    #[test]
-    fn stop_prompting_skips_later_conflicts() {
-        let mut resolver = DiskConflictResolver::new(false, true, "vi".to_string());
-        resolver.stop_prompting();
-        assert!(matches!(resolver.resolve_kind(), Resolution::Skip));
     }
 
     /// the conflict menu maps Merge first (the default) and Quit for any
@@ -768,5 +784,88 @@ mod tests {
         assert!(matches!(choice_from_selection(4), PromptChoice::SkipAll));
         assert!(matches!(choice_from_selection(5), PromptChoice::Quit));
         assert!(matches!(choice_from_selection(99), PromptChoice::Quit));
+    }
+
+    /// Make a unique scratch directory for one test
+    fn scratch() -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("thorctl-export-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    /// Offer a resolver two differing files, as an export of two changed configs does
+    ///
+    /// # Arguments
+    ///
+    /// * `resolver` - The resolver the export uses
+    async fn offer_two_differing_files(resolver: &mut DiskConflictResolver) -> Vec<WriteOutcome> {
+        /// A config with only a name, enough to validate what the resolver writes
+        #[derive(serde::Deserialize)]
+        struct Named {
+            /// The config's name
+            #[allow(dead_code)]
+            name: String,
+        }
+        let dir = scratch();
+        let progress = Bar::new_or_quiet("t", "", crate::handlers::progress::BarKind::Timer, true);
+        let mut outcomes = Vec::new();
+        for name in ["a", "b"] {
+            let path = dir.join(format!("{name}.json"));
+            std::fs::write(&path, r#"{"name": "old"}"#).unwrap();
+            let outcome = resolver
+                .write_yaml::<Named>(&path, r#"{"name": "new"}"#, &progress)
+                .await
+                .unwrap();
+            outcomes.push(outcome);
+        }
+        std::fs::remove_dir_all(&dir).unwrap();
+        outcomes
+    }
+
+    /// Without a terminal and without a flag, differing files are kept and the export refuses
+    #[tokio::test]
+    async fn unattended_export_with_conflicts_ends_in_an_error() {
+        let mut resolver = DiskConflictResolver::new(false, false, "vi".to_string());
+        let outcomes = offer_two_differing_files(&mut resolver).await;
+        assert_eq!(outcomes, vec![WriteOutcome::Skipped, WriteOutcome::Skipped]);
+        let mut report = ExportReport::default();
+        let progress = Bar::new_or_quiet("t", "", crate::handlers::progress::BarKind::Timer, true);
+        resolver.settle(&mut report, &progress);
+        assert_eq!(report.refused.len(), 2);
+        assert_eq!(report.banner(), "Export finished with errors");
+        let err = report.into_result().unwrap_err().to_string();
+        assert!(err.contains("--skip-conflicts"), "{err}");
+        assert!(err.contains("--overwrite"), "{err}");
+        assert!(err.contains("a.json") && err.contains("b.json"), "{err}");
+    }
+
+    /// With `--skip-conflicts` the same export succeeds and says what it skipped
+    #[tokio::test]
+    async fn skip_conflicts_export_succeeds_and_summarizes() {
+        let mut resolver =
+            DiskConflictResolver::new(false, false, "vi".to_string()).explicit_skip(true);
+        offer_two_differing_files(&mut resolver).await;
+        let mut report = ExportReport::default();
+        let progress = Bar::new_or_quiet("t", "", crate::handlers::progress::BarKind::Timer, true);
+        resolver.settle(&mut report, &progress);
+        assert_eq!(report.refused, Vec::<String>::new());
+        assert_eq!(report.banner(), "Export complete!");
+        report.into_result().unwrap();
+        let line = skipped_line(&["x/a.json".to_string(), "x/b.json".to_string()]);
+        assert!(line.contains('2') && line.contains("x/a.json"), "{line}");
+        assert!(line.contains("--skip-conflicts"), "{line}");
+    }
+
+    /// `--overwrite` replaces the files, so nothing is skipped or refused
+    #[tokio::test]
+    async fn overwrite_export_has_nothing_to_settle() {
+        let mut resolver = DiskConflictResolver::new(true, false, "vi".to_string());
+        let outcomes = offer_two_differing_files(&mut resolver).await;
+        assert_eq!(outcomes, vec![WriteOutcome::Written, WriteOutcome::Written]);
+        let mut report = ExportReport::default();
+        let progress = Bar::new_or_quiet("t", "", crate::handlers::progress::BarKind::Timer, true);
+        resolver.settle(&mut report, &progress);
+        assert_eq!(report.refused, Vec::<String>::new());
+        report.into_result().unwrap();
     }
 }

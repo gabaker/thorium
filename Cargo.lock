@@ -8685,6 +8685,7 @@ dependencies = [
  "indicatif",
  "itertools 0.14.0",
  "kanal",
+ "libc",
  "openssl",
  "owo-colors",
  "pathdiff",

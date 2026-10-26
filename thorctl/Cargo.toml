@@ -60,8 +60,12 @@ ratatui = "0.30.0"
 unicode-width = "0.2"
 ansi-to-tui = "8.0.1"
 unicode-segmentation = "1.12.0"
+# restores the terminal and removes temporary files when thorctl is interrupted
+libc = "0.2"
 tui-markdown = "0.3.7"
 sigma-rust = { workspace = true }
 
 [dev-dependencies]
 thorium-api = { workspace = true, features = ["client", "trace", "test-utilities"] }
+# pseudo-terminals for the prompt smoke tests
+libc = "0.2"

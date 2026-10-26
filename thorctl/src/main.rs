@@ -16,6 +16,8 @@ use args::{Args, SubCommands};
 
 #[tokio::main]
 async fn main() {
+    // restore the terminal and remove temporary files if we are interrupted
+    utils::interrupt::install();
     // get the command line args that were passed in
     let args = Args::parse();
     // fall into the right handler and execute this users command
@@ -54,8 +56,14 @@ async fn main() {
         SubCommands::Config(config) => handlers::config::config(&args, config),
         SubCommands::Toolbox(toolbox) => handlers::toolbox::handle(&args, toolbox).await,
     };
+    // a prompt that failed or ended on a key press may have left the cursor hidden
+    utils::interrupt::restore_terminal();
     // error if thorctl failed
     if let Err(error) = thorctl_result {
+        // a prompt that read Ctrl-C as a key press ends like an interrupt, without an error dump
+        if utils::interrupt::was_interrupted(&error) {
+            utils::interrupt::exit_interrupted();
+        }
         // print our error to stderr nicely if possible
         match error {
             Error::Generic(msg) => eprintln!("{msg}"),

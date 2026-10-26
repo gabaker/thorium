@@ -1,6 +1,5 @@
 //! Functionality shared between toolbox handlers
 
-use colored::Colorize;
 use futures::StreamExt;
 use http::header::CONTENT_LENGTH;
 use std::path::Path;
@@ -8,87 +7,17 @@ use thorium::Error;
 use tokio::io::AsyncReadExt;
 use url::Url;
 
-use crate::args::toolbox::ManifestLocation;
 use crate::handlers::progress::{Bar, BarKind};
-use crate::handlers::toolbox::manifest::{DroppedItems, ToolboxManifest};
+use crate::handlers::toolbox::manifest::ToolboxManifest;
 use crate::utils;
 
-/// Warn through the progress bar about every image/pipeline version a validation
-/// pass dropped, so skipped resources are visible before anything is applied
-///
-/// Shared by `toolbox import` (before the confirmation screen) and `toolbox
-/// export` (before writing to disk).
-///
-/// # Arguments
-///
-/// * `dropped` - The report returned by a `validate_*` pass
-/// * `progress` - The progress bar to log warnings through
-pub fn warn_dropped(dropped: &DroppedItems, progress: &Bar) {
-    // emit one warning per dropped image; `warning` (not `info_anonymous`) is used so
-    // skipped resources still reach the user in quiet mode or when output isn't a tty
-    // (warnings fall back to stderr), keeping silent drops from going unnoticed
-    for (name, reason) in &dropped.images {
-        progress.warning(format!(
-            "Skipping invalid image '{}': {}",
-            name.bright_yellow(),
-            reason
-        ));
-    }
-    // emit one warning per dropped pipeline; a pipeline can be dropped for several
-    // independent reasons at once, so join them into a single readable line
-    for (name, reasons) in &dropped.pipelines {
-        progress.warning(format!(
-            "Skipping invalid pipeline '{}': {}",
-            name.bright_yellow(),
-            reasons.join("; ")
-        ));
-    }
-}
-
-/// Get a [`ToolboxManifest`] from a [`ManifestLocation`], with a progress bar named `name`
-///
-/// The bar's name prefixes its warnings and errors (`Warning: <name> - ...`), so it
-/// should identify the running command (e.g. "toolbox import").
-///
-/// # Arguments
-///
-/// * `location` - The location the manifest is found at
-/// * `name` - The name of the returned progress bar
-///
-/// # Returns
-///
-/// Returns the [`ToolboxManifest`] along with a [`Bar`] used to track download/reading progress
-pub async fn get_manifest_named(
-    location: &ManifestLocation,
-    name: &str,
-) -> Result<(ToolboxManifest, Bar), Error> {
-    // branch on whether the manifest lives at a URL or a local path; the two sources
-    // need different fetch logic and a differently-worded progress message
-    match location {
-        ManifestLocation::Url(manifest_url) => {
-            // start the bar unbounded since the content length isn't known until the
-            // response headers arrive inside the URL fetch
-            let progress = Bar::new(name, "Downloading manifest...", BarKind::UnboundIO);
-            let manifest = get_manifest_from_url(manifest_url, &progress).await?;
-            Ok((manifest, progress))
-        }
-        ManifestLocation::Path(manifest_path) => {
-            // start the bar unbounded; the file size isn't known until the path fetch
-            // stats the file, at which point it switches the bar to a bounded mode
-            let progress = Bar::new(name, "Reading manifest file...", BarKind::UnboundIO);
-            let manifest = get_manifest_from_path(manifest_path, &progress).await?;
-            Ok((manifest, progress))
-        }
-    }
-}
-
-/// Read and parse the manifest file at the given URL
+/// Download the manifest at the given URL
 ///
 /// # Arguments
 ///
 /// * `url` - The manifest URL
 /// * `progress` - The progress bar
-async fn get_manifest_from_url(url: &Url, progress: &Bar) -> Result<ToolboxManifest, Error> {
+pub async fn download_manifest_bytes(url: &Url, progress: &Bar) -> Result<Vec<u8>, Error> {
     // issue the GET; a transport-level failure (DNS, connection) surfaces here before
     // any status code is known
     let resp = reqwest::get(url.clone())
@@ -113,7 +42,7 @@ async fn get_manifest_from_url(url: &Url, progress: &Bar) -> Result<ToolboxManif
             }
             // stream the body chunk by chunk into a buffer, advancing the bar as bytes
             // arrive; the bytes are collected (rather than handed to reqwest's `.json()`)
-            // so we can run serde_json ourselves and emit a more descriptive parse error
+            // so the caller can run serde_json itself and emit a more descriptive parse error
             let mut manifest_bytes = Vec::new();
             let mut manifest_bytes_stream = resp.bytes_stream();
             while let Some(bytes) = manifest_bytes_stream.next().await {
@@ -125,9 +54,8 @@ async fn get_manifest_from_url(url: &Url, progress: &Bar) -> Result<ToolboxManif
                 progress.inc(bytes.len() as u64);
                 manifest_bytes.extend_from_slice(&bytes);
             }
-            // parse the fully buffered body into the manifest model
-            serde_json::from_slice(&manifest_bytes)
-                .map_err(|err| Error::new(format!("Failed to parse toolbox manifest: {err}")))
+            // hand back the fully buffered body for the caller to parse
+            Ok(manifest_bytes)
         }
         Err(err) => Err(Error::new(format!(
             "Failed to download toolbox manifest: {err}"
@@ -135,13 +63,13 @@ async fn get_manifest_from_url(url: &Url, progress: &Bar) -> Result<ToolboxManif
     }
 }
 
-/// Read and parse the manifest file at the given path
+/// Read the manifest file at the given path
 ///
 /// # Arguments
 ///
 /// * `path` - The manifest file path
 /// * `progress` - The progress bar
-async fn get_manifest_from_path(path: &Path, progress: &Bar) -> Result<ToolboxManifest, Error> {
+pub async fn read_manifest_bytes(path: &Path, progress: &Bar) -> Result<Vec<u8>, Error> {
     // a directory (e.g. a toolbox repo checkout) isn't a manifest; point the user at the
     // toolbox.json inside it, or at `toolbox build` to generate one, instead of a raw IO error
     if path.is_dir() {
@@ -194,9 +122,8 @@ async fn get_manifest_from_path(path: &Path, progress: &Bar) -> Result<ToolboxMa
         }
         progress.inc(bytes_read as u64);
     }
-    // parse the fully buffered file into the manifest model
-    serde_json::from_slice(&manifest_bytes)
-        .map_err(|err| Error::new(format!("Failed to parse toolbox manifest: {err}")))
+    // hand back the fully buffered file for the caller to parse
+    Ok(manifest_bytes)
 }
 
 /// Fetch a JSON config from a URL and deserialize it
@@ -204,7 +131,7 @@ async fn get_manifest_from_path(path: &Path, progress: &Bar) -> Result<ToolboxMa
 /// # Arguments
 ///
 /// * `url` - The URL to fetch the JSON config from
-async fn fetch_json_config<T: serde::de::DeserializeOwned>(url: &str) -> Result<T, Error> {
+pub async fn fetch_json_config<T: serde::de::DeserializeOwned>(url: &str) -> Result<T, Error> {
     // issue the GET; transport-level failures surface here before any status is known
     let resp = reqwest::get(url)
         .await

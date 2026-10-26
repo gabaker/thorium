@@ -7736,7 +7736,7 @@
             "RunOnNewSamples": "NewSample"
           }
         },
-        "description": "",
+        "description": "---\n\n`Balbuzard` is an older open source tool used to extract patterns of interest from suspicious files including IP addresses, domain names, headers, and strings. It is part of a package of tools with the same name (Balbuzzard) and was written by Philippe Lagadec.\n\n---\n##### Usage\n\nRun `balbuzard` on any binary executable to extract embedded strings and headers. \n\n---\n##### Status\n\nThis tool last received updates to its open source code repository 6 years ago.\n\n---\n##### Documentation\n\n[https://github.com/decalage2/balbuzard](https://github.com/decalage2/balbuzard)\n\n---\n##### License: \n\nThis license applies to the whole Balbuzard package including balbuzard, bbcrack, bbharvest and bbtrans, apart from the thirdparty and plugins folders which contain third-party files published with their own license.\n\nThe Balbuzard package is copyright (c) 2007-2019, Philippe Lagadec (http://www.decalage.info) All rights reserved.\n\nRedistribution and use in source and binary forms, with or without modification, are permitted provided that the following conditions are met:\n\n - Redistributions of source code must retain the above copyright notice, this list of conditions and the following disclaimer.\n - Redistributions in binary form must reproduce the above copyright notice, this list of conditions and the following disclaimer in the documentation and/or other materials provided with the distribution.\n\n---",
         "dir": "pipelines/static/balbuzard",
         "images": {
           "balbuzard": {
@@ -7759,7 +7759,7 @@
           "sla": 640800,
           "triggers": {}
         },
-        "description": "",
+        "description": "---\n`Binwalk (v3)` is a file extraction (file carving) tool. It is used for identifying and/or extracting files and data that have been embedded inside of other files. It was originally written to analyze firmware files by ReFirmLabs, which was aquired by Microsoft.\n\n---\n##### Usage\n\nUse `binwalk` on any sample with suspected embedded files. Valid target samples may include disk images, archive files, or PCAPs. This tool will not work on samples that have been encrypted. You can see a full list of supported signatures used for extraction here: [https://github.com/ReFirmLabs/binwalk/wiki/Supported-Signatures](https://github.com/ReFirmLabs/binwalk/wiki/Supported-Signatures).\n\n---\n##### Status\n\nBinwalk is actively maintained and the project receives daily updates.\n\n---\n#### Documentation\n\n[https://github.com/ReFirmLabs/binwalk](https://github.com/ReFirmLabs/binwalk)\n\n---\n#### License\n\nMIT License\n\n&nbsp;\n\nCopyright (c) 2024 devttys0\n\n---",
         "dir": "pipelines/static/binwalk",
         "images": {
           "binwalk": {
@@ -7782,7 +7782,7 @@
           "sla": 640800,
           "triggers": {}
         },
-        "description": "",
+        "description": "---\n`BLint` is a Binary Linter that checks the security properties and capabilities of your executables. It is powered by lief. Since version 2, `blint` can also generate Software Bill-of-Materials (SBOM) for supported binaries.\n\n---\n##### Usage\n\nUse may run `blint` on executables with the following binary formats:\n\n - Android (apk, aab)\n - ELF (GNU, musl)\n - PE (exe, dll)\n - Mach-O (x64, arm64)\n\n---\n##### Status\n\n`BLint` is actively maintained and the project receives monthly updates.\n\n---\n##### Documentation\n\n[https://github.com/owasp-dep-scan/blint](https://github.com/owasp-dep-scan/blint)\n\n---\n##### License\n\nMIT License\n\n&nbsp;\n\nCopyright (c) OWASP Foundation\n\n---",
         "dir": "pipelines/static/blint",
         "images": {
           "blint": {
@@ -7805,7 +7805,7 @@
           "sla": 640800,
           "triggers": {}
         },
-        "description": "",
+        "description": "---\n`bulk-extractor` is a digital forensics tool used for file extraction (file carving) and evidence collection.\n\n---\n##### Usage\n\nUse `bulk-extractor` on any sample with suspected embedded or encoded content. Valid target samples may include disk images, archive files, or PCAPs. This tool will not work on samples that have been encrypted.\n\n---\n##### Status\n\n`bulk_extractor` is actively maintained and the project receives monthly updates.\n\n---\n##### Documentation\n\n[https://github.com/simsong/bulk_extractor](https://github.com/simsong/bulk_extractor)\n\n---\n##### License\n\nGovernment developed (public domain), MIT License Copyright (C) 2020-2024, Simson L. Garfinkel, various others for components.\n\n&nbsp;\n\n[Full License info](https://github.com/simsong/bulk_extractor/blob/main/LICENSE.md)\n\n---",
         "dir": "pipelines/static/bulk-extractor",
         "images": {
           "bulk-extractor": {
@@ -7830,7 +7830,7 @@
             "RunOnNewSamples": "NewSample"
           }
         },
-        "description": "",
+        "description": "---\nThe `byte-frequency` tool graphs how often unicode characters occur within a binary file and provides a variance that can be compared across samples.\n\n---\n##### Usage\n\nUse this tool on any sample that you suspect may be packed or encrypted to verify if it exhibits high entropy. High entropy in files is an indicator that they have been obfuscated. For executable files that the `byte-frequency` graph suggests are packed, you can try using static unpackers like `upx-unpack` or dynamic analysis tools such as `CAPEv2` to obtain an unpacked version of the sample. Additionally, you can analyze the variance shown below the graph to compare multiple samples and identify any outliers within a group of samples that are likely packed.\n\n---",
         "dir": "pipelines/static/bytefrequency",
         "images": {
           "byte-frequency": {
@@ -7917,7 +7917,7 @@
           "sla": 640800,
           "triggers": {}
         },
-        "description": "",
+        "description": "The CVE Binary Tool is a free, open source tool to help you find known vulnerabilities in software, using data from the National Vulnerability Database (NVD) list of Common Vulnerabilities and Exposures (CVEs) as well as known vulnerability data from Redhat, Open Source Vulnerability Database (OSV), Gitlab Advisory Database (GAD), and Curl.",
         "dir": "pipelines/static/cve-bin-tool",
         "images": {
           "cve-bin-tool": {
@@ -7980,7 +7980,7 @@
             }
           }
         },
-        "description": "",
+        "description": "Parses emails",
         "dir": "pipelines/static/email-parser",
         "images": {
           "email-parser": {
@@ -8035,7 +8035,7 @@
             "RunOnNewSamples": "NewSample"
           }
         },
-        "description": "",
+        "description": "Identify file type info using an ensemble of tools",
         "dir": "pipelines/static/identify-files",
         "images": {
           "detect-it-easy": {
@@ -8142,7 +8142,7 @@
             }
           }
         },
-        "description": "",
+        "description": "Analyze PDF files",
         "dir": "pipelines/static/pdf-analyze",
         "images": {
           "pdf-preview": {
@@ -8452,7 +8452,7 @@
           "sla": 640800,
           "triggers": {}
         },
-        "description": "",
+        "description": "https://github.com/LLNL/Surfactant",
         "dir": "pipelines/static/surfactant",
         "images": {
           "surfactant": {
@@ -8475,7 +8475,7 @@
           "sla": 640800,
           "triggers": {}
         },
-        "description": "",
+        "description": "An all-in-one security scanning tool.",
         "dir": "pipelines/static/trivy",
         "images": {
           "trivy": {
@@ -8618,7 +8618,7 @@
             }
           }
         },
-        "description": "",
+        "description": "Unpack a UPX packed file",
         "dir": "pipelines/static/upx-unpack",
         "images": {
           "upx-unpack": {

@@ -335,7 +335,10 @@ ingress:
 # Import a toolbox after Thorium is up. Nothing is imported unless enabled is true and url or
 # json is set. The import Job is named after a hash of its whole spec, so changing these settings
 # (or the image, pull settings, admin secret, or scheduling it uses) runs a new import, which
-# skip-conflicts makes harmless to repeat
+# skip-conflicts makes harmless to repeat. The import logs in as the bootstrap admin, which
+# the repository's toolbox needs because its tools run as root. thorctl's import report is the
+# Job's log; the Job succeeds when the import applied or had nothing to change and fails when
+# thorctl exits 1
 toolbox:
   # false never imports a toolbox (no Job or ConfigMap), even with url or json set
   enabled: true
@@ -343,10 +346,18 @@ toolbox:
   url: ""
   # the contents of a toolbox.json (e.g. `--set-file operator.toolbox.json=./toolbox.json`)
   json: ""
-  # how existing images/pipelines are handled: skip-conflicts or overwrite
+  # how existing tools, workflows, and pipelines are handled: skip-conflicts creates what is
+  # missing and changes nothing that exists; overwrite publishes changed tool specs as new
+  # versions and updates the rest
   mode: skip-conflicts
   # force every tool into this group (created if missing)
   groupOverride: ""
+  # create the groups the toolbox names that don't exist yet (owned by the admin), on top of
+  # the groups listed below
+  createGroups: false
+  # fail the import before any change when converting an older toolbox file raised issues
+  # (skipped entries or dropped fields), instead of importing what converts
+  strict: false
   # groups and network policies the toolbox references, created (if missing) before importing;
   # the defaults match what tools/toolbox.json expects. Network policies use the Thorium API's
   # network policy fields, so their keys are snake_case
@@ -360,7 +371,7 @@ toolbox:
       forced_policy: false
       default_policy: false
   # how many times the import Job retries before giving up
-  backoffLimit: 20
+  backoffLimit: 6
   # the thorctl binary the import runs, inside the Thorium image; empty picks
   # /app/binaries/linux/<arch>/thorctl for the node's architecture (x86-64 or arm64)
   thorctlPath: ""

@@ -87,7 +87,7 @@ async fn in_terminal(user: &TestUser, name: &str, args: &[&str]) -> std::process
 ///
 /// * `output` - The run's output
 fn assert_gone(output: &std::process::Output) {
-    // the run fails and names the tool route and commands
+    // the run fails and prints the pointer to the tools commands, not the API's raw refusal
     let printed = format!(
         "{}{}",
         String::from_utf8_lossy(&output.stdout),
@@ -97,13 +97,19 @@ fn assert_gone(output: &std::process::Output) {
         !output.status.success(),
         "the image write succeeded: {printed}"
     );
-    assert!(printed.contains("/api/entities/"), "{printed}");
-    assert!(printed.contains("thorctl tools"), "{printed}");
+    assert!(
+        printed.contains(
+            "Images can no longer be created or updated; use tools (thorctl tools create|edit|publish)"
+        ),
+        "{printed}"
+    );
+    assert!(!printed.contains("/api/entities/"), "{printed}");
 }
 
 /// `images import`, `images edit`, and `images bans create` and `delete` fail printing that image
 /// writes are gone and the image is unchanged
 #[tokio::test]
+#[allow(clippy::too_many_lines)]
 async fn images_writes_print_gone() -> Result<(), Error> {
     // seed an image with a ban in the user's group, then refuse image writes there
     let user = TestUser::new("images-writes-gone").await?;
@@ -196,6 +202,14 @@ async fn images_writes_print_gone() -> Result<(), Error> {
         &ban_id,
     ];
     assert_gone(&user.run("images-bans-delete-gone", &args).await);
+    // reading images still works
+    let args = ["images", "get", "-g", &user.group];
+    let output = user.run("images-get-after-gone", &args).await;
+    assert_success(&output);
+    assert!(common::stdout(&output).contains(&image.name));
+    let qualified = format!("{}/{}", user.group, image.name);
+    let args = ["images", "describe", "--", &qualified];
+    assert_success(&user.run("images-describe-after-gone", &args).await);
     // the images are unchanged
     let after = user.admin.images.get(&user.group, &image.name).await?;
     assert_eq!(
@@ -207,5 +221,117 @@ async fn images_writes_print_gone() -> Result<(), Error> {
         serde_json::to_value(&plain_after)?,
         serde_json::to_value(&plain_before)?
     );
+    // deleting an image still works
+    let args = [
+        "images",
+        "delete",
+        "-g",
+        &user.group,
+        "--skip-confirm",
+        "--",
+        &plain.name,
+    ];
+    assert_success(&user.run("images-delete-after-gone", &args).await);
+    assert!(
+        user.admin
+            .images
+            .get(&user.group, &plain.name)
+            .await
+            .is_err()
+    );
+    Ok(())
+}
+
+/// Without a terminal, importing or exporting over differing images refuses unless
+/// `--skip-conflicts` or `--overwrite` says what to do, and the flags skip or replace them
+#[tokio::test]
+#[allow(clippy::too_many_lines)]
+async fn images_import_export_conflicts_need_a_flag_without_a_terminal() -> Result<(), Error> {
+    // an image, exported to a directory
+    let user = TestUser::new("images-conflicts").await?;
+    // image writes stay allowed so the import reaches its conflict handling
+    test_utilities::faults::allow_image_writes(&user.group);
+    let image = generators::images(&user.group, 1, true, &user.admin)
+        .await?
+        .remove(0);
+    let dir = std::env::temp_dir().join(unique("thorctl-images-conflicts-"));
+    let dir_str = dir.to_string_lossy().into_owned();
+    // the export arguments with some extra flags before the image name
+    let export = |flags: &[&'static str]| -> Vec<&str> {
+        let mut args = vec![
+            "images",
+            "export",
+            "-g",
+            &user.group,
+            "-o",
+            &dir_str,
+            "--config-only",
+        ];
+        args.extend_from_slice(flags);
+        args.extend(["--", &image.name]);
+        args
+    };
+    assert_success(&user.run("images-export-new", &export(&[])).await);
+    // the exported copy now differs from the stored image
+    change_descriptions(&dir);
+    let path = dir.join("images").join(format!("{}.json", image.name));
+    let changed = std::fs::read_to_string(&path)?;
+    // importing it with nothing to settle the difference refuses before anything is written
+    let import = [
+        "images",
+        "import",
+        "-g",
+        &user.group,
+        "-i",
+        &dir_str,
+        "--skip-push",
+    ];
+    let out = user.run("images-import-refused", &import).await;
+    assert_eq!(out.status.code(), Some(1));
+    let err = String::from_utf8_lossy(&out.stderr).into_owned();
+    assert!(err.contains("--skip-conflicts"), "{err}");
+    assert!(err.contains(&image.name), "{err}");
+    // --skip-conflicts leaves it alone, says how many were skipped, and succeeds (also with -q)
+    for quiet in [false, true] {
+        let mut args = import.to_vec();
+        args.push("--skip-conflicts");
+        if quiet {
+            args.insert(0, "-q");
+        }
+        let out = user.run("images-import-skip", &args).await;
+        assert_success(&out);
+        let err = String::from_utf8_lossy(&out.stderr).into_owned();
+        assert!(err.contains("Skipped 1 existing"), "quiet={quiet}: {err}");
+        assert!(err.contains(&image.name), "quiet={quiet}: {err}");
+    }
+    // exporting over the changed file: the stored image differs from it, so the export refuses
+    let out = user.run("images-export-refused", &export(&[])).await;
+    assert_eq!(out.status.code(), Some(1));
+    let err = String::from_utf8_lossy(&out.stderr).into_owned();
+    assert!(
+        err.contains("--skip-conflicts") && err.contains("--overwrite"),
+        "{err}"
+    );
+    assert_eq!(std::fs::read_to_string(&path)?, changed);
+    // --skip-conflicts keeps the file, says how many were skipped, and succeeds (also with -q)
+    for quiet in [false, true] {
+        let mut args = export(&["--skip-conflicts"]);
+        if quiet {
+            args.insert(0, "-q");
+        }
+        let out = user.run("images-export-skip", &args).await;
+        assert_success(&out);
+        let err = String::from_utf8_lossy(&out.stderr).into_owned();
+        assert!(err.contains("Skipped 1 existing"), "quiet={quiet}: {err}");
+        assert_eq!(std::fs::read_to_string(&path)?, changed);
+    }
+    // --overwrite replaces the file with the stored image
+    assert_success(
+        &user
+            .run("images-export-overwrite", &export(&["--overwrite"]))
+            .await,
+    );
+    assert_ne!(std::fs::read_to_string(&path)?, changed);
+    std::fs::remove_dir_all(&dir)?;
     Ok(())
 }

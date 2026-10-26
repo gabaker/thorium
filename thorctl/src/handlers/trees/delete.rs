@@ -574,6 +574,8 @@ pub async fn delete(thorium: &Thorium, args: &Args, cmd: &DeleteTree) -> Result<
     }
     // confirm the deletion unless the user opted to skip the prompt
     if !cmd.force {
+        // fail clearly, not with a raw dialoguer error, when there is no terminal to ask on
+        crate::utils::require_confirm_terminal("--force (--yes)")?;
         // ask the user to confirm this destructive action
         let confirmed = dialoguer::Confirm::new()
             .with_prompt(format!("Delete {} entities?", targets.len()))

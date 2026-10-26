@@ -4,11 +4,9 @@ use thorium::{CtlConf, Error, Thorium};
 
 mod build;
 mod build_images;
-mod collisions;
+mod convert;
 mod diff;
 mod export;
-// the image import flow stays in place for when toolbox imports learn to create tools
-#[allow(dead_code)]
 mod import;
 pub(crate) mod init;
 mod manifest;
@@ -16,6 +14,7 @@ pub(crate) mod policies;
 mod prompt;
 mod remove;
 mod shared;
+pub(crate) mod v2;
 
 use crate::args::Args;
 use crate::args::toolbox::Toolbox;
@@ -31,7 +30,7 @@ use crate::utils;
 /// # Arguments
 ///
 /// * `args` - The top-level thorctl args
-async fn connect(args: &Args) -> Result<(CtlConf, Thorium), Error> {
+pub(super) async fn connect(args: &Args) -> Result<(CtlConf, Thorium), Error> {
     // load the full ctl config and build a client from it
     let (conf, thorium) = utils::get_client(args).await?;
     // warn about an insecure (non-TLS / untrusted) connection unless the config
@@ -45,12 +44,6 @@ async fn connect(args: &Args) -> Result<(CtlConf, Thorium), Error> {
     }
     Ok((conf, thorium))
 }
-
-/// Why toolbox imports are refused
-const TOOLBOX_IMPORT_GONE: &str = "Toolbox imports are not supported: Thorium runs Tools \
-    instead of images, and images can no longer be created. Create each tool with \
-    `thorctl tools create --spec <spec>` and set each pipeline stage's tool with \
-    `thorctl pipelines stage-tool <pipeline> <stage> <tool>`.";
 
 /// Dispatches a toolbox subcommand to its handler
 ///
@@ -84,8 +77,15 @@ pub async fn handle(args: &Args, toolbox: &Toolbox) -> Result<(), Error> {
             super::container::init_runtime(args.container_runtime, configured_runtime);
             build_images::build_images(cmd).await
         }
-        // images can't be created, so importing a toolbox fails before any API call
-        Toolbox::Import(_) => Err(Error::new(TOOLBOX_IMPORT_GONE.to_owned())),
+        Toolbox::Import(cmd) => {
+            // the import loads the toolbox before it connects, so a bad toolbox is refused
+            // without a login; translate a failed import into a non-zero exit after its report
+            // is printed
+            if !import::import(args, cmd).await? {
+                std::process::exit(1);
+            }
+            Ok(())
+        }
         Toolbox::Export(cmd) => {
             // build a client and run the connection checks
             let (conf, thorium) = connect(args).await?;
@@ -97,7 +97,33 @@ pub async fn handle(args: &Args, toolbox: &Toolbox) -> Result<(), Error> {
         Toolbox::Remove(cmd) => {
             // build a client and run the connection checks
             let (conf, thorium) = connect(args).await?;
-            remove::remove(thorium, conf, cmd).await
+            remove::remove(thorium, conf, cmd, args.workers).await
+        }
+        // list and validate only read the manifest, so they need no client
+        Toolbox::List(cmd) => v2::list::list(cmd).await,
+        Toolbox::Validate(cmd) => {
+            // translate "invalid" into a non-zero exit at the dispatch boundary, after the report
+            // is printed
+            if !v2::validate::validate(cmd).await? {
+                std::process::exit(1);
+            }
+            Ok(())
+        }
+        Toolbox::Convert(cmd) => {
+            // convert is offline, so it needs no client; translate a failed check, a strict
+            // refusal, or a refused conversion into a non-zero exit after the report is printed
+            if !convert::convert(cmd).await? {
+                std::process::exit(1);
+            }
+            Ok(())
+        }
+        Toolbox::Update(cmd) => {
+            // like an import, an update loads the toolbox before it connects; translate a
+            // failed update into a non-zero exit after its report is printed
+            if !import::update(args, cmd).await? {
+                std::process::exit(1);
+            }
+            Ok(())
         }
         Toolbox::Diff(cmd) => {
             // build a client and run the connection checks
@@ -105,7 +131,7 @@ pub async fn handle(args: &Args, toolbox: &Toolbox) -> Result<(), Error> {
             // translate "drift detected" into a `git diff --exit-code`-style non-zero
             // exit here at the dispatch boundary; diff() returns normally so its own
             // resources (progress bar, buffers) are dropped before the process exits
-            if diff::diff(thorium, &conf, cmd).await? {
+            if diff::diff(thorium, &conf, cmd, args.workers).await? {
                 std::process::exit(1);
             }
             Ok(())

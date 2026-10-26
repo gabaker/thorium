@@ -1,7 +1,7 @@
 //! Builds a toolbox manifest from a directory of image and pipeline manifests
 
 use serde::{Deserialize, Serialize};
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::ffi::OsStr;
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
@@ -12,7 +12,14 @@ use walkdir::WalkDir;
 
 use crate::args::toolbox::BuildToolbox;
 use crate::handlers::progress;
+use crate::handlers::toolbox::v2::types::{StageTool, ToolRef};
 use crate::utils;
+
+mod assemble;
+mod rewrite;
+mod tool;
+
+pub(super) use rewrite::spec_json;
 
 // ─── TOML Input Models ─────────────────────────────────────────────────────
 
@@ -122,14 +129,15 @@ pub(super) fn load_config(path: &Path) -> Result<ToolboxConfig, Error> {
     })
 }
 
-/// A single image or pipeline `manifest.toml` — one per tool/pipeline directory
-/// in a toolbox repo. `toolbox build` reads these (plus their JSON configs) to
-/// assemble `toolbox.json`.
+/// A single tool, base build, toolset, agent, workflow, image, or pipeline `manifest.toml` — one per item
+/// directory in a toolbox repo. `toolbox build` reads these (plus the specs and configs they
+/// point at) to assemble `toolbox.json`.
 #[derive(Deserialize)]
 pub(crate) struct ManifestToml {
     /// The resource's name — the top-level key for this entry in `toolbox.json`
     name: String,
-    /// Whether this manifest describes an `image` or a `pipeline`
+    /// Whether this manifest describes a `tool`, `build`, `toolset`, `agent`, `workflow`, `image`,
+    /// or `pipeline`
     #[serde(rename = "type")]
     manifest_type: ManifestType,
     /// The version label for this entry (defaults to `latest`)
@@ -166,8 +174,11 @@ pub(crate) struct ManifestToml {
     /// local JSON file (relative to the manifest) or a URL
     #[serde(default)]
     network_policies_from: Option<Vec<String>>,
-    /// (images) Reuse another toolbox image's container image instead of building or
-    /// pinning one of this image's own — only the runtime config (args/env) differs
+    /// (images, tools) Reuse another toolbox item's container image instead of building or
+    /// pinning one of this item's own — only the runtime config or spec (args/env) differs
+    ///
+    /// An image names another image or a tool; a tool names another tool or a base build, and
+    /// its spec leaves the image empty for the reused one to be written into.
     ///
     /// Forces `build = false`; `build_path`, `[base_image]`, and
     /// `exported_image_path` have no effect. Resolved at build time to the referenced
@@ -184,6 +195,38 @@ pub(crate) struct ManifestToml {
     /// Dockerfile for the image substitution.
     #[serde(default)]
     base_image: Option<BaseImage>,
+    /// (tools) The kind of tool: `image`, `agentic`, or `harness` (derived from the spec when unset)
+    #[serde(default)]
+    kind: Option<String>,
+    /// (tools, toolsets, agents, workflows) The groups the item is in
+    #[serde(default)]
+    groups: Vec<String>,
+    /// (tools) The user tags on the tool, keyed by tag key
+    #[serde(default)]
+    tags: BTreeMap<String, Vec<String>>,
+    /// (tools) Whether this version is the one published last, which becomes the tool's latest
+    #[serde(default)]
+    latest: bool,
+    /// (tools, toolsets, agents, workflows) Path (relative to the manifest) or URL (tools only) of
+    /// the spec or document file
+    #[serde(default)]
+    spec_from: Option<String>,
+    /// (tools) Whether CI should build this tool's image; takes the place of `build` and, with
+    /// `build_path`, gives the tool version a build section
+    #[serde(default)]
+    build_image: Option<bool>,
+    /// (tools) The native tools this harness version provides
+    #[serde(default)]
+    provides: Vec<ToolRef>,
+    /// (tools) The harness environment variables, in the text `tools harness-env --set` takes
+    #[serde(default)]
+    harness_env: Vec<String>,
+    /// (tools) The model ids no run of this harness may resolve to
+    #[serde(default)]
+    disabled_models: Vec<String>,
+    /// (pipelines) The tool behind each stage, mapped stage name -> tool and version
+    #[serde(default)]
+    stage_tools: Option<BTreeMap<String, StageTool>>,
 }
 
 /// An `image_from` reference: the toolbox image whose container image to reuse
@@ -200,10 +243,20 @@ struct ImageFromToml {
 #[derive(Deserialize, PartialEq)]
 #[serde(rename_all = "lowercase")]
 enum ManifestType {
-    /// A container image
+    /// A container image (the legacy way to describe a tool)
     Image,
-    /// A pipeline composed of images
+    /// A pipeline whose stages run images or tools
     Pipeline,
+    /// A tool with a spec
+    Tool,
+    /// A base image other builds start from, which no tool runs (only format 2 holds it)
+    Build,
+    /// A toolset
+    Toolset,
+    /// An agent
+    Agent,
+    /// A workflow
+    Workflow,
 }
 
 /// A pipeline's reference to one of its images in `manifest.toml`
@@ -1050,7 +1103,17 @@ fn build_pipeline_version(
     }
     // normalize the finished config to its canonical form so build matches export;
     // stub/URL configs pass through untouched
-    let config = canonicalize_config::<PipelineRequest>(config);
+    let mut config = canonicalize_config::<PipelineRequest>(config);
+    // the canonical form adds an empty `stage_tools` map, which only the current format uses
+    // and which a legacy pipeline never has, so the legacy output leaves it out
+    if let Some(object) = config.as_mut().and_then(serde_json::Value::as_object_mut)
+        && object
+            .get("stage_tools")
+            .and_then(serde_json::Value::as_object)
+            .is_some_and(serde_json::Map::is_empty)
+    {
+        object.remove("stage_tools");
+    }
     Ok(BuildPipelineVersion {
         dir,
         description,
@@ -1139,11 +1202,12 @@ fn warn_pipeline_image_drift(
     }
 }
 
-/// Build a toolbox manifest from a directory of image and pipeline manifests
+/// Build a toolbox manifest from a directory of tool, image, and pipeline manifests
 ///
 /// A buildable image's registry url is derived from the registry/prefix and
 /// `image_name`; an image that isn't built locally keeps its recorded
-/// `exported_image_path` (or existing config url) so exported toolboxes round-trip.
+/// `exported_image_path` (or existing config url) so exported toolboxes round-trip. The format
+/// written follows the manifests found (see [`assemble::pick_format`]).
 ///
 /// # Arguments
 ///
@@ -1160,14 +1224,49 @@ pub fn build(cmd: &BuildToolbox) -> Result<(), Error> {
         output_path.display()
     );
     // walk the manifests and assemble the output
-    let output = build_output(cmd, &crawl, &output_path)?;
-    // serialize through the canonical (sorted-key) form: `BuildOutput`'s image and
-    // pipeline maps are `HashMap`s, so a direct `to_string_pretty` would emit keys in
-    // random order and churn `toolbox.json` between otherwise-identical runs. Routing
-    // through serde_json::Value (a sorted BTreeMap) makes the file byte-deterministic
-    // so it can be committed and diffed.
-    let json = crate::utils::canonical_json(&output)?;
-    // write the manifest beside the config (or at --output)
+    let walked = build_output(cmd, &crawl, &output_path)?;
+    // choose the format from the manifests found and the flags given
+    let format = assemble::pick_format(
+        cmd.format_version.as_deref(),
+        !walked.items.is_empty(),
+        cmd.rewrite_manifests,
+    )?;
+    let json = match format {
+        assemble::Format::Legacy => {
+            // the legacy images and pipelines stay in the legacy lexicon; a hint points at the
+            // way to the current format
+            if !walked.legacy.images.is_empty() || !walked.legacy.pipelines.is_empty() {
+                progress::note(
+                    "wrote the legacy toolbox format; pass --format-version 2 to write tools, or \
+                     --rewrite-manifests to convert these manifests in place",
+                );
+            }
+            // serialize through the canonical (sorted-key) form: `BuildOutput`'s image and
+            // pipeline maps are `HashMap`s, so a direct `to_string_pretty` would emit keys in
+            // random order and churn `toolbox.json` between otherwise-identical runs. Routing
+            // through serde_json::Value (a sorted BTreeMap) makes the file byte-deterministic
+            // so it can be committed and diffed.
+            crate::utils::canonical_json(&walked.legacy)?
+        }
+        assemble::Format::Current => {
+            // convert the legacy part, merge in the tools, and check the whole manifest
+            let manifest = assemble::assemble_current(&walked.legacy, walked.items)?;
+            // rewrite the legacy manifests in place before the toolbox is written, so a refused
+            // rewrite leaves the directory and the toolbox as they were
+            if cmd.rewrite_manifests {
+                rewrite::rewrite_manifests(&walked.legacy_manifests, &manifest)?;
+            }
+            super::convert::render_manifest(&manifest)?
+        }
+    };
+    // write the manifest beside the config (or at --output), creating the directory it is in
+    if let Some(parent) = output_path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+    {
+        std::fs::create_dir_all(parent)
+            .map_err(|e| Error::new(format!("Failed to create '{}': {e}", parent.display())))?;
+    }
     std::fs::write(&output_path, json)
         .map_err(|e| Error::new(format!("Failed to write '{}': {e}", output_path.display())))?;
     println!("Wrote toolbox manifest to '{}'", output_path.display());
@@ -1216,23 +1315,6 @@ fn resolved_output(cmd: &BuildToolbox) -> PathBuf {
         .unwrap_or_else(|| config_base_dir(&cmd.config).join("toolbox.json"))
 }
 
-/// Build a toolbox manifest in memory without writing it to disk
-///
-/// Used by `toolbox diff` to compare a toolbox repo checkout against a live
-/// instance without requiring a regenerated `toolbox.json`.
-///
-/// # Arguments
-///
-/// * `cmd` - The build inputs (config path and walk root)
-pub(super) fn build_in_memory(cmd: &BuildToolbox) -> Result<serde_json::Value, Error> {
-    // run the same walk/assembly as `build`, just keeping the result in memory
-    let output = build_output(cmd, &resolved_crawl(cmd), &resolved_output(cmd))?;
-    // hand back a `Value` (not the canonical sorted-key string) since diff compares structures, not
-    // bytes, and doesn't need the deterministic on-disk form
-    serde_json::to_value(&output)
-        .map_err(|e| Error::new(format!("Failed to serialize toolbox output: {e}")))
-}
-
 /// Resolve the concrete container url an `image_from` image should reuse
 ///
 /// Follows the reuse chain (a target that is itself an `image_from`) until it reaches a
@@ -1246,11 +1328,15 @@ pub(super) fn build_in_memory(cmd: &BuildToolbox) -> Result<serde_json::Value, E
 /// * `ref_version` - The version of the image declaring `image_from`
 /// * `images` - Every built image entry, keyed by name then version
 /// * `from_map` - Each `image_from` image's `(name, version)` mapped to its target's
+/// * `tool_urls` - The container image of each tool version, keyed by `(name, version)`; a
+///   target that is a tool instead of an image (a base turned into a tool by
+///   `--rewrite-manifests`) reuses this image
 fn resolve_image_from_url(
     ref_name: &str,
     ref_version: &str,
     images: &HashMap<String, HashMap<String, BuildImageVersion>>,
     from_map: &HashMap<(String, String), (String, String)>,
+    tool_urls: &HashMap<(String, String), String>,
 ) -> Result<String, String> {
     // seed the visited set with the declaring image so a self- or mutual-reference is
     // caught as a cycle rather than looping forever
@@ -1275,17 +1361,23 @@ fn resolve_image_from_url(
             version.clone_from(next_version);
             continue;
         }
-        // base case: read the concrete url off the resolved image, preferring its embedded
-        // config url and falling back to its first derived tag
+        // a target that is a tool reuses the tool's container image
         let entry = images
             .get(&name)
-            .and_then(|versions| versions.get(&version))
-            .ok_or_else(|| {
-                format!(
-                    "image '{}' not found in toolbox",
-                    utils::entry_id(None, &name, &version)
-                )
-            })?;
+            .and_then(|versions| versions.get(&version));
+        if entry.is_none()
+            && let Some(url) = tool_urls.get(&(name.clone(), version.clone()))
+        {
+            return Ok(url.clone());
+        }
+        // base case: read the concrete url off the resolved image, preferring its embedded
+        // config url and falling back to its first derived tag
+        let entry = entry.ok_or_else(|| {
+            format!(
+                "image '{}' not found in toolbox",
+                utils::entry_id(None, &name, &version)
+            )
+        })?;
         return entry
             .config
             .as_ref()
@@ -1300,6 +1392,16 @@ fn resolve_image_from_url(
     }
 }
 
+/// Everything a walk of a toolbox directory found
+struct Walked {
+    /// The legacy images and pipelines, in the legacy output shape
+    legacy: BuildOutput,
+    /// The tools, toolsets, agents, workflows, and pipelines with stage tools
+    items: tool::Items,
+    /// The legacy manifests found, which `--rewrite-manifests` rewrites
+    legacy_manifests: Vec<rewrite::LegacyManifest>,
+}
+
 /// Walk the manifests and assemble the toolbox output structure
 ///
 /// # Arguments
@@ -1308,11 +1410,7 @@ fn resolve_image_from_url(
 /// * `crawl` - The resolved directory to crawl for manifests
 /// * `output_path` - The resolved `toolbox.json` path build paths are recorded relative to
 #[allow(clippy::too_many_lines)]
-fn build_output(
-    cmd: &BuildToolbox,
-    crawl: &Path,
-    output_path: &Path,
-) -> Result<BuildOutput, Error> {
+fn build_output(cmd: &BuildToolbox, crawl: &Path, output_path: &Path) -> Result<Walked, Error> {
     // load the toolbox-wide settings from config.toml
     let config = load_config(&cmd.config)?;
     // assemble the registries to derive image tags for: the primary registry plus any
@@ -1342,6 +1440,10 @@ fn build_output(
     // make toolbox.json non-deterministic
     let mut image_locations: HashMap<(String, String), String> = HashMap::new();
     let mut pipeline_locations: HashMap<(String, String), String> = HashMap::new();
+    // the manifests of items only the current format holds, assembled after the walk
+    let mut found: Vec<(ManifestToml, PathBuf)> = Vec::new();
+    // the legacy manifests, kept so they can be rewritten in place
+    let mut legacy_manifests: Vec<rewrite::LegacyManifest> = Vec::new();
     // walk every file under the crawl root, turning each manifest.toml into an entry
     for entry in WalkDir::new(crawl) {
         // a path we can't read (permissions, broken symlink) shouldn't vanish
@@ -1378,6 +1480,29 @@ fn build_output(
         // name+version is the identity that must be unique within each kind (images, pipelines) and
         // the lookup key for image_from resolution and duplicate detection below
         let key = (manifest.name.clone(), manifest.version.clone());
+        // items that only the current format holds are collected and assembled after the walk
+        let is_current = match manifest.manifest_type {
+            ManifestType::Tool
+            | ManifestType::Build
+            | ManifestType::Toolset
+            | ManifestType::Agent
+            | ManifestType::Workflow => true,
+            ManifestType::Pipeline => manifest.stage_tools.is_some(),
+            ManifestType::Image => false,
+        };
+        if is_current {
+            found.push((manifest, root.to_path_buf()));
+            continue;
+        }
+        // remember each legacy manifest so `--rewrite-manifests` can rewrite it
+        legacy_manifests.push(rewrite::LegacyManifest {
+            path: path.to_path_buf(),
+            is_pipeline: manifest.manifest_type == ManifestType::Pipeline,
+            name: manifest.name.clone(),
+            version: manifest.version.clone(),
+            image_from: manifest.image_from.is_some(),
+            config_from: manifest.config_from.clone(),
+        });
         match manifest.manifest_type {
             ManifestType::Image => {
                 // two image manifests with the same name+version would overwrite each other in
@@ -1414,6 +1539,12 @@ fn build_output(
                     .or_default()
                     .insert(manifest.version.clone(), version_entry);
             }
+            // the items only the current format holds were collected above
+            ManifestType::Tool
+            | ManifestType::Build
+            | ManifestType::Toolset
+            | ManifestType::Agent
+            | ManifestType::Workflow => {}
             ManifestType::Pipeline => {
                 // same determinism guard for pipelines
                 if let Some(prev) = pipeline_locations.get(&key) {
@@ -1434,6 +1565,17 @@ fn build_output(
             }
         }
     }
+    // assemble the tools, toolsets, agents, workflows, and pipelines with stage tools, first so
+    // an image_from image can reuse the container image of a tool
+    let tags = tool::TagSettings {
+        registries: &registries,
+        use_image_path: cmd.use_image_path,
+        image_path_prefix: config.image_path_prefix.as_deref(),
+        tag_suffix: cmd.tag_suffix.as_deref(),
+        global_base_image: config.base_image.as_ref(),
+    };
+    let items = tool::build_items(found, output_dir, &tags)?;
+    let tool_urls = items.image_urls();
     // resolve every image_from reference to a concrete container url now that the whole
     // tree has been walked and each non-reusing image carries its url. Collect all
     // failures so the build reports every bad reference in one pass.
@@ -1443,7 +1585,7 @@ fn build_output(
     let mut refs: Vec<(String, String)> = image_from_map.keys().cloned().collect();
     refs.sort();
     for (name, version) in refs {
-        match resolve_image_from_url(&name, &version, &images, &image_from_map) {
+        match resolve_image_from_url(&name, &version, &images, &image_from_map, &tool_urls) {
             Ok(url) => {
                 // safe: the key came from a walked image, so its entry exists
                 if let Some(entry) = images.get_mut(&name).and_then(|v| v.get_mut(&version)) {
@@ -1498,17 +1640,21 @@ fn build_output(
     }
     // assemble the final output; the top-level base_image is the raw global config for reference,
     // while each image entry already carries its own resolved (merged) value
-    Ok(BuildOutput {
-        pipelines,
-        images,
-        name: config.name,
-        registry: config.registry,
-        registries,
-        bundled_images: config.bundled_images,
-        image_path_prefix: config.image_path_prefix,
-        export_image_path: config.export_image_path,
-        export_pipeline_path: config.export_pipeline_path,
-        base_image: config.base_image,
+    Ok(Walked {
+        legacy: BuildOutput {
+            pipelines,
+            images,
+            name: config.name,
+            registry: config.registry,
+            registries,
+            bundled_images: config.bundled_images,
+            image_path_prefix: config.image_path_prefix,
+            export_image_path: config.export_image_path,
+            export_pipeline_path: config.export_pipeline_path,
+            base_image: config.base_image,
+        },
+        items,
+        legacy_manifests,
     })
 }
 
@@ -1775,7 +1921,7 @@ mod tests {
         let images = images_map(vec![("a", "1", image_entry(Some("reg/a:1"), &[]))]);
         let from = from_map(vec![(("b", "latest"), ("a", "1"))]);
         assert_eq!(
-            resolve_image_from_url("b", "latest", &images, &from),
+            resolve_image_from_url("b", "latest", &images, &from, &HashMap::new()),
             Ok("reg/a:1".to_string())
         );
     }
@@ -1786,7 +1932,7 @@ mod tests {
         let images = images_map(vec![("a", "1", image_entry(None, &["reg/a:1"]))]);
         let from = from_map(vec![(("b", "latest"), ("a", "1"))]);
         assert_eq!(
-            resolve_image_from_url("b", "latest", &images, &from),
+            resolve_image_from_url("b", "latest", &images, &from, &HashMap::new()),
             Ok("reg/a:1".to_string())
         );
     }
@@ -1802,7 +1948,7 @@ mod tests {
         ]);
         let from = from_map(vec![(("c", "1"), ("b", "1")), (("b", "1"), ("a", "1"))]);
         assert_eq!(
-            resolve_image_from_url("c", "1", &images, &from),
+            resolve_image_from_url("c", "1", &images, &from, &HashMap::new()),
             Ok("reg/a:1".to_string())
         );
     }
@@ -1815,7 +1961,7 @@ mod tests {
             ("b", "1", image_entry(None, &[])),
         ]);
         let from = from_map(vec![(("a", "1"), ("b", "1")), (("b", "1"), ("a", "1"))]);
-        let err = resolve_image_from_url("a", "1", &images, &from).unwrap_err();
+        let err = resolve_image_from_url("a", "1", &images, &from, &HashMap::new()).unwrap_err();
         assert!(err.contains("cycle"), "expected a cycle error, got: {err}");
     }
 
@@ -1824,10 +1970,34 @@ mod tests {
     fn image_from_missing_target_errors() {
         let images = images_map(vec![]);
         let from = from_map(vec![(("b", "latest"), ("missing", "1"))]);
-        let err = resolve_image_from_url("b", "latest", &images, &from).unwrap_err();
+        let err =
+            resolve_image_from_url("b", "latest", &images, &from, &HashMap::new()).unwrap_err();
         assert!(
             err.contains("not found"),
             "expected a not-found error, got: {err}"
+        );
+    }
+
+    /// A target that is a tool instead of an image reuses the tool's container image, at the end
+    /// of a chain too
+    #[test]
+    fn image_from_target_tool_reuses_its_image() {
+        let images = images_map(vec![("b", "latest", image_entry(None, &[]))]);
+        let from = from_map(vec![
+            (("b", "latest"), ("base", "latest")),
+            (("c", "1"), ("b", "latest")),
+        ]);
+        let tools = HashMap::from([(
+            ("base".to_owned(), "latest".to_owned()),
+            "reg.example/base:latest".to_owned(),
+        )]);
+        assert_eq!(
+            resolve_image_from_url("b", "latest", &images, &from, &tools),
+            Ok("reg.example/base:latest".to_owned())
+        );
+        assert_eq!(
+            resolve_image_from_url("c", "1", &images, &from, &tools),
+            Ok("reg.example/base:latest".to_owned())
         );
     }
 
@@ -1836,7 +2006,8 @@ mod tests {
     fn image_from_target_without_url_errors() {
         let images = images_map(vec![("a", "1", image_entry(None, &[]))]);
         let from = from_map(vec![(("b", "latest"), ("a", "1"))]);
-        let err = resolve_image_from_url("b", "latest", &images, &from).unwrap_err();
+        let err =
+            resolve_image_from_url("b", "latest", &images, &from, &HashMap::new()).unwrap_err();
         assert!(
             err.contains("no container image"),
             "expected a no-container-image error, got: {err}"

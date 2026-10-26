@@ -5,18 +5,32 @@ use std::path::Path;
 use thorium::models::{
     AgentConfig, AgentEntity, AgentEntityRequest, Entity, EntityKinds, EntityListOpts,
     EntityMetadata, EntityMetadataRequest, EntityMetadataUpdate, EntityRequest, EntityUpdate,
+    ModelAuthSource,
 };
-use thorium::{Error, Thorium};
+use thorium::{CtlConf, Error, Thorium};
 use uuid::Uuid;
 
 use crate::args::Args;
 use crate::args::agents::{
-    Agents, CreateAgent, Delegate, DescribeAgent, GetAgents, LinkTool, LinkToolset, SetHarness,
+    Agents, ClearHarness, CreateAgent, Delegate, DeleteAgent, DescribeAgent, EditAgent, GetAgents,
+    LinkTool, LinkToolset, SetHarness, SpecAgent, Undelegate, UnlinkTool, UnlinkToolset,
+    UpdateAgent,
 };
+use crate::handlers::edit::{Editable, edit_with, update_with};
 use crate::utils;
 use crate::utils::output::{self, OutputFormat, View};
 use crate::utils::render;
+use crate::utils::spec_io;
 use crate::utils::watch;
+
+pub(crate) mod edit;
+pub(crate) mod refs;
+
+#[cfg(test)]
+pub(crate) mod fixtures;
+
+use edit::{AgentEditable, AgentTarget};
+use refs::{ToolRef, ToolSetRef};
 
 /// Get an AI agent's metadata, if the entity is an AI agent
 ///
@@ -219,25 +233,21 @@ impl View for AgentView {
     }
 }
 
-/// Read an AI agent config from a YAML or JSON file
+/// Read an AI agent config from a YAML or JSON file, or from stdin
 ///
 /// # Arguments
 ///
-/// * `path` - The path to the config
+/// * `path` - The path to the config, or `-` for stdin
 fn read_config(path: &Path) -> Result<AgentConfig, Error> {
-    // read the config file
-    let raw = std::fs::read_to_string(path)
-        .map_err(|err| Error::new(format!("Failed to read {}: {err}", path.display())))?;
+    // read the config file, or stdin for `-`
+    let source = path.to_string_lossy();
+    let raw = spec_io::read_text(&source)?;
     // read the document as YAML, which also reads JSON
     let value: serde_json::Value = serde_norway::from_str(&raw)
-        .map_err(|err| Error::new(format!("Failed to parse {}: {err}", path.display())))?;
+        .map_err(|err| Error::new(format!("Failed to parse {source}: {err}")))?;
     // check that the document is an AI agent config
-    serde_json::from_value(value).map_err(|err| {
-        Error::new(format!(
-            "{} is not a valid AI agent config: {err}",
-            path.display()
-        ))
-    })
+    serde_json::from_value(value)
+        .map_err(|err| Error::new(format!("{source} is not a valid AI agent config: {err}")))
 }
 
 /// Find an entity of one kind by its ID or name
@@ -254,6 +264,28 @@ pub(crate) async fn find(
     label: &str,
     value: &str,
 ) -> Result<Entity, Error> {
+    // look in every group the caller can see
+    find_in(thorium, kind, label, value, &[]).await
+}
+
+/// Find an entity of one kind by its ID or name, looking only in some groups
+///
+/// A name that is also used in a group outside `groups` is not ambiguous.
+///
+/// # Arguments
+///
+/// * `thorium` - The Thorium client
+/// * `kind` - The kind of entity to find
+/// * `label` - What the entity is called in errors
+/// * `value` - The entity's ID or name
+/// * `groups` - The groups to look in (every group the caller can see when empty)
+pub(crate) async fn find_in(
+    thorium: &Thorium,
+    kind: EntityKinds,
+    label: &str,
+    value: &str,
+    groups: &[String],
+) -> Result<Entity, Error> {
     // an ID is read directly, and must be of the right kind
     if let Ok(id) = Uuid::parse_str(value) {
         let found = thorium.entities.get(id).await?;
@@ -263,7 +295,10 @@ pub(crate) async fn find(
         return Ok(found);
     }
     // otherwise find the entities of this kind with this name
-    let opts = EntityListOpts::default().kind(kind).limit(10_000);
+    let opts = EntityListOpts::default()
+        .groups(groups.to_vec())
+        .kind(kind)
+        .limit(10_000);
     let mut cursor = thorium.entities.list(&opts).await?;
     let mut matches = Vec::new();
     loop {
@@ -392,6 +427,181 @@ fn edge_update(
     })
 }
 
+/// Build an AI agent update that only removes edges
+///
+/// # Arguments
+///
+/// * `remove_tools` - The tools to stop calling
+/// * `remove_tool_sets` - The toolsets to stop calling
+/// * `remove_sub_agents` - The sub-agents to stop delegating to
+fn removal_update(
+    remove_tools: Vec<Uuid>,
+    remove_tool_sets: Vec<Uuid>,
+    remove_sub_agents: Vec<Uuid>,
+) -> EntityUpdate {
+    // an update with only the removed edges
+    EntityUpdate::default().metadata(EntityMetadataUpdate::Agent {
+        config: None,
+        model_auth: None,
+        harness: None,
+        clear_harness: None,
+        add_tools: Vec::new(),
+        remove_tools,
+        add_tool_sets: Vec::new(),
+        remove_tool_sets,
+        add_sub_agents: Vec::new(),
+        remove_sub_agents,
+        extend_target_groups: false,
+    })
+}
+
+/// Build an AI agent update that only clears the harness
+fn clear_harness_update() -> EntityUpdate {
+    // an update that removes the harness edge and changes nothing else
+    EntityUpdate::default().metadata(EntityMetadataUpdate::Agent {
+        config: None,
+        model_auth: None,
+        harness: None,
+        clear_harness: Some(true),
+        add_tools: Vec::new(),
+        remove_tools: Vec::new(),
+        add_tool_sets: Vec::new(),
+        remove_tool_sets: Vec::new(),
+        add_sub_agents: Vec::new(),
+        remove_sub_agents: Vec::new(),
+        extend_target_groups: false,
+    })
+}
+
+/// Whether an edge target is named by an ID or a name
+///
+/// # Arguments
+///
+/// * `target` - The entity at the end of an edge
+/// * `value` - The ID or name a command was given
+fn is_named(target: &Entity, value: &str) -> bool {
+    // an edge target is named by its ID or its name
+    target.name == value || target.id.to_string() == value
+}
+
+/// Find the edge to a tool an AI agent has, at its latest version or pinned to one
+///
+/// # Arguments
+///
+/// * `agent` - The AI agent, with its edges filled in
+/// * `tool` - The ID or name of the tool
+/// * `pin` - The tool instance the edge is pinned to, if it is
+fn tool_edge(agent: &AgentEntity, tool: &str, pin: Option<Uuid>) -> Result<Uuid, String> {
+    // a pin names a version of the tool the agent is pinned to
+    if let Some(pin) = pin {
+        let found = agent.pinned_tools.iter().find(|target| {
+            target.id == pin
+                && match &target.metadata {
+                    EntityMetadata::ToolInstance(meta) => {
+                        meta.tool.to_string() == tool || ToolRef::from_entity(target).tool == tool
+                    }
+                    _ => false,
+                }
+        });
+        return found.map(|target| target.id).ok_or_else(|| {
+            format!("The AI agent is not pinned to {pin} as a version of tool {tool}")
+        });
+    }
+    // otherwise the agent follows the tool at its latest version
+    if let Some(target) = agent
+        .latest_tools
+        .iter()
+        .find(|target| is_named(target, tool))
+    {
+        return Ok(target.id);
+    }
+    // a pinned tool needs its pin to be named
+    let pinned = agent
+        .pinned_tools
+        .iter()
+        .any(|target| ToolRef::from_entity(target).tool == tool);
+    if pinned {
+        Err(format!(
+            "The AI agent calls tool {tool} pinned to a version, not at its latest version; name the version's ID with --pin"
+        ))
+    } else {
+        Err(format!("The AI agent does not call tool {tool}"))
+    }
+}
+
+/// Find the edge to a toolset an AI agent has, at its latest instance or pinned to one
+///
+/// # Arguments
+///
+/// * `agent` - The AI agent, with its edges filled in
+/// * `toolset` - The ID or name of the toolset
+/// * `pin` - The toolset instance the edge is pinned to, if it is
+fn toolset_edge(agent: &AgentEntity, toolset: &str, pin: Option<Uuid>) -> Result<Uuid, String> {
+    // a pin names an instance of the toolset the agent is pinned to
+    if let Some(pin) = pin {
+        let found = agent.tool_sets.iter().find(|target| {
+            target.id == pin
+                && target.kind == EntityKinds::ToolSetInstance
+                && match &target.metadata {
+                    EntityMetadata::ToolSetInstance(meta) => {
+                        meta.tool_set.to_string() == toolset
+                            || ToolSetRef::from_entity(target).toolset == toolset
+                    }
+                    _ => false,
+                }
+        });
+        return found.map(|target| target.id).ok_or_else(|| {
+            format!("The AI agent is not pinned to {pin} as an instance of toolset {toolset}")
+        });
+    }
+    // otherwise the agent follows the toolset at its latest instance
+    if let Some(target) = agent
+        .tool_sets
+        .iter()
+        .find(|target| target.kind == EntityKinds::ToolSet && is_named(target, toolset))
+    {
+        return Ok(target.id);
+    }
+    // a pinned toolset needs its pin to be named
+    let pinned = agent.tool_sets.iter().any(|target| {
+        target.kind == EntityKinds::ToolSetInstance
+            && ToolSetRef::from_entity(target).toolset == toolset
+    });
+    if pinned {
+        Err(format!(
+            "The AI agent calls toolset {toolset} pinned to an instance, not at its latest instance; name the instance's ID with --pin"
+        ))
+    } else {
+        Err(format!("The AI agent does not call toolset {toolset}"))
+    }
+}
+
+/// Find the edge to a sub-agent an AI agent has
+///
+/// # Arguments
+///
+/// * `agent` - The AI agent, with its edges filled in
+/// * `sub_agent` - The ID or name of the sub-agent
+fn sub_agent_edge(agent: &AgentEntity, sub_agent: &str) -> Result<Uuid, String> {
+    // the sub-agent is named by ID or name
+    agent
+        .sub_agents
+        .iter()
+        .find(|target| is_named(target, sub_agent))
+        .map(|target| target.id)
+        .ok_or_else(|| format!("The AI agent does not delegate to {sub_agent}"))
+}
+
+/// Get an AI agent's metadata, refusing an entity that isn't one
+///
+/// # Arguments
+///
+/// * `agent` - The entity to read
+fn require_meta(agent: &Entity) -> Result<&AgentEntity, Error> {
+    // an agent found by kind always has agent metadata
+    agent_meta(agent).ok_or_else(|| Error::new(format!("{} is not an AI agent", agent.name)))
+}
+
 /// List AI agents
 ///
 /// # Arguments
@@ -444,14 +654,50 @@ async fn describe(thorium: &Thorium, cmd: &DescribeAgent) -> Result<(), Error> {
 /// * `cmd` - The create command to execute
 /// * `config` - The AI agent's config
 async fn create(thorium: &Thorium, cmd: &CreateAgent, config: AgentConfig) -> Result<(), Error> {
-    // build the AI agent request
+    // build the AI agent request with its config
+    let mut agent = AgentEntityRequest::new(config);
+    // find each tool the AI agent calls, at latest or pinned to a version
+    for tool in &cmd.tool {
+        let target = ToolRef::parse(tool)
+            .resolve(thorium, &cmd.group, "a tool")
+            .await?;
+        agent = agent.tool(target);
+    }
+    // find each toolset the AI agent calls, at latest or pinned to an instance
+    for toolset in &cmd.toolset {
+        let target = ToolSetRef::parse(toolset)
+            .resolve(thorium, &cmd.group)
+            .await?;
+        agent = agent.tool_set(target);
+    }
+    // find each AI agent it delegates to
+    for sub_agent in &cmd.sub_agent {
+        agent = agent.sub_agent(refs::resolve_agent(thorium, &cmd.group, sub_agent).await?);
+    }
+    // find the harness it runs in
+    if let Some(harness) = &cmd.harness {
+        let target = ToolRef::parse(harness)
+            .resolve(thorium, &cmd.group, "a harness")
+            .await?;
+        agent = agent.harness(target);
+    }
+    // limit the levels that may supply model auth
+    if !cmd.model_auth.is_empty() {
+        agent = agent.model_auth(ModelAuthSource {
+            levels: cmd.model_auth.iter().copied().map(Into::into).collect(),
+        });
+    }
+    // widen the targets of the edges only when asked
+    if cmd.extend_target_groups {
+        agent = agent.extend_target_groups();
+    }
+    // create the AI agent
     let mut req = EntityRequest::new(
         &cmd.name,
-        EntityMetadataRequest::Agent(AgentEntityRequest::new(config)),
+        EntityMetadataRequest::Agent(agent),
         cmd.group.clone(),
     );
     req.description.clone_from(&cmd.description);
-    // create the AI agent
     let resp = thorium.entities.create(req).await?;
     println!("Created AI agent {} ({})", resp.name, resp.id);
     Ok(())
@@ -617,6 +863,213 @@ async fn link_toolset(thorium: &Thorium, cmd: &LinkToolset) -> Result<(), Error>
     Ok(())
 }
 
+/// Stop an AI agent calling a tool
+///
+/// # Arguments
+///
+/// * `thorium` - The Thorium client
+/// * `cmd` - The unlink-tool command to execute
+async fn unlink_tool(thorium: &Thorium, cmd: &UnlinkTool) -> Result<(), Error> {
+    // find the AI agent and the edge to remove
+    let agent = find(thorium, EntityKinds::Agent, "an AI agent", &cmd.agent).await?;
+    let target = tool_edge(require_meta(&agent)?, &cmd.tool, cmd.pin)
+        .map_err(|err| Error::new(format!("{}: {err}", agent.name)))?;
+    // remove the call edge
+    let update = removal_update(vec![target], Vec::new(), Vec::new());
+    thorium.entities.update(agent.id, update).await?;
+    println!("AI agent {} no longer calls {}", agent.name, cmd.tool);
+    Ok(())
+}
+
+/// Stop an AI agent calling a toolset
+///
+/// # Arguments
+///
+/// * `thorium` - The Thorium client
+/// * `cmd` - The unlink-toolset command to execute
+async fn unlink_toolset(thorium: &Thorium, cmd: &UnlinkToolset) -> Result<(), Error> {
+    // find the AI agent and the edge to remove
+    let agent = find(thorium, EntityKinds::Agent, "an AI agent", &cmd.agent).await?;
+    let target = toolset_edge(require_meta(&agent)?, &cmd.toolset, cmd.pin)
+        .map_err(|err| Error::new(format!("{}: {err}", agent.name)))?;
+    // remove the call edge
+    let update = removal_update(Vec::new(), vec![target], Vec::new());
+    thorium.entities.update(agent.id, update).await?;
+    println!(
+        "AI agent {} no longer calls toolset {}",
+        agent.name, cmd.toolset
+    );
+    Ok(())
+}
+
+/// Stop an AI agent delegating to another AI agent
+///
+/// # Arguments
+///
+/// * `thorium` - The Thorium client
+/// * `cmd` - The undelegate command to execute
+async fn undelegate(thorium: &Thorium, cmd: &Undelegate) -> Result<(), Error> {
+    // find the AI agent and the edge to remove
+    let agent = find(thorium, EntityKinds::Agent, "an AI agent", &cmd.agent).await?;
+    let target = sub_agent_edge(require_meta(&agent)?, &cmd.sub_agent)
+        .map_err(|err| Error::new(format!("{}: {err}", agent.name)))?;
+    // remove the delegation edge
+    let update = removal_update(Vec::new(), Vec::new(), vec![target]);
+    thorium.entities.update(agent.id, update).await?;
+    println!(
+        "AI agent {} no longer delegates to {}",
+        agent.name, cmd.sub_agent
+    );
+    Ok(())
+}
+
+/// Stop an AI agent running in its harness
+///
+/// # Arguments
+///
+/// * `thorium` - The Thorium client
+/// * `cmd` - The clear-harness command to execute
+async fn clear_harness(thorium: &Thorium, cmd: &ClearHarness) -> Result<(), Error> {
+    // find the AI agent, which must run in a harness
+    let agent = find(thorium, EntityKinds::Agent, "an AI agent", &cmd.agent).await?;
+    if require_meta(&agent)?.harness.is_none() {
+        return Err(Error::new(format!(
+            "{}: The AI agent does not run in a harness",
+            agent.name
+        )));
+    }
+    // remove the harness edge
+    thorium
+        .entities
+        .update(agent.id, clear_harness_update())
+        .await?;
+    println!("AI agent {} no longer runs in a harness", agent.name);
+    Ok(())
+}
+
+/// Edit an AI agent in an editor, or from `--file`, `--set`, `--unset` and `--patch`
+///
+/// # Arguments
+///
+/// * `thorium` - The Thorium client
+/// * `conf` - The Thorctl config
+/// * `cmd` - The edit command to execute
+async fn edit_agent(thorium: &Thorium, conf: &CtlConf, cmd: &EditAgent) -> Result<(), Error> {
+    // find the AI agent
+    let agent = find(thorium, EntityKinds::Agent, "an AI agent", &cmd.agent).await?;
+    let target = AgentTarget {
+        id: agent.id,
+        extend_target_groups: cmd.extend_target_groups,
+    };
+    // run the shared edit flow, which prints the result
+    edit_with::<AgentEditable>(thorium, conf, &target, &cmd.edit).await?;
+    Ok(())
+}
+
+/// Update an AI agent from flags, `--file`, `--set`, `--unset` and `--patch`
+///
+/// # Arguments
+///
+/// * `thorium` - The Thorium client
+/// * `cmd` - The update command to execute
+async fn update_agent(thorium: &Thorium, cmd: &UpdateAgent) -> Result<(), Error> {
+    // find the AI agent
+    let agent = find(thorium, EntityKinds::Agent, "an AI agent", &cmd.agent).await?;
+    let target = AgentTarget {
+        id: agent.id,
+        extend_target_groups: cmd.extend_target_groups,
+    };
+    // turn the typed flags into edits that apply before the `--set` and `--unset` edits
+    let view = AgentEditable::to_view(&agent);
+    let mut args = cmd.edit.clone();
+    let mut ops = edit::typed_ops(cmd, &view)?;
+    ops.append(&mut args.ops);
+    args.ops = ops;
+    // run the shared update flow, which prints the result
+    update_with::<AgentEditable>(thorium, &target, &args).await?;
+    Ok(())
+}
+
+/// Print an AI agent as a spec
+///
+/// # Arguments
+///
+/// * `thorium` - The Thorium client
+/// * `cmd` - The spec command to execute
+async fn spec(thorium: &Thorium, cmd: &SpecAgent) -> Result<(), Error> {
+    // find the AI agent and build its view
+    let agent = find(thorium, EntityKinds::Agent, "an AI agent", &cmd.agent).await?;
+    let view = AgentEditable::to_view(&agent);
+    // write the view as JSON or, by default, YAML
+    let text = match cmd.format.format {
+        Some(OutputFormat::Json) => utils::curated_json(&view, AgentEditable::FIELD_ORDER)?,
+        _ => utils::curated_yaml(&view, AgentEditable::FIELD_ORDER)?,
+    };
+    // print it, or save it to the file asked for
+    match &cmd.output {
+        Some(path) => std::fs::write(path, text)
+            .map_err(|err| Error::new(format!("Failed to write {}: {err}", path.display()))),
+        None => {
+            print!("{text}");
+            Ok(())
+        }
+    }
+}
+
+/// Ask whether to delete an entity, unless the question was skipped
+///
+/// # Arguments
+///
+/// * `what` - What the entity is, for the prompt (`AI agent`)
+/// * `name` - The entity's name
+/// * `skip_confirm` - Whether `--skip-confirm` was given
+pub(crate) fn confirm_delete(what: &str, name: &str, skip_confirm: bool) -> Result<bool, Error> {
+    // the flag skips the question
+    if skip_confirm {
+        return Ok(true);
+    }
+    // fail clearly, not with a raw dialoguer error, when there is no terminal to ask on
+    utils::require_confirm_terminal("--skip-confirm")?;
+    // deleting is irreversible, so the default answer is no
+    dialoguer::Confirm::new()
+        .with_prompt(format!("Delete {what} {name}?"))
+        .default(false)
+        .interact()
+        .map_err(|err| Error::new(format!("Failed to read user input: {err}")))
+}
+
+/// Delete an AI agent
+///
+/// # Arguments
+///
+/// * `thorium` - The Thorium client
+/// * `cmd` - The delete command to execute
+async fn delete_agent(thorium: &Thorium, cmd: &DeleteAgent) -> Result<(), Error> {
+    // find the AI agent
+    let agent = find(thorium, EntityKinds::Agent, "an AI agent", &cmd.agent).await?;
+    // a dry run only says what would be deleted
+    if cmd.dry_run {
+        println!(
+            "Dry run: would delete AI agent {} ({})",
+            agent.name, agent.id
+        );
+        return Ok(());
+    }
+    // confirm the deletion
+    if !confirm_delete("AI agent", &agent.name, cmd.skip_confirm)? {
+        println!("Cancelled.");
+        return Ok(());
+    }
+    // delete the AI agent, which the API refuses while something still needs it
+    thorium
+        .entities
+        .delete(agent.id)
+        .await
+        .map_err(utils::delete_refusal)?;
+    println!("Deleted AI agent {} ({})", agent.name, agent.id);
+    Ok(())
+}
+
 /// Handle all AI agent commands
 ///
 /// # Arguments
@@ -630,7 +1083,7 @@ pub async fn handle(args: &Args, cmd: &Agents) -> Result<(), Error> {
         _ => None,
     };
     // load our config and instance our client
-    let (_, thorium) = utils::get_client(args).await?;
+    let (conf, thorium) = utils::get_client(args).await?;
     // call the right agents handler
     let result = match (cmd, config) {
         (Agents::Get(cmd), _) => get(&thorium, cmd).await,
@@ -641,6 +1094,14 @@ pub async fn handle(args: &Args, cmd: &Agents) -> Result<(), Error> {
         (Agents::Delegate(cmd), _) => delegate(&thorium, cmd).await,
         (Agents::LinkToolset(cmd), _) => link_toolset(&thorium, cmd).await,
         (Agents::SetHarness(cmd), _) => set_harness(&thorium, cmd).await,
+        (Agents::UnlinkTool(cmd), _) => unlink_tool(&thorium, cmd).await,
+        (Agents::UnlinkToolset(cmd), _) => unlink_toolset(&thorium, cmd).await,
+        (Agents::Undelegate(cmd), _) => undelegate(&thorium, cmd).await,
+        (Agents::ClearHarness(cmd), _) => clear_harness(&thorium, cmd).await,
+        (Agents::Update(cmd), _) => update_agent(&thorium, cmd).await,
+        (Agents::Edit(cmd), _) => edit_agent(&thorium, &conf, cmd).await,
+        (Agents::Spec(cmd), _) => spec(&thorium, cmd).await,
+        (Agents::Delete(cmd), _) => delete_agent(&thorium, cmd).await,
     };
     // show the API's status code with any refusal
     result.map_err(|err| match err.status() {
@@ -651,9 +1112,109 @@ pub async fn handle(args: &Args, cmd: &Agents) -> Result<(), Error> {
 
 #[cfg(test)]
 mod tests {
-    use super::{kind_refusal, name_refusal};
-    use thorium::models::EntityKinds;
+    use super::fixtures::{agent, tool, tool_instance, toolset};
+    use super::{
+        clear_harness_update, kind_refusal, name_refusal, sub_agent_edge, tool_edge, toolset_edge,
+    };
+    use thorium::models::{AgentEntity, EntityKinds, EntityMetadata, EntityMetadataUpdate};
     use uuid::Uuid;
+
+    /// Get an agent's metadata from a test entity
+    ///
+    /// # Arguments
+    ///
+    /// * `entity` - The entity to read
+    fn meta(entity: &thorium::models::Entity) -> &AgentEntity {
+        // fixtures always build agents
+        match &entity.metadata {
+            EntityMetadata::Agent(meta) => meta,
+            _ => panic!("expected an agent"),
+        }
+    }
+
+    /// Unlinking a tool finds the latest edge by name or ID and the pinned edge by its instance
+    #[test]
+    fn tool_edges_are_found() {
+        // an agent that follows one tool and is pinned to a version of another
+        let followed = tool("yara");
+        let other = tool("capa");
+        let pinned = tool_instance(&other, "1.0.0");
+        let lead = agent("lead", |meta| {
+            meta.latest_tools.push(followed.clone());
+            meta.pinned_tools.push(pinned.clone());
+        });
+        // the latest edge is found by name or ID
+        assert_eq!(tool_edge(meta(&lead), "yara", None).unwrap(), followed.id);
+        let id = followed.id.to_string();
+        assert_eq!(tool_edge(meta(&lead), &id, None).unwrap(), followed.id);
+        // the pinned edge is found by its instance and the tool's name or ID
+        assert_eq!(
+            tool_edge(meta(&lead), "capa", Some(pinned.id)).unwrap(),
+            pinned.id
+        );
+        let other_id = other.id.to_string();
+        assert_eq!(
+            tool_edge(meta(&lead), &other_id, Some(pinned.id)).unwrap(),
+            pinned.id
+        );
+        // a tool the agent doesn't call is refused
+        let err = tool_edge(meta(&lead), "nmap", None).unwrap_err();
+        assert!(err.contains("nmap"), "{err}");
+        // a pinned tool needs its pin, and says so
+        let err = tool_edge(meta(&lead), "capa", None).unwrap_err();
+        assert!(err.contains("--pin"), "{err}");
+        // a pin to another tool's instance is refused
+        let err = tool_edge(meta(&lead), "yara", Some(pinned.id)).unwrap_err();
+        assert!(err.contains("yara"), "{err}");
+    }
+
+    /// Unlinking a toolset or sub-agent finds the edge or says there isn't one
+    #[test]
+    fn toolset_and_sub_agent_edges_are_found() {
+        // an agent that calls a toolset and delegates to another agent
+        let kit = toolset("ghidra");
+        let scout = agent("scout", |_| {});
+        let lead = agent("lead", |meta| {
+            meta.tool_sets.push(kit.clone());
+            meta.sub_agents.push(scout.clone());
+        });
+        // the toolset and the sub-agent are found by name or ID
+        assert_eq!(toolset_edge(meta(&lead), "ghidra", None).unwrap(), kit.id);
+        assert_eq!(
+            sub_agent_edge(meta(&lead), &scout.id.to_string()).unwrap(),
+            scout.id
+        );
+        assert_eq!(sub_agent_edge(meta(&lead), "scout").unwrap(), scout.id);
+        // anything else is refused by name
+        let err = toolset_edge(meta(&lead), "angr", None).unwrap_err();
+        assert!(err.contains("angr"), "{err}");
+        let err = sub_agent_edge(meta(&lead), "ghost").unwrap_err();
+        assert!(err.contains("ghost"), "{err}");
+    }
+
+    /// Clearing the harness sends only the clear flag
+    #[test]
+    fn clear_harness_changes_only_the_harness() {
+        // the update clears the harness and nothing else
+        let update = clear_harness_update();
+        let Some(EntityMetadataUpdate::Agent {
+            harness,
+            clear_harness,
+            add_tools,
+            remove_tools,
+            remove_tool_sets,
+            remove_sub_agents,
+            config,
+            ..
+        }) = update.metadata
+        else {
+            panic!("expected an agent update");
+        };
+        assert_eq!(clear_harness, Some(true));
+        assert!(harness.is_none() && config.is_none());
+        assert!(add_tools.is_empty() && remove_tools.is_empty());
+        assert!(remove_tool_sets.is_empty() && remove_sub_agents.is_empty());
+    }
 
     /// An ID of the wrong kind is refused with readable kind names and their articles
     #[test]

@@ -1,14 +1,13 @@
 //! Build (and optionally push) the container images described by a toolbox
 //!
 //! This is the local stand-in for the CI pipeline that normally builds a
-//! toolbox repo's images: walk `toolbox.json`, build every entry with build
-//! enabled from its build context, alias the extra registry tags, and push.
-//! With the images in a registry, `toolbox import` works as usual.
+//! toolbox repo's images: walk `toolbox.json` (legacy `images`, or a current toolbox's tool
+//! builds and base `builds`), build every entry with build enabled from its build context,
+//! alias the extra registry tags, and push. With the images in a registry, `toolbox import`
+//! works as usual.
 
 use colored::Colorize;
-use serde::Deserialize;
-use std::collections::{HashMap, HashSet};
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use thorium::Error;
 
 use crate::args::toolbox::BuildImagesToolbox;
@@ -16,26 +15,9 @@ use crate::handlers::container;
 use crate::handlers::progress;
 use crate::utils;
 
-use super::build::{BaseImage, DEFAULT_BASE_IMAGE_ARG, default_true};
+use super::build::{BaseImage, DEFAULT_BASE_IMAGE_ARG};
 
-/// The slice of a toolbox.json image entry that drives a build
-///
-/// Deserialized standalone (not via [`super::manifest::ToolboxManifest`]) so
-/// building doesn't require resolvable configs.
-#[derive(Deserialize)]
-struct BuildEntry {
-    /// The build context to build from
-    build_path: PathBuf,
-    /// Whether this image should be built at all
-    #[serde(default = "default_true")]
-    build_image: bool,
-    /// Every registry tag this image should carry
-    #[serde(default)]
-    image_tags: Vec<String>,
-    /// This image's resolved base-image configuration (per-tool merged over global at build time)
-    #[serde(default)]
-    base_image: Option<BaseImage>,
-}
+mod plan;
 
 /// The outcome of resolving an image's base-image substitution
 enum BaseResolution {
@@ -167,85 +149,61 @@ fn apply_tag_suffix(tag: &str, suffix: Option<&str>) -> String {
     }
 }
 
-/// Only the parts of toolbox.json that builds care about
-///
-/// Deserialized as a subset on purpose: every other top-level toolbox.json field (name, registry,
-/// pipelines, etc.) is intentionally ignored, so no `deny_unknown_fields` here.
-#[derive(Deserialize)]
-struct BuildManifest {
-    /// The image entries mapped name -> version -> entry (each carries its resolved `base_image`)
-    images: HashMap<String, HashMap<String, BuildEntry>>,
-}
-
 /// Build and optionally push every buildable image in a toolbox
 ///
 /// # Arguments
 ///
 /// * `cmd` - The build-images command that was run
+#[allow(clippy::too_many_lines)]
 pub async fn build_images(cmd: &BuildImagesToolbox) -> Result<(), Error> {
-    // read the whole toolbox.json into memory; it is small and parsed in one pass
-    let manifest_str = tokio::fs::read_to_string(&cmd.manifest)
+    // a toolbox directory stands for the manifest file inside it
+    let manifest_path = plan::locate(&cmd.manifest)?;
+    // read the whole manifest into memory; it is small and parsed in one pass
+    let manifest_str = tokio::fs::read_to_string(&manifest_path)
         .await
         .map_err(|err| {
             Error::new(format!(
                 "Failed to read toolbox manifest '{}': {err}",
-                cmd.manifest.display()
+                manifest_path.display()
             ))
         })?;
     // parse only the build-relevant subset; unknown top-level fields are ignored by design so a
-    // full toolbox.json (name, registry, pipelines, …) deserializes without resolvable configs
-    let manifest: BuildManifest = serde_json::from_str(&manifest_str).map_err(|err| {
+    // full manifest (name, registry, pipelines, specs, …) deserializes without resolvable configs
+    let manifest: plan::BuildManifest = serde_json::from_str(&manifest_str).map_err(|err| {
         Error::new(format!(
             "Failed to parse toolbox manifest '{}': {err}",
-            cmd.manifest.display()
+            manifest_path.display()
         ))
     })?;
-    // build_path values in toolbox.json are recorded relative to the manifest's own
+    // build_path values in the manifest are recorded relative to the manifest's own
     // directory, so resolve them against it rather than the cwd build-images runs from
-    let manifest_dir = cmd.manifest.parent().unwrap_or_else(|| Path::new("."));
-    // image names present in the manifest, captured before the map is consumed below so we can
-    // flag requested --images that match nothing
-    let available: HashSet<String> = manifest.images.keys().cloned().collect();
-    // flatten the name -> version -> entry map into a flat (name, version, entry) target list,
-    // narrowing by --images when given (an empty list means build everything)
-    let mut targets: Vec<(String, String, BuildEntry)> = manifest
-        .images
-        .into_iter()
-        // an explicit --image list narrows the build set to the named top-level image names
-        .filter(|(name, _)| cmd.images.is_empty() || cmd.images.contains(name))
-        .flat_map(|(name, versions)| {
-            versions
-                .into_iter()
-                .map(move |(version, entry)| (name.clone(), version, entry))
-        })
-        .collect();
-    // sort by (name, version) so the build order (and the printed log) is deterministic regardless
-    // of the HashMap iteration order
-    targets.sort_by(|a, b| (&a.0, &a.1).cmp(&(&b.0, &b.1)));
-    // warn about any requested --images that matched nothing, so a typo isn't a silent no-op
+    let manifest_dir = manifest_path.parent().unwrap_or_else(|| Path::new("."));
+    // order the targets (base contexts first) and narrow them by --tools when given
+    let plan::Plan { targets, available } = plan::plan(manifest, &cmd.tools)?;
+    // warn about any requested names that matched nothing, so a typo isn't a silent no-op
     // when other names did match
     let unknown: Vec<&str> = cmd
-        .images
+        .tools
         .iter()
         .filter(|name| !available.contains(*name))
         .map(String::as_str)
         .collect();
     if !unknown.is_empty() {
         progress::warn(format!(
-            "requested image(s) not found in the toolbox manifest: {}",
+            "requested tool(s) not found in the toolbox manifest: {}",
             unknown.join(", ")
         ));
     }
     // no targets is a hard error rather than a quiet success; the message distinguishes an empty
-    // manifest from a --images filter that matched nothing so the user knows which to fix
+    // manifest from a --tools filter that matched nothing so the user knows which to fix
     if targets.is_empty() {
-        return Err(Error::new(if cmd.images.is_empty() {
-            "No image entries found in the toolbox manifest".to_string()
+        return Err(Error::new(if cmd.tools.is_empty() {
+            "No build entries found in the toolbox manifest".to_string()
         } else {
             format!(
-                "No image entries in '{}' match the requested --images: {}",
-                cmd.manifest.display(),
-                cmd.images.join(", ")
+                "No build entries in '{}' match the requested --tools: {}",
+                manifest_path.display(),
+                cmd.tools.join(", ")
             )
         }));
     }
@@ -261,8 +219,9 @@ pub async fn build_images(cmd: &BuildImagesToolbox) -> Result<(), Error> {
     }
     // token/user are pass-through for an external CI/CD pipeline; build-images does no
     // base-registry login, so note it once (rather than per image) if any target carries them
-    if targets.iter().any(|(_, _, entry)| {
-        entry
+    if targets.iter().any(|target| {
+        target
+            .entry
             .base_image
             .as_ref()
             .is_some_and(|base| base.token.is_some() || base.user.is_some())
@@ -283,7 +242,12 @@ pub async fn build_images(cmd: &BuildImagesToolbox) -> Result<(), Error> {
     // run (best-effort), then surfaced at the end. Stays empty under --exit-on-error since that
     // path returns immediately
     let mut failures: Vec<String> = Vec::new();
-    for (name, version, entry) in targets {
+    for plan::Target {
+        name,
+        version,
+        entry,
+    } in targets
+    {
         // human-readable identity for log lines and the failure list
         let label = utils::entry_id(None, &name, &version);
         // entries can opt out of building (prebuilt images in a registry)
@@ -294,6 +258,11 @@ pub async fn build_images(cmd: &BuildImagesToolbox) -> Result<(), Error> {
         // a tag is required to anchor the build
         if entry.image_tags.is_empty() {
             println!("{} {label} (no image tags)", "Skipping".bright_yellow());
+            continue;
+        }
+        // a build context is required to build from; a current toolbox may omit it
+        if entry.build_path.as_os_str().is_empty() {
+            println!("{} {label} (no build_path)", "Skipping".bright_yellow());
             continue;
         }
         // apply the tag suffix to every tag so a feature-branch run builds/pushes differentiated
@@ -339,6 +308,25 @@ pub async fn build_images(cmd: &BuildImagesToolbox) -> Result<(), Error> {
         // resolve the build context against the manifest's directory since toolbox.json records
         // build_path relative to its own location; Path::join keeps an absolute build_path as-is
         let context = manifest_dir.join(&entry.build_path);
+        // a dry run says what would be built, with which tags and build args, and builds nothing
+        if cmd.dry_run {
+            println!(
+                "{} {label} from '{}' as {}{}",
+                "Would build".bright_green(),
+                context.display(),
+                tags.join(", "),
+                if cmd.push {
+                    " (then push every tag)"
+                } else {
+                    ""
+                },
+            );
+            for (key, value) in &build_args {
+                println!("    build arg {key}={value}");
+            }
+            built += 1;
+            continue;
+        }
         println!(
             "{} {label} from '{}'",
             "Building".bright_green(),
@@ -370,6 +358,15 @@ pub async fn build_images(cmd: &BuildImagesToolbox) -> Result<(), Error> {
                 failures.push(label);
             }
         }
+    }
+    // a dry run ends with a count of what it would have built
+    if cmd.dry_run {
+        println!(
+            "\n{} {built} image{} would be built",
+            "Dry run complete:".bright_green(),
+            if built == 1 { "" } else { "s" },
+        );
+        return Ok(());
     }
     // the built count and push note shared by every summary line
     let built_summary = format!(

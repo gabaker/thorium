@@ -1,22 +1,24 @@
 //! Handles files commands
 
+use crate::utils::paint::Paint;
 use download::FilesDownloadWorker;
-use futures::TryStreamExt;
 use futures::stream::{self, StreamExt};
 use http::status::StatusCode;
-use owo_colors::OwoColorize;
 use regex::RegexSet;
 use std::collections::{HashMap, HashSet};
 use std::fmt::Write;
 use std::path::Path;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use thorium::models::{
     FileDeleteOpts, ReactionRequest, Sample, SampleListLine, SampleSubmissionResponse,
     SubmissionChunk,
 };
 use thorium::{CtlConf, Error, Thorium};
+use tokio::sync::mpsc;
 use uuid::Uuid;
 
 mod download;
+pub mod upload_runs;
 
 use super::{Controller, update};
 use crate::args::files::{
@@ -24,14 +26,17 @@ use crate::args::files::{
 };
 use crate::args::pipelines::PipelineTarget;
 use crate::args::{Args, DescribeCommand, SearchParameterized};
+use crate::handlers::run_batch::{BatchOpts, Outcome};
 use crate::utils;
+use crate::utils::output::OutputFormat;
+use upload_runs::{RunFile, Started, Starter, Target};
 
 /// A single line for an file upload log
 struct UploadLine;
 
-macro_rules! upload_print {
+macro_rules! upload_fmt {
     ($status:expr, $path:expr, $sha256:expr, $id:expr, $msg:expr) => {
-        println!(
+        format!(
             "{:<4} | {:<32} | {:<64} | {:<36} | {:<24}",
             $status,
             $path.to_string_lossy(),
@@ -39,6 +44,12 @@ macro_rules! upload_print {
             $id,
             $msg
         )
+    };
+}
+
+macro_rules! upload_print {
+    ($status:expr, $path:expr, $sha256:expr, $id:expr, $msg:expr) => {
+        println!("{}", upload_fmt!($status, $path, $sha256, $id, $msg))
     };
 }
 
@@ -103,7 +114,14 @@ impl UploadLine {
     ///
     /// * `path` - The path this file was uploaded from
     /// * `sha256` - The SHA256 of the file
-    pub fn uploaded_dry_run(path: &Path, sha256: &str, tags: &HashMap<String, HashSet<String>>) {
+    /// * `tags` - The tags the file would be given
+    /// * `runs` - The runs that would start on the file, as text
+    pub fn uploaded_dry_run(
+        path: &Path,
+        sha256: &str,
+        tags: &HashMap<String, HashSet<String>>,
+        runs: &str,
+    ) {
         // construct a message to display the tags assigned to the file
         let tags_msg = if tags.is_empty() {
             String::new()
@@ -118,8 +136,32 @@ impl UploadLine {
                 .trim_end_matches(", ")
                 .to_string()
         };
+        // add the runs that would start
+        let msg = match (tags_msg.is_empty(), runs.is_empty()) {
+            (_, true) => tags_msg,
+            (true, false) => format!("Runs: {runs}"),
+            (false, false) => format!("{tags_msg}; Runs: {runs}"),
+        };
         // print an uploaded dry run line
-        upload_print_dry_run!("-", path, sha256, tags_msg);
+        upload_print_dry_run!("-", path, sha256, msg);
+    }
+
+    /// Build the line that says we failed to upload a file
+    ///
+    /// # Arguments
+    ///
+    /// * `path` - The path this file was uploaded from
+    /// * `err` - The error that stopped the upload
+    pub fn error_line(path: &Path, err: &thorium::Error) -> String {
+        // get the error message if one was set
+        let msg = err.msg().unwrap_or_else(|| "-".to_owned());
+        // show either the reqwest body error or the hyper error
+        match err.status() {
+            // we have a status so well return the code and body as a message
+            Some(code) => upload_fmt!(code.as_str().bright_red(), path, "-", "-", msg),
+            // no status code is present so just use '-' painted bright red
+            None => upload_fmt!("-".bright_red(), path, "-", "-", msg),
+        }
     }
 
     /// Build and print that we failed to upload a file
@@ -127,33 +169,299 @@ impl UploadLine {
     /// # Arguments
     ///
     /// * `path` - The path this file was uploaded from
-    /// * `sha256` - The sha256 for this file
+    /// * `err` - The error that stopped the upload
     pub fn error(path: &Path, err: &thorium::Error) {
-        // get the error message if one was set
-        let msg = err.msg().unwrap_or_else(|| "-".to_owned());
-        // show either the reqwest body error or the hyper error
-        match err.status() {
-            // we have a status so well return the code and body as a message
-            Some(code) => upload_print!(code.as_str().bright_red(), path, "-", "-", msg),
-            // no status code is present so just use '-' painted bright red
-            None => upload_print!("-".bright_red(), path, "-", "-", msg),
+        // print the failure on stdout with the other lines
+        println!("{}", Self::error_line(path, err));
+    }
+
+    /// Build the line for a run that was started on an uploaded file
+    ///
+    /// # Arguments
+    ///
+    /// * `path` - The path the file was uploaded from
+    /// * `sha256` - The sha256 of the file
+    /// * `id` - The id of the run's reaction
+    /// * `what` - The kind of run and what ran
+    pub fn run_started(path: &Path, sha256: &str, id: &str, what: &str) -> String {
+        // a started run has the 200 code and its reaction in the submission column
+        upload_fmt!("200".bright_green(), path, sha256, id, what)
+    }
+
+    /// Build the line for a run that failed to start on an uploaded file
+    ///
+    /// # Arguments
+    ///
+    /// * `path` - The path the file was uploaded from
+    /// * `sha256` - The sha256 of the file
+    /// * `what` - The kind of run and what ran
+    /// * `error` - Why the run did not start
+    pub fn run_failed(path: &Path, sha256: &str, what: &str, error: &str) -> String {
+        // a run that failed to start has no reaction to show
+        upload_fmt!(
+            "ERR".bright_red(),
+            path,
+            sha256,
+            "-",
+            format!("{what}: {error}")
+        )
+    }
+}
+
+/// How the lines of an upload are printed
+#[derive(Debug, Clone, Copy)]
+pub struct Printer {
+    /// Whether results are JSON lines instead of a table
+    pub json: bool,
+    /// Whether only failures are printed
+    pub quiet: bool,
+}
+
+impl Printer {
+    /// Build the printer for an upload command
+    ///
+    /// # Arguments
+    ///
+    /// * `cmd` - The files upload command
+    /// * `args` - The arguments passed to Thorctl
+    #[must_use]
+    pub fn new(cmd: &UploadFiles, args: &Args) -> Self {
+        Printer {
+            json: cmd.runs.format.format == Some(OutputFormat::Json),
+            quiet: args.quiet,
         }
+    }
+
+    /// Print the header of the upload table
+    ///
+    /// # Arguments
+    ///
+    /// * `dry_run` - Whether this upload is a dry run
+    pub fn header(self, dry_run: bool) {
+        // JSON and quiet output have no header
+        if self.json || self.quiet {
+            return;
+        }
+        if dry_run {
+            UploadLine::header_dry_run();
+        } else {
+            UploadLine::header();
+        }
+    }
+
+    /// Print a JSON line for a file
+    ///
+    /// # Arguments
+    ///
+    /// * `path` - The path the file was uploaded from
+    /// * `status` - What became of the file
+    /// * `sha256` - The sha256 of the file, if it is known
+    /// * `submission` - The id of the file's submission, if it was made
+    /// * `error` - Why the file failed to upload, if it did
+    fn json_file(
+        path: &Path,
+        status: &str,
+        sha256: Option<&str>,
+        submission: Option<&str>,
+        error: Option<&str>,
+    ) {
+        // one object per file
+        println!(
+            "{}",
+            serde_json::json!({
+                "type": "upload",
+                "path": path,
+                "status": status,
+                "sha256": sha256,
+                "submission": submission,
+                "error": error,
+            })
+        );
+    }
+
+    /// Print that a file was uploaded
+    ///
+    /// # Arguments
+    ///
+    /// * `path` - The path the file was uploaded from
+    /// * `resp` - The submission response from the API
+    pub fn uploaded(self, path: &Path, resp: &SampleSubmissionResponse) {
+        if self.json {
+            Self::json_file(
+                path,
+                "uploaded",
+                Some(&resp.sha256),
+                Some(&resp.id.to_string()),
+                None,
+            );
+        } else if !self.quiet {
+            UploadLine::uploaded(path, resp);
+        }
+    }
+
+    /// Print that a file already exists
+    ///
+    /// # Arguments
+    ///
+    /// * `path` - The path the file was uploaded from
+    /// * `sha256` - The sha256 of the file
+    pub fn conflict(self, path: &Path, sha256: &str) {
+        if self.json {
+            Self::json_file(path, "exists", Some(sha256), None, None);
+        } else if !self.quiet {
+            UploadLine::conflict(path, sha256);
+        }
+    }
+
+    /// Print what a dry run would upload
+    ///
+    /// # Arguments
+    ///
+    /// * `path` - The path the file would be uploaded from
+    /// * `sha256` - The sha256 of the file
+    /// * `tags` - The tags the file would be given
+    /// * `runs` - The runs that would start on the file, as text
+    pub fn dry_run(
+        self,
+        path: &Path,
+        sha256: &str,
+        tags: &HashMap<String, HashSet<String>>,
+        runs: &str,
+    ) {
+        if self.json {
+            Self::json_file(path, "dry-run", Some(sha256), None, None);
+        } else if !self.quiet {
+            UploadLine::uploaded_dry_run(path, sha256, tags, runs);
+        }
+    }
+
+    /// Print that a file failed to upload
+    ///
+    /// # Arguments
+    ///
+    /// * `path` - The path the file was uploaded from
+    /// * `err` - The error that stopped the upload
+    pub fn error(self, path: &Path, err: &Error) {
+        if self.json {
+            Self::json_file(path, "failed", None, None, Some(&error_text(err)));
+        } else if self.quiet {
+            eprintln!("{}", UploadLine::error_line(path, err));
+        } else {
+            UploadLine::error(path, err);
+        }
+    }
+
+    /// Print the result of one run started on an uploaded file
+    ///
+    /// JSON output prints every run once the runs are followed, so only the table prints here.
+    ///
+    /// # Arguments
+    ///
+    /// * `path` - The path the file was uploaded from
+    /// * `sha256` - The sha256 of the file
+    /// * `target` - What was started
+    /// * `outcome` - What became of the run
+    pub fn run_line(self, path: &Path, sha256: &str, target: &Target, outcome: &Outcome) {
+        if self.json {
+            return;
+        }
+        let what = format!("{} {}", target.kind(), target.label());
+        match (outcome.id, &outcome.error) {
+            // a run that started
+            (Some(id), _) => {
+                if !self.quiet {
+                    println!(
+                        "{}",
+                        UploadLine::run_started(path, sha256, &id.to_string(), &what)
+                    );
+                }
+            }
+            // a run that did not
+            (None, error) => eprintln_or_print(
+                self.quiet,
+                &UploadLine::run_failed(path, sha256, &what, error.as_deref().unwrap_or("unknown")),
+            ),
+        }
+    }
+
+    /// Print a JSON line for a run that was started on an uploaded file
+    ///
+    /// # Arguments
+    ///
+    /// * `started` - What the run was
+    /// * `outcome` - What became of the run
+    pub fn run_json(started: &Started, outcome: &Outcome) {
+        // one object per run with the file it is on
+        println!(
+            "{}",
+            serde_json::json!({
+                "type": "run",
+                "path": started.path,
+                "sha256": started.sha256,
+                "kind": started.kind,
+                "target": started.target,
+                "id": outcome.id,
+                "group": outcome.group,
+                "status": outcome.status,
+                "error": outcome.error,
+            })
+        );
+    }
+}
+
+/// Print a line to stderr when quiet and to stdout otherwise
+///
+/// # Arguments
+///
+/// * `quiet` - Whether output is quiet
+/// * `line` - The line to print
+fn eprintln_or_print(quiet: bool, line: &str) {
+    // quiet output keeps stdout for results and puts failures on stderr
+    if quiet {
+        eprintln!("{line}");
+    } else {
+        println!("{line}");
+    }
+}
+
+/// Get the text of an error for a line of output
+///
+/// # Arguments
+///
+/// * `error` - The error to describe
+fn error_text(error: &Error) -> String {
+    // prefer the API's message and fall back to the whole error
+    let msg = error.msg().unwrap_or_else(|| error.to_string());
+    // the API answers with a JSON object holding the message
+    match serde_json::from_str::<serde_json::Value>(&msg) {
+        Ok(serde_json::Value::Object(body)) => match body.get("error") {
+            Some(serde_json::Value::String(text)) => text.clone(),
+            _ => msg,
+        },
+        _ => msg,
     }
 }
 
 /// Hashes a file and uploads it if it doesn't exist
 ///
+/// A file that is uploaded is handed to the starter so its runs start; a file that already exists
+/// is only reported.
+///
 /// # Arguments
 ///
 ///  * `thorium` - A Thorium client
 ///  * `cmd` - The upload files command to execute
-///  * `entry` - The file entry we are uploading
-///  * `reaction_reqs` - The requests for reactions to spawn on the file on upload
+///  * `printer` - How lines are printed
+///  * `path` - The file we are uploading
+///  * `runs_text` - The runs a dry run says would start on the file
+///  * `starter` - Where uploaded files are sent to start their runs
 async fn uploader(
     thorium: &Thorium,
     cmd: &UploadFiles,
+    printer: Printer,
     path: &Path,
-    reaction_reqs: Vec<ReactionRequest>,
+    runs_text: &str,
+    starter: Option<&mpsc::Sender<RunFile>>,
 ) -> Result<(), Error> {
     // get the sha256 for this file
     let sha256 = utils::sha256(path).await?;
@@ -162,45 +470,40 @@ async fn uploader(
         .files
         .exists(&cmd.build_check(path, &sha256))
         .await?;
-    // if this id does not already exist then upload it
-    if exists.id.is_none() {
-        // Build the sample request for this file
-        let sample_req = cmd.build_req(path);
-        if cmd.dry_run {
-            UploadLine::uploaded_dry_run(path, &sha256, &sample_req.tags);
-        } else {
-            // upload this file
-            let resp = thorium.files.create(sample_req).await;
-            // determine if we should print an error message or not
-            match resp {
-                Ok(resp) => {
-                    UploadLine::uploaded(path, &resp);
-                    // create reactions for the new file concurrently
-                    stream::iter(
-                        reaction_reqs
-                            .into_iter()
-                            .map(|req| req.sample(sha256.clone())),
-                    )
-                    .map(Ok)
-                    .try_for_each_concurrent(10, |req| async move {
-                        thorium.reactions.create(&req).await.map(|_| ())
-                    })
-                    .await?;
-                }
-                Err(err) => {
-                    // if this file was already uploaded then don't print an error
-                    if err.status() == Some(StatusCode::CONFLICT) {
-                        UploadLine::conflict(path, &sha256);
-                    } else {
-                        UploadLine::error(path, &err);
-                    }
-                }
-            }
-        }
-    } else {
-        UploadLine::conflict(path, &sha256);
+    // a file that already exists is only reported
+    if exists.id.is_some() {
+        printer.conflict(path, &sha256);
+        return Ok(());
     }
-    Ok(())
+    // Build the sample request for this file
+    let sample_req = cmd.build_req(path);
+    // a dry run says what would be uploaded and stops
+    if cmd.dry_run {
+        printer.dry_run(path, &sha256, &sample_req.tags, runs_text);
+        return Ok(());
+    }
+    // upload this file
+    match thorium.files.create(sample_req).await {
+        Ok(resp) => {
+            printer.uploaded(path, &resp);
+            // hand the new file to the starter so its runs start
+            if let Some(starter) = starter {
+                let file = RunFile {
+                    path: path.to_path_buf(),
+                    sha256,
+                };
+                // a starter that is gone has nothing left to start
+                let _ = starter.send(file).await;
+            }
+            Ok(())
+        }
+        // if this file was already uploaded then don't print an error
+        Err(err) if err.status() == Some(StatusCode::CONFLICT) => {
+            printer.conflict(path, &sha256);
+            Ok(())
+        }
+        Err(err) => Err(err),
+    }
 }
 
 /// Build base reaction requests from the given pipelines
@@ -229,13 +532,19 @@ pub async fn build_reaction_reqs(
                         )));
                     };
                     // make sure the pipeline exists before uploading anything
-                    thorium
+                    let found = thorium
                         .pipelines
                         .get(&group, &target.pipeline)
                         .await
                         .map_err(|err| {
                             Error::new(format!("Invalid pipeline '{pipeline}': {err}"))
                         })?;
+                    // a banned pipeline refuses every reaction and any bulk request holding one
+                    if !found.bans.is_empty() {
+                        return Err(Error::new(format!(
+                            "Pipeline '{pipeline}' is banned; see its notifications for details"
+                        )));
+                    }
                     // create a base reaction request
                     Ok(ReactionRequest::new(group, target.pipeline))
                 })
@@ -251,45 +560,106 @@ pub async fn build_reaction_reqs(
 
 /// Crawl a directory and upload files
 ///
+/// New files are uploaded up to `--workers` at a time, and the pipelines, workflows, and tools
+/// asked for are started on each of them as they arrive.
+///
 /// # Arguments
 ///
 /// * `thorium` - A Thorium client
 /// * `cmd` - The files or directories to crawl and upload
-async fn upload(thorium: &Thorium, cmd: &UploadFiles) -> Result<(), Error> {
-    // get reaction requests
-    let reaction_reqs = build_reaction_reqs(thorium, cmd).await?;
+/// * `args` - The arguments passed to Thorctl
+async fn upload(thorium: &Thorium, cmd: &UploadFiles, args: &Args) -> Result<(), Error> {
+    // the flags every run is followed with
+    let common = cmd.runs.common();
+    // find every pipeline, workflow, and tool before uploading anything
+    let targets = upload_runs::resolve(thorium, cmd, &common).await?;
     // build the set of regexs to determine which files to include or skip
     let filter = RegexSet::new(&cmd.filter)?;
     let skip = RegexSet::new(&cmd.skip)?;
-    // print the upload logs headers
-    if cmd.dry_run {
-        UploadLine::header_dry_run();
-    } else {
-        UploadLine::header();
+    let printer = Printer::new(cmd, args);
+    // name the batch the runs are tagged with when there is one
+    let batch = cmd.batch_name();
+    // say what a dry run would start on each new file
+    let runs_text = targets
+        .iter()
+        .map(|target| format!("{} {}", target.kind(), target.label()))
+        .collect::<Vec<String>>()
+        .join(", ");
+    // tell the user the batch name before anything starts
+    if let (Some(batch), false, false) = (&batch, cmd.dry_run, args.quiet) {
+        if printer.json {
+            eprintln!("Batch: {batch}");
+        } else {
+            println!("Batch: {batch}");
+        }
     }
+    // print the upload logs headers
+    printer.header(cmd.dry_run);
     // collect targets to upload from the command
-    let targets = cmd.targets.clone().into_targets().await?;
-    utils::fs::process_async_walk(
-        targets.into_iter(),
-        |target| {
-            // get a reference to the reaction requests that we can move into the async block
-            let reaction_reqs_ref = &reaction_reqs;
-            async move {
-                let reaction_reqs = reaction_reqs_ref.clone();
+    let paths = cmd.targets.clone().into_targets().await?;
+    // count the files and the failures for the exit code
+    let seen = AtomicUsize::new(0);
+    let failed = AtomicUsize::new(0);
+    // a dry run starts nothing, so only a real upload with targets needs a starter
+    let mut starter = (!cmd.dry_run && !targets.is_empty()).then(|| {
+        Starter::new(
+            thorium,
+            targets,
+            batch,
+            BatchOpts::from_args(args),
+            common,
+            printer,
+        )
+    });
+    let (sender, receiver) = mpsc::channel(starter.as_ref().map_or(1, Starter::files_per_chunk));
+    // upload the files, sending each new one on to start its runs
+    let has_starter = starter.is_some();
+    let walk = async {
+        let sender_ref = has_starter.then_some(&sender);
+        let (seen, failed, runs_text) = (&seen, &failed, runs_text.as_str());
+        utils::fs::process_async_walk(
+            paths.into_iter(),
+            |target| async move {
+                seen.fetch_add(1, Ordering::Relaxed);
                 // upload the entry if it's new
-                if let Err(err) = uploader(thorium, cmd, &target, reaction_reqs).await {
-                    UploadLine::error(&target, &err);
+                if let Err(err) =
+                    uploader(thorium, cmd, printer, &target, runs_text, sender_ref).await
+                {
+                    failed.fetch_add(1, Ordering::Relaxed);
+                    printer.error(&target, &err);
                 }
-            }
-        },
-        UploadLine::error,
-        &filter,
-        &skip,
-        cmd.include_hidden,
-        10,
-    )
-    .await;
-    Ok(())
+            },
+            |path, err| {
+                // a path that could not be read is a file that failed
+                seen.fetch_add(1, Ordering::Relaxed);
+                failed.fetch_add(1, Ordering::Relaxed);
+                printer.error(path, err);
+            },
+            &filter,
+            &skip,
+            cmd.include_hidden,
+            args.workers.max(1),
+        )
+        .await;
+        // no more files will arrive
+        drop(sender);
+    };
+    // start runs while uploads continue
+    match starter.as_mut() {
+        Some(starter) => {
+            tokio::join!(walk, starter.run(receiver));
+        }
+        None => walk.await,
+    }
+    let (seen, failed) = (seen.load(Ordering::Relaxed), failed.load(Ordering::Relaxed));
+    // follow the runs and report how the upload and its runs ended
+    match starter {
+        Some(starter) => starter.finish(failed, seen).await,
+        None if failed > 0 => Err(Error::new(format!(
+            "{failed} of {seen} files failed to upload"
+        ))),
+        None => Ok(()),
+    }
 }
 
 /// Download all requested files from Thorium
@@ -801,11 +1171,49 @@ pub async fn handle(args: &Args, cmd: &Files) -> Result<(), Error> {
     }
     // call the right files handler
     match cmd {
-        Files::Upload(cmd) => upload(&thorium, cmd).await,
+        Files::Upload(cmd) => upload(&thorium, cmd, args).await,
         Files::Download(cmd) => download(&thorium, cmd, args, &conf).await,
         Files::Get(cmd) => get(&thorium, cmd).await,
         Files::Count(cmd) => count(&thorium, cmd).await,
         Files::Describe(cmd) => describe(&thorium, cmd).await,
         Files::Delete(cmd) => delete(&thorium, cmd).await,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::path::Path;
+    use thorium::Error;
+
+    use super::{UploadLine, error_text};
+
+    /// The API's JSON error body is shown as its message and anything else as is
+    #[test]
+    fn error_text_unwraps_the_api_message() {
+        // a JSON error object shows its message
+        let body = Error::new(r#"{"error":"Unable to create reaction(s)! banned"}"#);
+        assert_eq!(error_text(&body), "Unable to create reaction(s)! banned");
+        // other JSON and plain text are left alone
+        let other = Error::new(r#"{"detail":"x"}"#);
+        assert_eq!(error_text(&other), r#"{"detail":"x"}"#);
+        assert_eq!(error_text(&Error::new("boom")), "boom");
+    }
+
+    /// A started run fills the submission column with its reaction and a failed one says why
+    #[test]
+    fn run_lines_use_the_upload_table_columns() {
+        let sha = "a".repeat(64);
+        let id = "6a3e2f9c-1b7d-4a58-9c0e-3d5f7a1b2c4d";
+        // a started run
+        let ok = UploadLine::run_started(Path::new("f.bin"), &sha, id, "workflow triage");
+        let cells: Vec<&str> = ok.split('|').map(str::trim).collect();
+        assert!(cells[0].ends_with("200"), "{ok}");
+        assert_eq!(&cells[1..], ["f.bin", sha.as_str(), id, "workflow triage"]);
+        // a run that did not start has no reaction and the error in the message
+        let bad = UploadLine::run_failed(Path::new("f.bin"), &sha, "tool scan", "no such tool");
+        let cells: Vec<&str> = bad.split('|').map(str::trim).collect();
+        assert!(cells[0].ends_with("ERR"), "{bad}");
+        assert_eq!(cells[3], "-");
+        assert_eq!(cells[4], "tool scan: no such tool");
     }
 }

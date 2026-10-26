@@ -1,0 +1,68 @@
+{
+  "name": "Broken v2 toolbox",
+  "source": "v2",
+  "counts": {
+    "tools": 3,
+    "tool_versions": 3,
+    "builds": 0,
+    "build_versions": 0,
+    "toolsets": 0,
+    "agents": 0,
+    "workflows": 0,
+    "pipelines": 1,
+    "pipeline_versions": 1,
+    "network_policies": 0,
+    "groups": 0
+  },
+  "valid": false,
+  "errors": 5,
+  "warnings": 1,
+  "issues": [
+    {
+      "severity": "error",
+      "code": "invalid_value:name",
+      "item": "tool bad name",
+      "message": "the name contains ' '"
+    },
+    {
+      "severity": "error",
+      "code": "missing_field:spec",
+      "item": "tool bad name@1",
+      "message": "has neither spec nor spec_from"
+    },
+    {
+      "severity": "error",
+      "code": "missing_field:stage_tools.*",
+      "item": "pipeline p@latest",
+      "message": "stage 'gamma' has no entry in stage_tools"
+    },
+    {
+      "severity": "error",
+      "code": "missing_ref:tool",
+      "item": "pipeline p@latest",
+      "message": "refers to 'alpha@9', but tool 'alpha' defines no version '9'"
+    },
+    {
+      "severity": "error",
+      "code": "cycle:tool",
+      "item": "tool alpha",
+      "message": "depends on itself through alpha -> beta -> alpha"
+    },
+    {
+      "severity": "warning",
+      "code": "warning:secret-env",
+      "item": "tool alpha@1",
+      "message": "environment variable API_TOKEN looks like a secret; spec env values are readable by group members"
+    }
+  ],
+  "converted": {
+    "converted_tools": 0,
+    "converted_builds": 0,
+    "converted_pipelines": 0,
+    "mappings": [],
+    "skipped": [],
+    "notes": [],
+    "warnings": [],
+    "collisions": []
+  }
+}

@@ -70,19 +70,6 @@ pub trait ImportKind {
         conf: &CtlConf,
         editor_override: Option<&str>,
     ) -> Result<MergeEdit<Self::Update>, Error>;
-    /// Whether the incoming request would change the existing resource
-    ///
-    /// Delegates to [`ImportKind::calculate_update`] so it can never disagree with
-    /// the update that would actually be applied.
-    ///
-    /// # Arguments
-    ///
-    /// * `existing` - The resource as it exists in Thorium
-    /// * `req` - The incoming request
-    fn changed(existing: &Self::Existing, req: &Self::Request) -> bool {
-        Self::calculate_update(existing.clone(), req.clone()).is_some()
-    }
-
     /// Record a creation in the rollback journal
     fn record_created(journal: &Journal, group: &str, name: &str);
     /// Snapshot the pre-update state in the rollback journal

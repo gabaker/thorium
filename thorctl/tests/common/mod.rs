@@ -2,14 +2,16 @@
 
 #![allow(dead_code)]
 
+pub mod editor;
+
 use std::path::PathBuf;
 use std::process::{Output, Stdio};
 use std::time::Duration;
 
 use thorium::client::{ClientSettings, Users};
 use thorium::models::{
-    GroupRequest, GroupUsersRequest, ImageScaler, Pipeline, Pools, Reaction, Resources, UserCreate,
-    UserRole, WorkerRegistrationList,
+    GroupRequest, GroupUsersRequest, ImageScaler, Pipeline, PipelineRequest, Pools, Reaction,
+    Resources, UserCreate, UserRole, WorkerRegistrationList,
 };
 use thorium::test_utilities::evidence::EvidenceRecorder;
 use thorium::test_utilities::{self, generators};
@@ -42,6 +44,27 @@ pub struct TestUser {
 /// * `prefix` - The prefix of the name
 pub fn unique(prefix: &str) -> String {
     format!("{prefix}{}", Uuid::new_v4().simple())
+}
+
+/// Create a random pipeline whose name thorctl can take as an argument
+///
+/// Generated names may start with `-`, which thorctl reads as a flag (`-o<rest>` is `--format
+/// <rest>`), so such a pipeline is passed over and another one is generated.
+///
+/// # Arguments
+///
+/// * `group` - The group to create the pipeline in
+/// * `client` - The client to create the pipeline with
+pub async fn cli_pipeline(group: &str, client: &Thorium) -> Result<PipelineRequest, Error> {
+    loop {
+        // generate a pipeline and keep it unless its name reads as a flag
+        let req = generators::pipelines(group, 1, false, client)
+            .await?
+            .remove(0);
+        if !req.name.starts_with('-') {
+            return Ok(req);
+        }
+    }
 }
 
 impl TestUser {
@@ -210,9 +233,7 @@ impl TestUser {
     /// Create a pipeline and one reaction for it in our group
     pub async fn reaction(&self) -> Result<(Pipeline, Reaction), Error> {
         // create a random pipeline as our user
-        let pipe_req = generators::pipelines(&self.group, 1, false, &self.client)
-            .await?
-            .remove(0);
+        let pipe_req = cli_pipeline(&self.group, &self.client).await?;
         let pipe = self
             .client
             .pipelines

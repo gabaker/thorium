@@ -21,7 +21,11 @@ async fn add_ban(thorium: Thorium, cmd: &CreateImageBan) -> Result<(), Error> {
     let update = ImageUpdate::default().bans(ImageBanUpdate::default().add_ban(ban));
     // send the update
     err_not_admin!(
-        thorium.images.update(&cmd.group, &cmd.image, &update).await,
+        thorium
+            .images
+            .update(&cmd.group, &cmd.image, &update)
+            .await
+            .map_err(super::point_refused_write_at_tools),
         "ban images"
     );
     Ok(())
@@ -38,7 +42,11 @@ async fn remove_ban(thorium: Thorium, cmd: &DeleteImageBan) -> Result<(), Error>
     let update = ImageUpdate::default().bans(ImageBanUpdate::default().remove_ban(cmd.id));
     // send the update
     err_not_admin!(
-        thorium.images.update(&cmd.group, &cmd.image, &update).await,
+        thorium
+            .images
+            .update(&cmd.group, &cmd.image, &update)
+            .await
+            .map_err(super::point_refused_write_at_tools),
         "remove image bans"
     );
     Ok(())

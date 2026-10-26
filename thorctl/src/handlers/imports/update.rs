@@ -197,11 +197,28 @@ fn pipeline_update_from_view(
     }
     // diff triggers into the set-to-apply and the keys to remove
     let (remove_triggers, triggers) = calc_remove_add_map!(current_triggers, resolved.triggers);
+    // diff the stage tools: set the ones that differ for stages in the order and drop the
+    // ones the view no longer has
+    let add_stage_tools = resolved
+        .stage_tools
+        .iter()
+        .filter(|(stage, _)| resolved.order.iter().flatten().any(|name| name == *stage))
+        .filter(|(stage, tool)| current.stage_tools.get(*stage) != Some(*tool))
+        .map(|(stage, tool)| (stage.clone(), *tool))
+        .collect();
+    let remove_stage_tools = current
+        .stage_tools
+        .keys()
+        .filter(|stage| !resolved.stage_tools.contains_key(*stage))
+        .cloned()
+        .collect();
     // only send a new order when the stages actually differ
     let order = (current.order != resolved.order).then(|| serde_json::Value::from(resolved.order));
     // build the update from the diffs computed above
     let update = PipelineUpdate {
         order,
+        add_stage_tools,
+        remove_stage_tools,
         sla: set_modified!(current.sla, resolved.sla),
         triggers,
         remove_triggers,
@@ -209,8 +226,6 @@ fn pipeline_update_from_view(
         description: set_modified_opt!(current.description, resolved.description),
         // bans are managed via the dedicated pipeline bans subcommands, not imports
         bans: PipelineBanUpdate::default(),
-        // stage tools are set with the pipelines stage-tool command, not imports
-        ..PipelineUpdate::default()
     };
     // an update that changes nothing is not a change
     (!is_noop(&update)).then_some(update)
@@ -306,6 +321,7 @@ mod tests {
     use super::*;
     use std::collections::HashMap;
     use thorium::models::{EventTrigger, SecurityContext};
+    use uuid::Uuid;
 
     /// Build a stored image exactly as the server would create it from a request
     ///
@@ -509,5 +525,84 @@ mod tests {
         assert!(serde_norway::from_str::<MergeablePipeline>(yaml).is_err());
         let valid = "order: [[a]]\nsla: 10\ntriggers:\n  t: NewSample\ndescription: null\n";
         assert!(serde_norway::from_str::<MergeablePipeline>(valid).is_ok());
+    }
+
+    /// Build a stored pipeline whose stages each run their own tool
+    ///
+    /// # Arguments
+    ///
+    /// * `order` - The stored stage order
+    /// * `tools` - The stage tools by stage
+    fn stored_with_tools(order: &[&[&str]], tools: &[(&str, Uuid)]) -> Pipeline {
+        let mut pipeline = stored_pipeline(order, 3600);
+        pipeline.stage_tools = tools
+            .iter()
+            .map(|(stage, tool)| ((*stage).to_string(), *tool))
+            .collect();
+        pipeline
+    }
+
+    /// A stage whose tool differs is set, and an unchanged stage is left alone
+    #[test]
+    fn stage_tool_changes_are_detected() {
+        let (old, new) = (Uuid::new_v4(), Uuid::new_v4());
+        let existing = stored_with_tools(&[&["a"], &["b"]], &[("a", old), ("b", old)]);
+        let req = PipelineRequest::new("g", "p", serde_json::json!([["a"], ["b"]]))
+            .stage_tool("a", old)
+            .stage_tool("b", new);
+        let update = calculate_pipeline_update(existing, req).expect("stage tool change");
+        assert_eq!(update.add_stage_tools.len(), 1);
+        assert_eq!(update.add_stage_tools.get("b"), Some(&new));
+        assert_eq!(update.remove_stage_tools, Vec::<String>::new());
+        assert!(update.order.is_none());
+    }
+
+    /// A request that names no stage tools keeps the stored ones instead of removing them
+    #[test]
+    fn omitted_stage_tools_keep_existing_tools() {
+        let tool = Uuid::new_v4();
+        let existing = stored_with_tools(&[&["a"]], &[("a", tool)]);
+        let req = PipelineRequest::new("g", "p", serde_json::json!([["a"]]));
+        assert!(calculate_pipeline_update(existing.clone(), req).is_none());
+        // an unrelated change never removes them either
+        let req = PipelineRequest::new("g", "p", serde_json::json!([["a"]])).sla(10);
+        let update = calculate_pipeline_update(existing, req).expect("sla change");
+        assert_eq!(update.remove_stage_tools, Vec::<String>::new());
+        assert!(update.add_stage_tools.is_empty());
+    }
+
+    /// A new stage is sent with its tool, and a dropped stage's tool is removed with it
+    #[test]
+    fn stage_tools_follow_the_order() {
+        let (old, new) = (Uuid::new_v4(), Uuid::new_v4());
+        let existing = stored_with_tools(&[&["a"], &["b"]], &[("a", old), ("b", old)]);
+        let req =
+            PipelineRequest::new("g", "p", serde_json::json!([["a"], ["c"]])).stage_tool("c", new);
+        let update = calculate_pipeline_update(existing, req).expect("order change");
+        assert_eq!(update.add_stage_tools.get("c"), Some(&new));
+        assert_eq!(update.remove_stage_tools, ["b".to_string()]);
+        assert_eq!(update.order, Some(serde_json::json!([["a"], ["c"]])));
+    }
+
+    /// A tool for a stage that is not in the order is never sent
+    #[test]
+    fn stage_tools_outside_the_order_are_not_sent() {
+        let tool = Uuid::new_v4();
+        let existing = stored_with_tools(&[&["a"]], &[("a", tool)]);
+        let mut view = MergeablePipeline::from(existing.clone());
+        view.stage_tools.insert("ghost".to_string(), Uuid::new_v4());
+        view.sla = 10;
+        let update = calculate_pipeline_update_from_mergeable(existing, view)
+            .unwrap()
+            .expect("sla change");
+        assert!(update.add_stage_tools.is_empty());
+    }
+
+    /// An editor result may leave out `stage_tools`, which then holds none
+    #[test]
+    fn stage_tools_are_optional_in_the_merge_view() {
+        let yaml = "order: [[a]]\nsla: 10\ndescription: null\n";
+        let view = serde_norway::from_str::<MergeablePipeline>(yaml).unwrap();
+        assert!(view.stage_tools.is_empty());
     }
 }

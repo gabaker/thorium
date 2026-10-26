@@ -1,6 +1,6 @@
+use crate::utils::paint::Paint;
 use futures::stream::{self, StreamExt};
 use http::StatusCode;
-use owo_colors::OwoColorize;
 use regex::RegexSet;
 use serde::Serialize;
 use std::collections::{BTreeMap, HashSet};
@@ -171,7 +171,7 @@ async fn get_results(
             // write just the first output off to disk (the most recent)
             if let Some(recent_output) = output.into_iter().next() {
                 // append our tools name to our root path
-                root.push(&tool);
+                root.push(utils::fs::path_component(&tool));
                 // create a folder to store this tools results
                 create_dir_all(&root).await?;
                 // only get result files if we're not set to get results only

@@ -3,7 +3,7 @@
 use clap::Parser;
 use std::path::PathBuf;
 
-use super::helpers::{ShortFormatArgs, WaitForArgs, WatchArgs};
+use super::helpers::{EditArgs, FormatArgs, ShortFormatArgs, WaitForArgs, WatchArgs};
 
 /// The commands to send to the models task handler
 #[derive(Parser, Debug)]
@@ -100,6 +100,32 @@ pub struct CreateArgs {
     pub description: Option<String>,
 }
 
+/// A command to edit a model entity as a document
+///
+/// Without `--file`, `--patch`, `--set` or `--unset` the document opens in your editor; with any
+/// of them the change is applied without opening one.
+#[derive(Parser, Debug)]
+pub struct EditModel {
+    /// The entity to edit, by ID or name
+    pub entity: String,
+    /// How to change the document, and what to do with the change
+    #[clap(flatten)]
+    pub edit: EditArgs,
+}
+
+/// A command to print the document `edit` shows for a model entity
+#[derive(Parser, Debug)]
+pub struct SpecModel {
+    /// The entity to print, by ID or name
+    pub entity: String,
+    /// Write the document to this file instead of printing it
+    #[clap(short, long)]
+    pub output: Option<PathBuf>,
+    /// The format of the document: yaml by default, or json
+    #[clap(flatten)]
+    pub format: FormatArgs,
+}
+
 /// A command to delete a model entity
 #[derive(Parser, Debug)]
 pub struct DeleteModel {
@@ -119,9 +145,16 @@ pub enum Endpoints {
     /// Create a model endpoint from a YAML or JSON spec (owners and managers only)
     #[clap(version, author)]
     Create(CreateArgs),
-    /// Update a model endpoint (owners and managers only)
+    /// Update a model endpoint with flags, or from --file, --patch, --set and --unset (owners and
+    /// managers only)
     #[clap(version, author)]
     Update(UpdateEndpoint),
+    /// Edit a model endpoint's document in your editor (owners and managers only)
+    #[clap(version, author)]
+    Edit(EditModel),
+    /// Print the document `edit` shows for a model endpoint (credentials appear by name only)
+    #[clap(version, author)]
+    Spec(SpecModel),
     /// Delete a model endpoint (owners and managers only)
     #[clap(version, author)]
     Delete(DeleteModel),
@@ -156,6 +189,24 @@ pub struct UpdateEndpoint {
     /// A new description
     #[clap(short, long)]
     pub description: Option<String>,
+    /// Change the endpoint's document instead (cannot be combined with the flags above)
+    #[clap(flatten)]
+    pub edit: EditArgs,
+}
+
+impl UpdateEndpoint {
+    /// Whether any of the flags that change one setting each was given
+    #[must_use]
+    pub fn has_flag_changes(&self) -> bool {
+        self.provider.is_some()
+            || self.credential.is_some()
+            || self.clear_credential
+            || self.add_models.is_some()
+            || !self.remove_model.is_empty()
+            || !self.disable_model.is_empty()
+            || !self.enable_model.is_empty()
+            || self.description.is_some()
+    }
 }
 
 /// The catalog commands
@@ -203,9 +254,15 @@ pub enum Profiles {
     /// Create a model profile from a YAML or JSON spec
     #[clap(version, author)]
     Create(CreateArgs),
-    /// Update a model profile
+    /// Update a model profile with flags, or from --file, --patch, --set and --unset
     #[clap(version, author)]
     Update(UpdateProfile),
+    /// Edit a model profile's document in your editor
+    #[clap(version, author)]
+    Edit(EditModel),
+    /// Print the document `edit` shows for a model profile
+    #[clap(version, author)]
+    Spec(SpecModel),
     /// Delete a model profile
     #[clap(version, author)]
     Delete(DeleteModel),
@@ -240,6 +297,24 @@ pub struct UpdateProfile {
     /// Use the catalog entry's capabilities again
     #[clap(long)]
     pub clear_capabilities: bool,
+    /// Change the profile's document instead (cannot be combined with the flags above)
+    #[clap(flatten)]
+    pub edit: EditArgs,
+}
+
+impl UpdateProfile {
+    /// Whether any of the flags that change one setting each was given
+    #[must_use]
+    pub fn has_flag_changes(&self) -> bool {
+        self.endpoint.is_some()
+            || self.model_id.is_some()
+            || self.api.is_some()
+            || self.parameters.is_some()
+            || self.limits.is_some()
+            || self.clear_limits
+            || self.capabilities.is_some()
+            || self.clear_capabilities
+    }
 }
 
 /// The model credential commands
@@ -474,6 +549,7 @@ mod tests {
 
     use super::{Bans, Credentials, Endpoints, Models, Profiles, Settings};
     use crate::args::{Args, SubCommands};
+    use crate::utils::output::OutputFormat;
 
     /// Parse thorctl arguments into a models command
     ///
@@ -667,5 +743,125 @@ mod tests {
             parse(&["settings", "get"]),
             Models::Settings(Settings::Get(_))
         ));
+    }
+
+    /// `endpoints edit` takes the shared edit flags in the order they were typed
+    #[test]
+    fn endpoint_edit_args() {
+        // every shared flag parses
+        let Models::Endpoints(Endpoints::Edit(cmd)) = parse(&[
+            "endpoint",
+            "edit",
+            "corn",
+            "--editor",
+            "vim -n",
+            "--set",
+            "catalog[0].context_window=5",
+            "--unset",
+            "credential",
+            "--set",
+            "name=cob",
+            "--patch",
+            "{\"description\":null}",
+            "--file",
+            "-",
+            "--dry-run",
+            "--yes",
+            "--force",
+            "-o",
+            "json",
+        ]) else {
+            panic!("expected endpoints edit");
+        };
+        assert_eq!(cmd.entity, "corn");
+        assert_eq!(cmd.edit.editor.as_deref(), Some("vim -n"));
+        assert_eq!(cmd.edit.ops.len(), 3);
+        assert_eq!(cmd.edit.patch, vec!["{\"description\":null}"]);
+        assert_eq!(cmd.edit.file.as_deref(), Some("-"));
+        assert!(cmd.edit.dry_run && cmd.edit.skip_confirm && cmd.edit.force);
+        assert_eq!(cmd.edit.format, Some(OutputFormat::Json));
+        // with no edit flags the command opens an editor
+        let Models::Endpoints(Endpoints::Edit(cmd)) = parse(&["endpoints", "edit", "corn"]) else {
+            panic!("expected endpoints edit");
+        };
+        assert!(!cmd.edit.has_changes());
+        // an edit needs a target
+        let missing = ["thorctl", "models", "endpoints", "edit"];
+        assert!(Args::try_parse_from(missing).is_err());
+    }
+
+    /// `profiles edit` and both `spec` commands parse their targets and output flags
+    #[test]
+    fn profile_edit_and_spec_args() {
+        // profiles edit shares the edit flags
+        let Models::Profiles(Profiles::Edit(cmd)) =
+            parse(&["profile", "edit", "fast", "--set", "model_id=m"])
+        else {
+            panic!("expected profiles edit");
+        };
+        assert_eq!(cmd.entity, "fast");
+        assert!(cmd.edit.has_changes());
+        // spec prints to stdout, or to a file, as yaml or json
+        let Models::Profiles(Profiles::Spec(cmd)) = parse(&["profiles", "spec", "fast"]) else {
+            panic!("expected profiles spec");
+        };
+        assert_eq!(cmd.entity, "fast");
+        assert!(cmd.output.is_none() && cmd.format.format.is_none());
+        let Models::Endpoints(Endpoints::Spec(cmd)) = parse(&[
+            "endpoints",
+            "spec",
+            "corn",
+            "-o",
+            "corn.json",
+            "--format",
+            "json",
+        ]) else {
+            panic!("expected endpoints spec");
+        };
+        assert_eq!(cmd.output.unwrap().to_string_lossy(), "corn.json");
+        assert_eq!(cmd.format.format, Some(OutputFormat::Json));
+    }
+
+    /// `update` keeps its flags and gains the shared edit flags
+    #[test]
+    fn update_takes_flags_and_edit_flags() {
+        // the flags that change one setting each still parse and are noticed
+        let Models::Endpoints(Endpoints::Update(cmd)) =
+            parse(&["endpoints", "update", "corn", "--disable-model", "a"])
+        else {
+            panic!("expected endpoints update");
+        };
+        assert!(cmd.has_flag_changes());
+        assert!(!cmd.edit.has_changes());
+        // the edit flags parse beside them and are not counted as one of those flags
+        let Models::Endpoints(Endpoints::Update(cmd)) = parse(&[
+            "endpoints",
+            "update",
+            "corn",
+            "--set",
+            "name=x",
+            "--patch",
+            "{}",
+            "--dry-run",
+        ]) else {
+            panic!("expected endpoints update");
+        };
+        assert!(!cmd.has_flag_changes());
+        assert!(cmd.edit.has_changes() && cmd.edit.dry_run);
+        // the same holds for profiles
+        let Models::Profiles(Profiles::Update(cmd)) =
+            parse(&["profiles", "update", "fast", "--clear-limits"])
+        else {
+            panic!("expected profiles update");
+        };
+        assert!(cmd.has_flag_changes() && !cmd.edit.has_changes());
+        let Models::Profiles(Profiles::Update(cmd)) = parse(&[
+            "profiles", "update", "fast", "--file", "p.yaml", "-o", "yaml",
+        ]) else {
+            panic!("expected profiles update");
+        };
+        assert!(!cmd.has_flag_changes());
+        assert_eq!(cmd.edit.file.as_deref(), Some("p.yaml"));
+        assert_eq!(cmd.edit.format, Some(OutputFormat::Yaml));
     }
 }

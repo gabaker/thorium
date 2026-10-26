@@ -15,7 +15,7 @@
 
 use colored::Colorize;
 use serde::{Deserialize, Serialize};
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use thorium::models::{
     ChildFilters, Cleanup, Dependencies, EventTrigger, Image, ImageArgs, ImageBan, ImageLifetime,
     ImageRequest, ImageScaler, ImageUpdate, Kvm, OutputCollection, OutputDisplayType, Pipeline,
@@ -68,8 +68,15 @@ pub const IMAGE_FIELD_ORDER: &[&str] = &[
 /// form: the fields in `ui/src/components/pages/pipelines/Fields.tsx` (name, group,
 /// description, SLA), then the order, then the triggers. `name`/`group` are absent from
 /// the edit view, where they are simply skipped.
-pub const PIPELINE_FIELD_ORDER: &[&str] =
-    &["name", "group", "description", "sla", "order", "triggers"];
+pub const PIPELINE_FIELD_ORDER: &[&str] = &[
+    "name",
+    "group",
+    "description",
+    "sla",
+    "order",
+    "triggers",
+    "stage_tools",
+];
 
 // ─── Mergeable Structs ───────────────────────────────────────────────────────
 
@@ -232,15 +239,6 @@ impl MergeableImage {
             .files
             .entities
             .clone_from(&current.output_collection.files.entities);
-    }
-
-    /// Clear the identity and server-managed fields, leaving only editable ones
-    pub(crate) fn strip_non_editable(&mut self) {
-        self.group = None;
-        self.name = None;
-        self.creator = None;
-        self.runtime = None;
-        self.bans = None;
     }
 
     /// Serialize the view with object keys and set-valued arrays in canonical order
@@ -438,6 +436,10 @@ pub struct MergeablePipeline {
     pub triggers: HashMap<String, EventTrigger>,
     /// The pipeline's description (normalized via [`normalize_description`])
     pub description: Option<String>,
+    /// The tools backing each stage by stage name (a tool id follows its latest version and a
+    /// tool instance id is pinned)
+    #[serde(default)]
+    pub stage_tools: BTreeMap<String, Uuid>,
 }
 
 impl MergeablePipeline {
@@ -471,6 +473,7 @@ impl From<Pipeline> for MergeablePipeline {
             sla: pipeline.sla,
             triggers: pipeline.triggers,
             description: pipeline.description,
+            stage_tools: pipeline.stage_tools,
         };
         // trim the description into the comparison form
         view.normalize();
@@ -504,6 +507,7 @@ impl From<PipelineRequest> for MergeablePipeline {
             sla: req.sla.unwrap_or(thorium::models::DEFAULT_PIPELINE_SLA),
             triggers: req.triggers,
             description: req.description,
+            stage_tools: req.stage_tools,
         };
         // trim the description into the comparison form
         view.normalize();
@@ -515,7 +519,10 @@ impl From<PipelineRequest> for MergeablePipeline {
 ///
 /// An omitted `sla` keeps the existing pipeline's SLA rather than resetting it to a
 /// default, matching how [`incoming_image_view`] treats fields the server fills in
-/// on create. Every other field means exactly what the request says.
+/// on create. Stages the request names no tool for keep their existing tool (a stage
+/// can't lose its tool while it stays in the order), and the tools of stages the
+/// request drops from the order are left to the server to remove. Every other field
+/// means exactly what the request says.
 ///
 /// # Arguments
 ///
@@ -529,7 +536,15 @@ pub(crate) fn incoming_pipeline_view(
     if req.sla.is_none() {
         req.sla = Some(existing.sla);
     }
-    MergeablePipeline::from(req)
+    // stages the request names no tool for keep their existing one
+    for (stage, tool) in &existing.stage_tools {
+        req.stage_tools.entry(stage.clone()).or_insert(*tool);
+    }
+    // only stages that stay in the order have a tool
+    let mut view = MergeablePipeline::from(req);
+    let staying: HashSet<&String> = view.order.iter().flatten().collect();
+    view.stage_tools.retain(|stage, _| staying.contains(stage));
+    view
 }
 
 // ─── Per-Resource Prompt ─────────────────────────────────────────────────────

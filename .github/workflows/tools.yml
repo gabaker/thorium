@@ -9,14 +9,73 @@ on:
       - main
   # rebuilds the tool images on demand; runs started from any other branch build nothing
   workflow_dispatch:
+  # checks that the converted toolbox is current when the toolbox or its sources change; a pull
+  # request run builds and pushes nothing
+  pull_request:
+    paths:
+      - 'tools/toolbox.json'
+      - 'tools/toolbox.v2.json'
+      - 'tools/config.toml'
+      - 'tools/images/**'
+      - 'tools/pipelines/**'
+      - 'tools/scripts/**'
+      - '.github/workflows/tools.yml'
 
+# image builds share one group so only one runs at a time; pull request checks use a group of
+# their own so they never displace a pending image build
 concurrency:
-  group: tool-build-group
+  group: ${{ github.event_name == 'pull_request' && format('tool-check-{0}', github.ref) || 'tool-build-group' }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 # jobs start with no token permissions and are granted only what they use
 permissions: {}
 
 jobs:
+  # the legacy tools/toolbox.json is what the images are built from, and tools/toolbox.v2.json is
+  # its conversion for thorctl; this fails when the two drift apart
+  check-toolbox:
+    name: Check the converted toolbox
+    # the nightly schedule only rebuilds images
+    if: github.event_name != 'schedule'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    permissions:
+      contents: read
+    env:
+      # enable the features required by gxhash explicitly
+      RUSTFLAGS: "-C target-feature=+aes,+sse2"
+      CARGO_INCREMENTAL: "0"
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      # the matrix script must read both toolbox formats and give the same matrix
+      - name: Test the build matrix script
+        run: python3 -m unittest discover -s tools/scripts -p 'test_*.py'
+
+      - name: Install system packages
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends libssl-dev pkg-config
+
+      - name: Install nightly toolchain
+        run: rustup toolchain install nightly --profile minimal
+
+      # converting is offline, so no instance or login is needed; --check writes nothing and exits
+      # 1 with a diff when tools/toolbox.v2.json is not what the conversion produces
+      - name: Check tools/toolbox.v2.json is current
+        run: >
+          cargo +nightly run --locked -p thorctl --
+          toolbox convert tools/toolbox.json --check -o tools/toolbox.v2.json
+
+      # rebuilding a copy of tools/ must give tools/toolbox.json back, and rewriting its manifests
+      # to tools and building again must give tools/toolbox.v2.json
+      - name: Check the toolboxes are reproducible from tools/
+        run: >
+          cargo +nightly test --locked -p thorctl --test toolbox_build
+          real_tools_reproduce_the_committed_toolboxes
+
   generate-tool-builds:
     name: Generate Tool Build Matrix
     # tool images are pushed to their published tags, so they are only built from main

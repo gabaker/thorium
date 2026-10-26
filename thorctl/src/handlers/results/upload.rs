@@ -1,6 +1,6 @@
+use crate::utils::paint::Paint;
 use futures::TryStreamExt;
 use http::StatusCode;
-use owo_colors::OwoColorize;
 use std::ffi::OsStr;
 use std::fmt::Display;
 use std::path::{Path, PathBuf};

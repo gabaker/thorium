@@ -452,7 +452,10 @@ pub struct ImportImages {
     ///
     /// Each skipped image logs a warning listing the fields that differ,
     /// making this safe for non-interactive imports that must never
-    /// overwrite local changes.
+    /// overwrite local changes. A summary line says how many were skipped.
+    ///
+    /// Without a terminal, an import that finds differing resources refuses (exit 1)
+    /// unless this or --overwrite is given.
     #[clap(long)]
     pub skip_conflicts: bool,
     /// Automatically roll back applied changes if the import stops early
@@ -489,6 +492,9 @@ pub struct ExportImages {
     pub overwrite: bool,
     /// Skip on-disk conflicts: write new configs and leave differing existing ones
     /// untouched with a warning (use --overwrite to overwrite instead)
+    ///
+    /// Without a terminal, differing configs end the export in an error unless this or
+    /// --overwrite is given; with this flag a summary line says how many were skipped.
     #[clap(long)]
     pub skip_conflicts: bool,
     /// Open each config in an editor to review/tweak it before writing (requires a terminal)

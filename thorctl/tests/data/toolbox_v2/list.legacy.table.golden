@@ -1,0 +1,5 @@
+ KIND     | NAME      | GROUPS | VERSIONS 
+----------+-----------+--------+----------
+ tool     | clamav    | static | latest   
+ pipeline | antivirus | static | latest   
+ build    | base      |        | 1        

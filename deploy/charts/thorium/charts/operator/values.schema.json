@@ -594,6 +594,12 @@
         "groupOverride": {
           "type": "string"
         },
+        "createGroups": {
+          "type": "boolean"
+        },
+        "strict": {
+          "type": "boolean"
+        },
         "groups": {
           "type": "array",
           "items": {

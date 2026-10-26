@@ -4,10 +4,13 @@
 
 use clap::Parser;
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 use thorium::Error;
 use thorium::models::{OriginRequest, SampleCheck, SampleRequest};
 use uuid::Uuid;
 
+use super::helpers::{ShortFormatArgs, WaitForArgs, WatchArgs, parse_duration, parse_interval};
+use super::runs::{RunCommonArgs, RunInputArgs};
 use super::traits::describe::{DescribeCommand, DescribeSealed};
 use super::traits::search::{SearchParameterized, SearchParams, SearchSealed};
 
@@ -23,39 +26,43 @@ Upload some files and/or directories to Thorium
 
 Examples:
   # Upload a single file to a group
-  thorctl files upload -G example-group ./hello.txt
+  thorctl files upload -g example-group ./hello.txt
 
   # Upload several files and a directory in one command
-  thorctl files upload -G example-group ./hello.txt /bin/ls ~/Documents
+  thorctl files upload -g example-group ./hello.txt /bin/ls ~/Documents
 
   # Upload to multiple groups
-  thorctl files upload -G group1,group2,group3 ./my-folder
+  thorctl files upload -g group1,group2,group3 ./my-folder
 
   # Upload with tags (each tag requires its own flag)
-  thorctl files upload -G example-group -T Dataset=Examples -T Corn=good ./my-file.exe
+  thorctl files upload -g example-group -T Dataset=Examples -T Corn=good ./my-file.exe
 
   # Upload only files matching a regex
-  thorctl files upload -G example-group --filter \\.exe$ ./my-folder
+  thorctl files upload -g example-group --filter \\.exe$ ./my-folder
 
   # Upload everything except files matching a regex
-  thorctl files upload -G example-group --skip ^temp-.* ./my-folder
+  thorctl files upload -g example-group --skip ^temp-.* ./my-folder
 
   # Combine multiple filters and skips
-  thorctl files upload -G example-group \
+  thorctl files upload -g example-group \
     --filter \\.exe$ \
     --skip evil \
     --skip ^temp-.* \
     ./my-folder
 
   # Include hidden files and directories
-  thorctl files upload -G example-group --include-hidden ./my-folder
+  thorctl files upload -g example-group --include-hidden ./my-folder
 
   # Use folder hierarchy as tag values associated with given keys (keys delimited by '/')
   # (see `--folder-tags` documentation below for more usage details)
-  thorctl files upload -G example-group --folder-tags alpha/beta/gamma ./my-folder
+  thorctl files upload -g example-group --folder-tags alpha/beta/gamma ./my-folder
 
   # Adjust the number of parallel uploads (workers)
-  thorctl --workers 20 files upload -G example-group ./big-dir
+  thorctl --workers 20 files upload -g example-group ./big-dir
+
+  # Start a pipeline, a workflow, and a tool on every new file and wait for the runs
+  thorctl files upload -g example-group -p example-group/scan --workflows triage \
+    --tools example-group/strings --wait ./my-folder
 "#
     )]
     Upload(UploadFiles),
@@ -115,9 +122,99 @@ impl UploadFilesTargets {
     }
 }
 
+/// What to start on each file an upload creates and how to follow what was started
+///
+/// Runs start only for files that are new: a file that already exists is reported and left alone.
+#[derive(clap::Args, Debug, Clone)]
+pub struct UploadRunArgs {
+    /// Any workflows to run on each file that is uploaded; a workflow is its name (its latest
+    /// instance), `<WORKFLOW>#r<REVISION>`, or an instance ID, optionally after the group to run
+    /// in and a "/" (i.e. `<GROUP>/<WORKFLOW>`)
+    #[clap(long, value_delimiter = ',', value_name = "[GROUP/]WORKFLOW[#rN]")]
+    pub workflows: Option<Vec<String>>,
+    /// Any tools to run on each file that is uploaded; a tool is its name (its latest version),
+    /// `<TOOL>@<VERSION>`, or an instance ID, optionally after the group to run in and a "/"
+    /// (i.e. `<GROUP>/<TOOL>`)
+    #[clap(long, value_delimiter = ',', value_name = "[GROUP/]TOOL[@VERSION]")]
+    pub tools: Option<Vec<String>>,
+    /// Tag every run started with this name so the runs can be listed, followed, and cancelled
+    /// together (`runs get --batch`, `runs cancel --batch`); generated when omitted and the runs
+    /// are followed or include a workflow or tool
+    #[clap(long, value_name = "NAME")]
+    pub batch: Option<String>,
+    /// Block until every run started is Completed or Failed
+    ///
+    /// Exits 0 only when every file was uploaded or already existed and every run Completed, 1
+    /// when any upload or run failed, and 3 when some runs had not finished before `--timeout`.
+    #[clap(long, requires = "starts", conflicts_with = "watch")]
+    pub wait: bool,
+    /// Follow the runs started until they finish with no timeout (exits like `--wait`)
+    #[clap(long, requires = "starts")]
+    pub watch: bool,
+    /// How long `--wait` follows the runs before giving up (e.g. 30s, 10m, 1h)
+    #[clap(long, default_value = "10m", value_parser = parse_duration, requires = "wait", conflicts_with = "watch")]
+    pub timeout: Duration,
+    /// How long to wait between reads of the runs with `--wait` or `--watch` (e.g. 500ms, 2s, 1m)
+    #[clap(long, default_value = "2s", value_parser = parse_interval)]
+    pub interval: Duration,
+    /// The format to print results in: human (a table) or json (one line per file and one per run)
+    #[clap(flatten)]
+    pub format: ShortFormatArgs,
+}
+
+impl UploadRunArgs {
+    /// Build the run flags the runs of an upload are followed with
+    #[must_use]
+    pub fn common(&self) -> RunCommonArgs {
+        // an upload follows runs with the same code a batch run does, using these flags
+        RunCommonArgs {
+            group: None,
+            inputs: RunInputArgs::default(),
+            tag: Vec::new(),
+            sla: None,
+            wait: self.wait,
+            wait_for: WaitForArgs {
+                wait_for: None,
+                timeout: self.timeout,
+            },
+            watch: WatchArgs {
+                watch: self.watch,
+                interval: self.interval,
+            },
+            output: None,
+            logs: false,
+            format: self.format.clone(),
+            one_per_input: false,
+            batch: self.batch.clone(),
+            dry_run: false,
+        }
+    }
+}
+
+impl Default for UploadRunArgs {
+    /// Build the flags of a command line that asks for nothing to run
+    fn default() -> Self {
+        UploadRunArgs {
+            workflows: None,
+            tools: None,
+            batch: None,
+            wait: false,
+            watch: false,
+            timeout: Duration::from_secs(600),
+            interval: Duration::from_secs(2),
+            format: ShortFormatArgs::default(),
+        }
+    }
+}
+
 /// A command to upload some files to Thorium
 #[derive(Parser, Debug)]
 #[cfg_attr(test, derive(Default))]
+#[clap(group(
+    clap::ArgGroup::new("starts")
+        .multiple(true)
+        .args(["pipelines", "workflows", "tools"])
+))]
 pub struct UploadFiles {
     /// The targets to upload, whether explicit paths, paths in a file, or both
     /// but at least one
@@ -144,6 +241,9 @@ pub struct UploadFiles {
     /// (i.e. `<GROUP1>/<PIPELINE1>,<GROUP2>/<PIPELINE2>`; `<PIPELINE>:<GROUP>` is also accepted)
     #[clap(short, long, value_delimiter = ',', value_name = "GROUP/PIPELINE")]
     pub pipelines: Option<Vec<String>>,
+    /// The workflows and tools to run on new files and how to follow what was started
+    #[clap(flatten)]
+    pub runs: UploadRunArgs,
     /// Any regular expressions to use to determine which files to upload
     ///
     /// Regular expressions follow the syntax for the Rust regex crate:
@@ -175,6 +275,27 @@ pub struct UploadFiles {
 }
 
 impl UploadFiles {
+    /// Get the batch name to tag the runs of this upload with
+    ///
+    /// A name is generated when runs are followed or include a workflow or tool, and an upload that
+    /// only starts pipelines and follows nothing is left untagged.
+    #[must_use]
+    pub fn batch_name(&self) -> Option<String> {
+        // count what is started on each file
+        let has = |list: &Option<Vec<String>>| list.as_ref().is_some_and(|list| !list.is_empty());
+        let others = has(&self.runs.workflows) || has(&self.runs.tools);
+        // nothing to start has nothing to tag
+        if !others && !has(&self.pipelines) {
+            return None;
+        }
+        // a given name is always used
+        if let Some(batch) = &self.runs.batch {
+            return Some(batch.clone());
+        }
+        // follows and workflow or tool runs need a tag to be found again
+        (others || self.runs.wait || self.runs.watch).then(|| Uuid::new_v4().to_string())
+    }
+
     /// Try to extract any origins from a file name
     ///
     /// # Arguments
@@ -931,5 +1052,118 @@ mod tests {
         // no folder tags
         let expected = HashMap::new();
         assert_eq!(result, expected);
+    }
+
+    /// Parse a `files upload` command line, returning the clap error text when it is refused
+    ///
+    /// # Arguments
+    ///
+    /// * `flags` - The arguments after `files upload -g corn ./a.bin`
+    fn upload(flags: &[&str]) -> Result<UploadFiles, String> {
+        use crate::args::{Args, SubCommands};
+        let mut argv = vec!["thorctl", "files", "upload", "-g", "corn", "./a.bin"];
+        argv.extend_from_slice(flags);
+        match Args::try_parse_from(argv) {
+            Ok(Args {
+                cmd: SubCommands::Files(Files::Upload(cmd)),
+                ..
+            }) => Ok(cmd),
+            Ok(_) => Err("not a files upload".to_owned()),
+            Err(err) => Err(err.to_string()),
+        }
+    }
+
+    /// The run flags parse with their values and defaults
+    #[test]
+    fn upload_run_flags_parse() {
+        let cmd = upload(&[
+            "-p",
+            "corn/harvest",
+            "--workflows",
+            "triage,corn/deep#r2",
+            "--tools",
+            "strings@1.0.0",
+            "--batch",
+            "nightly",
+            "--wait",
+            "--timeout",
+            "90s",
+            "--interval",
+            "500ms",
+            "-o",
+            "json",
+        ])
+        .unwrap();
+        assert_eq!(
+            cmd.pipelines.as_deref(),
+            Some(&["corn/harvest".to_owned()][..])
+        );
+        assert_eq!(
+            cmd.runs.workflows,
+            Some(vec!["triage".to_owned(), "corn/deep#r2".to_owned()])
+        );
+        assert_eq!(cmd.runs.tools, Some(vec!["strings@1.0.0".to_owned()]));
+        assert_eq!(cmd.runs.batch.as_deref(), Some("nightly"));
+        assert!(cmd.runs.wait && !cmd.runs.watch);
+        assert_eq!(cmd.runs.timeout, Duration::from_secs(90));
+        assert_eq!(cmd.runs.interval, Duration::from_millis(500));
+        assert_eq!(
+            cmd.runs.format.format,
+            Some(crate::utils::output::OutputFormat::Json)
+        );
+        // the flags become the run flags the follow code reads
+        let common = cmd.runs.common();
+        assert!(common.waits() && common.follows_batch());
+        assert_eq!(common.wait_for.timeout, Duration::from_secs(90));
+        assert_eq!(common.batch.as_deref(), Some("nightly"));
+        // without flags nothing runs and nothing is followed
+        let plain = upload(&[]).unwrap();
+        assert!(plain.runs.workflows.is_none() && plain.runs.tools.is_none());
+        assert!(!plain.runs.common().follows_batch());
+        assert_eq!(plain.runs.timeout, Duration::from_secs(600));
+    }
+
+    /// Following and batch flags need something to run and `--wait` and `--watch` exclude each other
+    #[test]
+    fn upload_follow_flags_need_runs() {
+        // nothing to follow
+        for flags in [&["--wait"][..], &["--watch"], &["--timeout", "5s"]] {
+            assert!(upload(flags).is_err(), "{flags:?} should be refused");
+        }
+        // either kind of run is something to follow
+        assert!(upload(&["--workflows", "w", "--wait"]).is_ok());
+        assert!(upload(&["--tools", "t", "--watch"]).is_ok());
+        assert!(upload(&["-p", "corn/p", "--wait", "--timeout", "1m"]).is_ok());
+        // they exclude each other
+        assert!(upload(&["--workflows", "w", "--wait", "--watch"]).is_err());
+        // a timeout belongs to --wait
+        assert!(upload(&["--workflows", "w", "--watch", "--timeout", "5s"]).is_err());
+        // a malformed duration is refused
+        assert!(upload(&["--workflows", "w", "--wait", "--timeout", "soon"]).is_err());
+    }
+
+    /// The batch is named only when runs need to be found again
+    #[test]
+    fn upload_batch_name_follows_the_runs_asked_for() {
+        // nothing to start is untagged even with a name
+        assert!(upload(&["--batch", "x"]).unwrap().batch_name().is_none());
+        // pipelines alone stay untagged, as they always were
+        assert!(upload(&["-p", "corn/p"]).unwrap().batch_name().is_none());
+        // a name is used as given
+        assert_eq!(
+            upload(&["-p", "corn/p", "--batch", "x"])
+                .unwrap()
+                .batch_name(),
+            Some("x".to_owned())
+        );
+        // workflows, tools, and following generate a name
+        for flags in [
+            &["--workflows", "w"][..],
+            &["--tools", "t"],
+            &["-p", "corn/p", "--wait"],
+        ] {
+            let name = upload(flags).unwrap().batch_name().unwrap();
+            assert!(Uuid::parse_str(&name).is_ok(), "{name}");
+        }
     }
 }

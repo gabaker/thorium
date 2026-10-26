@@ -21,6 +21,7 @@ pub mod reactions;
 pub mod repos;
 pub mod results;
 pub mod run;
+pub mod run_batch;
 pub mod runs;
 pub mod tags;
 pub mod tokens;

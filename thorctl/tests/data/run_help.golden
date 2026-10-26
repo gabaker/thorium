@@ -1,0 +1,31 @@
+Start a tool, workflow, or pipeline run (`run <KIND> <NAME>`), or run one pipeline on one input
+
+Usage: thorctl run <tool|workflow|pipeline> <NAME> [OPTIONS]
+       thorctl run <PIPELINE> <SHA256_OR_REPO> [OPTIONS]
+
+Commands:
+  tool      Run a tool instance, or a tool's latest version (the same as `thorctl tools run`)
+  workflow  Run a workflow instance, or a workflow's latest (the same as `thorctl workflows run`)
+  pipeline  Run a pipeline (legacy: the same as `thorctl pipelines run`; prefer tools and workflows)
+  help      Print this message or the help of the given subcommand(s)
+
+Arguments:
+  <PIPELINE>        The pipeline to run
+  <SHA256_OR_REPO>  The sample SHA256 or repo to run the pipeline on
+
+Options:
+  -h, --help     Print help
+  -V, --version  Print version
+
+Older form:
+      --group <GROUP>    The group that the pipeline is in (required if a pipeline with the same
+                         name exists in another group)
+  -s, --sla <SLA>        How many seconds allowed to wait before starting the job [default: 1]
+  -o, --output <OUTPUT>  The path to save the results to [default: `<SHA256/REPO>_<PIPELINE>`]
+
+Older form: thorctl run <PIPELINE> <SHA256|REPO> [--group <GROUP>] [--sla <SECONDS>] [--output
+<PATH>] creates one reaction and prints each stage's output as it runs.
+
+For many inputs use `--one-per-input` (one run per file or repo, tagged with a shared `--batch`
+name); `thorctl runs get --batch <NAME>` lists a batch and `thorctl runs cancel --batch <NAME>`
+cancels it.

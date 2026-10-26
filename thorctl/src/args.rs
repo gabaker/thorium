@@ -21,7 +21,7 @@ use self::{
     reactions::Reactions,
     repos::Repos,
     results::Results,
-    run::Run,
+    run::RootRun,
     runs::Runs,
     tags::Tags,
     tokens::{ActivateScopedToken, Tokens},
@@ -99,7 +99,8 @@ pub struct Args {
     /// Don't check for updates from the API
     #[clap(long)]
     pub skip_update: bool,
-    /// The command string to follow (files, images, pipelines, reactions, trees, install, admins, agents, cart, uncart, update, config)
+    /// The command to run (for example files, tools, workflows, run, runs, reactions, results,
+    /// cart, uncart, update, config; see `thorctl help`)
     #[clap(subcommand)]
     pub cmd: SubCommands,
     /// The number of parallel async actions to process at once
@@ -190,7 +191,7 @@ pub enum SubCommands {
     /// List, describe, and compare tool, toolset, and workflow instances
     #[clap(version, author, subcommand, alias = "instance")]
     Instances(Instances),
-    /// List, describe, and retry tool and workflow runs
+    /// List, describe, retry, and cancel runs, singly or by batch
     #[clap(version, author, subcommand)]
     Runs(Runs),
     /// Cart files locally
@@ -199,9 +200,9 @@ pub enum SubCommands {
     /// Uncart files locally
     #[clap(version, author)]
     Uncart(Uncart),
-    /// Create and run a reaction, monitor its progress, and download its results
+    /// Start a tool, workflow, or pipeline run (`run <KIND> <NAME>`), or run one pipeline on one input
     #[clap(version, author)]
-    Run(Run),
+    Run(RootRun),
     /// Update Thorctl if necessary
     #[clap(version, author)]
     Update,

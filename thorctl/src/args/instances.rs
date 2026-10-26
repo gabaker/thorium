@@ -16,6 +16,9 @@ pub enum Instances {
     /// Show the fields that differ between two instances of the same kind
     #[clap(version, author)]
     Diff(DiffInstances),
+    /// Ask for a new instance of a workflow or toolset to be built now
+    #[clap(version, author)]
+    Request(RequestInstance),
 }
 
 /// The kind of root whose instances to list
@@ -23,6 +26,15 @@ pub enum Instances {
 pub enum InstanceRoot {
     /// A tool, whose instances are its versions
     Tool,
+    /// A toolset
+    Toolset,
+    /// A workflow
+    Workflow,
+}
+
+/// The kind of root a new instance can be requested for
+#[derive(ValueEnum, Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RequestRoot {
     /// A toolset
     Toolset,
     /// A workflow
@@ -76,12 +88,38 @@ pub struct DiffInstances {
     pub format: ShortFormatArgs,
 }
 
+/// A command to request a new instance of a workflow or toolset
+///
+/// The instance is built by Thorium after the request is accepted. Pass
+/// `--wait-for instance-revision=N` to wait until it exists.
+#[derive(Parser, Debug)]
+pub struct RequestInstance {
+    /// The kind of root
+    #[clap(value_enum)]
+    pub kind: RequestRoot,
+    /// The workflow or toolset, by ID or name
+    pub root: String,
+    /// Print what would be requested and stop
+    #[clap(long)]
+    pub dry_run: bool,
+    /// The format to print the result in (human readable by default)
+    #[clap(flatten)]
+    pub format: ShortFormatArgs,
+    /// Re-read and re-print the instances until interrupted
+    #[clap(flatten)]
+    pub watch: WatchArgs,
+    /// Wait until the root's instances match a condition, such as `instance-revision=2`
+    #[clap(flatten)]
+    pub wait: WaitForArgs,
+}
+
 #[cfg(test)]
 mod tests {
     use clap::Parser;
 
-    use super::{InstanceRoot, Instances};
+    use super::{InstanceRoot, Instances, RequestRoot};
     use crate::args::{Args, SubCommands};
+    use crate::utils::output::OutputFormat;
 
     /// Parse thorctl arguments into an instances command
     ///
@@ -97,6 +135,46 @@ mod tests {
             SubCommands::Instances(instances) => Ok(instances),
             _ => panic!("expected an instances command"),
         }
+    }
+
+    /// `instances request` takes a workflow or toolset, a dry run, and the wait flags
+    #[test]
+    fn request_args() {
+        // a workflow root alone
+        let Instances::Request(cmd) = parse(&["request", "workflow", "triage"]).unwrap() else {
+            panic!("expected instances request");
+        };
+        assert_eq!(cmd.kind, RequestRoot::Workflow);
+        assert_eq!(cmd.root, "triage");
+        assert!(!cmd.dry_run && cmd.wait.wait_for.is_none());
+        // a toolset root with every flag
+        let Instances::Request(cmd) = parse(&[
+            "request",
+            "toolset",
+            "ghidra",
+            "--wait-for",
+            "instance-revision=2",
+            "--timeout",
+            "30s",
+            "--interval",
+            "1s",
+            "--dry-run",
+            "-o",
+            "json",
+        ])
+        .unwrap() else {
+            panic!("expected instances request");
+        };
+        assert_eq!(cmd.kind, RequestRoot::Toolset);
+        assert!(cmd.dry_run && cmd.wait.wait_for.is_some());
+        assert_eq!(cmd.wait.timeout, std::time::Duration::from_secs(30));
+        assert_eq!(cmd.format.format, Some(OutputFormat::Json));
+        // a tool's instances are its versions, which are published, and an agent has none
+        assert!(parse(&["request", "tool", "yara"]).is_err());
+        assert!(parse(&["request", "agent", "triage"]).is_err());
+        // a root is required
+        assert!(parse(&["request", "workflow"]).is_err());
+        assert!(parse(&["request"]).is_err());
     }
 
     /// `instances get` takes a root kind and a root, `describe` an instance, and `diff` two

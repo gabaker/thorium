@@ -3,22 +3,27 @@
 use serde::Serialize;
 use thorium::models::{
     Entity, EntityKinds, EntityListOpts, EntityMetadata, EntityMetadataRequest,
-    EntityMetadataUpdate, EntityRequest, EntityUpdate, ToolSetEntity, ToolSetEntityRequest,
-    ToolSetSelector,
+    EntityMetadataUpdate, EntityRequest, EntityUpdate, ToolSetEntity, ToolSetSelector,
 };
-use thorium::{Error, Thorium};
+use thorium::{CtlConf, Error, Thorium};
 use uuid::Uuid;
 
 use crate::args::Args;
 use crate::args::toolsets::{
-    CreateToolSet, DescribeToolSet, GetToolSets, IncludeTool, RemoveTool, SetReadOnly, SetSelector,
-    Switch, ToolSets,
+    CreateToolSet, DeleteToolSet, DescribeToolSet, EditToolSet, GetToolSets, IncludeTool,
+    RemoveTool, SetReadOnly, SetSelector, SpecToolSet, Switch, ToolSets, UpdateToolSet,
 };
-use crate::handlers::agents::find;
+use crate::handlers::agents::{confirm_delete, find};
+use crate::handlers::edit::{Editable, edit_with, update_with};
 use crate::utils;
 use crate::utils::output::{self, OutputFormat, View};
 use crate::utils::render;
+use crate::utils::spec_io;
 use crate::utils::watch;
+
+pub(crate) mod edit;
+
+use edit::{ToolSetEditable, ToolSetTarget};
 
 /// Get a toolset's metadata, if the entity is a toolset
 ///
@@ -284,42 +289,33 @@ async fn describe(thorium: &Thorium, cmd: &DescribeToolSet) -> Result<(), Error>
     .await
 }
 
-/// Create a toolset
+/// Create a toolset from its flags and spec
 ///
 /// # Arguments
 ///
 /// * `thorium` - The Thorium client
 /// * `cmd` - The create command to execute
-async fn create(thorium: &Thorium, cmd: &CreateToolSet) -> Result<(), Error> {
-    // find each tool to include at latest
-    let mut req = ToolSetEntityRequest::default();
-    for tool in &cmd.tool {
-        req = req.tool(find(thorium, EntityKinds::Tool, "a tool", tool).await?.id);
+/// * `spec` - The spec document, if one was given
+async fn create(
+    thorium: &Thorium,
+    cmd: &CreateToolSet,
+    spec: Option<&serde_json::Value>,
+) -> Result<(), Error> {
+    // describe the toolset from its spec and flags
+    let view = edit::create_view(spec, cmd)?;
+    // find each tool to include at latest or pinned, in the toolset's groups
+    let mut tools = Vec::new();
+    for tool in &view.tools {
+        tools.push(tool.resolve(thorium, &view.groups, "a tool").await?);
     }
-    // pin each tool instance as it was given
-    for pin in &cmd.pin {
-        req = req.tool(*pin);
-    }
-    // set the selector and settings
-    if let Some(selector) = &cmd.selector {
-        req = req.selector(selector.clone());
-    }
-    if cmd.read_only {
-        req = req.read_only(true);
-    }
-    if cmd.no_auto_instance {
-        req = req.auto_instance(false);
-    }
-    if cmd.extend_target_groups {
-        req = req.extend_target_groups();
-    }
+    let req = edit::create_request(&view, &tools, &cmd.pin, cmd.extend_target_groups)?;
     // create the toolset
     let mut entity = EntityRequest::new(
-        &cmd.name,
+        &view.name,
         EntityMetadataRequest::ToolSet(req),
-        cmd.group.clone(),
+        view.groups.clone(),
     );
-    entity.description.clone_from(&cmd.description);
+    entity.description.clone_from(&view.description);
     let resp = thorium.entities.create(entity).await?;
     println!("Created toolset {} ({})", resp.name, resp.id);
     Ok(())
@@ -444,6 +440,107 @@ async fn set_read_only(thorium: &Thorium, cmd: &SetReadOnly) -> Result<(), Error
     Ok(())
 }
 
+/// Edit a toolset in an editor, or from `--file`, `--set`, `--unset` and `--patch`
+///
+/// # Arguments
+///
+/// * `thorium` - The Thorium client
+/// * `conf` - The Thorctl config
+/// * `cmd` - The edit command to execute
+async fn edit_toolset(thorium: &Thorium, conf: &CtlConf, cmd: &EditToolSet) -> Result<(), Error> {
+    // find the toolset
+    let tool_set = find(thorium, EntityKinds::ToolSet, "a toolset", &cmd.toolset).await?;
+    let target = ToolSetTarget {
+        id: tool_set.id,
+        extend_target_groups: cmd.extend_target_groups,
+    };
+    // run the shared edit flow, which prints the result
+    edit_with::<ToolSetEditable>(thorium, conf, &target, &cmd.edit).await?;
+    Ok(())
+}
+
+/// Update a toolset from flags, `--file`, `--set`, `--unset` and `--patch`
+///
+/// # Arguments
+///
+/// * `thorium` - The Thorium client
+/// * `cmd` - The update command to execute
+async fn update_toolset(thorium: &Thorium, cmd: &UpdateToolSet) -> Result<(), Error> {
+    // find the toolset
+    let tool_set = find(thorium, EntityKinds::ToolSet, "a toolset", &cmd.toolset).await?;
+    let target = ToolSetTarget {
+        id: tool_set.id,
+        extend_target_groups: cmd.extend_target_groups,
+    };
+    // turn the typed flags into edits that apply before the `--set` and `--unset` edits
+    let view = ToolSetEditable::to_view(&tool_set);
+    let mut args = cmd.edit.clone();
+    let mut ops = edit::typed_ops(cmd, &view);
+    ops.append(&mut args.ops);
+    args.ops = ops;
+    // run the shared update flow, which prints the result
+    update_with::<ToolSetEditable>(thorium, &target, &args).await?;
+    Ok(())
+}
+
+/// Print a toolset as a spec
+///
+/// # Arguments
+///
+/// * `thorium` - The Thorium client
+/// * `cmd` - The spec command to execute
+async fn print_spec(thorium: &Thorium, cmd: &SpecToolSet) -> Result<(), Error> {
+    // find the toolset and build its view
+    let tool_set = find(thorium, EntityKinds::ToolSet, "a toolset", &cmd.toolset).await?;
+    let view = ToolSetEditable::to_view(&tool_set);
+    // write the view as JSON or, by default, YAML
+    let text = match cmd.format.format {
+        Some(OutputFormat::Json) => utils::curated_json(&view, ToolSetEditable::FIELD_ORDER)?,
+        _ => utils::curated_yaml(&view, ToolSetEditable::FIELD_ORDER)?,
+    };
+    // print it, or save it to the file asked for
+    match &cmd.output {
+        Some(path) => std::fs::write(path, text)
+            .map_err(|err| Error::new(format!("Failed to write {}: {err}", path.display()))),
+        None => {
+            print!("{text}");
+            Ok(())
+        }
+    }
+}
+
+/// Delete a toolset
+///
+/// # Arguments
+///
+/// * `thorium` - The Thorium client
+/// * `cmd` - The delete command to execute
+async fn delete_toolset(thorium: &Thorium, cmd: &DeleteToolSet) -> Result<(), Error> {
+    // find the toolset
+    let tool_set = find(thorium, EntityKinds::ToolSet, "a toolset", &cmd.toolset).await?;
+    // a dry run only says what would be deleted
+    if cmd.dry_run {
+        println!(
+            "Dry run: would delete toolset {} ({})",
+            tool_set.name, tool_set.id
+        );
+        return Ok(());
+    }
+    // confirm the deletion
+    if !confirm_delete("toolset", &tool_set.name, cmd.skip_confirm)? {
+        println!("Cancelled.");
+        return Ok(());
+    }
+    // delete the toolset, which the API refuses while an AI agent still calls it
+    thorium
+        .entities
+        .delete(tool_set.id)
+        .await
+        .map_err(utils::delete_refusal)?;
+    println!("Deleted toolset {} ({})", tool_set.name, tool_set.id);
+    Ok(())
+}
+
 /// Handle all toolset commands
 ///
 /// # Arguments
@@ -451,17 +548,28 @@ async fn set_read_only(thorium: &Thorium, cmd: &SetReadOnly) -> Result<(), Error
 /// * `args` - The arguments passed to Thorctl
 /// * `cmd` - The toolsets command to execute
 pub async fn handle(args: &Args, cmd: &ToolSets) -> Result<(), Error> {
+    // read a create's spec before making any request
+    let spec = match cmd {
+        ToolSets::Create(CreateToolSet {
+            spec: Some(path), ..
+        }) => Some(spec_io::read_document(&path.to_string_lossy(), "--spec")?),
+        _ => None,
+    };
     // load our config and instance our client
-    let (_, thorium) = utils::get_client(args).await?;
+    let (conf, thorium) = utils::get_client(args).await?;
     // call the right toolsets handler
     let result = match cmd {
         ToolSets::Get(cmd) => get(&thorium, cmd).await,
         ToolSets::Describe(cmd) => describe(&thorium, cmd).await,
-        ToolSets::Create(cmd) => create(&thorium, cmd).await,
+        ToolSets::Create(cmd) => create(&thorium, cmd, spec.as_ref()).await,
         ToolSets::Include(cmd) => include(&thorium, cmd).await,
         ToolSets::RemoveTool(cmd) => remove_tool(&thorium, cmd).await,
         ToolSets::Selector(cmd) => set_selector(&thorium, cmd).await,
         ToolSets::ReadOnly(cmd) => set_read_only(&thorium, cmd).await,
+        ToolSets::Update(cmd) => update_toolset(&thorium, cmd).await,
+        ToolSets::Edit(cmd) => edit_toolset(&thorium, &conf, cmd).await,
+        ToolSets::Spec(cmd) => print_spec(&thorium, cmd).await,
+        ToolSets::Delete(cmd) => delete_toolset(&thorium, cmd).await,
     };
     // show the API's status code with any refusal
     result.map_err(|err| match err.status() {

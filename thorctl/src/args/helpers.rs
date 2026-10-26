@@ -4,6 +4,7 @@ use std::str::FromStr;
 use std::time::Duration;
 
 use crate::utils::output::OutputFormat;
+use crate::utils::patch::{self, EditOp};
 use crate::utils::watch::WaitFor;
 
 /// Provide a possible number range for an argument, producing an error if a user
@@ -100,7 +101,8 @@ pub struct WatchArgs {
     /// Re-read and re-print until interrupted
     #[clap(long)]
     pub watch: bool,
-    /// How long to wait between re-reads with `--watch` or `--wait-for` (e.g. 500ms, 2s, 1m)
+    /// How long to wait between re-reads with `--watch`, `--wait-for`, or a run's `--wait`
+    /// (e.g. 500ms, 2s, 1m)
     #[clap(long, default_value = "2s", value_parser = parse_interval)]
     pub interval: Duration,
 }
@@ -113,9 +115,130 @@ pub struct WaitForArgs {
     /// A condition is `<field>=<value>` (e.g. status=Completed) or a bare `<field>` that must be set
     #[clap(long, value_name = "CONDITION", conflicts_with = "watch")]
     pub wait_for: Option<WaitFor>,
-    /// How long `--wait-for` polls before giving up (e.g. 30s, 10m, 1h)
+    /// How long `--wait-for`, or a run's `--wait`, `--output`, or `--logs`, waits before giving up
+    /// (e.g. 30s, 10m, 1h)
     #[clap(long, default_value = "10m", value_parser = parse_duration)]
     pub timeout: Duration,
+}
+
+/// The raw flags behind [`EditArgs`], before `--set` and `--unset` are put in command-line order
+#[derive(clap::Args, Debug, Clone)]
+struct RawEditArgs {
+    /// Edit only: the editor command (`$VISUAL`, `$EDITOR`, the config's `default_editor`, then `vi`)
+    #[clap(long)]
+    editor: Option<String>,
+    /// Replace the editable view with a YAML or JSON document (- reads stdin)
+    #[clap(long, value_name = "FILE|-")]
+    file: Option<String>,
+    /// Apply an RFC 7386 merge patch, given as JSON or YAML text or as `@FILE`
+    #[clap(long, value_name = "JSON|@FILE")]
+    patch: Vec<String>,
+    /// Set one field of the view; PATH is dotted with [N] indexes and VALUE is a YAML scalar or
+    /// flow value (`--set config.max_turns=5`, `--set 'groups=[a,b]'`); repeatable
+    #[clap(long, value_name = "PATH=VALUE", value_parser = patch::parse_set)]
+    set: Vec<EditOp>,
+    /// Remove one field of the view; repeatable
+    #[clap(long, value_name = "PATH", value_parser = patch::parse_unset)]
+    unset: Vec<EditOp>,
+    /// Print the changes and stop without applying them
+    #[clap(long)]
+    dry_run: bool,
+    /// Apply without asking to confirm the changes
+    #[clap(long, visible_alias = "yes")]
+    skip_confirm: bool,
+    /// Apply even if the resource changed after it was read
+    #[clap(long)]
+    force: bool,
+    /// The format to print the result in: table, human, json, or yaml
+    #[clap(short = 'o', long, value_enum, ignore_case = true)]
+    format: Option<OutputFormat>,
+}
+
+/// The flags shared by every `edit` and `update` command
+///
+/// Flatten this into a command with `#[clap(flatten)]`. The change sources apply in a fixed
+/// order: `--file` (or the fetched view), then each `--patch`, then every `--set` and `--unset`
+/// in the order they were typed.
+#[derive(Debug, Clone, Default)]
+pub struct EditArgs {
+    /// The editor command to use instead of the configured one
+    pub editor: Option<String>,
+    /// A YAML or JSON document (or `-` for stdin) that replaces the editable view
+    pub file: Option<String>,
+    /// Merge patches (inline text or `@FILE`) applied in order after the file
+    pub patch: Vec<String>,
+    /// The `--set` and `--unset` edits in command-line order
+    pub ops: Vec<EditOp>,
+    /// Print the changes and stop without applying them
+    pub dry_run: bool,
+    /// Apply without asking to confirm the changes
+    pub skip_confirm: bool,
+    /// Apply even if the resource changed after it was read
+    pub force: bool,
+    /// The format to print the result in
+    pub format: Option<OutputFormat>,
+}
+
+impl EditArgs {
+    /// Whether any non-interactive source (`--file`, `--patch`, `--set`, `--unset`) was given
+    #[must_use]
+    pub fn has_changes(&self) -> bool {
+        self.file.is_some() || !self.patch.is_empty() || !self.ops.is_empty()
+    }
+
+    /// Merge the raw flags with the command-line positions of `--set` and `--unset`
+    ///
+    /// # Arguments
+    ///
+    /// * `raw` - The flags as clap parsed them
+    /// * `matches` - The matches the flags were parsed from
+    fn from_raw(raw: RawEditArgs, matches: &clap::ArgMatches) -> Self {
+        // pair each edit with its position on the command line
+        let mut positioned = Vec::with_capacity(raw.set.len() + raw.unset.len());
+        let set_positions = matches.indices_of("set").into_iter().flatten();
+        positioned.extend(set_positions.zip(raw.set));
+        let unset_positions = matches.indices_of("unset").into_iter().flatten();
+        positioned.extend(unset_positions.zip(raw.unset));
+        // apply edits in the order they were typed
+        positioned.sort_by_key(|(position, _)| *position);
+        EditArgs {
+            editor: raw.editor,
+            file: raw.file,
+            patch: raw.patch,
+            ops: positioned.into_iter().map(|(_, op)| op).collect(),
+            dry_run: raw.dry_run,
+            skip_confirm: raw.skip_confirm,
+            force: raw.force,
+            format: raw.format,
+        }
+    }
+}
+
+impl clap::Args for EditArgs {
+    /// Add the shared edit flags to a command
+    fn augment_args(cmd: clap::Command) -> clap::Command {
+        RawEditArgs::augment_args(cmd)
+    }
+
+    /// Add the shared edit flags to a command that is being updated
+    fn augment_args_for_update(cmd: clap::Command) -> clap::Command {
+        RawEditArgs::augment_args_for_update(cmd)
+    }
+}
+
+impl clap::FromArgMatches for EditArgs {
+    /// Build the edit flags from parsed matches
+    fn from_arg_matches(matches: &clap::ArgMatches) -> Result<Self, clap::Error> {
+        // parse the raw flags and then order the edits
+        let raw = RawEditArgs::from_arg_matches(matches)?;
+        Ok(Self::from_raw(raw, matches))
+    }
+
+    /// Update the edit flags from parsed matches
+    fn update_from_arg_matches(&mut self, matches: &clap::ArgMatches) -> Result<(), clap::Error> {
+        *self = Self::from_arg_matches(matches)?;
+        Ok(())
+    }
 }
 
 #[cfg(test)]
@@ -125,13 +248,15 @@ mod tests {
     use clap::Parser;
 
     use super::{
-        FormatArgs, ShortFormatArgs, WaitForArgs, WatchArgs, parse_duration, parse_interval,
+        EditArgs, FormatArgs, ShortFormatArgs, WaitForArgs, WatchArgs, parse_duration,
+        parse_interval,
     };
     use crate::args::reactions::Reactions;
     use crate::args::results::Results;
     use crate::args::tokens::Tokens;
     use crate::args::{Args, SubCommands};
     use crate::utils::output::OutputFormat;
+    use crate::utils::patch::{parse_set, parse_unset};
 
     /// A test command using the flags for commands with an output path
     #[derive(Parser, Debug)]
@@ -393,5 +518,88 @@ mod tests {
             PathCommand::try_parse_from(["test", "--watch", "--wait-for", "status=Completed"])
                 .is_err()
         );
+    }
+
+    /// A test command carrying the shared edit flags
+    #[derive(Parser, Debug)]
+    struct EditCommand {
+        /// The edit flags
+        #[clap(flatten)]
+        edit: EditArgs,
+    }
+
+    /// Parse the edit flags from a command line
+    ///
+    /// # Arguments
+    ///
+    /// * `args` - The arguments after the program name
+    fn edit_flags(args: &[&str]) -> EditArgs {
+        // parse the flags through a flattened test command
+        EditCommand::try_parse_from(std::iter::once("test").chain(args.iter().copied()))
+            .unwrap()
+            .edit
+    }
+
+    /// With no flags nothing is set and there is no non-interactive source
+    #[test]
+    fn edit_flags_default_to_interactive() {
+        let edit = edit_flags(&[]);
+        assert!(!edit.has_changes());
+        assert!(edit.ops.is_empty() && edit.patch.is_empty() && edit.file.is_none());
+        assert!(!edit.dry_run && !edit.skip_confirm && !edit.force);
+        assert_eq!(edit.format, None);
+    }
+
+    /// `--set` and `--unset` keep the order they were typed in
+    #[test]
+    fn edit_flags_keep_set_and_unset_order() {
+        let edit = edit_flags(&[
+            "--set", "a=1", "--unset", "b", "--set", "c=2", "--unset", "d",
+        ]);
+        assert!(edit.has_changes());
+        assert_eq!(
+            edit.ops,
+            vec![
+                parse_set("a=1").unwrap(),
+                parse_unset("b").unwrap(),
+                parse_set("c=2").unwrap(),
+                parse_unset("d").unwrap(),
+            ]
+        );
+    }
+
+    /// Every other edit flag parses, and `--yes` is an alias of `--skip-confirm`
+    #[test]
+    fn edit_flags_parse_each_source() {
+        let edit = edit_flags(&[
+            "--file",
+            "-",
+            "--patch",
+            "{}",
+            "--patch",
+            "@p.yml",
+            "--dry-run",
+            "--yes",
+            "--force",
+            "--editor",
+            "code --wait",
+            "-o",
+            "json",
+        ]);
+        assert_eq!(edit.file.as_deref(), Some("-"));
+        assert_eq!(edit.patch, vec!["{}", "@p.yml"]);
+        assert!(edit.dry_run && edit.skip_confirm && edit.force);
+        assert_eq!(edit.editor.as_deref(), Some("code --wait"));
+        assert_eq!(edit.format, Some(OutputFormat::Json));
+        assert!(edit_flags(&["--skip-confirm"]).skip_confirm);
+    }
+
+    /// A malformed `--set` or `--unset` is a usage error naming the problem
+    #[test]
+    fn edit_flags_reject_bad_paths() {
+        let missing = EditCommand::try_parse_from(["test", "--set", "novalue"]).unwrap_err();
+        assert!(missing.to_string().contains("PATH=VALUE"), "{missing}");
+        let bad_path = EditCommand::try_parse_from(["test", "--unset", "a[x]"]).unwrap_err();
+        assert!(bad_path.to_string().contains("index"), "{bad_path}");
     }
 }

@@ -11,6 +11,8 @@ use std::sync::OnceLock;
 use thorium::{CtlConf, Error};
 use uuid::Uuid;
 
+use crate::handlers::edit::seams::Seams;
+
 /// The editor named by `$VISUAL` or `$EDITOR`, read once per process
 ///
 /// Returns `None` when neither is set to a non-empty value.
@@ -296,22 +298,32 @@ impl EditorParseError for toml::de::Error {
     }
 }
 
+/// The menu entries of the error prompt, with the entry that reopens the editor first
+pub(crate) const ERROR_CHOICES: &[&str] = &[
+    "Edit   - Reopen editor to fix the issue",
+    "Cancel - Abandon changes for this resource",
+];
+
 /// Prompt the user to either retry editing or cancel after a validation error
-fn prompt_error_action() -> Result<ErrorAction, Error> {
-    let items = &[
-        "Edit   - Reopen editor to fix the issue",
-        "Cancel - Abandon changes for this resource",
-    ];
+///
+/// Without a terminal the answer comes from the edit seams (see [`Seams`]), so scripts and
+/// tests never block on a prompt.
+///
+/// # Arguments
+///
+/// * `seams` - The terminal state and scripted prompt answers
+pub(crate) fn prompt_error_action_with(seams: &Seams) -> Result<ErrorAction, Error> {
     // ask which action to take
-    let selection = dialoguer::Select::new()
-        .items(items)
-        .default(0)
-        .interact()
-        .map_err(|err| Error::new(format!("Failed to read user input: {err}")))?;
-    Ok(match selection {
-        0 => ErrorAction::Edit,
-        _ => ErrorAction::Cancel,
+    Ok(if seams.reedit(ERROR_CHOICES)? {
+        ErrorAction::Edit
+    } else {
+        ErrorAction::Cancel
     })
+}
+
+/// Prompt the user to either retry editing or cancel, using the process environment
+fn prompt_error_action() -> Result<ErrorAction, Error> {
+    prompt_error_action_with(&Seams::from_env())
 }
 
 /// Ask whether to reopen the editor after an error, returning `true` to reopen
@@ -323,7 +335,7 @@ pub(crate) fn prompt_reedit() -> Result<bool, Error> {
 }
 
 /// Action the user wants to take after a validation error
-enum ErrorAction {
+pub(crate) enum ErrorAction {
     /// Reopen the editor to fix the issue
     Edit,
     /// Abandon changes for this resource
@@ -411,6 +423,8 @@ struct TempFile {
     dir: PathBuf,
     /// The path to the temporary file
     path: PathBuf,
+    /// Removes the directory if the process is interrupted while this guard lives
+    _interrupt: crate::utils::interrupt::Tracked,
 }
 
 impl TempFile {
@@ -428,6 +442,7 @@ impl TempFile {
         // build the guard first so the directory is removed even if the write fails
         let temp = TempFile {
             path: dir.join(format!("{}.{ext}", file_safe(label))),
+            _interrupt: crate::utils::interrupt::track(&dir),
             dir,
         };
         create_private_file(&temp.path, content)?;
@@ -481,6 +496,8 @@ async fn run_editor(editor: &str, path: &Path) -> Result<(), Error> {
     let (program, args) = words
         .split_first()
         .ok_or_else(|| Error::new("The editor command is empty"))?;
+    // leave Ctrl-C to the editor while it is open, as it reaches both of us
+    let _editing = crate::utils::interrupt::while_editing();
     // launch the editor and wait for it
     let status = tokio::process::Command::new(program)
         .args(args)
@@ -526,6 +543,27 @@ async fn editor_loop_core<R, E: EditorParseError>(
     ext: &str,
     parse: impl Fn(&str) -> Result<R, E>,
 ) -> Result<Option<R>, Error> {
+    editor_loop_asking(content, label, editor, ext, parse, prompt_error_action).await
+}
+
+/// [`editor_loop_core`] with the caller choosing how the error prompt is answered
+///
+/// # Arguments
+///
+/// * `content` - The initial file content
+/// * `label` - A label used when naming the temp file
+/// * `editor` - The editor command to open
+/// * `ext` - The temp file extension (without a dot)
+/// * `parse` - Validates the saved text, returning the value to hand back
+/// * `ask` - Asks the user whether to reopen the editor after an error
+pub(crate) async fn editor_loop_asking<R, E: EditorParseError>(
+    content: &str,
+    label: &str,
+    editor: &str,
+    ext: &str,
+    parse: impl Fn(&str) -> Result<R, E>,
+    ask: impl Fn() -> Result<ErrorAction, Error>,
+) -> Result<Option<R>, Error> {
     // own the temp file in a guard so every exit below (including `?` from the
     // error prompts) removes it rather than leaking it
     let temp = TempFile::create(label, ext, content)?;
@@ -543,7 +581,7 @@ async fn editor_loop_core<R, E: EditorParseError>(
                 "Error:".bright_red().bold(),
                 line.to_string().bright_yellow(),
             );
-            match prompt_error_action()? {
+            match ask()? {
                 ErrorAction::Edit => continue,
                 ErrorAction::Cancel => {
                     return Ok(None);
@@ -571,7 +609,7 @@ async fn editor_loop_core<R, E: EditorParseError>(
                     eprintln!("{} Parse error: {}", "Error:".bright_red().bold(), err);
                 }
                 // reopen the editor on the next loop iteration, or give up
-                if let ErrorAction::Cancel = prompt_error_action()? {
+                if let ErrorAction::Cancel = ask()? {
                     return Ok(None);
                 }
             }
