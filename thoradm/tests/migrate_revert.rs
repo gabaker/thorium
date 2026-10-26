@@ -10,7 +10,7 @@ use common::migrate::World;
 use common::record;
 use std::process::Output;
 use thorium::models::schema::MigrationRecordKind;
-use thorium::models::upgrades::{AppliedStep, StepState};
+use thorium::models::upgrades::{self, AppliedStep, StepState};
 
 /// The environment variable that points thoradm at the fixture catalog
 const CATALOG_ENV: &str = "THORADM_FIXTURE_CATALOG";
@@ -289,8 +289,9 @@ const REAL_TO: &str = "2026-10-v02";
 /// The real catalog's step that reverses the users migration
 const REVERSE_STEP: &str = "users-settings-theme-reverse";
 
-/// Seed the record of a deployment at the revision after the first Helm one, with every step of it
-/// finished and the users family recorded in layout 2
+/// Seed the record of a deployment at the revision after the first Helm one, with only the steps
+/// the users conversion needs finished (no tool conversion has run, so the reverse step is planned)
+/// and the users family recorded in layout 2
 ///
 /// # Arguments
 ///
@@ -494,5 +495,64 @@ async fn a_rerun_by_hand_of_the_reverse_step_records_an_outcome() {
     let outcomes = reverse_outcomes(&world).await;
     assert_eq!(outcomes.len(), 2, "{outcomes:?}");
     assert_eq!(outcomes[0], StepState::Done, "{outcomes:?}");
+    world.drop_keyspace().await;
+}
+
+/// Seed the record of a deployment at the newest revision that finished every tool conversion step
+///
+/// # Arguments
+///
+/// * `world` - The world to seed
+async fn seed_converted_record(world: &World) {
+    // the revision row replaces the one the world's apply recorded, and each conversion is done
+    let newest = upgrades::latest().to_string();
+    let mut revision = record::blank(MigrationRecordKind::Revision, "deployment");
+    revision.revision = Some(newest.clone());
+    revision.version = Some("1.8.1".to_owned());
+    let mut rows = record::Rows::default();
+    rows.migrations.push(revision);
+    for (minute, step) in [
+        "users-settings-theme",
+        "images-to-tools",
+        "pipelines-to-tool-stages",
+        "provenance-to-legacy-tools",
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let minute = u32::try_from(minute).expect("few steps") + 1;
+        rows.migrations
+            .push(record::history_row(&record::step(&newest, step, minute)));
+    }
+    record::insert(world.session(), &world.ns, &rows).await;
+}
+
+/// `migrate revert` across the real catalog is refused, even as a dry run, naming the first tool
+/// conversion step, and changes nothing
+#[tokio::test]
+async fn a_revert_across_the_tool_conversions_is_refused_naming_the_step() {
+    // a deployment at the newest revision that finished the conversions
+    let world = World::new("conv01").await;
+    seed_converted_record(&world).await;
+    // the dry run and the real run both refuse as a usage error, naming the step
+    for extra in [&["--dry-run"][..], &[][..]] {
+        let output = World::run(
+            world
+                .thoradm()
+                .args(["migrate", "revert", "--to", "2026-10-v02"])
+                .args(extra),
+        );
+        assert_eq!(output.status.code(), Some(2), "{}", stderr(&output));
+        assert!(
+            stderr(&output).contains("images-to-tools"),
+            "{}",
+            stderr(&output)
+        );
+    }
+    // the recorded revision is unchanged
+    assert_eq!(
+        recorded_revision(&world).await,
+        Some(upgrades::latest().to_string())
+    );
     world.drop_keyspace().await;
 }

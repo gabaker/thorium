@@ -20,7 +20,13 @@ use crate::k8s::crds::ThoriumCluster;
 const OLDER: &str = "2026-10-v02";
 
 /// The steps of the latest revision, which the state holds finished
-const LATEST_STEPS: [&str; 2] = ["schema-apply", "users-settings-theme"];
+const LATEST_STEPS: [&str; 5] = [
+    "drain-reactions",
+    "images-to-tools",
+    "pipelines-to-tool-stages",
+    "provenance-to-legacy-tools",
+    "finalize-tool-only",
+];
 
 /// Build the finished history of the latest revision's steps
 fn finished_history() -> Vec<AppliedStep> {

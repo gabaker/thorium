@@ -1876,7 +1876,7 @@ pub(crate) mod tests {
         // every step to the latest revision is listed as pending
         assert_eq!(progress.current.as_deref(), Some(BASELINE_REVISION));
         assert_eq!(progress.target, None);
-        assert_eq!(progress.steps.len(), 6);
+        assert_eq!(progress.steps.len(), 11);
         assert!(
             progress
                 .steps
@@ -1909,7 +1909,12 @@ pub(crate) mod tests {
                     "elastic-reindex-keyword-mappings",
                     "finalize",
                     "schema-apply",
-                    "users-settings-theme"
+                    "drain-reactions",
+                    "users-settings-theme",
+                    "images-to-tools",
+                    "pipelines-to-tool-stages",
+                    "provenance-to-legacy-tools",
+                    "finalize-tool-only"
                 ]
             );
         }
@@ -1935,7 +1940,57 @@ pub(crate) mod tests {
                 "elastic-reindex-keyword-mappings",
                 "finalize",
                 "schema-apply",
-                "users-settings-theme"
+                "drain-reactions",
+                "users-settings-theme",
+                "images-to-tools",
+                "pipelines-to-tool-stages",
+                "provenance-to-legacy-tools",
+                "finalize-tool-only"
+            ]
+        );
+    }
+
+    /// A target of the revision that applies the schema first plans only that revision's steps, so
+    /// an image that only knows it releases the schema and users steps and no conversion
+    #[test]
+    fn decide_the_schema_revision_plans_no_conversion_step() {
+        // a first Helm cluster targeting the revision that applies the schema first
+        let state = UpgradeState::new(rev(FIRST_HELM_REVISION), OPERATOR_VERSION);
+        let Decision::Upgrade { target, steps } = decide(&state, &spec(Some("2026-10-v03"), false))
+        else {
+            panic!("a targeted cluster should be upgraded");
+        };
+        assert_eq!(target, rev("2026-10-v03"));
+        let ids = steps
+            .iter()
+            .map(|step| step.step.as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(ids, ["schema-apply", "users-settings-theme"]);
+    }
+
+    /// A cluster that reached the revision that applies the schema first, with that revision
+    /// recorded, still runs every conversion step when it is upgraded to the newest revision, the
+    /// drain first
+    #[test]
+    fn decide_a_cluster_at_the_schema_revision_runs_the_conversions() {
+        // the state of a cluster a build knowing only the schema revision finished
+        let state = catalog().reached(&rev("2026-10-v03"), OPERATOR_VERSION);
+        let Decision::Upgrade { target, steps } = decide(&state, &spec(None, true)) else {
+            panic!("a targeted cluster should be upgraded");
+        };
+        assert_eq!(target, upgrades::latest());
+        let ids = steps
+            .iter()
+            .map(|step| step.step.as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            ids,
+            [
+                "drain-reactions",
+                "images-to-tools",
+                "pipelines-to-tool-stages",
+                "provenance-to-legacy-tools",
+                "finalize-tool-only"
             ]
         );
     }
@@ -1953,7 +2008,7 @@ pub(crate) mod tests {
         // the message names the target and how to continue
         assert!(message.contains("at its target revision 2026-10-v01"));
         assert_eq!(progress.target.as_deref(), Some(BASELINE_REVISION));
-        assert_eq!(progress.steps.len(), 6);
+        assert_eq!(progress.steps.len(), 11);
     }
 
     /// Backwards, malformed, unknown, and too new revisions are errors
@@ -2051,7 +2106,7 @@ pub(crate) mod tests {
             .expect("plan")
             .expect("held");
         assert!(message.contains("reached its target revision 2026-10-v01"));
-        assert_eq!(progress.steps.len(), 6);
+        assert_eq!(progress.steps.len(), 11);
         assert_eq!(progress.target.as_deref(), Some(BASELINE_REVISION));
         // reaching the latest revision holds nothing
         let current = UpgradeState::new(upgrades::latest(), OPERATOR_VERSION);
@@ -2138,7 +2193,10 @@ pub(crate) mod tests {
         assert_eq!(writes.len(), 1, "{writes:?}");
         let status = &status_patches(&fake)[0];
         assert_eq!(status["phase"], "UpgradeRequired");
-        assert_eq!(status["upgrade"]["steps"].as_array().map(Vec::len), Some(6));
+        assert_eq!(
+            status["upgrade"]["steps"].as_array().map(Vec::len),
+            Some(11)
+        );
         assert_eq!(status["upgrade"]["steps"][2]["state"], "Pending");
     }
 

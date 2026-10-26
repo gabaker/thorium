@@ -366,9 +366,6 @@ mod tests {
     use clap::Parser;
     use thorium::models::upgrades::CATALOG;
 
-    /// The migrations that can run but that no catalog step performs yet
-    const UNCATALOGED: [&str; 1] = ["images-to-tools"];
-
     /// Every migration the catalog references is registered, and every registered migration
     /// is performed by a catalog step
     #[test]
@@ -385,13 +382,11 @@ mod tests {
         }
         // a registered migration no catalog step uses could never be run by an upgrade
         for migration in MIGRATIONS.iter().filter(|migration| {
-            // a fixture or rebucket migration has no catalog step, a check-only migration may be
-            // registered ahead of the step that runs it, and so may a migration whose writer is
-            // built and run by hand before the revision that performs it is cataloged
+            // a fixture or rebucket migration has no catalog step, and a check-only migration may be
+            // registered ahead of the step that runs it
             !migration.id.starts_with("fixture-")
                 && !migration.id.starts_with("rebucket-")
                 && migration.support != Support::CheckOnly
-                && !UNCATALOGED.contains(&migration.id)
         }) {
             assert!(
                 step_for(migration.id).is_some(),
@@ -423,8 +418,15 @@ mod tests {
                 "{}",
                 migration.id
             );
+            // a check-only migration has no catalog step to run it, except the drain, whose check
+            // is its whole work and whose step only waits for it
             if migration.support == Support::CheckOnly {
-                assert!(step_for(migration.id).is_none(), "{}", migration.id);
+                assert_eq!(
+                    step_for(migration.id).is_some(),
+                    migration.id == "drain-reactions",
+                    "{}",
+                    migration.id
+                );
             }
         }
     }
@@ -440,15 +442,40 @@ mod tests {
         assert_eq!(migration.families, ["images", "entities"]);
     }
 
-    /// The pipeline conversion is registered, runs in the `pipelines` pass, and covers the pipelines
-    /// family
+    /// The pipeline conversion is registered as runnable, runs in the `pipelines` pass, and covers
+    /// the pipelines family
     #[test]
     fn the_pipeline_conversion_is_registered() {
         // look it up as a run would
         let migration = find("pipelines-to-tool-stages").expect("the migration is registered");
-        assert_eq!(migration.support, Support::CheckOnly);
+        assert_eq!(migration.support, Support::Yes);
         assert_eq!(migration.pass, "pipelines");
         assert_eq!(migration.families, ["pipelines"]);
+    }
+
+    /// The provenance conversion is registered as runnable and covers the entities its rows are in
+    #[test]
+    fn the_provenance_conversion_is_registered() {
+        // look it up as a run would
+        let migration = find("provenance-to-legacy-tools").expect("the migration is registered");
+        assert_eq!(migration.support, Support::Yes);
+        assert_eq!(migration.families, ["entities"]);
+    }
+
+    /// The drain is registered as a check that waits, and its step has no pause list, no
+    /// approval work, and a procedure that names the command that clears reactions
+    #[test]
+    fn the_drain_is_a_check_with_a_waiting_step() {
+        // the registration is a check only
+        let migration = find("drain-reactions").expect("the migration is registered");
+        assert_eq!(migration.support, Support::CheckOnly);
+        // its step pauses nothing, reads nothing after another step, and says how to clear reactions
+        let step = step_for("drain-reactions").expect("a catalog step");
+        assert!(step.pause.is_empty() && step.reads_after.is_empty());
+        assert!(
+            step.manual_procedure
+                .is_some_and(|text| text.contains("thorctl reactions delete"))
+        );
     }
 
     /// A stub migration fails with the not implemented exit code and the manual procedure
@@ -552,12 +579,24 @@ mod tests {
             lines[0],
             format!("Upgrading from 2026-10-v01 to {} runs:", upgrades::latest())
         );
-        // every step of every later forward edge follows in catalog order, the edges back aside
-        let expected: Vec<&str> = CATALOG
+        // every step of every later forward edge follows in catalog order, the edges back aside,
+        // except that the drain, which needs the API running, comes before the users step that
+        // pauses the API
+        let mut expected: Vec<&str> = CATALOG
             .iter()
             .filter(|entry| entry.id > "2026-10-v01" && !entry.is_downward())
             .flat_map(|entry| entry.steps.iter().map(|step| step.id))
             .collect();
+        let drain = expected
+            .iter()
+            .position(|id| *id == "drain-reactions")
+            .expect("the drain is planned");
+        let users = expected
+            .iter()
+            .position(|id| *id == "users-settings-theme")
+            .expect("the users step is planned");
+        let drain = expected.remove(drain);
+        expected.insert(users, drain);
         let found: Vec<&str> = lines[1..]
             .iter()
             .map(|line| line.split_whitespace().nth(1).expect("step id"))

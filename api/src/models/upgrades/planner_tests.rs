@@ -6,13 +6,14 @@ use std::cell::Cell;
 use super::fixtures::{self, BASE, NEXT, RELEASE, STACK};
 use super::plan_fixtures::{
     self, CHECKED, CONTRACT_BETWEEN, CYCLE, EXAMPLE, EXPAND_KINDS, FUSED, FUSED_SELF_READS,
-    INDEPENDENT, MANUAL_BETWEEN, PHASES, READS, READS_AFTER, REBUILD_BETWEEN, REVERSIBLE,
+    INDEPENDENT, LEADS, MANUAL_BETWEEN, PHASES, READS, READS_AFTER, REBUILD_BETWEEN, REVERSIBLE,
     SUPERSEDES_CHAIN, SUPERSEDES_DIAMOND, USERS, USERS_V2, USERS_V3, UserVariant,
 };
 use super::{
     AppliedStep, CATALOG, Catalog, ChainLink, ChainOutcome, Family, FusedChain, IssueCategory,
     IssueReason, NextWork, PlanDirection, PlanItem, PlannedPass, PlannedStep, RESET_STATE_STEP,
-    Record, RecordClass, RevisionId, StepState, TransformDef, UpgradePlan, UpgradeState, Work,
+    Record, RecordClass, RevisionId, StepKind, StepState, TransformDef, UpgradePlan, UpgradeState,
+    Work,
 };
 use crate::models::schema::PassCheckpoint;
 
@@ -528,14 +529,134 @@ fn converge_runs_first_and_contract_steps_last() {
         .map(PlanItem::Step)
         .collect();
     assert_eq!(plan.items, steps);
-    // the edge after it applies the schema, then converts the users in a pass
+    // the edge after it applies the schema and converts the users in a pass
     assert_eq!(
         shape(&compose(&Catalog::PRODUCTION, "2026-10-v02", "2026-10-v03")),
         [
             "step schema-apply",
-            "passes redis:users [users-settings-theme]",
+            "passes redis:users [users-settings-theme]"
         ]
     );
+    // the edge after that drains the reactions, then runs the tool conversion steps in order
+    assert_eq!(
+        shape(&compose(&Catalog::PRODUCTION, "2026-10-v03", "2026-10-v04")),
+        [
+            "step drain-reactions",
+            "step images-to-tools",
+            "step pipelines-to-tool-stages",
+            "step provenance-to-legacy-tools",
+            "step finalize-tool-only",
+        ]
+    );
+    // a plan across both edges applies the schema, then drains before the users pass pauses the
+    // API, then converts
+    assert_eq!(
+        shape(&compose(&Catalog::PRODUCTION, "2026-10-v02", "2026-10-v04")),
+        [
+            "step schema-apply",
+            "step drain-reactions",
+            "passes redis:users [users-settings-theme]",
+            "step images-to-tools",
+            "step pipelines-to-tool-stages",
+            "step provenance-to-legacy-tools",
+            "step finalize-tool-only",
+        ]
+    );
+}
+
+/// The drain can wait a long time while Thorium keeps writing, so every data step planned after it
+/// reads after it: its check runs again once the drain finishes, and a step the early check found
+/// nothing to change for isn't skipped over data written during the wait
+#[test]
+fn data_steps_after_the_drain_read_after_it() {
+    // find the newest edge and the position of its drain
+    let edge = CATALOG
+        .iter()
+        .find(|entry| entry.id == "2026-10-v04" && !entry.is_downward())
+        .expect("the newest edge");
+    let drain = edge
+        .steps
+        .iter()
+        .position(|step| step.id == "drain-reactions")
+        .expect("the drain step");
+    // every data step after the drain names it as a step its check reads after
+    let later = edge.steps[drain + 1..]
+        .iter()
+        .filter(|step| step.kind == StepKind::Data)
+        .collect::<Vec<_>>();
+    assert!(!later.is_empty(), "the edge has data steps after the drain");
+    for step in later {
+        assert!(
+            step.reads_after.contains(&"drain-reactions"),
+            "{} doesn't read after the drain",
+            step.id
+        );
+    }
+}
+
+/// A step that needs the API running moves before the first step pausing the API in a plan across
+/// several edges, in both the flat plan the operator runs and the composed plan, and stays behind
+/// a pause of another component; on its own edge, or when no pause precedes it, it keeps its place
+#[test]
+fn a_step_that_needs_the_api_comes_before_the_first_api_pause() {
+    // a deployment at the baseline runs the second edge's step before the first edge's pausing
+    // step, but after the step that pauses only the search streamer
+    let state = LEADS.reached(&rev(BASE), "0.0.0");
+    let flat = LEADS.plan(&state, &rev(NEXT)).expect("plan");
+    let ids = flat
+        .iter()
+        .map(|step| step.step.as_str())
+        .collect::<Vec<_>>();
+    assert_eq!(
+        ids,
+        [
+            "reindex",
+            "rebuild-results",
+            "wait-idle",
+            "users-v2",
+            "users-v3"
+        ]
+    );
+    // the composed plan places it the same way, and the transforms it no longer separates fuse
+    assert_eq!(
+        shape(&compose(&LEADS, BASE, NEXT)),
+        [
+            "step reindex",
+            "step rebuild-results",
+            "step wait-idle",
+            "passes redis:users [users-v2,users-v3]",
+        ]
+    );
+    // a deployment already at the first edge's revision runs the second edge in its own order
+    assert_eq!(
+        shape(&compose(&LEADS, RELEASE, NEXT)),
+        ["step wait-idle", "passes redis:users [users-v3]"]
+    );
+    // a plan that stops at the first edge never reaches the step
+    assert_eq!(
+        shape(&compose(&LEADS, BASE, RELEASE)),
+        [
+            "step reindex",
+            "step rebuild-results",
+            "passes redis:users [users-v2]"
+        ]
+    );
+    // with the pausing step finished the step has nothing to move ahead of
+    let mut done = LEADS.reached(&rev(BASE), "0.0.0");
+    for id in ["reindex", "rebuild-results", "users-v2"] {
+        done.record(AppliedStep {
+            revision: RELEASE.to_owned(),
+            step: id.to_owned(),
+            outcome: StepState::Done,
+            ..AppliedStep::default()
+        });
+    }
+    let rest = LEADS.plan(&done, &rev(NEXT)).expect("plan");
+    let ids = rest
+        .iter()
+        .map(|step| step.step.as_str())
+        .collect::<Vec<_>>();
+    assert_eq!(ids, ["wait-idle", "users-v3"]);
 }
 
 /// Only an infra step without a migration folds into the converge step when tagged `Expand`;

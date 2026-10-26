@@ -9,10 +9,10 @@ use super::downgrade_fixtures::{
 use super::fixtures::{self, BASE, NEXT, RELEASE};
 use super::plan_fixtures::{self, USERS_V2, USERS_V3, UserVariant};
 use super::{
-    Catalog, CatalogEntry, ChainLink, ChainOutcome, FieldLoss, Fill, FillValue, FusedChain,
-    IssueCategory, IssueReason, LossReport, MigrationPhase, PlanDirection, PlanItem, PlannedPass,
-    PlannedStep, Record, RecordClass, Reversibility, RevisionId, StepDef, StepKind, StepLoss,
-    TransformDef, TransformIssue, UpgradeError, UpgradePlan,
+    AppliedStep, Catalog, CatalogEntry, ChainLink, ChainOutcome, FieldLoss, Fill, FillValue,
+    FusedChain, IssueCategory, IssueReason, LossReport, MigrationPhase, PlanDirection, PlanItem,
+    PlannedPass, PlannedStep, Record, RecordClass, Reversibility, RevisionId, StepDef, StepKind,
+    StepLoss, StepState, TransformDef, TransformIssue, UpgradeError, UpgradePlan, UpgradeState,
 };
 
 /// Parse a revision id that must be valid
@@ -914,4 +914,116 @@ fn after_a_reverse_up_recomputes_stale_new_forms() {
         };
         assert_eq!(field(&converted, name), Some(expected), "{converted:?}");
     }
+}
+
+/// The newest revision of the production catalog
+const NEWEST: &str = "2026-10-v04";
+
+/// The revision before the newest one, which the newest revision's edge back leads to
+const PREVIOUS: &str = "2026-10-v03";
+
+/// The first Helm revision, two revisions below the newest one
+const FIRST_HELM: &str = "2026-10-v02";
+
+/// Build the state of a deployment at a revision that finished only some of its steps
+///
+/// # Arguments
+///
+/// * `revision` - The revision the deployment is at
+/// * `finished` - The ids of the steps of that revision the deployment finished
+fn state_at(revision: &str, finished: &[&str]) -> UpgradeState {
+    // start from a deployment at the revision and record each finished step
+    let mut state = UpgradeState::new(rev(revision), "0.0.0");
+    for step in finished {
+        state.record(AppliedStep {
+            revision: revision.to_owned(),
+            step: (*step).to_owned(),
+            outcome: StepState::Done,
+            ..AppliedStep::default()
+        });
+    }
+    state
+}
+
+/// Build the state of a deployment at the newest revision that finished only some of its steps
+///
+/// # Arguments
+///
+/// * `finished` - The ids of the steps of the newest revision the deployment finished
+fn newest_state(finished: &[&str]) -> UpgradeState {
+    // the steps belong to the newest revision
+    state_at(NEWEST, finished)
+}
+
+/// A downgrade of the production catalog from the newest revision is refused for each tool
+/// conversion step the deployment finished, naming that step and the revision, whether it goes
+/// back one revision or two
+#[test]
+fn the_production_downgrade_refuses_each_tool_conversion_step() {
+    for step in [
+        "images-to-tools",
+        "pipelines-to-tool-stages",
+        "provenance-to-legacy-tools",
+    ] {
+        // a deployment that finished the step alongside the drain
+        let state = newest_state(&["drain-reactions", step]);
+        for target in [PREVIOUS, FIRST_HELM] {
+            let error = Catalog::PRODUCTION
+                .compose(&state, &rev(target))
+                .expect_err("the downgrade is refused");
+            assert_eq!(
+                error,
+                UpgradeError::Irreversible {
+                    revision: rev(NEWEST),
+                    step: step.to_owned(),
+                }
+            );
+            // the message names the step and says to restore from backup
+            let message = error.to_string();
+            assert!(message.contains(step), "{message}");
+            assert!(message.contains(NEWEST), "{message}");
+            assert!(message.contains("restore from backup"), "{message}");
+            // planning refuses it the same way
+            assert_eq!(Catalog::PRODUCTION.plan(&state, &rev(target)), Err(error));
+        }
+    }
+    // a deployment that finished every step is refused, at the first conversion step in order
+    let state = Catalog::PRODUCTION.reached(&rev(NEWEST), "0.0.0");
+    let error = Catalog::PRODUCTION
+        .compose(&state, &rev(PREVIOUS))
+        .expect_err("refused");
+    assert!(error.to_string().contains("images-to-tools"), "{error}");
+}
+
+/// A downgrade across only the users conversion is not refused: the previous revision's reverse
+/// step runs, and no step of the newest revision blocks it
+#[test]
+fn the_users_theme_conversion_alone_still_downgrades() {
+    // a deployment at the revision that applies the schema first, with its steps finished
+    let state = state_at(PREVIOUS, &["schema-apply", "users-settings-theme"]);
+    let plan = Catalog::PRODUCTION
+        .compose(&state, &rev(FIRST_HELM))
+        .expect("the users conversion alone downgrades");
+    // the reverse of the users conversion is the only step in the plan
+    assert_eq!(
+        shape(&plan),
+        ["passes redis:users [users-settings-theme-reverse]"]
+    );
+    // a deployment at the newest revision that finished the earlier revisions and only drained
+    // goes down two revisions the same way
+    let mut drained = Catalog::PRODUCTION.reached(&rev(PREVIOUS), "0.0.0");
+    drained.revision = rev(NEWEST);
+    drained.record(AppliedStep {
+        revision: NEWEST.to_owned(),
+        step: "drain-reactions".to_owned(),
+        outcome: StepState::Done,
+        ..AppliedStep::default()
+    });
+    let plan = Catalog::PRODUCTION
+        .compose(&drained, &rev(FIRST_HELM))
+        .expect("a drain alone downgrades");
+    assert_eq!(
+        shape(&plan),
+        ["passes redis:users [users-settings-theme-reverse]"]
+    );
 }

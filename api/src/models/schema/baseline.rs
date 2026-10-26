@@ -9,7 +9,9 @@
 //! created the same schema.
 //!
 //! A change to the declared schema that moves this baseline keeps the released definition here
-//! instead: the committed snapshots of released revisions never change.
+//! instead: the committed snapshots of released revisions never change. A revision released after
+//! the registry existed whose layouts the declared schema has since moved on from keeps the
+//! layouts it wrote in [`RELEASED_LAYOUTS`], and [`RevisionSnapshot::released`] builds its snapshot.
 
 use super::cql_type::{CqlDesc, CqlNative};
 use super::definition::{
@@ -21,6 +23,11 @@ use crate::models::upgrades::{LAYOUTS, LayoutDef, RevisionId, SchemaBackend};
 
 /// The revisions released before the schema registry existed, whose snapshots are the baseline
 pub const BASELINE_REVISIONS: &[&str] = &["2026-10-v01", "2026-10-v02"];
+
+/// The layouts a revision released after the schema registry existed wrote where the declared
+/// schema has since moved to another layout, as `(revision, family, layout)`; every other object of
+/// such a revision is the declared one
+pub const RELEASED_LAYOUTS: &[(&str, &str, u32)] = &[("2026-10-v03", "pipelines", 1)];
 
 /// Every declared Scylla object the baseline's setup statements created, in their order; the
 /// statements are kept in `goldens/legacy_ddl.cql`, and the declared definitions are held to them
@@ -269,6 +276,49 @@ impl RevisionSnapshot {
         let mut objects = baseline_objects()
             .iter()
             .map(SnapshotObject::of)
+            .collect::<Vec<_>>();
+        objects
+            .sort_by(|left, right| (left.backend, &left.name).cmp(&(right.backend, &right.name)));
+        let backends = Self::backend_fingerprints(&objects);
+        RevisionSnapshot {
+            revision,
+            deployment: Self::deployment_fingerprint(&backends),
+            backends,
+            objects,
+        }
+    }
+}
+
+impl RevisionSnapshot {
+    /// Build the snapshot of a revision released after the schema registry existed: the declared
+    /// schema, with the layouts the revision wrote where they differ from the declared ones
+    ///
+    /// # Arguments
+    ///
+    /// * `revision` - The revision the snapshot is recorded for
+    #[must_use]
+    pub fn released(revision: RevisionId) -> RevisionSnapshot {
+        // fingerprint the declared objects, except the layouts this revision wrote differently
+        let mut objects = SchemaObject::declared()
+            .into_iter()
+            .map(|object| {
+                let written = RELEASED_LAYOUTS.iter().find(|(id, family, _)| {
+                    *id == revision.as_str()
+                        && object.backend == SchemaBackend::Redis
+                        && object.name == *family
+                });
+                match written {
+                    Some(&(_, family, version)) => SnapshotObject::of(&SchemaObject {
+                        definition: SchemaDefinition::Layout(baseline_layout(
+                            SchemaBackend::Redis,
+                            family,
+                            version,
+                        )),
+                        ..object
+                    }),
+                    None => SnapshotObject::of(&object),
+                }
+            })
             .collect::<Vec<_>>();
         objects
             .sort_by(|left, right| (left.backend, &left.name).cmp(&(right.backend, &right.name)));

@@ -641,6 +641,30 @@ pub const READS_AFTER: Catalog = two_edges!(
     ]
 );
 
+/// A step that needs the API running leads the second edge, after the first edge's reindex, which
+/// pauses only the search streamer, and its rebuild, and before its users transform, which pauses
+/// the API
+pub const LEADS: Catalog = two_edges!(
+    &[
+        StepDef {
+            pause: &[UpgradeComponent::SearchStreamer],
+            ..rebuild("reindex", &[])
+        },
+        rebuild("rebuild-results", &[]),
+        StepDef {
+            pause: &[UpgradeComponent::Api],
+            ..transform("users-v2", &USERS_V2)
+        }
+    ],
+    &[
+        StepDef {
+            needs_running: &[UpgradeComponent::Api],
+            ..step("wait-idle", StepKind::Data, None)
+        },
+        transform("users-v3", &USERS_V3)
+    ]
+);
+
 /// Users from layout 2 to layout 3, reading users
 pub const USERS_V3_READING_USERS: TransformDef = TransformDef {
     reads: &[USERS],

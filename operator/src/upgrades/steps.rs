@@ -27,7 +27,8 @@ enum Unattended {
     /// Run the schema-apply Job, converging Scylla to the target schema before any step that
     /// changes data
     SchemaApply,
-    /// Record the new revision, which the runner does once every step is done
+    /// Record the new revision, which the runner does once every step is done; also the step that
+    /// undoes that record, which has nothing of its own to run
     Finalize,
 }
 
@@ -59,6 +60,14 @@ const EXECUTORS: &[(&str, Executor)] = &[
         Executor::Guarded(Guarded::ElasticReindex),
     ),
     ("finalize", Executor::Unattended(Unattended::Finalize)),
+    (
+        "finalize-tool-only",
+        Executor::Unattended(Unattended::Finalize),
+    ),
+    (
+        "finalize-tool-only-reverse",
+        Executor::Unattended(Unattended::Finalize),
+    ),
 ];
 
 /// Find the executor registered for a step id
@@ -475,6 +484,120 @@ mod tests {
                 "{id} is listed twice"
             );
         }
+    }
+
+    /// The steps that convert agentic data are planned in a fixed order, each with the pause list
+    /// and executor the design gives it: a cluster at the revision that applies the schema first
+    /// runs only them, and one at the first Helm revision runs the schema and users steps first
+    #[test]
+    fn the_conversion_steps_are_planned_in_order_with_their_executors() {
+        use thorium::models::upgrades::{Catalog, RevisionId, UpgradeComponent, UpgradeState};
+        let catalog = Catalog::PRODUCTION;
+        // the steps planned from a revision to the newest one
+        let plan = |from: &str| {
+            let state = UpgradeState::new(from.parse::<RevisionId>().expect("revision"), "0.0.0");
+            catalog
+                .plan(&state, &catalog.latest())
+                .expect("a plan")
+                .into_iter()
+                .map(|step| step.step)
+                .collect::<Vec<_>>()
+        };
+        // from the revision that applies the schema first the drain waits, then the conversions
+        // run, and the record is last
+        let conversions = [
+            "drain-reactions",
+            "images-to-tools",
+            "pipelines-to-tool-stages",
+            "provenance-to-legacy-tools",
+            "finalize-tool-only",
+        ];
+        assert_eq!(plan("2026-10-v03"), conversions);
+        // from the first Helm revision the schema is applied first and the drain still waits
+        // before the users step pauses the API
+        assert_eq!(
+            plan("2026-10-v02"),
+            [
+                "schema-apply",
+                "drain-reactions",
+                "users-settings-theme",
+                "images-to-tools",
+                "pipelines-to-tool-stages",
+                "provenance-to-legacy-tools",
+                "finalize-tool-only",
+            ]
+        );
+        // the conversions pause the five components and the drain pauses none
+        let pauses = [
+            UpgradeComponent::Api,
+            UpgradeComponent::Scaler,
+            UpgradeComponent::BaremetalScaler,
+            UpgradeComponent::EventHandler,
+            UpgradeComponent::SearchStreamer,
+        ];
+        let step = |id: &str| thorium::models::upgrades::step(id).expect("a step").1;
+        assert_eq!(step("drain-reactions").pause, []);
+        for id in [
+            "images-to-tools",
+            "pipelines-to-tool-stages",
+            "provenance-to-legacy-tools",
+        ] {
+            assert_eq!(step(id).pause, pauses, "{id}");
+        }
+        assert_eq!(step("finalize-tool-only").pause, []);
+        // the three conversions run as migration Jobs, and so does the drain's check
+        for id in [
+            "drain-reactions",
+            "images-to-tools",
+            "pipelines-to-tool-stages",
+            "provenance-to-legacy-tools",
+        ] {
+            assert!(runs_in_thoradm(step(id)), "{id}");
+            assert!(registered(id).is_none(), "{id} needs no row of its own");
+        }
+        // the record step has its own row and runs unattended
+        assert!(!runs_in_thoradm(step("finalize-tool-only")));
+        assert_eq!(
+            registered("finalize-tool-only"),
+            Some(Executor::Unattended(Unattended::Finalize))
+        );
+        // the pipeline conversion reads what the image conversion wrote, and every data step
+        // after the drain checks again once the drain ends
+        assert_eq!(
+            step("pipelines-to-tool-stages").reads_after,
+            ["drain-reactions", "images-to-tools"]
+        );
+        for id in ["images-to-tools", "provenance-to-legacy-tools"] {
+            assert_eq!(step(id).reads_after, ["drain-reactions"], "{id}");
+        }
+        // the users step belongs to the earlier revision, which has no drain to wait for
+        assert!(step("users-settings-theme").reads_after.is_empty());
+    }
+
+    /// Every data step of the newest revision names a block of text an admin can follow by hand
+    #[test]
+    fn the_conversion_steps_say_how_to_do_them_by_hand() {
+        // the three conversions are run by thoradm, and the drain names the command that clears reactions
+        for id in [
+            "images-to-tools",
+            "pipelines-to-tool-stages",
+            "provenance-to-legacy-tools",
+        ] {
+            let step = thorium::models::upgrades::step(id).expect("a step").1;
+            let text = step.manual_procedure.expect("a procedure");
+            assert!(
+                text.contains(&format!("thoradm migrate run --id {id}")),
+                "{id}"
+            );
+        }
+        let drain = thorium::models::upgrades::step("drain-reactions")
+            .expect("a step")
+            .1;
+        assert!(
+            drain
+                .manual_procedure
+                .is_some_and(|text| text.contains("thorctl reactions delete"))
+        );
     }
 
     /// Get the reindex step from the catalog

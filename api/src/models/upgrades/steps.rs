@@ -119,6 +119,10 @@ pub struct StepDef {
     /// Ids of earlier steps whose output this step's check reads; when one of them in the same
     /// plan finishes, the operator runs this step's check again before its approval
     pub reads_after: &'static [&'static str],
+    /// The components this step needs running normally: in a plan across several edges it comes
+    /// before the first step that pauses one of them, because a step that waits for in-flight
+    /// work can't follow a pause of the components that do it
+    pub needs_running: &'static [UpgradeComponent],
 }
 
 impl StepDef {
@@ -140,6 +144,7 @@ impl StepDef {
         reverses: None,
         group_max: DEFAULT_GROUP_MAX,
         reads_after: &[],
+        needs_running: &[],
     };
 }
 

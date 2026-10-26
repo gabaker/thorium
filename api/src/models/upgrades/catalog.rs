@@ -11,6 +11,8 @@ mod v01;
 mod v02;
 mod v03;
 mod v03_reverse;
+mod v04;
+mod v04_reverse;
 
 pub use v02::REINDEX_PROCEDURE;
 pub use v03::{SCHEMA_APPLY_STEP, USERS_SETTINGS_THEME_REVERSE_STEP, USERS_SETTINGS_THEME_STEP};
@@ -336,7 +338,14 @@ pub struct SupportFloor {
 }
 
 /// Every edge this build knows about, oldest first; a new edge is appended in its own file
-pub const CATALOG: &[CatalogEntry] = &[v01::ENTRY, v02::ENTRY, v03::ENTRY, v03_reverse::ENTRY];
+pub const CATALOG: &[CatalogEntry] = &[
+    v01::ENTRY,
+    v02::ENTRY,
+    v03::ENTRY,
+    v03_reverse::ENTRY,
+    v04::ENTRY,
+    v04_reverse::ENTRY,
+];
 
 /// The artifacts this build's reversible steps register: round-trip and new-layout fixtures,
 /// compatibility tests, the changes of lossy steps, and the security-sensitive fields; a step
@@ -395,17 +404,80 @@ pub fn step(id: &str) -> Option<(&'static CatalogEntry, &'static StepDef)> {
 
 #[cfg(test)]
 mod tests {
-    use super::{CATALOG, Catalog, RevisionId, SCHEMA_APPLY_STEP, v02, v03};
+    use super::{CATALOG, Catalog, CatalogEntry, RevisionId, SCHEMA_APPLY_STEP, v02, v03};
     #[cfg(feature = "scylla-utils")]
     use crate::models::schema::RevisionSnapshot;
     #[cfg(feature = "scylla-utils")]
     use crate::models::upgrades::LAYOUTS;
     #[cfg(feature = "scylla-utils")]
     use crate::models::upgrades::{ARTIFACTS, Reversibility};
-    use crate::models::upgrades::{StepKind, UpgradeComponent, UpgradeState};
+    use crate::models::upgrades::{
+        AppliedStep, StepKind, StepState, UpgradeComponent, UpgradeState,
+    };
+
+    /// The revision that holds the steps converting images, pipelines, and provenance to tools
+    const V04: &str = "2026-10-v04";
+
+    /// The steps of revision `2026-10-v04`, in the order they run
+    const V04_STEPS: [&str; 5] = [
+        "drain-reactions",
+        "images-to-tools",
+        "pipelines-to-tool-stages",
+        "provenance-to-legacy-tools",
+        "finalize-tool-only",
+    ];
+
+    /// The steps of revision `2026-10-v03`, in the order they run
+    const V03_STEPS: [&str; 2] = [SCHEMA_APPLY_STEP, "users-settings-theme"];
+
+    /// Get the release edge to the revision that holds the tool conversions
+    fn v04() -> &'static CatalogEntry {
+        // the edge starts at the revision that applies the schema first
+        Catalog::PRODUCTION
+            .edge(v03::ENTRY.id, V04)
+            .expect("the edge to 2026-10-v04")
+    }
+
+    /// Plan the steps from one revision to another over a state that reached the first
+    ///
+    /// # Arguments
+    ///
+    /// * `from` - The revision the deployment reached
+    /// * `to` - The revision to plan to
+    fn planned(from: &str, to: &str) -> Vec<String> {
+        // plan over the production catalog, naming each step
+        let catalog = Catalog::PRODUCTION;
+        let state = catalog.reached(&from.parse().expect("revision"), "0.0.0");
+        catalog
+            .plan(&state, &to.parse().expect("revision"))
+            .expect("plan")
+            .into_iter()
+            .map(|step| step.step)
+            .collect()
+    }
+
+    /// Record a revision's steps as done in a state
+    ///
+    /// # Arguments
+    ///
+    /// * `state` - The state to record into
+    /// * `revision` - The revision the steps belong to
+    /// * `steps` - The ids of the steps
+    fn finish(state: &mut UpgradeState, revision: &str, steps: &[&str]) {
+        // record each step as done
+        for step in steps {
+            state.record(AppliedStep {
+                revision: revision.to_owned(),
+                step: (*step).to_owned(),
+                outcome: StepState::Done,
+                ..AppliedStep::default()
+            });
+        }
+    }
 
     /// The revision after the first Helm revision is released: its first step applies the schema,
-    /// it is the newest revision, and a deployment at the first Helm revision plans just that step
+    /// it holds only the schema and users steps, and a deployment at the first Helm revision plans
+    /// exactly those steps
     #[test]
     fn v03_is_released_with_the_schema_apply_step_first() {
         // the id parses as a revision newer than the edge it starts from
@@ -419,33 +491,123 @@ mod tests {
         assert_eq!(first.id, SCHEMA_APPLY_STEP);
         assert_eq!(first.kind, StepKind::Infra);
         assert!(first.thoradm_migration.is_none());
-        // it is the newest revision, and the catalog's own checks pass
-        let catalog = Catalog::PRODUCTION;
-        assert_eq!(catalog.latest(), id);
-        assert_eq!(catalog.check(), Ok(()));
-        // a deployment at the first Helm revision plans the schema-apply step first
-        let state = UpgradeState::new(v02::ENTRY.revision(), "0.0.0");
-        let planned = catalog.plan(&state, &id).expect("plan");
-        let steps = planned
+        // the revision holds no step that converts tools, so an image that only reached it
+        // still has every conversion to run
+        let ids = v03::ENTRY
+            .steps
             .iter()
-            .map(|step| step.step.as_str())
+            .map(|step| step.id)
             .collect::<Vec<_>>();
-        assert_eq!(steps.first().copied(), Some(SCHEMA_APPLY_STEP), "{steps:?}");
+        assert_eq!(ids, V03_STEPS);
+        assert!(
+            v03::ENTRY
+                .steps
+                .iter()
+                .all(|step| step.needs_running.is_empty())
+        );
+        // the catalog's own checks pass
+        assert_eq!(Catalog::PRODUCTION.check(), Ok(()));
+        // a deployment at the first Helm revision plans exactly its steps
+        assert_eq!(planned(v02::ENTRY.id, v03::ENTRY.id), V03_STEPS);
     }
 
-    /// The released revision's committed snapshot has the fingerprint its entry records
+    /// The revision after it is the newest, holds only the conversion steps in order, starts from
+    /// the revision that applies the schema first, and is documented as released with this version
+    #[test]
+    fn v04_is_the_newest_revision_with_the_conversion_steps() {
+        // the edge starts at the schema revision, reaches a newer id, and is the newest
+        let edge = v04();
+        let id = edge.id.parse::<RevisionId>().expect("valid revision");
+        assert!(id > v03::ENTRY.revision());
+        assert_eq!(edge.from, Some(v03::ENTRY.id));
+        assert!(!edge.prerelease && !edge.sibling && !edge.is_downward());
+        assert_eq!(Catalog::PRODUCTION.latest(), id);
+        assert_eq!(edge.released_with, v03::ENTRY.released_with);
+        // its steps are the drain, the three conversions, and the record, in order
+        let ids = edge.steps.iter().map(|step| step.id).collect::<Vec<_>>();
+        assert_eq!(ids, V04_STEPS);
+        // the catalog's checks pass
+        assert_eq!(Catalog::PRODUCTION.check(), Ok(()));
+    }
+
+    /// The drain waits first and pauses nothing, every step that pauses comes after it, and every
+    /// data step after it reads after it, so no check precedes the wait
+    #[test]
+    fn v04_drains_before_any_pause_and_its_data_steps_read_after_the_drain() {
+        let steps = v04().steps;
+        // the drain leads the edge, needs the API running, and pauses nothing
+        let drain = steps.first().expect("a step");
+        assert_eq!(drain.id, "drain-reactions");
+        assert_eq!(drain.pause, []);
+        assert!(drain.needs_running.contains(&UpgradeComponent::Api));
+        // the steps that pause are the three conversions, all after the drain
+        let pausing = steps
+            .iter()
+            .filter(|step| !step.pause.is_empty())
+            .map(|step| step.id)
+            .collect::<Vec<_>>();
+        assert_eq!(
+            pausing,
+            [
+                "images-to-tools",
+                "pipelines-to-tool-stages",
+                "provenance-to-legacy-tools"
+            ]
+        );
+        // each data step after the drain names it as a step its check reads after
+        for step in steps[1..].iter().filter(|step| step.kind == StepKind::Data) {
+            assert!(
+                step.reads_after.contains(&"drain-reactions"),
+                "{} doesn't read after the drain",
+                step.id
+            );
+        }
+        // the record step is last and pauses nothing
+        let last = steps.last().expect("a step");
+        assert_eq!(
+            (last.id, last.kind),
+            ("finalize-tool-only", StepKind::Config)
+        );
+        assert_eq!(last.pause, []);
+    }
+
+    /// The three conversion steps can't be reverted, so the edge back refuses them naming the step,
+    /// while the drain and the record are not marked
+    #[test]
+    fn v04s_conversions_are_irreversible() {
+        // each conversion declares why a revert is refused
+        for step in v04().steps {
+            let irreversible = matches!(
+                step.reversibility,
+                Some(super::super::Reversibility::Irreversible { .. })
+            );
+            let converts = matches!(
+                step.id,
+                "images-to-tools" | "pipelines-to-tool-stages" | "provenance-to-legacy-tools"
+            );
+            assert_eq!(irreversible, converts, "{}", step.id);
+        }
+    }
+
+    /// The released revisions' committed snapshots have the fingerprints their entries record
     #[test]
     #[cfg(feature = "scylla-utils")]
-    fn v03_records_its_snapshots_fingerprint() {
-        // the committed snapshot's deployment fingerprint is the one in the entry
-        let snapshot = RevisionSnapshot::committed(v03::ENTRY.id)
-            .expect("a committed snapshot")
-            .expect("a valid snapshot");
-        assert_eq!(
-            v03::ENTRY.schema,
-            Some(snapshot.deployment.as_str()),
-            "write the snapshot with the schema_report example"
-        );
+    fn the_revisions_record_their_snapshots_fingerprints() {
+        // the committed snapshot's deployment fingerprint is the one in each entry
+        for entry in [&v03::ENTRY, v04()] {
+            let snapshot = RevisionSnapshot::committed(entry.id)
+                .expect("a committed snapshot")
+                .expect("a valid snapshot");
+            assert_eq!(
+                entry.schema,
+                Some(snapshot.deployment.as_str()),
+                "write the snapshot of {} with the schema_report example",
+                entry.id
+            );
+        }
+        // the two revisions declare different schemas: pipelines are stored in a second layout
+        // from the second one on
+        assert_ne!(v03::ENTRY.schema, v04().schema);
     }
 
     /// The users example's step is a `Data` step on the release edge to the revision that applies
@@ -469,9 +631,9 @@ mod tests {
                 .is_some_and(|transform| transform.down.is_some())
         );
         assert!(matches!(step.reversibility, Some(Reversibility::Backfill)));
-        // the schema is applied before the users are converted
+        // the schema is applied before the users are converted, and nothing else is on the edge
         let ids = edge.steps.iter().map(|step| step.id).collect::<Vec<_>>();
-        assert_eq!(ids, [SCHEMA_APPLY_STEP, "users-settings-theme"]);
+        assert_eq!(ids, V03_STEPS);
         // the reverse edge holds the step that runs the transform's `down`
         let (back, reverse) = catalog
             .reverting_step("users-settings-theme")
@@ -511,29 +673,43 @@ mod tests {
         }
     }
 
-    /// A deployment at the first Helm revision plans exactly the steps of the next release
+    /// A deployment at the first Helm revision plans the steps of each release after it: only the
+    /// schema and users steps for the first, then the conversions on top of them for the second
     #[test]
-    fn the_first_helm_revision_plans_exactly_the_next_releases_steps() {
-        // plan from the first Helm revision to the newest one
-        let state = UpgradeState::new(v02::ENTRY.revision(), "0.0.0");
-        let planned = Catalog::PRODUCTION
-            .plan(&state, &v03::ENTRY.revision())
-            .expect("plan");
-        let steps = planned
-            .iter()
-            .map(|step| step.step.as_str())
+    fn the_first_helm_revision_plans_the_steps_of_the_releases_after_it() {
+        // to the revision that applies the schema first: only its own steps
+        assert_eq!(planned(v02::ENTRY.id, v03::ENTRY.id), V03_STEPS);
+        // from there to the newest: only the conversions, the drain first
+        assert_eq!(planned(v03::ENTRY.id, V04), V04_STEPS);
+        // straight to the newest: the drain moves ahead of the users step that pauses the API, so
+        // it waits with Thorium running, and the schema is still applied first
+        assert_eq!(
+            planned(v02::ENTRY.id, V04),
+            [
+                "schema-apply",
+                "drain-reactions",
+                "users-settings-theme",
+                "images-to-tools",
+                "pipelines-to-tool-stages",
+                "provenance-to-legacy-tools",
+                "finalize-tool-only",
+            ]
+        );
+        // the same steps in two stops, the first stop's steps recorded between them
+        let mut state = Catalog::PRODUCTION.reached(&v02::ENTRY.revision(), "0.0.0");
+        finish(&mut state, v03::ENTRY.id, &V03_STEPS);
+        state.revision = v03::ENTRY.revision();
+        let next = Catalog::PRODUCTION
+            .plan(&state, &V04.parse().expect("revision"))
+            .expect("plan")
+            .into_iter()
+            .map(|step| step.step)
             .collect::<Vec<_>>();
-        // only the steps of the release edge are planned
-        let expected = v03::ENTRY
-            .steps
-            .iter()
-            .map(|step| step.id)
-            .collect::<Vec<_>>();
-        assert_eq!(steps, expected, "{steps:?}");
+        assert_eq!(next, V04_STEPS);
     }
 
-    /// This build and every release snapshot keep users layout 2, and a deployment at the newest
-    /// release plans the reverse step for the first Helm revision
+    /// This build and every release snapshot keep users layout 2, and pipelines are stored in
+    /// layout 2 only from the revision that converts them
     #[test]
     #[cfg(feature = "scylla-utils")]
     fn the_releases_keep_users_layout_2() {
@@ -543,32 +719,106 @@ mod tests {
             .find(|layout| layout.family == "users")
             .expect("users layout");
         assert_eq!((users.version, users.reads_from), (2, 2));
-        // the release snapshots hold layout 2
-        for (revision, version) in [(v02::ENTRY.id, 2), (v03::ENTRY.id, 2)] {
+        // each snapshot holds users layout 2 and the pipelines layout its release reads
+        for (revision, pipelines) in [(v02::ENTRY.id, 1), (v03::ENTRY.id, 1), (V04, 2)] {
             let snapshot = RevisionSnapshot::committed(revision)
                 .expect("committed snapshot")
                 .expect("valid snapshot");
-            let object = snapshot
-                .objects
-                .iter()
-                .find(|object| object.name == "users" && object.canonical.get("users").is_some())
-                .expect("users object");
-            assert_eq!(object.canonical["users"], version, "{revision}");
+            for (name, version) in [("users", 2), ("pipelines", pipelines)] {
+                let object = snapshot
+                    .objects
+                    .iter()
+                    .find(|object| object.name == name && object.canonical.get(name).is_some())
+                    .expect("the object");
+                assert_eq!(object.canonical[name], version, "{revision} {name}");
+            }
         }
     }
 
-    /// A deployment at the newest release plans the reverse step for the first Helm revision
+    /// A deployment at the revision that applies the schema first plans the users reverse step for
+    /// the first Helm revision, since no conversion step belongs to it, while one that ran a
+    /// conversion step of the newest revision can't go back to either
     #[test]
-    fn a_cluster_at_the_release_plans_the_reverse() {
-        // the release's reverse step is the only step planned for the first Helm revision
+    fn a_cluster_at_v03_plans_the_users_reverse() {
+        // a deployment that finished the steps of the revision
         let released = Catalog::PRODUCTION.reached(&v03::ENTRY.revision(), "0.0.0");
+        // the only step planned for the first Helm revision is the users reverse
         let planned = Catalog::PRODUCTION
             .plan(&released, &v02::ENTRY.revision())
-            .expect("plan");
-        let steps = planned
-            .iter()
-            .map(|step| step.step.as_str())
+            .expect("plan")
+            .into_iter()
+            .map(|step| step.step)
             .collect::<Vec<_>>();
-        assert_eq!(steps, ["users-settings-theme-reverse"], "{steps:?}");
+        assert_eq!(planned, ["users-settings-theme-reverse"], "{planned:?}");
+    }
+
+    /// A deployment at the newest revision refuses to go back, naming the first conversion step, once
+    /// that step finished or was skipped; one that only drained goes back with nothing to undo
+    #[test]
+    fn a_cluster_at_v04_is_refused_naming_the_first_conversion() {
+        let catalog = Catalog::PRODUCTION;
+        let v04_revision = V04.parse::<RevisionId>().expect("revision");
+        // a deployment that finished every step is refused on the way to either older revision
+        let released = catalog.reached(&v04_revision, "0.0.0");
+        for target in [v03::ENTRY.revision(), v02::ENTRY.revision()] {
+            let error = catalog.plan(&released, &target).expect_err("refused");
+            assert!(error.to_string().contains("images-to-tools"), "{error}");
+        }
+        // a step that finished as skipped counts as finished, so the refusal stands
+        let mut skipped = catalog.reached(&v03::ENTRY.revision(), "0.0.0");
+        for step in ["drain-reactions", "images-to-tools"] {
+            skipped.record(AppliedStep {
+                revision: V04.to_owned(),
+                step: step.to_owned(),
+                outcome: StepState::Skipped,
+                ..AppliedStep::default()
+            });
+        }
+        skipped.revision = v04_revision.clone();
+        let error = catalog
+            .plan(&skipped, &v03::ENTRY.revision())
+            .expect_err("refused");
+        assert!(error.to_string().contains("images-to-tools"), "{error}");
+        // a deployment that only drained has nothing to undo going back to v03
+        let mut drained = catalog.reached(&v03::ENTRY.revision(), "0.0.0");
+        finish(&mut drained, V04, &["drain-reactions"]);
+        drained.revision = v04_revision;
+        let back = catalog
+            .plan(&drained, &v03::ENTRY.revision())
+            .expect("plan");
+        assert!(back.is_empty(), "{back:?}");
+        // and going back to the first Helm revision from there plans just the users reverse
+        let down = catalog
+            .plan(&drained, &v02::ENTRY.revision())
+            .expect("plan")
+            .into_iter()
+            .map(|step| step.step)
+            .collect::<Vec<_>>();
+        assert_eq!(down, ["users-settings-theme-reverse"], "{down:?}");
+    }
+
+    /// The reverse edge of the newest revision starts there, reaches the revision that applies the
+    /// schema, and holds only the step that undoes the record: the conversions are irreversible
+    #[test]
+    fn v04_has_a_reverse_edge_that_undoes_only_the_record() {
+        // the edge back exists and leads down
+        let forward = v04();
+        let back = Catalog::PRODUCTION
+            .revert_edge(forward)
+            .expect("the edge back");
+        assert_eq!((back.from, back.id), (Some(V04), v03::ENTRY.id));
+        assert!(back.is_downward() && !back.prerelease);
+        // its one step reverses the record step, and none reverses a conversion
+        let steps = back
+            .steps
+            .iter()
+            .map(|step| (step.id, step.reverses))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            steps,
+            [("finalize-tool-only-reverse", Some("finalize-tool-only"))]
+        );
+        // it records the schema fingerprint of the revision it reaches
+        assert_eq!(back.schema, v03::ENTRY.schema);
     }
 }

@@ -516,8 +516,7 @@ impl MigrationRunner for PipelinesToToolStages {
 pub const PIPELINES_TO_TOOL_STAGES: MigrationDef = MigrationDef {
     id: ID,
     backend: Backend::Redis,
-    // checked only until the release's catalog step runs it; flips to `Support::Yes` with that step
-    support: Support::CheckOnly,
+    support: Support::Yes,
     runner: &PipelinesToToolStages,
     pass: "pipelines",
     chain: &[ID],

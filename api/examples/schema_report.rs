@@ -98,14 +98,14 @@ fn write_snapshots(revisions: &[String]) -> Result<(), String> {
     // write each revision's snapshot in the order given
     for raw in revisions {
         // snapshot the revision's schema: the baseline for a revision released before the
-        // registry existed, otherwise the declared schema
+        // registry existed, otherwise the declared schema with the layouts the revision wrote
         let revision = raw
             .parse::<RevisionId>()
             .map_err(|error| format!("{raw} isn't a revision id: {error}"))?;
         let snapshot = if BASELINE_REVISIONS.contains(&revision.as_str()) {
             RevisionSnapshot::baseline(revision)
         } else {
-            RevisionSnapshot::declared(revision)
+            RevisionSnapshot::released(revision)
         };
         // write it where the api crate embeds it from
         let path = repo_root()

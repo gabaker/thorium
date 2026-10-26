@@ -11,7 +11,7 @@
 use std::collections::BTreeSet;
 use std::fmt;
 
-use super::plan::{loss_of, planned};
+use super::plan::{lead_first, loss_of, planned};
 use super::{
     Catalog, CatalogEntry, ChainLink, Family, LossReport, MigrationPhase, PlanDirection, PlanItem,
     PlannedPass, PlannedStep, Record, RecordClass, Reversibility, RevisionId, StepDef, StepKind,
@@ -626,7 +626,8 @@ impl Catalog {
     /// * `run` - The edges, in path order
     fn pending(&self, state: &UpgradeState, run: &[&'static CatalogEntry]) -> Vec<Pending> {
         // keep each edge's unfinished steps, noting the forward ones reversed since their `Done`
-        run.iter()
+        let pending = run
+            .iter()
             .flat_map(|&edge| {
                 self.edge_steps(state, edge)
                     .into_iter()
@@ -637,7 +638,25 @@ impl Catalog {
                         forward: self.forward_of(edge, step),
                     })
             })
-            .collect()
+            .collect();
+        // a step that needs components running comes before the first step that pauses one of them
+        lead_first(
+            pending,
+            |pending| {
+                if pending.edge.is_downward() {
+                    &[]
+                } else {
+                    pending.step.needs_running
+                }
+            },
+            |pending| {
+                if pending.edge.is_downward() {
+                    &[]
+                } else {
+                    pending.step.pause
+                }
+            },
+        )
     }
 
     /// Get the forward step a step of an edge leading down reverses, if it reverses one
