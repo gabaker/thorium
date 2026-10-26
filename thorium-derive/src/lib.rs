@@ -15,6 +15,9 @@ mod sync;
 #[cfg(feature = "python")]
 mod python;
 
+#[cfg(feature = "thorpal")]
+mod tools;
+
 // sync and python are the only users of utils right now;
 // should that change, remove this feature gate
 #[cfg(any(feature = "sync", feature = "python"))]
@@ -200,6 +203,26 @@ pub fn blocking_trait(meta: TokenStream, input: TokenStream) -> TokenStream {
 #[proc_macro_attribute]
 pub fn blocking_fn(meta: TokenStream, input: TokenStream) -> TokenStream {
     sync::blocking_fn(meta, input)
+}
+
+/// Register a ThorPal tool into ThorPal's compile-time tool registry
+///
+/// This must be placed *above* `#[rig::tool_macro]` on a rig tool function; it
+/// re-emits the function untouched and registers the tool struct rig generates
+/// into `crate::thorpal::tools::registry` via `inventory`, so annotating the
+/// function is the only step needed to add a new compiled in tool.
+///
+/// The arguments carry the tool's registry metadata:
+///
+/// * `group` - The tool group this tool belongs to (required, e.g. `"ghidra"`)
+/// * `requires` - An external requirement this tool needs (e.g. `"ghidra"`)
+/// * `logs` - The tracing target prefix this tool's streaming logs come from
+/// * `examining` - Calling this tool counts as examining a function
+/// * `function_scoped` - This tool takes a `target` arg naming a function
+#[cfg(feature = "thorpal")]
+#[proc_macro_attribute]
+pub fn thorpal_tool(meta: TokenStream, input: TokenStream) -> TokenStream {
+    tools::thorpal_tool(meta, input)
 }
 
 /// Set the struct to be a ``PyO3`` `pyclass`, applying `get` and `set` attributes to

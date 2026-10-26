@@ -1,0 +1,19 @@
+/* Make the book widescreen-friendly: mdbook's default theme caps page
+ * content at 750px, wasting most of a wide monitor and forcing horizontal
+ * scrolling on wide tables (like the evaluation ground-truth checklists).
+ * Let content grow with the viewport, capped so prose lines stay readable
+ * on very large displays. */
+:root {
+    --content-max-width: min(1800px, 96%);
+}
+
+/* Let tables use the full widened content area instead of hugging their
+ * natural width, and keep long evidence cells wrapping instead of forcing
+ * the whole table wider than the page. */
+.content table {
+    width: 100%;
+}
+.content table td,
+.content table th {
+    overflow-wrap: anywhere;
+}

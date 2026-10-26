@@ -13,6 +13,7 @@ members = [
   "operator",
   "thorium-derive",
   "cart-rs",
+  "thorpal",
   "python/thorpy",
   "python/thorpy-stubs"
 ]
@@ -43,6 +44,9 @@ debug = true
 [workspace.dependencies]
 thorium-api = { version= "1.8.1", path="api", default-features = false }
 thorium-derive = { version = "1.8.1", path = "thorium-derive" }
+thorpal = { path = "thorpal" }
+rig = "0.42.0"
+ghidra-cli = { path = "../ghidra-cli" }
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "multipart", "stream", "blocking"] }
 tokio = { version = "1.45", features = ["full"] }
 kube = { git = "https://github.com/stackabletech/kube-rs.git", rev="cfdfcd1", features = ["rustls-tls", "derive", "config", "client", "runtime", "http-proxy"] }
@@ -90,3 +94,21 @@ yara-x = { version = "=1.21.0", default-features = false, features = [
   "test_proto3-module",
   "vt-module",
 ] }
+inventory = "0.3"
+rhai = { version = "1.26", features = ["serde"] }
+
+# `thorpal` pulls in `rig` 0.42.0, which reverse-engineers this workspace's
+# LLM tooling. The published rig-core 0.42.0 has a latent type-inference bug in
+# `start_text_item` (`self.current_text_item.as_deref() != Some(item_id)` with
+# `item_id: &String`) that only surfaces here: thorium enables chrono's `rkyv`
+# feature, whose rkyv 0.7 blanket `PartialEq` impls defeat the `&String`->`&str`
+# deref coercion and make the comparison ambiguous. The local rig checkout is a
+# coherent 0.42.0 workspace that already refactored that signature, so we patch
+# the whole rig family to it (patching only rig-core would mix an ahead-of-release
+# rig-core with crates.io facade/agent). rig is a sibling checkout at ../rig, like
+# the ../ghidra-cli checkout thorpal also depends on.
+[patch.crates-io]
+rig = { path = "../rig" }
+rig-core = { path = "../rig/crates/rig-core" }
+rig-agent = { path = "../rig/crates/rig-agent" }
+rig-derive = { path = "../rig/crates/rig-derive" }

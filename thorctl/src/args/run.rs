@@ -163,19 +163,28 @@ mod tests {
         }
     }
 
-    /// No top-level command or alias is named `analyze`, `si`, or `ai`, which other builds reserve
+    /// The names `analyze`, `ai`, and `si` belong only to the ThorPal analyze command
     #[test]
     fn run_commands_do_not_collide_with_reserved_names() {
         let command = Args::command();
-        // collect every name and alias at the top level
-        let mut names = Vec::new();
+        // every top-level command or alias using a ThorPal name must be analyze itself
         for sub in command.get_subcommands() {
-            names.push(sub.get_name().to_owned());
-            names.extend(sub.get_all_aliases().map(ToOwned::to_owned));
-        }
-        // `analyze`, `si`, and `ai` are reserved, so no command here may use them
-        for taken in ["analyze", "si"] {
-            assert!(!names.iter().any(|name| name == taken), "{taken} is used");
+            // collect this command's name and every alias it answers to
+            let names: Vec<&str> = std::iter::once(sub.get_name())
+                .chain(sub.get_all_aliases())
+                .collect();
+            // a command touching a ThorPal name may only be the analyze command
+            if names
+                .iter()
+                .any(|name| ["analyze", "ai", "si"].contains(name))
+            {
+                assert_eq!(
+                    sub.get_name(),
+                    "analyze",
+                    "{} squats on a ThorPal name",
+                    sub.get_name()
+                );
+            }
         }
         // none of the run kinds or their aliases are those names either
         let run = command.find_subcommand("run").expect("a run command");

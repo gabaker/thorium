@@ -24,3 +24,8 @@ built
 **/.venv
 __pycache__/
 python/thorpy/main.py
+
+# runtime state ThorPal creates in its working directory
+GhidraProjects/
+sessions/
+forum_output/

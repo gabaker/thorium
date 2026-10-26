@@ -61,6 +61,7 @@ async fn main() {
         SubCommands::Workflows(workflows) => handlers::workflows::handle(&args, workflows).await,
         SubCommands::Instances(instances) => handlers::instances::handle(&args, instances).await,
         SubCommands::Runs(runs) => handlers::runs::handle(&args, runs).await,
+        SubCommands::Analyze(ai) => handlers::ai::handle(&args, ai).await,
         SubCommands::Cart(cart) => handlers::cart::handle(&args, cart).await,
         SubCommands::Uncart(uncart) => handlers::uncart::handle(&args, uncart).await,
         SubCommands::Run(run) => handlers::run::handle(&args, run).await,
@@ -80,8 +81,15 @@ async fn main() {
         }
         // print our error to stderr nicely if possible
         match error {
+            // a generic error is already a human-readable message; print it bare
             Error::Generic(msg) => eprintln!("{msg}"),
-            _ => eprintln!("{error:#?}"),
+            // otherwise prefer the error's own message, prefixed with its kind so
+            // the source is still clear, and fall back to the debug dump only when
+            // the error carries no message of its own
+            _ => match error.msg() {
+                Some(msg) => eprintln!("{}: {msg}", error.kind()),
+                None => eprintln!("{error:#?}"),
+            },
         }
         // exit with the timeout code if a --wait-for timed out, or 1 otherwise
         std::process::exit(utils::watch::exit_code());
