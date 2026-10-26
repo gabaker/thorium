@@ -44,7 +44,10 @@ async function openDiagram(page: Page) {
 }
 
 async function dragHandle(page: Page, dy: number) {
-  const hb = await page.locator('div[title="Drag to resize the diagram height"]').boundingBox();
+  const handle = page.locator('div[title="Drag to resize the diagram height"]');
+  // the handle sits at the bottom of the canvas, which can be below the fold, and a drag outside the viewport is lost
+  await handle.scrollIntoViewIfNeeded();
+  const hb = await handle.boundingBox();
   expect(hb).not.toBeNull();
   await page.mouse.move(hb!.x + hb!.width / 2, hb!.y + hb!.height / 2);
   await page.mouse.down();

@@ -46,12 +46,35 @@ export function isEmptyResult(value: Value): boolean {
   return false;
 }
 
+// the tools that have a custom result renderer
+const AV_TOOLS = ['symantec', 'clamav'];
+const TC2_TOOLS = ['titanium-core2', 'tc2'];
+const VBA_TOOLS = ['vbaextraction'];
+
+/**
+ * Get the display type a result is drawn with.
+ *
+ * A Custom result is drawn by the renderer of its tool; a tool with no custom renderer (such as a
+ * converted legacy tool that kept its old Custom display type) is drawn as JSON so its result is
+ * never blank.
+ *
+ * @param type - The display type the result declares.
+ * @param tool - The tool or workflow result key the result is stored under.
+ * @returns The display type to render with.
+ */
+export function effectiveDisplayType(type: OutputDisplayType, tool: string): OutputDisplayType {
+  const hasCustom = AV_TOOLS.includes(tool) || TC2_TOOLS.includes(tool) || VBA_TOOLS.includes(tool);
+  return type === OutputDisplayType.Custom && !hasCustom ? OutputDisplayType.Json : type;
+}
+
 /**
  * The "Result" tab body: dispatches to the appropriate display component based on the result's
  * display type (and, for custom display types, the tool name). Extracted from the old monolithic
  * ToolResult so the result rendering lives alongside the other tabs.
  */
-const ResultTab: React.FC<ToolResultTabProps> = ({ result, sha256, tool, type }) => {
+const ResultTab: React.FC<ToolResultTabProps> = ({ result, sha256, tool, type: declaredType }) => {
+  // draw a Custom result that has no custom renderer as JSON
+  const type = effectiveDisplayType(declaredType, tool);
   // Every display type renders nothing for empty content, so show a consistent info alert instead.
   // Image is the exception — it can render images from result files even with an empty `result`.
   const hasImageFiles = type === OutputDisplayType.Image && (result.files?.length ?? 0) > 0;
@@ -74,13 +97,9 @@ const ResultTab: React.FC<ToolResultTabProps> = ({ result, sha256, tool, type })
       }
     >
       <ResultContainer>
-        {type == OutputDisplayType.Custom && (tool == 'symantec' || tool == 'clamav') && (
-          <AvMulti result={result} sha256={sha256} tool={tool} />
-        )}
-        {type == OutputDisplayType.Custom && tool == 'vbaextraction' && <VBA result={result} />}
-        {type == OutputDisplayType.Custom && (tool == 'titanium-core2' || tool == 'tc2') && (
-          <TC2 result={result} sha256={sha256} tool={tool} />
-        )}
+        {type == OutputDisplayType.Custom && AV_TOOLS.includes(tool) && <AvMulti result={result} sha256={sha256} tool={tool} />}
+        {type == OutputDisplayType.Custom && VBA_TOOLS.includes(tool) && <VBA result={result} />}
+        {type == OutputDisplayType.Custom && TC2_TOOLS.includes(tool) && <TC2 result={result} sha256={sha256} tool={tool} />}
         {type == OutputDisplayType.Decomposition && <Decomposition result={result} sha256={sha256} tool={tool} />}
         {type == OutputDisplayType.Disassembly && <Disassembly result={result} sha256={sha256} tool={tool} />}
         {type == OutputDisplayType.Html && <SafeHtml result={result} sha256={sha256} tool={tool} />}

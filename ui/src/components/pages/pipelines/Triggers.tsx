@@ -20,7 +20,7 @@ import {
 import { PipelineFormMode } from './types';
 import { FieldError } from '@components/shared/inputs/FieldError';
 import SelectInputArray from '@components/shared/inputs/selectable/SelectInputArray';
-import { OverlayTipRight } from '@components/shared/overlay/tips';
+import { OverlayTipRight, OverlayTipTop } from '@components/shared/overlay/tips';
 import type { EventTrigger, TagTrigger } from '@models/pipelines';
 import { TagTypes } from '@models/tags';
 
@@ -305,26 +305,28 @@ const Triggers: React.FC<TriggersProps> = ({ value, onChange, onValidate, mode, 
   }
   const nameErrors = triggerNameErrors(forms);
   return (
-    // The section help shows on hovering the triggers content itself (like the description field's
-    // `block`-wrapped textarea) rather than from a title/`?`. Lives here so create and edit share it.
-    <OverlayTipRight tip={TRIGGERS_TIP} block>
-      <Panel>
-        {forms.length === 0 && <EmptyNote>No event triggers configured.</EmptyNote>}
-        {forms.map((form, idx) => (
-          <TriggerCardItem
-            key={idx}
-            form={form}
-            showErrors={showErrors}
-            nameError={showErrors ? nameErrors[idx] : null}
-            onChange={(patch) => updateForm(idx, patch)}
-            onRemove={() => removeTrigger(idx)}
-          />
-        ))}
+    <Panel>
+      {forms.length === 0 && <EmptyNote>No event triggers configured.</EmptyNote>}
+      {forms.map((form, idx) => (
+        <TriggerCardItem
+          key={idx}
+          form={form}
+          showErrors={showErrors}
+          nameError={showErrors ? nameErrors[idx] : null}
+          onChange={(patch) => updateForm(idx, patch)}
+          onRemove={() => removeTrigger(idx)}
+        />
+      ))}
+      {/* The section help is anchored to the compact add button rather than the whole panel: the
+          panel grows with every trigger and can be taller than the viewport, which leaves a top or
+          bottom placed tip no room to render in view. The button is always short, so the tip fits
+          above it (flipping below near the top edge). Lives here so create and edit share it. */}
+      <OverlayTipTop tip={TRIGGERS_TIP}>
         <AddButton type="button" onClick={addTrigger} aria-label="Add trigger">
           <b>+</b>
         </AddButton>
-      </Panel>
-    </OverlayTipRight>
+      </OverlayTipTop>
+    </Panel>
   );
 };
 

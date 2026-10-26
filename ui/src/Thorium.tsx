@@ -27,6 +27,23 @@ const EntityDetails = lazy(async () => await import('./pages/entities/EntityDeta
 const EntityCreate = lazy(async () => await import('./pages/entities/EntityCreate'));
 const CreateImage = lazy(async () => await import('./pages/images/ImageCreate'));
 const CreatePipeline = lazy(async () => await import('./pages/pipelines/PipelineCreate'));
+const ToolBrowsing = lazy(async () => await import('./pages/tools/ToolBrowsing'));
+const ToolCreate = lazy(async () => await import('./pages/tools/ToolCreate'));
+const ToolDetails = lazy(async () => await import('./pages/tools/ToolDetails'));
+const ToolSetBrowsing = lazy(async () => await import('./pages/toolsets/ToolSetBrowsing'));
+const ToolSetCreate = lazy(async () => await import('./pages/toolsets/ToolSetCreate'));
+const ToolSetDetails = lazy(async () => await import('./pages/toolsets/ToolSetDetails'));
+const AgentBrowsing = lazy(async () => await import('./pages/agents/AgentBrowsing'));
+const AgentCreate = lazy(async () => await import('./pages/agents/AgentCreate'));
+const AgentDetails = lazy(async () => await import('./pages/agents/AgentDetails'));
+const WorkflowBrowsing = lazy(async () => await import('./pages/workflows/WorkflowBrowsing'));
+const WorkflowCreate = lazy(async () => await import('./pages/workflows/WorkflowCreate'));
+const WorkflowDetails = lazy(async () => await import('./pages/workflows/WorkflowDetails'));
+const WorkflowInstanceDetails = lazy(async () => await import('./pages/workflows/WorkflowInstanceDetails'));
+const ModelBrowsing = lazy(async () => await import('./pages/models/ModelBrowsing'));
+const LaunchRun = lazy(async () => await import('./pages/runs/LaunchRun'));
+const RunBrowsing = lazy(async () => await import('./pages/runs/RunBrowsing'));
+const RunDetails = lazy(async () => await import('./pages/runs/RunDetails'));
 const GraphBuilder = lazy(async () => await import('./pages/GraphBuilder'));
 const Pipelines = lazy(async () => await import('./pages/pipelines/PipelineBrowsing'));
 const Images = lazy(async () => await import('./pages/images/ImageBrowsing'));
@@ -104,6 +121,25 @@ const Resources = () => (
     // Account-creation email verification (browser-redirect catch page, like the OAuth link page)
     <Route path="/users/verify/:username/email/:token" element={<PageWrapper auth={false} Contents={EmailVerify} />} />
     <Route path="/users/verify/:username/verified" element={<PageWrapper auth={false} Contents={EmailVerified} />} />
+    // Tools, toolsets, agents, workflows, and models
+    <Route path="/tools" element={<PageWrapper Contents={ToolBrowsing} />} />
+    <Route path="/tools/create" element={<PageWrapper Contents={ToolCreate} />} />
+    <Route path="/tools/:id" element={<PageWrapper Contents={ToolDetails} />} />
+    <Route path="/toolsets" element={<PageWrapper Contents={ToolSetBrowsing} />} />
+    <Route path="/toolsets/create" element={<PageWrapper Contents={ToolSetCreate} />} />
+    <Route path="/toolsets/:id" element={<PageWrapper Contents={ToolSetDetails} />} />
+    <Route path="/agents" element={<PageWrapper Contents={AgentBrowsing} />} />
+    <Route path="/agents/create" element={<PageWrapper Contents={AgentCreate} />} />
+    <Route path="/agents/:id" element={<PageWrapper Contents={AgentDetails} />} />
+    <Route path="/workflows" element={<PageWrapper Contents={WorkflowBrowsing} />} />
+    <Route path="/workflows/create" element={<PageWrapper Contents={WorkflowCreate} />} />
+    <Route path="/workflows/instances/:id" element={<PageWrapper Contents={WorkflowInstanceDetails} />} />
+    <Route path="/workflows/:id" element={<PageWrapper Contents={WorkflowDetails} />} />
+    <Route path="/models" element={<PageWrapper Contents={ModelBrowsing} />} />
+    // Runs
+    <Route path="/launch" element={<PageWrapper Contents={LaunchRun} />} />
+    <Route path="/runs" element={<PageWrapper Contents={RunBrowsing} />} />
+    <Route path="/runs/:group/:id" element={<PageWrapper Contents={RunDetails} />} />
     // Pipelines and Image settings
     <Route path="/pipelines" element={<PageWrapper Contents={Pipelines} />} />
     <Route path="/images" element={<PageWrapper Contents={Images} />} />

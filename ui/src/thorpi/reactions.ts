@@ -1,3 +1,4 @@
+import axios from 'axios';
 import client, { parseRequestError } from './client';
 
 // project imports
@@ -60,9 +61,15 @@ export async function createReaction(
  * @param group - The group the reaction belongs to.
  * @param uuid - The reaction's unique id.
  * @param errorHandler - Called with a formatted message if the request fails.
+ * @param statusHandler - Called with the HTTP status when the API answers with an error.
  * @returns The {@link Reaction}, or `null` if not found or the request failed.
  */
-export async function getReaction(group: string, uuid: string, errorHandler: (error: string) => void): Promise<Reaction | null> {
+export async function getReaction(
+  group: string,
+  uuid: string,
+  errorHandler: (error: string) => void,
+  statusHandler?: (status: number) => void,
+): Promise<Reaction | null> {
   const url = '/reactions/' + group + '/' + uuid;
   return client
     .get<Reaction>(url)
@@ -73,6 +80,7 @@ export async function getReaction(group: string, uuid: string, errorHandler: (er
       return null;
     })
     .catch((error: unknown) => {
+      if (statusHandler && axios.isAxiosError(error) && error.response) statusHandler(error.response.status);
       parseRequestError(error, errorHandler, 'Get Reaction');
       return null;
     });

@@ -16,7 +16,8 @@ const Time: React.FC<TimeProps> = ({ children, verbose }) => {
     if (!fullTime) {
       return <Fragment>{children}</Fragment>;
     }
-    time = fullTime.split('.')[0];
+    // drop fractional seconds and any trailing UTC designator so API timestamps render in one format
+    time = fullTime.split('.')[0].replace(/Z$/, '');
   } catch {
     return <Fragment>{children}</Fragment>;
   }

@@ -1,8 +1,10 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import type { FC } from 'react';
-import { useNavigate } from 'react-router-dom';
+import styled from 'styled-components';
 
 // project imports
+import AlertBanner, { Severity } from '@components/shared/alerts/AlertBanner';
+import { Badge } from '@components/shared/badges/Badge';
 import ImageAccordionItem from '@components/pages/images/ImageAccordionItem';
 import Page from '@components/pages/Page';
 import { OmnibarImages } from '@components/shared/inputs/omnibar/Bars';
@@ -10,21 +12,26 @@ import type { Clause } from '@components/shared/inputs/omnibar/ClauseTypes';
 import { defaultTimeSelection } from '@components/shared/inputs/omnibar/timepicker/utils';
 import { useOmnibarUrlState } from '@components/shared/inputs/omnibar/useOmnibarUrlState';
 import { getGroupsFromClauses, getSearchTextFromClauses, matchesStringClauses } from '@components/shared/inputs/omnibar/utils';
+import ListErrorBanner from '@components/shared/alerts/ListErrorBanner';
 import NoResultsBanner from '@components/shared/alerts/NoResultsBanner';
 import Title from '@components/shared/titles/Title';
 import LoadingSpinner from '@components/shared/fallback/LoadingSpinner';
-import { OverlayTipRight, OverlayTipBottom } from '@components/shared/overlay/tips';
+import { OverlayTipRight } from '@components/shared/overlay/tips';
 import { useAuth } from '@utilities/auth';
 import { getThoriumRole } from '@utilities/role';
 import { fetchImages, fetchGroups } from '@utilities/fetch';
 import type { Image } from '@models/images';
 import type { Group } from '@models/groups';
 import { RoleKey } from '@models/users';
-import type { UserInfo } from '@models/users';
 import { scrollToSection } from '@utilities/interactions';
 import { Accordion } from '@components/shared/accordion';
-import { CountBadge, HeaderBar, OmnibarRow } from '@pages/pipelines/PipelineBrowsing.styled';
-import { Button } from '@components/shared/buttons';
+import { HeaderBar, NoteRow, OmnibarRow } from '@pages/pipelines/PipelineBrowsing.styled';
+
+/** The header with the title centred on the page: the count on the left and an empty cell of the same share on the right. */
+const CentredHeaderBar = styled(HeaderBar)`
+  display: grid;
+  grid-template-columns: 1fr auto 1fr;
+`;
 
 /** Filter images client-side by the omnibar clauses (group, creator, name, free text). */
 const filterImages = (images: Image[], clauses: Clause[]): Image[] => {
@@ -40,34 +47,12 @@ const filterImages = (images: Image[], clauses: Clause[]): Image[] => {
   });
 };
 
-interface CreateImageButtonProps {
-  userInfo: UserInfo | null;
-}
-
-const CreateImageButton: FC<CreateImageButtonProps> = ({ userInfo }) => {
-  const navigate = useNavigate();
-  const userCanCreateImage = userInfo
-    ? ([RoleKey.Developer, RoleKey.Analyst, RoleKey.Admin] as string[]).includes(getThoriumRole(userInfo.role))
-    : false;
-  const tip = userCanCreateImage
-    ? `Create a new Image. You must be a
-    Thorium developer, analyst, or admin to create an image.`
-    : `You must be a Thorium developer or
-    admin to create an image.`;
-
-  return (
-    <OverlayTipBottom tip={tip}>
-      <Button className="ok-btn m-1" disabled={!userCanCreateImage} onClick={() => void navigate('/create/image')}>
-        <b>+</b>
-      </Button>
-    </OverlayTipBottom>
-  );
-};
-
 const ImageBrowsing: FC = () => {
   const [loading, setLoading] = useState(false);
   const [images, setImages] = useState<Image[]>([]);
   const [groups, setGroups] = useState<Record<string, Group>>({});
+  // the messages from image list reads that failed, so an unreadable list is not shown as an empty one
+  const [listErrors, setListErrors] = useState<string[]>([]);
   // expanded accordion rows + omnibar filters live in the URL so the view is shareable
   const { clauses, setClauses } = useOmnibarUrlState({ clauses: [], time: defaultTimeSelection() });
   const { userInfo, checkCookie } = useAuth();
@@ -102,8 +87,18 @@ const ImageBrowsing: FC = () => {
     };
   }, [groups]);
 
+  // Record a failed list read for display and re-check the session.
+  const onListError = useCallback(
+    (message: string) => {
+      setListErrors((prev) => (prev.includes(message) ? prev : [...prev, message]));
+      void checkCookie();
+    },
+    [checkCookie],
+  );
+
   const fetchImageData = async () => {
-    await fetchImages(Object.keys(groups), setImages, cancelUpdateRef.current, () => void checkCookie(), setLoading, true);
+    setListErrors([]);
+    await fetchImages(Object.keys(groups), setImages, cancelUpdateRef.current, onListError, setLoading, true);
     // need to wait 1 second because the page takes so long to load
     setTimeout(scrollOnLoad, 1000);
   };
@@ -122,9 +117,13 @@ const ImageBrowsing: FC = () => {
   // Full list reload (with the loading spinner) used after a delete removes an image.
   const reloadImages = useCallback(() => {
     if (Object.keys(groups).length) {
-      void fetchImages(Object.keys(groups), setImages, false, () => void checkCookie(), setLoading, true);
+      setListErrors([]);
+      void fetchImages(Object.keys(groups), setImages, false, onListError, setLoading, true);
     }
-  }, [groups, checkCookie]);
+  }, [groups, onListError]);
+
+  // a failed read with nothing loaded has no count to show; 0 would claim the list is empty
+  const listFailed = listErrors.length > 0 && images.length === 0;
 
   const imageCountTip =
     userInfo && getThoriumRole(userInfo.role) == RoleKey.Admin
@@ -133,24 +132,34 @@ const ImageBrowsing: FC = () => {
 
   return (
     <Page title="Images · Thorium">
-      <HeaderBar>
+      <CentredHeaderBar>
         <div>
           <h2>
-            <OverlayTipRight tip={imageCountTip}>
-              <CountBadge> {images.length} </CountBadge>
-            </OverlayTipRight>
+            {!listFailed && (
+              <OverlayTipRight tip={imageCountTip}>
+                <Badge count data-testid="image-count">
+                  {images.length}
+                </Badge>
+              </OverlayTipRight>
+            )}
           </h2>
         </div>
         <Title>Images</Title>
-        <div>
-          <CreateImageButton userInfo={userInfo} />
-        </div>
-      </HeaderBar>
+        <div />
+      </CentredHeaderBar>
+      <NoteRow>
+        <AlertBanner severity={Severity.Info}>
+          <span data-testid="images-note">
+            Images are legacy: they can be viewed and deleted but no longer created or changed. Tools replace them.
+          </span>
+        </AlertBanner>
+      </NoteRow>
       <OmnibarRow>
         <OmnibarImages clauses={clauses} setClauses={setClauses} images={images} />
       </OmnibarRow>
+      <ListErrorBanner errors={listErrors} />
       <LoadingSpinner loading={loading}></LoadingSpinner>
-      {!loading && filteredImages.length === 0 && <NoResultsBanner type="Images" />}
+      {!loading && listErrors.length === 0 && filteredImages.length === 0 && <NoResultsBanner type="Images" />}
       <Accordion alwaysOpen activeKey={activeKeys} onSelect={handleAccordionSelect}>
         {filteredImages.map((image) => (
           <ImageAccordionItem

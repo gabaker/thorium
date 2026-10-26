@@ -8,6 +8,7 @@ import {
   isGroupOwner,
   canModifyGroup,
   canEditGroupData,
+  canEditEntityInGroups,
   canViewGroup,
   canDevelopInGroup,
   canDevelopAnyInGroup,
@@ -160,6 +161,30 @@ describe('canEditGroupData (mirrors Group::editable)', () => {
   it('denies monitors and non-members', () => {
     expect(canEditGroupData(makeGroup({ monitors: roleBucket(['mo']) }), makeUser('mo', USER))).toBe(false);
     expect(canEditGroupData(makeGroup(), makeUser('nobody', USER))).toBe(false);
+  });
+});
+
+describe('canEditEntityInGroups (mirrors the graph check for contained entities)', () => {
+  const juno = makeGroup({ name: 'juno', monitors: roleBucket(['gan']) });
+  const minerva = makeGroup({ name: 'minerva', users: roleBucket(['gan']) });
+
+  it('allows a user who can edit every group of the entity', () => {
+    expect(canEditEntityInGroups([juno, minerva], ['minerva'], makeUser('gan', USER))).toBe(true);
+    expect(canEditEntityInGroups([juno, minerva], ['juno', 'minerva'], makeUser('admin', ADMIN))).toBe(true);
+  });
+
+  it('denies a user who only monitors one of the groups', () => {
+    expect(canEditEntityInGroups([juno, minerva], ['juno'], makeUser('gan', USER))).toBe(false);
+    expect(canEditEntityInGroups([juno, minerva], ['juno', 'minerva'], makeUser('gan', USER))).toBe(false);
+  });
+
+  it('denies when a group does not allow entities, even for an admin', () => {
+    const closed = makeGroup({ name: 'closed', allowed: { ...makeGroup().allowed, entities: false } });
+    expect(canEditEntityInGroups([closed], ['closed'], makeUser('admin', ADMIN))).toBe(false);
+  });
+
+  it('leaves a group with unknown details to the API', () => {
+    expect(canEditEntityInGroups([], ['juno'], makeUser('gan', USER))).toBe(true);
   });
 });
 

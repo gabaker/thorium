@@ -89,7 +89,9 @@ export const VersionSelect = styled.select`
   padding: 5px 8px;
   font-size: 0.85rem;
   cursor: pointer;
-  max-width: 220px;
+  // wide enough for a full "date, time - version" label so the caret doesn't cover the version
+  max-width: min(100%, 320px);
+  text-overflow: ellipsis;
 
   &:focus-visible {
     outline: none;

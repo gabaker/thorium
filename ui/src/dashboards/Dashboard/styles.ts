@@ -681,20 +681,6 @@ export const SortCaret = styled.span`
   color: var(--thorium-highlight-text);
 `;
 
-/**
- * A small pill showing a reaction status, colored by outcome. Uses CSS variables per status keyword so a
- * single styled component covers every status without a stylesheet explosion.
- */
-export const StatusPill = styled.span<{ $bg: string; $fg: string }>`
-  display: inline-block;
-  padding: ${spacers.one} ${spacers.three};
-  border-radius: 999px;
-  font-size: 0.72rem;
-  font-weight: 600;
-  background: ${({ $bg }) => $bg};
-  color: ${({ $fg }) => $fg};
-`;
-
 /// The File cell's link cluster: wraps each sample sha256 link with a small gap so a multi-sample
 /// reaction's links read as distinct tokens instead of one run-together monospace string.
 export const FileLinks = styled.div`

@@ -2,6 +2,8 @@ import { useRef, useState } from 'react';
 import type { FC } from 'react';
 
 // project imports
+import { isStageConverted } from '@components/agentic/pipelines/stages';
+import { Badge, BadgeTone } from '@components/agentic/shared';
 import PipelineInfo from './PipelineInfo';
 import type { PipelineInfoHandle } from './PipelineInfo';
 import { AccordionBody, AccordionHeader, AccordionItem } from '@components/shared/accordion';
@@ -99,6 +101,13 @@ const PipelineAccordionItem: FC<PipelineAccordionItemProps> = ({
           </div>
         </div>
         <div className="accordion-item-status">
+          {pipeline.order.flat().some((stage) => !isStageConverted(pipeline, stage)) && (
+            <OverlayTipRight tip="Some stages name an image that no tool backs, so this pipeline cannot be run.">
+              <Badge $tone={BadgeTone.Legacy} data-testid="legacy-badge">
+                legacy image
+              </Badge>
+            </OverlayTipRight>
+          )}
           {hasBans && (
             <OverlayTipRight tip="This pipeline has active bans and cannot run.">
               <BanWarningIcon />

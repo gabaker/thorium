@@ -1,7 +1,7 @@
 import { Form } from 'react-bootstrap';
 import styles from './TokenViewStyles.module.scss';
 import { ScopedTokenRole, ScopedTokenRoleKey, ThoriumDeveloperRoleValue } from '@models/users';
-import { useMemo } from 'react';
+import { useId, useMemo } from 'react';
 
 const defaultDeveloperPermissions: ThoriumDeveloperRoleValue = {
   k8s: false,
@@ -26,6 +26,8 @@ type ScopedTokenFormProps = {
   showClearExpires?: boolean;
   clearExpires?: boolean;
   onClearExpiresChange?: (v: boolean) => void;
+  // the developer permissions the user may grant, or null when they may not make a developer token; unset puts no limit on the form
+  grantable?: ThoriumDeveloperRoleValue | null;
 };
 
 export const ScopedTokenForm = ({
@@ -41,9 +43,17 @@ export const ScopedTokenForm = ({
   showClearExpires,
   clearExpires,
   onClearExpiresChange,
+  grantable,
 }: ScopedTokenFormProps) => {
+  // a prefix that keeps each control's id unique, so its label can be tied to it
+  // (the Name, Role and Expiry groups build their controlId from it)
+  const idPrefix = useId();
   const sortedGroups = useMemo(() => [...availableGroups].sort(), [availableGroups]);
   const roleKey = role === ScopedTokenRoleKey.User ? ScopedTokenRoleKey.User : ScopedTokenRoleKey.Developer;
+  // the roles offered; Developer is left out for a user the API would refuse it, unless the token already has it
+  const offeredRoles = Object.values(ScopedTokenRoleKey).filter(
+    (candidate) => candidate !== ScopedTokenRoleKey.Developer || grantable !== null || roleKey === ScopedTokenRoleKey.Developer,
+  );
 
   const developerPermissions = [
     { key: 'k8s', label: 'K8s' },
@@ -82,10 +92,10 @@ export const ScopedTokenForm = ({
   return (
     <Form>
       {onNameChange !== undefined && (
-        <Form.Group className="mb-3">
+        <Form.Group className="mb-3" controlId={`${idPrefix}-name`}>
           <Form.Label>Name</Form.Label>
           <Form.Control type="text" placeholder="my-token" value={name ?? ''} onChange={(e) => onNameChange(e.target.value)} />
-          <Form.Text className="text-muted">Scoped token names can contain lower case letters, numbers, and dashes</Form.Text>
+          <Form.Text className="text-muted">Scoped token names can contain lower case letters, numbers, and dashes.</Form.Text>
         </Form.Group>
       )}
       <Form.Group className="mb-3">
@@ -97,6 +107,7 @@ export const ScopedTokenForm = ({
             <Form.Check
               className={styles.group_check}
               key={group}
+              id={`${idPrefix}-group-${group}`}
               type="checkbox"
               label={group}
               checked={selectedGroups.includes(group)}
@@ -105,10 +116,10 @@ export const ScopedTokenForm = ({
           ))
         )}
       </Form.Group>
-      <Form.Group className="mb-3">
+      <Form.Group className="mb-3" controlId={`${idPrefix}-role`}>
         <Form.Label>Role</Form.Label>
         <Form.Select value={roleKey} onChange={(e) => onChangeRoleKey(e.target.value as ScopedTokenRoleKey)}>
-          {Object.values(ScopedTokenRoleKey).map((selectedRole) => (
+          {offeredRoles.map((selectedRole) => (
             <option key={selectedRole} value={selectedRole}>
               {selectedRole}
             </option>
@@ -119,9 +130,12 @@ export const ScopedTokenForm = ({
             {developerPermissions.map(({ key, label }) => (
               <Form.Check
                 key={key}
+                id={`${idPrefix}-permission-${key}`}
                 className={styles.group_check}
                 type="checkbox"
                 label={label}
+                // a permission the user doesn't hold themselves is refused by the API, so it can't be ticked
+                disabled={grantable != null && !grantable[key] && !(role !== ScopedTokenRoleKey.User && role.Developer[key])}
                 checked={role !== ScopedTokenRoleKey.User && role.Developer[key]}
                 onChange={() => role !== ScopedTokenRoleKey.User && updateDeveloperPermission(key, !role.Developer[key])}
               />
@@ -129,12 +143,13 @@ export const ScopedTokenForm = ({
           </div>
         )}
       </Form.Group>
-      <Form.Group className="mb-3">
-        <Form.Label>Permanent Expiry (optional)</Form.Label>
+      <Form.Group className="mb-3" controlId={`${idPrefix}-expires`}>
+        <Form.Label>Permanent expiry (optional)</Form.Label>
         <Form.Control type="date" value={expires} disabled={clearExpires} onChange={(e) => onExpiresChange(e.target.value)} />
       </Form.Group>
       {showClearExpires && onClearExpiresChange && (
         <Form.Check
+          id={`${idPrefix}-clear-expires`}
           type="checkbox"
           label="Clear permanent expiry"
           checked={clearExpires ?? false}

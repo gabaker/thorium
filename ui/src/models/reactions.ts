@@ -1,6 +1,9 @@
 // Types generated from api/src/models/reactions.rs, api/src/models/jobs.rs,
 // and api/src/models/git/repos.rs
 
+// project imports
+import type { ReactionPlan, ReactionSource } from './runs';
+
 // -- Job argument types (from api/src/models/jobs.rs) --
 
 /** Options to apply to a generic job */
@@ -77,6 +80,46 @@ export enum ReactionStatus {
   Failed = 'Failed',
 }
 
+/** The current status of a job (from api/src/models/jobs.rs) */
+export enum JobStatus {
+  /** This job has been created but is not running */
+  Created = 'Created',
+  /** This job has been claimed and is running */
+  Running = 'Running',
+  /** This job has completed */
+  Completed = 'Completed',
+  /** This job has failed due to an error */
+  Failed = 'Failed',
+  /** This job has returned to Thorium to be respawned (generators) */
+  Sleeping = 'Sleeping',
+}
+
+/** The actions a reaction's status log records (from api/src/models/logs.rs) */
+export enum StatusAction {
+  /** Reaction created */
+  ReactionCreated = 'ReactionCreated',
+  /** Reaction completed */
+  ReactionCompleted = 'ReactionCompleted',
+  /** The reaction is proceeding to the next group of stages/images */
+  ReactionProceeding = 'ReactionProceeding',
+  /** Jobs for this reaction will be spawned/executed */
+  ReactionEnabled = 'ReactionEnabled',
+  /** Any jobs for this reaction will not be spawned */
+  ReactionDisabled = 'ReactionDisabled',
+  /** One of the jobs for this reaction has ran into an error and this reaction has failed */
+  ReactionFailed = 'ReactionFailed',
+  /** Created a Job */
+  JobCreated = 'JobCreated',
+  /** Job has begun execution */
+  JobRunning = 'JobRunning',
+  /** Job has been reset (the API serializes it as an object keyed by this name, holding the requestor) */
+  JobReset = 'JobReset',
+  /** Job completed */
+  JobCompleted = 'JobCompleted',
+  /** Job has ran into an error */
+  JobFailed = 'JobFailed',
+}
+
 /** A status update log entry for a reaction (from api/src/models/logs.rs) */
 export interface StatusUpdate {
   /** The group the pipeline/reaction this status update is for */
@@ -85,12 +128,12 @@ export interface StatusUpdate {
   pipeline: string;
   /** The reaction this status update is for */
   reaction: string;
-  /** The action that occurred in this update */
-  action: string;
+  /** The action that occurred in this update; a job reset arrives as `{ JobReset: <requestor> }` */
+  action: string | Record<string, unknown>;
   /** The timestamp this occurred */
   timestamp: string;
   /** A message or reason why this action occurred */
-  msg?: string;
+  msg?: string | null;
   /** The update that occurred */
   update: Record<string, string>;
 }
@@ -193,6 +236,14 @@ export interface Reaction {
   trigger_depth?: number;
   /** Whether this reaction has any cache data set */
   has_cache: boolean;
+  /** What this reaction runs (a pipeline, a single tool instance, or a workflow instance) */
+  source?: ReactionSource;
+  /** The stages resolved when this reaction was created, each running a tool instance */
+  plan?: ReactionPlan;
+  /** The name of the run-scoped token this reaction's workers use */
+  run_token?: string | null;
+  /** The run whose token and per-run workers this reaction's jobs use */
+  run?: string | null;
 }
 
 /** Cached data for a reaction */
@@ -239,18 +290,6 @@ export interface ReactionRunResult {
   group: string;
   /** The pipeline this reaction was for */
   pipeline: string;
-}
-
-/** A single entry in a reaction's event log */
-export interface ReactionLogEntry {
-  /** The log entry ID */
-  id: string;
-  /** The type of event */
-  action: 'JobCreated' | 'JobCompleted' | 'JobFailed' | 'JobRunning';
-  /** When this event occurred */
-  timestamp: string;
-  /** Event-specific key/value data */
-  update: Record<string, string>;
 }
 
 /** The response from listing reactions for a group */

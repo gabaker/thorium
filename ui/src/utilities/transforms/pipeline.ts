@@ -83,11 +83,23 @@ function computeTriggerDiffs(
 }
 
 /**
+ * Find the stage tools an update has to send: those that are new or point at a different tool.
+ *
+ * @param newTools - The edited stage tools, by stage name.
+ * @param oldTools - The pipeline's stage tools as loaded.
+ * @returns The new and changed entries; empty when nothing changed.
+ */
+export function changedStageTools(newTools: Record<string, unknown>, oldTools: Record<string, unknown>): Record<string, unknown> {
+  return Object.fromEntries(Object.entries(newTools).filter(([stage, tool]) => !valuesEqual(tool, oldTools[stage])));
+}
+
+/**
  * Build a minimal pipeline-update request by diffing the editor object against the original pipeline.
  *
  * Only changed fields are included: `order` and `sla` when they differ, the description (set when
- * present/changed or cleared via `clear_description` when emptied), and trigger add/remove diffs via
- * {@link computeTriggerDiffs}.
+ * present/changed or cleared via `clear_description` when emptied), new or changed stage tools as
+ * `add_stage_tools`, and trigger add/remove diffs via {@link computeTriggerDiffs}. A stage tool
+ * that left with its stage needs no removal: the API drops the tools of removed stages itself.
  *
  * @param obj - The current editor object.
  * @param originalPipeline - The pipeline as originally loaded from the API.
@@ -121,6 +133,14 @@ export function editorObjectToPipelineUpdate(
     }
   } else if (hasOrigDesc) {
     data['clear_description'] = true;
+  }
+
+  // the API refuses a stage added to the order without a tool, so new and changed stage tools go with the order
+  const newTools = (obj['stage_tools'] ?? {}) as Record<string, unknown>;
+  const oldTools = (originalPipeline['stage_tools'] ?? {}) as Record<string, unknown>;
+  const addTools = changedStageTools(newTools, oldTools);
+  if (Object.keys(addTools).length > 0) {
+    data['add_stage_tools'] = addTools;
   }
 
   const newTriggers = (obj['triggers'] ?? {}) as Record<string, unknown>;

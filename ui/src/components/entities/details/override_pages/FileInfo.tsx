@@ -1,5 +1,5 @@
 import React, { Fragment, ReactNode, useEffect, useState } from 'react';
-import { Badge, Button, ButtonToolbar, Card, Col, Form, Modal, Row } from 'react-bootstrap';
+import { Button, Card, Col, Form, Modal, Row } from 'react-bootstrap';
 import Select from 'react-select';
 import { FaFileAlt, FaSitemap, FaTrash } from 'react-icons/fa';
 import { MultiValue } from 'react-select';
@@ -17,7 +17,18 @@ import { deleteSubmission } from '@thorpi/files';
 import type { Sample } from '@models/files';
 import type { Group } from '@models/groups';
 import styled from 'styled-components';
-import { BuildDashboardButton, BuildDashboardResource, IconButton } from '@components/shared/buttons';
+import {
+  BuildDashboardButton,
+  BuildDashboardResource,
+  ButtonSize,
+  ButtonToolbar,
+  ButtonVariant,
+  IconButton,
+  LinkButton,
+} from '@components/shared/buttons';
+import { launchRunPath } from '@components/agentic/runs/launchForms';
+import { InlineList } from '@components/agentic/shared';
+import { Badge, BadgeTone } from '@components/shared/badges/Badge';
 import { LuPackageSearch } from 'react-icons/lu';
 import OriginData from './OriginData';
 
@@ -51,9 +62,9 @@ interface FileActionsToolbarProps {
   onNavigateTab: (key: string) => void;
 }
 
-// centered toolbar rendered under the tags section: quick jumps to the Entities/Associations tabs
-// plus the shared build-dashboard entry point
-const FileActionsToolbar = ({ sha256, onNavigateTab }: FileActionsToolbarProps) => (
+// centered toolbar rendered under the tags section: quick jumps to the Entities/Associations tabs, the shared
+// build-dashboard entry point, and a link to the run page with this file filled in
+export const FileActionsToolbar = ({ sha256, onNavigateTab }: FileActionsToolbarProps) => (
   <ButtonToolbar className="mt-3">
     <OverlayTipBottom tip="Entities Search">
       <IconButton onClick={() => onNavigateTab('entities')} aria-label="Entities Search">
@@ -66,6 +77,14 @@ const FileActionsToolbar = ({ sha256, onNavigateTab }: FileActionsToolbarProps) 
       </IconButton>
     </OverlayTipBottom>
     <BuildDashboardButton resource={BuildDashboardResource.Sample} id={sha256} label="file" />
+    <LinkButton
+      variant={ButtonVariant.Ok}
+      size={ButtonSize.Small}
+      to={launchRunPath({ samples: [sha256] })}
+      data-testid="file-run-analysis"
+    >
+      Run Analysis
+    </LinkButton>
   </ButtonToolbar>
 );
 
@@ -225,6 +244,7 @@ const FileInfo = ({ details, setDetails, groupDetails, setDeletionStatus, onNavi
               size="sm"
               variant=""
               className="icon-btn"
+              aria-label="Delete submission"
               disabled={!deletePermissions[selectedSub]}
               onClick={() => handleShowDeleteModal()}
             >
@@ -339,15 +359,15 @@ const FileInfo = ({ details, setDetails, groupDetails, setDeletionStatus, onNavi
                     </SubmitterLine>
                   </FileInfoRow>
                   <FileInfoRow title="Groups">
-                    <p>
+                    <InlineList as="p">
                       {details.submissions &&
                         details.submissions[subIndex[selectedSub]] &&
                         details.submissions[subIndex[selectedSub]].groups.map((group, idx) => (
-                          <Badge key={idx} pill bg="" className="bg-blue py-2 px-3">
+                          <Badge key={idx} tone={BadgeTone.Accent}>
                             {group}
                           </Badge>
                         ))}
-                    </p>
+                    </InlineList>
                   </FileInfoRow>
                 </Col>
                 <Col xs={2} className="details-circle">

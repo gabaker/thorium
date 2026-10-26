@@ -9,7 +9,6 @@ import type { PipelineFieldsValue } from './Fields';
 import OrderField from './OrderField';
 import {
   AlertSpacer,
-  CreatorBadge,
   DetailCol,
   EditForm,
   FormatBar,
@@ -24,6 +23,9 @@ import { EditFieldCol, EditMiddle } from './shared.styled';
 import TriggerDisplay from './TriggerDisplay';
 import Triggers from './Triggers';
 import { PipelineFormMode } from './types';
+import type { PipelineEdit } from '@components/agentic/pipelines/diagramEdit';
+import { PipelineStageTools } from '@components/agentic/pipelines/PipelineStageTools';
+import { Badge, BadgeTone } from '@components/shared/badges/Badge';
 import Markdown from '@components/shared/syntax/Markdown';
 import { BansContainer, BanItem } from '@components/shared/browsing';
 import AlertBanner, { Severity } from '@components/shared/alerts/AlertBanner';
@@ -41,7 +43,7 @@ import { cleanDescription } from '@utilities/description';
 import { canModifyPipeline } from '@utilities/permissions';
 import { FormatType } from '@utilities/rules/types';
 import { useDebouncedValue } from '@utilities/useDebouncedValue';
-import { pipelineToEditorObject } from '@utilities/transforms/pipeline';
+import { changedStageTools, pipelineToEditorObject } from '@utilities/transforms/pipeline';
 import type { Group } from '@models/groups';
 import type { EventTrigger, Pipeline, PipelineBan, PipelineUpdate } from '@models/pipelines';
 
@@ -78,7 +80,8 @@ const PipelineInfo: FC<PipelineInfoProps> = ({ ref, pipeline, groups, inEditMode
   // Bumped whenever editorObj is re-seeded from the pipeline so the form sections
   // re-derive their internal state instead of keeping stale edits.
   const [formResetKey, setFormResetKey] = useState(0);
-  const [pendingOrder, setPendingOrder] = useState<(string | string[])[] | null>(null);
+  // An order edited on the details diagram, with its stage tools, until the user applies or discards it.
+  const [pendingEdit, setPendingEdit] = useState<PipelineEdit | null>(null);
   const [orderUpdateError, setOrderUpdateError] = useState('');
   const pipelineTriggers = pipeline.triggers ?? {};
 
@@ -98,7 +101,7 @@ const PipelineInfo: FC<PipelineInfoProps> = ({ ref, pipeline, groups, inEditMode
 
   useEffect(() => {
     if (inEditMode) {
-      setPendingOrder(null);
+      setPendingEdit(null);
       setOrderUpdateError('');
       setEditorObj(pipelineToEditorObject(pipeline));
       setFormResetKey((k) => k + 1);
@@ -130,9 +133,13 @@ const PipelineInfo: FC<PipelineInfoProps> = ({ ref, pipeline, groups, inEditMode
   }, [debouncedEditorGroup]);
 
   const handleOrderApply = async () => {
-    if (!pendingOrder) return;
-    if (await updatePipeline(pipeline.group, pipeline.name, { order: pendingOrder } as PipelineUpdate, setOrderUpdateError)) {
-      setPendingOrder(null);
+    if (!pendingEdit) return;
+    // a stage added on the diagram needs its tool in the same update; the API drops the tools of removed stages itself
+    const addTools = changedStageTools(pendingEdit.stageTools, pipeline.stage_tools ?? {}) as Record<string, string>;
+    const update = { order: pendingEdit.order } as PipelineUpdate;
+    if (Object.keys(addTools).length > 0) update.add_stage_tools = addTools;
+    if (await updatePipeline(pipeline.group, pipeline.name, update, setOrderUpdateError)) {
+      setPendingEdit(null);
       setOrderUpdateError('');
       // Refresh only this pipeline so the reordered content rerenders without collapsing the accordion.
       refreshPipeline(pipeline.group, pipeline.name);
@@ -140,7 +147,7 @@ const PipelineInfo: FC<PipelineInfoProps> = ({ ref, pipeline, groups, inEditMode
   };
 
   const handleOrderDiscard = () => {
-    setPendingOrder(null);
+    setPendingEdit(null);
     setOrderUpdateError('');
   };
 
@@ -225,7 +232,8 @@ const PipelineInfo: FC<PipelineInfoProps> = ({ ref, pipeline, groups, inEditMode
             <EditFieldCol>
               <OrderField
                 order={Array.isArray(editorObj.order) ? (editorObj.order as (string | string[])[]) : []}
-                onChange={(o) => setEditorObj((prev) => ({ ...prev, order: o }))}
+                stageTools={(editorObj.stage_tools as Record<string, string> | undefined) ?? {}}
+                onChange={(o, tools) => setEditorObj((prev) => ({ ...prev, order: o, stage_tools: tools }))}
                 group={pipeline.group}
                 bannedImages={bannedImages}
               />
@@ -258,7 +266,7 @@ const PipelineInfo: FC<PipelineInfoProps> = ({ ref, pipeline, groups, inEditMode
               </SimpleSubtitle>
             </HeaderCol>
             <DetailCol>
-              <CreatorBadge>{pipeline.creator}</CreatorBadge>
+              <Badge tone={BadgeTone.Accent}>{pipeline.creator}</Badge>
             </DetailCol>
           </InfoRow>
           {pipeline.bans && Object.keys(pipeline.bans).length > 0 && (
@@ -304,12 +312,13 @@ const PipelineInfo: FC<PipelineInfoProps> = ({ ref, pipeline, groups, inEditMode
             </HeaderCol>
             <DetailCol>
               <PipelineOrderFlow
-                order={pendingOrder ?? pipeline.order}
-                onOrderChange={userCanModifyOrder ? setPendingOrder : undefined}
+                order={pendingEdit?.order ?? pipeline.order}
+                stageTools={pendingEdit?.stageTools ?? pipeline.stage_tools}
+                onOrderChange={userCanModifyOrder ? (order, stageTools) => setPendingEdit({ order, stageTools }) : undefined}
                 bannedImages={bannedImages}
                 group={pipeline.group}
               />
-              {pendingOrder && (
+              {pendingEdit && (
                 <OrderChangeBar>
                   <ApplyBtn type="button" onClick={() => void handleOrderApply()}>
                     Apply
@@ -324,6 +333,16 @@ const PipelineInfo: FC<PipelineInfoProps> = ({ ref, pipeline, groups, inEditMode
                   <AlertBanner>{orderUpdateError}</AlertBanner>
                 </OrderErrorSpacer>
               )}
+            </DetailCol>
+          </SpacedInfoRow>
+          <SpacedInfoRow>
+            <HeaderCol>
+              <SimpleSubtitle>
+                <b>Stage Tools</b>
+              </SimpleSubtitle>
+            </HeaderCol>
+            <DetailCol>
+              <PipelineStageTools pipeline={pipeline} />
             </DetailCol>
           </SpacedInfoRow>
           <TriggerDisplay triggers={pipelineTriggers} />

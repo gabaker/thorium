@@ -302,6 +302,12 @@ $snl-black-0: tint($snl-black, 25%);
   // dark amber for high-contrast text on the light amber warning backgrounds
   --thorium-warning-text: #{$snl-amber-900};
   --thorium-info-bg: #{$snl-grey-600};
+  // badge tones: a blue info tone (info-bg is grey in most themes), an in-progress tone, and an accent
+  --thorium-badge-info: #{$snl-medium-blue-600};
+  --thorium-badge-active: #{$snl-medium-blue-400};
+  --thorium-badge-accent: #{$snl-dark-blue-400};
+  --thorium-badge-radius: 4px;
+  --thorium-badge-radius-sm: 3px;
   --thorium-info-secondary-bg: #{$snl-medium-blue};
   --thorium-empty-bg: #{$snl-light-blue-800};
   --thorium-ok-bg: #{$snl-green-600};
@@ -363,7 +369,18 @@ $snl-black-0: tint($snl-black, 25%);
   --thorium-warning-secondary-bg: #{$snl-amber-300};
   // dark amber for high-contrast text on the light amber warning backgrounds
   --thorium-warning-text: #{$snl-amber-900};
+  // dark amber for text inside warning banners, which tint the white panel instead of filling with amber
+  --thorium-alert-warning-text: #{$snl-amber-900};
+  // dark green and red for text inside success and error banners, which tint the light panel instead of filling
+  --thorium-alert-success-text: #{$snl-green-700};
+  --thorium-alert-error-text: #{$snl-red-700};
   --thorium-info-bg: #{$snl-grey-500};
+  // badge tones: a blue info tone (info-bg is grey in most themes), an in-progress tone, and an accent
+  --thorium-badge-info: #{$snl-medium-blue-600};
+  --thorium-badge-active: #{$snl-medium-blue-400};
+  --thorium-badge-accent: #{$snl-dark-blue-400};
+  --thorium-badge-radius: 4px;
+  --thorium-badge-radius-sm: 3px;
   --thorium-info-secondary-bg: #{$snl-grey-800};
   --thorium-empty-bg: #{$snl-light-blue-800};
   --thorium-ok-bg: #{$snl-green-600};
@@ -425,6 +442,12 @@ $snl-black-0: tint($snl-black, 25%);
   // dark amber for high-contrast text on the light amber warning backgrounds
   --thorium-warning-text: #{$snl-amber-900};
   --thorium-info-bg: #{$snl-medium-blue};
+  // badge tones: a blue info tone (info-bg is grey in most themes), an in-progress tone, and an accent
+  --thorium-badge-info: #{$snl-medium-blue-600};
+  --thorium-badge-active: #{$snl-medium-blue-400};
+  --thorium-badge-accent: #{$snl-dark-blue-400};
+  --thorium-badge-radius: 4px;
+  --thorium-badge-radius-sm: 3px;
   --thorium-info-secondary-bg: #{$snl-light-blue-300};
   --thorium-empty-bg: #{$snl-medium-blue-800};
   --thorium-ok-bg: #{$snl-green-600};
@@ -492,7 +515,18 @@ $snl-black-0: tint($snl-black, 25%);
   --thorium-warning-secondary-bg: #{$snl-amber-300};
   // dark amber for high-contrast text on the light amber warning backgrounds
   --thorium-warning-text: #{$snl-amber-900};
+  // dark amber for text inside warning banners, which tint the cream panel instead of filling with amber
+  --thorium-alert-warning-text: #{$snl-amber-900};
+  // dark green and red for text inside success and error banners, which tint the light panel instead of filling
+  --thorium-alert-success-text: #{$snl-green-700};
+  --thorium-alert-error-text: #{$snl-red-700};
   --thorium-info-bg: #{$snl-warm-grey-600};
+  // badge tones: a blue info tone (info-bg is grey in most themes), an in-progress tone, and an accent
+  --thorium-badge-info: #{$snl-medium-blue-600};
+  --thorium-badge-active: #{$snl-medium-blue-400};
+  --thorium-badge-accent: #{$snl-dark-blue-400};
+  --thorium-badge-radius: 4px;
+  --thorium-badge-radius-sm: 3px;
   --thorium-info-secondary-bg: #{$snl-amber-100};
   --thorium-empty-bg: #{$snl-light-blue-800};
   --thorium-ok-bg: #{$snl-green-600};

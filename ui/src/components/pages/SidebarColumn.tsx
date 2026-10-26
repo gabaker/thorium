@@ -73,12 +73,18 @@ const hoverStyle = css`
   background-color: var(--thorium-highlight-panel-bg);
 `;
 
-const CategoryRow = styled.div<{ $active?: boolean }>`
+// A real button (not a div) so keyboard users can focus a group and open it with Enter/Space.
+const CategoryRow = styled.button<{ $active?: boolean }>`
   display: flex;
   align-items: center;
   gap: 0.5rem;
+  width: 100%;
   padding: 0.5rem 0.5rem;
   cursor: pointer;
+  border: none;
+  background: none;
+  font: inherit;
+  text-align: left;
   border-radius: 6px;
   color: ${(p) => (p.$active ? 'var(--thorium-highlight-text)' : 'var(--thorium-nav-text)')};
   text-decoration: none;
@@ -90,7 +96,8 @@ const CategoryRow = styled.div<{ $active?: boolean }>`
     justify-content: center;
   }
 
-  &:hover {
+  &:hover,
+  &:focus-visible {
     ${hoverStyle}
   }
 `;
@@ -216,6 +223,23 @@ const SubItemLabel = styled.span`
   }
 `;
 
+// Small italic marker beside a legacy screen's label, kept separate from the label so the label can
+// truncate without clipping the marker. Inherits the link's color (nav text in the sidebar, body
+// text in the flyout) at reduced opacity so it stays above the WCAG AA 4.5:1 contrast on both
+// backgrounds, unlike the grey secondary-text color. Hidden with the label in icon-only mode.
+const LegacyBadge = styled.span`
+  flex-shrink: 0;
+  color: inherit;
+  opacity: 0.8;
+  font-size: 0.65rem;
+  font-style: italic;
+  line-height: 1rem;
+
+  @media (max-width: ${scaling.xl}) {
+    display: none;
+  }
+`;
+
 // "Show more" / "Show less" toggle row. Mirrors SubItemLink sizing but is a real button
 // (not a link) so keyboard users get Enter/Space activation and focus handling for free.
 const SecondaryToggleRow = styled.button`
@@ -309,6 +333,13 @@ const FlyoutItem = styled(NavLink)`
   }
 `;
 
+// Flyout variant of the legacy marker. The flyout always shows labels, so no responsive hiding.
+const FlyoutLegacyBadge = styled(LegacyBadge)`
+  @media (max-width: ${scaling.xl}) {
+    display: inline;
+  }
+`;
+
 // Flyout variant of the show-more toggle. Labels always show (the flyout exists to
 // surface labels when the sidebar is icon-only), so no responsive hiding here. A real
 // button so keyboard users get activation and focus handling for free.
@@ -348,10 +379,12 @@ interface SidebarSubItemProps {
 const SidebarSubItem: React.FC<SidebarSubItemProps> = ({ item }) => {
   const Icon = item.icon;
   return (
-    <OverlayTipRight tip={item.label} className="sidebar-nav-tooltip">
-      <SubItemLink to={item.path} end>
+    <OverlayTipRight tip={item.legacy ? `${item.label} (legacy)` : item.label} className="sidebar-nav-tooltip">
+      {/* the label is hidden in icon-only mode, so name the link explicitly */}
+      <SubItemLink to={item.path} end aria-label={item.legacy ? `${item.label} (legacy)` : item.label}>
         <Icon size={ICON_SIZE - 4} />
         <SubItemLabel>{item.label}</SubItemLabel>
+        {item.legacy && <LegacyBadge>legacy</LegacyBadge>}
       </SubItemLink>
     </OverlayTipRight>
   );
@@ -363,11 +396,14 @@ interface SecondaryToggleProps {
   testId?: string;
 }
 
-// Inline "Show more" / "Show less" toggle. Label hides in icon-only mode like SubItemLabel.
-const SecondaryToggle: React.FC<SecondaryToggleProps> = ({ expanded, onToggle, testId }) => (
+// Inline "Show more" / "Show less" toggle. Label hides in icon-only mode like SubItemLabel, so the
+// button carries its own accessible name and expanded state.
+export const SecondaryToggle: React.FC<SecondaryToggleProps> = ({ expanded, onToggle, testId }) => (
   <SecondaryToggleRow
     type="button"
     data-testid={testId}
+    aria-label={expanded ? 'Show less' : 'Show more'}
+    aria-expanded={expanded}
     onClick={(e) => {
       e.stopPropagation();
       onToggle();
@@ -423,7 +459,7 @@ const AnimatedSubItemList: React.FC<AnimatedSubItemListProps> = ({
 
 interface PortalFlyoutProps {
   category: NavCategory;
-  anchorRef: React.RefObject<HTMLDivElement | null>;
+  anchorRef: React.RefObject<HTMLElement | null>;
   panelRef: React.RefObject<HTMLDivElement | null>;
   showSecondary: boolean;
   onToggleSecondary: () => void;
@@ -475,6 +511,7 @@ const PortalFlyout: React.FC<PortalFlyoutProps> = ({
       <FlyoutItem key={child.path} to={child.path} end onClick={onSelect}>
         <ChildIcon size={ICON_SIZE - 4} />
         {child.label}
+        {child.legacy && <FlyoutLegacyBadge>legacy</FlyoutLegacyBadge>}
       </FlyoutItem>
     );
   };
@@ -485,7 +522,7 @@ const PortalFlyout: React.FC<PortalFlyoutProps> = ({
       {category.children!.map(renderFlyoutItem)}
       {hasSecondary && showSecondary && secondary.map(renderFlyoutItem)}
       {hasSecondary && (
-        <FlyoutSecondaryToggle type="button" data-testid={toggleTestId} onClick={handleToggleClick}>
+        <FlyoutSecondaryToggle type="button" data-testid={toggleTestId} aria-expanded={showSecondary} onClick={handleToggleClick}>
           <SecondaryToggleIcon size={ICON_SIZE - 8} $expanded={showSecondary} />
           {showSecondary ? 'Show less' : 'Show more'}
         </FlyoutSecondaryToggle>
@@ -514,7 +551,7 @@ const SidebarCategory: React.FC<SidebarCategoryProps> = ({
   onFlyoutLeave,
   onFlyoutClose,
 }) => {
-  const rowRef = useRef<HTMLDivElement>(null);
+  const rowRef = useRef<HTMLButtonElement>(null);
   const flyoutPanelRef = useRef<HTMLDivElement>(null);
   const location = useLocation();
 
@@ -620,7 +657,8 @@ const SidebarCategory: React.FC<SidebarCategoryProps> = ({
     return (
       <CategoryContainer>
         <OverlayTipRight tip={category.label} className="sidebar-nav-tooltip">
-          <DirectLink to={category.path!} end={category.path === '/'}>
+          {/* the label is hidden in icon-only mode, so name the link explicitly */}
+          <DirectLink to={category.path!} end={category.path === '/'} aria-label={category.label}>
             <Icon size={ICON_SIZE} />
             <DirectLinkLabel>{category.label}</DirectLinkLabel>
           </DirectLink>
@@ -631,7 +669,14 @@ const SidebarCategory: React.FC<SidebarCategoryProps> = ({
 
   return (
     <CategoryContainer data-testid={`category-${category.label}`} onMouseEnter={handleMouseEnter} onMouseLeave={handleMouseLeave}>
-      <CategoryRow ref={rowRef} $active={isChildActive || isSelfActive} onClick={() => onToggle(category.label)}>
+      <CategoryRow
+        ref={rowRef}
+        type="button"
+        aria-label={category.label}
+        aria-expanded={expanded}
+        $active={isChildActive || isSelfActive}
+        onClick={() => onToggle(category.label)}
+      >
         <Icon size={ICON_SIZE} />
         <CategoryLabel>{category.label}</CategoryLabel>
         <ChevronWrapper>

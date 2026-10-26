@@ -11,6 +11,7 @@ import Subtitle from '@components/shared/titles/Subtitle';
 import { OverlayTipTop, OverlayTipLeft } from '@components/shared/overlay/tips';
 import { useAuth } from '@utilities/auth';
 import { listReactions, deleteReaction } from '@thorpi/reactions';
+import { reactionPath } from '@utilities/runs';
 import { getStatusBadge } from './reactions';
 import type { Reaction, ReactionRunResult } from '@models/reactions';
 
@@ -219,23 +220,23 @@ const ReactionStatus = ({ sha256, autoRefresh }: ReactionStatusProps) => {
             <>
               <Row>
                 <Card className="panel">
-                  <Row>
-                    <Col className="reactions-pipeline mt-3" md={2}>
-                      <Subtitle>Pipeline</Subtitle>
+                  <Row className="reactions-grid">
+                    <Col className="reactions-pipeline mt-3">
+                      <Subtitle>Run</Subtitle>
                     </Col>
-                    <Col className="reactions-creator mt-3" md={1}>
-                      <Subtitle className="mt-2">Creator</Subtitle>
+                    <Col className="reactions-creator mt-3">
+                      <Subtitle>Creator</Subtitle>
                     </Col>
-                    <Col className="reactions-group mt-3" md={1}>
+                    <Col className="reactions-group mt-3">
                       <Subtitle>Group</Subtitle>
                     </Col>
-                    <Col className="reactions-status mt-3" md={1}>
+                    <Col className="reactions-status mt-3">
                       <Subtitle>Status</Subtitle>
                     </Col>
-                    <Col className="reactions-id mt-3" md={3}>
+                    <Col className="reactions-id mt-3">
                       <Subtitle>Reaction ID</Subtitle>
                     </Col>
-                    <Col className="reactions-selection d-flex justify-content-end" md={1}>
+                    <Col className="reactions-selection">
                       <ButtonToolbar className="d-flex justify-content-end">
                         <OverlayTipTop
                           tip={`Delete selected reactions. Only system admins,
@@ -292,23 +293,23 @@ const ReactionStatus = ({ sha256, autoRefresh }: ReactionStatusProps) => {
               <Row className="mt-1">
                 {reactionsList.map((reaction, idx) => (
                   <Card key={`${reaction.id}_${idx}`} className="no-border">
-                    <LinkFields className="no-decoration">
-                      <Link to={`/reaction/${reaction.group}/${reaction.id}`} className="no-decoration reactions-pipeline">
+                    <LinkFields className="no-decoration reactions-grid">
+                      <Link to={reactionPath(reaction)} className="no-decoration reactions-pipeline">
                         <Col>{reaction.pipeline}</Col>
                       </Link>
-                      <Link to={`/reaction/${reaction.group}/${reaction.id}`} className="no-decoration reactions-creator">
+                      <Link to={reactionPath(reaction)} className="no-decoration reactions-creator" title={reaction.creator}>
                         <Col>{reaction.creator}</Col>
                       </Link>
-                      <Link to={`/reaction/${reaction.group}/${reaction.id}`} className="no-decoration reactions-group">
+                      <Link to={reactionPath(reaction)} className="no-decoration reactions-group" title={reaction.group}>
                         <Col>{reaction.group}</Col>
                       </Link>
-                      <Link to={`/reaction/${reaction.group}/${reaction.id}`} className="no-decoration reactions-status">
+                      <Link to={reactionPath(reaction)} className="no-decoration reactions-status">
                         <Col>{getStatusBadge(reaction.status)}</Col>
                       </Link>
-                      <Link to={`/reaction/${reaction.group}/${reaction.id}`} className="no-decoration reactions-id">
+                      <Link to={reactionPath(reaction)} className="no-decoration reactions-id" title={reaction.id}>
                         <Col>{reaction.id}</Col>
                       </Link>
-                      <Col className="reactions-selection" md={1}>
+                      <Col className="reactions-selection">
                         <FormCheck
                           onChange={() => {
                             handleSelectionChange(reaction.id);

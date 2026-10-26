@@ -1,5 +1,6 @@
 import { test, expect, Page } from '@playwright/test';
 import path from 'path';
+import { mockEntity, mockEntityList } from './agentic-mocks';
 import { snapshot, MOCK_USER, waitForEditor } from './helpers';
 
 const SCREENSHOT_DIR = path.join(import.meta.dirname, 'screenshots');
@@ -61,7 +62,10 @@ async function setupMockAuth(page: Page) {
   ]);
 }
 
-const MOCK_GROUP_IMAGES = ['tool-a', 'tool-b', 'tool-c', 'scanner', 'extra-tool', 'analyzer'];
+// the Image tools that can back a stage added on the diagram
+const MOCK_GROUP_TOOLS = ['tool-a', 'tool-b', 'tool-c', 'scanner', 'extra-tool', 'analyzer'].map((name, index) =>
+  mockEntity('Tool', `00000000-0000-0000-0000-00000000dd0${index}`, name, { kind: 'Image', latest: null, modified: '' }),
+);
 
 async function setupPipelineMocks(page: Page, pipelines = [MOCK_PIPELINE, MOCK_PIPELINE_WITH_TRIGGER]) {
   await page.route('**/api/groups/details/**', (route) =>
@@ -85,9 +89,7 @@ async function setupPipelineMocks(page: Page, pipelines = [MOCK_PIPELINE, MOCK_P
     }
     return route.fulfill({ status: 200, contentType: 'application/json', body: '{}' });
   });
-  await page.route('**/api/images/system/', (route) =>
-    route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ names: MOCK_GROUP_IMAGES }) }),
-  );
+  await mockEntityList(page, MOCK_GROUP_TOOLS);
 }
 
 test.describe('Pipelines Page', () => {
@@ -124,7 +126,7 @@ test.describe('Pipelines Page', () => {
     await page.waitForSelector('[data-testid="accordion"]', { timeout: 10000 });
 
     await expect(page.locator('.accordion-item-name .text').first()).toContainText('test-pipeline');
-    await expect(page.locator('.accordion-item-ownership i').first()).toContainText('system');
+    await expect(page.locator('.accordion-item-subtitle i').first()).toContainText('system');
   });
 
   test('expand pipeline shows details', async ({ page }) => {
@@ -134,7 +136,9 @@ test.describe('Pipelines Page', () => {
     await page.locator('[data-testid="accordion-header"]').first().click();
     await page.waitForTimeout(500);
 
-    await expect(page.locator('.bg-blue').first()).toContainText('test');
+    // the details show the creator's name under a Creator heading
+    await expect(page.getByText('Creator', { exact: true })).toBeVisible();
+    await expect(page.getByText('test', { exact: true }).first()).toBeVisible();
     await expect(page.locator('text=A test pipeline for E2E testing')).toBeVisible();
     await expect(page.locator('text=604800')).toBeVisible();
 
@@ -152,54 +156,6 @@ test.describe('Pipelines Page', () => {
     await expect(page.locator('text=NewSample')).toBeVisible();
   });
 
-  test('create pipeline button navigates to create page', async ({ page }) => {
-    await page.goto('/pipelines');
-    await page.waitForSelector('[data-testid="accordion"]', { timeout: 10000 });
-
-    await page.locator('[data-testid="create-pipeline-btn"]').click();
-    await page.waitForURL('**/create/pipeline');
-
-    await expect(page.locator('h3:has-text("Create A Pipeline")')).toBeVisible();
-    // both views are reachable via the form/editor toggle
-    await expect(page.locator('button:has-text("Form")')).toBeVisible();
-    await expect(page.locator('button:has-text("Editor")')).toBeVisible();
-
-    await snapshot(page, SCREENSHOT_DIR, 'pipeline-create-page');
-  });
-
-  test('create pipeline page editor view has format toggle', async ({ page }) => {
-    await page.goto('/pipelines');
-    await page.waitForSelector('[data-testid="accordion"]', { timeout: 10000 });
-
-    await page.locator('[data-testid="create-pipeline-btn"]').click();
-    await page.waitForURL('**/create/pipeline');
-
-    // the YAML/JSON toggle only appears in the editor view
-    await page.locator('button:has-text("Editor")').click();
-    await expect(page.locator('button:has-text("YAML")')).toBeVisible();
-    await expect(page.locator('button:has-text("JSON")')).toBeVisible();
-  });
-
-  test('create pipeline page form view shows order and triggers sections', async ({ page }) => {
-    await page.goto('/pipelines');
-    await page.waitForSelector('[data-testid="accordion"]', { timeout: 10000 });
-
-    await page.locator('[data-testid="create-pipeline-btn"]').click();
-    await page.waitForURL('**/create/pipeline');
-
-    // the form view (default) exposes the dedicated order and triggers editors
-    await expect(page.locator('h5:has-text("Order")')).toBeVisible();
-    await expect(page.locator('h5:has-text("Triggers")')).toBeVisible();
-    await expect(page.locator('button[aria-label="Add trigger"]')).toBeVisible();
-
-    // before a group is chosen the order section prompts for one (no diagram yet)
-    await expect(page.locator('text=Select a group to configure the pipeline order')).toBeVisible();
-
-    // choosing a group renders the editable xydiagram directly (no first-image dropdown)
-    await page.locator('select').first().selectOption('system');
-    await expect(page.locator('.react-flow')).toBeVisible();
-  });
-
   test('edit button enters edit mode with form/editor toggle', async ({ page }) => {
     await page.goto('/pipelines');
     await page.waitForSelector('[data-testid="accordion"]', { timeout: 10000 });
@@ -207,11 +163,11 @@ test.describe('Pipelines Page', () => {
     await page.locator('[data-testid="accordion-header"]').first().click();
     await page.waitForTimeout(500);
 
-    await page.locator('button:has-text("Edit")').first().click();
+    await page.locator('[data-testid="header-btn-edit"]').first().click();
     await page.waitForTimeout(500);
 
-    await expect(page.locator('button:has-text("Discard")').first()).toBeVisible();
-    await expect(page.locator('button:has-text("Accept")').first()).toBeVisible();
+    await expect(page.locator('[data-testid="header-btn-discard"]').first()).toBeVisible();
+    await expect(page.locator('[data-testid="header-btn-accept"]').first()).toBeVisible();
 
     // edit defaults to the form view; switching to the editor view shows the code editor
     await page.locator('button:has-text("Editor")').first().click();
@@ -227,15 +183,88 @@ test.describe('Pipelines Page', () => {
     await page.locator('[data-testid="accordion-header"]').first().click();
     await page.waitForTimeout(500);
 
-    await page.locator('button:has-text("Edit")').first().click();
+    await page.locator('[data-testid="header-btn-edit"]').first().click();
     await page.waitForTimeout(500);
-    await expect(page.locator('button:has-text("Discard")').first()).toBeVisible();
+    await expect(page.locator('[data-testid="header-btn-discard"]').first()).toBeVisible();
 
-    await page.locator('button:has-text("Discard")').first().click();
+    await page.locator('[data-testid="header-btn-discard"]').first().click();
     await page.waitForTimeout(300);
 
     await expect(page.locator('.cm-editor')).toHaveCount(0);
     await expect(page.locator('text=A test pipeline for E2E testing')).toBeVisible();
+  });
+
+  test('edit form section labels stack tightly above their fields at 1024px', async ({ page }) => {
+    await page.setViewportSize({ width: 1024, height: 900 });
+    await page.goto('/pipelines');
+    await page.waitForSelector('[data-testid="accordion"]', { timeout: 10000 });
+
+    await page.locator('[data-testid="accordion-header"]').first().click();
+    await page.waitForTimeout(500);
+
+    await page.locator('[data-testid="header-btn-edit"]').first().click();
+    await expect(page.locator('[data-testid="header-btn-discard"]').first()).toBeVisible();
+
+    // below the xl breakpoint each section stacks its label over its fields; the label's
+    // fixed-width basis must not turn into a tall blank block
+    for (const label of ['Order', 'Triggers']) {
+      const labelCol = page.getByText(label, { exact: true }).first().locator('xpath=ancestor::*[contains(@class, "EditMiddle")][1]');
+      const box = await labelCol.boundingBox();
+      expect(box).not.toBeNull();
+      expect(box!.height).toBeLessThan(60);
+    }
+  });
+
+  test('triggers hover tip stays inside the viewport at 1024px', async ({ page }) => {
+    await page.setViewportSize({ width: 1024, height: 900 });
+    await page.goto('/pipelines');
+    await page.waitForSelector('[data-testid="accordion"]', { timeout: 10000 });
+    await page.locator('[data-testid="accordion-header"]').first().click();
+    await page.waitForTimeout(500);
+    await page.locator('[data-testid="header-btn-edit"]').first().click();
+    await expect(page.locator('[data-testid="header-btn-discard"]').first()).toBeVisible();
+
+    // hover the add-trigger button inside the full-width triggers box
+    const addTrigger = page.getByRole('button', { name: 'Add trigger' }).first();
+    await addTrigger.scrollIntoViewIfNeeded();
+    await addTrigger.hover();
+    const tip = page.locator('.tip-fixed', { hasText: 'Automatic triggers' });
+    await expect(tip).toBeVisible();
+
+    // the tip must not run past either edge of the viewport
+    const box = await tip.boundingBox();
+    expect(box).not.toBeNull();
+    expect(box!.x).toBeGreaterThanOrEqual(0);
+    expect(box!.x + box!.width).toBeLessThanOrEqual(1024);
+  });
+
+  test('triggers hover tip stays in view when the triggers box is taller than the viewport', async ({ page }) => {
+    await page.setViewportSize({ width: 1440, height: 700 });
+    await page.goto('/pipelines');
+    await page.waitForSelector('[data-testid="accordion"]', { timeout: 10000 });
+    await page.locator('[data-testid="accordion-header"]').first().click();
+    await page.waitForTimeout(500);
+    await page.locator('[data-testid="header-btn-edit"]').first().click();
+    await expect(page.locator('[data-testid="header-btn-discard"]').first()).toBeVisible();
+
+    // grow the triggers box well past the viewport height
+    const addTrigger = page.getByRole('button', { name: 'Add trigger' }).first();
+    for (let i = 0; i < 4; i++) {
+      await addTrigger.click();
+    }
+    // park the add button at the bottom edge of the viewport so there is little room below it
+    await addTrigger.evaluate((el) => el.scrollIntoView({ block: 'end' }));
+    await addTrigger.hover();
+    const tip = page.locator('.tip-fixed', { hasText: 'Automatic triggers' });
+    await expect(tip).toBeVisible();
+
+    // the tip must be fully visible vertically and horizontally
+    const box = await tip.boundingBox();
+    expect(box).not.toBeNull();
+    expect(box!.y).toBeGreaterThanOrEqual(0);
+    expect(box!.y + box!.height).toBeLessThanOrEqual(700);
+    expect(box!.x).toBeGreaterThanOrEqual(0);
+    expect(box!.x + box!.width).toBeLessThanOrEqual(1440);
   });
 
   test('delete pipeline shows confirmation modal', async ({ page }) => {
@@ -245,7 +274,7 @@ test.describe('Pipelines Page', () => {
     await page.locator('[data-testid="accordion-header"]').first().click();
     await page.waitForTimeout(500);
 
-    await page.locator('button:has-text("Delete")').first().click();
+    await page.locator('[data-testid="header-btn-delete"]').first().click();
     await page.waitForTimeout(300);
 
     const modal = page.locator('.modal');
@@ -272,34 +301,13 @@ test.describe('Pipelines Page', () => {
     await page.locator('[data-testid="accordion-header"]').first().click();
     await page.waitForTimeout(500);
 
-    await page.locator('button:has-text("Delete")').first().click();
+    await page.locator('[data-testid="header-btn-delete"]').first().click();
     await page.waitForTimeout(300);
 
     await page.locator('.danger-btn:has-text("Confirm")').click();
     await page.waitForTimeout(500);
 
     expect(deleteRequested).toBe(true);
-  });
-
-  test('format toggle switches between YAML and JSON on create page', async ({ page }) => {
-    await page.goto('/pipelines');
-    await page.waitForSelector('[data-testid="accordion"]', { timeout: 10000 });
-
-    await page.locator('[data-testid="create-pipeline-btn"]').click();
-    await page.waitForURL('**/create/pipeline');
-
-    await page.locator('button:has-text("Editor")').click();
-    await waitForEditor(page);
-
-    const editorContent = await page.locator('.cm-content').textContent();
-    expect(editorContent).toContain('group');
-
-    await page.locator('button:has-text("JSON")').click();
-    await page.waitForTimeout(500);
-    await waitForEditor(page);
-
-    const jsonContent = await page.locator('.cm-content').textContent();
-    expect(jsonContent).toContain('{');
   });
 
   test('pipeline order flow renders with correct nodes', async ({ page }) => {
@@ -376,7 +384,7 @@ test.describe('Pipelines Page', () => {
     await page.locator('[data-testid="accordion-header"]').first().click();
     await page.waitForSelector('.react-flow__node', { timeout: 5000 });
 
-    await page.locator('button:has-text("Edit")').first().click();
+    await page.locator('[data-testid="header-btn-edit"]').first().click();
     await page.waitForTimeout(500);
 
     // the editor view replaces the order diagram with the code editor
@@ -384,7 +392,7 @@ test.describe('Pipelines Page', () => {
     await waitForEditor(page);
     await expect(firstBody.locator('.react-flow')).toHaveCount(0);
 
-    await page.locator('button:has-text("Discard")').first().click();
+    await page.locator('[data-testid="header-btn-discard"]').first().click();
     await page.waitForSelector('.react-flow__node', { timeout: 5000 });
     await page.waitForTimeout(500);
 
@@ -417,7 +425,7 @@ test.describe('Pipelines Page', () => {
     await snapshot(page, SCREENSHOT_DIR, 'pipeline-single-step-flow');
   });
 
-  test('right-click on empty pane shows context menu with Insert Image', async ({ page }) => {
+  test('right-click on empty pane shows context menu with Insert stage', async ({ page }) => {
     await page.goto('/pipelines');
     await page.waitForSelector('[data-testid="accordion"]', { timeout: 10000 });
 
@@ -429,7 +437,7 @@ test.describe('Pipelines Page', () => {
     await flow.click({ button: 'right', position: { x: 50, y: 50 } });
     await page.waitForTimeout(300);
 
-    const contextMenu = page.locator('div:has-text("Insert Image")').filter({ hasText: 'Insert Image' }).first();
+    const contextMenu = page.locator('div:has-text("Insert stage")').filter({ hasText: 'Insert stage' }).first();
     await expect(contextMenu).toBeVisible();
   });
 
@@ -445,8 +453,8 @@ test.describe('Pipelines Page', () => {
     await node.click({ button: 'right' });
     await page.waitForTimeout(300);
 
-    await expect(page.locator('text=Insert Image')).toBeVisible();
-    await expect(page.locator('text=Remove Image')).toBeVisible();
+    await expect(page.locator('text=Insert stage')).toBeVisible();
+    await expect(page.locator('text=Remove stage')).toBeVisible();
   });
 
   test('context menu dismissed on Escape', async ({ page }) => {
@@ -460,14 +468,14 @@ test.describe('Pipelines Page', () => {
     const flow = page.locator('.react-flow').first();
     await flow.click({ button: 'right', position: { x: 50, y: 50 } });
     await page.waitForTimeout(300);
-    await expect(page.locator('text=Insert Image')).toBeVisible();
+    await expect(page.locator('text=Insert stage')).toBeVisible();
 
     await page.keyboard.press('Escape');
     await page.waitForTimeout(300);
-    await expect(page.locator('text=Insert Image')).not.toBeVisible();
+    await expect(page.locator('text=Insert stage')).not.toBeVisible();
   });
 
-  test('Insert Image opens select dropdown with available images', async ({ page }) => {
+  test('Insert stage opens select dropdown with the group tools', async ({ page }) => {
     await page.goto('/pipelines');
     await page.waitForSelector('[data-testid="accordion"]', { timeout: 10000 });
 
@@ -479,27 +487,21 @@ test.describe('Pipelines Page', () => {
     await flow.click({ button: 'right', position: { x: 50, y: 50 } });
     await page.waitForTimeout(300);
 
-    await page.locator('text=Insert Image').click();
+    await page.locator('text=Insert stage').click();
     await page.waitForTimeout(300);
 
-    // Select dropdown should be visible with available images (not already in pipeline)
+    // the select lists the group's Image tools, each to follow at latest; a tool can back several stages
     const selectMenu = page.locator('[class*="menu"]');
     await expect(selectMenu.first()).toBeVisible();
-
-    // Images already in the pipeline (tool-a, tool-b, tool-c) should be excluded
-    // Images not in the pipeline (extra-tool, analyzer) should be available
-    const options = page.locator('[class*="option"]');
-    const optionTexts = await options.allTextContents();
-    expect(optionTexts.some((t) => t.includes('extra-tool'))).toBe(true);
-    expect(optionTexts.some((t) => t.includes('analyzer'))).toBe(true);
-    expect(optionTexts.every((t) => !t.includes('tool-a'))).toBe(true);
-    expect(optionTexts.every((t) => !t.includes('tool-b'))).toBe(true);
-    expect(optionTexts.every((t) => !t.includes('tool-c'))).toBe(true);
+    const optionTexts = await page.locator('[class*="option"]').allTextContents();
+    expect(optionTexts).toContain('extra-tool · follow latest');
+    expect(optionTexts).toContain('analyzer · follow latest');
+    expect(optionTexts).toContain('tool-a · follow latest');
 
     await snapshot(page, SCREENSHOT_DIR, 'pipeline-insert-image-select');
   });
 
-  test('selecting an image from dropdown adds it to the diagram and shows Apply bar', async ({ page }) => {
+  test('selecting a tool from dropdown adds a stage to the diagram and shows Apply bar', async ({ page }) => {
     await page.goto('/pipelines');
     await page.waitForSelector('[data-testid="accordion"]', { timeout: 10000 });
 
@@ -516,11 +518,11 @@ test.describe('Pipelines Page', () => {
     await flow.click({ button: 'right', position: { x: 50, y: 50 } });
     await page.waitForTimeout(300);
 
-    await page.locator('text=Insert Image').click();
+    await page.locator('text=Insert stage').click();
     await page.waitForTimeout(300);
 
     // Click an available option
-    await page.locator('[class*="option"]', { hasText: 'extra-tool' }).click();
+    await page.locator('[class*="option"]', { hasText: 'extra-tool · follow latest' }).click();
     await page.waitForTimeout(500);
 
     // Should now have 4 image nodes
@@ -533,7 +535,7 @@ test.describe('Pipelines Page', () => {
     await snapshot(page, SCREENSHOT_DIR, 'pipeline-image-inserted');
   });
 
-  test('Remove Image removes a node and shows Apply bar', async ({ page }) => {
+  test('Remove stage removes a node and shows Apply bar', async ({ page }) => {
     await page.goto('/pipelines');
     await page.waitForSelector('[data-testid="accordion"]', { timeout: 10000 });
 
@@ -544,12 +546,12 @@ test.describe('Pipelines Page', () => {
     const firstBody = page.locator('[data-testid="accordion-item"]').first().locator('[data-testid="accordion-body"]');
     await expect(firstBody.locator('.react-flow__node-imageStep')).toHaveCount(3);
 
-    // Right-click on a node to get Remove Image option
+    // Right-click on a node to get Remove stage option
     const node = firstBody.locator('.react-flow__node-imageStep').first();
     await node.click({ button: 'right' });
     await page.waitForTimeout(300);
 
-    await page.locator('text=Remove Image').click();
+    await page.locator('text=Remove stage').click();
     await page.waitForTimeout(500);
 
     // Should now have 2 image nodes
@@ -576,7 +578,7 @@ test.describe('Pipelines Page', () => {
     const node = firstBody.locator('.react-flow__node-imageStep').first();
     await node.click({ button: 'right' });
     await page.waitForTimeout(300);
-    await page.locator('text=Remove Image').click();
+    await page.locator('text=Remove stage').click();
     await page.waitForTimeout(500);
     await expect(firstBody.locator('.react-flow__node-imageStep')).toHaveCount(2);
 
@@ -589,7 +591,7 @@ test.describe('Pipelines Page', () => {
     await expect(page.locator('button:has-text("Apply")')).not.toBeVisible();
   });
 
-  test('double-click on empty pane opens image select dropdown', async ({ page }) => {
+  test('double-click on empty pane opens the tool select dropdown', async ({ page }) => {
     await page.goto('/pipelines');
     await page.waitForSelector('[data-testid="accordion"]', { timeout: 10000 });
 
@@ -625,5 +627,16 @@ test.describe('Pipelines Page', () => {
     await page.waitForTimeout(300);
 
     await expect(selectMenu).not.toBeVisible();
+  });
+
+  test('edit mode order note describes adding, inserting, removing, and reordering stages', async ({ page }) => {
+    await page.goto('/pipelines');
+    await page.waitForSelector('[data-testid="accordion"]', { timeout: 10000 });
+
+    await page.locator('[data-testid="accordion-header"]').first().click();
+    await page.waitForSelector('.react-flow__node-imageStep', { timeout: 5000 });
+    await page.locator('[data-testid="header-btn-edit"]').first().click();
+
+    await expect(page.locator('text=Double-click to add a stage backed by a tool').first()).toBeVisible();
   });
 });

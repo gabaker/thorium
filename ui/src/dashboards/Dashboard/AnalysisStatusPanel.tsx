@@ -19,26 +19,18 @@ import {
   SortCaret,
   SortHeaderButton,
   SpinningIcon,
-  StatusPill,
   TileHeader,
   TileHeaderRow,
 } from './styles';
 import { Button, ButtonSize, ButtonVariant, IconButton } from '@components/shared/buttons';
 import AlertBanner, { Severity } from '@components/shared/alerts/AlertBanner';
 import LoadingSpinner from '@components/shared/fallback/LoadingSpinner';
+import { Badge, BadgeSize, statusTone } from '@components/shared/badges/Badge';
 import { OverlayTipBottom } from '@components/shared/overlay/tips';
 import { ReactionStatus } from '@models/reactions';
 
 /// The number of leading sha256 characters shown in the File column before truncating with an ellipsis.
 const HASH_DISPLAY_LEN = 12;
-
-/// The visual tokens for each reaction status pill (theme-aware CSS variables).
-const STATUS_TOKENS: Record<ReactionStatus, { bg: string; fg: string }> = {
-  [ReactionStatus.Completed]: { bg: 'var(--thorium-ok-bg)', fg: 'var(--thorium-button-text)' },
-  [ReactionStatus.Failed]: { bg: 'var(--thorium-danger-bg)', fg: 'var(--thorium-button-text)' },
-  [ReactionStatus.Started]: { bg: 'var(--thorium-info-bg)', fg: 'var(--thorium-button-text)' },
-  [ReactionStatus.Created]: { bg: 'var(--thorium-secondary-panel-bg)', fg: 'var(--thorium-text)' },
-};
 
 /// The table columns, in display order, each mapped to its sortable key and header label.
 const COLUMNS: { key: AnalysisSortColumn; label: string }[] = [
@@ -49,19 +41,16 @@ const COLUMNS: { key: AnalysisSortColumn; label: string }[] = [
 ];
 
 /**
- * A colored status pill for a reaction status, falling back to a neutral style for unknown values.
+ * A status badge for a reaction status, in the shared status tone (neutral for an unknown status).
  *
  * @param status - The reaction status string.
- * @returns The status pill.
+ * @returns The status badge.
  */
-const StatusBadge: React.FC<{ status: string }> = ({ status }) => {
-  const token = STATUS_TOKENS[status as ReactionStatus] ?? { bg: 'var(--thorium-secondary-panel-bg)', fg: 'var(--thorium-text)' };
-  return (
-    <StatusPill $bg={token.bg} $fg={token.fg}>
-      {status}
-    </StatusPill>
-  );
-};
+const StatusBadge: React.FC<{ status: string }> = ({ status }) => (
+  <Badge size={BadgeSize.Small} tone={statusTone(status)}>
+    {status}
+  </Badge>
+);
 
 /**
  * The dashboard's "Analysis Status" section: a lazy, batched view of the reactions run against the

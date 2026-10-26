@@ -2,12 +2,14 @@ import React, { useCallback, useRef } from 'react';
 import styled from 'styled-components';
 
 // project imports
-import { TabItem, TabsProps } from './types';
+import { TabItem, TabsAlign, TabsProps } from './types';
 import { firstEnabledTabIndex, lastEnabledTabIndex, nextEnabledTabIndex } from './step';
+import { Badge, BadgeSize, BadgeTone } from '@components/shared/badges/Badge';
 import { OverlayTipTop } from '@components/shared/overlay/tips';
 
-const TabList = styled.div<{ $flush: boolean }>`
+const TabList = styled.div<{ $flush: boolean; $align: TabsAlign }>`
   display: flex;
+  justify-content: ${({ $align }) => ($align === TabsAlign.Center ? 'center' : 'flex-start')};
   align-items: stretch;
   gap: 2px;
   border-bottom: ${({ $flush }) => ($flush ? 'none' : '1px solid var(--thorium-panel-border)')};
@@ -83,24 +85,6 @@ const ActionIcon = styled.span<{ $disabled: boolean }>`
   }
 `;
 
-const CountBadge = styled.span<{ $active: boolean }>`
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  min-width: 20px;
-  height: 20px;
-  padding: 0 6px;
-  border-radius: 10px;
-  font-size: 0.75rem;
-  font-weight: 600;
-  line-height: 1;
-  /* both states pair a panel background with --thorium-text so the count reads at AA in all four
-     themes (the previous accent-on-accent / secondary-on-highlight pairs fell below the threshold) */
-  background: ${({ $active }) => ($active ? 'var(--thorium-highlight-panel-bg)' : 'var(--thorium-secondary-panel-bg)')};
-  color: var(--thorium-text);
-  border: 1px solid var(--thorium-panel-border);
-`;
-
 /**
  * Controlled, themeable, accessible tab bar.
  *
@@ -108,7 +92,15 @@ const CountBadge = styled.span<{ $active: boolean }>`
  * Supports an optional count badge per tab and full keyboard navigation (arrow keys, Home/End)
  * over the enabled tabs via a roving tabindex.
  */
-function Tabs<K extends string = string>({ tabs, active, onChange, className, 'aria-label': ariaLabel, flush = false }: TabsProps<K>) {
+function Tabs<K extends string = string>({
+  tabs,
+  active,
+  onChange,
+  className,
+  'aria-label': ariaLabel,
+  flush = false,
+  align = TabsAlign.Start,
+}: TabsProps<K>) {
   const buttonRefs = useRef<(HTMLButtonElement | null)[]>([]);
 
   // move selection/focus to the next enabled tab in the given direction
@@ -151,7 +143,7 @@ function Tabs<K extends string = string>({ tabs, active, onChange, className, 'a
   );
 
   return (
-    <TabList role="tablist" aria-label={ariaLabel} className={className} $flush={flush}>
+    <TabList role="tablist" aria-label={ariaLabel} className={className} $flush={flush} $align={align}>
       {tabs.map((tab: TabItem<K>, index) => {
         const isActive = tab.key === active;
         // the action shows only on the active tab; while it's shown its tip replaces the tab's own tip
@@ -169,16 +161,17 @@ function Tabs<K extends string = string>({ tabs, active, onChange, className, 'a
             aria-controls={`tabpanel-${tab.key}`}
             tabIndex={isActive ? 0 : -1}
             disabled={tab.disabled}
+            data-testid={tab.testId}
             $active={isActive}
             onClick={() => !tab.disabled && onChange(tab.key)}
             onKeyDown={(e) => handleKeyDown(e, index)}
           >
             <span>{tab.label}</span>
             {tab.count != null && (
-              <CountBadge $active={isActive}>
+              <Badge count size={BadgeSize.Small} tone={isActive ? BadgeTone.Accent : BadgeTone.Neutral}>
                 {tab.count}
                 {tab.countMore ? '+' : ''}
-              </CountBadge>
+              </Badge>
             )}
             {showAction && action && (
               <OverlayTipTop tip={action.tip}>

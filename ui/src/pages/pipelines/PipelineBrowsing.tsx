@@ -3,7 +3,9 @@ import type { FC } from 'react';
 import { useLocation, useNavigate } from 'react-router-dom';
 
 // project imports
-import { CountBadge, HeaderBar, OmnibarRow } from './PipelineBrowsing.styled';
+import AlertBanner, { Severity } from '@components/shared/alerts/AlertBanner';
+import { Badge } from '@components/shared/badges/Badge';
+import { HeaderBar, NoteRow, OmnibarRow } from './PipelineBrowsing.styled';
 import PipelineAccordionItem from '@components/pages/pipelines/PipelineAccordionItem';
 import { orderComparePipeline } from '@components/pages/files/reactions/pipelines';
 import Page from '@components/pages/Page';
@@ -14,6 +16,7 @@ import type { Clause } from '@components/shared/inputs/omnibar/ClauseTypes';
 import { defaultTimeSelection } from '@components/shared/inputs/omnibar/timepicker/utils';
 import { useOmnibarUrlState } from '@components/shared/inputs/omnibar/useOmnibarUrlState';
 import { getGroupsFromClauses, matchesStringClauses } from '@components/shared/inputs/omnibar/utils';
+import ListErrorBanner from '@components/shared/alerts/ListErrorBanner';
 import NoResultsBanner from '@components/shared/alerts/NoResultsBanner';
 import Title from '@components/shared/titles/Title';
 import LoadingSpinner from '@components/shared/fallback/LoadingSpinner';
@@ -46,6 +49,8 @@ const PipelineBrowsing: FC = () => {
   const [loading, setLoading] = useState(false);
   const [pipelines, setPipelines] = useState<Pipeline[]>([]);
   const [groups, setGroups] = useState<Record<string, Group>>({});
+  // the messages from pipeline list reads that failed, so an unreadable list is not shown as an empty one
+  const [listErrors, setListErrors] = useState<string[]>([]);
   // expanded accordion rows + omnibar filters live in the URL so the view is shareable
   // const [activeKeys, setActiveKeys] = useUrlState(listCodec('open'), []);
   const { clauses, setClauses } = useOmnibarUrlState({ clauses: [], time: defaultTimeSelection() });
@@ -70,7 +75,14 @@ const PipelineBrowsing: FC = () => {
 
   const fetchPipelinesData = async () => {
     setLoading(true);
-    const results = await Promise.all(Object.keys(groups).map((group) => listPipelines(group, () => void checkCookie(), true, null, 1000)));
+    // each failed group read is recorded for display and still re-checks the session
+    const failures: string[] = [];
+    const onListError = (message: string) => {
+      failures.push(message);
+      void checkCookie();
+    };
+    const results = await Promise.all(Object.keys(groups).map((group) => listPipelines(group, onListError, true, null, 1000)));
+    setListErrors(failures);
     setPipelines(results.filter(Boolean).flat() as Pipeline[]);
     setLoading(false);
     setTimeout(scrollOnLoad, 1000);
@@ -142,6 +154,9 @@ const PipelineBrowsing: FC = () => {
     [navigate, pipelines],
   );
 
+  // a failed read with nothing loaded has no count to show; 0 would claim the list is empty
+  const listFailed = listErrors.length > 0 && pipelines.length === 0;
+
   const pipelineCountTip =
     userInfo && getThoriumRole(userInfo.role) == RoleKey.Admin
       ? `There are a total of ${pipelines.length} Thorium pipelines.`
@@ -158,9 +173,13 @@ const PipelineBrowsing: FC = () => {
       <HeaderBar>
         <div>
           <h2>
-            <OverlayTipRight tip={pipelineCountTip}>
-              <CountBadge data-testid="pipeline-count">{pipelines.length}</CountBadge>
-            </OverlayTipRight>
+            {!listFailed && (
+              <OverlayTipRight tip={pipelineCountTip}>
+                <Badge count data-testid="pipeline-count">
+                  {pipelines.length}
+                </Badge>
+              </OverlayTipRight>
+            )}
           </h2>
         </div>
         <Title>Pipelines</Title>
@@ -178,11 +197,20 @@ const PipelineBrowsing: FC = () => {
           </OverlayTipBottom>
         </div>
       </HeaderBar>
+      <NoteRow>
+        <AlertBanner severity={Severity.Info}>
+          <span data-testid="pipelines-note">
+            Pipeline stages run tools. A stage marked <b>legacy</b> still names an image that no tool backs and cannot be run until a tool
+            is chosen for it.
+          </span>
+        </AlertBanner>
+      </NoteRow>
       <OmnibarRow>
         <OmnibarPipelines clauses={clauses} setClauses={setClauses} pipelines={pipelines} />
       </OmnibarRow>
+      <ListErrorBanner errors={listErrors} />
       <LoadingSpinner loading={loading}></LoadingSpinner>
-      {!loading && filteredPipelines.length === 0 && <NoResultsBanner type="Pipelines" />}
+      {!loading && listErrors.length === 0 && filteredPipelines.length === 0 && <NoResultsBanner type="Pipelines" />}
       <Accordion alwaysOpen activeKey={activeKeys} onSelect={handleAccordionSelect}>
         {filteredPipelines
           .sort((a, b) => orderComparePipeline(a, b))

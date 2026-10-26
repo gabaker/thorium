@@ -22,27 +22,23 @@ export type UserStageStats = {
   total: number;
 };
 
-/// Stats for a single pipeline
-export type PipelineStats = {
-  /// Per-stage, per-user stats
-  stages: {
-    [stage: string]: {
-      [user: string]: UserStageStats;
-    };
-  };
-};
-
 /// Per-group stats
 export type GroupsStats = {
   [group: string]: {
-    pipelines: {
-      [pipeline: string]: PipelineStats;
+    /// Status summaries for each tool instance with jobs on a shared workload queue in this group, by user
+    workloads: {
+      [toolInstance: string]: {
+        [user: string]: UserStageStats;
+      };
     };
   };
 };
 
+/// One system setting's value: a scalar, or a nested structure such as the models settings
+export type SystemSettingValue = string | number | boolean | null | SystemSettingValue[] | { [key: string]: SystemSettingValue };
+
 /// System settings key-value map returned by the settings API
-export type SystemSettings = Record<string, string | number | boolean>;
+export type SystemSettings = Record<string, SystemSettingValue>;
 
 /// System-wide stats
 export type Stats = {

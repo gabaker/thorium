@@ -6,6 +6,7 @@ import styled from 'styled-components';
 // project imports
 import Page from '@components/pages/Page';
 import AlertBanner, { Severity } from '@components/shared/alerts/AlertBanner';
+import { Badge, BadgeTone } from '@components/shared/badges/Badge';
 import { OverlayTipRight } from '@components/shared/overlay/tips';
 import UserAvatar from '@components/shared/UserAvatar';
 import Subtitle from '@components/shared/titles/Subtitle';
@@ -16,7 +17,10 @@ import { getThoriumRoleBadge } from '@utilities/role';
 import { deleteUserImage, updateUser, uploadUserImage } from '@thorpi/users';
 import { BUTTON_BADGE_GAP } from '@styles';
 import { ThoriumRole } from '@models/users';
+import ProfileRefreshButton from '@components/pages/users/ProfileRefreshButton';
 import TokenView from '@components/pages/users/TokenView';
+import { runProfileRefresh } from '@components/pages/users/scopedTokens';
+import { useScopedTokens } from '@components/pages/users/useScopedTokens';
 
 const ProfileCard = styled.div`
   border: none;
@@ -40,25 +44,8 @@ const ProfileCard = styled.div`
 
 const Themes = ['Dark', 'Light', 'Ocean', 'Crab', 'Automatic'];
 
-// Rounded pill for the role/group badges. The background comes from a passed `bg-*` color class;
-// the flex layout plus collapsed line-height keeps the label centered within the pill (the same
-// treatment as the sign-in MethodPill), which the react-bootstrap badge did not do.
-const InfoPill = styled.span`
-  display: inline-block;
-  text-align: center;
-  line-height: 1;
-  /* trim the font's half-leading to cap-height/baseline so the label is optically centered by the
-     symmetric padding rather than sitting high (see MethodPill for the full rationale) */
-  text-box-trim: trim-both;
-  text-box-edge: cap alphabetic;
-  border-radius: 999px;
-  padding: 0.45rem 0.75rem;
-  font-size: 0.85rem;
-  color: var(--thorium-button-text);
-`;
-
-// Wrapping container for a set of pills. `gap` spaces both axes, so pills stay separated even when
-// they wrap onto multiple rows (inline-block pills would otherwise stack with no vertical margin).
+// Wrapping container for a set of badges. `gap` spaces both axes, so badges stay separated even when
+// they wrap onto multiple rows.
 const PillGroup = styled.div`
   display: flex;
   flex-wrap: wrap;
@@ -77,7 +64,13 @@ const Role: React.FC<RoleProps> = ({ role }) => {
         <Col xs={2}>
           <Subtitle>Role</Subtitle>
         </Col>
-        <Col>{badge && <InfoPill className={badge.className}>{badge.label}</InfoPill>}</Col>
+        <Col>
+          {badge && (
+            <Badge tone={BadgeTone.Accent} data-testid="profile-role">
+              {badge.label}
+            </Badge>
+          )}
+        </Col>
       </Row>
     </Container>
   );
@@ -94,9 +87,9 @@ const Groups = ({ groups }: { groups: string[] | undefined }) => {
           <PillGroup>
             {groups &&
               [...groups].sort().map((group: string, idx: number) => (
-                <InfoPill key={idx} className="bg-blue">
+                <Badge key={idx} tone={BadgeTone.Accent} data-testid="profile-group">
                   {group}
-                </InfoPill>
+                </Badge>
               ))}
           </PillGroup>
         </Col>
@@ -138,10 +131,11 @@ const Theme = ({ theme }: { theme: string | undefined }) => {
   );
 };
 
+// The label column is the same two twelfths wide as the Bootstrap rows above and below, so the values share one left edge.
 const MethodSection = styled.div`
   display: grid;
-  grid-template-columns: minmax(0, 2fr) minmax(0, 10fr);
-  gap: 1rem;
+  grid-template-columns: calc((100% + 1.5rem) / 6) minmax(0, 1fr);
+  gap: 0;
   padding: 0 0.75rem;
   align-items: start;
 `;
@@ -151,24 +145,6 @@ const MethodBadges = styled.div`
   flex-wrap: wrap;
   gap: 0.5rem;
   margin-bottom: 0.5rem;
-`;
-
-const MethodPill = styled.span<{ $tone: 'ok' | 'warn' | 'muted' }>`
-  display: inline-block;
-  text-align: center;
-  line-height: 1;
-  /* Trim the font's half-leading down to the cap-height/baseline so the label is optically centered
-     by the symmetric padding, instead of sitting high inside the empty reserved descender space that
-     align-items:center would otherwise center on. Only takes effect on a non-flex box; ignored by
-     browsers without text-box support (degrading to the untrimmed look). */
-  text-box-trim: trim-both;
-  text-box-edge: cap alphabetic;
-  border-radius: 999px;
-  padding: 0.45rem 0.75rem;
-  font-size: 0.85rem;
-  color: var(--thorium-button-text);
-  background-color: ${({ $tone }) =>
-    $tone === 'ok' ? 'var(--thorium-ok-bg)' : $tone === 'warn' ? 'var(--thorium-warning-bg)' : 'var(--thorium-secondary-panel-bg)'};
 `;
 
 const MethodGuidance = styled.p`
@@ -186,8 +162,8 @@ const SignInMethods: React.FC<{ local?: boolean; verified?: boolean }> = ({ loca
       <div>
         <MethodBadges>
           {/* `local` mirrors the backend ScrubbedUser.local (the account has a password set) */}
-          {local && <MethodPill $tone="ok">Local Login</MethodPill>}
-          <MethodPill $tone={verified ? 'ok' : 'warn'}>{verified ? 'Email verified' : 'Email not verified'}</MethodPill>
+          {local && <Badge tone={BadgeTone.Ok}>Local Login</Badge>}
+          <Badge tone={verified ? BadgeTone.Ok : BadgeTone.Warn}>{verified ? 'Email verified' : 'Email not verified'}</Badge>
         </MethodBadges>
         <MethodGuidance>
           To add a single sign-on provider, sign in with that provider using this same email address. You&apos;ll receive an email to
@@ -391,15 +367,45 @@ const ProfileImage = () => {
   );
 };
 
+// The username centred on the title row with the page-level controls right-aligned on the same row;
+// the empty first column balances the controls so the username stays centred.
+const ProfileHeader = styled.div`
+  display: grid;
+  grid-template-columns: 1fr auto 1fr;
+  align-items: center;
+
+  h2 {
+    grid-column: 2;
+    margin: 0;
+  }
+`;
+
+// The controls in the last column of the profile header, level with the username.
+const ProfileControls = styled.div`
+  grid-column: 3;
+  display: flex;
+  justify-content: flex-end;
+`;
+
 const UserProfile = () => {
-  const { userInfo } = useAuth();
+  const { userInfo, refreshUserInfo } = useAuth();
+  const tokenList = useScopedTokens();
+  const [refreshing, setRefreshing] = useState(false);
+
+  // reload whoami and the token list in place, without reloading the page
+  const handleRefresh = () => {
+    void runProfileRefresh({ refreshUserInfo, reloadTokens: tokenList.reload, setRefreshing });
+  };
 
   return (
     <Page title="Profile · Thorium" className="d-flex justify-content-center">
       <ProfileCard>
-        <Row className="d-flex justify-content-center">
-          <h2 className="pb-3 d-flex justify-content-center">{userInfo?.username}</h2>
-        </Row>
+        <ProfileHeader className="pb-3">
+          <h2>{userInfo?.username}</h2>
+          <ProfileControls>
+            <ProfileRefreshButton refreshing={refreshing} onRefresh={handleRefresh} />
+          </ProfileControls>
+        </ProfileHeader>
         <Row className="d-flex justify-content-center">
           <ProfileImage />
         </Row>
@@ -411,7 +417,7 @@ const UserProfile = () => {
         {userInfo && <Role role={userInfo.role} />}
         <hr />
         {/* User Token + Scoped Tokens */}
-        <TokenView />
+        <TokenView list={tokenList} />
         <hr />
         {/* Sign-in methods (local password / SSO + verification status) */}
         <SignInMethods local={userInfo?.local} verified={userInfo?.verified} />

@@ -105,10 +105,10 @@ test.describe('Profile page (mocked)', () => {
     await page.goto('/profile');
     await page.waitForLoadState('networkidle');
 
-    // group membership and Thorium role render as color pills (scoped by color class so the sidebar's
+    // group membership and Thorium role render as badges (scoped by test id so the sidebar's
     // "Admin" nav item doesn't collide with the role badge)
-    await expect(page.locator('span.bg-blue', { hasText: 'system' })).toBeVisible();
-    await expect(page.locator('span.bg-maroon', { hasText: 'Admin' })).toBeVisible();
+    await expect(page.getByTestId('profile-group').filter({ hasText: 'system' })).toBeVisible();
+    await expect(page.getByTestId('profile-role').filter({ hasText: 'Admin' })).toBeVisible();
     // read-only sign-in method badges
     await expect(page.getByText('Local Login', { exact: true })).toBeVisible();
     await expect(page.getByText('Email verified', { exact: true })).toBeVisible();

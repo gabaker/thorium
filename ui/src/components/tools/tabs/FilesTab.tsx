@@ -13,6 +13,7 @@ import { OverlayWindow, PositionType, Placement } from '@components/shared/windo
 import { downloadBlob } from '@utilities/download';
 import { fetchResultFileCached } from '@utilities/resultFiles';
 import { getCachedResultFile } from '@utilities/resultFileCache';
+import { useResultsOnRepo } from '@components/tools/ResultSourceContext';
 import { useAuth } from '@utilities/auth';
 
 const FileList = styled.div`
@@ -63,6 +64,7 @@ const RowActions = styled.div`
  */
 const FilesTab: React.FC<ToolResultTabProps> = ({ result, sha256, tool }) => {
   const { checkCookie } = useAuth();
+  const repo = useResultsOnRepo();
   const [openBytes, setOpenBytes] = useState<Record<string, ArrayBuffer>>({});
   const [openWindows, setOpenWindows] = useState<string[]>([]);
   const [loading, setLoading] = useState<string[]>([]);
@@ -71,8 +73,8 @@ const FilesTab: React.FC<ToolResultTabProps> = ({ result, sha256, tool }) => {
 
   // fetch a file's bytes via the shared cache (keyed by this result's unique id)
   const fetchBytes = useCallback(
-    (name: string): Promise<ArrayBuffer | null> => fetchResultFileCached(sha256, tool, result.id, name, errorHandler),
-    [sha256, tool, result.id, errorHandler],
+    (name: string): Promise<ArrayBuffer | null> => fetchResultFileCached(sha256, tool, result.id, name, errorHandler, repo),
+    [sha256, tool, result.id, errorHandler, repo],
   );
 
   const handleRender = useCallback(

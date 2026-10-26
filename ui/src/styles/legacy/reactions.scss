@@ -35,38 +35,67 @@ $spacers: (
   min-width: 150px;
 }
 
+// the header and each row of the file's reaction list share one grid so their columns line up
+.reactions-grid {
+  display: grid !important;
+  // run, creator, group, status, reaction id, selection; the reaction id column takes up to the width
+  // of a full id before the other columns grow, and shrinks (with an ellipsis) only when the row is narrower
+  grid-template-columns: minmax(15rem, 3fr) minmax(6rem, 1fr) minmax(6rem, 1.2fr) minmax(6.5rem, 1fr) minmax(8rem, 22rem) 5.5rem;
+  align-items: center;
+  column-gap: 0.5rem;
+  // narrower cell padding than the bootstrap gutter, so a full reaction id fits in a smaller column
+  --bs-gutter-x: 0.5rem;
+  // the grid sets the columns, so the bootstrap column widths and legacy minimums stay out of the way
+  > * {
+    width: auto !important;
+    max-width: none;
+    min-width: 0 !important;
+    overflow-wrap: anywhere;
+  }
+}
+
 .reactions-pipeline {
-  min-width: 150px;
-  width: 20%;
   text-align: start;
+  // a run label breaks only between its parts, not inside a name at its hyphens
+  overflow-wrap: normal !important;
+  word-break: normal;
 }
 
 .reactions-creator {
-  width: 10%;
   text-align: center;
 }
 
 .reactions-group {
-  width: 15%;
-  min-width: 100px;
   text-align: center;
 }
 
+// creators, groups and reaction ids are single tokens: they stay on one line and are cut with an
+// ellipsis when their column is too narrow, never wrapped or broken inside a word
+.reactions-creator,
+.reactions-creator > *,
+.reactions-group,
+.reactions-group > *,
+.reactions-id,
+.reactions-id > * {
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  overflow-wrap: normal !important;
+  word-break: normal;
+}
+
 .reactions-status {
-  width: 5%;
-  min-width: 100px;
   text-align: center;
 }
 
 .reactions-id {
-  width: 35%;
-  min-width: 200px;
   text-align: center;
 }
 
 .reactions-selection {
-  width: 10%;
-  text-align: end;
+  display: flex;
+  justify-content: flex-end;
+  align-items: center;
 }
 
 .timestamp-log {
@@ -123,85 +152,18 @@ $spacers: (
   .reactions-creator {
     display: none;
   }
-  .reactions-pipeline {
-    width: 18%;
-  }
-  .reactions-group {
-    width: 20%;
-  }
-  .reactions-status {
-    width: 10%;
-  }
-  .reactions-id {
-    width: 40%;
-  }
-  .reactions-selection {
-    width: 10%;
+  .reactions-grid {
+    grid-template-columns: minmax(15rem, 3fr) minmax(6rem, 1.2fr) minmax(6.5rem, 1fr) minmax(8rem, 22rem) 5.5rem;
   }
 }
 
 // 992px
 @media (max-width: scaling.$lg) {
-  .reactions-creator {
-    display: none;
-  }
+  .reactions-creator,
   .reactions-id {
     display: none;
   }
-  .reactions-selection {
-    width: 15%;
-  }
-  .reactions-pipeline {
-    width: 30%;
-  }
-  .reactions-group {
-    width: 25%;
-  }
-  .reactions-status {
-    width: 30%;
-  }
-}
-
-// 768px
-@media (max-width: scaling.$md) {
-  .reactions-creator {
-    display: none;
-  }
-  .reactions-id {
-    display: none;
-  }
-  .reactions-selection {
-    width: 15%;
-  }
-  .reactions-pipeline {
-    width: 30%;
-  }
-  .reactions-group {
-    width: 25%;
-  }
-  .reactions-status {
-    width: 30%;
-  }
-}
-
-// 576px
-@media (max-width: scaling.$sm) {
-  .reactions-creator {
-    display: none;
-  }
-  .reactions-id {
-    display: none;
-  }
-  .reactions-pipeline {
-    width: 35%;
-  }
-  .reactions-group {
-    width: 20%;
-  }
-  .reactions-status {
-    width: 30%;
-  }
-  .reactions-selection {
-    width: 15%;
+  .reactions-grid {
+    grid-template-columns: minmax(0, 3fr) minmax(0, 1.5fr) minmax(6.5rem, 1fr) 5.5rem;
   }
 }

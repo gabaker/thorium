@@ -47,14 +47,14 @@ export async function deleteGroup(group: string, errorHandler: (error: string) =
 }
 
 /**
- * Fetch a group's full details, including membership (`GET /groups/{group}/details/`).
+ * Fetch a group's full details, including membership (`GET /groups/{group}/details`).
  *
  * @param group - The name of the group to fetch.
  * @param errorHandler - Called with a formatted message if the request fails.
  * @returns The {@link Group} details, or `null` if not found or the request failed.
  */
 export async function getGroup(group: string, errorHandler: (error: string) => void): Promise<Group | null> {
-  const url = '/groups/' + group + '/details/';
+  const url = '/groups/' + group + '/details';
   return client
     .get<Group>(url)
     .then((res) => {

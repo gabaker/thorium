@@ -123,6 +123,7 @@ export async function buildResultsZip(
  * @param tool - The tool that produced the result (also used in the archive name and manifest).
  * @param output - The result to archive (its `result`, `files`, and `id`).
  * @param errorHandler - Called with a formatted message if a result-file download fails.
+ * @param repo - Whether `sha256` is a repo's URL, so the files are read from the repo's results.
  * @returns `true` if the archive was built and the download triggered, `false` on failure.
  */
 export async function downloadResultsAsZip(
@@ -130,10 +131,11 @@ export async function downloadResultsAsZip(
   tool: string,
   output: Output,
   errorHandler: (error: string) => void,
+  repo = false,
 ): Promise<boolean> {
   try {
     // reuse any bytes already cached from previewing/downloading files of this exact result
-    const blob = await buildResultsZip(tool, output, (name) => fetchResultFileCached(sha256, tool, output.id, name, errorHandler));
+    const blob = await buildResultsZip(tool, output, (name) => fetchResultFileCached(sha256, tool, output.id, name, errorHandler, repo));
     downloadBlob(blob, resultsBundleName(sha256, tool, output));
     return true;
   } catch (err) {

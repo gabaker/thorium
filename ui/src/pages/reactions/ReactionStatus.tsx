@@ -1,574 +1,191 @@
-import { useEffect, useState } from 'react';
+import { FC, Fragment, useState } from 'react';
 import { Link, useParams } from 'react-router-dom';
-import { Button, Card, Col, Modal, Row, Tab, Tabs } from 'react-bootstrap';
-import { FaTrash } from 'react-icons/fa';
+import { useMutation, useQueryClient } from '@tanstack/react-query';
 
 // project imports
-import { getStatusIcon, getStatusBadge } from '@components/pages/files/reactions';
+import { EntityNotFound } from '@components/agentic/EntityNotFound';
+import { ConfirmButton } from '@components/agentic/ConfirmButton';
+import { RunStagesSection } from '@components/agentic/runs/RunStages';
+import { RunSubRunsPanel } from '@components/agentic/runs/RunSubRunsPanel';
+import { RunSummaryPanel } from '@components/agentic/runs/RunSummaryPanel';
+import { RunUpdatesPanel } from '@components/agentic/runs/RunUpdatesPanel';
+import { RunStagesView } from '@components/agentic/runs/stages';
+import { StatusPill } from '@components/agentic/runs/StatusIndicator';
+import { Actions, BannerSlot, EntityLink, InlineList, Mono, Muted, PageHead, PageTitle, Pre } from '@components/agentic/shared';
 import Page from '@components/pages/Page';
-import Subtitle from '@components/shared/titles/Subtitle';
-import { OverlayTipBottom, OverlayTipLeft, OverlayTipTop } from '@components/shared/overlay/tips';
 import AlertBanner, { Severity } from '@components/shared/alerts/AlertBanner';
-import { useAuth } from '@utilities/auth';
-import { deleteReaction, getReaction, getReactionLogs } from '@thorpi/reactions';
-import { getPipeline } from '@thorpi/pipelines';
-import { ReactionStatus as ReactionStatusEnum, type Reaction, type ReactionLogEntry } from '@models/reactions';
+import { deleteReaction } from '@thorpi/reactions';
+import { reactionKey, useReactionQuery, useReactionUpdates, useStageOrder } from '@utilities/queries/runs';
+import { ReactionReadView, reactionReadView, runKind } from '@utilities/runs';
+import { RunKind } from '@models/runs';
+import { Reaction } from '@models/reactions';
 
-interface ReactionLogsProps {
-  logs: ReactionLogEntry[];
-  width: number;
+/** How often the reaction is read while it works, in milliseconds. */
+const POLL_MS = 5000;
+
+/** Props for {@link ReactionSections}. */
+interface ReactionSectionsProps {
+  /** The reaction */
+  reaction: Reaction;
 }
 
-// Display the reaction log entries in a scrollable card
-const ReactionLogs = ({ logs, width }: ReactionLogsProps) => {
-  return (
-    <Card className="log-box scroll-log panel">
-      <Card.Header>
-        <Row className="mt-1 mb-1 flex-nowrap">
-          <Col className="timestamp-log" xs={3}>
-            TIME STAMP
-          </Col>
-          <Col className="action-log" xs={2}>
-            ACTION
-          </Col>
-          <Col className="flex-nowrap">
-            <Row className="flex-nowrap">
-              <Col className="key-log" xs={2}>
-                KEY
-              </Col>
-              <Col className="value-log">VALUE</Col>
-            </Row>
-          </Col>
-        </Row>
-      </Card.Header>
-      <Card.Body>
-        {logs.map((reaction, idx) => (
-          <Row key={`${reaction.id}_${idx}`} className="flex-nowrap">
-            <Col className="timestamp-log" xs={3}>
-              {width <= 1400 ? reaction.timestamp.split('.')[0] : reaction.timestamp}
-            </Col>
-            <Col className="action-log" xs={2}>
-              {reaction.action}
-            </Col>
-            <Col>{renderUpdate(reaction)}</Col>
-          </Row>
-        ))}
-      </Card.Body>
-    </Card>
-  );
-};
-
-// Render the key/value pairs for a single log entry update
-const renderUpdate = (reaction: ReactionLogEntry) => {
-  const exclude = ['current_stage', 'group', 'pipeline', 'reaction', 'id', 'status'];
-  const sorted = Object.keys(reaction.update)
-    .filter((key) => !exclude.includes(key))
-    .sort();
+/**
+ * The sections of the single reaction status page: the shared run summary with the fields only this page
+ * shows (args, generators, ephemeral files), the stage diagram with each stage's jobs and logs, sub
+ * reactions, and status updates.
+ */
+export const ReactionSections: FC<ReactionSectionsProps> = ({ reaction }) => {
+  const order = useStageOrder(reaction);
+  const updates = useReactionUpdates(reaction, POLL_MS);
+  const generators = reaction.generators ?? [];
+  const ephemeral = reaction.ephemeral ?? [];
+  const parentEphemeral = Object.entries(reaction.parent_ephemeral ?? {});
   return (
     <>
-      {sorted.map((key) => (
-        <Row key={key} className="flex-nowrap">
-          <Col className="key-log" xs={2}>
-            {key}
-          </Col>
-          <Col className="value-log">{reaction.update[key]}</Col>
-        </Row>
-      ))}
+      <RunSummaryPanel run={reaction} steps={order.length}>
+        <dt>Args</dt>
+        <dd>
+          {Object.keys(reaction.args ?? {}).length === 0 ? (
+            <Muted>none</Muted>
+          ) : (
+            <Pre data-testid="reaction-args">{JSON.stringify(reaction.args, null, 2)}</Pre>
+          )}
+        </dd>
+        {generators.length > 0 && (
+          <>
+            <dt>Generators</dt>
+            <dd data-testid="reaction-generators">
+              <InlineList>
+                {generators.map((job) => (
+                  <Mono key={job}>{job}</Mono>
+                ))}
+              </InlineList>
+            </dd>
+          </>
+        )}
+        {ephemeral.length > 0 && (
+          <>
+            <dt>Ephemeral</dt>
+            <dd data-testid="reaction-ephemeral">{ephemeral.join(', ')}</dd>
+          </>
+        )}
+        {parentEphemeral.length > 0 && (
+          <>
+            <dt>Parent ephemeral</dt>
+            <dd data-testid="reaction-parent-ephemeral">
+              {parentEphemeral.map(([file, parent]) => (
+                <div key={file}>
+                  {file} <Muted>from</Muted> <EntityLink to={`/reactions/${reaction.group}/${parent}`}>{parent}</EntityLink>
+                </div>
+              ))}
+            </dd>
+          </>
+        )}
+      </RunSummaryPanel>
+      <RunStagesSection run={reaction} order={order} updates={updates.data} view={RunStagesView.Diagram} />
+      {reaction.sub_reactions > 0 && <RunSubRunsPanel run={reaction} />}
+      <RunUpdatesPanel updates={updates.data} error={updates.error} />
     </>
   );
 };
 
-const ReactionStatus = () => {
-  const { reactionID } = useParams();
-  const { group } = useParams();
-  const [reactionInfo, setReactionInfo] = useState<Partial<Reaction>>({});
-  const [reactionInfoError, setReactionInfoError] = useState('');
-  const [reactionLogs, setReactionLogs] = useState<ReactionLogEntry[]>([]);
-  const [pipelineOrder, setPipelineOrder] = useState<(string | string[])[]>([]);
-  const [statusMap, setStatusMap] = useState<Record<string, string>>({});
-  const [reactionFinished, setReactionFinished] = useState(false);
-  const [width, setWindowWidth] = useState(0);
-  const { checkCookie } = useAuth();
-  const [showDeleteModal, setShowDeleteModal] = useState(false);
-  const [deletionStatus, setDeletionStatus] = useState('');
+/** The single reaction status page: one reaction's status, stages, jobs, logs, and status updates. */
+const ReactionStatus: FC = () => {
+  const { group = '', reactionID = '' } = useParams();
+  const queryClient = useQueryClient();
+  // the samples of a deleted reaction, kept for the links back to them; `null` until it is deleted
+  const [deletedSamples, setDeletedSamples] = useState<string[] | null>(null);
+  const [deletionError, setDeletionError] = useState('');
+  const deleted = deletedSamples !== null;
+  // a deleted reaction is not read again
+  const { run: reaction, error } = useReactionQuery(group, reactionID, POLL_MS, !deleted);
+  const remove = useMutation({
+    mutationFn: async (current: Reaction) => {
+      setDeletionError('');
+      const done = await deleteReaction(current.group, current.id, setDeletionError);
+      return done ? current.samples : null;
+    },
+    onSuccess: (samples) => {
+      if (samples === null) return;
+      setDeletedSamples(samples);
+      // nothing about the reaction is left to read
+      queryClient.removeQueries({ queryKey: reactionKey(group, reactionID) });
+      void queryClient.invalidateQueries({ queryKey: ['reaction-sub-runs'] });
+    },
+  });
 
-  // Update stored window width
-  const updateDimensions = () => {
-    const width = window.innerWidth;
-    setWindowWidth(width);
-  };
-
-  useEffect(() => {
-    updateDimensions();
-    window.addEventListener('resize', updateDimensions);
-    return () => window.removeEventListener('resize', updateDimensions);
-  }, [deletionStatus]);
-
-  // This is a temporary hack to get the job ID/stage name mapping, that
-  // will be replaced by an equivalent API route. This could become very
-  // slow in the case of large reaction logs.
-  const parseReactionLogs = (reactionLogs: ReactionLogEntry[]) => {
-    const stages: Record<string, string> = {};
-    const status: Record<string, string> = {};
-    reactionLogs.map((entry) => {
-      // set the status map based on the entry.action value
-      switch (entry.action) {
-        case 'JobCreated':
-          if (stages[entry.update.id] == undefined) {
-            stages[`${entry.update.id}`] = entry.update.stage;
-            stages[`${entry.update.stage}`] = entry.update.id;
-          }
-          status[`${entry.update.stage}`] = 'Created';
-          break;
-        case 'JobCompleted':
-          status[`${stages[entry.update.job]}`] = 'Completed';
-          break;
-        case 'JobFailed':
-          status[`${stages[entry.update.job]}`] = 'Failed';
-          break;
-        case 'JobRunning':
-          status[`${entry.update.worker.split('-')[0]}`] = 'Running';
-          break;
-      }
-    });
-    setStatusMap(status);
-  };
-
-  // Get reaction details and status
-  const getReactionInfo = async () => {
-    const reaction = await getReaction(group as string, reactionID as string, setReactionInfoError);
-    if (reaction) {
-      setReactionInfo(reaction);
-      if (reaction && reaction.status && reaction.status === ReactionStatusEnum.Completed) {
-        setReactionFinished(true);
-      }
-      if (reaction && reaction.pipeline) {
-        const pipeline = await getPipeline(group as string, reaction.pipeline, () => {
-          void checkCookie();
-        });
-        if (pipeline && pipeline.order) {
-          setPipelineOrder(pipeline.order);
-        }
-      }
-    }
-  };
-
-  // Fetch all reaction logs in paginated chunks
-  const getReactionStatusLogs = async () => {
-    const logs: ReactionLogEntry[] = [];
-    let moreLogs = true;
-    let cursor = 0;
-    // need to get all reactions in chunks of 100 until there are no more left
-    while (moreLogs) {
-      const requestedLogs = await getReactionLogs(
-        group as string,
-        reactionID as string,
-        () => {
-          void checkCookie();
-        },
-        cursor as unknown as null,
-        1000,
-      );
-      if (requestedLogs) {
-        logs.push(...(requestedLogs as unknown as ReactionLogEntry[]));
-        if (requestedLogs.length == 0) {
-          moreLogs = false;
-        } else {
-          cursor += requestedLogs.length;
-        }
-      } else {
-        moreLogs = false;
-      }
-    }
-    setReactionLogs(logs);
-    parseReactionLogs(logs);
-  };
-
-  // Show the delete confirmation modal
-  const handleShowDeleteModal = () => {
-    setDeletionStatus('');
-    setShowDeleteModal(true);
-  };
-
-  // Close the delete confirmation modal
-  const handleCloseDeleteModal = () => {
-    setShowDeleteModal(false);
-  };
-
-  // Handle removal of reaction using trash button
-  const handleRemoveClick = async () => {
-    const res = await deleteReaction(group as string, reactionID as string, setDeletionStatus);
-    if (res) {
-      setDeletionStatus('Success');
-    }
-    setShowDeleteModal(false);
-  };
-
-  // Get logs on first page load
-  useEffect(() => {
-    void getReactionInfo();
-    void getReactionStatusLogs();
-  }, []);
-
-  // Get reaction info and logs every 5 seconds after initial load
-  useEffect(() => {
-    const intervalId = setInterval(() => {
-      if (!reactionFinished) {
-        void getReactionInfo();
-        void getReactionStatusLogs();
-      }
-    }, 5000);
-    return () => clearInterval(intervalId);
-  }, [reactionFinished]);
-
-  // Render the pipeline stage chart with status icons and links to stage logs
-  const renderPipelineChart = (order: (string | string[])[], id: string, group: string) => {
+  // a reaction that was never read (it doesn't exist or the user can't see it) shows only a titled message with a way back
+  const readView = reactionReadView(Boolean(reaction), error);
+  if (readView === ReactionReadView.NotFound && !deleted) {
+    return <EntityNotFound what="Reaction" loading={false} listPath="/runs" listName="runs" error={error} />;
+  }
+  if (deleted) {
     return (
-      <Row className="ms-2 flex-nowrap pipeline-chart body-panel">
-        {order.map &&
-          order.map((stage, idx) => {
-            // a stage is either a single image (run alone) or a list of parallel images
-            const images = typeof stage === 'string' ? [stage] : stage;
-            return (
-              <Col xs={2} key={idx} className="pipeline-col">
-                <Row>
-                  {images.map((image, idx) => (
-                    <Row key={`${image}_${idx}`}>
-                      {statusMap[image] == undefined ? (
-                        <Card className="m-1 panel reaction-card panel">
-                          <Row>
-                            <Col>{image}</Col>
-                            <Col xs={2}>{getStatusIcon(statusMap[image])}</Col>
-                          </Row>
-                        </Card>
-                      ) : (
-                        <Link to={`/reaction/logs/${group}/${id}/${image}`} className="p-0 no-decoration">
-                          <OverlayTipBottom tip={`Click to view the logs for ${image}`}>
-                            <Card className="m-1 panel reaction-card">
-                              <Row>
-                                <Col>{image}</Col>
-                                <Col xs={2}>{getStatusIcon(statusMap[image])}</Col>
-                              </Row>
-                            </Card>
-                          </OverlayTipBottom>
-                        </Link>
-                      )}
-                    </Row>
-                  ))}
-                </Row>
-              </Col>
-            );
-          })}
-      </Row>
-    );
-  };
-
-  return (
-    <Page title="Reaction Status" className="full-min-width">
-      {deletionStatus == 'Success' ? (
+      <Page title="Reaction · Thorium">
         <AlertBanner severity={Severity.Success}>
-          Reaction deleted successfully! Return to sample &nbsp;
-          {reactionInfo.samples &&
-            reactionInfo.samples.map((sample) => (
-              <Link key={sample} to={`/file/${sample}`}>
-                {width <= 768 && sample.length > 15 ? sample.substring(0, 15) + '...' : sample}
-              </Link>
+          <span data-testid="reaction-deleted">
+            Reaction deleted successfully.
+            {/* a reaction that ran on no samples has none to return to */}
+            {deletedSamples.length > 0 && ` Return to sample${deletedSamples.length > 1 ? 's' : ''} `}
+            {deletedSamples.map((sample, index) => (
+              <Fragment key={sample}>
+                {index > 0 && ', '}
+                <Link to={`/file/${sample}`}>{sample}</Link>
+              </Fragment>
             ))}
+          </span>
         </AlertBanner>
-      ) : reactionInfoError ? (
-        <AlertBanner severity={Severity.Warning}>{'Error: ' + reactionInfoError}</AlertBanner>
-      ) : (
-        reactionInfo.id && (
-          <>
-            {deletionStatus && <AlertBanner>{deletionStatus}</AlertBanner>}
-            <Row>
-              <Col>
-                <Card className="panel">
-                  <Card.Body>
-                    <Row>
-                      <Col className="full-reactions-row" xs={5}>
-                        <Row>
-                          <Col xs={3}>
-                            <Subtitle>Reaction ID</Subtitle>
-                          </Col>
-                          <Col>{reactionInfo.id}</Col>
-                        </Row>
-                        <br />
-                        <Row>
-                          <Col>
-                            <OverlayTipTop
-                              tip={`Delete this reaction. Only system admins, group
-                              owners/managers, and the submitter can delete a reaction.`}
-                            >
-                              <Button size="sm" variant="" className="icon-btn" disabled={false} onClick={() => handleShowDeleteModal()}>
-                                <FaTrash />
-                              </Button>
-                            </OverlayTipTop>
-                            <Modal show={showDeleteModal} onHide={handleCloseDeleteModal} backdrop="static" keyboard={false}>
-                              <Modal.Header closeButton>
-                                <Modal.Title>Confirm deletion?</Modal.Title>
-                              </Modal.Header>
-                              <Modal.Body>
-                                <p>Do you really want to delete the reaction:</p>
-                                <center>
-                                  <p>
-                                    <b>
-                                      {reactionInfo.pipeline}&nbsp;:&nbsp;
-                                      {reactionInfo.group}
-                                    </b>
-                                  </p>
-                                </center>
-                              </Modal.Body>
-                              <Modal.Footer className="d-flex justify-content-center">
-                                <Button
-                                  className="danger-btn"
-                                  onClick={() => {
-                                    void handleRemoveClick();
-                                  }}
-                                >
-                                  Confirm
-                                </Button>
-                                <Button className="primary-btn" onClick={handleCloseDeleteModal}>
-                                  Cancel
-                                </Button>
-                              </Modal.Footer>
-                            </Modal>
-                          </Col>
-                        </Row>
-                        <br />
-                        <Row>
-                          <Col xs={3}>
-                            <Subtitle>Status</Subtitle>
-                          </Col>
-                          <Col>{getStatusBadge(reactionInfo.status as string)}</Col>
-                        </Row>
-                      </Col>
-                      <Col className="full-reactions-row" xs={7}>
-                        <Row>
-                          <Col xs={2}>
-                            <Subtitle>Pipeline</Subtitle>
-                          </Col>
-                          <Col xs={10}>{reactionInfo.pipeline}</Col>
-                        </Row>
-                        <Row>
-                          <Col xs={2}>
-                            <Subtitle>Creator</Subtitle>
-                          </Col>
-                          <Col xs={10}>{reactionInfo.creator}</Col>
-                        </Row>
-                        <Row>
-                          <Col xs={2}>
-                            <Subtitle>Group</Subtitle>
-                          </Col>
-                          <Col xs={10}>{reactionInfo.group}</Col>
-                        </Row>
-                        <Row className="flex-nowrap">
-                          <Col xs={2}>
-                            <Subtitle>Samples</Subtitle>
-                          </Col>
-                          <Col xs={10}>
-                            {reactionInfo.samples &&
-                              reactionInfo.samples.map((sample) => (
-                                <OverlayTipLeft key={sample} tip={`Click to view details about this sample`}>
-                                  <Row>
-                                    <Link to={`/file/${sample}`}>
-                                      {width <= 768 && sample.length > 15 ? sample.substring(0, 15) + '...' : sample}
-                                    </Link>
-                                  </Row>
-                                </OverlayTipLeft>
-                              ))}
-                          </Col>
-                        </Row>
-                        <Row>
-                          <Col xs={2}>
-                            <Subtitle>SLA</Subtitle>
-                          </Col>
-                          <Col xs={10}>{reactionInfo.sla}</Col>
-                        </Row>
-                        <Row>
-                          <Col xs={2}>
-                            <Subtitle>Args</Subtitle>
-                          </Col>
-                          <Col xs={10}>{JSON.stringify(reactionInfo.args, null, 2)}</Col>
-                        </Row>
-                        {reactionInfo.parent && (
-                          <Row>
-                            <Col xs={2}>
-                              <Subtitle>Parent</Subtitle>
-                            </Col>
-                            <Col xs={10}>{reactionInfo.parent}</Col>
-                          </Row>
-                        )}
-                        {(reactionInfo.generators?.length ?? 0) > 0 && (
-                          <Row>
-                            <Col xs={2}>
-                              <Subtitle>Generators</Subtitle>
-                            </Col>
-                            <Col xs={10}>{reactionInfo.generators?.join(', ')}</Col>
-                          </Row>
-                        )}
-                        {(reactionInfo.ephemeral?.length ?? 0) > 0 && (
-                          <Row>
-                            <Col xs={2}>
-                              <Subtitle>Ephemeral</Subtitle>
-                            </Col>
-                            <Col xs={10}>{reactionInfo.ephemeral?.join(', ')}</Col>
-                          </Row>
-                        )}
-                        {reactionInfo.parent_ephemeral && Object.keys(reactionInfo.parent_ephemeral).length > 0 && (
-                          <Row>
-                            <Col xs={2}>
-                              <Subtitle>Parent Ephemeral</Subtitle>
-                            </Col>
-                            <Col xs={10}>{JSON.stringify(reactionInfo.parent_ephemeral, null, 2)}</Col>
-                          </Row>
-                        )}
-                        {(reactionInfo.repos?.length ?? 0) > 0 && (
-                          <Row>
-                            <Col xs={2}>
-                              <Subtitle>Repos</Subtitle>
-                            </Col>
-                            <Col xs={10}>{reactionInfo.repos?.map((r) => r.url).join(', ')}</Col>
-                          </Row>
-                        )}
-                      </Col>
-                      <Col className="compact-reactions-row" xs={7}>
-                        <Row className="flex-nowrap">
-                          <Col className="reaction-name-width" xs={2}>
-                            <Subtitle>Reaction ID</Subtitle>
-                          </Col>
-                          <Col xs={8}>{reactionInfo.id}</Col>
-                        </Row>
-                        <br />
-                        <br />
-                        <Row className="flex-nowrap">
-                          <Col className="reaction-name-width" xs={2}>
-                            <Subtitle>Status</Subtitle>
-                          </Col>
-                          <Col xs={9}>{getStatusBadge(reactionInfo.status as string)}</Col>
-                        </Row>
-                      </Col>
-                      <Col className="compact-reactions-row" xs={7}>
-                        <Row className="flex-nowrap">
-                          <Col className="reaction-name-width" xs={2}>
-                            <Subtitle>Pipeline</Subtitle>
-                          </Col>
-                          <Col xs={9}>{reactionInfo.pipeline}</Col>
-                        </Row>
-                        <Row className="flex-nowrap">
-                          <Col className="reaction-name-width" xs={2}>
-                            <Subtitle>Creator</Subtitle>
-                          </Col>
-                          <Col xs={9}>{reactionInfo.creator}</Col>
-                        </Row>
-                        <Row className="flex-nowrap">
-                          <Col className="reaction-name-width" xs={2}>
-                            <Subtitle>Group</Subtitle>
-                          </Col>
-                          <Col xs={9}>{reactionInfo.group}</Col>
-                        </Row>
-                        <Row className="flex-nowrap">
-                          <Col className="reaction-name-width" xs={2}>
-                            <Subtitle>Samples</Subtitle>
-                          </Col>
-                          <Col xs={9}>
-                            {reactionInfo.samples &&
-                              reactionInfo.samples.map((sample) => (
-                                <OverlayTipLeft key={sample} tip={`Click to view details about this sample`}>
-                                  <Row>
-                                    <Link to={`/file/${sample}`}>
-                                      {width <= 768 && sample.length > 15 ? sample.substring(0, 15) + '...' : sample}
-                                    </Link>
-                                  </Row>
-                                </OverlayTipLeft>
-                              ))}
-                          </Col>
-                        </Row>
-                        <Row className="flex-nowrap">
-                          <Col className="reaction-name-width" xs={2}>
-                            <Subtitle>SLA</Subtitle>
-                          </Col>
-                          <Col xs={9}>{width <= 768 ? String(reactionInfo.sla).split(':')[0] : reactionInfo.sla}</Col>
-                        </Row>
-                        <Row className="flex-nowrap">
-                          <Col className="reaction-name-width" xs={2}>
-                            <Subtitle>Args</Subtitle>
-                          </Col>
-                          <Col xs={9}>{JSON.stringify(reactionInfo.args, null, 2)}</Col>
-                        </Row>
-                        {reactionInfo.parent && (
-                          <Row className="flex-nowrap">
-                            <Col className="reaction-name-width" xs={2}>
-                              <Subtitle>Parent</Subtitle>
-                            </Col>
-                            <Col xs={9}>{reactionInfo.parent}</Col>
-                          </Row>
-                        )}
-                        {(reactionInfo.generators?.length ?? 0) > 0 && (
-                          <Row className="flex-nowrap">
-                            <Col className="reaction-name-width" xs={2}>
-                              <Subtitle>Generators</Subtitle>
-                            </Col>
-                            <Col xs={9}>{reactionInfo.generators?.join(', ')}</Col>
-                          </Row>
-                        )}
-                        {(reactionInfo.ephemeral?.length ?? 0) > 0 && (
-                          <Row className="flex-nowrap">
-                            <Col className="reaction-name-width" xs={2}>
-                              <Subtitle>Ephemeral</Subtitle>
-                            </Col>
-                            <Col xs={9}>{reactionInfo.ephemeral?.join(', ')}</Col>
-                          </Row>
-                        )}
-                        {reactionInfo.parent_ephemeral && Object.keys(reactionInfo.parent_ephemeral).length > 0 && (
-                          <Row className="flex-nowrap">
-                            <Col className="reaction-name-width" xs={2}>
-                              <Subtitle>Parent Ephemeral</Subtitle>
-                            </Col>
-                            <Col xs={9}>{JSON.stringify(reactionInfo.parent_ephemeral, null, 2)}</Col>
-                          </Row>
-                        )}
-                        {(reactionInfo.repos?.length ?? 0) > 0 && (
-                          <Row className="flex-nowrap">
-                            <Col className="reaction-name-width" xs={2}>
-                              <Subtitle>Repos</Subtitle>
-                            </Col>
-                            <Col xs={9}>{reactionInfo.repos?.map((r) => r.url).join(', ')}</Col>
-                          </Row>
-                        )}
-                      </Col>
-                    </Row>
-                  </Card.Body>
-                </Card>
-              </Col>
-            </Row>
-            <Row>
-              <Col>
-                <Tabs defaultActiveKey="pipeline" id="uncontrolled-tab-example" className="mb-3 mt-3">
-                  <Tab eventKey="pipeline" title="Pipeline">
-                    {renderPipelineChart(pipelineOrder, reactionInfo.id, reactionInfo.group as string)}
-                  </Tab>
-                  <Tab eventKey="logs" title="Logs">
-                    <ReactionLogs logs={reactionLogs} width={width} />
-                  </Tab>
-                  <Tab eventKey="tags" title="Tags">
-                    <Row>
-                      <Col>
-                        {reactionInfo.tags &&
-                          reactionInfo.tags.map((tag, idx) => (
-                            <Row key={`tag_${tag}_${idx}`}>
-                              <Col>{width <= 768 && tag.length > 35 ? tag.substring(0, 35) + '...' : tag}</Col>
-                            </Row>
-                          ))}
-                      </Col>
-                    </Row>
-                  </Tab>
-                </Tabs>
-              </Col>
-            </Row>
-          </>
-        )
+      </Page>
+    );
+  }
+  return (
+    <Page title="Reaction · Thorium">
+      <PageHead>
+        <InlineList>
+          <PageTitle>Reaction {reaction ? `· ${reaction.pipeline}` : ''}</PageTitle>
+          {reaction && <StatusPill status={reaction.status} testId="reaction-head-status" />}
+        </InlineList>
+        <Actions>
+          {reaction && (
+            <ConfirmButton
+              testId="reaction-delete"
+              confirmText="Delete it"
+              title="Delete this reaction. Only system admins, group owners and managers, and the submitter can delete a reaction."
+              disabled={remove.isPending}
+              onConfirm={() => remove.mutate(reaction)}
+            >
+              Delete reaction
+            </ConfirmButton>
+          )}
+        </Actions>
+      </PageHead>
+      {reaction && (
+        <>
+          <BannerSlot>
+            {deletionError !== '' && (
+              <AlertBanner severity={Severity.Error}>
+                <span data-testid="reaction-delete-error">{deletionError}</span>
+              </AlertBanner>
+            )}
+            {readView === ReactionReadView.StaleDetails && (
+              // the reaction loaded earlier, so keep showing it and say the latest refresh failed
+              <AlertBanner severity={Severity.Warning}>
+                <span data-testid="reaction-refresh-error">Could not refresh this reaction, showing the last details read. {error}</span>
+              </AlertBanner>
+            )}
+            <AlertBanner severity={Severity.Info}>
+              <span data-testid="run-banner">
+                {runKind(reaction) === RunKind.Pipeline
+                  ? 'This reaction is a pipeline run. '
+                  : `This reaction is a ${runKind(reaction).toLowerCase()} run. `}
+                <Link to={`/runs/${reaction.group}/${reaction.id}`}>Open it in the run view</Link> for its results, source, and versions.
+              </span>
+            </AlertBanner>
+          </BannerSlot>
+          <ReactionSections reaction={reaction} />
+        </>
       )}
+      {!reaction && <Muted>Loading reaction...</Muted>}
     </Page>
   );
 };

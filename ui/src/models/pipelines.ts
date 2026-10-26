@@ -57,11 +57,16 @@ export type Pipeline = {
   /// A list of reasons the pipeline is banned mapped by ban UUID;
   /// if the list has any bans, the pipeline cannot be run
   bans?: { [uuid: string]: PipelineBan };
+  /// The tools backing each stage, keyed by stage name (a Tool ID follows its latest instance,
+  /// a Tool Instance ID is pinned)
+  stage_tools?: { [stage: string]: string };
 };
 
 export type PipelineCreate = Omit<Pipeline, 'creator' | 'bans'>;
 
-export type PipelineUpdate = Omit<PipelineCreate, 'name' | 'group'> & {
+export type PipelineUpdate = Omit<PipelineCreate, 'name' | 'group' | 'stage_tools'> & {
+  add_stage_tools?: { [stage: string]: string }; // stage tools to add or replace, keyed by stage name
+  remove_stage_tools?: string[]; // stages whose tool entry to remove
   remove_triggers?: string[]; // array of trigger names to remove
   clear_description?: boolean; // whether to clear the description
   bans?: { [uuid: string]: PipelineBan };

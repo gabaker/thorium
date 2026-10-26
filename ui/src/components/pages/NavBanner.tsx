@@ -4,12 +4,12 @@ import { FaQuestion } from 'react-icons/fa';
 import styled from 'styled-components';
 
 // project imports
+import { Badge, BadgeTone } from '@components/shared/badges/Badge';
 import { OverlayTipRight } from '@components/shared/overlay/tips';
 import UserAvatar from '@components/shared/UserAvatar';
 import { clearTagDataFromLocalStorage } from '@utilities/tags';
 import { useAuth } from '@utilities/auth';
 import { getApiUrl } from '@utilities/url';
-import { Badge } from 'react-bootstrap';
 
 const StyledNavbar = styled.nav`
   display: flex;
@@ -167,17 +167,13 @@ const NavBanner = () => {
 
   return (
     <StyledNavbar>
-      <HomeLink onClick={handleHomeClick}>
+      <HomeLink type="button" aria-label="Home" onClick={handleHomeClick}>
         <OverlayTipRight tip={'Home'}>
-          <img src="/ferris-scientist.png" alt="FerrisScientist" width="40px" />
+          <img src="/ferris-scientist.png" alt="" width="40px" />
         </OverlayTipRight>
       </HomeLink>
       <NavActions>
-        {scopedToken && (
-          <>
-            <Badge className="py-2 px-3">Token: {scopedToken.name}</Badge>
-          </>
-        )}
+        {scopedToken && <Badge tone={BadgeTone.Accent}>Token: {scopedToken.name}</Badge>}
         <DocsLink aria-label="Read the thorium documentation" href={`${apiURL}/docs/user/index.html`}>
           <FaQuestion size={22} title="Thorium Documentation" />
         </DocsLink>

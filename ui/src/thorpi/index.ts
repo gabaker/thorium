@@ -1,3 +1,4 @@
+export * from './agentic';
 export * from './associations';
 export * from './base';
 export * from './comments';
@@ -10,6 +11,7 @@ export * from './pipelines';
 export * from './reactions';
 export * from './repos';
 export * from './results';
+export * from './runs';
 export * from './search';
 export * from './system';
 export * from './trees';

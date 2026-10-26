@@ -1,8 +1,8 @@
 import { useRef, useState } from 'react';
 import type { FC } from 'react';
-import { useNavigate } from 'react-router-dom';
 
 // project imports
+import { Badge, BadgeTone } from '@components/agentic/shared';
 import ImageInfo from './ImageInfo';
 import type { ImageInfoHandle } from './ImageInfo';
 import { BanWarningIcon, DeleteConfirmModal, HeaderActions, HeaderBtn } from '@components/shared/browsing';
@@ -10,8 +10,7 @@ import { ButtonVariant } from '@components/shared/buttons';
 import { OverlayTipBottom, OverlayTipLeft, OverlayTipRight } from '@components/shared/overlay/tips';
 import { deleteImage } from '@thorpi/images';
 import { useAuth } from '@utilities/auth';
-import { generateCopyName } from '@utilities/naming';
-import { canDeleteImage, canDevelopAnyInGroup, canModifyImage } from '@utilities/permissions';
+import { canDeleteImage } from '@utilities/permissions';
 import type { Group } from '@models/groups';
 import type { Image } from '@models/images';
 import { updateURLSection } from '@utilities/url';
@@ -30,18 +29,14 @@ interface ImageAccordionItemProps {
 }
 
 const ImageAccordionItem: FC<ImageAccordionItemProps> = ({ image, images, groups, setImages, onRefresh, onExpand }) => {
-  const navigate = useNavigate();
   const { userInfo } = useAuth();
-  const [inEditMode, setEditMode] = useState(false);
   const [showDeleteModal, setShowDeleteModal] = useState(false);
   const [deleteError, setDeleteError] = useState('');
   const imageInfoRef = useRef<ImageInfoHandle>(null);
 
   // gate edit/delete/create against the backend image authorization predicates
   const group = groups[image.group];
-  const userCanModify = !!userInfo && !!group && canModifyImage(image, group, userInfo);
   const userCanDelete = !!userInfo && !!group && canDeleteImage(image, group, userInfo);
-  const userCanCreateImage = !!userInfo && !!group && canDevelopAnyInGroup(group, userInfo);
 
   const hasBans = image.bans && Object.keys(image.bans).length > 0;
 
@@ -92,6 +87,11 @@ const ImageAccordionItem: FC<ImageAccordionItemProps> = ({ image, images, groups
           </div>
         </div>
         <div className="accordion-item-status">
+          <OverlayTipRight tip="Images can no longer be created or changed. This one still works in pipelines that name it; create a tool to replace it.">
+            <Badge $tone={BadgeTone.Legacy} data-testid="legacy-badge">
+              legacy
+            </Badge>
+          </OverlayTipRight>
           {hasBans && (
             <OverlayTipRight tip="This image has active bans and cannot be used.">
               <BanWarningIcon />
@@ -99,49 +99,6 @@ const ImageAccordionItem: FC<ImageAccordionItemProps> = ({ image, images, groups
           )}
         </div>
         <HeaderActions onClick={(e) => e.stopPropagation()}>
-          {!inEditMode && userCanCreateImage && (
-            <OverlayTipBottom tip={`Create a new image using ${image.name} as a template.`}>
-              <HeaderBtn
-                $variant={ButtonVariant.Ok}
-                data-testid="header-btn-copy"
-                onClick={() => {
-                  const allNames = images.map((img) => img.name);
-                  const copyName = generateCopyName(image.name, allNames);
-                  void navigate('/create/image', { state: { ...image, name: copyName } });
-                }}
-              >
-                Copy
-              </HeaderBtn>
-            </OverlayTipBottom>
-          )}
-          {!inEditMode && userCanModify && (
-            <OverlayTipBottom tip="Edit this image.">
-              <HeaderBtn
-                $variant={ButtonVariant.Secondary}
-                data-testid="header-btn-edit"
-                onClick={() => {
-                  setEditMode(true);
-                  onExpand(id);
-                }}
-              >
-                Edit
-              </HeaderBtn>
-            </OverlayTipBottom>
-          )}
-          {inEditMode && userCanModify && (
-            <OverlayTipBottom tip="Submit pending updates.">
-              <HeaderBtn $variant={ButtonVariant.Ok} onClick={() => imageInfoRef.current?.handleUpdate()}>
-                Accept
-              </HeaderBtn>
-            </OverlayTipBottom>
-          )}
-          {inEditMode && userCanModify && (
-            <OverlayTipBottom tip="Discard pending changes.">
-              <HeaderBtn $variant={ButtonVariant.Secondary} onClick={() => setEditMode(false)}>
-                Discard
-              </HeaderBtn>
-            </OverlayTipBottom>
-          )}
           {userCanDelete && (
             <OverlayTipBottom tip="Delete this image.">
               <HeaderBtn $variant={ButtonVariant.Warning} data-testid="header-btn-delete" onClick={() => setShowDeleteModal(true)}>
@@ -158,9 +115,9 @@ const ImageAccordionItem: FC<ImageAccordionItemProps> = ({ image, images, groups
           image={image}
           groups={groups}
           setImages={setImages}
-          inEditMode={inEditMode}
-          onExitEditMode={() => setEditMode(false)}
-          userCanModify={userCanModify}
+          inEditMode={false}
+          onExitEditMode={() => undefined}
+          userCanModify={false}
         />
       </AccordionBody>
       <DeleteConfirmModal

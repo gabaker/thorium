@@ -1,240 +1,162 @@
-import { useCallback, useEffect, useState } from 'react';
+import { FC, useEffect, useMemo, useState } from 'react';
 import { useLocation, useNavigate } from 'react-router-dom';
+import styled from 'styled-components';
 
 // project imports
-import { Fields, OrderField, PipelineFormMode, Triggers } from '@components/pages/pipelines';
-import type { PipelineFieldsValue } from '@components/pages/pipelines';
-import { pipelineChecker } from '@components/pages/pipelines/checker';
+import { useAgenticList, usePipelineCreateBlockReason, usePipelineGroupNames } from '@components/agentic/hooks';
+import { ActionHint } from '@components/agentic/tools/ActionHint';
+import { StageEditor } from '@components/agentic/pipelines/StageEditor';
 import {
-  ActionRow,
-  AlertWrap,
-  CenterRow,
-  CreateTitle,
-  FieldCol,
-  FormatRow,
-  PipelineCreateWrapper,
-  SectionRow,
-  TitleCol,
-  ToggleRow,
-} from '@components/pages/pipelines/shared.styled';
+  BLANK_STAGE,
+  buildPipelineRequest,
+  retainStageTools,
+  pinStageInstances,
+  listedGroup,
+  pipelineProblem,
+  stepsFromPipeline,
+  StageStep,
+} from '@components/agentic/pipelines/stages';
+import { Actions, BannerSlot, Field, PageHead, PageTitle, Section, Select } from '@components/agentic/shared';
 import Page from '@components/pages/Page';
+import AlertBanner, { Severity } from '@components/shared/alerts/AlertBanner';
 import { Button, ButtonVariant } from '@components/shared/buttons';
-import AlertBanner from '@components/shared/alerts/AlertBanner';
-import { FieldError } from '@components/shared/inputs/FieldError';
-import LoadingSpinner from '@components/shared/fallback/LoadingSpinner';
-import FormatToggle from '@components/shared/inputs/code/CodeEditor/FormatToggle';
-import ImagePipelineEditor from '@components/shared/inputs/code/CodeEditor/ImagePipelineEditor';
-import ViewModeToggle, { ViewMode } from '@components/shared/inputs/code/CodeEditor/ViewModeToggle';
-import { listImages } from '@thorpi/images';
+import TextInput from '@components/shared/inputs/TextInput';
 import { createPipeline } from '@thorpi/pipelines';
-import { useAuth } from '@utilities/auth';
-import { fetchGroups } from '@utilities/fetch';
-import { FormatType } from '@utilities/rules/types';
-import { useDebouncedValue } from '@utilities/useDebouncedValue';
-import { editorObjectToPipelineCreate, pipelineToEditorObject } from '@utilities/transforms/pipeline';
-import type { EventTrigger, Pipeline, PipelineCreate as PipelineCreateType } from '@models/pipelines';
-import type { Group } from '@models/groups';
+import { AgenticKinds } from '@models/agentic';
+import { Pipeline } from '@models/pipelines';
+import { Tool } from '@models/tools';
 
-/// The blank editor object used to seed a new pipeline
-// `sla` is intentionally omitted so the field starts blank; the default (DEFAULT_SLA) is shown as
-// placeholder text and applied on submit when left empty.
-export const PIPELINE_CREATE_TEMPLATE: Record<string, unknown> = {
-  group: '',
-  name: '',
-  order: [],
-  description: '',
-};
+/** The submit error below the stage editor, held clear of the editor's buttons above it. */
+const FormNote = styled.div`
+  margin-top: 0.75rem;
+`;
 
-/// Top-level editor keys managed by the Fields form
-const FIELDS_KEYS = new Set(['name', 'group', 'description', 'sla']);
+/** The submit and cancel buttons below the stage editor. */
+const FormActions = styled(Actions)`
+  margin-top: 0.75rem;
+`;
 
-const PipelineCreate: React.FC = () => {
+/** Create a pipeline whose every stage is backed by a tool (following latest) or a pinned tool version. */
+const PipelineCreate: FC = () => {
   const navigate = useNavigate();
   const { state } = useLocation() as { state: Pipeline | null };
-  const { checkCookie } = useAuth();
-  const [groups, setGroups] = useState<string[]>([]);
-  const [loading, setLoading] = useState(false);
-  const [displayErrors, setDisplayErrors] = useState(false);
-  const [createError, setCreateError] = useState('');
-  // Single source of truth: both form and editor views read/write this object
-  const [editorObj, setEditorObj] = useState<Record<string, unknown>>(state ? pipelineToEditorObject(state) : PIPELINE_CREATE_TEMPLATE);
-  const [viewMode, setViewMode] = useState<ViewMode>(ViewMode.Form);
-  const [editorFormat, setEditorFormat] = useState<FormatType>(FormatType.YAML);
-  const [editorParseValid, setEditorParseValid] = useState(false);
-  const [fieldErrors, setFieldErrors] = useState(true);
-  const [triggerErrors, setTriggerErrors] = useState(false);
+  // only groups the user may create a pipeline in are offered, and a user who can create in none is told why
+  const myGroups = usePipelineGroupNames();
+  const blockReason = usePipelineCreateBlockReason();
+  const { items: tools, error: toolsError } = useAgenticList<Tool>(AgenticKinds.Tool);
+  const [name, setName] = useState(state?.name ?? '');
+  const [chosenGroup, setGroup] = useState(state?.group ?? '');
+  // a copied pipeline's group the user can't create in is not a choice, so it counts as unchosen
+  const group = listedGroup(chosenGroup, myGroups);
+  const [description, setDescription] = useState(state?.description ?? '');
+  const [sla, setSla] = useState(state ? String(state.sla) : '');
+  // a copy starts from the source pipeline's stages, each bound to the id its stage tool names
+  const [steps, setSteps] = useState<StageStep[]>(() => (state ? stepsFromPipeline(state, {}) : [[{ ...BLANK_STAGE }]]));
+  const [error, setError] = useState('');
+  const [busy, setBusy] = useState(false);
+  const triggers = state?.triggers ?? {};
+  const triggerNames = Object.keys(triggers);
+  const values = { name, group, description, sla, steps, triggers };
+  const problem = useMemo(() => pipelineProblem(values), [name, group, description, sla, steps]);
 
-  const formMode = state ? PipelineFormMode.Copy : PipelineFormMode.Create;
-  const group = typeof editorObj.group === 'string' ? editorObj.group : '';
-  const order = Array.isArray(editorObj.order) ? (editorObj.order as (string | string[])[]) : [];
-  const triggers = (editorObj.triggers ?? {}) as Record<string, EventTrigger>;
-  // an order with at least one image is required to create a pipeline
-  const orderError = order.length === 0;
-
-  // Lossless view switching — no confirmation needed since both views share editorObj
-  const handleViewModeChange = (mode: ViewMode) => {
-    if (mode !== viewMode) setViewMode(mode);
-  };
-
-  const handleEditorChange = (obj: Record<string, unknown> | null) => {
-    if (obj) {
-      setEditorObj(obj);
-      setEditorParseValid(true);
-    } else {
-      setEditorParseValid(false);
-    }
-  };
-
-  // Fields manages multiple top-level keys — remove old keys before merging new ones
-  const handleFieldsChange = useCallback((fields: PipelineFieldsValue) => {
-    setEditorObj((prev) => {
-      const rest: Record<string, unknown> = {};
-      for (const [k, v] of Object.entries(prev)) {
-        if (!FIELDS_KEYS.has(k)) rest[k] = v;
-      }
-      // Changing the group invalidates the order: its images belong to the old group and may not
-      // exist in the new one, so reset the order whenever the group changes.
-      if (fields.group !== prev.group) rest.order = [];
-      return { ...rest, ...(fields as unknown as Record<string, unknown>) };
-    });
-  }, []);
-
+  // once the tools are known, a stage bound to a tool version becomes a pinned stage of its tool; other edits are kept
   useEffect(() => {
-    void fetchGroups(setGroups as (groups: { [name: string]: Group } | Group[] | string[]) => void, () => void checkCookie(), false);
-  }, []);
+    const instanceTool: Record<string, string> = {};
+    for (const tool of tools) {
+      for (const instance of tool.metadata.Tool.instances ?? []) instanceTool[instance.id] = tool.id;
+    }
+    setSteps((current) => pinStageInstances(current, instanceTool));
+  }, [tools]);
 
-  // Clear the bottom error banner once the form's field/trigger/order validation passes, so a
-  // resolved set of "missing field" errors doesn't leave a stale alert behind.
-  useEffect(() => {
-    if (viewMode === ViewMode.Form && !fieldErrors && !triggerErrors && !orderError) {
-      setCreateError('');
-    }
-  }, [viewMode, fieldErrors, triggerErrors, orderError]);
-
-  // Debounce so we don't refetch the image list on every keystroke while the group is typed.
-  const debouncedGroup = useDebouncedValue(group, 400);
-  useEffect(() => {
-    if (!debouncedGroup) return;
-    let cancelled = false;
-    void listImages(debouncedGroup, () => {}, false, null, 1000).then((result) => {
-      if (cancelled) return;
-      if (result && 'names' in result) pipelineChecker.setValidImageNames(debouncedGroup, result.names);
-    });
-    return () => {
-      cancelled = true;
-    };
-  }, [debouncedGroup]);
-
-  const handlePipelineCreate = async () => {
-    if (viewMode === ViewMode.Form && (fieldErrors || triggerErrors || orderError)) {
-      setCreateError('Please resolve missing fields or invalid entries');
-      setDisplayErrors(true);
-      return;
-    }
-    const data = editorObjectToPipelineCreate(editorObj);
-    if (!data) {
-      setCreateError('Pipeline group, name, and order are required');
-      setDisplayErrors(true);
-      return;
-    }
-    setLoading(true);
-    try {
-      if (await createPipeline(data as PipelineCreateType, setCreateError)) {
-        void navigate('/pipelines');
-      } else {
-        setDisplayErrors(true);
-      }
-    } finally {
-      setLoading(false);
-    }
+  /** Send the create request and return to the pipeline list. */
+  const submit = async () => {
+    if (problem !== '' || blockReason !== '') return;
+    setBusy(true);
+    setError('');
+    const created = await createPipeline(buildPipelineRequest(values), setError);
+    setBusy(false);
+    if (created) void navigate('/pipelines');
   };
 
   return (
-    <Page title="Create Pipeline">
-      <PipelineCreateWrapper>
-        <CreateTitle>Create A Pipeline</CreateTitle>
-        <ToggleRow>
-          <ViewModeToggle viewMode={viewMode} onViewModeChange={handleViewModeChange} />
-        </ToggleRow>
-        {viewMode === ViewMode.Editor ? (
-          <>
-            <FormatRow>
-              <FormatToggle format={editorFormat} onFormatChange={setEditorFormat} />
-            </FormatRow>
-            <ImagePipelineEditor
-              value={editorObj}
-              onChange={handleEditorChange}
-              checker={pipelineChecker}
-              format={editorFormat}
-              height="600px"
-            />
-          </>
-        ) : (
-          <>
-            <SectionRow>
-              <TitleCol>
-                <h5>Pipeline</h5>
-              </TitleCol>
-              <FieldCol>
-                <Fields
-                  value={editorObj as unknown as PipelineFieldsValue}
-                  groups={groups}
-                  onChange={handleFieldsChange}
-                  onValidate={setFieldErrors}
-                  showErrors={displayErrors}
-                  mode={formMode}
-                />
-              </FieldCol>
-            </SectionRow>
-            <hr />
-            <SectionRow>
-              <TitleCol>
-                <h5>Order</h5>
-              </TitleCol>
-              <FieldCol>
-                <OrderField order={order} onChange={(o) => setEditorObj((prev) => ({ ...prev, order: o }))} group={group} />
-                {displayErrors && orderError && <FieldError>At least one image is required.</FieldError>}
-              </FieldCol>
-            </SectionRow>
-            <hr />
-            <SectionRow>
-              <TitleCol>
-                <h5>Triggers</h5>
-              </TitleCol>
-              <FieldCol>
-                <Triggers
-                  value={triggers}
-                  onChange={(t) => setEditorObj((prev) => ({ ...prev, triggers: t }))}
-                  onValidate={setTriggerErrors}
-                  showErrors={displayErrors}
-                  mode={formMode}
-                />
-              </FieldCol>
-            </SectionRow>
-          </>
+    <Page title="Create Pipeline · Thorium">
+      <PageHead>
+        <PageTitle>Create pipeline</PageTitle>
+      </PageHead>
+      <BannerSlot>
+        <AlertBanner severity={Severity.Info}>
+          Every stage of a pipeline is backed by a tool: choose a tool to follow its latest version, or pin one version. Triggers are not
+          edited here.
+          {triggerNames.length > 0 && (
+            <span data-testid="copied-triggers"> The copy keeps the source pipeline&apos;s triggers: {triggerNames.join(', ')}.</span>
+          )}
+        </AlertBanner>
+        {blockReason !== '' && (
+          <AlertBanner severity={Severity.Warning}>
+            <span data-testid="create-blocked">{blockReason}</span>
+          </AlertBanner>
         )}
-        {createError && (
-          <AlertWrap>
-            <AlertBanner>{createError}</AlertBanner>
-          </AlertWrap>
+        {toolsError !== '' && (
+          <AlertBanner>
+            <span data-testid="tools-error">{toolsError}</span>
+          </AlertBanner>
         )}
-        <CenterRow>
-          <LoadingSpinner loading={loading}></LoadingSpinner>
-        </CenterRow>
-        <ActionRow>
-          <Button variant={ButtonVariant.Secondary} data-testid="create-cancel" onClick={() => void navigate(-1)}>
-            Cancel
-          </Button>
-          <Button
-            variant={ButtonVariant.Ok}
-            data-testid="create-submit"
-            disabled={(viewMode === ViewMode.Editor && !editorParseValid) || loading}
-            onClick={() => void handlePipelineCreate()}
+      </BannerSlot>
+      <Section>
+        <Field>
+          <span className="label">Name</span>
+          <TextInput data-testid="pipeline-name" value={name} onChange={(event) => setName(event.target.value)} />
+        </Field>
+        <Field>
+          <span className="label">Group</span>
+          <Select
+            data-testid="pipeline-group"
+            value={group}
+            onChange={(event) => {
+              setGroup(event.target.value);
+              // tools belong to groups, so a group change unbinds only the stages whose tool is not in the new group
+              setSteps((current) => retainStageTools(current, tools, event.target.value));
+            }}
           >
-            Create
-          </Button>
-        </ActionRow>
-      </PipelineCreateWrapper>
+            <option value="">Choose a group</option>
+            {myGroups.map((option) => (
+              <option key={option} value={option}>
+                {option}
+              </option>
+            ))}
+          </Select>
+        </Field>
+        <Field>
+          <span className="label">Description</span>
+          <TextInput data-testid="pipeline-description" value={description} onChange={(event) => setDescription(event.target.value)} />
+        </Field>
+        <Field>
+          <span className="label">SLA (seconds)</span>
+          <span className="hint">Leave blank for one week.</span>
+          <TextInput data-testid="pipeline-sla" value={sla} onChange={(event) => setSla(event.target.value)} />
+        </Field>
+      </Section>
+      <StageEditor tools={tools} group={group} steps={steps} onChange={setSteps} />
+      {error !== '' && (
+        // keep the submit error clear of the stage editor's buttons above it
+        <FormNote data-testid="create-error">
+          <AlertBanner>{error}</AlertBanner>
+        </FormNote>
+      )}
+      <FormActions>
+        <Button
+          variant={ButtonVariant.Ok}
+          data-testid="create-submit"
+          disabled={busy || problem !== '' || blockReason !== ''}
+          onClick={() => void submit()}
+        >
+          Create
+        </Button>
+        <Button variant={ButtonVariant.Secondary} data-testid="create-cancel" onClick={() => void navigate(-1)}>
+          Cancel
+        </Button>
+        {problem !== '' && <ActionHint data-testid="pipeline-problem">{problem}</ActionHint>}
+      </FormActions>
     </Page>
   );
 };

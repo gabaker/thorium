@@ -7,7 +7,9 @@ import LoadingSpinner from '@components/shared/fallback/LoadingSpinner';
 import { useAuth } from '@utilities/auth';
 import { updateURLSection } from '@utilities/url';
 import { scrollToSection } from '@utilities/interactions';
-import { getResults } from '@thorpi/results';
+import { getRepoResults, getResults } from '@thorpi/results';
+import { ResultSourceContext } from '@components/tools/ResultSourceContext';
+import { resultDisplayName } from '@utilities/runs';
 import { OutputDisplayType, type Output } from '@models/results';
 
 type ParsedResults = Record<string, Output[]>;
@@ -53,9 +55,10 @@ const ResultsTableOfContents = ({ parsedResults, inViewElements }: ResultsTableO
                 <a
                   href={`#results-${image}`}
                   onClick={() => scrollToSection(`results-tab-${image}`)}
+                  title={image}
                   className={`${inViewElements.includes(image) ? 'selected' : 'unselected'}`}
                 >
-                  {image}
+                  {resultDisplayName(image)}
                 </a>
                 <hr className="m-1" />
               </li>
@@ -66,15 +69,18 @@ const ResultsTableOfContents = ({ parsedResults, inViewElements }: ResultsTableO
 };
 
 interface ResultsProps {
+  // the file's SHA256, or the repo's URL when repo is set
   sha256: string;
   results: ParsedResults;
   setResults: (results: ParsedResults) => void;
   numResults: number;
   setNumResults: (num: number) => void;
   allowHashUpdate?: boolean;
+  // whether the results belong to a repo instead of a file
+  repo?: boolean;
 }
 
-const Results = ({ sha256, results, setResults, numResults, setNumResults }: ResultsProps) => {
+const Results = ({ sha256, results, setResults, numResults, setNumResults, repo = false }: ResultsProps) => {
   const [loading, setLoading] = useState(false);
   const [inViewElements, setInViewElements] = useState<string[]>([]);
   const { checkCookie } = useAuth();
@@ -84,13 +90,10 @@ const Results = ({ sha256, results, setResults, numResults, setNumResults }: Res
     let isSubscribed = true;
     const fetchData = async () => {
       setLoading(true);
-      const resultsRes = await getResults(
-        sha256,
-        () => {
-          void checkCookie();
-        },
-        {},
-      );
+      const onError = () => {
+        void checkCookie();
+      };
+      const resultsRes = repo ? await getRepoResults(sha256, onError) : await getResults(sha256, onError, {});
       if (resultsRes && 'results' in resultsRes && isSubscribed) {
         setNumResults(Object.keys(resultsRes.results).length);
         setResults(resultsRes.results);
@@ -101,7 +104,7 @@ const Results = ({ sha256, results, setResults, numResults, setNumResults }: Res
     return () => {
       isSubscribed = false;
     };
-  }, [sha256]);
+  }, [sha256, repo]);
 
   // update whether an element is in the viewport
   const updateInView = (inView: boolean, entry: string) => {
@@ -112,6 +115,9 @@ const Results = ({ sha256, results, setResults, numResults, setNumResults }: Res
     }
   };
 
+  // tells the result tiles whether to read result files from a repo's routes
+  const source = useMemo(() => ({ repo }), [repo]);
+
   const parsedResults = useMemo(() => {
     if (!results || typeof results !== 'object') return {};
     return Object.fromEntries(
@@ -121,42 +127,47 @@ const Results = ({ sha256, results, setResults, numResults, setNumResults }: Res
     );
   }, [results]);
 
+  // the table of contents column only exists when there are results to list
+  const hasToc = Object.keys(parsedResults).length > 0;
   return (
-    <div id="results-tab" className="navbar-scroll-offset results-container">
-      <LoadingSpinner loading={loading}></LoadingSpinner>
-      {parsedResults && typeof parsedResults === 'object' && !loading && (
-        <>
-          <div>
-            {numResults == 0 && !loading && (
-              <>
-                <br />
-                <AlertBanner severity={Severity.Info}>
-                  <h3>No Tool Results Available</h3>
-                </AlertBanner>
-              </>
-            )}
-            {Object.keys(parsedResults)
-              .sort()
-              .map((image) => (
-                <ToolResult
-                  key={image}
-                  header={image}
-                  tool={image}
-                  sha256={sha256}
-                  updateInView={updateInView}
-                  updateURLSection={updateURLSection}
-                  results={parsedResults[image]}
-                />
-              ))}
-          </div>
-          {Object.keys(parsedResults).length > 0 && (
-            <div className="results-toc-col">
-              <ResultsTableOfContents parsedResults={parsedResults} inViewElements={inViewElements} />
+    <ResultSourceContext.Provider value={source}>
+      <div id="results-tab" className={`navbar-scroll-offset results-container${hasToc ? '' : ' results-container-single'}`}>
+        <LoadingSpinner loading={loading}></LoadingSpinner>
+        {parsedResults && typeof parsedResults === 'object' && !loading && (
+          <>
+            <div>
+              {numResults == 0 && !loading && (
+                <>
+                  {/* a repo's panel uses the same plain banner text as its sibling panels; the file page keeps its heading */}
+                  {!repo && <br />}
+                  <AlertBanner severity={Severity.Info}>
+                    {repo ? 'No tool results available.' : <h3>No Tool Results Available</h3>}
+                  </AlertBanner>
+                </>
+              )}
+              {Object.keys(parsedResults)
+                .sort()
+                .map((image) => (
+                  <ToolResult
+                    key={image}
+                    header={resultDisplayName(image)}
+                    tool={image}
+                    sha256={sha256}
+                    updateInView={updateInView}
+                    updateURLSection={updateURLSection}
+                    results={parsedResults[image]}
+                  />
+                ))}
             </div>
-          )}
-        </>
-      )}
-    </div>
+            {hasToc && (
+              <div className="results-toc-col">
+                <ResultsTableOfContents parsedResults={parsedResults} inViewElements={inViewElements} />
+              </div>
+            )}
+          </>
+        )}
+      </div>
+    </ResultSourceContext.Provider>
   );
 };
 

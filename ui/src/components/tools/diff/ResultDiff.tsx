@@ -14,6 +14,7 @@ import RenderErrorAlert from '@components/shared/alerts/RenderErrorAlert';
 import { decodeText, detectRenderKind, RenderKind } from '@components/shared/renderers';
 import { OverlayWindow, Placement, PositionType } from '@components/shared/windows';
 import { getResultsFile } from '@thorpi/results';
+import { useResultsOnRepo } from '@components/tools/ResultSourceContext';
 import { useAuth } from '@utilities/auth';
 import { versionLabel } from '@utilities/version';
 import { OutputDisplayType, type Output } from '@models/results';
@@ -73,6 +74,7 @@ export interface ResultDiffProps {
  */
 const ResultDiff: React.FC<ResultDiffProps> = ({ results, sha256, tool, initialIndex, onClose }) => {
   const { checkCookie } = useAuth();
+  const repo = useResultsOnRepo();
   const [baseIndex, setBaseIndex] = useState(initialIndex);
   const [compareIndex, setCompareIndex] = useState(initialIndex === 0 ? Math.min(1, results.length - 1) : 0);
   const [target, setTarget] = useState<string>(RESULT_TARGET);
@@ -112,8 +114,8 @@ const ResultDiff: React.FC<ResultDiffProps> = ({ results, sha256, tool, initialI
       const baseExpected = baseResult?.files?.includes(target) ?? false;
       const compareExpected = compareResult?.files?.includes(target) ?? false;
       const [b, c] = await Promise.all([
-        baseExpected ? getResultsFile(sha256, tool, baseResult.id, target, errorHandler) : Promise.resolve(null),
-        compareExpected ? getResultsFile(sha256, tool, compareResult.id, target, errorHandler) : Promise.resolve(null),
+        baseExpected ? getResultsFile(sha256, tool, baseResult.id, target, errorHandler, repo) : Promise.resolve(null),
+        compareExpected ? getResultsFile(sha256, tool, compareResult.id, target, errorHandler, repo) : Promise.resolve(null),
       ]);
       if (!active) return;
       setFetchError((baseExpected && b === null) || (compareExpected && c === null));
@@ -125,7 +127,7 @@ const ResultDiff: React.FC<ResultDiffProps> = ({ results, sha256, tool, initialI
     return () => {
       active = false;
     };
-  }, [target, baseResult, compareResult, sha256, tool, checkCookie]);
+  }, [target, baseResult, compareResult, sha256, tool, checkCookie, repo]);
 
   const oldTitle = baseResult ? versionLabel(baseResult.uploaded, baseResult.tool_version) : 'unknown';
   const newTitle = compareResult ? versionLabel(compareResult.uploaded, compareResult.tool_version) : 'unknown';

@@ -1,7 +1,7 @@
 import client, { parseRequestError } from './client';
 
 // project imports
-import { Repo } from '@models/repos';
+import { CommitishDetailsPage, Repo } from '@models/repos';
 import { Filters } from '@models/search';
 
 interface ApiCursor<T> {
@@ -47,5 +47,58 @@ export async function listRepos(
     .catch((error: unknown) => {
       parseRequestError(error, errorHandler, 'List Repos');
       return { entityList: [], entityCursor: null };
+    });
+}
+
+/**
+ * Build the path of a repo in a route (the repo's URL with each segment encoded).
+ *
+ * @param repo - The repo's URL, such as `github.com/org/name`.
+ * @returns The encoded path, keeping the slashes between segments.
+ */
+function repoRoutePath(repo: string): string {
+  return repo.split('/').map(encodeURIComponent).join('/');
+}
+
+/**
+ * Fetch one repo (`GET /repos/data/{repo_path}`).
+ *
+ * @param repo - The repo's URL, such as `github.com/org/name`.
+ * @param errorHandler - Called with the API's error message if the request fails (a repo the user
+ *   can't see answers not found, the same as a repo that doesn't exist).
+ * @returns The repo, or `null` if it was not found or the request failed.
+ */
+export async function getRepo(repo: string, errorHandler: (error: string) => void): Promise<Repo | null> {
+  return client
+    .get<Repo>(`/repos/data/${repoRoutePath(repo)}`)
+    .then((res) => (res?.status == 200 && res.data ? res.data : null))
+    .catch((error: unknown) => {
+      parseRequestError(error, errorHandler, 'Get Repo');
+      return null;
+    });
+}
+
+/**
+ * List the latest commits, branches, and tags of a repo with their details
+ * (`GET /repos/commitish-details/{repo_path}`).
+ *
+ * @param repo - The repo's URL, such as `github.com/org/name`.
+ * @param errorHandler - Called with a formatted message if the request fails.
+ * @param limit - The most commitishes to return on the page.
+ * @param cursor - The cursor of the page to read; the first page when omitted.
+ * @returns The page of commitishes, or `null` if the request failed.
+ */
+export async function listCommitishDetails(
+  repo: string,
+  errorHandler: (error: string) => void,
+  limit = 100,
+  cursor?: string | null,
+): Promise<CommitishDetailsPage | null> {
+  return client
+    .get<CommitishDetailsPage>(`/repos/commitish-details/${repoRoutePath(repo)}`, { params: cursor ? { limit, cursor } : { limit } })
+    .then((res) => (res?.status == 200 && res.data ? res.data : null))
+    .catch((error: unknown) => {
+      parseRequestError(error, errorHandler, 'List Commitishes');
+      return null;
     });
 }

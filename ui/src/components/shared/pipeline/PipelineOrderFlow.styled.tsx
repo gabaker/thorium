@@ -65,7 +65,15 @@ export const ResizeHandle = styled.div`
   }
 `;
 
-export const StepNodeWrapper = styled.div<{ $parallel?: boolean; $banned?: boolean }>`
+export const StepNodeWrapper = styled.div<{
+  $parallel?: boolean;
+  $banned?: boolean;
+  // the left accent of a decorated node, such as its run status colour
+  $accent?: string;
+  $selected?: boolean;
+  $active?: boolean;
+  $selectable?: boolean;
+}>`
   display: flex;
   align-items: center;
   height: ${NODE_HEIGHT}px;
@@ -76,6 +84,7 @@ export const StepNodeWrapper = styled.div<{ $parallel?: boolean; $banned?: boole
   border-left: 3px solid
     ${(props) => {
       if (props.$banned) return 'var(--thorium-danger, #e74c3c)';
+      if (props.$accent) return props.$accent;
       return props.$parallel ? 'var(--thorium-warning-bg)' : 'var(--thorium-info-secondary-bg)';
     }};
   border-radius: 4px;
@@ -90,6 +99,14 @@ export const StepNodeWrapper = styled.div<{ $parallel?: boolean; $banned?: boole
   min-width: 120px;
   max-width: 240px;
   box-shadow: 0 1px 3px rgba(0, 0, 0, 0.12);
+  cursor: ${(props) => (props.$selectable ? 'pointer' : 'inherit')};
+  ${(props) => (props.$active ? 'background-color: color-mix(in srgb, var(--thorium-info-bg) 18%, var(--thorium-panel-bg));' : '')}
+  ${(props) => (props.$selected ? 'outline: 2px solid var(--thorium-highlight-panel-border); outline-offset: 2px;' : '')}
+
+  &:focus-visible {
+    outline: 2px solid var(--thorium-highlight-panel-border);
+    outline-offset: 2px;
+  }
 
   .react-flow__handle {
     width: 6px;
@@ -251,5 +268,16 @@ export const ImageSelectOverlay = styled.div<{ $top: number; $left: number }>`
   top: ${(props) => props.$top}px;
   left: ${(props) => props.$left}px;
   z-index: 1000;
-  width: 220px;
+  width: 260px;
+`;
+
+export const PickerNote = styled.div`
+  padding: 8px 12px;
+  font-size: 12px;
+  color: var(--thorium-text);
+  background: var(--thorium-panel-bg);
+  border: 1px solid var(--thorium-panel-border);
+  border-radius: 4px;
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.25);
+  white-space: normal;
 `;

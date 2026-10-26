@@ -8,6 +8,7 @@ import { useResultAlerts } from './useResultAlerts';
 import { ResultRenderProps } from '../props';
 import { OceanJsonTheme, useJsonTreeInvert } from '@components/shared/renderers/jsonTheme';
 import { getResultsFile } from '@thorpi/results';
+import { useResultsOnRepo } from '@components/tools/ResultSourceContext';
 import { useAuth } from '@utilities/auth';
 
 // legacy display path — the modular ImageRenderer (detect.ts IMAGE_EXTENSIONS/imageMimeForName) is
@@ -26,6 +27,7 @@ const Image: React.FC<ResultRenderProps> = ({ result, sha256, tool }) => {
   // const invertTheme = useJsonTreeInvert();
 
   const { checkCookie } = useAuth();
+  const repo = useResultsOnRepo();
   // create + revoke object URLs in a single guarded effect so an out-of-order fetch (result changed
   // mid-flight) can't publish stale URLs or revoke ones still bound to a mounted <img>; object URLs
   // live for the document's lifetime until explicitly revoked
@@ -38,7 +40,7 @@ const Image: React.FC<ResultRenderProps> = ({ result, sha256, tool }) => {
         const extension = fileName.split('.').pop();
         if (!SupportedImageFormats.includes(extension ? extension : '')) continue;
         // get images from the API and build a local URL path for display
-        const res = await getResultsFile(sha256, tool, result.id, fileName, () => void checkCookie());
+        const res = await getResultsFile(sha256, tool, result.id, fileName, () => void checkCookie(), repo);
         if (res && res.data) {
           const resultFile = new File([res.data], fileName, {
             type: `image/${extension}`,
@@ -55,7 +57,7 @@ const Image: React.FC<ResultRenderProps> = ({ result, sha256, tool }) => {
       active = false;
       created.forEach((url) => URL.revokeObjectURL(url));
     };
-  }, [result, sha256, tool]);
+  }, [result, sha256, tool, repo]);
 
   return (
     <>

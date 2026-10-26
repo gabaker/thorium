@@ -27,7 +27,7 @@ const Name = styled(Col)`
   text-align: center;
   flex-wrap: wrap;
   word-break: break-all;
-  min-width: 650px;
+  min-width: 300px;
   color: var(--thorium-text);
 `;
 
@@ -70,7 +70,7 @@ const RepoItem: React.FC<RepoItemProp> = ({ repo }) => {
           <LinkFields>
             <Name>{repo.name}</Name>
             <Submissions>{JSON.stringify(repo.submissions.length)}</Submissions>
-            <Providers>{JSON.stringify(repo.provider)}</Providers>
+            <Providers>{repo.provider}</Providers>
           </LinkFields>
         </Link>
       </BrowsingContents>
