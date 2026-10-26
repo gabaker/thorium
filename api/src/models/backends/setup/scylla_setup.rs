@@ -11,8 +11,9 @@ use crate::models::schema::statements::prepare_all;
 use crate::models::schema::{ApplyOptions, ApplyTarget, apply, check_startup, connect};
 use crate::models::schema::{RevisionSnapshot, SchemaCheckError, SchemaCheckPass, SnapshotError};
 use crate::models::upgrades::Catalog;
-use crate::utils::StartupOpts;
+use crate::utils::{ApiError, StartupOpts};
 use crate::{Conf, setup};
+use axum::http::StatusCode;
 
 /// Loads a revision's committed snapshot
 pub type SnapshotLoader = fn(&str) -> Option<Result<RevisionSnapshot, SnapshotError>>;
@@ -57,6 +58,34 @@ impl Scylla {
             );
         }
         Ok(scylla)
+    }
+
+    /// Connect to Scylla and prepare every generated statement, with no schema check and no DDL
+    ///
+    /// For a writer that runs inside an upgrade, where the schema is already applied and the
+    /// startup check isn't the writer's to make.
+    ///
+    /// # Arguments
+    ///
+    /// * `config` - The Thorium config
+    pub async fn offline(config: &Conf) -> Result<Self, ApiError> {
+        // connect with the shared session settings
+        let session = connect(config).await.map_err(|err| {
+            ApiError::new(
+                StatusCode::SERVICE_UNAVAILABLE,
+                Some(format!("Scylla can't be reached: {err}")),
+            )
+        })?;
+        // prepare the generated statements against the namespace's keyspace
+        let queries = ScyllaQueries::prepare(&session, &config.thorium.namespace)
+            .await
+            .map_err(|err| {
+                ApiError::new(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Some(format!("the Scylla statements didn't prepare: {err}")),
+                )
+            })?;
+        Ok(Scylla { session, queries })
     }
 
     /// Connect to Scylla, judge the applied schema against a catalog, and prepare every

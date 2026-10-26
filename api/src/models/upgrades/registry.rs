@@ -150,7 +150,7 @@ pub const REDIS_IMAGES_LAYOUT: LayoutDef = LayoutDef {
 pub const REDIS_PIPELINES_LAYOUT: LayoutDef = LayoutDef {
     backend: SchemaBackend::Redis,
     family: "pipelines",
-    version: 1,
+    version: 2,
     reads_from: 1,
     security_sensitive: &[],
     enumerate: Some(Enumeration::IndexSet("pipelines:{group}")),
@@ -628,8 +628,9 @@ mod tests {
         "graphics",
     ];
 
-    /// Every Redis family and S3 bucket role has exactly one layout, at its baseline version, and
-    /// the cursors layout matches the version the cursor keys carry
+    /// Every Redis family and S3 bucket role has exactly one layout, at its baseline version (the
+    /// pipelines layout is written at version 2 and still read at version 1), and the cursors
+    /// layout matches the version the cursor keys carry
     #[test]
     fn layouts_cover_every_family_once() {
         // each family is declared once per backend
@@ -665,12 +666,18 @@ mod tests {
         );
         for layout in LAYOUTS {
             // users start at layout 2, after the example's development-only layout 1, and cursors
-            // at 2, the versioned keys this build writes; the rest at 1
+            // at 2, the versioned keys this build writes; pipelines write layout 2 (a tool for
+            // each stage) and still read layout 1; the rest at 1
             let baseline = match layout.family {
                 "users" | "cursors" => 2,
                 _ => 1,
             };
-            assert_eq!(layout.version, baseline, "{} version", layout.family);
+            let version = if layout.family == "pipelines" {
+                2
+            } else {
+                baseline
+            };
+            assert_eq!(layout.version, version, "{} version", layout.family);
             assert_eq!(layout.reads_from, baseline, "{} reads_from", layout.family);
             // Redis families say how they are enumerated, S3 roles are enumerated by prefix
             match layout.backend {

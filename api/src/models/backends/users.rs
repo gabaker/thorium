@@ -1694,6 +1694,10 @@ fn secret_key_matches(configured: &str, presented: &str) -> bool {
 impl User {
     /// Creates a new user in the backend
     ///
+    /// When a verification email is required, it is sent before the user is created. When it can't
+    /// be sent, the verification token saved for it is discarded and the send's error is returned,
+    /// so no half made user is left behind.
+    ///
     /// # Arguments
     ///
     /// * `req` - The user registration request
@@ -1776,8 +1780,12 @@ impl User {
         match (req.skip_verification, &shared.email) {
             (true, _) | (_, None) => cast.verified = true,
             (false, Some(client)) => {
-                // send our verification email
-                cast.send_verification_email(client, shared).await?;
+                // send our verification email, forgetting its token when it can't be sent so no
+                // half made user is left behind
+                if let Err(error) = cast.send_verification_email(client, shared).await {
+                    db::users::discard_verification_token(&cast.username, shared).await?;
+                    return Err(error);
+                }
             }
         }
         // let a test hold this create between its existing-user check and the user write

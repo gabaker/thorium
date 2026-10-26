@@ -49,6 +49,7 @@ pub(crate) mod toolsets;
 pub mod workflows;
 
 pub(crate) use agents::check_new_calls;
+pub use tools::{PublishStamp, create_migrated_tool};
 
 /// How a group change treats an entity's `PublishedFrom` edges
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

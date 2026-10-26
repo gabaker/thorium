@@ -1,11 +1,11 @@
 {
   "backends": {
     "elastic": "c1770f2ccf3cbcf1af2387732a54a7365f9f5d5e4b7f8082811f261c688268d7",
-    "redis": "aa2ae3b00d020dc00810e00d50493eaa1cfc73e3f343545ee847804aaeb8e364",
+    "redis": "a16ee5a775d4efb4afa3220d1ca9268fbfa5b96c58f46eb2a1db4172f2244655",
     "s3": "5a647d2e12a64df7059fd26f653ba60435f7698c1b512e74e17f31226b8a3d1c",
     "scylla": "cac70b24e9c4a849a1ba327c68d3f682a56e481b5fe3619f7a6f963c9f9fac03"
   },
-  "deployment": "86722e9607083db0e1f7d2b527ce3c4937c78b34fdc5cdb3ef5691eb70fbbdfd",
+  "deployment": "f9f605025a1d9dca23c939a5dec4b9699f7e525877b8439e214de03bdd6bd346",
   "objects": [
     {
       "backend": "scylla",
@@ -249,7 +249,7 @@
     },
     {
       "backend": "redis",
-      "fingerprint": "9cacf2ff5055d51a8b25b5cf501f36a72dc8039d895eabda097c5aa87e51caad",
+      "fingerprint": "292203e2981355015bc83d66582230d6aa1a13936ed244ae61cd4be693b4e7f9",
       "name": "pipelines"
     },
     {
