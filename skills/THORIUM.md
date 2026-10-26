@@ -56,7 +56,7 @@ These are the key resources available on a Thorium instance:
 
 | Resource | URL | Description |
 |----------|-----|-------------|
-| Web UI | `{THORIUM_URL}` | Browser interface for file browsing, uploading, reactions, search, and results |
+| Web UI | `{THORIUM_URL}` | Browser interface for file browsing, uploading, reactions, search, and results, and for tools, toolsets, agents, workflows, models (read only), launching runs, and following them |
 | User Docs | `{THORIUM_URL}/api/docs/user/index.html` | Guides for uploading files, viewing results, spawning reactions, search, tagging. If the API is offline, use `https://cisagov.github.io/thorium/` as a fallback |
 | Developer Docs | `{THORIUM_URL}/api/docs/dev/thorium/index.html` | Rust API documentation (rustdoc) for Thorium internals |
 | API Spec (Swagger) | `{THORIUM_URL}/api/docs/swagger-ui/` | Interactive OpenAPI spec — full details on every endpoint, request/response schemas |

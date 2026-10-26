@@ -15,11 +15,11 @@ operate these features. What users and developers do with them is covered in
 | [Scheduling Tools and Runs](./scheduling.md) | How the scaler, agent, and reactor run tool instances and per-run workers |
 | [Upgrading to Agentic Workflows](./upgrading.md) | The upgrade steps that convert images, pipelines, and provenance: the drain wait, approvals, the outage, issues, and rollback |
 
-> **Known gaps in this release.** The Web UI does not support tools, runs, or the reworked
-> images and pipelines yet: image and pipeline pages fail, the reaction page can't show runs,
-> the stats page throws, and provenance edits are rejected. Use Thorctl or the API. The
-> BareMetal, Windows, and Kvm launchers of the reactor have not been tested on live nodes and
-> may not work. See [Release Notes](../../release_notes/agentic_workflows.md).
+> **Known gaps in this release.** The Web UI rejects edits to the tools of a FileSystem or
+> WindowsProcessTree, and its Models page is read only (see
+> [The Web UI](../../concepts/concepts.md#the-web-ui) for what it supports). The BareMetal,
+> Windows, and Kvm launchers of the reactor have not been tested on live nodes and may not work.
+> See [Release Notes](../../release_notes/agentic_workflows.md).
 
 ### Configuration
 ---

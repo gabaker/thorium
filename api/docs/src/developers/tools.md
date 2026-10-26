@@ -406,7 +406,9 @@ working.
   create|edit|publish)`. Image bans are refused the same way. To copy tools between instances use
   [`thorctl toolbox`](./toolbox.md), which imports tools, and a legacy image toolbox is converted to
   tools as it is read.
-- The Web UI's image and pipeline pages don't work with this release yet; use Thorctl.
+- The Web UI's Images page lists, shows, and deletes images, and its create page explains that images
+  can't be created and links to creating a tool. Its Pipelines page shows each stage's tool and binds
+  stages to tools.
 
 ### Using the API
 ---

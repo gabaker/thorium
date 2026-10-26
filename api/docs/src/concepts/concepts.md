@@ -3,8 +3,8 @@
 Thorium runs analysis tools on files and repos, and since the Agentic Workflows release it can also
 run AI workflows. This page names the pieces and says where each is covered. The guides use
 [Thorctl](../getting_started/thorctl.md) for their examples and name the API route behind each
-command for scripts. The Web UI is being rebuilt, so these guides do not teach it; its instructions
-will be added with the new interface.
+command for scripts. The Web UI has pages for most of the same tasks; [The Web UI](#the-web-ui) lists
+them.
 
 ### The pieces
 ---
@@ -24,6 +24,27 @@ will be added with the new interface.
 | Ban and notification | Why a model, endpoint, pipeline, or legacy image cannot be used right now | `thorctl models bans`, `thorctl pipelines notifications` | [Bans](../developers/bans.md) |
 | Toolbox | A directory (or bundle) of tools, toolsets, agents, workflows, and pipelines that moves between instances | `thorctl toolbox` | [Toolboxes](../developers/toolbox.md) |
 | Image, pipeline | An image is the older way to describe a tool and is now read-only; a pipeline is a static chain of stages, and each stage runs a tool | `thorctl images`, `thorctl pipelines` | [Legacy Images and Pipelines](../developers/images.md) |
+
+### The Web UI
+---
+
+The Web UI's sidebar has these pages for tools, workflows, and runs:
+
+| Page | What it does |
+| ---- | ------------ |
+| Run > Launch | Starts several workflow runs, tool version runs, and pipeline runs in one go on the same typed prompt (uploaded as `prompt.txt`), uploaded files, existing samples, or a repo at a commit. Each chosen run is listed with its own version, group, args, extra tags, and SLA, beside tags and an SLA shared by all, and only the listed runs start. The page links to each run it started and keeps the ones that failed to retry; its URL holds the chosen runs and samples so it can be shared |
+| Run > Runs | Lists the runs of one kind in your groups. A run's page follows it until it ends and shows its plan, stage logs, status updates, source, resolved models, provenance, inputs, and results, with retry and cancel |
+| Tools > Tools | Lists tools by kind and creates one from a YAML or JSON spec, starting from a template for each kind. A tool's page shows its versions and spec, publishes a new version, deprecates, restores, and deletes versions, changes the description, adds groups, and links to running a version |
+| Tools > Toolsets | Lists, creates, and shows toolsets: add and remove tools, turn the read-only filter on or off, and ask for a new instance |
+| Tools > Agents | Lists, creates, and shows AI agents |
+| Tools > Workflows | Lists, creates, and shows workflows: add agents, set or clear the entry agent, see each instance as Ready or Invalid, ask for a new instance, and run the workflow |
+| Tools > Models | Shows model endpoints, profiles, and credentials with their bans and notifications; it is read only, so change them with `thorctl models` |
+| Tools > Pipelines | Lists pipelines with each stage's tool, marking a stage that still names an image as legacy; creating a pipeline binds each stage to a tool at its latest version or a pinned version |
+| Tools > Images (legacy) | Lists, shows, and deletes images; images can't be created or changed |
+
+A tool or workflow run opened on the older reaction page links to its run page. Not supported in the
+Web UI yet: editing the tools a FileSystem or WindowsProcessTree names is rejected, and your own
+notifications aren't shown.
 
 ### What to use for what
 ---

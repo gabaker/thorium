@@ -10,7 +10,8 @@ Thorium is driven with Thorctl (pronounced Thor-cuddle), our command line tool, 
 scripts and integrations. Thorctl scales from one file to thousands: it uploads data, runs tools, workflows,
 and pipelines, and downloads the results, and it works in a "headless" analysis environment where only a command
 line is available. The guides in this book use Thorctl for their examples and name the API route behind each
-command. The Web UI is being rebuilt; its instructions will be added with the new interface.
+command. The Web UI covers most of the same tasks; [Concepts](../concepts/concepts.md#the-web-ui) lists
+its pages.
 
 ### First steps
 ---

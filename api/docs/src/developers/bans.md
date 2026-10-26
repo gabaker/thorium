@@ -91,7 +91,9 @@ This will output the image's data in JSON format, including the image's bans:
 }
 ```
 
-> Bans/notifications are currently not viewable in the Web UI, but this feature is planned for a future release of Thorium!
+> The Web UI shows the bans of images and pipelines on their pages, and the bans and notifications of
+> model endpoints, profiles, and credentials on its Models page. Other notifications are read with
+> Thorctl or the API.
 
 ## Ban Types
 

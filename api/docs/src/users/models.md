@@ -221,7 +221,8 @@ thorctl models bans clear anthropic <BAN_ID>
 ```
 
 Every ban sends a notification to the people it affects. Read yours with
-`GET /api/users/notifications/`; the Web UI doesn't show them yet.
+`GET /api/users/notifications/`. The Web UI's Models page shows each item's bans and notifications,
+but not your own notifications yet.
 
 ### Using the API
 ---

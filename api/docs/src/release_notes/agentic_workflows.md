@@ -291,9 +291,11 @@ See [Scheduling Tools and Runs](../admins/agentic/scheduling.md).
 ### Known gaps
 ---
 
-- **Web UI:** the Web UI has not been updated for this release. Image and pipeline pages fail, the
-  reaction page can't show runs, the stats page throws, and provenance edits are rejected. There are
-  no pages for tools, agents, toolsets, workflows, models, or runs. Use Thorctl or the API.
+- **Web UI:** the Web UI has pages for tools, toolsets, agents, workflows, models, and runs, a launch
+  page, read-only image pages, and pipeline pages that bind stages to tools (see
+  [The Web UI](../concepts/concepts.md#the-web-ui)). Editing the tools of a FileSystem or
+  WindowsProcessTree is rejected, the Models page is read only, and your own notifications aren't
+  shown. Use Thorctl or the API for those.
 - **Reactor launchers:** the BareMetal, Windows, and Kvm launchers have not been tested on live
   nodes with tool instances and may be broken. K8s is the tested environment, and harnesses run only
   on K8s.
