@@ -2004,7 +2004,7 @@ pub(crate) mod tests {
         // every step to the latest revision is listed as pending
         assert_eq!(progress.current.as_deref(), Some(BASELINE_REVISION));
         assert_eq!(progress.target, None);
-        assert_eq!(progress.steps.len(), 6);
+        assert_eq!(progress.steps.len(), 11);
         assert!(
             progress
                 .steps
@@ -2037,7 +2037,12 @@ pub(crate) mod tests {
                     "elastic-reindex-keyword-mappings",
                     "finalize",
                     "schema-apply",
-                    "users-settings-theme"
+                    "drain-reactions",
+                    "users-settings-theme",
+                    "images-to-tools",
+                    "pipelines-to-tool-stages",
+                    "provenance-to-legacy-tools",
+                    "finalize-tool-only"
                 ]
             );
         }
@@ -2063,7 +2068,57 @@ pub(crate) mod tests {
                 "elastic-reindex-keyword-mappings",
                 "finalize",
                 "schema-apply",
-                "users-settings-theme"
+                "drain-reactions",
+                "users-settings-theme",
+                "images-to-tools",
+                "pipelines-to-tool-stages",
+                "provenance-to-legacy-tools",
+                "finalize-tool-only"
+            ]
+        );
+    }
+
+    /// A target of the revision that applies the schema first plans only that revision's steps, so
+    /// an image that only knows it releases the schema and users steps and no conversion
+    #[test]
+    fn decide_the_schema_revision_plans_no_conversion_step() {
+        // a first Helm cluster targeting the revision that applies the schema first
+        let state = UpgradeState::new(rev(FIRST_HELM_REVISION), OPERATOR_VERSION);
+        let Decision::Upgrade { target, steps } = decide(&state, &spec(Some("2026-10-v03"), false))
+        else {
+            panic!("a targeted cluster should be upgraded");
+        };
+        assert_eq!(target, rev("2026-10-v03"));
+        let ids = steps
+            .iter()
+            .map(|step| step.step.as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(ids, ["schema-apply", "users-settings-theme"]);
+    }
+
+    /// A cluster that reached the revision that applies the schema first, with that revision
+    /// recorded, still runs every conversion step when it is upgraded to the newest revision, the
+    /// drain first
+    #[test]
+    fn decide_a_cluster_at_the_schema_revision_runs_the_conversions() {
+        // the state of a cluster a build knowing only the schema revision finished
+        let state = catalog().reached(&rev("2026-10-v03"), OPERATOR_VERSION);
+        let Decision::Upgrade { target, steps } = decide(&state, &spec(None, true)) else {
+            panic!("a targeted cluster should be upgraded");
+        };
+        assert_eq!(target, upgrades::latest());
+        let ids = steps
+            .iter()
+            .map(|step| step.step.as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            ids,
+            [
+                "drain-reactions",
+                "images-to-tools",
+                "pipelines-to-tool-stages",
+                "provenance-to-legacy-tools",
+                "finalize-tool-only"
             ]
         );
     }
@@ -2081,7 +2136,7 @@ pub(crate) mod tests {
         // the message names the target and how to continue
         assert!(message.contains("at its target revision 2026-10-v01"));
         assert_eq!(progress.target.as_deref(), Some(BASELINE_REVISION));
-        assert_eq!(progress.steps.len(), 6);
+        assert_eq!(progress.steps.len(), 11);
     }
 
     /// Backwards, malformed, unknown, and too new revisions are errors
@@ -2179,7 +2234,7 @@ pub(crate) mod tests {
             .expect("plan")
             .expect("held");
         assert!(message.contains("reached its target revision 2026-10-v01"));
-        assert_eq!(progress.steps.len(), 6);
+        assert_eq!(progress.steps.len(), 11);
         assert_eq!(progress.target.as_deref(), Some(BASELINE_REVISION));
         // reaching the latest revision holds nothing
         let current = UpgradeState::new(upgrades::latest(), OPERATOR_VERSION);
@@ -2266,7 +2321,10 @@ pub(crate) mod tests {
         assert_eq!(writes.len(), 1, "{writes:?}");
         let status = &status_patches(&fake)[0];
         assert_eq!(status["phase"], "UpgradeRequired");
-        assert_eq!(status["upgrade"]["steps"].as_array().map(Vec::len), Some(6));
+        assert_eq!(
+            status["upgrade"]["steps"].as_array().map(Vec::len),
+            Some(11)
+        );
         assert_eq!(status["upgrade"]["steps"][2]["state"], "Pending");
     }
 
@@ -2400,6 +2458,65 @@ pub(crate) mod tests {
             .await
             .expect("gate");
         assert!(saved_state(&fake).is_none());
+    }
+
+    /// A drain skipped in a v04 attempt, then the target lowered to the cluster's revision and
+    /// raised to v04 again, drains again before the first conversion
+    #[tokio::test]
+    async fn gate_drains_again_after_the_target_is_lowered_to_the_current_revision() {
+        // an attempt from v03 skipped the drain and blocked at the first conversion
+        let v03 = "2026-10-v03";
+        let v04 = "2026-10-v04";
+        let mut attempted = Catalog::PRODUCTION.reached(&rev(v03), OPERATOR_VERSION);
+        for (step, outcome) in [
+            ("drain-reactions", StepState::Skipped),
+            ("images-to-tools", StepState::Blocked),
+        ] {
+            attempted.record(AppliedStep {
+                revision: v04.to_owned(),
+                step: step.to_owned(),
+                outcome,
+                at: Some("2026-10-27T13:24:00Z".to_owned()),
+                ..AppliedStep::default()
+            });
+        }
+        // the target lowered to v03 holds the cluster there and records the stop
+        let lowered = chart_cluster(serde_json::json!({"target_revision": v03}));
+        let fake = fake_with_status(&lowered)
+            .route("GET", STATE_PATH, 200, state_config_map(&attempted))
+            .route("PUT", STATE_PATH, 200, state_config_map(&attempted));
+        let gated = gate(&fake.client(), &tracked(&lowered))
+            .await
+            .expect("gate");
+        assert!(matches!(gated, Gate::Hold(_)));
+        let stopped = saved_state(&fake).expect("the stop is saved");
+        let entry = stopped.applied.last().expect("an entry");
+        assert_eq!(
+            (entry.revision.as_str(), entry.step.as_str()),
+            (v03, UPGRADE_STOPPED_STEP)
+        );
+        // the target raised to v04 again plans the drain ahead of every conversion
+        let raised = chart_cluster(serde_json::json!({"target_revision": v04}));
+        let fake =
+            fake_with_status(&raised).route("GET", STATE_PATH, 200, state_config_map(&stopped));
+        let Ok(Gate::Upgrade(pending)) = gate(&fake.client(), &tracked(&raised)).await else {
+            panic!("a targeted cluster should be upgraded");
+        };
+        let ids = pending
+            .steps
+            .iter()
+            .map(|step| step.step.as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            ids,
+            [
+                "drain-reactions",
+                "images-to-tools",
+                "pipelines-to-tool-stages",
+                "provenance-to-legacy-tools",
+                "finalize-tool-only",
+            ]
+        );
     }
 
     /// A malformed recorded state is an error rather than a fresh start

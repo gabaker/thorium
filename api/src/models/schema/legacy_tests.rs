@@ -112,7 +112,7 @@ fn the_support_window_is_the_released_revisions_above_the_floor() {
     let window = support_window(&Catalog::PRODUCTION);
     assert_eq!(
         window.iter().map(RevisionId::as_str).collect::<Vec<_>>(),
-        ["2026-10-v03", "2026-10-v02", "2026-10-v01"]
+        ["2026-10-v04", "2026-10-v03", "2026-10-v02", "2026-10-v01"]
     );
     // a catalog with a floor drops the revisions below it
     let floors: &'static [SupportFloor] = Box::leak(Box::new([SupportFloor {
@@ -129,7 +129,7 @@ fn the_support_window_is_the_released_revisions_above_the_floor() {
             .iter()
             .map(RevisionId::as_str)
             .collect::<Vec<_>>(),
-        ["2026-10-v03", "2026-10-v02"]
+        ["2026-10-v04", "2026-10-v03", "2026-10-v02"]
     );
 }
 
@@ -321,7 +321,7 @@ fn planning_refuses_required_data_and_renders_the_statements() {
     assert_eq!(plan.drops[0].rows, 5);
     assert!(plan.drops[0].present);
     assert!(plan.drops[1].present);
-    assert_eq!(plan.drops[0].downgrades.len(), 3);
+    assert_eq!(plan.drops[0].downgrades.len(), 4);
     // one object that a window revision needs refuses the whole list, naming the revision and rows
     let entries = [LEGACY[0], FOO];
     let refusal = plan_drops("ks", &entries, &listing).expect_err("required");

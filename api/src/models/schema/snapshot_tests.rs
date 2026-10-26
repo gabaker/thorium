@@ -139,10 +139,13 @@ fn committed_snapshots_are_generated_and_complete() {
             entry.id
         );
     }
-    // the baseline, the first Helm revision, and the revision that applies the schema first are
-    // snapshotted
+    // the baseline, the first Helm revision, the revision that applies the schema first, and the
+    // revision that converts tools are snapshotted
     let ids = RevisionSnapshot::committed_ids().collect::<Vec<_>>();
-    assert_eq!(ids, ["2026-10-v01", "2026-10-v02", "2026-10-v03"]);
+    assert_eq!(
+        ids,
+        ["2026-10-v01", "2026-10-v02", "2026-10-v03", "2026-10-v04"]
+    );
     // every file in the snapshot directory is listed, and each is the generator's exact text
     let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("schema/revisions");
     let mut files = std::fs::read_dir(&dir)
@@ -181,6 +184,35 @@ fn committed_snapshots_are_generated_and_complete() {
             "{id}.json isn't the baseline's snapshot"
         );
     }
+    // the revisions released after it are the declared schema with the layouts they wrote: the
+    // revision that applies the schema first wrote pipelines in layout 1, and the one after it
+    // writes the layout this build declares
+    for id in ["2026-10-v03", "2026-10-v04"] {
+        let snapshot = RevisionSnapshot::committed(id)
+            .expect("listed")
+            .expect("valid");
+        assert_eq!(
+            snapshot,
+            RevisionSnapshot::released(id.parse().expect("a valid revision")),
+            "{id}.json isn't the released schema's snapshot"
+        );
+    }
+    let first = RevisionSnapshot::released("2026-10-v03".parse().expect("a valid revision"));
+    let newest = RevisionSnapshot::released("2026-10-v04".parse().expect("a valid revision"));
+    let moved = first
+        .objects
+        .iter()
+        .zip(&newest.objects)
+        .filter(|(old, new)| old.fingerprint != new.fingerprint)
+        .map(|(old, _)| old.name.as_str())
+        .collect::<Vec<_>>();
+    assert_eq!(moved, ["pipelines"]);
+    assert_eq!(newest.objects.len(), first.objects.len());
+    assert_eq!(
+        newest.deployment,
+        declared("2026-10-v04").deployment,
+        "the newest revision is the declared schema"
+    );
     // a snapshot's fingerprints are checked against its canonical forms
     let mut snapshot = declared("2030-01-v01");
     assert_eq!(snapshot.verify(), Ok(()));

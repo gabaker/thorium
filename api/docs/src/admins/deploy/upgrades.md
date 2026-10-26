@@ -187,8 +187,8 @@ the latest revision, it then reconciles the deployment as usual and deploys the 
 | `Config`, `Infra` | Automatically once a target is set |
 | `Data`, `Manual` | Only with an approval (see [Approvals](#approvals)), and only when the step has work to do; a step with nothing to do is recorded as `Skipped` without one |
 
-A step that only checks or waits and changes no data (such as `scylla-role` and
-`elastic-identity`) counts as finished only within the attempt that ran it. Clearing the target,
+A step that only checks or waits and changes no data (`scylla-role`, `elastic-identity`, and
+`drain-reactions`) counts as finished only within the attempt that ran it. Clearing the target,
 or setting it back to the deployment's revision, before the upgrade reaches it stops the attempt:
 the operator records an `upgrade-stopped` entry in the history, and the next attempt runs those
 checks again before the steps that rely on them. Steps that changed data stay finished.
@@ -682,7 +682,7 @@ its revision when it is converted (see [Converting a Pre-Helm Deployment](./conv
 <!-- upgrade-paths:begin (generated from the catalog's support floors) -->
 | Thorium version | Revision | Oldest revision it upgrades from | From an older revision |
 |-----------------|----------|----------------------------------|------------------------|
-| 1.8.1 | `2026-10-v03` | `2026-10-v01` | — |
+| 1.8.1 | `2026-10-v04` | `2026-10-v01` | — |
 | Pre-Helm, any version | `2026-10-v01` once converted | — | Convert with the `convert-to-helm.sh` of Thorium 1.8.1, then upgrade from `2026-10-v01` |
 <!-- upgrade-paths:end -->
 

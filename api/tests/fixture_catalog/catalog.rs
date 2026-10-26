@@ -15,25 +15,25 @@ use super::transforms::{
 };
 
 /// The latest release the matrix builds on: a revision of the production catalog
-pub const BASE: &str = "2026-10-v03";
+pub const BASE: &str = "2026-10-v04";
 
 /// Matrix revision 1, which adds objects only (T1)
-pub const M1: &str = "2026-10-v03-pre.matrix-1";
+pub const M1: &str = "2026-10-v04-pre.matrix-1";
 
 /// Matrix revision 2, which restructures (T2)
-pub const M2: &str = "2026-10-v03-pre.matrix-2";
+pub const M2: &str = "2026-10-v04-pre.matrix-2";
 
 /// Matrix revision 3, which joins steps into shared passes (T3)
-pub const M3: &str = "2026-10-v03-pre.matrix-3";
+pub const M3: &str = "2026-10-v04-pre.matrix-3";
 
 /// Matrix revision 4, which removes and restructures with loss (T4)
-pub const M4: &str = "2026-10-v03-pre.matrix-4";
+pub const M4: &str = "2026-10-v04-pre.matrix-4";
 
 /// Matrix revision 5, which holds an irreversible step (T5)
-pub const M5: &str = "2026-10-v03-pre.matrix-5";
+pub const M5: &str = "2026-10-v04-pre.matrix-5";
 
 /// Matrix revision 5b, the sibling of revision 5 without the irreversible step (T5b)
-pub const M5B: &str = "2026-10-v03-pre.matrix-5b";
+pub const M5B: &str = "2026-10-v04-pre.matrix-5b";
 
 /// The release the users example's pre-release builds on: the first Helm revision, whose users are
 /// in layout 2

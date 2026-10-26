@@ -1593,6 +1593,17 @@ mod tests {
         planned.sort();
         expected.sort();
         assert_eq!(planned, expected);
+        // under the tool revision that includes converting images and pipelines to tools
+        let conversions = planned_after(&rev("2026-10-v02"), &rev("2026-10-v04"), &production);
+        for step in [
+            "2026-10-v04 images-to-tools",
+            "2026-10-v04 pipelines-to-tool-stages",
+        ] {
+            assert!(
+                conversions.contains(&step.to_owned()),
+                "{step} missing: {conversions:?}"
+            );
+        }
         // nothing is planned when the restore didn't lower the revision
         assert_eq!(
             planned_after(&latest, &latest, &production),

@@ -2764,3 +2764,116 @@ mod reingest_tests;
 /// Tests of a step's approval, check, and issues across repeated runs and several edges
 #[path = "rerun_tests.rs"]
 mod rerun_tests;
+
+/// Build a catalog of the production drain and image conversion steps, from the first revision to
+/// the second
+fn agentic_catalog() -> Catalog {
+    // copy the production steps, which are plain values, into a catalog that lives for the test
+    let steps = ["drain-reactions", "images-to-tools"]
+        .into_iter()
+        .map(|id| {
+            *thorium::models::upgrades::step(id)
+                .expect("a production step")
+                .1
+        })
+        .collect::<Vec<_>>();
+    let steps: &'static [StepDef] = Box::leak(steps.into_boxed_slice());
+    let edges = vec![
+        edge(None, "2026-10-v01", &[]),
+        edge(Some("2026-10-v01"), "2026-10-v02", steps),
+    ];
+    Catalog {
+        edges: Box::leak(edges.into_boxed_slice()),
+        floors: &[],
+    }
+}
+
+/// Run reconciles, ending each check Job with the report its step's migration leaves
+///
+/// # Arguments
+///
+/// * `scene` - The scene
+/// * `drain` - The report the drain's check leaves
+/// * `images` - The report the image conversion's check leaves
+/// * `rounds` - How many reconciles to run
+async fn settle_agentic(scene: &Scene, drain: &Value, images: &Value, rounds: usize) {
+    // a reconcile creates or reads a Job, and the test ends the Jobs between them
+    for _ in 0..rounds {
+        scene.reconcile().await;
+        for job in scene.sim.active("migration-check") {
+            let report = if job.contains("drain-reactions") {
+                drain
+            } else {
+                images
+            };
+            scene.sim.leave_result(&job, report.clone());
+            scene.sim.finish(
+                &job,
+                &Finish::Complete(json!({"outcome": "done", "result_id": format!("uid-{job}")})),
+            );
+        }
+    }
+    scene.reconcile().await;
+}
+
+/// The drain only checks: while its check waits the step is `Waiting` with the reason, no approval
+/// is asked, no migration Job runs, and no component is paused; once nothing is in flight the step
+/// is skipped with no migration Job and no pause
+#[tokio::test]
+async fn the_drain_waits_before_anything_is_paused_and_skips_when_nothing_is_in_flight() {
+    // a cluster with every component the conversions pause
+    let start = Utc::now();
+    set_now(start);
+    let components = [
+        ("api", 3),
+        ("scaler", 1),
+        ("baremetal-scaler", 1),
+        ("event-handler", 1),
+        ("search-streamer", 1),
+    ];
+    let scene = Scene::new(agentic_catalog(), &json!([]), &components);
+    // the drain's check asks to wait and names a count, and the images have nothing to convert
+    let mut waiting = check_report("drain-reactions", 0, &[], Some(15));
+    waiting["wait"]["reason"] = json!("2 reaction(s) are still Created or Started");
+    let images = check_report("images-to-tools", 0, &[], None);
+    settle_agentic(&scene, &waiting, &images, 3).await;
+    // the check is a read-only check Job of the drain
+    let checks = scene.sim.created_of("migration-check");
+    let drain_check = checks
+        .iter()
+        .find(|job| Scene::args(job).get(3).map(String::as_str) == Some("drain-reactions"))
+        .expect("a check Job for the drain");
+    assert_eq!(&Scene::args(drain_check)[..3], ["migrate", "check", "--id"]);
+    // the step waits with the reason and asks for no approval
+    let step = scene.step("drain-reactions");
+    assert_eq!(step.state, StepState::Waiting, "{step:?}");
+    assert_eq!(
+        step.message.as_deref(),
+        Some("2 reaction(s) are still Created or Started")
+    );
+    // no migration Job ran and every component keeps its replicas
+    assert_eq!(migrations(&scene).len(), 0);
+    for (name, replicas) in components {
+        assert_eq!(scene.sim.replicas(name), Some(replicas), "{name}");
+    }
+    assert_eq!(scene.sim.scaled(), Vec::<(String, i32)>::new());
+    // the wait ends once nothing is in flight: the step is skipped, with nothing paused or run
+    set_now(start + Duration::seconds(60));
+    let clear = check_report("drain-reactions", 0, &[], None);
+    settle_agentic(&scene, &clear, &images, 4).await;
+    let entries = scene.history("drain-reactions");
+    assert_eq!(
+        entries.last().map(|entry| entry.outcome),
+        Some(StepState::Skipped),
+        "{entries:?}"
+    );
+    // the skip says the check found nothing for the step, not that objects were converted
+    let why = entries.last().and_then(|entry| entry.message.clone());
+    assert!(
+        why.as_deref()
+            .is_some_and(|why| why.contains("the check read needs this step")),
+        "{why:?}"
+    );
+    assert_eq!(migrations(&scene).len(), 0);
+    assert_eq!(scene.sim.scaled(), Vec::<(String, i32)>::new());
+}

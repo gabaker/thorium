@@ -5,7 +5,7 @@ use std::collections::BTreeSet;
 
 use super::{
     AppliedStep, Catalog, CatalogEntry, Family, FieldLoss, LossReport, PlannedStep, Reversibility,
-    RevisionId, StepDef, StepLoss, StepState, UpgradeError, UpgradeState,
+    RevisionId, StepDef, StepLoss, StepState, UpgradeComponent, UpgradeError, UpgradeState,
 };
 
 /// The work that moves a deployment from its revision to a target, composed by the planner
@@ -372,6 +372,10 @@ impl Catalog {
     /// interrupted upgrade stopped. A path down across a finished irreversible step is refused
     /// ([`Catalog::check_reversible`]).
     ///
+    /// On an upward edge, a step that needs components running ([`StepDef::needs_running`]) is
+    /// planned before the first earlier step that needs none and pauses one of them
+    /// (`lead_first`). Steps on a path down keep their place.
+    ///
     /// # Arguments
     ///
     /// * `state` - The deployment's recorded upgrade state
@@ -390,14 +394,26 @@ impl Catalog {
         let path = self.path(&state.revision, target)?;
         // a path down may not cross a finished irreversible step
         self.check_reversible(state, &path)?;
-        let steps = path
-            .into_iter()
-            .flat_map(|edge| {
-                self.edge_steps(state, edge)
-                    .into_iter()
-                    .map(move |step| self.describe(edge, step))
-            })
-            .collect();
+        let steps = lead_first(
+            path.into_iter()
+                .flat_map(|edge| {
+                    self.edge_steps(state, edge)
+                        .into_iter()
+                        .map(move |step| (edge, step))
+                })
+                .collect(),
+            |(edge, step)| {
+                if edge.is_downward() {
+                    &[]
+                } else {
+                    step.needs_running
+                }
+            },
+            |(edge, step)| if edge.is_downward() { &[] } else { step.pause },
+        )
+        .into_iter()
+        .map(|(edge, step)| self.describe(edge, step))
+        .collect();
         Ok(steps)
     }
 
@@ -566,6 +582,47 @@ pub(super) fn loss_of(edge: &CatalogEntry, step: &StepDef, forward: &StepDef) ->
 pub fn plan(state: &UpgradeState, target: &RevisionId) -> Result<Vec<PlannedStep>, UpgradeError> {
     // plan over the catalog this build deploys
     Catalog::PRODUCTION.plan(state, target)
+}
+
+/// Move each step that needs components running ahead of the first earlier step that pauses one
+///
+/// A step that lists [`StepDef::needs_running`] components can't come after an earlier edge's step
+/// that paused one of them, so across several edges it moves to just before the first step that
+/// pauses any of them. A step with no such step before it stays where it is, and the steps that
+/// move keep their order.
+///
+/// # Arguments
+///
+/// * `steps` - The steps of a path, in path order
+/// * `needs` - The components a step needs running
+/// * `pauses` - The components a step pauses
+pub(super) fn lead_first<T>(
+    steps: Vec<T>,
+    needs: impl Fn(&T) -> &'static [UpgradeComponent],
+    pauses: impl Fn(&T) -> &'static [UpgradeComponent],
+) -> Vec<T> {
+    // find the place each step sorts at: a step needing components takes the place of the first
+    // earlier step that needs none and pauses one of them, and sorts ahead of it; every other step
+    // keeps its own place
+    let keys = steps
+        .iter()
+        .enumerate()
+        .map(|(index, step)| {
+            let needed = needs(step);
+            let blocker = steps[..index].iter().position(|earlier| {
+                needs(earlier).is_empty() && pauses(earlier).iter().any(|c| needed.contains(c))
+            });
+            if needed.is_empty() {
+                (index, 1, index)
+            } else {
+                (blocker.unwrap_or(index), 0, index)
+            }
+        })
+        .collect::<Vec<_>>();
+    // sort the steps by their keys, which are all different
+    let mut keyed = keys.into_iter().zip(steps).collect::<Vec<_>>();
+    keyed.sort_by_key(|(key, _)| *key);
+    keyed.into_iter().map(|(_, step)| step).collect()
 }
 
 /// Pick the revision a cluster should move to in this build's catalog

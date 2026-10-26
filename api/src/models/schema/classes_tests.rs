@@ -248,7 +248,7 @@ fn the_class_table_moves_no_fingerprint() {
         let generated = if super::BASELINE_REVISIONS.contains(&entry.id) {
             RevisionSnapshot::baseline(revision)
         } else {
-            RevisionSnapshot::declared(revision)
+            RevisionSnapshot::released(revision)
         };
         assert_eq!(
             committed.to_file_text(),

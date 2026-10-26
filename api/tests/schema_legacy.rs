@@ -274,8 +274,8 @@ async fn a_keyspace_an_older_release_created_lists_both_objects() -> Result<(), 
     for status in &listing.objects {
         assert_eq!(status.created_by, ["2026-10-v01", "2026-10-v02"]);
         assert_eq!(status.used_by, []);
-        assert_eq!(status.downgrades.len(), 3, "{}", status.id);
-        assert_eq!(status.downgrades[0].revision, "2026-10-v03");
+        assert_eq!(status.downgrades.len(), 4, "{}", status.id);
+        assert_eq!(status.downgrades[0].revision, "2026-10-v04");
         assert_eq!(status.droppable, thorium::models::schema::Droppable::Yes);
     }
     // the declared objects are neither not-registered nor unmanaged

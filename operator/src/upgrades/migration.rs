@@ -630,10 +630,19 @@ pub(super) fn work(step: &'static StepDef, report: &CheckReport) -> Work {
     // nothing to change when every object is in the target layout
     let counts = &report.counts;
     if counts.migratable == 0 && counts.unrecognized == 0 && counts.error == 0 {
-        return Work::Nothing(format!(
-            "every one of the {} objects is already in the target layout",
-            counts.read
-        ));
+        // a step that only checks or waits converts nothing, so it found nothing to wait for
+        let why = if step.check_only {
+            format!(
+                "none of the {} objects the check read needs this step",
+                counts.read
+            )
+        } else {
+            format!(
+                "every one of the {} objects is already in the target layout",
+                counts.read
+            )
+        };
+        return Work::Nothing(why);
     }
     Work::Needed(describe(step, report))
 }
