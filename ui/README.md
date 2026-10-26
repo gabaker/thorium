@@ -5,6 +5,7 @@ Thorium's web application is a React 19 + TypeScript SPA built with Vite and sty
 ## Installation
 
 Install the required node packages:
+
 ```bash
 npm install
 ```
@@ -14,18 +15,27 @@ npm install
 ### Running locally
 
 Point the frontend at a Thorium API instance and start the dev server:
+
 ```bash
 export THORIUM_API_URL=https://[thorium.DOMAIN]
 npm run dev
 ```
 
-The dev server runs on port 8000 by default.
+The dev server runs on port 8000 by default. It listens on the IPv4 loopback only, so open
+http://localhost:8000 or http://127.0.0.1:8000; http://[::1]:8000 is not served, and other
+hosts cannot reach it. `npm run preview` listens on 127.0.0.1 the same way.
+
+Browsers scope cookies by host, not by port, so two Thorium UIs on one host (for example two
+port-forwards to localhost) share one login: logging into one logs the other out. To keep
+separate logins, open them on different hostnames, such as localhost for one and 127.0.0.1 for
+the other, or a hosts-file alias per port-forward.
 
 ### Local dev environment (minithor)
 
 For a self-contained development cluster, use minithor (see root `CLAUDE.md` for full instructions):
 
 **First-time setup:**
+
 ```bash
 minithor/minithor minikube install  # install minikube and start the k8s cluster
 minithor/minithor deploy            # deploy Thorium services (creates test user test/INSECURE_DEV_PASSWORD)
@@ -35,6 +45,7 @@ npm run dev
 ```
 
 **After a reboot or `minithor stop`:**
+
 ```bash
 minithor/minithor start             # restart the cluster
 minithor/minithor expose            # re-establish port-forwards
@@ -79,6 +90,7 @@ npm run build-check        # full type-check including .jsx checkJs
 ```
 
 To verify the production bundle locally:
+
 ```bash
 npm run build-preview
 npm run preview
