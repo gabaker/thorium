@@ -168,6 +168,8 @@ fn default_search_limit() -> u32 {
 /// The query params for searching results
 #[derive(Serialize, Deserialize, Debug, Default)]
 #[cfg_attr(feature = "api", derive(utoipa::ToSchema))]
+#[cfg_attr(feature = "api", derive(utoipa::IntoParams))]
+#[cfg_attr(feature = "api", into_params(parameter_in = Query))]
 pub struct ElasticSearchParams {
     /// The indexes to search
     #[serde(default = "default_search_indexes")]

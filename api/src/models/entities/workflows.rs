@@ -209,6 +209,7 @@ pub struct WorkflowCatalogEntity {
     pub model_auth: ModelAuthSource,
     /// The agents directly in this workflow (populated from associations)
     #[serde(default)]
+    #[cfg_attr(feature = "api", schema(no_recursion))]
     pub agents: Vec<Entity>,
     /// When this workflow was last modified (any edit, including its agent edges; not part of
     /// the digest)

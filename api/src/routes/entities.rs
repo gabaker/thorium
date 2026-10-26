@@ -7,17 +7,20 @@ use axum::routing::post;
 use axum::{Json, Router};
 use axum_extra::body::AsyncReadBody;
 use tracing::instrument;
+use utoipa::OpenApi;
 use uuid::Uuid;
 
 use super::shared::{self, graphics};
+use super::{OpenApiParameterExamples, OpenApiSecurity};
 use crate::models::AuthedUser;
 use crate::models::backends::entities::{is_definition_kind, models, toolsets, workflows};
 use crate::models::backends::{self, GraphicSupport, TagSupport};
 use crate::models::{
     ApiCursor, Association, AssociationListParams, AssociationTargetColumn, Entity, EntityListLine,
-    EntityListParams, EntityMetadata, EntityResponse, GrepMatches, GrepQueryParams, GrepRequest,
-    InstancedAgentToolset, ModelCredentialEntity, ModelEndpointEntity, Notification, RedactSecrets,
-    TagDeleteRequest, TagRequest, ToolInstanceSummary,
+    EntityListParams, EntityMetadata, EntityResponse, GrepDocumentMatches, GrepMatch, GrepMatches,
+    GrepQueryParams, GrepRequest, GrepSource, GrepStats, InstancedAgentToolset,
+    ModelCredentialEntity, ModelEndpointEntity, Notification, RedactSecrets, TagDeleteRequest,
+    TagRequest, ToolInstanceSummary, TruncationReason,
 };
 use crate::utils::{ApiError, AppState};
 use crate::{bad, not_found};
@@ -55,13 +58,22 @@ fn refuse_run_token_on_definitions(
 #[utoipa::path(
     post,
     path = "/api/entities/",
+    request_body(
+        content = Vec<u8>,
+        content_type = "multipart/form-data",
+        description = "The multipart form describing the new entity: its name, kind, groups, description, tags, a `metadata` section for the kind's own fields, and an optional image",
+    ),
     responses(
         (status = 200, description = "Entity created", body = EntityResponse),
-        (status = 401, description = "This user is not authorized to create entities in all given groups"),
+        (status = 400, description = "The request is invalid: the multipart form is malformed or fails validation"),
+        (status = 401, description = "This user is not authorized to create entities in all given groups. A run token is refused when the entity is a definition."),
         (status = 404, description = "One or more of the given groups does not exist"),
+        (status = 500, description = "An internal error occurred, such as a backing database, cache or object store failing"),
+        (status = 503, description = "A service Thorium depends on, such as Redis or LDAP, is unavailable"),
     ),
     security(
         ("basic" = []),
+        ("bearer" = []),
     )
 )]
 #[instrument(name = "routes::entities::create", skip_all, err(Debug))]
@@ -83,7 +95,7 @@ async fn create(
     Ok(Json(resp))
 }
 
-/// Gets an entity by id
+/// Gets an entity by its id
 ///
 /// The entity is returned without its secrets and without any snapshot groups the user can't see,
 /// and a tool instance carries its portability report.
@@ -91,21 +103,25 @@ async fn create(
 /// # Arguments
 ///
 /// * `user` - The user that is getting this entity
-/// * `state` - Shared Thorium objects
 /// * `id` - The id of the entity to get
+/// * `state` - Shared Thorium objects
 #[utoipa::path(
     get,
-    path = "/api/entities/:id",
+    path = "/api/entities/{id}",
     params(
         ("id" = Uuid, Path, description = "The entity's id"),
     ),
     responses(
         (status = 200, description = "Entity details", body = Entity),
+        (status = 400, description = "The request is invalid: a path parameter has an invalid value"),
         (status = 401, description = "This user is not authorized to access this route"),
         (status = 404, description = "A entity with the given name (and ID) does not exist in the user's groups"),
+        (status = 500, description = "An internal error occurred, such as a backing database, cache or object store failing"),
+        (status = 503, description = "A service Thorium depends on, such as Redis or LDAP, is unavailable"),
     ),
     security(
         ("basic" = []),
+        ("bearer" = []),
     )
 )]
 #[instrument(name = "routes::entities::get", skip_all, err(Debug))]
@@ -135,20 +151,25 @@ async fn get(
 /// * `user` - The user that is listing entities
 /// * `params` - The query params to use for this request
 /// * `state` - Shared Thorium objects
-//#[utoipa::path(
-//get,
-//path = "/api/entities/",
-//params(
-//("params" = EntityListParams, description = "Query params to use for this entity list request"),
-//),
-//responses(
-//(status = 200, description = "JSON-formatted cursor response containing the names and ID's of entities as well as their upload timestamps", body = ApiCursor<EntityListLine>),
-//(status = 401, description = "This user is not authorized to access this route"),
-//),
-//security(
-//("basic" = []),
-//)
-//)]
+#[utoipa::path(
+    get,
+    path = "/api/entities/",
+    params(
+        EntityListParams,
+    ),
+    responses(
+        (status = 200, description = "JSON-formatted cursor response containing the names and ids of entities as well as their upload timestamps", body = ApiCursor<EntityListLine>),
+        (status = 400, description = "The request is invalid: a query parameter has an invalid value"),
+        (status = 401, description = "This user is not authorized to access this route"),
+        (status = 404, description = "A resource named in the request, such as a path value, group or body field, does not exist or is not visible to this user"),
+        (status = 500, description = "An internal error occurred, such as a backing database, cache or object store failing"),
+        (status = 503, description = "A service Thorium depends on, such as Redis or LDAP, is unavailable"),
+    ),
+    security(
+        ("basic" = []),
+        ("bearer" = []),
+    )
+)]
 #[instrument(name = "routes::entities::list", skip_all, err(Debug))]
 async fn list(
     user: AuthedUser,
@@ -170,16 +191,21 @@ async fn list(
 /// * `state` - Shared Thorium objects
 #[utoipa::path(
     get,
-    path = "/api/entities/details",
+    path = "/api/entities/details/",
     params(
-        ("params" = EntityListParams, description = "Query params to use for this entity list request"),
+        EntityListParams,
     ),
     responses(
         (status = 200, description = "JSON-formatted cursor response containing the entities' details", body = ApiCursor<Entity>),
+        (status = 400, description = "The request is invalid: a query parameter has an invalid value"),
         (status = 401, description = "This user is not authorized to access this route"),
+        (status = 404, description = "A resource named in the request, such as a path value, group or body field, does not exist or is not visible to this user"),
+        (status = 500, description = "An internal error occurred, such as a backing database, cache or object store failing"),
+        (status = 503, description = "A service Thorium depends on, such as Redis or LDAP, is unavailable"),
     ),
     security(
         ("basic" = []),
+        ("bearer" = []),
     )
 )]
 #[instrument(name = "routes::entities::list_details", skip_all, err(Debug))]
@@ -211,17 +237,27 @@ async fn list_details(
 /// * `form` - The multipart entity update request
 #[utoipa::path(
     patch,
-    path = "/api/entities/:id",
+    path = "/api/entities/{id}",
     params(
         ("id" = Uuid, Path, description = "The entity id"),
     ),
+    request_body(
+        content = Vec<u8>,
+        content_type = "multipart/form-data",
+        description = "The multipart form with the fields to change: name, description, metadata, groups to add or remove, `clear_*` flags, and an optional image",
+    ),
     responses(
         (status = 204, description = "Entity updated"),
-        (status = 401, description = "This user is not authorized to edit this entity or the group does not allow editing entities"),
+        (status = 400, description = "The request is invalid: the multipart form is malformed or fails validation; a path parameter has an invalid value"),
+        (status = 401, description = "This user is not authorized to edit this entity or the group does not allow editing entities. A run token is refused when the entity is a definition."),
         (status = 404, description = "One or more of the given groups does not exist or the entity does not exist"),
+        (status = 409, description = "The update conflicts with how other entities use this one, for example it removes a group that referrers still need"),
+        (status = 500, description = "An internal error occurred, such as a backing database, cache or object store failing"),
+        (status = 503, description = "A service Thorium depends on, such as Redis or LDAP, is unavailable"),
     ),
     security(
         ("basic" = []),
+        ("bearer" = []),
     )
 )]
 #[instrument(name = "routes::entities::update", skip_all, err(Debug))]
@@ -252,17 +288,22 @@ async fn update(
 /// * `state` - Shared Thorium objects
 #[utoipa::path(
     delete,
-    path = "/api/entities/:id",
+    path = "/api/entities/{id}",
     params(
         ("id" = Uuid, Path, description = "The entity id"),
     ),
     responses(
         (status = 204, description = "Entity deleted"),
-        (status = 401, description = "This user is not authorized to delete this entity or the group does not allow editing entities"),
+        (status = 400, description = "The request is invalid: a path parameter has an invalid value"),
+        (status = 401, description = "This user is not authorized to delete this entity or the group does not allow editing entities. A run token is refused when the entity is a definition, and a scoped token must hold every one of the entity's groups."),
         (status = 404, description = "One or more of the given groups does not exist or the entity does not exist"),
+        (status = 409, description = "The entity is still in use: a tool still has tool instances, a model endpoint or credential is still referenced, or an entity, pipeline, or tool spec still references it (the message names what the caller can see)"),
+        (status = 500, description = "An internal error occurred, such as a backing database, cache or object store failing"),
+        (status = 503, description = "A service Thorium depends on, such as Redis or LDAP, is unavailable"),
     ),
     security(
         ("basic" = []),
+        ("bearer" = []),
     )
 )]
 #[instrument(name = "routes::entities::delete", skip_all, err(Debug))]
@@ -294,17 +335,23 @@ async fn delete(
 /// * `tags` - The new tags to apply
 #[utoipa::path(
     post,
-    path = "/api/entities/tags/:id",
+    path = "/api/entities/tags/{id}",
     params(
         ("id" = Uuid, Path, description = "The ID of the entity to add tags too"),
-        ("tags" = TagRequest<Entity>, description = "JSON-formatted tags to apply to entity")
     ),
+    request_body = TagRequest<Entity>,
     responses(
         (status = 204, description = "entity tags updated"),
-        (status = 401, description = "This user is not authorized to access this route"),
+        (status = 400, description = "The request is invalid: the JSON body is malformed or fails validation; a path parameter has an invalid value"),
+        (status = 401, description = "This user is not authorized to access this route. A run token is refused when the entity is a definition kind"),
+        (status = 404, description = "A resource named in the request, such as a path value, group or body field, does not exist or is not visible to this user"),
+        (status = 422, description = "The JSON body is well formed but does not match the expected shape, for example a required field is missing or has the wrong type"),
+        (status = 500, description = "An internal error occurred, such as a backing database, cache or object store failing"),
+        (status = 503, description = "A service Thorium depends on, such as Redis or LDAP, is unavailable"),
     ),
     security(
         ("basic" = []),
+        ("bearer" = []),
     )
 )]
 #[instrument(name = "routes::entities::tag", skip_all, err(Debug))]
@@ -337,17 +384,23 @@ async fn tag(
 /// * `tags_del` - The tags to delete and the groups to delete them from
 #[utoipa::path(
     delete,
-    path = "/api/entities/tags/:id",
+    path = "/api/entities/tags/{id}",
     params(
-        ("Id" = Uuid, Path, description = "The id for the entity to delete tags from"),
-        ("tags_del" = TagDeleteRequest<Entity>, description = "JSON-formatted tags to delete")
+        ("id" = Uuid, Path, description = "The id for the entity to delete tags from"),
     ),
+    request_body = TagDeleteRequest<Entity>,
     responses(
         (status = 204, description = "entity tags deleted"),
-        (status = 401, description = "This user is not authorized to access this route"),
+        (status = 400, description = "The request is invalid: the JSON body is malformed or fails validation; a path parameter has an invalid value"),
+        (status = 401, description = "This user is not authorized to access this route. A run token is refused when the entity is a definition kind"),
+        (status = 404, description = "A resource named in the request, such as a path value, group or body field, does not exist or is not visible to this user"),
+        (status = 422, description = "The JSON body is well formed but does not match the expected shape, for example a required field is missing or has the wrong type"),
+        (status = 500, description = "An internal error occurred, such as a backing database, cache or object store failing"),
+        (status = 503, description = "A service Thorium depends on, such as Redis or LDAP, is unavailable"),
     ),
     security(
         ("basic" = []),
+        ("bearer" = []),
     )
 )]
 #[instrument(name = "routes::files::delete_tags", skip_all, err(Debug))]
@@ -376,17 +429,22 @@ async fn delete_tags(
 /// * `request` - The entity update request
 /// * `state` - Shared Thorium objects
 #[utoipa::path(
-    patch,
-    path = "/api/entities/:id/image",
+    get,
+    path = "/api/entities/{id}/image",
     params(
         ("id" = Uuid, Path, description = "The entity's ID")
     ),
     responses(
         (status = 200, description = "The image was successfully retrieved"),
+        (status = 400, description = "The request is invalid: a path parameter has an invalid value"),
+        (status = 401, description = "This user is not authorized to access this route"),
         (status = 404, description = "The entity does not exist or the entity does not have an image"),
+        (status = 500, description = "An internal error occurred, such as a backing database, cache or object store failing"),
+        (status = 503, description = "A service Thorium depends on, such as Redis or LDAP, is unavailable"),
     ),
     security(
         ("basic" = []),
+        ("bearer" = []),
     )
 )]
 #[instrument(
@@ -432,15 +490,19 @@ async fn get_image(
     path = "/api/entities/associations/{id}",
     params(
         ("id" = Uuid, Path, description = "The id of the entity to list associations for"),
-        ("params" = AssociationListParams, description = "Query params to use for this association list request"),
+        AssociationListParams,
     ),
     responses(
         (status = 200, description = "JSON-formatted cursor response containing the associations for an entity", body = ApiCursor<Association>),
+        (status = 400, description = "The request is invalid: a path parameter has an invalid value; a query parameter has an invalid value"),
         (status = 401, description = "This user is not authorized to access this route"),
         (status = 404, description = "The entity does not exist"),
+        (status = 500, description = "An internal error occurred, such as a backing database, cache or object store failing"),
+        (status = 503, description = "A service Thorium depends on, such as Redis or LDAP, is unavailable"),
     ),
     security(
         ("basic" = []),
+        ("bearer" = []),
     )
 )]
 #[instrument(name = "routes::entities::list_associations", skip_all, err(Debug))]
@@ -470,6 +532,27 @@ async fn list_associations(
 /// * `params` - The query params for this grep search
 /// * `state` - Shared Thorium objects
 /// * `request` - The grep request body containing the regex pattern
+#[utoipa::path(
+    post,
+    path = "/api/entities/grep/",
+    params(
+        GrepQueryParams,
+    ),
+    request_body = GrepRequest,
+    responses(
+        (status = 200, description = "A page of grep matches, with a cursor to continue searching entities that were not reached", body = ApiCursor<GrepMatches>),
+        (status = 400, description = "The request is invalid: the pattern is not a valid regex; the JSON body is malformed; a query parameter has an invalid value"),
+        (status = 401, description = "This user is not authorized to access this route"),
+        (status = 404, description = "The cursor or a group named in the request does not exist or is not visible to this user"),
+        (status = 422, description = "The JSON body is well formed but does not match the expected shape, for example a required field is missing or has the wrong type"),
+        (status = 500, description = "An internal error occurred, such as a backing database, cache or object store failing"),
+        (status = 503, description = "A service Thorium depends on, such as Redis or LDAP, is unavailable"),
+    ),
+    security(
+        ("basic" = []),
+        ("bearer" = []),
+    )
+)]
 #[instrument(name = "routes::entities::grep", skip_all, err(Debug))]
 async fn grep(
     user: AuthedUser,
@@ -493,6 +576,28 @@ async fn grep(
 /// * `params` - The query params for this grep search
 /// * `state` - Shared Thorium objects
 /// * `request` - The grep request body containing the regex pattern
+#[utoipa::path(
+    post,
+    path = "/api/entities/grep/{id}",
+    params(
+        ("id" = Uuid, Path, description = "The id of the entity to grep"),
+        GrepQueryParams,
+    ),
+    request_body = GrepRequest,
+    responses(
+        (status = 200, description = "The grep matches for this entity", body = GrepMatches),
+        (status = 400, description = "The request is invalid: the pattern is not a valid regex; a path parameter has an invalid value; the JSON body is malformed; a query parameter has an invalid value"),
+        (status = 401, description = "This user is not authorized to access this route"),
+        (status = 404, description = "The entity does not exist or is not visible to this user"),
+        (status = 422, description = "The JSON body is well formed but does not match the expected shape, for example a required field is missing or has the wrong type"),
+        (status = 500, description = "An internal error occurred, such as a backing database, cache or object store failing"),
+        (status = 503, description = "A service Thorium depends on, such as Redis or LDAP, is unavailable"),
+    ),
+    security(
+        ("basic" = []),
+        ("bearer" = []),
+    )
+)]
 #[instrument(name = "routes::entities::grep_entity", skip_all, err(Debug))]
 async fn grep_entity(
     user: AuthedUser,
@@ -526,11 +631,15 @@ async fn grep_entity(
     ),
     responses(
         (status = 200, description = "Every association of the entity", body = Vec<Association>),
+        (status = 400, description = "The request is invalid: a path parameter has an invalid value"),
         (status = 401, description = "This user is not an admin"),
         (status = 404, description = "The entity does not exist"),
+        (status = 500, description = "An internal error occurred, such as a backing database, cache or object store failing"),
+        (status = 503, description = "A service Thorium depends on, such as Redis or LDAP, is unavailable"),
     ),
     security(
         ("basic" = []),
+        ("bearer" = []),
     )
 )]
 #[instrument(name = "routes::entities::associations", skip_all, err(Debug))]
@@ -561,11 +670,15 @@ async fn associations(
     ),
     responses(
         (status = 200, description = "The entity's ban notifications"),
+        (status = 400, description = "The request is invalid: a path parameter has an invalid value"),
         (status = 401, description = "This user is not authorized to access this route"),
         (status = 404, description = "The entity does not exist in the user's groups"),
+        (status = 500, description = "An internal error occurred, such as a backing database, cache or object store failing"),
+        (status = 503, description = "A service Thorium depends on, such as Redis or LDAP, is unavailable"),
     ),
     security(
         ("basic" = []),
+        ("bearer" = []),
     )
 )]
 #[instrument(name = "routes::entities::notifications", skip_all, err(Debug))]
@@ -616,11 +729,15 @@ async fn notifications(
     ),
     responses(
         (status = 200, description = "The tool's instances, newest first", body = Vec<ToolInstanceSummary>),
+        (status = 400, description = "The request is invalid: a path parameter has an invalid value"),
         (status = 401, description = "This user is not authorized to access this route"),
         (status = 404, description = "The tool does not exist in the user's groups"),
+        (status = 500, description = "An internal error occurred, such as a backing database, cache or object store failing"),
+        (status = 503, description = "A service Thorium depends on, such as Redis or LDAP, is unavailable"),
     ),
     security(
         ("basic" = []),
+        ("bearer" = []),
     )
 )]
 #[instrument(name = "routes::entities::tool_instances", skip_all, err(Debug))]
@@ -640,6 +757,7 @@ async fn tool_instances(
 
 /// The query params of a workflow instance's toolset read
 #[derive(Debug, serde::Deserialize, utoipa::IntoParams)]
+#[into_params(parameter_in = Query)]
 struct ToolsetParams {
     /// The agent in the instance whose toolset to read
     agent: Option<Uuid>,
@@ -665,9 +783,12 @@ struct ToolsetParams {
         (status = 400, description = "No agent was named"),
         (status = 401, description = "This user is not authorized to access this route"),
         (status = 404, description = "The workflow instance or the agent in it does not exist in the user's groups"),
+        (status = 500, description = "An internal error occurred, such as a backing database, cache or object store failing"),
+        (status = 503, description = "A service Thorium depends on, such as Redis or LDAP, is unavailable"),
     ),
     security(
         ("basic" = []),
+        ("bearer" = []),
     )
 )]
 #[instrument(name = "routes::entities::workflow_toolset", skip_all, err(Debug))]
@@ -701,11 +822,15 @@ async fn workflow_toolset(
     ),
     responses(
         (status = 202, description = "The instance request was queued"),
-        (status = 401, description = "This user can't edit the workflow in every one of its groups"),
+        (status = 400, description = "The request is invalid: a path parameter has an invalid value"),
+        (status = 401, description = "This user can't edit the workflow in every one of its groups. A run token is refused."),
         (status = 404, description = "The workflow does not exist in the user's groups"),
+        (status = 500, description = "An internal error occurred, such as a backing database, cache or object store failing"),
+        (status = 503, description = "A service Thorium depends on, such as Redis or LDAP, is unavailable"),
     ),
     security(
         ("basic" = []),
+        ("bearer" = []),
     )
 )]
 #[instrument(name = "routes::entities::request_instance", skip_all, err(Debug))]
@@ -736,11 +861,15 @@ async fn request_instance(
     ),
     responses(
         (status = 202, description = "The instance request was queued"),
-        (status = 401, description = "This user can't edit the toolset in every one of its groups"),
+        (status = 400, description = "The request is invalid: a path parameter has an invalid value"),
+        (status = 401, description = "This user can't edit the toolset in every one of its groups. A run token is refused."),
         (status = 404, description = "The toolset does not exist in the user's groups"),
+        (status = 500, description = "An internal error occurred, such as a backing database, cache or object store failing"),
+        (status = 503, description = "A service Thorium depends on, such as Redis or LDAP, is unavailable"),
     ),
     security(
         ("basic" = []),
+        ("bearer" = []),
     )
 )]
 #[instrument(
@@ -776,11 +905,15 @@ async fn request_tool_set_instance(
     responses(
         (status = 202, description = "The refresh was queued"),
         (status = 400, description = "The endpoint isn't on the deployment's allowed endpoint list"),
-        (status = 401, description = "This user doesn't own or manage any of the endpoint's groups"),
+        (status = 401, description = "This user doesn't own or manage any of the endpoint's groups. A run token is refused"),
         (status = 404, description = "The model endpoint does not exist in the user's groups"),
+        (status = 409, description = "Another request kept the endpoint locked for longer than the 20 seconds this request waits; try again"),
+        (status = 500, description = "An internal error occurred, such as a backing database, cache or object store failing"),
+        (status = 503, description = "A service Thorium depends on, such as Redis or LDAP, is unavailable"),
     ),
     security(
         ("basic" = []),
+        ("bearer" = []),
     )
 )]
 #[instrument(
@@ -815,11 +948,15 @@ async fn refresh_model_endpoint(
     ),
     responses(
         (status = 200, description = "The credential with its secrets", body = ModelCredentialEntity),
-        (status = 401, description = "This user is not an admin"),
+        (status = 400, description = "The request is invalid: a path parameter has an invalid value"),
+        (status = 401, description = "This user is not an admin. Only a full token may use this route: a scoped token, including a run token, is refused."),
         (status = 404, description = "The model credential does not exist"),
+        (status = 500, description = "An internal error occurred, such as a backing database, cache or object store failing"),
+        (status = 503, description = "A service Thorium depends on, such as Redis or LDAP, is unavailable"),
     ),
     security(
         ("basic" = []),
+        ("bearer" = []),
     )
 )]
 #[instrument(
@@ -837,6 +974,15 @@ async fn model_credential_secret(
     let credential = models::credential_secret(&user, id, &state.shared).await?;
     Ok(Json(credential))
 }
+
+/// The struct containing our openapi docs
+#[derive(OpenApi)]
+#[openapi(
+    paths(create, get, list, list_details, update, delete, tag, delete_tags, get_image, list_associations, associations, notifications, tool_instances, workflow_toolset, request_instance, request_tool_set_instance, refresh_model_endpoint, model_credential_secret, grep, grep_entity),
+    components(schemas(ApiCursor<Association>, ApiCursor<Entity>, ApiCursor<EntityListLine>, ApiCursor<GrepMatches>, Association, Entity, EntityListLine, EntityResponse, GrepDocumentMatches, GrepMatch, GrepMatches, GrepQueryParams, GrepRequest, GrepSource, GrepStats, InstancedAgentToolset, ModelCredentialEntity, TagDeleteRequest<Entity>, TagRequest<Entity>, ToolInstanceSummary, TruncationReason)),
+    modifiers(&OpenApiSecurity, &OpenApiParameterExamples),
+)]
+pub struct EntityApiDocs;
 
 /// Add the entities routes to our router
 ///

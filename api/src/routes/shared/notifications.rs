@@ -36,7 +36,7 @@ pub async fn create_notification<N: NotificationSupport>(
     Ok(StatusCode::NO_CONTENT)
 }
 
-/// Get the all of the image's notifications
+/// Get all of the image's notifications
 ///
 /// # Arguments
 ///

@@ -6,12 +6,12 @@ use axum::routing::get;
 use tracing::{Span, instrument};
 use utoipa::OpenApi;
 
-use super::OpenApiSecurity;
+use super::{OpenApiParameterExamples, OpenApiSecurity};
 use crate::models::AuthedUser;
 use crate::models::{Group, Stream, StreamDepth};
 use crate::utils::{ApiError, AppState};
 
-/// Gets the number of obects between two points in a stream
+/// Gets the number of objects between two points in a stream
 ///
 /// # Arguments
 ///
@@ -23,7 +23,7 @@ use crate::utils::{ApiError, AppState};
 /// * `state` - Shared Thorium objects
 #[utoipa::path(
     get,
-    path = "/api/streams/depth/:group/:namespace/:stream/:start/:end",
+    path = "/api/streams/depth/{group}/{namespace}/{stream}/{start}/{end}",
     params(
         ("group" = String, Path, description = "The group this stream is in"),
         ("namespace" = String, Path, description = "The namespace this stream is in inside this group"),
@@ -33,10 +33,15 @@ use crate::utils::{ApiError, AppState};
     ),
     responses(
         (status = 200, description = "The number of objects in the stream between start and end time", body = StreamDepth),
+        (status = 400, description = "The request is invalid: a path parameter has an invalid value"),
         (status = 401, description = "This user is not authorized to access this route"),
+        (status = 404, description = "A resource named in the request, such as a path value, group or body field, does not exist or is not visible to this user"),
+        (status = 500, description = "An internal error occurred, such as a backing database, cache or object store failing"),
+        (status = 503, description = "A service Thorium depends on, such as Redis or LDAP, is unavailable"),
     ),
     security(
         ("basic" = []),
+        ("bearer" = []),
     )
 )]
 #[instrument(name = "routes::streams::depth", skip_all, err(Debug))]
@@ -52,7 +57,7 @@ pub async fn depth(
     Ok(Json(depth))
 }
 
-/// Gets the number of obects between two points in a stream in a range smaller chunks
+/// Gets the number of objects between two points in a stream in a range smaller chunks
 ///
 /// If the split does not fit evenly into the overall range then the last chunk will be smaller.
 ///
@@ -67,7 +72,7 @@ pub async fn depth(
 /// * `state` - Shared Thorium objects
 #[utoipa::path(
     get,
-    path = "/api/streams/depth/:group/:namespace/:stream/:start/:end/:split",
+    path = "/api/streams/depth/{group}/{namespace}/{stream}/{start}/{end}/{split}",
     params(
         ("group" = String, Path, description = "The group this stream is in"),
         ("namespace" = String, Path, description = "The namespace this stream is in inside this group"),
@@ -78,10 +83,15 @@ pub async fn depth(
     ),
     responses(
         (status = 200, description = "The number of objects in the stream between start and end time in specified chunks", body = Vec<StreamDepth>),
+        (status = 400, description = "The request is invalid: a path parameter has an invalid value"),
         (status = 401, description = "This user is not authorized to access this route"),
+        (status = 404, description = "A resource named in the request, such as a path value, group or body field, does not exist or is not visible to this user"),
+        (status = 500, description = "An internal error occurred, such as a backing database, cache or object store failing"),
+        (status = 503, description = "A service Thorium depends on, such as Redis or LDAP, is unavailable"),
     ),
     security(
         ("basic" = []),
+        ("bearer" = []),
     )
 )]
 #[instrument(name = "routes::streams::depth_range", skip_all, err(Debug))]
@@ -121,6 +131,8 @@ fn default_map_min() -> u64 {
 /// The query params for a map request
 #[derive(Deserialize, Debug)]
 #[cfg_attr(feature = "api", derive(utoipa::ToSchema))]
+#[cfg_attr(feature = "api", derive(utoipa::IntoParams))]
+#[cfg_attr(feature = "api", into_params(parameter_in = Query))]
 pub struct MapParams {
     /// The minimum number of objects to map
     #[serde(default = "default_map_min")]
@@ -139,19 +151,24 @@ pub struct MapParams {
 /// * `state` - Shared Thorium objects
 #[utoipa::path(
     get,
-    path = "/api/streams/map/:group/:namespace/:stream",
+    path = "/api/streams/map/{group}/{namespace}/{stream}",
     params(
         ("group" = String, Path, description = "The group this stream is in"),
         ("namespace" = String, Path, description = "The namespace for this stream"),
         ("stream" = String, Path, description = "The name of the stream to map"),
-        ("params" = MapParams, Query, description = "The query params to use for this request"),
+        MapParams,
     ),
     responses(
         (status = 200, description = "StreamDepth map", body = Vec<StreamDepth>),
+        (status = 400, description = "The request is invalid: a query parameter has an invalid value"),
         (status = 401, description = "This user is not authorized to access this route"),
+        (status = 404, description = "A resource named in the request, such as a path value, group or body field, does not exist or is not visible to this user"),
+        (status = 500, description = "An internal error occurred, such as a backing database, cache or object store failing"),
+        (status = 503, description = "A service Thorium depends on, such as Redis or LDAP, is unavailable"),
     ),
     security(
         ("basic" = []),
+        ("bearer" = []),
     )
 )]
 #[instrument(name = "routes::streams::map", skip_all, err(Debug))]
@@ -182,7 +199,7 @@ pub async fn map(
 #[openapi(
     paths(depth, depth_range, map),
     components(schemas(MapParams, StreamDepth)),
-    modifiers(&OpenApiSecurity),
+    modifiers(&OpenApiSecurity, &OpenApiParameterExamples),
 )]
 pub struct StreamApiDocs;
 

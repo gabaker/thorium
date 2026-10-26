@@ -385,6 +385,8 @@ impl<O: OutputSupport> OutputRequest<O> {
 /// Optional arameters for getting results
 #[derive(Clone, Default, Debug, Serialize, Deserialize)]
 #[cfg_attr(feature = "api", derive(utoipa::ToSchema))]
+#[cfg_attr(feature = "api", derive(utoipa::IntoParams))]
+#[cfg_attr(feature = "api", into_params(parameter_in = Query))]
 #[cfg_attr(feature = "python", pyclass(from_py_object))]
 pub struct ResultGetParams {
     /// Also show hidden results

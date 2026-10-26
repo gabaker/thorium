@@ -4,7 +4,10 @@ use axum::Router;
 use axum::extract::{Json, Path, State};
 use axum::routing::{get, post};
 use tracing::instrument;
+use utoipa::OpenApi;
 use uuid::Uuid;
+
+use super::{OpenApiParameterExamples, OpenApiSecurity};
 
 use crate::models::AuthedUser;
 use crate::models::{Tree, TreeGrowQuery, TreeParams, TreeQuery};
@@ -22,15 +25,21 @@ use crate::utils::{ApiError, AppState};
     post,
     path = "/api/trees/",
     params(
-        ("params" = TreeParams, description = "The params for starting a new tree"),
-        ("query" = TreeQuery, description = "The query to use to start a new tree")
+        TreeParams,
     ),
+    request_body = TreeQuery,
     responses(
         (status = 200, description = "A new tree", body = Tree),
+        (status = 400, description = "The request is invalid: the JSON body is malformed or fails validation; a query parameter has an invalid value"),
         (status = 401, description = "This user is not authorized to access this route"),
+        (status = 404, description = "A resource named in the request, such as a path value, group or body field, does not exist or is not visible to this user"),
+        (status = 422, description = "The JSON body is well formed but does not match the expected shape, for example a required field is missing or has the wrong type"),
+        (status = 500, description = "An internal error occurred, such as a backing database, cache or object store failing"),
+        (status = 503, description = "A service Thorium depends on, such as Redis or LDAP, is unavailable"),
     ),
     security(
         ("basic" = []),
+        ("bearer" = []),
     )
 )]
 #[instrument(name = "routes::trees::start_tree", skip_all, err(Debug))]
@@ -53,28 +62,33 @@ async fn start_tree(
 }
 
 /// Continue to grow a tree based on some growable nodes
-/// Start building a tree of data in Thorium from some starting points
 ///
 /// # Arguments
 ///
 /// * `user` - The user that is building a tree
 /// * `params` - The params for building this tree
 /// * `state` - Shared Thorium objects
-/// * `query` - The query to use to start this tree
+/// * `query` - The growable nodes and bounds to grow this tree with
 #[utoipa::path(
     patch,
-    path = "/api/trees/:cursor",
+    path = "/api/trees/{cursor}",
     params(
-        ("cursor" = Uuid, description = "The id of an existing tree to grow"),
-        ("params" = TreeParams, description = "The params for growing an existing tree"),
-        ("query" = TreeGrowQuery, description = "The query to use to grow an existing tree")
+        ("cursor" = Uuid, Path, description = "The id of an existing tree to grow"),
+        TreeParams,
     ),
+    request_body = TreeGrowQuery,
     responses(
         (status = 200, description = "A tree grown from an existing tree", body = Tree),
+        (status = 400, description = "The request is invalid: the JSON body is malformed or fails validation; a path parameter has an invalid value; a query parameter has an invalid value"),
         (status = 401, description = "This user is not authorized to access this route"),
+        (status = 404, description = "A resource named in the request, such as a path value, group or body field, does not exist or is not visible to this user"),
+        (status = 422, description = "The JSON body is well formed but does not match the expected shape, for example a required field is missing or has the wrong type"),
+        (status = 500, description = "An internal error occurred, such as a backing database, cache or object store failing"),
+        (status = 503, description = "A service Thorium depends on, such as Redis or LDAP, is unavailable"),
     ),
     security(
         ("basic" = []),
+        ("bearer" = []),
     )
 )]
 #[instrument(name = "routes::trees::grow_tree", skip_all, err(Debug))]
@@ -111,16 +125,21 @@ async fn grow_tree(
 /// * `state` - Shared Thorium objects
 #[utoipa::path(
     get,
-    path = "/api/trees/:id",
+    path = "/api/trees/{cursor}",
     params(
-        ("id" = Uuid, Path, description = "The id of the tree to get in its entirety"),
+        ("cursor" = Uuid, Path, description = "The id of the tree to get in its entirety"),
     ),
     responses(
         (status = 200, description = "A tree", body = Tree),
+        (status = 400, description = "The request is invalid: a path parameter has an invalid value"),
         (status = 401, description = "This user is not authorized to access this route"),
+        (status = 404, description = "A resource named in the request, such as a path value, group or body field, does not exist or is not visible to this user"),
+        (status = 500, description = "An internal error occurred, such as a backing database, cache or object store failing"),
+        (status = 503, description = "A service Thorium depends on, such as Redis or LDAP, is unavailable"),
     ),
     security(
         ("basic" = []),
+        ("bearer" = []),
     )
 )]
 #[instrument(name = "routes::trees::get", skip_all, err(Debug))]
@@ -136,6 +155,15 @@ async fn get_tree(
     // return our tree
     Ok(Json(tree))
 }
+
+/// The struct containing our openapi docs
+#[derive(OpenApi)]
+#[openapi(
+    paths(start_tree, grow_tree, get_tree),
+    components(schemas(Tree, TreeGrowQuery, TreeQuery)),
+    modifiers(&OpenApiSecurity, &OpenApiParameterExamples),
+)]
+pub struct TreeApiDocs;
 
 /// Add the tree routes to our router
 ///

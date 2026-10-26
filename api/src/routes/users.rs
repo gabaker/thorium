@@ -10,8 +10,8 @@ use tracing::{Level, event, instrument};
 use utoipa::OpenApi;
 use uuid::Uuid;
 
-use super::OpenApiSecurity;
 use super::shared::{self, graphics};
+use super::{OpenApiParameterExamples, OpenApiSecurity};
 
 // our imports
 use crate::models::backends::GraphicSupport;
@@ -24,6 +24,9 @@ use crate::models::{
 };
 use crate::utils::{ApiError, AppState};
 use crate::{bad, conflict, is_admin, not_found, unauthorized, unavailable};
+
+/// A notification for a user as the documents describe it
+pub type UserNotification = Notification<User>;
 
 /// The maximum size (bytes) accepted for a profile-icon upload. Static images are client-resized to a small
 /// PNG, but animated GIFs and short video clips (MP4/WebM) are uploaded as-is since they can't be cheaply
@@ -43,14 +46,18 @@ const ICON_MAX_BYTES: usize = 10 << 20;
     post,
     path = "/api/users/",
     params(
-        ("user_create" = UserCreate, description = "The user to create"),
+        ("secret-key" = Option<String>, Header, description = "Thorium's secret key, which a request needs to create a user with a role other than User, a local user, or a user whose email verification is skipped"),
     ),
+    request_body = UserCreate,
     responses(
         (status = 200, description = "New user created", body=AuthResponse),
-        (status = 401, description = "This user is not authorized to access this route"),
-    ),
-    security(
-        ("basic" = []),
+        (status = 400, description = "The request is invalid: the JSON body is malformed or fails validation"),
+        (status = 401, description = "The secret-key header is missing or wrong for a user that needs it"),
+        (status = 404, description = "A resource named in the request, such as a path value, group or body field, does not exist or is not visible to this user"),
+        (status = 409, description = "A user with this name already exists"),
+        (status = 422, description = "The JSON body is well formed but does not match the expected shape, for example a required field is missing or has the wrong type"),
+        (status = 500, description = "An internal error occurred, such as a backing database, cache or object store failing"),
+        (status = 503, description = "A service Thorium depends on, such as Redis or LDAP, is unavailable"),
     )
 )]
 #[instrument(name = "routes::users::create", skip_all, fields(key_set = key.is_some()), err(Debug))]
@@ -101,17 +108,17 @@ impl IntoResponse for ResendVerificationResponse {
 /// Resend our verification email if we are not yet verified
 #[utoipa::path(
     get,
-    path = "/api/users/resend/verify/email/:username",
+    path = "/api/users/resend/verify/email/{username}",
     params(
         ("username" = String, Path, description = "The user to resend verificaton email for"),
     ),
     responses(
         (status = 200, description = "Verification email resent"),
-        (status = 401, description = "This user is not authorized to access this route"),
+        (status = 404, description = "A resource named in the request, such as a path value, group or body field, does not exist or is not visible to this user"),
+        (status = 409, description = "This user has already verified their email"),
         (status = 429, description = "A verification email was sent too recently; see the Retry-After header"),
-    ),
-    security(
-        ("basic" = []),
+        (status = 500, description = "An internal error occurred, such as a backing database, cache or object store failing"),
+        (status = 503, description = "Email verification is not enabled"),
     )
 )]
 #[instrument(
@@ -164,7 +171,7 @@ async fn resend_email_verification(
 /// Verifies an email for a specific user
 #[utoipa::path(
     get,
-    path = "/api/users/verify/:username/email/:verification_token",
+    path = "/api/users/verify/{username}/email/{verification_token}",
     params(
         ("username" = String, Path, description = "The user to resend verificaton email for"),
         ("verification_token" = String, Path, description = "The token to send in the verification email"),
@@ -172,6 +179,8 @@ async fn resend_email_verification(
     responses(
         (status = 204, description = "The user's email was verified"),
         (status = 401, description = "The verification token is invalid, expired, or already used"),
+        (status = 500, description = "An internal error occurred, such as a backing database, cache or object store failing"),
+        (status = 503, description = "A service Thorium depends on, such as Redis or LDAP, is unavailable"),
     ),
 )]
 #[instrument(name = "routes::users::verify_email", skip_all, err(Debug))]
@@ -206,15 +215,15 @@ async fn verify_email(
 #[utoipa::path(
     post,
     path = "/api/users/auth",
-    params(
-        ("user" = User, description = "The user to create"),
-    ),
     responses(
         (status = 200, description = "User authenticated", body=AuthResponse),
         (status = 401, description = "This user is not authorized to access this route"),
+        (status = 500, description = "An internal error occurred, such as a backing database, cache or object store failing"),
+        (status = 503, description = "A service Thorium depends on, such as Redis or LDAP, is unavailable"),
     ),
     security(
         ("basic" = []),
+        ("bearer" = []),
     )
 )]
 #[instrument(name = "routes::users::auth", skip_all, err(Debug))]
@@ -232,17 +241,20 @@ async fn auth(resp: AuthResponse) -> Result<Json<AuthResponse>, ApiError> {
 /// * `state` - Shared Thorium objects
 #[utoipa::path(
     get,
-    path = "/api/users/user/:username",
+    path = "/api/users/user/{username}",
     params(
-        ("user" = User, description = "The user that is requesting info about another user"),
         ("username" = String, Path, description = "The user to get info about"),
     ),
     responses(
         (status = 200, description = "Requested user info", body=ScrubbedUser),
-        (status = 401, description = "This user is not authorized to access this route"),
+        (status = 401, description = "This user is not authorized to access this route. Only a full token may use this route: a scoped token, including a run token, is refused."),
+        (status = 404, description = "A resource named in the request, such as a path value, group or body field, does not exist or is not visible to this user"),
+        (status = 500, description = "An internal error occurred, such as a backing database, cache or object store failing"),
+        (status = 503, description = "A service Thorium depends on, such as Redis or LDAP, is unavailable"),
     ),
     security(
         ("basic" = []),
+        ("bearer" = []),
     )
 )]
 #[instrument(name = "routes::users::get_user", skip_all, err(Debug))]
@@ -275,15 +287,15 @@ async fn get_user(
 #[utoipa::path(
     get,
     path = "/api/users/",
-    params(
-        ("user" = User, description = "The user that is listing users"),
-    ),
     responses(
         (status = 200, description = "Requested user list", body=Vec<String>),
         (status = 401, description = "This user is not authorized to access this route"),
+        (status = 500, description = "An internal error occurred, such as a backing database, cache or object store failing"),
+        (status = 503, description = "A service Thorium depends on, such as Redis or LDAP, is unavailable"),
     ),
     security(
         ("basic" = []),
+        ("bearer" = []),
     )
 )]
 #[instrument(name = "routes::users::list", skip_all, err(Debug))]
@@ -305,15 +317,16 @@ async fn list(
 #[utoipa::path(
     get,
     path = "/api/users/details/",
-    params(
-        ("user" = User, description = "The user that is listing user details"),
-    ),
     responses(
         (status = 200, description = "Requested user info list", body=Vec<ScrubbedUser>),
-        (status = 401, description = "This user is not authorized to access this route"),
+        (status = 401, description = "This user is not authorized to access this route. Only a full token may use this route: a scoped token, including a run token, is refused."),
+        (status = 404, description = "A resource named in the request, such as a path value, group or body field, does not exist or is not visible to this user"),
+        (status = 500, description = "An internal error occurred, such as a backing database, cache or object store failing"),
+        (status = 503, description = "A service Thorium depends on, such as Redis or LDAP, is unavailable"),
     ),
     security(
         ("basic" = []),
+        ("bearer" = []),
     )
 )]
 #[instrument(name = "routes::users::list_details", skip_all, err(Debug))]
@@ -336,15 +349,15 @@ async fn list_details(
 #[utoipa::path(
     get,
     path = "/api/users/whoami",
-    params(
-        ("user" = User, description = "The current user"),
-    ),
     responses(
         (status = 200, description = "Currently-authenticated user info", body=ScrubbedUser),
         (status = 401, description = "This user is not authorized to access this route"),
+        (status = 500, description = "An internal error occurred, such as a backing database, cache or object store failing"),
+        (status = 503, description = "A service Thorium depends on, such as Redis or LDAP, is unavailable"),
     ),
     security(
         ("basic" = []),
+        ("bearer" = []),
     )
 )]
 #[instrument(name = "routes::users::info", skip_all, err(Debug))]
@@ -362,16 +375,19 @@ async fn info(user: AuthedUser) -> Result<Json<ScrubbedUser>, ApiError> {
 #[utoipa::path(
     patch,
     path = "/api/users/",
-    params(
-        ("user" = User, description = "The user to update"),
-        ("update" = UserUpdate, description = "The update to apply to this user"),
-    ),
+    request_body = UserUpdate,
     responses(
         (status = 204, description = "User update applied"),
-        (status = 401, description = "This user is not authorized to access this route"),
+        (status = 400, description = "The request is invalid: the JSON body is malformed or fails validation"),
+        (status = 401, description = "This user is not authorized to access this route. Only a full token may use this route: a scoped token, including a run token, is refused."),
+        (status = 404, description = "A resource named in the request, such as a path value, group or body field, does not exist or is not visible to this user"),
+        (status = 422, description = "The JSON body is well formed but does not match the expected shape, for example a required field is missing or has the wrong type"),
+        (status = 500, description = "An internal error occurred, such as a backing database, cache or object store failing"),
+        (status = 503, description = "A service Thorium depends on, such as Redis or LDAP, is unavailable"),
     ),
     security(
         ("basic" = []),
+        ("bearer" = []),
     )
 )]
 #[instrument(name = "routes::users::update", skip_all, err(Debug))]
@@ -396,18 +412,23 @@ async fn update(
 /// * `update` - The update to apply to this user
 #[utoipa::path(
     patch,
-    path = "/api/users/user/:username",
+    path = "/api/users/user/{username}",
     params(
-        ("name" = String, Path, description = "The name of the user to update"),
-        ("user" = User, description = "The user applying the update"),
-        ("update" = UserUpdate, description = "The update to apply to this user"),
+        ("username" = String, Path, description = "The name of the user to update"),
     ),
+    request_body = UserUpdate,
     responses(
         (status = 204, description = "User update applied"),
-        (status = 401, description = "This user is not authorized to access this route"),
+        (status = 400, description = "The request is invalid: the JSON body is malformed or fails validation"),
+        (status = 401, description = "This user is not authorized to access this route. Only a full token may use this route: a scoped token, including a run token, is refused."),
+        (status = 404, description = "A resource named in the request, such as a path value, group or body field, does not exist or is not visible to this user"),
+        (status = 422, description = "The JSON body is well formed but does not match the expected shape, for example a required field is missing or has the wrong type"),
+        (status = 500, description = "An internal error occurred, such as a backing database, cache or object store failing"),
+        (status = 503, description = "A service Thorium depends on, such as Redis or LDAP, is unavailable"),
     ),
     security(
         ("basic" = []),
+        ("bearer" = []),
     )
 )]
 #[instrument(name = "routes::users::update_user", skip_all, err(Debug))]
@@ -433,15 +454,16 @@ async fn update_user(
 #[utoipa::path(
     post,
     path = "/api/users/logout",
-    params(
-        ("user" = User, description = "The user to logout"),
-    ),
     responses(
         (status = 204, description = "User logged out"),
-        (status = 401, description = "This user is not authorized to access this route"),
+        (status = 401, description = "This user is not authorized to access this route. A run token can't be logged out."),
+        (status = 404, description = "A resource named in the request, such as a path value, group or body field, does not exist or is not visible to this user"),
+        (status = 500, description = "An internal error occurred, such as a backing database, cache or object store failing"),
+        (status = 503, description = "A service Thorium depends on, such as Redis or LDAP, is unavailable"),
     ),
     security(
         ("basic" = []),
+        ("bearer" = []),
     )
 )]
 #[instrument(name = "routes::users::logout", skip_all, err(Debug))]
@@ -470,17 +492,20 @@ async fn logout(user: AuthedUser, State(state): State<AppState>) -> Result<Statu
 /// * `state` - Shared Thorium objects
 #[utoipa::path(
     get,
-    path = "/api/users/logout/:target",
+    path = "/api/users/logout/{target}",
     params(
         ("target" = String, Path, description = "The username to logout"),
-        ("user" = User, description = "The user forcing the logout"),
     ),
     responses(
         (status = 204, description = "User logged out"),
-        (status = 401, description = "This user is not authorized to access this route"),
+        (status = 401, description = "This user is not authorized to access this route. Only a full token may use this route: a scoped token, including a run token, is refused."),
+        (status = 404, description = "The user to log out does not exist"),
+        (status = 500, description = "An internal error occurred, such as a backing database, cache or object store failing"),
+        (status = 503, description = "A service Thorium depends on, such as Redis or LDAP, is unavailable"),
     ),
     security(
         ("basic" = []),
+        ("bearer" = []),
     )
 )]
 #[instrument(name = "routes::users::logout_user", skip_all, err(Debug))]
@@ -511,17 +536,20 @@ async fn logout_user(
 /// * `state` - Shared Thorium objects
 #[utoipa::path(
     delete,
-    path = "/api/users/delete/:target",
+    path = "/api/users/delete/{target}",
     params(
         ("target" = String, Path, description = "The username to delete"),
-        ("user" = User, description = "The user who is deleting another user"),
     ),
     responses(
         (status = 204, description = "User deleted"),
-        (status = 401, description = "This user is not authorized to access this route"),
+        (status = 401, description = "This user is not authorized to access this route. Only a full token may use this route: a scoped token, including a run token, is refused."),
+        (status = 404, description = "A resource named in the request, such as a path value, group or body field, does not exist or is not visible to this user"),
+        (status = 500, description = "An internal error occurred, such as a backing database, cache or object store failing"),
+        (status = 503, description = "A service Thorium depends on, such as Redis or LDAP, is unavailable"),
     ),
     security(
         ("basic" = []),
+        ("bearer" = []),
     )
 )]
 #[instrument(name = "routes::users::delete_user", skip_all, err(Debug))]
@@ -548,11 +576,16 @@ async fn delete_user(
     path = "/api/users/sync/ldap",
     params(),
     responses(
-        (status = 204, description = "All ldap metagroups and users synced"),
+        (status = 204, description = "The unix info of every user was synced"),
+        (status = 400, description = "The request is invalid: it fails validation"),
         (status = 401, description = "This user is not authorized to access this route"),
+        (status = 404, description = "A resource named in the request, such as a path value, group or body field, does not exist or is not visible to this user"),
+        (status = 500, description = "An internal error occurred, such as a backing database, cache or object store failing"),
+        (status = 503, description = "A service Thorium depends on, such as Redis or LDAP, is unavailable"),
     ),
     security(
         ("basic" = []),
+        ("bearer" = []),
     )
 )]
 #[instrument(name = "routes::users::sync_ldap", skip_all, err(Debug))]
@@ -578,16 +611,19 @@ async fn sync_ldap(
 #[utoipa::path(
     post,
     path = "/api/users/tokens/",
-    params(
-        ("req" = ScopedTokenRequest, description = "The scoped token to create"),
-    ),
+    request_body = ScopedTokenRequest,
     responses(
         (status = 200, description = "New scoped token created", body=ScopedToken),
         (status = 400, description = "The request is invalid or sets a run scope"),
-        (status = 401, description = "This user is not authorized to access this route"),
+        (status = 401, description = "This user is not authorized to access this route. Only a full token may use this route: a scoped token, including a run token, is refused."),
+        (status = 409, description = "A scoped token with this name already exists"),
+        (status = 422, description = "The JSON body is well formed but does not match the expected shape, for example a required field is missing or has the wrong type"),
+        (status = 500, description = "An internal error occurred, such as a backing database, cache or object store failing"),
+        (status = 503, description = "A service Thorium depends on, such as Redis or LDAP, is unavailable"),
     ),
     security(
         ("basic" = []),
+        ("bearer" = []),
     )
 )]
 #[instrument(name = "routes::users::create_scoped_token", skip_all, err(Debug))]
@@ -619,10 +655,13 @@ async fn create_scoped_token(
     params(),
     responses(
         (status = 200, description = "The current users scoped tokens", body=Vec<ScopedToken>),
-        (status = 401, description = "This user is not authorized to access this route"),
+        (status = 401, description = "This user is not authorized to access this route. Only a full token may use this route: a scoped token, including a run token, is refused."),
+        (status = 500, description = "An internal error occurred, such as a backing database, cache or object store failing"),
+        (status = 503, description = "A service Thorium depends on, such as Redis or LDAP, is unavailable"),
     ),
     security(
         ("basic" = []),
+        ("bearer" = []),
     )
 )]
 #[instrument(name = "routes::users::list_scoped_tokens", skip_all, err(Debug))]
@@ -649,17 +688,20 @@ async fn list_scoped_tokens(
 /// * `state` - Shared Thorium objects
 #[utoipa::path(
     get,
-    path = "/api/users/tokens/:name",
+    path = "/api/users/tokens/{name}",
     params(
         ("name" = String, Path, description = "The name of the scoped token to get"),
     ),
     responses(
         (status = 200, description = "The requested scoped token", body=ScopedToken),
-        (status = 401, description = "This user is not authorized to access this route"),
+        (status = 401, description = "This user is not authorized to access this route. Only a full token may use this route: a scoped token, including a run token, is refused."),
         (status = 404, description = "This scoped token does not exist"),
+        (status = 500, description = "An internal error occurred, such as a backing database, cache or object store failing"),
+        (status = 503, description = "A service Thorium depends on, such as Redis or LDAP, is unavailable"),
     ),
     security(
         ("basic" = []),
+        ("bearer" = []),
     )
 )]
 #[instrument(name = "routes::users::get_scoped_token", skip_all, err(Debug))]
@@ -688,19 +730,23 @@ async fn get_scoped_token(
 /// * `update` - The update to apply to this scoped token
 #[utoipa::path(
     patch,
-    path = "/api/users/tokens/:name",
+    path = "/api/users/tokens/{name}",
     params(
         ("name" = String, Path, description = "The name of the scoped token to update"),
-        ("update" = ScopedTokenUpdate, description = "The update to apply to this scoped token"),
     ),
+    request_body = ScopedTokenUpdate,
     responses(
         (status = 200, description = "The updated scoped token", body=ScopedToken),
         (status = 400, description = "This scoped token update is invalid"),
-        (status = 401, description = "This user is not authorized to access this route"),
+        (status = 401, description = "This user is not authorized to access this route. Only a full token may use this route: a scoped token, including a run token, is refused."),
         (status = 404, description = "This scoped token does not exist"),
+        (status = 422, description = "The JSON body is well formed but does not match the expected shape, for example a required field is missing or has the wrong type"),
+        (status = 500, description = "An internal error occurred, such as a backing database, cache or object store failing"),
+        (status = 503, description = "A service Thorium depends on, such as Redis or LDAP, is unavailable"),
     ),
     security(
         ("basic" = []),
+        ("bearer" = []),
     )
 )]
 #[instrument(name = "routes::users::update_scoped_token", skip_all, err(Debug))]
@@ -726,17 +772,20 @@ async fn update_scoped_token(
 /// * `state` - Shared Thorium objects
 #[utoipa::path(
     delete,
-    path = "/api/users/tokens/:name",
+    path = "/api/users/tokens/{name}",
     params(
         ("name" = String, Path, description = "The name of the scoped token to delete"),
     ),
     responses(
         (status = 204, description = "Scoped token deleted"),
-        (status = 401, description = "This user is not authorized to access this route"),
+        (status = 401, description = "This user is not authorized to access this route. Only a full token may use this route: a scoped token, including a run token, is refused."),
         (status = 404, description = "This scoped token does not exist"),
+        (status = 500, description = "An internal error occurred, such as a backing database, cache or object store failing"),
+        (status = 503, description = "A service Thorium depends on, such as Redis or LDAP, is unavailable"),
     ),
     security(
         ("basic" = []),
+        ("bearer" = []),
     )
 )]
 #[instrument(name = "routes::users::delete_scoped_token", skip_all, err(Debug))]
@@ -770,10 +819,13 @@ async fn delete_scoped_token(
     responses(
         (status = 204, description = "The profile icon was uploaded"),
         (status = 400, description = "No image field was provided"),
-        (status = 401, description = "This user is not authorized to access this route"),
+        (status = 401, description = "This user is not authorized to access this route. Only a full token may use this route: a scoped token, including a run token, is refused."),
+        (status = 500, description = "An internal error occurred, such as a backing database, cache or object store failing"),
+        (status = 503, description = "A service Thorium depends on, such as Redis or LDAP, is unavailable"),
     ),
     security(
         ("basic" = []),
+        ("bearer" = []),
     )
 )]
 #[axum_macros::debug_handler]
@@ -807,10 +859,13 @@ async fn upload_image(
     path = "/api/users/image",
     responses(
         (status = 204, description = "The profile icon was removed"),
-        (status = 401, description = "This user is not authorized to access this route"),
+        (status = 401, description = "This user is not authorized to access this route. Only a full token may use this route: a scoped token, including a run token, is refused."),
+        (status = 500, description = "An internal error occurred, such as a backing database, cache or object store failing"),
+        (status = 503, description = "A service Thorium depends on, such as Redis or LDAP, is unavailable"),
     ),
     security(
         ("basic" = []),
+        ("bearer" = []),
     )
 )]
 #[instrument(name = "routes::users::delete_image", skip_all, fields(user = user.username), err(Debug))]
@@ -842,11 +897,14 @@ async fn delete_image(
     ),
     responses(
         (status = 200, description = "The profile icon was retrieved"),
-        (status = 404, description = "The user does not exist or has no icon"),
         (status = 401, description = "This user is not authorized to access this route"),
+        (status = 404, description = "The user does not exist or has no icon"),
+        (status = 500, description = "An internal error occurred, such as a backing database, cache or object store failing"),
+        (status = 503, description = "A service Thorium depends on, such as Redis or LDAP, is unavailable"),
     ),
     security(
         ("basic" = []),
+        ("bearer" = []),
     )
 )]
 #[instrument(name = "routes::users::get_image", skip(_user, state), err(Debug))]
@@ -886,19 +944,24 @@ async fn get_image(
 /// * `req` - The notification to create
 #[utoipa::path(
     post,
-    path = "/api/users/notifications/{username}",
+    path = "/api/users/notifications/{id}",
     params(
-        ("username" = String, Path, description = "The user to notify"),
-        ("params" = NotificationParams, description = "Whether the notification expires"),
-        ("req" = NotificationRequest<User>, description = "The notification to create")
+        ("id" = String, Path, description = "The user to notify"),
+        NotificationParams,
     ),
+    request_body = NotificationRequest<User>,
     responses(
         (status = 204, description = "Notification created"),
-        (status = 401, description = "This user is not authorized to access this route"),
+        (status = 400, description = "The request is invalid: the JSON body is malformed or fails validation; a query parameter has an invalid value"),
+        (status = 401, description = "This user is not authorized to access this route. Only a full token may use this route: a scoped token, including a run token, is refused."),
         (status = 404, description = "The user doesn't exist"),
+        (status = 422, description = "The JSON body is well formed but does not match the expected shape, for example a required field is missing or has the wrong type"),
+        (status = 500, description = "An internal error occurred, such as a backing database, cache or object store failing"),
+        (status = 503, description = "A service Thorium depends on, such as Redis or LDAP, is unavailable"),
     ),
     security(
         ("basic" = []),
+        ("bearer" = []),
     )
 )]
 #[instrument(name = "routes::users::create_notification", skip_all, err(Debug))]
@@ -929,11 +992,14 @@ async fn create_notification(
     path = "/api/users/notifications/",
     params(),
     responses(
-        (status = 200, description = "The caller's own notifications"),
+        (status = 200, description = "The caller's own notifications", body = Vec<UserNotification>),
         (status = 401, description = "This user is not authorized to access this route"),
+        (status = 500, description = "An internal error occurred, such as a backing database, cache or object store failing"),
+        (status = 503, description = "A service Thorium depends on, such as Redis or LDAP, is unavailable"),
     ),
     security(
         ("basic" = []),
+        ("bearer" = []),
     )
 )]
 #[instrument(name = "routes::users::get_notifications", skip_all, err(Debug))]
@@ -962,11 +1028,15 @@ async fn get_notifications(
     ),
     responses(
         (status = 204, description = "Notification dismissed"),
-        (status = 401, description = "This user is not authorized to access this route"),
+        (status = 400, description = "The request is invalid: a path parameter has an invalid value"),
+        (status = 401, description = "This user is not authorized to access this route. Only a full token may use this route: a scoped token, including a run token, is refused."),
         (status = 404, description = "The caller has no notification with this id"),
+        (status = 500, description = "An internal error occurred, such as a backing database, cache or object store failing"),
+        (status = 503, description = "A service Thorium depends on, such as Redis or LDAP, is unavailable"),
     ),
     security(
         ("basic" = []),
+        ("bearer" = []),
     )
 )]
 #[instrument(name = "routes::users::delete_notification", skip_all, err(Debug))]
@@ -998,11 +1068,15 @@ async fn delete_notification(
     ),
     responses(
         (status = 200, description = "The credential with its secrets", body = UserCredentialRef),
-        (status = 401, description = "This user is not an admin"),
+        (status = 400, description = "The request is invalid: a path parameter has an invalid value"),
+        (status = 401, description = "This user is not an admin. Only a full token may use this route: a scoped token, including a run token, is refused."),
         (status = 404, description = "The user doesn't exist or has no credential for the endpoint"),
+        (status = 500, description = "An internal error occurred, such as a backing database, cache or object store failing"),
+        (status = 503, description = "A service Thorium depends on, such as Redis or LDAP, is unavailable"),
     ),
     security(
         ("basic" = []),
+        ("bearer" = []),
     )
 )]
 #[instrument(name = "routes::users::user_model_credential", skip_all, err(Debug))]
@@ -1033,7 +1107,7 @@ async fn user_model_credential(
 #[openapi(
     paths(list, create, update, resend_email_verification, verify_email, list_details, auth, get_user, update_user, info, logout, logout_user, delete_user, sync_ldap, create_scoped_token, list_scoped_tokens, get_scoped_token, update_scoped_token, delete_scoped_token, upload_image, delete_image, get_image, create_notification, get_notifications, delete_notification, user_model_credential),
     components(schemas(AuthResponse, ScrubbedUser, Theme, UnixInfo, User, UserCreate, UserRole, UserSettings, UserSettingsUpdate, UserUpdate, AiSettings, AiSettingsUpdate, AiEndpoint, AiEndpointUpdate, RunTokenScope, ScopedToken, ScopedTokenRequest, ScopedTokenUpdate, UserModelSettings, UserModelEndpoint, UserCredentialRef, UserModelSettingsUpdate)),
-    modifiers(&OpenApiSecurity),
+    modifiers(&OpenApiSecurity, &OpenApiParameterExamples),
 )]
 pub struct UserApiDocs;
 

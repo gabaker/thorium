@@ -1227,6 +1227,8 @@ fn default_list_limit() -> usize {
 
 #[derive(Deserialize, Debug)]
 #[cfg_attr(feature = "api", derive(utoipa::ToSchema))]
+#[cfg_attr(feature = "api", derive(utoipa::IntoParams))]
+#[cfg_attr(feature = "api", into_params(parameter_in = Query))]
 pub struct NetworkPolicyListParams {
     /// The cursor id to use if one exists
     pub cursor: Option<Uuid>,

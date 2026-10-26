@@ -688,9 +688,12 @@ impl OutputKind {
 /// The query params for downloading result files
 #[derive(Deserialize, Debug)]
 #[cfg_attr(feature = "api", derive(utoipa::ToSchema))]
+#[cfg_attr(feature = "api", derive(utoipa::IntoParams))]
+#[cfg_attr(feature = "api", into_params(parameter_in = Query))]
 pub struct ResultFileDownloadParams {
     /// The path to the result file to download
     #[cfg_attr(feature = "api", schema(value_type = String))]
+    #[cfg_attr(feature = "api", param(value_type = String))]
     pub result_file: PathBuf,
 }
 

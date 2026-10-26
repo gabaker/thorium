@@ -43,6 +43,8 @@ fn default_job_list_limit() -> u64 {
 /// The query params for a map request
 #[derive(Deserialize, Debug)]
 #[cfg_attr(feature = "api", derive(utoipa::ToSchema))]
+#[cfg_attr(feature = "api", derive(utoipa::IntoParams))]
+#[cfg_attr(feature = "api", into_params(parameter_in = Query))]
 pub struct JobListOpts {
     /// The number of objects to skip in the stream
     #[serde(default)]

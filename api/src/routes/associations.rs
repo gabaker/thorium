@@ -5,6 +5,9 @@ use axum::extract::{Json, State};
 use axum::http::StatusCode;
 use axum::routing::post;
 use tracing::instrument;
+use utoipa::OpenApi;
+
+use super::{OpenApiParameterExamples, OpenApiSecurity};
 
 use crate::models::AuthedUser;
 use crate::models::{AssociationDeleteRequest, AssociationKind, AssociationRequest};
@@ -40,6 +43,25 @@ fn refuse_run_token_on_graph_edges(
 /// * `user` - The user that is creating associations
 /// * `state` - Shared Thorium objects
 /// * `req` - The association request to apply
+#[utoipa::path(
+    post,
+    path = "/api/associations/",
+    request_body = AssociationRequest,
+    responses(
+        (status = 204, description = "Associations created"),
+        (status = 400, description = "The request was invalid, such as a kind that must be created through its own field"),
+        (status = 401, description = "This user is not authorized to create these associations. A run token is refused for the graph-edge kinds"),
+        (status = 404, description = "The source or a target does not exist"),
+        (status = 409, description = "The association would break a graph or integrity rule"),
+        (status = 422, description = "The JSON body is well formed but does not match the expected shape, for example a required field is missing or has the wrong type"),
+        (status = 500, description = "An internal error occurred, such as a backing database, cache or object store failing"),
+        (status = 503, description = "A service Thorium depends on, such as Redis or LDAP, is unavailable"),
+    ),
+    security(
+        ("basic" = []),
+        ("bearer" = []),
+    )
+)]
 #[instrument(name = "routes::associations::create", skip_all, err(Debug))]
 async fn create(
     user: AuthedUser,
@@ -68,11 +90,15 @@ async fn create(
     responses(
         (status = 204, description = "Associations deleted"),
         (status = 400, description = "No targets were set"),
-        (status = 401, description = "This user is not authorized to delete these associations"),
+        (status = 401, description = "This user is not authorized to delete these associations. A run token is refused for the graph-edge kinds"),
         (status = 404, description = "The source does not exist or no matching associations were found"),
+        (status = 422, description = "The JSON body is well formed but does not match the expected shape, for example a required field is missing or has the wrong type"),
+        (status = 500, description = "An internal error occurred, such as a backing database, cache or object store failing"),
+        (status = 503, description = "A service Thorium depends on, such as Redis or LDAP, is unavailable"),
     ),
     security(
         ("basic" = []),
+        ("bearer" = []),
     )
 )]
 #[instrument(name = "routes::associations::delete", skip_all, err(Debug))]
@@ -94,6 +120,15 @@ async fn delete(
 /// # Arguments
 ///
 // * `router` - The router to add routes too
+/// The struct containing our openapi docs
+#[derive(OpenApi)]
+#[openapi(
+    paths(create, delete),
+    components(schemas(AssociationDeleteRequest, AssociationRequest)),
+    modifiers(&OpenApiSecurity, &OpenApiParameterExamples),
+)]
+pub struct AssociationApiDocs;
+
 pub fn mount(router: Router<AppState>) -> Router<AppState> {
     router.route("/associations/", post(create).delete(delete))
 }

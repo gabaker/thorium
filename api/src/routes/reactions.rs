@@ -11,7 +11,7 @@ use tracing::instrument;
 use utoipa::OpenApi;
 use uuid::Uuid;
 
-use super::OpenApiSecurity;
+use super::{OpenApiParameterExamples, OpenApiSecurity};
 use crate::models::AuthedUser;
 use crate::models::backends::reactions::ReactionCursorParam;
 use crate::models::{
@@ -53,15 +53,19 @@ fn refuse_run_token(user: &AuthedUser) -> Result<(), ApiError> {
 #[utoipa::path(
     post,
     path = "/api/reactions/",
-    params(
-        ("req" = ReactionRequest, description = "The reaction request used to create a reqction"),
-    ),
+    request_body = ReactionRequest,
     responses(
-        (status = 200, description = "Pipeline created", body = ReactionIdResponse),
-        (status = 401, description = "This user is not authorized to access this route"),
+        (status = 200, description = "Reaction created", body = ReactionIdResponse),
+        (status = 400, description = "The request is invalid: the JSON body is malformed or fails validation"),
+        (status = 401, description = "This user is not authorized to access this route. A run token is refused."),
+        (status = 404, description = "A resource named in the request, such as a path value, group or body field, does not exist or is not visible to this user"),
+        (status = 422, description = "The JSON body is well formed but does not match the expected shape, for example a required field is missing or has the wrong type"),
+        (status = 500, description = "An internal error occurred, such as a backing database, cache or object store failing"),
+        (status = 503, description = "A service Thorium depends on, such as Redis or LDAP, is unavailable"),
     ),
     security(
         ("basic" = []),
+        ("bearer" = []),
     )
 )]
 #[instrument(name = "routes::reactions::create", skip_all, err(Debug))]
@@ -97,15 +101,19 @@ async fn create(
 #[utoipa::path(
     post,
     path = "/api/reactions/bulk/",
-    params(
-        ("reqs" = Vec<ReactionRequest>, description = "The reactions to create in bulk"),
-    ),
+    request_body = Vec<ReactionRequest>,
     responses(
-        (status = 200, description = "Pipeline created", body = BulkReactionResponse),
-        (status = 401, description = "This user is not authorized to access this route"),
+        (status = 200, description = "The reactions that were created and the requests that were refused", body = BulkReactionResponse),
+        (status = 400, description = "The request is invalid: the JSON body is malformed or fails validation"),
+        (status = 401, description = "This user is not authorized to access this route. A run token is refused."),
+        (status = 404, description = "A pipeline a reaction names does not exist"),
+        (status = 422, description = "The JSON body is well formed but does not match the expected shape, for example a required field is missing or has the wrong type"),
+        (status = 500, description = "An internal error occurred, such as a backing database, cache or object store failing"),
+        (status = 503, description = "A service Thorium depends on, such as Redis or LDAP, is unavailable"),
     ),
     security(
         ("basic" = []),
+        ("bearer" = []),
     )
 )]
 #[instrument(name = "routes::reactions::create_bulk", skip_all, err(Debug))]
@@ -121,15 +129,33 @@ async fn create_bulk(
     Ok(Json(response))
 }
 
-/// Creates new reactions in bulk
+/// Creates new reactions in bulk as other users
 ///
-/// Scoped tokens cannot create reactions as other users.
+/// Only admins authenticated with their full token can create reactions as other users.
 ///
 /// # Arguments
 ///
 /// * `user` - The user that is creating these reactions
 /// * `state` - Shared Thorium objects
 /// * `reqs` - The reactions to create in bulk, by the name of the user to create them as
+#[utoipa::path(
+    post,
+    path = "/api/reactions/bulk/by/user/",
+    request_body = HashMap<String, Vec<ReactionRequest>>,
+    responses(
+        (status = 200, description = "The reactions created for each user, with an error for every refused request", body = HashMap<String, BulkReactionResponse>),
+        (status = 400, description = "The request is invalid: the JSON body is malformed or fails validation"),
+        (status = 401, description = "Only admins with a full token can create reactions as other users. Only a full token may use this route: a scoped token, including a run token, is refused."),
+        (status = 404, description = "A named user does not exist"),
+        (status = 422, description = "The JSON body is well formed but does not match the expected shape, for example a required field is missing or has the wrong type"),
+        (status = 500, description = "An internal error occurred, such as a backing database, cache or object store failing"),
+        (status = 503, description = "A service Thorium depends on, such as Redis or LDAP, is unavailable"),
+    ),
+    security(
+        ("basic" = []),
+        ("bearer" = []),
+    )
+)]
 #[instrument(name = "routes::reactions::create_bulk_by_user", skip_all, err(Debug))]
 async fn create_bulk_by_user(
     user: AuthedUser,
@@ -153,17 +179,22 @@ async fn create_bulk_by_user(
 /// * `state` - Shared Thorium objects
 #[utoipa::path(
     get,
-    path = "/api/reactions/:group/:id",
+    path = "/api/reactions/{group}/{id}",
     params(
         ("group" = String, Path, description = "The group this reaction is in"),
         ("id" = Uuid, Path, description = "The uuid of the reaction to get info for"),
     ),
     responses(
         (status = 200, description = "Returned reaction", body = Reaction),
+        (status = 400, description = "The request is invalid: a path parameter has an invalid value"),
         (status = 401, description = "This user is not authorized to access this route"),
+        (status = 404, description = "A resource named in the request, such as a path value, group or body field, does not exist or is not visible to this user"),
+        (status = 500, description = "An internal error occurred, such as a backing database, cache or object store failing"),
+        (status = 503, description = "A service Thorium depends on, such as Redis or LDAP, is unavailable"),
     ),
     security(
         ("basic" = []),
+        ("bearer" = []),
     )
 )]
 #[instrument(name = "routes::reactions::get", skip_all, err(Debug))]
@@ -189,18 +220,22 @@ async fn get_reaction(
 /// * `state` - Shared Thorium objects
 #[utoipa::path(
     get,
-    path = "/api/reactions/:group/:id/run-token",
+    path = "/api/reactions/{group}/{id}/run-token",
     params(
         ("group" = String, Path, description = "The group the run's reaction is in"),
         ("id" = Uuid, Path, description = "The id of the run's reaction"),
     ),
     responses(
         (status = 200, description = "The run's token", body = ScopedToken),
+        (status = 400, description = "The request is invalid: a path parameter has an invalid value"),
         (status = 401, description = "This user is not an admin authenticated with their full token"),
-        (status = 404, description = "The reaction has no run token"),
+        (status = 404, description = "The reaction has no run token: it never had one, the token stored under its name is not scoped to this run, or the run's creator can no longer edit in the group"),
+        (status = 500, description = "An internal error occurred, such as a backing database, cache or object store failing"),
+        (status = 503, description = "A service Thorium depends on, such as Redis or LDAP, is unavailable"),
     ),
     security(
         ("basic" = []),
+        ("bearer" = []),
     )
 )]
 #[instrument(name = "routes::reactions::run_token", skip_all, err(Debug))]
@@ -226,19 +261,23 @@ async fn run_token(
 /// * `state` - Shared Thorium objects
 #[utoipa::path(
     get,
-    path = "/api/reactions/:group/:id/run-models",
+    path = "/api/reactions/{group}/{id}/run-models",
     params(
         ("group" = String, Path, description = "The group the run's reaction is in"),
         ("id" = Uuid, Path, description = "The id of the run's reaction"),
     ),
     responses(
         (status = 200, description = "The run's models with their credentials' secrets", body = RunModels),
+        (status = 400, description = "The request is invalid: a path parameter has an invalid value"),
         (status = 401, description = "This user is not an admin authenticated with their full token"),
-        (status = 404, description = "The reaction has no live run token or no model bindings"),
-        (status = 409, description = "A credential the run is bound to was deleted or is banned"),
+        (status = 404, description = "The reaction has no live run token (it never had one, the token stored under its name is not scoped to this run, or the run's creator can no longer edit in the group) or is not a workflow run with model bindings"),
+        (status = 409, description = "A credential or endpoint the run is bound to was deleted, a credential it is bound to is banned, or an endpoint it is bound to is banned `NotAllowedByDeployment` or no longer on the deployment's allowed endpoint list"),
+        (status = 500, description = "An internal error occurred, such as a backing database, cache or object store failing"),
+        (status = 503, description = "A service Thorium depends on, such as Redis or LDAP, is unavailable"),
     ),
     security(
         ("basic" = []),
+        ("bearer" = []),
     )
 )]
 #[instrument(name = "routes::reactions::run_models", skip_all, err(Debug))]
@@ -262,19 +301,23 @@ async fn run_models(
 /// * `req` - The inputs, run group, and args of the run
 #[utoipa::path(
     post,
-    path = "/api/tools/instances/:id/runs",
+    path = "/api/tools/instances/{id}/runs",
     params(
         ("id" = Uuid, Path, description = "The id of the tool instance to run"),
-        ("req" = ToolRunRequest, description = "The inputs, run group, and args of the run"),
     ),
+    request_body = ToolRunRequest,
     responses(
         (status = 200, description = "The run's reaction was created", body = ReactionIdResponse),
         (status = 400, description = "The run has no inputs, the tool instance can't be run directly, or several run groups are possible"),
         (status = 401, description = "This user can't run the tool instance in any of its groups, or a run token names a tool instance outside its run or overrides its args"),
         (status = 404, description = "The tool instance or an input doesn't exist or isn't visible"),
+        (status = 422, description = "The JSON body is well formed but does not match the expected shape, for example a required field is missing or has the wrong type"),
+        (status = 500, description = "An internal error occurred, such as a backing database, cache or object store failing"),
+        (status = 503, description = "A service Thorium depends on, such as Redis or LDAP, is unavailable"),
     ),
     security(
         ("basic" = []),
+        ("bearer" = []),
     )
 )]
 #[instrument(name = "routes::reactions::run_tool", skip_all, err(Debug))]
@@ -306,19 +349,23 @@ async fn run_tool(
 /// * `req` - The inputs and run group of the run
 #[utoipa::path(
     post,
-    path = "/api/workflows/instances/:id/runs",
+    path = "/api/workflows/instances/{id}/runs",
     params(
         ("id" = Uuid, Path, description = "The id of the workflow instance to run"),
-        ("req" = WorkflowRunRequest, description = "The inputs and run group of the run"),
     ),
+    request_body = WorkflowRunRequest,
     responses(
         (status = 200, description = "The run's reaction was created", body = ReactionIdResponse),
         (status = 400, description = "The instance isn't Ready, the run has no inputs, or several run groups are possible"),
-        (status = 401, description = "This user can't run the workflow instance in any of its groups, or the request used a run token"),
+        (status = 401, description = "This user can't run the workflow instance in any of its groups, or the request used a run token. A run token is refused."),
         (status = 404, description = "The workflow instance or an input doesn't exist or isn't visible"),
+        (status = 422, description = "The JSON body is well formed but does not match the expected shape, for example a required field is missing or has the wrong type"),
+        (status = 500, description = "An internal error occurred, such as a backing database, cache or object store failing"),
+        (status = 503, description = "A service Thorium depends on, such as Redis or LDAP, is unavailable"),
     ),
     security(
         ("basic" = []),
+        ("bearer" = []),
     )
 )]
 #[instrument(name = "routes::reactions::run_workflow", skip_all, err(Debug))]
@@ -345,7 +392,7 @@ async fn run_workflow(
 /// * `state` - Shared Thorium objects
 #[utoipa::path(
     post,
-    path = "/api/workflows/instances/:id/runs/:reaction/retry",
+    path = "/api/workflows/instances/{id}/runs/{reaction}/retry",
     params(
         ("id" = Uuid, Path, description = "The id of the workflow instance the failed run ran"),
         ("reaction" = Uuid, Path, description = "The id of the failed run's reaction"),
@@ -353,11 +400,14 @@ async fn run_workflow(
     responses(
         (status = 200, description = "The retry's reaction was created", body = ReactionIdResponse),
         (status = 400, description = "The reaction isn't a failed run of this instance, or the instance isn't Ready"),
-        (status = 401, description = "This user can't run the workflow instance in the failed run's group, or the request used a run token"),
+        (status = 401, description = "This user can't run the workflow instance in the failed run's group, or the request used a run token. A run token is refused."),
         (status = 404, description = "The workflow instance or the reaction doesn't exist or isn't visible"),
+        (status = 500, description = "An internal error occurred, such as a backing database, cache or object store failing"),
+        (status = 503, description = "A service Thorium depends on, such as Redis or LDAP, is unavailable"),
     ),
     security(
         ("basic" = []),
+        ("bearer" = []),
     )
 )]
 #[instrument(name = "routes::reactions::retry_workflow_run", skip_all, err(Debug))]
@@ -390,18 +440,24 @@ async fn retry_workflow_run(
 /// * `cache_update` - The update to apply to this reactions cache
 #[utoipa::path(
     patch,
-    path = "/api/reactions/:group/:id/cache",
+    path = "/api/reactions/{group}/{id}/cache",
     params(
         ("group" = String, Path, description = "The group this reaction is in"),
-        ("id" = Uuid, Path, description = "The uuid of the reaction to update"),
-        ("cache_update" = ReactionCacheUpdate, description = "The update to apply to this reactions cache"),
+        ("id" = Uuid, Path, description = "The uuid of the reaction to update the cache of"),
     ),
+    request_body = ReactionCacheUpdate,
     responses(
-        (status = 204, description = "Reaction has been updated"),
+        (status = 204, description = "The reactions cache has been updated"),
+        (status = 400, description = "The request is invalid: the JSON body is malformed or fails validation; a path parameter has an invalid value"),
         (status = 401, description = "This user is not authorized to access this route"),
+        (status = 404, description = "The reaction does not exist"),
+        (status = 422, description = "The JSON body is well formed but does not match the expected shape, for example a required field is missing or has the wrong type"),
+        (status = 500, description = "An internal error occurred, such as a backing database, cache or object store failing"),
+        (status = 503, description = "A service Thorium depends on, such as Redis or LDAP, is unavailable"),
     ),
     security(
         ("basic" = []),
+        ("bearer" = []),
     )
 )]
 #[instrument(name = "routes::reactions::update_cache", skip_all, err(Debug))]
@@ -437,18 +493,27 @@ async fn update_cache(
 /// * `multipart` - The multipart form containing the files to upload
 #[utoipa::path(
     patch,
-    path = "/api/reactions/:group/:id/cache/files/",
+    path = "/api/reactions/{group}/{id}/cache/files/",
     params(
         ("group" = String, Path, description = "The group this reaction is in"),
-        ("id" = Uuid, Path, description = "The uuid of the reaction to add a file too"),
-        ("multipart", description = "The multipart form containing the cache file upload")
+        ("id" = Uuid, Path, description = "The uuid of the reaction to add cache files to"),
+    ),
+    request_body(
+        content = Vec<u8>,
+        content_type = "multipart/form-data",
+        description = "The multipart form containing the cache files to upload",
     ),
     responses(
-        (status = 204, description = "Reaction file has been added"),
+        (status = 204, description = "The cache files have been added"),
+        (status = 400, description = "The request is invalid: the multipart form is malformed or fails validation; a path parameter has an invalid value"),
         (status = 401, description = "This user is not authorized to access this route"),
+        (status = 404, description = "The reaction does not exist"),
+        (status = 500, description = "An internal error occurred, such as a backing database, cache or object store failing"),
+        (status = 503, description = "A service Thorium depends on, such as Redis or LDAP, is unavailable"),
     ),
     security(
         ("basic" = []),
+        ("bearer" = []),
     )
 )]
 #[instrument(name = "routes::reactions::update_cache_files", skip_all, err(Debug))]
@@ -468,19 +533,31 @@ async fn update_cache_files(
 }
 
 /// Get a reactions cache
+///
+/// # Arguments
+///
+/// * `user` - The user that is getting this reactions cache
+/// * `group` - The group this reaction is in
+/// * `id` - The uuid of the reaction to get the cache of
+/// * `state` - Shared Thorium objects
 #[utoipa::path(
-    patch,
-    path = "/api/reactions/:group/:id/cache",
+    get,
+    path = "/api/reactions/{group}/{id}/cache",
     params(
         ("group" = String, Path, description = "The group this reaction is in"),
-        ("id" = Uuid, Path, description = "The uuid of the reaction to get info for"),
+        ("id" = Uuid, Path, description = "The uuid of the reaction to get the cache of"),
     ),
     responses(
         (status = 200, description = "This reactions cache", body = ReactionCache),
+        (status = 400, description = "The request is invalid: a path parameter has an invalid value"),
         (status = 401, description = "This user is not authorized to access this route"),
+        (status = 404, description = "The reaction does not exist"),
+        (status = 500, description = "An internal error occurred, such as a backing database, cache or object store failing"),
+        (status = 503, description = "A service Thorium depends on, such as Redis or LDAP, is unavailable"),
     ),
     security(
         ("basic" = []),
+        ("bearer" = []),
     )
 )]
 #[instrument(name = "routes::reactions::get_cache", skip_all, err(Debug))]
@@ -505,22 +582,27 @@ async fn get_cache(
 /// * `reaction` - The uuid of the reaction to download an ephemeral file from
 /// * `name` - The name of the ephemeral file
 /// * `state` - Shared Thorium objects
-//#[utoipa::path(
-//    get,
-//    path = "/api/reactions/:group/:id/cache/files/:repo_path",
-//    params(
-//        ("group" = String, Path, description = "The group this reaction is in"),
-//        ("reaction" = Uuid, Path, description = "The uuid of the reaction to download a cache file from"),
-//        ("path" = String, Path, description = "The path or name of the cache file")
-//    ),
-//    responses(
-//        (status = 200, description = "cache file byte stream", body = Vec<u8>),
-//        (status = 401, description = "This user is not authorized to access this route"),
-//    ),
-//    security(
-//        ("basic" = []),
-//    )
-//)]
+#[utoipa::path(
+    get,
+    path = "/api/reactions/{group}/{id}/cache/files/{path}",
+    params(
+        ("group" = String, Path, description = "The group this reaction is in"),
+        ("id" = Uuid, Path, description = "The uuid of the reaction to download a cache file from"),
+        ("path" = String, Path, description = "The path or name of the cache file, which may contain slashes")
+    ),
+    responses(
+        (status = 200, description = "The cache file as a byte stream", body = Vec<u8>),
+        (status = 400, description = "The request is invalid: a path parameter has an invalid value"),
+        (status = 401, description = "This user is not authorized to access this route"),
+        (status = 404, description = "The reaction or cache file does not exist"),
+        (status = 500, description = "An internal error occurred, such as a backing database, cache or object store failing"),
+        (status = 503, description = "A service Thorium depends on, such as Redis or LDAP, is unavailable"),
+    ),
+    security(
+        ("basic" = []),
+        ("bearer" = []),
+    )
+)]
 #[instrument(name = "routes::reactions::download_cache_file", skip_all, err(Debug))]
 async fn download_cache_file(
     user: AuthedUser,
@@ -552,7 +634,7 @@ async fn download_cache_file(
 /// * `state` - Shared Thorium objects
 #[utoipa::path(
     post,
-    path = "/api/reactions/handle/:group/:id/:cmd",
+    path = "/api/reactions/handle/{group}/{id}/{cmd}",
     params(
         ("group" = String, Path, description = "The group this reaction is in"),
         ("id" = Uuid, Path, description = "The uuid of the reaction to handle a command for"),
@@ -560,10 +642,16 @@ async fn download_cache_file(
     ),
     responses(
         (status = 202, description = "Returned reaction", body = HandleReactionResponse),
+        (status = 400, description = "The request is invalid: a path parameter has an invalid value"),
         (status = 401, description = "This user is not authorized to access this route"),
+        (status = 404, description = "A resource named in the request, such as a path value, group or body field, does not exist or is not visible to this user"),
+        (status = 409, description = "The reaction has already completed or failed"),
+        (status = 500, description = "An internal error occurred, such as a backing database, cache or object store failing"),
+        (status = 503, description = "A service Thorium depends on, such as Redis or LDAP, is unavailable"),
     ),
     security(
         ("basic" = []),
+        ("bearer" = []),
     )
 )]
 #[instrument(name = "routes::reactions::handle", skip_all, err(Debug))]
@@ -606,18 +694,23 @@ async fn handle(
 /// * `state` - Shared Thorium objects
 #[utoipa::path(
     get,
-    path = "/api/reactions/logs/:group/:id",
+    path = "/api/reactions/logs/{group}/{id}",
     params(
         ("group" = String, Path, description = "The group this reaction is in"),
         ("id" = Uuid, Path, description = "The uuid of the reaction to get status logs for"),
-        ("params" = ReactionListParams, Query, description = "The query params to use for this request")
+        ReactionListParams,
     ),
     responses(
         (status = 200, description = "Returned reaction", body = Vec<StatusUpdate>),
+        (status = 400, description = "The request is invalid: a path parameter has an invalid value; a query parameter has an invalid value"),
         (status = 401, description = "This user is not authorized to access this route"),
+        (status = 404, description = "A resource named in the request, such as a path value, group or body field, does not exist or is not visible to this user"),
+        (status = 500, description = "An internal error occurred, such as a backing database, cache or object store failing"),
+        (status = 503, description = "A service Thorium depends on, such as Redis or LDAP, is unavailable"),
     ),
     security(
         ("basic" = []),
+        ("bearer" = []),
     )
 )]
 #[instrument(name = "routes::reactions::logs", skip_all, err(Debug))]
@@ -648,19 +741,25 @@ async fn logs(
 /// * `logs` - The stdout/stderr logs to add
 #[utoipa::path(
     post,
-    path = "/api/reactions/logs/:group/:id/:stage",
+    path = "/api/reactions/logs/{group}/{id}/{stage}",
     params(
         ("group" = String, Path, description = "The group this reaction is in"),
         ("id" = Uuid, Path, description = "The uuid of the reaction to add stage logs"),
         ("stage" = String, Path, description = "The stage these logs are for"),
-        ("logs" = StageLogsAdd, description = "The stdout/stderr logs to add")
     ),
+    request_body = StageLogsAdd,
     responses(
         (status = 204, description = "Stage logs added"),
+        (status = 400, description = "The request is invalid: the JSON body is malformed or fails validation; a path parameter has an invalid value"),
         (status = 401, description = "This user is not authorized to access this route"),
+        (status = 404, description = "A resource named in the request, such as a path value, group or body field, does not exist or is not visible to this user"),
+        (status = 422, description = "The JSON body is well formed but does not match the expected shape, for example a required field is missing or has the wrong type"),
+        (status = 500, description = "An internal error occurred, such as a backing database, cache or object store failing"),
+        (status = 503, description = "A service Thorium depends on, such as Redis or LDAP, is unavailable"),
     ),
     security(
         ("basic" = []),
+        ("bearer" = []),
     )
 )]
 #[instrument(name = "routes::reactions::add_stage_logs", skip_all, err(Debug))]
@@ -691,19 +790,24 @@ async fn add_stage_logs(
 /// * `state` - Shared Thorium objects
 #[utoipa::path(
     get,
-    path = "/api/reactions/logs/:group/:id/:stage",
+    path = "/api/reactions/logs/{group}/{id}/{stage}",
     params(
         ("group" = String, Path, description = "The group this reaction is in"),
         ("id" = Uuid, Path, description = "The uuid of the reaction to get stage logs for"),
         ("stage" = String, Path, description = "The stage to get logs from"),
-        ("params" = ReactionListParams, Query, description = "The query params to use for this request")
+        ReactionListParams,
     ),
     responses(
         (status = 200, description = "Logs for the requested reaction stage", body = StageLogs),
+        (status = 400, description = "The request is invalid: a path parameter has an invalid value; a query parameter has an invalid value"),
         (status = 401, description = "This user is not authorized to access this route"),
+        (status = 404, description = "A resource named in the request, such as a path value, group or body field, does not exist or is not visible to this user"),
+        (status = 500, description = "An internal error occurred, such as a backing database, cache or object store failing"),
+        (status = 503, description = "A service Thorium depends on, such as Redis or LDAP, is unavailable"),
     ),
     security(
         ("basic" = []),
+        ("bearer" = []),
     )
 )]
 #[instrument(name = "routes::reactions::stage_logs", skip_all, err(Debug))]
@@ -733,18 +837,23 @@ async fn stage_logs(
 /// * `state` - Shared Thorium objects
 #[utoipa::path(
     get,
-    path = "/api/reactions/list/:group/:pipeline/",
+    path = "/api/reactions/list/{group}/{pipeline}/",
     params(
         ("group" = String, Path, description = "The group this reaction is in"),
         ("pipeline" = String, Path, description = "The pipeline to list reactions from"),
-        ("params" = ReactionListParams, Query, description = "The query params to use for this request")
+        ReactionListParams,
     ),
     responses(
         (status = 200, description = "Reactions for this pipeline", body = ReactionList),
+        (status = 400, description = "The request is invalid: a query parameter has an invalid value"),
         (status = 401, description = "This user is not authorized to access this route"),
+        (status = 404, description = "A resource named in the request, such as a path value, group or body field, does not exist or is not visible to this user"),
+        (status = 500, description = "An internal error occurred, such as a backing database, cache or object store failing"),
+        (status = 503, description = "A service Thorium depends on, such as Redis or LDAP, is unavailable"),
     ),
     security(
         ("basic" = []),
+        ("bearer" = []),
     )
 )]
 #[instrument(name = "routes::reactions::list", skip_all, err(Debug))]
@@ -772,18 +881,23 @@ async fn list(
 /// * `state` - Shared Thorium objects
 #[utoipa::path(
     get,
-    path = "/api/reactions/list/:group/:pipeline/details/",
+    path = "/api/reactions/list/{group}/{pipeline}/details/",
     params(
         ("group" = String, Path, description = "The group this reaction is in"),
         ("pipeline" = String, Path, description = "The pipeline to list reactions from"),
-        ("params" = ReactionListParams, Query, description = "The query params to use for this request")
+        ReactionListParams,
     ),
     responses(
         (status = 200, description = "Reaction details for this pipeline", body = ReactionDetailsList),
+        (status = 400, description = "The request is invalid: a query parameter has an invalid value"),
         (status = 401, description = "This user is not authorized to access this route"),
+        (status = 404, description = "A resource named in the request, such as a path value, group or body field, does not exist or is not visible to this user"),
+        (status = 500, description = "An internal error occurred, such as a backing database, cache or object store failing"),
+        (status = 503, description = "A service Thorium depends on, such as Redis or LDAP, is unavailable"),
     ),
     security(
         ("basic" = []),
+        ("bearer" = []),
     )
 )]
 #[instrument(name = "routes::reactions::list_details", skip_all, err(Debug))]
@@ -815,19 +929,24 @@ async fn list_details(
 /// * `state` - Shared Thorium objects
 #[utoipa::path(
     get,
-    path = "/api/reactions/status/:group/:pipeline/:status/",
+    path = "/api/reactions/status/{group}/{pipeline}/{status}/",
     params(
         ("group" = String, Path, description = "The group to list reactions from"),
         ("pipeline" = String, Path, description = "The pipeline to list reactions from"),
         ("status" = ReactionStatus, Path, description = "The status to list reactions for"),
-        ("params" = ReactionListParams, Query, description = "The query params to use for this request")
+        ReactionListParams,
     ),
     responses(
         (status = 200, description = "Reactions for this specific pipeline and status", body = ReactionList),
+        (status = 400, description = "The request is invalid: a path parameter has an invalid value; a query parameter has an invalid value"),
         (status = 401, description = "This user is not authorized to access this route"),
+        (status = 404, description = "A resource named in the request, such as a path value, group or body field, does not exist or is not visible to this user"),
+        (status = 500, description = "An internal error occurred, such as a backing database, cache or object store failing"),
+        (status = 503, description = "A service Thorium depends on, such as Redis or LDAP, is unavailable"),
     ),
     security(
         ("basic" = []),
+        ("bearer" = []),
     )
 )]
 #[instrument(name = "routes::reactions::list_status", skip_all, err(Debug))]
@@ -864,19 +983,24 @@ async fn list_status(
 /// * `state` - Shared Thorium objects
 #[utoipa::path(
     get,
-    path = "/api/reactions/status/:group/:pipeline/:status/details/",
+    path = "/api/reactions/status/{group}/{pipeline}/{status}/details/",
     params(
         ("group" = String, Path, description = "The group to list reactions from"),
         ("pipeline" = String, Path, description = "The pipeline to list reactions from"),
         ("status" = ReactionStatus, Path, description = "The status to list reactions for"),
-        ("params" = ReactionListParams, Query, description = "The query params to use for this request")
+        ReactionListParams,
     ),
     responses(
         (status = 200, description = "Reaction details for this specific pipeline and status", body = ReactionDetailsList),
+        (status = 400, description = "The request is invalid: a path parameter has an invalid value; a query parameter has an invalid value"),
         (status = 401, description = "This user is not authorized to access this route"),
+        (status = 404, description = "A resource named in the request, such as a path value, group or body field, does not exist or is not visible to this user"),
+        (status = 500, description = "An internal error occurred, such as a backing database, cache or object store failing"),
+        (status = 503, description = "A service Thorium depends on, such as Redis or LDAP, is unavailable"),
     ),
     security(
         ("basic" = []),
+        ("bearer" = []),
     )
 )]
 #[instrument(name = "routes::reactions::list_status_details", skip_all, err(Debug))]
@@ -913,17 +1037,22 @@ async fn list_status_details(
 /// * `state` - Shared Thorium objects
 #[utoipa::path(
     get,
-    path = "/api/reactions/list/:pipeline/",
+    path = "/api/reactions/list/{pipeline}/",
     params(
         ("pipeline" = String, Path, description = "The pipeline to list reactions from"),
-        ("params" = ReactionCursorParams, Query, description = "The query params to use for this request")
+        ReactionCursorParams,
     ),
     responses(
         (status = 200, description = "A page of reaction ids for this pipeline and a cursor id if more data may exist", body = ApiCursor<String>),
+        (status = 400, description = "The request is invalid: a query parameter has an invalid value"),
         (status = 401, description = "This user is not authorized to access this route"),
+        (status = 404, description = "A resource named in the request, such as a path value, group or body field, does not exist or is not visible to this user"),
+        (status = 500, description = "An internal error occurred, such as a backing database, cache or object store failing"),
+        (status = 503, description = "A service Thorium depends on, such as Redis or LDAP, is unavailable"),
     ),
     security(
         ("basic" = []),
+        ("bearer" = []),
     )
 )]
 #[instrument(name = "routes::reactions::list_new", skip_all, err(Debug))]
@@ -951,18 +1080,23 @@ async fn list_new(
 /// * `state` - Shared Thorium objects
 #[utoipa::path(
     get,
-    path = "/api/reactions/status/:pipeline/:status/",
+    path = "/api/reactions/status/{pipeline}/{status}/",
     params(
         ("pipeline" = String, Path, description = "The pipeline to list reactions from"),
         ("status" = ReactionStatus, Path, description = "The status to list reactions for"),
-        ("params" = ReactionCursorParams, Query, description = "The query params to use for this request")
+        ReactionCursorParams,
     ),
     responses(
         (status = 200, description = "A page of reaction ids with this status and a cursor id if more data may exist", body = ApiCursor<String>),
+        (status = 400, description = "The request is invalid: a path parameter has an invalid value; a query parameter has an invalid value"),
         (status = 401, description = "This user is not authorized to access this route"),
+        (status = 404, description = "A resource named in the request, such as a path value, group or body field, does not exist or is not visible to this user"),
+        (status = 500, description = "An internal error occurred, such as a backing database, cache or object store failing"),
+        (status = 503, description = "A service Thorium depends on, such as Redis or LDAP, is unavailable"),
     ),
     security(
         ("basic" = []),
+        ("bearer" = []),
     )
 )]
 #[instrument(name = "routes::reactions::list_status_new", skip_all, err(Debug))]
@@ -994,18 +1128,23 @@ async fn list_status_new(
 /// * `state` - Shared Thorium objects
 #[utoipa::path(
     get,
-    path = "/api/reactions/tag/:group/:tag/",
+    path = "/api/reactions/tag/{group}/{tag}/",
     params(
         ("group" = String, Path, description = "The group to list reactions from"),
         ("tag" = String, Path, description = "The tag to list reactions from"),
-        ("params" = ReactionListParams, Query, description = "The query params to use for this request")
+        ReactionListParams,
     ),
     responses(
         (status = 200, description = "Reactions with the specified tag", body = ReactionList),
+        (status = 400, description = "The request is invalid: a query parameter has an invalid value"),
         (status = 401, description = "This user is not authorized to access this route"),
+        (status = 404, description = "A resource named in the request, such as a path value, group or body field, does not exist or is not visible to this user"),
+        (status = 500, description = "An internal error occurred, such as a backing database, cache or object store failing"),
+        (status = 503, description = "A service Thorium depends on, such as Redis or LDAP, is unavailable"),
     ),
     security(
         ("basic" = []),
+        ("bearer" = []),
     )
 )]
 #[instrument(name = "routes::reactions::list_tag", skip_all, err(Debug))]
@@ -1033,17 +1172,22 @@ async fn list_tag(
 /// * `state` - Shared Thorium objects
 #[utoipa::path(
     get,
-    path = "/api/reactions/tag/:tag/",
+    path = "/api/reactions/tag/{tag}/",
     params(
         ("tag" = String, Path, description = "The tag to list reactions from"),
-        ("params" = ReactionCursorParams, Query, description = "The query params to use for this request")
+        ReactionCursorParams,
     ),
     responses(
         (status = 200, description = "A page of reaction ids with this tag and a cursor id if more data may exist", body = ApiCursor<String>),
+        (status = 400, description = "The request is invalid: a query parameter has an invalid value"),
         (status = 401, description = "This user is not authorized to access this route"),
+        (status = 404, description = "A resource named in the request, such as a path value, group or body field, does not exist or is not visible to this user"),
+        (status = 500, description = "An internal error occurred, such as a backing database, cache or object store failing"),
+        (status = 503, description = "A service Thorium depends on, such as Redis or LDAP, is unavailable"),
     ),
     security(
         ("basic" = []),
+        ("bearer" = []),
     )
 )]
 #[instrument(name = "routes::reactions::list_tag_new", skip_all, err(Debug))]
@@ -1071,18 +1215,23 @@ async fn list_tag_new(
 /// * `state` - Shared Thorium objects
 #[utoipa::path(
     get,
-    path = "/api/reactions/tag/:group/:tag/details/",
+    path = "/api/reactions/tag/{group}/{tag}/details/",
     params(
         ("group" = String, Path, description = "The group to list reactions from"),
         ("tag" = String, Path, description = "The tag to list reactions from"),
-        ("params" = ReactionListParams, Query, description = "The query params to use for this request")
+        ReactionListParams,
     ),
     responses(
         (status = 200, description = "Reaction details for the specified tag", body = ReactionDetailsList),
+        (status = 400, description = "The request is invalid: a query parameter has an invalid value"),
         (status = 401, description = "This user is not authorized to access this route"),
+        (status = 404, description = "A resource named in the request, such as a path value, group or body field, does not exist or is not visible to this user"),
+        (status = 500, description = "An internal error occurred, such as a backing database, cache or object store failing"),
+        (status = 503, description = "A service Thorium depends on, such as Redis or LDAP, is unavailable"),
     ),
     security(
         ("basic" = []),
+        ("bearer" = []),
     )
 )]
 #[instrument(name = "routes::reactions::list_tag_details", skip_all, err(Debug))]
@@ -1113,18 +1262,23 @@ async fn list_tag_details(
 /// * `state` - Shared Thorium objects
 #[utoipa::path(
     get,
-    path = "/api/reactions/group/:group/:status/",
+    path = "/api/reactions/group/{group}/{status}/",
     params(
         ("group" = String, Path, description = "The group to list reactions from"),
         ("status" = ReactionStatus, Path, description = "The status to list reactions for"),
-        ("params" = ReactionListParams, Query, description = "The query params to use for this request")
+        ReactionListParams,
     ),
     responses(
         (status = 200, description = "Reactions for the specified group and status", body = ReactionList),
+        (status = 400, description = "The request is invalid: a path parameter has an invalid value; a query parameter has an invalid value"),
         (status = 401, description = "This user is not authorized to access this route"),
+        (status = 404, description = "A resource named in the request, such as a path value, group or body field, does not exist or is not visible to this user"),
+        (status = 500, description = "An internal error occurred, such as a backing database, cache or object store failing"),
+        (status = 503, description = "A service Thorium depends on, such as Redis or LDAP, is unavailable"),
     ),
     security(
         ("basic" = []),
+        ("bearer" = []),
     )
 )]
 #[instrument(name = "routes::reactions::list_group_set", skip_all, err(Debug))]
@@ -1154,18 +1308,23 @@ async fn list_group_set(
 /// * `state` - Shared Thorium objects
 #[utoipa::path(
     get,
-    path = "/api/reactions/group/:group/:status/details/",
+    path = "/api/reactions/group/{group}/{status}/details/",
     params(
         ("group" = String, Path, description = "The group to list reactions from"),
         ("status" = ReactionStatus, Path, description = "The status to list reactions for"),
-        ("params" = ReactionListParams, Query, description = "The query params to use for this request")
+        ReactionListParams,
     ),
     responses(
         (status = 200, description = "Reaction details for the specified group and status", body = ReactionDetailsList),
+        (status = 400, description = "The request is invalid: a path parameter has an invalid value; a query parameter has an invalid value"),
         (status = 401, description = "This user is not authorized to access this route"),
+        (status = 404, description = "A resource named in the request, such as a path value, group or body field, does not exist or is not visible to this user"),
+        (status = 500, description = "An internal error occurred, such as a backing database, cache or object store failing"),
+        (status = 503, description = "A service Thorium depends on, such as Redis or LDAP, is unavailable"),
     ),
     security(
         ("basic" = []),
+        ("bearer" = []),
     )
 )]
 #[instrument(
@@ -1201,18 +1360,23 @@ async fn list_group_set_details(
 /// * `state` - Shared Thorium objects
 #[utoipa::path(
     get,
-    path = "/api/reactions/sub/:group/:reaction/",
+    path = "/api/reactions/sub/{group}/{reaction}/",
     params(
         ("group" = String, Path, description = "The group to list sub reactions from"),
         ("reaction" = Uuid, Path, description = "The parent reaction to list sub reactions for"),
-        ("params" = ReactionListParams, Query, description = "The query params to use for this request")
+        ReactionListParams,
     ),
     responses(
         (status = 200, description = "Sub-reactions for the specified group and parent reaction", body = ReactionList),
+        (status = 400, description = "The request is invalid: a path parameter has an invalid value; a query parameter has an invalid value"),
         (status = 401, description = "This user is not authorized to access this route"),
+        (status = 404, description = "A resource named in the request, such as a path value, group or body field, does not exist or is not visible to this user"),
+        (status = 500, description = "An internal error occurred, such as a backing database, cache or object store failing"),
+        (status = 503, description = "A service Thorium depends on, such as Redis or LDAP, is unavailable"),
     ),
     security(
         ("basic" = []),
+        ("bearer" = []),
     )
 )]
 #[instrument(name = "routes::reactions::list_sub", skip_all, err(Debug))]
@@ -1241,19 +1405,24 @@ async fn list_sub(
 /// * `state` - Shared Thorium objects
 #[utoipa::path(
     get,
-    path = "/api/reactions/sub/:group/:reaction/:status/",
+    path = "/api/reactions/sub/{group}/{reaction}/{status}/",
     params(
         ("group" = String, Path, description = "The group to list sub reactions from"),
         ("reaction" = Uuid, Path, description = "The parent reaction to list sub reactions for"),
         ("status" = ReactionStatus, Path, description = "The status to list sub reactions for"),
-        ("params" = ReactionListParams, Query, description = "The query params to use for this request")
+        ReactionListParams,
     ),
     responses(
         (status = 200, description = "Sub-reactions for the specified group and parent reaction and status", body = ReactionList),
+        (status = 400, description = "The request is invalid: a path parameter has an invalid value; a query parameter has an invalid value"),
         (status = 401, description = "This user is not authorized to access this route"),
+        (status = 404, description = "A resource named in the request, such as a path value, group or body field, does not exist or is not visible to this user"),
+        (status = 500, description = "An internal error occurred, such as a backing database, cache or object store failing"),
+        (status = 503, description = "A service Thorium depends on, such as Redis or LDAP, is unavailable"),
     ),
     security(
         ("basic" = []),
+        ("bearer" = []),
     )
 )]
 #[instrument(name = "routes::reactions::list_sub_status", skip_all, err(Debug))]
@@ -1287,17 +1456,22 @@ async fn list_sub_status(
 /// * `state` - Shared Thorium objects
 #[utoipa::path(
     get,
-    path = "/api/reactions/sub/:reaction/",
+    path = "/api/reactions/sub/{reaction}/",
     params(
         ("reaction" = Uuid, Path, description = "The parent reaction to list sub reactions for"),
-        ("params" = ReactionCursorParams, Query, description = "The query params to use for this request")
+        ReactionCursorParams,
     ),
     responses(
         (status = 200, description = "A page of sub reaction ids and a cursor id if more data may exist", body = ApiCursor<String>),
+        (status = 400, description = "The request is invalid: a path parameter has an invalid value; a query parameter has an invalid value"),
         (status = 401, description = "This user is not authorized to access this route"),
+        (status = 404, description = "A resource named in the request, such as a path value, group or body field, does not exist or is not visible to this user"),
+        (status = 500, description = "An internal error occurred, such as a backing database, cache or object store failing"),
+        (status = 503, description = "A service Thorium depends on, such as Redis or LDAP, is unavailable"),
     ),
     security(
         ("basic" = []),
+        ("bearer" = []),
     )
 )]
 #[instrument(name = "routes::reactions::list_sub_new", skip_all, err(Debug))]
@@ -1328,18 +1502,23 @@ async fn list_sub_new(
 /// * `state` - Shared Thorium objects
 #[utoipa::path(
     get,
-    path = "/api/reactions/sub/:reaction/status/:status/",
+    path = "/api/reactions/sub/{reaction}/status/{status}/",
     params(
         ("reaction" = Uuid, Path, description = "The parent reaction to list sub reactions for"),
         ("status" = ReactionStatus, Path, description = "The status to list sub reactions for"),
-        ("params" = ReactionCursorParams, Query, description = "The query params to use for this request")
+        ReactionCursorParams,
     ),
     responses(
         (status = 200, description = "A page of sub reaction ids with this status and a cursor id if more data may exist", body = ApiCursor<String>),
+        (status = 400, description = "The request is invalid: a path parameter has an invalid value; a query parameter has an invalid value"),
         (status = 401, description = "This user is not authorized to access this route"),
+        (status = 404, description = "A resource named in the request, such as a path value, group or body field, does not exist or is not visible to this user"),
+        (status = 500, description = "An internal error occurred, such as a backing database, cache or object store failing"),
+        (status = 503, description = "A service Thorium depends on, such as Redis or LDAP, is unavailable"),
     ),
     security(
         ("basic" = []),
+        ("bearer" = []),
     )
 )]
 #[instrument(name = "routes::reactions::list_sub_status_new", skip_all, err(Debug))]
@@ -1371,18 +1550,23 @@ async fn list_sub_status_new(
 /// * `state` - Shared Thorium objects
 #[utoipa::path(
     get,
-    path = "/api/reactions/sub/:group/:reaction/details/",
+    path = "/api/reactions/sub/{group}/{reaction}/details/",
     params(
         ("group" = String, Path, description = "The group to list sub reactions from"),
         ("reaction" = Uuid, Path, description = "The parent reaction to list sub reactions for"),
-        ("params" = ReactionListParams, Query, description = "The query params to use for this request")
+        ReactionListParams,
     ),
     responses(
         (status = 200, description = "Sub-reaction details for the specified group and parent reaction", body = ReactionDetailsList),
+        (status = 400, description = "The request is invalid: a path parameter has an invalid value; a query parameter has an invalid value"),
         (status = 401, description = "This user is not authorized to access this route"),
+        (status = 404, description = "A resource named in the request, such as a path value, group or body field, does not exist or is not visible to this user"),
+        (status = 500, description = "An internal error occurred, such as a backing database, cache or object store failing"),
+        (status = 503, description = "A service Thorium depends on, such as Redis or LDAP, is unavailable"),
     ),
     security(
         ("basic" = []),
+        ("bearer" = []),
     )
 )]
 #[instrument(name = "routes::reactions::list_sub_details", skip_all, err(Debug))]
@@ -1414,19 +1598,24 @@ async fn list_sub_details(
 /// * `state` - Shared Thorium objects
 #[utoipa::path(
     get,
-    path = "/api/reactions/sub/:group/:reaction/:status/details/",
+    path = "/api/reactions/sub/{group}/{reaction}/{status}/details/",
     params(
         ("group" = String, Path, description = "The group to list sub reactions from"),
         ("reaction" = Uuid, Path, description = "The parent reaction to list sub reactions for"),
         ("status" = ReactionStatus, Path, description = "The status to list sub reactions for"),
-        ("params" = ReactionListParams, Query, description = "The query params to use for this request")
+        ReactionListParams,
     ),
     responses(
         (status = 200, description = "Sub-reaction details for the specified group and parent reaction and status", body = ReactionDetailsList),
+        (status = 400, description = "The request is invalid: a path parameter has an invalid value; a query parameter has an invalid value"),
         (status = 401, description = "This user is not authorized to access this route"),
+        (status = 404, description = "A resource named in the request, such as a path value, group or body field, does not exist or is not visible to this user"),
+        (status = 500, description = "An internal error occurred, such as a backing database, cache or object store failing"),
+        (status = 503, description = "A service Thorium depends on, such as Redis or LDAP, is unavailable"),
     ),
     security(
         ("basic" = []),
+        ("bearer" = []),
     )
 )]
 #[instrument(
@@ -1467,18 +1656,24 @@ async fn list_sub_status_details(
 /// * `update` - The update to apply to this reaction
 #[utoipa::path(
     patch,
-    path = "/api/reactions/:group/:id",
+    path = "/api/reactions/{group}/{id}",
     params(
         ("group" = String, Path, description = "The group this reaction is in"),
-        ("reaction" = Uuid, Path, description = "The uuid of the reaction to update"),
-        ("update" = ReactionUpdate, description = "The update to apply to this reaction")
+        ("id" = Uuid, Path, description = "The uuid of the reaction to update"),
     ),
+    request_body = ReactionUpdate,
     responses(
         (status = 200, description = "Updated reaction", body = Reaction),
+        (status = 400, description = "The request is invalid: the JSON body is malformed or fails validation; a path parameter has an invalid value"),
         (status = 401, description = "This user is not authorized to access this route"),
+        (status = 404, description = "A resource named in the request, such as a path value, group or body field, does not exist or is not visible to this user"),
+        (status = 422, description = "The JSON body is well formed but does not match the expected shape, for example a required field is missing or has the wrong type"),
+        (status = 500, description = "An internal error occurred, such as a backing database, cache or object store failing"),
+        (status = 503, description = "A service Thorium depends on, such as Redis or LDAP, is unavailable"),
     ),
     security(
         ("basic" = []),
+        ("bearer" = []),
     )
 )]
 #[instrument(name = "routes::reactions::update", skip_all, err(Debug))]
@@ -1500,7 +1695,7 @@ async fn update(
 /// Deletes a reaction
 ///
 /// This will only cancel any currently active pods if this is the only reaction causing that pod
-/// type to be spawend.
+/// type to be spawned.
 ///
 /// # Arguments
 ///
@@ -1510,17 +1705,22 @@ async fn update(
 /// * `state` - Shared Thorium objects
 #[utoipa::path(
     delete,
-    path = "/api/reactions/:group/:id",
+    path = "/api/reactions/{group}/{id}",
     params(
         ("group" = String, Path, description = "The group this reaction is in"),
-        ("reaction" = Uuid, Path, description = "The uuid of the reaction to update")
+        ("id" = Uuid, Path, description = "The uuid of the reaction to update")
     ),
     responses(
         (status = 204, description = "Reaction deleted"),
+        (status = 400, description = "The request is invalid: a path parameter has an invalid value"),
         (status = 401, description = "This user is not authorized to access this route"),
+        (status = 404, description = "A resource named in the request, such as a path value, group or body field, does not exist or is not visible to this user"),
+        (status = 500, description = "An internal error occurred, such as a backing database, cache or object store failing"),
+        (status = 503, description = "A service Thorium depends on, such as Redis or LDAP, is unavailable"),
     ),
     security(
         ("basic" = []),
+        ("bearer" = []),
     )
 )]
 #[instrument(name = "routes::reactions::delete_reaction", skip_all, err(Debug))]
@@ -1549,18 +1749,23 @@ async fn delete_reaction(
 /// * `state` - Shared Thorium objects
 #[utoipa::path(
     get,
-    path = "/api/reactions/ephemeral/:group/:id/:name",
+    path = "/api/reactions/ephemeral/{group}/{id}/{name}",
     params(
         ("group" = String, Path, description = "The group this reaction is in"),
-        ("reaction" = Uuid, Path, description = "The uuid of the reaction to download an ephemeral file from"),
+        ("id" = Uuid, Path, description = "The uuid of the reaction to download an ephemeral file from"),
         ("name" = String, Path, description = "The name of the ephemeral file")
     ),
     responses(
         (status = 200, description = "Ephemeral file byte stream", body = Vec<u8>),
+        (status = 400, description = "The request is invalid: a path parameter has an invalid value"),
         (status = 401, description = "This user is not authorized to access this route"),
+        (status = 404, description = "A resource named in the request, such as a path value, group or body field, does not exist or is not visible to this user"),
+        (status = 500, description = "An internal error occurred, such as a backing database, cache or object store failing"),
+        (status = 503, description = "A service Thorium depends on, such as Redis or LDAP, is unavailable"),
     ),
     security(
         ("basic" = []),
+        ("bearer" = []),
     )
 )]
 #[instrument(name = "routes::reactions::download_ephemeral", skip_all, err(Debug))]
@@ -1585,9 +1790,9 @@ async fn download_ephemeral(
     paths(create, create_bulk, get_reaction, run_token, run_models, run_tool, run_workflow, retry_workflow_run, update, delete_reaction, handle, logs, stage_logs, add_stage_logs,
           list, list_new, list_details, list_status, list_status_new, list_status_details, list_tag, list_tag_new,
           list_tag_details, list_group_set, list_group_set_details, list_sub, list_sub_new, list_sub_details,
-          list_sub_status_details, list_sub_status, list_sub_status_new, download_ephemeral),
+          list_sub_status_details, list_sub_status, list_sub_status_new, download_ephemeral, create_bulk_by_user, get_cache, update_cache, update_cache_files, download_cache_file),
     components(schemas(Actions, ApiCursor<String>, BulkReactionResponse, CommitishKinds, HandleReactionResponse, ImageScaler, JobResetRequestor, Reaction, ReactionIdResponse, ReactionList, ReactionDetailsList, ReactionCursorParams, ReactionListParams, ReactionRequest, ReactionStatus, ReactionUpdate, RepoDependency, RepoDependencyRequest, RunInputs, StageLogs, StageLogsAdd, StageLogLine, StatusUpdate, SystemComponents, ReactionCache, ReactionCacheUpdate, ToolRunRequest, WorkflowRunRequest, RunModels, ModelResolutionError)),
-    modifiers(&OpenApiSecurity),
+    modifiers(&OpenApiSecurity, &OpenApiParameterExamples),
 )]
 pub struct ReactionApiDocs;
 
@@ -1704,7 +1909,7 @@ mod tests {
         assert!(
             docs.paths
                 .paths
-                .contains_key("/api/reactions/:group/:id/run-token")
+                .contains_key("/api/reactions/{group}/{id}/run-token")
         );
     }
 }

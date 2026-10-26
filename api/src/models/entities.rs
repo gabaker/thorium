@@ -1999,6 +1999,8 @@ impl EntityListOpts {
 /// The params for listing entities
 #[derive(Deserialize, Debug)]
 #[cfg_attr(feature = "api", derive(utoipa::ToSchema))]
+#[cfg_attr(feature = "api", derive(utoipa::IntoParams))]
+#[cfg_attr(feature = "api", into_params(parameter_in = Query))]
 pub struct EntityListParams {
     /// The groups to list data from
     #[serde(default)]

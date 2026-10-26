@@ -2806,6 +2806,8 @@ impl TreeSupport for Sample {
 
 #[derive(Deserialize, Debug, Default)]
 #[cfg_attr(feature = "api", derive(utoipa::ToSchema))]
+#[cfg_attr(feature = "api", derive(utoipa::IntoParams))]
+#[cfg_attr(feature = "api", into_params(parameter_in = Query))]
 pub struct DeleteSampleParams {
     /// The groups to delete data from
     #[serde(default)]
@@ -2977,6 +2979,8 @@ fn default_list_limit() -> usize {
 
 #[derive(Deserialize, Debug)]
 #[cfg_attr(feature = "api", derive(utoipa::ToSchema))]
+#[cfg_attr(feature = "api", derive(utoipa::IntoParams))]
+#[cfg_attr(feature = "api", into_params(parameter_in = Query))]
 pub struct FileListParams {
     /// The groups to list data from
     #[serde(default)]
@@ -3267,6 +3271,8 @@ impl CommentRequest {
 /// The query parameters used when deleting a comment
 #[derive(Deserialize, Debug, Default)]
 #[cfg_attr(feature = "api", derive(utoipa::ToSchema))]
+#[cfg_attr(feature = "api", derive(utoipa::IntoParams))]
+#[cfg_attr(feature = "api", into_params(parameter_in = Query))]
 pub struct DeleteCommentParams {
     /// The groups to delete the comment from
     /// (if empty, the comment will be deleted from all groups)
@@ -3489,6 +3495,8 @@ impl FileDeleteOpts {
 /// The parameters for downloading samples as zips
 #[derive(Serialize, Deserialize, Debug, Default)]
 #[cfg_attr(feature = "api", derive(utoipa::ToSchema))]
+#[cfg_attr(feature = "api", derive(utoipa::IntoParams))]
+#[cfg_attr(feature = "api", into_params(parameter_in = Query))]
 pub struct ZipDownloadParams {
     /// The password to use to encrypt this zip
     pub password: Option<String>,
