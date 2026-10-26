@@ -31,6 +31,11 @@ pub fn exit_code() -> i32 {
     }
 }
 
+/// Remember that waiting for a run timed out so Thorctl exits with [`TIMEOUT_EXIT_CODE`]
+pub fn mark_timed_out() {
+    TIMED_OUT.store(true, Ordering::Relaxed);
+}
+
 /// A condition that `--wait-for` polls a view until it holds
 ///
 /// A condition is either `<field>=<value>`, which holds when the field equals the value

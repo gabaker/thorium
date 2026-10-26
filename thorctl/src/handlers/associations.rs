@@ -1,7 +1,7 @@
 //! Handle association related Thorctl commands
 
+use crate::utils::paint::Paint;
 use futures::stream::{self, StreamExt, TryStreamExt};
-use owo_colors::OwoColorize;
 use std::io::Write;
 use thorium::models::{
     Association, AssociationDeleteRequest, AssociationListOpts, AssociationRequest,

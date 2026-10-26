@@ -1,9 +1,9 @@
 # Runs Thorium's Rust static checks: cargo check, clippy, and rustfmt; the unit tests that need no
 # services along with a check that the chart's CRD matches the operator, the schema change
 # warnings, and a check that the schema pattern test series stays off main; a check that the
-# integration tests compile; thoradm's tests that need no backing services; and a check that
-# every copy of Thorium's version matches the Cargo workspace version
-# (.github/scripts/versions.py)
+# integration tests compile; thoradm's tests that need no backing services; thorctl's unit tests
+# and its harness tests that need no services; and a check that every copy of Thorium's version
+# matches the Cargo workspace version (.github/scripts/versions.py)
 #
 # - Failures are reported here, as failed (red) jobs on the commit and pull
 #   request. This workflow has no `needs` or `workflow_run` link to deploy.yml
@@ -20,7 +20,8 @@
 #   are separate jobs with no `needs` between them, so a failed check never
 #   hides whether the unit tests passed. The thoradm job runs thoradm's unit
 #   tests and its harness tests that need no services, and compiles the rest
-#   of its harness. Test failures are read from the job log.
+#   of its harness; the thorctl job does the same for thorctl. Test failures
+#   are read from the job log.
 # - The nightly toolchain is installed with the runner's preinstalled rustup,
 #   so no third-party toolchain action is used. Nightly is unpinned, so a
 #   nightly regression can fail these jobs without any change to this repo.
@@ -309,6 +310,78 @@ jobs:
       # the integration harness needs services, so it is only compiled here
       - name: Compile the thoradm harness
         run: cargo +nightly test --locked -p thoradm --no-run --tests
+
+      - name: Save Cargo cache
+        if: (github.event_name == 'push' || github.event_name == 'schedule') && github.ref == 'refs/heads/main' && steps.cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ steps.cache.outputs.cache-primary-key }}
+
+  thorctl-test:
+    name: thorctl tests
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    permissions:
+      contents: read # check out the repository
+    env:
+      # enable the features required by gxhash explicitly
+      RUSTFLAGS: "-C target-feature=+aes,+sse2"
+      # every harness test is its own binary linking the whole API, so with debug info the
+      # target dir outgrows the runner's disk
+      CARGO_PROFILE_DEV_DEBUG: "0"
+      CARGO_PROFILE_TEST_DEBUG: "0"
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Install system packages
+        run: |
+          sudo apt-get update
+          # APT_PACKAGES is a fixed space-separated list, so it is split into words on purpose
+          # shellcheck disable=SC2086
+          sudo apt-get install -y --no-install-recommends $APT_PACKAGES
+
+      # the toolchain hash keys the cache, since build output from another
+      # nightly cannot be reused
+      - name: Install nightly toolchain
+        id: toolchain
+        run: |
+          rustup toolchain install nightly --profile minimal
+          rustc +nightly --version
+          echo "hash=$(rustc +nightly --version --verbose | sha256sum | cut -c1-16)" >> "$GITHUB_OUTPUT"
+
+      - name: Restore Cargo cache
+        id: cache
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: rust-check-${{ github.job }}-${{ runner.os }}-${{ steps.toolchain.outputs.hash }}-${{ hashFiles('Cargo.lock') }}
+          restore-keys: |
+            rust-check-${{ github.job }}-${{ runner.os }}-${{ steps.toolchain.outputs.hash }}-
+
+      # thorctl is a bin-only crate, so --bins runs the unit tests compiled into
+      # the binary: toolbox v2 loading, validation, and import planning, and the
+      # edit, run, and batch handlers against mock APIs
+      - name: Run thorctl unit tests
+        run: cargo +nightly test --locked -p thorctl --bins
+
+      # the harness tests that need no services: toolbox build and convert run
+      # as programs, and the pseudo-terminal prompt tests
+      - name: Run thorctl offline harness tests
+        run: cargo +nightly test --locked -p thorctl --test toolbox_build --test toolbox_convert --test tty
+
+      # the rest of the harness needs a live Thorium, so it is only compiled here
+      - name: Compile the thorctl harness
+        run: cargo +nightly test --locked -p thorctl --no-run --tests
 
       - name: Save Cargo cache
         if: (github.event_name == 'push' || github.event_name == 'schedule') && github.ref == 'refs/heads/main' && steps.cache.outputs.cache-hit != 'true'

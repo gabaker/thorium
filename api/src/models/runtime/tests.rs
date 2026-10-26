@@ -15,9 +15,9 @@ use super::{
 use crate::models::images::GenericBan;
 use crate::models::{
     ArgStrategy, AutoTag, AutoTagLogic, ChildFilters, Cleanup, Dependencies,
-    DependencyPassStrategy, Image, ImageArgs, ImageBan, ImageBanKind, ImageLifetime, ImageScaler,
-    Kvm, OutputCollection, OutputDisplayType, Resources, ResourcesRequest, SecurityContext,
-    SpawnLimits, ToolVersion, Volume, VolumeTypes,
+    DependencyPassStrategy, Image, ImageArgs, ImageBan, ImageBanKind, ImageLifetime, ImageRequest,
+    ImageScaler, Kvm, OutputCollection, OutputDisplayType, Resources, ResourcesRequest,
+    SecurityContext, SpawnLimits, ToolVersion, Volume, VolumeTypes,
 };
 
 /// Every scaler an image can use
@@ -949,4 +949,143 @@ fn digest_defaults() {
         ..K8sEnvironment::default()
     };
     assert_eq!(k8s.digest_value(), json!({"env": {"FOO": null}}));
+}
+
+/// Store an image request the way the API does: resolve its resources and security context and
+/// copy every other field
+///
+/// # Arguments
+///
+/// * `request` - The image request to store
+fn stored(request: &ImageRequest) -> Image {
+    // the API gives a request without resources the default request and one worker slot
+    let resources = Resources::from(request.resources.clone());
+    Image {
+        group: request.group.clone(),
+        name: request.name.clone(),
+        creator: "alice".into(),
+        version: request.version.clone(),
+        scaler: request.scaler,
+        image: request.image.clone(),
+        lifetime: request.lifetime.clone(),
+        timeout: request.timeout,
+        resources,
+        spawn_limit: request.spawn_limit.clone(),
+        env: request.env.clone(),
+        runtime: 600.0,
+        volumes: request.volumes.clone(),
+        args: request.args.clone(),
+        modifiers: request.modifiers.clone(),
+        description: request.description.clone(),
+        security_context: request.security_context.clone().unwrap_or_default(),
+        used_by: Vec::new(),
+        collect_logs: request.collect_logs,
+        generator: request.generator,
+        dependencies: request.dependencies.clone(),
+        display_type: request.display_type,
+        output_collection: request.output_collection.clone(),
+        child_filters: request.child_filters.clone(),
+        clean_up: request.clean_up.clone(),
+        kvm: request.kvm.clone(),
+        bans: HashMap::new(),
+        network_policies: request.network_policies.clone(),
+    }
+}
+
+/// A request for each scaler that sets every field to a non-default value converts to the spec
+/// and the dropped fields its stored image converts to
+#[test]
+fn full_requests_convert_like_their_stored_images() {
+    for scaler in SCALERS {
+        // build the request a fully populated image would have been created from
+        let request = ImageRequest::from(full_image(scaler));
+        // both conversions agree on the spec and on what is dropped
+        let from_request = WorkloadSpec::from_image_request(&request).unwrap();
+        let from_stored = WorkloadSpec::from_image(&stored(&request)).unwrap();
+        assert_eq!(from_request, from_stored, "{scaler}");
+        // every environment drops something from a fully populated request
+        assert!(!from_request.dropped.is_empty(), "{scaler}");
+    }
+}
+
+/// A request that leaves resources and the security context unset gets the defaults the API
+/// stores, so it converts like its stored image
+#[test]
+fn minimal_requests_convert_like_their_stored_images() {
+    for scaler in SCALERS {
+        // a request with only its group, name, scaler, and container image
+        let request = ImageRequest::new("corn", "harvester")
+            .scaler(scaler)
+            .image("repo/harvester:1.0");
+        let from_request = WorkloadSpec::from_image_request(&request).unwrap();
+        let from_stored = WorkloadSpec::from_image(&stored(&request)).unwrap();
+        assert_eq!(from_request, from_stored, "{scaler}");
+    }
+    // the default resource request and no security context are what a K8s spec holds
+    let request = ImageRequest::new("corn", "harvester").image("repo/harvester:1.0");
+    let spec = WorkloadSpec::from_image_request(&request).unwrap().spec;
+    let scheduling = spec.environment.scheduling().unwrap();
+    assert_eq!(scheduling.resources.cpu, 1000);
+    assert_eq!(scheduling.resources.memory, 4096);
+    assert_eq!(scheduling.resources.worker_slots, 1);
+    let WorkloadEnvironment::K8s(k8s) = spec.environment else {
+        panic!("not a K8s environment");
+    };
+    assert_eq!(k8s.security_context, SecurityContext::default());
+}
+
+/// A container environment without an image to run is refused with the same error for a request
+/// as for the stored image
+#[test]
+fn requests_without_an_image_fail_like_their_stored_images() {
+    for scaler in [ImageScaler::K8s, ImageScaler::Windows] {
+        // neither a missing nor an empty container image can run
+        for image in [None, Some(String::new())] {
+            let mut request = ImageRequest::new("corn", "harvester").scaler(scaler);
+            request.image = image;
+            let from_request = WorkloadSpec::from_image_request(&request).unwrap_err();
+            let from_stored = WorkloadSpec::from_image(&stored(&request)).unwrap_err();
+            assert_eq!(from_request.msg, from_stored.msg);
+        }
+    }
+    // environments that don't run a container image need none
+    for scaler in [
+        ImageScaler::BareMetal,
+        ImageScaler::Kvm,
+        ImageScaler::External,
+    ] {
+        let request = ImageRequest::new("corn", "harvester").scaler(scaler);
+        assert!(
+            WorkloadSpec::from_image_request(&request).is_ok(),
+            "{scaler}"
+        );
+    }
+}
+
+/// The dropped fields of a request name the same fields as its stored image, and env variables
+/// by name only
+#[test]
+fn request_dropped_fields_match_the_stored_image() {
+    for scaler in SCALERS {
+        let request = ImageRequest::from(full_image(scaler));
+        let from_request = WorkloadSpec::from_image_request(&request).unwrap().dropped;
+        let from_stored = WorkloadSpec::from_image(&stored(&request)).unwrap().dropped;
+        assert_eq!(from_request, from_stored, "{scaler}");
+        // no env value appears anywhere in what is reported
+        let rendered = from_request
+            .iter()
+            .map(ToString::to_string)
+            .collect::<Vec<String>>()
+            .join(", ");
+        assert!(!rendered.contains("\"x\""), "{scaler}: {rendered}");
+    }
+    // a BareMetal request drops the container image, env, and volumes
+    let request = ImageRequest::from(full_image(ImageScaler::BareMetal));
+    let dropped = WorkloadSpec::from_image_request(&request).unwrap().dropped;
+    assert!(dropped.contains(&DroppedImageField::Image));
+    assert!(dropped.contains(&DroppedImageField::Env(vec![
+        "EMPTY".to_owned(),
+        "SECRET".to_owned()
+    ])));
+    assert!(dropped.contains(&DroppedImageField::Volumes));
 }

@@ -14,8 +14,8 @@ use super::conversions::ConversionError;
 use super::{
     CacheDependencySettings, ChildFilters, ChildrenDependencySettings, Cleanup, Dependencies,
     DependencyPassStrategy, EphemeralDependencySettings, FileSystemDependencySettings, Image,
-    ImageArgs, ImageJobInfo, ImageLifetime, ImageScaler, Kvm, KwargDependency, OutputCollection,
-    OutputDisplayType, RepoDependencySettings, Resources, ResourcesRequest,
+    ImageArgs, ImageJobInfo, ImageLifetime, ImageRequest, ImageScaler, Kvm, KwargDependency,
+    OutputCollection, OutputDisplayType, RepoDependencySettings, Resources, ResourcesRequest,
     ResultDependencySettings, SampleDependencySettings, SecurityContext, SpawnLimits,
     TagDependencySettings, Volume,
 };
@@ -112,17 +112,17 @@ pub struct SchedulingSettings {
 }
 
 impl SchedulingSettings {
-    /// Build the scheduling settings of an image
+    /// Build the scheduling settings of an image source
     ///
     /// # Arguments
     ///
-    /// * `image` - The image to copy the scheduling settings from
-    fn from_image(image: &Image) -> Self {
+    /// * `source` - The image fields to copy the scheduling settings from
+    fn from_source(source: &ImageSource<'_>) -> Self {
         // copy the fields the scaler and the agent read
         SchedulingSettings {
-            resources: image.resources,
-            spawn_limit: image.spawn_limit.clone(),
-            lifetime: image.lifetime.clone(),
+            resources: source.resources,
+            spawn_limit: source.spawn_limit.clone(),
+            lifetime: source.lifetime.clone(),
         }
     }
 }
@@ -640,8 +640,8 @@ impl KeptFields {
     ///
     /// # Arguments
     ///
-    /// * `image` - The image being converted
-    fn dropped(&self, image: &Image) -> Vec<DroppedImageField> {
+    /// * `image` - The image fields being converted
+    fn dropped(&self, image: &ImageSource<'_>) -> Vec<DroppedImageField> {
         // collect the dropped fields in the order the checks below run
         let mut dropped = Vec::new();
         // the image reference is read only by the container environments
@@ -656,11 +656,11 @@ impl KeptFields {
                 dropped.push(DroppedImageField::Resources);
             }
             // a limited spawn count is a non-default limit
-            if image.spawn_limit != defaults.spawn_limit {
+            if *image.spawn_limit != defaults.spawn_limit {
                 dropped.push(DroppedImageField::SpawnLimit);
             }
             // any lifetime is a non-default lifetime
-            if image.lifetime != defaults.lifetime {
+            if *image.lifetime != defaults.lifetime {
                 dropped.push(DroppedImageField::Lifetime);
             }
         }
@@ -719,13 +719,133 @@ fn unset_resources(resources: &Resources) -> bool {
     resources == Resources::default() || resources == created
 }
 
+/// The image fields a workload spec is built from
+///
+/// A stored [`Image`] and an [`ImageRequest`] both reduce to this view, so the conversion to a
+/// spec has one implementation. The request's resources and security context are resolved the
+/// way the API resolves them when it stores the image.
+struct ImageSource<'a> {
+    /// The group the image is in
+    group: &'a str,
+    /// The image's name
+    name: &'a str,
+    /// The scaler that runs the image
+    scaler: ImageScaler,
+    /// The container image reference
+    image: &'a Option<String>,
+    /// The worker lifetime
+    lifetime: &'a Option<ImageLifetime>,
+    /// The job timeout in seconds
+    timeout: Option<u64>,
+    /// The resources each worker requires
+    resources: Resources,
+    /// The limit on how many workers can be spawned at once
+    spawn_limit: &'a SpawnLimits,
+    /// The volumes to bind into the container
+    volumes: &'a Vec<Volume>,
+    /// The environment variables to set
+    env: &'a HashMap<String, Option<String>>,
+    /// The arguments for the image's jobs
+    args: &'a ImageArgs,
+    /// The path to the modifier folders
+    modifiers: &'a Option<String>,
+    /// The security context
+    security_context: SecurityContext,
+    /// Whether the agent streams stdout and stderr back
+    collect_logs: bool,
+    /// Whether the image is a generator
+    generator: bool,
+    /// The image's dependency settings
+    dependencies: &'a Dependencies,
+    /// The display type of the image's output
+    display_type: OutputDisplayType,
+    /// The settings for collecting results
+    output_collection: &'a OutputCollection,
+    /// The filters applied to children
+    child_filters: &'a ChildFilters,
+    /// The settings for cleaning up canceled jobs
+    clean_up: &'a Option<Cleanup>,
+    /// The Kvm settings
+    kvm: &'a Option<Kvm>,
+    /// The network policies applied to spawned pods
+    network_policies: &'a HashSet<String>,
+}
+
+impl<'a> ImageSource<'a> {
+    /// View a stored image as the fields a spec is built from
+    ///
+    /// # Arguments
+    ///
+    /// * `image` - The stored image
+    fn from_image(image: &'a Image) -> Self {
+        // borrow every field a spec reads
+        ImageSource {
+            group: &image.group,
+            name: &image.name,
+            scaler: image.scaler,
+            image: &image.image,
+            lifetime: &image.lifetime,
+            timeout: image.timeout,
+            resources: image.resources,
+            spawn_limit: &image.spawn_limit,
+            volumes: &image.volumes,
+            env: &image.env,
+            args: &image.args,
+            modifiers: &image.modifiers,
+            security_context: image.security_context.clone(),
+            collect_logs: image.collect_logs,
+            generator: image.generator,
+            dependencies: &image.dependencies,
+            display_type: image.display_type,
+            output_collection: &image.output_collection,
+            child_filters: &image.child_filters,
+            clean_up: &image.clean_up,
+            kvm: &image.kvm,
+            network_policies: &image.network_policies,
+        }
+    }
+
+    /// View an image request as the fields a spec is built from
+    ///
+    /// # Arguments
+    ///
+    /// * `request` - The image request
+    fn from_request(request: &'a ImageRequest) -> Self {
+        // borrow every field a spec reads, resolving what the API resolves on creation
+        ImageSource {
+            group: &request.group,
+            name: &request.name,
+            scaler: request.scaler,
+            image: &request.image,
+            lifetime: &request.lifetime,
+            timeout: request.timeout,
+            resources: Resources::from(request.resources.clone()),
+            spawn_limit: &request.spawn_limit,
+            volumes: &request.volumes,
+            env: &request.env,
+            args: &request.args,
+            modifiers: &request.modifiers,
+            security_context: request.security_context.clone().unwrap_or_default(),
+            collect_logs: request.collect_logs,
+            generator: request.generator,
+            dependencies: &request.dependencies,
+            display_type: request.display_type,
+            output_collection: &request.output_collection,
+            child_filters: &request.child_filters,
+            clean_up: &request.clean_up,
+            kvm: &request.kvm,
+            network_policies: &request.network_policies,
+        }
+    }
+}
+
 /// Get the container image reference of an image whose environment requires one
 ///
 /// # Arguments
 ///
-/// * `image` - The image to read the reference from
-fn required_image(image: &Image) -> Result<String, ConversionError> {
-    match &image.image {
+/// * `image` - The image fields to read the reference from
+fn required_image(image: &ImageSource<'_>) -> Result<String, ConversionError> {
+    match image.image {
         // a non-empty reference is what the pod builder and the Windows launcher run
         Some(reference) if !reference.is_empty() => Ok(reference.clone()),
         // without one the workload can't run
@@ -751,8 +871,32 @@ impl WorkloadSpec {
     ///
     /// * `image` - The image to convert
     pub fn from_image(image: &Image) -> Result<ImageConversion, ConversionError> {
+        // build the spec from the stored image's fields
+        Self::build(&ImageSource::from_image(image))
+    }
+
+    /// Convert an image request into the workload spec its image would convert to
+    ///
+    /// The request's resources and security context are resolved the way the API resolves them
+    /// when it stores the image, so the result equals [`WorkloadSpec::from_image`] of the stored
+    /// image. Fields the environment never reads are dropped and listed as in that conversion.
+    ///
+    /// # Arguments
+    ///
+    /// * `request` - The image request to convert
+    pub fn from_image_request(request: &ImageRequest) -> Result<ImageConversion, ConversionError> {
+        // build the spec from the request's fields
+        Self::build(&ImageSource::from_request(request))
+    }
+
+    /// Build a spec from the image fields every conversion shares
+    ///
+    /// # Arguments
+    ///
+    /// * `image` - The image fields to convert
+    fn build(image: &ImageSource<'_>) -> Result<ImageConversion, ConversionError> {
         // build the environment the image's scaler picks
-        let scheduling = SchedulingSettings::from_image(image);
+        let scheduling = SchedulingSettings::from_source(image);
         let environment = match image.scaler {
             ImageScaler::K8s => WorkloadEnvironment::K8s(K8sEnvironment {
                 image: required_image(image)?,
@@ -791,7 +935,7 @@ impl WorkloadSpec {
         };
         // copy the job data settings
         let data = JobDataSettings {
-            dependencies: ToolDependencies::from_image(&image.dependencies),
+            dependencies: ToolDependencies::from_image(image.dependencies),
             output_collection: image.output_collection.clone(),
             child_filters: image.child_filters.clone(),
             display_type: image.display_type,

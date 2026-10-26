@@ -13,10 +13,11 @@ use thorium::models::{
     AgenticToolBacking, AssociationKind, AssociationRequest, AssociationTarget,
     ContainerToolBacking, Entity, EntityListOpts, EntityMetadata, EntityMetadataUpdate,
     EntityRequest, EntityUpdate, GroupAllowed, GroupAllowedUpdate, GroupUpdate,
-    HostPathWhitelistUpdate, NetworkPolicyRequest, ScopedTokenRequest, SecurityContext,
-    SystemSettingsUpdate, SystemSettingsUpdateParams, ToolEntity, ToolInstanceEntity,
-    ToolInstanceEntityRequest, ToolKind, ToolSpec, ToolVersion, UserRole, Volume, VolumeTypes,
-    WorkflowGraphChange, WorkloadEnvironment,
+    HostPathWhitelistUpdate, ImageScaler, NetworkPolicyRequest, ScopedTokenRequest,
+    SecurityContext, SystemSettingsUpdate, SystemSettingsUpdateParams, TagDeleteRequest,
+    TagRequest, ToolEntity, ToolInstanceEntity, ToolInstanceEntityRequest, ToolKind, ToolSpec,
+    ToolVersion, UserRole, Volume, VolumeTypes, WorkflowGraphChange, WorkloadEnvironment,
+    WorkloadSpec,
 };
 use thorium::test_utilities::generators::{GroupRoles, TestUser};
 use thorium::test_utilities::{self, events, generators};
@@ -3239,6 +3240,98 @@ async fn large_specs_in_many_groups() -> Result<(), Error> {
             EntityMetadata::ToolInstance(meta) => is!(meta.deprecated, true, group),
             other => panic!("expected a tool instance, got {other:?}"),
         }
+    }
+    Ok(())
+}
+
+/// A tag added through the client shows on the tool and a tag removed through it no longer does,
+/// only in the groups the requests name
+#[tokio::test]
+async fn client_adds_and_removes_tool_tags() -> Result<(), Error> {
+    // a tool in two groups
+    let admin = test_utilities::admin_client().await?;
+    let groups = generators::groups(2, &admin).await?;
+    let (a, b) = (groups[0].name.clone(), groups[1].name.clone());
+    let spec = generators::gen_agentic_spec();
+    let (tool, _) = generators::tool(&[&a, &b], "1.0.0", &spec, &admin).await?;
+    // add a tag in the first group and another in both
+    let first = TagRequest::<Entity>::default()
+        .add("Team", "red")
+        .group(a.clone());
+    let both = TagRequest::<Entity>::default()
+        .add("Phase", "one")
+        .groups(vec![a.clone(), b.clone()]);
+    is!(
+        admin.entities.tag(tool.id, &first).await?.status().as_u16(),
+        204
+    );
+    is!(
+        admin.entities.tag(tool.id, &both).await?.status().as_u16(),
+        204
+    );
+    // both show when the tool is read back
+    let read = admin.entities.get(tool.id).await?;
+    is!(tag_values(&read, "Team"), vec!["red".to_owned()]);
+    is!(tag_values(&read, "Phase"), vec!["one".to_owned()]);
+    // removing the first tag leaves the other
+    let untag = TagDeleteRequest::<Entity>::default()
+        .add("Team", "red")
+        .group(a.clone());
+    is!(
+        admin
+            .entities
+            .untag(tool.id, &untag)
+            .await?
+            .status()
+            .as_u16(),
+        204
+    );
+    let read = admin.entities.get(tool.id).await?;
+    is!(tag_values(&read, "Team"), Vec::<String>::new());
+    is!(tag_values(&read, "Phase"), vec!["one".to_owned()]);
+    // removing the other from one group keeps it in the second
+    let untag = TagDeleteRequest::<Entity>::default()
+        .add("Phase", "one")
+        .group(a);
+    is!(
+        admin
+            .entities
+            .untag(tool.id, &untag)
+            .await?
+            .status()
+            .as_u16(),
+        204
+    );
+    let read = admin.entities.get(tool.id).await?;
+    is!(tag_values(&read, "Phase"), vec!["one".to_owned()]);
+    Ok(())
+}
+
+/// An image created through the API converts to the same tool spec as the request it was created
+/// from, so the hash an offline conversion publishes equals the one the migration of the stored
+/// image would
+#[tokio::test]
+async fn stored_images_and_their_requests_convert_to_one_spec_hash() -> Result<(), Error> {
+    // create a K8s, a BareMetal, and an External image through the image route
+    let admin = test_utilities::admin_client().await?;
+    let groups = generators::groups(1, &admin).await?;
+    let group = groups[0].name.clone();
+    test_utilities::faults::allow_image_writes(&group);
+    let k8s = generators::gen_image(&group);
+    let bare = generators::gen_image(&group).scaler(ImageScaler::BareMetal);
+    let external = generators::gen_ext_image(&group);
+    for request in [k8s, bare, external] {
+        admin.images.create(&request).await?;
+        let stored = admin.images.get(&group, &request.name).await?;
+        // convert the stored image and the request it came from
+        let from_stored = WorkloadSpec::from_image(&stored).unwrap();
+        let from_request = WorkloadSpec::from_image_request(&request).unwrap();
+        // the specs, the dropped fields, and the hashes all agree
+        is!(from_request.clone(), from_stored.clone(), request.name);
+        let hash = |spec: WorkloadSpec| ThorDigest::tool_spec(&ToolSpec::Image(spec), None);
+        let request_hash = hash(from_request.spec).unwrap();
+        let stored_hash = hash(from_stored.spec).unwrap();
+        is!(request_hash, stored_hash);
     }
     Ok(())
 }

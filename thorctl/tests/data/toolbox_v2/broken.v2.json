@@ -1,0 +1,109 @@
+{
+  "format_version": 2,
+  "name": "Broken v2 toolbox",
+  "tools": {
+    "bad name": {
+      "groups": [
+        "static"
+      ],
+      "versions": {
+        "1": {}
+      }
+    },
+    "alpha": {
+      "groups": [
+        "static"
+      ],
+      "versions": {
+        "1": {
+          "spec": {
+            "Image": {
+              "environment": {
+                "K8s": {
+                  "image": "x:1",
+                  "scheduling": {
+                    "resources": {
+                      "cpu": 1,
+                      "memory": 1
+                    },
+                    "spawn_limit": "Unlimited"
+                  },
+                  "env": {
+                    "API_TOKEN": "hunter2"
+                  }
+                }
+              },
+              "data": {
+                "dependencies": {
+                  "results": {
+                    "tools": [
+                      "ref:tool/beta"
+                    ]
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "beta": {
+      "groups": [
+        "static"
+      ],
+      "versions": {
+        "1": {
+          "spec": {
+            "Image": {
+              "environment": {
+                "K8s": {
+                  "image": "y:1",
+                  "scheduling": {
+                    "resources": {
+                      "cpu": 1,
+                      "memory": 1
+                    },
+                    "spawn_limit": "Unlimited"
+                  }
+                }
+              },
+              "data": {
+                "dependencies": {
+                  "results": {
+                    "tools": [
+                      "ref:tool/alpha"
+                    ]
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  },
+  "pipelines": {
+    "p": {
+      "versions": {
+        "latest": {
+          "config": {
+            "group": "static",
+            "name": "p",
+            "order": [
+              [
+                "alpha",
+                "gamma"
+              ]
+            ]
+          },
+          "stage_tools": {
+            "alpha": {
+              "tool": "alpha",
+              "version": "9"
+            }
+          }
+        }
+      }
+    }
+  }
+}

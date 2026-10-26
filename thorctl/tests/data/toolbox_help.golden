@@ -1,0 +1,1121 @@
+=== thorctl toolbox (exit 0)
+Perform toolbox related tasks
+
+Usage: thorctl toolbox <COMMAND>
+
+Commands:
+  import        Import a toolbox into Thorium
+  build         Build a toolbox manifest from tool, image, and pipeline manifests
+  init          Initialize toolbox, tool, image, or pipeline scaffolding
+  export        Export Thorium tools and pipelines into a toolbox directory structure
+  remove        Remove a previously imported toolbox from Thorium
+  diff          Diff an on-disk toolbox against what a Thorium instance has imported
+  build-images  Build (and optionally push) the container images in a toolbox
+  convert       Convert a legacy toolbox manifest to the current format
+  list          List what a toolbox manifest contains
+  validate      Check a toolbox manifest without talking to Thorium
+  update        Refresh the items of a toolbox that were imported earlier
+  help          Print this message or the help of the given subcommand(s)
+
+Options:
+  -h, --help     Print help
+  -V, --version  Print version
+
+=== thorctl toolbox import (exit 0)
+Import a toolbox into Thorium
+
+A Thorium toolbox is an external collection of tools, toolsets, agents, workflows, and pipelines
+pre-configured and ready to run in Thorium. Legacy toolboxes (images and pipelines) are converted in
+memory first, and the issues the conversion finds are reported. Tools are created and their versions
+published in dependency order, and importing the same toolbox again changes nothing.
+
+Tool versions are told apart by the hash of their spec. A version that matches a published one is
+left alone; one with a new label is published; one whose label is taken by a different spec is
+published as LABEL+HASH, since published versions never change. If items already exist and differ
+you are asked per item to Apply, Skip, or Quit; this needs a terminal. Use --overwrite to apply
+every difference without asking, or --skip-conflicts to leave existing items untouched. Use
+--dry-run to see the plan.
+
+Usage: thorctl toolbox import [OPTIONS] <PATH | URL | DIR>
+
+Arguments:
+  <PATH | URL | DIR>
+          The toolbox manifest to use: a toolbox.json path, an http(s) URL, or a toolbox directory.
+          Format: `path | url | dir`
+          
+          Legacy toolboxes (images and pipelines) are converted in memory first, exactly as `toolbox
+          convert` would, and the conversion's issues are reported.
+
+Options:
+      --group-override <GROUP>
+          Force every item to be imported into a specific group
+          
+          The group is created if it doesn't already exist.
+
+  -t, --tools <NAME>
+          Only import these tools (and what they need), comma separated
+          
+          Anything a selected item depends on is imported with it.
+
+  -p, --pipelines <NAME>
+          Only import these pipelines (and the tools they need), comma separated
+
+      --only <KIND/NAME>
+          Only import this item (and what it needs), written KIND/NAME; repeat for several items
+          
+          The kind is tool, toolset, agent, workflow, or pipeline.
+
+      --overwrite
+          Apply every difference without asking
+          
+          A changed tool version is published under its label, or under `LABEL+HASH` when the label
+          is taken by a different spec, since published versions never change. Toolsets, agents,
+          workflows, and pipelines that differ are updated in place.
+
+      --skip-conflicts
+          Create what is missing but never change what already exists
+          
+          Each existing item that differs from the toolbox is left as it is and listed. This is safe
+          for non-interactive (CI or agent) imports that must never overwrite local changes.
+
+      --dry-run
+          Show what would be created, published, and updated, and write nothing
+
+      --skip-confirm
+          Don't ask for confirmation before writing
+          
+          [alias: --yes]
+
+  -o, --format <FORMAT>
+          The format to print in: table, human, json (the API's response), or yaml
+
+          Possible values:
+          - table: A table with one row per item
+          - human: Labeled fields for people to read
+          - json:  The API's response as JSON
+          - yaml:  The same document as the JSON format, written as YAML
+
+      --rollback-on-failure
+          Automatically roll back what was applied if the import stops early
+          
+          Without this flag a session with a terminal is asked, and any other session keeps what was
+          applied and reports it.
+
+      --editor <EDITOR>
+          The editor to use when reviewing a difference
+          
+          Accepted for compatibility; differences are decided with Apply, Skip, or Quit.
+
+      --update-network-policy
+          Update existing Thorium network policies to match the toolbox
+          
+          Without this, an existing policy that differs is left untouched and only a warning is
+          logged. With it, the toolbox's definition is authoritative: rule/flag differences
+          overwrite the policy, and a groups-only difference adds the toolbox's groups to the
+          existing policy. Group coverage is only ever added, never removed.
+          
+          This overwrites cluster network-security state, and it applies WITHOUT a prompt when the
+          session can't ask.
+
+      --image-path-prefix <REGISTRY/BASE>
+          Target registry base path for images bundled in the toolbox
+          
+          Only used when the toolbox bundles container images (exported with `--with-images`): each
+          tool's container image is rewritten to `<image-path-prefix>/<group>/<name>:<tag>`.
+          Importing does not push container images; push them to that registry first.
+
+      --follow-latest
+          Make pipeline stages of a legacy toolbox follow their tool's latest version instead of
+          pinning the version the legacy pipeline named
+
+      --no-pipelines
+          Don't import pipelines
+
+      --strict
+          Stop before any write if converting a legacy toolbox raised an issue or the manifest has a
+          warning
+
+      --create-groups
+          Create the groups the toolbox names that don't exist yet, owned by you
+
+  -h, --help
+          Print help (see a summary with '-h')
+
+  -V, --version
+          Print version
+
+=== thorctl toolbox build (exit 0)
+Build a toolbox manifest from tool, image, and pipeline manifests
+
+Walks the directory containing --config (or --path, if given) for manifest.toml files (tools, base
+builds, toolsets, agents, workflows, pipelines, and legacy images) and reads the specs and configs
+they point at to produce a toolbox.json file suitable for import into Thorium.
+
+The format follows the manifests: any `type = "tool"`, `"build"`, `"toolset"`, `"agent"`, or
+`"workflow"` manifest writes the current format (format 2), and legacy `type = "image"` manifests
+alone write the legacy format (format 1) with a hint to convert. Use --format-version to choose, and
+--rewrite-manifests to convert a directory of legacy manifests in place.
+
+Usage: thorctl toolbox build [OPTIONS]
+
+Options:
+  -c, --config <CONFIG.TOML>
+          Path to the toolbox TOML config file
+          
+          [default: config.toml]
+
+      --use-image-path
+          Tag every image with its manifest `image_name` (a repo-style path) as the leaf:
+          `<registry>/[prefix/]<image_name>:<version>`
+          
+          By default images are tagged with the tool `name`
+          (`<registry>/[prefix/]<name>:<version>`). Set this to use the path-style `image_name` from
+          each manifest instead. No effect on images pinned to an explicit url.
+
+  -o, --output <PATH>
+          Output path for the generated toolbox.json
+          
+          Defaults to a `toolbox.json` beside the --config file (the toolbox root). Overriding this
+          only redirects the artifact; it does not change where manifests are crawled from.
+
+      --path <DIR>
+          Root directory to walk for tool, image, and pipeline manifests
+          
+          Defaults to the directory containing --config (the toolbox root). Overriding this only
+          changes the crawl root; it does not change where toolbox.json is written.
+
+      --tag-suffix <SUFFIX>
+          Append this suffix to every derived image tag's version, baking it into the generated
+          toolbox.json (tags and embedded image urls)
+          
+          Lets a CI/CD feature-branch build produce a toolbox.json that references differentiated
+          images (e.g. `:1.0-mybranch`) instead of colliding with the mainline `:1.0`. Only affects
+          derived `<registry>/...:<version>` tags; images pinned to an explicit url are left
+          untouched. Pass the separator you want (e.g. `-mybranch`).
+          
+          This is the alternative to `toolbox build-images --tag-suffix`, which suffixes tags at
+          build time without touching toolbox.json; use one or the other (build-images won't
+          re-apply a suffix a tag already carries).
+
+      --format-version <VERSION>
+          The format of the toolbox to write: `1` (the legacy images and pipelines) or `2` (tools,
+          toolsets, agents, workflows, pipelines with stage tools, and base builds)
+          
+          By default the format follows the manifests found: any `type = "tool"`, `"build"`,
+          `"toolset"`, `"agent"`, or `"workflow"` manifest, or a pipeline with `[stage_tools]`,
+          writes format 2, and legacy `type = "image"` manifests alone write format 1. Format 2 over
+          legacy manifests converts them exactly as `toolbox convert` does. Format 1 refuses
+          manifests that only format 2 can hold.
+          
+          [possible values: 1, 2]
+
+      --rewrite-manifests
+          Rewrite the legacy image and pipeline manifests in place as tool, build, and stage-tool
+          manifests
+          
+          Each `type = "image"` manifest.toml becomes a `type = "tool"` manifest whose `spec_from`
+          names its config file (`config_from`), which now holds the converted spec as JSON; an
+          image with `[image_from]` keeps it and leaves its spec's image empty. A build-only image
+          (no config) becomes a `type = "build"` manifest, and each pipeline's `[images.*]` tables
+          become `[stage_tools.*]` tables. Every replaced file is kept with `.bak` added to its name
+          and an existing backup is never replaced. Writes format 2, so it can't be combined with
+          `--format-version 1`.
+
+  -h, --help
+          Print help (see a summary with '-h')
+
+  -V, --version
+          Print version
+
+=== thorctl toolbox init (exit 0)
+Initialize toolbox, tool, image, or pipeline scaffolding
+
+Generate default manifest.toml files with their spec or JSON config. Existing files are skipped
+unless --overwrite (per-tool files) or --overwrite-config (config.toml, `init toolbox` only) is
+given.
+
+Usage: thorctl toolbox init <COMMAND>
+
+Commands:
+  toolbox   Initialize a full toolbox with config.toml, image, and pipeline files
+  image     Initialize a single image with a manifest.toml and JSON config
+  pipeline  Initialize a single pipeline with a manifest.toml and JSON config
+  tool      Initialize a tool, toolset, agent, or workflow with a manifest.toml and a spec file
+  help      Print this message or the help of the given subcommand(s)
+
+Options:
+  -h, --help
+          Print help (see a summary with '-h')
+
+  -V, --version
+          Print version
+
+=== thorctl toolbox init toolbox (exit 0)
+Initialize a full toolbox with config.toml, image, and pipeline files
+
+Usage: thorctl toolbox init toolbox [OPTIONS] --images <PATH>
+
+Options:
+  -i, --images <PATH>
+          Image build directories, comma-separated. Format: `path[,path,...]` (each gets a
+          manifest.toml + JSON config)
+          
+          Relative paths are resolved under --toolbox-dir.
+
+  -p, --pipeline <PATH[:IMAGE,...]>
+          Pipeline directories, optionally binding images. Format: `path[:image,...]`
+          
+          Use the optional `[:image,...]` colon suffix to bind specific images, e.g.
+          `-p ./pipelines/capa:capa,yara`. Without it, all --images are bound. Repeat -p for
+          multiple pipelines. A suffix containing a path separator, or a Windows drive
+          prefix like `C:`, is part of the path rather than an image list. Relative paths
+          are resolved under --toolbox-dir.
+
+  -g, --group <GROUP>
+          Group name to use in generated configs (prompted interactively if omitted)
+
+      --toolbox-dir <DIR>
+          Path to the toolbox root directory where config.toml will be created
+          
+          [default: .]
+
+  -c, --config <CONFIG.TOML>
+          Seed the new config.toml from an existing one (name, registry, registries,
+          `image_path_prefix`, export paths, `bundled_images`, `[base_image]`) instead of
+          --name/--registry
+          
+          Mutually exclusive with --name, --registry, --image-path, and --pipeline-path.
+
+      --name <NAME>
+          Toolbox name for config.toml
+          
+          [default: "My Toolbox"]
+
+      --registry <REGISTRY>
+          Container registry for config.toml, e.g. ghcr.io/org/repo
+          
+          Optional: when omitted, the toolbox declares no central registry and each image's tag is
+          taken from the `image` url in its own config.
+
+      --image-path <DIR>
+          Directory (relative to the toolbox root) `export` writes image tool dirs under (default:
+          images)
+          
+          Sets `export_image_path` in config.toml. Must be a relative subpath (no absolute path, no
+          `..`). Only affects where `export` places files — `build` still discovers manifests at any
+          depth.
+
+      --pipeline-path <DIR>
+          Directory (relative to the toolbox root) `export` writes pipeline tool dirs under
+          (default: pipelines)
+          
+          Sets `export_pipeline_path` in config.toml. Must be a relative subpath (no absolute path,
+          no `..`).
+
+      --editor <EDITOR>
+          The editor to use when filling in configs (defaults to your configured `default_editor`)
+
+  -n, --non-interactive
+          Skip interactive prompts and use defaults for all fields
+          
+          Interactive mode needs a terminal on stdin and stderr; without one, pass -n together with
+          --group.
+
+      --overwrite
+          Overwrite existing per-tool files instead of skipping them
+          
+          Covers the scaffolded manifest.toml/JSON/description files. It does NOT touch an existing
+          config.toml — use --overwrite-config for that.
+
+      --overwrite-config
+          Overwrite an existing config.toml instead of preserving it
+          
+          By default an existing config.toml is kept (so re-running init in a toolbox doesn't
+          clobber its settings). Distinct from --overwrite, which covers per-tool files.
+
+  -h, --help
+          Print help (see a summary with '-h')
+
+  -V, --version
+          Print version
+
+=== thorctl toolbox init image (exit 0)
+Initialize a single image with a manifest.toml and JSON config
+
+Usage: thorctl toolbox init image [OPTIONS] <PATH>
+
+Arguments:
+  <PATH>
+          Path to the image build directory (the scaffolded files land here)
+
+Options:
+      --image-name <IMAGE_NAME>
+          The manifest `image_name`: the registry tag path leaf used at build time, formatted as a
+          repo-style path (`<registry>/<image_name>:<version>`); defaults to the build directory
+          name
+
+  -g, --group <GROUP>
+          Group name to use in the generated image config (prompted interactively if omitted)
+
+  -c, --config <CONFIG.TOML>
+          Validate against an existing toolbox's config.toml (resolution source, not placement)
+          
+          When set, scaffolding errors if an image of the same name+version already exists in that
+          toolbox (pass --overwrite to replace). Does not move files — the positional path is the
+          destination.
+
+      --no-build
+          Skip building this image in CI/CD (image already exists in registry)
+
+      --editor <EDITOR>
+          The editor to use when filling in the config (defaults to your configured
+          `default_editor`)
+
+  -n, --non-interactive
+          Skip interactive prompts and use defaults for all fields
+          
+          Interactive mode needs a terminal on stdin and stderr; without one, pass -n together with
+          --group.
+
+      --overwrite
+          Overwrite existing files instead of skipping them
+
+  -h, --help
+          Print help (see a summary with '-h')
+
+  -V, --version
+          Print version
+
+=== thorctl toolbox init pipeline (exit 0)
+Initialize a single pipeline with a manifest.toml and JSON config
+
+Usage: thorctl toolbox init pipeline [OPTIONS] <PATH>
+
+Arguments:
+  <PATH>
+          Path to the pipeline directory (the scaffolded files land here)
+
+Options:
+  -i, --images <IMAGE>
+          Image names this pipeline runs, comma-separated. Format: `image[,image,...]`
+          
+          Required with --non-interactive. Otherwise, when omitted, the editor opens with an empty
+          order to fill in.
+
+  -g, --group <GROUP>
+          Group name to use in the generated pipeline config (prompted interactively if omitted)
+
+      --order <JSON>
+          Pipeline order as JSON: a list of parallel stages, e.g. `[["img1","img2"],["img3"]]`, or a
+          flat list like `["img1","img2"]` (defaults to all images in a single parallel stage)
+
+  -c, --config <CONFIG.TOML>
+          Resolve the pipeline's images against an existing toolbox's config.toml (the "look here"
+          source, not placement)
+          
+          When set, every referenced image must exist in that toolbox (else an error — `init
+          pipeline` never creates images), and each is version-pinned from the toolbox instead of
+          `latest`. Does not move files — the positional path is the destination.
+
+      --editor <EDITOR>
+          The editor to use when filling in the config (defaults to your configured
+          `default_editor`)
+
+  -n, --non-interactive
+          Skip interactive prompts and use defaults for all fields
+          
+          Interactive mode needs a terminal on stdin and stderr; without one, pass -n together with
+          --group and --images.
+
+      --overwrite
+          Overwrite existing files instead of skipping them
+
+  -h, --help
+          Print help (see a summary with '-h')
+
+  -V, --version
+          Print version
+
+=== thorctl toolbox init tool (exit 0)
+Initialize a tool, toolset, agent, or workflow with a manifest.toml and a spec file
+
+Writes a `type = "tool"` (or toolset, agent, workflow) manifest.toml and the spec file it points at:
+`<name>.json` for a tool, `<name>.toolset.yaml`, `<name>.agent.yaml`, or `<name>.workflow.yaml` for
+the others. Fill in the spec, then run `toolbox build`.
+
+Usage: thorctl toolbox init tool [OPTIONS] --kind <KIND> <PATH>
+
+Arguments:
+  <PATH>
+          Path to the directory to scaffold into; its name is the item's name
+
+Options:
+      --kind <KIND>
+          The kind of item to scaffold
+
+          Possible values:
+          - image:    A tool run as Thorium jobs from a container image
+          - agentic:  A tool a model calls (backed by Thorium's MCP server, a container tool, or a
+            harness)
+          - harness:  A swappable agent harness
+          - toolset:  A toolset of tools
+          - agent:    An agent that uses tools
+          - workflow: A workflow of agents
+
+  -g, --group <GROUP>
+          Group name to put the item in (prompted interactively if omitted)
+
+      --image-name <IMAGE_NAME>
+          The manifest `image_name`: the registry tag path leaf used at build time when `toolbox
+          build --use-image-path` is set (image tools only; defaults to the item's name)
+
+      --no-build
+          Skip building this image in CI/CD (image already exists in registry; image tools only)
+
+  -n, --non-interactive
+          Skip interactive prompts and use defaults for all fields
+          
+          Interactive mode needs a terminal on stdin and stderr; without one, pass -n together with
+          --group.
+
+      --overwrite
+          Overwrite existing files instead of skipping them
+
+  -h, --help
+          Print help (see a summary with '-h')
+
+  -V, --version
+          Print version
+
+=== thorctl toolbox export (exit 0)
+Export Thorium tools and pipelines into a toolbox directory structure
+
+Reads tools (with every version's spec), pipelines, and with --all-kinds toolsets, agents, and
+workflows from a running Thorium instance, and writes a toolbox directory with a manifest.toml per
+item and a v2 toolbox.json ready to validate, diff, and import elsewhere. Container images stay in
+their registry; model endpoints, profiles, and credentials are never exported.
+
+Usage: thorctl toolbox export [OPTIONS]
+
+Options:
+  -g, --group <GROUP>
+          Export everything of the selected kinds from this Thorium group (the source group to read
+          from)
+          
+          Tools and pipelines are exported by default and `--all-kinds` adds toolsets, agents, and
+          workflows. Exported items are written under this same group unless `--group-override` sets
+          a different destination group. When re-exporting into an existing toolbox whose items live
+          under a different group, `--overwrite` rewrites them in place to this group (no
+          `--group-override` needed); without `--overwrite` a differing item is an error rather than
+          a duplicate. With any of `--tools`, `--pipelines`, `--toolsets`, `--agents`, or
+          `--workflows`, this is only the default group of the names given without one.
+
+  -p, --pipelines <GROUP/NAME[=DIR]>
+          Export specific pipelines. Format: `group/name[=dir]` (or `name[=dir]` with --group),
+          comma-separated for multiple.
+          
+          Tools used by exported pipelines are auto-included. The optional `[=dir]` suffix writes
+          that pipeline's files to `dir`, e.g. `static/av=pipelines/av`; without it the default
+          layout (`pipelines/<group>/<name>`) is used. `dir` must be relative to the toolbox root
+          and must not leave it. `[=dir]` is placement only; it never changes which pipeline (or its
+          tools) is selected.
+
+  -t, --tools <GROUP/NAME[=DIR]>
+          Export specific tools. Format: `group/name[=dir]` (or `name[=dir]` with --group),
+          comma-separated for multiple.
+          
+          Every version of a tool is exported (deprecated versions only with
+          `--include-deprecated`). The optional `[=dir]` suffix writes that tool's files to `dir`,
+          e.g. `static/clamav=tools/clamav`; naming an auto-included dependency tool this way also
+          redirects it. `dir` must be relative to the toolbox root and must not leave it. `[=dir]`
+          is placement only. `-i/--images` is a hidden alias of this flag for older scripts.
+
+      --toolsets <GROUP/NAME[=DIR]>
+          Export specific toolsets. Format: `group/name[=dir]` (or `name[=dir]` with --group),
+          comma-separated for multiple.
+          
+          The tools a toolset includes are auto-included.
+
+      --agents <GROUP/NAME[=DIR]>
+          Export specific agents. Format: `group/name[=dir]` (or `name[=dir]` with --group),
+          comma-separated for multiple.
+          
+          The harness, tools, toolsets, and sub-agents an agent names are auto-included.
+
+      --workflows <GROUP/NAME[=DIR]>
+          Export specific workflows. Format: `group/name[=dir]` (or `name[=dir]` with --group),
+          comma-separated for multiple.
+          
+          The agents a workflow runs, and everything they name, are auto-included.
+
+      --all-kinds
+          With --group and no named items, also export the group's toolsets, agents, and workflows
+
+      --include-deprecated
+          Also export deprecated tool versions (by default they are skipped)
+          
+          A deprecated version that something pins (an agentic tool's container, a harness's
+          provided tool) is exported anyway so the reference resolves.
+
+      --latest-only
+          Only export each tool's latest version
+          
+          A version that something pins is exported anyway so the reference resolves.
+
+      --group-override <GROUP>
+          Destination group: write every exported item under this group instead of its source group
+          
+          Use it to read from one Thorium group (`-g`/`--pipelines`/`--tools`) but store the items
+          under a different group in the toolbox, or to align an export with an existing toolbox's
+          group so the items reconcile and update in place. Two items of one kind that share a name
+          can't both be exported, with or without this flag.
+
+  -o, --output <DIR>
+          Root directory for the exported toolbox
+          
+          Defaults to the `--config` directory when `--config` is given (so pointing at a toolbox's
+          config.toml exports into that toolbox), otherwise `./toolbox` for a brand-new toolbox. An
+          explicit value always wins; pass it to seed settings from one toolbox into a different
+          output directory.
+
+  -c, --config <CONFIG.TOML>
+          Seed the toolbox-wide settings (name, registry, registries, `image_path_prefix`,
+          `[base_image]`) from *another* toolbox's config.toml instead of --name/--registry
+          
+          This is for starting a new toolbox from an existing one's settings. Appending into a
+          toolbox that already has a config.toml does NOT need this: an existing
+          `<output>/config.toml` is auto-detected, reused, and preserved, and while it is kept it
+          takes precedence over --config (which is then ignored with a warning). Settings-source
+          priority is: kept `<output>/config.toml` > --config > --name/--registry. With
+          --overwrite-config, an explicit --name/--registry is applied. Mutually exclusive with
+          --name and --registry. Bundling is never inherited; it always follows --with-images.
+          
+          Giving --config also anchors --output to the config's directory unless --output is set, so
+          `export -c mytb/config.toml ...` exports into `mytb/`. If the --config file doesn't exist,
+          a warning is printed and a new toolbox is created there with the default name and no
+          registry (--name/--registry can't be combined with --config).
+
+      --name <NAME>
+          Toolbox name for config.toml (default: "My Toolbox" for a new toolbox)
+          
+          Ignored with a warning while an existing config.toml is kept; applied over it with
+          --overwrite-config.
+
+      --registry <REGISTRY>
+          Container registry for config.toml, e.g. ghcr.io/org/repo
+          
+          Optional: when omitted, the exported toolbox declares no central registry and relies on
+          each image tool's own `image` url (captured on export unless `--strip-registry` is used).
+
+      --skip-conflicts
+          Skip on-disk conflicts: write new items and leave differing existing ones untouched with a
+          warning (use --overwrite to overwrite instead)
+          
+          Without --overwrite or --skip-conflicts, an item that already exists in the output with
+          different contents stops the export before anything is written.
+
+      --review
+          Open each exported item in an editor to review/tweak it before writing (requires a
+          terminal)
+
+      --editor <EDITOR>
+          The editor to open with --review (default: the configured editor, then $VISUAL, then
+          $EDITOR)
+
+      --overwrite
+          Update a matched in-toolbox item that differs (otherwise the export stops listing it)
+          
+          When an item with the same kind and name already exists in the output and differs, this
+          replaces it (its manifest.toml and spec files are rewritten and its toolbox.json entry is
+          replaced); unchanged items are not rewritten. It does NOT touch config.toml; use
+          --overwrite-config for that. With no selection and no --group, `--overwrite` refreshes
+          every item already in the output from the same groups.
+
+      --overwrite-config
+          Overwrite an existing config.toml with this run's settings
+          
+          By default an existing config.toml is preserved (and its settings reused), so exporting
+          into an existing toolbox never clobbers its settings. Pass this to replace it. Distinct
+          from --overwrite, which covers per-item files.
+
+      --with-images
+          Bundle each image tool's container image file into the toolbox for offline transfer
+          
+          Pulls and saves each image tool's container with the configured container runtime (docker
+          or podman, see --container-runtime) into its directory as `<dir>/<name>.tar.gz`. Only K8s
+          image tools run from a container, so tools with other scalers are exported without a
+          tarball; a K8s tool with no container url fails the export. Requires a container runtime.
+
+      --strip-registry
+          Write each image tool's container url as empty so the export carries no hard-coded
+          registry path
+          
+          Clears the `image` url in every exported image tool's K8s environment, so a rebuild
+          derives each image's path from the toolbox's own `config.toml`
+          registry/`image_path_prefix` instead of a pinned url. Requires a registry in the effective
+          config (--registry, --config, or the existing config.toml). **Conflicts with
+          `--with-images`** (a bundled import needs the url to tag and push the saved tarball). A
+          tool exported this way has a different spec hash than the tool in Thorium.
+
+      --format <FORMAT>
+          The format to print in: table, human, json (the API's response), or yaml
+
+          Possible values:
+          - table: A table with one row per item
+          - human: Labeled fields for people to read
+          - json:  The API's response as JSON
+          - yaml:  The same document as the JSON format, written as YAML
+
+  -h, --help
+          Print help (see a summary with '-h')
+
+  -V, --version
+          Print version
+
+=== thorctl toolbox remove (exit 0)
+Remove a previously imported toolbox from Thorium
+
+Deletes the pipelines, workflows, agents, toolsets, and tools named by a toolbox manifest from the
+target instance, in dependency order: pipelines, workflows, agents, and toolsets first, then each
+tool's versions and the tool. Items that don't exist are reported and skipped, and a tool still used
+by something outside the toolbox is left in place and reported. Groups and network policies are
+never deleted.
+
+Usage: thorctl toolbox remove [OPTIONS] <PATH | URL | DIR>
+
+Arguments:
+  <PATH | URL | DIR>
+          The toolbox manifest to use: a toolbox.json path or an http(s) URL, or a toolbox
+          directory. Format: `path | url | dir`
+          
+          A legacy toolbox is converted in memory first, so its images are removed as the tools an
+          import created. A directory is read through its toolbox.json.
+
+Options:
+      --group-override <GROUP>
+          Remove from this group instead of the groups recorded in the manifest
+          
+          Use this when the toolbox was imported with --group-override.
+
+      --skip-confirm
+          Skip the confirmation dialog
+          
+          The resources being removed are still listed before anything is deleted.
+          
+          [alias: --yes]
+
+      --dry-run
+          List what would be removed without deleting anything
+          
+          Needs no terminal, so it can preview a removal in CI.
+
+  -h, --help
+          Print help (see a summary with '-h')
+
+  -V, --version
+          Print version
+
+=== thorctl toolbox diff (exit 0)
+Diff an on-disk toolbox against what a Thorium instance has imported
+
+Shows what an import of this toolbox would change: each tool version is listed as new, unchanged
+(counted only), or a label conflict, and toolsets, agents, workflows, and pipelines that differ show
+unified hunks of their normalized definitions. A summary line counts each kind. Use --exit-code to
+fail when an import would change something.
+
+Usage: thorctl toolbox diff [OPTIONS] <PATH | URL | DIR>
+
+Arguments:
+  <PATH | URL | DIR>
+          A toolbox.json (path or http(s) URL) or a toolbox repo directory. Format: `path | url |
+          dir`
+          
+          A legacy toolbox is converted in memory first, so its images are compared as the tools an
+          import would create. A directory is read through its toolbox.json.
+
+Options:
+      --group-override <GROUP>
+          Compare against this group instead of the groups recorded in the toolbox
+          
+          Use this when the toolbox was imported with --group-override.
+
+      --exit-code
+          Exit with code 1 when an import would change something (git diff --exit-code semantics)
+          
+          Counts tools that are new or gain a version, tool versions whose label exists with another
+          spec, toolsets, agents, workflows, and pipelines that are new or differ, and differing
+          network policies. Resources only in the instance never count, since an import doesn't
+          delete them. Errors also exit with code 1, so exit code 1 alone doesn't distinguish drift
+          from a failed diff.
+
+      --image-path-prefix <REGISTRY/BASE>
+          Target registry base path for images bundled in the toolbox
+          
+          Only used when the toolbox bundles container images (exported with `--with-images`). Each
+          bundled image's url is compared as `<image-path-prefix>/<group>/<name>:<tag>`, the url an
+          import with the same prefix would store. If omitted for a bundled toolbox, the prefix
+          recorded in the manifest is used; with neither, urls are compared as-is. Never prompts.
+
+      --format <FORMAT>
+          The format to print in: table, human, json (the API's response), or yaml
+
+          Possible values:
+          - table: A table with one row per item
+          - human: Labeled fields for people to read
+          - json:  The API's response as JSON
+          - yaml:  The same document as the JSON format, written as YAML
+
+  -h, --help
+          Print help (see a summary with '-h')
+
+  -V, --version
+          Print version
+
+=== thorctl toolbox build-images (exit 0)
+Build (and optionally push) the container images in a toolbox
+
+Walks a toolbox.json (a legacy images toolbox, or a v2 toolbox with tool versions that have a
+`build` section and a `builds` section of base contexts) for entries with build enabled, builds each
+entry's docker context with its first tag, aliases the remaining tags, and pushes all tags with
+--push. Base contexts are built before the tools that start from them. For forks without CI: build,
+push, then import as usual.
+
+Usage: thorctl toolbox build-images [OPTIONS] [TOOLBOX.JSON]
+
+Arguments:
+  [TOOLBOX.JSON]
+          The toolbox.json holding the build entries, or the directory holding it
+          
+          Reads either format: a v2 toolbox builds every tool version with a `build` section plus
+          the `builds` section (base contexts other builds start from, built first), and a legacy
+          toolbox builds its `images` entries. A directory is searched for `toolbox.json`, then
+          `toolbox.v2.json`.
+          
+          [default: toolbox.json]
+
+Options:
+  -t, --tools <NAME>
+          Only build these tools and base builds, comma-separated. Format: `name[,name,...]`
+          (default: everything with build enabled)
+          
+          `-i/--images` is a hidden alias of this flag for older scripts.
+
+      --dry-run
+          Print what would be built, tagged, and pushed without running the container runtime
+          
+          Lists the entries in build order with their tags, build arguments, and the entries that
+          are skipped, then exits.
+
+      --push
+          Push every built tag to its registry after building
+
+      --base-image <ARG=IMAGE>
+          Override an image's base image: `ARG=IMAGE`, passed to the build as `--build-arg
+          ARG=IMAGE`
+          
+          Run-global escape hatch that overrides each image's resolved `[base_image]`. Only applied
+          to images whose `[base_image].allow_override` is true (the default); images that opt out
+          are built with their default base. `ARG` is the build arg the Dockerfile reads (e.g.
+          `IMAGE` for `FROM ${IMAGE}`). On a key collision with a `--build-arg`, this value wins for
+          images that allow the override.
+
+      --build-arg <KEY=VALUE>
+          Extra build arg passed to every image build: `KEY=VALUE` (repeatable)
+          
+          Unlike `--base-image`, these are passed to every build regardless of each entry's
+          `base_image.allow_override` gate.
+
+      --tag-suffix <SUFFIX>
+          Append this suffix to every tag built and pushed, without touching toolbox.json
+          
+          Lets a CI/CD feature-branch run build/push differentiated images (e.g. `:1.0-mybranch`)
+          from an unmodified toolbox.json so they don't collide with the mainline `:1.0`. Pass the
+          separator you want (e.g. `-mybranch`).
+          
+          This is the alternative to `toolbox build --tag-suffix`, which bakes the suffix into
+          toolbox.json instead; use one or the other. A tag that already ends with the suffix is not
+          suffixed again.
+
+  -e, --exit-on-error
+          Stop at the first image whose build or push fails
+          
+          By default the build keeps going on failure — logging each one and exiting non-zero at the
+          end if any image failed. This flag instead aborts the run on the first failure.
+
+      --no-cache
+          Build without the layer cache (passes `--no-cache` to docker/podman)
+          
+          Applies to every image built in this run.
+
+      --pull
+          Force a fresh pull of referenced images before building (passes `--pull` to docker/podman)
+          
+          Like docker/podman `--pull`, this refreshes every image the build references (including
+          the `FROM` base) instead of using a locally cached one. Applies to every image built in
+          this run.
+
+  -h, --help
+          Print help (see a summary with '-h')
+
+  -V, --version
+          Print version
+
+=== thorctl toolbox list (exit 0)
+List what a toolbox manifest contains
+
+Reads a toolbox manifest (a legacy or a v2 toolbox.json, a path, URL, or toolbox directory) and
+lists its tools, toolsets, agents, workflows, pipelines, and build-only image contexts with their
+groups and versions. Nothing is sent to Thorium.
+
+Usage: thorctl toolbox list [OPTIONS] <PATH | URL | DIR>
+
+Arguments:
+  <PATH | URL | DIR>
+          The toolbox to list. Format: `path | url | dir`
+
+Options:
+      --kind <KIND>
+          Only list this kind of item
+
+          Possible values:
+          - tools:     Tools
+          - toolsets:  Toolsets
+          - agents:    Agents
+          - workflows: Workflows
+          - pipelines: Pipelines
+          - builds:    Build-only image contexts
+
+  -o, --format <FORMAT>
+          The format to print in: table, human, json (the API's response), or yaml
+
+          Possible values:
+          - table: A table with one row per item
+          - human: Labeled fields for people to read
+          - json:  The API's response as JSON
+          - yaml:  The same document as the JSON format, written as YAML
+
+  -h, --help
+          Print help (see a summary with '-h')
+
+  -V, --version
+          Print version
+
+=== thorctl toolbox validate (exit 0)
+Check a toolbox manifest without talking to Thorium
+
+Reads a toolbox manifest (a legacy or a v2 toolbox.json, a path, URL, or toolbox directory) and
+reports every problem with it: unusable names, specs that don't parse, unresolved references,
+dependency cycles, pipeline stages without a tool, and more. Exits with code 1 when there are
+errors, or with --strict when there are warnings too.
+
+Usage: thorctl toolbox validate [OPTIONS] <PATH | URL | DIR>
+
+Arguments:
+  <PATH | URL | DIR>
+          The toolbox to check. Format: `path | url | dir`
+
+Options:
+      --strict
+          Exit with code 1 on warnings and skipped items too, not only on errors
+
+      --format <FORMAT>
+          The format to print in: table, human, json (the API's response), or yaml
+
+          Possible values:
+          - table: A table with one row per item
+          - human: Labeled fields for people to read
+          - json:  The API's response as JSON
+          - yaml:  The same document as the JSON format, written as YAML
+
+  -h, --help
+          Print help (see a summary with '-h')
+
+  -V, --version
+          Print version
+
+=== thorctl toolbox convert (exit 0)
+Convert a legacy toolbox manifest to the current format
+
+Reads a legacy toolbox (a toolbox.json with images and pipelines, given as a path, a URL, or a
+toolbox directory) and writes the same toolbox as tools with their specs, bundled build contexts,
+and pipelines whose stages name tools. Nothing is sent to Thorium and no login is needed. The input
+is never changed unless --in-place is given.
+
+By default the result is written to toolbox.v2.json next to the input. Images with no container
+image are skipped, exactly as the migration of stored images skips them, and a pipeline with a stage
+whose tool was not converted is left out; both are listed in the report together with every other
+issue. A manifest that is already in the current format is accepted and converts to itself.
+
+Usage: thorctl toolbox convert [OPTIONS] <PATH | URL | DIR>
+
+Arguments:
+  <PATH | URL | DIR>
+          The toolbox to convert. Format: `path | url | dir`
+
+Options:
+  -o, --output <PATH | ->
+          Where to write the converted manifest, or `-` for stdout (required for a URL input)
+
+      --in-place
+          Write the converted manifest over the input, first saving the input as `INPUT.bak`
+
+      --no-backup
+          Do not save a `.bak` copy of the input with --in-place (an existing `.bak` is an error
+          without this flag)
+
+      --check
+          Write nothing and exit with code 1 when the converted manifest differs from the output
+          file (or is missing it), printing a diff
+
+      --dry-run
+          Write nothing; print the report and, when the output file exists, a diff against it
+
+      --report <FILE | ->
+          Write the report as JSON to this file, or to stdout with `-`, instead of printing it on
+          stderr
+
+      --strict
+          Write nothing and exit with code 1 when any item was skipped or any issue was raised
+
+      --group-override <GROUP>
+          Put every tool and pipeline in this group instead of the groups the legacy entries name
+
+      --follow-latest
+          Make pipeline stages follow their tool's latest version instead of pinning the version the
+          legacy pipeline named
+
+      --fill-image-from-tags
+          Give a container image entry with no `image` the first of its build `image_tags` (default:
+          skip the entry)
+
+      --keep-incomplete-pipelines
+          Keep a pipeline that has a stage with no converted tool, flagged `incomplete` (default:
+          leave the pipeline out)
+
+      --format <FORMAT>
+          The format to print in: table, human, json (the API's response), or yaml
+
+          Possible values:
+          - table: A table with one row per item
+          - human: Labeled fields for people to read
+          - json:  The API's response as JSON
+          - yaml:  The same document as the JSON format, written as YAML
+
+  -h, --help
+          Print help (see a summary with '-h')
+
+  -V, --version
+          Print version
+
+=== thorctl toolbox update (exit 0)
+Refresh the items of a toolbox that were imported earlier
+
+Works like import, but only touches the tools, toolsets, agents, workflows, and pipelines that
+already exist in the target groups: nothing is created, no group is created, and the items that are
+missing are listed as not imported. Use it to bring what you imported before up to date with a newer
+copy of the toolbox.
+
+Usage: thorctl toolbox update [OPTIONS] <PATH | URL | DIR>
+
+Arguments:
+  <PATH | URL | DIR>
+          The toolbox manifest to use: a toolbox.json path, an http(s) URL, or a toolbox directory.
+          Format: `path | url | dir`
+          
+          Legacy toolboxes (images and pipelines) are converted in memory first, exactly as `toolbox
+          convert` would, and the conversion's issues are reported.
+
+Options:
+      --group-override <GROUP>
+          Force every item to be imported into a specific group
+          
+          The group is created if it doesn't already exist.
+
+  -t, --tools <NAME>
+          Only import these tools (and what they need), comma separated
+          
+          Anything a selected item depends on is imported with it.
+
+  -p, --pipelines <NAME>
+          Only import these pipelines (and the tools they need), comma separated
+
+      --only <KIND/NAME>
+          Only import this item (and what it needs), written KIND/NAME; repeat for several items
+          
+          The kind is tool, toolset, agent, workflow, or pipeline.
+
+      --overwrite
+          Apply every difference without asking
+          
+          A changed tool version is published under its label, or under `LABEL+HASH` when the label
+          is taken by a different spec, since published versions never change. Toolsets, agents,
+          workflows, and pipelines that differ are updated in place.
+
+      --skip-conflicts
+          Create what is missing but never change what already exists
+          
+          Each existing item that differs from the toolbox is left as it is and listed. This is safe
+          for non-interactive (CI or agent) imports that must never overwrite local changes.
+
+      --dry-run
+          Show what would be created, published, and updated, and write nothing
+
+      --skip-confirm
+          Don't ask for confirmation before writing
+          
+          [alias: --yes]
+
+  -o, --format <FORMAT>
+          The format to print in: table, human, json (the API's response), or yaml
+
+          Possible values:
+          - table: A table with one row per item
+          - human: Labeled fields for people to read
+          - json:  The API's response as JSON
+          - yaml:  The same document as the JSON format, written as YAML
+
+      --rollback-on-failure
+          Automatically roll back what was applied if the import stops early
+          
+          Without this flag a session with a terminal is asked, and any other session keeps what was
+          applied and reports it.
+
+      --editor <EDITOR>
+          The editor to use when reviewing a difference
+          
+          Accepted for compatibility; differences are decided with Apply, Skip, or Quit.
+
+      --update-network-policy
+          Update existing Thorium network policies to match the toolbox
+          
+          Without this, an existing policy that differs is left untouched and only a warning is
+          logged. With it, the toolbox's definition is authoritative: rule/flag differences
+          overwrite the policy, and a groups-only difference adds the toolbox's groups to the
+          existing policy. Group coverage is only ever added, never removed.
+          
+          This overwrites cluster network-security state, and it applies WITHOUT a prompt when the
+          session can't ask.
+
+      --image-path-prefix <REGISTRY/BASE>
+          Target registry base path for images bundled in the toolbox
+          
+          Only used when the toolbox bundles container images (exported with `--with-images`): each
+          tool's container image is rewritten to `<image-path-prefix>/<group>/<name>:<tag>`.
+          Importing does not push container images; push them to that registry first.
+
+      --follow-latest
+          Make pipeline stages of a legacy toolbox follow their tool's latest version instead of
+          pinning the version the legacy pipeline named
+
+      --no-pipelines
+          Don't import pipelines
+
+      --strict
+          Stop before any write if converting a legacy toolbox raised an issue or the manifest has a
+          warning
+
+  -h, --help
+          Print help (see a summary with '-h')
+
+  -V, --version
+          Print version

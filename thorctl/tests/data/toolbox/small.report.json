@@ -1,0 +1,37 @@
+{
+  "name": "Small legacy toolbox",
+  "source": "legacy",
+  "output": null,
+  "tools": 1,
+  "tool_versions": 1,
+  "builds": 1,
+  "pipelines": 1,
+  "network_policies": 0,
+  "mappings": [
+    {
+      "pipeline": "antivirus",
+      "stage": "clamav",
+      "tool": "clamav",
+      "version": "latest"
+    }
+  ],
+  "issues": [
+    {
+      "code": "missing_field:image",
+      "group": "static",
+      "item": "image noimage@latest",
+      "message": "names no container image, so it was not converted into a tool",
+      "skipped": true
+    },
+    {
+      "code": "invalid_value:stages.*",
+      "group": "static",
+      "item": "pipeline scan-all@latest",
+      "message": "runs a stage whose tool was not converted",
+      "skipped": true
+    }
+  ],
+  "warnings": [],
+  "notes": [],
+  "collisions": []
+}

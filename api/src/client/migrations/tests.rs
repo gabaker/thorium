@@ -9,13 +9,13 @@ use super::{
     DependencyKind, GroupEntity, ImageClass, ImageContext, MIGRATED_FROM_IMAGE_TAG,
     MIGRATED_INSTANCE_NAMESPACE, MIGRATED_TOOL_NAMESPACE, MIGRATION_OPERATOR, MigratedSubmitter,
     MigrationCategory, MigrationNote, MigrationReason, ProvenanceClass, ProvenanceRow, SkippedItem,
-    StageTarget, ToolIdMap, classify, classify_image, convert_image, migrated_at, remedy,
-    resolve_stages, rewrite_dependencies, up,
+    StageTarget, ToolIdMap, classify, classify_image, convert_image, convert_image_request,
+    migrated_at, remedy, resolve_request_stages, resolve_stages, rewrite_dependencies, up,
 };
 use crate::models::{
-    DroppedImageField, EntityKinds, EntityMetadata, HostPath, Image, ImageScaler, Pipeline,
-    ToolInstanceSummary, ToolSpec, ToolVersion, Volume, VolumeTypes, WorkloadEnvironment,
-    WorkloadSpec,
+    DroppedImageField, EntityKinds, EntityMetadata, HostPath, Image, ImageRequest, ImageScaler,
+    Pipeline, ThorDigest, ToolInstanceSummary, ToolSpec, ToolVersion, Volume, VolumeTypes,
+    WorkloadEnvironment, WorkloadSpec,
 };
 
 /// Build a K8s image with nothing but its group, name, creator, and container image set
@@ -890,4 +890,232 @@ fn the_migration_time_is_fixed() {
     );
     // asking twice gives the same instant
     assert_eq!(migrated_at(), migrated_at());
+}
+
+/// Build an image request for a group's image with a container image to run
+///
+/// # Arguments
+///
+/// * `group` - The image's group
+/// * `name` - The image's name
+/// * `scaler` - The image's scaler
+fn request(group: &str, name: &str, scaler: ImageScaler) -> ImageRequest {
+    // a request with a container image and the given scaler
+    ImageRequest::new(group, name)
+        .scaler(scaler)
+        .image(format!("repo/{name}:1.0"))
+}
+
+/// Store an image request as the API does, with its creator and the default runtime
+///
+/// # Arguments
+///
+/// * `request` - The request to store
+fn stored(request: &ImageRequest) -> Image {
+    // start from an empty projection and copy the fields the conversion reads
+    let mut image = WorkloadSpec::default().project_image(&request.group, &request.name, 600.0);
+    image.creator = "io".to_owned();
+    image.scaler = request.scaler;
+    image.image = request.image.clone();
+    image.description = request.description.clone();
+    image.env = request.env.clone();
+    image.collect_logs = request.collect_logs;
+    image.generator = request.generator;
+    image.dependencies = request.dependencies.clone();
+    image.resources = crate::models::Resources::from(request.resources.clone());
+    image
+}
+
+/// Requests with dependency names, secret-like env, and every scaler convert to the tool their
+/// stored images convert to, with the same spec hash, dropped fields, issues, and warnings
+#[test]
+fn request_conversions_match_the_live_conversion() {
+    // b is a plain K8s request; a depends on b and on a name that was never converted
+    let b = request("corn", "b", ImageScaler::K8s);
+    let mut a = request("corn", "a", ImageScaler::K8s);
+    a.dependencies.results.images = vec!["b".to_owned(), "gone".to_owned()];
+    a.dependencies.children.images = vec!["b".to_owned()];
+    a.dependencies.filesystems.enabled = true;
+    a.env
+        .insert("API_TOKEN".to_owned(), Some("s3cr3t".to_owned()));
+    a.env
+        .insert("LOG_LEVEL".to_owned(), Some("debug".to_owned()));
+    a.description = Some("grows corn".to_owned());
+    // one request for each other scaler, carrying env that the scaler drops
+    let mut requests = vec![a, b];
+    for (name, scaler) in [
+        ("bare", ImageScaler::BareMetal),
+        ("win", ImageScaler::Windows),
+        ("vm", ImageScaler::Kvm),
+        ("ext", ImageScaler::External),
+    ] {
+        let mut request = request("corn", name, scaler);
+        request
+            .env
+            .insert("DB_PASSWORD".to_owned(), Some("pw".to_owned()));
+        requests.push(request);
+    }
+    // the same map is built from the stored images and from the names alone
+    let images = requests.iter().map(stored).collect::<Vec<Image>>();
+    let map = ToolIdMap::from_images(&images);
+    let from_names = ToolIdMap::from_names(
+        requests
+            .iter()
+            .map(|request| (request.group.as_str(), request.name.as_str())),
+    );
+    assert_eq!(map, from_names);
+    let label = ToolVersion::Custom("1.0".to_owned());
+    let ctx = ImageContext {
+        creator_in_group: true,
+        last_modified: None,
+        map: &map,
+    };
+    for (request, image) in requests.iter().zip(&images) {
+        // convert both ways
+        let live = convert_image(image, &ctx).unwrap();
+        let offline =
+            convert_image_request(&request.group, &request.name, label.clone(), request, &map)
+                .unwrap();
+        // the tool differs only in who publishes it and its version label
+        assert_eq!(offline.tool.spec, live.tool.spec, "{}", request.name);
+        assert_eq!(offline.tool.id, live.tool.id);
+        assert_eq!(offline.tool.group, live.tool.group);
+        assert_eq!(offline.tool.name, live.tool.name);
+        assert_eq!(offline.tool.description, live.tool.description);
+        assert_eq!(offline.tool.tags, live.tool.tags);
+        assert_eq!(offline.tool.dropped, live.tool.dropped);
+        assert_eq!(offline.tool.dependency_tools, live.tool.dependency_tools);
+        assert_eq!(offline.tool.version, label);
+        assert_eq!(offline.tool.submitter, MigratedSubmitter::Operator);
+        // the spec hashes are equal
+        let live_hash = ThorDigest::tool_spec(&live.tool.spec, None).unwrap();
+        let offline_hash = ThorDigest::tool_spec(&offline.tool.spec, None).unwrap();
+        assert_eq!(offline_hash, live_hash, "{}", request.name);
+        // the same issues and warnings are raised
+        assert_eq!(offline.issues, live.issues);
+        assert_eq!(offline.warnings, live.warnings);
+        // every note of the live conversion except who publishes it and the version is kept
+        let kept = live
+            .notes
+            .iter()
+            .filter(|note| {
+                !note.note.starts_with("published as") && !note.note.starts_with("no version")
+            })
+            .cloned()
+            .collect::<Vec<_>>();
+        assert_eq!(offline.notes, kept, "{}", request.name);
+    }
+    // a names dropped dependency and b's tool in its lists, as the live conversion does
+    let a = convert_image_request("corn", "a", label, &requests[0], &map).unwrap();
+    assert_eq!(a.issues.len(), 1);
+    assert_eq!(
+        a.tool.dependency_tools.results,
+        vec![ToolIdMap::tool_id("corn", "b")]
+    );
+}
+
+/// A request the spec conversion rejects, or whose dependency list would empty, is skipped with
+/// the code the live conversion gives
+#[test]
+fn request_conversions_skip_with_the_live_codes() {
+    // a K8s request with no container image
+    let mut missing = request("corn", "missing", ImageScaler::K8s);
+    missing.image = None;
+    // a request whose only results dependency was never converted
+    let mut emptied = request("corn", "emptied", ImageScaler::K8s);
+    emptied.dependencies.results.images = vec!["gone".to_owned()];
+    let map = ToolIdMap::from_names([("corn", "missing"), ("corn", "emptied")]);
+    let label = ToolVersion::Custom("1.0".to_owned());
+    let ctx = ImageContext {
+        creator_in_group: true,
+        last_modified: None,
+        map: &map,
+    };
+    for request in [&missing, &emptied] {
+        let live = convert_image(&stored(request), &ctx).unwrap_err();
+        let offline =
+            convert_image_request("corn", &request.name, label.clone(), request, &map).unwrap_err();
+        assert_eq!(offline, live, "{}", request.name);
+    }
+    assert_eq!(
+        convert_image_request("corn", "missing", label, &missing, &map)
+            .unwrap_err()
+            .reason
+            .code(),
+        "missing_field:image"
+    );
+}
+
+/// Settling image requests by their dependency settings skips the same images, in the same
+/// chains, as settling the stored images
+#[test]
+fn settling_requests_matches_settling_images() {
+    // x is skipped for naming only a missing image, y names only x, and z names only y
+    let mut x = request("corn", "x", ImageScaler::K8s);
+    x.dependencies.results.images = vec!["gone".to_owned()];
+    let mut y = request("corn", "y", ImageScaler::K8s);
+    y.dependencies.children.images = vec!["x".to_owned()];
+    let mut z = request("corn", "z", ImageScaler::K8s);
+    z.dependencies.filesystems.images = vec!["y".to_owned()];
+    let w = request("corn", "w", ImageScaler::K8s);
+    let requests = [x, y, z, w];
+    // settle the stored images
+    let images = requests.iter().map(stored).collect::<Vec<Image>>();
+    let mut live = ToolIdMap::from_images(&images);
+    let mut live_skipped = BTreeMap::new();
+    live.settle(&images, &mut live_skipped);
+    // settle the requests by name and dependencies
+    let mut offline = ToolIdMap::from_names(
+        requests
+            .iter()
+            .map(|request| (request.group.as_str(), request.name.as_str())),
+    );
+    let mut offline_skipped = BTreeMap::new();
+    offline.settle_dependencies(
+        requests.iter().map(|request| {
+            (
+                request.group.as_str(),
+                request.name.as_str(),
+                &request.dependencies,
+            )
+        }),
+        &mut offline_skipped,
+    );
+    assert_eq!(offline, live);
+    assert_eq!(offline_skipped, live_skipped);
+    assert_eq!(live_skipped.len(), 3);
+    assert!(offline.get("corn", "w").is_some());
+}
+
+/// A pipeline request's stages resolve through the map like the live resolution of a stored
+/// pipeline before its tools exist, and each stage is resolved once
+#[test]
+fn request_stages_resolve_like_planned_stages() {
+    // grow's image is converted, harvest's isn't, and grow is repeated in the order
+    let map = ToolIdMap::from_images([&image("corn", "grow")]);
+    let resolution =
+        resolve_request_stages("corn", "farm", ["grow", "harvest", "grow", "harvest"], &map);
+    // grow resolves to its future tool id
+    assert_eq!(
+        resolution.stages.get("grow"),
+        Some(&StageTarget::Planned {
+            tool: ToolIdMap::tool_id("corn", "grow")
+        })
+    );
+    // harvest is skipped once, with the stage code naming the pipeline and stage
+    assert_eq!(resolution.skipped.len(), 1);
+    assert_eq!(
+        resolution.skipped[0].reason.code(),
+        "invalid_value:stages.*"
+    );
+    assert_eq!(resolution.skipped[0].item, "pipeline farm stage harvest");
+    // the stored pipeline's resolution is the same
+    let mut stored = pipeline("corn", &["grow", "harvest"], &[]);
+    stored.name = "farm".to_owned();
+    let live = resolve_stages(&stored, &[], Some(&map));
+    assert_eq!(resolution, live);
+    // a stage in another group never resolves
+    let other = resolve_request_stages("oranges", "farm", ["grow"], &map);
+    assert!(other.stages.is_empty());
+    assert_eq!(other.skipped.len(), 1);
 }

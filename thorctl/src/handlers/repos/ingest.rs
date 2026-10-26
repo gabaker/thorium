@@ -1,4 +1,5 @@
 //! A worker that ingests repos into Thorium
+use crate::utils::paint::Paint;
 use chrono::prelude::*;
 use futures::stream::{FuturesUnordered, StreamExt};
 use git2::build::RepoBuilder;
@@ -7,7 +8,6 @@ use gix::Id;
 use gix::bstr::ByteSlice;
 use gix::remote::Direction;
 use kanal::{AsyncSender, Receiver, Sender};
-use owo_colors::OwoColorize;
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;

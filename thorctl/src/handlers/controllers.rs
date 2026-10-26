@@ -3,10 +3,10 @@ use crate::args::Args;
 
 use super::progress::{Bar, BarKind, MultiBar};
 use super::{JobMsg, MonitorHandler, MonitorMsg, Worker, WorkerWrapper};
+use crate::utils::paint::Paint;
 use futures::StreamExt;
 use futures::stream::FuturesUnordered;
 use kanal::{AsyncReceiver, AsyncSender};
-use owo_colors::OwoColorize;
 use thorium::{CtlConf, Error, Thorium};
 use tokio::task::JoinHandle;
 

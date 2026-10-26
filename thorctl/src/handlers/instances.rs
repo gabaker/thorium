@@ -12,7 +12,8 @@ use uuid::Uuid;
 
 use crate::args::Args;
 use crate::args::instances::{
-    DescribeInstance, DiffInstances, GetInstances, InstanceRoot, Instances,
+    DescribeInstance, DiffInstances, GetInstances, InstanceRoot, Instances, RequestInstance,
+    RequestRoot,
 };
 use crate::handlers::agents::find;
 use crate::utils;
@@ -863,6 +864,165 @@ async fn diff(thorium: &Thorium, cmd: &DiffInstances) -> Result<(), Error> {
     )
 }
 
+/// The result of asking for a new instance of a workflow or toolset
+#[derive(Serialize)]
+struct RequestView {
+    /// The kind of root
+    kind: EntityKinds,
+    /// The root's ID
+    root: Uuid,
+    /// The root's name
+    root_name: String,
+    /// Whether the request was sent (a dry run sends nothing)
+    requested: bool,
+    /// The newest revision any instance of the root has had so far
+    highest_revision: u64,
+    /// The revision the new instance gets when no other request is ahead of it
+    next_revision: u64,
+}
+
+impl RequestView {
+    /// The word for the root in text
+    fn noun(&self) -> &'static str {
+        // only workflows and toolsets have requests
+        if self.kind == EntityKinds::ToolSet {
+            "toolset"
+        } else {
+            "workflow"
+        }
+    }
+}
+
+impl View for RequestView {
+    /// Render the request as a one row table
+    fn table(&self) -> String {
+        // one row naming the root and the revisions
+        output::table_from(
+            &[
+                "NAME",
+                "ID",
+                "REQUESTED",
+                "HIGHEST REVISION",
+                "NEXT REVISION",
+            ],
+            vec![vec![
+                self.root_name.clone(),
+                self.root.to_string(),
+                self.requested.to_string(),
+                self.highest_revision.to_string(),
+                self.next_revision.to_string(),
+            ]],
+        )
+    }
+
+    /// Render the request as text
+    ///
+    /// # Arguments
+    ///
+    /// * `ansi` - Whether to style the text
+    fn human(&self, ansi: bool) -> String {
+        // say what was asked, or what would be
+        let _ = ansi;
+        let noun = self.noun();
+        let action = if self.requested {
+            "Requested"
+        } else {
+            "Dry run: would request"
+        };
+        let mut lines = vec![format!(
+            "{action} a new instance of {noun} {} ({})",
+            self.root_name, self.root
+        )];
+        // say how to wait for it
+        lines.push(format!(
+            "Wait for it with: thorctl instances get {noun} {} --wait-for instance-revision={}",
+            self.root_name, self.next_revision
+        ));
+        lines.join("\n")
+    }
+}
+
+/// Describe a request for a new instance of a root
+///
+/// # Arguments
+///
+/// * `root` - The workflow or toolset
+/// * `requested` - Whether the request was sent
+fn request_view(root: &Entity, requested: bool) -> Result<RequestView, Error> {
+    // read the newest revision from the root's metadata
+    let highest_revision = match &root.metadata {
+        EntityMetadata::WorkflowCatalog(meta) => meta.highest_revision,
+        EntityMetadata::ToolSet(meta) => meta.highest_revision,
+        _ => {
+            return Err(Error::new(format!(
+                "{} is not a workflow or a toolset, so it has no instance to request",
+                root.name
+            )));
+        }
+    };
+    Ok(RequestView {
+        kind: root.kind,
+        root: root.id,
+        root_name: root.name.clone(),
+        requested,
+        highest_revision,
+        next_revision: highest_revision + 1,
+    })
+}
+
+/// Ask for a new instance of a workflow or toolset
+///
+/// # Arguments
+///
+/// * `thorium` - The Thorium client
+/// * `cmd` - The request command to execute
+async fn request(thorium: &Thorium, cmd: &RequestInstance) -> Result<(), Error> {
+    // find the root of the kind asked for
+    let (kind, label, listed) = match cmd.kind {
+        RequestRoot::Workflow => (
+            EntityKinds::WorkflowCatalog,
+            "a workflow",
+            InstanceRoot::Workflow,
+        ),
+        RequestRoot::Toolset => (EntityKinds::ToolSet, "a toolset", InstanceRoot::Toolset),
+    };
+    let root = find(thorium, kind, label, &cmd.root).await?;
+    // a dry run only says what would be requested
+    let format = cmd.format.format.unwrap_or(OutputFormat::Human);
+    if cmd.dry_run {
+        return output::print(&request_view(&root, false)?, format);
+    }
+    // queue the request, which Thorium builds into an instance
+    let view = request_view(&root, true)?;
+    match cmd.kind {
+        RequestRoot::Workflow => thorium.entities.request_instance(root.id).await?,
+        RequestRoot::Toolset => thorium.entities.request_tool_set_instance(root.id).await?,
+    };
+    // without a wait, print the request
+    if cmd.wait.wait_for.is_none() && !cmd.watch.watch {
+        return output::print(&view, format);
+    }
+    // with a wait, the instances are the result, so the request is noted on stderr
+    eprintln!(
+        "Requested a new instance of {} {} ({})",
+        view.noun(),
+        view.root_name,
+        view.root
+    );
+    let listing = GetInstances {
+        kind: listed,
+        root: root.id.to_string(),
+        format: cmd.format.clone(),
+        watch: cmd.watch.clone(),
+        wait: cmd.wait.clone(),
+    };
+    let format = cmd.format.format.unwrap_or(OutputFormat::Table);
+    watch::show(format, &cmd.watch, Some(&cmd.wait), || {
+        read_instances(thorium, &listing)
+    })
+    .await
+}
+
 /// Handle all instance commands
 ///
 /// # Arguments
@@ -877,6 +1037,7 @@ pub async fn handle(args: &Args, cmd: &Instances) -> Result<(), Error> {
         Instances::Get(cmd) => get(&thorium, cmd).await,
         Instances::Describe(cmd) => describe(&thorium, cmd).await,
         Instances::Diff(cmd) => diff(&thorium, cmd).await,
+        Instances::Request(cmd) => request(&thorium, cmd).await,
     };
     // show the API's status code with any refusal
     result.map_err(|err| match err.status() {
@@ -887,10 +1048,13 @@ pub async fn handle(args: &Args, cmd: &Instances) -> Result<(), Error> {
 
 #[cfg(test)]
 mod tests {
-    use super::row_of;
+    use super::{request_view, row_of};
+    use crate::handlers::agents::fixtures::entity;
+    use crate::utils::output::{OutputFormat, View, render};
     use thorium::models::{
         Entity, EntityKinds, EntityMetadata, ToolSetInstanceEntity, WorkflowInstanceEntity,
     };
+    use thorium::models::{ToolSetEntity, WorkflowCatalogEntity};
     use uuid::Uuid;
 
     /// Build an instance entity of a kind from its metadata
@@ -949,5 +1113,61 @@ mod tests {
         assert!(row_of(root, &workflow(other)).is_none());
         assert!(row_of(root, &tool_set(root)).is_some());
         assert!(row_of(root, &tool_set(other)).is_none());
+    }
+
+    /// A request view reads the root's newest revision and names the one to wait for
+    #[test]
+    fn request_view_names_the_next_revision() {
+        // a workflow whose instances reached revision 3
+        let workflow = entity(
+            "triage",
+            EntityKinds::WorkflowCatalog,
+            EntityMetadata::WorkflowCatalog(WorkflowCatalogEntity {
+                highest_revision: 3,
+                ..WorkflowCatalogEntity::default()
+            }),
+            &["lab"],
+        );
+        let view = request_view(&workflow, true).unwrap();
+        let doc = serde_json::to_value(&view).unwrap();
+        assert_eq!(doc["root_name"], "triage");
+        assert_eq!(doc["requested"], true);
+        assert_eq!(doc["highest_revision"], 3);
+        assert_eq!(doc["next_revision"], 4);
+        // the text says what was asked and how to wait for it
+        let text = view.human(false);
+        assert!(
+            text.contains("Requested a new instance of workflow triage"),
+            "{text}"
+        );
+        assert!(
+            text.contains("instances get workflow triage --wait-for instance-revision=4"),
+            "{text}"
+        );
+        // a dry run says nothing was requested
+        let dry = request_view(&workflow, false).unwrap().human(false);
+        assert!(
+            dry.contains("Dry run: would request a new instance of workflow triage"),
+            "{dry}"
+        );
+        // a toolset is read the same way
+        let toolset = entity(
+            "ghidra",
+            EntityKinds::ToolSet,
+            EntityMetadata::ToolSet(ToolSetEntity {
+                highest_revision: 5,
+                ..ToolSetEntity::default()
+            }),
+            &["lab"],
+        );
+        let view = request_view(&toolset, true).unwrap();
+        assert_eq!(serde_json::to_value(&view).unwrap()["next_revision"], 6);
+        assert!(view.human(false).contains("toolset ghidra"));
+        // the JSON output is the document
+        let json = render(&view, OutputFormat::Json, false).unwrap();
+        assert!(json.contains("\"next_revision\": 6"), "{json}");
+        // anything else has no instances to request
+        let tool = entity("yara", EntityKinds::Tool, EntityMetadata::Other, &["lab"]);
+        assert!(request_view(&tool, true).is_err());
     }
 }

@@ -12,6 +12,14 @@ use crate::args::clusters::{ClusterStatus, ClusterWorkers, Clusters, Login};
 use crate::utils;
 
 /// Get a users credentials
+///
+/// A missing username is read from stdin and a missing password is asked for on the terminal
+/// with echo off; each is refused with a message naming the flag that avoids the prompt when
+/// there is nothing to read.
+///
+/// # Arguments
+///
+/// * `cmd` - The login command that was run
 fn get_creds(cmd: &Login) -> Result<(String, String), Error> {
     // get this users username if we don't have one
     let username = match &cmd.user {
@@ -21,17 +29,48 @@ fn get_creds(cmd: &Login) -> Result<(String, String), Error> {
             print!("Username: ");
             // flush standard out so it prints our username prompt
             std::io::stdout().flush()?;
-            // read in our username from stdout
+            // read in our username from stdin
             let mut username = String::new();
-            std::io::stdin().read_line(&mut username)?;
+            let read = std::io::stdin().read_line(&mut username)?;
             // remove the newline
-            username.trim_end().to_string()
+            let username = username.trim_end().to_string();
+            // an empty answer or the end of input can't name a user
+            if read == 0 || username.is_empty() {
+                return Err(Error::new(
+                    "No username given; type one at the prompt or pass --user",
+                ));
+            }
+            username
         }
     };
     // get this users password if we didn't get it already
     let password = match &cmd.password {
         Some(password) => password.to_owned(),
-        None => rpassword::prompt_password("Password: ")?,
+        None => match rpassword::prompt_password("Password: ") {
+            Ok(password) if password.is_empty() => {
+                return Err(Error::new(
+                    "No password given; type one at the prompt or pass --password",
+                ));
+            }
+            Ok(password) => password,
+            // Ctrl-C at a raw mode prompt arrives as an error rather than a signal
+            Err(err) if err.kind() == std::io::ErrorKind::Interrupted => {
+                crate::utils::interrupt::exit_interrupted()
+            }
+            // the end of input (Ctrl-D) is not a password
+            Err(err) if err.kind() == std::io::ErrorKind::UnexpectedEof => {
+                return Err(Error::new(
+                    "No password given; type one at the prompt or pass --password",
+                ));
+            }
+            // without a terminal there is nowhere to ask
+            Err(err) => {
+                return Err(Error::new(format!(
+                    "No terminal available to ask for the password ({err}); \
+                     pass --password to give it without a prompt"
+                )));
+            }
+        },
     };
     Ok((username, password))
 }

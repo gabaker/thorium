@@ -1,4 +1,8 @@
-use thorium::{Error, client::Thorium, models::Image};
+use thorium::{
+    Error,
+    client::Thorium,
+    models::{Image, ImageUpdate},
+};
 
 use crate::args::Args;
 use crate::args::{
@@ -33,6 +37,68 @@ cfg_if::cfg_if! {
         pub(crate) mod import;
 
         use export::{ImageExportWorker, TarballExport};
+    }
+}
+
+/// What the user is told when Thorium refuses to write an image
+const IMAGE_WRITES_POINTER: &str =
+    "Images can no longer be created or updated; use tools (thorctl tools create|edit|publish)";
+
+/// The name probed to find out whether Thorium accepts image writes at all
+const IMAGE_WRITE_PROBE: &str = "thorctl-write-check";
+
+/// Check whether an error is Thorium refusing an image write
+///
+/// # Arguments
+///
+/// * `err` - The error to check
+fn is_image_write_refused(err: &Error) -> bool {
+    // image writes are refused with 410 Gone
+    err.status() == Some(http::StatusCode::GONE)
+}
+
+/// Replace a refused image write's raw error with the pointer to tools
+///
+/// Any other error is returned untouched.
+///
+/// # Arguments
+///
+/// * `err` - The error from an image write
+fn point_refused_write_at_tools(err: Error) -> Error {
+    // only the refusal is replaced, so every other failure keeps its own message
+    if is_image_write_refused(&err) {
+        Error::new(IMAGE_WRITES_POINTER)
+    } else {
+        err
+    }
+}
+
+/// Fail with the pointer to tools when Thorium refuses image writes
+///
+/// Sends an update that changes nothing, which Thorium refuses before it looks for the
+/// image, so a command that would otherwise open an editor or push containers can stop
+/// first. Any other answer, including a missing image, means writes are accepted.
+///
+/// # Arguments
+///
+/// * `thorium` - The Thorium client
+/// * `group` - The group the command would write images in
+/// * `name` - The image the command would write
+async fn ensure_image_writes_accepted(
+    thorium: &Thorium,
+    group: &str,
+    name: &str,
+) -> Result<(), Error> {
+    // an empty update is harmless where image writes are still accepted
+    match thorium
+        .images
+        .update(group, name, &ImageUpdate::default())
+        .await
+    {
+        // a refusal ends the command with the pointer
+        Err(err) if is_image_write_refused(&err) => Err(point_refused_write_at_tools(err)),
+        // anything else leaves the command to run and report its own errors
+        _ => Ok(()),
     }
 }
 
@@ -200,6 +266,8 @@ async fn delete(thorium: Thorium, cmd: &crate::args::images::DeleteImages) -> Re
 
 /// Import images into Thorium through the shared conflict engine
 ///
+/// The import stops before any container or config work when Thorium refuses image writes.
+///
 /// # Arguments
 ///
 /// * `thorium` - The Thorium client
@@ -222,6 +290,13 @@ async fn import(
     } else {
         imports::dedup_names(cmd.images.clone(), &progress)
     };
+    // stop before any container or config work when image writes are refused
+    ensure_image_writes_accepted(
+        thorium,
+        &cmd.group,
+        cmd.images.first().map_or(IMAGE_WRITE_PROBE, String::as_str),
+    )
+    .await?;
     // load the requests and check what already exists before changing anything
     let images = import::categorize_from_disk(thorium, &opts, &names, &progress).await?;
     // no pipelines for a standalone image import; the shared driver handles the rest
@@ -381,6 +456,8 @@ pub(crate) async fn export_images_with(
 ///
 /// A Quit at a conflict prompt stops writing further configs, still exports the
 /// tarballs of configs already written, and exits non-zero ("Export stopped early").
+/// Configs left untouched because no terminal was available to ask about them also end the
+/// export with an error unless `--skip-conflicts` was given.
 ///
 /// # Arguments
 ///
@@ -437,8 +514,10 @@ async fn export(
         review: cmd.review,
         editor,
     };
-    let report =
+    let mut report =
         export_images_with(thorium, &opts, names, &mut resolver, &progress, args, conf).await;
+    // report the configs left untouched, which refuses the export unless --skip-conflicts asked
+    resolver.settle(&mut report, &progress);
     // print the final banner and exit non-zero on any failure or a Quit
     progress.refresh(report.banner(), BarKind::Timer);
     progress.finish();
@@ -488,5 +567,107 @@ pub async fn handle(args: &Args, cmd: &Images) -> Result<(), Error> {
             );
             export(&thorium, cmd, args, &conf).await
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::{Arc, Mutex};
+
+    use thorium::Thorium;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::net::TcpListener;
+
+    use super::*;
+
+    /// Start a mock API that answers every request with one status and body
+    ///
+    /// Returns the mock's url and the request lines it received.
+    ///
+    /// # Arguments
+    ///
+    /// * `code` - The status code to answer with
+    /// * `body` - The body to answer with
+    async fn mock(code: u16, body: &'static str) -> (String, Arc<Mutex<Vec<String>>>) {
+        // bind to a random local port and answer in the background
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let host = format!("http://{}", listener.local_addr().unwrap());
+        let lines = Arc::new(Mutex::new(Vec::new()));
+        let inner = lines.clone();
+        tokio::spawn(async move {
+            while let Ok((mut stream, _)) = listener.accept().await {
+                // read the request head, which is all the mock needs
+                let mut buf = vec![0_u8; 8192];
+                let read = stream.read(&mut buf).await.unwrap_or(0);
+                let text = String::from_utf8_lossy(&buf[..read]).to_string();
+                inner
+                    .lock()
+                    .unwrap()
+                    .push(text.lines().next().unwrap_or_default().to_owned());
+                // answer with the configured status and body
+                let resp = format!(
+                    "HTTP/1.1 {code} Mock\r\ncontent-type: text/plain\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
+                    body.len()
+                );
+                let _ = stream.write_all(resp.as_bytes()).await;
+                let _ = stream.shutdown().await;
+            }
+        });
+        (host, lines)
+    }
+
+    /// A refused write becomes the pointer to tools and every other error is left alone
+    #[test]
+    fn refused_write_becomes_the_tools_pointer() {
+        // the API's refusal is replaced with the pointer
+        let gone = Error::Thorium {
+            code: http::StatusCode::GONE,
+            msg: Some("Images can no longer be created or updated; see /api/entities/".to_owned()),
+        };
+        let mapped = point_refused_write_at_tools(gone);
+        assert_eq!(mapped.msg().as_deref(), Some(IMAGE_WRITES_POINTER));
+        assert!(
+            mapped
+                .to_string()
+                .contains("thorctl tools create|edit|publish")
+        );
+        // an unrelated failure keeps its own status and message
+        let missing = Error::Thorium {
+            code: http::StatusCode::NOT_FOUND,
+            msg: Some("no such image".to_owned()),
+        };
+        let kept = point_refused_write_at_tools(missing);
+        assert_eq!(kept.status(), Some(http::StatusCode::NOT_FOUND));
+        assert_eq!(kept.msg().as_deref(), Some("no such image"));
+    }
+
+    /// The write check stops with the pointer when Thorium answers 410 Gone
+    #[tokio::test]
+    async fn write_check_stops_with_the_pointer_when_refused() {
+        // a Thorium that refuses image writes
+        let (host, lines) = mock(410, "Images can no longer be created or updated").await;
+        let thorium = Thorium::build(&host).token("token").build().await.unwrap();
+        // the check fails with only the pointer, not the raw refusal
+        let err = ensure_image_writes_accepted(&thorium, "corn", "husker")
+            .await
+            .expect_err("a refusal fails the check");
+        assert_eq!(err.msg().as_deref(), Some(IMAGE_WRITES_POINTER));
+        // the check probed the update route of the image it was given
+        assert_eq!(
+            lines.lock().unwrap().as_slice(),
+            ["PATCH /api/images/corn/husker HTTP/1.1"]
+        );
+    }
+
+    /// The write check lets a command run when Thorium does not refuse the probe
+    #[tokio::test]
+    async fn write_check_passes_when_the_image_is_missing() {
+        // a Thorium that still accepts image writes answers 404 for an unknown image
+        let (host, _lines) = mock(404, "no such image").await;
+        let thorium = Thorium::build(&host).token("token").build().await.unwrap();
+        // a missing image is not a refusal
+        ensure_image_writes_accepted(&thorium, "corn", IMAGE_WRITE_PROBE)
+            .await
+            .expect("only a refusal fails the check");
     }
 }

@@ -121,9 +121,16 @@ template:
             {{- range $t.networkPolicies }}
             post /api/network-policies {{ include "operator.shellQuote" (toJson .) }}
             {{- end }}
-            "$thorctl" toolbox import "$TOOLBOX" --{{ $t.mode }}{{ with $t.groupOverride }} --group-override {{ include "operator.shellQuote" . }}{{ end }}
-            # thorctl prints nothing when an import succeeds
-            echo "Imported the toolbox ({{ $t.mode }})"
+            # thorctl exits 0 when the import applied or found nothing to change and 1 when it failed (a
+            # conflict, a refusal, or a rollback); its report is the Job's log. A failed import can be
+            # retried, since a repeat only applies what is still missing
+            rc=0
+            "$thorctl" toolbox import "$TOOLBOX" --{{ $t.mode }}{{ if $t.createGroups }} --create-groups{{ end }}{{ if $t.strict }} --strict{{ end }}{{ with $t.groupOverride }} --group-override {{ include "operator.shellQuote" . }}{{ end }} || rc=$?
+            if [ "$rc" != 0 ]; then
+              echo "The toolbox import failed (thorctl exit code $rc); see its report above"
+              exit "$rc"
+            fi
+            echo "The toolbox import finished ({{ $t.mode }})"
         # thorctl writes its config under HOME, so the root filesystem can stay read-only
         volumeMounts:
           - name: tmp

@@ -1,670 +1,424 @@
-//! Diff an on-disk toolbox against what a Thorium instance has imported
+//! Diff a toolbox against what a Thorium instance holds
 //!
-//! Renders what an import of the toolbox would change in git-diff style:
-//! resources present on both sides but differing show unified hunks, while a
-//! resource present on only one side (only in the toolbox, or only in the
-//! instance's groups) is noted on a single line so a fully-new or fully-extra
-//! resource doesn't drown the real diff in full-body adds or deletes.
-//! Whether a resource changed is decided by the same predicate an import uses
-//! ([`ImportKind::calculate_update`]), and hunks render the same normalized views
-//! the merge editor shows (omitted fields resolved against the live resource,
-//! set-like fields sorted, descriptions trimmed), so server-only fields like
-//! creators, bans, and timestamps never show up as drift and a clean diff means
-//! an import would change nothing.
-//!
-//! The toolbox runs through the same pre-processing an import would (structural and
-//! group-coherence validation, the group override, and non-interactive collision
-//! resolution), so the preview reflects what an import would actually create/change
-//! rather than the raw manifest.
+//! The diff is the read-only plan an import of the toolbox would follow. A tool version is
+//! compared by spec hash: it is unchanged when some instance of the tool already has its spec, a
+//! label conflict when the label exists with another spec, and new otherwise. Toolsets, agents,
+//! workflows, and pipelines are compared field by field after both sides are normalized, and a
+//! legacy toolbox is converted in memory first, so its images are compared as the tools an import
+//! would create from them.
 
-use colored::Colorize;
-use similar::TextDiff;
-use std::collections::HashSet;
-use thorium::models::{Image, ImageRequest, Pipeline, PipelineRequest};
+use serde::Serialize;
+use serde_json::Value;
+use std::collections::HashMap;
+use thorium::client::migrations::{ToolIdMap, convert_image_request};
+use thorium::models::ToolVersion;
 use thorium::{CtlConf, Error, Thorium};
+use uuid::Uuid;
 
-use super::manifest::ToolboxManifest;
-use super::{build, collisions, import, policies, shared};
-use crate::args::toolbox::{BuildToolbox, DiffToolbox, ManifestLocation};
-use crate::handlers::imports::categorize;
-use crate::handlers::imports::kind::{ImageKind, ImportKind, PipelineKind};
-use crate::handlers::imports::merge::{self, MergeableImage, MergeablePipeline};
-use crate::handlers::progress::{self, Bar};
-use crate::utils;
-use crate::utils::images::list_all_images;
-use crate::utils::pipelines::list_all_pipelines;
+use super::export::live::{load_manifest_for, read_group_states, read_live, read_policy_states};
+use crate::args::toolbox::DiffToolbox;
+use crate::handlers::toolbox::v2::plan_types::{
+    GroupState, ItemState, Plan, PlanSummary, PolicyState, VersionClass,
+};
+use crate::handlers::toolbox::v2::refs::{Ref, unresolve_slots};
+use crate::handlers::toolbox::v2::types::ToolboxManifestV2;
+use crate::utils::output::{self, OutputFormat, View};
 
-/// Running totals for the trailing summary line
-#[derive(Default)]
-struct DiffStats {
-    /// Images/pipelines that exist on both sides but differ
-    changed: usize,
-    /// Images/pipelines/policies only present in the toolbox (an import would create them)
-    only_toolbox: usize,
-    /// Resources in the toolbox's groups that the toolbox doesn't name (informational only —
-    /// an import never deletes them)
-    only_instance: usize,
-    /// Resources that match exactly
-    unchanged: usize,
-    /// Network policies that exist in the instance but differ from the toolbox's definition
-    policy_changed: usize,
+mod classify;
+#[cfg(test)]
+mod tests;
+
+/// How many tool versions fall in each class
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize)]
+pub struct VersionCounts {
+    /// Versions of tools that don't exist yet
+    pub new: usize,
+    /// Versions an existing tool lacks
+    pub new_version: usize,
+    /// Versions whose label exists with another spec
+    pub label_conflict: usize,
+    /// Versions an instance of the tool already has
+    pub unchanged: usize,
 }
 
-impl DiffStats {
-    /// Whether an import of this toolbox would actually change anything — drives `--exit-code`
+/// What a diff found, as printed
+#[derive(Debug, Clone, Serialize)]
+pub struct DiffReport {
+    /// Whether an import would change anything
+    pub changed: bool,
+    /// How many items are in each state
+    pub summary: PlanSummary,
+    /// How many tool versions are in each class
+    pub versions: VersionCounts,
+    /// The whole plan
+    pub plan: Plan,
+    /// What was left out of the comparison and why
+    pub notes: Vec<String>,
+}
+
+/// Count the tool versions of a plan by class
+///
+/// # Arguments
+///
+/// * `plan` - The plan to count
+fn count_versions(plan: &Plan) -> VersionCounts {
+    // tally every version of every item
+    let mut counts = VersionCounts::default();
+    for version in plan.items.iter().flat_map(|item| &item.versions) {
+        match version.class {
+            VersionClass::New => counts.new += 1,
+            VersionClass::NewVersion => counts.new_version += 1,
+            VersionClass::LabelConflict => counts.label_conflict += 1,
+            VersionClass::Unchanged => counts.unchanged += 1,
+        }
+    }
+    counts
+}
+
+/// Whether an import of a plan would change anything
+///
+/// A network policy that differs counts too, though an import only replaces it when asked.
+///
+/// # Arguments
+///
+/// * `plan` - The plan to check
+fn is_actionable(plan: &Plan) -> bool {
+    // anything that is written, or a policy that differs
+    plan.has_changes()
+        || plan
+            .policies
+            .iter()
+            .any(|policy| policy.state == PolicyState::Differs)
+}
+
+impl DiffReport {
+    /// Build the report of a plan
     ///
-    /// Instance-only resources are deliberately excluded: an import only creates/updates, never
-    /// deletes, so the instance merely having extra resources is not an import-actionable difference.
-    fn any_actionable(&self) -> bool {
-        self.changed > 0 || self.only_toolbox > 0 || self.policy_changed > 0
-    }
-}
-
-/// Print one resource's diff with git-style file headers
-///
-/// # Arguments
-///
-/// * `old_label` - The old/left-side header (or "/dev/null" for new resources)
-/// * `new_label` - The new/right-side header (or "/dev/null" for deletions)
-/// * `old_text` - The old/left-side rendered text (image/pipeline/policy)
-/// * `new_text` - The new/right-side rendered text
-fn print_diff(old_label: &str, new_label: &str, old_text: &str, new_text: &str) {
-    // line-granular diff so each changed YAML field reads as its own +/- pair
-    let diff = TextDiff::from_lines(old_text, new_text);
-    // render a git-style unified hunk with three lines of surrounding context
-    let unified = diff
-        .unified_diff()
-        .context_radius(3)
-        .header(old_label, new_label)
-        .to_string();
-    // colorize after the fact: the unified renderer emits plain text, so prefixes are the
-    // only signal of each line's role
-    for line in unified.lines() {
-        // colorize like git: headers bold, adds green, removes red, hunks cyan
-        if line.starts_with("---") || line.starts_with("+++") {
-            println!("{}", line.bold());
-        } else if line.starts_with('@') {
-            println!("{}", line.cyan());
-        } else if line.starts_with('+') {
-            println!("{}", line.green());
-        } else if line.starts_with('-') {
-            println!("{}", line.red());
-        } else {
-            println!("{line}");
+    /// # Arguments
+    ///
+    /// * `plan` - The plan
+    /// * `notes` - What was left out of the comparison
+    fn new(plan: Plan, notes: Vec<String>) -> Self {
+        // summarize the plan
+        DiffReport {
+            changed: is_actionable(&plan),
+            summary: plan.summary(),
+            versions: count_versions(&plan),
+            plan,
+            notes,
         }
     }
-    println!();
+
+    /// Render the report's lines
+    ///
+    /// # Arguments
+    ///
+    /// * `ansi` - Whether to color additions and removals
+    fn lines(&self, ansi: bool) -> Vec<String> {
+        let paint = |code: &str, text: String| {
+            if ansi {
+                format!("\x1b[{code}m{text}\x1b[0m")
+            } else {
+                text
+            }
+        };
+        let mut lines = Vec::new();
+        // groups that don't exist yet
+        for group in &self.plan.groups {
+            match group.state {
+                GroupState::Missing => {
+                    lines.push(paint("32", format!("+ group {} (missing)", group.name)));
+                }
+                GroupState::Forbidden => lines.push(paint(
+                    "31",
+                    format!("! group {} (you can't write to it)", group.name),
+                )),
+                GroupState::Exists => {}
+            }
+        }
+        // network policies
+        for policy in &self.plan.policies {
+            match policy.state {
+                PolicyState::Create => {
+                    lines.push(paint(
+                        "32",
+                        format!("+ network policy {} (new)", policy.name),
+                    ));
+                }
+                PolicyState::Differs => {
+                    lines.push(paint(
+                        "33",
+                        format!("~ network policy {} (differs)", policy.name),
+                    ));
+                }
+                PolicyState::Reuse => {}
+            }
+        }
+        // each item: a line per changed tool version, a line or a hunk for the other kinds
+        for item in &self.plan.items {
+            for version in &item.versions {
+                let name = &item.item.name;
+                let label = &version.label;
+                match version.class {
+                    VersionClass::New => {
+                        lines.push(paint("32", format!("+ {name}@{label} (new)")));
+                    }
+                    VersionClass::NewVersion => {
+                        lines.push(paint("32", format!("+ {name}@{label} (new version)")));
+                    }
+                    VersionClass::LabelConflict => lines.push(paint(
+                        "33",
+                        format!("~ {name}@{label} (label conflict: Thorium has another spec under this label)"),
+                    )),
+                    VersionClass::Unchanged => {}
+                }
+            }
+            if item.versions.is_empty() {
+                match (item.state, &item.diff) {
+                    (ItemState::Create, _) => {
+                        lines.push(paint("32", format!("+ {} (new)", item.item)));
+                    }
+                    (ItemState::Update, Some(diff)) => {
+                        for line in diff.lines() {
+                            let code = if line.starts_with('+') {
+                                "32"
+                            } else if line.starts_with('-') {
+                                "31"
+                            } else {
+                                "36"
+                            };
+                            lines.push(paint(code, line.to_owned()));
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
+        for note in &self.notes {
+            lines.push(format!("note: {note}"));
+        }
+        for note in &self.plan.notes {
+            lines.push(format!("note: {note}"));
+        }
+        // the summary line
+        lines.push(format!(
+            "{} to create, {} to update, {} unchanged; tool versions: {} new, {} new version, {} \
+             label conflict, {} unchanged",
+            self.summary.create,
+            self.summary.update,
+            self.summary.unchanged,
+            self.versions.new,
+            self.versions.new_version,
+            self.versions.label_conflict,
+            self.versions.unchanged
+        ));
+        lines
+    }
 }
 
-/// Print a compact one-line note that a resource lives on only one side of the diff
+impl View for DiffReport {
+    /// Render the plan as a table with a row per item
+    fn table(&self) -> String {
+        // one row per item with its state and what happens to each version
+        let rows = self
+            .plan
+            .items
+            .iter()
+            .map(|item| {
+                let versions = item
+                    .versions
+                    .iter()
+                    .map(|version| format!("{}:{:?}", version.label, version.class))
+                    .collect::<Vec<_>>()
+                    .join(",");
+                vec![
+                    item.item.kind.to_string(),
+                    item.item.name.clone(),
+                    item.group.clone(),
+                    format!("{:?}", item.state),
+                    versions,
+                ]
+            })
+            .collect();
+        output::table_from(&["KIND", "NAME", "GROUP", "STATE", "VERSIONS"], rows)
+    }
+
+    /// Render the diff as text for people
+    ///
+    /// # Arguments
+    ///
+    /// * `ansi` - Whether to color additions and removals
+    fn human(&self, ansi: bool) -> String {
+        // the lines, joined
+        self.lines(ansi).join("\n")
+    }
+}
+
+/// Build the specs of the tool versions that came from legacy images
 ///
-/// Used for both toolbox-only and instance-only resources so a fully-new (or fully-extra)
-/// resource is reported as a single line rather than a full-body add or delete.
+/// A version whose image can't be converted is removed and noted.
 ///
 /// # Arguments
 ///
-/// * `root` - The side the resource is on: `"toolbox"` or the instance host (`host[:port]`)
-/// * `group` - The resource's group
-/// * `name` - The resource's name
-/// * `kind` - The resource kind (`"image"` / `"pipeline"`)
-/// * `absent_from` - The side it's missing from, for the trailing "not in …" clause
-fn print_only_in(root: &str, group: &str, name: &str, kind: &str, absent_from: &str) {
-    println!(
-        "{} {root}/{} ({kind}) — not in {absent_from}",
-        "only in".yellow(),
-        utils::resource_id(group, name)
+/// * `manifest` - The manifest to fill in
+/// * `notes` - Where to note what was left out
+fn fill_legacy_specs(manifest: &mut ToolboxManifestV2, notes: &mut Vec<String>) {
+    // every tool that came from an image has an id the conversion refers to it by
+    let names: Vec<(String, String)> = manifest
+        .tools
+        .iter()
+        .filter_map(|(name, tool)| Some((tool.groups.first()?.clone(), name.clone())))
+        .collect();
+    let map = ToolIdMap::from_names(
+        names
+            .iter()
+            .map(|(group, name)| (group.as_str(), name.as_str())),
     );
-}
-
-/// Render a resource present on both sides: unchanged is silent, changed shows a hunk
-///
-/// # Arguments
-///
-/// * `stats` - The running diff totals to update
-/// * `changed` - Whether an import would change this resource
-/// * `instance_label` - The instance-side header for the changed resource
-/// * `toolbox_path` - The toolbox-side header
-/// * `old_text` - The instance-side normalized YAML
-/// * `new_text` - The toolbox-side normalized YAML
-fn render_changed(
-    stats: &mut DiffStats,
-    changed: bool,
-    instance_label: &str,
-    toolbox_path: &str,
-    old_text: &str,
-    new_text: &str,
-) {
-    if changed {
-        // an import would update this resource: show the hunk
-        stats.changed += 1;
-        print_diff(instance_label, toolbox_path, old_text, new_text);
-    } else {
-        // an import would leave this resource alone: nothing to show
-        stats.unchanged += 1;
-    }
-}
-
-/// Render the live and incoming views of an image as normalized YAML
-///
-/// Both sides use the views an import compares (see [`merge::incoming_image_view`]),
-/// with identity/server-managed fields dropped, in the same curated key order as
-/// exported image configs (see [`merge::IMAGE_FIELD_ORDER`]).
-///
-/// # Arguments
-///
-/// * `existing` - The image as it exists in the instance
-/// * `request` - The toolbox's image request
-fn image_texts(existing: &Image, request: &ImageRequest) -> Result<(String, String), Error> {
-    // build both sides the same way the import comparison does
-    let mut current = MergeableImage::from(existing.clone());
-    let mut incoming = merge::incoming_image_view(existing, request.clone());
-    // identity/server-managed fields are never compared, so leave them out
-    current.strip_non_editable();
-    incoming.strip_non_editable();
-    // serialize both in the exported-config key order; nested maps and sets are sorted
-    // so nothing reorders between runs
-    let old_text = utils::curated_yaml(&current.canonical_value(), merge::IMAGE_FIELD_ORDER)
-        .map_err(|err| Error::new(format!("Failed to serialize image for diff: {err}")))?;
-    let new_text = utils::curated_yaml(&incoming.canonical_value(), merge::IMAGE_FIELD_ORDER)
-        .map_err(|err| Error::new(format!("Failed to serialize image for diff: {err}")))?;
-    Ok((old_text, new_text))
-}
-
-/// Render the live and incoming views of a pipeline as normalized YAML
-///
-/// Both sides use the views an import compares (see [`merge::incoming_pipeline_view`])
-/// in the same curated key order as exported pipeline configs (see
-/// [`merge::PIPELINE_FIELD_ORDER`]).
-///
-/// # Arguments
-///
-/// * `existing` - The pipeline as it exists in the instance
-/// * `request` - The toolbox's pipeline request
-fn pipeline_texts(
-    existing: &Pipeline,
-    request: &PipelineRequest,
-) -> Result<(String, String), Error> {
-    // build both sides the same way the import comparison does
-    let current = MergeablePipeline::from(existing.clone());
-    let incoming = merge::incoming_pipeline_view(existing, request.clone());
-    // serialize both in the exported-config key order; nested maps are sorted so
-    // nothing reorders between runs
-    let old_text = utils::curated_yaml(&current, merge::PIPELINE_FIELD_ORDER)
-        .map_err(|err| Error::new(format!("Failed to serialize pipeline for diff: {err}")))?;
-    let new_text = utils::curated_yaml(&incoming, merge::PIPELINE_FIELD_ORDER)
-        .map_err(|err| Error::new(format!("Failed to serialize pipeline for diff: {err}")))?;
-    Ok((old_text, new_text))
-}
-
-/// Whether a group-listing error just means the group isn't visible to us
-///
-/// A 404 (group absent) or 403 (not a member) means the group simply holds no
-/// resources we can see, which is safely treated as empty. Any other status (auth,
-/// transient 5xx) is a genuine failure the caller should surface instead of
-/// silently under-reporting instance-only drift.
-///
-/// Note the asymmetry with `categorize`, which treats any non-404 status (including a 403) as an
-/// error: a *named* toolbox resource in an inaccessible group is a real problem, whereas here an
-/// unlistable group merely can't contribute instance-only entries.
-///
-/// # Arguments
-///
-/// * `err` - The error returned while listing a group's images or pipelines
-fn is_invisible_group(err: &Error) -> bool {
-    matches!(err.status().map(|status| status.as_u16()), Some(403 | 404))
-}
-
-/// Load the toolbox manifest from a file, URL, or repo directory
-///
-/// Directories are built in-memory with image urls preserved so the diff
-/// reflects the configs exactly as they sit on disk.
-///
-/// # Arguments
-///
-/// * `location` - Where the toolbox lives
-async fn load_manifest(location: &ManifestLocation) -> Result<(ToolboxManifest, Bar), Error> {
-    // a directory is a toolbox repo checkout; build it in memory
-    if let ManifestLocation::Path(path) = location
-        && path.is_dir()
-    {
-        let config = path.join("config.toml");
-        if !config.exists() {
-            return Err(Error::new(format!(
-                "'{}' has no config.toml; point at a toolbox repo root or a toolbox.json",
-                path.display()
-            )));
+    let by_id: HashMap<Uuid, String> = names
+        .iter()
+        .map(|(group, name)| (ToolIdMap::tool_id(group, name), name.clone()))
+        .collect();
+    let mut dropped = Vec::new();
+    for (name, tool) in &mut manifest.tools {
+        let Some(group) = tool.groups.first().cloned() else {
+            continue;
+        };
+        for (label, version) in &mut tool.versions {
+            // only a version with no spec that has a legacy config needs converting
+            let (None, Some(request)) = (
+                &version.spec,
+                version
+                    .legacy
+                    .as_ref()
+                    .and_then(|legacy| legacy.config.as_ref()),
+            ) else {
+                continue;
+            };
+            match convert_image_request(&group, name, ToolVersion::from(label), request, &map) {
+                Ok(migration) => {
+                    // the converted spec names its dependencies by the ids of the map
+                    let mut spec =
+                        serde_json::to_value(&migration.tool.spec).unwrap_or(Value::Null);
+                    unresolve_slots(&mut spec, |id, _| {
+                        by_id.get(&id).map(|tool| Ref::Tool {
+                            name: tool.clone(),
+                            label: None,
+                        })
+                    });
+                    version.spec = Some(spec);
+                    version.legacy = None;
+                }
+                Err(skipped) => {
+                    notes.push(format!(
+                        "image {name} ({label}) can't be compared: {}",
+                        skipped.reason.code()
+                    ));
+                    dropped.push((name.clone(), label.clone()));
+                }
+            }
         }
-        let build_cmd = BuildToolbox {
-            config,
-            use_image_path: false,
-            // never written; build_in_memory ignores the output path
-            output: Some(path.join("toolbox.json")),
-            path: Some(path.clone()),
-            // diff compares the on-disk toolbox as-is, so no tag suffix is applied
-            tag_suffix: None,
-        };
-        // build walks the tree with synchronous std::fs, so run it off the async runtime
-        let value = tokio::task::spawn_blocking(move || build::build_in_memory(&build_cmd))
-            .await
-            .map_err(|err| Error::new(format!("Toolbox build task failed: {err}")))??;
-        let manifest: ToolboxManifest = serde_json::from_value(value)
-            .map_err(|err| Error::new(format!("Failed to assemble toolbox manifest: {err}")))?;
-        let progress = Bar::new(
-            "",
-            "Diffing toolbox",
-            crate::handlers::progress::BarKind::Timer,
-        );
-        return Ok((manifest, progress));
     }
-    shared::get_manifest_named(location, "toolbox diff").await
+    // leave out what could not be converted
+    for (name, label) in dropped {
+        if let Some(tool) = manifest.tools.get_mut(&name) {
+            tool.versions.remove(&label);
+        }
+    }
+    manifest.tools.retain(|_, tool| !tool.versions.is_empty());
 }
 
-/// Reduce a Thorium API url to a `host[:port]` label for diff output
-///
-/// Strips the scheme and any path so the diff names the specific instance by its domain (and
-/// explicit port, when one is given) rather than a generic "instance". Falls back to a manual
-/// scheme/trailing-path strip if the url doesn't parse, and to the raw value if even that yields
-/// nothing.
+/// Rewrite the image url of the tools a toolbox bundles as an import with a prefix would
 ///
 /// # Arguments
 ///
-/// * `api_url` - The configured Thorium API url (`conf.keys.api`)
-fn instance_host(api_url: &str) -> String {
-    // prefer a real parse so userinfo/path/query are dropped and the port is explicit
-    if let Ok(url) = url::Url::parse(api_url)
-        && let Some(host) = url.host_str()
-    {
-        return match url.port() {
-            Some(port) => format!("{host}:{port}"),
-            None => host.to_string(),
-        };
-    }
-    // fallback: drop a `scheme://` prefix and anything from the first path slash
-    let without_scheme = api_url
-        .split_once("://")
-        .map_or(api_url, |(_scheme, rest)| rest);
-    // drop any userinfo (user:pass@) before the host
-    let after_userinfo = without_scheme
-        .rsplit_once('@')
-        .map_or(without_scheme, |(_userinfo, rest)| rest);
-    // drop any path, query, or fragment after the host[:port]
-    let host = after_userinfo
-        .split(['/', '?', '#'])
-        .next()
-        .unwrap_or(after_userinfo);
-    if host.is_empty() {
-        api_url.to_string()
-    } else {
-        host.to_string()
+/// * `manifest` - The manifest to change
+/// * `prefix` - The registry base path the images are pushed under
+fn apply_image_prefix(manifest: &mut ToolboxManifestV2, prefix: &str) {
+    // an image is stored at `<prefix>/<group>/<name>:<tag>`
+    let prefix = prefix.trim_end_matches('/');
+    for (name, tool) in &mut manifest.tools {
+        let group = tool.groups.first().cloned().unwrap_or_default();
+        for version in tool.versions.values_mut() {
+            let Some(spec) = &mut version.spec else {
+                continue;
+            };
+            for pointer in [
+                "/Image/environment/K8s/image",
+                "/Harness/workload/environment/K8s/image",
+            ] {
+                let Some(image) = spec.pointer_mut(pointer) else {
+                    continue;
+                };
+                let tag = image
+                    .as_str()
+                    .and_then(|url| url.rsplit_once(':'))
+                    .map_or("latest", |(_, tag)| tag)
+                    .to_owned();
+                *image = Value::String(format!("{prefix}/{group}/{name}:{tag}"));
+            }
+        }
     }
 }
 
-/// Rewrite bundled image urls the way an import would before they are compared
-///
-/// A bundled toolbox's images are pushed to and stored at
-/// `<prefix>/<group>/<name>:<tag>` on import, so comparing the raw urls would show
-/// every previously imported bundled image as changed. The prefix comes from
-/// `--image-path-prefix`, then the manifest's recorded prefix; diff never prompts,
-/// so with neither set the urls are compared unrewritten and a note says so.
+/// Load a manifest and put it in the form it is compared in
 ///
 /// # Arguments
 ///
-/// * `cmd` - The toolbox diff command (provides the `--image-path-prefix` flag)
-/// * `manifest` - The toolbox manifest
-/// * `images` - The categorized images whose urls are rewritten in place
-/// * `progress` - The progress bar to log notes and warnings through
-fn apply_bundled_rewrite(
+/// * `cmd` - The diff command
+/// * `notes` - Where to note what was left out
+async fn load_manifest(
     cmd: &DiffToolbox,
-    manifest: &ToolboxManifest,
-    images: &mut [categorize::CategorizedImage],
-    progress: &Bar,
-) {
-    // --image-path-prefix only affects bundled toolboxes; warn so it isn't a silent no-op
-    if !manifest.bundled_images {
-        if cmd.image_path_prefix.is_some() {
-            progress.warning(
-                "--image-path-prefix has no effect: this toolbox does not bundle container images",
-            );
-        }
-        return;
+    notes: &mut Vec<String>,
+) -> Result<ToolboxManifestV2, Error> {
+    // read the manifest, in the group it was imported into if that was overridden
+    let mut manifest =
+        load_manifest_for("toolbox diff", &cmd.manifest, cmd.group_override.as_deref()).await?;
+    // legacy images are compared as the tools they convert to
+    fill_legacy_specs(&mut manifest, notes);
+    // a toolbox that bundles its images is compared at the url an import would give them
+    let prefix = cmd
+        .image_path_prefix
+        .clone()
+        .or_else(|| manifest.image_path_prefix.clone());
+    if manifest.bundled_images
+        && let Some(prefix) = prefix
+    {
+        apply_image_prefix(&mut manifest, &prefix);
     }
-    // rewrite with the configured prefix, or say the urls are compared as-is
-    match import::configured_image_path_prefix(cmd.image_path_prefix.as_deref(), manifest) {
-        Some(prefix) => {
-            import::rewrite_bundled_urls(prefix, images);
-        }
-        None => progress::note(
-            "This toolbox bundles container images and no image path prefix is set, so bundled \
-             image urls are compared unrewritten; pass --image-path-prefix to match the urls an \
-             import would store",
-        ),
-    }
+    Ok(manifest)
 }
 
-/// Diff a toolbox against the instance and print the result
+/// Compare a toolbox with a Thorium instance and print the differences
+///
+/// Returns whether an import of the toolbox would change anything, so the caller can exit with
+/// code 1 when `--exit-code` is set.
 ///
 /// # Arguments
 ///
 /// * `thorium` - The Thorium client
-/// * `conf` - The Thorctl config (provides the instance url shown in the diff)
-/// * `cmd` - The toolbox diff command that was run
-pub async fn diff(thorium: Thorium, conf: &CtlConf, cmd: &DiffToolbox) -> Result<bool, Error> {
-    // the instance's host[:port], used in place of a generic "instance" in the diff output
-    let instance = instance_host(&conf.keys.api);
-    let (mut manifest, progress) = load_manifest(&cmd.manifest).await?;
-    shared::resolve_manifest_configs(&mut manifest, &progress).await?;
-    // run the SAME pre-processing an import would, so the preview reflects what import actually
-    // does: drop intrinsically-invalid versions, apply the group override, drop group-incoherent
-    // pipelines, then resolve (group, name) collisions non-interactively (skip+warn, since diff
-    // can't prompt), then re-check coherence after any renames.
-    shared::warn_dropped(&manifest.validate_structural(), &progress);
-    let sources = manifest.capture_source_groups();
-    if let Some(group_override) = &cmd.group_override {
-        manifest = manifest.override_group(group_override);
-    }
-    shared::warn_dropped(&manifest.validate_group_coherence(), &progress);
-    // diff is read-only and can't prompt, so collisions take the non-interactive skip+warn path;
-    // the returned image renames don't matter here (diff pushes no bundled images)
-    collisions::resolve_collisions(&mut manifest, &sources, false, &progress)?;
-    shared::warn_dropped(&manifest.validate_group_coherence(), &progress);
-    // categorize everything against the live instance
-    let mut images = categorize::categorize_images(
-        &thorium,
-        import::flatten_manifest_images(&manifest),
-        &progress,
-    )
-    .await?;
-    // compare bundled images at the registry location an import would store them under
-    apply_bundled_rewrite(cmd, &manifest, &mut images, &progress);
-    let pipelines = categorize::categorize_pipelines(
-        &thorium,
-        import::flatten_manifest_pipelines(&manifest),
-        &progress,
-    )
-    .await?;
-    let policy_plan = policies::categorize_policies(
-        &thorium,
-        policies::collect_policies(&manifest, cmd.group_override.as_deref(), &progress),
-        // diff is read-only: always categorize as warn-only so it never plans a mutation
-        false,
-        &progress,
-    )
-    .await?;
-    // the groups the toolbox targets, where we'll look for resources it doesn't name
-    let groups = manifest.groups();
-    // index the toolbox's image identities so instance-only images can be detected
-    let toolbox_images: HashSet<(String, String)> = images
+/// * `_conf` - The thorctl config
+/// * `cmd` - The diff command
+/// * `workers` - The most reads in flight at once
+pub async fn diff(
+    thorium: Thorium,
+    _conf: &CtlConf,
+    cmd: &DiffToolbox,
+    workers: usize,
+) -> Result<bool, Error> {
+    let mut notes = Vec::new();
+    let manifest = load_manifest(cmd, &mut notes).await?;
+    // read what Thorium holds that the manifest names
+    let mut live = read_live(&thorium, &manifest, workers).await?;
+    let policies: Vec<String> = manifest
+        .network_policies
         .iter()
-        .map(|img| (img.request.group.clone(), img.request.name.clone()))
+        .map(|policy| policy.name.clone())
         .collect();
-    // index the toolbox's pipeline identities for the same instance-only detection
-    let toolbox_pipelines: HashSet<(String, String)> = pipelines
-        .iter()
-        .map(|pipe| (pipe.request.group.clone(), pipe.request.name.clone()))
-        .collect();
-    // list every group's images and pipelines concurrently; a group we can't see
-    // (absent or non-member) can't hold extra resources, so its listing is treated
-    // as empty, but a genuine failure is surfaced rather than hiding drift
-    let thorium_ref = &thorium;
-    let progress_ref = &progress;
-    let group_listings = futures::future::join_all(groups.iter().map(|group| async move {
-        // list this group's images, warning on a real failure before treating it empty
-        let images = match list_all_images(thorium_ref, group).await {
-            Ok(images) => images,
-            Err(err) if is_invisible_group(&err) => Vec::new(),
-            Err(err) => {
-                progress_ref.warning(format!(
-                    "Could not list images in group '{group}': {err} — treating it as empty; any \
-                     instance-only images there won't appear in this diff"
-                ));
-                Vec::new()
-            }
-        };
-        // list this group's pipelines with the same visible-vs-genuine error handling
-        let pipelines = match list_all_pipelines(thorium_ref, group).await {
-            Ok(pipelines) => pipelines,
-            Err(err) if is_invisible_group(&err) => Vec::new(),
-            Err(err) => {
-                progress_ref.warning(format!(
-                    "Could not list pipelines in group '{group}': {err} — treating it as empty; any \
-                     instance-only pipelines there won't appear in this diff"
-                ));
-                Vec::new()
-            }
-        };
-        (images, pipelines)
-    }))
-    .await;
-    let mut instance_only_images = Vec::new();
-    let mut instance_only_pipelines = Vec::new();
-    // fold every group's listing down to the resources the toolbox doesn't name; a listed
-    // resource whose identity is absent from the toolbox index exists only on the instance
-    for (group_images, group_pipelines) in group_listings {
-        // keep only images the toolbox never names (matched on the (group, name) identity)
-        for image in group_images {
-            if !toolbox_images.contains(&(image.group.clone(), image.name.clone())) {
-                instance_only_images.push(image);
-            }
-        }
-        // keep only pipelines the toolbox never names, by the same identity comparison
-        for pipeline in group_pipelines {
-            if !toolbox_pipelines.contains(&(pipeline.group.clone(), pipeline.name.clone())) {
-                instance_only_pipelines.push(pipeline);
-            }
-        }
-    }
-    // tear down the progress bar before any diff output so the rendered hunks aren't
-    // interleaved with a live spinner on the same terminal
-    progress.finish_and_clear();
-    // accumulate the per-resource verdicts here so the trailing summary and the --exit-code
-    // decision both read from one set of totals
-    let mut stats = DiffStats::default();
-    // images first: a toolbox image either has no instance counterpart (only-in note) or one
-    // to diff against
-    for img in &images {
-        match &img.existing {
-            // only in the toolbox: a compact note instead of a full-body new-file diff
-            None => {
-                stats.only_toolbox += 1;
-                print_only_in(
-                    "toolbox",
-                    &img.request.group,
-                    &img.request.name,
-                    "image",
-                    &instance,
-                );
-            }
-            // present on both sides: decide with the import's own change predicate and
-            // render the normalized views for the hunk
-            Some(existing) => {
-                let label = utils::resource_id(&img.request.group, &img.request.name);
-                let changed =
-                    ImageKind::calculate_update(existing.clone(), img.request.clone()).is_some();
-                let (old_text, new_text) = image_texts(existing, &img.request)?;
-                render_changed(
-                    &mut stats,
-                    changed,
-                    &format!("{instance}/{label} (image)"),
-                    // use the config's group and name on both sides so a differing manifest key
-                    // doesn't read like a rename
-                    &format!("toolbox/{label} (image)"),
-                    &old_text,
-                    &new_text,
-                );
-            }
-        }
-    }
-    // pipelines next, mirroring the image handling exactly
-    for pipe in &pipelines {
-        match &pipe.existing {
-            // only in the toolbox: a compact note instead of a full-body new-file diff
-            None => {
-                stats.only_toolbox += 1;
-                print_only_in(
-                    "toolbox",
-                    &pipe.request.group,
-                    &pipe.request.name,
-                    "pipeline",
-                    &instance,
-                );
-            }
-            // present on both sides: the same predicate and rendering as images
-            Some(existing) => {
-                let label = utils::resource_id(&pipe.request.group, &pipe.request.name);
-                let changed =
-                    PipelineKind::calculate_update(existing.clone(), pipe.request.clone())
-                        .is_some();
-                let (old_text, new_text) = pipeline_texts(existing, &pipe.request)?;
-                render_changed(
-                    &mut stats,
-                    changed,
-                    &format!("{instance}/{label} (pipeline)"),
-                    // use the config's group and name on both sides (see the image header above)
-                    &format!("toolbox/{label} (pipeline)"),
-                    &old_text,
-                    &new_text,
-                );
-            }
-        }
-    }
-    // policies: toolbox-only ones are noted on a single line, mismatches as summary lines
-    // (the instance side is authoritative and never updated by imports)
-    // a brand-new policy is an import-actionable create, so it counts toward only_toolbox
-    for policy in &policy_plan.new {
-        stats.only_toolbox += 1;
-        println!(
-            "{} toolbox/network-policies/{} (network policy) — not in {instance}",
-            "only in".yellow(),
-            policy.name
-        );
-    }
-    for mismatch in &policy_plan.mismatched {
-        // a mismatch counts once toward the policy total even when it prints two note lines
-        // (rule/flag drift and a coverage gap are distinct reasons for the same policy)
-        stats.policy_changed += 1;
-        // attribute the difference to the instance's existing policy, splitting rule/flag
-        // drift from a coverage gap so the suggested action matches each case
-        let name = &mismatch.name;
-        if !mismatch.drift.is_empty() {
-            println!(
-                "{} network policy '{name}' already exists on {instance} with a different \
-                 definition (differs: [{}]); use --update-network-policy on import to overwrite it\n",
-                "note:".cyan(),
-                mismatch.drift.join(", ")
-            );
-        }
-        if !mismatch.missing_groups.is_empty() {
-            println!(
-                "{} network policy '{name}' exists on {instance} but not in group(s) [{}]; \
-                 use --update-network-policy on import to add those group(s)\n",
-                "note:".cyan(),
-                mismatch.missing_groups.join(", ")
-            );
-        }
-    }
-    // policy "unchanged" folds into the same total as images/pipelines
-    stats.unchanged += policy_plan.unchanged;
-    // resources only in the instance are listed compactly: a partial toolbox
-    // (one pipeline out of a big group) would otherwise drown the real diff
-    // in full-body deletions
-    // instance-only images: a single note each (these never affect --exit-code; an import
-    // never deletes them)
-    for image in &instance_only_images {
-        stats.only_instance += 1;
-        print_only_in(
-            &instance,
-            &image.group,
-            &image.name,
-            "image",
-            "this toolbox",
-        );
-    }
-    // instance-only pipelines: the same compact treatment
-    for pipeline in &instance_only_pipelines {
-        stats.only_instance += 1;
-        print_only_in(
-            &instance,
-            &pipeline.group,
-            &pipeline.name,
-            "pipeline",
-            "this toolbox",
-        );
-    }
-    // separate the instance-only block from the trailing summary with a blank line
-    if stats.only_instance > 0 {
-        println!();
-    }
-    // trailing summary like git's diffstat footer; network-policy differences are reported
-    // separately (they share none of the image/pipeline counters except "unchanged")
-    let policy_note = if stats.policy_changed > 0 {
-        format!(
-            ", {} network polic{} differ",
-            stats.policy_changed,
-            if stats.policy_changed == 1 {
-                "y"
-            } else {
-                "ies"
-            }
-        )
-    } else {
-        String::new()
-    };
-    println!(
-        "{} changed, {} only in toolbox, {} only in {instance}, {} unchanged{policy_note}",
-        stats.changed, stats.only_toolbox, stats.only_instance, stats.unchanged
-    );
-    // git diff --exit-code semantics: exit non-zero only on import-actionable drift (instance-only
-    // resources are excluded — see DiffStats::any_actionable). The actual process exit happens at
-    // the dispatch boundary so this function returns normally and its resources drop first.
-    Ok(cmd.exit_code && stats.any_actionable())
-}
-
-/// Unit tests for the host-derivation helper that names the instance in diff output
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    /// A full https url is reduced to its host with an explicit port preserved and the
-    /// default port dropped
-    #[test]
-    fn instance_host_strips_scheme_keeps_explicit_port() {
-        assert_eq!(
-            instance_host("https://thorium.example.com:8443"),
-            "thorium.example.com:8443"
-        );
-        assert_eq!(
-            instance_host("https://thorium.example.com"),
-            "thorium.example.com"
-        );
-    }
-
-    /// A path/query after the host is dropped
-    #[test]
-    fn instance_host_drops_path() {
-        assert_eq!(instance_host("http://10.0.0.5:9000/api/"), "10.0.0.5:9000");
-    }
-
-    /// A value with no scheme falls back to a manual strip and keeps host[:port]
-    #[test]
-    fn instance_host_handles_no_scheme() {
-        assert_eq!(
-            instance_host("thorium.example.com:8443"),
-            "thorium.example.com:8443"
-        );
-        assert_eq!(
-            instance_host("thorium.example.com/api"),
-            "thorium.example.com"
-        );
-    }
-
-    /// The no-parse fallback also drops userinfo and any query/fragment
-    #[test]
-    fn instance_host_fallback_strips_userinfo_and_query() {
-        // no scheme + userinfo + query (won't strict-parse as a URL)
-        assert_eq!(
-            instance_host("user:pw@thorium.example.com:8443?x=1"),
-            "thorium.example.com:8443"
-        );
-        assert_eq!(instance_host("svc@host/api#frag"), "host");
-    }
+    let groups = manifest.named_groups();
+    live.policies = read_policy_states(&thorium, &policies, &groups).await?;
+    live.groups = read_group_states(&thorium, &groups).await?;
+    // classify every item and print the result
+    let report = DiffReport::new(classify::plan(&manifest, &live), notes);
+    output::print(&report, cmd.format.format.unwrap_or(OutputFormat::Human))?;
+    Ok(cmd.exit_code && report.changed)
 }

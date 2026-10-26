@@ -1,10 +1,13 @@
 //! Arguments for workflow Thorctl commands
 
 use clap::{Parser, ValueEnum};
+use std::path::PathBuf;
 use thorium::models::ModelAuthLevel;
 
-use super::helpers::{ShortFormatArgs, WaitForArgs, WatchArgs};
-use super::runs::RunInputArgs;
+use super::agents::ModelAuthArg;
+use super::helpers::{EditArgs, FormatArgs, ShortFormatArgs, WaitForArgs, WatchArgs};
+pub use super::runs::RunWorkflow;
+use super::toolsets::Switch;
 
 /// The commands to send to the workflows task handler
 #[derive(Parser, Debug)]
@@ -30,39 +33,22 @@ pub enum Workflows {
     /// Show one AI agent of a workflow instance and the full spec of each of its tools
     #[clap(version, author)]
     Toolset(ShowToolset),
-    /// Run a workflow instance on files or repos
+    /// Change a workflow from flags, a file, or `--set`, `--unset` and `--patch` edits
+    #[clap(version, author)]
+    Update(UpdateWorkflow),
+    /// Edit a workflow in your editor, or with `--file`, `--set`, `--unset` and `--patch`
+    #[clap(version, author)]
+    Edit(EditWorkflow),
+    /// Print a workflow as a spec that `workflows update --file` reads back
+    #[clap(version, author)]
+    Spec(SpecWorkflow),
+    /// Delete a workflow
+    #[clap(version, author)]
+    Delete(DeleteWorkflow),
+    /// Run a workflow on files or repos: by name for its latest instance, as WORKFLOW#rN for one
+    /// revision, or by instance ID
     #[clap(version, author)]
     Run(RunWorkflow),
-}
-
-/// A command to run a workflow instance
-#[derive(Parser, Debug)]
-pub struct RunWorkflow {
-    /// The workflow instance to run, by ID or name (`<workflow>#r<revision>`)
-    pub instance: String,
-    /// The group to run in (needed when you can run the instance in several of its groups)
-    #[clap(short, long)]
-    pub group: Option<String>,
-    /// The files and repos to run on
-    #[clap(flatten)]
-    pub inputs: RunInputArgs,
-    /// A tag to add to the run's reaction
-    #[clap(long)]
-    pub tag: Vec<String>,
-    /// The run's SLA in seconds
-    #[clap(long)]
-    pub sla: Option<u64>,
-    /// The format to print the run in once a `--wait-for` condition holds (human readable by
-    /// default)
-    #[clap(flatten)]
-    pub format: ShortFormatArgs,
-    /// Re-read and re-print the run until interrupted
-    #[clap(flatten)]
-    pub watch: WatchArgs,
-    /// Wait until the run matches a condition (e.g. status=Completed); without it the run's
-    /// reaction ID is printed
-    #[clap(flatten)]
-    pub wait: WaitForArgs,
 }
 
 /// A command to list workflows
@@ -134,9 +120,10 @@ impl From<AuthLevel> for ModelAuthLevel {
 #[derive(Parser, Debug)]
 pub struct CreateWorkflow {
     /// The name of the workflow
-    pub name: String,
+    #[clap(required_unless_present = "spec")]
+    pub name: Option<String>,
     /// The groups to create the workflow in
-    #[clap(short, long, required = true)]
+    #[clap(short, long, required_unless_present = "spec")]
     pub group: Vec<String>,
     /// An AI agent in the workflow, by ID or name
     #[clap(long)]
@@ -163,6 +150,10 @@ pub struct CreateWorkflow {
     /// Add the workflow's groups to agents that are missing some of them
     #[clap(long)]
     pub extend_target_groups: bool,
+    /// Create the workflow from a YAML or JSON spec, as `workflows spec` prints it (- reads
+    /// stdin); flags replace what the spec sets
+    #[clap(long, value_name = "FILE|-")]
+    pub spec: Option<PathBuf>,
 }
 
 /// A command to add an AI agent to a workflow
@@ -212,11 +203,105 @@ pub struct ShowToolset {
     pub format: ShortFormatArgs,
 }
 
+/// A command to change a workflow without an editor
+#[derive(Parser, Debug)]
+// each flag is its own switch on the command line
+#[allow(clippy::struct_excessive_bools)]
+pub struct UpdateWorkflow {
+    /// The workflow to update, by ID or name
+    pub workflow: String,
+    /// Rename the workflow
+    #[clap(long)]
+    pub rename: Option<String>,
+    /// Set the workflow's description
+    #[clap(short, long, conflicts_with = "clear_description")]
+    pub description: Option<String>,
+    /// Remove the workflow's description
+    #[clap(long)]
+    pub clear_description: bool,
+    /// Add the workflow to a group; repeatable
+    #[clap(long, conflicts_with = "file")]
+    pub add_group: Vec<String>,
+    /// Remove the workflow from a group; repeatable
+    #[clap(long, conflicts_with = "file")]
+    pub remove_group: Vec<String>,
+    /// The most sub-agent invocations a run of the workflow has going at once
+    #[clap(long)]
+    pub max_alive_sub_agents: Option<u32>,
+    /// Replace the default models with these model ids, highest priority first; repeatable
+    #[clap(long, conflicts_with = "clear_default_models")]
+    pub default_model: Vec<String>,
+    /// Remove every default model
+    #[clap(long)]
+    pub clear_default_models: bool,
+    /// Limit the levels that may supply model auth for the workflow's runs; repeatable
+    #[clap(
+        long,
+        value_enum,
+        ignore_case = true,
+        conflicts_with = "clear_model_auth"
+    )]
+    pub model_auth: Vec<ModelAuthArg>,
+    /// Allow every level to supply model auth for the workflow's runs
+    #[clap(long)]
+    pub clear_model_auth: bool,
+    /// Build new workflow instances automatically when the workflow or its agents change
+    #[clap(long, value_enum, value_name = "on|off")]
+    pub auto_instance: Option<Switch>,
+    /// Add the workflow's groups to the agents that miss some of them
+    #[clap(long)]
+    pub extend_target_groups: bool,
+    /// The shared edit flags
+    #[clap(flatten)]
+    pub edit: EditArgs,
+}
+
+/// A command to edit a workflow
+#[derive(Parser, Debug)]
+pub struct EditWorkflow {
+    /// The workflow to edit, by ID or name
+    pub workflow: String,
+    /// Add the workflow's groups to the agents that miss some of them
+    #[clap(long)]
+    pub extend_target_groups: bool,
+    /// The shared edit flags
+    #[clap(flatten)]
+    pub edit: EditArgs,
+}
+
+/// A command to print a workflow as a spec
+#[derive(Parser, Debug)]
+pub struct SpecWorkflow {
+    /// The workflow to print, by ID or name
+    pub workflow: String,
+    /// Write the spec to this file instead of stdout
+    #[clap(short, long)]
+    pub output: Option<PathBuf>,
+    /// The format to print the spec in: yaml (the default) or json
+    #[clap(flatten)]
+    pub format: FormatArgs,
+}
+
+/// A command to delete a workflow
+#[derive(Parser, Debug)]
+pub struct DeleteWorkflow {
+    /// The workflow to delete, by ID or name
+    pub workflow: String,
+    /// Delete without asking for confirmation
+    #[clap(long, visible_alias = "yes")]
+    pub skip_confirm: bool,
+    /// Print what would be deleted and stop
+    #[clap(long)]
+    pub dry_run: bool,
+}
+
 #[cfg(test)]
 mod tests {
     use clap::Parser;
 
     use super::{AuthLevel, Workflows};
+    use crate::args::agents::ModelAuthArg;
+    use crate::args::toolsets::Switch;
     use crate::args::{Args, SubCommands};
     use crate::utils::output::OutputFormat;
 
@@ -264,7 +349,7 @@ mod tests {
         .unwrap() else {
             panic!("expected workflows create");
         };
-        assert_eq!(cmd.name, "triage");
+        assert_eq!(cmd.name.as_deref(), Some("triage"));
         assert_eq!(cmd.group, vec!["minerva"]);
         assert_eq!(cmd.agent, vec!["triage", "reverser"]);
         assert_eq!(cmd.entry.as_deref(), Some("triage"));
@@ -285,6 +370,32 @@ mod tests {
             ])
             .is_err()
         );
+    }
+
+    /// `workflows create` takes a spec instead of a name and groups, and flags beside it
+    #[test]
+    fn create_from_spec_args() {
+        // a spec alone is enough
+        let Workflows::Create(cmd) = parse(&["create", "--spec", "-"]).unwrap() else {
+            panic!("expected workflows create");
+        };
+        assert_eq!(cmd.spec.as_deref(), Some(std::path::Path::new("-")));
+        assert_eq!(cmd.name, None);
+        assert_eq!(cmd.group, Vec::<String>::new());
+        // flags go beside a spec
+        let Workflows::Create(cmd) = parse(&[
+            "create", "copy", "--spec", "w.yaml", "-g", "mars", "--agent", "late",
+        ])
+        .unwrap() else {
+            panic!("expected workflows create");
+        };
+        assert_eq!(cmd.name.as_deref(), Some("copy"));
+        assert_eq!(cmd.group, vec!["mars"]);
+        assert_eq!(cmd.agent, vec!["late"]);
+        // without a spec a name and a group are still required
+        assert!(parse(&["create"]).is_err());
+        assert!(parse(&["create", "x"]).is_err());
+        assert!(parse(&["create", "-g", "minerva"]).is_err());
     }
 
     /// The read and edit commands take exactly what they need
@@ -321,6 +432,156 @@ mod tests {
         };
         assert_eq!(cmd.instance, "triage#r1");
         assert!(parse(&["toolset", "triage#r1"]).is_err());
+    }
+
+    /// `workflows update` takes typed flags and the shared edit flags, and refuses contradictions
+    #[test]
+    fn update_args() {
+        // every typed flag and the shared edit flags parse
+        let Workflows::Update(cmd) = parse(&[
+            "update",
+            "triage",
+            "--rename",
+            "sorting",
+            "-d",
+            "sorts files",
+            "--add-group",
+            "mars",
+            "--remove-group",
+            "minerva",
+            "--max-alive-sub-agents",
+            "4",
+            "--default-model",
+            "claude-sonnet",
+            "--default-model",
+            "gpt-5",
+            "--model-auth",
+            "user",
+            "--auto-instance",
+            "off",
+            "--extend-target-groups",
+            "--set",
+            "limits.max_alive_sub_agents=9",
+            "--unset",
+            "entry_agent",
+            "--dry-run",
+            "--skip-confirm",
+            "-o",
+            "json",
+        ])
+        .unwrap() else {
+            panic!("expected workflows update");
+        };
+        assert_eq!(cmd.workflow, "triage");
+        assert_eq!(cmd.rename.as_deref(), Some("sorting"));
+        assert_eq!(cmd.description.as_deref(), Some("sorts files"));
+        assert_eq!(cmd.add_group, vec!["mars"]);
+        assert_eq!(cmd.remove_group, vec!["minerva"]);
+        assert_eq!(cmd.max_alive_sub_agents, Some(4));
+        assert_eq!(cmd.default_model, vec!["claude-sonnet", "gpt-5"]);
+        assert_eq!(cmd.model_auth, vec![ModelAuthArg::User]);
+        assert_eq!(cmd.auto_instance, Some(Switch::Off));
+        assert!(cmd.extend_target_groups);
+        assert_eq!(cmd.edit.ops.len(), 2);
+        assert!(cmd.edit.dry_run && cmd.edit.skip_confirm);
+        assert_eq!(cmd.edit.format, Some(OutputFormat::Json));
+        // the clearing flags parse on their own
+        let Workflows::Update(cmd) = parse(&[
+            "update",
+            "triage",
+            "--clear-description",
+            "--clear-default-models",
+            "--clear-model-auth",
+        ])
+        .unwrap() else {
+            panic!("expected workflows update");
+        };
+        assert!(cmd.clear_description && cmd.clear_default_models && cmd.clear_model_auth);
+        // contradictions are refused
+        assert!(parse(&["update", "triage", "-d", "x", "--clear-description"]).is_err());
+        assert!(
+            parse(&[
+                "update",
+                "triage",
+                "--default-model",
+                "m",
+                "--clear-default-models"
+            ])
+            .is_err()
+        );
+        assert!(
+            parse(&[
+                "update",
+                "triage",
+                "--model-auth",
+                "user",
+                "--clear-model-auth"
+            ])
+            .is_err()
+        );
+        // group changes are relative to the current groups, which --file replaces
+        assert!(parse(&["update", "triage", "--add-group", "g", "--file", "f.yaml"]).is_err());
+        // a workflow is required, and an unknown level is refused
+        assert!(parse(&["update"]).is_err());
+        assert!(parse(&["update", "triage", "--model-auth", "nobody"]).is_err());
+        assert!(parse(&["update", "triage", "--auto-instance", "maybe"]).is_err());
+    }
+
+    /// `workflows edit` takes the shared edit flags, and `workflows spec` a file and a format
+    #[test]
+    fn edit_and_spec_args() {
+        // edit takes the editor, the widening flag and the shared flags
+        let Workflows::Edit(cmd) = parse(&[
+            "edit",
+            "triage",
+            "--editor",
+            "nano",
+            "--extend-target-groups",
+            "--patch",
+            "{\"description\": null}",
+            "--force",
+        ])
+        .unwrap() else {
+            panic!("expected workflows edit");
+        };
+        assert_eq!(cmd.workflow, "triage");
+        assert_eq!(cmd.edit.editor.as_deref(), Some("nano"));
+        assert!(cmd.extend_target_groups && cmd.edit.force);
+        assert_eq!(cmd.edit.patch.len(), 1);
+        assert!(parse(&["edit"]).is_err());
+        // spec takes an output file and a format
+        let Workflows::Spec(cmd) =
+            parse(&["spec", "triage", "-o", "a.yaml", "--format", "json"]).unwrap()
+        else {
+            panic!("expected workflows spec");
+        };
+        assert_eq!(cmd.workflow, "triage");
+        assert_eq!(cmd.output.as_deref(), Some(std::path::Path::new("a.yaml")));
+        assert_eq!(cmd.format.format, Some(OutputFormat::Json));
+        assert!(parse(&["spec"]).is_err());
+    }
+
+    /// `workflows delete` takes a workflow, a dry run, and `--skip-confirm` or its `--yes` alias
+    #[test]
+    fn delete_args() {
+        // a workflow alone asks before deleting
+        let Workflows::Delete(cmd) = parse(&["delete", "triage"]).unwrap() else {
+            panic!("expected workflows delete");
+        };
+        assert_eq!(cmd.workflow, "triage");
+        assert!(!cmd.skip_confirm && !cmd.dry_run);
+        // the flag and its alias skip the question, and a dry run stops before deleting
+        let Workflows::Delete(cmd) = parse(&["delete", "triage", "--yes", "--dry-run"]).unwrap()
+        else {
+            panic!("expected workflows delete");
+        };
+        assert!(cmd.skip_confirm && cmd.dry_run);
+        let Workflows::Delete(cmd) = parse(&["delete", "triage", "--skip-confirm"]).unwrap() else {
+            panic!("expected workflows delete");
+        };
+        assert!(cmd.skip_confirm);
+        // a workflow is required
+        assert!(parse(&["delete"]).is_err());
     }
 
     /// The commands left out of thorctl don't exist: no direct instance requests, no resolver

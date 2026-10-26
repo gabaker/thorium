@@ -194,6 +194,49 @@ impl<'a> ImportPlan<'a> {
                 .iter()
                 .any(|p| pipeline_would_change(p))
     }
+
+    /// The labels of the existing resources that would actually be updated
+    ///
+    /// Images come first, then pipelines, each in plan order; this is exactly the set
+    /// [`ImportPlan::has_conflicts`] tests for.
+    pub fn conflict_labels(&self) -> Vec<String> {
+        // the changed images, then the changed pipelines
+        let images = self
+            .existing_images
+            .iter()
+            .filter(|img| image_would_change(img))
+            .map(|img| format!("image {}", img.label()));
+        let pipelines = self
+            .existing_pipelines
+            .iter()
+            .filter(|pipe| pipeline_would_change(pipe))
+            .map(|pipe| format!("pipeline {}", pipe.label()));
+        images.chain(pipelines).collect()
+    }
+}
+
+/// Join names into one comma separated list, naming at most `max` of them
+///
+/// A longer list ends with how many more there were (`a, b and 3 more`) so a message about
+/// many items stays one line.
+///
+/// # Arguments
+///
+/// * `items` - The names to list
+/// * `max` - The most names to spell out
+pub fn list_bounded(items: &[String], max: usize) -> String {
+    // spell out the first few names
+    let shown = items
+        .iter()
+        .take(max)
+        .map(String::as_str)
+        .collect::<Vec<&str>>()
+        .join(", ");
+    // count the rest instead of listing them
+    match items.len().checked_sub(max) {
+        Some(more) if more > 0 => format!("{shown} and {more} more"),
+        _ => shown,
+    }
 }
 
 /// How the confirmation screen should describe existing resources
@@ -275,24 +318,6 @@ pub async fn current_username(thorium: &Thorium, progress: &Bar) -> String {
             "<current user>".to_string()
         }
     }
-}
-
-/// Confirm an import with the user, showing what will be created and what
-/// already exists
-///
-/// # Arguments
-///
-/// * `conf` - The Thorctl config (used to display the API URL)
-/// * `plan` - The categorized resources this import will create or touch
-/// * `username` - The current user's name, shown in the confirmation prompt
-/// * `mode` - How existing resources will be handled, to label them accurately
-pub fn confirm_import(
-    conf: &CtlConf,
-    plan: &ImportPlan,
-    username: &str,
-    mode: ConflictMode,
-) -> Result<bool, Error> {
-    confirm_plan(conf, plan, username, PlanLabels::Conflicts(mode))
 }
 
 /// Confirm an import with the user, labelling existing resources per `labels`

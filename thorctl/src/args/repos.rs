@@ -553,7 +553,7 @@ pub struct DownloadRepos {
     #[clap(long)]
     pub cursor: Option<Uuid>,
     /// Skip uncarting any downloaded repos
-    #[clap(short, long)]
+    #[clap(long)]
     pub carted: bool,
     /// The organizational file structure to use when downloading repos
     #[clap(long, default_value_t, ignore_case = true)]

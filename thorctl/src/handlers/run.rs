@@ -1,4 +1,5 @@
-use owo_colors::{OwoColorize, Rgb};
+use crate::utils::paint::Paint;
+use colored::Color;
 use rand::seq::SliceRandom;
 use std::{
     collections::HashMap,
@@ -20,8 +21,11 @@ use uuid::Uuid;
 
 use super::update;
 use crate::Error;
+use crate::args::pipelines::Pipelines;
 use crate::args::repos::RepoTarget;
-use crate::args::run::Run;
+use crate::args::run::{RootRun, Run, RunKinds};
+use crate::args::tools::Tools;
+use crate::args::workflows::Workflows;
 use crate::args::{Args, Mode};
 use crate::utils;
 
@@ -94,6 +98,21 @@ async fn forward_logs(
     Ok(())
 }
 
+/// A 24 bit color
+///
+/// # Arguments
+///
+/// * `r` - The red channel
+/// * `g` - The green channel
+/// * `b` - The blue channel
+const fn rgb(r: u8, g: u8, b: u8) -> Color {
+    // build the true color directly
+    Color::TrueColor { r, g, b }
+}
+
+/// The color of a tool that has no color assigned yet
+const DEFAULT_TOOL_COLOR: Color = rgb(0, 255, 0);
+
 /// Outputs anything on the channel to the console and
 /// finishes once all senders have been closed.
 ///
@@ -102,22 +121,22 @@ async fn forward_logs(
 /// # Arguments
 ///
 /// * `log_rx` - The channel to poll for log information
-async fn log(mut log_rx: mpsc::Receiver<(String, String)>) -> HashMap<String, Rgb> {
+async fn log(mut log_rx: mpsc::Receiver<(String, String)>) -> HashMap<String, Color> {
     // create a vector of shuffled colors to highlight different stages in a reaction
     let colors = {
         let mut colors = vec![
-            Rgb(255, 0, 0),   // red
-            Rgb(255, 128, 0), // orange
-            Rgb(255, 255, 0), // yellow
-            Rgb(128, 255, 0), // lime green
-            Rgb(0, 255, 0),   // green
-            Rgb(0, 255, 128), // seafoam green
-            Rgb(0, 255, 255), // baby blue
-            Rgb(0, 128, 255), // light blue
-            Rgb(0, 0, 255),   // blue
-            Rgb(128, 0, 255), // purple
-            Rgb(255, 0, 255), // light purple
-            Rgb(255, 0, 128), // pink
+            rgb(255, 0, 0),   // red
+            rgb(255, 128, 0), // orange
+            rgb(255, 255, 0), // yellow
+            rgb(128, 255, 0), // lime green
+            rgb(0, 255, 0),   // green
+            rgb(0, 255, 128), // seafoam green
+            rgb(0, 255, 255), // baby blue
+            rgb(0, 128, 255), // light blue
+            rgb(0, 0, 255),   // blue
+            rgb(128, 0, 255), // purple
+            rgb(255, 0, 255), // light purple
+            rgb(255, 0, 128), // pink
         ];
         colors.shuffle(&mut rand::rng());
         colors
@@ -208,7 +227,9 @@ async fn write_result(
     client: &Thorium,
     run_mode: &Mode,
 ) -> Result<(), Error> {
-    let mut out_path = base_out_path.join(&tool);
+    // name the tool's output after the tool in a form valid on every platform
+    let tool_path = utils::fs::path_component(&tool);
+    let mut out_path = base_out_path.join(&tool_path);
     // write the result attachments to disk if they exist
     if !output.files.is_empty() {
         // create a base directory to contain all of the attachments
@@ -225,7 +246,7 @@ async fn write_result(
         )
         .await?;
         // push an additional filename to write the actual contents of the result to
-        out_path.push(&tool);
+        out_path.push(&tool_path);
     }
     // write the result contents to disk
     let file = std::fs::File::create(&out_path)?;
@@ -248,7 +269,7 @@ async fn write_results(
     thorium: &Thorium,
     cmd: &Run,
     pipeline: Pipeline,
-    tool_colors: HashMap<String, Rgb>,
+    tool_colors: HashMap<String, Color>,
     run_mode: &Mode,
 ) -> Result<(), Error> {
     // retrieve the file/repo's results
@@ -315,7 +336,7 @@ async fn write_results(
                 })
                 // map to future that will write the result
                 .map(|(tool, output)| async {
-                    let color = tool_colors.get(&tool).unwrap_or(&Rgb(0, 255, 0));
+                    let color = tool_colors.get(&tool).unwrap_or(&DEFAULT_TOOL_COLOR);
                     let tool_name = tool.clone();
                     match write_result(
                         output,
@@ -429,13 +450,43 @@ async fn run(thorium: Arc<Thorium>, cmd: &Run) -> Result<(), Error> {
     Ok(())
 }
 
-/// Handle all run commands or print run info
+/// Run one kind of run through the handler of its own command
+///
+/// # Arguments
+///
+/// * `args` - The arguments passed to Thorctl
+/// * `kind` - The kind of run to start
+async fn run_kind(args: &Args, kind: &RunKinds) -> Result<(), Error> {
+    // each kind runs like its `tools run`, `workflows run`, or `pipelines run` spelling
+    match kind {
+        RunKinds::Tool(run) => crate::handlers::tools::handle(args, &Tools::Run(run.clone())).await,
+        RunKinds::Workflow(run) => {
+            crate::handlers::workflows::handle(args, &Workflows::Run(run.clone())).await
+        }
+        RunKinds::Pipeline(run) => {
+            crate::handlers::pipelines::handle(args, &Pipelines::Run(run.clone())).await
+        }
+    }
+}
+
+/// Handle `thorctl run`: a run of one kind, or the older single pipeline run
 ///
 /// # Arguments
 ///
 /// * `args` - The arguments passed to Thorctl
 /// * `cmd` - The run command to execute
-pub async fn handle(args: &Args, cmd: &Run) -> Result<(), Error> {
+pub async fn handle(args: &Args, cmd: &RootRun) -> Result<(), Error> {
+    // a kind has its own handler; otherwise the older pipeline form is needed
+    let legacy = match (&cmd.kind, &cmd.legacy) {
+        (Some(kind), _) => return run_kind(args, kind).await,
+        (None, Some(legacy)) => legacy,
+        (None, None) => {
+            return Err(Error::new(
+                "A run needs a kind: thorctl run <tool|workflow|pipeline> <NAME> [flags], or the \
+older thorctl run <PIPELINE> <SHA256|REPO>",
+            ));
+        }
+    };
     // load our config and instance our client
     let (conf, thorium) = utils::get_client(args).await?;
     // warn about insecure connections if not set to skip
@@ -447,5 +498,5 @@ pub async fn handle(args: &Args, cmd: &Run) -> Result<(), Error> {
         update::ask_update(&thorium).await?;
     }
     // call the run handler
-    run(Arc::new(thorium), cmd).await
+    run(Arc::new(thorium), legacy).await
 }

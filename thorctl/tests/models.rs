@@ -2,8 +2,10 @@
 
 mod common;
 
+use common::editor::{EditorScript, recovery_path};
 use common::{TestUser, assert_success, stdout, unique};
 use serde_json::{Value, json};
+use std::fmt::Write as _;
 use std::process::Stdio;
 use std::time::Duration;
 use thorium::models::{
@@ -563,7 +565,7 @@ async fn models_entities() -> Result<(), Error> {
     let out = member
         .run(
             "models-endpoint-delete-member",
-            &["models", "endpoints", "delete", &endpoint_name],
+            &["models", "endpoints", "delete", &endpoint_name, "--yes"],
         )
         .await;
     assert!(!out.status.success());
@@ -574,7 +576,7 @@ async fn models_entities() -> Result<(), Error> {
         ("models-cred-delete", "credentials", &name),
     ] {
         let out = owner
-            .run(transcript, &["models", kind, "delete", name])
+            .run(transcript, &["models", kind, "delete", name, "--yes"])
             .await;
         assert_success(&out);
     }
@@ -1019,5 +1021,1060 @@ async fn models_lists_page() -> Result<(), Error> {
     let out = owner.run("models-bans-get-pages", &args).await;
     assert_success(&out);
     assert_eq!(json(&out).as_array().map(Vec::len), Some(51));
+    Ok(())
+}
+
+/// The environment that lets thorctl open an editor script without a terminal
+const EDIT_ENV: [(&str, &str); 1] = [("THORCTL_EDIT_ASSUME_TTY", "1")];
+
+/// Run thorctl to completion with extra environment variables
+///
+/// # Arguments
+///
+/// * `user` - The user to run as
+/// * `_name` - A label for the run, which names what it checks
+/// * `args` - The thorctl arguments after the global flags
+/// * `envs` - The environment variables to set
+async fn run_with(
+    user: &TestUser,
+    _name: &str,
+    args: &[&str],
+    envs: &[(&str, &str)],
+) -> std::process::Output {
+    // set the variables and run, giving up if it hangs
+    let mut command = user.command(args);
+    command.envs(envs.iter().copied());
+    tokio::time::timeout(Duration::from_secs(120), command.output())
+        .await
+        .expect("thorctl timed out")
+        .expect("failed to run thorctl")
+}
+
+/// Run thorctl with `--stdin` text piped to it
+///
+/// # Arguments
+///
+/// * `user` - The user to run as
+/// * `args` - The thorctl arguments after the global flags
+/// * `input` - The text to write to stdin
+async fn run_with_stdin(user: &TestUser, args: &[&str], input: &str) -> std::process::Output {
+    // start thorctl with a pipe for stdin
+    let mut child = user
+        .command(args)
+        .stdin(Stdio::piped())
+        .spawn()
+        .expect("failed to start thorctl");
+    child
+        .stdin
+        .take()
+        .expect("no stdin")
+        .write_all(input.as_bytes())
+        .await
+        .expect("failed to write stdin");
+    child.wait_with_output().await.expect("thorctl failed")
+}
+
+/// The text a command wrote to stderr
+///
+/// # Arguments
+///
+/// * `output` - The command's output
+fn stderr(output: &std::process::Output) -> String {
+    String::from_utf8_lossy(&output.stderr).into_owned()
+}
+
+/// Allow a second keyless gateway on the deployment's whitelist
+async fn allow_second_gateway() -> Result<(), Error> {
+    // a url the edit tests move an endpoint to
+    let provider = ModelProvider::LiteLlm {
+        base_url: "https://gw2.local/v1".to_owned(),
+        key_header: None,
+    };
+    generators::allow_model_endpoint(&provider).await
+}
+
+/// Create a keyless gateway endpoint with a description and some catalog models
+///
+/// # Arguments
+///
+/// * `owner` - The group's owner
+/// * `models` - The catalog model ids
+async fn gateway(owner: &TestUser, models: &[&str]) -> String {
+    // list each model in the spec
+    let mut spec = String::from(
+        "provider:\n  LiteLlm:\n    base_url: https://gw.local/v1\n    key_header: null\ncredential: null\nmodels:\n",
+    );
+    for model in models {
+        let _ = writeln!(spec, "  - model_id: {model}\n    context_window: 100");
+    }
+    let spec = write_file("endpoint", &spec);
+    let name = unique("endpoint");
+    let args = [
+        "models",
+        "endpoints",
+        "create",
+        "--spec",
+        &spec,
+        "-n",
+        &name,
+        "-g",
+        &owner.group,
+        "-d",
+        "before",
+    ];
+    assert_success(&owner.run("models-edit-endpoint", &args).await);
+    name
+}
+
+/// Read a model entity as the API returns it
+///
+/// # Arguments
+///
+/// * `owner` - The user to read as
+/// * `kind` - `endpoints` or `profiles`
+/// * `name` - The entity's name
+async fn entity_json(owner: &TestUser, kind: &str, name: &str) -> Value {
+    // describe it as JSON
+    let out = owner
+        .run(
+            "models-edit-read",
+            &["models", kind, "describe", name, "-o", "json"],
+        )
+        .await;
+    assert_success(&out);
+    json(&out)
+}
+
+/// Read a model entity's `modified` time, which any update moves
+///
+/// # Arguments
+///
+/// * `owner` - The user to read as
+/// * `kind` - `endpoints` or `profiles`
+/// * `name` - The entity's name
+/// * `variant` - The metadata variant (`ModelEndpoint` or `ModelProfile`)
+async fn modified(owner: &TestUser, kind: &str, name: &str, variant: &str) -> Value {
+    entity_json(owner, kind, name).await["metadata"][variant]["modified"].clone()
+}
+
+/// Read the document `spec` prints for a model entity
+///
+/// # Arguments
+///
+/// * `owner` - The user to read as
+/// * `kind` - `endpoints` or `profiles`
+/// * `name` - The entity's name
+async fn spec_doc(owner: &TestUser, kind: &str, name: &str) -> Value {
+    // print the spec and read it as YAML
+    let out = owner
+        .run("models-edit-spec", &["models", kind, "spec", name])
+        .await;
+    assert_success(&out);
+    serde_norway::from_str(&stdout(&out)).expect("spec was not YAML")
+}
+
+/// `endpoints edit` changes an endpoint in an editor, and cancels, refuses and recovers as the
+/// shared edit flow does, with every change checked in the API
+#[tokio::test]
+// one scenario walks each editor outcome against the same endpoint
+#[allow(clippy::too_many_lines)]
+async fn models_endpoints_edit_interactive() -> Result<(), Error> {
+    // an owner with a gateway endpoint listing two models
+    let owner = TestUser::new("models-endpoint-edit").await?;
+    allow_test_endpoints().await?;
+    allow_second_gateway().await?;
+    let name = gateway(&owner, &["m1", "m2"]).await;
+    let target = ["models", "endpoints", "edit", &name];
+    // an editor changing one field applies it, after showing the header and read-only marks
+    let script = EditorScript::replace("description: before", "description: after");
+    let editor = script.editor();
+    let args = [target.as_slice(), &["--editor", &editor]].concat();
+    let out = run_with(&owner, "models-edit-description", &args, &EDIT_ENV).await;
+    assert_success(&out);
+    assert!(
+        stdout(&out).contains("updated successfully"),
+        "{}",
+        stdout(&out)
+    );
+    let shown = script.seen(0).expect("the editor wasn't opened");
+    assert!(shown.contains("# Editing model endpoint"), "{shown}");
+    assert!(shown.contains("*id*"), "{shown}");
+    assert!(shown.contains("Secrets are never shown"), "{shown}");
+    assert_eq!(
+        entity_json(&owner, "endpoints", &name).await["description"],
+        "after"
+    );
+    // saving without a change says so and writes nothing
+    let before = modified(&owner, "endpoints", &name, "ModelEndpoint").await;
+    let script = EditorScript::noop();
+    let editor = script.editor();
+    let args = [target.as_slice(), &["--editor", &editor]].concat();
+    let out = run_with(&owner, "models-edit-noop", &args, &EDIT_ENV).await;
+    assert_success(&out);
+    assert!(stdout(&out).contains("No changes"), "{}", stdout(&out));
+    assert_eq!(
+        modified(&owner, "endpoints", &name, "ModelEndpoint").await,
+        before
+    );
+    // a whole new document changes the provider, the catalog and the disabled models at once
+    let mut doc = spec_doc(&owner, "endpoints", &name).await;
+    doc["provider"] = json!({"LiteLlm": {"base_url": "https://gw2.local/v1", "key_header": null}});
+    doc["disabled_models"] = json!(["m1"]);
+    doc["catalog"] = json!([
+        {"model_id": "m2", "context_window": 100},
+        {"model_id": "m3", "context_window": 7, "capabilities": {"vision": true}},
+    ]);
+    let script = EditorScript::write(&serde_norway::to_string(&doc).unwrap());
+    let editor = script.editor();
+    let args = [target.as_slice(), &["--editor", &editor]].concat();
+    let out = run_with(&owner, "models-edit-document", &args, &EDIT_ENV).await;
+    assert_success(&out);
+    let meta = &entity_json(&owner, "endpoints", &name).await["metadata"]["ModelEndpoint"];
+    assert_eq!(
+        meta["provider"]["LiteLlm"]["base_url"],
+        "https://gw2.local/v1"
+    );
+    assert_eq!(meta["disabled_models"], json!(["m1"]));
+    let ids: Vec<&str> = meta["catalog"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|entry| entry["model_id"].as_str().unwrap())
+        .collect();
+    assert_eq!(ids, ["m2", "m3"]);
+    assert_eq!(meta["catalog"][1]["capabilities"]["vision"], true);
+    assert_eq!(meta["catalog"][1]["limits"]["context_window"], 7);
+    // an edit to a read-only field is warned about and ignored while the rest applies
+    let mut doc = spec_doc(&owner, "endpoints", &name).await;
+    doc["*id*"] = json!(Uuid::new_v4().to_string());
+    doc["description"] = json!("third");
+    let script = EditorScript::write(&serde_norway::to_string(&doc).unwrap());
+    let editor = script.editor();
+    let args = [target.as_slice(), &["--editor", &editor]].concat();
+    let out = run_with(&owner, "models-edit-readonly", &args, &EDIT_ENV).await;
+    assert_success(&out);
+    assert!(stderr(&out).contains("read-only"), "{}", stderr(&out));
+    assert_eq!(
+        entity_json(&owner, "endpoints", &name).await["description"],
+        "third"
+    );
+    // a document that isn't YAML, cancelled, fails and keeps the text in a recovery file
+    let broken = "name: [unterminated";
+    let script = EditorScript::write(broken);
+    let editor = script.editor();
+    let args = [target.as_slice(), &["--editor", &editor]].concat();
+    let envs = [EDIT_ENV[0], ("THORCTL_EDIT_PROMPT", "cancel")];
+    let out = run_with(&owner, "models-edit-invalid", &args, &envs).await;
+    assert!(!out.status.success());
+    let path = recovery_path(&stderr(&out)).expect("no recovery file named");
+    assert!(std::fs::read_to_string(&path)?.contains(broken));
+    let _ = std::fs::remove_file(path);
+    assert_eq!(
+        entity_json(&owner, "endpoints", &name).await["description"],
+        "third"
+    );
+    // a provider the deployment doesn't allow is refused by the API with its reason
+    let mut doc = spec_doc(&owner, "endpoints", &name).await;
+    doc["provider"] =
+        json!({"LiteLlm": {"base_url": "https://not-allowed.local/v1", "key_header": null}});
+    let edited = serde_norway::to_string(&doc).unwrap();
+    let script = EditorScript::write(&edited);
+    let editor = script.editor();
+    let args = [target.as_slice(), &["--editor", &editor]].concat();
+    let out = run_with(&owner, "models-edit-refused", &args, &EDIT_ENV).await;
+    assert!(!out.status.success());
+    assert!(stderr(&out).contains("400"), "{}", stderr(&out));
+    let path = recovery_path(&stderr(&out)).expect("no recovery file named");
+    assert!(std::fs::read_to_string(&path)?.contains("not-allowed.local"));
+    let _ = std::fs::remove_file(path);
+    // declining the confirmation applies nothing and keeps the text in a recovery file
+    let script = EditorScript::replace("description: third", "description: declined");
+    let editor = script.editor();
+    let args = [target.as_slice(), &["--editor", &editor]].concat();
+    let out = run_with(&owner, "models-edit-declined", &args, &envs).await;
+    assert_success(&out);
+    assert!(stdout(&out).contains("Cancelled"), "{}", stdout(&out));
+    let path = recovery_path(&stderr(&out)).expect("no recovery file named");
+    assert!(std::fs::read_to_string(&path)?.contains("description: declined"));
+    let _ = std::fs::remove_file(path);
+    assert_eq!(
+        entity_json(&owner, "endpoints", &name).await["description"],
+        "third"
+    );
+    // an empty buffer cancels without an error
+    let script = EditorScript::write("");
+    let editor = script.editor();
+    let args = [target.as_slice(), &["--editor", &editor]].concat();
+    let out = run_with(&owner, "models-edit-empty", &args, &EDIT_ENV).await;
+    assert_success(&out);
+    assert!(stdout(&out).contains("Cancelled"), "{}", stdout(&out));
+    // editing without a terminal and without a change flag points at the flags
+    let out = owner.run("models-edit-no-tty", &target).await;
+    assert!(!out.status.success());
+    assert!(stderr(&out).contains("--set"), "{}", stderr(&out));
+    Ok(())
+}
+
+/// `endpoints update` takes `--file`, `--patch`, `--set` and `--unset` and shows every result
+/// the way the shared edit flow does
+#[tokio::test]
+// one scenario walks each change source against the same endpoint
+#[allow(clippy::too_many_lines)]
+async fn models_endpoints_update_documents() -> Result<(), Error> {
+    // an owner with a gateway endpoint listing two models
+    let owner = TestUser::new("models-endpoint-update").await?;
+    allow_test_endpoints().await?;
+    allow_second_gateway().await?;
+    let name = gateway(&owner, &["m1", "m2"]).await;
+    let update = ["models", "endpoints", "update", &name];
+    // --set changes one field and nested ones through indexes
+    let args = [
+        update.as_slice(),
+        &[
+            "--set",
+            "description=set",
+            "--set",
+            "catalog[0].context_window=555",
+        ],
+    ]
+    .concat();
+    let out = owner.run("models-update-set", &args).await;
+    assert_success(&out);
+    assert!(
+        stdout(&out).contains("updated successfully"),
+        "{}",
+        stdout(&out)
+    );
+    let meta = entity_json(&owner, "endpoints", &name).await;
+    assert_eq!(meta["description"], "set");
+    assert_eq!(
+        meta["metadata"]["ModelEndpoint"]["catalog"][0]["limits"]["context_window"],
+        555
+    );
+    // --set to the current value changes nothing
+    let before = modified(&owner, "endpoints", &name, "ModelEndpoint").await;
+    let args = [update.as_slice(), &["--set", "description=set"]].concat();
+    let out = owner.run("models-update-same", &args).await;
+    assert_success(&out);
+    assert!(stdout(&out).contains("No changes"), "{}", stdout(&out));
+    assert_eq!(
+        modified(&owner, "endpoints", &name, "ModelEndpoint").await,
+        before
+    );
+    // --patch merges, and null clears the description
+    let args = [
+        update.as_slice(),
+        &[
+            "--patch",
+            r#"{"description": null, "disabled_models": ["m2"]}"#,
+        ],
+    ]
+    .concat();
+    assert_success(&owner.run("models-update-patch", &args).await);
+    let meta = entity_json(&owner, "endpoints", &name).await;
+    assert!(meta["description"].is_null());
+    assert_eq!(
+        meta["metadata"]["ModelEndpoint"]["disabled_models"],
+        json!(["m2"])
+    );
+    // --unset removes a field, and removing one that is already gone is fine
+    let args = [
+        update.as_slice(),
+        &["--unset", "disabled_models", "--unset", "no_such_key"],
+    ]
+    .concat();
+    assert_success(&owner.run("models-update-unset", &args).await);
+    let meta = entity_json(&owner, "endpoints", &name).await;
+    assert_eq!(
+        meta["metadata"]["ModelEndpoint"]["disabled_models"],
+        json!([])
+    );
+    // --file replaces the document, from a path and from stdin
+    let mut doc = spec_doc(&owner, "endpoints", &name).await;
+    doc["description"] = json!("from-file");
+    let file = write_file("endpoint-doc", &serde_norway::to_string(&doc).unwrap());
+    let args = [update.as_slice(), &["--file", &file]].concat();
+    assert_success(&owner.run("models-update-file", &args).await);
+    assert_eq!(
+        entity_json(&owner, "endpoints", &name).await["description"],
+        "from-file"
+    );
+    doc["description"] = json!("from-stdin");
+    let args = [update.as_slice(), &["--file", "-"]].concat();
+    let out = run_with_stdin(&owner, &args, &serde_norway::to_string(&doc).unwrap()).await;
+    assert_success(&out);
+    assert_eq!(
+        entity_json(&owner, "endpoints", &name).await["description"],
+        "from-stdin"
+    );
+    // a document with an unknown key or a bad value is refused before any change
+    let before = modified(&owner, "endpoints", &name, "ModelEndpoint").await;
+    for (transcript, bad) in [
+        (
+            "models-update-unknown-key",
+            "name: x\nprovider: {LiteLlm: {base_url: 'https://gw.local/v1', key_header: null}}\nnmae: y\n",
+        ),
+        (
+            "models-update-bad-url",
+            "name: x\nprovider: {LiteLlm: {base_url: 'not a url', key_header: null}}\n",
+        ),
+    ] {
+        let file = write_file("endpoint-bad", bad);
+        let args = [update.as_slice(), &["--file", &file]].concat();
+        let out = owner.run(transcript, &args).await;
+        assert!(!out.status.success(), "{transcript} was accepted");
+    }
+    assert_eq!(
+        modified(&owner, "endpoints", &name, "ModelEndpoint").await,
+        before
+    );
+    // a provider the API refuses prints its status
+    let args = [
+        update.as_slice(),
+        &[
+            "--set",
+            "provider.LiteLlm.base_url=https://not-allowed.local/v1",
+        ],
+    ]
+    .concat();
+    let out = owner.run("models-update-refused", &args).await;
+    assert!(!out.status.success());
+    assert!(stderr(&out).contains("400"), "{}", stderr(&out));
+    // read-only fields can't be set
+    let args = [update.as_slice(), &["--set", "*id*=abc"]].concat();
+    let out = owner.run("models-update-readonly", &args).await;
+    assert!(!out.status.success());
+    assert!(stderr(&out).contains("read-only"), "{}", stderr(&out));
+    // --dry-run prints the changes and writes nothing, and -o json pins the result's shape
+    let args = [
+        update.as_slice(),
+        &["--set", "description=dry", "--dry-run", "-o", "json"],
+    ]
+    .concat();
+    let out = owner.run("models-update-dry-run", &args).await;
+    assert_success(&out);
+    let result = json(&out);
+    assert_eq!(result["status"], "dry_run");
+    assert_eq!(result["changed"], false);
+    assert_eq!(result["kind"], "model endpoint");
+    assert_eq!(result["diff"][0]["path"], "description");
+    assert_eq!(result["diff"][0]["new"], "dry");
+    assert_eq!(
+        entity_json(&owner, "endpoints", &name).await["description"],
+        "from-stdin"
+    );
+    let args = [
+        update.as_slice(),
+        &["--set", "description=json", "-o", "json"],
+    ]
+    .concat();
+    let out = owner.run("models-update-json", &args).await;
+    assert_success(&out);
+    let result = json(&out);
+    assert_eq!(result["status"], "updated");
+    assert_eq!(result["changed"], true);
+    assert_eq!(result["name"], name);
+    assert_eq!(result["resource"]["description"], "json");
+    // the flags that change one setting each can't be mixed with a document change
+    let args = [
+        update.as_slice(),
+        &["--set", "description=a", "--disable-model", "x"],
+    ]
+    .concat();
+    let out = owner.run("models-update-mixed", &args).await;
+    assert!(!out.status.success());
+    assert!(stderr(&out).contains("not both"), "{}", stderr(&out));
+    let args = [update.as_slice(), &["--dry-run"]].concat();
+    let out = owner.run("models-update-lone-dry-run", &args).await;
+    assert!(!out.status.success());
+    // the printed spec feeds straight back with no change
+    let out = owner
+        .run(
+            "models-update-spec",
+            &["models", "endpoints", "spec", &name],
+        )
+        .await;
+    assert_success(&out);
+    let args = [update.as_slice(), &["--file", "-"]].concat();
+    let out = run_with_stdin(&owner, &args, &stdout(&out)).await;
+    assert!(stdout(&out).contains("No changes"), "{}", stdout(&out));
+    // the flags still work on their own
+    let args = [update.as_slice(), &["-d", "flag"]].concat();
+    assert_success(&owner.run("models-update-flag", &args).await);
+    assert_eq!(
+        entity_json(&owner, "endpoints", &name).await["description"],
+        "flag"
+    );
+    Ok(())
+}
+
+/// A change made by someone else between the read and the apply is refused unless forced
+#[tokio::test]
+async fn models_endpoints_update_guards_remote_changes() -> Result<(), Error> {
+    // an owner with a gateway endpoint
+    let owner = TestUser::new("models-endpoint-guard").await?;
+    allow_test_endpoints().await?;
+    let name = gateway(&owner, &["m1"]).await;
+    // a hook that changes the endpoint with thorctl itself after the edit's first read
+    let hook = format!(
+        "{} --keys {} --skip-update models endpoints update {name} -d remote",
+        env!("CARGO_BIN_EXE_thorctl"),
+        owner.keys.display()
+    );
+    let envs = [("THORCTL_EDIT_BEFORE_APPLY", hook.as_str())];
+    let update = ["models", "endpoints", "update", &name];
+    // the edit stops, and the remote change stays
+    let args = [update.as_slice(), &["--set", "description=mine"]].concat();
+    let out = run_with(&owner, "models-guard-refused", &args, &envs).await;
+    assert!(!out.status.success());
+    assert!(
+        stderr(&out).contains("changed remotely"),
+        "{}",
+        stderr(&out)
+    );
+    assert_eq!(
+        entity_json(&owner, "endpoints", &name).await["description"],
+        "remote"
+    );
+    // --force applies it anyway
+    let args = [update.as_slice(), &["--set", "description=mine", "--force"]].concat();
+    let out = run_with(&owner, "models-guard-forced", &args, &envs).await;
+    assert_success(&out);
+    assert_eq!(
+        entity_json(&owner, "endpoints", &name).await["description"],
+        "mine"
+    );
+    Ok(())
+}
+
+/// An endpoint document names its credential, never shows a secret, and the credential can be
+/// swapped or removed by name
+#[tokio::test]
+// one scenario creates the credentials the later steps use
+#[allow(clippy::too_many_lines)]
+async fn models_endpoints_edit_never_shows_secrets() -> Result<(), Error> {
+    // an owner with two credentials and an Anthropic endpoint that uses the first
+    let owner = TestUser::new("models-endpoint-secrets").await?;
+    allow_test_endpoints().await?;
+    let group = owner.group.clone();
+    let spec = write_file("cred", "kind: ApiKey\n");
+    let mut names = Vec::new();
+    let mut ids = Vec::new();
+    let mut secrets = Vec::new();
+    for _ in 0..2 {
+        let secret = format!("sk-{}", unique("secret"));
+        let secret_file = write_file("secret", &secret);
+        let cred = unique("cred");
+        let args = [
+            "models",
+            "credentials",
+            "create",
+            "--spec",
+            &spec,
+            "-n",
+            &cred,
+            "-g",
+            &group,
+            "--secret-file",
+            &secret_file,
+        ];
+        let out = owner.run("models-secrets-cred", &args).await;
+        assert_success(&out);
+        ids.push(created_id(&out));
+        names.push(cred);
+        secrets.push(secret);
+    }
+    let endpoint_spec = write_file(
+        "endpoint",
+        &format!(
+            "provider:\n  Anthropic:\n    base_url: null\n    workspace_id: null\ncredential: {}\n",
+            ids[0]
+        ),
+    );
+    let name = unique("endpoint");
+    let args = [
+        "models",
+        "endpoints",
+        "create",
+        "--spec",
+        &endpoint_spec,
+        "-n",
+        &name,
+        "-g",
+        &group,
+    ];
+    assert_success(&owner.run("models-secrets-endpoint", &args).await);
+    // the spec names the credential and holds nothing secret
+    let out = owner
+        .run(
+            "models-secrets-spec",
+            &["models", "endpoints", "spec", &name],
+        )
+        .await;
+    assert_success(&out);
+    let printed = stdout(&out);
+    assert!(
+        printed.contains(&format!("credential: {}", names[0])),
+        "{printed}"
+    );
+    for secret in &secrets {
+        assert_no_secret(&out, secret, "endpoints spec");
+        assert_no_secret(
+            &out,
+            &ModelSecret::from(secret.as_str()).fingerprint(),
+            "endpoints spec",
+        );
+    }
+    // an editor sees the same document and its diff stays free of secrets
+    let script = EditorScript::replace("description: null", "description: shown");
+    let editor = script.editor();
+    let args = ["models", "endpoints", "edit", &name, "--editor", &editor];
+    let out = run_with(&owner, "models-secrets-edit", &args, &EDIT_ENV).await;
+    assert_success(&out);
+    let shown = script.seen(0).expect("the editor wasn't opened");
+    for secret in &secrets {
+        assert!(
+            !shown.contains(secret.as_str()),
+            "the editor was shown a secret"
+        );
+        assert_no_secret(&out, secret, "endpoints edit");
+    }
+    // swapping the credential by name moves the endpoint to it
+    let update = ["models", "endpoints", "edit", &name];
+    let setting = format!("credential={}", names[1]);
+    let args = [update.as_slice(), &["--set", &setting]].concat();
+    let out = owner.run("models-secrets-swap", &args).await;
+    assert_success(&out);
+    let meta = entity_json(&owner, "endpoints", &name).await;
+    assert_eq!(meta["metadata"]["ModelEndpoint"]["credential"], ids[1]);
+    // removing it clears the credential, which this provider allows only if keyless is allowed
+    let args = [
+        update.as_slice(),
+        &["--unset", "credential", "--dry-run", "-o", "json"],
+    ]
+    .concat();
+    let out = owner.run("models-secrets-unset-dry-run", &args).await;
+    assert_success(&out);
+    assert_eq!(json(&out)["diff"][0]["path"], "credential");
+    assert_eq!(json(&out)["diff"][0]["new"], Value::Null);
+    // a credential that doesn't exist is refused and nothing changes
+    let args = [
+        update.as_slice(),
+        &["--set", "credential=no-such-credential"],
+    ]
+    .concat();
+    let out = owner.run("models-secrets-missing", &args).await;
+    assert!(!out.status.success());
+    let meta = entity_json(&owner, "endpoints", &name).await;
+    assert_eq!(meta["metadata"]["ModelEndpoint"]["credential"], ids[1]);
+    Ok(())
+}
+
+/// `endpoints spec` prints a document `edit --file -` accepts unchanged, and can write it to a
+/// file as YAML or JSON
+#[tokio::test]
+async fn models_endpoints_spec_round_trips() -> Result<(), Error> {
+    // an owner with a gateway endpoint
+    let owner = TestUser::new("models-endpoint-spec").await?;
+    allow_test_endpoints().await?;
+    let name = gateway(&owner, &["m1", "m2"]).await;
+    // the printed spec feeds straight back with no change
+    let out = owner
+        .run("models-spec-print", &["models", "endpoints", "spec", &name])
+        .await;
+    assert_success(&out);
+    let printed = stdout(&out);
+    assert!(
+        printed.starts_with("*id*:")
+            || printed.starts_with("'*id*':")
+            || printed.starts_with("\"*id*\":"),
+        "{printed}"
+    );
+    let args = ["models", "endpoints", "edit", &name, "--file", "-"];
+    let out = run_with_stdin(&owner, &args, &printed).await;
+    assert_success(&out);
+    assert!(stdout(&out).contains("No changes"), "{}", stdout(&out));
+    // -o writes a file, and --format json writes JSON
+    let path = std::env::temp_dir().join(unique("spec-out"));
+    let file = path.to_string_lossy().into_owned();
+    let args = [
+        "models",
+        "endpoints",
+        "spec",
+        &name,
+        "-o",
+        &file,
+        "--format",
+        "json",
+    ];
+    assert_success(&owner.run("models-spec-file", &args).await);
+    let written: Value = serde_json::from_str(&std::fs::read_to_string(&path)?).expect("not JSON");
+    assert_eq!(written["name"], name);
+    assert_eq!(written["catalog"][1]["model_id"], "m2");
+    let _ = std::fs::remove_file(path);
+    // an endpoint that doesn't exist is an error
+    let out = owner
+        .run(
+            "models-spec-missing",
+            &["models", "endpoints", "spec", "no-such"],
+        )
+        .await;
+    assert!(!out.status.success());
+    Ok(())
+}
+
+/// Create a profile on a gateway endpoint
+///
+/// # Arguments
+///
+/// * `owner` - The group's owner
+/// * `endpoint_id` - The endpoint the profile calls
+async fn profile_on(owner: &TestUser, endpoint_id: &str) -> String {
+    // a profile that calls the endpoint's first model
+    let spec = write_file(
+        "profile",
+        &format!(
+            "endpoint: {endpoint_id}\nmodel_id: m1\napi: OpenAiChat\nparameters:\n  temperature: 0.2\n"
+        ),
+    );
+    let name = unique("profile");
+    let args = [
+        "models",
+        "profiles",
+        "create",
+        "--spec",
+        &spec,
+        "-n",
+        &name,
+        "-g",
+        &owner.group,
+        "-d",
+        "before",
+    ];
+    assert_success(&owner.run("models-edit-profile", &args).await);
+    name
+}
+
+/// `profiles edit` changes a profile in an editor, and cancels, refuses and recovers as the
+/// shared edit flow does, with every change checked in the API
+#[tokio::test]
+// one scenario walks each editor outcome against the same profile
+#[allow(clippy::too_many_lines)]
+async fn models_profiles_edit_interactive() -> Result<(), Error> {
+    // an owner with a gateway endpoint listing two models and a profile on it
+    let owner = TestUser::new("models-profile-edit").await?;
+    allow_test_endpoints().await?;
+    let endpoint = gateway(&owner, &["m1", "m2"]).await;
+    let endpoint_id = entity_json(&owner, "endpoints", &endpoint).await["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let name = profile_on(&owner, &endpoint_id).await;
+    let target = ["models", "profiles", "edit", &name];
+    // an editor changing one field applies it, after showing the header and the endpoint's name
+    let script = EditorScript::replace("model_id: m1", "model_id: m2");
+    let editor = script.editor();
+    let args = [target.as_slice(), &["--editor", &editor]].concat();
+    let out = run_with(&owner, "models-profile-edit-model", &args, &EDIT_ENV).await;
+    assert_success(&out);
+    assert!(
+        stdout(&out).contains("updated successfully"),
+        "{}",
+        stdout(&out)
+    );
+    let shown = script.seen(0).expect("the editor wasn't opened");
+    assert!(shown.contains("# Editing model profile"), "{shown}");
+    assert!(shown.contains(&format!("endpoint: {endpoint}")), "{shown}");
+    let meta = entity_json(&owner, "profiles", &name).await;
+    assert_eq!(meta["metadata"]["ModelProfile"]["model_id"], "m2");
+    // saving without a change says so and writes nothing
+    let before = modified(&owner, "profiles", &name, "ModelProfile").await;
+    let script = EditorScript::noop();
+    let editor = script.editor();
+    let args = [target.as_slice(), &["--editor", &editor]].concat();
+    let out = run_with(&owner, "models-profile-edit-noop", &args, &EDIT_ENV).await;
+    assert_success(&out);
+    assert!(stdout(&out).contains("No changes"), "{}", stdout(&out));
+    assert_eq!(
+        modified(&owner, "profiles", &name, "ModelProfile").await,
+        before
+    );
+    // a whole new document changes the protocol, parameters, limits and capabilities
+    let mut doc = spec_doc(&owner, "profiles", &name).await;
+    doc["api"] = json!("OpenAiResponses");
+    doc["parameters"] = json!({"temperature": 0.9, "stop_sequences": ["END"]});
+    doc["limits"] = json!({"context_window": 50, "max_output_tokens": 10});
+    doc["capabilities"] = json!({"tool_calling": true});
+    let script = EditorScript::write(&serde_norway::to_string(&doc).unwrap());
+    let editor = script.editor();
+    let args = [target.as_slice(), &["--editor", &editor]].concat();
+    assert_success(&run_with(&owner, "models-profile-edit-document", &args, &EDIT_ENV).await);
+    let meta = &entity_json(&owner, "profiles", &name).await["metadata"]["ModelProfile"];
+    assert_eq!(meta["api"], "OpenAiResponses");
+    assert_eq!(meta["parameters"]["temperature"], 0.9);
+    assert_eq!(meta["parameters"]["stop_sequences"], json!(["END"]));
+    assert_eq!(meta["limits"]["context_window"], 50);
+    assert_eq!(meta["capabilities"]["tool_calling"], true);
+    // leaving limits and capabilities out of the document clears them
+    let mut doc = spec_doc(&owner, "profiles", &name).await;
+    doc["limits"] = Value::Null;
+    doc["capabilities"] = Value::Null;
+    let script = EditorScript::write(&serde_norway::to_string(&doc).unwrap());
+    let editor = script.editor();
+    let args = [target.as_slice(), &["--editor", &editor]].concat();
+    assert_success(&run_with(&owner, "models-profile-edit-clear", &args, &EDIT_ENV).await);
+    let meta = &entity_json(&owner, "profiles", &name).await["metadata"]["ModelProfile"];
+    assert!(meta["limits"].is_null() && meta["capabilities"].is_null());
+    // a misspelled parameter, cancelled, fails and keeps the text in a recovery file
+    let mut doc = spec_doc(&owner, "profiles", &name).await;
+    doc["parameters"]["temprature"] = json!(1.0);
+    let broken = serde_norway::to_string(&doc).unwrap();
+    let script = EditorScript::write(&broken);
+    let editor = script.editor();
+    let args = [target.as_slice(), &["--editor", &editor]].concat();
+    let envs = [EDIT_ENV[0], ("THORCTL_EDIT_PROMPT", "cancel")];
+    let out = run_with(&owner, "models-profile-edit-invalid", &args, &envs).await;
+    assert!(!out.status.success());
+    assert!(stderr(&out).contains("temprature"), "{}", stderr(&out));
+    let path = recovery_path(&stderr(&out)).expect("no recovery file named");
+    assert!(std::fs::read_to_string(&path)?.contains("temprature"));
+    let _ = std::fs::remove_file(path);
+    // a model the endpoint doesn't serve is refused by the API with its status
+    let script = EditorScript::replace("model_id: m2", "model_id: nope");
+    let editor = script.editor();
+    let args = [target.as_slice(), &["--editor", &editor]].concat();
+    let out = run_with(&owner, "models-profile-edit-refused", &args, &EDIT_ENV).await;
+    assert!(!out.status.success());
+    assert!(stderr(&out).contains("400"), "{}", stderr(&out));
+    let path = recovery_path(&stderr(&out)).expect("no recovery file named");
+    let _ = std::fs::remove_file(path);
+    let meta = entity_json(&owner, "profiles", &name).await;
+    assert_eq!(meta["metadata"]["ModelProfile"]["model_id"], "m2");
+    // a dry run through the editor shows the changes and writes nothing
+    let script = EditorScript::replace("description: before", "description: after");
+    let editor = script.editor();
+    let args = [target.as_slice(), &["--editor", &editor, "--dry-run"]].concat();
+    let out = run_with(&owner, "models-profile-edit-dry-run", &args, &EDIT_ENV).await;
+    assert_success(&out);
+    assert!(stdout(&out).contains("Dry run"), "{}", stdout(&out));
+    assert_eq!(
+        entity_json(&owner, "profiles", &name).await["description"],
+        "before"
+    );
+    Ok(())
+}
+
+/// `profiles update` takes `--file`, `--patch`, `--set` and `--unset`, finding a new endpoint by
+/// name, and the flags that change one setting each keep working
+#[tokio::test]
+// one scenario walks each change source against the same profile
+#[allow(clippy::too_many_lines)]
+async fn models_profiles_update_documents() -> Result<(), Error> {
+    // an owner with two gateway endpoints serving the same models and a profile on the first
+    let owner = TestUser::new("models-profile-update").await?;
+    allow_test_endpoints().await?;
+    let first = gateway(&owner, &["m1", "m2"]).await;
+    let second = gateway(&owner, &["m1", "m2"]).await;
+    let first_id = entity_json(&owner, "endpoints", &first).await["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let second_id = entity_json(&owner, "endpoints", &second).await["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let name = profile_on(&owner, &first_id).await;
+    let update = ["models", "profiles", "update", &name];
+    // --set changes nested fields
+    let args = [
+        update.as_slice(),
+        &[
+            "--set",
+            "parameters.temperature=0.9",
+            "--set",
+            "model_id=m2",
+        ],
+    ]
+    .concat();
+    let out = owner.run("models-profile-update-set", &args).await;
+    assert_success(&out);
+    assert!(
+        stdout(&out).contains("updated successfully"),
+        "{}",
+        stdout(&out)
+    );
+    let meta = entity_json(&owner, "profiles", &name).await;
+    assert_eq!(
+        meta["metadata"]["ModelProfile"]["parameters"]["temperature"],
+        0.9
+    );
+    assert_eq!(meta["metadata"]["ModelProfile"]["model_id"], "m2");
+    // --set to the current value changes nothing
+    let before = modified(&owner, "profiles", &name, "ModelProfile").await;
+    let args = [update.as_slice(), &["--set", "model_id=m2"]].concat();
+    let out = owner.run("models-profile-update-same", &args).await;
+    assert!(stdout(&out).contains("No changes"), "{}", stdout(&out));
+    assert_eq!(
+        modified(&owner, "profiles", &name, "ModelProfile").await,
+        before
+    );
+    // --patch sets limits, and --unset clears them again
+    let args = [
+        update.as_slice(),
+        &["--patch", r#"{"limits": {"context_window": 64}}"#],
+    ]
+    .concat();
+    assert_success(&owner.run("models-profile-update-patch", &args).await);
+    let meta = entity_json(&owner, "profiles", &name).await;
+    assert_eq!(
+        meta["metadata"]["ModelProfile"]["limits"]["context_window"],
+        64
+    );
+    let args = [update.as_slice(), &["--unset", "limits"]].concat();
+    assert_success(&owner.run("models-profile-update-unset", &args).await);
+    assert!(
+        entity_json(&owner, "profiles", &name).await["metadata"]["ModelProfile"]["limits"]
+            .is_null()
+    );
+    // a new endpoint is found by name and by id
+    let setting = format!("endpoint={second}");
+    let args = [update.as_slice(), &["--set", &setting]].concat();
+    assert_success(&owner.run("models-profile-update-endpoint", &args).await);
+    assert_eq!(
+        entity_json(&owner, "profiles", &name).await["metadata"]["ModelProfile"]["endpoint"],
+        second_id
+    );
+    let setting = format!("endpoint={first_id}");
+    let args = [update.as_slice(), &["--set", &setting]].concat();
+    assert_success(&owner.run("models-profile-update-endpoint-id", &args).await);
+    assert_eq!(
+        entity_json(&owner, "profiles", &name).await["metadata"]["ModelProfile"]["endpoint"],
+        first_id
+    );
+    // --file replaces the document, from a path and from stdin
+    let mut doc = spec_doc(&owner, "profiles", &name).await;
+    doc["description"] = json!("from-file");
+    let file = write_file("profile-doc", &serde_norway::to_string(&doc).unwrap());
+    let args = [update.as_slice(), &["--file", &file]].concat();
+    assert_success(&owner.run("models-profile-update-file", &args).await);
+    assert_eq!(
+        entity_json(&owner, "profiles", &name).await["description"],
+        "from-file"
+    );
+    doc["description"] = json!("from-stdin");
+    let args = [update.as_slice(), &["--file", "-"]].concat();
+    let out = run_with_stdin(&owner, &args, &serde_norway::to_string(&doc).unwrap()).await;
+    assert_success(&out);
+    assert_eq!(
+        entity_json(&owner, "profiles", &name).await["description"],
+        "from-stdin"
+    );
+    // a misspelled parameter or an unknown protocol is refused before any change
+    let before = modified(&owner, "profiles", &name, "ModelProfile").await;
+    for (transcript, setting) in [
+        (
+            "models-profile-update-unknown-parameter",
+            "parameters.temprature=1",
+        ),
+        ("models-profile-update-unknown-api", "api=Telepathy"),
+    ] {
+        let args = [update.as_slice(), &["--set", setting]].concat();
+        let out = owner.run(transcript, &args).await;
+        assert!(!out.status.success(), "{transcript} was accepted");
+    }
+    assert_eq!(
+        modified(&owner, "profiles", &name, "ModelProfile").await,
+        before
+    );
+    // a model the endpoint doesn't serve prints the API's status
+    let args = [update.as_slice(), &["--set", "model_id=nope"]].concat();
+    let out = owner.run("models-profile-update-refused", &args).await;
+    assert!(!out.status.success());
+    assert!(stderr(&out).contains("400"), "{}", stderr(&out));
+    // an endpoint that doesn't exist is refused
+    let args = [update.as_slice(), &["--set", "endpoint=no-such-endpoint"]].concat();
+    assert!(
+        !owner
+            .run("models-profile-update-missing", &args)
+            .await
+            .status
+            .success()
+    );
+    // read-only fields can't be set
+    let args = [update.as_slice(), &["--set", "*id*=abc"]].concat();
+    let out = owner.run("models-profile-update-readonly", &args).await;
+    assert!(!out.status.success());
+    assert!(stderr(&out).contains("read-only"), "{}", stderr(&out));
+    // --dry-run prints the changes and writes nothing, and -o json pins the result's shape
+    let args = [
+        update.as_slice(),
+        &["--set", "model_id=m1", "--dry-run", "-o", "json"],
+    ]
+    .concat();
+    let out = owner.run("models-profile-update-dry-run", &args).await;
+    assert_success(&out);
+    let result = json(&out);
+    assert_eq!(result["status"], "dry_run");
+    assert_eq!(result["kind"], "model profile");
+    assert_eq!(result["diff"][0]["path"], "model_id");
+    assert_eq!(
+        entity_json(&owner, "profiles", &name).await["metadata"]["ModelProfile"]["model_id"],
+        "m2"
+    );
+    let args = [update.as_slice(), &["--set", "model_id=m1", "-o", "json"]].concat();
+    let out = owner.run("models-profile-update-json", &args).await;
+    assert_success(&out);
+    let result = json(&out);
+    assert_eq!(result["status"], "updated");
+    assert_eq!(result["changed"], true);
+    assert_eq!(result["resource"]["model_id"], "m1");
+    // a change made by someone else between the read and the apply is refused unless forced
+    let hook = format!(
+        "{} --keys {} --skip-update models profiles update {name} --api OpenAiResponses",
+        env!("CARGO_BIN_EXE_thorctl"),
+        owner.keys.display()
+    );
+    let envs = [("THORCTL_EDIT_BEFORE_APPLY", hook.as_str())];
+    let args = [update.as_slice(), &["--set", "model_id=m2"]].concat();
+    let out = run_with(&owner, "models-profile-update-guard", &args, &envs).await;
+    assert!(!out.status.success());
+    assert!(
+        stderr(&out).contains("changed remotely"),
+        "{}",
+        stderr(&out)
+    );
+    let args = [update.as_slice(), &["--set", "model_id=m2", "--force"]].concat();
+    assert_success(&run_with(&owner, "models-profile-update-force", &args, &envs).await);
+    assert_eq!(
+        entity_json(&owner, "profiles", &name).await["metadata"]["ModelProfile"]["model_id"],
+        "m2"
+    );
+    // the flags that change one setting each can't be mixed with a document change, and still
+    // work on their own
+    let args = [
+        update.as_slice(),
+        &["--set", "model_id=m1", "--clear-limits"],
+    ]
+    .concat();
+    let out = owner.run("models-profile-update-mixed", &args).await;
+    assert!(!out.status.success());
+    assert!(stderr(&out).contains("not both"), "{}", stderr(&out));
+    let args = [update.as_slice(), &["--api", "OpenAiChat"]].concat();
+    assert_success(&owner.run("models-profile-update-flag", &args).await);
+    assert_eq!(
+        entity_json(&owner, "profiles", &name).await["metadata"]["ModelProfile"]["api"],
+        "OpenAiChat"
+    );
+    // the printed spec feeds straight back with no change
+    let out = owner
+        .run(
+            "models-profile-spec",
+            &["models", "profiles", "spec", &name],
+        )
+        .await;
+    assert_success(&out);
+    let args = [update.as_slice(), &["--file", "-"]].concat();
+    let out = run_with_stdin(&owner, &args, &stdout(&out)).await;
+    assert!(stdout(&out).contains("No changes"), "{}", stdout(&out));
     Ok(())
 }

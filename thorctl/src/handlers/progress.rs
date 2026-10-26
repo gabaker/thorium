@@ -11,10 +11,10 @@
 //! are still running, so text printed after every bar has finished can't be erased by a later
 //! redraw.
 
+use crate::utils::paint::Paint;
 use indicatif::{
     MultiProgress, ProgressBar, ProgressDrawTarget, ProgressFinish, ProgressStyle, TermLike,
 };
-use owo_colors::OwoColorize;
 use std::cell::Cell;
 use std::io::IsTerminal;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -624,6 +624,7 @@ impl Bar {
     }
 
     /// Whether this bar is actually drawn (it exists and stderr is a terminal)
+    #[cfg(test)]
     pub fn is_visible(&self) -> bool {
         // quiet bars never draw, and no bar draws without a terminal on stderr
         self.bar.is_some() && bars_visible()

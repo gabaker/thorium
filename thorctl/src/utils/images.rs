@@ -3,8 +3,8 @@
 use std::io::Write;
 use std::sync::{Arc, Mutex};
 
+use crate::utils::paint::Paint;
 use futures::{TryStreamExt, stream};
-use owo_colors::OwoColorize;
 use thorium::{
     Cursor, Error, Thorium,
     models::{Image, ImageBanKind, SpawnLimits, ToolVersion},

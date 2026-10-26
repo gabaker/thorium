@@ -119,6 +119,10 @@ jobs:
       # PyYAML comes from the distro's signed packages when the runner image lacks it
       - name: Install PyYAML
         run: python3 -c 'import yaml' 2>/dev/null || { sudo apt-get update && sudo apt-get install -y python3-yaml; }
+      # the toolbox import Job's thorctl flags and retry limit follow the operator.toolbox values
+      - name: Check the toolbox import Job for each toolbox value combination
+        run: |
+          "$CHARTS/scripts/check-toolbox-job.sh"
       - name: Check the namespace blacklist covers every prefixed namespace
         run: |
           helm template thorium "$CHARTS/thorium" -n dev-thorium --set secrets.renderOnly=true \

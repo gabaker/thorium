@@ -1,0 +1,5 @@
+Toolbox 'Small legacy toolbox' (legacy format)
+  tools: 1 (1 versions), builds: 1 (1 labels), toolsets: 0, agents: 0, workflows: 0, pipelines: 1, network policies: 0
+warning[missing_field:image] image noimage@latest: names no container image, so it was not converted into a tool
+warning[invalid_value:stages.*] pipeline scan-all@latest: runs a stage whose tool was not converted, so the pipeline was left out
+Result: invalid (0 errors, 2 warnings)

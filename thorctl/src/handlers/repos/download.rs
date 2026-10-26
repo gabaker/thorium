@@ -1,9 +1,9 @@
 //! Allow thorctl to download repos from Thorium
 
+use crate::utils::paint::Paint;
 use async_walkdir::{DirEntry, WalkDir};
 use futures::StreamExt;
 use kanal::AsyncSender;
-use owo_colors::OwoColorize;
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;

@@ -1,10 +1,11 @@
 //! Arguments for toolset Thorctl commands
 
 use clap::{Parser, ValueEnum};
+use std::path::PathBuf;
 use thorium::models::ToolSetSelector;
 use uuid::Uuid;
 
-use super::helpers::{ShortFormatArgs, WaitForArgs, WatchArgs};
+use super::helpers::{EditArgs, FormatArgs, ShortFormatArgs, WaitForArgs, WatchArgs};
 
 /// The commands to send to the toolsets task handler
 #[derive(Parser, Debug)]
@@ -30,6 +31,18 @@ pub enum ToolSets {
     /// Turn a toolset's read-only filter on or off
     #[clap(version, author)]
     ReadOnly(SetReadOnly),
+    /// Change a toolset with flags, a spec file, or `--set`, `--unset` and `--patch`
+    #[clap(version, author)]
+    Update(UpdateToolSet),
+    /// Edit a toolset in your editor, or with `--file`, `--set`, `--unset` and `--patch`
+    #[clap(version, author)]
+    Edit(EditToolSet),
+    /// Print a toolset as a spec that `toolsets update --file` reads back
+    #[clap(version, author)]
+    Spec(SpecToolSet),
+    /// Delete a toolset
+    #[clap(version, author)]
+    Delete(DeleteToolSet),
 }
 
 /// A command to list toolsets
@@ -72,9 +85,10 @@ pub struct DescribeToolSet {
 #[derive(Parser, Debug)]
 pub struct CreateToolSet {
     /// The name of the toolset
-    pub name: String,
+    #[clap(required_unless_present = "spec")]
+    pub name: Option<String>,
     /// The groups to create the toolset in
-    #[clap(short, long, required = true)]
+    #[clap(short, long, required_unless_present = "spec")]
     pub group: Vec<String>,
     /// A tool to include at its latest version, by ID or name
     #[clap(long)]
@@ -98,6 +112,10 @@ pub struct CreateToolSet {
     /// Add the toolset's groups to included tools that are missing some of them
     #[clap(long)]
     pub extend_target_groups: bool,
+    /// Create the toolset from a YAML or JSON spec, as `toolsets spec` prints it (- reads
+    /// stdin); flags replace what the spec sets
+    #[clap(long, value_name = "FILE|-")]
+    pub spec: Option<PathBuf>,
 }
 
 /// A command to include a tool in a toolset
@@ -159,6 +177,76 @@ pub struct SetReadOnly {
     pub state: Switch,
 }
 
+/// A command to change a toolset without an editor
+#[derive(Parser, Debug)]
+pub struct UpdateToolSet {
+    /// The toolset to update, by ID or name
+    pub toolset: String,
+    /// Rename the toolset
+    #[clap(long)]
+    pub rename: Option<String>,
+    /// Set the toolset's description
+    #[clap(short, long, conflicts_with = "clear_description")]
+    pub description: Option<String>,
+    /// Remove the toolset's description
+    #[clap(long)]
+    pub clear_description: bool,
+    /// Add the toolset to a group; repeatable
+    #[clap(long, conflicts_with = "file")]
+    pub add_group: Vec<String>,
+    /// Remove the toolset from a group; repeatable
+    #[clap(long, conflicts_with = "file")]
+    pub remove_group: Vec<String>,
+    /// Build new toolset instances automatically when the toolset or its tools change
+    #[clap(long, value_enum, value_name = "on|off")]
+    pub auto_instance: Option<Switch>,
+    /// Add the toolset's groups to the tools that miss some of them
+    #[clap(long)]
+    pub extend_target_groups: bool,
+    /// The shared edit flags
+    #[clap(flatten)]
+    pub edit: EditArgs,
+}
+
+/// A command to edit a toolset
+#[derive(Parser, Debug)]
+pub struct EditToolSet {
+    /// The toolset to edit, by ID or name
+    pub toolset: String,
+    /// Add the toolset's groups to the tools that miss some of them
+    #[clap(long)]
+    pub extend_target_groups: bool,
+    /// The shared edit flags
+    #[clap(flatten)]
+    pub edit: EditArgs,
+}
+
+/// A command to print a toolset as a spec
+#[derive(Parser, Debug)]
+pub struct SpecToolSet {
+    /// The toolset to print, by ID or name
+    pub toolset: String,
+    /// Write the spec to this file instead of stdout
+    #[clap(short, long)]
+    pub output: Option<PathBuf>,
+    /// The format to print the spec in: yaml (the default) or json
+    #[clap(flatten)]
+    pub format: FormatArgs,
+}
+
+/// A command to delete a toolset
+#[derive(Parser, Debug)]
+pub struct DeleteToolSet {
+    /// The toolset to delete, by ID or name
+    pub toolset: String,
+    /// Delete without asking for confirmation
+    #[clap(long, visible_alias = "yes")]
+    pub skip_confirm: bool,
+    /// Print what would be deleted and stop
+    #[clap(long)]
+    pub dry_run: bool,
+}
+
 #[cfg(test)]
 mod tests {
     use clap::Parser;
@@ -205,7 +293,7 @@ mod tests {
         .unwrap() else {
             panic!("expected toolsets create");
         };
-        assert_eq!(cmd.name, "ghidra");
+        assert_eq!(cmd.name.as_deref(), Some("ghidra"));
         assert_eq!(cmd.group, vec!["minerva"]);
         assert_eq!(cmd.tool, vec!["decompile"]);
         assert_eq!(cmd.pin.len(), 1);
@@ -217,6 +305,151 @@ mod tests {
         // a group is required and a selector needs an equals sign
         assert!(parse(&["create", "x"]).is_err());
         assert!(parse(&["create", "x", "-g", "a", "--selector", "toolset"]).is_err());
+    }
+
+    /// `toolsets create --spec` supplies what the flags don't, and needs no name or group flags
+    #[test]
+    fn create_spec_args() {
+        // a spec alone is enough
+        let ToolSets::Create(cmd) = parse(&["create", "--spec", "kit.yaml"]).unwrap() else {
+            panic!("expected toolsets create");
+        };
+        assert_eq!(
+            cmd.spec
+                .as_ref()
+                .map(|path| path.to_string_lossy().into_owned()),
+            Some("kit.yaml".to_owned())
+        );
+        assert!(cmd.name.is_none() && cmd.group.is_empty());
+        // a spec on stdin, with flags that override it
+        let ToolSets::Create(cmd) = parse(&[
+            "create", "kit", "--spec", "-", "-g", "minerva", "-d", "text",
+        ])
+        .unwrap() else {
+            panic!("expected toolsets create");
+        };
+        assert_eq!(cmd.name.as_deref(), Some("kit"));
+        assert_eq!(cmd.group, vec!["minerva"]);
+        assert_eq!(cmd.description.as_deref(), Some("text"));
+        // without a spec the name and a group are still required
+        assert!(parse(&["create", "-g", "minerva"]).is_err());
+        assert!(parse(&["create", "kit"]).is_err());
+    }
+
+    /// `toolsets delete` takes a toolset and the usual confirmation flags
+    #[test]
+    fn delete_args() {
+        // the toolset alone asks for confirmation
+        let ToolSets::Delete(cmd) = parse(&["delete", "ghidra"]).unwrap() else {
+            panic!("expected toolsets delete");
+        };
+        assert_eq!(cmd.toolset, "ghidra");
+        assert!(!cmd.skip_confirm && !cmd.dry_run);
+        // --yes is an alias of --skip-confirm
+        let ToolSets::Delete(cmd) = parse(&["delete", "ghidra", "--yes", "--dry-run"]).unwrap()
+        else {
+            panic!("expected toolsets delete");
+        };
+        assert!(cmd.skip_confirm && cmd.dry_run);
+        assert!(parse(&["delete", "ghidra", "--skip-confirm"]).is_ok());
+        // a toolset is required
+        assert!(parse(&["delete"]).is_err());
+    }
+
+    /// `toolsets update` takes the typed flags and the shared edit flags
+    #[test]
+    fn update_args() {
+        // the typed flags and the edit flags parse together
+        let ToolSets::Update(cmd) = parse(&[
+            "update",
+            "ghidra",
+            "--rename",
+            "ghidra2",
+            "-d",
+            "reverse engineering",
+            "--add-group",
+            "mars",
+            "--remove-group",
+            "minerva",
+            "--auto-instance",
+            "off",
+            "--set",
+            "read_only=true",
+            "--dry-run",
+            "--yes",
+            "-o",
+            "json",
+            "--extend-target-groups",
+        ])
+        .unwrap() else {
+            panic!("expected toolsets update");
+        };
+        assert_eq!(cmd.toolset, "ghidra");
+        assert_eq!(cmd.rename.as_deref(), Some("ghidra2"));
+        assert_eq!(cmd.description.as_deref(), Some("reverse engineering"));
+        assert_eq!(cmd.add_group, vec!["mars"]);
+        assert_eq!(cmd.remove_group, vec!["minerva"]);
+        assert_eq!(cmd.auto_instance, Some(Switch::Off));
+        assert_eq!(cmd.edit.ops.len(), 1);
+        assert!(cmd.edit.dry_run && cmd.edit.skip_confirm && cmd.extend_target_groups);
+        assert_eq!(cmd.edit.format, Some(OutputFormat::Json));
+        // the description can be cleared, and contradictions are refused
+        let ToolSets::Update(cmd) = parse(&["update", "ghidra", "--clear-description"]).unwrap()
+        else {
+            panic!("expected toolsets update");
+        };
+        assert!(cmd.clear_description);
+        assert!(parse(&["update", "ghidra", "-d", "x", "--clear-description"]).is_err());
+        // group changes are relative to the current groups, which --file replaces
+        assert!(parse(&["update", "ghidra", "--add-group", "g", "--file", "f.yaml"]).is_err());
+        assert!(
+            parse(&[
+                "update",
+                "ghidra",
+                "--remove-group",
+                "g",
+                "--file",
+                "f.yaml"
+            ])
+            .is_err()
+        );
+        // auto instance takes on or off
+        assert!(parse(&["update", "ghidra", "--auto-instance", "maybe"]).is_err());
+    }
+
+    /// `toolsets edit` takes the shared edit flags, and `spec` an output path and a format
+    #[test]
+    fn edit_and_spec_args() {
+        // edit takes the shared edit flags
+        let ToolSets::Edit(cmd) = parse(&[
+            "edit",
+            "ghidra",
+            "--editor",
+            "vim",
+            "--patch",
+            "{}",
+            "--force",
+            "--extend-target-groups",
+        ])
+        .unwrap() else {
+            panic!("expected toolsets edit");
+        };
+        assert_eq!(cmd.toolset, "ghidra");
+        assert_eq!(cmd.edit.editor.as_deref(), Some("vim"));
+        assert!(cmd.edit.force && cmd.extend_target_groups);
+        assert_eq!(cmd.edit.patch, vec!["{}"]);
+        // spec takes an output path and a format
+        let ToolSets::Spec(cmd) =
+            parse(&["spec", "ghidra", "-o", "t.yaml", "--format", "json"]).unwrap()
+        else {
+            panic!("expected toolsets spec");
+        };
+        assert_eq!(cmd.toolset, "ghidra");
+        assert_eq!(
+            cmd.output.map(|path| path.to_string_lossy().into_owned()),
+            Some("t.yaml".to_owned())
+        );
+        assert_eq!(cmd.format.format, Some(OutputFormat::Json));
     }
 
     /// `toolsets get` and `describe` take groups, a toolset, and the output flags

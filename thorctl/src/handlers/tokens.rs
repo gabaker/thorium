@@ -406,13 +406,37 @@ async fn update(thorium: Thorium, cmd: &UpdateScopedToken) -> Result<(), Error> 
     Ok(())
 }
 
-/// Delete scoped tokens
+/// Delete scoped tokens, asking first unless told not to
 ///
 /// # Arguments
 ///
 /// * `thorium` - The Thorium client
 /// * `cmd` - The delete command to execute
 async fn delete(thorium: Thorium, cmd: &DeleteScopedTokens) -> Result<(), Error> {
+    // ask on the real terminal
+    delete_asking(&thorium, cmd, &utils::Terminal).await
+}
+
+/// Delete scoped tokens, confirming with `asker` unless `--skip-confirm` was given
+///
+/// # Arguments
+///
+/// * `thorium` - The Thorium client
+/// * `cmd` - The delete command to execute
+/// * `asker` - Where the confirmation answer comes from
+async fn delete_asking<A: utils::Asker>(
+    thorium: &Thorium,
+    cmd: &DeleteScopedTokens,
+    asker: &A,
+) -> Result<(), Error> {
+    // deleting a scoped token can't be undone, so name exactly what goes before asking
+    let question = match cmd.names.as_slice() {
+        [name] => format!("Delete scoped token {name}?"),
+        names => format!("Delete scoped tokens {}?", names.join(", ")),
+    };
+    if !utils::confirm_or_skip(asker, &question, "--skip-confirm", cmd.skip_confirm)? {
+        return Ok(());
+    }
     // track whether any deletes failed
     let mut failed = false;
     // try to delete each of the target scoped tokens
@@ -583,11 +607,103 @@ pub async fn handle(args: &Args, cmd: &Tokens) -> Result<(), Error> {
 #[cfg(test)]
 mod tests {
     use chrono::{Duration, Utc};
+    use clap::Parser;
     use thorium::models::{RunTokenScope, ScopedToken, ScopedTokenRole};
     use uuid::Uuid;
 
-    use super::{TokensView, select_tokens};
+    use super::{TokensView, delete_asking, select_tokens};
+    use crate::args::tokens::DeleteScopedTokens;
     use crate::utils::output::{OutputFormat, REDACTED, render};
+    use crate::utils::run_wait::testing::{client, mock};
+    use crate::utils::testing::Scripted;
+
+    /// Parse a `tokens delete` command
+    ///
+    /// # Arguments
+    ///
+    /// * `args` - The arguments after `tokens delete`
+    fn delete_cmd(args: &[&str]) -> DeleteScopedTokens {
+        // prepend the subcommand name and parse
+        let mut full = vec!["delete"];
+        full.extend_from_slice(args);
+        DeleteScopedTokens::try_parse_from(full).unwrap()
+    }
+
+    /// Count the delete requests a mock API received
+    ///
+    /// # Arguments
+    ///
+    /// * `requests` - The mock's request log
+    fn deletes(requests: &crate::utils::run_wait::testing::Requests) -> usize {
+        // only the token deletes count
+        requests
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|(line, _)| line.starts_with("DELETE /api/users/tokens/"))
+            .count()
+    }
+
+    /// Deleting asks first, naming every token, and an accepted question deletes them all
+    #[tokio::test]
+    async fn delete_asks_then_deletes_on_yes() {
+        let (host, requests) = mock(|_, _| (200, String::new())).await;
+        let thorium = client(&host).await;
+        let asker = Scripted::answering(true);
+        delete_asking(&thorium, &delete_cmd(&["one", "two"]), &asker)
+            .await
+            .unwrap();
+        // one question that names both tokens, and both deleted
+        let questions = asker.asked.borrow();
+        assert_eq!(questions.len(), 1, "{questions:?}");
+        assert!(
+            questions[0].contains("one") && questions[0].contains("two"),
+            "{questions:?}"
+        );
+        assert_eq!(deletes(&requests), 2);
+    }
+
+    /// A declined question deletes nothing and is not an error
+    #[tokio::test]
+    async fn delete_declined_changes_nothing() {
+        let (host, requests) = mock(|_, _| (200, String::new())).await;
+        let thorium = client(&host).await;
+        let asker = Scripted::answering(false);
+        delete_asking(&thorium, &delete_cmd(&["one"]), &asker)
+            .await
+            .unwrap();
+        assert_eq!(asker.asked.borrow().len(), 1);
+        assert_eq!(deletes(&requests), 0);
+    }
+
+    /// `--skip-confirm` and its `--yes` alias delete without asking
+    #[tokio::test]
+    async fn delete_skip_confirm_never_asks() {
+        let (host, requests) = mock(|_, _| (200, String::new())).await;
+        let thorium = client(&host).await;
+        for flag in ["--skip-confirm", "--yes"] {
+            let asker = Scripted::no_terminal();
+            delete_asking(&thorium, &delete_cmd(&["one", flag]), &asker)
+                .await
+                .unwrap();
+            assert!(asker.asked.borrow().is_empty());
+        }
+        assert_eq!(deletes(&requests), 2);
+    }
+
+    /// Without a terminal and without the flag the delete is refused, naming the flag
+    #[tokio::test]
+    async fn delete_without_a_terminal_is_refused() {
+        let (host, requests) = mock(|_, _| (200, String::new())).await;
+        let thorium = client(&host).await;
+        let asker = Scripted::no_terminal();
+        let err = delete_asking(&thorium, &delete_cmd(&["one"]), &asker)
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("--skip-confirm"), "{err}");
+        assert_eq!(deletes(&requests), 0);
+    }
 
     /// Build a scoped token holding a known secret value
     ///

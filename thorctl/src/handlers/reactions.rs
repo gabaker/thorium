@@ -2,11 +2,11 @@ use std::collections::HashMap;
 use std::io::{BufRead, Write};
 use std::path::{Path, PathBuf};
 
+use crate::utils::paint::Paint;
 use colored::Colorize;
 use futures::TryStreamExt;
 use futures::stream::{self, StreamExt};
 use itertools::Itertools;
-use owo_colors::OwoColorize;
 use serde::Serialize;
 use thorium::models::{Reaction, ReactionListParams, ReactionStatus, StageLogs, StatusUpdate};
 use thorium::{CtlConf, Thorium};
@@ -26,8 +26,12 @@ use crate::utils::output::{self, OutputFormat, View};
 use crate::utils::reactions::ReactionsView;
 use crate::utils::watch;
 
+/// The most log lines the API returns for one stage of a reaction
+const DEFAULT_LOG_LIMIT: usize = 250_000;
+
 pub mod create;
 pub mod delete;
+pub mod retag;
 
 use create::create;
 use delete::ReactionsDeleteWorker;
@@ -490,6 +494,35 @@ async fn write_status_logs(
     Ok(())
 }
 
+/// Get the names of the stages a reaction runs, in order and without duplicates
+///
+/// Tool runs and workflow runs have no stored pipeline, so the stages come from the plan the
+/// reaction was created with; only a reaction without a plan looks up its pipeline's order.
+///
+/// # Arguments
+///
+/// * `thorium` - The Thorium client
+/// * `reaction` - The reaction to get the stages of
+pub(crate) async fn reaction_stages(
+    thorium: &Thorium,
+    reaction: &Reaction,
+) -> Result<Vec<String>, Error> {
+    // use the stages in the reaction's plan when it has one
+    if !reaction.plan.stages.is_empty() {
+        let stages = reaction.plan.stages.iter().flatten();
+        return Ok(stages.map(|stage| stage.name.clone()).unique().collect());
+    }
+    // otherwise retrieve the reaction's pipeline and use its order
+    let pipeline = error_and_return!(
+        thorium
+            .pipelines
+            .get(&reaction.group, &reaction.pipeline)
+            .await,
+        format!("Unable to retrieve pipeline for reaction '{}'", reaction.id)
+    )?;
+    Ok(pipeline.order.into_iter().flatten().unique().collect())
+}
+
 /// Write logs for a particular reaction in its own subdirectory
 ///
 /// # Arguments
@@ -506,17 +539,11 @@ async fn write_reaction_logs(
     params: &ReactionListParams,
     progress: &Bar,
 ) -> Result<(), Error> {
-    // retrieve information about the reaction's pipeline
-    let pipeline = error_and_return!(
-        thorium
-            .pipelines
-            .get(&reaction.group, &reaction.pipeline)
-            .await,
-        format!("Unable to retrieve pipeline for reaction '{}'", reaction.id)
-    )?;
+    // retrieve the names of the reaction's stages
+    let stages = reaction_stages(thorium, &reaction).await?;
     // create a subdirectory for the reaction underneath the pipeline
     let reaction_subdir = PathBuf::from(output)
-        .join(&pipeline.name)
+        .join(utils::fs::path_component(&reaction.pipeline))
         .join(reaction.id.to_string());
     error_and_return!(
         tokio::fs::create_dir_all(&reaction_subdir).await,
@@ -528,7 +555,7 @@ async fn write_reaction_logs(
     // write the reaction's status logs
     write_status_logs(thorium, &reaction, &reaction_subdir).await?;
     // write logs for every stage
-    for stage in pipeline.order.iter().flatten().unique() {
+    for stage in &stages {
         let logs = error_and_return!(
             thorium
                 .reactions
@@ -536,7 +563,7 @@ async fn write_reaction_logs(
                 .await,
             format!(
                 "Unable to retrieve logs for stage '{}' in pipeline '{}' in reaction '{}'",
-                stage, pipeline.name, reaction.id
+                stage, reaction.pipeline, reaction.id
             )
         )?;
         if logs.logs.is_empty() {
@@ -549,7 +576,7 @@ async fn write_reaction_logs(
             // skip this stage
             continue;
         }
-        let file_path = reaction_subdir.join(stage);
+        let file_path = reaction_subdir.join(utils::fs::path_component(stage));
         // only create the file if it's new
         let mut file = match tokio::fs::OpenOptions::new()
             .write(true)
@@ -598,16 +625,9 @@ async fn write_reaction_logs_stdout(
     reaction: Reaction,
     params: &ReactionListParams,
 ) -> Result<(), Error> {
-    // retrieve information about the reaction's pipeline
-    let pipeline = error_and_return!(
-        thorium
-            .pipelines
-            .get(&reaction.group, &reaction.pipeline)
-            .await,
-        format!("Unable to retrieve pipeline for reaction '{}'", reaction.id)
-    )?;
-    let stage_iter = pipeline.order.into_iter().flatten().unique();
-    let stage_logs: HashMap<String, Vec<String>> = futures::stream::iter(stage_iter.clone())
+    // retrieve the names of the reaction's stages
+    let stages = reaction_stages(thorium, &reaction).await?;
+    let stage_logs: HashMap<String, Vec<String>> = futures::stream::iter(stages.clone())
         .map(|stage| async {
             let logs = thorium
                 .reactions
@@ -617,7 +637,7 @@ async fn write_reaction_logs_stdout(
                 Ok(logs) => Ok((stage, logs.logs)),
                 Err(err) => Err(Error::new(format!(
                     "Unable to retrieve logs for stage '{}' in pipeline '{}' in reaction '{}': {}",
-                    stage, pipeline.name, reaction.id, err
+                    stage, reaction.pipeline, reaction.id, err
                 ))),
             }
         })
@@ -638,17 +658,21 @@ async fn write_reaction_logs_stdout(
     // print reaction header
     println!(
         "{}",
-        format!("Reaction '{}' (Pipeline '{}')", reaction.id, pipeline.name).bright_green()
+        format!(
+            "Reaction '{}' (Pipeline '{}')",
+            reaction.id, reaction.pipeline
+        )
+        .bright_green()
     );
     // print each status log to stdout
     for log in status_logs {
         println!("    {}", status_update_to_string!(&log));
     }
     // write the reaction's stage logs to stdout
-    for stage in stage_iter {
+    for stage in &stages {
         // print stage header
         println!("{}", format!("Stage '{stage}'").bright_yellow());
-        for log in stage_logs.get(&stage).unwrap() {
+        for log in stage_logs.get(stage).unwrap() {
             // print the log to stdout
             println!("{log}");
         }
@@ -835,7 +859,7 @@ struct StageLogsView {
 
 /// One reaction's status and stage logs in a reaction logs view
 #[derive(Serialize)]
-struct ReactionLogsView {
+pub(crate) struct ReactionLogsView {
     /// The id of the reaction
     reaction: Uuid,
     /// The group the reaction is in
@@ -887,7 +911,10 @@ impl ReactionLogsView {
 /// The logs of the reactions one logs command shows
 #[derive(Serialize)]
 #[serde(transparent)]
-struct LogsView(Vec<ReactionLogsView>);
+pub(crate) struct LogsView(
+    /// Each reaction's logs
+    pub Vec<ReactionLogsView>,
+);
 
 impl View for LogsView {
     /// Render the logs as a table with one row per line
@@ -943,16 +970,10 @@ async fn fetch_reaction_logs(
     reaction: Reaction,
     params: &ReactionListParams,
 ) -> Result<ReactionLogsView, Error> {
-    // retrieve information about the reaction's pipeline
-    let pipeline = error_and_return!(
-        thorium
-            .pipelines
-            .get(&reaction.group, &reaction.pipeline)
-            .await,
-        format!("Unable to retrieve pipeline for reaction '{}'", reaction.id)
-    )?;
-    // retrieve each stage's logs in pipeline order
-    let stages = futures::stream::iter(pipeline.order.into_iter().flatten().unique())
+    // retrieve the names of the reaction's stages
+    let stages = reaction_stages(thorium, &reaction).await?;
+    // retrieve each stage's logs in stage order
+    let stages = futures::stream::iter(stages)
         .map(|stage| async {
             let logs = error_and_return!(
                 thorium
@@ -987,6 +1008,40 @@ async fn fetch_reaction_logs(
         status,
         stages,
     })
+}
+
+/// Retrieve a run's status updates and the logs of one stage or of every stage
+///
+/// # Arguments
+///
+/// * `thorium` - The Thorium client
+/// * `reaction` - The run's reaction
+/// * `stage` - The one stage to keep the logs of, or `None` for every stage
+pub(crate) async fn run_logs_view(
+    thorium: &Thorium,
+    reaction: Reaction,
+    stage: Option<&str>,
+) -> Result<LogsView, Error> {
+    // read every stage's logs with the most lines the API allows
+    let params = ReactionListParams::default().limit(DEFAULT_LOG_LIMIT);
+    let mut view = fetch_reaction_logs(thorium, reaction, &params).await?;
+    // keep only the stage that was asked for, naming the real stages when it isn't one
+    if let Some(stage) = stage {
+        if !view.stages.iter().any(|logs| logs.stage == stage) {
+            let known = view
+                .stages
+                .iter()
+                .map(|logs| logs.stage.as_str())
+                .collect::<Vec<&str>>()
+                .join(", ");
+            return Err(Error::new(format!(
+                "Run {} has no stage '{stage}' (its stages are {known})",
+                view.reaction
+            )));
+        }
+        view.stages.retain(|logs| logs.stage == stage);
+    }
+    Ok(LogsView(vec![view]))
 }
 
 /// Retrieve every reaction a logs command targets
@@ -1079,7 +1134,7 @@ async fn write_logs_documents(
             _ => (output::to_json(reaction)?, "json"),
         };
         // create the directory for this reaction's pipeline
-        let dir = output.join(&reaction.pipeline);
+        let dir = output.join(utils::fs::path_component(&reaction.pipeline));
         error_and_return!(
             tokio::fs::create_dir_all(&dir).await,
             format!("Unable to create directory '{}'", dir.to_string_lossy())
@@ -1273,5 +1328,7 @@ pub async fn handle(args: &Args, cmd: &Reactions) -> Result<(), Error> {
         Reactions::Logs(cmd) => logs(&thorium, cmd).await,
         Reactions::Delete(cmd) => delete(&thorium, cmd, args, &conf).await,
         Reactions::Create(cmd) => create(thorium, cmd).await,
+        Reactions::Update(cmd) => retag::retag(&thorium, cmd).await,
+        Reactions::Fail(cmd) => super::runs::cancel(&thorium, cmd, args.workers).await,
     }
 }

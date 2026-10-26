@@ -27,7 +27,6 @@ use colored::Colorize;
 use std::sync::Mutex;
 use thorium::models::{Image, NetworkPolicy, NetworkPolicyRequest, NetworkPolicyUpdate, Pipeline};
 use thorium::{Error, Thorium};
-use uuid::Uuid;
 
 use super::merge::{MergeableImage, MergeablePipeline};
 use super::update;
@@ -43,16 +42,6 @@ enum AppliedAction {
     CreatedImage { group: String, name: String },
     /// A pipeline was created; undo by deleting it
     CreatedPipeline { group: String, name: String },
-    /// A network policy was created; undo by deleting it
-    ///
-    /// The id (when it could be resolved) targets this exact policy, since policies
-    /// in different groups may share a name.
-    CreatedNetworkPolicy {
-        /// The name of the created policy
-        name: String,
-        /// The created policy's id, if it could be resolved
-        id: Option<Uuid>,
-    },
     /// A network policy was updated; undo by reverting to the pre-update snapshot
     UpdatedNetworkPolicy { original: Box<NetworkPolicy> },
     /// An image was updated; undo by reverting to the pre-update snapshot
@@ -71,13 +60,6 @@ impl AppliedAction {
             }
             Self::CreatedPipeline { group, name } => {
                 format!("created pipeline '{}'", utils::resource_id(group, name))
-            }
-            Self::CreatedNetworkPolicy { name, id } => {
-                // a policy is qualified by its id alone here; its groups aren't journaled
-                format!(
-                    "created network policy '{name}'{}",
-                    utils::policy_suffix(utils::NO_GROUPS, id.as_ref())
-                )
             }
             Self::UpdatedNetworkPolicy { original } => {
                 format!(
@@ -173,19 +155,6 @@ impl Journal {
         });
     }
 
-    /// Record a created network policy
-    ///
-    /// # Arguments
-    ///
-    /// * `name` - The name of the created policy
-    /// * `id` - The created policy's id, if it could be resolved
-    pub fn created_network_policy<T: Into<String>>(&self, name: T, id: Option<Uuid>) {
-        self.push(AppliedAction::CreatedNetworkPolicy {
-            name: name.into(),
-            id,
-        });
-    }
-
     /// Record an updated network policy, snapshotting its pre-update state
     pub fn updated_network_policy(&self, original: NetworkPolicy) {
         self.push(AppliedAction::UpdatedNetworkPolicy {
@@ -244,11 +213,6 @@ impl Journal {
                     }
                     AppliedAction::CreatedPipeline { group, name } => {
                         thorium.pipelines.delete(&group, &name).await?;
-                    }
-                    AppliedAction::CreatedNetworkPolicy { name, id } => {
-                        // target the exact policy by id when known, since names can
-                        // repeat across groups
-                        thorium.network_policies.delete(&name, id).await?;
                     }
                     AppliedAction::UpdatedNetworkPolicy { original } => {
                         // unbox the owned snapshot, keeping the identity needed to target

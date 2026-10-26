@@ -104,6 +104,48 @@ async fn create(thorium: Thorium, conf: CtlConf, cmd: &CreateNetworkPolicy) -> R
 /// * `thorium` - The Thorium client
 /// * `cmd` - The delete network policy command that was run
 async fn delete(thorium: Thorium, cmd: &DeleteNetworkPolicy) -> Result<(), Error> {
+    // ask on the real terminal
+    delete_asking(&thorium, cmd, &utils::Terminal).await
+}
+
+/// Delete a network policy, confirming with `asker` unless `--skip-confirm` was given
+///
+/// A network policy is shared by every group it is in, so the question names the policy and
+/// the groups that hold it; deleting it removes it for all of them.
+///
+/// # Arguments
+///
+/// * `thorium` - The Thorium client
+/// * `cmd` - The delete network policy command that was run
+/// * `asker` - Where the confirmation answer comes from
+async fn delete_asking<A: utils::Asker>(
+    thorium: &Thorium,
+    cmd: &DeleteNetworkPolicy,
+    asker: &A,
+) -> Result<(), Error> {
+    if !cmd.skip_confirm {
+        // refuse before reading anything when there is no one to ask
+        utils::require_asker(asker, "--skip-confirm")?;
+        // read the policy so the question names it and the groups that hold it
+        let policy = thorium.network_policies.get(&cmd.name, cmd.id).await?;
+        // a policy still used by images is worth saying
+        let used = policy.used_by.values().map(Vec::len).sum::<usize>();
+        let used = if used > 0 {
+            format!("; {used} image(s) use it")
+        } else {
+            String::new()
+        };
+        // the policy is shared, so deleting it removes it from every group that holds it
+        let question = format!(
+            "Delete network policy '{}'{} for all of its groups{used}?",
+            policy.name,
+            utils::policy_suffix(&policy.groups, Some(&policy.id)),
+        );
+        // ask, and stop when the answer is no
+        if !utils::confirm_or_skip(asker, &question, "--skip-confirm", false)? {
+            return Ok(());
+        }
+    }
     // send the request
     err_not_admin!(
         thorium.network_policies.delete(&cmd.name, cmd.id).await,
@@ -318,5 +360,136 @@ pub async fn handle(args: &Args, network_policies: &NetworkPolicies) -> Result<(
         NetworkPolicies::Delete(cmd) => delete(thorium, cmd).await,
         NetworkPolicies::Update(cmd) => update(thorium, conf, cmd).await,
         NetworkPolicies::Verify(cmd) => verify(cmd),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::HashMap;
+
+    use chrono::Utc;
+    use clap::Parser;
+    use thorium::models::NetworkPolicy;
+    use uuid::Uuid;
+
+    use super::delete_asking;
+    use crate::args::network_policies::DeleteNetworkPolicy;
+    use crate::utils::run_wait::testing::{Requests, client, mock};
+    use crate::utils::testing::Scripted;
+
+    /// A network policy shared by two groups
+    fn shared_policy() -> NetworkPolicy {
+        NetworkPolicy {
+            name: "allow-dns".to_owned(),
+            id: Uuid::nil(),
+            k8s_name: format!("allow-dns-{}", Uuid::nil()),
+            groups: vec!["corn".to_owned(), "wheat".to_owned()],
+            created: Utc::now(),
+            ingress: None,
+            egress: None,
+            forced_policy: false,
+            default_policy: false,
+            used_by: HashMap::new(),
+        }
+    }
+
+    /// Start a mock API that serves the shared policy and accepts its deletion
+    async fn policy_api() -> (String, Requests) {
+        mock(|line, _| {
+            if line.starts_with("GET /api/network-policies/allow-dns") {
+                (200, serde_json::to_string(&shared_policy()).unwrap())
+            } else if line.starts_with("DELETE /api/network-policies/allow-dns") {
+                (204, String::new())
+            } else {
+                (404, r#"{"error":"not found"}"#.to_owned())
+            }
+        })
+        .await
+    }
+
+    /// Parse a `network-policies delete` command
+    ///
+    /// # Arguments
+    ///
+    /// * `args` - The arguments after `network-policies delete`
+    fn delete_cmd(args: &[&str]) -> DeleteNetworkPolicy {
+        // prepend the subcommand name and parse
+        let mut full = vec!["delete"];
+        full.extend_from_slice(args);
+        DeleteNetworkPolicy::try_parse_from(full).unwrap()
+    }
+
+    /// Count the requests whose line starts with a prefix
+    ///
+    /// # Arguments
+    ///
+    /// * `requests` - The mock's request log
+    /// * `prefix` - What the request lines start with
+    fn count(requests: &Requests, prefix: &str) -> usize {
+        requests
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|(line, _)| line.starts_with(prefix))
+            .count()
+    }
+
+    /// The question names the policy and every group that holds it, and yes deletes it
+    #[tokio::test]
+    async fn delete_asks_naming_the_groups_then_deletes_on_yes() {
+        let (host, requests) = policy_api().await;
+        let thorium = client(&host).await;
+        let asker = Scripted::answering(true);
+        delete_asking(&thorium, &delete_cmd(&["allow-dns"]), &asker)
+            .await
+            .unwrap();
+        let questions = asker.asked.borrow();
+        assert_eq!(questions.len(), 1, "{questions:?}");
+        for part in ["allow-dns", "corn", "wheat", &Uuid::nil().to_string()] {
+            assert!(questions[0].contains(part), "{part} missing: {questions:?}");
+        }
+        assert_eq!(count(&requests, "DELETE "), 1);
+    }
+
+    /// A declined question deletes nothing and is not an error
+    #[tokio::test]
+    async fn delete_declined_changes_nothing() {
+        let (host, requests) = policy_api().await;
+        let thorium = client(&host).await;
+        let asker = Scripted::answering(false);
+        delete_asking(&thorium, &delete_cmd(&["allow-dns"]), &asker)
+            .await
+            .unwrap();
+        assert_eq!(count(&requests, "DELETE "), 0);
+    }
+
+    /// `--skip-confirm` and `--yes` delete without asking or reading the policy first
+    #[tokio::test]
+    async fn delete_skip_confirm_never_asks() {
+        let (host, requests) = policy_api().await;
+        let thorium = client(&host).await;
+        for flag in ["--skip-confirm", "--yes"] {
+            let asker = Scripted::no_terminal();
+            delete_asking(&thorium, &delete_cmd(&["allow-dns", flag]), &asker)
+                .await
+                .unwrap();
+            assert!(asker.asked.borrow().is_empty());
+        }
+        assert_eq!(count(&requests, "DELETE "), 2);
+        assert_eq!(count(&requests, "GET "), 0);
+    }
+
+    /// Without a terminal and without the flag the delete is refused, naming the flag
+    #[tokio::test]
+    async fn delete_without_a_terminal_is_refused() {
+        let (host, requests) = policy_api().await;
+        let thorium = client(&host).await;
+        let asker = Scripted::no_terminal();
+        let err = delete_asking(&thorium, &delete_cmd(&["allow-dns"]), &asker)
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("--skip-confirm"), "{err}");
+        assert_eq!(count(&requests, "DELETE "), 0);
     }
 }

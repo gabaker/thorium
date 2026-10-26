@@ -516,6 +516,9 @@ fn debug_report(tree: &Tree, graph: &DeleteGraph, plan: &Plan) {
 
 /// Delete the descendant entities under a set of initial tree nodes
 ///
+/// Without `--force` the delete is confirmed first, and it fails with a message naming the flag
+/// when there is no terminal to ask on.
+///
 /// # Arguments
 ///
 /// * `thorium` - The Thorium client
@@ -574,6 +577,8 @@ pub async fn delete(thorium: &Thorium, args: &Args, cmd: &DeleteTree) -> Result<
     }
     // confirm the deletion unless the user opted to skip the prompt
     if !cmd.force {
+        // fail clearly, not with a raw dialoguer error, when there is no terminal to ask on
+        crate::utils::require_confirm_terminal("--force (--yes)")?;
         // ask the user to confirm this destructive action
         let confirmed = dialoguer::Confirm::new()
             .with_prompt(format!("Delete {} entities?", targets.len()))

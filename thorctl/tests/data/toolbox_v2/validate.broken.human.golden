@@ -1,0 +1,9 @@
+Toolbox 'Broken v2 toolbox' (v2 format)
+  tools: 3 (3 versions), builds: 0 (0 labels), toolsets: 0, agents: 0, workflows: 0, pipelines: 1, network policies: 0
+error[invalid_value:name] tool bad name: the name contains ' '
+error[missing_field:spec] tool bad name@1: has neither spec nor spec_from
+error[missing_field:stage_tools.*] pipeline p@latest: stage 'gamma' has no entry in stage_tools
+error[missing_ref:tool] pipeline p@latest: refers to 'alpha@9', but tool 'alpha' defines no version '9'
+error[cycle:tool] tool alpha: depends on itself through alpha -> beta -> alpha
+warning[warning:secret-env] tool alpha@1: environment variable API_TOKEN looks like a secret; spec env values are readable by group members
+Result: invalid (5 errors, 1 warnings)

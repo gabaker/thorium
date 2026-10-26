@@ -1,10 +1,9 @@
 //! Network policy transport for toolboxes
 //!
-//! Images reference network policies by name, so a toolbox that doesn't carry
-//! the policy definitions imports broken on instances that lack them. This
-//! module collects the policies bundled in a manifest, dedupes them, checks
-//! them against the target instance, and creates the missing ones before any
-//! images are imported.
+//! Images and tools reference network policies by name, so a toolbox that doesn't carry
+//! the policy definitions imports broken on instances that lack them. This module
+//! classifies a bundled policy against the target instance and creates, or when asked
+//! updates, the policies an import needs before the tools that use them.
 //!
 //! By default policies are not updated, even under `--overwrite`: they are
 //! cluster security state owned by instance admins, so an existing-but-different
@@ -13,7 +12,6 @@
 //! policy and a groups-only difference adds the toolbox's groups to it (group
 //! coverage is only ever added, never removed).
 
-use colored::Colorize;
 use http::StatusCode;
 use std::collections::HashMap;
 use thorium::models::{
@@ -23,25 +21,8 @@ use thorium::models::{
 use thorium::{Error, Thorium};
 use uuid::Uuid;
 
-use super::manifest::ToolboxManifest;
-use crate::handlers::imports::rollback::Journal;
-use crate::handlers::progress::{Bar, BarKind};
+use crate::handlers::progress::Bar;
 use crate::utils;
-
-/// The bundled policies categorized against the target instance
-pub struct PolicyPlan {
-    /// Policies missing from the target that will be created
-    pub new: Vec<NetworkPolicyRequest>,
-    /// Policies that exist in the target but differ from the bundled definition
-    /// (rule/flag drift and/or partial group coverage); left in place and only
-    /// warned about unless `--update-network-policy` is set
-    pub mismatched: Vec<PolicyMismatch>,
-    /// Existing Thorium policies to update toward the toolbox's definition,
-    /// populated only when `--update-network-policy` is set
-    pub updates: Vec<PolicyUpdatePlan>,
-    /// How many bundled policies already match the target exactly
-    pub unchanged: usize,
-}
 
 /// One bundled policy that differs from what already exists in Thorium
 ///
@@ -51,9 +32,6 @@ pub struct PolicyPlan {
 pub struct PolicyMismatch {
     /// The policy name
     pub name: String,
-    /// The rule/flag fields that differ against a matched existing policy
-    /// (group membership excluded); empty when the only difference is coverage
-    pub drift: Vec<String>,
     /// Target groups the policy is missing from in Thorium
     pub missing_groups: Vec<String>,
     /// The toolbox's chosen definition for this policy
@@ -131,7 +109,7 @@ fn normalize_rules(rules: Option<&mut Vec<NetworkPolicyRuleRaw>>) {
 /// # Arguments
 ///
 /// * `policy` - The policy request to normalize
-fn normalize(mut policy: NetworkPolicyRequest) -> NetworkPolicyRequest {
+pub(super) fn normalize(mut policy: NetworkPolicyRequest) -> NetworkPolicyRequest {
     // sort and de-duplicate the groups since their order and repetition carry no meaning
     policy.groups.sort_unstable();
     policy.groups.dedup();
@@ -139,34 +117,6 @@ fn normalize(mut policy: NetworkPolicyRequest) -> NetworkPolicyRequest {
     normalize_rules(policy.ingress.as_mut());
     normalize_rules(policy.egress.as_mut());
     policy
-}
-
-/// Whether two policy requests are semantically equal
-///
-/// `NetworkPolicyRequest` doesn't implement `PartialEq`, so equality is
-/// checked on the serialized form (callers normalize first).
-///
-/// # Arguments
-///
-/// * `ours` - The bundled policy from the toolbox
-/// * `theirs` - The policy to compare against
-fn requests_equal(ours: &NetworkPolicyRequest, theirs: &NetworkPolicyRequest) -> bool {
-    // compare the serialized forms, since the request type has no PartialEq
-    match (serde_json::to_value(ours), serde_json::to_value(theirs)) {
-        (Ok(ours), Ok(theirs)) => ours == theirs,
-        // treat serialization failures as different so they surface as warnings
-        _ => false,
-    }
-}
-
-/// List the top-level fields that differ between two policy requests
-///
-/// # Arguments
-///
-/// * `ours` - The bundled policy from the toolbox
-/// * `theirs` - The existing policy in the target instance
-fn diff_fields(ours: &NetworkPolicyRequest, theirs: &NetworkPolicyRequest) -> Vec<String> {
-    diff_fields_excluding(ours, theirs, &[])
 }
 
 /// List the top-level fields that differ between two policy requests, ignoring the
@@ -212,138 +162,6 @@ fn diff_fields_excluding(
     // sort so the reported field list is deterministic
     fields.sort_unstable();
     fields
-}
-
-/// Collect and dedupe the network policies bundled across a manifest's images
-///
-/// Identical duplicates (after normalization) collapse into one entry. The same name
-/// bundled with differing definitions can't be reconciled, but it must not fail the
-/// whole import: the first definition (in sorted order) is kept, the rest are ignored,
-/// and a warning is emitted per conflicting name. A policy that targets no groups
-/// can't be created or used by any image, so it is dropped with a warning.
-///
-/// # Arguments
-///
-/// * `manifest` - The toolbox manifest holding bundled policies
-/// * `group_override` - The group override applied to the rest of the import
-/// * `progress` - The progress bar to log conflict warnings through
-pub fn collect_policies(
-    manifest: &ToolboxManifest,
-    group_override: Option<&str>,
-    progress: &Bar,
-) -> Vec<NetworkPolicyRequest> {
-    // dedupe purely, then surface any conflicts as warnings so a conflicting bundle
-    // degrades to "first definition wins" instead of aborting the import
-    let (policies, warnings) = dedupe_policies(manifest, group_override);
-    for warning in warnings {
-        progress.warning(warning);
-    }
-    policies
-}
-
-/// Dedupe bundled policies by name, returning the kept policies and a warning message
-/// for every name that was bundled with conflicting definitions
-///
-/// Images and their versions are visited in sorted (key, then version) order so the
-/// definition kept on a conflict is deterministic rather than hash-map dependent. Pure
-/// (no I/O) so the dedup/conflict behavior can be unit tested.
-///
-/// # Arguments
-///
-/// * `manifest` - The toolbox manifest holding bundled policies
-/// * `group_override` - The group override applied to the rest of the import
-fn dedupe_policies(
-    manifest: &ToolboxManifest,
-    group_override: Option<&str>,
-) -> (Vec<NetworkPolicyRequest>, Vec<String>) {
-    // track each kept policy alongside the image key it was first seen in so a genuine
-    // conflict can name both sides
-    let mut by_name: HashMap<String, (NetworkPolicyRequest, String)> = HashMap::new();
-    // the warnings to surface for skipped or conflicting policies
-    let mut warnings = Vec::new();
-    // visit images in sorted key order so "first definition wins" is deterministic
-    let mut images: Vec<_> = manifest.images.iter().collect();
-    images.sort_by(|a, b| a.0.cmp(b.0));
-    for (image_key, image_manifest) in images {
-        // visit versions in sorted order for the same determinism
-        let mut versions: Vec<_> = image_manifest.versions.iter().collect();
-        versions.sort_by(|a, b| a.0.cmp(b.0));
-        for (_version, version) in versions {
-            for policy in &version.network_policies {
-                // normalize first so equivalent definitions compare equal
-                let mut policy = normalize(policy.clone());
-                // policies are group-scoped, so the override applies to them
-                // exactly like it does to images and pipelines
-                if let Some(group) = group_override {
-                    policy.groups = vec![group.to_string()];
-                }
-                // blank group names are never valid, so ignore them
-                policy.groups.retain(|group| !group.trim().is_empty());
-                // a policy with no target groups can't be created, so skip it up front
-                // rather than letting the create fail midway through the apply
-                if policy.groups.is_empty() {
-                    warnings.push(format!(
-                        "Skipping network policy '{}' bundled by image '{image_key}': it targets \
-                         no groups",
-                        policy.name
-                    ));
-                    continue;
-                }
-                match by_name.get_mut(&policy.name) {
-                    // first sighting of this policy name
-                    None => {
-                        by_name.insert(policy.name.clone(), (policy, image_key.clone()));
-                    }
-                    // identical duplicates across images are expected and fine
-                    Some((existing, _)) if requests_equal(existing, &policy) => {}
-                    // a groups-only difference isn't a conflict: the two copies describe the
-                    // same policy in different groups, so union their groups and keep going
-                    Some((existing, _)) if diff_fields(existing, &policy) == ["groups"] => {
-                        existing.groups.extend(policy.groups);
-                        existing.groups.sort_unstable();
-                        existing.groups.dedup();
-                    }
-                    // the same name with genuinely different rules/flags can't be reconciled;
-                    // keep the first definition and warn rather than failing the import
-                    Some((existing, first_key)) => {
-                        warnings.push(format!(
-                            "Network policy '{}' is defined differently by two images in the \
-                             toolbox ('{first_key}' vs '{image_key}') (differs: [{}]); keeping \
-                             '{first_key}'s definition and ignoring '{image_key}'s",
-                            policy.name,
-                            diff_fields(existing, &policy).join(", ")
-                        ));
-                    }
-                }
-            }
-        }
-    }
-    // sort for deterministic create order and confirmation display, dropping the
-    // first-seen image key now that conflicts have been resolved
-    let mut policies: Vec<_> = by_name.into_values().map(|(policy, _)| policy).collect();
-    policies.sort_unstable_by(|a, b| a.name.cmp(&b.name));
-    (policies, warnings)
-}
-
-/// The distinct groups targeted across a set of bundled policies, in first-seen order
-///
-/// # Arguments
-///
-/// * `policies` - The bundled policies to collect target groups from
-fn unique_groups(policies: &[NetworkPolicyRequest]) -> Vec<String> {
-    // the set tracks membership for O(1) dedup while the vec preserves first-seen order,
-    // which keeps the resulting group list stable for callers (e.g. error messages)
-    let mut seen = std::collections::HashSet::new();
-    let mut groups = Vec::new();
-    for policy in policies {
-        for group in &policy.groups {
-            // push only the first sighting of each group; insert returns false on repeats
-            if seen.insert(group.clone()) {
-                groups.push(group.clone());
-            }
-        }
-    }
-    groups
 }
 
 /// Whether a listing error means the caller simply can't see the group's policies
@@ -421,22 +239,41 @@ pub(super) async fn fetch_existing_in_groups(
     Ok(existing)
 }
 
+/// Find the policy of a name in the first of the given groups that has one
+///
+/// A name is unique within a group but not across groups, so a policy a manifest or a snapshot
+/// names is the one in the first of its groups that holds it.
+///
+/// # Arguments
+///
+/// * `existing` - The existing policies, indexed by `(group, name)`
+/// * `groups` - The groups to look in, in order
+/// * `name` - The name of the policy
+pub(super) fn find_in_groups<'a>(
+    existing: &'a HashMap<(String, String), NetworkPolicy>,
+    groups: &[String],
+    name: &str,
+) -> Option<&'a NetworkPolicy> {
+    // the first group that holds a policy of this name wins
+    groups
+        .iter()
+        .find_map(|group| existing.get(&(group.clone(), name.to_owned())))
+}
+
 /// The outcome of categorizing one bundled policy against the existing instance state
 ///
 /// `Mismatched` can't derive `PartialEq`/`Eq` because it carries
 /// [`NetworkPolicy`] (no `Eq`), so tests match on it rather than comparing it.
 #[derive(Debug)]
-enum PolicyClassification {
+pub(super) enum PolicyClassification {
     /// The policy exists in no target group and will be created
     New,
     /// The policy already exists in every target group and matches
     Unchanged,
     /// The policy exists but differs (rule/flag drift) and/or is missing from some
-    /// target groups; carries the drift fields, the missing groups, and the distinct
-    /// existing policies it overlaps for the warning/update path
+    /// target groups; carries the missing groups and the distinct existing policies it
+    /// overlaps for the warning/update path
     Mismatched {
-        /// The rule/flag fields that differ against a matched existing policy
-        drift: Vec<String>,
         /// Target groups the policy is missing from in Thorium
         missing_groups: Vec<String>,
         /// The distinct existing policies (by id) this overlaps
@@ -455,7 +292,7 @@ enum PolicyClassification {
 ///
 /// * `policy` - The bundled policy (its `groups` are the target groups)
 /// * `existing` - The existing policies indexed by `(group, name)`
-fn classify_policy(
+pub(super) fn classify_policy(
     policy: &NetworkPolicyRequest,
     existing: &HashMap<(String, String), NetworkPolicy>,
 ) -> PolicyClassification {
@@ -509,86 +346,9 @@ fn classify_policy(
         return PolicyClassification::Unchanged;
     }
     PolicyClassification::Mismatched {
-        drift,
         missing_groups: missing,
         existing: overlapped,
     }
-}
-
-/// Categorize bundled policies against the target instance, scoped by each policy's
-/// target groups
-///
-/// The existence check is scoped to the groups each bundled policy targets (a single
-/// group after `--group-override`), so a name that exists in several groups across the
-/// instance still resolves uniquely instead of erroring with a 400. See
-/// [`classify_policy`] for the per-policy new/unchanged/mismatched decision.
-///
-/// # Arguments
-///
-/// * `thorium` - The Thorium client
-/// * `policies` - The deduped bundled policies
-/// * `update` - Whether `--update-network-policy` is set, turning mismatches into
-///   planned updates instead of passive warnings
-/// * `progress` - The progress bar
-pub async fn categorize_policies(
-    thorium: &Thorium,
-    policies: Vec<NetworkPolicyRequest>,
-    update: bool,
-    progress: &Bar,
-) -> Result<PolicyPlan, Error> {
-    // start with an empty plan that each classified policy is filed into
-    let mut plan = PolicyPlan {
-        new: Vec::new(),
-        mismatched: Vec::new(),
-        updates: Vec::new(),
-        unchanged: 0,
-    };
-    // nothing bundled means nothing to check
-    if policies.is_empty() {
-        return Ok(plan);
-    }
-    // bound the bar by the number of bundled policies being checked
-    progress.refresh(
-        "Checking network policies",
-        BarKind::Bound(policies.len() as u64),
-    );
-    // fetch existing policies scoped to just the groups the bundle targets; the full
-    // policy is retained (not reduced to a request) so the update path can target it by
-    // id and build a delta from its rule UUIDs
-    let groups = unique_groups(&policies);
-    let existing: HashMap<(String, String), NetworkPolicy> =
-        fetch_existing_in_groups(thorium, &groups).await?;
-    for policy in policies {
-        // file each policy by how it compares to the instance
-        match classify_policy(&policy, &existing) {
-            PolicyClassification::New => plan.new.push(policy),
-            PolicyClassification::Unchanged => plan.unchanged += 1,
-            PolicyClassification::Mismatched {
-                drift,
-                missing_groups,
-                existing,
-            } => {
-                // assemble the mismatch with everything needed to warn about or update it
-                let mismatch = PolicyMismatch {
-                    name: policy.name.clone(),
-                    drift,
-                    missing_groups,
-                    chosen: policy,
-                    existing,
-                };
-                // with the flag, plan concrete updates against each overlapped policy;
-                // without it, keep the mismatch for a source-attributed warning
-                if update {
-                    plan.updates.extend(build_updates(&mismatch));
-                } else {
-                    plan.mismatched.push(mismatch);
-                }
-            }
-        }
-        // count this policy as checked
-        progress.inc(1);
-    }
-    Ok(plan)
 }
 
 /// Build the per-policy update plans for one mismatch
@@ -602,7 +362,7 @@ pub async fn categorize_policies(
 /// # Arguments
 ///
 /// * `mismatch` - The classified mismatch to turn into update plans
-fn build_updates(mismatch: &PolicyMismatch) -> Vec<PolicyUpdatePlan> {
+pub(super) fn build_updates(mismatch: &PolicyMismatch) -> Vec<PolicyUpdatePlan> {
     // sort the overlapped policies by id so the choice of "first" (which absorbs the
     // coverage gaps) is deterministic
     let mut existing = mismatch.existing.clone();
@@ -737,153 +497,41 @@ pub(crate) fn rule_direction_delta(
     }
 }
 
-/// Print the policy sections of the import confirmation screen
+/// Update one existing Thorium policy toward the toolbox's definition
 ///
-/// # Arguments
-///
-/// * `plan` - The categorized policy plan
-pub fn print_plan(plan: &PolicyPlan) {
-    // list the policies that will be created, with the groups they will be created in
-    if !plan.new.is_empty() {
-        println!("{}", "New Network Policies:".bright_green());
-        for policy in &plan.new {
-            println!(
-                "  {}{}",
-                policy.name,
-                utils::policy_suffix(&policy.groups, None)
-            );
-        }
-    }
-    // list the existing policies that differ but are left alone without the update flag
-    if !plan.mismatched.is_empty() {
-        println!(
-            "{}",
-            "Existing Network Policies that differ (left unchanged; re-run with \
-             --update-network-policy to apply):"
-                .bright_yellow()
-        );
-        for mismatch in &plan.mismatched {
-            // rule/flag drift and coverage gaps are distinct problems, so describe each
-            if !mismatch.drift.is_empty() {
-                println!(
-                    "  {} (differs: [{}])",
-                    mismatch.name,
-                    mismatch.drift.join(", ")
-                );
-            }
-            if !mismatch.missing_groups.is_empty() {
-                println!(
-                    "  {} (missing from group(s): [{}])",
-                    mismatch.name,
-                    mismatch.missing_groups.join(", ")
-                );
-            }
-        }
-    }
-    // list the existing policies that will be updated toward the toolbox's definition
-    if !plan.updates.is_empty() {
-        println!("{}", "Network Policies to update:".bright_yellow());
-        for update in &plan.updates {
-            // each line names the exact policy (group + id) being changed, since one
-            // bundled name can map to several distinct existing policies
-            if !update.drift.is_empty() {
-                println!(
-                    "  {}{} — overwrite (differs: [{}])",
-                    update.name,
-                    utils::policy_suffix(&[&update.group], Some(&update.id)),
-                    update.drift.join(", ")
-                );
-            }
-            if !update.add_groups.is_empty() {
-                println!(
-                    "  {}{} — add group(s): [{}]",
-                    update.name,
-                    utils::policy_suffix(&[&update.group], Some(&update.id)),
-                    update.add_groups.join(", ")
-                );
-            }
-        }
-    }
-}
-
-/// Warn for every bundled policy that exists in the target but differs, attributing the
-/// problem to Thorium's existing policy and pointing at the update flag
-///
-/// # Arguments
-///
-/// * `plan` - The categorized policy plan
-/// * `progress` - The progress bar to log warnings through
-pub fn warn_mismatched(plan: &PolicyPlan, progress: &Bar) {
-    for mismatch in &plan.mismatched {
-        // rule/flag drift: Thorium's copy differs and would be overwritten under the flag
-        if !mismatch.drift.is_empty() {
-            progress.warning(format!(
-                "Network policy '{}' already exists in Thorium with a different definition \
-                 (differs: [{}]); leaving Thorium's policy unchanged — re-run with \
-                 --update-network-policy to overwrite it with the toolbox's definition",
-                mismatch.name,
-                mismatch.drift.join(", ")
-            ));
-        }
-        // coverage gap: the policy exists but not in every target group
-        if !mismatch.missing_groups.is_empty() {
-            progress.warning(format!(
-                "Network policy '{}' exists in Thorium but not in group(s) [{}]; not creating \
-                 it there — re-run with --update-network-policy to add those group(s) to the \
-                 existing policy",
-                mismatch.name,
-                mismatch.missing_groups.join(", ")
-            ));
-        }
-    }
-}
-
-/// Apply the planned updates to existing Thorium policies
-///
-/// Each policy is fetched immediately before it is patched so the rollback snapshot is its
-/// true pre-update state (not a stale categorization view) and the delta's removed rule
-/// UUIDs come from the current state. The snapshot is journaled before the patch lands so
-/// a stop after this point can still revert it.
+/// The policy is fetched immediately before it is patched so the snapshot handed back is its true
+/// pre-update state and the delta's removed rule UUIDs come from the current state.
 ///
 /// # Arguments
 ///
 /// * `thorium` - The Thorium client
-/// * `updates` - The planned per-policy updates
-/// * `progress` - The progress bar
-/// * `journal` - The journal to record pre-update snapshots in for rollback
-pub async fn update_policies(
+/// * `plan` - The planned update
+/// * `progress` - The progress bar to log the action through, if there is one
+/// * `snapshot` - Called with the policy as it is before the patch is sent
+pub(super) async fn update_one(
     thorium: &Thorium,
-    updates: &[PolicyUpdatePlan],
-    progress: &Bar,
-    journal: &Journal,
-) -> Result<(), Error> {
-    // nothing planned means nothing to update
-    if updates.is_empty() {
-        return Ok(());
-    }
-    // bound the bar by the number of planned updates
-    progress.refresh(
-        "Updating network policies",
-        BarKind::Bound(updates.len() as u64),
-    );
-    for plan in updates {
-        // fetch the policy's current state right before mutating it
-        let current = thorium
-            .network_policies
-            .get(&plan.name, Some(plan.id))
-            .await
-            .map_err(|err| {
-                Error::new(format!(
-                    "Failed to fetch network policy '{}'{} before update: {err}",
-                    plan.name,
-                    utils::policy_suffix(utils::NO_GROUPS, Some(&plan.id))
-                ))
-            })?;
-        // record the pre-update snapshot before the patch so rollback can restore it
-        journal.updated_network_policy(current.clone());
-        // build the delta from the freshly-fetched state so removed rule UUIDs are current
-        let delta = build_delta(&plan.chosen, &plan.drift, &plan.add_groups, &current);
-        // log the action being taken, splitting overwrite from a groups-only add
+    plan: &PolicyUpdatePlan,
+    progress: Option<&Bar>,
+    snapshot: impl FnOnce(&NetworkPolicy),
+) -> Result<NetworkPolicy, Error> {
+    // fetch the policy's current state right before mutating it
+    let current = thorium
+        .network_policies
+        .get(&plan.name, Some(plan.id))
+        .await
+        .map_err(|err| {
+            Error::new(format!(
+                "Failed to fetch network policy '{}'{} before update: {err}",
+                plan.name,
+                utils::policy_suffix(utils::NO_GROUPS, Some(&plan.id))
+            ))
+        })?;
+    // hand the pre-update snapshot over before the patch so a rollback can restore it
+    snapshot(&current);
+    // build the delta from the freshly-fetched state so removed rule UUIDs are current
+    let delta = build_delta(&plan.chosen, &plan.drift, &plan.add_groups, &current);
+    // log the action being taken, splitting overwrite from a groups-only add
+    if let Some(progress) = progress {
         if !plan.drift.is_empty() {
             progress.info_anonymous(format!(
                 "Updating network policy '{}'{} in Thorium to match the toolbox (differs: [{}])",
@@ -900,22 +548,20 @@ pub async fn update_policies(
                 utils::policy_suffix(&[&plan.group], Some(&plan.id))
             ));
         }
-        // apply the patch targeting this exact policy by id
-        thorium
-            .network_policies
-            .update(&plan.name, Some(plan.id), &delta)
-            .await
-            .map_err(|err| {
-                Error::new(format!(
-                    "Failed to update network policy '{}'{}: {err}",
-                    plan.name,
-                    utils::policy_suffix(utils::NO_GROUPS, Some(&plan.id))
-                ))
-            })?;
-        // count this update as applied
-        progress.inc(1);
     }
-    Ok(())
+    // apply the patch targeting this exact policy by id
+    thorium
+        .network_policies
+        .update(&plan.name, Some(plan.id), &delta)
+        .await
+        .map_err(|err| {
+            Error::new(format!(
+                "Failed to update network policy '{}'{}: {err}",
+                plan.name,
+                utils::policy_suffix(utils::NO_GROUPS, Some(&plan.id))
+            ))
+        })?;
+    Ok(current)
 }
 
 /// Look up the id Thorium assigned to a policy this import just created
@@ -942,69 +588,40 @@ async fn created_policy_id(thorium: &Thorium, policy: &NetworkPolicyRequest) -> 
         .map(|created| created.id)
 }
 
-/// Create the missing network policies in the target instance
+/// Create one network policy and look up the id Thorium gave it
 ///
 /// # Arguments
 ///
 /// * `thorium` - The Thorium client
-/// * `policies` - The policies missing from the target
-/// * `progress` - The progress bar
-/// * `journal` - The journal to record created policies in for rollback
-pub async fn create_policies(
+/// * `policy` - The policy to create
+pub(super) async fn create_one(
     thorium: &Thorium,
-    policies: &[NetworkPolicyRequest],
-    progress: &Bar,
-    journal: &Journal,
-) -> Result<(), Error> {
-    // nothing missing means nothing to create
-    if policies.is_empty() {
-        return Ok(());
+    policy: &NetworkPolicyRequest,
+) -> Result<Option<Uuid>, Error> {
+    // create the policy in the instance; the request already carries its target groups
+    if let Err(err) = thorium.network_policies.create(policy.clone()).await {
+        // only admins may create network policies, so name that requirement when refused
+        let hint = if matches!(
+            err.status(),
+            Some(StatusCode::UNAUTHORIZED | StatusCode::FORBIDDEN)
+        ) {
+            " (creating network policies requires a Thorium admin)"
+        } else {
+            ""
+        };
+        return Err(Error::new(format!(
+            "Failed to create network policy '{}'{hint}: {err}",
+            policy.name
+        )));
     }
-    // bound the bar by the number of policies being created
-    progress.refresh(
-        "Creating network policies",
-        BarKind::Bound(policies.len() as u64),
-    );
-    for policy in policies {
-        // create the policy in the instance; the request already carries its target groups
-        if let Err(err) = thorium.network_policies.create(policy.clone()).await {
-            // only admins may create network policies, so name that requirement when refused
-            let hint = if matches!(
-                err.status(),
-                Some(StatusCode::UNAUTHORIZED | StatusCode::FORBIDDEN)
-            ) {
-                " (creating network policies requires a Thorium admin)"
-            } else {
-                ""
-            };
-            return Err(Error::new(format!(
-                "Failed to create network policy '{}'{hint}: {err}",
-                policy.name
-            )));
-        }
-        // resolve the new policy's id so it can be told apart from same-named policies in
-        // other groups
-        let id = created_policy_id(thorium, policy).await;
-        // journal the creation only after it succeeds so rollback never tries to delete a
-        // policy that was never actually created
-        journal.created_network_policy(&policy.name, id);
-        // report the creation, including the id when it could be resolved
-        progress.info_anonymous(format!(
-            "Created network policy '{}'{}",
-            policy.name,
-            utils::policy_suffix(&policy.groups, id.as_ref())
-        ));
-        // count this policy as created
-        progress.inc(1);
-    }
-    Ok(())
+    // resolve the new policy's id so it can be told apart from same-named policies in other groups
+    Ok(created_policy_id(thorium, policy).await)
 }
 
 /// Unit tests for the pure (no-I/O) policy logic: dedupe/conflict resolution,
 /// classification against existing state, delta construction, and update planning
 #[cfg(test)]
 mod tests {
-    use super::super::manifest::{ImageManifest, ImageVersion, ToolboxManifest};
     use super::*;
 
     /// A minimal policy with the given name, groups, and `default_policy` flag (the flag
@@ -1024,110 +641,6 @@ mod tests {
             forced_policy: false,
             default_policy,
         }
-    }
-
-    /// Build a manifest where each `(image_key, policies)` entry is one image with a
-    /// single `latest` version bundling those policies
-    ///
-    /// # Arguments
-    ///
-    /// * `images` - The `(image_key, policies)` entries to build images from
-    fn manifest(images: Vec<(&str, Vec<NetworkPolicyRequest>)>) -> ToolboxManifest {
-        let images = images
-            .into_iter()
-            .map(|(key, policies)| {
-                let version = ImageVersion {
-                    dir: String::new(),
-                    build_path: String::new(),
-                    config_from: None,
-                    config: None,
-                    network_policies_from: Vec::new(),
-                    network_policies: policies,
-                };
-                (
-                    key.to_string(),
-                    ImageManifest {
-                        versions: HashMap::from([("latest".to_string(), version)]),
-                    },
-                )
-            })
-            .collect();
-        ToolboxManifest {
-            name: "t".to_string(),
-            registry: None,
-            pipelines: HashMap::new(),
-            images,
-            bundled_images: false,
-            image_path_prefix: None,
-        }
-    }
-
-    /// The same policy bundled identically across images collapses to one, no warning
-    #[test]
-    fn dedupes_identical_policy_without_warning() {
-        let m = manifest(vec![
-            ("a", vec![policy("p", &["g"], false)]),
-            ("b", vec![policy("p", &["g"], false)]),
-        ]);
-        let (policies, warnings) = dedupe_policies(&m, None);
-        assert_eq!(policies.len(), 1);
-        assert!(warnings.is_empty());
-    }
-
-    /// A name bundled with conflicting definitions warns instead of erroring, keeping
-    /// the first definition in sorted-key order
-    #[test]
-    fn conflicting_policy_warns_and_keeps_first() {
-        // images visited in sorted key order, so "a" (default_policy = false) wins over
-        // "b" (default_policy = true) regardless of insertion order here
-        let m = manifest(vec![
-            ("b", vec![policy("p", &["g"], true)]),
-            ("a", vec![policy("p", &["g"], false)]),
-        ]);
-        let (policies, warnings) = dedupe_policies(&m, None);
-        assert_eq!(policies.len(), 1);
-        assert!(
-            !policies[0].default_policy,
-            "the 'a' definition should be kept"
-        );
-        assert_eq!(warnings.len(), 1);
-        // the warning names both images involved and the kept side
-        assert!(warnings[0].contains("defined differently by two images"));
-        assert!(warnings[0].contains("'a'") && warnings[0].contains("'b'"));
-    }
-
-    /// A groups-only difference is no longer a conflict: the two copies merge into one
-    /// policy spanning both groups; an override collapses them to the override group
-    #[test]
-    fn group_override_resolves_groups_only_conflict() {
-        let m = manifest(vec![
-            ("a", vec![policy("p", &["x"], false)]),
-            ("b", vec![policy("p", &["y"], false)]),
-        ]);
-        // without an override the differing groups merge into one policy, no warning
-        let (policies, warnings) = dedupe_policies(&m, None);
-        assert!(warnings.is_empty());
-        assert_eq!(policies.len(), 1);
-        assert_eq!(policies[0].groups, vec!["x".to_string(), "y".to_string()]);
-        // with an override both collapse to ["g"], a single deduped policy, no warning
-        let (policies, warnings) = dedupe_policies(&m, Some("g"));
-        assert!(warnings.is_empty());
-        assert_eq!(policies.len(), 1);
-        assert_eq!(policies[0].groups, vec!["g".to_string()]);
-    }
-
-    /// Two images bundling the same policy in different groups merge into one entry whose
-    /// groups are the (sorted, deduped) union, with no warning
-    #[test]
-    fn groups_only_conflict_merges_union() {
-        let m = manifest(vec![
-            ("a", vec![policy("p", &["a"], false)]),
-            ("b", vec![policy("p", &["b"], false)]),
-        ]);
-        let (policies, warnings) = dedupe_policies(&m, None);
-        assert!(warnings.is_empty());
-        assert_eq!(policies.len(), 1);
-        assert_eq!(policies[0].groups, vec!["a".to_string(), "b".to_string()]);
     }
 
     /// Build a stored `NetworkPolicy` for the existing-index and delta tests
@@ -1168,6 +681,31 @@ mod tests {
             .into_iter()
             .map(|(group, policy)| ((group.to_string(), policy.name.clone()), policy))
             .collect()
+    }
+
+    /// The policy of a name is read from the first group that holds one, even when another
+    /// group holds a different policy of the same name
+    #[test]
+    fn find_in_groups_takes_the_first_group_that_has_the_name() {
+        let first = existing_policy("allow-all", &["a"], false, Uuid::from_u128(1));
+        let second = existing_policy("allow-all", &["b"], true, Uuid::from_u128(2));
+        let existing = index(vec![("a", first), ("b", second)]);
+        let groups = vec!["b".to_string(), "a".to_string()];
+        let found = find_in_groups(&existing, &groups, "allow-all").expect("a policy");
+        assert_eq!(found.id, Uuid::from_u128(2));
+        let found = find_in_groups(&existing, &["a".to_string()], "allow-all").expect("a policy");
+        assert_eq!(found.id, Uuid::from_u128(1));
+    }
+
+    /// A name no listed group holds is not found, whatever other groups hold
+    #[test]
+    fn find_in_groups_ignores_groups_outside_the_list() {
+        let existing = index(vec![(
+            "a",
+            existing_policy("allow-all", &["a"], false, Uuid::from_u128(1)),
+        )]);
+        assert!(find_in_groups(&existing, &["b".to_string()], "allow-all").is_none());
+        assert!(find_in_groups(&existing, &["a".to_string()], "other").is_none());
     }
 
     /// A policy absent from its target group is classified new (safe to create)
@@ -1237,11 +775,9 @@ mod tests {
         let bundled = policy("allow-all", &["a"], false);
         match classify_policy(&bundled, &existing) {
             PolicyClassification::Mismatched {
-                drift,
                 missing_groups,
                 existing,
             } => {
-                assert!(drift.iter().any(|field| field == "default_policy"));
                 assert!(missing_groups.is_empty());
                 assert_eq!(existing.len(), 1);
             }
@@ -1259,12 +795,7 @@ mod tests {
         )]);
         let bundled = policy("allow-all", &["a", "b"], false);
         match classify_policy(&bundled, &existing) {
-            PolicyClassification::Mismatched {
-                drift,
-                missing_groups,
-                ..
-            } => {
-                assert!(drift.is_empty());
+            PolicyClassification::Mismatched { missing_groups, .. } => {
                 assert_eq!(missing_groups, vec!["b".to_string()]);
             }
             other => panic!("expected mismatched, got {other:?}"),
@@ -1280,12 +811,7 @@ mod tests {
         )]);
         let bundled = policy("allow-all", &["a", "b"], false);
         match classify_policy(&bundled, &existing) {
-            PolicyClassification::Mismatched {
-                drift,
-                missing_groups,
-                ..
-            } => {
-                assert!(drift.iter().any(|field| field == "default_policy"));
+            PolicyClassification::Mismatched { missing_groups, .. } => {
                 assert_eq!(missing_groups, vec!["b".to_string()]);
             }
             other => panic!("expected mismatched, got {other:?}"),
@@ -1413,7 +939,6 @@ mod tests {
         let drifting = existing_policy("p", &["b"], true, Uuid::from_u128(2));
         let mismatch = PolicyMismatch {
             name: "p".to_string(),
-            drift: vec!["default_policy".to_string()],
             missing_groups: Vec::new(),
             chosen: policy("p", &["a", "b"], false),
             existing: vec![matching, drifting],
@@ -1435,7 +960,6 @@ mod tests {
         let existing = existing_policy("p", &["a"], false, Uuid::from_u128(1));
         let mismatch = PolicyMismatch {
             name: "p".to_string(),
-            drift: Vec::new(),
             missing_groups: vec!["b".to_string()],
             chosen: policy("p", &["a", "b"], false),
             existing: vec![existing],
@@ -1515,21 +1039,6 @@ mod tests {
         ));
     }
 
-    /// A bundled policy with no target groups is dropped with a warning instead of being
-    /// sent to create
-    #[test]
-    fn dedupe_drops_policy_without_groups() {
-        let m = manifest(vec![("a", vec![policy("p", &[], false)])]);
-        let (policies, warnings) = dedupe_policies(&m, None);
-        assert!(policies.is_empty());
-        assert_eq!(warnings.len(), 1);
-        assert!(warnings[0].contains("targets no groups"));
-        // an override supplies a group, so the same policy is kept
-        let (policies, warnings) = dedupe_policies(&m, Some("g"));
-        assert_eq!(policies.len(), 1);
-        assert_eq!(warnings, Vec::<String>::new());
-    }
-
     /// Repeated groups within one policy collapse to a single entry
     #[test]
     fn normalize_dedups_groups() {
@@ -1544,7 +1053,6 @@ mod tests {
         let existing = existing_policy("p", &["z", "b"], true, Uuid::from_u128(1));
         let mismatch = PolicyMismatch {
             name: "p".to_string(),
-            drift: vec!["default_policy".to_string()],
             missing_groups: Vec::new(),
             chosen: policy("p", &["b"], false),
             existing: vec![existing],

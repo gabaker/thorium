@@ -1,0 +1,83 @@
+[
+  {
+    "kind": "tool",
+    "name": "pal-harness",
+    "groups": [
+      "static"
+    ],
+    "versions": [
+      "1.0.0"
+    ],
+    "description": null
+  },
+  {
+    "kind": "tool",
+    "name": "strings",
+    "groups": [
+      "static"
+    ],
+    "versions": [
+      "1.0.0",
+      "latest"
+    ],
+    "description": "Extract printable strings"
+  },
+  {
+    "kind": "tool",
+    "name": "strings-agent",
+    "groups": [
+      "static"
+    ],
+    "versions": [
+      "1.0.0"
+    ],
+    "description": "Lets a model count strings"
+  },
+  {
+    "kind": "toolset",
+    "name": "kit",
+    "groups": [
+      "static"
+    ],
+    "versions": [],
+    "description": "Triage tools"
+  },
+  {
+    "kind": "agent",
+    "name": "triage",
+    "groups": [
+      "static"
+    ],
+    "versions": [],
+    "description": "Triage agent"
+  },
+  {
+    "kind": "workflow",
+    "name": "triage-flow",
+    "groups": [
+      "static"
+    ],
+    "versions": [],
+    "description": "Triage workflow"
+  },
+  {
+    "kind": "pipeline",
+    "name": "strings-only",
+    "groups": [
+      "static"
+    ],
+    "versions": [
+      "latest"
+    ],
+    "description": null
+  },
+  {
+    "kind": "build",
+    "name": "base",
+    "groups": [],
+    "versions": [
+      "1"
+    ],
+    "description": null
+  }
+]

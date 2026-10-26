@@ -1,0 +1,8 @@
+tool pal-harness [static] versions: 1.0.0
+tool strings [static] versions: 1.0.0,latest - Extract printable strings
+tool strings-agent [static] versions: 1.0.0 - Lets a model count strings
+toolset kit [static] - Triage tools
+agent triage [static] - Triage agent
+workflow triage-flow [static] - Triage workflow
+pipeline strings-only [static] versions: latest
+build base versions: 1

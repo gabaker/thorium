@@ -1,7 +1,6 @@
 //! Contains useful functions for interacting with notifications
 
-use owo_colors::OwoColorize;
-use owo_colors::colors::{BrightBlue, BrightGreen, BrightRed, BrightYellow};
+use crate::utils::paint::Paint;
 use thorium::models::backends::NotificationSupport;
 use thorium::models::{Notification, NotificationLevel};
 
@@ -18,13 +17,13 @@ pub fn print_notifications<N: NotificationSupport>(notifications: &[Notification
             let level = notification.level.as_ref().to_uppercase();
             match &notification.level {
                 NotificationLevel::Info => {
-                    println!("[{}] {} {}: {}", notification.created, notification.id.fg::<BrightGreen>(), level.fg::<BrightBlue>(), notification.msg);
+                    println!("[{}] {} {}: {}", notification.created, notification.id.bright_green(), level.bright_blue(), notification.msg);
                 }
                 NotificationLevel::Warn => {
-                    println!("[{}] {} {}: {}", notification.created, notification.id.fg::<BrightGreen>(), level.fg::<BrightYellow>(), notification.msg);
+                    println!("[{}] {} {}: {}", notification.created, notification.id.bright_green(), level.bright_yellow(), notification.msg);
                 }
                 NotificationLevel::Error => {
-                    println!("[{}] {} {}: {}", notification.created, notification.id.fg::<BrightGreen>(), level.fg::<BrightRed>(), notification.msg);
+                    println!("[{}] {} {}: {}", notification.created, notification.id.bright_green(), level.bright_red(), notification.msg);
                 }
             }
         }
@@ -33,13 +32,13 @@ pub fn print_notifications<N: NotificationSupport>(notifications: &[Notification
             let level = notification.level.as_ref().to_uppercase();
             match &notification.level {
                 NotificationLevel::Info => {
-                    println!("[{}] {}: {}", notification.created, level.fg::<BrightBlue>(), notification.msg);
+                    println!("[{}] {}: {}", notification.created, level.bright_blue(), notification.msg);
                 }
                 NotificationLevel::Warn => {
-                    println!("[{}] {}: {}", notification.created, level.fg::<BrightYellow>(), notification.msg);
+                    println!("[{}] {}: {}", notification.created, level.bright_yellow(), notification.msg);
                 }
                 NotificationLevel::Error => {
-                    println!("[{}] {}: {}", notification.created, level.fg::<BrightRed>(), notification.msg);
+                    println!("[{}] {}: {}", notification.created, level.bright_red(), notification.msg);
                 }
             }
         }
