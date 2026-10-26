@@ -40,7 +40,7 @@ function getCookie(cname: string): string {
  *
  * In local development (`localhost`/`127.0.0.1`) it honors the `THORIUM_API_URL` build-time env
  * var so the dev server can point at a separately running API; otherwise it derives the origin
- * from the current page location. Guarded for non-browser environments.
+ * (scheme, host and port) from the current page location. Guarded for non-browser environments.
  *
  * @returns The resolved origin (without a trailing slash or `/api` suffix), or an empty string outside a browser.
  */
@@ -53,7 +53,7 @@ function resolveBaseURL(): string {
       return apiUrl.replace(/\/+$/, '');
     }
   }
-  return `${window.location.protocol}//${window.location.hostname}`;
+  return window.location.origin;
 }
 
 const apiURL = `${resolveBaseURL()}/api`;
