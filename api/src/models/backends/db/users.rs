@@ -920,6 +920,32 @@ pub async fn set_verification_token(username: &str, verification_token: &str, sh
     Ok(())
 }
 
+/// Forgets the verification token a user was just given without verifying them
+///
+/// The token is saved before the verification email is sent, and for a user that is still being
+/// created it is the only thing saved. A send that fails would otherwise leave a user that has
+/// nothing but a token, which can't be read back and blocks the name.
+///
+/// # Arguments
+///
+/// * `username` - The name of the user whose token to forget
+/// * `shared` - Shared Thorium objects
+#[rustfmt::skip]
+#[instrument(name = "db::users::discard_verification_token", skip(shared), err(Debug))]
+pub async fn discard_verification_token(username: &str, shared: &Shared) -> Result<(), ApiError> {
+    // build key to user data
+    let data_key = UserKeys::data(username, shared);
+    // build a redis pipeline
+    let mut pipe = redis::pipe();
+    // drop the token and when it was sent; a hash left with no fields no longer exists
+    pipe.cmd("hdel").arg(&data_key).arg("verification_token").arg("verification_sent");
+    // save user into redis
+    let _: () = pipe.atomic()
+        .query_async(conn!(shared))
+        .await?;
+    Ok(())
+}
+
 /// clears a specific users verification token
 ///
 /// # Arguments

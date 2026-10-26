@@ -2534,6 +2534,44 @@ async fn write_order() -> Result<(), Error> {
     Ok(())
 }
 
+/// Reading a tool or publishing an instance of it reads each instance's entity row but not its
+/// tags, since the summaries and the latest instance come from the rows alone
+#[tokio::test]
+async fn tool_reads_do_not_read_instance_tags() -> Result<(), Error> {
+    // a tool with four instances
+    let admin = test_utilities::admin_client().await?;
+    let group = generators::groups(1, &admin).await?.remove(0).name;
+    let spec = generators::gen_image_spec();
+    let (tool, first) = generators::tool(&[&group], "1.0.0", &spec, &admin).await?;
+    for version in ["1.0.1", "1.0.2", "1.0.3"] {
+        // each version gets its own spec, since republishing the latest spec is refused
+        let update = generators::gen_tool_publish(version, &generators::gen_image_spec());
+        admin.entities.update(tool.id, update).await?;
+    }
+    let instances = admin.entities.tool_instances(tool.id).await?;
+    is!(instances.len(), 4);
+    // note how often each instance's tags have been read so far
+    let tag_reads = |ids: &[Uuid]| -> Vec<u64> {
+        ids.iter()
+            .map(|id| test_utilities::faults::tag_reads(*id))
+            .collect()
+    };
+    let ids: Vec<Uuid> = instances.iter().map(|instance| instance.id).collect();
+    let before = tag_reads(&ids);
+    // reading the tool and listing its instances reads no instance's tags
+    admin.entities.get(tool.id).await?;
+    admin.entities.tool_instances(tool.id).await?;
+    is!(tag_reads(&ids), before);
+    // publishing another instance reads none of the existing instances' tags either
+    let update = generators::gen_tool_publish("1.0.4", &generators::gen_image_spec());
+    admin.entities.update(tool.id, update).await?;
+    is!(tag_reads(&ids), before);
+    // the instances still list newest first and the first is still readable with its tags
+    is!(admin.entities.tool_instances(tool.id).await?.len(), 5);
+    is!(admin.entities.get(first.id).await?.id, first.id);
+    Ok(())
+}
+
 /// The instances route needs a token and hides tools outside the user's groups
 #[tokio::test]
 async fn instances_route() -> Result<(), Error> {

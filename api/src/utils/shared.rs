@@ -1,5 +1,6 @@
 //! Shared objects and methods across all requests
 use axum::extract::FromRef;
+use axum::http::StatusCode;
 use bb8_redis::{RedisConnectionManager, bb8::Pool};
 use elasticsearch::Elasticsearch;
 use lettre::message::header::ContentType;
@@ -123,6 +124,15 @@ impl EmailClient {
     }
 
     /// Send an email
+    ///
+    /// An address that does not parse is a bad request, and a relay that cannot be reached or that
+    /// refuses the message is an unavailable service: neither crashes the request.
+    ///
+    /// # Arguments
+    ///
+    /// * `addr` - The address to send the email to
+    /// * `subject` - The subject of the email
+    /// * `body` - The body of the email
     pub async fn send<S: Into<String>, B: IntoBody>(
         &self,
         addr: &str,
@@ -130,7 +140,12 @@ impl EmailClient {
         body: B,
     ) -> Result<(), ApiError> {
         // try to parse the email address we are sending email too
-        let to = addr.parse().unwrap();
+        let Ok(to) = addr.parse() else {
+            return Err(ApiError::new(
+                StatusCode::BAD_REQUEST,
+                Some(format!("{addr} is not a valid email address")),
+            ));
+        };
         // build the email to send
         let email = lettre::Message::builder()
             .from(self.from.clone())
@@ -138,9 +153,29 @@ impl EmailClient {
             .subject(subject)
             .header(ContentType::TEXT_PLAIN)
             .body(body)
-            .unwrap();
-        // send our email
-        self.client.send(email).await.unwrap();
+            .map_err(|error| {
+                tracing::event!(
+                    tracing::Level::ERROR,
+                    msg = "Failed to build an email",
+                    error = error.to_string()
+                );
+                ApiError::new(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Some("The email could not be built".to_owned()),
+                )
+            })?;
+        // send our email, answering that the relay is unavailable when it cannot be used
+        self.client.send(email).await.map_err(|error| {
+            tracing::event!(
+                tracing::Level::ERROR,
+                msg = "Failed to send an email",
+                error = error.to_string()
+            );
+            ApiError::new(
+                StatusCode::SERVICE_UNAVAILABLE,
+                Some("The email relay is unavailable".to_owned()),
+            )
+        })?;
         Ok(())
     }
 }
@@ -417,6 +452,51 @@ impl Shared {
     }
 }
 
+impl Shared {
+    /// Builds the shared objects a writer needs when it runs offline, inside an upgrade job
+    ///
+    /// The writer calls the same code the API's routes call, which reads only the config, the
+    /// Redis pool, and the Scylla session and statements. Nothing here connects to Elastic or
+    /// an OAuth provider, builds an email transport, or checks the applied schema, and no DDL
+    /// runs. The Elastic client points at nothing reachable, so a write that begins to need
+    /// search fails loudly instead of silently. The S3 clients are built but never used.
+    ///
+    /// This is the one place a writer outside the API builds a `Shared`; a trait over only the
+    /// data backends the writers use could replace it later without changing what they write.
+    ///
+    /// # Arguments
+    ///
+    /// * `config` - The Thorium config to use
+    /// * `redis` - The Redis pool the caller already holds
+    pub async fn for_offline_writer(
+        config: Conf,
+        redis: Pool<RedisConnectionManager>,
+    ) -> Result<Self, ApiError> {
+        // connect to scylla and prepare its statements without touching the schema
+        let scylla = Scylla::offline(&config).await?;
+        // build the s3 clients, which make no requests until used
+        let s3 = S3::new(&config).map_err(|err| {
+            ApiError::new(
+                axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                Some(format!(
+                    "the S3 clients can't be built from the config: {err}"
+                )),
+            )
+        })?;
+        Ok(Shared {
+            config,
+            redis,
+            scylla,
+            s3,
+            // the default client targets localhost and connects only when used
+            elastic: Elasticsearch::default(),
+            email: None,
+            oauth: HashMap::default(),
+            banner: String::new(),
+        })
+    }
+}
+
 /// All of the global states in Axum
 #[derive(Clone)]
 pub struct AppState {
@@ -435,5 +515,43 @@ impl AppState {
 impl FromRef<AppState> for Arc<Shared> {
     fn from_ref(state: &AppState) -> Self {
         state.shared.clone()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use axum::http::StatusCode;
+    use lettre::{AsyncSmtpTransport, Tokio1Executor};
+
+    use super::EmailClient;
+
+    /// An email that cannot be sent is a refused request, never a crash
+    ///
+    /// A relay that refuses connections answers 503 and an address that does not parse answers 400,
+    /// so the route that sent the email answers its documented status instead of dropping the
+    /// connection.
+    #[tokio::test]
+    async fn failed_emails_are_answered_not_panics() {
+        // a client whose relay is a port nothing listens on
+        let client = EmailClient {
+            from: "thorium@example.com".parse().expect("a sender"),
+            client: AsyncSmtpTransport::<Tokio1Executor>::starttls_relay("localhost")
+                .expect("a relay")
+                .port(1)
+                .build(),
+            approved: None,
+        };
+        // a relay that cannot be reached is unavailable
+        let unreachable = client
+            .send("someone@example.com", "subject", "body".to_owned())
+            .await
+            .expect_err("an unreachable relay");
+        assert_eq!(unreachable.status(), StatusCode::SERVICE_UNAVAILABLE);
+        // an address that does not parse is a bad request
+        let invalid = client
+            .send("not an address", "subject", "body".to_owned())
+            .await
+            .expect_err("an invalid address");
+        assert_eq!(invalid.status(), StatusCode::BAD_REQUEST);
     }
 }

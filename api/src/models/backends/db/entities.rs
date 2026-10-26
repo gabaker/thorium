@@ -473,6 +473,9 @@ pub async fn get_many(
     stream::iter(details.iter_mut())
         .map(Ok::<_, ApiError>)
         .try_for_each_concurrent(10, |entity| async {
+            // count these tag reads so tests can check which requests read tags
+            #[cfg(feature = "test-utilities")]
+            crate::test_utilities::faults::count_tag_read(entity.id);
             entity.get_tags(groups, shared).await?;
             Ok(())
         })

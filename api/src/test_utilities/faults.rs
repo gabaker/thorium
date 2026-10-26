@@ -881,6 +881,48 @@ pub fn entity_reads(id: Uuid) -> u64 {
         .unwrap_or_default()
 }
 
+/// The number of times each entity's tags were read from Scylla by a bulk entity read
+static TAG_READS: LazyLock<Mutex<HashMap<Uuid, u64>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
+
+/// Count one read of an entity's tags by a bulk entity read
+///
+/// # Arguments
+///
+/// * `id` - The id of the entity whose tags were read
+///
+/// # Panics
+///
+/// Panics if another thread panicked while holding the read counts
+pub fn count_tag_read(id: Uuid) {
+    // add one to this entity's tag read count
+    *TAG_READS
+        .lock()
+        .expect("tag read counts poisoned")
+        .entry(id)
+        .or_default() += 1;
+}
+
+/// Get the number of times a bulk entity read read an entity's tags
+///
+/// # Arguments
+///
+/// * `id` - The id of the entity
+///
+/// # Panics
+///
+/// Panics if another thread panicked while holding the read counts
+#[must_use]
+pub fn tag_reads(id: Uuid) -> u64 {
+    // get this entity's tag read count
+    TAG_READS
+        .lock()
+        .expect("tag read counts poisoned")
+        .get(&id)
+        .copied()
+        .unwrap_or_default()
+}
+
 /// The groups whose next workload prune pauses between counting the jobs of idle tool instances
 /// and removing them
 static PRUNE_PAUSES: UserPauses = LazyLock::new(|| Mutex::new(HashMap::new()));
