@@ -1,9 +1,17 @@
-/** Get the API URL path as a string. */
+/**
+ * Get the absolute API URL, resolved the same way as the API client's base URL.
+ *
+ * On `localhost`/`127.0.0.1` it honors the `THORIUM_API_URL` dev-server override; otherwise it uses
+ * the page origin (scheme, host and port).
+ *
+ * @returns The API URL ending in `/api`, without a trailing slash.
+ */
 export function getApiUrl() {
-  if (window.location.hostname == 'localhost' && import.meta.env.THORIUM_API_URL) {
+  const host = window.location.hostname;
+  if ((host === 'localhost' || host === '127.0.0.1') && import.meta.env.THORIUM_API_URL) {
     return `${String(import.meta.env.THORIUM_API_URL).replace(/\/+$/, '')}/api`;
   }
-  return `${window.location.protocol}//${window.location.hostname}/api`;
+  return `${window.location.origin}/api`;
 }
 
 /**
